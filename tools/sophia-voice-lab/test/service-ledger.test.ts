@@ -49,6 +49,40 @@ describe("service and durable memory-ledger contracts", () => {
     expect(JSON.stringify(error)).not.toContain("\\u0000");
   });
 
+  it("rebinds recovery to the current deployment only for a proven allocation-free terminal run", async () => {
+    const current = { frontend: "e".repeat(40), backend: "f".repeat(40), voice: "1".repeat(40) };
+    const config = testConfig({
+      SOPHIA_VOICE_LAB_TARGET_FRONTEND_URL: "http://frontend.test",
+      SOPHIA_VOICE_LAB_TARGET_GATEWAY_URL: "http://gateway.test",
+      SOPHIA_VOICE_LAB_TARGET_VOICE_URL: "http://voice.test",
+      SOPHIA_VOICE_LAB_TARGET_LANGGRAPH_URL: "http://langgraph.test",
+      SOPHIA_VOICE_LAB_EXPECTED_FRONTEND_SHA: current.frontend,
+      SOPHIA_VOICE_LAB_EXPECTED_BACKEND_SHA: current.backend,
+      SOPHIA_VOICE_LAB_EXPECTED_VOICE_SHA: current.voice,
+      SOPHIA_VOICE_LAB_EXPECTED_LANGGRAPH_SHA: "2".repeat(40),
+    });
+    const terminalError = labError("ORDINARY_UI_ROUTE_FAILED", "The ordinary deployed Sophia voice route could not be established.", "harness");
+    const run = testRun({ state: "failed_harness", cleanupComplete: false, terminalError, verdicts: { ...initialVerdicts(), harness: "fail", evidence: "fail" } });
+    await ledger.createRunWithOperation(run, startOperation(run), { global: 1, caller: 1 });
+    await ledger.cancelPendingRunOperations(run.id, null, terminalError);
+    let observedExpectedDeployment: unknown = null;
+    const driver = {
+      hasSession: () => false,
+      recover: async (_run: unknown, token: string) => {
+        observedExpectedDeployment = JSON.parse(Buffer.from(token.split(".")[0]!, "base64url").toString("utf8")).expected_deployment;
+        return { events: [{ kind: "cleanup.recovery", source: "canonical", payload: { complete: true, live_cleanup_complete: true }, dedupeKey: `allocation-free-recovery:${run.id}` }], artifacts: [] };
+      },
+      readiness: async () => ({ ok: true, detail: "test-browser", engine: "chromium", version: "test" }),
+      close: async () => undefined,
+    } as any;
+    const worker = new VoiceLabWorker("allocation-free-recovery-worker", ledger, config, audio, driver, new CapabilityCodec(config.capabilitySecret, config.capabilityIssuer, config.capabilityTtlSeconds));
+
+    await worker.maintainSessions();
+
+    expect(observedExpectedDeployment).toEqual(current);
+    expect((await ledger.listAuthAudit(run.id)).some((entry) => entry.action === "capability:session:recover" && entry.detail.recovery_runtime_rebound === true)).toBe(true);
+  });
+
   it("advances the evidence revision after an orphan manifest and changed run projection", async () => {
     const terminalError = labError(
       "ORDINARY_UI_ROUTE_FAILED",

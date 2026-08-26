@@ -1,4362 +1,1732 @@
-import { createHash, randomUUID } from "node:crypto";
-import { promisify } from "node:util";
-import { gzip } from "node:zlib";
-
-import pino, { type Logger } from "pino";
-
-import { assertAudioByteLimit, parseWav, type AudioResolver } from "./audio.js";
-import { hasExactFinalizationEnvelope, type D02BrowserContextBinding, type D02ProductCleanupAcknowledgement, type VoiceBrowserDriver } from "./browser-driver.js";
-import { BUNDLED_FIXTURE_MANIFEST_SHA256, type VoiceLabConfig } from "./config.js";
-import { D02GatewayContinuityObservationReceiptSchema, D02GatewaySettlementReceiptSchema } from "./d02-gateway.js";
-import { TERMINAL_RUN_STATES, VoiceLabError, initialVerdicts, labError, type EvidenceRef, type LabError, type RunRecord, type RunState, type SuiteRecord, type Verdicts } from "./domain.js";
-import type { ClaimedOperation, RollingAdmissionLimits, VoiceLabLedger } from "./ledger.js";
-import { PostgresVoiceLabLedger } from "./postgres-ledger.js";
-import { pkceS256 } from "./oauth.js";
-import { CapabilityCodec, StaticBearerAuthenticator, assertNoSecret, canonicalRequestHash, redact, requireScope, sha256 } from "./security.js";
-import { validateAllowedOrigin } from "./security.js";
-import { D02BrowserContinuityProofSchema, assertFreshProductAdmissionProof, reserveAudioInput, toolInputSchemas, validateAudioInputLimit, type FixtureSummary } from "./service.js";
-import { transitionRun } from "./state-machine.js";
-import { createWorkerBootIdentity, createWorkerHeartbeatAttestation, type WorkerBootIdentity } from "./worker-heartbeat.js";
-
-interface ActiveLease { epoch: number; }
-interface D02WorkerShutdownArm {
-  runId: string;
-  terminationRequestIdSha256: string;
-  cleanupObligationIdSha256: string;
-  lostWorkerIdSha256: string;
-  lostBrowserLeaseEpoch: number;
-  browserContextIdSha256: string;
-  providerSessionIdSha256: string;
-  providerAdmissionIdSha256: string;
-  providerConnectionEpoch: number;
-  frozenProviderConnectionEpochs: number[];
-  renderActionRequestSha256: string;
-  gatewayFreezeRequestSha256: string;
-  gatewayFreezeEventSeq: number;
-  commandEventSeq: number;
-  renderDispatchClaimSha256: string;
-  renderDispatchClaimEventSeq: number;
-}
-const D02_PRE_DISPATCH_SHUTDOWN_WAIT_MS = 20_000;
-const D02_PRE_DISPATCH_SHUTDOWN_POLL_MS = 100;
-export const WORKER_HEARTBEAT_INTERVAL_MS = 2_000;
-export const WORKER_HEARTBEAT_BROWSER_READINESS_TIMEOUT_MS = 5_000;
-const gzipAsync = promisify(gzip);
-
-export const S01_FRONTEND_GRANT_VARIANTS = ["missing", "expired", "wrong_audience", "wrong_operation", "wrong_principal", "wrong_run", "ordinary_user"] as const;
-export const S01_OAUTH_VARIANTS = ["oauth_missing", "oauth_invalid", "oauth_insufficient_fault_scope", "oauth_resource_mismatch", "oauth_authorization_code_replay"] as const;
-export const S02_VALIDATION_VARIANTS = [
-  "unknown_fields", "malformed_id", "malformed_sha", "text_limit", "fixture_metadata_bytes", "fixture_metadata_duration",
-  "unsupported_fixture", "unsupported_scenario", "http_origin", "unsupported_target_path", "unsupported_target_query",
-  "unsupported_target_origin", "redirect_origin", "invalid_capture_policy", "malformed_wav", "oversized_audio",
-] as const;
-export const S02_HTTP_VARIANTS = [
-  "unknown_fields", "malformed_id", "malformed_sha", "text_limit", "unsupported_fixture", "unsupported_scenario", "http_origin",
-  "unsupported_target_path", "unsupported_target_query", "unsupported_target_origin", "redirect_origin",
-  "invalid_capture_policy", "deep_json", "malformed_json", "oversized_json",
-] as const;
-export const S02_MCP_BOUNDARY_PROBE_SCHEMA = "sophia_voice_lab_s02_mcp_boundary_probe_v1" as const;
-type S02HttpVariant = typeof S02_HTTP_VARIANTS[number];
-type S02RequestBodyKind = "parsed_tool_call" | "bounded_deep_json" | "malformed_json" | "oversized_json";
-interface S02HttpProbeExpectation {
-  requestContract: {
-    schema: "sophia_voice_lab_s02_mcp_request_v1";
-    method: "POST";
-    path: "/mcp";
-    content_type: "application/json";
-    body_kind: S02RequestBodyKind;
-    jsonrpc_method: "tools/call" | null;
-    tool_name: "start_voice_run" | "speak" | "get_capabilities" | null;
-  };
-  httpStatus: 200 | 400 | 413;
-  errorCode: string;
-  auditAction: "mcp.authenticate" | "mcp.request" | "mcp.body";
-  auditOutcome: "allowed" | "denied";
-  auditUsesBoundedFallback: boolean;
-  auditErrorClass: string | null;
-}
-interface S02ResourceSnapshot {
-  active_run_count: number;
-  operation_count: number;
-  run_event_cursor: number;
-  input_mutation_event_count: number;
-  browser_context_count: number;
-  canonical_session_count: number;
-  provider_session_count: number;
-}
-
-const S02_HTTP_EXPECTATIONS: Readonly<Record<S02HttpVariant, Omit<S02HttpProbeExpectation, "requestContract"> & { bodyKind: S02RequestBodyKind; toolName: S02HttpProbeExpectation["requestContract"]["tool_name"] }>> = {
-  unknown_fields: { bodyKind: "parsed_tool_call", toolName: "start_voice_run", httpStatus: 200, errorCode: "MCP_INVALID_ARGUMENTS", auditAction: "mcp.authenticate", auditOutcome: "allowed", auditUsesBoundedFallback: false, auditErrorClass: null },
-  malformed_id: { bodyKind: "parsed_tool_call", toolName: "speak", httpStatus: 200, errorCode: "MCP_INVALID_ARGUMENTS", auditAction: "mcp.authenticate", auditOutcome: "allowed", auditUsesBoundedFallback: false, auditErrorClass: null },
-  malformed_sha: { bodyKind: "parsed_tool_call", toolName: "start_voice_run", httpStatus: 200, errorCode: "MCP_INVALID_ARGUMENTS", auditAction: "mcp.authenticate", auditOutcome: "allowed", auditUsesBoundedFallback: false, auditErrorClass: null },
-  text_limit: { bodyKind: "parsed_tool_call", toolName: "speak", httpStatus: 200, errorCode: "TEXT_TOO_LARGE", auditAction: "mcp.authenticate", auditOutcome: "allowed", auditUsesBoundedFallback: false, auditErrorClass: null },
-  unsupported_fixture: { bodyKind: "parsed_tool_call", toolName: "speak", httpStatus: 200, errorCode: "FIXTURE_NOT_FOUND", auditAction: "mcp.authenticate", auditOutcome: "allowed", auditUsesBoundedFallback: false, auditErrorClass: null },
-  unsupported_scenario: { bodyKind: "parsed_tool_call", toolName: "start_voice_run", httpStatus: 200, errorCode: "MCP_INVALID_ARGUMENTS", auditAction: "mcp.authenticate", auditOutcome: "allowed", auditUsesBoundedFallback: false, auditErrorClass: null },
-  http_origin: { bodyKind: "parsed_tool_call", toolName: "start_voice_run", httpStatus: 200, errorCode: "TARGET_NOT_ALLOWED", auditAction: "mcp.authenticate", auditOutcome: "allowed", auditUsesBoundedFallback: false, auditErrorClass: null },
-  unsupported_target_path: { bodyKind: "parsed_tool_call", toolName: "start_voice_run", httpStatus: 200, errorCode: "TARGET_NOT_ALLOWED", auditAction: "mcp.authenticate", auditOutcome: "allowed", auditUsesBoundedFallback: false, auditErrorClass: null },
-  unsupported_target_query: { bodyKind: "parsed_tool_call", toolName: "start_voice_run", httpStatus: 200, errorCode: "TARGET_NOT_ALLOWED", auditAction: "mcp.authenticate", auditOutcome: "allowed", auditUsesBoundedFallback: false, auditErrorClass: null },
-  unsupported_target_origin: { bodyKind: "parsed_tool_call", toolName: "start_voice_run", httpStatus: 200, errorCode: "TARGET_NOT_ALLOWED", auditAction: "mcp.authenticate", auditOutcome: "allowed", auditUsesBoundedFallback: false, auditErrorClass: null },
-  redirect_origin: { bodyKind: "parsed_tool_call", toolName: "start_voice_run", httpStatus: 200, errorCode: "TARGET_NOT_ALLOWED", auditAction: "mcp.authenticate", auditOutcome: "allowed", auditUsesBoundedFallback: false, auditErrorClass: null },
-  invalid_capture_policy: { bodyKind: "parsed_tool_call", toolName: "start_voice_run", httpStatus: 200, errorCode: "MCP_INVALID_ARGUMENTS", auditAction: "mcp.authenticate", auditOutcome: "allowed", auditUsesBoundedFallback: false, auditErrorClass: null },
-  deep_json: { bodyKind: "bounded_deep_json", toolName: "get_capabilities", httpStatus: 400, errorCode: "ARGUMENT_BOUNDS", auditAction: "mcp.request", auditOutcome: "denied", auditUsesBoundedFallback: true, auditErrorClass: "ARGUMENT_BOUNDS" },
-  malformed_json: { bodyKind: "malformed_json", toolName: null, httpStatus: 400, errorCode: "MALFORMED_JSON", auditAction: "mcp.body", auditOutcome: "denied", auditUsesBoundedFallback: true, auditErrorClass: "MALFORMED_JSON" },
-  oversized_json: { bodyKind: "oversized_json", toolName: "get_capabilities", httpStatus: 413, errorCode: "BODY_TOO_LARGE", auditAction: "mcp.body", auditOutcome: "denied", auditUsesBoundedFallback: true, auditErrorClass: "BODY_TOO_LARGE" },
-};
-
-export function s02HttpProbeExpectation(variant: S02HttpVariant): S02HttpProbeExpectation {
-  const expectation = S02_HTTP_EXPECTATIONS[variant];
-  return {
-    requestContract: {
-      schema: "sophia_voice_lab_s02_mcp_request_v1",
-      method: "POST",
-      path: "/mcp",
-      content_type: "application/json",
-      body_kind: expectation.bodyKind,
-      jsonrpc_method: expectation.bodyKind === "malformed_json" ? null : "tools/call",
-      tool_name: expectation.toolName,
-    },
-    httpStatus: expectation.httpStatus,
-    errorCode: expectation.errorCode,
-    auditAction: expectation.auditAction,
-    auditOutcome: expectation.auditOutcome,
-    auditUsesBoundedFallback: expectation.auditUsesBoundedFallback,
-    auditErrorClass: expectation.auditErrorClass,
-  };
-}
-
-export class VoiceLabWorker {
-  readonly #activeLeases = new Map<string, ActiveLease>();
-  readonly #frontendCapabilities: CapabilityCodec;
-  readonly #workerBootIdentity: WorkerBootIdentity;
-  readonly logger: Logger;
-  #stopping = false;
-  #workerHeartbeatSequence = 0;
-  #workerHeartbeatLoopPromise: Promise<void> | null = null;
-  #workerHeartbeatFirstAttemptPromise: Promise<void> | null = null;
-  #resolveWorkerHeartbeatFirstAttempt: (() => void) | null = null;
-  #wakeWorkerHeartbeatLoop: (() => void) | null = null;
-  #loopPromise: Promise<void> | null = null;
-  #currentOperationAbort: AbortController | null = null;
-  #currentOperationRunId: string | null = null;
-  readonly #d02ShutdownArms = new Map<string, D02WorkerShutdownArm>();
-  readonly #d02ShutdownsInFlight = new Map<string, Promise<void>>();
-  readonly #d02PreDispatchPauses = new Set<string>();
-
-  constructor(
-    readonly workerId: string,
-    readonly ledger: VoiceLabLedger,
-    readonly config: VoiceLabConfig,
-    readonly audio: AudioResolver,
-    readonly driver: VoiceBrowserDriver,
-    readonly capabilities: CapabilityCodec,
-    logger?: Logger,
-    readonly scenarioFetch: typeof fetch = fetch,
-    readonly targetIdentity: () => Promise<Record<string, unknown> & { ok: boolean }> = async () => config.nodeEnv === "test" && config.readinessTarget === null
-      ? ({ ok: true, status: "test_target_not_configured" })
-      : ({ ok: false, status: "target_probe_not_injected" }),
-    workerBootIdentity: WorkerBootIdentity = createWorkerBootIdentity(workerId),
-  ) {
-    this.logger = logger ?? pino({ level: config.logLevel, base: { service: "sophia-voice-lab-worker", worker_id: workerId } });
-    this.#frontendCapabilities = new CapabilityCodec(config.grantSecret, config.capabilityIssuer, config.capabilityTtlSeconds);
-    this.#workerBootIdentity = workerBootIdentity;
-  }
-
-  run(): Promise<void> {
-    if (this.#loopPromise) return this.#loopPromise;
-    this.#startWorkerHeartbeatLoop();
-    const firstHeartbeatAttempt = this.#workerHeartbeatFirstAttemptPromise ?? Promise.resolve();
-    this.#loopPromise = firstHeartbeatAttempt.then(() => this.#runLoop()).finally(async () => {
-      this.#stopping = true;
-      this.#wakeWorkerHeartbeatLoop?.();
-      await this.#workerHeartbeatLoopPromise;
-      this.#loopPromise = null;
-    });
-    return this.#loopPromise;
-  }
-
-  async #runLoop(): Promise<void> {
-    while (!this.#stopping) {
-      const worked = await this.runOnce().catch((error) => { this.logger.error({ error: safeError(error) }, "worker iteration failed"); return false; });
-      await this.maintainSessions().catch((error) => this.logger.error({ error: safeError(error) }, "browser maintenance failed"));
-      if (!worked) await delay(this.config.workerPollMs);
-    }
-  }
-
-  stop(): void {
-    this.#stopping = true;
-    this.#wakeWorkerHeartbeatLoop?.();
-  }
-
-  async close(): Promise<void> {
-    this.stop();
-    await this.#workerHeartbeatLoopPromise;
-    let d02QuiescenceFailure: unknown = null;
-    let d02ArmValidationFailure: unknown = null;
-    for (const runId of this.#activeLeases.keys()) {
-      await this.#resolveD02WorkerShutdownArm(runId).then((arm) => {
-        if (arm) this.#d02ShutdownArms.set(runId, arm);
-      }).catch((error) => {
-        this.logger.error({ run_id: runId, error: safeError(error) }, "D02 shutdown arm validation failed closed");
-        d02ArmValidationFailure ??= error;
-      });
-    }
-    // An indeterminate source chain cannot safely fall through to generic
-    // cancellation: doing so could destroy the exact page whose durable D02
-    // command/dispatch proof merely failed to load during shutdown.
-    if (d02ArmValidationFailure !== null) throw d02ArmValidationFailure;
-    // A committed local intent is already a product/browser mutation fence,
-    // even though it is not yet shutdown authority. Keep the exact lease alive
-    // while the Gateway freeze, signed command, and global dispatch converge.
-    // A null arm must never fall through to generic page destruction here.
-    const preDispatchRuns = [...this.#activeLeases.keys()].filter((runId) =>
-      this.#d02PreDispatchPauses.has(runId) && !this.#d02ShutdownArms.has(runId));
-    await Promise.all(preDispatchRuns.map(async (runId) => {
-      try {
-        const arm = await this.#awaitD02PreDispatchShutdownArm(runId, D02_PRE_DISPATCH_SHUTDOWN_WAIT_MS);
-        this.#d02ShutdownArms.set(runId, arm);
-      } catch (error) {
-        this.logger.error({ run_id: runId, error: safeError(error) }, "D02 pre-dispatch shutdown arm did not converge");
-        d02ArmValidationFailure ??= error;
-      }
-    }));
-    if (d02ArmValidationFailure !== null) throw d02ArmValidationFailure;
-    const currentD02Arm = this.#currentOperationRunId === null ? undefined : this.#d02ShutdownArms.get(this.#currentOperationRunId);
-    this.#currentOperationAbort?.abort(new VoiceLabError(currentD02Arm
-      ? labError("BROWSER_SESSION_LOST", "The source-validated D02 worker restart quiesced the in-flight browser operation.", "harness", false, { termination_request_id_sha256: currentD02Arm.terminationRequestIdSha256, source: "worker_graceful_d02_restart" })
-      : labError("WORKER_GRACEFUL_SHUTDOWN", "Worker shutdown cancelled the in-flight operation before cleanup.", "harness", true)));
-    const loopDrain = this.#loopPromise ? withTimeout(this.#loopPromise, 25_000) : null;
-    // Source-armed D02 cleanup starts as soon as SIGTERM is observed. Waiting
-    // for a stalled maintenance iteration first would add the 25s drain budget
-    // to the 20s quiescence budget and could exceed the platform grace window.
-    // The in-flight map makes the operation converge with runOnce's abort path.
-    const armedCleanups = [...this.#d02ShutdownArms.entries()]
-      .filter(([runId]) => this.#activeLeases.has(runId))
-      .map(async ([runId, arm]) => {
-        await withTimeout(this.#quiesceD02Worker(runId, arm), 20_000).catch((error) => {
-          this.logger.error({ run_id: runId, error: safeError(error) }, "graceful D02 run cleanup failed");
-          d02QuiescenceFailure ??= error;
-        });
-      });
-    if (armedCleanups.length > 0) await Promise.all(armedCleanups);
-    if (d02QuiescenceFailure !== null) throw d02QuiescenceFailure;
-    if (loopDrain) await loopDrain.catch((error) => {
-      this.logger.error({ error: safeError(error) }, "worker loop did not drain cleanly");
-      if (armedCleanups.length > 0) d02QuiescenceFailure ??= error;
-    });
-    // A source-specific close is only successful if the old loop stopped as
-    // well; otherwise the signal handler must leave a non-zero, fail-closed
-    // process path instead of reporting a graceful deployment exit.
-    if (d02QuiescenceFailure !== null) throw d02QuiescenceFailure;
-    for (const runId of [...this.#activeLeases.keys()]) {
-      const arm = this.#d02ShutdownArms.get(runId) ?? await this.#resolveD02WorkerShutdownArm(runId).catch((error) => {
-        this.logger.error({ run_id: runId, error: safeError(error) }, "D02 shutdown arm validation failed closed");
-        d02ArmValidationFailure ??= error;
-        return null;
-      });
-      if (d02ArmValidationFailure !== null) break;
-      const cleanup = arm
-        ? this.#quiesceD02Worker(runId, arm)
-        : this.#terminalizeFailure(runId, labError("WORKER_GRACEFUL_SHUTDOWN", "Worker shutdown cleaned up the live synthetic run.", "harness", true), "cancelled");
-      await withTimeout(cleanup, 20_000).catch((error) => {
-        this.logger.error({ run_id: runId, error: safeError(error) }, "graceful run cleanup failed");
-        if (arm && d02QuiescenceFailure === null) d02QuiescenceFailure = error;
-      });
-    }
-    // A D02 provider acknowledgement failure must not fall through to the
-    // driver's generic context sweep.  That would destroy the only page able
-    // to finish the canonical close/abort receipt POST while still claiming
-    // the source-specific shutdown failed closed.
-    if (d02ArmValidationFailure !== null) throw d02ArmValidationFailure;
-    if (d02QuiescenceFailure !== null) throw d02QuiescenceFailure;
-    await this.driver.close();
-  }
-
-  async runOnce(): Promise<boolean> {
-    const claimed = await this.ledger.claimNextOperation(this.workerId, this.config.operationLeaseSeconds);
-    if (!claimed) return false;
-    await this.ledger.markOperationExecuting(claimed.operation.id, this.workerId, claimed.operation.leaseEpoch);
-    const controller = new AbortController();
-    this.#currentOperationAbort = controller;
-    this.#currentOperationRunId = claimed.run.id;
-    let heartbeatInFlight = false;
-    const heartbeat = setInterval(() => {
-      if (heartbeatInFlight || controller.signal.aborted) return;
-      heartbeatInFlight = true;
-      void this.ledger.heartbeatOperation(claimed.operation.id, this.workerId, claimed.operation.leaseEpoch, this.config.operationLeaseSeconds)
-        .then(async (owned) => {
-          if (!owned) { controller.abort(new VoiceLabError(labError("LEASE_LOST", "Operation lease was lost before the next irreversible action.", "conflict", true))); return; }
-          const browserLease = this.#activeLeases.get(claimed.run.id);
-          if (!browserLease) return;
-          const browserOwned = await this.ledger.heartbeatBrowserLease(claimed.run.id, this.workerId, browserLease.epoch, this.config.browserLeaseSeconds);
-          if (!browserOwned) controller.abort(new VoiceLabError(labError("BROWSER_LEASE_LOST", "Browser lease was lost while the operation was in flight.", "conflict", true)));
-        })
-        .catch(() => controller.abort(new VoiceLabError(labError("LEASE_HEARTBEAT_FAILED", "Operation lease could not be renewed safely.", "harness", true))))
-        .finally(() => { heartbeatInFlight = false; });
-    }, leaseHeartbeatIntervalMs(this.config.operationLeaseSeconds, this.config.browserLeaseSeconds));
-    heartbeat.unref();
-    const deadlineSeconds = claimed.operation.type === "start" ? this.config.startOperationSeconds : claimed.operation.type === "end" ? this.config.endOperationSeconds : claimed.operation.type === "force_socket_rotation" ? this.config.faultOperationSeconds : this.config.maxOperationSeconds;
-    const deadline = setTimeout(() => controller.abort(new VoiceLabError(labError("OPERATION_TIMEOUT", "Operation exceeded its bounded execution deadline and was cancelled.", "harness", true, { operation_type: claimed.operation.type, deadline_seconds: deadlineSeconds }))), deadlineSeconds * 1_000);
-    deadline.unref();
-    let operationSettled = false;
-    try {
-      const execution = this.#execute(claimed, controller.signal);
-      const cancellation = new Promise<never>((_resolve, reject) => controller.signal.addEventListener("abort", () => {
-        if (this.#d02ShutdownArms.has(claimed.run.id)) {
-          reject(controller.signal.reason);
-          return;
-        }
-        void this.driver.cancel(claimed.run.id, errorDetail(controller.signal.reason).code).finally(() => reject(controller.signal.reason));
-      }, { once: true }));
-      let result: Record<string, unknown>;
-      try { result = await Promise.race([execution, cancellation]); }
-      catch (error) {
-        if (controller.signal.aborted) {
-          if (this.#d02ShutdownArms.has(claimed.run.id)) void execution.catch(() => undefined);
-          else {
-            await this.driver.cancel(claimed.run.id, errorDetail(controller.signal.reason).code).catch(() => undefined);
-            await execution.catch(() => undefined);
-          }
-          throw controller.signal.reason;
-        }
-        throw error;
-      }
-      const finalizePreResource = result._finalize_pre_resource === true;
-      const finalizeEnd = result._finalize_end === true;
-      if (finalizePreResource) delete result._finalize_pre_resource;
-      if (finalizeEnd) delete result._finalize_end;
-      assertNoSecret(result);
-      await this.ledger.finishOperation(claimed.operation.id, this.workerId, claimed.operation.leaseEpoch, "succeeded", result, null);
-      operationSettled = true;
-      await this.ledger.appendEvent(claimed.run.id, "operation.succeeded", "worker", { operation_id: claimed.operation.id, operation_type: claimed.operation.type }, `operation:${claimed.operation.id}:succeeded`);
-      if (finalizePreResource) await this.#finalizePreResourceScenario(claimed.run.id);
-      if (finalizeEnd) await this.#finalizeEndRun(claimed.run.id);
-    } catch (error) {
-      const detail = errorDetail(error);
-      if (!operationSettled) {
-        await this.ledger.finishOperation(claimed.operation.id, this.workerId, claimed.operation.leaseEpoch, detail.code === "OPERATION_TIMEOUT" ? "timed_out" : "failed", null, detail).catch(() => undefined);
-        await this.ledger.appendEvent(claimed.run.id, "operation.failed", "worker", { operation_id: claimed.operation.id, operation_type: claimed.operation.type, error: detail }, `operation:${claimed.operation.id}:failed`).catch(() => undefined);
-      } else {
-        await this.ledger.appendEvent(claimed.run.id, "evidence.finalization_failed", "worker", { operation_id: claimed.operation.id, error: detail }, `evidence:${claimed.operation.id}:finalization-failed`).catch(() => undefined);
-      }
-      const d02Arm = this.#d02ShutdownArms.get(claimed.run.id);
-      if (d02Arm) await this.#quiesceD02Worker(claimed.run.id, d02Arm).catch((terminalError) => this.logger.error({ error: safeError(terminalError), run_id: claimed.run.id }, "D02 run quiescence failed"));
-      else await this.#terminalizeFailure(claimed.run.id, detail).catch((terminalError) => this.logger.error({ error: safeError(terminalError), run_id: claimed.run.id }, "run terminalization failed"));
-    } finally {
-      clearInterval(heartbeat);
-      clearTimeout(deadline);
-      if (this.#currentOperationAbort === controller) {
-        this.#currentOperationAbort = null;
-        this.#currentOperationRunId = null;
-      }
-    }
-    return true;
-  }
-
-  async maintainSessions(): Promise<void> {
-    const maintenanceNow = new Date();
-    for (const pending of await this.ledger.listRunsCertificationDue(maintenanceNow, 20)) {
-      const error = labError("EXTERNAL_EVIDENCE_DEADLINE_EXPIRED", "The bounded external-evidence window expired before every mandatory supported assertion became machine-verifiable.", "harness", false, { deadline_at: pending.expiresAt.toISOString() });
-      const verdicts: Verdicts = { ...pending.verdicts, harness: "fail", evidence: "fail" };
-      let failed = await transitionRun(this.ledger, pending, "failed_harness", { verdicts, terminalError: error });
-      const terminal = await this.ledger.appendEvent(failed.id, "run.failed_harness", "worker", { terminal_state: "failed_harness", terminal_reason: error.code, certification_deadline_at: pending.expiresAt.toISOString(), execution_cleanup_complete: failed.cleanupComplete }, `run:${failed.id}:failed_harness`);
-      failed = await this.#freshRun(failed.id);
-      await this.#saveFailureEvidence(failed, error, []);
-      this.logger.warn({ run_id: failed.id, terminal_event_seq: terminal.seq }, "external evidence deadline expired");
-    }
-    // Retention is a second, restart-safe lifecycle. A live run can finish and
-    // export once execution resources are authoritatively zero, while the
-    // exact binding remains durable until the Gateway later proves deletion of
-    // retained product evidence. Only then may the lab delete its own copies.
-    for (const retained of await this.ledger.listRunsRetentionDue(maintenanceNow, 20)) {
-      try {
-        const recovery = await this.#recoverRun(retained);
-        await this.#persistEvents(retained.id, recovery.events);
-        const page = await this.#allEvents(retained.id);
-        if (authoritativeRetentionPurged(page.events)) {
-          const fresh = await this.#freshRun(retained.id);
-          await this.ledger.updateRun(fresh.id, fresh.version, { retentionPurgePending: false, retentionPurgeVerifiedAt: new Date() });
-        }
-      } catch (error) {
-        // Remote deletion truth remains "unconfirmed", but a Gateway outage
-        // can never extend the signed lifetime of local transcripts/screenshots.
-        // purgeExpiredRetention below deletes local content unconditionally and
-        // retains only the keyed content-free tombstone.
-        this.logger.error({ run_id: retained.id, error: safeError(error) }, "remote retention purge could not be confirmed before local hard deadline");
-      }
-    }
-    await this.ledger.purgeExpiredRetention(maintenanceNow, 20);
-    for (const pending of await this.ledger.listRunsPendingEvidence(10)) {
-      if (pending.terminalError !== null || !["completed", "product_failed", "inconclusive_provider", "failed_harness", "authorization_failed"].includes(pending.state)) await this.#saveFailureEvidence(pending, pending.terminalError ?? labError("TERMINAL_CERTIFICATION_REVISION", "Terminal execution evidence was revised without mutating the execution decision.", "evidence"), []);
-      else if (pending.scenarioId === "V-S01" || pending.scenarioId === "V-S02") await this.#finalizePreResourceScenario(pending.id);
-      else await this.#finalizeEndRun(pending.id);
-    }
-    for (const expired of await this.ledger.listExpiredRuns(new Date(), 20)) {
-      await this.#terminalizeFailure(expired.id, labError("RUN_EXPIRED", "Run exceeded its bounded TTL and was cleaned up.", "harness"), "expired");
-    }
-    for (const pending of await this.ledger.listRunsNeedingRecovery(10)) {
-      const replacement = await this.#observeD02GracefulWorkerReplacement(pending);
-      if (replacement === "awaiting_replacement") continue;
-      await this.#terminalizeFailure(pending.id, pending.terminalError ?? labError("RECOVERY_PENDING", "Terminal run still requires durable zero-orphan recovery.", "harness", true), pending.state);
-    }
-    if (this.#killSwitchEngaged()) {
-      // Accepted suites are durable scheduling intent. Engaging the kill switch
-      // must quiesce that intent as well as live runs; otherwise maintenance
-      // would keep allocating children that immediately fail authorization.
-      for (const suite of await this.ledger.listRunnableSuites(100)) {
-        await this.ledger.updateSuite(suite.id, "cancelled", suite.runIds, suite.nextScenarioIndex);
-      }
-    } else {
-      await this.#advanceSuites();
-    }
-    await this.#finalizeTerminalSuites();
-    for (const [runId, lease] of this.#activeLeases) {
-      const current = await this.ledger.getRun(runId);
-      const d02Arm = await this.#resolveD02WorkerShutdownArm(runId);
-      if (d02Arm) {
-        this.#d02ShutdownArms.set(runId, d02Arm);
-        await this.#quiesceD02Worker(runId, d02Arm);
-        continue;
-      }
-      if (this.#d02PreDispatchPauses.has(runId)) {
-        // Gateway is already frozen, but global Render dispatch authority has
-        // not committed. Preserve ownership without touching the frozen app;
-        // the next maintenance pass either observes the unique dispatch claim
-        // and quiesces or remains paused.
-        const owned = await this.ledger.heartbeatBrowserLease(runId, this.workerId, lease.epoch, this.config.browserLeaseSeconds);
-        if (!owned) {
-          this.#activeLeases.delete(runId);
-          const lostLease = await this.ledger.getBrowserLease(runId);
-          await this.#markDriverRestart(runId, lostLease?.workerId === this.workerId && lostLease.leaseEpoch === lease.epoch ? lostLease : undefined);
-        }
-        continue;
-      }
-      if (this.#killSwitchEngaged() && current && !TERMINAL_RUN_STATES.has(current.state)) {
-        await this.#terminalizeFailure(runId, labError("KILL_SWITCH_ENGAGED", "Kill switch actively terminated and recovered the live synthetic run.", "authorization", false), "cancelled");
-        continue;
-      }
-      if (current && current.expiresAt <= new Date() && !TERMINAL_RUN_STATES.has(current.state)) {
-        await this.#terminalizeFailure(runId, labError("RUN_EXPIRED", "Run exceeded its bounded TTL and was cleaned up.", "harness"), "expired");
-        continue;
-      }
-      const owned = await this.ledger.heartbeatBrowserLease(runId, this.workerId, lease.epoch, this.config.browserLeaseSeconds);
-      if (!owned || !this.driver.hasSession(runId)) {
-        this.#activeLeases.delete(runId);
-        // Preserve the exact owned lease even when the in-process browser
-        // registry disappears before the database lease expires. Without this
-        // receipt a live browser crash would be indistinguishable from an
-        // unowned policy assertion during late D02 certification.
-        const lostLease = await this.ledger.getBrowserLease(runId);
-        await this.#markDriverRestart(runId, lostLease?.workerId === this.workerId && lostLease.leaseEpoch === lease.epoch ? lostLease : undefined);
-        continue;
-      }
-      try {
-        if (!this.#killSwitchEngaged() && current) {
-          const continueGrant = await this.#mintAndVerify(current, "sophia-voice-lab-frontend", ["session:continue", "session:create", "session:read", "session:finalize"], "session:continue");
-          await this.#persistEvents(runId, await this.driver.continueSession(current, continueGrant.token));
-        }
-        await this.#persistEvents(runId, await this.driver.drain(runId));
-      }
-      catch (error) {
-        const armedAfterFailure = await this.#resolveD02WorkerShutdownArm(runId);
-        if (armedAfterFailure) {
-          this.#d02ShutdownArms.set(runId, armedAfterFailure);
-          await this.#quiesceD02Worker(runId, armedAfterFailure);
-        } else {
-          this.#activeLeases.delete(runId);
-          await this.#terminalizeFailure(runId, errorDetail(error));
-        }
-      }
-    }
-    for (const lostLease of await this.ledger.reapExpiredBrowserLeases()) await this.#markDriverRestart(lostLease.runId, lostLease);
-  }
-
-  async #advanceSuites(): Promise<void> {
-    for (const suite of await this.ledger.listRunnableSuites(10)) {
-      const children = (await Promise.all(suite.runIds.map((runId) => this.ledger.getRun(runId)))).filter((run): run is RunRecord => run !== null);
-      if (children.some((run) => !TERMINAL_RUN_STATES.has(run.state) || !run.cleanupComplete)) continue;
-      if (suite.nextScenarioIndex >= suite.definition.scenarios.length) {
-        const state = suiteCertificationState(children);
-        if (state === "pending") continue;
-        const evidenceReady = await this.#saveSuiteEvidence(suite, children, state);
-        if (evidenceReady) await this.ledger.updateSuite(suite.id, state, suite.runIds, suite.nextScenarioIndex);
-        continue;
-      }
-      if (await this.ledger.countActiveRuns() >= 1) return;
-      const index = suite.nextScenarioIndex;
-      const scenario = suite.definition.scenarios[index]!;
-      if (scenario.support === "typed_unsupported") {
-        await this.ledger.updateSuite(suite.id, "running", suite.runIds, index + 1);
-        return;
-      }
-      await this.#fenceSuiteAdmission(suite);
-      const now = new Date();
-      const runId = randomUUID();
-      const operationId = randomUUID();
-      const idempotencyKey = `suite:${suite.id}:${index}`;
-      const operationInput = { environment: suite.definition.environment, target: suite.definition.target, scenario_id: scenario.id, scenario_version: scenario.version, capture_policy: suite.definition.capturePolicy, idempotency_key: idempotencyKey, suite_run_id: suite.id, suite_scenario_index: index };
-      const run: RunRecord = {
-        id: runId, callerId: suite.callerId, principalId: this.config.principalId, testRunId: randomUUID(), cleanupObligationId: randomUUID(), environment: suite.definition.environment,
-        scenarioId: scenario.id, scenarioVersion: scenario.version, state: "reserved", version: 1, target: suite.definition.target,
-        observedDeployment: {}, capturePolicy: suite.definition.capturePolicy, verdicts: initialVerdicts(), canonicalSessionId: null, threadId: null,
-        providerSessionId: null, traceId: null, providerEpoch: null, turnId: null, latestCursor: 0,
-        expiresAt: new Date(now.getTime() + this.config.maxRunSeconds * 1_000), createdAt: now, updatedAt: now, cleanupComplete: false,
-        retentionPurgeDueAt: null, retentionPurgePending: false, retentionPurgeVerifiedAt: null, evidencePurgedAt: null, terminalError: null,
-      };
-      try {
-        const created = await this.ledger.createRunWithOperation(run, { id: operationId, runId, callerId: suite.callerId, type: "start", idempotencyKey, requestHash: canonicalRequestHash(operationInput), input: operationInput }, { global: 1, caller: 1 });
-        const runIds = [...new Set([...suite.runIds, created.run.id])];
-        await this.ledger.updateSuite(suite.id, "running", runIds, index + 1);
-        if (!created.replay) await this.ledger.appendEvent(created.run.id, "run.accepted", "worker", { operation_id: created.operation.id, suite_run_id: suite.id, suite_scenario_index: index }, `operation:${created.operation.id}:accepted`);
-      } catch (error) {
-        if (error instanceof VoiceLabError && error.detail.code === "CONCURRENCY_LIMIT") return;
-        throw error;
-      }
-      // A single dedicated principal means exactly one suite child at a time.
-      return;
-    }
-  }
-
-  async #finalizeTerminalSuites(): Promise<void> {
-    for (const suite of await this.ledger.listSuitesPendingEvidence(20)) {
-      if (suite.state !== "completed" && suite.state !== "failed" && suite.state !== "cancelled") continue;
-      const children = (await Promise.all(suite.runIds.map((runId) => this.ledger.getRun(runId)))).filter((run): run is RunRecord => run !== null);
-      if (children.length !== suite.runIds.length || children.some((run) => !TERMINAL_RUN_STATES.has(run.state) || !run.cleanupComplete)) continue;
-      await this.#saveSuiteEvidence(suite, children, suite.state);
-    }
-  }
-
-  async #saveSuiteEvidence(suite: SuiteRecord, children: RunRecord[], terminalState: Extract<SuiteRecord["state"], "completed" | "failed" | "cancelled">): Promise<boolean> {
-    const childRows: Array<Record<string, unknown>> = [];
-    const childRefs: EvidenceRef[] = [];
-    for (const scenario of suite.definition.scenarios) {
-      if (scenario.support === "typed_unsupported") {
-        childRows.push({ scenario_id: scenario.id, scenario_version: scenario.version, status: "typed_unsupported", certification_outcome: "typed_unsupported", certification_reason: scenario.unavailableReason, unavailable_reason: scenario.unavailableReason, run_id: null, evidence: { status: "unavailable", reason: scenario.unavailableReason } });
-        continue;
-      }
-      const run = children.find((candidate) => candidate.scenarioId === scenario.id && candidate.scenarioVersion === scenario.version);
-      if (!run) return false;
-      const evidence = await this.ledger.getEvidence(run.id);
-      if (!evidence && run.evidencePurgedAt === null) return false;
-      if (evidence) childRefs.push(...evidence.artifactRefs.filter((reference) => reference.kind === "manifest"));
-      const certification = runCertificationProjection(run.verdicts);
-      childRows.push({
-        scenario_id: scenario.id,
-        scenario_version: scenario.version,
-        status: run.state,
-        run_id: run.id,
-        test_run_id: run.testRunId,
-        verdicts: run.verdicts,
-        certification_outcome: certification.outcome,
-        certification_reason: certification.reason,
-        cleanup_complete: run.cleanupComplete,
-        retention_purge_pending: run.retentionPurgePending,
-        evidence: evidence ? { status: "available", manifest_id: evidence.manifestId, manifest_sha256: evidence.manifestSha256, schema_version: evidence.schemaVersion, references: evidence.artifactRefs } : { status: "unavailable", reason: "retention_purged", purged_at: run.evidencePurgedAt?.toISOString() ?? null },
-      });
-    }
-    const manifestId = deterministicUuid(suite.id, `suite-terminal:${terminalState}:${suite.requestHash}`);
-    const stableCreatedAt = children.map((run) => run.updatedAt).sort((left, right) => right.getTime() - left.getTime())[0] ?? suite.createdAt;
-    const verdictCounts = childRows.reduce<Record<string, number>>((counts, row) => {
-      const verdicts = row.verdicts as Verdicts | undefined;
-      if (row.status === "typed_unsupported") counts.typed_unsupported = (counts.typed_unsupported ?? 0) + 1;
-      else if (verdicts) {
-        for (const dimension of ["harness", "product", "provider", "auth", "evidence"] as const) {
-          const key = `${dimension}_${verdicts[dimension]}`;
-          counts[key] = (counts[key] ?? 0) + 1;
-        }
-      } else counts.harness_nonterminal_verdict = (counts.harness_nonterminal_verdict ?? 0) + 1;
-      return counts;
-    }, {});
-    const aggregateCertification = suiteCertificationProjection(children);
-    const manifest = {
-      contract_version: "sophia.voice-lab.suite-evidence.v1",
-      schema_version: "sophia.voice-lab.suite-evidence.v1",
-      manifest_id: manifestId,
-      suite_run_id: suite.id,
-      terminal_state: terminalState,
-      scheduling: "agent_guided_sequential",
-      scenario_catalog_version: suite.definition.scenarios[0]?.version ?? null,
-      environment: suite.definition.environment,
-      deployment_identity: { expected: suite.definition.target.expectedDeployment },
-      deployment_dependencies: { expected: suite.definition.target.expectedDependencies },
-      scenario_count: suite.definition.scenarios.length,
-      supported_child_count: children.length,
-      typed_unsupported_count: suite.definition.scenarios.filter((scenario) => scenario.support === "typed_unsupported").length,
-      verdict_counts: verdictCounts,
-      certification_outcome_counts: aggregateCertification.outcome_counts,
-      aggregate_certification: aggregateCertification,
-      cleanup: { all_supported_children_terminal: children.every((run) => TERMINAL_RUN_STATES.has(run.state)), all_live_execution_resources_zero: children.every((run) => run.cleanupComplete), retention_pending_run_ids: children.filter((run) => run.retentionPurgePending).map((run) => run.id) },
-      children: childRows,
-      failures_retained: childRows.filter((row) => row.status !== "completed" && row.status !== "typed_unsupported").map((row) => ({ scenario_id: row.scenario_id, run_id: row.run_id, status: row.status, verdicts: row.verdicts })),
-      product_nonpass_certifications: childRows.filter((row) => row.status !== "typed_unsupported" && row.certification_outcome !== "harness_evidence_certified_product_pass").map((row) => ({ scenario_id: row.scenario_id, run_id: row.run_id, certification_outcome: row.certification_outcome, certification_reason: row.certification_reason })),
-      created_at: stableCreatedAt.toISOString(),
-      human_summary: `Suite ${terminalState}; ${aggregateCertification.harness_evidence_certified_count}/${children.length} supported children have harness+evidence certification. Product outcomes: ${aggregateCertification.product_counts.pass} pass, ${aggregateCertification.product_counts.unavailable} unavailable, ${aggregateCertification.product_counts.fail} fail, ${aggregateCertification.product_counts.inconclusive} inconclusive, ${aggregateCertification.product_counts.pending} pending. Aggregate label: ${aggregateCertification.outcome_label}. ${suite.definition.scenarios.length - children.length} typed unsupported scenario entries are separate.`,
-    };
-    assertNoSecret(manifest);
-    const bytes = Buffer.from(JSON.stringify(manifest), "utf8");
-    if (bytes.byteLength > 2_000_000) throw new VoiceLabError(labError("SUITE_EVIDENCE_TOO_LARGE", "Aggregate suite evidence exceeded the durable Postgres cap.", "evidence"));
-    const digest = sha256(bytes);
-    const aggregateRef: EvidenceRef = { kind: "suite_manifest", resource_id: `voice-lab://suite-evidence/${manifestId}`, sha256: digest, content_type: "application/json", byte_length: bytes.byteLength };
-    await this.ledger.saveSuiteEvidence({ suiteId: suite.id, manifestId, manifestSha256: digest, schemaVersion: "sophia.voice-lab.suite-evidence.v1", bytes, artifactRefs: [aggregateRef, ...childRefs], createdAt: stableCreatedAt });
-    return true;
-  }
-
-  async #heartbeatWorker(): Promise<void> {
-    // Chromium launch/context/WebAudio probing is intentionally deeper than a
-    // process-liveness check and Playwright does not bound every internal wait.
-    // Keep the durable worker pulse alive, but fail its allocation readiness
-    // closed, if that deeper probe hangs or rejects.
-    const browser = await boundedBrowserReadiness(this.driver, WORKER_HEARTBEAT_BROWSER_READINESS_TIMEOUT_MS);
-    const tts = this.audio.readiness();
-    const fixturesReady = this.audio.summaries().length > 0;
-    const observedAt = new Date();
-    const heartbeatSequence = ++this.#workerHeartbeatSequence;
-    const effectiveKillSwitchEngaged = this.#killSwitchEngaged();
-    await this.ledger.heartbeatWorker({
-      workerId: this.workerId,
-      serviceVersion: this.config.serviceVersion,
-      browserReady: browser.ok && tts.ok && fixturesReady,
-      observedAt,
-      attestation: createWorkerHeartbeatAttestation(this.config, this.#workerBootIdentity, effectiveKillSwitchEngaged, heartbeatSequence),
-      detail: { browser: browser.detail, browser_engine: browser.engine ?? null, browser_version: browser.version ?? null, fixtures_ready: fixturesReady, fixture_count: this.audio.summaries().length, tts_ready: tts.ok, tts: tts.detail },
-    });
-  }
-
-  #startWorkerHeartbeatLoop(): void {
-    if (this.#workerHeartbeatLoopPromise !== null) return;
-    this.#workerHeartbeatFirstAttemptPromise = new Promise((resolve) => { this.#resolveWorkerHeartbeatFirstAttempt = resolve; });
-    this.#workerHeartbeatLoopPromise = this.#runWorkerHeartbeatLoop().finally(() => {
-      this.#resolveWorkerHeartbeatFirstAttempt?.();
-      this.#resolveWorkerHeartbeatFirstAttempt = null;
-      this.#workerHeartbeatFirstAttemptPromise = null;
-      this.#wakeWorkerHeartbeatLoop = null;
-      this.#workerHeartbeatLoopPromise = null;
-    });
-  }
-
-  async #runWorkerHeartbeatLoop(): Promise<void> {
-    while (!this.#stopping) {
-      await this.#heartbeatWorker().catch((error) => this.logger.error({ error: safeError(error) }, "worker heartbeat failed"));
-      this.#resolveWorkerHeartbeatFirstAttempt?.();
-      this.#resolveWorkerHeartbeatFirstAttempt = null;
-      if (this.#stopping) return;
-      await new Promise<void>((resolve) => {
-        let settled = false;
-        const finish = () => {
-          if (settled) return;
-          settled = true;
-          clearTimeout(timer);
-          if (this.#wakeWorkerHeartbeatLoop === finish) this.#wakeWorkerHeartbeatLoop = null;
-          resolve();
-        };
-        const timer = setTimeout(finish, WORKER_HEARTBEAT_INTERVAL_MS);
-        this.#wakeWorkerHeartbeatLoop = finish;
-        if (this.#stopping) finish();
-      });
-    }
-  }
-
-  async #execute(claimed: ClaimedOperation, signal: AbortSignal): Promise<Record<string, unknown>> {
-    const { operation } = claimed;
-    let run = await this.#freshRun(claimed.run.id);
-    if (operation.type !== "end" && this.#killSwitchEngaged()) throw new VoiceLabError(labError("KILL_SWITCH_ENGAGED", `${operation.type} was rejected by the worker kill switch.`, "authorization", true));
-    if (operation.type !== "start" && !this.driver.hasSession(run.id) && !(operation.type === "end" && ["ending", "finalizing", "exporting"].includes(run.state))) throw new VoiceLabError(labError("BROWSER_SESSION_LOST", "The browser worker restarted; live media state cannot be reconstructed honestly.", "harness"));
-    if (operation.type === "start") {
-      if (run.state !== "reserved") throw new VoiceLabError(labError("BROWSER_SESSION_LOST", "A replayed start operation cannot recreate an already-started browser honestly.", "harness"));
-      run = await transitionRun(this.ledger, run, "validating_target");
-      if (run.scenarioId === "V-S01" || run.scenarioId === "V-S02") return this.#executePreResourceScenario(run, operation.id);
-      if (this.config.readinessTarget !== null || this.config.nodeEnv !== "test") assertFreshProductAdmissionProof(this.config, run.target, await this.targetIdentity());
-      // Admission at the MCP boundary prevents an accepted request from
-      // allocating work beyond the rolling campaign budget. Replaying the
-      // exact durable reservation here is the final provider-allocation fence:
-      // a restart, suite scheduler, or older API process cannot bypass the
-      // same transactionally enforced counter before a browser/provider exists.
-      await this.#fenceProviderAdmission(run, operation);
-      run = await transitionRun(this.ledger, run, "browser_queued");
-      const browserLease = await this.ledger.upsertBrowserLease(run.id, this.workerId, this.config.browserLeaseSeconds);
-      this.#activeLeases.set(run.id, { epoch: browserLease.leaseEpoch });
-      run = await transitionRun(this.ledger, run, "browser_leased");
-      run = await transitionRun(this.ledger, run, "authenticating");
-      const startOps = ["auth:session", "session:create", "session:read", "voice:start", "session:finalize", ...(run.scenarioId === "V-L01" ? ["trace:fault"] : [])];
-      const browserContextBinding = await this.#resolveD02BrowserContextBinding(run);
-      const grant = await this.#mintAndVerify(run, "sophia-voice-lab-frontend", startOps, "auth:session", browserContextBinding);
-      await this.#fenceMutation(claimed, signal);
-      const started = await this.driver.start(run, grant.token, browserContextBinding);
-      if (!sameD02BrowserContextBinding(started.browserContextBinding, browserContextBinding)) throw new VoiceLabError(labError("BROWSER_CONTEXT_BINDING_MISMATCH", "The browser driver did not attest the exact V-D02 run, worker, lease, and context allocation.", "harness", false));
-      if (browserContextBinding) {
-        await this.ledger.appendEvent(run.id, "harness.browser_context_bound", "canonical", {
-          schema: "sophia_voice_lab_browser_context_binding_v1",
-          test_run_id_sha256: sha256(run.testRunId),
-          cleanup_obligation_id_sha256: sha256(run.cleanupObligationId),
-          ...browserContextBinding,
-          context_allocation: "deterministic_run_worker_lease_v1",
-          driver_attested: true,
-          raw_run_worker_and_context_identifiers_excluded: true,
-        }, `browser-context-binding:${run.id}:${browserContextBinding.browser_lease_epoch}`);
-      }
-      run = await transitionRun(this.ledger, run, "opening_app", { observedDeployment: started.observedDeployment, verdicts: { ...run.verdicts, auth: "pass" } });
-      await this.#persistEvents(run.id, started.events);
-      const browserRuntime = await this.driver.readiness();
-      if (!browserRuntime.ok || typeof browserRuntime.engine !== "string" || browserRuntime.engine.length === 0 || typeof browserRuntime.version !== "string" || browserRuntime.version.length === 0) throw new VoiceLabError(labError("BROWSER_RUNTIME_PROVENANCE_UNAVAILABLE", "The acquired browser runtime did not expose an exact engine/version identity.", "harness", false));
-      await this.ledger.appendEvent(run.id, "harness.browser_runtime_acquired", "canonical", {
-        worker_id_sha256: sha256(this.workerId),
-        browser_lease_epoch: browserLease.leaseEpoch,
-        ...(browserContextBinding ? { browser_context_id_sha256: browserContextBinding.browser_context_id_sha256 } : {}),
-        operation_id: operation.id,
-        engine: browserRuntime.engine,
-        version: browserRuntime.version,
-        service_version: this.config.serviceVersion,
-        acquired_at: new Date().toISOString(),
-        raw_worker_identifier_excluded: true,
-      }, `browser-runtime:${run.id}:${browserLease.leaseEpoch}`);
-      run = await this.#freshRun(run.id);
-      run = await transitionRun(this.ledger, run, "ready", { verdicts: { ...run.verdicts, harness: "pass", auth: "pass" } });
-      await this.ledger.appendEvent(run.id, "run.ready", "worker", { operation_id: operation.id }, `run:${run.id}:ready`);
-      if (run.scenarioId === "V-D02") {
-        await this.#certifyFreshApiReattach(run);
-      }
-      return { run_state: run.state, capability_jti_hash: sha256(grant.claims.jti) };
-    }
-    if (operation.type === "speak" || operation.type === "barge_in") {
-      const allowedOp = operation.type === "speak" ? "voice:synthetic_input" : "voice:barge_in";
-      await this.#mintAndVerify(run, "sophia-voice-runtime", [allowedOp], allowedOp);
-      await this.#awaitPriorInputSettlement(run, operation.id, signal);
-      const bargeTarget = operation.input._barge_target as Record<string, unknown> | undefined;
-      if (operation.type === "barge_in") assertBargeWindow(bargeTarget);
-      const text = typeof operation.input.text === "string" ? operation.input.text : undefined;
-      const fixtureId = typeof operation.input.fixture_id === "string" ? operation.input.fixture_id : undefined;
-      const audio = await this.audio.resolve({ ...(text === undefined ? {} : { text }), ...(fixtureId === undefined ? {} : { fixture_id: fixtureId }) }, signal);
-      if (audio.durationMs > this.config.maxAudioDurationMs) throw new VoiceLabError(labError("AUDIO_DURATION_LIMIT", "Resolved audio exceeds the per-utterance duration limit.", "validation"));
-      assertResolvedAudioWithinAdmission(operation.input._admission, audio.durationMs, audio.bytes.byteLength);
-      const priorOperations = await this.ledger.listOperations(run.id);
-      const priorUsage = priorOperations.filter((candidate) => candidate.id !== operation.id && candidate.state === "succeeded" && (candidate.type === "speak" || candidate.type === "barge_in")).reduce((usage, candidate) => {
-        const wav = candidate.result?.wav as Record<string, unknown> | undefined;
-        return { durationMs: usage.durationMs + Number(wav?.duration_ms ?? 0), bytes: usage.bytes + Number(wav?.byte_length ?? 0) };
-      }, { durationMs: 0, bytes: 0 });
-      if (priorUsage.durationMs + audio.durationMs > this.config.maxInjectedDurationMs) throw new VoiceLabError(labError("INJECTED_DURATION_LIMIT", "Run cumulative injected duration budget would be exceeded.", "conflict"));
-      if (priorUsage.bytes + audio.bytes.byteLength > this.config.maxInjectedBytes) throw new VoiceLabError(labError("INJECTED_BYTES_LIMIT", "Run cumulative injected byte budget would be exceeded.", "conflict"));
-      // The page bridge memoizes by operation ID; this deterministic ID makes
-      // a reclaimed/retried operation return the identical scheduling receipt.
-      const utteranceId = deterministicUuid(operation.id, "utterance");
-      const timing = typeof operation.input.timing_policy === "object" && operation.input.timing_policy !== null ? operation.input.timing_policy as Record<string, unknown> : {};
-      const targetAt = typeof bargeTarget?.target_schedule_at === "string" ? new Date(bargeTarget.target_schedule_at).getTime() : Number.NaN;
-      if (operation.type === "barge_in") assertBargeWindow(bargeTarget);
-      const delayMs = operation.type === "barge_in" ? (Number.isNaN(targetAt) ? Number(operation.input.delay_ms ?? 0) : Math.max(0, targetAt - Date.now())) : Number(timing.delay_ms ?? 0);
-      await this.ledger.appendEvent(run.id, "utterance.resolved", "worker", { utterance_id: utteranceId, operation_id: operation.id, idempotency_key_hash: sha256(operation.idempotencyKey), test_run_id: run.testRunId, scenario_id: run.scenarioId, scenario_version: run.scenarioVersion, source: audio.source, fixture: audio.fixture ?? null, source_text_hash: audio.sourceTextHash ?? null, synthesis: audio.synthesis ?? null, barge_target: bargeTarget ?? null, scheduled_delay_ms: delayMs, wav: { sha256: audio.sha256, sample_rate: audio.sampleRate, channels: audio.channels, duration_ms: audio.durationMs, byte_length: audio.bytes.byteLength } }, `utterance:${utteranceId}:resolved`);
-      if (operation.type === "barge_in" && operation.input._tool_target) await this.#revalidateActiveTarget(run, operation.id, operation.input._tool_target as Record<string, unknown>);
-      await this.#fenceMutation(claimed, signal);
-      const scheduled = await this.driver.schedule(run, operation.id, utteranceId, audio, delayMs, operation.type === "barge_in" ? operation.input._tool_target as Record<string, unknown> | undefined : undefined);
-      await this.#persistEvents(run.id, scheduled.events);
-      run = await this.#freshRun(run.id);
-      if (run.state === "ready") run = await transitionRun(this.ledger, run, "active");
-      return { run_state: run.state, utterance_id: utteranceId, source: audio.source, source_text_hash: audio.sourceTextHash ?? null, synthesis: audio.synthesis ?? null, wav: { sha256: audio.sha256, sample_rate: audio.sampleRate, channels: audio.channels, duration_ms: audio.durationMs, byte_length: audio.bytes.byteLength }, schedule_receipt: scheduled.receipt };
-    }
-    if (operation.type === "force_socket_rotation") {
-      await this.#mintAndVerify(run, "sophia-voice-runtime", ["voice:fault:socket_rotation"], "voice:fault:socket_rotation");
-      if (operation.input._commit_target) await this.#revalidateActiveTarget(run, operation.id, operation.input._commit_target as Record<string, unknown>);
-      await this.#fenceMutation(claimed, signal);
-      const rotated = await this.driver.rotate(run, Number(operation.input.expected_socket_epoch), operation.id, operation.input._commit_target as Record<string, unknown> | undefined);
-      await this.#persistEvents(run.id, rotated.events);
-      return { run_state: run.state, rotation_receipt: rotated.receipt };
-    }
-    // A reclaimed end may resume only from durable canonical receipts. The
-    // browser itself is intentionally non-resumable; after its context has
-    // closed, recovery/final evidence may continue from the ledger without
-    // repeating UI or provider side effects.
-    if (!this.driver.hasSession(run.id)) {
-      const prior = await this.#allEvents(run.id);
-      const finalized = prior.events.some((event) => isCanonicalFinalizationReceipt(run, event));
-      if (!finalized) throw new VoiceLabError(labError("BROWSER_SESSION_LOST", "The browser disappeared before a bound canonical finalization receipt was durable; end cannot be replayed safely.", "harness", false));
-      const recovered = await this.#recoverRun(run);
-      await this.#persistEvents(run.id, recovered.events);
-      run = await this.#freshRun(run.id);
-      if (run.state === "ending") run = await transitionRun(this.ledger, run, "finalizing");
-      if (run.state === "finalizing") run = await transitionRun(this.ledger, run, "exporting");
-      if (run.state !== "exporting") throw new VoiceLabError(labError("END_RESUME_STATE_INVALID", `Durable end recovery cannot resume from ${run.state}.`, "conflict", false));
-      const browserLeaseReleased = await this.#releaseBrowserLeaseProof(run.id);
-      if (!browserLeaseReleased) throw new VoiceLabError(labError("BROWSER_LEASE_RELEASE_UNCONFIRMED", "Durable end recovery could not prove the browser lease absent.", "harness", true));
-      return { run_state: run.state, evidence_state: "pending_post_settlement", resumed_from_durable_finalization: true, _finalize_end: true };
-    }
-
-    await this.#mintAndVerify(run, "sophia-voice-runtime", ["voice:end"], "voice:end");
-    const finalizeGrant = await this.#mintAndVerify(run, "sophia-voice-lab-frontend", ["session:finalize"], "session:finalize");
-    const cleanupGrant = await this.#mintAndVerify(run, "sophia-voice-lab-frontend", ["session:cleanup"], "session:cleanup");
-    if (run.state !== "ending") run = await transitionRun(this.ledger, run, "ending");
-    await this.#fenceMutation(claimed, signal);
-    const ended = await this.driver.end(run, finalizeGrant.token, cleanupGrant.token);
-    await this.#persistEvents(run.id, ended.events);
-    run = await this.#freshRun(run.id);
-    const recoveredAfterEnd = await this.#recoverRun(run);
-    await this.#persistEvents(run.id, recoveredAfterEnd.events);
-    run = await this.#freshRun(run.id);
-    run = await transitionRun(this.ledger, run, "finalizing");
-    for (const artifact of ended.artifacts) {
-      if (artifact.bytes.byteLength > 2_000_000) {
-        await this.ledger.appendEvent(run.id, "evidence.artifact_dropped", "worker", { kind: artifact.kind, reason: "size_limit", byte_length: artifact.bytes.byteLength });
-        continue;
-      }
-      const digest = sha256(artifact.bytes);
-      await this.ledger.saveArtifact({ ...artifact, runId: run.id, sha256: digest, createdAt: new Date() });
-    }
-    run = await transitionRun(this.ledger, run, "exporting");
-    const browserLeaseReleased = await this.#releaseBrowserLeaseProof(run.id);
-    if (!browserLeaseReleased) throw new VoiceLabError(labError("BROWSER_LEASE_RELEASE_UNCONFIRMED", "End could not prove the browser lease absent before evidence settlement.", "harness", true));
-    return { run_state: run.state, evidence_state: "pending_post_settlement", _finalize_end: true };
-  }
-
-  async #fenceProviderAdmission(run: RunRecord, operation: ClaimedOperation["operation"]): Promise<void> {
-    const suiteRunId = typeof operation.input.suite_run_id === "string" ? operation.input.suite_run_id : null;
-    if (suiteRunId) {
-      const suite = await this.ledger.getSuite(suiteRunId);
-      if (!suite || suite.callerId !== run.callerId || !suite.runIds.includes(run.id)) throw new VoiceLabError(labError("SUITE_ADMISSION_BINDING_INVALID", "Suite child could not prove its durable rolling-admission ownership before provider allocation.", "harness", false));
-      await this.#fenceSuiteAdmission(suite);
-      return;
-    }
-    await this.ledger.reserveRollingAdmission({
-      reservationKey: sha256(`run\u0000${run.callerId}\u0000${operation.idempotencyKey}`),
-      requestHash: operation.requestHash,
-      callerId: run.callerId,
-      environment: run.environment,
-      kind: "run",
-      runStarts: 1,
-      providerSeconds: this.config.maxRunSeconds,
-      suites: 0,
-      suiteChildren: 0,
-      audioDurationMs: 0,
-      audioBytes: 0,
-      observedAt: run.createdAt,
-    }, this.#rollingAdmissionLimits());
-  }
-
-  async #fenceSuiteAdmission(suite: SuiteRecord): Promise<void> {
-    const supportedChildren = suite.definition.scenarios.filter((scenario) => scenario.support === "supported").length;
-    const providerChildren = suite.definition.scenarios.filter((scenario) => scenario.support === "supported" && scenario.id !== "V-S01" && scenario.id !== "V-S02").length;
-    await this.ledger.reserveRollingAdmission({
-      reservationKey: sha256(`suite\u0000${suite.callerId}\u0000${suite.idempotencyKey}`),
-      requestHash: suite.requestHash,
-      callerId: suite.callerId,
-      environment: suite.definition.environment,
-      kind: "suite",
-      runStarts: supportedChildren,
-      providerSeconds: providerChildren * this.config.maxRunSeconds,
-      suites: 1,
-      suiteChildren: supportedChildren,
-      audioDurationMs: 0,
-      audioBytes: 0,
-      observedAt: suite.createdAt,
-    }, this.#rollingAdmissionLimits());
-  }
-
-  #rollingAdmissionLimits(): RollingAdmissionLimits {
-    return {
-      windowSeconds: this.config.admissionWindowSeconds,
-      global: { runStarts: this.config.maxRollingRunStarts, providerSeconds: this.config.maxRollingProviderSeconds, suites: this.config.maxRollingSuites, suiteChildren: this.config.maxRollingSuiteChildren, audioDurationMs: this.config.maxRollingInjectedDurationMs, audioBytes: this.config.maxRollingInjectedBytes },
-      caller: { runStarts: this.config.maxRollingRunStartsPerCaller, providerSeconds: this.config.maxRollingProviderSecondsPerCaller, suites: this.config.maxRollingSuitesPerCaller, suiteChildren: this.config.maxRollingSuiteChildrenPerCaller, audioDurationMs: this.config.maxRollingInjectedDurationMsPerCaller, audioBytes: this.config.maxRollingInjectedBytesPerCaller },
-    };
-  }
-
-  /**
-   * Publish final evidence only after the end operation itself is durable.
-   * This method is deliberately idempotent: maintenance can re-enter it after
-   * a worker crash at any boundary, and every returned resource keeps immutable
-   * bytes behind its original URI/hash.
-   */
-  async #finalizeEndRun(runId: string): Promise<void> {
-    let run = await this.#freshRun(runId);
-    if (run.state !== "exporting" && !(TERMINAL_RUN_STATES.has(run.state) && run.terminalError === null && run.cleanupComplete)) {
-      throw new VoiceLabError(labError("EVIDENCE_FINALIZATION_STATE_INVALID", `Final evidence cannot be published from ${run.state}.`, "conflict", true));
-    }
-
-    let operations = await this.ledger.listOperations(run.id);
-    const nonterminal = operations.filter((operation) => ["accepted", "queued", "leased", "executing"].includes(operation.state));
-    if (nonterminal.length > 0) throw new VoiceLabError(labError("EVIDENCE_OPERATION_PENDING", "Final evidence is waiting for every run operation to settle.", "evidence", true, { operation_ids: nonterminal.map((operation) => operation.id) }));
-    const endOperations = operations.filter((operation) => operation.type === "end" && operation.state === "succeeded");
-    if (endOperations.length === 0) throw new VoiceLabError(labError("END_SETTLEMENT_MISSING", "Final evidence requires a durably succeeded end operation.", "evidence", true));
-    // Repair only the evidence projection after a crash between the canonical
-    // operation row update and event append; the operation row is authoritative.
-    for (const operation of operations.filter((candidate) => candidate.state === "succeeded")) {
-      await this.ledger.appendEvent(run.id, "operation.succeeded", "worker", { operation_id: operation.id, operation_type: operation.type }, `operation:${operation.id}:succeeded`);
-    }
-
-    let eventPage = await this.#allEvents(run.id);
-    const browserContextClosed = eventPage.events.some((event) => event.kind === "cleanup.browser_context_closed" && event.payload.close_resolved === true && event.payload.browser_registry_absent === true) && !this.driver.hasSession(run.id);
-    const browserLeaseReleased = await this.#releaseBrowserLeaseProof(run.id);
-    eventPage = await this.#allEvents(run.id);
-    const taskCleanup = deriveTaskCleanup(eventPage.events, run);
-    const providerDisconnected = eventPage.events.some((event) => isExactBoundProductEvent(run, event) && event.kind === "provider.stage" && ["closed", "ended"].includes(String(event.payload.stage))) || recoveryComponentComplete(eventPage.events, "voice_provider");
-    const authSessionRevoked = eventPage.events.some(authCleanupConfirmed) || recoveryComponentComplete(eventPage.events, "auth_sessions");
-    const canonicalFinalized = eventPage.events.some((event) => isCanonicalFinalizationReceipt(run, event));
-    const liveCleanupComplete = authoritativeLiveCleanupComplete(eventPage.events);
-    const cleanupComplete = canonicalFinalized && browserContextClosed && browserLeaseReleased && providerDisconnected && authSessionRevoked && taskCleanup.unresolved_count === 0 && liveCleanupComplete;
-    if (!cleanupComplete) {
-      throw new VoiceLabError(labError("ZERO_ORPHAN_CLEANUP_UNCONFIRMED", "Run cannot produce final evidence until canonical finalization plus browser, provider, auth, and owned-task cleanup are proven.", "harness", true, {
-        canonical_finalization: canonicalFinalized,
-        browser_context_closed: browserContextClosed,
-        browser_lease_released: browserLeaseReleased,
-        provider_disconnect: providerDisconnected,
-        auth_session_revoked: authSessionRevoked,
-        unresolved_tasks: taskCleanup.unresolved_count,
-        live_cleanup_complete: liveCleanupComplete,
-      }));
-    }
-
-    const authAudit = await this.ledger.listAuthAudit(run.id);
-    const derivedVerdicts = deriveCompletedVerdicts(run, eventPage.events, operations, authAudit);
-    const machineAssertions = evaluateScenarioAssertions(run, eventPage.events, operations, authAudit);
-    const decision = certificationTerminalDecision(derivedVerdicts);
-    const terminalState = decision.state;
-    const terminalReason = decision.reason;
-
-    if (run.state === "exporting") {
-      const retention = retentionPatchFromEvents(eventPage.events);
-      run = await this.ledger.updateRun(run.id, run.version, { verdicts: derivedVerdicts, cleanupComplete: true, ...retention });
-      run = await transitionRun(this.ledger, run, terminalState, { verdicts: derivedVerdicts, cleanupComplete: true, ...retention });
-    } else if (run.state === "pending_external_evidence" && terminalState !== "pending_external_evidence") {
-      run = await transitionRun(this.ledger, run, terminalState, { verdicts: derivedVerdicts });
-    } else if (run.state !== terminalState) {
-      throw new VoiceLabError(labError("TERMINAL_DECISION_CONFLICT", "A recovered evidence finalizer derived a different terminal state from the already durable decision.", "evidence", false, { durable_state: run.state, derived_state: terminalState }));
-    } else if (canonicalRequestHash(run.verdicts) !== canonicalRequestHash(derivedVerdicts)) {
-      // Execution terminal state is immutable, while certification is an
-      // append-only projection. A late owning attestation may therefore update
-      // only verdicts and the current manifest pointer.
-      run = await this.ledger.updateRun(run.id, run.version, { verdicts: derivedVerdicts });
-    }
-    const terminalEvent = await this.ledger.appendEvent(run.id, `run.${terminalState}`, "worker", {
-      terminal_state: terminalState,
-      terminal_reason: terminalReason,
-      cleanup_complete: true,
-      end_operation_ids: endOperations.map((operation) => operation.id).sort(),
-    }, `run:${run.id}:${terminalState}`);
-
-    await this.#publishRunEvidence({
-      runId: run.id,
-      terminalState,
-      terminalReason,
-      verdicts: derivedVerdicts,
-      terminalError: terminalState === "completed" || terminalState === "pending_external_evidence" ? null : labError("SCENARIO_VERDICT_TERMINAL", "One or more machine assertions produced a non-passing terminal verdict.", terminalState === "product_failed" ? "product" : terminalState === "inconclusive_provider" ? "provider" : terminalState === "authorization_failed" ? "authorization" : "harness", false, { terminal_state: terminalState }),
-      createdAt: terminalEvent.at,
-      purpose: "completed-flow",
-      intentionallyUnallocated: false,
-      artifacts: [],
-    });
-  }
-
-  async #executePreResourceScenario(run: RunRecord, operationId: string): Promise<Record<string, unknown>> {
-    const activeRunsBefore = await this.ledger.countActiveRuns();
-    const verified = await this.driver.verifyTarget(run);
-    run = await this.ledger.updateRun(run.id, run.version, { observedDeployment: verified.observedDeployment });
-    await this.#persistEvents(run.id, verified.events);
-    if (run.scenarioId === "V-S01") {
-      const grantUrl = new URL(this.config.authGrantPath, validateAllowedOrigin(run.target.frontendUrl, this.config.allowedOrigins).origin).toString();
-      const common = { sub: run.principalId, principal_id: run.principalId, test_run_id: run.testRunId, cleanup_obligation_id: run.cleanupObligationId, scenario_id: "V-S01", ...(run.scenarioVersion === null ? {} : { scenario_version: run.scenarioVersion }), synthetic: true as const, environment: run.environment, retention_hours: run.capturePolicy.retentionHours, provider_expires_at: run.expiresAt.toISOString(), allowed_ops: ["auth:session"], expected_deployment: run.target.expectedDeployment };
-      const expired = this.#frontendCapabilities.mint({ ...common, aud: "sophia-voice-lab-frontend" }, new Date(Date.now() - (this.config.capabilityTtlSeconds + 30) * 1_000));
-      const wrongAudience = this.#frontendCapabilities.mint({ ...common, aud: "sophia-voice-gateway" });
-      const wrongOperation = this.#frontendCapabilities.mint({ ...common, aud: "sophia-voice-lab-frontend", allowed_ops: ["auth:readiness"] });
-      const wrongPrincipal = this.#frontendCapabilities.mint({ ...common, aud: "sophia-voice-lab-frontend", principal_id: "wrong-principal-probe" });
-      const wrongRun = this.#frontendCapabilities.mint({ ...common, aud: "sophia-voice-lab-frontend", test_run_id: randomUUID() });
-      const ordinary = this.#frontendCapabilities.mint({ ...common, aud: "sophia-voice-lab-frontend", sub: "ordinary-user-probe", principal_id: "ordinary-user-probe" });
-      const variants: Array<{ id: typeof S01_FRONTEND_GRANT_VARIANTS[number]; token?: string }> = [
-        { id: "missing" }, { id: "expired", token: expired.token }, { id: "wrong_audience", token: wrongAudience.token },
-        { id: "wrong_operation", token: wrongOperation.token }, { id: "wrong_principal", token: wrongPrincipal.token },
-        { id: "wrong_run", token: wrongRun.token }, { id: "ordinary_user", token: ordinary.token },
-      ];
-      for (const variant of variants) {
-        const response = await this.scenarioFetch(grantUrl, { method: "POST", redirect: "error", signal: AbortSignal.timeout(5_000), headers: { accept: "application/json", ...(variant.token === undefined ? {} : { "X-Sophia-Voice-Lab-Capability": variant.token }) } });
-        const rejected = [400, 401, 403].includes(response.status) && response.url === grantUrl && !response.headers.has("set-cookie") && !response.headers.has("location");
-        await response.body?.cancel().catch(() => undefined);
-        await this.ledger.appendEvent(run.id, "security.invalid_grant_probe", "canonical", { variant: variant.id, rejected, http_status: response.status, exact_response_target: response.url === grantUrl, no_session_cookie: !response.headers.has("set-cookie"), no_redirect: !response.headers.has("location") }, `security:${run.id}:${variant.id}`);
-        if (!rejected) throw new VoiceLabError(labError("INVALID_GRANT_PROBE_ACCEPTED", "A governed invalid frontend grant was not rejected before session allocation.", "authorization", false, { variant: variant.id, status: response.status }));
-      }
-      await this.#runOAuthSecurityProbes(run);
-    } else {
-      const inputTarget = {
-        frontend_url: run.target.frontendUrl,
-        gateway_url: run.target.gatewayUrl,
-        voice_url: run.target.voiceUrl,
-        langgraph_url: run.target.langgraphUrl,
-        expected_deployment: run.target.expectedDeployment,
-        expected_dependencies: run.target.expectedDependencies,
-      };
-      const fixture = (patch: Partial<FixtureSummary>): FixtureSummary => ({
-        id: "governed-probe", fixtureVersion: "1.0.0", family: "security-probe", fixtureClass: "short_command",
-        sha256: "0".repeat(64), sampleRate: 16_000, channels: 1, durationMs: 1_000,
-        sourceText: { status: "unavailable", reason: "content_free_validation_probe" },
-        synthesis: { engine: "fixture", engine_version: "1", voice: "synthetic", rate: "fixed" },
-        provenance: { kind: "governed_security_probe", suite: "V-S02", manifestVersion: 1 },
-        assertionPolicy: { expect_transcript: false, semantic_threshold: "not_applicable" }, ...patch,
-      });
-      const start = { environment: run.environment, target: inputTarget, scenario_id: "V-S02", scenario_version: run.scenarioVersion ?? undefined, idempotency_key: "security-probe-start" };
-      const cases: Array<{ id: typeof S02_VALIDATION_VARIANTS[number]; expected: string; validator: string; execute: () => void | Promise<void> }> = [
-        { id: "unknown_fields", expected: "ZodError", validator: "toolInputSchemas.start_voice_run", execute: () => { toolInputSchemas.start_voice_run.parse({ ...start, unexpected: true }); } },
-        { id: "malformed_id", expected: "ZodError", validator: "toolInputSchemas.speak", execute: () => { toolInputSchemas.speak.parse({ run_id: "not-a-uuid", text: "safe", idempotency_key: "security-probe-speak" }); } },
-        { id: "malformed_sha", expected: "ZodError", validator: "toolInputSchemas.start_voice_run", execute: () => { toolInputSchemas.start_voice_run.parse({ ...start, target: { ...inputTarget, expected_deployment: { ...inputTarget.expected_deployment, frontend: "bad-sha" } } }); } },
-        { id: "text_limit", expected: "TEXT_TOO_LARGE", validator: "validateAudioInputLimit", execute: () => { validateAudioInputLimit({ text: "x".repeat(this.config.maxTextCharacters + 1) }, this.config.maxTextCharacters); } },
-        { id: "fixture_metadata_bytes", expected: "AUDIO_TOO_LARGE", validator: "reserveAudioInput", execute: async () => { await reserveAudioInput({ fixture_id: "governed-probe" }, [fixture({ sampleRate: this.config.maxAudioBytes, durationMs: 1_000, channels: 2 })], this.config); } },
-        { id: "fixture_metadata_duration", expected: "AUDIO_DURATION_LIMIT", validator: "reserveAudioInput", execute: async () => { await reserveAudioInput({ fixture_id: "governed-probe" }, [fixture({ durationMs: this.config.maxAudioDurationMs + 1 })], this.config); } },
-        { id: "unsupported_fixture", expected: "FIXTURE_NOT_FOUND", validator: "reserveAudioInput", execute: async () => { await reserveAudioInput({ fixture_id: "unknown-fixture" }, [], this.config); } },
-        { id: "unsupported_scenario", expected: "ZodError", validator: "toolInputSchemas.start_voice_run", execute: () => { toolInputSchemas.start_voice_run.parse({ ...start, scenario_id: "V-UNKNOWN" }); } },
-        { id: "http_origin", expected: "TARGET_NOT_ALLOWED", validator: "validateAllowedOrigin", execute: () => { validateAllowedOrigin("http://unsupported.invalid", this.config.allowedOrigins); } },
-        { id: "unsupported_target_path", expected: "TARGET_NOT_ALLOWED", validator: "validateAllowedOrigin", execute: () => { validateAllowedOrigin(`${new URL(run.target.frontendUrl).origin}/redirect`, this.config.allowedOrigins); } },
-        { id: "unsupported_target_query", expected: "TARGET_NOT_ALLOWED", validator: "validateAllowedOrigin", execute: () => { validateAllowedOrigin(`${new URL(run.target.frontendUrl).origin}/?redirect=https://unsupported.invalid`, this.config.allowedOrigins); } },
-        { id: "unsupported_target_origin", expected: "TARGET_NOT_ALLOWED", validator: "validateAllowedOrigin", execute: () => { validateAllowedOrigin("https://unsupported.invalid", this.config.allowedOrigins); } },
-        { id: "redirect_origin", expected: "TARGET_NOT_ALLOWED", validator: "validateAllowedOrigin", execute: () => { validateAllowedOrigin("https://allowed.invalid@redirect.invalid/", this.config.allowedOrigins); } },
-        { id: "invalid_capture_policy", expected: "ZodError", validator: "toolInputSchemas.start_voice_run", execute: () => { toolInputSchemas.start_voice_run.parse({ ...start, capture_policy: { raw_audio: false, screenshot: true, video: false, retention_hours: 0 } }); } },
-        { id: "malformed_wav", expected: "AUDIO_FORMAT_UNSUPPORTED", validator: "parseWav", execute: () => { parseWav(Buffer.from("not-a-wave")); } },
-        { id: "oversized_audio", expected: "AUDIO_TOO_LARGE", validator: "assertAudioByteLimit", execute: () => { assertAudioByteLimit(this.config.maxAudioBytes + 1, this.config.maxAudioBytes); } },
-      ];
-      for (const probe of cases) {
-        let code: string | null = null;
-        try { await probe.execute(); }
-        catch (error) { code = error instanceof VoiceLabError ? error.detail.code : error instanceof Error ? error.name : "Error"; }
-        const rejected = code === probe.expected;
-        await this.ledger.appendEvent(run.id, "security.pre_resource_validation_probe", "worker", { variant: probe.id, rejected, expected_error_class: probe.expected, observed_error_class: code, production_validator: probe.validator }, `security:${run.id}:${probe.id}`);
-        if (!rejected) throw new VoiceLabError(labError("PRE_RESOURCE_VALIDATION_PROBE_FAILED", "A governed malformed media or target case did not use the production fail-closed validator.", "harness", false, { variant: probe.id, expected: probe.expected, observed: code }));
-      }
-      await this.ledger.appendEvent(run.id, "security.shared_validator_equivalence", "worker", { internal_validator_supplement: true, variant_count: cases.length, production_boundary_assertion: "security.mcp_boundary_probe" }, `security:${run.id}:shared-validator-equivalence`);
-      await this.ledger.appendEvent(run.id, "security.s02_surface_coverage", "canonical", {
-        schema: "sophia_voice_lab_s02_surface_coverage_v1",
-        public_authenticated_mcp_variants: [...S02_HTTP_VARIANTS],
-        internal_startup_only_variants: ["fixture_metadata_bytes", "fixture_metadata_duration", "malformed_wav", "oversized_audio"],
-        unsupported_fixture_public_mcp: true,
-        raw_audio_public_surface: false,
-        raw_audio_surface_reason: "no_public_raw_audio_surface",
-        fixture_startup_receipt: this.audio.fixtureReadiness(),
-      }, `security:${run.id}:surface-coverage`);
-      await this.#runMcpValidationProbes(run, inputTarget);
-    }
-    const activeRunsAfter = await this.ledger.countActiveRuns();
-    const allocationRun = await this.#freshRun(run.id);
-    const allocationFence = {
-      active_runs_before: activeRunsBefore,
-      active_runs_after: activeRunsAfter,
-      active_run_count_unchanged: activeRunsAfter === activeRunsBefore,
-      browser_context_absent: !this.driver.hasSession(run.id),
-      browser_lease_absent: (await this.ledger.getBrowserLease(run.id)) === null,
-      canonical_session_absent: allocationRun.canonicalSessionId === null,
-      provider_session_absent: allocationRun.providerSessionId === null,
-      tts_process_invocations: 0,
-    };
-    await this.ledger.appendEvent(run.id, "security.pre_resource_allocation_fence", "worker", allocationFence, `security:${run.id}:allocation-fence`);
-    if (!Object.entries(allocationFence).every(([key, value]) => key.endsWith("_before") || key.endsWith("_after") ? true : value === true || value === 0)) throw new VoiceLabError(labError("PRE_RESOURCE_ALLOCATION_OCCURRED", "The governed security recipe observed a resource or quota mutation before rejection.", "harness", false));
-    await this.ledger.appendEvent(run.id, "cleanup.browser_context_absent", "worker", { pre_resource_recipe: true, browser_never_allocated: true }, `cleanup:${run.id}:browser-context-absent`);
-    await this.ledger.appendEvent(run.id, "cleanup.browser_lease_absent", "worker", { pre_resource_recipe: true, authoritative_ledger_read: (await this.ledger.getBrowserLease(run.id)) === null }, `cleanup:${run.id}:browser-lease-absent`);
-    const recovery = await this.#recoverRun(run);
-    await this.#persistEvents(run.id, recovery.events);
-    run = await this.#freshRun(run.id);
-    run = await transitionRun(this.ledger, run, "exporting");
-    return { run_state: run.state, certification_recipe: run.scenarioId, pre_resource_only: true, operation_id: operationId, _finalize_pre_resource: true };
-  }
-
-  async #runMcpValidationProbes(run: RunRecord, inputTarget: Record<string, unknown>): Promise<void> {
-    const resource = this.config.oauth?.resource;
-    if (!resource) throw new VoiceLabError(labError("MCP_BOUNDARY_CERTIFICATION_UNAVAILABLE", "V-S02 requires the configured public registered-app MCP resource.", "harness", false));
-    const endpoint = new URL(resource);
-    if (endpoint.pathname !== "/mcp" || endpoint.search || endpoint.hash) throw new VoiceLabError(labError("MCP_BOUNDARY_CERTIFICATION_UNAVAILABLE", "V-S02 public resource was not the exact /mcp endpoint.", "harness", false));
-    const call = (id: string, name: string, args: Record<string, unknown>) => ({ jsonrpc: "2.0", id: `v-s02-${id}-${randomUUID()}`, method: "tools/call", params: { name, arguments: args } });
-    const start = { environment: run.environment, target: inputTarget, scenario_id: "V-S02", scenario_version: run.scenarioVersion ?? undefined, idempotency_key: "s02-http-start" };
-    const standard: Array<{ id: Exclude<typeof S02_HTTP_VARIANTS[number], "deep_json" | "malformed_json" | "oversized_json">; body: Record<string, unknown> }> = [
-      { id: "unknown_fields", body: call("unknown", "start_voice_run", { ...start, unexpected: true }) },
-      { id: "malformed_id", body: call("id", "speak", { run_id: "not-a-uuid", text: "safe", idempotency_key: "s02-http-id" }) },
-      { id: "malformed_sha", body: call("sha", "start_voice_run", { ...start, target: { ...inputTarget, expected_deployment: { ...(inputTarget.expected_deployment as Record<string, unknown>), frontend: "bad-sha" } } }) },
-      { id: "text_limit", body: call("text", "speak", { run_id: run.id, text: "x".repeat(this.config.maxTextCharacters + 1), idempotency_key: "s02-http-text" }) },
-      { id: "unsupported_fixture", body: call("fixture", "speak", { run_id: run.id, fixture_id: "s02-governed-unknown-fixture", idempotency_key: "s02-http-fixture" }) },
-      { id: "unsupported_scenario", body: call("scenario", "start_voice_run", { ...start, scenario_id: "V-UNKNOWN" }) },
-      { id: "http_origin", body: call("http", "start_voice_run", { ...start, target: { ...inputTarget, frontend_url: "http://unsupported.invalid" } }) },
-      { id: "unsupported_target_path", body: call("path", "start_voice_run", { ...start, target: { ...inputTarget, frontend_url: `${new URL(run.target.frontendUrl).origin}/redirect` } }) },
-      { id: "unsupported_target_query", body: call("query", "start_voice_run", { ...start, target: { ...inputTarget, frontend_url: `${new URL(run.target.frontendUrl).origin}/?redirect=https://unsupported.invalid` } }) },
-      { id: "unsupported_target_origin", body: call("origin", "start_voice_run", { ...start, target: { ...inputTarget, frontend_url: "https://unsupported.invalid" } }) },
-      { id: "redirect_origin", body: call("redirect", "start_voice_run", { ...start, target: { ...inputTarget, frontend_url: "https://allowed.invalid@redirect.invalid/" } }) },
-      { id: "invalid_capture_policy", body: call("capture", "start_voice_run", { ...start, capture_policy: { raw_audio: false, screenshot: true, video: false, retention_hours: 0 } }) },
-    ];
-    const deep: Record<string, unknown> = {};
-    let cursor = deep;
-    for (let index = 0; index < 70; index += 1) { const next: Record<string, unknown> = {}; cursor.nested = next; cursor = next; }
-    const transport: Array<{ id: "deep_json" | "malformed_json" | "oversized_json"; raw: string; expectedStatus: number }> = [
-      { id: "deep_json", raw: JSON.stringify({ jsonrpc: "2.0", id: `v-s02-deep-${randomUUID()}`, method: "tools/call", params: { name: "get_capabilities", arguments: deep } }), expectedStatus: 400 },
-      { id: "malformed_json", raw: `{"jsonrpc":"2.0","id":"v-s02-malformed-${randomUUID()}",`, expectedStatus: 400 },
-      { id: "oversized_json", raw: JSON.stringify({ jsonrpc: "2.0", id: `v-s02-oversized-${randomUUID()}`, method: "tools/call", params: { name: "get_capabilities", arguments: { padding: "x".repeat(150_000) } } }), expectedStatus: 413 },
-    ];
-    let previousBoundary: import("./domain.js").LabEvent | null = null;
-    for (const probe of [...standard.map((item) => ({ id: item.id, raw: JSON.stringify(item.body), body: item.body, expectedStatus: null as number | null })), ...transport.map((item) => ({ ...item, body: null }))]) {
-      const resourceBefore = await this.#s02ResourceSnapshot(run.id);
-      const requestStartedAt = new Date();
-      const auditQueryStart = new Date(requestStartedAt.getTime() - 2_000);
-      const probeId = randomUUID();
-      const probeIdHash = sha256(probeId);
-      const boundedFallback = sha256("bounded-unparsed-request");
-      let bodyHash = boundedFallback;
-      let argumentHash: string | null = null;
-      if (probe.body) {
-        bodyHash = canonicalRequestHash(probe.body);
-        const params = probe.body.params as Record<string, unknown>;
-        argumentHash = canonicalRequestHash(params.arguments ?? null);
-      }
-      const response = await this.scenarioFetch(endpoint, { method: "POST", redirect: "manual", signal: AbortSignal.timeout(7_500), headers: { authorization: `Bearer ${this.config.bearerToken}`, accept: "application/json, text/event-stream", "content-type": "application/json", "x-sophia-voice-lab-probe-id": probeId }, body: probe.raw });
-      const responseBody = await response.text();
-      const responseObservedAt = new Date();
-      const hashes = [...new Set([bodyHash, boundedFallback, ...(argumentHash ? [argumentHash] : [])])];
-      const audits = await this.ledger.listAuthAuditByArgumentHashes(this.config.bearerSubject, hashes, auditQueryStart);
-      const exactProbeAudits = audits.filter((audit) => audit.detail.probe_id_sha256 === probeIdHash);
-      const resourceAfter = await this.#s02ResourceSnapshot(run.id);
-      const expectation = s02HttpProbeExpectation(probe.id);
-      const responseUrl = new URL(response.url);
-      const boundary = await this.ledger.appendEvent(run.id, "security.mcp_boundary_probe", "canonical", {
-        schema: S02_MCP_BOUNDARY_PROBE_SCHEMA,
-        variant: probe.id,
-        probe_id_sha256: probeIdHash,
-        request: {
-          contract: expectation.requestContract,
-          contract_sha256: canonicalRequestHash(expectation.requestContract),
-          endpoint_origin_sha256: sha256(endpoint.origin),
-          raw_body_sha256: sha256(probe.raw),
-          canonical_body_sha256: bodyHash,
-          byte_length: Buffer.byteLength(probe.raw),
-          started_at: requestStartedAt.toISOString(),
-        },
-        response: {
-          http_status: response.status,
-          error_code: classifyS02McpError(responseBody),
-          body_sha256: sha256(responseBody),
-          byte_length: Buffer.byteLength(responseBody),
-          content_type: (response.headers.get("content-type") ?? "").split(";", 1)[0]!.trim().toLowerCase(),
-          final_origin_sha256: sha256(responseUrl.origin),
-          final_path: responseUrl.pathname,
-          location: response.headers.get("location"),
-          observed_at: responseObservedAt.toISOString(),
-        },
-        audit_receipts: exactProbeAudits.map((audit) => ({
-          action: audit.action,
-          outcome: audit.outcome,
-          argument_sha256: audit.argumentHash,
-          caller_partition_id: audit.callerId,
-          probe_id_sha256: audit.detail.probe_id_sha256 ?? null,
-          request_id_sha256: audit.detail.request_id_hash ?? null,
-          error_class: audit.detail.error_class ?? null,
-          observed_at: audit.observedAt.toISOString(),
-        })),
-        resource_delta: { before: resourceBefore, after: resourceAfter },
-      }, `security:${run.id}:mcp-boundary:${probe.id}`);
-      if (!isExactS02McpBoundaryProbe(boundary, previousBoundary)) throw new VoiceLabError(labError("MCP_BOUNDARY_PROBE_FAILED", "The deployed authenticated MCP boundary did not produce an exact typed, audited, zero-mutation rejection.", "harness", false, { variant: probe.id, http_status: response.status, audit_receipt_count: exactProbeAudits.length }));
-      previousBoundary = boundary;
-    }
-  }
-
-  async #s02ResourceSnapshot(runId: string): Promise<S02ResourceSnapshot> {
-    const [activeRunCount, run, operations, events] = await Promise.all([
-      this.ledger.countActiveRuns(),
-      this.#freshRun(runId),
-      this.ledger.listOperations(runId),
-      this.#allEvents(runId),
-    ]);
-    const inputMutations = events.events.filter((event) => event.kind === "utterance.resolved" || event.kind === "harness.input_frame_forwarded" || event.kind.startsWith("audio.input.") || event.kind.startsWith("product.input.")).length;
-    return {
-      active_run_count: activeRunCount,
-      operation_count: operations.length,
-      run_event_cursor: events.latest,
-      input_mutation_event_count: inputMutations,
-      browser_context_count: this.driver.hasSession(runId) ? 1 : 0,
-      canonical_session_count: run.canonicalSessionId === null ? 0 : 1,
-      provider_session_count: run.providerSessionId === null ? 0 : 1,
-    };
-  }
-
-  async #runOAuthSecurityProbes(run: RunRecord): Promise<void> {
-    const oauth = this.config.oauth;
-    if (!oauth) throw new VoiceLabError(labError("OAUTH_CERTIFICATION_UNAVAILABLE", "V-S01 requires the configured registered-app OAuth boundary.", "authorization", false));
-    const resource = new URL(oauth.resource);
-    const issuer = new URL(oauth.issuer).origin;
-    if (resource.pathname !== "/mcp" || resource.search || resource.hash) throw new VoiceLabError(labError("OAUTH_RESOURCE_INVALID", "The registered OAuth resource is not the exact MCP endpoint.", "authorization", false));
-    const initialize = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "voice-lab-v-s01", version: "1" } } });
-    const unauthorizedCases: Array<{ id: "oauth_missing" | "oauth_invalid"; authorization?: string }> = [
-      { id: "oauth_missing" },
-      { id: "oauth_invalid", authorization: "Bearer governed-invalid-oauth-probe" },
-    ];
-    for (const probe of unauthorizedCases) {
-      const response = await this.scenarioFetch(resource, {
-        method: "POST", redirect: "manual", signal: AbortSignal.timeout(5_000),
-        headers: { accept: "application/json, text/event-stream", "content-type": "application/json", ...(probe.authorization ? { authorization: probe.authorization } : {}) },
-        body: initialize,
-      });
-      const challenge = response.headers.get("www-authenticate") ?? "";
-      const rejected = response.status === 401 && response.url === resource.toString() && challenge.includes("resource_metadata=") && challenge.includes("error_description=") && !response.headers.has("location");
-      await response.body?.cancel().catch(() => undefined);
-      await this.#recordOAuthProbe(run, probe.id, rejected, response.status, { exact_resource: response.url === resource.toString(), linking_challenge: challenge.includes("resource_metadata=") && challenge.includes("error_description=") });
-    }
-
-    const resourceMismatchParams = this.#authorizationParams(oauth, "voice_lab:read voice_lab:run", "https://resource-mismatch.invalid/mcp");
-    const mismatchUrl = new URL("/authorize", issuer);
-    mismatchUrl.search = resourceMismatchParams.toString();
-    const mismatch = await this.scenarioFetch(mismatchUrl, { method: "GET", redirect: "manual", signal: AbortSignal.timeout(5_000), headers: { accept: "text/html,application/json" } });
-    const mismatchLocation = mismatch.headers.get("location");
-    const mismatchRedirect = mismatchLocation ? new URL(mismatchLocation) : null;
-    const mismatchTargetBound = mismatchRedirect !== null && `${mismatchRedirect.origin}${mismatchRedirect.pathname}` === oauth.clientRedirectUri;
-    const mismatchRejected = mismatch.status === 303 && mismatchTargetBound && mismatchRedirect.searchParams.has("error") && mismatchRedirect.searchParams.get("iss") === issuer;
-    await mismatch.body?.cancel().catch(() => undefined);
-    await this.#recordOAuthProbe(run, "oauth_resource_mismatch", mismatchRejected, mismatch.status, { exact_registered_redirect: mismatchTargetBound });
-
-    const verifier = `${randomUUID().replaceAll("-", "")}${randomUUID().replaceAll("-", "")}`;
-    const authorizeParams = this.#authorizationParams(oauth, "voice_lab:read voice_lab:run", oauth.resource, verifier);
-    const authorizeUrl = new URL("/authorize", issuer);
-    authorizeUrl.search = authorizeParams.toString();
-    const page = await this.scenarioFetch(authorizeUrl, { method: "GET", redirect: "manual", signal: AbortSignal.timeout(5_000), headers: { accept: "text/html" } });
-    if (page.status !== 200 || new URL(page.url).origin !== issuer || new URL(page.url).pathname !== "/authorize") throw new VoiceLabError(labError("OAUTH_PROBE_FAILED", "The governed OAuth authorization page was unavailable.", "authorization", false));
-    const html = (await page.text()).slice(0, 64_000);
-    const hidden = (name: string): string => {
-      const value = new RegExp(`name="${name}" value="([A-Za-z0-9._~-]{8,2048})"`).exec(html)?.[1];
-      if (!value) throw new VoiceLabError(labError("OAUTH_PROBE_FAILED", "The governed OAuth consent form contract was incomplete.", "authorization", false, { field: name }));
-      return value;
-    };
-    const cookie = page.headers.get("set-cookie")?.split(";", 1)[0];
-    if (!cookie) throw new VoiceLabError(labError("OAUTH_PROBE_FAILED", "The governed OAuth consent CSRF cookie was unavailable.", "authorization", false));
-    const decision = await this.scenarioFetch(new URL("/authorize", issuer), {
-      method: "POST", redirect: "manual", signal: AbortSignal.timeout(5_000),
-      headers: { accept: "text/html", "content-type": "application/x-www-form-urlencoded", cookie },
-      body: new URLSearchParams({ request_id: hidden("request_id"), csrf_token: hidden("csrf_token"), consent_secret: oauth.consentSecret, decision: "approve" }).toString(),
-    });
-    const decisionLocation = decision.headers.get("location");
-    await decision.body?.cancel().catch(() => undefined);
-    const callback = decisionLocation ? new URL(decisionLocation) : null;
-    const code = callback?.searchParams.get("code");
-    if (decision.status !== 303 || callback === null || `${callback.origin}${callback.pathname}` !== oauth.clientRedirectUri || callback.searchParams.get("iss") !== issuer || !code) throw new VoiceLabError(labError("OAUTH_PROBE_FAILED", "The governed OAuth authorization-code redirect was not exactly bound.", "authorization", false));
-    const tokenRequest = new URLSearchParams({ grant_type: "authorization_code", code, redirect_uri: oauth.clientRedirectUri, client_id: oauth.clientMetadataUrl, code_verifier: verifier, resource: oauth.resource });
-    let accessToken: string | null = null;
-    let refreshToken: string | null = null;
-    let probeFailure: unknown = null;
-    try {
-      // The raw authorization code is also a one-shot durable cleanup handle.
-      // It is known before the response-loss boundary and is revoked below on
-      // every outcome, including a committed pair followed by a lost or
-      // unparsable HTTP response.
-      const exchange = await this.scenarioFetch(new URL("/token", issuer), { method: "POST", redirect: "manual", signal: AbortSignal.timeout(5_000), headers: { accept: "application/json", "content-type": "application/x-www-form-urlencoded" }, body: tokenRequest.toString() });
-      const tokenPayload = exchange.status === 200 ? await exchange.json() as Record<string, unknown> : {};
-      accessToken = typeof tokenPayload.access_token === "string" ? tokenPayload.access_token : null;
-      refreshToken = typeof tokenPayload.refresh_token === "string" ? tokenPayload.refresh_token : null;
-      if (!accessToken || !refreshToken || tokenPayload.resource !== oauth.resource || tokenPayload.scope !== "voice_lab:read voice_lab:run") throw new VoiceLabError(labError("OAUTH_PROBE_FAILED", "The governed OAuth token family was not exactly resource/scope bound.", "authorization", false));
-      const faultCall = await this.scenarioFetch(resource, {
-        method: "POST", redirect: "manual", signal: AbortSignal.timeout(5_000),
-        headers: { authorization: `Bearer ${accessToken}`, accept: "application/json, text/event-stream", "content-type": "application/json" },
-        body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "force_socket_rotation", arguments: { run_id: run.id, expected_socket_epoch: 0, idempotency_key: "s01-insufficient-fault" } } }),
-      });
-      const faultBody = (await faultCall.text()).slice(0, 64_000);
-      const faultRejected = faultCall.status === 200 && /SCOPE_REQUIRED|insufficient_scope/.test(faultBody) && !faultCall.headers.has("location");
-      await this.#recordOAuthProbe(run, "oauth_insufficient_fault_scope", faultRejected, faultCall.status, { exact_resource: faultCall.url === resource.toString(), challenge_present: /mcp\/www_authenticate|insufficient_scope/.test(faultBody) });
-
-      const replay = await this.scenarioFetch(new URL("/token", issuer), { method: "POST", redirect: "manual", signal: AbortSignal.timeout(5_000), headers: { accept: "application/json", "content-type": "application/x-www-form-urlencoded" }, body: tokenRequest.toString() });
-      const replayBody = (await replay.text()).slice(0, 1_024);
-      await this.#recordOAuthProbe(run, "oauth_authorization_code_replay", replay.status === 400 && /"error"\s*:\s*"invalid_grant"/.test(replayBody), replay.status, { no_redirect: !replay.headers.has("location") });
-    } catch (error) {
-      probeFailure = error;
-    }
-    let cleanupFailure: unknown = null;
-    try { await this.#revokeOAuthProbeFamily(run, oauth, code, accessToken, refreshToken); }
-    catch (error) { cleanupFailure = error; }
-    if (probeFailure) throw probeFailure;
-    if (cleanupFailure) throw cleanupFailure;
-
-    const direct = new StaticBearerAuthenticator(this.config.bearerToken, this.config.bearerSubject, this.config.faultBearerToken);
-    const baseCaller = await direct.authenticate(`Bearer ${this.config.bearerToken}`);
-    let baseFaultRejected = false;
-    try { requireScope(baseCaller, "voice_lab:fault"); } catch (error) { baseFaultRejected = error instanceof VoiceLabError && error.detail.code === "SCOPE_REQUIRED"; }
-    await this.ledger.appendEvent(run.id, "security.direct_fault_scope_probe", "worker", { rejected: baseFaultRejected, base_scope_set: [...baseCaller.scopes].sort(), fault_credential_distinct: this.config.faultBearerToken !== null && this.config.faultBearerToken !== this.config.bearerToken }, `security:${run.id}:direct-fault-scope`);
-    if (!baseFaultRejected) throw new VoiceLabError(labError("FAULT_SCOPE_PROBE_FAILED", "The base direct-client credential unexpectedly carried fault authority.", "authorization", false));
-  }
-
-  async #revokeOAuthProbeFamily(run: RunRecord, oauth: NonNullable<VoiceLabConfig["oauth"]>, authorizationCode: string, accessToken: string | null, refreshToken: string | null): Promise<void> {
-    const issuer = new URL(oauth.issuer).origin;
-    const revoke = async (token: string, hint: "refresh_token" | "access_token") => {
-      const response = await this.scenarioFetch(new URL("/revoke", issuer), {
-        method: "POST", redirect: "manual", signal: AbortSignal.timeout(5_000),
-        headers: { accept: "application/json", "content-type": "application/x-www-form-urlencoded" },
-        body: new URLSearchParams({ token, token_type_hint: hint, client_id: oauth.clientMetadataUrl }).toString(),
-      });
-      const exact = response.status === 200 && response.url === `${issuer}/revoke` && !response.headers.has("location");
-      await response.body?.cancel().catch(() => undefined);
-      return exact;
-    };
-    // Revoking the refresh token terminalizes its durable family. Revoking the
-    // access token again is an idempotent fence if an adapter ever returns a
-    // non-family refresh receipt.
-    const codeResponse = await this.scenarioFetch(new URL("/revoke", issuer), {
-      method: "POST", redirect: "manual", signal: AbortSignal.timeout(5_000),
-      headers: { accept: "application/json", "content-type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({ token: authorizationCode, token_type_hint: "authorization_code", client_id: oauth.clientMetadataUrl }).toString(),
-    }).catch(() => null);
-    const codeTerminalized = codeResponse !== null && codeResponse.status === 200 && codeResponse.url === `${issuer}/revoke`
-      && codeResponse.headers.get("x-sophia-oauth-revocation-receipt") === "authorization_code" && !codeResponse.headers.has("location");
-    await codeResponse?.body?.cancel().catch(() => undefined);
-    const refreshRevoked = refreshToken === null || await revoke(refreshToken, "refresh_token").catch(() => false);
-    const accessRevoked = accessToken === null || await revoke(accessToken, "access_token").catch(() => false);
-    const accessCheck = accessToken === null ? null : await this.scenarioFetch(new URL(oauth.resource), {
-      method: "POST", redirect: "manual", signal: AbortSignal.timeout(5_000),
-      headers: { authorization: `Bearer ${accessToken}`, accept: "application/json, text/event-stream", "content-type": "application/json" },
-      body: JSON.stringify({ jsonrpc: "2.0", id: `s01-revoked-${randomUUID()}`, method: "initialize", params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "voice-lab-v-s01-revocation", version: "1" } } }),
-    });
-    const accessDenied = accessCheck === null || accessCheck.status === 401 && accessCheck.url === oauth.resource && !accessCheck.headers.has("location");
-    await accessCheck?.body?.cancel().catch(() => undefined);
-    const refreshCheck = refreshToken === null ? null : await this.scenarioFetch(new URL("/token", issuer), {
-      method: "POST", redirect: "manual", signal: AbortSignal.timeout(5_000),
-      headers: { accept: "application/json", "content-type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({ grant_type: "refresh_token", refresh_token: refreshToken, client_id: oauth.clientMetadataUrl, resource: oauth.resource }).toString(),
-    });
-    const refreshBody = refreshCheck === null ? "" : (await refreshCheck.text()).slice(0, 1_024);
-    const refreshDenied = refreshCheck === null || refreshCheck.status === 400 && /"error"\s*:\s*"invalid_grant"/.test(refreshBody) && !refreshCheck.headers.has("location");
-    const complete = codeTerminalized && refreshRevoked && accessRevoked && accessDenied && refreshDenied;
-    await this.ledger.appendEvent(run.id, "security.oauth_family_cleanup", "canonical", {
-      complete,
-      authorization_code_cleanup_handle_used: true,
-      authorization_code_family_terminalized: codeTerminalized,
-      access_token_issued: accessToken !== null,
-      refresh_token_issued: refreshToken !== null,
-      refresh_family_revocation_receipt: refreshRevoked,
-      access_revocation_receipt: accessRevoked,
-      access_token_denied_after_revocation: accessDenied,
-      refresh_token_denied_after_revocation: refreshDenied,
-      durable_terminal_state_verified: accessDenied && refreshDenied,
-      raw_tokens_excluded: true,
-    }, `security:${run.id}:oauth-family-cleanup`);
-    if (!complete) throw new VoiceLabError(labError("OAUTH_FAMILY_CLEANUP_FAILED", "The governed OAuth probe family did not reach a durable revoked state.", "authorization", true));
-  }
-
-  #authorizationParams(oauth: NonNullable<VoiceLabConfig["oauth"]>, scopes: string, resource: string, verifier?: string): URLSearchParams {
-    const effectiveVerifier = verifier ?? `${randomUUID().replaceAll("-", "")}${randomUUID().replaceAll("-", "")}`;
-    return new URLSearchParams({ response_type: "code", response_mode: "query", client_id: oauth.clientMetadataUrl, redirect_uri: oauth.clientRedirectUri, scope: scopes, state: `s01-${randomUUID()}`, code_challenge: pkceS256(effectiveVerifier), code_challenge_method: "S256", resource });
-  }
-
-  async #recordOAuthProbe(run: RunRecord, variant: typeof S01_OAUTH_VARIANTS[number], rejected: boolean, httpStatus: number, detail: Record<string, unknown>): Promise<void> {
-    await this.ledger.appendEvent(run.id, "security.oauth_boundary_probe", "canonical", { variant, rejected, http_status: httpStatus, ...detail }, `security:${run.id}:${variant}`);
-    if (!rejected) throw new VoiceLabError(labError("OAUTH_SECURITY_PROBE_FAILED", "A governed OAuth rejection was not proven at the production resource boundary.", "authorization", false, { variant, http_status: httpStatus }));
-  }
-
-  async #finalizePreResourceScenario(runId: string): Promise<void> {
-    let run = await this.#freshRun(runId);
-    const events = await this.#allEvents(run.id);
-    const operations = await this.ledger.listOperations(run.id);
-    const assertions = evaluateScenarioAssertions(run, events.events, operations);
-    if (!assertions.harness.every((assertion) => assertion.status === "pass") || !authoritativeLiveCleanupComplete(events.events)) throw new VoiceLabError(labError("PRE_RESOURCE_CERTIFICATION_INCOMPLETE", "Pre-resource certification cannot pass without every governed rejection and authoritative zero-orphan recovery.", "harness", true, { scenario_id: run.scenarioId }));
-    const verdicts: Verdicts = { harness: "pass", product: "unavailable", provider: "unavailable", auth: run.scenarioId === "V-S01" ? "pass" : "unavailable", evidence: "pass" };
-    run = await this.#freshRun(run.id);
-    run = await transitionRun(this.ledger, run, "completed", { verdicts, cleanupComplete: true, ...retentionPatchFromEvents(events.events) });
-    const terminalEvent = await this.ledger.appendEvent(run.id, "run.completed", "worker", { terminal_state: "completed", terminal_reason: "pre_resource_security_recipe_passed", cleanup_complete: true, intentionally_unallocated: true }, `run:${run.id}:completed`);
-    await this.#publishRunEvidence({
-      runId: run.id,
-      terminalState: "completed",
-      terminalReason: "pre_resource_security_recipe_passed",
-      verdicts,
-      terminalError: null,
-      createdAt: terminalEvent.at,
-      purpose: "pre-resource",
-      intentionallyUnallocated: true,
-      artifacts: [],
-    });
-  }
-
-  async #certifyFreshApiReattach(run: RunRecord): Promise<void> {
-    if (!this.config.databaseUrl) {
-      await this.ledger.appendEvent(run.id, "durability.api_reattach_unavailable", "worker", { reason: "production_postgres_required" }, `durability:${run.id}:api-reattach-unavailable`);
-      return;
-    }
-    const independent = new PostgresVoiceLabLedger(this.config.databaseUrl, 1, this.config.recoveryInternalSecret, this.config.callerPartitionKeys);
-    try {
-      await independent.initialize();
-      const reattached = await independent.getRun(run.id);
-      const exact = reattached?.testRunId === run.testRunId && reattached?.latestCursor === (await this.ledger.getRun(run.id))?.latestCursor;
-      await this.ledger.appendEvent(run.id, "durability.independent_ledger_reader", "worker", { exact_test_run: exact, fresh_postgres_pool: true, browser_interaction_count: 0, mutation_count: 0, reattached_state: reattached?.state ?? null, reattached_version: reattached?.version ?? null, explicit_non_claim: "does_not_prove_mcp_api_process_restart" }, `durability:${run.id}:independent-ledger-reader`);
-      if (!exact) throw new VoiceLabError(labError("API_REATTACH_FAILED", "A fresh durable API adapter could not reattach the exact test run.", "harness", true));
-    } finally { await independent.close(); }
-  }
-
-  async #fenceMutation(claimed: ClaimedOperation, signal: AbortSignal): Promise<void> {
-    throwIfCancelled(signal);
-    const operationOwned = await this.ledger.heartbeatOperation(claimed.operation.id, this.workerId, claimed.operation.leaseEpoch, this.config.operationLeaseSeconds);
-    if (!operationOwned) throw new VoiceLabError(labError("LEASE_LOST", "Operation lease was lost before page mutation.", "conflict", true));
-    const lease = this.#activeLeases.get(claimed.run.id);
-    if (!lease) throw new VoiceLabError(labError("BROWSER_LEASE_LOST", "Browser lease is not owned before page mutation.", "conflict", true));
-    const browserOwned = await this.ledger.heartbeatBrowserLease(claimed.run.id, this.workerId, lease.epoch, this.config.browserLeaseSeconds);
-    if (!browserOwned) throw new VoiceLabError(labError("BROWSER_LEASE_LOST", "Browser lease was lost before page mutation.", "conflict", true));
-    throwIfCancelled(signal);
-  }
-
-  async #awaitPriorInputSettlement(run: RunRecord, operationId: string, signal: AbortSignal): Promise<void> {
-    const prior = (await this.ledger.listOperations(run.id))
-      .filter((operation) => operation.id !== operationId && operation.state === "succeeded" && (operation.type === "speak" || operation.type === "barge_in"))
-      .sort((left, right) => right.updatedAt.getTime() - left.updatedAt.getTime())[0];
-    if (!prior) return;
-    const deadline = Date.now() + 15_000;
-    while (Date.now() < deadline) {
-      throwIfCancelled(signal);
-      const events = await this.#allEvents(run.id);
-      const settled = events.events.some((event) => isExactBoundProductEvent(run, event) && event.kind === "audio.input.product_turn" && (event.payload.receipt as Record<string, unknown> | undefined)?.operation_id === prior.id && (event.payload.receipt as Record<string, unknown> | undefined)?.source === "settlement");
-      if (settled) return;
-      await this.#persistEvents(run.id, await this.driver.drain(run.id));
-      await delay(100);
-    }
-    throw new VoiceLabError(labError("INPUT_OPERATION_SETTLEMENT_PENDING", "The prior exact input operation did not reach its app-authored turn settlement before another injection could start.", "harness", true, { prior_operation_id: prior.id }));
-  }
-
-  async #revalidateActiveTarget(run: RunRecord, operationId: string, target: Record<string, unknown>): Promise<void> {
-    await this.#persistEvents(run.id, await this.driver.drain(run.id));
-    const page = await this.#allEvents(run.id);
-    const targetSeq = Number(target.event_seq);
-    const cited = page.events.find((event) => event.seq === targetSeq && isExactBoundProductEvent(run, event));
-    let active = false;
-    let kind: "output_realization" | "tool_effect";
-    if (target.kind === "output_realization") {
-      kind = "output_realization";
-      const receipt = cited?.payload.receipt as Record<string, unknown> | undefined;
-      const identityEvents = page.events.filter((event) => {
-        if (!isExactBoundProductEvent(run, event)) return false;
-        const later = event.payload.receipt as Record<string, unknown> | undefined;
-        return later?.realizationId === target.stable_id || (typeof target.chunk_hash === "string" && later?.chunkHash === target.chunk_hash);
-      });
-      const terminal = identityEvents.some((event) => ["audio.output.completed", "audio.output.flushed", "audio.output.dropped"].includes(event.kind));
-      const competingStart = identityEvents.some((event) => event.seq !== targetSeq && event.kind === "audio.output.started");
-      active = cited?.kind === "audio.output.started" && receipt?.phase === "started" && receipt.realizationId === target.stable_id && receipt.chunkHash === target.chunk_hash
-        && receipt.providerConnectionEpoch === target.provider_connection_epoch && receipt.playbackGeneration === target.playback_generation && !terminal && !competingStart;
-    } else {
-      kind = "tool_effect";
-      const entry = cited?.payload.entry as Record<string, unknown> | undefined;
-      const toolCallId = target.tool_call_id ?? target.stable_id;
-      const terminal = page.events.some((event) => {
-        if (!isExactBoundProductEvent(run, event) || event.seq <= targetSeq || !event.kind.includes("gemini-tool-call-ledger")) return false;
-        const later = event.payload.entry as Record<string, unknown> | undefined;
-        return later !== undefined && later.toolCallId === toolCallId && later.effectId === target.effect_id && ["responded", "cancelled-before-send", "cancelled-after-send", "suppressed", "rejected"].includes(String(later.finalState));
-      });
-      active = cited?.kind.includes("gemini-tool-call-ledger") === true && entry !== undefined && entry.toolCallId === toolCallId && entry.effectId === target.effect_id && entry.finalState === "unknown"
-        && entry.toolResponseSentAt === null && entry.cancelledAt === null && entry.providerConnectionEpoch === target.provider_connection_epoch && !terminal;
-    }
-    if (!active) throw new VoiceLabError(labError("ACTIVE_TARGET_REVALIDATION_FAILED", "The exact app-authored work target was no longer in flight immediately before governed page mutation.", "conflict", true, { target_event_seq: targetSeq, target_kind: kind }));
-    await this.ledger.appendEvent(run.id, "fault.active_target_revalidated", "canonical", { operation_id: operationId, target_event_seq: targetSeq, target_kind: kind, target_identity_sha256: sha256(`${String(target.stable_id ?? target.tool_call_id)}\u0000${String(target.effect_id ?? target.chunk_hash)}`), observed_through_seq: page.latest, active: true }, `active-target:${operationId}:${targetSeq}`);
-  }
-
-  async #mintAndVerify(run: RunRecord, audience: "sophia-voice-lab-frontend" | "sophia-voice-runtime" | "sophia-voice-lab-recovery", allowedOps: string[], operation: string, resolvedD02Binding?: D02BrowserContextBinding) {
-    const codec = audience === "sophia-voice-lab-frontend" ? this.#frontendCapabilities : this.capabilities;
-    const provisionalRetentionCeiling = run.createdAt.getTime() + run.capturePolicy.retentionHours * 3_600_000;
-    if (run.expiresAt.getTime() > provisionalRetentionCeiling) throw new VoiceLabError(labError("CAPABILITY_BINDING_INVALID", "The immutable provider deadline exceeded the run's provisional retention ceiling.", "internal", false));
-    const providerExpiresAt = run.expiresAt.toISOString();
-    const d02Binding = resolvedD02Binding ?? await this.#resolveD02BrowserContextBinding(run);
-    const minted = codec.mint({ aud: audience, sub: run.principalId, principal_id: run.principalId, test_run_id: run.testRunId, cleanup_obligation_id: run.cleanupObligationId, ...(run.scenarioId === null ? {} : { scenario_id: run.scenarioId }), ...(run.scenarioVersion === null ? {} : { scenario_version: run.scenarioVersion }), ...(d02Binding ?? {}), synthetic: true, environment: run.environment, retention_hours: run.capturePolicy.retentionHours, provider_expires_at: providerExpiresAt, allowed_ops: allowedOps, expected_deployment: run.target.expectedDeployment });
-    codec.verify(minted.token, { audience, operation, principalId: run.principalId, testRunId: run.testRunId, cleanupObligationId: run.cleanupObligationId, environment: run.environment, retentionHours: run.capturePolicy.retentionHours, providerExpiresAt, expectedDeployment: run.target.expectedDeployment, scenarioId: run.scenarioId, scenarioVersion: run.scenarioVersion, ...(d02Binding ? { voiceLabRunIdSha256: d02Binding.voice_lab_run_id_sha256, browserWorkerIdSha256: d02Binding.browser_worker_id_sha256, browserLeaseEpoch: d02Binding.browser_lease_epoch, browserContextIdSha256: d02Binding.browser_context_id_sha256 } : {}) });
-    const auditBinding = { audience, operation, test_run_id: run.testRunId, environment: run.environment, provider_expires_at: providerExpiresAt, expected_deployment: run.target.expectedDeployment, ...(d02Binding ?? {}) };
-    await this.ledger.recordAuthAudit({ runId: run.id, callerId: run.callerId, action: `capability:${operation}`, capabilityJtiHash: sha256(minted.claims.jti), argumentHash: canonicalRequestHash(auditBinding), outcome: "allowed", detail: { audience, operation, provider_expires_at: providerExpiresAt, ...(d02Binding ?? {}) }, observedAt: new Date() });
-    return minted;
-  }
-
-  async #resolveD02BrowserContextBinding(run: RunRecord): Promise<D02BrowserContextBinding | undefined> {
-    if (run.scenarioId !== "V-D02") return undefined;
-    const active = this.#activeLeases.get(run.id);
-    const activeBinding = active ? deriveD02BrowserContextBinding(run, this.workerId, active.epoch) : undefined;
-    const durable = await this.ledger.findLatestEvent(run.id, ["harness.browser_context_bound"]);
-    if (!durable) {
-      if (activeBinding) return activeBinding;
-      throw new VoiceLabError(labError("BROWSER_CONTEXT_BINDING_UNAVAILABLE", "The exact V-D02 browser ownership binding was not durably available.", "harness", false));
-    }
-    const payload = durable.payload;
-    const durableBinding: D02BrowserContextBinding = {
-      voice_lab_run_id_sha256: String(payload.voice_lab_run_id_sha256 ?? ""),
-      browser_worker_id_sha256: String(payload.browser_worker_id_sha256 ?? ""),
-      browser_lease_epoch: Number(payload.browser_lease_epoch),
-      browser_context_id_sha256: String(payload.browser_context_id_sha256 ?? ""),
-    };
-    if (!isExactD02BrowserContextBinding(run, durableBinding)
-      || payload.schema !== "sophia_voice_lab_browser_context_binding_v1"
-      || payload.driver_attested !== true
-      || payload.test_run_id_sha256 !== sha256(run.testRunId)
-      || payload.cleanup_obligation_id_sha256 !== sha256(run.cleanupObligationId)
-      || (activeBinding !== undefined && !sameD02BrowserContextBinding(durableBinding, activeBinding))) {
-      throw new VoiceLabError(labError("BROWSER_CONTEXT_BINDING_MISMATCH", "The durable V-D02 browser ownership binding conflicted with the reserved run or current lease.", "harness", false));
-    }
-    return durableBinding;
-  }
-
-  async #persistEvents(runId: string, events: Array<Omit<import("./domain.js").LabEvent, "runId" | "seq" | "at">>): Promise<void> {
-    const boundRun = await this.#freshRun(runId);
-    for (const event of events) {
-      const provenance = event.payload._capture_provenance as Record<string, unknown> | undefined;
-      const rawObservedAt = provenance?.recorded_at ?? provenance?.observed_at;
-      const parsed = typeof rawObservedAt === "string" ? new Date(rawObservedAt) : new Date();
-      const appBinding = strictProductRunBinding(event.source, event.payload, boundRun);
-      const governedPayload = event.payload;
-      await this.ledger.appendEvent(runId, event.kind, event.source, redact({ ...governedPayload, _runner_binding: { run_id: runId, test_run_id_sha256: sha256(boundRun.testRunId) }, ...(appBinding === null ? {} : { _product_run_binding: appBinding }) }), event.dedupeKey ?? undefined, Number.isNaN(parsed.getTime()) ? new Date() : parsed);
-      if (event.source === "product" && event.kind === "audio.input.product_fault" && appBinding !== null) {
-        const receipt = event.payload.receipt as Record<string, unknown> | undefined;
-        throw new VoiceLabError(labError("PRODUCT_INPUT_EVIDENCE_FAULT", "The product rejected or could not unambiguously correlate the governed synthetic input operation.", "harness", false, { fault_code: typeof receipt?.code === "string" ? receipt.code : "unknown" }));
-      }
-    }
-    let run = await this.#freshRun(runId);
-    let canonicalSessionId = run.canonicalSessionId;
-    let threadId = run.threadId;
-    let providerSessionId = run.providerSessionId;
-    let traceId = run.traceId;
-    let providerEpoch = run.providerEpoch;
-    let turnId = run.turnId;
-    for (const event of events) {
-      const payload = event.payload as Record<string, unknown>;
-      // Owning product joins are usable only when the original capture envelope
-      // carried the exact app-authored authenticated synthetic binding.
-      if (event.source === "product" && strictProductRunBinding(event.source, payload, boundRun) === null) continue;
-      if (event.kind === "session.credentials_received") {
-        canonicalSessionId = stableJoin("canonical_session_id", canonicalSessionId, exactString(payload.sessionId));
-        providerSessionId = stableJoin("provider_session_id", providerSessionId, exactString(payload.voiceAgentSessionId));
-        traceId = stableJoin("trace_id", traceId, exactString(payload.langsmithTraceId));
-        providerEpoch = monotonicEpoch(providerEpoch, exactFiniteNumber(payload.providerConnectionEpoch));
-      } else if (event.kind === "provider.connection_epoch") {
-        const receipt = payload.receipt && typeof payload.receipt === "object" ? payload.receipt as Record<string, unknown> : {};
-        canonicalSessionId = stableJoin("canonical_session_id", canonicalSessionId, exactString(payload.sessionId));
-        providerSessionId = stableJoin("provider_session_id", providerSessionId, exactString(payload.voiceAgentSessionId));
-        traceId = stableJoin("trace_id", traceId, exactString(receipt.langsmithTraceId));
-        providerEpoch = monotonicEpoch(providerEpoch, exactFiniteNumber(receipt.providerConnectionEpoch));
-      } else if (event.kind === "capture.snapshot") {
-        const snapshot = payload.snapshot && typeof payload.snapshot === "object" ? payload.snapshot as Record<string, unknown> : {};
-        const session = snapshot.session && typeof snapshot.session === "object" ? snapshot.session as Record<string, unknown> : {};
-        canonicalSessionId = stableJoin("canonical_session_id", canonicalSessionId, exactString(session.sessionId));
-        threadId = stableJoin("thread_id", threadId, exactString(session.threadId));
-      } else if (event.source === "canonical" && event.kind === "session.finalized") {
-        const receipt = payload.receipt && typeof payload.receipt === "object" ? payload.receipt as Record<string, unknown> : {};
-        const transcript = receipt.canonical_transcript && typeof receipt.canonical_transcript === "object" ? receipt.canonical_transcript as Record<string, unknown> : {};
-        canonicalSessionId = stableJoin("canonical_session_id", canonicalSessionId, exactString(transcript.session_id));
-        threadId = stableJoin("thread_id", threadId, exactString(transcript.thread_id));
-      } else if (event.kind.endsWith(".sophia.turn")) {
-        const data = payload.data && typeof payload.data === "object" ? payload.data as Record<string, unknown> : {};
-        turnId = exactString(data.turnId) ?? turnId;
-      }
-    }
-    if (canonicalSessionId !== run.canonicalSessionId || threadId !== run.threadId || providerSessionId !== run.providerSessionId || traceId !== run.traceId || providerEpoch !== run.providerEpoch || turnId !== run.turnId) {
-      run = await this.ledger.updateRun(run.id, run.version, { canonicalSessionId, threadId, providerSessionId, traceId, providerEpoch, turnId });
-    }
-  }
-
-  async #terminalizeFailure(runId: string, error: LabError, forcedState?: RunState): Promise<void> {
-    let run = await this.#freshRun(runId);
-    const cancelled = await this.ledger.cancelPendingRunOperations(run.id, null, labError("RUN_TERMINATED", "Operation was cancelled because its owning run became terminal.", "harness", false, { terminal_reason: error.code }));
-    for (const operation of cancelled) await this.ledger.appendEvent(run.id, "operation.cancelled", "worker", { operation_id: operation.id, operation_type: operation.type, reason_code: operation.error?.code ?? "RUN_TERMINATED" }, `operation:${operation.id}:cancelled`);
-    if (TERMINAL_RUN_STATES.has(run.state)) {
-      if (run.state !== "completed") {
-        const recovered = await this.#recoverRun(run);
-        await this.#persistEvents(run.id, recovered.events);
-      }
-      run = await this.#freshRun(run.id);
-      const recoveryPage = await this.#allEvents(run.id);
-      const browserLeaseReleased = await this.#releaseBrowserLeaseProof(run.id);
-      const liveCleanupComplete = authoritativeLiveCleanupComplete(recoveryPage.events) && !this.driver.hasSession(run.id) && browserLeaseReleased;
-      if (liveCleanupComplete && !run.cleanupComplete) run = await this.ledger.updateRun(run.id, run.version, { cleanupComplete: true, ...retentionPatchFromEvents(recoveryPage.events) });
-      // Rebuild the deterministic failure manifest after every recovery
-      // attempt so a pending receipt can become a durable complete receipt.
-      await this.#saveFailureEvidence(run, run.terminalError ?? error, []);
-      return;
-    }
-    let ended: Awaited<ReturnType<VoiceBrowserDriver["abort"]>> = { events: [], artifacts: [] };
-    if (this.driver.hasSession(run.id)) {
-      const finalizeGrant = await this.#mintAndVerify(run, "sophia-voice-lab-frontend", ["session:finalize"], "session:finalize");
-      const cleanupGrant = await this.#mintAndVerify(run, "sophia-voice-lab-frontend", ["session:cleanup"], "session:cleanup");
-      ended = await this.driver.abort(run, error.code, finalizeGrant.token, cleanupGrant.token);
-      await this.#persistEvents(run.id, ended.events);
-      run = await this.#freshRun(run.id);
-    }
-    const recovered = await this.#recoverRun(run);
-    ended = { events: [...ended.events, ...recovered.events], artifacts: [...ended.artifacts, ...recovered.artifacts] };
-    await this.#persistEvents(run.id, recovered.events);
-    run = await this.#freshRun(run.id);
-    const state: RunState = forcedState ?? (error.code === "CAPTURE_CURSOR_GAP" || error.code === "CAPTURE_DRAIN_UNSUPPORTED" || error.code === "PRODUCT_INPUT_EVIDENCE_FAULT" ? "invalid_test" : error.code === "DEPLOYMENT_MISMATCH" ? "deployment_mismatch" : error.category === "authorization" ? "authorization_failed" : error.category === "product" ? "product_failed" : error.category === "provider" ? "inconclusive_provider" : "failed_harness");
-    const verdicts = deriveFailureVerdicts(run, state, ended.events);
-    const browserLeaseReleased = await this.#releaseBrowserLeaseProof(run.id);
-    const liveCleanupComplete = authoritativeLiveCleanupComplete(ended.events) && !this.driver.hasSession(run.id) && browserLeaseReleased;
-    run = await this.ledger.updateRun(run.id, run.version, { state, verdicts, terminalError: error, cleanupComplete: liveCleanupComplete, ...retentionPatchFromEvents(ended.events) });
-    await this.ledger.appendEvent(run.id, `run.${state}`, "worker", { error }, `run:${run.id}:${state}`);
-    await this.#saveFailureEvidence(run, error, ended.artifacts);
-  }
-
-  async #recoverRun(run: RunRecord): Promise<Awaited<ReturnType<VoiceBrowserDriver["recover"]>>> {
-    const combined: Awaited<ReturnType<VoiceBrowserDriver["recover"]>> = { events: [], artifacts: [] };
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      const recoveryGrant = await this.#mintAndVerify(run, "sophia-voice-lab-recovery", ["session:recover"], "session:recover");
-      const result = await this.driver.recover(run, recoveryGrant.token);
-      combined.events.push(...result.events);
-      combined.artifacts.push(...result.artifacts);
-      if (result.events.some((event) => event.kind === "cleanup.recovery" && event.payload.complete === true)) break;
-      if (attempt < 2) await delay(250 * (attempt + 1));
-    }
-    return combined;
-  }
-
-  async #saveFailureEvidence(run: RunRecord, error: LabError, artifacts: Array<{ id: string; kind: string; contentType: string; bytes: Buffer }>): Promise<void> {
-    const events = await this.#allEvents(run.id);
-    const operations = await this.ledger.listOperations(run.id);
-    const authAudit = await this.ledger.listAuthAudit(run.id);
-    const assertions = evaluateScenarioAssertions(run, events.events, operations, authAudit);
-    const assertionHarness: Verdicts["harness"] = assertions.harness.length > 0 && assertions.harness.every((assertion) => assertion.status === "pass")
-      ? "pass"
-      : assertions.harness.some((assertion) => assertion.status === "fail") ? "fail" : "unavailable";
-    const terminalEvent = [...events.events].reverse().find((event) => event.kind === `run.${run.state}`);
-    const verdicts: Verdicts = {
-      ...run.verdicts,
-      harness: run.scenarioId === "V-D02" ? assertionHarness : run.verdicts.harness,
-      evidence: error.code === "EXTERNAL_EVIDENCE_DEADLINE_EXPIRED" ? "fail" : run.cleanupComplete ? (assertionHarness === "pass" ? "pass" : "unavailable") : "fail",
-    };
-    const existingEvidence = await this.ledger.getEvidence(run.id);
-    if (existingEvidence && existingEvidence.revisionSeq >= events.latest) {
-      // A retry with no new durable event cannot rewrite the deterministic
-      // manifest at the same cursor. The prior manifest already contains the
-      // same derived verdict; only the cached run projection may lag because
-      // it is updated after the append-only evidence transaction.
-      const fresh = await this.#freshRun(run.id);
-      if (canonicalRequestHash(fresh.verdicts) !== canonicalRequestHash(verdicts)) await this.ledger.updateRun(fresh.id, fresh.version, { verdicts });
-      return;
-    }
-    await this.#publishRunEvidence({
-      runId: run.id,
-      terminalState: run.state,
-      terminalReason: error.code,
-      verdicts,
-      terminalError: error,
-      createdAt: terminalEvent?.at ?? events.events.at(-1)?.at ?? run.updatedAt,
-      purpose: "failure",
-      intentionallyUnallocated: run.scenarioId === "V-S01" || run.scenarioId === "V-S02",
-      artifacts,
-    });
-    const fresh = await this.#freshRun(run.id);
-    await this.ledger.updateRun(fresh.id, fresh.version, { verdicts });
-  }
-
-  /**
-   * One ยง12-shaped, append-only evidence builder for every terminal outcome.
-   * Success, observed product/provider defects, invalid tests, authorization
-   * failures, driver restarts and pre-resource security recipes differ only in
-   * their truthful availability/failure fields; they never get a smaller
-   * bespoke bundle. Returned canonical artifact rows always define the public
-   * URI/hash, so content dedupe cannot create a dangling proposed reference.
-   */
-  async #publishRunEvidence(input: {
-    runId: string;
-    terminalState: RunState;
-    terminalReason: string;
-    verdicts: Verdicts;
-    terminalError: LabError | null;
-    createdAt: Date;
-    purpose: string;
-    intentionallyUnallocated: boolean;
-    artifacts: Array<{ id: string; kind: string; contentType: string; bytes: Buffer }>;
-  }): Promise<void> {
-    const run = await this.#freshRun(input.runId);
-    const evidenceExpiresAt = (run.retentionPurgeDueAt ?? new Date(input.createdAt.getTime() + run.capturePolicy.retentionHours * 3_600_000)).toISOString();
-    let [publicationOperations, publicationAuthAudit, publicationArtifacts] = await Promise.all([
-      this.ledger.listOperations(run.id),
-      this.ledger.listAuthAudit(run.id),
-      this.ledger.listArtifacts(run.id),
-    ]);
-    const unpublishedArtifactBytes = publicationArtifacts.reduce((total, artifact) => total + artifact.bytes.byteLength, 0);
-    if (unpublishedArtifactBytes >= 6_000_000 && await this.ledger.getEvidence(run.id) === null) {
-      const deleted = await this.ledger.deleteUnpublishedArtifacts(run.id);
-      await this.ledger.appendEvent(run.id, "evidence.orphan_artifacts_pruned", "worker", {
-        deleted_artifact_count: deleted,
-        deleted_byte_count: unpublishedArtifactBytes,
-        canonical_run_and_operation_ledgers_preserved: true,
-        published_manifest_absent: true,
-      }, `evidence:${run.id}:orphan-artifacts-pruned`);
-      publicationArtifacts = [];
-    }
-    const publicationRevisionHash = evidenceProjectionHash({
-      purpose: input.purpose,
-      terminal_state: input.terminalState,
-      terminal_reason: input.terminalReason,
-      terminal_error: input.terminalError,
-      verdicts: input.verdicts,
-      created_at: input.createdAt.toISOString(),
-      run_projection: {
-        observed_deployment: run.observedDeployment,
-        cleanup_complete: run.cleanupComplete,
-        retention_purge_due_at: run.retentionPurgeDueAt?.toISOString() ?? null,
-        retention_purge_pending: run.retentionPurgePending,
-        retention_purge_verified_at: run.retentionPurgeVerifiedAt?.toISOString() ?? null,
-      },
-      operations: publicationOperations.map((operation) => ({
-        id: operation.id,
-        type: operation.type,
-        state: operation.state,
-        attempt_count: operation.attemptCount,
-        request_hash: operation.requestHash,
-        result_sha256: operation.result === null ? null : evidenceProjectionHash(operation.result),
-        error_sha256: operation.error === null ? null : evidenceProjectionHash(operation.error),
-        updated_at: operation.updatedAt.toISOString(),
-      })),
-      authorization_audit: publicationAuthAudit.map((audit) => ({
-        id: audit.id,
-        action: audit.action,
-        capability_jti_hash: audit.capabilityJtiHash,
-        argument_hash: audit.argumentHash,
-        outcome: audit.outcome,
-        detail_sha256: evidenceProjectionHash(audit.detail),
-        observed_at: audit.observedAt.toISOString(),
-      })),
-      durable_artifacts: publicationArtifacts.map((artifact) => ({
-        id: artifact.id,
-        kind: artifact.kind,
-        content_type: artifact.contentType,
-        sha256: artifact.sha256,
-      })),
-      incoming_artifacts: input.artifacts.map((artifact) => ({
-        id: artifact.id,
-        kind: artifact.kind,
-        content_type: artifact.contentType,
-        sha256: sha256(artifact.bytes),
-      })),
-    });
-    await this.ledger.appendEvent(
-      run.id,
-      "evidence.publication_revision",
-      "worker",
-      { publication_revision_sha256: publicationRevisionHash, purpose: input.purpose },
-      `evidence:${run.id}:publication:${input.purpose}:${publicationRevisionHash}`,
-    );
-    for (const artifact of input.artifacts) {
-      if (artifact.bytes.byteLength > 2_000_000) {
-        await this.ledger.appendEvent(run.id, "evidence.artifact_dropped", "worker", { kind: artifact.kind, reason: "size_limit", byte_length: artifact.bytes.byteLength }, `evidence:${run.id}:${sha256(artifact.id)}:dropped`);
-        continue;
-      }
-      await this.ledger.saveArtifact({ ...artifact, runId: run.id, sha256: sha256(artifact.bytes), createdAt: input.createdAt });
-    }
-    const eventPage = await this.#allEvents(run.id);
-    const operations = await this.ledger.listOperations(run.id);
-    const authAudit = await this.ledger.listAuthAudit(run.id);
-    const refs: EvidenceRef[] = [];
-    const originalArtifacts = (await this.ledger.listArtifacts(run.id)).filter((artifact) => artifact.kind !== "manifest_attachment" && artifact.kind !== "capture_json");
-    for (const artifact of originalArtifacts) refs.push({ kind: artifact.kind, resource_id: `voice-lab://artifact/${artifact.id}`, sha256: artifact.sha256, content_type: artifact.contentType, byte_length: artifact.bytes.byteLength, expires_at: evidenceExpiresAt });
-    const eventEvidence = await this.#persistEventChunks(run, eventPage.events, evidenceExpiresAt, `${input.purpose}-${input.terminalState}-${eventPage.latest}`);
-    refs.push(...eventEvidence.refs);
-
-    const manifestId = deterministicUuid(run.id, `${input.purpose}:${input.terminalState}:${eventPage.latest}`);
-    const projectionOverflowId = deterministicUuid(run.id, `${input.purpose}:${input.terminalState}:${eventPage.latest}:projection-overflow`);
-    const projectionOverflow: EvidenceProjectionOverflowRecord[] = [];
-    const projectEvidence = (path: string, value: unknown): unknown => projectEvidenceValue(path, value, projectionOverflowId, projectionOverflow);
-    const projectedTerminalError = input.terminalError === null ? null : projectEvidence("terminal_error", input.terminalError);
-    const acquiredBrowser = eventPage.events.find((event) => event.kind === "harness.browser_runtime_acquired" && event.source === "canonical");
-    const productEvents = eventPage.events.filter((event) => isExactBoundProductEvent(run, event));
-    const taskCleanup = deriveTaskCleanup(eventPage.events, run);
-    const browserContextClosed = !this.driver.hasSession(run.id) && eventPage.events.some((event) =>
-      event.kind === "cleanup.browser_context_absent" && event.payload.browser_never_allocated === true
-      || event.kind === "cleanup.browser_context_closed" && event.payload.close_resolved === true && event.payload.browser_registry_absent === true);
-    const browserLeaseReleased = eventPage.events.some((event) =>
-      event.kind === "cleanup.browser_lease_released" && event.payload.cas_deleted === true
-      || event.kind === "cleanup.browser_lease_absent" && event.payload.authoritative_ledger_read === true);
-    const providerDisconnected = productEvents.some((event) => event.kind === "provider.stage" && ["closed", "ended"].includes(String(event.payload.stage))) || recoveryComponentComplete(eventPage.events, "voice_provider");
-    const authSessionRevoked = eventPage.events.some(authCleanupConfirmed) || recoveryComponentComplete(eventPage.events, "auth_sessions");
-    const liveCleanupComplete = authoritativeLiveCleanupComplete(eventPage.events);
-    const assertions = evaluateScenarioAssertions(run, eventPage.events, operations, authAudit);
-    const platformAttestation = eventPage.events.find((event) => event.source === "canonical" && event.kind === "external.attestation.p01_platform_plugin_task" && event.payload.binding_validated === true && typeof event.payload.content_sha256 === "string");
-    const platformProof = platformAttestation?.payload.evidence as Record<string, unknown> | undefined;
-    const platformInstallProjection = platformAttestation && platformProof ? {
-      status: "available",
-      source: "platform_plugin_ed25519_attestation",
-      attestation_id_sha256: sha256(String(platformAttestation.payload.attestation_id)),
-      content_sha256: platformAttestation.payload.content_sha256,
-      registered_app_id: platformProof.registered_app_id,
-      plugin_version: platformProof.plugin_version,
-      plugin_package_sha256: platformProof.plugin_package_sha256,
-      install_receipt_sha256: platformProof.install_receipt_sha256,
-      platform_task_id_sha256: platformProof.platform_task_id_sha256,
-      platform_thread_id_sha256: platformProof.platform_thread_id_sha256,
-      installed_at: platformProof.installed_at,
-      fresh_task_started_at: platformProof.fresh_task_started_at,
-      fresh_task_completed_at: platformProof.fresh_task_completed_at,
-      high_level_call_count: platformProof.high_level_call_count,
-    } : { status: "unavailable", reason: "platform_authored_install_and_fresh_task_attestation_not_attached" };
-    const failureOwner = input.terminalError === null ? null : input.terminalState === "product_failed" ? "product" : input.terminalState === "inconclusive_provider" ? "provider" : input.terminalState === "authorization_failed" ? "auth" : input.terminalError.category === "evidence" ? "evidence" : "harness";
-    const intentionallyUnavailable = input.intentionallyUnallocated ? { status: "intentionally_unallocated_pre_resource", reason: "scenario_rejects_before_browser_provider_session_allocation" } : null;
-    const manifest = {
-      contract_version: "sophia.voice-lab.evidence.v1",
-      schema_version: "sophia.voice-lab.evidence.v1",
-      scenario_version: run.scenarioVersion,
-      manifest_id: manifestId,
-      versions: {
-        harness: this.config.harnessVersion,
-        plugin: this.config.pluginVersion,
-        mcp: this.config.mcpVersion,
-        service_commit: this.config.serviceVersion,
-        evidence_schema: "sophia.voice-lab.evidence.v1",
-        scenario_catalog: run.scenarioVersion,
-        registered_app: {
-          technical_id: this.config.registeredAppId ?? { status: "unavailable", reason: "registered_app_technical_id_pending_configuration" },
-          plugin_package_sha256: this.config.pluginPackageSha256,
-          platform_install_attestation: platformInstallProjection,
-        },
-      },
-      repository_commits: { base: this.config.repositoryBaseSha, candidate: this.config.repositoryCandidateSha, rollback: this.config.repositoryRollbackSha },
-      run_id: run.id,
-      test_run_id: run.testRunId,
-      test_principal: { principal_id_sha256: sha256(run.principalId), raw_identifier_excluded: true },
-      cleanup_obligation: { cleanup_obligation_id_sha256: sha256(run.cleanupObligationId), raw_identifier_excluded: true },
-      environment: run.environment,
-      scenario: { id: run.scenarioId, version: run.scenarioVersion, resource_allocation: input.intentionallyUnallocated ? "intentionally_none" : "ordinary_deployed_path" },
-      run_lifecycle: { started_at: run.createdAt.toISOString(), ended_at: input.createdAt.toISOString(), terminal_state: input.terminalState, terminal_reason: input.terminalReason },
-      certification: {
-        status: input.verdicts.harness === "pass" && input.verdicts.evidence === "pass" ? "certified" : input.verdicts.harness === "unavailable" || input.verdicts.evidence === "unavailable" ? "pending_external_evidence" : "not_certified",
-        revision_seq: eventPage.latest,
-        execution_terminal_state_immutable: true,
-        current_manifest_pointer_advances_append_only: true,
-      },
-      terminal_state: input.terminalState,
-      terminal_reason: input.terminalReason,
-      terminal_error: projectedTerminalError,
-      deployment_identity: {
-        expected: run.target.expectedDeployment,
-        observed: run.observedDeployment,
-        observations: eventPage.events.filter((event) => event.kind === "deployment.verified" || event.kind === "deployment.reverified").map((event) => ({
-          phase: event.kind,
-          observed_at: event.at.toISOString(),
-          components: { frontend: event.payload.frontend, backend: event.payload.backend, voice: event.payload.voice },
-        })),
-      },
-      deployment_dependencies: {
-        expected: run.target.expectedDependencies,
-        observations: eventPage.events.filter((event) => event.kind === "deployment.verified" || event.kind === "deployment.reverified").map((event) => ({
-          phase: event.kind,
-          observed_at: event.at.toISOString(),
-          components: { langgraph: event.payload.langgraph },
-        })),
-      },
-      browser: acquiredBrowser ? {
-        engine: acquiredBrowser.payload.engine,
-        version: acquiredBrowser.payload.version,
-        readiness: "proven_at_run_acquisition",
-        worker_id_sha256: acquiredBrowser.payload.worker_id_sha256,
-        browser_lease_epoch: acquiredBrowser.payload.browser_lease_epoch,
-        browser_context_id_sha256: acquiredBrowser.payload.browser_context_id_sha256 ?? null,
-        operation_id: acquiredBrowser.payload.operation_id,
-        acquired_at: acquiredBrowser.payload.acquired_at,
-        service_version: acquiredBrowser.payload.service_version,
-        allocation: { status: "durably_acquired" },
-      } : { engine: null, version: null, readiness: "unavailable", worker_id_sha256: null, browser_lease_epoch: null, browser_context_id_sha256: null, operation_id: null, acquired_at: null, service_version: null, allocation: intentionallyUnavailable ?? { status: "runtime_acquisition_receipt_missing" } },
-      verdicts: input.verdicts,
-      joins: input.intentionallyUnallocated ? { status: "intentionally_unallocated_pre_resource", canonical_session: intentionallyUnavailable, thread: intentionallyUnavailable, gemini_runtime_session: intentionallyUnavailable, provider_connection_epoch: intentionallyUnavailable, turn: intentionallyUnavailable, langsmith: intentionallyUnavailable } : manifestJoins(run),
-      message_revisions: projectEvidence("message_revisions", input.intentionallyUnallocated ? { status: "intentionally_unallocated_pre_resource", reason: intentionallyUnavailable!.reason, rows: [] } : projectMessageRevisions(run, eventPage.events)),
-      utterances: projectEvidence("utterances", projectUtterances(run, eventPage.events, operations)),
-      transcripts_and_turns: projectEvidence("transcripts_and_turns", input.intentionallyUnallocated ? { status: "intentionally_unallocated_pre_resource", reason: intentionallyUnavailable!.reason, count: 0, event_refs: [] } : projectEvents(productEvents, (event) => event.kind.includes("transcript") || event.kind.endsWith(".sophia.user_transcript") || event.kind.endsWith(".sophia.assistant_transcript") || event.kind.endsWith(".sophia.turn"))),
-      media_receipts: projectEvidence("media_receipts", {
-        input_frames: projectEvents(eventPage.events, (event) => event.kind === "harness.input_frame_forwarded"),
-        input_product_legs: projectEvents(productEvents, (event) => event.kind === "audio.input.product_leg"),
-        input_product_turns: projectEvents(productEvents, (event) => event.kind === "audio.input.product_turn"),
-        output_chunks: projectEvents(productEvents, (event) => event.kind === "audio.output.received" || event.kind === "audio.output.leg_receipt"),
-        playback_flush_interruption: projectEvents(productEvents, (event) => event.kind.startsWith("audio.output.") && event.kind !== "audio.output.received" && event.kind !== "audio.output.leg_receipt"),
-      }),
-      tool_receipts: projectEvidence("tool_receipts", projectEvents(productEvents, (event) => event.kind === "tool.call" || event.kind.includes("tool-call") || event.kind.includes("tool_result"))),
-      builder_receipts: projectEvidence("builder_receipts", projectEvents(productEvents, (event) => event.kind.includes("builder") || event.kind.includes("task_state") || event.kind.includes("control"))),
-      durable_projections: projectEvidence("durable_projections", { session_finalization: projectEvents(eventPage.events, (event) => event.kind === "session.finalized"), task_cleanup: taskCleanup }),
-      ui_assertions: projectEvidence("ui_assertions", projectEvents(productEvents, (event) => event.kind === "ui.projection" || event.kind.includes("artifact"))),
-      artifact_references: refs,
-      screenshots: refs.filter((ref) => ref.kind.includes("screenshot")),
-      video: { status: "unavailable", reason: "video_capture_disabled_or_not_implemented" },
-      raw_audio: { status: "not_captured", reason: "privacy_default" },
-      metrics: deriveEvidenceMetrics(eventPage.events, operations),
-      cleanup_audit: {
-        browser_context_closed: browserContextClosed,
-        browser_lease_released: browserLeaseReleased,
-        provider_disconnect: input.intentionallyUnallocated ? intentionallyUnavailable : providerDisconnected,
-        auth_session_revoked: input.intentionallyUnallocated ? intentionallyUnavailable : authSessionRevoked,
-        synthetic_tasks: taskCleanup,
-        live_execution_resources_zero: liveCleanupComplete,
-        cleanup_complete: run.cleanupComplete && liveCleanupComplete && browserContextClosed && browserLeaseReleased,
-        recovery_receipts: projectEvidence("cleanup_audit/recovery_receipts", eventPage.events.filter((event) => event.kind === "cleanup.recovery").map((event) => ({ observed_at: event.at.toISOString(), ...event.payload }))),
-        retention_purge_due_at: run.retentionPurgeDueAt?.toISOString() ?? null,
-        retention_purge_pending: run.retentionPurgePending,
-        retention_purged: run.retentionPurgeVerifiedAt !== null,
-      },
-      failure: input.terminalError === null ? { owner: null, classification: null, detail: null } : { owner: failureOwner, classification: input.terminalError.code, detail: projectedTerminalError },
-      operations: projectEvidence("operations", operations.map((item) => ({ operation_id: item.id, type: item.type, state: item.state, attempt_count: item.attemptCount, idempotency_key_hash: sha256(item.idempotencyKey), request_hash: item.requestHash, result: projectEvidence(`operations/${item.id}/result`, item.result), error: projectEvidence(`operations/${item.id}/error`, item.error), created_at: item.createdAt.toISOString(), updated_at: item.updatedAt.toISOString() }))),
-      authorization_audit: projectEvidence("authorization_audit", authAudit.map((item) => ({ action: item.action, capability_jti_hash: item.capabilityJtiHash ?? null, argument_hash: item.argumentHash, outcome: item.outcome, detail: projectEvidence(`authorization_audit/${item.id}/detail`, item.detail), observed_at: item.observedAt.toISOString() }))),
-      external_attestations: eventPage.events.filter((event) => event.source === "canonical" && event.kind.startsWith("external.attestation.") && event.kind !== "external.attestation_nonce_claimed").map((event) => ({ kind: event.kind.slice("external.attestation.".length), event_seq: event.seq, content_sha256: event.payload.content_sha256, authority: (event.payload.evidence as Record<string, unknown> | undefined)?.authority ?? null, issuer: event.payload.issuer, authority_key_id: event.payload.authority_key_id, jti_sha256: sha256(String(event.payload.jti)), request_argument_sha256: event.payload.request_argument_sha256 })),
-      event_stream: eventEvidence.index,
-      assertions: projectEvidence("assertions", assertions),
-      human_summary: assertions.summary,
-    };
-    if (projectionOverflow.length > 0) {
-      const overflowPayload = { schema_version: "sophia.voice-lab.evidence-projection-overflow.v1", run_id: run.id, records: projectionOverflow };
-      assertNoSecret(overflowPayload);
-      const overflowBytes = await gzipAsync(Buffer.from(JSON.stringify(overflowPayload), "utf8"), { level: 9 });
-      if (overflowBytes.byteLength > 2_000_000) throw new VoiceLabError(labError("EVIDENCE_PROJECTION_OVERFLOW_TOO_LARGE", "Compressed evidence projection overflow exceeded its durable row cap.", "evidence"));
-      const savedOverflow = await this.ledger.saveArtifact({ id: projectionOverflowId, runId: run.id, kind: "capture_json", contentType: "application/gzip", sha256: sha256(overflowBytes), bytes: overflowBytes, createdAt: input.createdAt });
-      refs.push({ kind: "evidence_projection_overflow", resource_id: `voice-lab://artifact/${savedOverflow.id}`, sha256: savedOverflow.sha256, content_type: savedOverflow.contentType, byte_length: savedOverflow.bytes.byteLength, expires_at: evidenceExpiresAt });
-    }
-    assertNoSecret(manifest);
-    const bytes = Buffer.from(JSON.stringify(manifest), "utf8");
-    if (bytes.byteLength > 2_000_000) throw new VoiceLabError(labError("EVIDENCE_MANIFEST_TOO_LARGE", "Terminal evidence manifest exceeded its durable Postgres cap.", "evidence"));
-    const savedManifest = await this.ledger.saveArtifact({ id: manifestId, runId: run.id, kind: "manifest_attachment", contentType: "application/json", sha256: sha256(bytes), bytes, createdAt: input.createdAt });
-    const manifestRef: EvidenceRef = { kind: "manifest", resource_id: `voice-lab://evidence/${savedManifest.id}`, sha256: savedManifest.sha256, content_type: savedManifest.contentType, byte_length: savedManifest.bytes.byteLength, expires_at: evidenceExpiresAt };
-    await this.ledger.saveEvidence({ runId: run.id, manifestId: savedManifest.id, manifestSha256: savedManifest.sha256, schemaVersion: "sophia.voice-lab.evidence.v1", revisionSeq: eventPage.latest, artifactRefs: [manifestRef, ...refs], createdAt: input.createdAt });
-  }
-
-  async #allEvents(runId: string): Promise<Awaited<ReturnType<VoiceLabLedger["listEvents"]>>> {
-    const events: import("./domain.js").LabEvent[] = [];
-    let cursor = 0;
-    let latest = 0;
-    do {
-      const page = await this.ledger.listEvents(runId, cursor, 500);
-      latest = page.latest;
-      for (const event of page.events) {
-        const expected = cursor + 1;
-        if (event.seq !== expected) throw new VoiceLabError(labError("EVIDENCE_EVENT_GAP", "Durable event ledger contains a sequence gap; evidence cannot be certified.", "evidence", false, { expected_seq: expected, observed_seq: event.seq }));
-        events.push(event);
-        cursor = event.seq;
-      }
-      if (page.events.length === 0 && cursor < latest) throw new VoiceLabError(labError("EVIDENCE_EVENT_TRUNCATION", "Durable event scan stopped before the advertised latest cursor.", "evidence", false, { cursor, latest }));
-    } while (cursor < latest);
-    return { events, after: 0, latest };
-  }
-
-  async #persistEventChunks(run: RunRecord, events: import("./domain.js").LabEvent[], expiresAt: string, purpose: string) {
-    const refs: Array<{ kind: string; resource_id: string; sha256: string; content_type: string; byte_length: number; expires_at: string }> = [];
-    const chunks: Array<{ first_seq: number; last_seq: number; count: number; sha256: string; resource_id: string }> = [];
-    let chain = "0".repeat(64);
-    for (let offset = 0; offset < events.length; offset += 250) {
-      const slice = events.slice(offset, offset + 250).map((event) => ({ seq: event.seq, kind: event.kind, source: event.source, observed_at: event.at.toISOString(), payload: event.payload }));
-      assertNoSecret(slice);
-      for (const event of slice) chain = sha256(`${chain}:${sha256(JSON.stringify(event))}`);
-      const compressed = await gzipAsync(Buffer.from(JSON.stringify({ schema_version: "sophia.voice-lab.events.v1", run_id: run.id, events: slice }), "utf8"), { level: 9 });
-      if (compressed.byteLength > 2_000_000) throw new VoiceLabError(labError("EVIDENCE_EVENT_CHUNK_TOO_LARGE", "Compressed event evidence chunk exceeded its durable row cap.", "evidence"));
-      const digest = sha256(compressed);
-      const id = deterministicUuid(run.id, `${purpose}-events-${offset / 250}`);
-      const saved = await this.ledger.saveArtifact({ id, runId: run.id, kind: "capture_json", contentType: "application/gzip", sha256: digest, bytes: compressed, createdAt: new Date() });
-      const resourceId = `voice-lab://artifact/${saved.id}`;
-      refs.push({ kind: "event_chunk", resource_id: resourceId, sha256: saved.sha256, content_type: saved.contentType, byte_length: saved.bytes.byteLength, expires_at: expiresAt });
-      chunks.push({ first_seq: slice[0]!.seq, last_seq: slice.at(-1)!.seq, count: slice.length, sha256: saved.sha256, resource_id: resourceId });
-    }
-    return { refs, index: { schema_version: "sophia.voice-lab.events.v1", first_seq: events[0]?.seq ?? null, last_seq: events.at(-1)?.seq ?? null, count: events.length, final_hash_chain: chain, chunks } };
-  }
-
-  async #resolveD02WorkerShutdownArm(runId: string, requireOwnedContext = true): Promise<D02WorkerShutdownArm | null> {
-    this.#d02PreDispatchPauses.delete(runId);
-    const active = this.#activeLeases.get(runId);
-    if (!active) return null;
-    const [run, currentLease, eventPage] = await Promise.all([
-      this.ledger.getRun(runId),
-      this.ledger.getBrowserLease(runId),
-      this.#allEvents(runId),
-    ]);
-    if (!run || run.scenarioId !== "V-D02" || TERMINAL_RUN_STATES.has(run.state) || run.providerSessionId === null || run.providerEpoch === null
-      || !currentLease || currentLease.workerId !== this.workerId || currentLease.leaseEpoch !== active.epoch
-      || (requireOwnedContext && (currentLease.expiresAt <= new Date() || !this.driver.hasSession(runId)))) return null;
-
-    const workerHash = sha256(this.workerId);
-    const runHash = sha256(run.id);
-    const cleanupHash = sha256(run.cleanupObligationId);
-    const providerSessionHash = sha256(run.providerSessionId);
-    const expectedContext = deriveD02BrowserContextBinding(run, this.workerId, active.epoch);
-    const bindingEvents = eventPage.events.filter((event) => event.kind === "harness.browser_context_bound" && event.source === "canonical");
-    const runtimeEvents = eventPage.events.filter((event) => event.kind === "harness.browser_runtime_acquired" && event.source === "canonical");
-    const bindingEvent = bindingEvents[0];
-    const runtimeEvent = runtimeEvents[0];
-    const exactCurrentBinding = bindingEvents.length === 1 && bindingEvent !== undefined && hasExactKeys(bindingEvent.payload, [
-      "schema", "test_run_id_sha256", "cleanup_obligation_id_sha256", "voice_lab_run_id_sha256", "browser_worker_id_sha256",
-      "browser_lease_epoch", "browser_context_id_sha256", "context_allocation", "driver_attested", "raw_run_worker_and_context_identifiers_excluded",
-    ]) && bindingEvent.payload.schema === "sophia_voice_lab_browser_context_binding_v1"
-      && bindingEvent.payload.test_run_id_sha256 === sha256(run.testRunId) && bindingEvent.payload.cleanup_obligation_id_sha256 === cleanupHash
-      && bindingEvent.payload.voice_lab_run_id_sha256 === runHash && bindingEvent.payload.browser_worker_id_sha256 === workerHash
-      && bindingEvent.payload.browser_lease_epoch === active.epoch && bindingEvent.payload.browser_context_id_sha256 === expectedContext.browser_context_id_sha256
-      && bindingEvent.payload.context_allocation === "deterministic_run_worker_lease_v1" && bindingEvent.payload.driver_attested === true
-      && bindingEvent.payload.raw_run_worker_and_context_identifiers_excluded === true;
-    const exactCurrentRuntime = runtimeEvents.length === 1 && runtimeEvent !== undefined && hasExactKeys(runtimeEvent.payload, [
-      "worker_id_sha256", "browser_lease_epoch", "browser_context_id_sha256", "operation_id", "engine", "version", "service_version",
-      "acquired_at", "raw_worker_identifier_excluded",
-    ]) && runtimeEvent.payload.worker_id_sha256 === workerHash && runtimeEvent.payload.browser_lease_epoch === active.epoch
-      && runtimeEvent.payload.browser_context_id_sha256 === expectedContext.browser_context_id_sha256
-      && typeof runtimeEvent.payload.operation_id === "string" && typeof runtimeEvent.payload.engine === "string" && runtimeEvent.payload.engine.length > 0
-      && typeof runtimeEvent.payload.version === "string" && runtimeEvent.payload.version.length > 0
-      && runtimeEvent.payload.service_version === this.config.serviceVersion && isCanonicalTimestamp(runtimeEvent.payload.acquired_at)
-      && runtimeEvent.payload.raw_worker_identifier_excluded === true && bindingEvent !== undefined && bindingEvent.seq < runtimeEvent.seq;
-    const currentIntents = eventPage.events.filter((event) => event.kind === "product.d02_browser_worker_termination_freeze_pending" && event.source === "canonical"
-      && event.payload.voice_lab_run_id_sha256 === runHash && event.payload.browser_worker_id_sha256 === workerHash && event.payload.browser_lease_epoch === active.epoch);
-    if (currentIntents.length > 1) throw d02WorkerShutdownConflict("The current browser lease has multiple D02 local freeze intents.");
-    const intentEvent = currentIntents[0];
-    const intent = intentEvent?.payload;
-    const intentEpochs = Array.isArray(intent?.frozen_provider_connection_epochs) ? intent.frozen_provider_connection_epochs : [];
-    const exactIntent = intentEvent !== undefined && intent !== undefined && hasExactKeys(intent, [
-      "schema", "termination_request_id_sha256", "command_evidence_sha256", "voice_lab_run_id_sha256", "cleanup_obligation_id_sha256",
-      "provider_session_id_sha256", "provider_admission_id_sha256", "provider_connection_epoch", "frozen_provider_connection_epochs",
-      "browser_worker_id_sha256", "browser_lease_epoch", "browser_context_id_sha256", "render_action_request_sha256", "requested_at",
-      "raw_run_operation_provider_and_browser_identifiers_excluded",
-    ]) && intent.schema === "sophia_voice_lab_d02_local_browser_worker_freeze_intent_v1"
-      && isSha256(intent.termination_request_id_sha256) && isSha256(intent.command_evidence_sha256)
-      && intent.voice_lab_run_id_sha256 === runHash && intent.cleanup_obligation_id_sha256 === cleanupHash
-      && intent.provider_session_id_sha256 === providerSessionHash && isSha256(intent.provider_admission_id_sha256)
-      && intent.provider_connection_epoch === run.providerEpoch && intentEpochs.length > 0
-      && intentEpochs.every((epoch, index) => Number.isSafeInteger(epoch) && Number(epoch) > 0 && (index === 0 || Number(intentEpochs[index - 1]) < Number(epoch)))
-      && intentEpochs.includes(run.providerEpoch) && intent.browser_worker_id_sha256 === workerHash && intent.browser_lease_epoch === active.epoch
-      && intent.browser_context_id_sha256 === expectedContext.browser_context_id_sha256 && isSha256(intent.render_action_request_sha256)
-      && isCanonicalTimestamp(intent.requested_at) && intentEvent.at.toISOString() === intent.requested_at
-      && intent.raw_run_operation_provider_and_browser_identifiers_excluded === true
-      && exactCurrentBinding && exactCurrentRuntime && runtimeEvent !== undefined && runtimeEvent.seq < intentEvent.seq
-      && new Date(String(runtimeEvent.payload.acquired_at)) <= intentEvent.at;
-    if (intentEvent && !exactIntent) throw d02WorkerShutdownConflict("The current browser lease has a malformed or cross-bound D02 local freeze intent.");
-    if (exactIntent) this.#d02PreDispatchPauses.add(runId);
-    const commands = eventPage.events.filter((event) => {
-      if (event.kind !== "external.attestation.d02_browser_worker_termination_command" || event.source !== "canonical" || event.payload.binding_validated !== true) return false;
-      const evidence = event.payload.evidence as Record<string, unknown> | undefined;
-      return evidence?.run_id_sha256 === runHash && evidence.browser_worker_id_sha256 === workerHash && evidence.browser_lease_epoch === active.epoch;
-    });
-    const currentFreezes = eventPage.events.filter((event) => event.kind === "product.d02_gateway_browser_worker_termination_frozen" && event.source === "canonical"
-      && event.payload.voice_lab_run_id_sha256 === runHash && event.payload.browser_worker_id_sha256 === workerHash && event.payload.browser_lease_epoch === active.epoch);
-    if (commands.length === 0) {
-      // The local intent is committed before the cross-store Gateway call.
-      // It pauses provider/browser mutation immediately, but cannot authorize
-      // shutdown until the Gateway freeze, command, and dispatch all exist.
-      if (exactIntent) return null;
-      if (currentFreezes.length > 0) throw d02WorkerShutdownConflict("The current browser lease has a Gateway freeze without its local intent and canonical source command.");
-      return null;
-    }
-    if (!exactIntent || !intentEvent || !intent) throw d02WorkerShutdownConflict("The canonical D02 termination command did not have one exact prior local freeze intent.");
-    if (commands.length !== 1) throw d02WorkerShutdownConflict("The current browser lease has multiple canonical D02 termination commands.");
-    const commandEvent = commands[0]!;
-    const command = exactSourceValidatedD02WorkerCommand(commandEvent, run, this.config);
-    if (!command) throw d02WorkerShutdownConflict("The canonical D02 termination command lost its source-validation or immutable content binding.");
-    const terminationRequestIdSha256 = sha256(String(command.termination_request_id));
-    const freezes = currentFreezes.filter((event) => event.payload.termination_request_id_sha256 === terminationRequestIdSha256);
-    if (freezes.length !== 1) throw d02WorkerShutdownConflict("The canonical D02 termination command did not have one exact Gateway freeze.");
-    const freezeEvent = freezes[0]!;
-    const freeze = freezeEvent.payload;
-    const frozenEpochs = Array.isArray(command.frozen_provider_connection_epochs) ? command.frozen_provider_connection_epochs : [];
-    const requestedAt = typeof command.requested_at === "string" ? new Date(command.requested_at) : null;
-    const exactFreeze = hasExactKeys(freeze, [
-      "schema", "termination_request_id_sha256", "freeze_request_sha256", "voice_lab_run_id_sha256", "cleanup_obligation_id_sha256",
-      "provider_session_id_sha256", "provider_admission_id_sha256", "provider_connection_epoch", "frozen_provider_connection_epochs",
-      "browser_worker_id_sha256", "browser_lease_epoch", "browser_context_id_sha256", "render_action_request_sha256", "gateway_frozen",
-      "raw_product_identifiers_excluded",
-    ]) && freeze.schema === "sophia_voice_lab_d02_gateway_freeze_event_v1"
-      && freeze.termination_request_id_sha256 === terminationRequestIdSha256 && isSha256(freeze.freeze_request_sha256)
-      && freeze.voice_lab_run_id_sha256 === runHash && freeze.cleanup_obligation_id_sha256 === cleanupHash
-      && freeze.provider_session_id_sha256 === providerSessionHash && freeze.provider_admission_id_sha256 === command.provider_admission_id_sha256
-      && freeze.provider_connection_epoch === run.providerEpoch && canonicalRequestHash(freeze.frozen_provider_connection_epochs) === canonicalRequestHash(frozenEpochs)
-      && freeze.browser_worker_id_sha256 === workerHash && freeze.browser_lease_epoch === active.epoch
-      && freeze.browser_context_id_sha256 === expectedContext.browser_context_id_sha256
-      && freeze.render_action_request_sha256 === command.render_action_request_sha256
-      && freeze.gateway_frozen === true && freeze.raw_product_identifiers_excluded === true;
-    const exactBinding = exactCurrentBinding && bindingEvent !== undefined && bindingEvent.seq < intentEvent.seq;
-    const exactRuntime = exactCurrentRuntime && runtimeEvent !== undefined && runtimeEvent.seq < intentEvent.seq;
-    const exactCommand = command.run_id_sha256 === runHash && command.cleanup_obligation_id_sha256 === cleanupHash
-      && command.provider_session_id_sha256 === providerSessionHash && command.provider_connection_epoch === run.providerEpoch
-      && Array.isArray(frozenEpochs) && frozenEpochs.length > 0 && frozenEpochs.every((epoch, index) => Number.isSafeInteger(epoch) && Number(epoch) > 0 && (index === 0 || Number(frozenEpochs[index - 1]) < Number(epoch)))
-      && frozenEpochs.includes(run.providerEpoch) && command.browser_worker_id_sha256 === workerHash && command.browser_lease_epoch === active.epoch
-      && command.browser_context_id_sha256 === expectedContext.browser_context_id_sha256
-      && command.before_worker_owner_instance_id_sha256 === workerHash && command.before_worker_owner_membership_count === 1
-      && command.target_service === "sophia-voice-lab-worker" && command.termination_mode === "render_service_restart_one_shot"
-      && command.worker_mutation_authorized === true && command.product_mutation_authorized === false && command.one_shot === true;
-    const exactIntentCommand = intent.termination_request_id_sha256 === terminationRequestIdSha256
-      && intent.command_evidence_sha256 === canonicalRequestHash(command)
-      && intent.provider_admission_id_sha256 === command.provider_admission_id_sha256
-      && canonicalRequestHash(intent.frozen_provider_connection_epochs) === canonicalRequestHash(frozenEpochs)
-      && intent.render_action_request_sha256 === command.render_action_request_sha256 && intent.requested_at === command.requested_at;
-    const exactOrder = intentEvent.seq < freezeEvent.seq && freezeEvent.seq < commandEvent.seq && requestedAt !== null && Number.isFinite(requestedAt.getTime())
-      && requestedAt.toISOString() === command.requested_at && requestedAt <= freezeEvent.at;
-    if (!exactFreeze || !exactBinding || !exactRuntime || !exactIntentCommand || !exactCommand || !exactOrder) {
-      throw d02WorkerShutdownConflict("The D02 termination command, Gateway freeze, browser owner, lease, context, provider epochs, or durable ordering drifted.");
-    }
-    const dispatchClaims = eventPage.events.filter((event) => event.kind === "product.d02_render_worker_dispatch_claimed" && event.source === "canonical"
-      && event.payload.termination_request_id_sha256 === terminationRequestIdSha256);
-    if (dispatchClaims.length === 0) {
-      this.#d02PreDispatchPauses.add(runId);
-      return null;
-    }
-    if (dispatchClaims.length !== 1) throw d02WorkerShutdownConflict("The D02 termination command has multiple durable Render dispatch claims.");
-    const dispatchEvent = dispatchClaims[0]!;
-    const dispatch = dispatchEvent.payload;
-    const dispatchCore = { ...dispatch };
-    delete dispatchCore.dispatch_claim_sha256;
-    const exactDispatch = hasExactKeys(dispatch, [
-      "schema", "termination_request_id_sha256", "command_attestation_id_sha256", "command_content_sha256", "command_event_seq",
-      "worker_service_id_sha256", "action_request_sha256", "dispatch_attempt_id_sha256", "requested_at",
-      "raw_action_and_attempt_identifiers_excluded", "dispatch_claim_sha256",
-    ]) && dispatch.schema === "sophia_voice_lab_d02_render_worker_dispatch_claim_v1"
-      && dispatch.termination_request_id_sha256 === terminationRequestIdSha256
-      && dispatch.command_attestation_id_sha256 === sha256(String(commandEvent.payload.attestation_id))
-      && dispatch.command_content_sha256 === commandEvent.payload.content_sha256
-      && dispatch.command_event_seq === commandEvent.seq
-      && dispatch.worker_service_id_sha256 === command.worker_service_id_sha256
-      && dispatch.action_request_sha256 === command.render_action_request_sha256
-      && isSha256(dispatch.dispatch_attempt_id_sha256) && isCanonicalTimestamp(dispatch.requested_at)
-      && dispatch.raw_action_and_attempt_identifiers_excluded === true
-      && isSha256(dispatch.dispatch_claim_sha256) && dispatch.dispatch_claim_sha256 === canonicalRequestHash(dispatchCore)
-      && commandEvent.seq < dispatchEvent.seq && dispatchEvent.at.toISOString() === dispatch.requested_at
-      && commandEvent.at <= dispatchEvent.at;
-    if (!exactDispatch) throw d02WorkerShutdownConflict("The durable Render dispatch claim did not bind the exact canonical command, worker service, and one-shot action.");
-    return {
-      runId,
-      terminationRequestIdSha256,
-      cleanupObligationIdSha256: cleanupHash,
-      lostWorkerIdSha256: workerHash,
-      lostBrowserLeaseEpoch: active.epoch,
-      browserContextIdSha256: expectedContext.browser_context_id_sha256,
-      providerSessionIdSha256: providerSessionHash,
-      providerAdmissionIdSha256: String(command.provider_admission_id_sha256),
-      providerConnectionEpoch: run.providerEpoch,
-      frozenProviderConnectionEpochs: frozenEpochs.map(Number),
-      renderActionRequestSha256: String(command.render_action_request_sha256),
-      gatewayFreezeRequestSha256: String(freeze.freeze_request_sha256),
-      gatewayFreezeEventSeq: freezeEvent.seq,
-      commandEventSeq: commandEvent.seq,
-      renderDispatchClaimSha256: String(dispatch.dispatch_claim_sha256),
-      renderDispatchClaimEventSeq: dispatchEvent.seq,
-    };
-  }
-
-  async #awaitD02PreDispatchShutdownArm(runId: string, timeoutMs: number): Promise<D02WorkerShutdownArm> {
-    const initialLease = this.#activeLeases.get(runId);
-    if (!initialLease || !this.#d02PreDispatchPauses.has(runId)) {
-      throw d02WorkerShutdownConflict("The D02 pre-dispatch shutdown wait lost its exact local freeze intent or browser lease.");
-    }
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
-      const activeLease = this.#activeLeases.get(runId);
-      if (!activeLease || activeLease.epoch !== initialLease.epoch) {
-        throw d02WorkerShutdownConflict("The D02 pre-dispatch shutdown wait lost its exact browser lease epoch.");
-      }
-      const heartbeatBudgetMs = deadline - Date.now();
-      if (heartbeatBudgetMs <= 0) break;
-      const owned = await withTimeout(this.ledger.heartbeatBrowserLease(
-        runId,
-        this.workerId,
-        initialLease.epoch,
-        this.config.browserLeaseSeconds,
-      ), heartbeatBudgetMs);
-      if (!owned) {
-        throw d02WorkerShutdownConflict("The D02 pre-dispatch shutdown wait could not CAS-renew its exact browser lease.");
-      }
-      const resolutionBudgetMs = deadline - Date.now();
-      if (resolutionBudgetMs <= 0) break;
-      const arm = await withTimeout(this.#resolveD02WorkerShutdownArm(runId), resolutionBudgetMs);
-      if (arm) return arm;
-      if (!this.#d02PreDispatchPauses.has(runId)) {
-        throw d02WorkerShutdownConflict("The D02 pre-dispatch shutdown wait lost its immutable local freeze-intent binding.");
-      }
-      const remainingMs = deadline - Date.now();
-      if (remainingMs > 0) await delay(Math.min(D02_PRE_DISPATCH_SHUTDOWN_POLL_MS, remainingMs));
-    }
-    throw d02WorkerShutdownConflict("The D02 pre-dispatch shutdown source chain did not converge before the bounded grace deadline.");
-  }
-
-  #quiesceD02Worker(runId: string, arm: D02WorkerShutdownArm): Promise<void> {
-    const existing = this.#d02ShutdownsInFlight.get(runId);
-    if (existing) return existing;
-    const pending = this.#performD02WorkerQuiescence(runId, arm).finally(() => this.#d02ShutdownsInFlight.delete(runId));
-    this.#d02ShutdownsInFlight.set(runId, pending);
-    return pending;
-  }
-
-  async #performD02WorkerQuiescence(runId: string, armed: D02WorkerShutdownArm): Promise<void> {
-    const current = await this.#resolveD02WorkerShutdownArm(runId, true);
-    if (!current || canonicalRequestHash(current) !== canonicalRequestHash(armed)) throw d02WorkerShutdownConflict("The D02 worker shutdown arm changed before browser quiescence.");
-    this.#d02ShutdownArms.set(runId, current);
-    const error = labError("BROWSER_SESSION_LOST", "The source-validated D02 worker restart closed the owned browser context; live media state cannot be reconstructed.", "harness", false, {
-      termination_request_id_sha256: current.terminationRequestIdSha256,
-      source: "worker_graceful_d02_restart",
-    });
-    const cancelled = await this.ledger.cancelPendingRunOperations(runId, null, labError("RUN_TERMINATED", "Operation was cancelled because its D02 browser worker became terminal.", "harness", false, { terminal_reason: error.code }));
-    for (const operation of cancelled) await this.ledger.appendEvent(runId, "operation.cancelled", "worker", { operation_id: operation.id, operation_type: operation.type, reason_code: operation.error?.code ?? "RUN_TERMINATED" }, `operation:${operation.id}:cancelled`);
-
-    const ownedRun = await this.#freshRun(runId);
-    const productCleanup = await this.driver.quiesceD02Provider(ownedRun, {
-      browserContextBinding: {
-        voice_lab_run_id_sha256: sha256(ownedRun.id),
-        browser_worker_id_sha256: current.lostWorkerIdSha256,
-        browser_lease_epoch: current.lostBrowserLeaseEpoch,
-        browser_context_id_sha256: current.browserContextIdSha256,
-      },
-      providerSessionIdSha256: current.providerSessionIdSha256,
-      frozenProviderConnectionEpochs: [...current.frozenProviderConnectionEpochs],
-    });
-    assertExactD02ProductCleanupAcknowledgement(current, productCleanup);
-    // Context destruction is ordered strictly after the product-owned Gemini
-    // connection has persisted and received the canonical 202 receipt echo.
-    await this.driver.cancel(runId, error.code);
-    if (this.driver.hasSession(runId)) throw d02WorkerShutdownConflict("The owned browser context remained live after synchronous D02 cancellation.");
-    const observedAt = await this.#appendD02WorkerShutdownObservation(current, productCleanup);
-    let run = await this.#freshRun(runId);
-    if (TERMINAL_RUN_STATES.has(run.state)) {
-      if (run.state !== "aborted_driver_restart" || run.terminalError?.code !== "BROWSER_SESSION_LOST") throw d02WorkerShutdownConflict("A different terminal outcome won the D02 shutdown transition.");
-    } else {
-      const verdicts = deriveFailureVerdicts(run, "aborted_driver_restart", []);
-      run = await transitionRun(this.ledger, run, "aborted_driver_restart", { terminalError: error, verdicts, cleanupComplete: false });
-      await this.ledger.appendEvent(run.id, "run.aborted_driver_restart", "worker", { error, shutdown_observed_at: observedAt.toISOString() }, `run:${run.id}:aborted_driver_restart`);
-    }
-    const released = await this.ledger.releaseBrowserLease(runId, this.workerId, current.lostBrowserLeaseEpoch);
-    if (!released) throw d02WorkerShutdownConflict("The D02 worker could not CAS-release the exact browser lease after closing its context.");
-    await this.ledger.appendEvent(runId, "cleanup.browser_lease_released", "worker", { worker_id_hash: current.lostWorkerIdSha256, lease_epoch: current.lostBrowserLeaseEpoch, cas_deleted: true }, `cleanup:${runId}:browser-lease`);
-    this.#activeLeases.delete(runId);
-    this.#d02PreDispatchPauses.delete(runId);
-    const terminal = await this.#freshRun(runId);
-    const recovered = await this.#recoverRun(terminal);
-    await this.#persistEvents(runId, recovered.events);
-    // Keep the run recovery-pending until a distinct replacement worker has
-    // durably observed this old-worker fact. Otherwise the old process could
-    // mark cleanup complete before Render has actually replaced it, leaving no
-    // durable row discoverable by replacement startup.
-    await this.#saveFailureEvidence(await this.#freshRun(runId), error, recovered.artifacts);
-  }
-
-  async #observeD02GracefulWorkerReplacement(run: RunRecord): Promise<"not_d02" | "awaiting_replacement" | "observed"> {
-    if (run.scenarioId !== "V-D02" || run.state !== "aborted_driver_restart" || run.terminalError?.code !== "BROWSER_SESSION_LOST") return "not_d02";
-    const [eventPage, currentLease] = await Promise.all([this.#allEvents(run.id), this.ledger.getBrowserLease(run.id)]);
-    const shutdowns = eventPage.events.filter((event) => event.kind === "durability.browser_worker_shutdown_observed");
-    if (shutdowns.length === 0) return "not_d02";
-    if (shutdowns.length !== 1 || currentLease !== null || this.driver.hasSession(run.id)) throw d02WorkerShutdownConflict("A graceful D02 terminal run lost its unique shutdown observation or absent-lease boundary.");
-    const shutdown = shutdowns[0]!;
-    const proof = shutdown.payload;
-    const proofKeys = [
-      "schema", "termination_request_id_sha256", "voice_lab_run_id_sha256", "cleanup_obligation_id_sha256",
-      "lost_browser_worker_id_sha256", "lost_browser_lease_epoch", "browser_context_id_sha256", "provider_session_id_sha256",
-      "provider_admission_id_sha256", "provider_connection_epoch", "frozen_provider_connection_epochs", "render_action_request_sha256",
-      "gateway_freeze_request_sha256", "gateway_freeze_event_seq", "command_event_seq", "render_dispatch_claim_sha256",
-      "render_dispatch_claim_event_seq", "product_provider_cleanup_acknowledged", "product_provider_cleanup_settlement_sha256",
-      "product_provider_close_receipt_count", "product_provider_activation_abort_receipt_count", "product_provider_cleanup_epoch_union_matches_freeze",
-      "browser_context_closed", "source", "raw_run_worker_lease_context_and_product_identifiers_excluded",
-      "observed_at",
-    ] as const;
-    const command = eventPage.events.find((event) => event.seq === proof.command_event_seq);
-    const freeze = eventPage.events.find((event) => event.seq === proof.gateway_freeze_event_seq);
-    const dispatch = eventPage.events.find((event) => event.seq === proof.render_dispatch_claim_event_seq);
-    const commandEvidence = command ? exactSourceValidatedD02WorkerCommand(command, run, this.config) : null;
-    const dispatchCore = dispatch ? { ...dispatch.payload } : null;
-    if (dispatchCore) delete dispatchCore.dispatch_claim_sha256;
-    const exactProof = shutdown.source === "worker" && hasExactKeys(proof, proofKeys)
-      && proof.schema === "sophia_voice_lab_d02_browser_worker_shutdown_observation_v1"
-      && proof.voice_lab_run_id_sha256 === sha256(run.id) && proof.cleanup_obligation_id_sha256 === sha256(run.cleanupObligationId)
-      && isSha256(proof.termination_request_id_sha256) && isSha256(proof.lost_browser_worker_id_sha256)
-      && Number.isSafeInteger(proof.lost_browser_lease_epoch) && Number(proof.lost_browser_lease_epoch) > 0
-      && isSha256(proof.browser_context_id_sha256) && isSha256(proof.provider_session_id_sha256) && isSha256(proof.provider_admission_id_sha256)
-      && Number.isSafeInteger(proof.provider_connection_epoch) && Number(proof.provider_connection_epoch) > 0
-      && Array.isArray(proof.frozen_provider_connection_epochs) && proof.frozen_provider_connection_epochs.length > 0
-      && isSha256(proof.render_action_request_sha256) && isSha256(proof.gateway_freeze_request_sha256)
-      && isSha256(proof.render_dispatch_claim_sha256) && proof.product_provider_cleanup_acknowledged === true
-      && isSha256(proof.product_provider_cleanup_settlement_sha256)
-      && Number.isSafeInteger(proof.product_provider_close_receipt_count) && Number(proof.product_provider_close_receipt_count) >= 0
-      && Number.isSafeInteger(proof.product_provider_activation_abort_receipt_count) && Number(proof.product_provider_activation_abort_receipt_count) >= 0
-      && Number(proof.product_provider_close_receipt_count) + Number(proof.product_provider_activation_abort_receipt_count) === proof.frozen_provider_connection_epochs.length
-      && proof.product_provider_cleanup_epoch_union_matches_freeze === true && proof.browser_context_closed === true
-      && proof.source === "worker_graceful_d02_restart" && proof.raw_run_worker_lease_context_and_product_identifiers_excluded === true
-      && isCanonicalTimestamp(proof.observed_at) && shutdown.at.toISOString() === proof.observed_at;
-    const exactCommand = command?.kind === "external.attestation.d02_browser_worker_termination_command" && command.source === "canonical" && commandEvidence !== null
-      && sha256(String(commandEvidence.termination_request_id)) === proof.termination_request_id_sha256
-      && commandEvidence.cleanup_obligation_id_sha256 === proof.cleanup_obligation_id_sha256
-      && commandEvidence.browser_worker_id_sha256 === proof.lost_browser_worker_id_sha256
-      && commandEvidence.browser_lease_epoch === proof.lost_browser_lease_epoch
-      && commandEvidence.browser_context_id_sha256 === proof.browser_context_id_sha256
-      && commandEvidence.provider_session_id_sha256 === proof.provider_session_id_sha256
-      && commandEvidence.provider_admission_id_sha256 === proof.provider_admission_id_sha256
-      && commandEvidence.provider_connection_epoch === proof.provider_connection_epoch
-      && canonicalRequestHash(commandEvidence.frozen_provider_connection_epochs) === canonicalRequestHash(proof.frozen_provider_connection_epochs)
-      && commandEvidence.render_action_request_sha256 === proof.render_action_request_sha256;
-    const exactFreeze = freeze?.kind === "product.d02_gateway_browser_worker_termination_frozen" && freeze.source === "canonical"
-      && freeze.payload.termination_request_id_sha256 === proof.termination_request_id_sha256
-      && freeze.payload.freeze_request_sha256 === proof.gateway_freeze_request_sha256
-      && freeze.payload.browser_worker_id_sha256 === proof.lost_browser_worker_id_sha256
-      && freeze.payload.browser_lease_epoch === proof.lost_browser_lease_epoch
-      && freeze.payload.browser_context_id_sha256 === proof.browser_context_id_sha256
-      && freeze.payload.render_action_request_sha256 === proof.render_action_request_sha256;
-    const exactDispatch = dispatch?.kind === "product.d02_render_worker_dispatch_claimed" && dispatch.source === "canonical" && dispatchCore !== null
-      && dispatch.payload.termination_request_id_sha256 === proof.termination_request_id_sha256
-      && dispatch.payload.command_event_seq === command?.seq && dispatch.payload.command_content_sha256 === command?.payload.content_sha256
-      && dispatch.payload.action_request_sha256 === proof.render_action_request_sha256
-      && dispatch.payload.dispatch_claim_sha256 === proof.render_dispatch_claim_sha256
-      && dispatch.payload.dispatch_claim_sha256 === canonicalRequestHash(dispatchCore);
-    if (!exactProof || !exactCommand || !exactFreeze || !exactDispatch || !freeze || !command || !dispatch
-      || !(freeze.seq < command.seq && command.seq < dispatch.seq && dispatch.seq < shutdown.seq)) {
-      throw d02WorkerShutdownConflict("Replacement startup could not cross-join the old shutdown to the exact freeze, command, and Render dispatch claim.");
-    }
-    const replacementWorkerIdSha256 = sha256(this.workerId);
-    if (replacementWorkerIdSha256 === proof.lost_browser_worker_id_sha256) return "awaiting_replacement";
-    const observedAt = new Date();
-    const lossPayload = {
-      schema: "sophia_voice_lab_d02_browser_worker_loss_cross_join_v1",
-      termination_request_id_sha256: proof.termination_request_id_sha256,
-      lost_worker_id_sha256: proof.lost_browser_worker_id_sha256,
-      replacement_worker_id_sha256: replacementWorkerIdSha256,
-      lost_browser_lease_epoch: proof.lost_browser_lease_epoch,
-      browser_context_id_sha256: proof.browser_context_id_sha256,
-      old_worker_shutdown_event_seq: shutdown.seq,
-      render_dispatch_claim_sha256: proof.render_dispatch_claim_sha256,
-      render_dispatch_claim_event_seq: dispatch.seq,
-      lease_expired_at: null,
-      loss_observed_at: observedAt.toISOString(),
-      loss_source: "worker_graceful_d02_restart_cross_join",
-      raw_worker_identifiers_excluded: true,
-    };
-    let loss: import("./domain.js").LabEvent;
-    try {
-      loss = await this.ledger.appendEvent(run.id, "durability.browser_worker_loss_observed", "worker", lossPayload, `browser-worker-loss:${run.id}:${String(proof.lost_browser_lease_epoch)}`, observedAt);
-    } catch (error) {
-      const winner = await this.ledger.findLatestEvent(run.id, ["durability.browser_worker_loss_observed"]);
-      if (!winner || winner.payload.termination_request_id_sha256 !== proof.termination_request_id_sha256
-        || winner.payload.lost_worker_id_sha256 !== proof.lost_browser_worker_id_sha256
-        || winner.payload.lost_browser_lease_epoch !== proof.lost_browser_lease_epoch
-        || winner.payload.old_worker_shutdown_event_seq !== shutdown.seq
-        || winner.payload.render_dispatch_claim_sha256 !== proof.render_dispatch_claim_sha256
-        || winner.payload.replacement_worker_id_sha256 === proof.lost_browser_worker_id_sha256) throw error;
-      loss = winner;
-    }
-    await this.ledger.appendEvent(run.id, "durability.browser_worker_replacement_observed", "worker", {
-      schema: "sophia_voice_lab_d02_browser_worker_replacement_observation_v1",
-      termination_request_id_sha256: proof.termination_request_id_sha256,
-      lost_browser_worker_id_sha256: proof.lost_browser_worker_id_sha256,
-      replacement_browser_worker_id_sha256: loss.payload.replacement_worker_id_sha256,
-      lost_browser_lease_epoch: proof.lost_browser_lease_epoch,
-      browser_context_id_sha256: proof.browser_context_id_sha256,
-      old_worker_shutdown_event_seq: shutdown.seq,
-      loss_event_seq: loss.seq,
-      render_dispatch_claim_sha256: proof.render_dispatch_claim_sha256,
-      source: "replacement_worker_startup_after_graceful_d02_restart",
-      raw_worker_identifiers_excluded: true,
-    }, `d02-worker-replacement:${String(proof.termination_request_id_sha256)}`, loss.at);
-    return "observed";
-  }
-
-  async #appendD02WorkerShutdownObservation(arm: D02WorkerShutdownArm, productCleanup: D02ProductCleanupAcknowledgement): Promise<Date> {
-    const events = (await this.#allEvents(arm.runId)).events.filter((event) => event.kind === "durability.browser_worker_shutdown_observed");
-    const fixed = {
-      schema: "sophia_voice_lab_d02_browser_worker_shutdown_observation_v1",
-      termination_request_id_sha256: arm.terminationRequestIdSha256,
-      voice_lab_run_id_sha256: sha256(arm.runId),
-      cleanup_obligation_id_sha256: arm.cleanupObligationIdSha256,
-      lost_browser_worker_id_sha256: arm.lostWorkerIdSha256,
-      lost_browser_lease_epoch: arm.lostBrowserLeaseEpoch,
-      browser_context_id_sha256: arm.browserContextIdSha256,
-      provider_session_id_sha256: arm.providerSessionIdSha256,
-      provider_admission_id_sha256: arm.providerAdmissionIdSha256,
-      provider_connection_epoch: arm.providerConnectionEpoch,
-      frozen_provider_connection_epochs: arm.frozenProviderConnectionEpochs,
-      render_action_request_sha256: arm.renderActionRequestSha256,
-      gateway_freeze_request_sha256: arm.gatewayFreezeRequestSha256,
-      gateway_freeze_event_seq: arm.gatewayFreezeEventSeq,
-      command_event_seq: arm.commandEventSeq,
-      render_dispatch_claim_sha256: arm.renderDispatchClaimSha256,
-      render_dispatch_claim_event_seq: arm.renderDispatchClaimEventSeq,
-      product_provider_cleanup_acknowledged: true,
-      product_provider_cleanup_settlement_sha256: productCleanup.settlement_acknowledgement_sha256,
-      product_provider_close_receipt_count: productCleanup.browser_provider_close_receipt_count,
-      product_provider_activation_abort_receipt_count: productCleanup.browser_provider_activation_abort_receipt_count,
-      product_provider_cleanup_epoch_union_matches_freeze: true,
-      browser_context_closed: true,
-      source: "worker_graceful_d02_restart",
-      raw_run_worker_lease_context_and_product_identifiers_excluded: true,
-    } as const;
-    if (events.length > 1) throw d02WorkerShutdownConflict("Multiple D02 worker shutdown observations exist for one governed run.");
-    if (events.length === 1) {
-      const existing = events[0]!;
-      const observedAt = typeof existing.payload.observed_at === "string" ? new Date(existing.payload.observed_at) : null;
-      const existingFixed = { ...existing.payload };
-      delete existingFixed.observed_at;
-      if (existing.source !== "worker" || existing.seq <= arm.renderDispatchClaimEventSeq || canonicalRequestHash(existingFixed) !== canonicalRequestHash(fixed) || !observedAt || Number.isNaN(observedAt.getTime()) || observedAt.toISOString() !== existing.payload.observed_at) {
-        throw d02WorkerShutdownConflict("The replayed D02 worker shutdown observation drifted from its exact source binding.");
-      }
-      return observedAt;
-    }
-    const observedAt = new Date();
-    const appended = await this.ledger.appendEvent(arm.runId, "durability.browser_worker_shutdown_observed", "worker", { ...fixed, observed_at: observedAt.toISOString() }, `d02-worker-shutdown:${arm.terminationRequestIdSha256}`, observedAt);
-    if (appended.seq <= arm.renderDispatchClaimEventSeq) throw d02WorkerShutdownConflict("The D02 worker shutdown observation did not follow the durable Render dispatch claim.");
-    return observedAt;
-  }
-
-  async #markDriverRestart(runId: string, lostLease?: import("./ledger.js").BrowserLease): Promise<void> {
-    const run = await this.ledger.getRun(runId);
-    if (!run || TERMINAL_RUN_STATES.has(run.state)) return;
-    if (lostLease) await this.ledger.appendEvent(run.id, "durability.browser_worker_loss_observed", "canonical", {
-      lost_worker_id_sha256: sha256(lostLease.workerId),
-      replacement_worker_id_sha256: sha256(this.workerId),
-      lost_browser_lease_epoch: lostLease.leaseEpoch,
-      lease_expired_at: lostLease.expiresAt.toISOString(),
-      loss_observed_at: new Date().toISOString(),
-      raw_worker_identifiers_excluded: true,
-    }, `browser-worker-loss:${run.id}:${lostLease.leaseEpoch}`);
-    const error = labError("BROWSER_SESSION_LOST", "Browser worker lease expired; live media state cannot be reconstructed honestly.", "harness");
-    await this.#terminalizeFailure(run.id, error, "aborted_driver_restart");
-  }
-
-  async #releaseBrowserLeaseProof(runId: string): Promise<boolean> {
-    const active = this.#activeLeases.get(runId);
-    let current = await this.ledger.getBrowserLease(runId);
-    const epoch = active?.epoch ?? (current?.workerId === this.workerId ? current.leaseEpoch : null);
-    if (epoch !== null) {
-      const released = await this.ledger.releaseBrowserLease(runId, this.workerId, epoch);
-      if (released) await this.ledger.appendEvent(runId, "cleanup.browser_lease_released", "worker", { worker_id_hash: sha256(this.workerId), lease_epoch: epoch, cas_deleted: true }, `cleanup:${runId}:browser-lease`);
-    }
-    this.#activeLeases.delete(runId);
-    current = await this.ledger.getBrowserLease(runId);
-    if (current === null) {
-      const prior = await this.ledger.findLatestEvent(runId, ["cleanup.browser_lease_released", "cleanup.browser_lease_absent"]);
-      if (!prior) await this.ledger.appendEvent(runId, "cleanup.browser_lease_absent", "worker", { authoritative_ledger_read: true }, `cleanup:${runId}:browser-lease-absent`);
-      return true;
-    }
-    const ownerHash = sha256(current.workerId);
-    await this.ledger.appendEvent(runId, "cleanup.browser_lease_unconfirmed", "worker", { worker_id_hash: ownerHash, lease_epoch: current.leaseEpoch, expires_at: current.expiresAt.toISOString() }, `cleanup:${runId}:browser-lease-unconfirmed:${ownerHash}:${current.leaseEpoch}:${current.expiresAt.getTime()}`);
-    return false;
-  }
-
-  async #freshRun(runId: string): Promise<RunRecord> {
-    const run = await this.ledger.getRun(runId);
-    if (!run) throw new VoiceLabError(labError("RUN_NOT_FOUND", "Run was not found.", "validation"));
-    return run;
-  }
-
-  #killSwitchEngaged(): boolean {
-    const live = process.env.SOPHIA_VOICE_LAB_KILL_SWITCH?.trim().toLowerCase();
-    return this.config.killSwitch || live === "true" || live === "1";
-  }
-}
-
-function errorDetail(error: unknown): LabError {
-  if (error instanceof VoiceLabError) return error.detail;
-  return labError("UNEXPECTED_WORKER_ERROR", "Voice Lab worker encountered an unexpected internal error.", "internal", false, { cause: error instanceof Error ? error.message.slice(0, 300) : String(error).slice(0, 300) });
-}
-function d02WorkerShutdownConflict(message: string): VoiceLabError {
-  return new VoiceLabError(labError("D02_WORKER_SHUTDOWN_ARM_INVALID", message, "evidence", false));
-}
-function assertExactD02ProductCleanupAcknowledgement(arm: D02WorkerShutdownArm, acknowledgement: D02ProductCleanupAcknowledgement): void {
-  const keys = [
-    "schema", "voice_lab_run_id_sha256", "browser_worker_id_sha256", "browser_lease_epoch", "browser_context_id_sha256",
-    "provider_session_id_sha256", "frozen_provider_connection_epochs", "browser_provider_close_receipt_count",
-    "browser_provider_activation_abort_receipt_count", "settlement_acknowledgement_sha256", "raw_provider_and_receipt_identifiers_excluded",
-  ] as const;
-  const closeCount = Number(acknowledgement.browser_provider_close_receipt_count);
-  const abortCount = Number(acknowledgement.browser_provider_activation_abort_receipt_count);
-  if (!hasExactKeys(acknowledgement as unknown as Record<string, unknown>, keys)
-    || acknowledgement.schema !== "sophia_voice_lab_d02_product_provider_cleanup_acknowledgement_v1"
-    || acknowledgement.voice_lab_run_id_sha256 !== sha256(arm.runId)
-    || acknowledgement.browser_worker_id_sha256 !== arm.lostWorkerIdSha256
-    || acknowledgement.browser_lease_epoch !== arm.lostBrowserLeaseEpoch
-    || acknowledgement.browser_context_id_sha256 !== arm.browserContextIdSha256
-    || acknowledgement.provider_session_id_sha256 !== arm.providerSessionIdSha256
-    || canonicalRequestHash(acknowledgement.frozen_provider_connection_epochs) !== canonicalRequestHash(arm.frozenProviderConnectionEpochs)
-    || !Number.isSafeInteger(closeCount) || closeCount < 0 || !Number.isSafeInteger(abortCount) || abortCount < 0
-    || closeCount + abortCount !== arm.frozenProviderConnectionEpochs.length
-    || !isSha256(acknowledgement.settlement_acknowledgement_sha256)
-    || acknowledgement.raw_provider_and_receipt_identifiers_excluded !== true) {
-    throw d02WorkerShutdownConflict("The product provider-cleanup acknowledgement drifted from the exact frozen browser owner and epoch union.");
-  }
-}
-function isSha256(value: unknown): value is string { return typeof value === "string" && /^[a-f0-9]{64}$/.test(value); }
-function isCanonicalUuidV4(value: unknown): value is string { return typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value); }
-function isCanonicalTimestamp(value: unknown): value is string {
-  if (typeof value !== "string") return false;
-  const parsed = new Date(value);
-  return Number.isFinite(parsed.getTime()) && parsed.toISOString() === value;
-}
-function exactSourceValidatedD02WorkerCommand(event: import("./domain.js").LabEvent, run: RunRecord, config: VoiceLabConfig): Record<string, unknown> | null {
-  const payload = event.payload;
-  const evidence = payload.evidence;
-  if (!evidence || typeof evidence !== "object" || Array.isArray(evidence)) return null;
-  const command = evidence as Record<string, unknown>;
-  const commandKeys = [
-    "kind", "authority", "termination_request_id", "run_id_sha256", "cleanup_obligation_id_sha256", "worker_service_id_sha256",
-    "provider_session_id_sha256", "provider_admission_id_sha256", "provider_connection_epoch", "frozen_provider_connection_epochs",
-    "browser_worker_id_sha256", "browser_lease_epoch", "browser_context_id_sha256", "before_worker_deploy_id_sha256",
-    "before_worker_instance_set_sha256", "before_worker_owner_instance_id_sha256", "before_worker_owner_membership_count",
-    "render_action_request_sha256", "requested_at", "target_service", "termination_mode", "worker_mutation_authorized",
-    "product_mutation_authorized", "one_shot",
-  ] as const;
-  const shaKeys = [
-    "run_id_sha256", "cleanup_obligation_id_sha256", "worker_service_id_sha256", "provider_session_id_sha256",
-    "provider_admission_id_sha256", "browser_worker_id_sha256", "browser_context_id_sha256", "before_worker_deploy_id_sha256",
-    "before_worker_instance_set_sha256", "before_worker_owner_instance_id_sha256", "render_action_request_sha256",
-  ] as const;
-  const authority = config.attestationAuthorities.deployment_control;
-  const payloadCore = { ...payload };
-  delete payloadCore.content_sha256;
-  return hasExactKeys(command, commandKeys)
-    && command.kind === "d02_browser_worker_termination_command" && command.authority === "deployment_control"
-    && isCanonicalUuidV4(command.termination_request_id) && isCanonicalTimestamp(command.requested_at)
-    && shaKeys.every((key) => isSha256(command[key]))
-    && Number.isSafeInteger(command.provider_connection_epoch) && Number(command.provider_connection_epoch) > 0
-    && Number.isSafeInteger(command.browser_lease_epoch) && Number(command.browser_lease_epoch) > 0
-    && payload.binding_validated === true && payload.raw_identifiers_excluded === true
-    && payload.run_id === run.id && payload.test_run_id_sha256 === sha256(run.testRunId)
-    && payload.cleanup_obligation_id_sha256 === sha256(run.cleanupObligationId)
-    && payload.scenario_id === run.scenarioId && payload.scenario_version === run.scenarioVersion && payload.environment === run.environment
-    && canonicalRequestHash(payload.expected_deployment) === canonicalRequestHash(run.target.expectedDeployment)
-    && payload.issuer === authority.issuer && payload.authority_key_id === authority.keyId
-    && payload.authority_subject_sha256 === sha256(authority.subject)
-    && isCanonicalUuidV4(payload.attestation_id) && payload.jti === payload.attestation_id
-    && isSha256(payload.nonce_sha256) && isSha256(payload.signature_material_sha256)
-    && isSha256(payload.request_argument_sha256) && isSha256(payload.request_id_sha256)
-    && typeof payload.signature === "string" && /^[A-Za-z0-9_-]{86}$/.test(payload.signature)
-    && isCanonicalTimestamp(payload.issued_at) && isCanonicalTimestamp(payload.expires_at)
-    && event.at.toISOString() === payload.issued_at
-    && isSha256(payload.content_sha256) && payload.content_sha256 === canonicalRequestHash(payloadCore)
-    ? command : null;
-}
-function throwIfCancelled(signal: AbortSignal): void {
-  if (!signal.aborted) return;
-  if (signal.reason instanceof Error) throw signal.reason;
-  throw new VoiceLabError(labError("OPERATION_CANCELLED", "Operation was cancelled before page mutation.", "harness", true));
-}
-function safeError(error: unknown): Record<string, unknown> { return redact(error instanceof VoiceLabError ? { ...error.detail } : { name: error instanceof Error ? error.name : "Error", message: error instanceof Error ? error.message : String(error) }); }
-function delay(ms: number): Promise<void> { return new Promise((resolve) => setTimeout(resolve, ms)); }
-function boundedBrowserReadiness(driver: VoiceBrowserDriver, timeoutMs: number): ReturnType<VoiceBrowserDriver["readiness"]> {
-  return new Promise((resolve) => {
-    let settled = false;
-    const settle = (value: Awaited<ReturnType<VoiceBrowserDriver["readiness"]>>) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolve(value);
-    };
-    const timer = setTimeout(() => settle({ ok: false, detail: "chromium-readiness-timeout" }), timeoutMs);
-    Promise.resolve().then(() => driver.readiness()).then(
-      settle,
-      (error) => settle({ ok: false, detail: `chromium-readiness-unavailable:${error instanceof Error ? error.name : "Error"}` }),
-    );
-  });
-}
-function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new VoiceLabError(labError("OPERATION_TIMEOUT", "Operation exceeded its bounded execution time.", "harness", true))), timeoutMs);
-    promise.then((value) => { clearTimeout(timer); resolve(value); }, (error) => { clearTimeout(timer); reject(error); });
-  });
-}
-
-export function isCanonicalFinalizationReceipt(run: RunRecord, event: import("./domain.js").LabEvent): boolean {
-  if (event.source !== "canonical" || event.kind !== "session.finalized") return false;
-  const receipt = event.payload.receipt as Record<string, unknown> | undefined;
-  const evidence = receipt?.evidence_receipt as Record<string, unknown> | undefined;
-  const transcript = receipt?.canonical_transcript as Record<string, unknown> | undefined;
-  return hasExactFinalizationEnvelope(run, receipt)
-    && isStrictCanonicalTranscript(run, transcript)
-    && typeof evidence?.storage === "string"
-    && evidence.storage.length > 0
-    && (run.environment !== "production" || evidence.storage !== "local_ephemeral")
-    && typeof evidence.object_path === "string"
-    && evidence.object_path.length > 0
-    && evidence.object_path.length <= 512
-    && typeof evidence.sha256 === "string"
-    && /^[a-f0-9]{64}$/i.test(evidence.sha256);
-}
-
-function isStrictCanonicalTranscript(run: RunRecord, transcript: Record<string, unknown> | undefined): boolean {
-  if (!transcript || transcript.schema !== "sophia_voice_lab_canonical_transcript_v1" || transcript.source !== "sophia_session_messages" || transcript.synthetic !== true) return false;
-  if (transcript.principal_id !== run.principalId || transcript.test_run_id !== run.testRunId || transcript.scenario_id !== run.scenarioId || transcript.scenario_version !== run.scenarioVersion || transcript.environment !== run.environment) return false;
-  if (!sameDeployment(transcript.expected_deployment, run.target.expectedDeployment) || transcript.raw_audio_excluded !== true || transcript.digest_algorithm !== "sha-256" || transcript.canonicalization !== "utf8-json-sort-keys-compact-ascii-v1") return false;
-  if (typeof transcript.session_id !== "string" || transcript.session_id.length === 0 || typeof transcript.thread_id !== "string" || transcript.thread_id.length === 0) return false;
-  if (run.canonicalSessionId !== null && transcript.session_id !== run.canonicalSessionId) return false;
-  if (run.threadId !== null && transcript.thread_id !== run.threadId) return false;
-  const messages = Array.isArray(transcript.messages) ? transcript.messages : null;
-  const boundaries = Array.isArray(transcript.turn_boundaries) ? transcript.turn_boundaries : null;
-  if (!messages || !boundaries || !Number.isSafeInteger(transcript.message_revision) || Number(transcript.message_revision) < 0) return false;
-  const normalizedMessages: Record<string, unknown>[] = [];
-  for (let index = 0; index < messages.length; index += 1) {
-    const message = messages[index];
-    if (!message || typeof message !== "object" || Array.isArray(message)) return false;
-    const row = message as Record<string, unknown>;
-    const keys = Object.keys(row).sort();
-    const expectedKeys = ["approximate", "content", "created_at", "final", "message_id", "provider_event_id", "redaction_level", "role", "sequence", "source", "turn_id"].sort();
-    if (keys.length !== expectedKeys.length || keys.some((key, keyIndex) => key !== expectedKeys[keyIndex])) return false;
-    if (typeof row.message_id !== "string" || row.message_id.length === 0 || row.sequence !== index + 1 || (row.role !== "user" && row.role !== "assistant") || typeof row.content !== "string" || !canonicalIso(row.created_at) || typeof row.source !== "string" || row.source.length === 0 || typeof row.final !== "boolean" || typeof row.approximate !== "boolean" || (row.turn_id !== null && typeof row.turn_id !== "string") || (row.provider_event_id !== null && typeof row.provider_event_id !== "string") || typeof row.redaction_level !== "string") return false;
-    normalizedMessages.push(row);
-  }
-  const inputCount = normalizedMessages.filter((message) => message.role === "user").length;
-  const outputCount = normalizedMessages.filter((message) => message.role === "assistant").length;
-  if (transcript.message_count !== normalizedMessages.length || transcript.input_message_count !== inputCount || transcript.output_message_count !== outputCount || transcript.turn_boundary_count !== boundaries.length) return false;
-  if (transcript.provider_expires_at !== run.expiresAt.toISOString() || !canonicalIso(transcript.retention_expires_at) || transcript.retention_hours !== run.capturePolicy.retentionHours || transcript.retention_anchor !== "finalized_at" || typeof transcript.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(transcript.sha256)) return false;
-  if (sha256(canonicalAsciiJson(normalizedMessages)) !== transcript.sha256) return false;
-  const recomputedBoundaries = canonicalTurnBoundaries(normalizedMessages);
-  return canonicalAsciiJson(boundaries) === canonicalAsciiJson(recomputedBoundaries);
-}
-
-function canonicalTurnBoundaries(messages: Record<string, unknown>[]): Array<Record<string, unknown>> {
-  const result: Array<Record<string, unknown>> = [];
-  for (const message of messages) {
-    const sequence = Number(message.sequence);
-    const turnId = message.turn_id;
-    const prior = result.at(-1);
-    const boundary = prior && prior.turn_id === turnId && prior.last_sequence === sequence - 1
-      ? prior
-      : (() => { const created = { turn_id: turnId, first_sequence: sequence, last_sequence: sequence, input_message_count: 0, output_message_count: 0 }; result.push(created); return created; })();
-    boundary.last_sequence = sequence;
-    const countKey = message.role === "user" ? "input_message_count" : "output_message_count";
-    boundary[countKey] = Number(boundary[countKey]) + 1;
-  }
-  return result;
-}
-
-function canonicalAsciiJson(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(canonicalAsciiJson).join(",")}]`;
-  if (value && typeof value === "object") return `{${Object.entries(value as Record<string, unknown>).sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0).map(([key, child]) => `${asciiJsonString(key)}:${canonicalAsciiJson(child)}`).join(",")}}`;
-  if (typeof value === "string") return asciiJsonString(value);
-  return JSON.stringify(value);
-}
-
-function asciiJsonString(value: string): string {
-  return JSON.stringify(value).replace(/[\u007f-\uffff]/gu, (character) => {
-    const point = character.codePointAt(0)!;
-    if (point <= 0xffff) return `\\u${point.toString(16).padStart(4, "0")}`;
-    const adjusted = point - 0x10000;
-    return `\\u${(0xd800 + (adjusted >> 10)).toString(16)}\\u${(0xdc00 + (adjusted & 0x3ff)).toString(16)}`;
-  });
-}
-
-function canonicalIso(value: unknown): boolean {
-  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$/.test(value)) return false;
-  const parsed = new Date(value);
-  return !Number.isNaN(parsed.getTime());
-}
-
-function exactActiveTargetFenceEvents(
-  events: import("./domain.js").LabEvent[],
-  operationId: string,
-  target: Record<string, unknown>,
-  kind: "output_realization" | "tool_effect",
-): import("./domain.js").LabEvent[] {
-  const stableId = kind === "output_realization" ? target.stable_id : target.tool_call_id ?? target.stable_id;
-  const effectOrChunk = kind === "output_realization" ? target.chunk_hash : target.effect_id;
-  return events.filter((event) => {
-    if (event.source !== "browser" || event.kind !== "harness.product_active_target_fenced") return false;
-    const receipt = event.payload;
-    const fencedAt = typeof receipt.fenced_at === "string" ? Date.parse(receipt.fenced_at) : Number.NaN;
-    return receipt.schema === "sophia_voice_lab_active_target_fence_v1" && receipt.operation_id === operationId
-      && receipt.lab_event_seq === target.event_seq && receipt.kind === kind && receipt.product_generation === target.product_generation && receipt.product_seq === target.product_seq
-      && Number.isSafeInteger(receipt.observed_through_product_seq) && Number(receipt.observed_through_product_seq) >= Number(target.product_seq)
-      && receipt.stable_id === stableId && receipt.effect_or_chunk_id === effectOrChunk && receipt.provider_connection_epoch === target.provider_connection_epoch
-      && receipt.active === true && canonicalIso(receipt.fenced_at) && Number.isFinite(fencedAt) && Math.abs(event.at.getTime() - fencedAt) <= 2_000;
-  });
-}
-
-export function exactOutputLifecyclesAtEpoch(events: import("./domain.js").LabEvent[], providerEpoch: number, afterSeq: number): boolean {
-  const lifecycleKinds = new Set(["audio.output.scheduled", "audio.output.started", "audio.output.completed", "audio.output.flushed", "audio.output.dropped"]);
-  const rows = events.filter((event) => event.source === "product" && lifecycleKinds.has(event.kind)).map((event) => ({ event, receipt: event.payload.receipt as Record<string, unknown> | undefined }))
-    .filter(({ receipt }) => typeof receipt?.realizationId === "string");
-  const realizationIds = new Set(rows.map(({ receipt }) => String(receipt?.realizationId)));
-  return realizationIds.size > 0 && rows.every(({ event }) => event.seq > afterSeq) && [...realizationIds].every((realizationId) => {
-    const lifecycle = rows.filter(({ receipt }) => receipt?.realizationId === realizationId).sort((left, right) => left.event.seq - right.event.seq);
-    const scheduled = lifecycle.filter(({ event, receipt }) => event.kind === "audio.output.scheduled" && receipt?.phase === "scheduled");
-    const started = lifecycle.filter(({ event, receipt }) => event.kind === "audio.output.started" && receipt?.phase === "started");
-    const terminal = lifecycle.filter(({ event, receipt }) => ["audio.output.completed", "audio.output.flushed", "audio.output.dropped"].includes(event.kind) && ["completed", "flushed", "dropped"].includes(String(receipt?.phase)));
-    const epochs = new Set(lifecycle.map(({ receipt }) => Number(receipt?.providerConnectionEpoch)));
-    const generations = new Set(lifecycle.map(({ receipt }) => Number(receipt?.playbackGeneration)));
-    return scheduled.length === 1 && started.length === 1 && terminal.length === 1 && scheduled[0]!.event.seq < started[0]!.event.seq && started[0]!.event.seq < terminal[0]!.event.seq
-      && epochs.size === 1 && epochs.has(providerEpoch) && generations.size === 1;
-  });
-}
-
-const FINITE_TOOL_TERMINAL_STATES = new Set(["responded", "cancelled-before-send", "cancelled-after-send", "suppressed", "rejected"]);
-const FINITE_TOOL_NONTERMINAL_STATES = new Set(["unknown", "pending", "received", "executing"]);
-
-function exactTerminalLastToolLifecycle(rows: Array<{ event: import("./domain.js").LabEvent; entry: Record<string, unknown> }>, terminalAfterSeq = Number.NEGATIVE_INFINITY): boolean {
-  if (rows.length === 0 || !rows.every(({ entry }) => FINITE_TOOL_TERMINAL_STATES.has(String(entry.finalState)) || FINITE_TOOL_NONTERMINAL_STATES.has(String(entry.finalState)))) return false;
-  const terminal = rows.filter(({ entry }) => FINITE_TOOL_TERMINAL_STATES.has(String(entry.finalState)));
-  const last = rows.reduce((latest, row) => row.event.seq > latest.event.seq ? row : latest, rows[0]!);
-  return terminal.length === 1 && terminal[0] === last && terminal[0]!.event.seq > terminalAfterSeq;
-}
-
-function classifyS02McpError(responseBody: string): string | null {
-  const explicit = /"(?:error_class|error_code)"\s*:\s*"([A-Z][A-Z0-9_]{2,63})"/.exec(responseBody)?.[1];
-  if (explicit) return explicit;
-  if (/Invalid arguments(?: for tool)?/i.test(responseBody)) return "MCP_INVALID_ARGUMENTS";
-  return null;
-}
-
-function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
-  const actual = Object.keys(value).sort();
-  const expected = [...keys].sort();
-  return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
-}
-
-function exactS02Snapshot(value: unknown): S02ResourceSnapshot | null {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const record = value as Record<string, unknown>;
-  const keys = ["active_run_count", "operation_count", "run_event_cursor", "input_mutation_event_count", "browser_context_count", "canonical_session_count", "provider_session_count"] as const;
-  if (!hasExactKeys(record, keys) || keys.some((key) => !Number.isSafeInteger(record[key]) || Number(record[key]) < 0)) return null;
-  return Object.fromEntries(keys.map((key) => [key, Number(record[key])])) as unknown as S02ResourceSnapshot;
-}
-
-export function isExactS02McpBoundaryProbe(event: import("./domain.js").LabEvent, previous: import("./domain.js").LabEvent | null = null): boolean {
-  if (event.kind !== "security.mcp_boundary_probe" || event.source !== "canonical") return false;
-  const payload = event.payload;
-  if (!hasExactKeys(payload, ["schema", "variant", "probe_id_sha256", "request", "response", "audit_receipts", "resource_delta"]) || payload.schema !== S02_MCP_BOUNDARY_PROBE_SCHEMA) return false;
-  if (typeof payload.variant !== "string" || !S02_HTTP_VARIANTS.includes(payload.variant as S02HttpVariant)) return false;
-  const variant = payload.variant as S02HttpVariant;
-  const expectation = s02HttpProbeExpectation(variant);
-  if (typeof payload.probe_id_sha256 !== "string" || !/^[a-f0-9]{64}$/.test(payload.probe_id_sha256)) return false;
-  if (!payload.request || typeof payload.request !== "object" || Array.isArray(payload.request)) return false;
-  const request = payload.request as Record<string, unknown>;
-  if (!hasExactKeys(request, ["contract", "contract_sha256", "endpoint_origin_sha256", "raw_body_sha256", "canonical_body_sha256", "byte_length", "started_at"])) return false;
-  if (!request.contract || typeof request.contract !== "object" || Array.isArray(request.contract)) return false;
-  const contract = request.contract as Record<string, unknown>;
-  if (!hasExactKeys(contract, ["schema", "method", "path", "content_type", "body_kind", "jsonrpc_method", "tool_name"])
-    || canonicalAsciiJson(contract) !== canonicalAsciiJson(expectation.requestContract)
-    || request.contract_sha256 !== canonicalRequestHash(expectation.requestContract)) return false;
-  const requestHashes = [request.endpoint_origin_sha256, request.raw_body_sha256, request.canonical_body_sha256];
-  if (requestHashes.some((hash) => typeof hash !== "string" || !/^[a-f0-9]{64}$/.test(hash as string))
-    || !Number.isSafeInteger(request.byte_length) || Number(request.byte_length) <= 0 || Number(request.byte_length) > 200_000
-    || variant === "oversized_json" && Number(request.byte_length) <= 100_000 || !canonicalIso(request.started_at)) return false;
-  if (expectation.auditUsesBoundedFallback && request.canonical_body_sha256 !== sha256("bounded-unparsed-request")) return false;
-
-  if (!payload.response || typeof payload.response !== "object" || Array.isArray(payload.response)) return false;
-  const response = payload.response as Record<string, unknown>;
-  if (!hasExactKeys(response, ["http_status", "error_code", "body_sha256", "byte_length", "content_type", "final_origin_sha256", "final_path", "location", "observed_at"])
-    || response.http_status !== expectation.httpStatus || response.error_code !== expectation.errorCode
-    || typeof response.body_sha256 !== "string" || !/^[a-f0-9]{64}$/.test(response.body_sha256)
-    || !Number.isSafeInteger(response.byte_length) || Number(response.byte_length) <= 0 || Number(response.byte_length) > 65_536
-    || !["application/json", "text/event-stream"].includes(String(response.content_type))
-    || response.final_origin_sha256 !== request.endpoint_origin_sha256 || response.final_path !== "/mcp" || response.location !== null || !canonicalIso(response.observed_at)) return false;
-
-  if (!Array.isArray(payload.audit_receipts) || payload.audit_receipts.length !== 1) return false;
-  const auditValue = payload.audit_receipts[0];
-  if (!auditValue || typeof auditValue !== "object" || Array.isArray(auditValue)) return false;
-  const audit = auditValue as Record<string, unknown>;
-  const expectedAuditArgument = expectation.auditUsesBoundedFallback ? sha256("bounded-unparsed-request") : request.canonical_body_sha256;
-  if (!hasExactKeys(audit, ["action", "outcome", "argument_sha256", "caller_partition_id", "probe_id_sha256", "request_id_sha256", "error_class", "observed_at"])
-    || audit.action !== expectation.auditAction || audit.outcome !== expectation.auditOutcome || audit.argument_sha256 !== expectedAuditArgument
-    || audit.probe_id_sha256 !== payload.probe_id_sha256 || typeof audit.request_id_sha256 !== "string" || !/^[a-f0-9]{64}$/.test(audit.request_id_sha256)
-    || typeof audit.caller_partition_id !== "string" || !/^cp1:[A-Za-z0-9_-]{1,32}:[a-f0-9]{64}$/.test(audit.caller_partition_id)
-    || audit.error_class !== expectation.auditErrorClass || !canonicalIso(audit.observed_at)) return false;
-
-  if (!payload.resource_delta || typeof payload.resource_delta !== "object" || Array.isArray(payload.resource_delta)) return false;
-  const resourceDelta = payload.resource_delta as Record<string, unknown>;
-  if (!hasExactKeys(resourceDelta, ["before", "after"])) return false;
-  const before = exactS02Snapshot(resourceDelta.before);
-  const after = exactS02Snapshot(resourceDelta.after);
-  if (!before || !after || canonicalAsciiJson(before) !== canonicalAsciiJson(after)
-    || before.active_run_count < 1 || before.operation_count < 1 || before.input_mutation_event_count !== 0
-    || before.browser_context_count !== 0 || before.canonical_session_count !== 0 || before.provider_session_count !== 0
-    || event.seq !== after.run_event_cursor + 1 || previous && before.run_event_cursor !== previous.seq) return false;
-
-  const startedAt = new Date(String(request.started_at)).getTime();
-  const auditAt = new Date(String(audit.observed_at)).getTime();
-  const responseAt = new Date(String(response.observed_at)).getTime();
-  return startedAt <= auditAt && auditAt <= responseAt && responseAt <= event.at.getTime() && event.at.getTime() - startedAt <= 20_000;
-}
-
-function sameDeployment(value: unknown, expected: RunRecord["target"]["expectedDeployment"]): boolean {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const deployment = value as Record<string, unknown>;
-  return Object.keys(deployment).length === 3 && deployment.frontend === expected.frontend && deployment.backend === expected.backend && deployment.voice === expected.voice;
-}
-
-function recoveryComponentComplete(events: import("./domain.js").LabEvent[], component: "canonical_session" | "voice_provider" | "builder" | "auth_sessions"): boolean {
-  return events.some((event) => {
-    if (event.kind !== "cleanup.recovery" || event.payload.complete !== true) return false;
-    const receipt = event.payload.receipt as Record<string, unknown> | undefined;
-    const components = receipt?.components as Record<string, Record<string, unknown>> | undefined;
-    const status = components?.[component]?.status;
-    return receipt?.complete === true && typeof status === "string" && !["pending", "failed", "unavailable"].includes(status);
-  });
-}
-
-function manifestJoins(run: RunRecord): Record<string, unknown> {
-  const available = <T>(value: T | null, absent: string) => value === null ? { value: null, status: "unavailable", reason: absent } : { value, status: "available", reason: null };
-  return {
-    canonical_session: available(run.canonicalSessionId, "canonical_session_id_not_observed"),
-    thread: available(run.threadId, "canonical_thread_id_not_observed"),
-    gemini_runtime_session: available(run.providerSessionId, "provider_session_id_not_observed"),
-    provider_connection_epoch: available(run.providerEpoch, "provider_epoch_not_observed"),
-    turn: available(run.turnId, "product_turn_id_not_observed"),
-    langsmith: available(run.traceId, "trace_unavailable"),
-  };
-}
-
-function projectMessageRevisions(run: RunRecord, events: import("./domain.js").LabEvent[]): Record<string, unknown> {
-  const finalized = events.find((event) => isCanonicalFinalizationReceipt(run, event));
-  const transcript = (finalized?.payload.receipt as Record<string, unknown> | undefined)?.canonical_transcript as Record<string, unknown> | undefined;
-  if (!transcript) return { status: "unavailable", reason: "strict_canonical_transcript_unavailable", rows: [] };
-  const messages = transcript.messages as Record<string, unknown>[];
-  return {
-    status: "available",
-    authoritative_source: transcript.source,
-    message_revision: transcript.message_revision,
-    message_count: transcript.message_count,
-    input_message_count: transcript.input_message_count,
-    output_message_count: transcript.output_message_count,
-    turn_boundary_count: transcript.turn_boundary_count,
-    transcript_sha256: transcript.sha256,
-    messages: messages.map((message) => ({ message_id_hash: sha256(String(message.message_id)), sequence: message.sequence, role: message.role, final: message.final, approximate: message.approximate, turn_id_hash: message.turn_id === null ? null : sha256(String(message.turn_id)), provider_event_id_hash: message.provider_event_id === null ? null : sha256(String(message.provider_event_id)), redaction_level: message.redaction_level, content_sha256: sha256(String(message.content)), character_length: [...String(message.content)].length, created_at: message.created_at })),
-    turn_boundaries: transcript.turn_boundaries,
-  };
-}
-
-function projectUtterances(run: RunRecord, events: import("./domain.js").LabEvent[], operations: import("./domain.js").OperationRecord[]): Array<Record<string, unknown>> {
-  const exactProduct = events.filter((event) => isExactBoundProductEvent(run, event));
-  return operations.filter((operation) => operation.type === "speak" || operation.type === "barge_in").map((operation) => {
-    const matches = (event: import("./domain.js").LabEvent) => event.payload.operation_id === operation.id || (event.payload.data as Record<string, unknown> | undefined)?.operation_id === operation.id;
-    const resolved = events.find((event) => event.kind === "utterance.resolved" && matches(event));
-    const scheduled = events.find((event) => event.kind === "audio.input.scheduled" && matches(event));
-    const started = events.find((event) => event.kind === "audio.input.started" && matches(event));
-    const completed = events.find((event) => event.kind === "audio.input.completed" && matches(event));
-    const productLegs = exactProduct.filter((event) => event.kind === "audio.input.product_leg" && (event.payload.receipt as Record<string, unknown> | undefined)?.operation_id === operation.id);
-    const productTurns = exactProduct.filter((event) => event.kind === "audio.input.product_turn" && (event.payload.receipt as Record<string, unknown> | undefined)?.operation_id === operation.id);
-    const transcription = productTurns.find((event) => (event.payload.receipt as Record<string, unknown> | undefined)?.source === "provider_input_transcription" && (event.payload.receipt as Record<string, unknown> | undefined)?.outcome === "provider_input_transcription_observed");
-    const wav = (resolved?.payload.wav ?? operation.result?.wav ?? null) as Record<string, unknown> | null;
-    return {
-      operation_id: operation.id,
-      utterance_id: resolved?.payload.utterance_id ?? operation.result?.utterance_id ?? null,
-      test_run_id: run.testRunId,
-      idempotency_key_hash: sha256(operation.idempotencyKey),
-      source_kind: resolved?.payload.source ?? operation.result?.source ?? null,
-      source_text_hash: resolved?.payload.source_text_hash ?? operation.result?.source_text_hash ?? null,
-      fixture: resolved?.payload.fixture ?? null,
-      synthesis: resolved?.payload.synthesis ?? operation.result?.synthesis ?? null,
-      audio: wav,
-      scheduled_at: scheduled?.at.toISOString() ?? null,
-      started_at: started?.at.toISOString() ?? null,
-      completed_at: completed?.at.toISOString() ?? null,
-      intentional_overlap: operation.type === "barge_in",
-      barge_target: resolved?.payload.barge_target ?? null,
-      product_input_leg: productLegs.length === 1 ? { status: "available", event_seq: productLegs[0]!.seq, observed_at: productLegs[0]!.at.toISOString(), receipt: productLegs[0]!.payload.receipt } : { status: "unavailable", reason: productLegs.length === 0 ? "exact_product_input_leg_unavailable" : "duplicate_product_input_leg_receipts" },
-      harness_product_pcm_reconciliation: productLegs.length === 1 ? reconcileProductInputLeg(events, operation, productLegs[0]!.payload.receipt as Record<string, unknown>) : { verified: false, reason: "exact_product_input_leg_unavailable" },
-      product_input_turn_receipts: productTurns.length === 0 ? { status: "unavailable", reason: "exact_product_input_turn_receipts_unavailable", receipts: [] } : { status: "available", count: productTurns.length, receipts: productTurns.map((event) => ({ event_seq: event.seq, observed_at: event.at.toISOString(), receipt: event.payload.receipt })) },
-      provider_input_transcription: transcription ? { status: "available", event_seq: transcription.seq, observed_at: transcription.at.toISOString(), receipt: transcription.payload.receipt } : { status: "unavailable", reason: "operation_correlated_bound_product_transcription_unavailable" },
-      operation_state: operation.state,
-    };
-  });
-}
-
-function projectEvents(events: import("./domain.js").LabEvent[], predicate: (event: import("./domain.js").LabEvent) => boolean): Record<string, unknown> {
-  const selected = events.filter(predicate);
-  const inline = selected.slice(0, 200).map((event) => ({ event_seq: event.seq, kind: event.kind, observed_at: event.at.toISOString(), payload: event.payload }));
-  return selected.length === 0
-    ? { status: "unavailable", reason: "owning_receipts_not_observed", count: 0, event_refs: [] }
-    : { status: "available", count: selected.length, first_seq: selected[0]!.seq, last_seq: selected.at(-1)!.seq, complete_inline: selected.length <= inline.length, event_refs: inline };
-}
-
-function deriveEvidenceMetrics(events: import("./domain.js").LabEvent[], operations: import("./domain.js").OperationRecord[]): Record<string, unknown> {
-  const timing = operations.filter((operation) => operation.type === "speak" || operation.type === "barge_in").map((operation) => {
-    const matches = (event: import("./domain.js").LabEvent) => event.payload.operation_id === operation.id;
-    const scheduled = events.find((event) => event.kind === "audio.input.scheduled" && matches(event));
-    const started = events.find((event) => event.kind === "audio.input.started" && matches(event));
-    const completed = events.find((event) => event.kind === "audio.input.completed" && matches(event));
-    return { operation_id: operation.id, schedule_to_start_ms: scheduled && started ? Math.max(0, started.at.getTime() - scheduled.at.getTime()) : null, realized_duration_ms: started && completed ? Math.max(0, completed.at.getTime() - started.at.getTime()) : null };
-  });
-  const receipts = events.filter((event) => event.kind.startsWith("audio.output.")).map((event) => event.payload.receipt as Record<string, unknown> | undefined).filter((receipt): receipt is Record<string, unknown> => typeof receipt?.realizationId === "string");
-  const realizationKeys = receipts.map((receipt) => `${receipt.realizationId}\u0000${receipt.providerConnectionEpoch ?? "none"}\u0000${receipt.playbackGeneration ?? "none"}`);
-  const phaseKeys = receipts.map((receipt) => `${receipt.realizationId}\u0000${receipt.providerConnectionEpoch ?? "none"}\u0000${receipt.playbackGeneration ?? "none"}\u0000${receipt.phase ?? "unknown"}`);
-  const duplicatePhaseReceipts = phaseKeys.length - new Set(phaseKeys).size;
-  return { utterance_timing: timing, output_realization_receipt_count: receipts.length, unique_output_realizations: new Set(realizationKeys).size, duplicate_realization_receipts: duplicatePhaseReceipts, duplicate_realization_phase_receipts: duplicatePhaseReceipts };
-}
-
-function nullableHash(value: string | null): string | null { return value === null ? null : sha256(value); }
-
-export function runCertificationProjection(verdicts: Verdicts): { status: "certified" | "pending_external_evidence" | "not_certified"; outcome: string; reason: string } {
-  const decision = certificationTerminalDecision(verdicts);
-  if (verdicts.harness === "pass" && verdicts.evidence === "pass") return { status: "certified", outcome: `harness_evidence_certified_product_${verdicts.product}`, reason: decision.reason };
-  if (verdicts.harness === "unavailable" || verdicts.evidence === "unavailable") return { status: "pending_external_evidence", outcome: "pending_external_evidence", reason: decision.reason };
-  return { status: "not_certified", outcome: "harness_or_evidence_not_certified", reason: decision.reason };
-}
-
-export function suiteCertificationProjection(children: RunRecord[]): {
-  status: "certified" | "pending" | "not_certified";
-  outcome_label: string;
-  harness_evidence_certified_count: number;
-  supported_child_count: number;
-  product_counts: Record<"pass" | "unavailable" | "fail" | "inconclusive" | "pending", number>;
-  outcome_counts: Record<string, number>;
-} {
-  const projections = children.map((run) => runCertificationProjection(run.verdicts));
-  const productCounts = { pass: 0, unavailable: 0, fail: 0, inconclusive: 0, pending: 0 };
-  for (const run of children) productCounts[run.verdicts.product] += 1;
-  const outcomeCounts: Record<string, number> = {};
-  for (const projection of projections) outcomeCounts[projection.outcome] = (outcomeCounts[projection.outcome] ?? 0) + 1;
-  const certifiedCount = projections.filter((projection) => projection.status === "certified").length;
-  const status = projections.some((projection) => projection.status === "pending_external_evidence") ? "pending" : certifiedCount === children.length ? "certified" : "not_certified";
-  const observedProductOutcomes = (Object.keys(productCounts) as Array<keyof typeof productCounts>).filter((outcome) => productCounts[outcome] > 0);
-  const outcomeLabel = status !== "certified"
-    ? status === "pending" ? "supported_children_pending_external_evidence" : "supported_children_not_harness_evidence_certified"
-    : children.length === 0 ? "no_supported_children"
-      : observedProductOutcomes.length === 1 ? `harness_evidence_certified_all_product_${observedProductOutcomes[0]}`
-        : "harness_evidence_certified_mixed_product_outcomes";
-  return { status, outcome_label: outcomeLabel, harness_evidence_certified_count: certifiedCount, supported_child_count: children.length, product_counts: productCounts, outcome_counts: outcomeCounts };
-}
-
-export function certificationTerminalDecision(verdicts: Verdicts): { state: RunState; reason: string } {
-  const state: RunState = verdicts.harness === "unavailable" || verdicts.evidence === "unavailable"
-    ? "pending_external_evidence"
-    : verdicts.harness === "fail" ? "failed_harness"
-      : verdicts.auth === "fail" ? "authorization_failed"
-        : verdicts.product === "fail" ? "product_failed"
-          : verdicts.provider === "fail" ? "inconclusive_provider" : "completed";
-  return {
-    state,
-    reason: state === "completed"
-      ? `harness_evidence_certified_product_${verdicts.product}_provider_${verdicts.provider}`
-      : state === "pending_external_evidence" ? "mandatory_supported_assertions_awaiting_external_evidence" : `verdict_${state}`,
-  };
-}
-
-/** Suite certification is independent of a child's execution outcome. D02 may
- * truthfully finish as aborted_driver_restart and still certify its expected
- * loss/recovery behavior after owning evidence arrives. */
-export function suiteCertificationState(children: RunRecord[]): "pending" | "completed" | "failed" {
-  if (children.some((run) => run.state === "pending_external_evidence")) return "pending";
-  return children.every((run) => run.verdicts.harness === "pass" && run.verdicts.evidence === "pass" && run.cleanupComplete) ? "completed" : "failed";
-}
-
-export function deriveCompletedVerdicts(run: RunRecord, events: import("./domain.js").LabEvent[], operations: import("./domain.js").OperationRecord[], authAudit: import("./ledger.js").AuthAuditRecord[] = []): Verdicts {
-  const eligibleEvents = events.filter((event) => event.source !== "product" || isExactBoundProductEvent(run, event));
-  const kinds = new Set(eligibleEvents.map((event) => event.kind));
-  const failedHarness = events.some((event) => event.kind === "audio.input.rejected" || event.kind.includes("cursor_gap") || event.kind === "cleanup.capture_unavailable" || event.kind === "audio.input.interrupted");
-  const taskCleanup = deriveTaskCleanup(events, run);
-  const finalized = kinds.has("session.finalized");
-  const providerClosed = eligibleEvents.some((event) => event.kind === "provider.stage" && ["closed", "ended"].includes(String(event.payload.stage)));
-  const providerObserved = kinds.has("provider.connection_epoch");
-  const providerDegraded = eligibleEvents.some((event) => event.kind === "provider.connection_epoch" && (event.payload.receipt as Record<string, unknown> | undefined)?.phase === "degraded");
-  const authClean = events.some(authCleanupConfirmed);
-  const injectedOperations = operations.filter((operation) => (operation.type === "speak" || operation.type === "barge_in") && operation.state === "succeeded");
-  const nonSilenceOperations = injectedOperations.filter((operation) => !String(operation.input.fixture_id ?? "").toLowerCase().includes("silence"));
-  const inputTranscript = eligibleEvents.some((event) => event.kind.endsWith(".sophia.user_transcript") || event.kind === "transcript.input.final");
-  const assistantAudio = kinds.has("audio.output.started");
-  const assistantTurnEnded = eligibleEvents.some((event) => event.kind.endsWith(".sophia.turn") && ((event.payload.data as Record<string, unknown> | undefined)?.phase === "agent_ended" || event.payload.phase === "agent_ended"));
-  const injectionChains = injectedOperations.length > 0 && injectedOperations.every((operation) => exactProductInputChain(eligibleEvents, operation));
-  const dependencyVerified = (["deployment.verified", "deployment.reverified"] as const).every((kind) => eligibleEvents.some((event) => {
-    if (event.kind !== kind) return false;
-    const langgraph = event.payload.langgraph;
-    return langgraph !== null && typeof langgraph === "object"
-      && (langgraph as Record<string, unknown>).commit_sha === run.target.expectedDependencies.langgraph;
-  }));
-  const deploymentVerified = (["frontend", "backend", "voice"] as const).every((key) => run.observedDeployment[key] === run.target.expectedDeployment[key])
-    && dependencyVerified;
-  const joinsComplete = run.canonicalSessionId !== null && run.threadId !== null && run.providerSessionId !== null && run.providerEpoch !== null && (nonSilenceOperations.length === 0 || run.turnId !== null);
-  const captureProven = kinds.has("harness.initialized") && kinds.has("harness.media_stream_issued") && kinds.has("session.microphone_stream_acquired");
-  const cleanupProven = authoritativeLiveCleanupComplete(events) && (kinds.has("cleanup.browser_lease_released") || kinds.has("cleanup.browser_lease_absent")) && authClean && providerClosed && taskCleanup.unresolved_count === 0;
-  const scenarioEvaluation = evaluateScenarioAssertions(run, eligibleEvents, operations, authAudit);
-  const scenarioHasFailure = scenarioEvaluation.harness.some((assertion) => assertion.status === "fail");
-  const scenarioHasUnavailable = scenarioEvaluation.harness.length === 0 || scenarioEvaluation.harness.some((assertion) => assertion.status === "unavailable");
-  if (run.scenarioId === "V-F02") return { harness: "unavailable", product: "unavailable", provider: "unavailable", auth: "unavailable", evidence: "unavailable" };
-  const preResource = run.scenarioId === "V-S01" || run.scenarioId === "V-S02";
-  const preResourceCleanup = authoritativeLiveCleanupComplete(events)
-    && kinds.has("cleanup.browser_context_absent")
-    && eligibleEvents.some((event) => event.kind === "cleanup.browser_lease_absent" && event.payload.authoritative_ledger_read === true);
-  const baseHarnessPass = preResource
-    ? !failedHarness && preResourceCleanup
-    : !failedHarness && injectionChains && deploymentVerified && joinsComplete && captureProven && cleanupProven;
-  const harness: Verdicts["harness"] = !baseHarnessPass || scenarioHasFailure ? "fail" : scenarioHasUnavailable ? "unavailable" : "pass";
-  const productStatuses = scenarioEvaluation.product.map((assertion) => assertion.status);
-  const product: Verdicts["product"] = preResource
-    ? "unavailable"
-    : !finalized
-    ? "fail"
-    : productStatuses.length === 0 || productStatuses.every((status) => status === "unavailable")
-      ? "unavailable"
-      : productStatuses.some((status) => status === "fail")
-        ? "fail"
-        : productStatuses.every((status) => status === "pass") ? "pass" : "inconclusive";
-  return {
-    harness,
-    product,
-    provider: preResource ? "unavailable" : providerDegraded ? "fail" : providerObserved && providerClosed ? "pass" : "inconclusive",
-    auth: preResource ? (run.scenarioId === "V-S01" && harness === "pass" ? "pass" : "unavailable") : authClean ? "pass" : "fail",
-    evidence: harness === "pass" && (preResource ? preResourceCleanup : finalized && cleanupProven) ? "pass" : harness === "unavailable" ? "unavailable" : "fail",
-  };
-}
-
-export type ScenarioAssertion = {
-  id: string;
-  owner: "harness" | "product";
-  status: "pass" | "fail" | "unavailable";
-  evidence_seqs: number[];
-  reason: string | null;
-};
-
-export function assertResolvedAudioWithinAdmission(admission: unknown, durationMs: number, byteLength: number): void {
-  const receipt = admission && typeof admission === "object" ? admission as Record<string, unknown> : {};
-  const reservedDurationMs = Number(receipt.duration_ms);
-  const reservedBytes = Number(receipt.bytes);
-  if (!Number.isSafeInteger(reservedDurationMs) || reservedDurationMs < 0 || !Number.isSafeInteger(reservedBytes) || reservedBytes < 0) {
-    throw new VoiceLabError(labError("AUDIO_ADMISSION_RECEIPT_INVALID", "Durable audio admission receipt is missing or malformed.", "conflict", false));
-  }
-  if (!Number.isSafeInteger(durationMs) || durationMs < 0 || !Number.isSafeInteger(byteLength) || byteLength < 0 || durationMs > reservedDurationMs || byteLength > reservedBytes) {
-    throw new VoiceLabError(labError("AUDIO_ADMISSION_RESERVATION_EXCEEDED", "Resolved audio exceeded its durable rolling admission reservation before page or provider mutation.", "conflict", false, { reserved_duration_ms: reservedDurationMs, reserved_bytes: reservedBytes, resolved_duration_ms: durationMs, resolved_bytes: byteLength }));
-  }
-}
-
-export function reconcileProductInputLeg(
-  events: import("./domain.js").LabEvent[],
-  operation: import("./domain.js").OperationRecord,
-  leg: Record<string, unknown>,
-): { verified: boolean; reason: string | null; frame_count: number; byte_length: number; nonzero_byte_count: number; computed_pcm_sha256_chain: string | null } {
-  const frames = events
-    .filter((event) => event.source === "browser" && event.kind === "harness.input_frame_forwarded" && event.payload.operation_id === operation.id)
-    .sort((left, right) => Number(left.payload.frame_seq) - Number(right.payload.frame_seq));
-  if (events.some((event) => event.source === "browser" && event.kind === "harness.input_frame_observation_failed" && event.payload.operation_id === operation.id)) return { verified: false, reason: "harness_frame_digest_failed", frame_count: frames.length, byte_length: 0, nonzero_byte_count: 0, computed_pcm_sha256_chain: null };
-  if (frames.length === 0) return { verified: false, reason: "harness_frame_receipts_unavailable", frame_count: 0, byte_length: 0, nonzero_byte_count: 0, computed_pcm_sha256_chain: null };
-  let chain = Buffer.alloc(32);
-  let byteLength = 0;
-  let nonzeroBytes = 0;
-  for (let index = 0; index < frames.length; index += 1) {
-    const frame = frames[index]!;
-    const sequence = Number(frame.payload.frame_seq);
-    const digest = frame.payload.sha256;
-    const bytes = Number(frame.payload.byte_length);
-    const nonzero = Number(frame.payload.nonzero_byte_count);
-    if (sequence !== index + 1 || typeof digest !== "string" || !/^[a-f0-9]{64}$/.test(digest) || !Number.isSafeInteger(bytes) || bytes <= 0 || !Number.isSafeInteger(nonzero) || nonzero < 0 || nonzero > bytes) return { verified: false, reason: "harness_frame_receipt_invalid", frame_count: frames.length, byte_length: byteLength, nonzero_byte_count: nonzeroBytes, computed_pcm_sha256_chain: null };
-    const encodedSequence = Buffer.alloc(4);
-    encodedSequence.writeUInt32BE(sequence);
-    chain = Buffer.from(sha256(Buffer.concat([chain, Buffer.from(digest, "hex"), encodedSequence])), "hex");
-    byteLength += bytes;
-    nonzeroBytes += nonzero;
-  }
-  const computed = chain.toString("hex");
-  const silence = String(operation.input.fixture_id ?? "").toLowerCase().includes("silence");
-  const verified = Number(leg.frame_count) === frames.length
-    && Number(leg.byte_length) === byteLength
-    && leg.pcm_digest_algorithm === "sha-256-chain-v1"
-    && leg.pcm_sha256_chain === computed
-    && (silence ? nonzeroBytes === 0 && Number(leg.nonzero_sample_count) === 0 : nonzeroBytes > 0 && Number(leg.nonzero_sample_count) > 0);
-  return { verified, reason: verified ? null : "harness_product_pcm_digest_or_metric_mismatch", frame_count: frames.length, byte_length: byteLength, nonzero_byte_count: nonzeroBytes, computed_pcm_sha256_chain: computed };
-}
-
-function exactProductInputChain(events: import("./domain.js").LabEvent[], operation: import("./domain.js").OperationRecord): boolean {
-  const byOperation = (kind: string) => events.filter((event) => event.kind === kind && event.payload.operation_id === operation.id);
-  const resolved = byOperation("utterance.resolved");
-  const scheduled = byOperation("audio.input.scheduled");
-  const started = byOperation("audio.input.started");
-  const completed = byOperation("audio.input.completed");
-  if (resolved.length !== 1 || scheduled.length !== 1 || started.length !== 1 || completed.length !== 1 || operation.result?.schedule_receipt === undefined) return false;
-  const wav = resolved[0]!.payload.wav as Record<string, unknown> | undefined;
-  const utteranceId = resolved[0]!.payload.utterance_id;
-  const legs = events.filter((event) => event.source === "product" && event.kind === "audio.input.product_leg" && (event.payload.receipt as Record<string, unknown> | undefined)?.operation_id === operation.id);
-  if (legs.length !== 1) return false;
-  const leg = legs[0]!.payload.receipt as Record<string, unknown>;
-  const silence = String(operation.input.fixture_id ?? "").toLowerCase().includes("silence");
-  if (leg.schema !== "sophia_gemini_input_leg_v1" || leg.status !== "verified" || leg.utterance_id !== utteranceId || leg.source_sha256 !== wav?.sha256 || leg.expected_silence !== silence || leg.raw_audio_excluded !== true || Number(leg.frame_count) <= 0 || Number(leg.sample_count) <= 0 || leg.pcm_digest_algorithm !== "sha-256-chain-v1" || typeof leg.pcm_sha256_chain !== "string" || !/^[a-f0-9]{64}$/.test(leg.pcm_sha256_chain)) return false;
-  if (!reconcileProductInputLeg(events, operation, leg).verified) return false;
-  if (silence ? Number(leg.nonzero_sample_count) !== 0 || Number(leg.pcm_rms) !== 0 || Number(leg.pcm_peak) !== 0 : Number(leg.nonzero_sample_count) <= 0 || Number(leg.pcm_rms) <= 0 || Number(leg.pcm_peak) <= 0) return false;
-  const turns = events.filter((event) => event.source === "product" && event.kind === "audio.input.product_turn" && (event.payload.receipt as Record<string, unknown> | undefined)?.operation_id === operation.id).map((event) => event.payload.receipt as Record<string, unknown>);
-  if (!turns.every((receipt) => receipt.schema === "sophia_gemini_input_turn_v1" && receipt.utterance_id === utteranceId && receipt.frame_window_id === leg.frame_window_id && receipt.expected_silence === silence && receipt.raw_audio_excluded === true)) return false;
-  return silence
-    ? turns.some((receipt) => receipt.source === "settlement" && receipt.outcome === "no_user_turn_observed") && !turns.some((receipt) => receipt.outcome === "unexpected_user_turn_observed" || receipt.outcome === "user_turn_observed")
-    : turns.some((receipt) => receipt.source === "provider_input_transcription" && receipt.outcome === "provider_input_transcription_observed") && turns.some((receipt) => receipt.source === "public_user_turn" && receipt.outcome === "public_user_turn_accepted");
-}
-
-export type ScenarioAssertionEvaluation = {
-  scenario_id: string | null;
-  scenario_version: string | null;
-  harness: ScenarioAssertion[];
-  product: ScenarioAssertion[];
-  summary: string;
-};
-
-/**
- * Canonical scenario gates. Missing owning evidence is unavailable, never a
- * pass inferred from event counts or timing proximity.
- */
-export function evaluateScenarioAssertions(run: RunRecord, events: import("./domain.js").LabEvent[], operations: import("./domain.js").OperationRecord[], authAudit: import("./ledger.js").AuthAuditRecord[] = []): ScenarioAssertionEvaluation {
-  const eligible = events.filter((event) => event.source !== "product" || isExactBoundProductEvent(run, event));
-  const injected = operations.filter((operation) => (operation.type === "speak" || operation.type === "barge_in") && operation.state === "succeeded");
-  const productEvents = eligible.filter((event) => event.source === "product");
-  const byKind = (kind: string) => eligible.filter((event) => event.kind === kind);
-  const productByKind = (kind: string) => productEvents.filter((event) => event.kind === kind);
-  const externalAttestations = (kind: string) => eligible.filter((event) => {
-    if (event.source !== "canonical" || event.kind !== `external.attestation.${kind}` || event.payload.schema !== "sophia_voice_lab_external_attestation_v1" || event.payload.binding_validated !== true || event.payload.raw_identifiers_excluded !== true
-      || event.payload.test_run_id_sha256 !== sha256(run.testRunId) || event.payload.cleanup_obligation_id_sha256 !== sha256(run.cleanupObligationId) || event.payload.scenario_id !== run.scenarioId || event.payload.scenario_version !== run.scenarioVersion || event.payload.environment !== run.environment
-      || canonicalRequestHash(event.payload.expected_deployment) !== canonicalRequestHash(run.target.expectedDeployment) || typeof event.payload.content_sha256 !== "string"
-      || typeof event.payload.request_argument_sha256 !== "string" || typeof event.payload.request_id_sha256 !== "string"
-      || !authAudit.some((audit) => audit.action === "external_attestation.authenticate" && audit.outcome === "allowed" && audit.argumentHash === event.payload.request_argument_sha256
-        && audit.detail.request_id_hash === event.payload.request_id_sha256 && audit.detail.attestation_id_hash === sha256(String(event.payload.attestation_id)))) return false;
-    const content = { ...event.payload };
-    delete content.content_sha256;
-    return canonicalRequestHash(content) === event.payload.content_sha256;
-  });
-  const exactOperation = (event: import("./domain.js").LabEvent, operationId: string) => event.payload.operation_id === operationId || (event.payload.data as Record<string, unknown> | undefined)?.operation_id === operationId;
-  const chain = (operationId: string) => {
-    const resolved = byKind("utterance.resolved").filter((event) => exactOperation(event, operationId));
-    const scheduled = byKind("audio.input.scheduled").filter((event) => exactOperation(event, operationId));
-    const started = byKind("audio.input.started").filter((event) => exactOperation(event, operationId));
-    const completed = byKind("audio.input.completed").filter((event) => exactOperation(event, operationId));
-    const forwarded = byKind("harness.input_frame_forwarded").filter((event) => exactOperation(event, operationId));
-    const productLegs = productByKind("audio.input.product_leg").filter((event) => (event.payload.receipt as Record<string, unknown> | undefined)?.operation_id === operationId);
-    const productTurns = productByKind("audio.input.product_turn").filter((event) => (event.payload.receipt as Record<string, unknown> | undefined)?.operation_id === operationId);
-    const operation = operations.find((candidate) => candidate.id === operationId);
-    const silence = String(operation?.input.fixture_id ?? "").toLowerCase().includes("silence");
-    const resolvedPayload = resolved[0]?.payload;
-    const wav = resolvedPayload?.wav as Record<string, unknown> | undefined;
-    const utteranceId = resolvedPayload?.utterance_id;
-    const leg = productLegs[0]?.payload.receipt as Record<string, unknown> | undefined;
-    const legBound = productLegs.length === 1 && leg?.schema === "sophia_gemini_input_leg_v1" && leg.status === "verified" && leg.operation_id === operationId && leg.utterance_id === utteranceId && leg.source_sha256 === wav?.sha256 && leg.expected_silence === silence && leg.raw_audio_excluded === true && Number(leg.frame_count) > 0 && Number(leg.sample_count) > 0 && typeof leg.pcm_sha256_chain === "string" && /^[a-f0-9]{64}$/.test(leg.pcm_sha256_chain) && leg.pcm_digest_algorithm === "sha-256-chain-v1" && operation !== undefined && reconcileProductInputLeg(eligible, operation, leg).verified;
-    const productSignal = silence
-      ? legBound && Number(leg?.nonzero_sample_count) === 0 && Number(leg?.pcm_rms) === 0 && Number(leg?.pcm_peak) === 0
-      : legBound && Number(leg?.nonzero_sample_count) > 0 && Number(leg?.pcm_rms) > 0 && Number(leg?.pcm_peak) > 0;
-    const turnReceipts = productTurns.map((event) => event.payload.receipt as Record<string, unknown>);
-    const turnBound = turnReceipts.every((receipt) => receipt.schema === "sophia_gemini_input_turn_v1" && receipt.operation_id === operationId && receipt.utterance_id === utteranceId && receipt.frame_window_id === leg?.frame_window_id && receipt.expected_silence === silence && receipt.raw_audio_excluded === true);
-    const semanticSettlement = silence
-      ? turnBound && turnReceipts.some((receipt) => receipt.source === "settlement" && receipt.outcome === "no_user_turn_observed") && !turnReceipts.some((receipt) => receipt.outcome === "unexpected_user_turn_observed" || receipt.outcome === "user_turn_observed")
-      : turnBound && turnReceipts.some((receipt) => receipt.source === "provider_input_transcription" && receipt.outcome === "provider_input_transcription_observed") && turnReceipts.some((receipt) => receipt.source === "public_user_turn" && receipt.outcome === "public_user_turn_accepted");
-    return { resolved, scheduled, started, completed, forwarded, productLegs, productTurns, exact: resolved.length === 1 && scheduled.length === 1 && started.length === 1 && completed.length === 1 && operation?.result?.schedule_receipt !== undefined && productSignal && semanticSettlement };
-  };
-  const pass = (id: string, owner: ScenarioAssertion["owner"], evidence: import("./domain.js").LabEvent[], reason: string | null = null): ScenarioAssertion => ({ id, owner, status: "pass", evidence_seqs: evidence.map((event) => event.seq), reason });
-  const fail = (id: string, owner: ScenarioAssertion["owner"], evidence: import("./domain.js").LabEvent[], reason: string): ScenarioAssertion => ({ id, owner, status: "fail", evidence_seqs: evidence.map((event) => event.seq), reason });
-  const unavailable = (id: string, owner: ScenarioAssertion["owner"], reason: string): ScenarioAssertion => ({ id, owner, status: "unavailable", evidence_seqs: [], reason });
-  const check = (id: string, owner: ScenarioAssertion["owner"], condition: boolean, evidence: import("./domain.js").LabEvent[], missing: string, failure = missing): ScenarioAssertion => evidence.length === 0 ? unavailable(id, owner, missing) : condition ? pass(id, owner, evidence) : fail(id, owner, evidence, failure);
-  const harness: ScenarioAssertion[] = [];
-  const product: ScenarioAssertion[] = [];
-  const allChainEvents = injected.flatMap((operation) => Object.values(chain(operation.id)).flatMap((value) => Array.isArray(value) ? value : []));
-  const exactChains = injected.length > 0 && injected.every((operation) => chain(operation.id).exact);
-  const intervals = injected.map((operation) => ({ operation, start: chain(operation.id).started[0], complete: chain(operation.id).completed[0] })).filter((item) => item.start && item.complete).sort((left, right) => left.start!.seq - right.start!.seq);
-  const noOverlap = intervals.length === injected.length && intervals.every((item, index) => index === 0 || intervals[index - 1]!.complete!.seq < item.start!.seq);
-
-  switch (run.scenarioId) {
-    case "V-A01": {
-      harness.push(injected.length === 6 ? pass("a01.greeting_plus_five_adaptive_utterances", "harness", allChainEvents) : fail("a01.greeting_plus_five_adaptive_utterances", "harness", allChainEvents, `observed_${injected.length}`));
-      harness.push(check("a01.independent_pcm_chains", "harness", exactChains, allChainEvents, "exact_schedule_start_pcm_complete_chains_unavailable"));
-      harness.push(check("a01.no_unintended_overlap", "harness", noOverlap, intervals.flatMap((item) => [item.start!, item.complete!]), "input_intervals_unavailable"));
-      const ended = productEvents.filter((event) => event.kind.endsWith(".sophia.turn") && ((event.payload.data as Record<string, unknown> | undefined)?.phase === "agent_ended" || event.payload.phase === "agent_ended"));
-      const orderedInputs = [...injected].sort((left, right) => left.createdAt.getTime() - right.createdAt.getTime());
-      const observationEvents: import("./domain.js").LabEvent[] = [];
-      const observationSeqs = new Set<number>();
-      const observationTurnIds = new Set<string>();
-      const adaptive = orderedInputs.length === 6 && orderedInputs[0]?.input.adaptive_observation === undefined && orderedInputs.slice(1).every((operation, index) => {
-        const observation = operation.input.adaptive_observation as Record<string, unknown> | undefined;
-        const eventSeq = Number(observation?.event_seq);
-        const turnId = observation?.turn_id;
-        const expectedCursor = Number(operation.input.expected_cursor);
-        const expectedTurnId = operation.input.expected_turn_id;
-        const observationClass = observation?.observation_class;
-        const followupIntent = observation?.followup_intent;
-        const target = ended.find((event) => event.seq === eventSeq);
-        const targetData = target?.payload.data as Record<string, unknown> | undefined;
-        const previousChain = chain(orderedInputs[index]!.id);
-        const currentChain = chain(operation.id);
-        const currentStart = currentChain.started[0];
-        const precedingEnded = currentStart ? ended.filter((event) => event.seq < currentStart.seq).at(-1) : undefined;
-        if (target) observationEvents.push(target);
-        const exact = target !== undefined && precedingEnded?.seq === target.seq && targetData?.phase === "agent_ended" && targetData.turnId === turnId
-          && expectedTurnId === turnId && Number.isSafeInteger(expectedCursor) && expectedCursor >= eventSeq
-          && previousChain.completed.length === 1 && currentChain.started.length === 1 && previousChain.completed[0]!.seq < eventSeq && eventSeq < currentChain.started[0]!.seq
-          && operation.createdAt.getTime() >= target.at.getTime()
-          && ["assistant_turn_complete", "assistant_question", "assistant_result", "assistant_uncertainty", "assistant_commitment"].includes(String(observationClass))
-          && ["clarify", "deepen", "verify", "redirect", "summarize"].includes(String(followupIntent)) && !observationSeqs.has(eventSeq)
-          && typeof turnId === "string" && turnId.length > 0 && !observationTurnIds.has(turnId);
-        observationSeqs.add(eventSeq);
-        if (typeof turnId === "string") observationTurnIds.add(turnId);
-        return exact;
-      });
-      harness.push(check("a01.five_adaptive_turn_boundaries", "harness", adaptive, [...ended, ...observationEvents], "five_exact_observation_bound_followups_unavailable"));
-      const transcripts = productByKind("audio.input.product_turn").filter((event) => (event.payload.receipt as Record<string, unknown> | undefined)?.source === "provider_input_transcription" && (event.payload.receipt as Record<string, unknown> | undefined)?.outcome === "provider_input_transcription_observed");
-      const correlated = injected.length === 6 && injected.every((operation) => transcripts.filter((event) => (event.payload.receipt as Record<string, unknown> | undefined)?.operation_id === operation.id).length === 1);
-      harness.push(check("a01.operation_to_product_transcript_correlation", "harness", correlated, transcripts, "app_authored_operation_to_transcript_correlation_unavailable"));
-      // The runner proves exact causal observation binding and declared intent;
-      // hidden reasoning provenance remains supplemental platform evidence.
-      product.push(unavailable("a01.supplemental_adaptive_agent_reasoning_provenance", "product", "platform_authored_adaptive_decision_provenance_not_attached"));
-      product.push(check("a01.six_correlated_transcripts", "product", correlated, transcripts, "operation_correlated_transcripts_unavailable"));
-      // realizationId is a chunk identity, not an assistant-response identity.
-      // Until the product emits the frozen operation/input-turn -> assistant
-      // turn/response -> every output-chunk lineage, same-run turn/chunk counts
-      // cannot certify six causal, non-stacked responses.
-      product.push(unavailable("a01.six_nonstacked_responses", "product", "product_authored_input_operation_to_assistant_turn_response_output_lineage_unavailable"));
-      break;
-    }
-    case "V-A02": {
-      const fixtureIds = injected.map((operation) => String(operation.input.fixture_id ?? ""));
-      const expected = ["a02_short_command", "a02_long_brief", "a02_silence", "a02_trailing_pause", "a02_noisy_command"];
-      const resolved = byKind("utterance.resolved").filter((event) => injected.some((operation) => exactOperation(event, operation.id)));
-      harness.push(fixtureIds.length === 5 && expected.every((id) => fixtureIds.includes(id)) ? pass("a02.all_five_fixture_classes", "harness", resolved) : fail("a02.all_five_fixture_classes", "harness", resolved, "required_fixture_class_missing_or_duplicated"));
-      const attributable = resolved.length === 5 && resolved.every((event) => {
-        const fixture = event.payload.fixture as Record<string, unknown> | undefined;
-        const sourceText = fixture?.sourceText as Record<string, unknown> | undefined;
-        return typeof fixture?.fixtureVersion === "string" && sourceText?.status === "available" && typeof sourceText.sha256 === "string";
-      });
-      harness.push(check("a02.fixture_attribution_replayable", "harness", attributable && exactChains, [...resolved, ...allChainEvents], "governed_fixture_or_pcm_chain_unavailable"));
-      const silence = injected.find((operation) => operation.input.fixture_id === "a02_silence");
-      const silenceChain = silence ? chain(silence.id) : null;
-      const silenceSemantic = silence ? productByKind("audio.input.product_turn").filter((event) => (event.payload.receipt as Record<string, unknown> | undefined)?.operation_id === silence.id && (event.payload.receipt as Record<string, unknown> | undefined)?.outcome !== "no_user_turn_observed") : [];
-      const silenceSettled = silence ? productByKind("audio.input.product_turn").filter((event) => {
-        const receipt = event.payload.receipt as Record<string, unknown> | undefined;
-        return receipt?.operation_id === silence.id && receipt.source === "settlement" && receipt.outcome === "no_user_turn_observed";
-      }) : [];
-      harness.push(!silence || !silenceChain?.exact
-        ? unavailable("a02.silence_no_fabricated_turn", "harness", "exact_product_pcm_and_settlement_chain_unavailable")
-        : silenceSemantic.length > 0
-          ? fail("a02.silence_no_fabricated_turn", "harness", silenceSemantic, "operation_correlated_product_semantic_turn_observed_for_silence")
-          : silenceSettled.length === 1
-            ? pass("a02.silence_no_fabricated_turn", "harness", [...silenceChain.productLegs, ...silenceSettled])
-            : unavailable("a02.silence_no_fabricated_turn", "harness", "product_authored_operation_correlated_settled_no_effect_window_unavailable"));
-      product.push(unavailable("a02.fixture_semantic_thresholds", "product", "owning_semantic_threshold_evaluator_not_attached"));
-      break;
-    }
-    case "V-A03": {
-      const evidence = injected.flatMap((operation) => Object.values(chain(operation.id)).flatMap((value) => Array.isArray(value) ? value : []));
-      harness.push(injected.length === 1 ? pass("a03.single_durable_operation", "harness", evidence) : fail("a03.single_durable_operation", "harness", evidence, `observed_${injected.length}`));
-      const replays = byKind("operation.speak.idempotent_replay").filter((event) => injected[0] && event.payload.operation_id === injected[0].id && event.payload.exact_request_hash_replay === true && event.payload.no_new_operation === true);
-      const lossAttestations = externalAttestations("a03_http_response_loss").filter((event) => {
-        const proof = event.payload.evidence as Record<string, unknown> | undefined;
-        return injected[0] !== undefined && proof?.authority === "external_mcp_client" && proof.operation_id === injected[0].id && proof.replayed_operation_id === injected[0].id
-          && proof.request_sha256 === injected[0].requestHash && proof.idempotency_key_sha256 === sha256(injected[0].idempotencyKey) && proof.initial_response_observed === false && proof.transport_outcome === "connection_closed_after_durable_acceptance";
-      });
-      harness.push(lossAttestations.length === 0
-        ? unavailable("a03.client_response_loss_boundary", "harness", "privileged_external_client_response_loss_attestation_not_attached")
-        : check("a03.client_response_loss_boundary", "harness", lossAttestations.length === 1, lossAttestations, "single_exact_client_response_loss_attestation_unavailable"));
-      harness.push(lossAttestations.length === 0
-        ? unavailable("a03.same_key_client_replay_returns_original_operation", "harness", "response_loss_boundary_not_externally_attested")
-        : check("a03.same_key_client_replay_returns_original_operation", "harness", injected.length === 1 && replays.length === 1 && lossAttestations.length === 1, [...replays, ...lossAttestations], "same_key_mcp_replay_did_not_join_external_response_loss_receipt"));
-      // A user transcript alone does not own a later model/output/tool effect.
-      // Same-run random IDs and global cardinality are explicitly insufficient
-      // for lost-response at-most-once proof.
-      product.push(unavailable("a03.exactly_one_product_turn_effect", "product", "product_authored_input_operation_to_assistant_turn_response_and_backend_effect_lineage_unavailable"));
-      break;
-    }
-    case "V-O01": {
-      const received = productByKind("audio.output.received");
-      const providerChunks = productByKind("audio.output.provider_chunk");
-      const playback = ["audio.output.scheduled", "audio.output.started", "audio.output.completed"].flatMap(productByKind);
-      const legs = productByKind("audio.output.leg_receipt");
-      const chains = legs.map((legEvent) => {
-        const leg = legEvent.payload.receipt as Record<string, unknown> | undefined;
-        const realizationId = typeof leg?.realizationId === "string" ? leg.realizationId : null;
-        const receipts = playback.filter((event) => (event.payload.receipt as Record<string, unknown> | undefined)?.realizationId === realizationId);
-        const scheduled = receipts.filter((event) => (event.payload.receipt as Record<string, unknown> | undefined)?.phase === "scheduled");
-        const started = receipts.filter((event) => (event.payload.receipt as Record<string, unknown> | undefined)?.phase === "started");
-        const completed = receipts.filter((event) => (event.payload.receipt as Record<string, unknown> | undefined)?.phase === "completed");
-        const terminal = completed[0]?.payload.receipt as Record<string, unknown> | undefined;
-        const receivedEvent = received.find((event) => {
-          const diagnostic = event.payload.diagnostic as Record<string, unknown> | undefined;
-          return diagnostic?.providerReceiveSequence === terminal?.providerReceiveSequence
-            && diagnostic?.providerConnectionEpoch === terminal?.providerConnectionEpoch
-            && diagnostic?.playbackGeneration === terminal?.playbackGeneration
-            && diagnostic?.relayCorrelationId === terminal?.relayCorrelationId
-            && diagnostic?.providerRelaySequence === terminal?.providerRelaySequence
-            && diagnostic?.providerReceivedAt === terminal?.providerReceivedAt
-            && diagnostic?.responseId === terminal?.responseId
-            && diagnostic?.providerEventId === terminal?.providerEventId;
-        });
-        const chunkEvent = providerChunks.find((event) => {
-          const diagnostic = event.payload.diagnostic as Record<string, unknown> | undefined;
-          return diagnostic?.providerReceiveSequence === terminal?.providerReceiveSequence
-            && diagnostic?.providerConnectionEpoch === terminal?.providerConnectionEpoch
-            && diagnostic?.playbackGeneration === terminal?.playbackGeneration
-            && diagnostic?.relayCorrelationId === terminal?.relayCorrelationId
-            && diagnostic?.providerRelaySequence === terminal?.providerRelaySequence
-            && diagnostic?.providerReceivedAt === terminal?.providerReceivedAt
-            && diagnostic?.chunkIndex === terminal?.chunkIndex
-            && diagnostic?.chunksInEvent === terminal?.chunksInEvent
-            && diagnostic?.chunkHash === terminal?.chunkHash
-            && diagnostic?.byteLength === terminal?.byteLength
-            && diagnostic?.scheduled === true && diagnostic?.dropReason === null
-            && /^[a-f0-9]{64}$/.test(String(diagnostic?.chunkHash));
-        });
-        const exact = leg?.schema === "sophia_gemini_output_leg_v1" && leg.status === "verified" && leg.completionPhase === "completed"
-          && /^[a-f0-9]{64}$/.test(String(leg.monitorDigestSha256)) && Number(leg.monitorFrameCount) > 0 && Number(leg.monitorNonSilentFrameCount) > 0 && leg.rawAudioExcluded === true
-          && scheduled.length === 1 && started.length === 1 && completed.length === 1 && receivedEvent !== undefined && chunkEvent !== undefined
-          && typeof terminal?.responseId === "string" && terminal.responseId.length > 0
-          && leg.providerChunkFingerprint === terminal?.chunkHash && leg.providerConnectionEpoch === terminal?.providerConnectionEpoch && leg.playbackGeneration === terminal?.playbackGeneration
-          && receivedEvent.seq < chunkEvent.seq && chunkEvent.seq < scheduled[0]!.seq && scheduled[0]!.seq < started[0]!.seq && started[0]!.seq < completed[0]!.seq && completed[0]!.seq < legEvent.seq
-          && typeof leg.scheduledAt === "string" && typeof leg.completedAt === "string" && Number(leg.monitorDurationMs) >= 0 && Number(terminal?.durationSeconds) > 0;
-        return { exact, realizationId, fingerprint: leg?.providerChunkFingerprint, receivedSeq: receivedEvent?.seq ?? null, chunkSeq: chunkEvent?.seq ?? null, events: [...(receivedEvent ? [receivedEvent] : []), ...(chunkEvent ? [chunkEvent] : []), ...receipts, legEvent] };
-      });
-      const scheduledReceipts = playback.filter((event) => (event.payload.receipt as Record<string, unknown> | undefined)?.phase === "scheduled");
-      const startedReceipts = playback.filter((event) => (event.payload.receipt as Record<string, unknown> | undefined)?.phase === "started");
-      const completedReceipts = playback.filter((event) => (event.payload.receipt as Record<string, unknown> | undefined)?.phase === "completed");
-      const completedRealizations = completedReceipts.map((event) => (event.payload.receipt as Record<string, unknown> | undefined)?.realizationId);
-      const receivedCoverage = received.length > 0 && received.every((receivedEvent) => {
-        const aggregate = receivedEvent.payload.diagnostic as Record<string, unknown> | undefined;
-        const group = providerChunks.filter((event) => {
-          const diagnostic = event.payload.diagnostic as Record<string, unknown> | undefined;
-          return diagnostic?.providerReceiveSequence === aggregate?.providerReceiveSequence
-            && diagnostic?.providerConnectionEpoch === aggregate?.providerConnectionEpoch
-            && diagnostic?.playbackGeneration === aggregate?.playbackGeneration
-            && diagnostic?.relayCorrelationId === aggregate?.relayCorrelationId
-            && diagnostic?.providerRelaySequence === aggregate?.providerRelaySequence
-            && diagnostic?.providerReceivedAt === aggregate?.providerReceivedAt;
-        });
-        const count = Number(aggregate?.chunksInEvent);
-        const indexes = group.map((event) => Number((event.payload.diagnostic as Record<string, unknown> | undefined)?.chunkIndex)).sort((left, right) => left - right);
-        return Number.isSafeInteger(count) && count > 0 && group.length === count
-          && indexes.every((value, index) => value === index)
-          && typeof aggregate?.responseId === "string" && aggregate.responseId.length > 0;
-      });
-      const exactNaturalChains = chains.length > 0 && chains.every((chain) => chain.exact)
-        && receivedCoverage && providerChunks.length === chains.length && scheduledReceipts.length === chains.length && startedReceipts.length === chains.length && completedReceipts.length === chains.length && playback.length === chains.length * 3
-        && new Set(chains.map((chain) => chain.realizationId)).size === chains.length
-        && new Set(chains.map((chain) => chain.fingerprint)).size === chains.length
-        && new Set(chains.map((chain) => chain.chunkSeq)).size === chains.length
-        && completedRealizations.length === chains.length && new Set(completedRealizations).size === completedRealizations.length
-        && new Set(scheduledReceipts.map((event) => (event.payload.receipt as Record<string, unknown> | undefined)?.realizationId)).size === chains.length
-        && new Set(startedReceipts.map((event) => (event.payload.receipt as Record<string, unknown> | undefined)?.realizationId)).size === chains.length;
-      harness.push(check("o01.provider_chunk_to_playback_to_output_leg_join", "harness", exactNaturalChains, chains.flatMap((chain) => chain.events), "exact_epoch_generation_fingerprint_realization_and_timing_join_unavailable"));
-      product.push(check("o01.output_matches_realization", "product", exactNaturalChains, chains.flatMap((chain) => chain.events), "output_leg_and_playback_join_unavailable"));
-      break;
-    }
-    case "V-O02": {
-      const invalidated = [...productByKind("audio.output.flushed"), ...productByKind("audio.output.dropped")];
-      const rotations = operations.filter((operation) => operation.type === "force_socket_rotation" && operation.state === "succeeded");
-      const causal = rotations.flatMap((operation) => {
-        const target = operation.input._fault_target as Record<string, unknown> | undefined;
-        const cited = productByKind("audio.output.started").find((event) => event.seq === Number(target?.output_event_seq));
-        const citedReceipt = cited?.payload.receipt as Record<string, unknown> | undefined;
-        const terminals = invalidated.filter((event) => {
-          const receipt = event.payload.receipt as Record<string, unknown> | undefined;
-          return event.seq > (cited?.seq ?? Number.MAX_SAFE_INTEGER) && receipt?.realizationId === target?.realization_id && Number(receipt?.providerConnectionEpoch) === Number(target?.provider_connection_epoch) && Number(receipt?.playbackGeneration) === Number(target?.playback_generation);
-        });
-        const exact = target?.fault_intent === "invalidate_active_realization" && citedReceipt?.phase === "started" && citedReceipt.realizationId === target?.realization_id
-          && Number(citedReceipt.providerConnectionEpoch) === Number(target?.provider_connection_epoch) && Number(citedReceipt.playbackGeneration) === Number(target?.playback_generation)
-          && terminals.length === 1 && ["flushed", "dropped"].includes(String((terminals[0]!.payload.receipt as Record<string, unknown> | undefined)?.phase))
-          && operation.result?.rotation_receipt !== undefined;
-        return [{ exact, target, events: [...(cited ? [cited] : []), ...terminals] }];
-      });
-      const causalPass = causal.length === 1 && causal[0]!.exact;
-      const causalEvents = causal.flatMap((item) => item.events);
-      harness.push(check("o02.governed_fault_to_exact_realization_invalidation", "harness", causalPass, causalEvents, "exact_rotation_fault_target_and_terminal_realization_receipt_unavailable"));
-      const postInvalidationStarts = causal.flatMap((item) => item.events.filter((event) => ["audio.output.flushed", "audio.output.dropped"].includes(event.kind)).flatMap((terminal) => productByKind("audio.output.started").filter((started) => {
-        const startedReceipt = started.payload.receipt as Record<string, unknown> | undefined;
-        const terminalReceipt = terminal.payload.receipt as Record<string, unknown> | undefined;
-        return started.seq > terminal.seq && (startedReceipt?.realizationId === item.target?.realization_id || (typeof item.target?.chunk_hash === "string" && startedReceipt?.chunkHash === item.target.chunk_hash) || startedReceipt?.realizationId === terminalReceipt?.realizationId);
-      })));
-      product.push(causalEvents.length === 0 ? unavailable("o02.no_stale_playback_after_invalidation", "product", "invalidation_receipt_unavailable") : postInvalidationStarts.length === 0 ? pass("o02.no_stale_playback_after_invalidation", "product", causalEvents) : fail("o02.no_stale_playback_after_invalidation", "product", postInvalidationStarts, "stale_realization_restarted"));
-      break;
-    }
-    case "V-B01": case "V-B02": case "V-B03": case "V-B04": {
-      const joinEvents = productByKind("product.builder-ui.synthetic-builder-join");
-      const joinFaults = productByKind("product.builder-ui.synthetic-builder-join-fault");
-      const toolLedgers = productEvents.filter((event) => event.kind.includes("gemini-tool-call-ledger"));
-      const joinKeys = [
-        "schema", "test_run_id", "scenario_id", "scenario_version", "operation_id", "utterance_id", "provider_input_sequence", "tool_call_id", "effect_id",
-        "provider_connection_epoch", "relay_correlation_id", "tool_name", "tool_state", "builder_operation_id", "parent_thread_id", "task_id", "thread_id", "run_id", "build_id",
-        "artifact_id", "artifact_path_sha256", "ui_projection_state", "cancel_count", "no_post_cancel_publication", "source_tool_received_at", "source_backend_accepted_at",
-        "source_tool_response_sent_at", "source_builder_event_id", "source_builder_event_at", "source_ui_projected_at", "scenario_assertions",
-        "raw_transcript_excluded", "raw_artifact_content_excluded", "secrets_excluded",
-      ].sort();
-      const assertionKeys = ["artifact_created", "artifact_visible_current", "accepted_turn_count", "tool_dispatch_count", "owned_task_count", "stable_task_identity", "revision_updated_same_task", "current_behavior_result", "cancel_request_count", "cancel_terminal_settled", "no_post_cancel_publication"].sort();
-      const immutableJoinKeys = ["test_run_id", "scenario_id", "scenario_version", "operation_id", "utterance_id", "provider_input_sequence", "tool_call_id", "effect_id", "provider_connection_epoch", "relay_correlation_id", "tool_name", "builder_operation_id", "parent_thread_id", "task_id", "thread_id", "build_id", "source_tool_received_at", "source_backend_accepted_at"];
-      const terminalStates = new Set(["responded", "cancelled-before-send", "cancelled-after-send", "suppressed", "rejected"]);
-      const builderToolNames = new Set(["start_builder_task", "edit_builder_artifact", "check_async_task", "update_async_task", "cancel_async_task", "list_async_tasks", "coreview_request_artifact_update"]);
-      const exactJoins = joinEvents.map((event) => {
-        const join = event.payload;
-        const publicKeys = Object.keys(join).filter((key) => key !== "_product_run_binding" && key !== "_capture_provenance").sort();
-        const assertions = join.scenario_assertions && typeof join.scenario_assertions === "object" && !Array.isArray(join.scenario_assertions) ? join.scenario_assertions as Record<string, unknown> : null;
-        const strings = ["test_run_id", "scenario_id", "scenario_version", "operation_id", "utterance_id", "tool_call_id", "effect_id", "relay_correlation_id", "tool_name", "tool_state", "builder_operation_id", "parent_thread_id", "task_id", "thread_id", "run_id", "build_id", "source_tool_received_at", "source_backend_accepted_at"];
-        const operation = injected.find((candidate) => candidate.id === join.operation_id);
-        const resolved = operation ? byKind("utterance.resolved").filter((candidate) => exactOperation(candidate, operation.id) && candidate.payload.utterance_id === join.utterance_id) : [];
-        const acceptedTurns = operation ? productByKind("audio.input.product_turn").filter((candidate) => {
-          const receipt = candidate.payload.receipt as Record<string, unknown> | undefined;
-          return receipt?.schema === "sophia_gemini_input_turn_v1" && receipt.synthetic === true && receipt.test_run_id === run.testRunId && receipt.operation_id === operation.id && receipt.utterance_id === join.utterance_id
-            && receipt.source === "public_user_turn" && receipt.outcome === "public_user_turn_accepted" && receipt.provider_receive_sequence === join.provider_input_sequence && receipt.raw_audio_excluded === true;
-        }) : [];
-        const matchingLedgers = toolLedgers.filter((candidate) => {
-          const entry = candidate.payload.entry as Record<string, unknown> | undefined;
-          if (!entry) return false;
-          const toolEvidence = entry?.syntheticToolEvidence as Record<string, unknown> | undefined;
-          const backendJoin = entry?.syntheticBuilderJoin as Record<string, unknown> | undefined;
-          return candidate.seq < event.seq && entry?.toolCallId === join.tool_call_id && entry.effectId === join.effect_id && entry.providerConnectionEpoch === join.provider_connection_epoch
-            && entry.toolName === join.tool_name && terminalStates.has(String(entry.finalState)) && entry.receivedAt === join.source_tool_received_at && entry.toolResponseSentAt === join.source_tool_response_sent_at
-            && toolEvidence?.schema === "sophia_synthetic_tool_evidence_v1" && toolEvidence.test_run_id === run.testRunId && toolEvidence.scenario_id === run.scenarioId && toolEvidence.scenario_version === run.scenarioVersion
-            && toolEvidence.operation_id === join.operation_id && toolEvidence.utterance_id === join.utterance_id && toolEvidence.provider_input_sequence === join.provider_input_sequence
-            && toolEvidence.tool_call_id === join.tool_call_id && toolEvidence.effect_id === join.effect_id && toolEvidence.provider_connection_epoch === join.provider_connection_epoch
-            && toolEvidence.relay_correlation_id === join.relay_correlation_id && toolEvidence.tool_name === join.tool_name && toolEvidence.received_at === join.source_tool_received_at
-            && backendJoin !== undefined && immutableJoinKeys.every((key) => backendJoin[key] === join[key]);
-        });
-        const times = [join.source_tool_received_at, join.source_backend_accepted_at, join.source_tool_response_sent_at, join.source_builder_event_at, join.source_ui_projected_at];
-        const timeValues = times.map((value) => typeof value === "string" && canonicalIso(value) ? Date.parse(value) : Number.NaN);
-        const exact = publicKeys.length === joinKeys.length && publicKeys.every((key, index) => key === joinKeys[index])
-          && join.schema === "sophia_synthetic_builder_join_v1" && join.test_run_id === run.testRunId && join.scenario_id === run.scenarioId && join.scenario_version === run.scenarioVersion
-          && strings.every((key) => typeof join[key] === "string" && String(join[key]).length > 0 && String(join[key]).length <= 512 && !String(join[key]).includes("\u0000"))
-          && Number.isSafeInteger(join.provider_input_sequence) && Number(join.provider_input_sequence) > 0 && Number.isSafeInteger(join.provider_connection_epoch) && Number(join.provider_connection_epoch) > 0
-          && Number.isSafeInteger(join.cancel_count) && Number(join.cancel_count) >= 0 && join.thread_id === join.task_id && join.build_id === join.builder_operation_id
-          && (join.artifact_id === null || typeof join.artifact_id === "string") && (join.artifact_path_sha256 === null || /^[a-f0-9]{64}$/.test(String(join.artifact_path_sha256)))
-          && (join.ui_projection_state === "canvas_current" || join.ui_projection_state === "artifact_visible_current") && typeof join.source_builder_event_id === "string" && join.source_builder_event_id.length > 0
-          && join.raw_transcript_excluded === true && join.raw_artifact_content_excluded === true && join.secrets_excluded === true && join.no_post_cancel_publication === true
-          && assertions !== null && Object.keys(assertions).sort().length === assertionKeys.length && Object.keys(assertions).sort().every((key, index) => key === assertionKeys[index])
-          && timeValues.every(Number.isFinite) && timeValues.every((value, index) => index === 0 || timeValues[index - 1]! <= value)
-          && operation !== undefined && resolved.length === 1 && acceptedTurns.length === 1 && acceptedTurns[0]!.seq < matchingLedgers[0]?.seq! && matchingLedgers.length === 1;
-        return { exact, event, join, assertions, operation, acceptedTurns, matchingLedgers };
-      });
-      const exactEntries = exactJoins.filter((item) => item.exact);
-      const relevantBuilderLedgers = toolLedgers.map((event) => {
-        const entry = event.payload.entry as Record<string, unknown> | undefined;
-        const toolEvidence = entry?.syntheticToolEvidence as Record<string, unknown> | undefined;
-        const join = entry?.syntheticBuilderJoin as Record<string, unknown> | undefined;
-        return { event, entry, toolEvidence, join };
-      // `productEvents` is already restricted to the exact app-authored run
-      // binding. Categorize every known Builder dispatch by the owning entry's
-      // tool name before examining nested evidence: missing both nested receipts
-      // is itself a mandatory cardinality/provenance failure, not a reason to
-      // omit an observed dispatch from the candidate set.
-      }).filter(({ entry }) => builderToolNames.has(String(entry?.toolName)));
-      const exactBuilderLedger = ({ entry, toolEvidence }: (typeof relevantBuilderLedgers)[number]): boolean => typeof entry?.toolCallId === "string" && typeof entry.effectId === "string"
-        && typeof entry.providerConnectionEpoch === "number" && builderToolNames.has(String(entry.toolName))
-        && toolEvidence?.schema === "sophia_synthetic_tool_evidence_v1" && toolEvidence.test_run_id === run.testRunId && toolEvidence.scenario_id === run.scenarioId && toolEvidence.scenario_version === run.scenarioVersion
-        && toolEvidence.tool_call_id === entry.toolCallId && toolEvidence.effect_id === entry.effectId && toolEvidence.provider_connection_epoch === entry.providerConnectionEpoch && toolEvidence.tool_name === entry.toolName
-        && typeof toolEvidence.operation_id === "string" && typeof toolEvidence.utterance_id === "string" && Number.isSafeInteger(toolEvidence.provider_input_sequence) && Number(toolEvidence.provider_input_sequence) > 0;
-      const builderGroups = new Map<string, typeof relevantBuilderLedgers>();
-      for (const row of relevantBuilderLedgers) {
-        const key = `${String(row.entry?.toolCallId)}\u0000${String(row.entry?.effectId)}`;
-        const group = builderGroups.get(key) ?? [];
-        group.push(row);
-        builderGroups.set(key, group);
-      }
-      const exactBuilderGroups = [...builderGroups.values()].every((group) => {
-        const terminal = group.filter(({ entry }) => terminalStates.has(String(entry?.finalState)));
-        const last = group.reduce((latest, row) => row.event.seq > latest.event.seq ? row : latest, group[0]!);
-        return group.length > 0 && group.every(exactBuilderLedger) && terminal.length === 1 && terminal[0] === last && terminal[0]!.join?.schema === "sophia_synthetic_builder_join_v1"
-          && terminal[0]!.join?.test_run_id === run.testRunId && terminal[0]!.join?.scenario_id === run.scenarioId && terminal[0]!.join?.scenario_version === run.scenarioVersion;
-      });
-      const allTaskLedgers = [...builderGroups.values()].flatMap((group) => group.filter(({ entry }) => terminalStates.has(String(entry?.finalState))));
-      const taskIds = new Set(allTaskLedgers.map((item) => item.join?.task_id));
-      const toolCallIds = new Set(allTaskLedgers.map((item) => item.entry?.toolCallId));
-      const effectIds = new Set(allTaskLedgers.map((item) => item.entry?.effectId));
-      const baseExact = joinFaults.length === 0 && joinEvents.length === 1 && exactEntries.length === 1 && builderGroups.size > 0 && exactBuilderGroups
-        && taskIds.size === 1 && toolCallIds.size === allTaskLedgers.length && effectIds.size === allTaskLedgers.length && allTaskLedgers.length === builderGroups.size;
-      const exact = exactEntries[0];
-      const assertions = exact?.assertions;
-      let scenarioExact = false;
-      if (baseExact && assertions) {
-        if (run.scenarioId === "V-B01") scenarioExact = injected.length === 1 && allTaskLedgers.length === 1 && exact.join.tool_name === "start_builder_task" && exact.join.ui_projection_state === "artifact_visible_current" && exact.join.artifact_id !== null && exact.join.artifact_path_sha256 !== null
-          && assertions.artifact_created === true && assertions.artifact_visible_current === true && assertions.accepted_turn_count === 1 && assertions.tool_dispatch_count === 1 && assertions.owned_task_count === 1 && assertions.stable_task_identity === true;
-        if (run.scenarioId === "V-B02") scenarioExact = injected.length === 3 && allTaskLedgers.length === 1 && exact.join.tool_name === "start_builder_task" && exact.join.ui_projection_state === "artifact_visible_current"
-          && assertions.accepted_turn_count === 3 && assertions.tool_dispatch_count === 1 && assertions.owned_task_count === 1 && assertions.stable_task_identity === true
-          && new Set(injected.map((operation) => operation.id)).size === 3 && injected.every((operation) => productByKind("audio.input.product_turn").some((event) => (event.payload.receipt as Record<string, unknown> | undefined)?.operation_id === operation.id && (event.payload.receipt as Record<string, unknown> | undefined)?.outcome === "public_user_turn_accepted"));
-        if (run.scenarioId === "V-B03") {
-          const tools = new Set(allTaskLedgers.map((item) => item.entry?.toolName));
-          scenarioExact = injected.length === 2 && allTaskLedgers.length === 2 && tools.has("start_builder_task") && [...tools].some((tool) => ["update_async_task", "edit_builder_artifact", "coreview_request_artifact_update"].includes(String(tool)))
-            && exact.join.ui_projection_state === "artifact_visible_current" && exact.join.artifact_id !== null && exact.join.artifact_path_sha256 !== null
-            && assertions.accepted_turn_count === 2 && assertions.tool_dispatch_count === 2 && assertions.owned_task_count === 1 && assertions.stable_task_identity === true && assertions.revision_updated_same_task === true && assertions.current_behavior_result === true;
-        }
-        if (run.scenarioId === "V-B04") {
-          const tools = new Set(allTaskLedgers.map((item) => item.entry?.toolName));
-          scenarioExact = injected.length === 2 && allTaskLedgers.length === 2 && tools.has("start_builder_task") && tools.has("cancel_async_task") && exact.join.tool_name === "cancel_async_task"
-            && exact.join.tool_state === "terminal_settled" && exact.join.ui_projection_state === "canvas_current" && exact.join.cancel_count === 1 && exact.join.artifact_id === null && exact.join.artifact_path_sha256 === null
-            && typeof exact.join.source_builder_event_id === "string" && exact.join.source_builder_event_id === `langgraph-run-terminal:${exact.join.run_id}:cancelled`
-            && assertions.accepted_turn_count === 2 && assertions.tool_dispatch_count === 2 && assertions.owned_task_count === 1 && assertions.stable_task_identity === true
-            && assertions.cancel_request_count === 1 && assertions.cancel_terminal_settled === true && assertions.no_post_cancel_publication === true && exact.join.no_post_cancel_publication === true;
-        }
-      }
-      const evidence = [...joinEvents, ...joinFaults, ...toolLedgers, ...(exact?.acceptedTurns ?? [])];
-      harness.push(joinEvents.length === 0
-        ? unavailable(`${run.scenarioId.toLowerCase()}.exact_builder_ownership_chain`, "harness", "product_authored_synthetic_builder_join_unavailable")
-        : check(`${run.scenarioId.toLowerCase()}.exact_builder_ownership_chain`, "harness", scenarioExact, evidence, "operation_input_turn_tool_effect_builder_task_run_artifact_and_post_commit_ui_join_failed"));
-      product.push(run.scenarioId === "V-B02"
-        ? unavailable("v-b02.owning_builder_semantics", "product", "owning_status_reply_to_builder_task_state_grounding_receipt_unavailable")
-        : joinEvents.length === 0
-          ? unavailable(`${run.scenarioId.toLowerCase()}.owning_builder_semantics`, "product", "product_authored_synthetic_builder_join_unavailable")
-          : check(`${run.scenarioId.toLowerCase()}.owning_builder_semantics`, "product", scenarioExact, evidence, "product_builder_scenario_semantics_or_exactly_once_join_failed"));
-      break;
-    }
-    case "V-I01": case "V-I02": {
-      const barge = injected.filter((operation) => operation.type === "barge_in");
-      const terminals = [...productByKind("audio.output.flushed"), ...productByKind("audio.output.dropped")];
-      const causal = barge.map((operation) => {
-        const target = operation.input._barge_target as Record<string, unknown> | undefined;
-        const cited = productByKind("audio.output.started").find((event) => event.seq === Number(target?.after_output_event_seq));
-        const citedReceipt = cited?.payload.receipt as Record<string, unknown> | undefined;
-        const inputStarted = chain(operation.id).started[0];
-        const targetTerminals = terminals.filter((event) => {
-          const receipt = event.payload.receipt as Record<string, unknown> | undefined;
-          return event.seq > (inputStarted?.seq ?? Number.MAX_SAFE_INTEGER) && receipt?.realizationId === target?.realization_id && Number(receipt?.providerConnectionEpoch) === Number(target?.provider_connection_epoch) && Number(receipt?.playbackGeneration) === Number(target?.playback_generation);
-        });
-        const targetAt = typeof target?.target_schedule_at === "string" ? Date.parse(target.target_schedule_at) : Number.NaN;
-        const lateness = inputStarted ? inputStarted.at.getTime() - targetAt : Number.POSITIVE_INFINITY;
-        const flushAt = targetTerminals[0] ? Date.parse(String((targetTerminals[0]!.payload.receipt as Record<string, unknown>).timestamp)) : Number.NaN;
-        const flushLatency = inputStarted ? flushAt - inputStarted.at.getTime() : Number.POSITIVE_INFINITY;
-        const exact = citedReceipt?.phase === "started" && citedReceipt.realizationId === target?.realization_id && Number(citedReceipt.providerConnectionEpoch) === Number(target?.provider_connection_epoch)
-          && Number(citedReceipt.playbackGeneration) === Number(target?.playback_generation) && target?.receipt_phase === "started" && target?.intentional_overlap === true
-          && inputStarted !== undefined && Number.isFinite(targetAt) && lateness >= -50 && lateness <= Number(target?.max_lateness_ms) && targetTerminals.length === 1
-          && Number.isFinite(flushLatency) && flushLatency >= 0 && flushLatency <= 1_500 && chain(operation.id).exact;
-        return { exact, events: [...(cited ? [cited] : []), ...(inputStarted ? [inputStarted] : []), ...targetTerminals] };
-      });
-      const exactBarge = causal.length === 1 && causal[0]!.exact;
-      const staleRestarts = causal.flatMap((item, index) => {
-        const operation = barge[index]!;
-        const target = operation.input._barge_target as Record<string, unknown> | undefined;
-        const terminalSeq = item.events.filter((event) => ["audio.output.flushed", "audio.output.dropped"].includes(event.kind)).at(-1)?.seq ?? Number.MAX_SAFE_INTEGER;
-        return productByKind("audio.output.started").filter((event) => {
-          const receipt = event.payload.receipt as Record<string, unknown> | undefined;
-          return event.seq > terminalSeq && (receipt?.realizationId === target?.realization_id || (typeof target?.chunk_hash === "string" && receipt?.chunkHash === target.chunk_hash));
-        });
-      });
-      const exactBargeNoStale = exactBarge && staleRestarts.length === 0;
-      harness.push(check(`${run.scenarioId.toLowerCase()}.exact_barge_causal_chain`, "harness", exactBargeNoStale, [...causal.flatMap((item) => item.events), ...staleRestarts], "exact_cited_realization_epoch_generation_input_start_flush_latency_and_no_stale_restart_chain_unavailable"));
-      if (run.scenarioId === "V-I02") {
-        const operation = barge[0];
-        const toolTarget = operation?.input._tool_target as Record<string, unknown> | undefined;
-        const targetEvent = typeof toolTarget?.event_seq === "number" ? productEvents.find((event) => event.seq === toolTarget.event_seq && event.kind.includes("gemini-tool-call-ledger")) : undefined;
-        const targetEntry = targetEvent?.payload.entry as Record<string, unknown> | undefined;
-        const targetCapture = targetEvent?.payload._capture_provenance as Record<string, unknown> | undefined;
-        const targetEvidence = targetEntry?.syntheticToolEvidence as Record<string, unknown> | undefined;
-        const terminalStates = new Set(["responded", "cancelled-before-send", "cancelled-after-send", "suppressed", "rejected"]);
-        const related = productEvents.filter((event) => {
-          const entry = event.payload.entry as Record<string, unknown> | undefined;
-          return event.kind.includes("gemini-tool-call-ledger") && (entry?.toolCallId === toolTarget?.tool_call_id || entry?.effectId === toolTarget?.effect_id);
-        }).map((event) => ({ event, entry: event.payload.entry as Record<string, unknown> }));
-        const terminals = related.filter(({ entry }) => terminalStates.has(String(entry.finalState)) && (typeof entry.toolResponseSentAt === "string" || typeof entry.cancelledAt === "string"));
-        const inputStarted = operation ? chain(operation.id).started[0] : undefined;
-        const expectedTargetIdentity = sha256(`${String(toolTarget?.tool_call_id)}\u0000${String(toolTarget?.effect_id)}`);
-        const revalidated = operation ? byKind("fault.active_target_revalidated").filter((event) => event.source === "canonical" && event.payload.operation_id === operation.id && event.payload.target_event_seq === targetEvent?.seq && event.payload.target_kind === "tool_effect"
-          && event.payload.target_identity_sha256 === expectedTargetIdentity && Number.isSafeInteger(event.payload.observed_through_seq) && Number(event.payload.observed_through_seq) >= Number(targetEvent?.seq) && event.payload.active === true) : [];
-        const fenced = operation && toolTarget ? exactActiveTargetFenceEvents(events, operation.id, toolTarget, "tool_effect") : [];
-        const owner = operations.find((candidate) => candidate.id === toolTarget?.owner_operation_id && (candidate.type === "speak" || candidate.type === "barge_in") && candidate.state === "succeeded");
-        const exactEvidence = (entry: Record<string, unknown>): boolean => {
-          const evidence = entry.syntheticToolEvidence as Record<string, unknown> | undefined;
-          return entry.toolCallId === toolTarget?.tool_call_id && entry.effectId === toolTarget?.effect_id && entry.providerConnectionEpoch === toolTarget?.provider_connection_epoch
-            && evidence?.schema === "sophia_synthetic_tool_evidence_v1" && evidence.test_run_id === run.testRunId && evidence.scenario_id === run.scenarioId && evidence.scenario_version === run.scenarioVersion
-            && evidence.operation_id === toolTarget?.owner_operation_id && evidence.utterance_id === toolTarget?.owner_utterance_id && evidence.provider_input_sequence === toolTarget?.provider_input_sequence
-            && evidence.tool_call_id === toolTarget?.tool_call_id && evidence.effect_id === toolTarget?.effect_id && evidence.provider_connection_epoch === toolTarget?.provider_connection_epoch;
-        };
-        const exactTool = operation !== undefined && toolTarget?.activity_state === "in_flight" && targetEvent !== undefined && targetEntry?.finalState === "unknown" && typeof targetEntry.receivedAt === "string"
-          && targetEntry.toolResponseSentAt === null && targetEntry.cancelledAt === null && targetEntry.toolCallId === toolTarget.tool_call_id && targetEntry.effectId === toolTarget.effect_id
-          && targetEntry.providerConnectionEpoch === toolTarget.provider_connection_epoch && targetEvidence?.schema === "sophia_synthetic_tool_evidence_v1" && targetEvidence.test_run_id === run.testRunId
-          && targetEvidence.operation_id === toolTarget.owner_operation_id && targetEvidence.utterance_id === toolTarget.owner_utterance_id && targetEvidence.provider_input_sequence === toolTarget.provider_input_sequence
-          && targetEvidence.tool_call_id === toolTarget.tool_call_id && targetEvidence.effect_id === toolTarget.effect_id && targetCapture?.generation === toolTarget.product_generation && targetCapture?.seq === toolTarget.product_seq
-          && owner !== undefined && inputStarted !== undefined && related.every(({ entry }) => exactEvidence(entry))
-          && revalidated.length === 1 && fenced.length === 1 && targetEvent.seq < revalidated[0]!.seq && revalidated[0]!.seq < fenced[0]!.seq && fenced[0]!.seq < inputStarted.seq && terminals.length === 1 && inputStarted.seq < terminals[0]!.event.seq
-          && terminals[0]!.entry.toolCallId === toolTarget.tool_call_id && terminals[0]!.entry.effectId === toolTarget.effect_id
-          && (terminals[0]!.entry.syntheticToolEvidence as Record<string, unknown> | undefined)?.operation_id === owner.id
-          && related.filter(({ entry }) => terminalStates.has(String(entry.finalState))).length === 1 && exactTerminalLastToolLifecycle(related, inputStarted.seq);
-        harness.push(check("v-i02.tool_boundary_total_order_and_at_most_once_settlement", "harness", exactTool, [...related.map((item) => item.event), ...revalidated, ...fenced], "exact_owned_in_flight_tool_effect_browser_atomic_fence_barge_order_and_single_terminal_settlement_unavailable"));
-        // The exact effect ordering/cardinality is machine-verifiable above,
-        // but the product contract does not yet expose an owning semantic
-        // receipt joining the post-barge assistant promise to the actual tool
-        // terminal outcome. Never infer that relationship from transcript
-        // wording or turn proximity.
-        product.push(unavailable("v-i02.retained_input_and_at_most_once_effect", "product", "owning_post_barge_promise_to_tool_outcome_receipt_unavailable"));
-      } else product.push(check("v-i01.retained_input_after_flush", "product", exactBargeNoStale, [...causal.flatMap((item) => item.events), ...staleRestarts], "bound_barge_input_flush_or_no_stale_output_receipt_unavailable"));
-      break;
-    }
-    case "V-N01": case "V-N02": {
-      const rotation = operations.filter((operation) => operation.type === "force_socket_rotation" && operation.state === "succeeded");
-      const epochs = productByKind("provider.connection_epoch");
-      const operation = rotation[0];
-      const priorEpoch = Number(operation?.input.expected_socket_epoch);
-      const resultProduct = (operation?.result?.rotation_receipt as Record<string, unknown> | undefined)?.product as Record<string, unknown> | undefined;
-      const restoredEpoch = Number(resultProduct?.providerConnectionEpoch);
-      const restoredEvent = epochs.find((event) => event.seq === Number(resultProduct?._seq));
-      const restoredReceipt = restoredEvent?.payload.receipt as Record<string, unknown> | undefined;
-      const priorEvents = epochs.filter((event) => event.seq < (restoredEvent?.seq ?? -1)).filter((event) => {
-        const receipt = event.payload.receipt as Record<string, unknown> | undefined;
-        return Number(receipt?.providerConnectionEpoch) === priorEpoch && receipt?.continuityState === "active" && ["bootstrap", "restored"].includes(String(receipt?.phase));
-      });
-      const restored = rotation.length === 1 && Number.isSafeInteger(priorEpoch) && priorEvents.length >= 1 && restoredEvent !== undefined && resultProduct !== undefined
-        && resultProduct.phase === "restored" && resultProduct.previousProviderConnectionEpoch === priorEpoch && Number(resultProduct.providerConnectionEpoch) > priorEpoch && resultProduct.continuityState === "active"
-        && canonicalRequestHash(restoredReceipt) === canonicalRequestHash(Object.fromEntries(Object.entries(resultProduct).filter(([key]) => key !== "_seq")))
-        && restoredReceipt?.phase === "restored" && restoredReceipt.previousProviderConnectionEpoch === priorEpoch && Number(restoredReceipt.providerConnectionEpoch) > priorEpoch && restoredReceipt.continuityState === "active";
-      harness.push(check(`${run.scenarioId.toLowerCase()}.requested_epoch_to_restored_epoch`, "harness", restored, epochs, "exact_requested_prior_epoch_and_app_authored_restored_receipt_join_unavailable"));
-      if (run.scenarioId === "V-N02") {
-        const target = operation?.input._commit_target as Record<string, unknown> | undefined;
-        const targetEvent = typeof target?.event_seq === "number" ? productEvents.find((event) => event.seq === target.event_seq) : undefined;
-        const targetKind = target?.kind === "output_realization" ? "output_realization" : "tool_effect";
-        const expectedTargetIdentity = sha256(`${String(target?.stable_id)}\u0000${String(targetKind === "output_realization" ? target?.chunk_hash : target?.effect_id)}`);
-        const revalidated = operation ? byKind("fault.active_target_revalidated").filter((event) => event.source === "canonical" && event.payload.operation_id === operation.id && event.payload.target_event_seq === targetEvent?.seq
-          && event.payload.target_kind === targetKind && event.payload.target_identity_sha256 === expectedTargetIdentity && Number.isSafeInteger(event.payload.observed_through_seq)
-          && Number(event.payload.observed_through_seq) >= Number(targetEvent?.seq) && event.payload.active === true) : [];
-        const fenced = operation && target ? exactActiveTargetFenceEvents(events, operation.id, target, targetKind) : [];
-        let exactEffect = false;
-        let effectEvidence: import("./domain.js").LabEvent[] = targetEvent ? [targetEvent] : [];
-        if (target?.kind === "output_realization" && target?.activity_state === "in_flight" && targetEvent?.kind === "audio.output.started") {
-          const matching = productEvents.filter((event) => {
-            const receipt = event.payload.receipt as Record<string, unknown> | undefined;
-            return receipt?.realizationId === target.stable_id || (typeof target.chunk_hash === "string" && receipt?.chunkHash === target.chunk_hash);
-          });
-          const targetReceipt = targetEvent.payload.receipt as Record<string, unknown> | undefined;
-          const targetCapture = targetEvent.payload._capture_provenance as Record<string, unknown> | undefined;
-          const terminals = matching.filter((event) => {
-            const receipt = event.payload.receipt as Record<string, unknown> | undefined;
-            return event.seq > (fenced[0]?.seq ?? Number.MAX_SAFE_INTEGER) && ["audio.output.completed", "audio.output.flushed", "audio.output.dropped"].includes(event.kind)
-              && receipt?.realizationId === target.stable_id && receipt?.chunkHash === target.chunk_hash && Number(receipt?.providerConnectionEpoch) === priorEpoch
-              && Number(receipt?.playbackGeneration) === Number(target.playback_generation);
-          });
-          const allTerminals = matching.filter((event) => ["audio.output.completed", "audio.output.flushed", "audio.output.dropped"].includes(event.kind));
-          const competingStarts = matching.filter((event) => event.kind === "audio.output.started" && event.seq !== targetEvent.seq);
-          const replayedAfterFence = matching.filter((event) => event.seq > (fenced[0]?.seq ?? Number.MAX_SAFE_INTEGER) && ["audio.output.scheduled", "audio.output.started"].includes(event.kind));
-          const replayedAfterTerminal = terminals.length === 1 ? matching.filter((event) => event.seq > terminals[0]!.seq && ["audio.output.scheduled", "audio.output.started", "audio.output.completed"].includes(event.kind)) : [];
-          exactEffect = targetReceipt?.realizationId === target.stable_id && targetReceipt?.chunkHash === target.chunk_hash
-            && targetReceipt?.phase === "started" && Number(targetReceipt?.providerConnectionEpoch) === priorEpoch && Number(targetReceipt?.playbackGeneration) === Number(target.playback_generation)
-            && targetCapture?.generation === target.product_generation && targetCapture?.seq === target.product_seq
-            && terminals.length === 1 && allTerminals.length === 1 && competingStarts.length === 0 && replayedAfterFence.length === 0 && replayedAfterTerminal.length === 0 && Number.isSafeInteger(restoredEpoch) && restoredEpoch > priorEpoch;
-          effectEvidence = matching;
-        } else if (target?.kind === "tool_settlement" && target?.activity_state === "in_flight" && targetEvent?.kind.includes("gemini-tool-call-ledger")) {
-          const matching = productEvents.filter((event) => {
-            const entry = event.payload.entry as Record<string, unknown> | undefined;
-            return event.kind.includes("gemini-tool-call-ledger") && (entry?.toolCallId === target.stable_id || entry?.effectId === target.effect_id);
-          });
-          const terminal = matching.filter((event) => {
-            const entry = event.payload.entry as Record<string, unknown> | undefined;
-            return event.seq > targetEvent.seq && entry?.toolCallId === target.stable_id && entry?.effectId === target.effect_id
-              && ["responded", "cancelled-before-send", "cancelled-after-send", "suppressed", "rejected"].includes(String(entry?.finalState)) && (typeof entry?.toolResponseSentAt === "string" || typeof entry?.cancelledAt === "string");
-          });
-          const allTerminalForTool = matching.filter((event) => {
-            const entry = event.payload.entry as Record<string, unknown> | undefined;
-            return ["responded", "cancelled-before-send", "cancelled-after-send", "suppressed", "rejected"].includes(String(entry?.finalState));
-          });
-          const targetEntry = targetEvent.payload.entry as Record<string, unknown>;
-          const targetEvidence = targetEntry.syntheticToolEvidence as Record<string, unknown> | undefined;
-          const targetCapture = targetEvent.payload._capture_provenance as Record<string, unknown> | undefined;
-          const owner = operations.find((candidate) => candidate.id === target.owner_operation_id && (candidate.type === "speak" || candidate.type === "barge_in") && candidate.state === "succeeded");
-          const exactToolEvidence = (event: import("./domain.js").LabEvent): boolean => {
-            const entry = event.payload.entry as Record<string, unknown> | undefined;
-            const evidence = entry?.syntheticToolEvidence as Record<string, unknown> | undefined;
-            return entry?.toolCallId === target.stable_id && entry?.effectId === target.effect_id && entry?.providerConnectionEpoch === target.provider_connection_epoch
-              && evidence?.schema === "sophia_synthetic_tool_evidence_v1" && evidence.test_run_id === run.testRunId && evidence.scenario_id === run.scenarioId && evidence.scenario_version === run.scenarioVersion
-              && evidence.operation_id === target.owner_operation_id && evidence.utterance_id === target.owner_utterance_id && evidence.provider_input_sequence === target.provider_input_sequence
-              && evidence.tool_call_id === target.stable_id && evidence.effect_id === target.effect_id && evidence.provider_connection_epoch === target.provider_connection_epoch;
-          };
-          exactEffect = targetEntry.finalState === "unknown" && targetEntry.toolResponseSentAt === null && targetEntry.cancelledAt === null && terminal.length === 1 && allTerminalForTool.length === 1
-            && terminal[0]!.seq > (fenced[0]?.seq ?? Number.MAX_SAFE_INTEGER) && Number(targetEntry.providerConnectionEpoch) === priorEpoch && targetCapture?.generation === target.product_generation && targetCapture?.seq === target.product_seq
-            && targetEvidence?.operation_id === target.owner_operation_id && owner !== undefined && matching.every(exactToolEvidence)
-            && exactTerminalLastToolLifecycle(matching.map((event) => ({ event, entry: event.payload.entry as Record<string, unknown> })), fenced[0]?.seq ?? Number.MAX_SAFE_INTEGER)
-            && Number.isSafeInteger(restoredEpoch) && restoredEpoch > priorEpoch;
-          effectEvidence = matching;
-        }
-        const exactContinuity = restored && exactEffect && revalidated.length === 1 && fenced.length === 1 && targetEvent !== undefined && restoredEvent !== undefined
-          && targetEvent.seq < revalidated[0]!.seq && revalidated[0]!.seq < fenced[0]!.seq && fenced[0]!.seq < restoredEvent.seq;
-        harness.push(check("v-n02.committed_boundary_exactly_once_effect", "harness", exactContinuity, [...epochs, ...effectEvidence, ...revalidated, ...fenced], "exact_in_flight_app_target_browser_atomic_fence_and_exactly_once_terminal_effect_unavailable"));
-        product.push(check("v-n02.exactly_once_continuity_effect", "product", exactContinuity, [...epochs, ...effectEvidence, ...revalidated, ...fenced], "owning_in_flight_event_or_effect_ledger_unavailable"));
-      } else {
-        const outputLifecycleKinds = new Set(["audio.output.scheduled", "audio.output.started", "audio.output.completed", "audio.output.flushed", "audio.output.dropped"]);
-        const outputReceipts = productEvents.filter((event) => outputLifecycleKinds.has(event.kind)).map((event) => ({ event, receipt: event.payload.receipt as Record<string, unknown> | undefined })).filter(({ receipt }) => typeof receipt?.realizationId === "string");
-        const inputEffects = productByKind("audio.input.product_turn").map((event) => ({ event, receipt: event.payload.receipt as Record<string, unknown> | undefined })).filter(({ receipt }) => typeof receipt?.operation_id === "string");
-        const inputEffectKeys = inputEffects.map(({ receipt }) => `${receipt?.operation_id}\u0000${receipt?.source}\u0000${receipt?.outcome}`);
-        const toolLedgerRows = productEvents.filter((event) => event.kind.includes("gemini-tool-call-ledger")).map((event) => ({ event, entry: event.payload.entry as Record<string, unknown> | undefined }));
-        const validToolRows = toolLedgerRows.filter((row): row is { event: import("./domain.js").LabEvent; entry: Record<string, unknown> } => typeof row.entry?.toolCallId === "string" && typeof row.entry.effectId === "string");
-        const toolGroups = new Map<string, typeof validToolRows>();
-        for (const row of validToolRows) {
-          const key = `${String(row.entry.toolCallId)}\u0000${String(row.entry.effectId)}`;
-          const group = toolGroups.get(key) ?? [];
-          group.push(row);
-          toolGroups.set(key, group);
-        }
-        const toolCallIds = [...toolGroups.values()].map((group) => String(group[0]!.entry.toolCallId));
-        const toolEffectIds = [...toolGroups.values()].map((group) => String(group[0]!.entry.effectId));
-        const exactToolLifecycles = toolLedgerRows.length === validToolRows.length && [...toolGroups.values()].every((group) => exactTerminalLastToolLifecycle(group));
-        const postRestoreInputs = restoredEvent ? injected.filter((candidate) => {
-          const inputChain = chain(candidate.id);
-          const leg = inputChain.productLegs[0]?.payload.receipt as Record<string, unknown> | undefined;
-          return inputChain.exact && inputChain.started.length === 1 && inputChain.started[0]!.seq > restoredEvent.seq && inputChain.productTurns.some((event) => event.seq > restoredEvent.seq)
-            && Number(leg?.provider_connection_epoch) === restoredEpoch;
-        }) : [];
-        const acceptedInputSeq = postRestoreInputs.length === 1 ? Math.max(...chain(postRestoreInputs[0]!.id).productTurns.map((event) => event.seq)) : Number.MAX_SAFE_INTEGER;
-        const noDuplicateWork = injected.length === 1 && postRestoreInputs.length === 1 && injected.every((candidate) => chain(candidate.id).exact)
-          && exactOutputLifecyclesAtEpoch(productEvents, restoredEpoch, acceptedInputSeq) && new Set(inputEffectKeys).size === inputEffectKeys.length
-          && exactToolLifecycles && new Set(toolCallIds).size === toolCallIds.length && new Set(toolEffectIds).size === toolEffectIds.length;
-        harness.push(check("v-n01.no_duplicate_speech_or_tool_work", "harness", noDuplicateWork, [...allChainEvents, ...outputReceipts.map(({ event }) => event), ...inputEffects.map(({ event }) => event), ...toolLedgerRows.map(({ event }) => event)], "exact_input_output_and_tool_effect_continuity_evidence_unavailable"));
-        product.push(unavailable("v-n01.exactly_once_continuity_effect", "product", noDuplicateWork && restored ? "product_authored_post_restore_input_to_assistant_response_lineage_unavailable" : "exact_post_restore_input_output_continuity_receipts_unavailable"));
-      }
-      break;
-    }
-    case "V-F01": {
-      const finalizedEvents = byKind("session.finalized");
-      const nonSilence = injected.filter((operation) => !String(operation.input.fixture_id ?? "").toLowerCase().includes("silence"));
-      const exactInput = nonSilence.length === 1 && chain(nonSilence[0]!.id).exact;
-      harness.push(check("f01.one_exact_non_silence_input_chain", "harness", exactInput, nonSilence.flatMap((operation) => Object.values(chain(operation.id)).flatMap((value) => Array.isArray(value) ? value : [])), "one_operation_correlated_non_silence_input_chain_required"));
-      const assistantTurns = productEvents.filter((event) => event.kind.endsWith(".sophia.turn") && ((event.payload.data as Record<string, unknown> | undefined)?.phase === "agent_ended" || event.payload.phase === "agent_ended"));
-      harness.push(check("f01.completed_assistant_turn", "harness", assistantTurns.length >= 1, assistantTurns, "bound_assistant_turn_completion_unavailable"));
-      const strictFinalized = finalizedEvents.filter((event) => isCanonicalFinalizationReceipt(run, event));
-      const nonempty = strictFinalized.some((event) => {
-        const receipt = event.payload.receipt as Record<string, unknown>;
-        const transcript = receipt.canonical_transcript as Record<string, unknown>;
-        return Number(transcript.message_count) > 0 && Number(transcript.input_message_count) > 0 && Number(transcript.output_message_count) > 0 && Number(transcript.turn_boundary_count) > 0;
-      });
-      harness.push(check("f01.strict_nonempty_canonical_finalization", "harness", strictFinalized.length === 1 && nonempty, finalizedEvents, "strict_nonempty_bound_canonical_transcript_receipt_unavailable"));
-      product.push(check("f01.unified_durable_finalizer", "product", strictFinalized.length === 1 && nonempty, finalizedEvents, "durable_product_finalizer_receipt_unavailable"));
-      break;
-    }
-    case "V-D01": {
-      const captureEvents = productEvents.filter((event) => {
-        const provenance = event.payload._capture_provenance as Record<string, unknown> | undefined;
-        return Number.isSafeInteger(provenance?.generation) && Number.isSafeInteger(provenance?.seq);
-      });
-      const pages = byKind("capture.product_page");
-      const productCoordinates = captureEvents.map((event) => event.payload._capture_provenance as Record<string, unknown>);
-      const generations = new Set(productCoordinates.map((value) => Number(value.generation)));
-      const productSeqs = productCoordinates.map((value) => Number(value.seq)).sort((left, right) => left - right);
-      const monotonicProduct = captureEvents.length > 500 && generations.size === 1 && productSeqs[0] === 1 && productSeqs.every((seq, index) => index === 0 || seq === productSeqs[index - 1]! + 1) && new Set(productSeqs).size === productSeqs.length;
-      const pagePayloads = pages.map((event) => event.payload);
-      const paged = pagePayloads.length > 1 && pagePayloads.every((page, index) => {
-        const prior = index === 0 ? null : pagePayloads[index - 1]!;
-        const requested = Number(page.requestedSeq);
-        const returned = Number(page.returnedSeq);
-        const oldest = Number(page.oldestSeq);
-        const latest = Number(page.latestSeq);
-        const capacity = Number(page.capacity);
-        const dropped = Number(page.droppedCount);
-        const priorDropped = prior === null ? 0 : Number(prior.droppedCount);
-        const priorOldest = prior === null ? 1 : Number(prior.oldestSeq);
-        return page.gap === false
-          // droppedCount is ring eviction accounting, not evidence loss. A
-          // continuously drained cursor may remain ahead of oldestSeq while
-          // eviction rises. The durable union below must still be contiguous.
-          && Number.isSafeInteger(dropped) && dropped >= 0 && dropped >= priorDropped
-          && Number.isSafeInteger(capacity) && capacity > 0
-          && Number.isSafeInteger(oldest) && oldest >= 1 && oldest <= latest + 1 && oldest >= priorOldest
-          && Number.isSafeInteger(requested) && Number.isSafeInteger(returned) && returned >= requested
-          && (prior === null || requested === Number(prior.returnedSeq))
-          && (requested === 0 || requested >= oldest - 1);
-      });
-      const finalPage = pagePayloads.at(-1);
-      const reconciled = finalPage !== undefined && Number(finalPage.latestSeq) === productSeqs.at(-1) && Number(finalPage.totalProduced) === captureEvents.length && Number(finalPage.returnedSeq) === Number(finalPage.latestSeq);
-      harness.push(check("d01.over_500_bound_product_capture_events", "harness", monotonicProduct, captureEvents, "more_than_500_exact_bound_product_capture_envelopes_unavailable"));
-      harness.push(check("d01.read_after_metadata_reconciled", "harness", paged && reconciled, pages, "capture_generation_capacity_drop_and_total_metadata_unavailable_or_inconsistent"));
-      product.push(unavailable("d01.product_gate", "product", "not_applicable"));
-      break;
-    }
-    case "V-L01": {
-      const finalized = byKind("session.finalized");
-      const traceEvents = productByKind("trace.fault_receipt");
-      const traceReceipts = traceEvents.map((event) => ({ event, receipt: event.payload.receipt as Record<string, unknown> | undefined }));
-      const exactReceipt = (receipt: Record<string, unknown> | undefined, phase: "applied" | "restored") => receipt?.schema === "sophia_voice_lab_trace_fault_v1"
-        && receipt.fault === "langsmith_unavailable"
-        && receipt.phase === phase
-        && receipt.principal_id === run.principalId
-        && receipt.test_run_id === run.testRunId
-        && receipt.scenario_id === "V-L01"
-        && receipt.scenario_version === run.scenarioVersion
-        && receipt.environment === run.environment
-        && sameDeployment(receipt.expected_deployment, run.target.expectedDeployment)
-        && receipt.trace_unavailable === true
-        && receipt.canonical_behavior_unchanged === true
-        && canonicalIso(receipt.applied_at)
-        && (phase === "applied" ? receipt.restored_at === null : canonicalIso(receipt.restored_at));
-      const applied = traceReceipts.filter(({ receipt }) => exactReceipt(receipt, "applied"));
-      const restored = traceReceipts.filter(({ receipt }) => exactReceipt(receipt, "restored"));
-      const appliedAt = applied[0]?.receipt?.applied_at;
-      const exactLifecycle = traceEvents.length === 2 && applied.length === 1 && restored.length === 1
-        && restored[0]!.event.seq > applied[0]!.event.seq
-        && restored[0]!.receipt!.applied_at === appliedAt
-        && new Date(String(restored[0]!.receipt!.restored_at)).getTime() >= new Date(String(appliedAt)).getTime();
-      const observability = productByKind("provider.connection_observability").filter((event) => event.payload.langsmithTraceStatus === "trace_unavailable"
-        && event.payload.langsmithTraceUnavailableReason === "governed_synthetic_fault"
-        && (event.payload.langsmithTraceId === null || event.payload.langsmithTraceId === undefined));
-      harness.push(check("l01.governed_supplemental_trace_outage", "harness", exactLifecycle && observability.length >= 1, [...traceEvents, ...observability], "exact_app_authored_trace_fault_applied_restored_and_unavailable_receipts_missing"));
-      harness.push(check("l01.local_evidence_chain_survives", "harness", exactChains && finalized.length === 1, [...allChainEvents, ...finalized], "local_input_or_finalization_evidence_unavailable"));
-      const behavior = [...productByKind("audio.output.started"), ...productEvents.filter((event) => event.kind.endsWith(".sophia.turn"))];
-      product.push(check("l01.product_behavior_continues_without_trace_adapter", "product", behavior.length > 0, behavior, "bound_product_behavior_receipt_unavailable"));
-      break;
-    }
-    case "V-P01": {
-      const platform = externalAttestations("p01_platform_plugin_task").filter((event) => {
-        const proof = event.payload.evidence as Record<string, unknown> | undefined;
-        const ids = Array.isArray(proof?.operation_ids) ? proof.operation_ids : [];
-        const calls = Array.isArray(proof?.calls) ? proof.calls : [];
-        return proof?.authority === "platform_plugin" && proof.prohibited_tool_audit_passed === true && proof.raw_javascript_used === false && proof.local_runner_used === false && proof.manual_takeover_used === false
-          && proof.exact_deployment_discovered === true && proof.adaptive_followup_completed === true && Number(proof.high_level_call_count) === 10 && calls.length === 10
-          && ids.every((id) => operations.some((operation) => operation.id === id));
-      });
-      // Ordinary operation/audit rows still cannot self-certify installation.
-      // The only passing path is a privileged platform-authored attestation
-      // already cross-joined by the service to exact MCP audits/operations.
-      harness.push(platform.length === 0 ? unavailable("p01.fresh_registered_plugin_task", "harness", "platform_authored_plugin_asdk_app_install_and_fresh_task_provenance_not_attached") : check("p01.fresh_registered_plugin_task", "harness", platform.length === 1, platform, "platform_plugin_attestation_conflicted_or_duplicated"));
-      product.push(unavailable("p01.product_gate", "product", "not_applicable"));
-      break;
-    }
-    case "V-S01": {
-      const probes = byKind("security.invalid_grant_probe");
-      const variants = new Set(probes.map((event) => event.payload.variant));
-      const rejected = probes.length === S01_FRONTEND_GRANT_VARIANTS.length && S01_FRONTEND_GRANT_VARIANTS.every((variant) => variants.has(variant)) && probes.every((event) => event.payload.rejected === true && event.payload.exact_response_target === true && event.payload.no_session_cookie === true && event.payload.no_redirect === true);
-      harness.push(check("s01.all_invalid_grants_rejected", "harness", rejected, probes, "one_or_more_invalid_grant_receipts_unavailable_or_accepted"));
-      const oauth = byKind("security.oauth_boundary_probe");
-      const oauthVariants = new Set(oauth.map((event) => event.payload.variant));
-      harness.push(check("s01.oauth_resource_scope_and_replay_rejected", "harness", oauth.length === S01_OAUTH_VARIANTS.length && S01_OAUTH_VARIANTS.every((variant) => oauthVariants.has(variant)) && oauth.every((event) => event.payload.rejected === true), oauth, "oauth_missing_invalid_scope_resource_or_replay_receipt_unavailable"));
-      const directFault = byKind("security.direct_fault_scope_probe");
-      harness.push(check("s01.base_credential_has_no_fault_scope", "harness", directFault.length === 1 && directFault[0]!.payload.rejected === true && directFault[0]!.payload.fault_credential_distinct === true, directFault, "direct_fault_scope_separation_unavailable"));
-      const oauthCleanup = byKind("security.oauth_family_cleanup");
-      harness.push(check("s01.oauth_probe_family_revoked", "harness", oauthCleanup.length === 1 && oauthCleanup[0]!.payload.complete === true && oauthCleanup[0]!.payload.authorization_code_cleanup_handle_used === true && oauthCleanup[0]!.payload.authorization_code_family_terminalized === true && oauthCleanup[0]!.payload.access_token_issued === true && oauthCleanup[0]!.payload.refresh_token_issued === true && oauthCleanup[0]!.payload.refresh_family_revocation_receipt === true && oauthCleanup[0]!.payload.access_revocation_receipt === true && oauthCleanup[0]!.payload.access_token_denied_after_revocation === true && oauthCleanup[0]!.payload.refresh_token_denied_after_revocation === true && oauthCleanup[0]!.payload.durable_terminal_state_verified === true && oauthCleanup[0]!.payload.raw_tokens_excluded === true, oauthCleanup, "oauth_probe_authorization_code_access_or_refresh_family_remains_live"));
-      const zero = eligible.filter((event) => event.kind === "cleanup.recovery" || event.kind === "cleanup.browser_context_absent" || event.kind === "cleanup.browser_lease_absent" || event.kind === "security.pre_resource_allocation_fence");
-      const fence = byKind("security.pre_resource_allocation_fence");
-      const noAllocation = fence.length === 1 && fence[0]!.payload.active_run_count_unchanged === true && fence[0]!.payload.browser_context_absent === true && fence[0]!.payload.browser_lease_absent === true && fence[0]!.payload.canonical_session_absent === true && fence[0]!.payload.provider_session_absent === true && fence[0]!.payload.tts_process_invocations === 0;
-      harness.push(check("s01.rejected_before_resource_allocation", "harness", noAllocation && authoritativeLiveCleanupComplete(eligible) && byKind("cleanup.browser_context_absent").length === 1 && byKind("cleanup.browser_lease_absent").some((event) => event.payload.authoritative_ledger_read === true), zero, "authoritative_zero_resource_recovery_unavailable"));
-      product.push(unavailable("s01.no_ordinary_product_impact", "product", "not_applicable_pre_resource_rejection"));
-      break;
-    }
-    case "V-S02": {
-      const probes = byKind("security.pre_resource_validation_probe");
-      const variants = new Set(probes.map((event) => event.payload.variant));
-      const rejected = probes.length === S02_VALIDATION_VARIANTS.length && S02_VALIDATION_VARIANTS.every((variant) => variants.has(variant)) && probes.every((event) => event.payload.rejected === true && event.payload.expected_error_class === event.payload.observed_error_class && typeof event.payload.production_validator === "string");
-      harness.push(check("s02.shared_validators_reject_all_cases", "harness", rejected, probes, "malformed_media_or_target_validator_receipt_missing"));
-      const equivalence = byKind("security.shared_validator_equivalence");
-      harness.push(check("s02.internal_validator_supplement", "harness", equivalence.length === 1 && equivalence[0]!.payload.internal_validator_supplement === true && equivalence[0]!.payload.variant_count === S02_VALIDATION_VARIANTS.length && equivalence[0]!.payload.production_boundary_assertion === "security.mcp_boundary_probe", equivalence, "internal_shared_validator_supplement_unavailable"));
-      const surface = byKind("security.s02_surface_coverage");
-      const surfacePayload = surface[0]?.payload;
-      const fixtureStartup = surfacePayload?.fixture_startup_receipt as Record<string, unknown> | undefined;
-      const exactSurface = surface.length === 1 && surface[0]!.source === "canonical"
-        && hasExactKeys(surfacePayload!, ["schema", "public_authenticated_mcp_variants", "internal_startup_only_variants", "unsupported_fixture_public_mcp", "raw_audio_public_surface", "raw_audio_surface_reason", "fixture_startup_receipt"])
-        && surfacePayload!.schema === "sophia_voice_lab_s02_surface_coverage_v1"
-        && canonicalAsciiJson(surfacePayload!.public_authenticated_mcp_variants) === canonicalAsciiJson(S02_HTTP_VARIANTS)
-        && canonicalAsciiJson(surfacePayload!.internal_startup_only_variants) === canonicalAsciiJson(["fixture_metadata_bytes", "fixture_metadata_duration", "malformed_wav", "oversized_audio"])
-        && surfacePayload!.unsupported_fixture_public_mcp === true && surfacePayload!.raw_audio_public_surface === false && surfacePayload!.raw_audio_surface_reason === "no_public_raw_audio_surface"
-        && fixtureStartup !== undefined && hasExactKeys(fixtureStartup, ["schema", "status", "expected_manifest_sha256", "observed_manifest_sha256", "manifest_version", "fixture_count", "immutable_files_verified", "raw_audio_public_surface"])
-        && fixtureStartup.schema === "sophia_voice_lab_fixture_startup_v1" && fixtureStartup.status === "verified"
-        && fixtureStartup.expected_manifest_sha256 === BUNDLED_FIXTURE_MANIFEST_SHA256
-        && fixtureStartup.observed_manifest_sha256 === BUNDLED_FIXTURE_MANIFEST_SHA256
-        && fixtureStartup.expected_manifest_sha256 === fixtureStartup.observed_manifest_sha256
-        && fixtureStartup.manifest_version === 1
-        && Number.isSafeInteger(fixtureStartup.fixture_count) && Number(fixtureStartup.fixture_count) > 0 && fixtureStartup.immutable_files_verified === true && fixtureStartup.raw_audio_public_surface === false;
-      harness.push(check("s02.public_and_startup_surface_split", "harness", exactSurface, surface, "public_fixture_or_immutable_startup_audio_surface_receipt_unavailable"));
-      const boundary = byKind("security.mcp_boundary_probe").sort((left, right) => left.seq - right.seq);
-      const probeIds = boundary.map((event) => event.payload.probe_id_sha256);
-      const requestBodies = boundary.map((event) => (event.payload.request as Record<string, unknown> | undefined)?.raw_body_sha256);
-      const auditRequestIds = boundary.map((event) => ((event.payload.audit_receipts as Array<Record<string, unknown>> | undefined)?.[0])?.request_id_sha256);
-      const boundaryRejected = boundary.length === S02_HTTP_VARIANTS.length
-        && boundary.every((event, index) => event.payload.variant === S02_HTTP_VARIANTS[index] && isExactS02McpBoundaryProbe(event, index === 0 ? null : boundary[index - 1]!))
-        && new Set(probeIds).size === S02_HTTP_VARIANTS.length
-        && new Set(requestBodies).size === S02_HTTP_VARIANTS.length
-        && new Set(auditRequestIds).size === S02_HTTP_VARIANTS.length;
-      harness.push(check("s02.deployed_authenticated_mcp_boundary", "harness", boundaryRejected, boundary, "public_mcp_transport_parser_auth_schema_and_audit_rejections_unavailable"));
-      const zero = eligible.filter((event) => event.kind.startsWith("cleanup.") || event.kind === "security.pre_resource_allocation_fence");
-      const fence = byKind("security.pre_resource_allocation_fence");
-      const noAllocation = fence.length === 1 && fence[0]!.payload.active_run_count_unchanged === true && fence[0]!.payload.browser_context_absent === true && fence[0]!.payload.browser_lease_absent === true && fence[0]!.payload.provider_session_absent === true && fence[0]!.payload.tts_process_invocations === 0;
-      harness.push(check("s02.no_resource_or_orphan", "harness", noAllocation && authoritativeLiveCleanupComplete(eligible) && byKind("cleanup.browser_context_absent").length === 1, zero, "authoritative_zero_resource_recovery_unavailable"));
-      product.push(unavailable("s02.no_user_facing_impact", "product", "not_applicable_pre_resource_rejection"));
-      break;
-    }
-    case "V-D02": {
-      const reader = byKind("durability.independent_ledger_reader");
-      harness.push(check("d02.independent_ledger_reader_precondition", "harness", reader.length === 1 && reader[0]!.payload.exact_test_run === true && reader[0]!.payload.mutation_count === 0, reader, "independent_durable_reader_unavailable"));
-      const api = externalAttestations("d02_api_process_restart").filter((event) => {
-        const proof = event.payload.evidence as Record<string, unknown> | undefined;
-        const continuity = D02BrowserContinuityProofSchema.safeParse(proof?.browser_continuity_proof);
-        const operation = operations.find((candidate) => candidate.id === proof?.operation_id);
-        const replay = operation && byKind(`operation.${operation.type}.idempotent_replay`).some((candidate) => candidate.payload.operation_id === operation.id && candidate.payload.exact_request_hash_replay === true && candidate.payload.no_new_operation === true);
-        const command = externalAttestations("d02_restart_command").find((candidate) => {
-          const commandProof = candidate.payload.evidence as Record<string, unknown> | undefined;
-          return typeof commandProof?.restart_request_id === "string" && sha256(commandProof.restart_request_id) === proof?.restart_request_id_sha256
-            && commandProof.operation_id === proof?.operation_id && commandProof.requested_at === proof?.restart_requested_at && candidate.seq < event.seq;
-        });
-        return proof?.authority === "deployment_control" && command !== undefined && operation !== undefined && replay === true && continuity.success
-          && continuity.data.run_id_sha256 === sha256(run.id) && continuity.data.operation_id_sha256 === sha256(operation.id)
-          && continuity.data.restart_request_id_sha256 === proof.restart_request_id_sha256 && continuity.data.after_boot_id_sha256 === proof.after_boot_id_sha256
-          && continuity.data.browser_worker_id_sha256 === proof.browser_worker_id_sha256 && continuity.data.browser_lease_epoch === proof.browser_lease_epoch
-          && proof.request_sha256 === operation.requestHash && proof.idempotency_key_sha256 === sha256(operation.idempotencyKey)
-          && proof.before_boot_id_sha256 !== proof.after_boot_id_sha256 && proof.original_receipt_sha256 === proof.replay_receipt_sha256
-          && typeof proof.provider_restart_request_sha256 === "string" && /^[a-f0-9]{64}$/.test(proof.provider_restart_request_sha256)
-          && typeof proof.provider_restart_accepted_response_sha256 === "string" && /^[a-f0-9]{64}$/.test(proof.provider_restart_accepted_response_sha256)
-          && typeof proof.local_controller_receipt_sha256 === "string" && /^[a-f0-9]{64}$/.test(proof.local_controller_receipt_sha256)
-          && proof.browser_worker_continuity === true && proof.duplicate_injection_count === 0;
-      });
-      const workerLossClaims = externalAttestations("d02_browser_worker_loss");
-      const workerLoss = workerLossClaims.filter((event) => {
-        const proof = event.payload.evidence as Record<string, unknown> | undefined;
-        const command = externalAttestations("d02_browser_worker_termination_command").find((candidate) => {
-          const commandProof = candidate.payload.evidence as Record<string, unknown> | undefined;
-          return typeof commandProof?.termination_request_id === "string" && sha256(commandProof.termination_request_id) === proof?.termination_request_id_sha256
-            && commandProof.run_id_sha256 === proof?.run_id_sha256 && commandProof.cleanup_obligation_id_sha256 === proof.cleanup_obligation_id_sha256
-            && commandProof.worker_service_id_sha256 === proof.worker_service_id_sha256 && commandProof.provider_session_id_sha256 === proof.provider_session_id_sha256
-            && commandProof.provider_admission_id_sha256 === proof.provider_admission_id_sha256 && commandProof.provider_connection_epoch === proof.provider_connection_epoch
-            && canonicalRequestHash(commandProof.frozen_provider_connection_epochs) === canonicalRequestHash(proof.frozen_provider_connection_epochs)
-            && commandProof.browser_context_id_sha256 === proof.browser_context_id_sha256 && commandProof.browser_worker_id_sha256 === proof.lost_worker_id_sha256
-            && commandProof.browser_lease_epoch === proof.lost_browser_lease_epoch && commandProof.before_worker_deploy_id_sha256 === proof.before_deploy_id_sha256
-            && commandProof.before_worker_instance_set_sha256 === proof.before_instance_set_sha256
-            && commandProof.before_worker_owner_instance_id_sha256 === proof.lost_worker_owner_instance_id_sha256
-            && commandProof.before_worker_owner_membership_count === 1 && proof.lost_worker_owner_instance_id_sha256 === proof.lost_worker_id_sha256
-            && proof.lost_worker_present_before_restart === true && proof.lost_worker_absent_after_restart === true
-            && commandProof.render_action_request_sha256 === proof.render_action_request_sha256
-            && commandProof.requested_at === proof.command_requested_at && candidate.seq < event.seq;
-        });
-        const loss = byKind("durability.browser_worker_loss_observed").find((candidate) => candidate.seq === proof?.loss_event_seq
-          && candidate.payload.lost_worker_id_sha256 === proof?.lost_worker_id_sha256 && candidate.payload.replacement_worker_id_sha256 === proof.replacement_worker_id_sha256
-          && candidate.payload.lost_browser_lease_epoch === proof.lost_browser_lease_epoch && candidate.payload.loss_observed_at === proof.loss_observed_at);
-        const dispatch = byKind("product.d02_render_worker_dispatch_claimed").find((candidate) => candidate.source === "canonical"
-          && candidate.payload.termination_request_id_sha256 === proof?.termination_request_id_sha256
-          && candidate.payload.dispatch_claim_sha256 === proof?.render_dispatch_claim_sha256
-          && candidate.payload.command_attestation_id_sha256 === sha256(String(command?.payload.attestation_id))
-          && candidate.payload.command_content_sha256 === command?.payload.content_sha256 && candidate.payload.command_event_seq === command?.seq
-          && candidate.payload.worker_service_id_sha256 === proof?.worker_service_id_sha256
-          && candidate.payload.action_request_sha256 === proof?.render_action_request_sha256
-          && candidate.payload.requested_at === proof?.action_requested_at
-          && candidate.payload.raw_action_and_attempt_identifiers_excluded === true
-          && candidate.payload.dispatch_claim_sha256 === canonicalRequestHash(Object.fromEntries(Object.entries(candidate.payload).filter(([key]) => key !== "dispatch_claim_sha256"))));
-        const shutdown = byKind("durability.browser_worker_shutdown_observed").find((candidate) => candidate.source === "worker" && hasExactKeys(candidate.payload, [
-          "schema", "termination_request_id_sha256", "voice_lab_run_id_sha256", "cleanup_obligation_id_sha256",
-          "lost_browser_worker_id_sha256", "lost_browser_lease_epoch", "browser_context_id_sha256", "provider_session_id_sha256",
-          "provider_admission_id_sha256", "provider_connection_epoch", "frozen_provider_connection_epochs", "render_action_request_sha256",
-          "gateway_freeze_request_sha256", "gateway_freeze_event_seq", "command_event_seq", "render_dispatch_claim_sha256",
-          "render_dispatch_claim_event_seq", "product_provider_cleanup_acknowledged", "product_provider_cleanup_settlement_sha256",
-          "product_provider_close_receipt_count", "product_provider_activation_abort_receipt_count", "product_provider_cleanup_epoch_union_matches_freeze",
-          "browser_context_closed", "source", "raw_run_worker_lease_context_and_product_identifiers_excluded",
-          "observed_at",
-        ]) && candidate.payload.schema === "sophia_voice_lab_d02_browser_worker_shutdown_observation_v1"
-          && candidate.payload.termination_request_id_sha256 === proof?.termination_request_id_sha256
-          && candidate.payload.voice_lab_run_id_sha256 === proof?.run_id_sha256
-          && candidate.payload.cleanup_obligation_id_sha256 === proof?.cleanup_obligation_id_sha256
-          && candidate.payload.lost_browser_worker_id_sha256 === proof?.lost_worker_id_sha256
-          && candidate.payload.lost_browser_lease_epoch === proof?.lost_browser_lease_epoch
-          && candidate.payload.browser_context_id_sha256 === proof?.browser_context_id_sha256
-          && candidate.payload.provider_session_id_sha256 === proof?.provider_session_id_sha256
-          && candidate.payload.provider_admission_id_sha256 === proof?.provider_admission_id_sha256
-          && candidate.payload.provider_connection_epoch === proof?.provider_connection_epoch
-          && canonicalRequestHash(candidate.payload.frozen_provider_connection_epochs) === canonicalRequestHash(proof?.frozen_provider_connection_epochs)
-          && candidate.payload.render_action_request_sha256 === proof?.render_action_request_sha256
-          && candidate.payload.command_event_seq === command?.seq && candidate.payload.render_dispatch_claim_event_seq === dispatch?.seq
-          && candidate.payload.render_dispatch_claim_sha256 === proof?.render_dispatch_claim_sha256
-          && candidate.payload.product_provider_cleanup_acknowledged === true
-          && isSha256(candidate.payload.product_provider_cleanup_settlement_sha256)
-          && Number.isSafeInteger(candidate.payload.product_provider_close_receipt_count) && Number(candidate.payload.product_provider_close_receipt_count) >= 0
-          && Number.isSafeInteger(candidate.payload.product_provider_activation_abort_receipt_count) && Number(candidate.payload.product_provider_activation_abort_receipt_count) >= 0
-          && Array.isArray(candidate.payload.frozen_provider_connection_epochs)
-          && Number(candidate.payload.product_provider_close_receipt_count) + Number(candidate.payload.product_provider_activation_abort_receipt_count) === (candidate.payload.frozen_provider_connection_epochs as unknown[]).length
-          && candidate.payload.product_provider_cleanup_epoch_union_matches_freeze === true
-          && candidate.payload.browser_context_closed === true && candidate.payload.source === "worker_graceful_d02_restart"
-          && candidate.payload.raw_run_worker_lease_context_and_product_identifiers_excluded === true
-          && isCanonicalTimestamp(candidate.payload.observed_at) && candidate.at.toISOString() === candidate.payload.observed_at);
-        const gatewayFreeze = shutdown ? byKind("product.d02_gateway_browser_worker_termination_frozen").find((candidate) => candidate.source === "canonical"
-          && candidate.seq === shutdown.payload.gateway_freeze_event_seq
-          && candidate.payload.schema === "sophia_voice_lab_d02_gateway_freeze_event_v1"
-          && candidate.payload.termination_request_id_sha256 === proof?.termination_request_id_sha256
-          && candidate.payload.freeze_request_sha256 === shutdown.payload.gateway_freeze_request_sha256
-          && candidate.payload.browser_worker_id_sha256 === proof?.lost_worker_id_sha256
-          && candidate.payload.browser_lease_epoch === proof?.lost_browser_lease_epoch
-          && candidate.payload.browser_context_id_sha256 === proof?.browser_context_id_sha256
-          && candidate.payload.render_action_request_sha256 === proof?.render_action_request_sha256
-          && candidate.payload.gateway_frozen === true) : undefined;
-        const exactLoss = loss?.source === "worker" && hasExactKeys(loss.payload, [
-          "schema", "termination_request_id_sha256", "lost_worker_id_sha256", "replacement_worker_id_sha256",
-          "lost_browser_lease_epoch", "browser_context_id_sha256", "old_worker_shutdown_event_seq", "render_dispatch_claim_sha256",
-          "render_dispatch_claim_event_seq", "lease_expired_at", "loss_observed_at", "loss_source", "raw_worker_identifiers_excluded",
-        ]) && loss.payload.schema === "sophia_voice_lab_d02_browser_worker_loss_cross_join_v1"
-          && loss.payload.termination_request_id_sha256 === proof?.termination_request_id_sha256
-          && loss.payload.browser_context_id_sha256 === proof?.browser_context_id_sha256
-          && loss.payload.old_worker_shutdown_event_seq === shutdown?.seq
-          && loss.payload.render_dispatch_claim_sha256 === proof?.render_dispatch_claim_sha256
-          && loss.payload.render_dispatch_claim_event_seq === dispatch?.seq
-          && loss.payload.lease_expired_at === null && loss.payload.loss_source === "worker_graceful_d02_restart_cross_join"
-          && loss.payload.raw_worker_identifiers_excluded === true && isCanonicalTimestamp(loss.payload.loss_observed_at)
-          && loss.at.toISOString() === loss.payload.loss_observed_at;
-        const replacement = loss && shutdown ? byKind("durability.browser_worker_replacement_observed").find((candidate) => candidate.source === "worker" && hasExactKeys(candidate.payload, [
-          "schema", "termination_request_id_sha256", "lost_browser_worker_id_sha256", "replacement_browser_worker_id_sha256",
-          "lost_browser_lease_epoch", "browser_context_id_sha256", "old_worker_shutdown_event_seq", "loss_event_seq",
-          "render_dispatch_claim_sha256", "source", "raw_worker_identifiers_excluded",
-        ]) && candidate.payload.schema === "sophia_voice_lab_d02_browser_worker_replacement_observation_v1"
-          && candidate.payload.termination_request_id_sha256 === proof?.termination_request_id_sha256
-          && candidate.payload.lost_browser_worker_id_sha256 === proof?.lost_worker_id_sha256
-          && candidate.payload.replacement_browser_worker_id_sha256 === proof?.replacement_worker_id_sha256
-          && candidate.payload.lost_browser_lease_epoch === proof?.lost_browser_lease_epoch
-          && candidate.payload.browser_context_id_sha256 === proof?.browser_context_id_sha256
-          && candidate.payload.old_worker_shutdown_event_seq === shutdown.seq && candidate.payload.loss_event_seq === loss.seq
-          && candidate.payload.render_dispatch_claim_sha256 === proof?.render_dispatch_claim_sha256
-          && candidate.payload.source === "replacement_worker_startup_after_graceful_d02_restart"
-          && candidate.payload.raw_worker_identifiers_excluded === true) : undefined;
-        return proof?.authority === "deployment_control" && command !== undefined && dispatch !== undefined && gatewayFreeze !== undefined
-          && shutdown !== undefined && exactLoss === true && loss !== undefined && replacement !== undefined
-          && byKind("durability.browser_worker_shutdown_observed").length === 1
-          && byKind("durability.browser_worker_loss_observed").length === 1
-          && byKind("durability.browser_worker_replacement_observed").length === 1
-          && gatewayFreeze.seq < command.seq && command.seq < dispatch.seq && dispatch.seq < shutdown.seq && shutdown.seq < loss.seq && loss.seq < replacement.seq && replacement.seq < event.seq
-          && proof.run_id_sha256 === sha256(run.id) && proof.cleanup_obligation_id_sha256 === sha256(run.cleanupObligationId)
-          && proof.lost_worker_id_sha256 !== proof.replacement_worker_id_sha256 && proof.action_kind === "render_worker_service_restart"
-          && proof.restart_http_status === 200 && proof.old_worker_instances_absent === true && proof.replacement_worker_instances_observed === true
-          && proof.lost_worker_owner_instance_id_sha256 === proof.lost_worker_id_sha256 && proof.lost_worker_present_before_restart === true && proof.lost_worker_absent_after_restart === true
-          && proof.before_instance_set_sha256 !== proof.after_instance_set_sha256
-          && typeof proof.render_action_request_sha256 === "string" && typeof proof.render_action_accepted_response_sha256 === "string" && typeof proof.render_action_settled_snapshot_sha256 === "string"
-          && proof.gateway_settlement_receipt_included === false && run.state === "aborted_driver_restart" && run.terminalError?.code === "BROWSER_SESSION_LOST";
-      });
-      const gatewaySettlementEvents = byKind("product.d02_gateway_browser_worker_termination_settled").filter((event) => event.source === "canonical");
-      const exactGatewaySettlements = gatewaySettlementEvents.filter((event) => {
-        if (workerLoss.length !== 1 || !hasExactKeys(event.payload, ["schema", "termination_request_id_sha256", "settlement_request_sha256", "gateway_receipt_sha256", "gateway_receipt", "source", "raw_product_identifiers_excluded"])
-          || event.payload.schema !== "sophia_voice_lab_d02_gateway_settlement_event_v1" || event.payload.source !== "gateway_ed25519_settlement_receipt"
-          || event.payload.raw_product_identifiers_excluded !== true) return false;
-        const proof = workerLoss[0]!.payload.evidence as Record<string, unknown> | undefined;
-        const commandEvent = externalAttestations("d02_browser_worker_termination_command").find((candidate) => {
-          const command = candidate.payload.evidence as Record<string, unknown> | undefined;
-          return typeof command?.termination_request_id === "string" && sha256(command.termination_request_id) === proof?.termination_request_id_sha256;
-        });
-        const command = commandEvent?.payload.evidence as Record<string, unknown> | undefined;
-        const dispatchClaim = byKind("product.d02_render_worker_dispatch_claimed").find((candidate) => candidate.source === "canonical"
-          && candidate.payload.termination_request_id_sha256 === proof?.termination_request_id_sha256
-          && candidate.payload.dispatch_claim_sha256 === proof?.render_dispatch_claim_sha256);
-        const shutdownEvents = byKind("durability.browser_worker_shutdown_observed");
-        const strictShutdown = shutdownEvents.length === 1 ? shutdownEvents[0] : undefined;
-        const receiptResult = D02GatewaySettlementReceiptSchema.safeParse(event.payload.gateway_receipt);
-        if (!proof || !commandEvent || !command || !dispatchClaim || !strictShutdown || !receiptResult.success || run.providerSessionId === null) return false;
-        const receipt = receiptResult.data;
-        const settlementRequest = {
-          schema: "sophia_voice_lab_gateway_browser_worker_termination_settlement_request_v1",
-          termination_request_id: command.termination_request_id,
-          voice_lab_run_id_sha256: proof.run_id_sha256,
-          test_run_id: run.testRunId,
-          cleanup_obligation_id: run.cleanupObligationId,
-          provider_session_id: run.providerSessionId,
-          provider_admission_id_sha256: proof.provider_admission_id_sha256,
-          provider_connection_epoch: proof.provider_connection_epoch,
-          frozen_provider_connection_epochs: proof.frozen_provider_connection_epochs,
-          browser_worker_id_sha256: proof.lost_worker_id_sha256,
-          browser_lease_epoch: proof.lost_browser_lease_epoch,
-          browser_context_id_sha256: proof.browser_context_id_sha256,
-          render_action_request_sha256: proof.render_action_request_sha256,
-          render_action_accepted_response_sha256: proof.render_action_accepted_response_sha256,
-          render_action_settled_snapshot_sha256: proof.render_action_settled_snapshot_sha256,
-          loss_event_seq: proof.loss_event_seq,
-          loss_observed_at: proof.loss_observed_at,
-        };
-        const lossObserved = byKind("durability.browser_worker_loss_observed").find((candidate) => candidate.seq === proof.loss_event_seq);
-        return event.payload.termination_request_id_sha256 === proof.termination_request_id_sha256
-          && event.payload.settlement_request_sha256 === canonicalRequestHash(settlementRequest)
-          && event.payload.gateway_receipt_sha256 === canonicalRequestHash(receipt)
-          && commandEvent.seq < dispatchClaim.seq && dispatchClaim.seq < (lossObserved?.seq ?? 0) && (lossObserved?.seq ?? Number.MAX_SAFE_INTEGER) < event.seq && event.seq < workerLoss[0]!.seq
-          && receipt.termination_request_id_sha256 === proof.termination_request_id_sha256
-          && receipt.voice_lab_run_id_sha256 === sha256(run.id) && receipt.test_run_id_sha256 === sha256(run.testRunId)
-          && receipt.cleanup_obligation_id_sha256 === sha256(run.cleanupObligationId)
-          && receipt.scenario_id === run.scenarioId && receipt.scenario_version === run.scenarioVersion && receipt.environment === run.environment
-          && canonicalRequestHash(receipt.expected_deployment) === canonicalRequestHash(run.target.expectedDeployment)
-          && receipt.provider_session_id_sha256 === proof.provider_session_id_sha256 && receipt.provider_admission_id_sha256 === proof.provider_admission_id_sha256
-          && receipt.provider_connection_epoch === proof.provider_connection_epoch
-          && canonicalRequestHash(receipt.frozen_provider_connection_epochs) === canonicalRequestHash(proof.frozen_provider_connection_epochs)
-          && receipt.browser_worker_id_sha256 === proof.lost_worker_id_sha256 && receipt.browser_lease_epoch === proof.lost_browser_lease_epoch
-          && receipt.browser_context_id_sha256 === proof.browser_context_id_sha256
-          && receipt.render_action_request_sha256 === proof.render_action_request_sha256
-          && receipt.render_action_accepted_response_sha256 === proof.render_action_accepted_response_sha256
-          && receipt.render_action_settled_snapshot_sha256 === proof.render_action_settled_snapshot_sha256
-          && receipt.loss_event_seq === proof.loss_event_seq && receipt.loss_observed_at === proof.loss_observed_at
-          && receipt.provider_settlement_sha256 === strictShutdown.payload.product_provider_cleanup_settlement_sha256
-          && new Date(receipt.database_observed_at).getTime() >= new Date(String(proof.loss_observed_at)).getTime()
-          && receipt.cleanup_obligation_state === "closed" && receipt.canonical_provider_state === "closed" && receipt.canonical_pending_epoch === null
-          && receipt.all_frozen_provider_epochs_terminal === true && receipt.provider_admission_absent === true
-          && receipt.voice_provider_session_absent === true && receipt.gateway_browser_relay_absent === true;
-      });
-      const productPreconditions = byKind("product.d02_api_process_restart_precondition").filter((event) => event.source === "canonical");
-      const productContinuities = byKind("product.d02_api_process_restart_continuity").filter((event) => event.source === "canonical");
-      const exactProductContinuities = productContinuities.filter((continuityEvent) => {
-        if (api.length !== 1 || productPreconditions.length !== 1
-          || !hasExactKeys(productPreconditions[0]!.payload, ["schema", "phase", "restart_request_id_sha256", "observation_request_sha256", "observation_receipt_sha256", "gateway_receipt", "source", "raw_product_identifiers_excluded"])
-          || !hasExactKeys(continuityEvent.payload, ["schema", "phase", "restart_request_id_sha256", "observation_request_sha256", "observation_receipt_sha256", "prior_observation_receipt_sha256", "gateway_receipt", "source", "raw_product_identifiers_excluded"])) return false;
-        const precondition = productPreconditions[0]!;
-        const finalEvent = api[0]!;
-        const proof = finalEvent.payload.evidence as Record<string, unknown> | undefined;
-        const commandEvent = externalAttestations("d02_restart_command").find((candidate) => {
-          const command = candidate.payload.evidence as Record<string, unknown> | undefined;
-          return typeof command?.restart_request_id === "string" && sha256(command.restart_request_id) === proof?.restart_request_id_sha256;
-        });
-        const operation = operations.find((candidate) => candidate.id === proof?.operation_id);
-        const replay = operation && byKind(`operation.${operation.type}.idempotent_replay`).find((candidate) => candidate.payload.operation_id === operation.id
-          && candidate.payload.exact_request_hash_replay === true && candidate.payload.no_new_operation === true);
-        const command = commandEvent?.payload.evidence as Record<string, unknown> | undefined;
-        const beforeResult = D02GatewayContinuityObservationReceiptSchema.safeParse(precondition.payload.gateway_receipt);
-        const afterResult = D02GatewayContinuityObservationReceiptSchema.safeParse(continuityEvent.payload.gateway_receipt);
-        if (!proof || !commandEvent || !command || !operation || !replay || !beforeResult.success || !afterResult.success
-          || run.canonicalSessionId === null || run.threadId === null || run.providerSessionId === null || run.providerEpoch === null
-          || typeof command.restart_request_id !== "string" || typeof command.requested_at !== "string" || typeof command.provider_restart_request_sha256 !== "string") return false;
-        const before = beforeResult.data;
-        const after = afterResult.data;
-        const beforeUnsigned: Record<string, unknown> = { ...before };
-        delete beforeUnsigned.signature;
-        const beforeCore = { ...beforeUnsigned };
-        delete beforeCore.receipt_sha256;
-        const afterUnsigned: Record<string, unknown> = { ...after };
-        delete afterUnsigned.signature;
-        const afterCore = { ...afterUnsigned };
-        delete afterCore.receipt_sha256;
-        const beforeRequest = {
-          schema: "sophia_voice_lab_d02_product_continuity_observation_request_v1",
-          restart_request_id: command.restart_request_id,
-          cleanup_obligation_id: run.cleanupObligationId,
-          phase: "before_api_restart",
-          product_service_boot_id_sha256: proof.before_boot_id_sha256,
-          render_action_request_sha256: proof.provider_restart_request_sha256,
-          prior_observation_receipt_sha256: null,
-          observed_at: command.requested_at,
-        };
-        const afterRequest = {
-          ...beforeRequest,
-          phase: "after_api_restart",
-          product_service_boot_id_sha256: proof.after_boot_id_sha256,
-          prior_observation_receipt_sha256: before.receipt_sha256,
-          observed_at: proof.replay_observed_at,
-        };
-        const projection = before.continuity_projection;
-        const exactProjection = canonicalRequestHash(projection) === canonicalRequestHash(after.continuity_projection)
-          && projection.voice_lab_run_id_sha256 === sha256(run.id) && projection.test_run_id_sha256 === sha256(run.testRunId)
-          && projection.cleanup_obligation_id_sha256 === sha256(run.cleanupObligationId)
-          && projection.session_id_sha256 === sha256(run.canonicalSessionId) && projection.thread_id_sha256 === sha256(run.threadId)
-          && projection.provider_session_id_sha256 === sha256(run.providerSessionId) && projection.provider_connection_epoch === run.providerEpoch
-          && projection.browser_worker_id_sha256 === proof.browser_worker_id_sha256 && projection.browser_lease_epoch === proof.browser_lease_epoch
-          && canonicalRequestHash(projection.expected_deployment) === canonicalRequestHash(run.target.expectedDeployment);
-        return exactProjection
-          && precondition.payload.schema === "sophia_voice_lab_d02_product_continuity_event_v1" && continuityEvent.payload.schema === "sophia_voice_lab_d02_product_continuity_event_v1"
-          && precondition.payload.phase === "before_api_restart" && continuityEvent.payload.phase === "after_api_restart"
-          && precondition.payload.restart_request_id_sha256 === proof.restart_request_id_sha256 && continuityEvent.payload.restart_request_id_sha256 === proof.restart_request_id_sha256
-          && precondition.payload.observation_request_sha256 === canonicalRequestHash(beforeRequest) && continuityEvent.payload.observation_request_sha256 === canonicalRequestHash(afterRequest)
-          && precondition.payload.observation_receipt_sha256 === before.receipt_sha256 && continuityEvent.payload.observation_receipt_sha256 === after.receipt_sha256
-          && continuityEvent.payload.prior_observation_receipt_sha256 === before.receipt_sha256
-          && precondition.payload.source === "gateway_ed25519_locked_product_continuity" && continuityEvent.payload.source === "gateway_ed25519_locked_product_continuity"
-          && precondition.payload.raw_product_identifiers_excluded === true && continuityEvent.payload.raw_product_identifiers_excluded === true
-          && before.receipt_sha256 === canonicalRequestHash(beforeCore) && after.receipt_sha256 === canonicalRequestHash(afterCore)
-          && before.restart_request_id_sha256 === proof.restart_request_id_sha256 && after.restart_request_id_sha256 === proof.restart_request_id_sha256
-          && before.request_sha256 === canonicalRequestHash(beforeRequest) && after.request_sha256 === canonicalRequestHash(afterRequest)
-          && before.product_service_boot_id_sha256 === proof.before_boot_id_sha256 && after.product_service_boot_id_sha256 === proof.after_boot_id_sha256
-          && before.render_action_request_sha256 === proof.provider_restart_request_sha256 && after.render_action_request_sha256 === proof.provider_restart_request_sha256
-          && before.prior_observation_receipt_sha256 === null && after.prior_observation_receipt_sha256 === before.receipt_sha256
-          && command.provider_restart_request_sha256 === proof.provider_restart_request_sha256
-          && precondition.seq < commandEvent.seq && commandEvent.seq < replay.seq && replay.seq < continuityEvent.seq && continuityEvent.seq < finalEvent.seq;
-      });
-      harness.push(api.length === 0 ? unavailable("d02.mcp_api_process_restart_and_reattach", "harness", "privileged_deployment_restart_attestation_not_attached") : check("d02.mcp_api_process_restart_and_reattach", "harness", api.length === 1, api, "api_restart_attestation_conflicted_or_failed_cross_join"));
-      harness.push(workerLossClaims.length === 0
-        ? unavailable("d02.browser_worker_termination_action", "harness", "privileged_browser_worker_termination_attestation_not_attached")
-        : check("d02.browser_worker_termination_action", "harness", workerLoss.length === 1, workerLossClaims, "browser_worker_termination_action_conflicted_or_failed_cross_join"));
-      harness.push(workerLoss.length === 1
-        ? gatewaySettlementEvents.length === 0
-          ? unavailable("d02.browser_worker_loss_abort_recovery", "harness", "gateway_browser_worker_termination_settlement_receipt_not_attached")
-          : check("d02.browser_worker_loss_abort_recovery", "harness", exactGatewaySettlements.length === 1, [...workerLoss, ...gatewaySettlementEvents], "gateway_browser_worker_termination_settlement_receipt_not_attached", "gateway_browser_worker_termination_settlement_conflicted_or_failed_cross_join")
-        : workerLossClaims.length === 0
-          ? unavailable("d02.browser_worker_loss_abort_recovery", "harness", "privileged_browser_worker_termination_attestation_not_attached")
-          : fail("d02.browser_worker_loss_abort_recovery", "harness", workerLossClaims, "browser_worker_termination_action_conflicted_or_failed_cross_join"));
-      product.push(api.length === 0 || (productPreconditions.length === 0 && productContinuities.length === 0)
-        ? unavailable("d02.product_gate", "product", "exact_product_session_thread_provider_continuity_receipt_not_attached")
-        : check("d02.product_gate", "product", exactProductContinuities.length === 1, [...productPreconditions, ...productContinuities, ...api], "exact_product_session_thread_provider_continuity_receipt_not_attached", "product_session_thread_provider_continuity_receipt_conflicted_or_failed_cross_join"));
-      break;
-    }
-    case "V-F02":
-      harness.push(unavailable("v-f02.governed_product_clock", "harness", "governed_product_clock_not_available"));
-      product.push(unavailable("v-f02.product_gate", "product", "scenario_not_executed"));
-      break;
-    default:
-      harness.push(unavailable("scenario.catalog_binding", "harness", "scenario_not_declared"));
-      product.push(unavailable("scenario.product_gate", "product", "scenario_not_declared"));
-  }
-  const passed = harness.length > 0 && harness.every((assertion) => assertion.status === "pass");
-  return { scenario_id: run.scenarioId, scenario_version: run.scenarioVersion, harness, product, summary: passed ? `All ${harness.length} machine harness assertions passed.` : `Harness certification withheld: ${harness.filter((assertion) => assertion.status !== "pass").map((assertion) => `${assertion.id}=${assertion.status}`).join(", ")}.` };
-}
-
-export function deriveTaskCleanup(events: import("./domain.js").LabEvent[], run?: RunRecord): { observed_count: number; unresolved_count: number; proof: string; tasks: Array<{ task_id_hash: string; terminal: boolean; state: string | null }> } {
-  const authoritativeZero = authoritativeLiveCleanupComplete(events);
-  const latest = new Map<string, string | null>();
-  for (const event of events) {
-    if (event.source === "product" && (!run || !isExactBoundProductEvent(run, event))) continue;
-    if (!(event.kind === "builder.task_state" || event.kind.endsWith(".sophia.builder_task"))) continue;
-    const taskId = findString(event.payload, ["taskId", "task_id"]);
-    if (!taskId) continue;
-    const state = findString(event.payload, ["phase", "status", "state"]);
-    latest.set(taskId, state);
-  }
-  const terminalStates = new Set(["completed", "complete", "cancelled", "canceled", "failed", "settled", "done", "terminal"]);
-  const tasks = [...latest.entries()].map(([taskId, state]) => ({ task_id_hash: sha256(taskId), terminal: authoritativeZero || (state !== null && terminalStates.has(state.toLowerCase())), state }));
-  const unresolved = tasks.filter((task) => !task.terminal).length;
-  return { observed_count: tasks.length, unresolved_count: authoritativeZero ? 0 : Math.max(1, unresolved), proof: authoritativeZero ? "gateway_authoritative_post_delete_zero" : "authoritative_task_discovery_or_zero_unconfirmed", tasks };
-}
-
-function authoritativeLiveCleanupComplete(events: Array<{ kind: string; payload: Record<string, unknown> }>): boolean {
-  return events.some((event) => {
-    if (event.kind !== "cleanup.recovery" || event.payload.complete !== true) return false;
-    const receipt = event.payload.receipt as Record<string, unknown> | undefined;
-    const components = receipt?.components as Record<string, unknown> | undefined;
-    const builder = components?.builder as Record<string, unknown> | undefined;
-    const builderReceipt = builder?.receipt && typeof builder.receipt === "object" ? builder.receipt as Record<string, unknown> : {};
-    return receipt?.complete === true && receipt?.live_cleanup_complete === true && receipt?.live_resources_zero === true && builder?.status === "completed" && (builder?.cleanup_complete ?? builderReceipt.cleanup_complete) === true && (builder?.discovery_complete ?? builderReceipt.discovery_complete) === true && (builder?.authoritative_zero_tasks ?? builderReceipt.authoritative_zero_tasks) === true && Number.isInteger(builder?.discovered_task_count ?? builderReceipt.discovered_task_count) && Number(builder?.discovered_task_count ?? builderReceipt.discovered_task_count) >= 0;
-  });
-}
-
-function authoritativeRetentionPurged(events: Array<{ kind: string; payload: Record<string, unknown> }>): boolean {
-  return events.some((event) => {
-    if (event.kind !== "cleanup.recovery" || event.payload.retention_purged !== true) return false;
-    const receipt = event.payload.receipt as Record<string, unknown> | undefined;
-    return receipt?.retention_purged === true && receipt?.retention_purge_pending === false && receipt?.retention_maintenance_complete === true && receipt?.live_resources_zero === true;
-  });
-}
-
-function retentionPatchFromEvents(events: Array<{ kind: string; payload: Record<string, unknown> }>): Partial<Pick<import("./ledger.js").RunPatch, "retentionPurgeDueAt" | "retentionPurgePending" | "retentionPurgeVerifiedAt">> {
-  const latest = [...events].reverse().find((event) => event.kind === "cleanup.recovery" && event.payload.complete === true);
-  if (!latest) return {};
-  if (latest.payload.retention_purged === true) return { retentionPurgePending: false, retentionPurgeVerifiedAt: new Date() };
-  const raw = latest.payload.retention_purge_due_at;
-  if (latest.payload.retention_purge_pending !== true || typeof raw !== "string") return {};
-  const due = new Date(raw);
-  if (Number.isNaN(due.getTime()) || due.toISOString() !== raw) throw new VoiceLabError(labError("RETENTION_RECEIPT_INVALID", "Gateway retention receipt did not contain a canonical ISO purge deadline.", "evidence", false));
-  return { retentionPurgeDueAt: due, retentionPurgePending: true, retentionPurgeVerifiedAt: null };
-}
-
-export function deriveFailureVerdicts(run: RunRecord, state: RunState, cleanupEvents: Array<{ kind: string; payload: Record<string, unknown> }>): Verdicts {
-  const cleanupConfirmed = cleanupEvents.some(authCleanupConfirmed);
-  return {
-    harness: state === "product_failed" || state === "inconclusive_provider" ? (run.verdicts.harness === "pending" ? "inconclusive" : run.verdicts.harness) : "fail",
-    product: state === "product_failed" ? "fail" : run.verdicts.product === "pending" ? "inconclusive" : run.verdicts.product,
-    provider: state === "inconclusive_provider" ? "inconclusive" : run.verdicts.provider === "pending" ? "unavailable" : run.verdicts.provider,
-    auth: state === "authorization_failed" ? "fail" : cleanupConfirmed ? "pass" : run.verdicts.auth === "pending" ? "unavailable" : run.verdicts.auth,
-    evidence: "unavailable",
-  };
-}
-
-function authCleanupConfirmed(event: { kind: string; payload: Record<string, unknown> }): boolean {
-  if (event.kind !== "auth.session_cleanup") return false;
-  if (event.payload.session_revoked === true && event.payload.cookies_cleared === true) return true;
-  const receipt = event.payload.receipt as Record<string, unknown> | undefined;
-  return event.payload.confirmed === true && receipt?.session_revoked === true && receipt?.cookies_cleared === true;
-}
-
-function exactString(value: unknown): string | null { return typeof value === "string" && value.length > 0 && value.length <= 512 ? value : null; }
-export function isExactBoundProductEvent(run: RunRecord, event: Pick<import("./domain.js").LabEvent, "source" | "payload">): boolean {
-  if (event.source !== "product") return false;
-  const binding = event.payload._product_run_binding;
-  if (!binding || typeof binding !== "object" || Array.isArray(binding)) return false;
-  const record = binding as Record<string, unknown>;
-  return record.app_authenticated === true
-    && record.synthetic === true
-    && record.test_run_id_sha256 === sha256(run.testRunId)
-    && record.principal_id_sha256 === sha256(run.principalId)
-    && record.environment === run.environment
-    && record.scenario_id === run.scenarioId
-    && record.scenario_version === run.scenarioVersion
-    && record.retention_hours === run.capturePolicy.retentionHours
-    && record.provider_expires_at === run.expiresAt.toISOString()
-    && record.cleanup_obligation_id_sha256 === sha256(run.cleanupObligationId);
-}
-function strictProductRunBinding(source: string, payload: Record<string, unknown>, expected: RunRecord): Record<string, unknown> | null {
-  if (source !== "product") return null;
-  const binding = payload._app_synthetic_binding;
-  if (!binding || typeof binding !== "object" || Array.isArray(binding)) return null;
-  const record = binding as Record<string, unknown>;
-  const matches = record.app_authenticated === true
-    && record.synthetic === true
-    && record.test_run_id_sha256 === sha256(expected.testRunId)
-    && record.principal_id_sha256 === sha256(expected.principalId)
-    && record.environment === expected.environment
-    && record.scenario_id === expected.scenarioId
-    && record.scenario_version === expected.scenarioVersion
-    && record.retention_hours === expected.capturePolicy.retentionHours
-    && record.provider_expires_at === expected.expiresAt.toISOString()
-    && record.cleanup_obligation_id_sha256 === sha256(expected.cleanupObligationId);
-  if (!matches) throw new VoiceLabError(labError("PRODUCT_RUN_BINDING_MISMATCH", "Product capture provenance did not match the exact authenticated synthetic run.", "harness", false));
-  return {
-    app_authenticated: true,
-    synthetic: true,
-    test_run_id_sha256: record.test_run_id_sha256,
-    principal_id_sha256: record.principal_id_sha256,
-    environment: record.environment,
-    scenario_id: record.scenario_id,
-    scenario_version: record.scenario_version,
-    retention_hours: record.retention_hours,
-    provider_expires_at: record.provider_expires_at,
-    cleanup_obligation_id_sha256: record.cleanup_obligation_id_sha256,
-  };
-}
-function exactFiniteNumber(value: unknown): number | null { return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null; }
-function stableJoin(name: string, current: string | null, candidate: string | null): string | null {
-  if (candidate === null) return current;
-  if (current !== null && current !== candidate) throw new VoiceLabError(labError("JOIN_CORRELATION_CONFLICT", `Conflicting ${name} values were observed from strict owning receipts.`, "harness", false, { join: name, prior_hash: sha256(current), candidate_hash: sha256(candidate) }));
-  return candidate;
-}
-function monotonicEpoch(current: number | null, candidate: number | null): number | null {
-  if (candidate === null) return current;
-  if (current !== null && candidate < current) throw new VoiceLabError(labError("PROVIDER_EPOCH_REGRESSION", "Provider epoch regressed across strict product receipts.", "harness", false, { prior: current, candidate }));
-  return candidate;
-}
-
-function assertBargeWindow(target: Record<string, unknown> | undefined): void {
-  const targetAt = typeof target?.target_schedule_at === "string" ? new Date(target.target_schedule_at).getTime() : Number.NaN;
-  const maxLateness = Number(target?.max_lateness_ms);
-  const lateness = Date.now() - targetAt;
-  if (!Number.isFinite(targetAt) || !Number.isFinite(maxLateness) || maxLateness < 0 || lateness > maxLateness) throw new VoiceLabError(labError("BARGE_WINDOW_MISSED", "Barge-in execution could no longer meet the declared playback-relative timing window before page mutation.", "conflict", true, { lateness_ms: Number.isFinite(lateness) ? Math.max(0, lateness) : null, max_lateness_ms: Number.isFinite(maxLateness) ? maxLateness : null }));
-}
-
-export function leaseHeartbeatIntervalMs(operationLeaseSeconds: number, browserLeaseSeconds: number): number {
-  return Math.max(1_000, Math.floor(Math.min(operationLeaseSeconds, browserLeaseSeconds) * 1_000 / 3));
-}
-
-function findString(value: unknown, keys: readonly string[], depth = 0): string | null {
-  if (!value || typeof value !== "object" || depth > 8) return null;
-  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
-    if (keys.includes(key) && typeof child === "string" && child.length > 0) return child;
-  }
-  for (const child of Object.values(value as Record<string, unknown>)) {
-    const found = findString(child, keys, depth + 1);
-    if (found !== null) return found;
-  }
-  return null;
-}
-
-function findFiniteNumber(value: unknown, keys: readonly string[], depth = 0): number | null {
-  if (!value || typeof value !== "object" || depth > 8) return null;
-  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
-    if (keys.includes(key) && typeof child === "number" && Number.isFinite(child) && child >= 0) return child;
-  }
-  for (const child of Object.values(value as Record<string, unknown>)) {
-    const found = findFiniteNumber(child, keys, depth + 1);
-    if (found !== null) return found;
-  }
-  return null;
-}
-
-function deterministicUuid(runId: string, purpose: string): string {
-  const source = sha256(`${purpose}:${runId}`).slice(0, 32).split("");
-  source[12] = "5";
-  source[16] = (["8", "9", "a", "b"] as const)[Number.parseInt(source[16]!, 16) % 4]!;
-  const hex = source.join("");
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
-}
-
-/**
- * Hash immutable, already-persisted evidence without reusing the public request
- * hash's one-megabyte admission bound. The projection can legitimately contain
- * a browser diagnostic larger than that bound. Feed canonical JSON directly to
- * the digest so advancing an evidence revision remains deterministic without
- * allocating another full serialized copy of the retained evidence.
- */
-function evidenceProjectionHash(input: unknown): string {
-  const digest = createHash("sha256");
-  const seen = new WeakSet<object>();
-  const write = (value: unknown): void => {
-    if (value === null || typeof value === "boolean" || typeof value === "number" || typeof value === "string") {
-      digest.update(JSON.stringify(value));
-      return;
-    }
-    if (Array.isArray(value)) {
-      if (seen.has(value)) throw new VoiceLabError(labError("EVIDENCE_PROJECTION_INVALID", "Evidence revision projection contains a cycle.", "internal", false));
-      seen.add(value);
-      digest.update("[");
-      value.forEach((child, index) => {
-        if (index > 0) digest.update(",");
-        write(child);
-      });
-      digest.update("]");
-      seen.delete(value);
-      return;
-    }
-    if (value && typeof value === "object") {
-      if (seen.has(value)) throw new VoiceLabError(labError("EVIDENCE_PROJECTION_INVALID", "Evidence revision projection contains a cycle.", "internal", false));
-      seen.add(value);
-      digest.update("{");
-      const entries = Object.entries(value as Record<string, unknown>)
-        .filter(([, child]) => child !== undefined && typeof child !== "function" && typeof child !== "symbol")
-        .sort(([left], [right]) => left.localeCompare(right));
-      entries.forEach(([key, child], index) => {
-        if (index > 0) digest.update(",");
-        digest.update(JSON.stringify(key));
-        digest.update(":");
-        write(child);
-      });
-      digest.update("}");
-      seen.delete(value);
-      return;
-    }
-    digest.update("null");
-  };
-  write(input);
-  return digest.digest("hex");
-}
-
-interface EvidenceProjectionOverflowRecord {
-  path: string;
-  content_sha256: string;
-  byte_length: number;
-  value: unknown;
-}
-
-function projectEvidenceValue(path: string, value: unknown, overflowId: string, overflow: EvidenceProjectionOverflowRecord[]): unknown {
-  if (value === null) return null;
-  const serialized = JSON.stringify(value);
-  if (serialized === undefined) return null;
-  const byteLength = Buffer.byteLength(serialized);
-  if (byteLength <= 64_000) return value;
-  const contentSha256 = evidenceProjectionHash(value);
-  overflow.push({ path, content_sha256: contentSha256, byte_length: byteLength, value });
-  return {
-    status: "available_in_projection_overflow",
-    resource_id: `voice-lab://artifact/${overflowId}`,
-    path,
-    content_sha256: contentSha256,
-    byte_length: byteLength,
-  };
-}
-
-export function deriveD02BrowserContextBinding(run: RunRecord, workerId: string, leaseEpoch: number): D02BrowserContextBinding {
-  if (run.scenarioId !== "V-D02" || typeof workerId !== "string" || workerId.length === 0 || !Number.isSafeInteger(leaseEpoch) || leaseEpoch < 1) {
-    throw new VoiceLabError(labError("BROWSER_CONTEXT_BINDING_MISMATCH", "A deterministic browser context binding requires one exact V-D02 run, worker, and positive lease epoch.", "harness", false));
-  }
-  const workerHash = sha256(workerId);
-  const allocationId = deterministicUuid(run.id, `browser-context-allocation:${workerHash}:${leaseEpoch}`);
-  return {
-    voice_lab_run_id_sha256: sha256(run.id),
-    browser_worker_id_sha256: workerHash,
-    browser_lease_epoch: leaseEpoch,
-    browser_context_id_sha256: sha256(allocationId),
-  };
-}
-
-function isExactD02BrowserContextBinding(run: RunRecord, binding: D02BrowserContextBinding): boolean {
-  return run.scenarioId === "V-D02"
-    && /^[a-f0-9]{64}$/.test(binding.voice_lab_run_id_sha256)
-    && binding.voice_lab_run_id_sha256 === sha256(run.id)
-    && /^[a-f0-9]{64}$/.test(binding.browser_worker_id_sha256)
-    && Number.isSafeInteger(binding.browser_lease_epoch)
-    && binding.browser_lease_epoch > 0
-    && /^[a-f0-9]{64}$/.test(binding.browser_context_id_sha256);
-}
-
-function sameD02BrowserContextBinding(left: D02BrowserContextBinding | undefined, right: D02BrowserContextBinding | undefined): boolean {
-  if (left === undefined || right === undefined) return left === right;
-  return left.voice_lab_run_id_sha256 === right.voice_lab_run_id_sha256
-    && left.browser_worker_id_sha256 === right.browser_worker_id_sha256
-    && left.browser_lease_epoch === right.browser_lease_epoch
-    && left.browser_context_id_sha256 === right.browser_context_id_sha256;
-}
+Yช็x-ฎ้Üjืข๋iบฺ+งj[h‘้Üข้ํืn๛๏T่ตฉhบฺnถXงzอZ[\ÜศÜX]R\ฺ[ÛUURQHÛHูNÜ\ศย[\ÜศÛZ\ฺYHHÛHูN][ย[\ÜศÞ\HÛHูNXย[\Ü[หศ\Hููู\HÛH[ศย[\Üศ\Üู\]Y[ะ]S[Z]\ูUุ]\H]Y[ิ\ÛÛ\HÛHุ]Y[หศย[\Üศ\ั^XÝ[[^][Û‘[[ÜK\HÝÜู\ÛÛ^[[ห\H”ูXÝÛX[\XฺÛÝÛYู[Y[\HฺXูPÝÜู\‘]\HÛHุÝÜู\Y]\ศย[\Üศ•S‘Qั’VT‘WำPS’Q‘TีิาLM\HฺXูSXÛÛYศHÛHุÛÛYหศย[\Üศ‘ุ]]ุ^PÛÛ[Z]Sุู\][Û”XูZ\ฺุ[XK‘ุ]]ุ^Tู][Y[XูZ\ฺุ[XHHÛHูYุ]]ุ^Kศย[\ÜศT“RSSิ•S—ิีUTหฺXูSX‘\Ü[]X[\XÝหX‘\Ü\H]Y[ูTY\HX‘\Ü\H[”XÛÜ\H[”Ý]K\HÝZ]TXÛÜ\H\XÝศHÛHูÛXZ[ศย[\Ü\HศÛZ[YYÜ\][ÛÛ[ะYZ\Üฺ[Û“[Z]หฺXูSX“Yู\HÛHÛYู\ศย[\ÜศÜÝÜ\ีฺXูSX“Yู\HÛHÜÜÝÜ\ห[Yู\ศย[\ÜศุูTฬMHÛHÛุ]]ศย[\Üศุ\X[]PÛูXหÝ]XะX\\]][Xุ]Ü\Üู\ิูXÜ]ุ[ÛXุ[\]Y\Ý\ฺYXÝ\]Z\TุÛÜKฺLMHÛHÜูXÝ\]Kศย[\Üศ[Y]P[ÝูYÜYฺ[HÛHÜูXÝ\]Kศย[\ÜศÝÜู\ÛÛ[Z]TÛู”ฺุ[XK\Üู\\ฺูXÝYZ\Üฺ[Û”Ûู\ู\P]Y[า[]ÛÛ[]ฺุ[X\ห[Y]P]Y[า[][Z]\H^\TÝ[[X\HHÛHÜู\XูKศย[\Üศ[ฺ][Û”[HÛHÜÝ]K[XXฺ[Kศย[\ÜศÜX]UÛÜู\ÛÝY[]KÜX]UÛÜู\’X\X]]\Ý][Û\HÛÜู\ÛÝY[]HHÛHÝÛÜู\ZX\X]ศย[\XูHXÝ]SX\ูHศ\ฺุ[X\ศB[\XูH•ÛÜู\”ฺ]ÝÛ\Hย[’YÝ[ฮย\Z[][Û”\]Y\ÝYฺLMÝ[ฮยÛX[\ุYุ][Û’YฺLMÝ[ฮยÜÝÛÜู\’YฺLMÝ[ฮยÜÝÝÜู\“X\ูQ\ฺุ[X\ยÝÜู\ÛÛ^YฺLMÝ[ฮยÝY\”ู\Üฺ[Û’YฺLMÝ[ฮยÝY\YZ\Üฺ[Û’YฺLMÝ[ฮยÝY\ÛÛXÝ[Û‘\ฺุ[X\ยÞ[”ÝY\ÛÛXÝ[Û‘\ฺุฮ[X\–ืNย[\XÝ[Û”\]Y\ÝฺLMÝ[ฮยุ]]ุ^QY^T\]Y\ÝฺLMÝ[ฮยุ]]ุ^QY^Q][ู\N[X\ยÛÛ[X[][ู\N[X\ย[\‘\Ü]ฺÛZ[TฺLMÝ[ฮย[\‘\Ü]ฺÛZ[Q][ู\N[X\ยBÛÛÝ—ิ‘WัTิUาิาUีำ—ีะRUำTศHฬยÛÛÝ—ิ‘WัTิUาิาUีำ—ิำำTศHLย^ÜÛÛÝำิ’ัT—าPT•‘PUาS•T•SำTศH—ฬย^ÜÛÛÝำิ’ัT—าPT•‘PUะ”“ีิัT—ิ‘PQS‘TิืีSQSีUำTศHWฬยÛÛÝÞ\\Þ[ศHÛZ\ฺYJÞ\
+Nย^ÜÛÛÝฬWั”“ำ•S‘ัิS•ีT’PS•ศHศZ\Üฺ[ศ^\YÜÛืุ]YY[ูHÜÛืÛÜ\][ÛÜÛืÜ[ฺ\[ÜÛืÜ[Ü[\WÝ\ู\—H\ศÛÛÝย^ÜÛÛÝฬWำะUUีT’PS•ศHศุ]]ÛZ\Üฺ[ศุ]]ฺ[[Yุ]]ฺ[ÝYXฺY[ู][ÜุÛÜHุ]]Ü\ÛÝ\ูWÛZ\ÛX]ฺุ]]ุ]]Ü^][Û—ุÛูWÜ\^H—H\ศÛÛÝย^ÜÛÛÝฬ—ีSQUSำ—ีT’PS•ศHย[ÛÝÛ—ูY[ศX[ÜYYฺYX[ÜYYÜฺH^Û[Z]^\WÛY]Y]Wุ]\ศ^\WÛY]Y]Wู\][Û[Ý\ÜYู^\H[Ý\ÜYÜุู[\[ศÛÜYฺ[[Ý\ÜYÝ\ู]Ü][Ý\ÜYÝ\ู]Ü]Y\H[Ý\ÜYÝ\ู]ÛÜYฺ[Y\XÝÛÜYฺ[[[Yุุ\\WÜÛXÞHX[ÜYYÝุ]Ý\ฺ^Yุ]Y[ศ—H\ศÛÛÝย^ÜÛÛÝฬ—าีT’PS•ศHย[ÛÝÛ—ูY[ศX[ÜYYฺYX[ÜYYÜฺH^Û[Z][Ý\ÜYู^\H[Ý\ÜYÜุู[\[ศÛÜYฺ[[Ý\ÜYÝ\ู]Ü][Ý\ÜYÝ\ู]Ü]Y\H[Ý\ÜYÝ\ู]ÛÜYฺ[Y\XÝÛÜYฺ[[[Yุุ\\WÜÛXÞHY\ฺÛÛX[ÜYYฺÛÛÝ\ฺ^YฺÛÛ—H\ศÛÛÝย^ÜÛÛÝฬ—ำPิะ“ีS‘T–Wิ“ะ‘WิะาSPHHÛÜXWÝฺXูWÛX—Üฬ—ÛXÜุÝ[\WÜุWÝH\ศÛÛÝย\Hฬ’\X[H\[ูฬ—าีT’PS•ึÛ[X\—Nย\Hฬ”\]Y\ÝูRฺ[H\ูYÝÛÛุุ[Ý[YูY\ฺÛÛX[ÜYYฺÛÛÝ\ฺ^YฺÛÛย[\XูHฬ’ุQ^XÝ][Ûย\]Y\ÝÛÛXÝยฺุ[XNÛÜXWÝฺXูWÛX—Üฬ—ÛXÜÜ\]Y\ÝÝHยY]ู”ิีย]ÛXÜยÛÛ[Ý\N\Xุ][ÛฺÛÛยูWฺฺ[ฬ”\]Y\ÝูRฺ[ยÛÛืÛY]ูÛÛหุุ[[ยÛÛÛ[YNÝ\ÝฺXูWÜ[ÜXZศู]ุุ\X[]Y\ศ[ยNยÝ]\ฮLฮย\ÜÛูNÝ[ฮย]Y]XÝ[ÛXÜ]][Xุ]HXÜ\]Y\ÝXÜูHย]Y]Ý]ÛÛYN[ÝูY[YYย]Y]\ู\ะÝ[Y[XฺฮÛÛX[ย]Y]\ÜÛ\ÜฮÝ[ศ[ยB[\XูHฬ”\ÛÝ\ูTÛ\ฺÝยXÝ]WÜ[—ุÛÝ[[X\ยÜ\][Û—ุÛÝ[[X\ย[—ู][ุÝ\ÛÜ[X\ย[]Û]]][Û—ู][ุÛÝ[[X\ยÝÜู\—ุÛÛ^ุÛÝ[[X\ยุ[ÛXุ[Üู\Üฺ[Û—ุÛÝ[[X\ยÝY\—Üู\Üฺ[Û—ุÛÝ[[X\ยBÛÛÝฬ—าัVPีUSำ”ฮXYÛOXÛÜฬ’\X[ÛZ]ฬ’ุQ^XÝ][Û\]Y\ÝÛÛXÝ	ศูRฺ[ฬ”\]Y\ÝูRฺ[ศÛÛ[YNฬ’ุQ^XÝ][Û–ศ\]Y\ÝÛÛXÝ—VศÛÛÛ[YH—HOHย[ÛÝÛ—ูY[ฮศูRฺ[\ูYÝÛÛุุ[ÛÛ[YNÝ\ÝฺXูWÜ[Ý]\ฮ\ÜÛูN“PิาS•SQะT‘ีSQS•ศ]Y]XÝ[ÛXÜ]][Xุ]H]Y]Ý]ÛÛYN[ÝูY]Y]\ู\ะÝ[Y[Xฺฮ[ูK]Y]\ÜÛ\Üฮ[KX[ÜYYฺYศูRฺ[\ูYÝÛÛุุ[ÛÛ[YNÜXZศÝ]\ฮ\ÜÛูN“PิาS•SQะT‘ีSQS•ศ]Y]XÝ[ÛXÜ]][Xุ]H]Y]Ý]ÛÛYN[ÝูY]Y]\ู\ะÝ[Y[Xฺฮ[ูK]Y]\ÜÛ\Üฮ[KX[ÜYYÜฺNศูRฺ[\ูYÝÛÛุุ[ÛÛ[YNÝ\ÝฺXูWÜ[Ý]\ฮ\ÜÛูN“PิาS•SQะT‘ีSQS•ศ]Y]XÝ[ÛXÜ]][Xุ]H]Y]Ý]ÛÛYN[ÝูY]Y]\ู\ะÝ[Y[Xฺฮ[ูK]Y]\ÜÛ\Üฮ[K^Û[Z]ศูRฺ[\ูYÝÛÛุุ[ÛÛ[YNÜXZศÝ]\ฮ\ÜÛูN•VีำืำT‘ัH]Y]XÝ[ÛXÜ]][Xุ]H]Y]Ý]ÛÛYN[ÝูY]Y]\ู\ะÝ[Y[Xฺฮ[ูK]Y]\ÜÛ\Üฮ[K[Ý\ÜYู^\NศูRฺ[\ูYÝÛÛุุ[ÛÛ[YNÜXZศÝ]\ฮ\ÜÛูN‘’VT‘Wำ“ีั“ีS‘]Y]XÝ[ÛXÜ]][Xุ]H]Y]Ý]ÛÛYN[ÝูY]Y]\ู\ะÝ[Y[Xฺฮ[ูK]Y]\ÜÛ\Üฮ[K[Ý\ÜYÜุู[\[ฮศูRฺ[\ูYÝÛÛุุ[ÛÛ[YNÝ\ÝฺXูWÜ[Ý]\ฮ\ÜÛูN“PิาS•SQะT‘ีSQS•ศ]Y]XÝ[ÛXÜ]][Xุ]H]Y]Ý]ÛÛYN[ÝูY]Y]\ู\ะÝ[Y[Xฺฮ[ูK]Y]\ÜÛ\Üฮ[KÛÜYฺ[ศูRฺ[\ูYÝÛÛุุ[ÛÛ[YNÝ\ÝฺXูWÜ[Ý]\ฮ\ÜÛูN•T‘ัUำ“ีะSีัQ]Y]XÝ[ÛXÜ]][Xุ]H]Y]Ý]ÛÛYN[ÝูY]Y]\ู\ะÝ[Y[Xฺฮ[ูK]Y]\ÜÛ\Üฮ[K[Ý\ÜYÝ\ู]Ü]ศูRฺ[\ูYÝÛÛุุ[ÛÛ[YNÝ\ÝฺXูWÜ[Ý]\ฮ\ÜÛูN•T‘ัUำ“ีะSีัQ]Y]XÝ[ÛXÜ]][Xุ]H]Y]Ý]ÛÛYN[ÝูY]Y]\ู\ะÝ[Y[Xฺฮ[ูK]Y]\ÜÛ\Üฮ[K[Ý\ÜYÝ\ู]Ü]Y\NศูRฺ[\ูYÝÛÛุุ[ÛÛ[YNÝ\ÝฺXูWÜ[Ý]\ฮ\ÜÛูN•T‘ัUำ“ีะSีัQ]Y]XÝ[ÛXÜ]][Xุ]H]Y]Ý]ÛÛYN[ÝูY]Y]\ู\ะÝ[Y[Xฺฮ[ูK]Y]\ÜÛ\Üฮ[K[Ý\ÜYÝ\ู]ÛÜYฺ[ศูRฺ[\ูYÝÛÛุุ[ÛÛ[YNÝ\ÝฺXูWÜ[Ý]\ฮ\ÜÛูN•T‘ัUำ“ีะSีัQ]Y]XÝ[ÛXÜ]][Xุ]H]Y]Ý]ÛÛYN[ÝูY]Y]\ู\ะÝ[Y[Xฺฮ[ูK]Y]\ÜÛ\Üฮ[KY\XÝÛÜYฺ[ศูRฺ[\ูYÝÛÛุุ[ÛÛ[YNÝ\ÝฺXูWÜ[Ý]\ฮ\ÜÛูN•T‘ัUำ“ีะSีัQ]Y]XÝ[ÛXÜ]][Xุ]H]Y]Ý]ÛÛYN[ÝูY]Y]\ู\ะÝ[Y[Xฺฮ[ูK]Y]\ÜÛ\Üฮ[K[[Yุุ\\WÜÛXÞNศูRฺ[\ูYÝÛÛุุ[ÛÛ[YNÝ\ÝฺXูWÜ[Ý]\ฮ\ÜÛูN“PิาS•SQะT‘ีSQS•ศ]Y]XÝ[ÛXÜ]][Xุ]H]Y]Ý]ÛÛYN[ÝูY]Y]\ู\ะÝ[Y[Xฺฮ[ูK]Y]\ÜÛ\Üฮ[KY\ฺÛÛศูRฺ[Ý[YูY\ฺÛÛÛÛ[YNู]ุุ\X[]Y\ศÝ]\ฮ\ÜÛูNT‘ีSQS•ะ“ีS‘ศ]Y]XÝ[ÛXÜ\]Y\Ý]Y]Ý]ÛÛYN[YY]Y]\ู\ะÝ[Y[XฺฮYK]Y]\ÜÛ\ÜฮT‘ีSQS•ะ“ีS‘ศKX[ÜYYฺÛÛศูRฺ[X[ÜYYฺÛÛÛÛ[YN[Ý]\ฮ\ÜÛูN“PS“ิ“QQา”ำำ]Y]XÝ[ÛXÜูH]Y]Ý]ÛÛYN[YY]Y]\ู\ะÝ[Y[XฺฮYK]Y]\ÜÛ\Üฮ“PS“ิ“QQา”ำำKÝ\ฺ^YฺÛÛศูRฺ[Ý\ฺ^YฺÛÛÛÛ[YNู]ุุ\X[]Y\ศÝ]\ฮLห\ÜÛูN“ัWีำืำT‘ัH]Y]XÝ[ÛXÜูH]Y]Ý]ÛÛYN[YY]Y]\ู\ะÝ[Y[XฺฮYK]Y]\ÜÛ\Üฮ“ัWีำืำT‘ัHKNย^Ü[Ý[Ûฬ’ุQ^XÝ][Û\X[ฬ’\X[
+Nฬ’ุQ^XÝ][ÛยÛÛÝ^XÝ][ÛHฬ—าัVPีUSำ”ึÝ\X[Nย]\ย\]Y\ÝÛÛXÝยฺุ[XNÛÜXWÝฺXูWÛX—Üฬ—ÛXÜÜ\]Y\ÝÝHY]ู”ิี]ÛXÜÛÛ[Ý\N\Xุ][ÛฺÛÛูWฺฺ[^XÝ][ÛูRฺ[ÛÛืÛY]ู^XÝ][ÛูRฺ[OOHX[ÜYYฺÛÛศ[ÛÛหุุ[ÛÛÛ[YN^XÝ][ÛÛÛ[YKKÝ]\ฮ^XÝ][ÛÝ]\ห\ÜÛูN^XÝ][Û\ÜÛูK]Y]XÝ[Û^XÝ][Û]Y]XÝ[Û]Y]Ý]ÛÛYN^XÝ][Û]Y]Ý]ÛÛYK]Y]\ู\ะÝ[Y[Xฺฮ^XÝ][Û]Y]\ู\ะÝ[Y[Xฺห]Y]\ÜÛ\Üฮ^XÝ][Û]Y]\ÜÛ\ÜหNยB^ÜÛ\ÜศฺXูSX•ÛÜู\ยXYÛHุXÝ]SX\ู\ศH]ศX\Ý[หXÝ]SX\ูO
+NยXYÛHูÛ[ุ\X[]Y\ฮุ\X[]PÛูXฮยXYÛHÝÛÜู\ÛÝY[]NÛÜู\ÛÝY[]NยXYÛHููู\ููู\ยÜÝÜ[ศH[ูNยÝÛÜู\’X\X]ู\]Y[ูHHยÝÛÜู\’X\X]ÛÜÛZ\ูNÛZ\ูOฺY[H[ยÝÛÜู\’X\X]\Ý][\ÛZ\ูNÛZ\ูOฺY[H[ยÜ\ÛÛUÛÜู\’X\X]\Ý][\
+
+
+HOฺY
+H[H[ยÝุZูUÛÜู\’X\X]ÛÜ
+
+
+HOฺY
+H[H[ยÛÛÜÛZ\ูNÛZ\ูOฺY[H[ยุÝ\[Ü\][ÛXÜXÜÛÛÛ\[H[ยุÝ\[Ü\][Û”[’YÝ[ศ[H[ยXYÛHู”ฺ]ÝÛ\\ศH]ศX\Ý[ห•ÛÜู\”ฺ]ÝÛ\O
+NยXYÛHู”ฺ]ÝÛา[‘YฺH]ศX\Ý[หÛZ\ูOฺY
+NยXYÛHู”Q\Ü]ฺ]\ู\ศH]ศู]Ý[ฯ
+NยÛÛÝXÝÜXYÛHÛÜู\’YÝ[หXYÛHYู\ฺXูSX“Yู\XYÛHÛÛYฮฺXูSXÛÛYหXYÛH]Y[ฮ]Y[ิ\ÛÛ\XYÛH]\ฺXูPÝÜู\‘]\XYÛHุ\X[]Y\ฮุ\X[]PÛูXหููู\ฮููู\XYÛHุู[\[ั]ฺ\[ู]ฺH]ฺXYÛH\ู]Y[]N
+
+HOÛZ\ูOXÛÜÝ[ห[ÛÝÛ	ศฺฮÛÛX[OH\Þ[ศ
+
+HOÛÛYหูQ[OOH\Ý	ÛÛYหXY[\Üี\ู]OOH[ศ
+ศฺฮYKÝ]\ฮ\ÝÝ\ู]ÛÝุÛÛYÝ\YJB
+ศฺฮ[ูKÝ]\ฮ\ู]ÜุWÛÝฺ[XÝYJKÛÜู\ÛÝY[]NÛÜู\ÛÝY[]HHÜX]UÛÜู\ÛÝY[]JÛÜู\’Y
+K
+Hย\หููู\Hููู\ฯศ[สศ][ÛÛYหูำ][\ูNศู\XูNÛÜXK]ฺXูK[X]ÛÜู\ÛÜู\—ฺYÛÜู\’YHJNย\หูÛ[ุ\X[]Y\ศH]ศุ\X[]PÛูXสÛÛYหÜ[ูXÜ]ÛÛYหุ\X[]R\ÜÝY\ÛÛYหุ\X[]UูXÛÛสNย\หÝÛÜู\ÛÝY[]HHÛÜู\ÛÝY[]NยB[
+NÛZ\ูOฺYยY
+\หÛÛÜÛZ\ูJH]\\หÛÛÜÛZ\ูNย\หÜÝ\ÛÜู\’X\X]ÛÜ
+
+NยÛÛÝ\ÝX\X]][\H\หÝÛÜู\’X\X]\Ý][\ÛZ\ูHฯศÛZ\ูK\ÛÛJ
+Nย\หÛÛÜÛZ\ูHH\ÝX\X]][\[
+
+HO\หÜ[“ÛÜ
+
+JK[[J\Þ[ศ
+
+HOย\หÜÝÜ[ศHYNย\หÝุZูUÛÜู\’X\X]ÛÜห
+Nย]ุZ]\หÝÛÜู\’X\X]ÛÜÛZ\ูNย\หÛÛÜÛZ\ูHH[ยJNย]\\หÛÛÜÛZ\ูNยB\Þ[ศÜ[“ÛÜ
+
+NÛZ\ูOฺYยฺ[H
+]\หÜÝÜ[สHยÛÛÝÛÜูYH]ุZ]\ห[“ÛูJ
+Kุ]ฺ
+
+\ÜHOศ\หููู\\Üศ\ÜุYQ\Ü\ÜHKÛÜู\]\][ÛZ[YNศ]\[ูNศJNย]ุZ]\หXZ[Z[”ู\Üฺ[Ûส
+Kุ]ฺ
+
+\ÜHO\หููู\\Üศ\ÜุYQ\Ü\ÜHKÝÜู\XZ[[[ูHZ[YJNยY
+]ÛÜูY
+H]ุZ][^J\หÛÛYหÛÜู\”Û\สNยBBÝÜ
+
+NฺYย\หÜÝÜ[ศHYNย\หÝุZูUÛÜู\’X\X]ÛÜห
+NยB\Þ[ศÛÜูJ
+NÛZ\ูOฺYย\หÝÜ
+
+Nย]ุZ]\หÝÛÜู\’X\X]ÛÜÛZ\ูNย]”]ZY\ุู[ูQZ[\N[ÛÝÛH[ย]\U[Y][Û‘Z[\N[ÛÝÛH[ยÜ
+ÛÛÝ[’Yู\หุXÝ]SX\ู\หู^\ส
+JHย]ุZ]\หÜ\ÛÛQ•ÛÜู\”ฺ]ÝÛ\J[’Y
+K[
+\JHOยY
+\JH\หู”ฺ]ÝÛ\\หู]
+[’Y\JNยJKุ]ฺ
+
+\ÜHOย\หููู\\Üศ[—ฺY[’Y\ÜุYQ\Ü\ÜHK‘ฺ]ÝÛ\H[Y][ÛZ[YÛÜูYNย\U[Y][Û‘Z[\HฯฯH\ÜยJNยBหศ[[]\Z[]HÛÝ\ูHฺZ[ุ[ÝุY[H[ÝYฺศู[\Xยหศุ[ู[][Ûฺ[ศÛศÛÝ[\ÝÞHH^XÝYูHฺÜูH\XHหศÛÛ[X[ู\Ü]ฺÛูY\[HZ[YศุY\[ศฺ]ÝÛY
+\U[Y][Û‘Z[\HOOH[
+HÝศ\U[Y][Û‘Z[\NยหศHÛÛ[Z]Yุุ[[[\ศ[XYHHูXÝุÝÜู\]]][Û[ูKหศ][ÝYฺ]\ศÝY]ฺ]ÝÛ]]Ü]KูY\H^XÝX\ูH[]Bหศฺ[HHุ]]ุ^HY^KฺYÛYÛÛ[X[[Ûุ[\Ü]ฺÛÛ\ูKหศH[\H]\Ý]\[ÝYฺศู[\XศYูH\ÝXÝ[Û\KÛÛÝQ\Ü]ฺ[ศHห\หุXÝ]SX\ู\หู^\ส
+WK[\
+[’Y
+HO\หู”Q\Ü]ฺ]\ู\ห\ส[’Y
+H	]\หู”ฺ]ÝÛ\\ห\ส[’Y
+JNย]ุZ]ÛZ\ูK[
+Q\Ü]ฺ[หX\
+\Þ[ศ
+[’Y
+HOยHยÛÛÝ\HH]ุZ]\หุ]ุZ]”Q\Ü]ฺฺ]ÝÛ\J[’Y—ิ‘WัTิUาิาUีำ—ีะRUำTสNย\หู”ฺ]ÝÛ\\หู]
+[’Y\JNยHุ]ฺ
+\ÜHย\หููู\\Üศ[—ฺY[’Y\ÜุYQ\Ü\ÜHK‘KY\Ü]ฺฺ]ÝÛ\HYÝÛÛ\ูHNย\U[Y][Û‘Z[\HฯฯH\ÜยBJJNยY
+\U[Y][Û‘Z[\HOOH[
+HÝศ\U[Y][Û‘Z[\NยÛÛÝÝ\[\HH\หุÝ\[Ü\][Û”[’YOOH[ศ[Y[Y\หู”ฺ]ÝÛ\\หู]
+\หุÝ\[Ü\][Û”[’Y
+Nย\หุÝ\[Ü\][ÛXÜหXÜ
+]ศฺXูSX‘\ÜÝ\[\BศX‘\Ü”“ีิัT—ิัTิาSำ—ำิี•HÛÝ\ูK][Y]YÛÜู\\Ý\]ZY\ุูYH[YYฺÝÜู\Ü\][Û\\Üศ[ูKศ\Z[][Û—Ü\]Y\ÝฺYÜฺLMÝ\[\K\Z[][Û”\]Y\ÝYฺLMÛÝ\ูNÛÜู\—ูÜXูY[ู—Ü\Ý\JBX‘\Ü•ำิ’ัT—ัิPัQ•SิาUีำ•ÛÜู\ฺ]ÝÛุ[ู[YH[YYฺÜ\][ÛYÜHÛX[\\\ÜศYJJJNยÛÛÝÛÜZ[H\หÛÛÜÛZ\ูHศฺ][Y[Ý]
+\หÛÛÜÛZ\ูKWฬ
+H[ยหศÛÝ\ูKX\YYÛX[\Ý\ศ\ศÛÛÛ\ศาQีT“H\ศุู\YุZ][ยหศÜHÝ[YXZ[[[ูH]\][Û\ÝÛÝ[YH\ศZ[Yู]หศศHศ]ZY\ุู[ูHYู][ÛÝ[^ูYYH]ÜHÜXูHฺ[ÝหหศH[YYฺX\XZู\ศHÜ\][ÛÛÛ\ูHฺ][“ÛูIÜศXÜ]ÛÛÝ\YYÛX[\ศHห\หู”ฺ]ÝÛ\\ห[Y\ส
+WB[\
+Ü[’YJHO\หุXÝ]SX\ู\ห\ส[’Y
+JBX\
+\Þ[ศ
+Ü[’Y\WJHOย]ุZ]ฺ][Y[Ý]
+\หÜ]ZY\ุูQ•ÛÜู\[’Y\JKฬ
+Kุ]ฺ
+
+\ÜHOย\หููู\\Üศ[—ฺY[’Y\ÜุYQ\Ü\ÜHKÜXูY[[ÛX[\Z[YNย”]ZY\ุู[ูQZ[\HฯฯH\ÜยJNยJNยY
+\YYÛX[\ห[Ý
+H]ุZ]ÛZ\ูK[
+\YYÛX[\สNยY
+”]ZY\ุู[ูQZ[\HOOH[
+HÝศ”]ZY\ุู[ูQZ[\NยY
+ÛÜZ[H]ุZ]ÛÜZ[ุ]ฺ
+
+\ÜHOย\หููู\\Üศ\ÜุYQ\Ü\ÜHKÛÜู\ÛÜYÝZ[ÛX[HNยY
+\YYÛX[\ห[Ý
+H”]ZY\ุู[ูQZ[\HฯฯH\ÜยJNยหศHÛÝ\ูK\ÜXฺYXศÛÜูH\ศÛHÝXุู\Üู[YHÛÛÜÝÜY\ยหศู[ศÝ\ฺ\ูHHฺYÛ[[\]\ÝX]HHÛ^\หZ[XÛÜูYหศุู\Üศ][ÝXYู\Ü[ศHÜXูY[\Þ[Y[^]Y
+”]ZY\ุู[ูQZ[\HOOH[
+HÝศ”]ZY\ุู[ูQZ[\NยÜ
+ÛÛÝ[’Yูห\หุXÝ]SX\ู\หู^\ส
+WJHยÛÛÝ\HH\หู”ฺ]ÝÛ\\หู]
+[’Y
+Hฯศ]ุZ]\หÜ\ÛÛQ•ÛÜู\”ฺ]ÝÛ\J[’Y
+Kุ]ฺ
+
+\ÜHOย\หููู\\Üศ[—ฺY[’Y\ÜุYQ\Ü\ÜHK‘ฺ]ÝÛ\H[Y][ÛZ[YÛÜูYNย\U[Y][Û‘Z[\HฯฯH\Üย]\[ยJNยY
+\U[Y][Û‘Z[\HOOH[
+HXZฮยÛÛÝÛX[\H\Bศ\หÜ]ZY\ุูQ•ÛÜู\[’Y\JB\หÝ\Z[[^QZ[\J[’YX‘\Ü•ำิ’ัT—ัิPัQ•SิาUีำ•ÛÜู\ฺ]ÝÛÛX[Y\H]HÞ[]Xศ[\\ÜศYJKุ[ู[YNย]ุZ]ฺ][Y[Ý]
+ÛX[\ฬ
+Kุ]ฺ
+
+\ÜHOย\หููู\\Üศ[—ฺY[’Y\ÜุYQ\Ü\ÜHKÜXูY[[ÛX[\Z[YNยY
+\H	”]ZY\ุู[ูQZ[\HOOH[
+H”]ZY\ุู[ูQZ[\HH\ÜยJNยBหศHÝY\XฺÛÝÛYู[Y[Z[\H]\ÝÝ[ÝYฺศBหศ]\Üศู[\XศÛÛ^ÝูY\]ÛÝ[\ÝÞHHÛHYูHXBหศศ[\ฺHุ[ÛXุ[ÛÜูKุXÜXูZ\ิีฺ[HÝ[ÛZ[Z[ยหศHÛÝ\ูK\ÜXฺYXศฺ]ÝÛZ[YÛÜูYY
+\U[Y][Û‘Z[\HOOH[
+HÝศ\U[Y][Û‘Z[\NยY
+”]ZY\ุู[ูQZ[\HOOH[
+HÝศ”]ZY\ุู[ูQZ[\Nย]ุZ]\ห]\ÛÜูJ
+NยB\Þ[ศ[“ÛูJ
+NÛZ\ูOÛÛX[ยÛÛÝÛZ[YYH]ุZ]\หYู\ÛZ[S^Ü\][Û\หÛÜู\’Y\หÛÛYหÜ\][Û“X\ูTูXÛÛสNยY
+XÛZ[YY
+H]\[ูNย]ุZ]\หYู\X\ำÜ\][Û‘^XÝ][สÛZ[YYÜ\][ÛY\หÛÜู\’YÛZ[YYÜ\][ÛX\ูQ\ฺุ
+NยÛÛÝÛÛÛ\H]ศXÜÛÛÛ\
+Nย\หุÝ\[Ü\][ÛXÜHÛÛÛ\ย\หุÝ\[Ü\][Û”[’YHÛZ[YY[Yย]X\X][‘YฺH[ูNยÛÛÝX\X]Hู][\[
+
+
+HOยY
+X\X][‘YฺÛÛÛ\ฺYÛ[XÜY
+H]\ยX\X][‘YฺHYNยฺY\หYู\X\X]Ü\][ÛÛZ[YYÜ\][ÛY\หÛÜู\’YÛZ[YYÜ\][ÛX\ูQ\ฺุ\หÛÛYหÜ\][Û“X\ูTูXÛÛสB[\Þ[ศ
+ÝÛY
+HOยY
+[ÝÛY
+HศÛÛÛ\XÜ
+]ศฺXูSX‘\ÜX‘\Ü“PTัWำิี“Ü\][ÛX\ูHุ\ศÜÝYÜHH^\]\ฺXHXÝ[ÛÛÛXÝYJJJNศ]\ศBÛÛÝÝÜู\“X\ูHH\หุXÝ]SX\ู\หู]
+ÛZ[YY[Y
+NยY
+XÝÜู\“X\ูJH]\ยÛÛÝÝÜู\“ÝÛYH]ุZ]\หYู\X\X]ÝÜู\“X\ูJÛZ[YY[Y\หÛÜู\’YÝÜู\“X\ูK\ฺุ\หÛÛYหÝÜู\“X\ูTูXÛÛสNยY
+XÝÜู\“ÝÛY
+HÛÛÛ\XÜ
+]ศฺXูSX‘\ÜX‘\Ü”“ีิัT—ำPTัWำิีÝÜู\X\ูHุ\ศÜÝฺ[HHÜ\][Ûุ\ศ[YฺÛÛXÝYJJJNยJBุ]ฺ
+
+
+HOÛÛÛ\XÜ
+]ศฺXูSX‘\ÜX‘\Ü“PTัWาPT•‘PUัRSQ“Ü\][ÛX\ูHÛÝ[ÝH[]ูYุY[K\\ÜศYJJJJB[[J
+
+HOศX\X][‘YฺH[ูNศJNยKX\ูRX\X][\[\ส\หÛÛYหÜ\][Û“X\ูTูXÛÛห\หÛÛYหÝÜู\“X\ูTูXÛÛสJNยX\X][Y
+NยÛÛÝXY[TูXÛÛศHÛZ[YYÜ\][Û\HOOHÝ\ศ\หÛÛYหÝ\Ü\][Û”ูXÛÛศÛZ[YYÜ\][Û\HOOH[ศ\หÛÛYห[Ü\][Û”ูXÛÛศÛZ[YYÜ\][Û\HOOHÜูWÜÛฺุู]ÜÝ][Ûศ\หÛÛYห][Ü\][Û”ูXÛÛศ\หÛÛYหX^Ü\][Û”ูXÛÛฮยÛÛÝXY[HHู][Y[Ý]
+
+
+HOÛÛÛ\XÜ
+]ศฺXูSX‘\ÜX‘\Ü“ิTUSำ—ีSQSีU“Ü\][Û^ูYYY]ศÝ[Y^XÝ][ÛXY[H[ุ\ศุ[ู[Y\\ÜศYKศÜ\][Û—Ý\NÛZ[YYÜ\][Û\KXY[WÜูXÛÛฮXY[TูXÛÛศJJJKXY[TูXÛÛศ
+Wฬ
+NยXY[K[Y
+Nย]Ü\][Û”ู]YH[ูNยHยÛÛÝ^XÝ][ÛH\หู^XÝ]JÛZ[YYÛÛÛ\ฺYÛ[
+NยÛÛÝุ[ู[][ÛH]ศÛZ\ูO]\
+Ü\ÛÛKZXÝ
+HOÛÛÛ\ฺYÛ[Y][\Ý[\XÜ
+
+HOยY
+\หู”ฺ]ÝÛ\\ห\สÛZ[YY[Y
+JHยZXÝ
+ÛÛÛ\ฺYÛ[X\ÛÛNย]\ยBฺY\ห]\ุ[ู[
+ÛZ[YY[Y\Ü‘]Z[
+ÛÛÛ\ฺYÛ[X\ÛÛKÛูJK[[J
+
+HOZXÝ
+ÛÛÛ\ฺYÛ[X\ÛÛJNยKศÛูNYHJJNย]\Ý[XÛÜÝ[ห[ÛÝÛยHศ\Ý[H]ุZ]ÛZ\ูKXูJู^XÝ][Ûุ[ู[][Û—JNศBุ]ฺ
+\ÜHยY
+ÛÛÛ\ฺYÛ[XÜY
+HยY
+\หู”ฺ]ÝÛ\\ห\สÛZ[YY[Y
+JHฺY^XÝ][Ûุ]ฺ
+
+
+HO[Y[Y
+Nย[ูHย]ุZ]\ห]\ุ[ู[
+ÛZ[YY[Y\Ü‘]Z[
+ÛÛÛ\ฺYÛ[X\ÛÛKÛูJKุ]ฺ
+
+
+HO[Y[Y
+Nย]ุZ]^XÝ][Ûุ]ฺ
+
+
+HO[Y[Y
+NยBÝศÛÛÛ\ฺYÛ[X\ÛÛยBÝศ\ÜยBÛÛÝ[[^TT\ÛÝ\ูHH\Ý[—ู[[^WÜWÜ\ÛÝ\ูHOOHYNยÛÛÝ[[^Q[H\Ý[—ู[[^Wู[OOHYNยY
+[[^TT\ÛÝ\ูJH[]H\Ý[—ู[[^WÜWÜ\ÛÝ\ูNยY
+[[^Q[
+H[]H\Ý[—ู[[^Wู[ย\Üู\ิูXÜ]
+\Ý[
+Nย]ุZ]\หYู\[\ฺÜ\][ÛÛZ[YYÜ\][ÛY\หÛÜู\’YÛZ[YYÜ\][ÛX\ูQ\ฺุÝXุูYYY\Ý[[
+NยÜ\][Û”ู]YHYNย]ุZ]\หYู\\[][
+ÛZ[YY[YÜ\][ÛÝXุูYYYÛÜู\ศÜ\][Û—ฺYÛZ[YYÜ\][ÛYÜ\][Û—Ý\NÛZ[YYÜ\][Û\HKÜ\][ÛุÛZ[YYÜ\][ÛYNÝXุูYYY
+NยY
+[[^TT\ÛÝ\ูJH]ุZ]\หู[[^TT\ÛÝ\ูTุู[\[สÛZ[YY[Y
+NยY
+[[^Q[
+H]ุZ]\หู[[^Q[[ÛZ[YY[Y
+NยHุ]ฺ
+\ÜHยÛÛÝ]Z[H\Ü‘]Z[
+\ÜNยY
+[Ü\][Û”ู]Y
+Hย]ุZ]\หYู\[\ฺÜ\][ÛÛZ[YYÜ\][ÛY\หÛÜู\’YÛZ[YYÜ\][ÛX\ูQ\ฺุ]Z[ÛูHOOH“ิTUSำ—ีSQSีUศ[YYÛÝ]Z[Y[]Z[
+Kุ]ฺ
+
+
+HO[Y[Y
+Nย]ุZ]\หYู\\[][
+ÛZ[YY[YÜ\][ÛZ[YÛÜู\ศÜ\][Û—ฺYÛZ[YYÜ\][ÛYÜ\][Û—Ý\NÛZ[YYÜ\][Û\K\Ü]Z[KÜ\][ÛุÛZ[YYÜ\][ÛYNZ[Y
+Kุ]ฺ
+
+
+HO[Y[Y
+NยH[ูHย]ุZ]\หYู\\[][
+ÛZ[YY[Y]Y[ูK[[^][Û—ูZ[YÛÜู\ศÜ\][Û—ฺYÛZ[YYÜ\][ÛY\Ü]Z[K]Y[ูNุÛZ[YYÜ\][ÛYN[[^][ÛYZ[Y
+Kุ]ฺ
+
+
+HO[Y[Y
+NยBÛÛÝ\HH\หู”ฺ]ÝÛ\\หู]
+ÛZ[YY[Y
+NยY
+\JH]ุZ]\หÜ]ZY\ุูQ•ÛÜู\ÛZ[YY[Y\JKุ]ฺ
+
+\Z[[\ÜHO\หููู\\Üศ\ÜุYQ\Ü\Z[[\ÜK[—ฺYÛZ[YY[YK‘[]ZY\ุู[ูHZ[YJNย[ูH]ุZ]\หÝ\Z[[^QZ[\JÛZ[YY[Y]Z[
+Kุ]ฺ
+
+\Z[[\ÜHO\หููู\\Üศ\ÜุYQ\Ü\Z[[\ÜK[—ฺYÛZ[YY[YK[\Z[[^][ÛZ[YJNยH[[HยÛX\’[\[
+X\X]
+NยÛX\•[Y[Ý]
+XY[JNยY
+\หุÝ\[Ü\][ÛXÜOOHÛÛÛ\Hย\หุÝ\[Ü\][ÛXÜH[ย\หุÝ\[Ü\][Û”[’YH[ยBB]\YNยB\Þ[ศXZ[Z[”ู\Üฺ[Ûส
+NÛZ\ูOฺYยÛÛÝXZ[[[ูSÝศH]ศ]J
+NยÜ
+ÛÛÝ[[ศู]ุZ]\หYู\\Ý[ะู\YXุ][Û‘YJXZ[[[ูSÝห
+JHยÛÛÝ\ÜHX‘\Ü‘VT“SัU’QSัWัPQS‘WัVT‘Q•HÝ[Y^\[Y]Y[ูHฺ[Ýศ^\YYÜH]\HX[]ÜHÝ\ÜY\Üู\[ÛXุ[YHXXฺ[K]\YXXK\\Üศ[ูKศXY[Wุ][[ห^\\ะ]าTำิÝ[ส
+HJNยÛÛÝ\XÝฮ\XÝศHศ[[ห\XÝห\\ÜฮZ[]Y[ูNZ[Nย]Z[YH]ุZ][ฺ][Û”[\หYู\[[หZ[Yฺ\\Üศศ\XÝห\Z[[\Ü\ÜJNยÛÛÝ\Z[[H]ุZ]\หYู\\[][
+Z[YY[Z[Yฺ\\ÜศÛÜู\ศ\Z[[ÜÝ]NZ[Yฺ\\Üศ\Z[[ÜX\ÛÛ\ÜÛูKู\YXุ][Û—ูXY[Wุ][[ห^\\ะ]าTำิÝ[ส
+K^XÝ][Û—ุÛX[\ุÛÛ\]NZ[YÛX[\ÛÛ\]HK[ูZ[YYNZ[Yฺ\\Üุ
+NยZ[YH]ุZ]\หู\ฺ[Z[YY
+Nย]ุZ]\หÜุ]QZ[\Q]Y[ูJZ[Y\ÜืJNย\หููู\ุ\ศ[—ฺYZ[YY\Z[[ู][Üู\N\Z[[ู\HK^\[]Y[ูHXY[H^\YNยBหศ][[Û\ศHูXÛÛ\Ý\\ุYHYXÞXÛKH]H[ุ[[\ฺ[หศ^ÜÛูH^XÝ][Û\ÛÝ\ู\ศ\H]]Ü]]][H\หฺ[HBหศ^XÝ[[ศ[XZ[ศ\XH[[Hุ]]ุ^H]\Ý\ศ[][Ûูหศ]Z[YูXÝ]Y[ูKÛH[X^HHX[]H]ศÝÛÛÜY\หÜ
+ÛÛÝ]Z[Yู]ุZ]\หYู\\Ý[ิ][[Û‘YJXZ[[[ูSÝห
+JHยHยÛÛÝXÛÝ\HH]ุZ]\หÜXÛÝ\”[]Z[Y
+Nย]ุZ]\หÜ\ฺ\Ý][ส]Z[YYXÛÝ\K][สNยÛÛÝYูHH]ุZ]\หุ[][ส]Z[YY
+NยY
+]]Ü]]]T][[Û”\ูY
+YูK][สJHยÛÛÝ\ฺH]ุZ]\หู\ฺ[]Z[YY
+Nย]ุZ]\หYู\\]T[\ฺY\ฺ\ฺ[Ûศ][[Û”\ูT[[ฮ[ูK][[Û”\ูU\YYY]]ศ]J
+HJNยBHุ]ฺ
+\ÜHยหศ[[ÝH[][Û][XZ[ศ[ÛÛ\YY]Hุ]]ุ^HÝ]YูBหศุ[]\^[HฺYÛYY][YHูุุ[[ุÜ\หÜุÜY[ฺÝหหศ\ูQ^\Y][[Û[Ýศ[]\ศุุ[ÛÛ[[ÛÛ][Û[H[หศ]Z[ศÛHHู^YYÛÛ[YYHÛXÝÛK\หููู\\Üศ[—ฺY]Z[YY\ÜุYQ\Ü\ÜHK[[ÝH][[Û\ูHÛÝ[ÝHÛÛ\YYYÜHุุ[\XY[HNยBB]ุZ]\หYู\\ูQ^\Y][[ÛXZ[[[ูSÝห
+NยÜ
+ÛÛÝ[[ศู]ุZ]\หYู\\Ý[ิ[[ั]Y[ูJL
+JHยY
+[[ห\Z[[\ÜOOH[VศÛÛ\]YูXÝูZ[Y[ÛÛÛ\ฺ]WÜÝY\Z[Yฺ\\Üศ]]Ü^][Û—ูZ[Y—K[ÛY\ส[[หÝ]JJH]ุZ]\หÜุ]QZ[\Q]Y[ูJ[[ห[[ห\Z[[\ÜฯศX‘\Ü•T“RSSะัT•Q’PะUSำ—ิ‘U’TาSำ•\Z[[^XÝ][Û]Y[ูHุ\ศ]\ูYฺ]Ý]]]][ศH^XÝ][ÛXฺ\ฺ[Û]Y[ูHKืJNย[ูHY
+[[หุู[\[าYOOH•TฬH[[หุู[\[าYOOH•TฬH]ุZ]\หู[[^TT\ÛÝ\ูTุู[\[ส[[หY
+Nย[ูH]ุZ]\หู[[^Q[[[[หY
+NยBÜ
+ÛÛÝ^\Yู]ุZ]\หYู\\Ý^\Y[ส]ศ]J
+K
+JHย]ุZ]\หÝ\Z[[^QZ[\J^\YYX‘\Ü”•S—ัVT‘Q”[^ูYYY]ศÝ[Y[ุ\ศÛX[Y\\\ÜศK^\YNยBÜ
+ÛÛÝ[[ศู]ุZ]\หYู\\Ý[ำYY[ิXÛÝ\JL
+JHยÛÛÝ\Xู[Y[H]ุZ]\หÛุู\Q‘ÜXูY[ÛÜู\”\Xู[Y[
+[[สNยY
+\Xู[Y[OOH]ุZ][ืÜ\Xู[Y[HÛÛ[YNย]ุZ]\หÝ\Z[[^QZ[\J[[หY[[ห\Z[[\ÜฯศX‘\Ü”‘Pำี‘T–WิS‘S‘ศ•\Z[[[Ý[\]Z\\ศ\XH\ห[Ü[XÛÝ\K\\ÜศYJK[[หÝ]JNยBY
+\หฺฺ[Ýฺ]ฺ[ุYูY
+
+JHยหศXุู\YÝZ]\ศ\H\XHฺุY[[ศ[[[ุYฺ[ศHฺ[Ýฺ]ฺหศ]\Ý]ZY\ุูH][[\ศู[\ศ]H[ฮศÝ\ฺ\ูHXZ[[[ูBหศÛÝ[ูY\[ุุ][ศฺ[[][[YYX][HZ[]]Ü^][ÛÜ
+ÛÛÝÝZ]Hู]ุZ]\หYู\\Ý[XTÝZ]\สL
+JHย]ุZ]\หYู\\]TÝZ]JÝZ]KYุ[ู[YÝZ]K[’YหÝZ]K^ุู[\[า[^
+NยBH[ูHย]ุZ]\หุY[ูTÝZ]\ส
+NยB]ุZ]\หู[[^U\Z[[ÝZ]\ส
+NยÜ
+ÛÛÝÜ[’YX\ูWHู\หุXÝ]SX\ู\สHยÛÛÝÝ\[H]ุZ]\หYู\ู][[’Y
+NยÛÛÝ\HH]ุZ]\หÜ\ÛÛQ•ÛÜู\”ฺ]ÝÛ\J[’Y
+NยY
+\JHย\หู”ฺ]ÝÛ\\หู]
+[’Y\JNย]ุZ]\หÜ]ZY\ุูQ•ÛÜู\[’Y\JNยÛÛ[YNยBY
+\หู”Q\Ü]ฺ]\ู\ห\ส[’Y
+JHยหศุ]]ุ^H\ศ[XYHÞ[]Ûุ[[\\Ü]ฺ]]Ü]H\ยหศÝÛÛ[Z]Y\ู\HÝÛ\ฺ\ฺ]Ý]ÝXฺ[ศHÞ[\ยหศH^XZ[[[ูH\ÜศZ]\ุู\\ศH[\]YH\Ü]ฺÛZ[Bหศ[]ZY\ุู\ศÜ[XZ[ศ]\ูYÛÛÝÝÛYH]ุZ]\หYู\X\X]ÝÜู\“X\ูJ[’Y\หÛÜู\’YX\ูK\ฺุ\หÛÛYหÝÜู\“X\ูTูXÛÛสNยY
+[ÝÛY
+Hย\หุXÝ]SX\ู\ห[]J[’Y
+NยÛÛÝÜÝX\ูHH]ุZ]\หYู\ู]ÝÜู\“X\ูJ[’Y
+Nย]ุZ]\หÛX\ั]\”\Ý\
+[’YÜÝX\ูOหÛÜู\’YOOH\หÛÜู\’Y	ÜÝX\ูKX\ูQ\ฺุOOHX\ูK\ฺุศÜÝX\ูH[Y[Y
+NยBÛÛ[YNยBY
+\หฺฺ[Ýฺ]ฺ[ุYูY
+
+H	Ý\[	UT“RSSิ•S—ิีUTห\สÝ\[Ý]JJHย]ุZ]\หÝ\Z[[^QZ[\J[’YX‘\Ü’าSิีาUาัS‘ะQัQ’ฺ[Ýฺ]ฺXÝ][H\Z[]Y[XÛÝ\YH]HÞ[]Xศ[]]Ü^][Û[ูJKุ[ู[YNยÛÛ[YNยBY
+Ý\[	Ý\[^\\ะ]H]ศ]J
+H	UT“RSSิ•S—ิีUTห\สÝ\[Ý]JJHย]ุZ]\หÝ\Z[[^QZ[\J[’YX‘\Ü”•S—ัVT‘Q”[^ูYYY]ศÝ[Y[ุ\ศÛX[Y\\\ÜศK^\YNยÛÛ[YNยBÛÛÝÝÛYH]ุZ]\หYู\X\X]ÝÜู\“X\ูJ[’Y\หÛÜู\’YX\ูK\ฺุ\หÛÛYหÝÜู\“X\ูTูXÛÛสNยY
+[ÝÛY]\ห]\\ิู\Üฺ[Û[’Y
+JHย\หุXÝ]SX\ู\ห[]J[’Y
+Nยหศ\ู\HH^XÝÝÛYX\ูH][ฺ[H[\ุู\ÜศÝÜู\หศYฺ\ÝH\ุ\X\ศYÜHH]X\ูHX\ูH^\\หฺ]Ý]\ยหศXูZ\H]HÝÜู\Ü\ฺÛÝ[H[\Ý[ÝZ\ฺXHÛH[หศ[ÝÛYÛXÞH\Üู\[Û\[ศ]Hู\YXุ][ÛÛÛÝÜÝX\ูHH]ุZ]\หYู\ู]ÝÜู\“X\ูJ[’Y
+Nย]ุZ]\หÛX\ั]\”\Ý\
+[’YÜÝX\ูOหÛÜู\’YOOH\หÛÜู\’Y	ÜÝX\ูKX\ูQ\ฺุOOHX\ูK\ฺุศÜÝX\ูH[Y[Y
+NยÛÛ[YNยBHยY
+]\หฺฺ[Ýฺ]ฺ[ุYูY
+
+H	Ý\[
+HยÛÛÝÛÛ[YQÜ[H]ุZ]\หÛZ[[\YJÝ\[ÛÜXK]ฺXูK[XYÛ[ศู\Üฺ[ÛÛÛ[YHู\Üฺ[ÛÜX]Hู\Üฺ[ÛXYู\Üฺ[Û[[^H—Kู\Üฺ[ÛÛÛ[YHNย]ุZ]\หÜ\ฺ\Ý][ส[’Y]ุZ]\ห]\ÛÛ[YTู\Üฺ[ÛÝ\[ÛÛ[YQÜ[ฺู[JNยB]ุZ]\หÜ\ฺ\Ý][ส[’Y]ุZ]\ห]\Z[[’Y
+JNยBุ]ฺ
+\ÜHยÛÛÝ\YYY\‘Z[\HH]ุZ]\หÜ\ÛÛQ•ÛÜู\”ฺ]ÝÛ\J[’Y
+NยY
+\YYY\‘Z[\JHย\หู”ฺ]ÝÛ\\หู]
+[’Y\YYY\‘Z[\JNย]ุZ]\หÜ]ZY\ุูQ•ÛÜู\[’Y\YYY\‘Z[\JNยH[ูHย\หุXÝ]SX\ู\ห[]J[’Y
+Nย]ุZ]\หÝ\Z[[^QZ[\J[’Y\Ü‘]Z[
+\ÜJNยBBBÜ
+ÛÛÝÜÝX\ูHู]ุZ]\หYู\X\^\YÝÜู\“X\ู\ส
+JH]ุZ]\หÛX\ั]\”\Ý\
+ÜÝX\ูK[’YÜÝX\ูJNยB\Þ[ศุY[ูTÝZ]\ส
+NÛZ\ูOฺYยÜ
+ÛÛÝÝZ]Hู]ุZ]\หYู\\Ý[XTÝZ]\สL
+JHยÛÛÝฺ[[H
+]ุZ]ÛZ\ูK[
+ÝZ]K[’YหX\
+
+[’Y
+HO\หYู\ู][[’Y
+JJJK[\
+[N[\ศ[”XÛÜO[OOH[
+NยY
+ฺ[[ÛÛYJ
+[HOUT“RSSิ•S—ิีUTห\ส[Ý]JH\[ÛX[\ÛÛ\]JJHÛÛ[YNยY
+ÝZ]K^ุู[\[า[^HÝZ]KY[][Ûุู[\[Üห[Ý
+HยÛÛÝÝ]HHÝZ]Pู\YXุ][Û”Ý]Jฺ[[NยY
+Ý]HOOH[[ศHÛÛ[YNยÛÛÝ]Y[ูTXYHH]ุZ]\หÜุ]TÝZ]Q]Y[ูJÝZ]Kฺ[[Ý]JNยY
+]Y[ูTXYJH]ุZ]\หYู\\]TÝZ]JÝZ]KYÝ]KÝZ]K[’YหÝZ]K^ุู[\[า[^
+NยÛÛ[YNยBY
+]ุZ]\หYู\ÛÝ[XÝ]T[ส
+HHJH]\ยÛÛÝ[^HÝZ]K^ุู[\[า[^ยÛÛÝุู[\[ศHÝZ]KY[][Ûุู[\[Üึฺ[^HNยY
+ุู[\[หÝ\ÜOOH\YÝ[Ý\ÜYHย]ุZ]\หYู\\]TÝZ]JÝZ]KY[[ศÝZ]K[’Yห[^
+ศJNย]\ยB]ุZ]\หู[ูTÝZ]PYZ\Üฺ[ÛÝZ]JNยÛÛÝÝศH]ศ]J
+NยÛÛÝ[’YH[ÛUURQ
+
+NยÛÛÝÜ\][Û’YH[ÛUURQ
+
+NยÛÛÝY[\Ý[ÞRู^HHÝZ]NÜÝZ]KYNฺ[^XยÛÛÝÜ\][Û’[]Hศ[\ÛY[ÝZ]KY[][Û[\ÛY[\ู]ÝZ]KY[][Û\ู]ุู[\[ืฺYุู[\[หYุู[\[ืÝ\ฺ[Ûุู[\[ห\ฺ[Ûุ\\WÜÛXÞNÝZ]KY[][Ûุ\\TÛXÞKY[\Ý[ÞWฺู^NY[\Ý[ÞRู^KÝZ]WÜ[—ฺYÝZ]KYÝZ]WÜุู[\[ืฺ[^[^NยÛÛÝ[[”XÛÜHยY[’Yุ[\’YÝZ]Kุ[\’Y[ฺ\[Y\หÛÛYห[ฺ\[Y\Ý[’Y[ÛUURQ
+
+KÛX[\ุYุ][Û’Y[ÛUURQ
+
+K[\ÛY[ÝZ]KY[][Û[\ÛY[ุู[\[าYุู[\[หYุู[\[ี\ฺ[Ûุู[\[ห\ฺ[ÛÝ]N\ู\Y\ฺ[ÛK\ู]ÝZ]KY[][Û\ู]ุู\Y\Þ[Y[฿Kุ\\TÛXÞNÝZ]KY[][Ûุ\\TÛXÞK\XÝฮ[]X[\XÝส
+Kุ[ÛXุ[ู\Üฺ[Û’Y[XYY[ÝY\”ู\Üฺ[Û’Y[XูRY[ÝY\‘\ฺุ[\’Y[]\ÝÝ\ÛÜ^\\ะ]]ศ]JÝหู][YJ
+H
+ศ\หÛÛYหX^[”ูXÛÛศ
+Wฬ
+KÜX]Y]Ýห\]Y]ÝหÛX[\ÛÛ\]N[ูK][[Û”\ูQYP][][[Û”\ูT[[ฮ[ูK][[Û”\ูU\YYY][]Y[ูT\ูY][\Z[[\Ü[NยHยÛÛÝÜX]YH]ุZ]\หYู\ÜX]T[•ฺ]Ü\][Û[ศYÜ\][Û’Y[’Yุ[\’YÝZ]Kุ[\’Y\NÝ\Y[\Ý[ÞRู^K\]Y\Ý\ฺุ[ÛXุ[\]Y\Ý\ฺ
+Ü\][Û’[]
+K[]Ü\][Û’[]KศÛุ[Kุ[\HJNยÛÛÝ[’YศHห]ศู]
+หÝZ]K[’YหÜX]Y[YJWNย]ุZ]\หYู\\]TÝZ]JÝZ]KY[[ศ[’Yห[^
+ศJNยY
+XÜX]Y\^JH]ุZ]\หYู\\[][
+ÜX]Y[Y[Xุู\YÛÜู\ศÜ\][Û—ฺYÜX]YÜ\][ÛYÝZ]WÜ[—ฺYÝZ]KYÝZ]WÜุู[\[ืฺ[^[^KÜ\][ÛุÜX]YÜ\][ÛYNXุู\Y
+NยHุ]ฺ
+\ÜHยY
+\Ü[Ý[ู[ูฺXูSX‘\Ü	\Ü]Z[ÛูHOOHำำีT”‘SึWำSRUH]\ยÝศ\ÜยBหศHฺ[ÛHYXุ]Y[ฺ\[YX[ศ^XÝHÛHÝZ]Hฺ[]H[YK]\ยBB\Þ[ศู[[^U\Z[[ÝZ]\ส
+NÛZ\ูOฺYยÜ
+ÛÛÝÝZ]Hู]ุZ]\หYู\\ÝÝZ]\ิ[[ั]Y[ูJ
+JHยY
+ÝZ]KÝ]HOOHÛÛ\]Y	ÝZ]KÝ]HOOHZ[Y	ÝZ]KÝ]HOOHุ[ู[YHÛÛ[YNยÛÛÝฺ[[H
+]ุZ]ÛZ\ูK[
+ÝZ]K[’YหX\
+
+[’Y
+HO\หYู\ู][[’Y
+JJJK[\
+[N[\ศ[”XÛÜO[OOH[
+NยY
+ฺ[[[ÝOOHÝZ]K[’Yห[Ýฺ[[ÛÛYJ
+[HOUT“RSSิ•S—ิีUTห\ส[Ý]JH\[ÛX[\ÛÛ\]JJHÛÛ[YNย]ุZ]\หÜุ]TÝZ]Q]Y[ูJÝZ]Kฺ[[ÝZ]KÝ]JNยBB\Þ[ศÜุ]TÝZ]Q]Y[ูJÝZ]NÝZ]TXÛÜฺ[[[”XÛÜืK\Z[[Ý]N^XÝÝZ]TXÛÜศÝ]H—KÛÛ\]YZ[Yุ[ู[YNÛZ\ูOÛÛX[ยÛÛÝฺ[ÝÜฮ\^OXÛÜÝ[ห[ÛÝÛHืNยÛÛÝฺ[Yฮ]Y[ูTY–ืHHืNยÜ
+ÛÛÝุู[\[ศูÝZ]KY[][Ûุู[\[ÜสHยY
+ุู[\[หÝ\ÜOOH\YÝ[Ý\ÜYHยฺ[ÝÜห\ฺ
+ศุู[\[ืฺYุู[\[หYุู[\[ืÝ\ฺ[Ûุู[\[ห\ฺ[ÛÝ]\ฮ\YÝ[Ý\ÜYู\YXุ][Û—ÛÝ]ÛÛYN\YÝ[Ý\ÜYู\YXุ][Û—ÜX\ÛÛุู[\[ห[]Z[XTX\ÛÛ[]Z[XWÜX\ÛÛุู[\[ห[]Z[XTX\ÛÛ[—ฺY[]Y[ูNศÝ]\ฮ[]Z[XHX\ÛÛุู[\[ห[]Z[XTX\ÛÛHJNยÛÛ[YNยBÛÛÝ[Hฺ[[[
+
+ุ[Y]JHOุ[Y]Kุู[\[าYOOHุู[\[หY	ุ[Y]Kุู[\[ี\ฺ[ÛOOHุู[\[ห\ฺ[ÛNยY
+\[H]\[ูNยÛÛÝ]Y[ูHH]ุZ]\หYู\ู]]Y[ูJ[Y
+NยY
+Y]Y[ูH	[]Y[ูT\ูY]OOH[
+H]\[ูNยY
+]Y[ูJHฺ[Yห\ฺ
+]Y[ูK\YXÝYห[\
+Y\[ูJHOY\[ูKฺ[OOHX[Y\ÝJNยÛÛÝู\YXุ][ÛH[ู\YXุ][Û”ฺXÝ[Û[\XÝสNยฺ[ÝÜห\ฺ
+ยุู[\[ืฺYุู[\[หYุู[\[ืÝ\ฺ[Ûุู[\[ห\ฺ[ÛÝ]\ฮ[Ý]K[—ฺY[Y\ÝÜ[—ฺY[\Ý[’Y\XÝฮ[\XÝหู\YXุ][Û—ÛÝ]ÛÛYNู\YXุ][ÛÝ]ÛÛYKู\YXุ][Û—ÜX\ÛÛู\YXุ][ÛX\ÛÛÛX[\ุÛÛ\]N[ÛX[\ÛÛ\]K][[Û—Ü\ูWÜ[[ฮ[][[Û”\ูT[[ห]Y[ูN]Y[ูHศศÝ]\ฮ]Z[XHX[Y\ÝฺY]Y[ูKX[Y\ÝYX[Y\ÝÜฺLM]Y[ูKX[Y\ÝฺLMฺุ[XWÝ\ฺ[Û]Y[ูKฺุ[XU\ฺ[ÛY\[ู\ฮ]Y[ูK\YXÝYศHศÝ]\ฮ[]Z[XHX\ÛÛ][[Û—Ü\ูY\ูYุ][]Y[ูT\ูY]หาTำิÝ[ส
+Hฯศ[KJNยBÛÛÝX[Y\ÝYH]\Z[\ÝXี]ZY
+ÝZ]KYÝZ]K]\Z[[Ý\Z[[Ý]_NÜÝZ]K\]Y\Ý\ฺX
+NยÛÛÝÝXPÜX]Y]Hฺ[[X\
+
+[HO[\]Y]
+KÛÜ
+
+YYฺ
+HOYฺู][YJ
+HHYู][YJ
+JVฬHฯศÝZ]KÜX]Y]ยÛÛÝ\XÝÛÝ[ศHฺ[ÝÜหYXูOXÛÜÝ[ห[X\
+ÛÝ[หÝสHOยÛÛÝ\XÝศHÝห\XÝศ\ศ\XÝศ[Y[YยY
+ÝหÝ]\ศOOH\YÝ[Ý\ÜYHÛÝ[ห\YÝ[Ý\ÜYH
+ÛÝ[ห\YÝ[Ý\ÜYฯศ
+H
+ศNย[ูHY
+\XÝสHยÜ
+ÛÛÝ[Y[ฺ[Ûูศ\\ÜศูXÝÝY\]]]Y[ูH—H\ศÛÛÝ
+HยÛÛÝู^HH	ู[Y[ฺ[ÛWษÝ\XÝึู[Y[ฺ[Û—_XยÛÝ[ึฺู^WHH
+ÛÝ[ึฺู^WHฯศ
+H
+ศNยBH[ูHÛÝ[ห\\ÜืÛÛ\Z[[Ý\XÝH
+ÛÝ[ห\\ÜืÛÛ\Z[[Ý\XÝฯศ
+H
+ศNย]\ÛÝ[ฮยK฿JNยÛÛÝYูÜYุ]Pู\YXุ][ÛHÝZ]Pู\YXุ][Û”ฺXÝ[Ûฺ[[NยÛÛÝX[Y\ÝHยÛÛXÝÝ\ฺ[ÛÛÜXKฺXูK[XÝZ]KY]Y[ูKHฺุ[XWÝ\ฺ[ÛÛÜXKฺXูK[XÝZ]KY]Y[ูKHX[Y\ÝฺYX[Y\ÝYÝZ]WÜ[—ฺYÝZ]KY\Z[[ÜÝ]N\Z[[Ý]KฺุY[[ฮYู[ูÝZYYÜู\]Y[X[ุู[\[ืุุ][ูืÝ\ฺ[ÛÝZ]KY[][Ûุู[\[ÜึฬOห\ฺ[Ûฯศ[[\ÛY[ÝZ]KY[][Û[\ÛY[\Þ[Y[ฺY[]Nศ^XÝYÝZ]KY[][Û\ู]^XÝY\Þ[Y[K\Þ[Y[ู\[[ฺY\ฮศ^XÝYÝZ]KY[][Û\ู]^XÝY\[[ฺY\ศKุู[\[ืุÛÝ[ÝZ]KY[][Ûุู[\[Üห[ÝÝ\ÜYฺุ[ุÛÝ[ฺ[[[Ý\YÝ[Ý\ÜYุÛÝ[ÝZ]KY[][Ûุู[\[Üห[\
+ุู[\[สHOุู[\[หÝ\ÜOOH\YÝ[Ý\ÜYK[Ý\XÝุÛÝ[ฮ\XÝÛÝ[หู\YXุ][Û—ÛÝ]ÛÛYWุÛÝ[ฮYูÜYุ]Pู\YXุ][ÛÝ]ÛÛYWุÛÝ[หYูÜYุ]Wุู\YXุ][ÛYูÜYุ]Pู\YXุ][ÛÛX[\ศ[ÜÝ\ÜYฺุ[[—Ý\Z[[ฺ[[]\J
+[HOT“RSSิ•S—ิีUTห\ส[Ý]JJK[Û]Wู^XÝ][Û—Ü\ÛÝ\ู\ืÞ\ฮฺ[[]\J
+[HO[ÛX[\ÛÛ\]JK][[Û—Ü[[ืÜ[—ฺYฮฺ[[[\
+[HO[][[Û”\ูT[[สKX\
+
+[HO[Y
+HKฺ[[ฺ[ÝÜหZ[\\ืÜ]Z[Yฺ[ÝÜห[\
+ÝสHOÝหÝ]\ศOOHÛÛ\]Y	ÝหÝ]\ศOOH\YÝ[Ý\ÜYKX\
+
+ÝสHO
+ศุู[\[ืฺYÝหุู[\[ืฺY[—ฺYÝห[—ฺYÝ]\ฮÝหÝ]\ห\XÝฮÝห\XÝศJJKูXÝÛÛ\Üืุู\YXุ][Ûฮฺ[ÝÜห[\
+ÝสHOÝหÝ]\ศOOH\YÝ[Ý\ÜY	Ýหู\YXุ][Û—ÛÝ]ÛÛYHOOH\\Üืู]Y[ูWุู\YYYÜูXÝÜ\ÜศKX\
+
+ÝสHO
+ศุู[\[ืฺYÝหุู[\[ืฺY[—ฺYÝห[—ฺYู\YXุ][Û—ÛÝ]ÛÛYNÝหู\YXุ][Û—ÛÝ]ÛÛYKู\YXุ][Û—ÜX\ÛÛÝหู\YXุ][Û—ÜX\ÛÛJJKÜX]Yุ]ÝXPÜX]Y]าTำิÝ[ส
+K[X[—ÜÝ[[X\NÝZ]H	Ý\Z[[Ý]_Nศ	ุYูÜYุ]Pู\YXุ][Û\\Üืู]Y[ูWุู\YYYุÛÝ[Kษฺุ[[[ÝHÝ\ÜYฺ[[]H\\Üสู]Y[ูHู\YXุ][ÛูXÝÝ]ÛÛY\ฮ	ุYูÜYุ]Pู\YXุ][ÛูXÝุÛÝ[ห\Ü฿H\Üห	ุYูÜYุ]Pู\YXุ][ÛูXÝุÛÝ[ห[]Z[X_H[]Z[XK	ุYูÜYุ]Pู\YXุ][ÛูXÝุÛÝ[หZ[HZ[	ุYูÜYุ]Pู\YXุ][ÛูXÝุÛÝ[ห[ÛÛÛ\ฺ]_H[ÛÛÛ\ฺ]K	ุYูÜYุ]Pู\YXุ][ÛูXÝุÛÝ[ห[[฿H[[หYูÜYุ]HX[	ุYูÜYุ]Pู\YXุ][ÛÝ]ÛÛYWÛX[K	ÜÝZ]KY[][Ûุู[\[Üห[ÝHฺ[[[ÝH\Y[Ý\ÜYุู[\[ศ[Y\ศ\Hู\\]KNย\Üู\ิูXÜ]
+X[Y\Ý
+NยÛÛÝ]\ศHY\ÛJ”ำำÝ[ฺYJX[Y\Ý
+K]NยY
+]\ห]S[Ý—ฬฬ
+HÝศ]ศฺXูSX‘\ÜX‘\Ü”ีRUWัU’QSัWีำืำT‘ัHYูÜYุ]HÝZ]H]Y[ูH^ูYYYH\XHÜÝÜ\ศุ\]Y[ูHJNยÛÛÝYู\ÝHฺLM]\สNยÛÛÝYูÜYุ]TY]Y[ูTYHศฺ[ÝZ]WÛX[Y\Ý\ÛÝ\ูWฺYฺXูK[XหÜÝZ]KY]Y[ูKษÛX[Y\ÝYXฺLMYู\ÝÛÛ[Ý\N\Xุ][ÛฺÛÛ]WÛ[Ý]\ห]S[ÝNย]ุZ]\หYู\ุ]TÝZ]Q]Y[ูJศÝZ]RYÝZ]KYX[Y\ÝYX[Y\ÝฺLMYู\Ýฺุ[XU\ฺ[ÛÛÜXKฺXูK[XÝZ]KY]Y[ูKH]\ห\YXÝYฮุYูÜYุ]TYฺ[YืKÜX]Y]ÝXPÜX]Y]JNย]\YNยB\Þ[ศฺX\X]ÛÜู\
+NÛZ\ูOฺYยหศฺÛZ][H][ฺุÛÛ^ีูX]Y[ศุ[ศ\ศ[[[Û[HY\\[Bหศุู\Üห[][\ÜศฺXฺศ[^]ÜYฺู\ศÝÝ[]\H[\[ุZ]หศูY\H\XHÛÜู\[ูH[]K]Z[]ศ[ุุ][ÛXY[\ÜยหศÛÜูYY]Y\\ุH[ÜศÜZXÝหÛÛÝÝÜู\H]ุZ]Ý[YÝÜู\”XY[\Üส\ห]\ำิ’ัT—าPT•‘PUะ”“ีิัT—ิ‘PQS‘TิืีSQSีUำTสNยÛÛÝศH\ห]Y[หXY[\Üส
+NยÛÛÝ^\\ิXYHH\ห]Y[หÝ[[X\Y\ส
+K[ÝยÛÛÝุู\Y]H]ศ]J
+NยÛÛÝX\X]ู\]Y[ูHH
+สÝ\หÝÛÜู\’X\X]ู\]Y[ูNยÛÛÝYXÝ]Rฺ[Ýฺ]ฺ[ุYูYH\หฺฺ[Ýฺ]ฺ[ุYูY
+
+Nย]ุZ]\หYู\X\X]ÛÜู\ยÛÜู\’Y\หÛÜู\’Yู\XูU\ฺ[Û\หÛÛYหู\XูU\ฺ[ÛÝÜู\”XYNÝÜู\ฺศ	หฺศ	^\\ิXYKุู\Y]]\Ý][ÛÜX]UÛÜู\’X\X]]\Ý][Û\หÛÛYห\หÝÛÜู\ÛÝY[]KYXÝ]Rฺ[Ýฺ]ฺ[ุYูYX\X]ู\]Y[ูJK]Z[ศÝÜู\ÝÜู\]Z[ÝÜู\—ู[ฺ[NÝÜู\[ฺ[Hฯศ[ÝÜู\—Ý\ฺ[ÛÝÜู\\ฺ[Ûฯศ[^\\ืÜXYN^\\ิXYK^\WุÛÝ[\ห]Y[หÝ[[X\Y\ส
+K[ÝืÜXYNหฺหฮห]Z[KJNยBÜÝ\ÛÜู\’X\X]ÛÜ
+
+NฺYยY
+\หÝÛÜู\’X\X]ÛÜÛZ\ูHOOH[
+H]\ย\หÝÛÜู\’X\X]\Ý][\ÛZ\ูHH]ศÛZ\ูJ
+\ÛÛJHOศ\หÜ\ÛÛUÛÜู\’X\X]\Ý][\H\ÛÛNศJNย\หÝÛÜู\’X\X]ÛÜÛZ\ูHH\หÜ[•ÛÜู\’X\X]ÛÜ
+
+K[[J
+
+HOย\หÜ\ÛÛUÛÜู\’X\X]\Ý][\ห
+Nย\หÜ\ÛÛUÛÜู\’X\X]\Ý][\H[ย\หÝÛÜู\’X\X]\Ý][\ÛZ\ูHH[ย\หÝุZูUÛÜู\’X\X]ÛÜH[ย\หÝÛÜู\’X\X]ÛÜÛZ\ูHH[ยJNยB\Þ[ศÜ[•ÛÜู\’X\X]ÛÜ
+
+NÛZ\ูOฺYยฺ[H
+]\หÜÝÜ[สHย]ุZ]\หฺX\X]ÛÜู\
+Kุ]ฺ
+
+\ÜHO\หููู\\Üศ\ÜุYQ\Ü\ÜHKÛÜู\X\X]Z[YJNย\หÜ\ÛÛUÛÜู\’X\X]\Ý][\ห
+Nย\หÜ\ÛÛUÛÜู\’X\X]\Ý][\H[ยY
+\หÜÝÜ[สH]\ย]ุZ]]ศÛZ\ูOฺY
+\ÛÛJHOย]ู]YH[ูNยÛÛÝ[\ฺH
+
+HOยY
+ู]Y
+H]\ยู]YHYNยÛX\•[Y[Ý]
+[Y\NยY
+\หÝุZูUÛÜู\’X\X]ÛÜOOH[\ฺ
+H\หÝุZูUÛÜู\’X\X]ÛÜH[ย\ÛÛJ
+NยNยÛÛÝ[Y\Hู][Y[Ý]
+[\ฺำิ’ัT—าPT•‘PUาS•T•SำTสNย\หÝุZูUÛÜู\’X\X]ÛÜH[\ฺยY
+\หÜÝÜ[สH[\ฺ
+
+NยJNยBB\Þ[ศู^XÝ]JÛZ[YYÛZ[YYÜ\][ÛฺYÛ[XÜฺYÛ[
+NÛZ\ูOXÛÜÝ[ห[ÛÝÛยÛÛÝศÜ\][ÛHHÛZ[YYย][H]ุZ]\หู\ฺ[ÛZ[YY[Y
+NยY
+Ü\][Û\HOOH[	\หฺฺ[Ýฺ]ฺ[ุYูY
+
+JHÝศ]ศฺXูSX‘\ÜX‘\Ü’าSิีาUาัS‘ะQัQ	ÛÜ\][Û\_Hุ\ศZXÝYHHÛÜู\ฺ[Ýฺ]ฺ]]Ü^][ÛYJJNยY
+Ü\][Û\HOOHÝ\	]\ห]\\ิู\Üฺ[Û[Y
+H	JÜ\][Û\HOOH[	ศ[[ศ[[^[ศ^Ü[ศ—K[ÛY\ส[Ý]JJJHÝศ]ศฺXูSX‘\ÜX‘\Ü”“ีิัT—ิัTิาSำ—ำิี•HÝÜู\ÛÜู\\Ý\Yศ]HYYXHÝ]Hุ[ÝHXÛÛÝXÝYÛ\ÝK\\ÜศJNยY
+Ü\][Û\HOOHÝ\HยY
+[Ý]HOOH\ู\YHÝศ]ศฺXูSX‘\ÜX‘\Ü”“ีิัT—ิัTิาSำ—ำิีH\^YYÝ\Ü\][Ûุ[ÝXÜX]H[[XYK\Ý\YÝÜู\Û\ÝK\\ÜศJNย[H]ุZ][ฺ][Û”[\หYู\[[Y][ืÝ\ู]NยY
+[ุู[\[าYOOH•TฬH[ุู[\[าYOOH•TฬH]\\หู^XÝ]TT\ÛÝ\ูTุู[\[ส[Ü\][ÛY
+NยY
+\หÛÛYหXY[\Üี\ู]OOH[\หÛÛYหูQ[OOH\ÝH\Üู\\ฺูXÝYZ\Üฺ[Û”Ûู\หÛÛYห[\ู]]ุZ]\ห\ู]Y[]J
+JNยหศYZ\Üฺ[Û]HPิÝ[\H][ศ[Xุู\Y\]Y\ÝÛBหศ[ุุ][ศÛÜศ^[ÛHÛ[ศุ[\ZYÛYู]\^Z[ศBหศ^XÝ\XH\ู\][Û\H\ศH[[ÝY\X[ุุ][Û[ูNหศH\Ý\ÝZ]HฺุY[\ÜÛ\THุู\Üศุ[Ý\\ÜศBหศุ[YH[ุXÝ[Û[H[ÜูYÛÝ[\YÜHHÝÜู\ÜÝY\^\Ýห]ุZ]\หู[ูTÝY\YZ\Üฺ[Û[Ü\][ÛNย[H]ุZ][ฺ][Û”[\หYู\[ÝÜู\—Ü]Y]YYNยÛÛÝÝÜู\“X\ูHH]ุZ]\หYู\\ู\ÝÜู\“X\ูJ[Y\หÛÜู\’Y\หÛÛYหÝÜู\“X\ูTูXÛÛสNย\หุXÝ]SX\ู\หู]
+[Yศ\ฺุÝÜู\“X\ูKX\ูQ\ฺุJNย[H]ุZ][ฺ][Û”[\หYู\[ÝÜู\—ÛX\ูYNย[H]ุZ][ฺ][Û”[\หYู\[]][Xุ][ศNยÛÛÝÝ\ÜศHศ]]ู\Üฺ[Ûู\Üฺ[ÛÜX]Hู\Üฺ[ÛXYฺXูNÝ\ู\Üฺ[Û[[^H[ุู[\[าYOOH•SHศศXูN][—HืJWNยÛÛÝÝÜู\ÛÛ^[[ศH]ุZ]\หÜ\ÛÛQÝÜู\ÛÛ^[[ส[NยÛÛÝÜ[H]ุZ]\หÛZ[[\YJ[ÛÜXK]ฺXูK[XYÛ[Ý\Üห]]ู\Üฺ[ÛÝÜู\ÛÛ^[[สNย]ุZ]\หู[ูS]]][ÛÛZ[YYฺYÛ[
+NยÛÛÝÝ\YH]ุZ]\ห]\Ý\
+[Ü[ฺู[ÝÜู\ÛÛ^[[สNยY
+\ุ[YQÝÜู\ÛÛ^[[สÝ\YÝÜู\ÛÛ^[[หÝÜู\ÛÛ^[[สJHÝศ]ศฺXูSX‘\ÜX‘\Ü”“ีิัT—ะำำ•Vะ’S‘S‘ืำRTำPUา•HÝÜู\]\YÝ]\ÝH^XÝQ[ÛÜู\X\ูK[ÛÛ^[ุุ][Û\\Üศ[ูJJNยY
+ÝÜู\ÛÛ^[[สHย]ุZ]\หYู\\[][
+[Y\\ÜหÝÜู\—ุÛÛ^ุÝ[ุ[ÛXุ[ยฺุ[XNÛÜXWÝฺXูWÛX—ุÝÜู\—ุÛÛ^ุ[[ืÝH\ÝÜ[—ฺYÜฺLMฺLM[\Ý[’Y
+KÛX[\ÛุYุ][Û—ฺYÜฺLMฺLM[ÛX[\ุYุ][Û’Y
+KÝÜู\ÛÛ^[[หÛÛ^ุ[ุุ][Û]\Z[\ÝXืÜ[—ÝÛÜู\—ÛX\ูWÝH]\—ุ]\ÝYYK]ืÜ[—ÝÛÜู\—ุ[ุÛÛ^ฺY[YY\ืู^ÛYYYKKÝÜู\XÛÛ^X[[ฮÜ[YNุÝÜู\ÛÛ^[[หÝÜู\—ÛX\ูWู\ฺุX
+NยB[H]ุZ][ฺ][Û”[\หYู\[Ü[[ืุ\ศุู\Y\Þ[Y[Ý\Yุู\Y\Þ[Y[\XÝฮศ[\XÝห]]\ÜศHJNย]ุZ]\หÜ\ฺ\Ý][ส[YÝ\Y][สNยÛÛÝÝÜู\”[[YHH]ุZ]\ห]\XY[\Üส
+NยY
+XÝÜู\”[[YKฺศ\[ูÝÜู\”[[YK[ฺ[HOOHÝ[ศÝÜู\”[[YK[ฺ[K[ÝOOH\[ูÝÜู\”[[YK\ฺ[ÛOOHÝ[ศÝÜู\”[[YK\ฺ[Û[ÝOOH
+HÝศ]ศฺXูSX‘\ÜX‘\Ü”“ีิัT—ิ•S•SQWิ“ี‘SSัWีSURSP“H•HXÜ]Z\YÝÜู\[[YHYÝ^ÜูH[^XÝ[ฺ[KÝ\ฺ[ÛY[]K\\Üศ[ูJJNย]ุZ]\หYู\\[][
+[Y\\ÜหÝÜู\—Ü[[YWุXÜ]Z\Yุ[ÛXุ[ยÛÜู\—ฺYÜฺLMฺLM\หÛÜู\’Y
+KÝÜู\—ÛX\ูWู\ฺุÝÜู\“X\ูKX\ูQ\ฺุÝÜู\ÛÛ^[[ศศศÝÜู\—ุÛÛ^ฺYÜฺLMÝÜู\ÛÛ^[[หÝÜู\—ุÛÛ^ฺYÜฺLMH฿JKÜ\][Û—ฺYÜ\][ÛY[ฺ[NÝÜู\”[[YK[ฺ[K\ฺ[ÛÝÜู\”[[YK\ฺ[Ûู\XูWÝ\ฺ[Û\หÛÛYหู\XูU\ฺ[ÛXÜ]Z\Yุ]]ศ]J
+KาTำิÝ[ส
+K]ืÝÛÜู\—ฺY[YY\—ู^ÛYYYKKÝÜู\\[[YNÜ[YNุÝÜู\“X\ูKX\ูQ\ฺุX
+Nย[H]ุZ]\หู\ฺ[[Y
+Nย[H]ุZ][ฺ][Û”[\หYู\[XYHศ\XÝฮศ[\XÝห\\Üฮ\Üศ]]\ÜศHJNย]ุZ]\หYู\\[][
+[Y[XYHÛÜู\ศÜ\][Û—ฺYÜ\][ÛYK[Ü[YNXYX
+NยY
+[ุู[\[าYOOH•QHย]ุZ]\หุู\YQ\ฺ\TX]Xฺ
+[NยB]\ศ[—ÜÝ]N[Ý]Kุ\X[]WฺWฺ\ฺฺLMÜ[ÛZ[\หJHNยBY
+Ü\][Û\HOOHÜXZศÜ\][Û\HOOH\ูWฺ[HยÛÛÝ[ÝูYÜHÜ\][Û\HOOHÜXZศศฺXูNÞ[]Xืฺ[]ฺXูN\ูWฺ[ย]ุZ]\หÛZ[[\YJ[ÛÜXK]ฺXูK\[[YHุ[ÝูYÜK[ÝูYÜ
+Nย]ุZ]\หุ]ุZ][Ü’[]ู][Y[
+[Ü\][ÛYฺYÛ[
+NยÛÛÝ\ูU\ู]HÜ\][Û[]—ุ\ูWÝ\ู]\ศXÛÜÝ[ห[ÛÝÛ[Y[YยY
+Ü\][Û\HOOH\ูWฺ[H\Üู\\ูUฺ[Ýส\ูU\ู]
+NยÛÛÝ^H\[ูÜ\][Û[]^OOHÝ[ศศÜ\][Û[]^[Y[YยÛÛÝ^\RYH\[ูÜ\][Û[]^\WฺYOOHÝ[ศศÜ\][Û[]^\WฺY[Y[YยÛÛÝ]Y[ศH]ุZ]\ห]Y[ห\ÛÛJศ^OOH[Y[Yศ฿Hศ^JK^\RYOOH[Y[Yศ฿Hศ^\WฺY^\RYJHKฺYÛ[
+NยY
+]Y[ห\][Û“\ศ\หÛÛYหX^]Y[ั\][Û“\สHÝศ]ศฺXูSX‘\ÜX‘\ÜUQSืัTUSำ—ำSRU”\ÛÛY]Y[ศ^ูYYศH\]]\[ูH\][Û[Z][Y][ÛJNย\Üู\\ÛÛY]Y[ีฺ][YZ\Üฺ[ÛÜ\][Û[]—ุYZ\Üฺ[Û]Y[ห\][Û“\ห]Y[ห]\ห]S[Ý
+NยÛÛÝ[Ü“Ü\][ÛศH]ุZ]\หYู\\ÝÜ\][Ûส[Y
+NยÛÛÝ[Ü•\ุYูHH[Ü“Ü\][Ûห[\
+ุ[Y]JHOุ[Y]KYOOHÜ\][ÛY	ุ[Y]KÝ]HOOHÝXุูYYY	
+ุ[Y]K\HOOHÜXZศุ[Y]K\HOOH\ูWฺ[JKYXูJ
+\ุYูKุ[Y]JHOยÛÛÝุ]Hุ[Y]K\Ý[หุ]\ศXÛÜÝ[ห[ÛÝÛ[Y[Yย]\ศ\][Û“\ฮ\ุYูK\][Û“\ศ
+ศ[X\ุ]ห\][Û—Û\ศฯศ
+K]\ฮ\ุYูK]\ศ
+ศ[X\ุ]ห]WÛ[Ýฯศ
+HNยKศ\][Û“\ฮ]\ฮJNยY
+[Ü•\ุYูK\][Û“\ศ
+ศ]Y[ห\][Û“\ศ\หÛÛYหX^[XÝY\][Û“\สHÝศ]ศฺXูSX‘\ÜX‘\Ü’S’‘PีQัTUSำ—ำSRU”[Ý[][]]H[XÝY\][ÛYู]ÛÝ[H^ูYYYÛÛXÝJNยY
+[Ü•\ุYูK]\ศ
+ศ]Y[ห]\ห]S[Ý\หÛÛYหX^[XÝY]\สHÝศ]ศฺXูSX‘\ÜX‘\Ü’S’‘PีQะ–UTืำSRU”[Ý[][]]H[XÝY]HYู]ÛÝ[H^ูYYYÛÛXÝJNยหศHYูHYูHY[[ฺ^\ศHÜ\][ÛQศ\ศ]\Z[\ÝXศQXZู\ยหศHXÛZ[YYÜ]YYÜ\][Û]\HY[Xุ[ฺุY[[ศXูZ\ÛÛÝ]\[ูRYH]\Z[\ÝXี]ZY
+Ü\][ÛY]\[ูHNยÛÛÝ[Z[ศH\[ูÜ\][Û[][Z[ืÜÛXÞHOOHุXÝ	Ü\][Û[][Z[ืÜÛXÞHOOH[ศÜ\][Û[][Z[ืÜÛXÞH\ศXÛÜÝ[ห[ÛÝÛ฿NยÛÛÝ\ู]]H\[ู\ูU\ู]ห\ู]ÜฺุY[Wุ]OOHÝ[ศศ]ศ]J\ูU\ู]\ู]ÜฺุY[Wุ]
+Kู][YJ
+H[X\“SยY
+Ü\][Û\HOOH\ูWฺ[H\Üู\\ูUฺ[Ýส\ูU\ู]
+NยÛÛÝ[^S\ศHÜ\][Û\HOOH\ูWฺ[ศ
+[X\\ำS\ู]]
+Hศ[X\Ü\][Û[][^WÛ\ศฯศ
+HX]X^
+\ู]]H]KÝส
+JJH[X\[Z[ห[^WÛ\ศฯศ
+Nย]ุZ]\หYู\\[][
+[Y]\[ูK\ÛÛYÛÜู\ศ]\[ูWฺY]\[ูRYÜ\][Û—ฺYÜ\][ÛYY[\Ý[ÞWฺู^Wฺ\ฺฺLMÜ\][ÛY[\Ý[ÞRู^JK\ÝÜ[—ฺY[\Ý[’Yุู[\[ืฺY[ุู[\[าYุู[\[ืÝ\ฺ[Û[ุู[\[ี\ฺ[ÛÛÝ\ูN]Y[หÛÝ\ูK^\N]Y[ห^\Hฯศ[ÛÝ\ูWÝ^ฺ\ฺ]Y[หÛÝ\ูU^\ฺฯศ[Þ[\ฺ\ฮ]Y[หÞ[\ฺ\ศฯศ[\ูWÝ\ู]\ูU\ู]ฯศ[ฺุY[Yู[^WÛ\ฮ[^S\หุ]ศฺLM]Y[หฺLMุ[\WÜ]N]Y[หุ[\T]Kฺ[[ฮ]Y[หฺ[[ห\][Û—Û\ฮ]Y[ห\][Û“\ห]WÛ[Ý]Y[ห]\ห]S[ÝHK]\[ูNÝ]\[ูRYN\ÛÛY
+NยY
+Ü\][Û\HOOH\ูWฺ[	Ü\][Û[]—ÝÛÛÝ\ู]
+H]ุZ]\หÜ][Y]PXÝ]U\ู]
+[Ü\][ÛYÜ\][Û[]—ÝÛÛÝ\ู]\ศXÛÜÝ[ห[ÛÝÛNย]ุZ]\หู[ูS]]][ÛÛZ[YYฺYÛ[
+NยÛÛÝฺุY[YH]ุZ]\ห]\ฺุY[J[Ü\][ÛY]\[ูRY]Y[ห[^S\หÜ\][Û\HOOH\ูWฺ[ศÜ\][Û[]—ÝÛÛÝ\ู]\ศXÛÜÝ[ห[ÛÝÛ[Y[Y[Y[Y
+Nย]ุZ]\หÜ\ฺ\Ý][ส[YฺุY[Y][สNย[H]ุZ]\หู\ฺ[[Y
+NยY
+[Ý]HOOHXYHH[H]ุZ][ฺ][Û”[\หYู\[XÝ]HNย]\ศ[—ÜÝ]N[Ý]K]\[ูWฺY]\[ูRYÛÝ\ูN]Y[หÛÝ\ูKÛÝ\ูWÝ^ฺ\ฺ]Y[หÛÝ\ูU^\ฺฯศ[Þ[\ฺ\ฮ]Y[หÞ[\ฺ\ศฯศ[ุ]ศฺLM]Y[หฺLMุ[\WÜ]N]Y[หุ[\T]Kฺ[[ฮ]Y[หฺ[[ห\][Û—Û\ฮ]Y[ห\][Û“\ห]WÛ[Ý]Y[ห]\ห]S[ÝKฺุY[WÜXูZ\ฺุY[YXูZ\NยBY
+Ü\][Û\HOOHÜูWÜÛฺุู]ÜÝ][ÛHย]ุZ]\หÛZ[[\YJ[ÛÜXK]ฺXูK\[[YHศฺXูN][Ûฺุู]ÜÝ][Û—KฺXูN][Ûฺุู]ÜÝ][ÛNยY
+Ü\][Û[]—ุÛÛ[Z]Ý\ู]
+H]ุZ]\หÜ][Y]PXÝ]U\ู]
+[Ü\][ÛYÜ\][Û[]—ุÛÛ[Z]Ý\ู]\ศXÛÜÝ[ห[ÛÝÛNย]ุZ]\หู[ูS]]][ÛÛZ[YYฺYÛ[
+NยÛÛÝÝ]YH]ุZ]\ห]\Ý]J[[X\Ü\][Û[]^XÝYÜÛฺุู]ู\ฺุ
+KÜ\][ÛYÜ\][Û[]—ุÛÛ[Z]Ý\ู]\ศXÛÜÝ[ห[ÛÝÛ[Y[Y
+Nย]ุZ]\หÜ\ฺ\Ý][ส[YÝ]Y][สNย]\ศ[—ÜÝ]N[Ý]KÝ][Û—ÜXูZ\Ý]YXูZ\NยBหศHXÛZ[YY[X^H\Ý[YHÛHÛH\XHุ[ÛXุ[XูZ\หBหศÝÜู\]ู[\ศ[[[Û[HÛ\\Ý[XXNศY\]ศÛÛ^\ยหศÛÜูYXÛÝ\Kู[[]Y[ูHX^HÛÛ[YHÛHHYู\ฺ]Ý]หศ\X][ศRHÜÝY\ฺYHYXÝหY
+]\ห]\\ิู\Üฺ[Û[Y
+JHยÛÛÝ[ÜH]ุZ]\หุ[][ส[Y
+NยÛÛÝ[[^YH[Ü][หÛÛYJ
+][
+HO\ะุ[ÛXุ[[[^][Û”XูZ\
+[][
+JNยY
+Y[[^Y
+HÝศ]ศฺXูSX‘\ÜX‘\Ü”“ีิัT—ิัTิาSำ—ำิี•HÝÜู\\ุ\X\YYÜHHÝ[ุ[ÛXุ[[[^][ÛXูZ\ุ\ศ\XNศ[ุ[ÝH\^YYุY[K\\Üศ[ูJJNยÛÛÝXÛÝ\YH]ุZ]\หÜXÛÝ\”[[Nย]ุZ]\หÜ\ฺ\Ý][ส[YXÛÝ\Y][สNย[H]ุZ]\หู\ฺ[[Y
+NยY
+[Ý]HOOH[[ศH[H]ุZ][ฺ][Û”[\หYู\[[[^[ศNยY
+[Ý]HOOH[[^[ศH[H]ุZ][ฺ][Û”[\หYู\[^Ü[ศNยY
+[Ý]HOOH^Ü[ศHÝศ]ศฺXูSX‘\ÜX‘\Ü‘S‘ิ‘TีSQWิีUWาS•SQ\XH[XÛÝ\Hุ[Ý\Ý[YHÛH	Ü[Ý]_KÛÛXÝ[ูJJNยÛÛÝÝÜู\“X\ูT[X\ูYH]ุZ]\หÜ[X\ูPÝÜู\“X\ูTÛู[Y
+NยY
+XÝÜู\“X\ูT[X\ูY
+HÝศ]ศฺXูSX‘\ÜX‘\Ü”“ีิัT—ำPTัWิ‘SPTัWีSำำ‘’T“QQ‘\XH[XÛÝ\HÛÝ[ÝÝHHÝÜู\X\ูHXู[\\ÜศYJJNย]\ศ[—ÜÝ]N[Ý]K]Y[ูWÜÝ]N[[ืÜÜÝÜู][Y[\Ý[YYูÛWู\XWู[[^][ÛYKู[[^Wู[YHNยB]ุZ]\หÛZ[[\YJ[ÛÜXK]ฺXูK\[[YHศฺXูN[—KฺXูN[NยÛÛÝ[[^QÜ[H]ุZ]\หÛZ[[\YJ[ÛÜXK]ฺXูK[XYÛ[ศู\Üฺ[Û[[^H—Kู\Üฺ[Û[[^HNยÛÛÝÛX[\Ü[H]ุZ]\หÛZ[[\YJ[ÛÜXK]ฺXูK[XYÛ[ศู\Üฺ[ÛÛX[\—Kู\Üฺ[ÛÛX[\NยY
+[Ý]HOOH[[ศH[H]ุZ][ฺ][Û”[\หYู\[[[ศNย]ุZ]\หู[ูS]]][ÛÛZ[YYฺYÛ[
+NยÛÛÝ[YH]ุZ]\ห]\[
+[[[^QÜ[ฺู[ÛX[\Ü[ฺู[Nย]ุZ]\หÜ\ฺ\Ý][ส[Y[Y][สNย[H]ุZ]\หู\ฺ[[Y
+NยÛÛÝXÛÝ\YY\‘[H]ุZ]\หÜXÛÝ\”[[Nย]ุZ]\หÜ\ฺ\Ý][ส[YXÛÝ\YY\‘[][สNย[H]ุZ]\หู\ฺ[[Y
+Nย[H]ุZ][ฺ][Û”[\หYู\[[[^[ศNยÜ
+ÛÛÝ\YXÝู[Y\YXÝสHยY
+\YXÝ]\ห]S[Ý—ฬฬ
+Hย]ุZ]\หYู\\[][
+[Y]Y[ูK\YXÝูÜYÛÜู\ศฺ[\YXÝฺ[X\ÛÛฺ^WÛ[Z]]WÛ[Ý\YXÝ]\ห]S[ÝJNยÛÛ[YNยBÛÛÝYู\ÝHฺLM\YXÝ]\สNย]ุZ]\หYู\ุ]P\YXÝ
+ศ\YXÝ[’Y[YฺLMYู\ÝÜX]Y]]ศ]J
+HJNยB[H]ุZ][ฺ][Û”[\หYู\[^Ü[ศNยÛÛÝÝÜู\“X\ูT[X\ูYH]ุZ]\หÜ[X\ูPÝÜู\“X\ูTÛู[Y
+NยY
+XÝÜู\“X\ูT[X\ูY
+HÝศ]ศฺXูSX‘\ÜX‘\Ü”“ีิัT—ำPTัWิ‘SPTัWีSำำ‘’T“QQ‘[ÛÝ[ÝÝHHÝÜู\X\ูHXู[YÜH]Y[ูHู][Y[\\ÜศYJJNย]\ศ[—ÜÝ]N[Ý]K]Y[ูWÜÝ]N[[ืÜÜÝÜู][Y[ู[[^Wู[YHNยB\Þ[ศู[ูTÝY\YZ\Üฺ[Û[[”XÛÜÜ\][ÛÛZ[YYÜ\][Û–ศÜ\][Û—JNÛZ\ูOฺYยÛÛÝÝZ]T[’YH\[ูÜ\][Û[]ÝZ]WÜ[—ฺYOOHÝ[ศศÜ\][Û[]ÝZ]WÜ[—ฺY[ยY
+ÝZ]T[’Y
+HยÛÛÝÝZ]HH]ุZ]\หYู\ู]ÝZ]JÝZ]T[’Y
+NยY
+\ÝZ]HÝZ]Kุ[\’YOOH[ุ[\’Y\ÝZ]K[’Yห[ÛY\ส[Y
+JHÝศ]ศฺXูSX‘\ÜX‘\Ü”ีRUWะQRTิาSำ—ะ’S‘S‘ืาS•SQ”ÝZ]Hฺ[ÛÝ[ÝÝH]ศ\XHÛ[หXYZ\Üฺ[ÛÝÛ\ฺ\YÜHÝY\[ุุ][Û\\Üศ[ูJJNย]ุZ]\หู[ูTÝZ]PYZ\Üฺ[ÛÝZ]JNย]\ยB]ุZ]\หYู\\ู\TÛ[ะYZ\Üฺ[Ûย\ู\][Û’ู^NฺLM[—L	Ü[ุ[\’YWL	ÛÜ\][ÛY[\Ý[ÞRู^_X
+K\]Y\Ý\ฺÜ\][Û\]Y\Ý\ฺุ[\’Y[ุ[\’Y[\ÛY[[[\ÛY[ฺ[[[”Ý\ฮKÝY\”ูXÛÛฮ\หÛÛYหX^[”ูXÛÛหÝZ]\ฮÝZ]Pฺ[[]Y[ั\][Û“\ฮ]Y[ะ]\ฮุู\Y][ÜX]Y]K\หÜÛ[ะYZ\Üฺ[Û“[Z]ส
+JNยB\Þ[ศู[ูTÝZ]PYZ\Üฺ[ÛÝZ]NÝZ]TXÛÜ
+NÛZ\ูOฺYยÛÛÝÝ\ÜYฺ[[HÝZ]KY[][Ûุู[\[Üห[\
+ุู[\[สHOุู[\[หÝ\ÜOOHÝ\ÜYK[ÝยÛÛÝÝY\ฺ[[HÝZ]KY[][Ûุู[\[Üห[\
+ุู[\[สHOุู[\[หÝ\ÜOOHÝ\ÜY	ุู[\[หYOOH•TฬH	ุู[\[หYOOH•TฬK[Ýย]ุZ]\หYู\\ู\TÛ[ะYZ\Üฺ[Ûย\ู\][Û’ู^NฺLMÝZ]WL	ÜÝZ]Kุ[\’YWL	ÜÝZ]KY[\Ý[ÞRู^_X
+K\]Y\Ý\ฺÝZ]K\]Y\Ý\ฺุ[\’YÝZ]Kุ[\’Y[\ÛY[ÝZ]KY[][Û[\ÛY[ฺ[ÝZ]H[”Ý\ฮÝ\ÜYฺ[[ÝY\”ูXÛÛฮÝY\ฺ[[
+\หÛÛYหX^[”ูXÛÛหÝZ]\ฮKÝZ]Pฺ[[Ý\ÜYฺ[[]Y[ั\][Û“\ฮ]Y[ะ]\ฮุู\Y]ÝZ]KÜX]Y]K\หÜÛ[ะYZ\Üฺ[Û“[Z]ส
+JNยBÜÛ[ะYZ\Üฺ[Û“[Z]ส
+NÛ[ะYZ\Üฺ[Û“[Z]ศย]\ยฺ[ÝิูXÛÛฮ\หÛÛYหYZ\Üฺ[Û•ฺ[ÝิูXÛÛหÛุ[ศ[”Ý\ฮ\หÛÛYหX^Û[ิ[”Ý\หÝY\”ูXÛÛฮ\หÛÛYหX^Û[ิÝY\”ูXÛÛหÝZ]\ฮ\หÛÛYหX^Û[ิÝZ]\หÝZ]Pฺ[[\หÛÛYหX^Û[ิÝZ]Pฺ[[]Y[ั\][Û“\ฮ\หÛÛYหX^Û[า[XÝY\][Û“\ห]Y[ะ]\ฮ\หÛÛYหX^Û[า[XÝY]\ศKุ[\ศ[”Ý\ฮ\หÛÛYหX^Û[ิ[”Ý\ิ\ุ[\ÝY\”ูXÛÛฮ\หÛÛYหX^Û[ิÝY\”ูXÛÛิ\ุ[\ÝZ]\ฮ\หÛÛYหX^Û[ิÝZ]\ิ\ุ[\ÝZ]Pฺ[[\หÛÛYหX^Û[ิÝZ]Pฺ[[”\ุ[\]Y[ั\][Û“\ฮ\หÛÛYหX^Û[า[XÝY\][Û“\ิ\ุ[\]Y[ะ]\ฮ\หÛÛYหX^Û[า[XÝY]\ิ\ุ[\KNยBส
+X\ฺ[[]Y[ูHÛHY\H[Ü\][Û]ู[\ศ\XK
+\ศY]ู\ศ[X\][HY[\Ý[XZ[[[ูHุ[KY[\]Y\
+HÛÜู\Ü\ฺ][HÝ[\K[]\H]\Y\ÛÝ\ูHูY\ศ[[]]XB
+]\ศZ[]ศÜYฺ[[T’Kฺ\ฺ
+ย\Þ[ศู[[^Q[[[’YÝ[สNÛZ\ูOฺYย][H]ุZ]\หู\ฺ[[’Y
+NยY
+[Ý]HOOH^Ü[ศ	JT“RSSิ•S—ิีUTห\ส[Ý]JH	[\Z[[\ÜOOH[	[ÛX[\ÛÛ\]JJHยÝศ]ศฺXูSX‘\ÜX‘\Ü‘U’QSัWั’SSVUSำ—ิีUWาS•SQ[[]Y[ูHุ[ÝHX\ฺYÛH	Ü[Ý]_KÛÛXÝYJJNยB]Ü\][ÛศH]ุZ]\หYู\\ÝÜ\][Ûส[Y
+NยÛÛÝÛ\Z[[HÜ\][Ûห[\
+Ü\][ÛHOศXุู\Y]Y]YYX\ูY^XÝ][ศ—K[ÛY\สÜ\][ÛÝ]JJNยY
+Û\Z[[[Ý
+HÝศ]ศฺXูSX‘\ÜX‘\Ü‘U’QSัWำิTUSำ—ิS‘S‘ศ‘[[]Y[ูH\ศุZ][ศÜ]\H[Ü\][Ûศู]K]Y[ูHYKศÜ\][Û—ฺYฮÛ\Z[[X\
+
+Ü\][ÛHOÜ\][ÛY
+HJJNยÛÛÝ[Ü\][ÛศHÜ\][Ûห[\
+Ü\][ÛHOÜ\][Û\HOOH[	Ü\][ÛÝ]HOOHÝXุูYYYNยY
+[Ü\][Ûห[ÝOOH
+HÝศ]ศฺXูSX‘\ÜX‘\Ü‘S‘ิัUSQS•ำRTิาS‘ศ‘[[]Y[ูH\]Z\\ศH\XHÝXุูYYY[Ü\][Û]Y[ูHYJJNยหศ\Z\ÛHH]Y[ูHฺXÝ[ÛY\HÜ\ฺ]ูY[Hุ[ÛXุ[หศÜ\][ÛÝศ\]H[][\[ศHÜ\][ÛÝศ\ศ]]Ü]]]KÜ
+ÛÛÝÜ\][ÛูÜ\][Ûห[\
+ุ[Y]JHOุ[Y]KÝ]HOOHÝXุูYYYJHย]ุZ]\หYู\\[][
+[YÜ\][ÛÝXุูYYYÛÜู\ศÜ\][Û—ฺYÜ\][ÛYÜ\][Û—Ý\NÜ\][Û\HKÜ\][ÛÛÜ\][ÛYNÝXุูYYY
+NยB]][YูHH]ุZ]\หุ[][ส[Y
+NยÛÛÝÝÜู\ÛÛ^ÛÜูYH][YูK][หÛÛYJ
+][
+HO][ฺ[OOHÛX[\ÝÜู\—ุÛÛ^ุÛÜูY	][^[ุYÛÜูWÜ\ÛÛYOOHYH	][^[ุYÝÜู\—ÜYฺ\ÝWุXู[OOHYJH	]\ห]\\ิู\Üฺ[Û[Y
+NยÛÛÝÝÜู\“X\ูT[X\ูYH]ุZ]\หÜ[X\ูPÝÜู\“X\ูTÛู[Y
+Nย][YูHH]ุZ]\หุ[][ส[Y
+NยÛÛÝ\ฺะÛX[\H\]U\ฺะÛX[\
+][YูK][ห[NยÛÛÝÝY\‘\ุÛÛXÝYH][YูK][หÛÛYJ
+][
+HO\ั^XÝÝ[ูXÝ][
+[][
+H	][ฺ[OOHÝY\ÝYูH	ศÛÜูY[Y—K[ÛY\สÝ[ส][^[ุYÝYูJJJHXÛÝ\PÛÛ\Û[ÛÛ\]J][YูK][หฺXูWÜÝY\NยÛÛÝ]]ู\Üฺ[Û”]ฺูYH][YูK][หÛÛYJ]]ÛX[\ÛÛ\YY
+HXÛÝ\PÛÛ\Û[ÛÛ\]J][YูK][ห]]Üู\Üฺ[ÛศNยÛÛÝุ[ÛXุ[[[^YH][YูK][หÛÛYJ
+][
+HO\ะุ[ÛXุ[[[^][Û”XูZ\
+[][
+JNยÛÛÝ]PÛX[\ÛÛ\]HH]]Ü]]]S]PÛX[\ÛÛ\]J][YูK][สNยÛÛÝÛX[\ÛÛ\]HHุ[ÛXุ[[[^Y	ÝÜู\ÛÛ^ÛÜูY	ÝÜู\“X\ูT[X\ูY	ÝY\‘\ุÛÛXÝY	]]ู\Üฺ[Û”]ฺูY	\ฺะÛX[\[\ÛÛYุÛÝ[OOH	]PÛX[\ÛÛ\]NยY
+XÛX[\ÛÛ\]JHยÝศ]ศฺXูSX‘\ÜX‘\Ü–‘T“ืำิ”S—ะำPS•TีSำำ‘’T“QQ”[ุ[ÝูXูH[[]Y[ูH[[ุ[ÛXุ[[[^][Û\ศÝÜู\ÝY\]][ÝÛY]\ฺศÛX[\\HÝ[\\ÜศYKยุ[ÛXุ[ู[[^][Ûุ[ÛXุ[[[^YÝÜู\—ุÛÛ^ุÛÜูYÝÜู\ÛÛ^ÛÜูYÝÜู\—ÛX\ูWÜ[X\ูYÝÜู\“X\ูT[X\ูYÝY\—ู\ุÛÛXÝÝY\‘\ุÛÛXÝY]]Üู\Üฺ[Û—Ü]ฺูY]]ู\Üฺ[Û”]ฺูY[\ÛÛYÝ\ฺÜฮ\ฺะÛX[\[\ÛÛYุÛÝ[]WุÛX[\ุÛÛ\]N]PÛX[\ÛÛ\]KJJNยBÛÛÝ]]]Y]H]ุZ]\หYู\\Ý]]]Y]
+[Y
+NยÛÛÝ\]Y\XÝศH\]PÛÛ\]Y\XÝส[][YูK][หÜ\][Ûห]]]Y]
+NยÛÛÝXXฺ[P\Üู\[ÛศH][X]Tุู[\[ะ\Üู\[Ûส[][YูK][หÜ\][Ûห]]]Y]
+NยÛÛÝXฺ\ฺ[ÛHู\YXุ][Û•\Z[[Xฺ\ฺ[Û\]Y\XÝสNยÛÛÝ\Z[[Ý]HHXฺ\ฺ[ÛÝ]NยÛÛÝ\Z[[X\ÛÛHXฺ\ฺ[ÛX\ÛÛยY
+[Ý]HOOH^Ü[ศHยÛÛÝ][[ÛH][[Û”]ฺÛQ][ส][YูK][สNย[H]ุZ]\หYู\\]T[[Y[\ฺ[Ûศ\XÝฮ\]Y\XÝหÛX[\ÛÛ\]NYK][[ÛJNย[H]ุZ][ฺ][Û”[\หYู\[\Z[[Ý]Kศ\XÝฮ\]Y\XÝหÛX[\ÛÛ\]NYK][[ÛJNยH[ูHY
+[Ý]HOOH[[ืู^\[ู]Y[ูH	\Z[[Ý]HOOH[[ืู^\[ู]Y[ูHHย[H]ุZ][ฺ][Û”[\หYู\[\Z[[Ý]Kศ\XÝฮ\]Y\XÝศJNยH[ูHY
+[Ý]HOOH\Z[[Ý]JHยÝศ]ศฺXูSX‘\ÜX‘\Ü•T“RSSัPาTาSำ—ะำำ‘“PีHXÛÝ\Y]Y[ูH[[^\\]YHY\[\Z[[Ý]HÛHH[XYH\XHXฺ\ฺ[Û]Y[ูH[ูKศ\XWÜÝ]N[Ý]K\]YÜÝ]N\Z[[Ý]HJJNยH[ูHY
+ุ[ÛXุ[\]Y\Ý\ฺ
+[\XÝสHOOHุ[ÛXุ[\]Y\Ý\ฺ
+\]Y\XÝสJHยหศ^XÝ][Û\Z[[Ý]H\ศ[[]]XKฺ[Hู\YXุ][Û\ศ[หศ\[[ÛHฺXÝ[ÛH]HÝÛ[ศ]\Ý][ÛX^H\YÜH\]BหศÛH\XÝศ[HÝ\[X[Y\Ýฺ[\[H]ุZ]\หYู\\]T[[Y[\ฺ[Ûศ\XÝฮ\]Y\XÝศJNยBÛÛÝ\Z[[][H]ุZ]\หYู\\[][
+[Y[Ý\Z[[Ý]_XÛÜู\ย\Z[[ÜÝ]N\Z[[Ý]K\Z[[ÜX\ÛÛ\Z[[X\ÛÛÛX[\ุÛÛ\]NYK[ÛÜ\][Û—ฺYฮ[Ü\][ÛหX\
+
+Ü\][ÛHOÜ\][ÛY
+KÛÜ
+
+KK[Ü[YNÝ\Z[[Ý]_X
+Nย]ุZ]\หÜX\ฺ[‘]Y[ูJย[’Y[Y\Z[[Ý]K\Z[[X\ÛÛ\XÝฮ\]Y\XÝห\Z[[\Ü\Z[[Ý]HOOHÛÛ\]Y\Z[[Ý]HOOH[[ืู^\[ู]Y[ูHศ[X‘\Ü”ะัST’Sืี‘T‘PีีT“RSS“ÛHÜ[ÜHXXฺ[H\Üู\[ÛศูXูYHÛ\\Üฺ[ศ\Z[[\XÝ\Z[[Ý]HOOHูXÝูZ[YศูXÝ\Z[[Ý]HOOH[ÛÛÛ\ฺ]WÜÝY\ศÝY\\Z[[Ý]HOOH]]Ü^][Û—ูZ[Yศ]]Ü^][Û\\Üศ[ูKศ\Z[[ÜÝ]N\Z[[Ý]HJKÜX]Y]\Z[[][]\ÜูNÛÛ\]YYÝศ[[[Û[U[[ุุ]Y[ูK\YXÝฮืKJNยB\Þ[ศู^XÝ]TT\ÛÝ\ูTุู[\[ส[[”XÛÜÜ\][Û’YÝ[สNÛZ\ูOXÛÜÝ[ห[ÛÝÛยÛÛÝXÝ]T[ะYÜHH]ุZ]\หYู\ÛÝ[XÝ]T[ส
+NยÛÛÝ\YYYH]ุZ]\ห]\\YU\ู]
+[Nย[H]ุZ]\หYู\\]T[[Y[\ฺ[Ûศุู\Y\Þ[Y[\YYYุู\Y\Þ[Y[JNย]ุZ]\หÜ\ฺ\Ý][ส[Y\YYY][สNยY
+[ุู[\[าYOOH•TฬHHยÛÛÝÜ[\H]ศT“
+\หÛÛYห]]Ü[][Y]P[ÝูYÜYฺ[[\ู]Û[\\หÛÛYห[ÝูYÜYฺ[สKÜYฺ[KิÝ[ส
+NยÛÛÝÛÛ[[ÛHศÝX[[ฺ\[Y[ฺ\[ฺY[[ฺ\[Y\ÝÜ[—ฺY[\Ý[’YÛX[\ÛุYุ][Û—ฺY[ÛX[\ุYุ][Û’Yุู[\[ืฺY•TฬH[ุู[\[ี\ฺ[ÛOOH[ศ฿Hศุู[\[ืÝ\ฺ[Û[ุู[\[ี\ฺ[ÛJKÞ[]XฮYH\ศÛÛÝ[\ÛY[[[\ÛY[][[Û—ฺÝ\ฮ[ุ\\TÛXÞK][[Û’Ý\หÝY\—ู^\\ืุ][^\\ะ]าTำิÝ[ส
+K[ÝูYÛÜฮศ]]ู\Üฺ[Û—K^XÝYู\Þ[Y[[\ู]^XÝY\Þ[Y[NยÛÛÝ^\YH\หูÛ[ุ\X[]Y\หZ[
+ศÛÛ[[Û]YÛÜXK]ฺXูK[XYÛ[K]ศ]J]KÝส
+HH
+\หÛÛYหุ\X[]UูXÛÛศ
+ศฬ
+H
+Wฬ
+JNยÛÛÝÜÛะ]YY[ูHH\หูÛ[ุ\X[]Y\หZ[
+ศÛÛ[[Û]YÛÜXK]ฺXูKYุ]]ุ^HJNยÛÛÝÜÛำÜ\][ÛH\หูÛ[ุ\X[]Y\หZ[
+ศÛÛ[[Û]YÛÜXK]ฺXูK[XYÛ[[ÝูYÛÜฮศ]]XY[\Üศ—HJNยÛÛÝÜÛิ[ฺ\[H\หูÛ[ุ\X[]Y\หZ[
+ศÛÛ[[Û]YÛÜXK]ฺXูK[XYÛ[[ฺ\[ฺYÜÛห\[ฺ\[\ุHJNยÛÛÝÜÛิ[H\หูÛ[ุ\X[]Y\หZ[
+ศÛÛ[[Û]YÛÜXK]ฺXูK[XYÛ[\ÝÜ[—ฺY[ÛUURQ
+
+HJNยÛÛÝÜ[\HH\หูÛ[ุ\X[]Y\หZ[
+ศÛÛ[[Û]YÛÜXK]ฺXูK[XYÛ[ÝXÜ[\K]\ู\\ุH[ฺ\[ฺYÜ[\K]\ู\\ุHJNยÛÛÝ\X[ฮ\^OศY\[ูฬWั”“ำ•S‘ัิS•ีT’PS•ึÛ[X\—Nศฺู[ฮÝ[ศOHยศYZ\Üฺ[ศKศY^\Yฺู[^\Yฺู[KศYÜÛืุ]YY[ูHฺู[ÜÛะ]YY[ูKฺู[KศYÜÛืÛÜ\][Ûฺู[ÜÛำÜ\][Ûฺู[KศYÜÛืÜ[ฺ\[ฺู[ÜÛิ[ฺ\[ฺู[KศYÜÛืÜ[ฺู[ÜÛิ[ฺู[KศYÜ[\WÝ\ู\ฺู[Ü[\Kฺู[KNยÜ
+ÛÛÝ\X[ู\X[สHยÛÛÝ\ÜÛูHH]ุZ]\หุู[\[ั]ฺ
+Ü[\ศY]ู”ิีY\XÝ\ÜฺYÛ[XÜฺYÛ[[Y[Ý]
+Wฬ
+KXY\ฮศXุู\\Xุ][ÛฺÛÛ\X[ฺู[OOH[Y[Yศ฿Hศ–TÛÜXKUฺXูKSXPุ\X[]H\X[ฺู[JHHJNยÛÛÝZXÝYHอKืK[ÛY\ส\ÜÛูKÝ]\สH	\ÜÛูK\OOHÜ[\	\\ÜÛูKXY\ห\สู]XÛÛฺฺYHH	\\ÜÛูKXY\ห\สุุ][ÛNย]ุZ]\ÜÛูKูOหุ[ู[
+
+Kุ]ฺ
+
+
+HO[Y[Y
+Nย]ุZ]\หYู\\[][
+[YูXÝ\]K[[YูÜ[ÜุHุ[ÛXุ[ศ\X[\X[YZXÝYÜÝ]\ฮ\ÜÛูKÝ]\ห^XÝÜ\ÜÛูWÝ\ู]\ÜÛูK\OOHÜ[\ืÜู\Üฺ[Û—ุÛÛฺฺYN\\ÜÛูKXY\ห\สู]XÛÛฺฺYHKืÜY\XÝ\\ÜÛูKXY\ห\สุุ][ÛHKูXÝ\]NÜ[YNÝ\X[YX
+NยY
+\ZXÝY
+HÝศ]ศฺXูSX‘\ÜX‘\Ü’S•SQัิS•ิ“ะ‘WะPะัTQHÛÝ\Y[[YÛ[Ü[ุ\ศÝZXÝYYÜHู\Üฺ[Û[ุุ][Û]]Ü^][Û[ูKศ\X[\X[YÝ]\ฮ\ÜÛูKÝ]\ศJJNยB]ุZ]\หÜ[“ะ]]ูXÝ\]Tุ\ส[NยH[ูHยÛÛÝ[]\ู]HยÛ[Ý\[\ู]Û[\ุ]]ุ^WÝ\[\ู]ุ]]ุ^U\ฺXูWÝ\[\ู]ฺXูU\[ูÜ\Ý\[\ู][ูÜ\\^XÝYู\Þ[Y[[\ู]^XÝY\Þ[Y[^XÝYู\[[ฺY\ฮ[\ู]^XÝY\[[ฺY\หNยÛÛÝ^\HH
+]ฺ\X[^\TÝ[[X\ON^\TÝ[[X\HO
+ยYÛÝ\Y\ุH^\U\ฺ[ÛK[Z[NูXÝ\]K\ุH^\PÛ\ÜฮฺÜุÛÛ[X[ฺLM\X]
+
+Kุ[\T]NM—ฬฺ[[ฮK\][Û“\ฮWฬÛÝ\ูU^ศÝ]\ฮ[]Z[XHX\ÛÛÛÛ[ูYWÝ[Y][Û—ÜุHKÞ[\ฺ\ฮศ[ฺ[N^\H[ฺ[WÝ\ฺ[ÛHฺXูNÞ[]Xศ]N^YKÝ[[ูNศฺ[ÛÝ\YÜูXÝ\]WÜุHÝZ]N•TฬX[Y\Ý\ฺ[ÛHK\Üู\[Û”ÛXÞNศ^XÝÝ[ุÜ\[ูKู[X[XืÝ\ฺÛÝุ\XุXHK]ฺJNยÛÛÝÝ\Hศ[\ÛY[[[\ÛY[\ู][]\ู]ุู[\[ืฺY•Tฬุู[\[ืÝ\ฺ[Û[ุู[\[ี\ฺ[Ûฯศ[Y[YY[\Ý[ÞWฺู^NูXÝ\]K\ุK\Ý\NยÛÛÝุ\ู\ฮ\^OศY\[ูฬ—ีSQUSำ—ีT’PS•ึÛ[X\—Nศ^XÝYÝ[ฮศ[Y]ÜÝ[ฮศ^XÝ]N
+
+HOฺYÛZ\ูOฺYOHยศY[ÛÝÛ—ูY[ศ^XÝY–ู\Ü[Y]ÜÛÛ[]ฺุ[X\หÝ\ÝฺXูWÜ[^XÝ]N
+
+HOศÛÛ[]ฺุ[X\หÝ\ÝฺXูWÜ[\ูJศÝ\[^XÝYYHJNศHKศYX[ÜYYฺY^XÝY–ู\Ü[Y]ÜÛÛ[]ฺุ[X\หÜXZศ^XÝ]N
+
+HOศÛÛ[]ฺุ[X\หÜXZห\ูJศ[—ฺYÝXK]]ZY^ุYHY[\Ý[ÞWฺู^NูXÝ\]K\ุK\ÜXZศJNศHKศYX[ÜYYÜฺH^XÝY–ู\Ü[Y]ÜÛÛ[]ฺุ[X\หÝ\ÝฺXูWÜ[^XÝ]N
+
+HOศÛÛ[]ฺุ[X\หÝ\ÝฺXูWÜ[\ูJศÝ\\ู]ศ[]\ู]^XÝYู\Þ[Y[ศ[]\ู]^XÝYู\Þ[Y[Û[Y\ฺHHHJNศHKศY^Û[Z]^XÝY•VีำืำT‘ัH[Y]Ü[Y]P]Y[า[][Z]^XÝ]N
+
+HOศ[Y]P]Y[า[][Z]
+ศ^\X]
+\หÛÛYหX^^ฺ\XÝ\ศ
+ศJHK\หÛÛYหX^^ฺ\XÝ\สNศHKศY^\WÛY]Y]Wุ]\ศ^XÝYUQSืีำืำT‘ัH[Y]Ü\ู\P]Y[า[]^XÝ]N\Þ[ศ
+
+HOศ]ุZ]\ู\P]Y[า[]
+ศ^\WฺYÛÝ\Y\ุHKู^\Jศุ[\T]N\หÛÛYหX^]Y[ะ]\ห\][Û“\ฮWฬฺ[[ฮJWK\หÛÛYสNศHKศY^\WÛY]Y]Wู\][Û^XÝYUQSืัTUSำ—ำSRU[Y]Ü\ู\P]Y[า[]^XÝ]N\Þ[ศ
+
+HOศ]ุZ]\ู\P]Y[า[]
+ศ^\WฺYÛÝ\Y\ุHKู^\Jศ\][Û“\ฮ\หÛÛYหX^]Y[ั\][Û“\ศ
+ศHJWK\หÛÛYสNศHKศY[Ý\ÜYู^\H^XÝY‘’VT‘Wำ“ีั“ีS‘[Y]Ü\ู\P]Y[า[]^XÝ]N\Þ[ศ
+
+HOศ]ุZ]\ู\P]Y[า[]
+ศ^\WฺY[ÛÝÛY^\HKืK\หÛÛYสNศHKศY[Ý\ÜYÜุู[\[ศ^XÝY–ู\Ü[Y]ÜÛÛ[]ฺุ[X\หÝ\ÝฺXูWÜ[^XÝ]N
+
+HOศÛÛ[]ฺุ[X\หÝ\ÝฺXูWÜ[\ูJศÝ\ุู[\[ืฺY•US’ำ“ีำJNศHKศYÛÜYฺ[^XÝY•T‘ัUำ“ีะSีัQ[Y]Ü[Y]P[ÝูYÜYฺ[^XÝ]N
+
+HOศ[Y]P[ÝูYÜYฺ[หÝ[Ý\ÜY[[Y\หÛÛYห[ÝูYÜYฺ[สNศHKศY[Ý\ÜYÝ\ู]Ü]^XÝY•T‘ัUำ“ีะSีัQ[Y]Ü[Y]P[ÝูYÜYฺ[^XÝ]N
+
+HOศ[Y]P[ÝูYÜYฺ[	Û]ศT“
+[\ู]Û[\
+KÜYฺ[KÜY\XÝ\หÛÛYห[ÝูYÜYฺ[สNศHKศY[Ý\ÜYÝ\ู]Ü]Y\H^XÝY•T‘ัUำ“ีะSีัQ[Y]Ü[Y]P[ÝูYÜYฺ[^XÝ]N
+
+HOศ[Y]P[ÝูYÜYฺ[	Û]ศT“
+[\ู]Û[\
+KÜYฺ[KฯÜY\XÝZฮหÝ[Ý\ÜY[[Y\หÛÛYห[ÝูYÜYฺ[สNศHKศY[Ý\ÜYÝ\ู]ÛÜYฺ[^XÝY•T‘ัUำ“ีะSีัQ[Y]Ü[Y]P[ÝูYÜYฺ[^XÝ]N
+
+HOศ[Y]P[ÝูYÜYฺ[ฮหÝ[Ý\ÜY[[Y\หÛÛYห[ÝูYÜYฺ[สNศHKศYY\XÝÛÜYฺ[^XÝY•T‘ัUำ“ีะSีัQ[Y]Ü[Y]P[ÝูYÜYฺ[^XÝ]N
+
+HOศ[Y]P[ÝูYÜYฺ[ฮหุ[ÝูY[[YY\XÝ[[Yศ\หÛÛYห[ÝูYÜYฺ[สNศHKศY[[Yุุ\\WÜÛXÞH^XÝY–ู\Ü[Y]ÜÛÛ[]ฺุ[X\หÝ\ÝฺXูWÜ[^XÝ]N
+
+HOศÛÛ[]ฺุ[X\หÝ\ÝฺXูWÜ[\ูJศÝ\ุ\\WÜÛXÞNศ]ืุ]Y[ฮ[ูKุÜY[ฺÝYKY[ฮ[ูK][[Û—ฺÝ\ฮHJNศHKศYX[ÜYYÝุ]^XÝYUQSืั“ิ“PUีS”ีTิ•Q[Y]Ü\ูUุ]^XÝ]N
+
+HOศ\ูUุ]Y\ÛJÝXK]ุ]HJNศHKศYÝ\ฺ^Yุ]Y[ศ^XÝYUQSืีำืำT‘ัH[Y]Ü\Üู\]Y[ะ]S[Z]^XÝ]N
+
+HOศ\Üู\]Y[ะ]S[Z]
+\หÛÛYหX^]Y[ะ]\ศ
+ศK\หÛÛYหX^]Y[ะ]\สNศHKNยÜ
+ÛÛÝุHูุ\ู\สHย]ÛูNÝ[ศ[H[ยHศ]ุZ]ุK^XÝ]J
+NศBุ]ฺ
+\ÜHศÛูHH\Ü[Ý[ู[ูฺXูSX‘\Üศ\Ü]Z[ÛูH\Ü[Ý[ู[ู\Üศ\Ü[YH‘\ÜศBÛÛÝZXÝYHÛูHOOHุK^XÝYย]ุZ]\หYู\\[][
+[YูXÝ\]KWÜ\ÛÝ\ูWÝ[Y][Û—ÜุHÛÜู\ศ\X[ุKYZXÝY^XÝYู\Ü—ุÛ\ÜฮุK^XÝYุู\Yู\Ü—ุÛ\ÜฮÛูKูXÝ[Û—Ý[Y]ÜุK[Y]ÜKูXÝ\]NÜ[YNÜุKYX
+NยY
+\ZXÝY
+HÝศ]ศฺXูSX‘\ÜX‘\Ü”‘Wิ‘TำีTัWีSQUSำ—ิ“ะ‘WัRSQHÛÝ\YX[ÜYYYYXHÜ\ู]ุ\ูHYÝ\ูHHูXÝ[ÛZ[XÛÜูY[Y]Ü\\Üศ[ูKศ\X[ุKY^XÝYุK^XÝYุู\YÛูHJJNยB]ุZ]\หYู\\[][
+[YูXÝ\]Kฺ\YÝ[Y]Ü—ู\]Z][[ูHÛÜู\ศ[\[Ý[Y]Ü—ÜÝ\[Y[YK\X[ุÛÝ[ุ\ู\ห[ÝูXÝ[Û—ุÝ[\Wุ\Üู\[ÛูXÝ\]KXÜุÝ[\WÜุHKูXÝ\]NÜ[YNฺ\Y][Y]ÜY\]Z][[ูX
+Nย]ุZ]\หYู\\[][
+[YูXÝ\]Kฬ—ÜÝ\XูWุÛÝ\YูHุ[ÛXุ[ยฺุ[XNÛÜXWÝฺXูWÛX—Üฬ—ÜÝ\XูWุÛÝ\YูWÝHXXืุ]][Xุ]YÛXÜÝ\X[ฮห”ฬ—าีT’PS•ืK[\[ÜÝ\\ÛÛWÝ\X[ฮศ^\WÛY]Y]Wุ]\ศ^\WÛY]Y]Wู\][ÛX[ÜYYÝุ]Ý\ฺ^Yุ]Y[ศ—K[Ý\ÜYู^\WÜXXืÛXÜYK]ืุ]Y[ืÜXXืÜÝ\XูN[ูK]ืุ]Y[ืÜÝ\XูWÜX\ÛÛืÜXXืÜ]ืุ]Y[ืÜÝ\XูH^\WÜÝ\\ÜXูZ\\ห]Y[ห^\TXY[\Üส
+KKูXÝ\]NÜ[YNÝ\XูKXÛÝ\YูX
+Nย]ุZ]\หÜ[“XÜ[Y][Û”ุ\ส[[]\ู]
+NยBÛÛÝXÝ]T[ะY\H]ุZ]\หYู\ÛÝ[XÝ]T[ส
+NยÛÛÝ[ุุ][Û”[H]ุZ]\หู\ฺ[[Y
+NยÛÛÝ[ุุ][Û‘[ูHHยXÝ]WÜ[ืุYÜNXÝ]T[ะYÜKXÝ]WÜ[ืุY\XÝ]T[ะY\XÝ]WÜ[—ุÛÝ[Ý[ฺ[ูYXÝ]T[ะY\OOHXÝ]T[ะYÜKÝÜู\—ุÛÛ^ุXู[]\ห]\\ิู\Üฺ[Û[Y
+KÝÜู\—ÛX\ูWุXู[
+]ุZ]\หYู\ู]ÝÜู\“X\ูJ[Y
+JHOOH[ุ[ÛXุ[Üู\Üฺ[Û—ุXู[[ุุ][Û”[ุ[ÛXุ[ู\Üฺ[Û’YOOH[ÝY\—Üู\Üฺ[Û—ุXู[[ุุ][Û”[ÝY\”ู\Üฺ[Û’YOOH[ืÜุู\Üืฺ[ุุ][ÛฮNย]ุZ]\หYู\\[][
+[YูXÝ\]KWÜ\ÛÝ\ูWุ[ุุ][Û—ู[ูHÛÜู\[ุุ][Û‘[ูKูXÝ\]NÜ[YN[ุุ][ÛY[ูX
+NยY
+SุXÝ[Y\ส[ุุ][Û‘[ูJK]\J
+ฺู^K[YWJHOู^K[ีฺ]
+—ุYÜHHู^K[ีฺ]
+—ุY\HศYH[YHOOHYH[YHOOH
+JHÝศ]ศฺXูSX‘\ÜX‘\Ü”‘Wิ‘TำีTัWะSะะUSำ—ำะะีT”‘Q•HÛÝ\YูXÝ\]HXฺ\Hุู\YH\ÛÝ\ูHÜ][ÝH]]][ÛYÜHZXÝ[Û\\Üศ[ูJJNย]ุZ]\หYู\\[][
+[YÛX[\ÝÜู\—ุÛÛ^ุXู[ÛÜู\ศWÜ\ÛÝ\ูWÜXฺ\NYKÝÜู\—Û]\—ุ[ุุ]YYHKÛX[\Ü[YNÝÜู\XÛÛ^XXู[
+Nย]ุZ]\หYู\\[][
+[YÛX[\ÝÜู\—ÛX\ูWุXู[ÛÜู\ศWÜ\ÛÝ\ูWÜXฺ\NYK]]Ü]]]WÛYู\—ÜXY
+]ุZ]\หYู\ู]ÝÜู\“X\ูJ[Y
+JHOOH[KÛX[\Ü[YNÝÜู\[X\ูKXXู[
+NยÛÛÝXÛÝ\HH]ุZ]\หÜXÛÝ\”[[Nย]ุZ]\หÜ\ฺ\Ý][ส[YXÛÝ\K][สNย[H]ุZ]\หู\ฺ[[Y
+Nย[H]ุZ][ฺ][Û”[\หYู\[^Ü[ศNย]\ศ[—ÜÝ]N[Ý]Kู\YXุ][Û—ÜXฺ\N[ุู[\[าYWÜ\ÛÝ\ูWÛÛNYKÜ\][Û—ฺYÜ\][Û’Yู[[^WÜWÜ\ÛÝ\ูNYHNยB\Þ[ศÜ[“XÜ[Y][Û”ุ\ส[[”XÛÜ[]\ู]XÛÜÝ[ห[ÛÝÛNÛZ\ูOฺYยÛÛÝ\ÛÝ\ูHH\หÛÛYหุ]]ห\ÛÝ\ูNยY
+\\ÛÝ\ูJHÝศ]ศฺXูSX‘\ÜX‘\Ü“Pิะ“ีS‘T–WะัT•Q’PะUSำ—ีSURSP“H•Tฬ\]Z\\ศHÛÛYÝ\YXXศYฺ\Ý\YX\Pิ\ÛÝ\ูK\\Üศ[ูJJNยÛÛÝ[ฺ[H]ศT“
+\ÛÝ\ูJNยY
+[ฺ[][YHOOHÛXÜ[ฺ[ูX\ฺ[ฺ[\ฺ
+HÝศ]ศฺXูSX‘\ÜX‘\Ü“Pิะ“ีS‘T–WะัT•Q’PะUSำ—ีSURSP“H•TฬXXศ\ÛÝ\ูHุ\ศÝH^XÝÛXÜ[ฺ[\\Üศ[ูJJNยÛÛÝุ[H
+YÝ[ห[YNÝ[ห\ÜฮXÛÜÝ[ห[ÛÝÛHO
+ศÛÛฮY\ฬIฺYKIÜ[ÛUURQ
+
+_XY]ูÛÛหุุ[\[\ฮศ[YK\Ý[Y[ฮ\ÜศHJNยÛÛÝÝ\Hศ[\ÛY[[[\ÛY[\ู][]\ู]ุู[\[ืฺY•Tฬุู[\[ืÝ\ฺ[Û[ุู[\[ี\ฺ[Ûฯศ[Y[YY[\Ý[ÞWฺู^NฬZ\Ý\NยÛÛÝÝ[\\^OศY^ÛYO\[ูฬ—าีT’PS•ึÛ[X\—KY\ฺÛÛX[ÜYYฺÛÛÝ\ฺ^YฺÛÛศูNXÛÜÝ[ห[ÛÝÛOHยศY[ÛÝÛ—ูY[ศูNุ[
+[ÛÝÛÝ\ÝฺXูWÜ[ศÝ\[^XÝYYHJHKศYX[ÜYYฺYูNุ[
+YÜXZศศ[—ฺYÝXK]]ZY^ุYHY[\Ý[ÞWฺู^NฬZZYJHKศYX[ÜYYÜฺHูNุ[
+ฺHÝ\ÝฺXูWÜ[ศÝ\\ู]ศ[]\ู]^XÝYู\Þ[Y[ศ[]\ู]^XÝYู\Þ[Y[\ศXÛÜÝ[ห[ÛÝÛKÛ[Y\ฺHHHJHKศY^Û[Z]ูNุ[
+^ÜXZศศ[—ฺY[Y^\X]
+\หÛÛYหX^^ฺ\XÝ\ศ
+ศJKY[\Ý[ÞWฺู^NฬZ]^JHKศY[Ý\ÜYู^\HูNุ[
+^\HÜXZศศ[—ฺY[Y^\WฺYฬYÛÝ\Y][ÛÝÛY^\HY[\Ý[ÞWฺู^NฬZY^\HJHKศY[Ý\ÜYÜุู[\[ศูNุ[
+ุู[\[ศÝ\ÝฺXูWÜ[ศÝ\ุู[\[ืฺY•US’ำ“ีำJHKศYÛÜYฺ[ูNุ[
+Ý\ÝฺXูWÜ[ศÝ\\ู]ศ[]\ู]Û[Ý\หÝ[Ý\ÜY[[YHJHKศY[Ý\ÜYÝ\ู]Ü]ูNุ[
+]Ý\ÝฺXูWÜ[ศÝ\\ู]ศ[]\ู]Û[Ý\	Û]ศT“
+[\ู]Û[\
+KÜYฺ[KÜY\XÝHJHKศY[Ý\ÜYÝ\ู]Ü]Y\HูNุ[
+]Y\HÝ\ÝฺXูWÜ[ศÝ\\ู]ศ[]\ู]Û[Ý\	Û]ศT“
+[\ู]Û[\
+KÜYฺ[KฯÜY\XÝZฮหÝ[Ý\ÜY[[YHJHKศY[Ý\ÜYÝ\ู]ÛÜYฺ[ูNุ[
+ÜYฺ[Ý\ÝฺXูWÜ[ศÝ\\ู]ศ[]\ู]Û[Ý\ฮหÝ[Ý\ÜY[[YHJHKศYY\XÝÛÜYฺ[ูNุ[
+Y\XÝÝ\ÝฺXูWÜ[ศÝ\\ู]ศ[]\ู]Û[Ý\ฮหุ[ÝูY[[YY\XÝ[[YศHJHKศY[[Yุุ\\WÜÛXÞHูNุ[
+ุ\\HÝ\ÝฺXูWÜ[ศÝ\ุ\\WÜÛXÞNศ]ืุ]Y[ฮ[ูKุÜY[ฺÝYKY[ฮ[ูK][[Û—ฺÝ\ฮHJHKNยÛÛÝY\XÛÜÝ[ห[ÛÝÛH฿Nย]Ý\ÛÜHY\ยÜ
+][^Hศ[^ฬศ[^
+ฯHJHศÛÛÝ^XÛÜÝ[ห[ÛÝÛH฿NศÝ\ÛÜ\ÝYH^ศÝ\ÛÜH^ศBÛÛÝ[ÜÜ\^OศYY\ฺÛÛX[ÜYYฺÛÛÝ\ฺ^YฺÛÛศ]ฮÝ[ฮศ^XÝYÝ]\ฮ[X\OHยศYY\ฺÛÛ]ฮ”ำำÝ[ฺYJศÛÛฮY\ฬYY\IÜ[ÛUURQ
+
+_XY]ูÛÛหุุ[\[\ฮศ[YNู]ุุ\X[]Y\ศ\Ý[Y[ฮY\HJK^XÝYÝ]\ฮKศYX[ÜYYฺÛÛ]ฮศÛÛศY\ฬ[X[ÜYYIÜ[ÛUURQ
+
+_H^XÝYÝ]\ฮKศYÝ\ฺ^YฺÛÛ]ฮ”ำำÝ[ฺYJศÛÛฮY\ฬ[Ý\ฺ^YIÜ[ÛUURQ
+
+_XY]ูÛÛหุุ[\[\ฮศ[YNู]ุุ\X[]Y\ศ\Ý[Y[ฮศY[ฮ\X]
+MLฬ
+HHHJK^XÝYÝ]\ฮLศKNย]][Ý\ะÝ[\N[\Ü
+ูÛXZ[ศK“X‘][[H[ยÜ
+ÛÛÝุHูหÝ[\X\
+
+][JHO
+ศY][KY]ฮ”ำำÝ[ฺYJ][KูJKูN][KูK^XÝYÝ]\ฮ[\ศ[X\[JJK[ÜÜX\
+
+][JHO
+ศ][KูN[JJWJHยÛÛÝ\ÛÝ\ูPYÜHH]ุZ]\หÜฬ”\ÛÝ\ูTÛ\ฺÝ
+[Y
+NยÛÛÝ\]Y\ÝÝ\Y]H]ศ]J
+NยÛÛÝ]Y]]Y\TÝ\H]ศ]J\]Y\ÝÝ\Y]ู][YJ
+HH—ฬ
+NยÛÛÝุRYH[ÛUURQ
+
+NยÛÛÝุRY\ฺHฺLMุRY
+NยÛÛÝÝ[Y[XฺศHฺLMÝ[Y][\ูY\\]Y\ÝNย]ูR\ฺHÝ[Y[Xฺฮย]\Ý[Y[\ฺÝ[ศ[H[ยY
+ุKูJHยูR\ฺHุ[ÛXุ[\]Y\Ý\ฺ
+ุKูJNยÛÛÝ\[\ศHุKูK\[\ศ\ศXÛÜÝ[ห[ÛÝÛย\Ý[Y[\ฺHุ[ÛXุ[\]Y\Ý\ฺ
+\[\ห\Ý[Y[ศฯศ[
+NยBÛÛÝ\ÜÛูHH]ุZ]\หุู[\[ั]ฺ
+[ฺ[ศY]ู”ิีY\XÝX[X[ฺYÛ[XÜฺYÛ[[Y[Ý]
+ือL
+KXY\ฮศ]]Ü^][ÛX\\	Ý\หÛÛYหX\\•ฺู[XXุู\\Xุ][ÛฺÛÛ^ู][\ÝX[HÛÛ[]\H\Xุ][ÛฺÛÛ\ÛÜXK]ฺXูK[X\ุKZYุRYKูNุK]ศJNยÛÛÝ\ÜÛูPูHH]ุZ]\ÜÛูK^
+
+NยÛÛÝ\ÜÛูSุู\Y]H]ศ]J
+NยÛÛÝ\ฺ\ศHห]ศู]
+ุูR\ฺÝ[Y[Xฺห\Ý[Y[\ฺศุ\Ý[Y[\ฺHืJWJWNยÛÛÝ]Y]ศH]ุZ]\หYู\\Ý]]]Y]P\Ý[Y[\ฺ\ส\หÛÛYหX\\”ÝXXÝ\ฺ\ห]Y]]Y\TÝ\
+NยÛÛÝ^XÝุP]Y]ศH]Y]ห[\
+]Y]
+HO]Y]]Z[ุWฺYÜฺLMOOHุRY\ฺ
+NยÛÛÝ\ÛÝ\ูPY\H]ุZ]\หÜฬ”\ÛÝ\ูTÛ\ฺÝ
+[Y
+NยÛÛÝ^XÝ][ÛHฬ’ุQ^XÝ][ÛุKY
+NยÛÛÝ\ÜÛูU\H]ศT“
+\ÜÛูK\
+NยÛÛÝÝ[\HH]ุZ]\หYู\\[][
+[YูXÝ\]KXÜุÝ[\WÜุHุ[ÛXุ[ยฺุ[XNฬ—ำPิะ“ีS‘T–Wิ“ะ‘WิะาSPK\X[ุKYุWฺYÜฺLMุRY\ฺ\]Y\ÝยÛÛXÝ^XÝ][Û\]Y\ÝÛÛXÝÛÛXÝÜฺLMุ[ÛXุ[\]Y\Ý\ฺ
+^XÝ][Û\]Y\ÝÛÛXÝ
+K[ฺ[ÛÜYฺ[—ÜฺLMฺLM[ฺ[ÜYฺ[K]ืุูWÜฺLMฺLMุK]สKุ[ÛXุ[ุูWÜฺLMูR\ฺ]WÛ[ÝY\]S[Ý
+ุK]สKÝ\Yุ]\]Y\ÝÝ\Y]าTำิÝ[ส
+KK\ÜÛูNยÜÝ]\ฮ\ÜÛูKÝ]\ห\Ü—ุÛูNÛ\ÜฺYTฬ“XÜ\Ü\ÜÛูPูJKูWÜฺLMฺLM\ÜÛูPูJK]WÛ[ÝY\]S[Ý
+\ÜÛูPูJKÛÛ[Ý\N
+\ÜÛูKXY\หู]
+ÛÛ[]\HHฯศKÜ]
+ศJVฬHK[J
+KำÝู\ุ\ูJ
+K[[ÛÜYฺ[—ÜฺLMฺLM\ÜÛูU\ÜYฺ[K[[Ü]\ÜÛูU\][YKุุ][Û\ÜÛูKXY\หู]
+ุุ][ÛKุู\Yุ]\ÜÛูSุู\Y]าTำิÝ[ส
+KK]Y]ÜXูZ\ฮ^XÝุP]Y]หX\
+
+]Y]
+HO
+ยXÝ[Û]Y]XÝ[ÛÝ]ÛÛYN]Y]Ý]ÛÛYK\Ý[Y[ÜฺLM]Y]\Ý[Y[\ฺุ[\—Ü\][Û—ฺY]Y]ุ[\’YุWฺYÜฺLM]Y]]Z[ุWฺYÜฺLMฯศ[\]Y\ÝฺYÜฺLM]Y]]Z[\]Y\ÝฺYฺ\ฺฯศ[\Ü—ุÛ\Üฮ]Y]]Z[\Ü—ุÛ\Üศฯศ[ุู\Yุ]]Y]ุู\Y]าTำิÝ[ส
+KJJK\ÛÝ\ูWู[NศYÜN\ÛÝ\ูPYÜKY\\ÛÝ\ูPY\KKูXÝ\]NÜ[YNXÜXÝ[\NÜุKYX
+NยY
+Z\ั^XÝฬ“XÜÝ[\TุJÝ[\K][Ý\ะÝ[\JJHÝศ]ศฺXูSX‘\ÜX‘\Ü“Pิะ“ีS‘T–Wิ“ะ‘WัRSQ•H\ÞYY]][Xุ]YPิÝ[\HYÝูXูH[^XÝ\Y]Y]Y\ห[]]][ÛZXÝ[Û\\Üศ[ูKศ\X[ุKYÜÝ]\ฮ\ÜÛูKÝ]\ห]Y]ÜXูZ\ุÛÝ[^XÝุP]Y]ห[ÝJJNย][Ý\ะÝ[\HHÝ[\NยBB\Þ[ศÜฬ”\ÛÝ\ูTÛ\ฺÝ
+[’YÝ[สNÛZ\ูOฬ”\ÛÝ\ูTÛ\ฺÝยÛÛÝุXÝ]T[ÛÝ[[Ü\][Ûห][ืHH]ุZ]ÛZ\ูK[
+ย\หYู\ÛÝ[XÝ]T[ส
+K\หู\ฺ[[’Y
+K\หYู\\ÝÜ\][Ûส[’Y
+K\หุ[][ส[’Y
+KJNยÛÛÝ[]]]][ÛศH][ห][ห[\
+][
+HO][ฺ[OOH]\[ูK\ÛÛY][ฺ[OOH\\Üห[]ู[YWูÜุ\Y][ฺ[Ý\ีฺ]
+]Y[ห[]H][ฺ[Ý\ีฺ]
+ูXÝ[]JK[Ýย]\ยXÝ]WÜ[—ุÛÝ[XÝ]T[ÛÝ[Ü\][Û—ุÛÝ[Ü\][Ûห[Ý[—ู][ุÝ\ÛÜ][ห]\Ý[]Û]]][Û—ู][ุÛÝ[[]]]][ÛหÝÜู\—ุÛÛ^ุÛÝ[\ห]\\ิู\Üฺ[Û[’Y
+HศHุ[ÛXุ[Üู\Üฺ[Û—ุÛÝ[[ุ[ÛXุ[ู\Üฺ[Û’YOOH[ศKÝY\—Üู\Üฺ[Û—ุÛÝ[[ÝY\”ู\Üฺ[Û’YOOH[ศKNยB\Þ[ศÜ[“ะ]]ูXÝ\]Tุ\ส[[”XÛÜ
+NÛZ\ูOฺYยÛÛÝุ]]H\หÛÛYหุ]]ยY
+[ุ]]
+HÝศ]ศฺXูSX‘\ÜX‘\Ü“ะUUะัT•Q’PะUSำ—ีSURSP“H•TฬH\]Z\\ศHÛÛYÝ\YYฺ\Ý\YX\ะ]]Ý[\K]]Ü^][Û[ูJJNยÛÛÝ\ÛÝ\ูHH]ศT“
+ุ]]\ÛÝ\ูJNยÛÛÝ\ÜÝY\H]ศT“
+ุ]]\ÜÝY\KÜYฺ[ยY
+\ÛÝ\ูK][YHOOHÛXÜ\ÛÝ\ูKูX\ฺ\ÛÝ\ูK\ฺ
+HÝศ]ศฺXูSX‘\ÜX‘\Ü“ะUUิ‘TำีTัWาS•SQ•HYฺ\Ý\Yะ]]\ÛÝ\ูH\ศÝH^XÝPิ[ฺ[]]Ü^][Û[ูJJNยÛÛÝ[]X[^HH”ำำÝ[ฺYJศÛÛฮYKY]ู[]X[^H\[\ฮศÝุÛÛ\ฺ[ÛKLหLุ\X[]Y\ฮ฿KÛY[[ฮศ[YNฺXูK[X]\ฬH\ฺ[ÛHHHJNยÛÛÝ[]]Ü^Yุ\ู\ฮ\^OศYุ]]ÛZ\Üฺ[ศุ]]ฺ[[Yศ]]Ü^][ÛฮÝ[ศOHยศYุ]]ÛZ\Üฺ[ศKศYุ]]ฺ[[Y]]Ü^][ÛX\\ÛÝ\YZ[[Y[ุ]]\ุHKNยÜ
+ÛÛÝุHู[]]Ü^Yุ\ู\สHยÛÛÝ\ÜÛูHH]ุZ]\หุู[\[ั]ฺ
+\ÛÝ\ูKยY]ู”ิีY\XÝX[X[ฺYÛ[XÜฺYÛ[[Y[Ý]
+Wฬ
+KXY\ฮศXุู\\Xุ][ÛฺÛÛ^ู][\ÝX[HÛÛ[]\H\Xุ][ÛฺÛÛุK]]Ü^][Ûศศ]]Ü^][ÛุK]]Ü^][ÛH฿JHKูN[]X[^KJNยÛÛÝฺ[[ูHH\ÜÛูKXY\หู]
+ÝÝหX]][Xุ]HHฯศยÛÛÝZXÝYH\ÜÛูKÝ]\ศOOHH	\ÜÛูK\OOH\ÛÝ\ูKิÝ[ส
+H	ฺ[[ูK[ÛY\ส\ÛÝ\ูWÛY]Y]OHH	ฺ[[ูK[ÛY\ส\Ü—ู\ุÜ\[ÛHH	\\ÜÛูKXY\ห\สุุ][ÛNย]ุZ]\ÜÛูKูOหุ[ู[
+
+Kุ]ฺ
+
+
+HO[Y[Y
+Nย]ุZ]\หÜXÛÜะ]]ุJ[ุKYZXÝY\ÜÛูKÝ]\หศ^XÝÜ\ÛÝ\ูN\ÜÛูK\OOH\ÛÝ\ูKิÝ[ส
+K[ฺ[ืฺุ[[ูNฺ[[ูK[ÛY\ส\ÛÝ\ูWÛY]Y]OHH	ฺ[[ูK[ÛY\ส\Ü—ู\ุÜ\[ÛHHJNยBÛÛÝ\ÛÝ\ูSZ\ÛX]ฺ\[\ศH\หุ]]Ü^][Û”\[\สุ]]ฺXูWÛXXYฺXูWÛX[ฮหÜ\ÛÝ\ูK[Z\ÛX]ฺ[[YÛXÜNยÛÛÝZ\ÛX]ฺ\H]ศT“
+ุ]]Ü^H\ÜÝY\NยZ\ÛX]ฺ\ูX\ฺH\ÛÝ\ูSZ\ÛX]ฺ\[\หิÝ[ส
+NยÛÛÝZ\ÛX]ฺH]ุZ]\หุู[\[ั]ฺ
+Z\ÛX]ฺ\ศY]ู‘ัUY\XÝX[X[ฺYÛ[XÜฺYÛ[[Y[Ý]
+Wฬ
+KXY\ฮศXุู\^ฺ[\Xุ][ÛฺÛÛHJNยÛÛÝZ\ÛX]ฺุุ][ÛHZ\ÛX]ฺXY\หู]
+ุุ][ÛNยÛÛÝZ\ÛX]ฺY\XÝHZ\ÛX]ฺุุ][Ûศ]ศT“
+Z\ÛX]ฺุุ][ÛH[ยÛÛÝZ\ÛX]ฺ\ู]Ý[HZ\ÛX]ฺY\XÝOOH[		ÛZ\ÛX]ฺY\XÝÜYฺ[IÛZ\ÛX]ฺY\XÝ][Y_XOOHุ]]ÛY[Y\XÝ\NยÛÛÝZ\ÛX]ฺZXÝYHZ\ÛX]ฺÝ]\ศOOHฬศ	Z\ÛX]ฺ\ู]Ý[	Z\ÛX]ฺY\XÝูX\ฺ\[\ห\ส\ÜH	Z\ÛX]ฺY\XÝูX\ฺ\[\หู]
+\ÜศHOOH\ÜÝY\ย]ุZ]Z\ÛX]ฺูOหุ[ู[
+
+Kุ]ฺ
+
+
+HO[Y[Y
+Nย]ุZ]\หÜXÛÜะ]]ุJ[ุ]]Ü\ÛÝ\ูWÛZ\ÛX]ฺZ\ÛX]ฺZXÝYZ\ÛX]ฺÝ]\หศ^XÝÜYฺ\Ý\YÜY\XÝZ\ÛX]ฺ\ู]Ý[JNยÛÛÝ\YY\H	Ü[ÛUURQ
+
+K\XูP[
+H_IÜ[ÛUURQ
+
+K\XูP[
+H_XยÛÛÝ]]Ü^T\[\ศH\หุ]]Ü^][Û”\[\สุ]]ฺXูWÛXXYฺXูWÛX[ุ]]\ÛÝ\ูK\YY\NยÛÛÝ]]Ü^U\H]ศT“
+ุ]]Ü^H\ÜÝY\Nย]]Ü^U\ูX\ฺH]]Ü^T\[\หิÝ[ส
+NยÛÛÝYูHH]ุZ]\หุู[\[ั]ฺ
+]]Ü^U\ศY]ู‘ัUY\XÝX[X[ฺYÛ[XÜฺYÛ[[Y[Ý]
+Wฬ
+KXY\ฮศXุู\^ฺ[HJNยY
+YูKÝ]\ศOOH]ศT“
+YูK\
+KÜYฺ[OOH\ÜÝY\]ศT“
+YูK\
+K][YHOOHุ]]Ü^HHÝศ]ศฺXูSX‘\ÜX‘\Ü“ะUUิ“ะ‘WัRSQ•HÛÝ\Yะ]]]]Ü^][ÛYูHุ\ศ[]Z[XK]]Ü^][Û[ูJJNยÛÛÝ[H
+]ุZ]YูK^
+
+JKÛXูJฬ
+NยÛÛÝY[H
+[YNÝ[สNÝ[ศOยÛÛÝ[YHH]ศYั^
+[YOHÛ[Y_H[YOHะKVK^NK—฿W^ฮJH
+K^Xส[
+Oห–ฬWNยY
+][YJHÝศ]ศฺXูSX‘\ÜX‘\Ü“ะUUิ“ะ‘WัRSQ•HÛÝ\Yะ]]ÛÛู[ÜHÛÛXÝุ\ศ[ÛÛ\]K]]Ü^][Û[ูKศY[[YHJJNย]\[YNยNยÛÛÝÛÛฺฺYHHYูKXY\หู]
+ู]XÛÛฺฺYHOหÜ]
+ศJVฬNยY
+XÛÛฺฺYJHÝศ]ศฺXูSX‘\ÜX‘\Ü“ะUUิ“ะ‘WัRSQ•HÛÝ\Yะ]]ÛÛู[ิิ‘ÛÛฺฺYHุ\ศ[]Z[XK]]Ü^][Û[ูJJNยÛÛÝXฺ\ฺ[ÛH]ุZ]\หุู[\[ั]ฺ
+]ศT“
+ุ]]Ü^H\ÜÝY\KยY]ู”ิีY\XÝX[X[ฺYÛ[XÜฺYÛ[[Y[Ý]
+Wฬ
+KXY\ฮศXุู\^ฺ[ÛÛ[]\H\Xุ][ÛÞ]ÝÝหYÜK]\[ÛูYÛÛฺฺYHKูN]ศT“ูX\ฺ\[\สศ\]Y\ÝฺYY[\]Y\ÝฺYKÜÜ—Ýฺู[Y[ÜÜ—Ýฺู[KÛÛู[ÜูXÜ]ุ]]ÛÛู[ูXÜ]Xฺ\ฺ[Û\ÝHJKิÝ[ส
+KJNยÛÛÝXฺ\ฺ[Û“ุุ][ÛHXฺ\ฺ[ÛXY\หู]
+ุุ][ÛNย]ุZ]Xฺ\ฺ[ÛูOหุ[ู[
+
+Kุ]ฺ
+
+
+HO[Y[Y
+NยÛÛÝุ[XฺศHXฺ\ฺ[Û“ุุ][Ûศ]ศT“
+Xฺ\ฺ[Û“ุุ][ÛH[ยÛÛÝÛูHHุ[XฺฯหูX\ฺ\[\หู]
+ÛูHNยY
+Xฺ\ฺ[ÛÝ]\ศOOHฬศุ[XฺศOOH[	ุุ[XฺหÜYฺ[Iุุ[Xฺห][Y_XOOHุ]]ÛY[Y\XÝ\Hุ[XฺหูX\ฺ\[\หู]
+\ÜศHOOH\ÜÝY\XÛูJHÝศ]ศฺXูSX‘\ÜX‘\Ü“ะUUิ“ะ‘WัRSQ•HÛÝ\Yะ]]]]Ü^][ÛXÛูHY\XÝุ\ศÝ^XÝHÝ[]]Ü^][Û[ูJJNยÛÛÝฺู[”\]Y\ÝH]ศT“ูX\ฺ\[\สศÜ[Ý\N]]Ü^][Û—ุÛูHÛูKY\XÝÝ\Nุ]]ÛY[Y\XÝ\KÛY[ฺYุ]]ÛY[Y]Y]U\ÛูWÝ\YY\\YY\\ÛÝ\ูNุ]]\ÛÝ\ูHJNย]Xุู\Üีฺู[Ý[ศ[H[ย]Y\ฺฺู[Ý[ศ[H[ย]ุQZ[\N[ÛÝÛH[ยHยหศH]ศ]]Ü^][ÛÛูH\ศ[ÛศHÛK\ฺÝ\XHÛX[\[Kหศ]\ศÛÝÛYÜHH\ÜÛูK[ÜÜศÝ[\H[\ศ]ฺูY[ÝศÛหศ]\HÝ]ÛÛYK[ÛY[ศHÛÛ[Z]YZ\ÛÝูYHHÜÝÜหศ[\ุXH\ÜÛูKÛÛÝ^ฺ[ูHH]ุZ]\หุู[\[ั]ฺ
+]ศT“
+Ýฺู[\ÜÝY\KศY]ู”ิีY\XÝX[X[ฺYÛ[XÜฺYÛ[[Y[Ý]
+Wฬ
+KXY\ฮศXุู\\Xุ][ÛฺÛÛÛÛ[]\H\Xุ][ÛÞ]ÝÝหYÜK]\[ÛูYKูNฺู[”\]Y\ÝิÝ[ส
+HJNยÛÛÝฺู[”^[ุYH^ฺ[ูKÝ]\ศOOHศ]ุZ]^ฺ[ูKÛÛ
+H\ศXÛÜÝ[ห[ÛÝÛ฿NยXุู\Üีฺู[H\[ูฺู[”^[ุYXุู\ÜืÝฺู[OOHÝ[ศศฺู[”^[ุYXุู\ÜืÝฺู[[ยY\ฺฺู[H\[ูฺู[”^[ุYY\ฺÝฺู[OOHÝ[ศศฺู[”^[ุYY\ฺÝฺู[[ยY
+XXุู\Üีฺู[\Y\ฺฺู[ฺู[”^[ุY\ÛÝ\ูHOOHุ]]\ÛÝ\ูHฺู[”^[ุYุÛÜHOOHฺXูWÛXXYฺXูWÛX[HÝศ]ศฺXูSX‘\ÜX‘\Ü“ะUUิ“ะ‘WัRSQ•HÛÝ\Yะ]]ฺู[[Z[Hุ\ศÝ^XÝH\ÛÝ\ูKÜุÛÜHÝ[]]Ü^][Û[ูJJNยÛÛÝ][ุ[H]ุZ]\หุู[\[ั]ฺ
+\ÛÝ\ูKยY]ู”ิีY\XÝX[X[ฺYÛ[XÜฺYÛ[[Y[Ý]
+Wฬ
+KXY\ฮศ]]Ü^][ÛX\\	ุXุู\Üีฺู[XXุู\\Xุ][ÛฺÛÛ^ู][\ÝX[HÛÛ[]\H\Xุ][ÛฺÛÛKูN”ำำÝ[ฺYJศÛÛฮYY]ูÛÛหุุ[\[\ฮศ[YNÜูWÜÛฺุู]ÜÝ][Û\Ý[Y[ฮศ[—ฺY[Y^XÝYÜÛฺุู]ู\ฺุY[\Ý[ÞWฺู^NฬKZ[ÝYXฺY[Y][HHJKJNยÛÛÝ][ูHH
+]ุZ]][ุ[^
+
+JKÛXูJฬ
+NยÛÛÝ][ZXÝYH][ุ[Ý]\ศOOH	ิะำิWิ‘TURT‘Q[ÝYXฺY[ÜุÛÜKห\Ý
+][ูJH	Y][ุ[XY\ห\สุุ][ÛNย]ุZ]\หÜXÛÜะ]]ุJ[ุ]]ฺ[ÝYXฺY[ู][ÜุÛÜH][ZXÝY][ุ[Ý]\หศ^XÝÜ\ÛÝ\ูN][ุ[\OOH\ÛÝ\ูKิÝ[ส
+Kฺ[[ูWÜ\ู[ÛXÜÝÝÝืุ]][Xุ]_[ÝYXฺY[ÜุÛÜKห\Ý
+][ูJHJNยÛÛÝ\^HH]ุZ]\หุู[\[ั]ฺ
+]ศT“
+Ýฺู[\ÜÝY\KศY]ู”ิีY\XÝX[X[ฺYÛ[XÜฺYÛ[[Y[Ý]
+Wฬ
+KXY\ฮศXุู\\Xุ][ÛฺÛÛÛÛ[]\H\Xุ][ÛÞ]ÝÝหYÜK]\[ÛูYKูNฺู[”\]Y\ÝิÝ[ส
+HJNยÛÛÝ\^PูHH
+]ุZ]\^K^
+
+JKÛXูJWฬ
+Nย]ุZ]\หÜXÛÜะ]]ุJ[ุ]]ุ]]Ü^][Û—ุÛูWÜ\^H\^KÝ]\ศOOH	ศ\Ü—ส—ส[[YูÜ[ห\Ý
+\^PูJK\^KÝ]\หศืÜY\XÝ\\^KXY\ห\สุุ][ÛHJNยHุ]ฺ
+\ÜHยุQZ[\HH\ÜยB]ÛX[\Z[\N[ÛÝÛH[ยHศ]ุZ]\หÜ]ฺูSะ]]ุQ[Z[J[ุ]]ÛูKXุู\Üีฺู[Y\ฺฺู[NศBุ]ฺ
+\ÜHศÛX[\Z[\HH\ÜศBY
+ุQZ[\JHÝศุQZ[\NยY
+ÛX[\Z[\JHÝศÛX[\Z[\NยÛÛÝ\XÝH]ศÝ]XะX\\]][Xุ]Ü\หÛÛYหX\\•ฺู[\หÛÛYหX\\”ÝXXÝ\หÛÛYห][X\\•ฺู[NยÛÛÝ\ูPุ[\H]ุZ]\XÝ]][Xุ]JX\\	Ý\หÛÛYหX\\•ฺู[X
+Nย]\ูQ][ZXÝYH[ูNยHศ\]Z\TุÛÜJ\ูPุ[\ฺXูWÛX][NศHุ]ฺ
+\ÜHศ\ูQ][ZXÝYH\Ü[Ý[ู[ูฺXูSX‘\Ü	\Ü]Z[ÛูHOOH”ะำิWิ‘TURT‘QศB]ุZ]\หYู\\[][
+[YูXÝ\]K\XÝู][ÜุÛÜWÜุHÛÜู\ศZXÝY\ูQ][ZXÝY\ูWÜุÛÜWÜู]ห\ูPุ[\ุÛÜ\ืKÛÜ
+
+K][ุÜY[X[ู\Ý[Ý\หÛÛYห][X\\•ฺู[OOH[	\หÛÛYห][X\\•ฺู[OOH\หÛÛYหX\\•ฺู[KูXÝ\]NÜ[YN\XÝY][\ุÛÜX
+NยY
+X\ูQ][ZXÝY
+HÝศ]ศฺXูSX‘\ÜX‘\Ü‘USิะำิWิ“ะ‘WัRSQ•H\ูH\XÝXÛY[ÜY[X[[^XÝYHุ\YY][]]Ü]K]]Ü^][Û[ูJJNยB\Þ[ศÜ]ฺูSะ]]ุQ[Z[J[[”XÛÜุ]]Û“[XOฺXูSXÛÛYึศุ]]—O]]Ü^][ÛÛูNÝ[หXุู\Üีฺู[Ý[ศ[Y\ฺฺู[Ý[ศ[
+NÛZ\ูOฺYยÛÛÝ\ÜÝY\H]ศT“
+ุ]]\ÜÝY\KÜYฺ[ยÛÛÝ]ฺูHH\Þ[ศ
+ฺู[Ý[ห[Y\ฺÝฺู[Xุู\ÜืÝฺู[HOยÛÛÝ\ÜÛูHH]ุZ]\หุู[\[ั]ฺ
+]ศT“
+Ü]ฺูH\ÜÝY\KยY]ู”ิีY\XÝX[X[ฺYÛ[XÜฺYÛ[[Y[Ý]
+Wฬ
+KXY\ฮศXุู\\Xุ][ÛฺÛÛÛÛ[]\H\Xุ][ÛÞ]ÝÝหYÜK]\[ÛูYKูN]ศT“ูX\ฺ\[\สศฺู[ฺู[—Ý\Wฺ[[ÛY[ฺYุ]]ÛY[Y]Y]U\JKิÝ[ส
+KJNยÛÛÝ^XÝH\ÜÛูKÝ]\ศOOH	\ÜÛูK\OOH	ฺ\ÜÝY\KÜ]ฺูX	\\ÜÛูKXY\ห\สุุ][ÛNย]ุZ]\ÜÛูKูOหุ[ู[
+
+Kุ]ฺ
+
+
+HO[Y[Y
+Nย]\^XÝยNยหศ]ฺฺ[ศHY\ฺฺู[\Z[[^\ศ]ศ\XH[Z[K]ฺฺ[ศBหศXุู\Üศฺู[YุZ[\ศ[Y[\Ý[[ูHY[Y\\]\]\ศBหศÛY[Z[HY\ฺXูZ\ÛÛÝÛูT\ÜÛูHH]ุZ]\หุู[\[ั]ฺ
+]ศT“
+Ü]ฺูH\ÜÝY\KยY]ู”ิีY\XÝX[X[ฺYÛ[XÜฺYÛ[[Y[Ý]
+Wฬ
+KXY\ฮศXุู\\Xุ][ÛฺÛÛÛÛ[]\H\Xุ][ÛÞ]ÝÝหYÜK]\[ÛูYKูN]ศT“ูX\ฺ\[\สศฺู[]]Ü^][ÛÛูKฺู[—Ý\Wฺ[]]Ü^][Û—ุÛูHÛY[ฺYุ]]ÛY[Y]Y]U\JKิÝ[ส
+KJKุ]ฺ
+
+
+HO[
+NยÛÛÝÛูU\Z[[^YHÛูT\ÜÛูHOOH[	ÛูT\ÜÛูKÝ]\ศOOH	ÛูT\ÜÛูK\OOH	ฺ\ÜÝY\KÜ]ฺูX	ÛูT\ÜÛูKXY\หู]
+\ÛÜXK[ุ]]\]ุุ][Û\XูZ\HOOH]]Ü^][Û—ุÛูH	XÛูT\ÜÛูKXY\ห\สุุ][ÛNย]ุZ]ÛูT\ÜÛูOหูOหุ[ู[
+
+Kุ]ฺ
+
+
+HO[Y[Y
+NยÛÛÝY\ฺ]ฺูYHY\ฺฺู[OOH[]ุZ]]ฺูJY\ฺฺู[Y\ฺÝฺู[Kุ]ฺ
+
+
+HO[ูJNยÛÛÝXุู\Üิ]ฺูYHXุู\Üีฺู[OOH[]ุZ]]ฺูJXุู\Üีฺู[Xุู\ÜืÝฺู[Kุ]ฺ
+
+
+HO[ูJNยÛÛÝXุู\ÜะฺXฺศHXุู\Üีฺู[OOH[ศ[]ุZ]\หุู[\[ั]ฺ
+]ศT“
+ุ]]\ÛÝ\ูJKยY]ู”ิีY\XÝX[X[ฺYÛ[XÜฺYÛ[[Y[Ý]
+Wฬ
+KXY\ฮศ]]Ü^][ÛX\\	ุXุู\Üีฺู[XXุู\\Xุ][ÛฺÛÛ^ู][\ÝX[HÛÛ[]\H\Xุ][ÛฺÛÛKูN”ำำÝ[ฺYJศÛÛฮYฬK\]ฺูYIÜ[ÛUURQ
+
+_XY]ู[]X[^H\[\ฮศÝุÛÛ\ฺ[ÛKLหLุ\X[]Y\ฮ฿KÛY[[ฮศ[YNฺXูK[X]\ฬK\]ุุ][Û\ฺ[ÛHHHJKJNยÛÛÝXุู\Üั[YYHXุู\ÜะฺXฺศOOH[Xุู\ÜะฺXฺหÝ]\ศOOHH	Xุู\ÜะฺXฺห\OOHุ]]\ÛÝ\ูH	XXุู\ÜะฺXฺหXY\ห\สุุ][ÛNย]ุZ]Xุู\ÜะฺXฺฯหูOหุ[ู[
+
+Kุ]ฺ
+
+
+HO[Y[Y
+NยÛÛÝY\ฺฺXฺศHY\ฺฺู[OOH[ศ[]ุZ]\หุู[\[ั]ฺ
+]ศT“
+Ýฺู[\ÜÝY\KยY]ู”ิีY\XÝX[X[ฺYÛ[XÜฺYÛ[[Y[Ý]
+Wฬ
+KXY\ฮศXุู\\Xุ][ÛฺÛÛÛÛ[]\H\Xุ][ÛÞ]ÝÝหYÜK]\[ÛูYKูN]ศT“ูX\ฺ\[\สศÜ[Ý\NY\ฺÝฺู[Y\ฺÝฺู[Y\ฺฺู[ÛY[ฺYุ]]ÛY[Y]Y]U\\ÛÝ\ูNุ]]\ÛÝ\ูHJKิÝ[ส
+KJNยÛÛÝY\ฺูHHY\ฺฺXฺศOOH[ศ
+]ุZ]Y\ฺฺXฺห^
+
+JKÛXูJWฬ
+NยÛÛÝY\ฺ[YYHY\ฺฺXฺศOOH[Y\ฺฺXฺหÝ]\ศOOH	ศ\Ü—ส—ส[[YูÜ[ห\Ý
+Y\ฺูJH	\Y\ฺฺXฺหXY\ห\สุุ][ÛNยÛÛÝÛÛ\]HHÛูU\Z[[^Y	Y\ฺ]ฺูY	Xุู\Üิ]ฺูY	Xุู\Üั[YY	Y\ฺ[YYย]ุZ]\หYู\\[][
+[YูXÝ\]Kุ]]ู[Z[WุÛX[\ุ[ÛXุ[ยÛÛ\]K]]Ü^][Û—ุÛูWุÛX[\ฺ[WÝ\ูYYK]]Ü^][Û—ุÛูWู[Z[WÝ\Z[[^YÛูU\Z[[^YXุู\ÜืÝฺู[—ฺ\ÜÝYYXุู\Üีฺู[OOH[Y\ฺÝฺู[—ฺ\ÜÝYYY\ฺฺู[OOH[Y\ฺู[Z[WÜ]ุุ][Û—ÜXูZ\Y\ฺ]ฺูYXุู\ÜืÜ]ุุ][Û—ÜXูZ\Xุู\Üิ]ฺูYXุู\ÜืÝฺู[—ู[YYุY\—Ü]ุุ][ÛXุู\Üั[YYY\ฺÝฺู[—ู[YYุY\—Ü]ุุ][ÛY\ฺ[YY\XWÝ\Z[[ÜÝ]WÝ\YYYXุู\Üั[YY	Y\ฺ[YY]ืÝฺู[ืู^ÛYYYKKูXÝ\]NÜ[YNุ]]Y[Z[KXÛX[\
+NยY
+XÛÛ\]JHÝศ]ศฺXูSX‘\ÜX‘\Ü“ะUUัSRSWะำPS•TัRSQ•HÛÝ\Yะ]]ุH[Z[HYÝXXฺH\XH]ฺูYÝ]K]]Ü^][ÛYJJNยBุ]]Ü^][Û”\[\สุ]]Û“[XOฺXูSXÛÛYึศุ]]—OุÛÜ\ฮÝ[ห\ÛÝ\ูNÝ[ห\YY\ฮÝ[สNT“ูX\ฺ\[\ศยÛÛÝYXÝ]U\YY\H\YY\ฯศ	Ü[ÛUURQ
+
+K\XูP[
+H_IÜ[ÛUURQ
+
+K\XูP[
+H_Xย]\]ศT“ูX\ฺ\[\สศ\ÜÛูWÝ\NÛูH\ÜÛูWÛ[ูN]Y\HÛY[ฺYุ]]ÛY[Y]Y]U\Y\XÝÝ\Nุ]]ÛY[Y\XÝ\KุÛÜNุÛÜ\หÝ]NฬKIÜ[ÛUURQ
+
+_XÛูWฺุ[[ูNุูTฬMYXÝ]U\YY\KÛูWฺุ[[ูWÛY]ู”ฬM\ÛÝ\ูHJNยB\Þ[ศÜXÛÜะ]]ุJ[[”XÛÜ\X[\[ูฬWำะUUีT’PS•ึÛ[X\—KZXÝYÛÛX[Ý]\ฮ[X\]Z[XÛÜÝ[ห[ÛÝÛNÛZ\ูOฺYย]ุZ]\หYู\\[][
+[YูXÝ\]Kุ]]ุÝ[\WÜุHุ[ÛXุ[ศ\X[ZXÝYÜÝ]\ฮÝ]\ห]Z[KูXÝ\]NÜ[YNÝ\X[X
+NยY
+\ZXÝY
+HÝศ]ศฺXูSX‘\ÜX‘\Ü“ะUUิัPีT’UWิ“ะ‘WัRSQHÛÝ\Yะ]]ZXÝ[Ûุ\ศÝÝ[]HูXÝ[Û\ÛÝ\ูHÝ[\K]]Ü^][Û[ูKศ\X[ÜÝ]\ฮÝ]\ศJJNยB\Þ[ศู[[^TT\ÛÝ\ูTุู[\[ส[’YÝ[สNÛZ\ูOฺYย][H]ุZ]\หู\ฺ[[’Y
+NยÛÛÝ][ศH]ุZ]\หุ[][ส[Y
+NยÛÛÝÜ\][ÛศH]ุZ]\หYู\\ÝÜ\][Ûส[Y
+NยÛÛÝ\Üู\[ÛศH][X]Tุู[\[ะ\Üู\[Ûส[][ห][หÜ\][ÛสNยY
+X\Üู\[Ûห\\Üห]\J
+\Üู\[ÛHO\Üู\[ÛÝ]\ศOOH\ÜศHX]]Ü]]]S]PÛX[\ÛÛ\]J][ห][สJHÝศ]ศฺXูSX‘\ÜX‘\Ü”‘Wิ‘TำีTัWะัT•Q’PะUSำ—าSำำTUH”K\\ÛÝ\ูHู\YXุ][Ûุ[Ý\Üศฺ]Ý]]\HÛÝ\YZXÝ[Û[]]Ü]]]H\ห[Ü[XÛÝ\K\\ÜศYKศุู[\[ืฺY[ุู[\[าYJJNยÛÛÝ\XÝฮ\XÝศHศ\\Üฮ\ÜศูXÝ[]Z[XHÝY\[]Z[XH]][ุู[\[าYOOH•TฬHศ\Üศ[]Z[XH]Y[ูN\ÜศNย[H]ุZ]\หู\ฺ[[Y
+Nย[H]ุZ][ฺ][Û”[\หYู\[ÛÛ\]Yศ\XÝหÛX[\ÛÛ\]NYK][[Û”]ฺÛQ][ส][ห][สHJNยÛÛÝ\Z[[][H]ุZ]\หYู\\[][
+[Y[ÛÛ\]YÛÜู\ศ\Z[[ÜÝ]NÛÛ\]Y\Z[[ÜX\ÛÛWÜ\ÛÝ\ูWÜูXÝ\]WÜXฺ\WÜ\ÜูYÛX[\ุÛÛ\]NYK[[[Û[WÝ[[ุุ]YYHK[Ü[YNÛÛ\]Y
+Nย]ุZ]\หÜX\ฺ[‘]Y[ูJย[’Y[Y\Z[[Ý]NÛÛ\]Y\Z[[X\ÛÛWÜ\ÛÝ\ูWÜูXÝ\]WÜXฺ\WÜ\ÜูY\XÝห\Z[[\Ü[ÜX]Y]\Z[[][]\ÜูNK\\ÛÝ\ูH[[[Û[U[[ุุ]YYK\YXÝฮืKJNยB\Þ[ศุู\YQ\ฺ\TX]Xฺ
+[[”XÛÜ
+NÛZ\ูOฺYยY
+]\หÛÛYห]X\ูU\
+Hย]ุZ]\หYู\\[][
+[Y\X[]K\WÜX]XฺÝ[]Z[XHÛÜู\ศX\ÛÛูXÝ[Û—ÜÜÝÜ\ืÜ\]Z\YK\X[]NÜ[YN\K\X]Xฺ][]Z[XX
+Nย]\ยBÛÛÝ[\[[H]ศÜÝÜ\ีฺXูSX“Yู\\หÛÛYห]X\ูU\K\หÛÛYหXÛÝ\R[\[ูXÜ]\หÛÛYหุ[\”\][Û’ู^\สNยHย]ุZ][\[[[]X[^J
+NยÛÛÝX]XฺYH]ุZ][\[[ู][[Y
+NยÛÛÝ^XÝHX]XฺYห\Ý[’YOOH[\Ý[’Y	X]XฺYห]\ÝÝ\ÛÜOOH
+]ุZ]\หYู\ู][[Y
+JOห]\ÝÝ\ÛÜย]ุZ]\หYู\\[][
+[Y\X[]K[\[[ÛYู\—ÜXY\ÛÜู\ศ^XÝÝ\ÝÜ[^XÝ\ฺÜÜÝÜ\ืÜÛÛYKÝÜู\—ฺ[\XÝ[Û—ุÛÝ[]]][Û—ุÛÝ[X]XฺYÜÝ]NX]XฺYหÝ]Hฯศ[X]XฺYÝ\ฺ[ÛX]XฺYห\ฺ[Ûฯศ[^Xฺ]ÛÛ—ุÛZ[Nู\ืÛÝÜÝWÛXÜุ\WÜุู\ÜืÜ\Ý\K\X[]NÜ[YN[\[[[Yู\\XY\
+NยY
+Y^XÝ
+HÝศ]ศฺXูSX‘\ÜX‘\ÜTWิ‘PUPาัRSQH\ฺ\XHTHY\\ÛÝ[ÝX]XฺH^XÝ\Ý[\\ÜศYJJNยH[[Hศ]ุZ][\[[ÛÜูJ
+NศBB\Þ[ศู[ูS]]][ÛÛZ[YYÛZ[YYÜ\][ÛฺYÛ[XÜฺYÛ[
+NÛZ\ูOฺYยÝาYุ[ู[Y
+ฺYÛ[
+NยÛÛÝÜ\][Û“ÝÛYH]ุZ]\หYู\X\X]Ü\][ÛÛZ[YYÜ\][ÛY\หÛÜู\’YÛZ[YYÜ\][ÛX\ูQ\ฺุ\หÛÛYหÜ\][Û“X\ูTูXÛÛสNยY
+[Ü\][Û“ÝÛY
+HÝศ]ศฺXูSX‘\ÜX‘\Ü“PTัWำิี“Ü\][ÛX\ูHุ\ศÜÝYÜHYูH]]][ÛÛÛXÝYJJNยÛÛÝX\ูHH\หุXÝ]SX\ู\หู]
+ÛZ[YY[Y
+NยY
+[X\ูJHÝศ]ศฺXูSX‘\ÜX‘\Ü”“ีิัT—ำPTัWำิีÝÜู\X\ูH\ศÝÝÛYYÜHYูH]]][ÛÛÛXÝYJJNยÛÛÝÝÜู\“ÝÛYH]ุZ]\หYู\X\X]ÝÜู\“X\ูJÛZ[YY[Y\หÛÜู\’YX\ูK\ฺุ\หÛÛYหÝÜู\“X\ูTูXÛÛสNยY
+XÝÜู\“ÝÛY
+HÝศ]ศฺXูSX‘\ÜX‘\Ü”“ีิัT—ำPTัWำิีÝÜู\X\ูHุ\ศÜÝYÜHYูH]]][ÛÛÛXÝYJJNยÝาYุ[ู[Y
+ฺYÛ[
+NยB\Þ[ศุ]ุZ][Ü’[]ู][Y[
+[[”XÛÜÜ\][Û’YÝ[หฺYÛ[XÜฺYÛ[
+NÛZ\ูOฺYยÛÛÝ[ÜH
+]ุZ]\หYู\\ÝÜ\][Ûส[Y
+JB[\
+Ü\][ÛHOÜ\][ÛYOOHÜ\][Û’Y	Ü\][ÛÝ]HOOHÝXุูYYY	
+Ü\][Û\HOOHÜXZศÜ\][Û\HOOH\ูWฺ[JBÛÜ
+
+YYฺ
+HOYฺ\]Y]ู][YJ
+HHY\]Y]ู][YJ
+JVฬNยY
+\[ÜH]\ยÛÛÝXY[HH]KÝส
+H
+ศMWฬยฺ[H
+]KÝส
+HXY[JHยÝาYุ[ู[Y
+ฺYÛ[
+NยÛÛÝ][ศH]ุZ]\หุ[][ส[Y
+NยÛÛÝู]YH][ห][หÛÛYJ
+][
+HO\ั^XÝÝ[ูXÝ][
+[][
+H	][ฺ[OOH]Y[ห[]ูXÝÝ\	
+][^[ุYXูZ\\ศXÛÜÝ[ห[ÛÝÛ[Y[Y
+OหÜ\][Û—ฺYOOH[ÜY	
+][^[ุYXูZ\\ศXÛÜÝ[ห[ÛÝÛ[Y[Y
+OหÛÝ\ูHOOHู][Y[NยY
+ู]Y
+H]\ย]ุZ]\หÜ\ฺ\Ý][ส[Y]ุZ]\ห]\Z[[Y
+JNย]ุZ][^JL
+NยBÝศ]ศฺXูSX‘\ÜX‘\Ü’S”UำิTUSำ—ิัUSQS•ิS‘S‘ศ•H[Ü^XÝ[]Ü\][ÛYÝXXฺ]ศ\X]]ÜY\ู][Y[YÜH[Ý\[XÝ[ÛÛÝ[Ý\\\ÜศYKศ[Ü—ÛÜ\][Û—ฺY[ÜYJJNยB\Þ[ศÜ][Y]PXÝ]U\ู]
+[[”XÛÜÜ\][Û’YÝ[ห\ู]XÛÜÝ[ห[ÛÝÛNÛZ\ูOฺYย]ุZ]\หÜ\ฺ\Ý][ส[Y]ุZ]\ห]\Z[[Y
+JNยÛÛÝYูHH]ุZ]\หุ[][ส[Y
+NยÛÛÝ\ู]ู\HH[X\\ู]][Üู\JNยÛÛÝฺ]YHYูK][ห[
+
+][
+HO][ู\HOOH\ู]ู\H	\ั^XÝÝ[ูXÝ][
+[][
+JNย]XÝ]HH[ูNย]ฺ[Ý]]ÜX[^][ÛÛÛูYXÝยY
+\ู]ฺ[OOHÝ]]ÜX[^][ÛHยฺ[HÝ]]ÜX[^][ÛยÛÛÝXูZ\Hฺ]Yห^[ุYXูZ\\ศXÛÜÝ[ห[ÛÝÛ[Y[YยÛÛÝY[]Q][ศHYูK][ห[\
+][
+HOยY
+Z\ั^XÝÝ[ูXÝ][
+[][
+JH]\[ูNยÛÛÝ]\H][^[ุYXูZ\\ศXÛÜÝ[ห[ÛÝÛ[Y[Yย]\]\หX[^][Û’YOOH\ู]ÝXWฺY
+\[ู\ู]ฺ[ืฺ\ฺOOHÝ[ศ	]\หฺ[า\ฺOOH\ู]ฺ[ืฺ\ฺ
+NยJNยÛÛÝ\Z[[HY[]Q][หÛÛYJ
+][
+HOศ]Y[หÝ]]ÛÛ\]Y]Y[หÝ]]\ฺY]Y[หÝ]]ÜY—K[ÛY\ส][ฺ[
+JNยÛÛÝÛÛ\][ิÝ\HY[]Q][หÛÛYJ
+][
+HO][ู\HOOH\ู]ู\H	][ฺ[OOH]Y[หÝ]]Ý\YNยXÝ]HHฺ]Yหฺ[OOH]Y[หÝ]]Ý\Y	XูZ\ห\ูHOOHÝ\Y	XูZ\X[^][Û’YOOH\ู]ÝXWฺY	XูZ\ฺ[า\ฺOOH\ู]ฺ[ืฺ\ฺ	XูZ\ÝY\ÛÛXÝ[Û‘\ฺุOOH\ู]ÝY\—ุÛÛXÝ[Û—ู\ฺุ	XูZ\^XXฺัู[\][ÛOOH\ู]^XXฺืูู[\][Û	]\Z[[	XÛÛ\][ิÝ\ยH[ูHยฺ[HÛÛูYXÝยÛÛÝ[HHฺ]Yห^[ุY[H\ศXÛÜÝ[ห[ÛÝÛ[Y[YยÛÛÝÛÛุ[YH\ู]ÛÛุุ[ฺYฯศ\ู]ÝXWฺYยÛÛÝ\Z[[HYูK][หÛÛYJ
+][
+HOยY
+Z\ั^XÝÝ[ูXÝ][
+[][
+H][ู\HH\ู]ู\HY][ฺ[[ÛY\สู[Z[K]ÛÛXุ[[Yู\JH]\[ูNยÛÛÝ]\H][^[ุY[H\ศXÛÜÝ[ห[ÛÝÛ[Y[Yย]\]\OOH[Y[Y	]\ÛÛุ[YOOHÛÛุ[Y	]\YXÝYOOH\ู]YXÝฺY	ศ\ÜÛYุ[ู[YXYÜK\ู[ุ[ู[YXY\\ู[Ý\\ÜูYZXÝY—K[ÛY\สÝ[ส]\[[Ý]JJNยJNยXÝ]HHฺ]Yหฺ[[ÛY\สู[Z[K]ÛÛXุ[[Yู\HOOHYH	[HOOH[Y[Y	[KÛÛุ[YOOHÛÛุ[Y	[KYXÝYOOH\ู]YXÝฺY	[K[[Ý]HOOH[ÛÝÛ	[KÛÛ\ÜÛูTู[]OOH[	[Kุ[ู[Y]OOH[	[KÝY\ÛÛXÝ[Û‘\ฺุOOH\ู]ÝY\—ุÛÛXÝ[Û—ู\ฺุ	]\Z[[ยBY
+XXÝ]JHÝศ]ศฺXูSX‘\ÜX‘\ÜPีU‘WีT‘ัUิ‘USQUSำ—ัRSQ•H^XÝ\X]]ÜYÛÜศ\ู]ุ\ศศÛู\[Yฺ[[YYX][HYÜHÛÝ\YYูH]]][ÛÛÛXÝYKศ\ู]ู][Üู\N\ู]ู\K\ู]ฺฺ[ฺ[JJNย]ุZ]\หYู\\[][
+[Y][XÝ]WÝ\ู]Ü][Y]Yุ[ÛXุ[ศÜ\][Û—ฺYÜ\][Û’Y\ู]ู][Üู\N\ู]ู\K\ู]ฺฺ[ฺ[\ู]ฺY[]WÜฺLMฺLM	ิÝ[ส\ู]ÝXWฺYฯศ\ู]ÛÛุุ[ฺY
+_WL	ิÝ[ส\ู]YXÝฺYฯศ\ู]ฺ[ืฺ\ฺ
+_X
+Kุู\YÝÝYฺÜู\NYูK]\ÝXÝ]NYHKXÝ]K]\ู]ÛÜ\][Û’YNÝ\ู]ู\_X
+NยB\Þ[ศÛZ[[\YJ[[”XÛÜ]YY[ูNÛÜXK]ฺXูK[XYÛ[ÛÜXK]ฺXูK\[[YHÛÜXK]ฺXูK[X\XÛÝ\H[ÝูYÜฮÝ[ึืKÜ\][ÛÝ[ห\ÛÛY[[ฯฮÝÜู\ÛÛ^[[ห^XÝY\Þ[Y[H[\ู]^XÝY\Þ[Y[
+HยÛÛÝÛูXศH]YY[ูHOOHÛÜXK]ฺXูK[XYÛ[ศ\หูÛ[ุ\X[]Y\ศ\หุ\X[]Y\ฮยÛÛÝÝ\ฺ[Û[][[ÛูZ[[ศH[ÜX]Y]ู][YJ
+H
+ศ[ุ\\TÛXÞK][[Û’Ý\ศ
+ือฬยY
+[^\\ะ]ู][YJ
+HÝ\ฺ[Û[][[ÛูZ[[สHÝศ]ศฺXูSX‘\ÜX‘\ÜะTP’SUWะ’S‘S‘ืาS•SQ•H[[]]XHÝY\XY[H^ูYYYH[ÜศÝ\ฺ[Û[][[ÛูZ[[ห[\[[ูJJNยÛÛÝÝY\‘^\\ะ]H[^\\ะ]าTำิÝ[ส
+NยÛÛÝ[[ศH\ÛÛY[[ศฯศ]ุZ]\หÜ\ÛÛQÝÜู\ÛÛ^[[ส[NยÛÛÝZ[YHÛูXหZ[
+ศ]Y]YY[ูKÝX[[ฺ\[Y[ฺ\[ฺY[[ฺ\[Y\ÝÜ[—ฺY[\Ý[’YÛX[\ÛุYุ][Û—ฺY[ÛX[\ุYุ][Û’Y[ุู[\[าYOOH[ศ฿Hศุู[\[ืฺY[ุู[\[าYJK[ุู[\[ี\ฺ[ÛOOH[ศ฿Hศุู[\[ืÝ\ฺ[Û[ุู[\[ี\ฺ[ÛJK[[ศฯศ฿JKÞ[]XฮYK[\ÛY[[[\ÛY[][[Û—ฺÝ\ฮ[ุ\\TÛXÞK][[Û’Ý\หÝY\—ู^\\ืุ]ÝY\‘^\\ะ][ÝูYÛÜฮ[ÝูYÜห^XÝYู\Þ[Y[^XÝY\Þ[Y[JNยÛูXห\YJZ[Yฺู[ศ]YY[ูKÜ\][Û[ฺ\[Y[[ฺ\[Y\Ý[’Y[\Ý[’YÛX[\ุYุ][Û’Y[ÛX[\ุYุ][Û’Y[\ÛY[[[\ÛY[][[Û’Ý\ฮ[ุ\\TÛXÞK][[Û’Ý\หÝY\‘^\\ะ]^XÝY\Þ[Y[ุู[\[าY[ุู[\[าYุู[\[ี\ฺ[Û[ุู[\[ี\ฺ[Û[[ศศศฺXูSX”[’YฺLM[[หฺXูWÛX—Ü[—ฺYÜฺLMÝÜู\•ÛÜู\’YฺLM[[หÝÜู\—ÝÛÜู\—ฺYÜฺLMÝÜู\“X\ูQ\ฺุ[[หÝÜู\—ÛX\ูWู\ฺุÝÜู\ÛÛ^YฺLM[[หÝÜู\—ุÛÛ^ฺYÜฺLMH฿JHJNยÛÛÝ[[YTXÝ[Hุ[ÛXุ[\]Y\Ý\ฺ
+^XÝY\Þ[Y[
+HOOHุ[ÛXุ[\]Y\Ý\ฺ
+[\ู]^XÝY\Þ[Y[
+NยÛÛÝ]Y][[ศHศ]YY[ูKÜ\][Û\ÝÜ[—ฺY[\Ý[’Y[\ÛY[[[\ÛY[ÝY\—ู^\\ืุ]ÝY\‘^\\ะ]^XÝYู\Þ[Y[^XÝY\Þ[Y[XÛÝ\WÜ[[YWÜXÝ[[[YTXÝ[[[ศฯศ฿JHNย]ุZ]\หYู\XÛÜ]]]Y]
+ศ[’Y[Yุ[\’Y[ุ[\’YXÝ[Ûุ\X[]NÛÜ\][ÛXุ\X[]RR\ฺฺLMZ[YÛZ[\หJK\Ý[Y[\ฺุ[ÛXุ[\]Y\Ý\ฺ
+]Y][[สKÝ]ÛÛYN[ÝูY]Z[ศ]YY[ูKÜ\][ÛÝY\—ู^\\ืุ]ÝY\‘^\\ะ]XÛÝ\WÜ[[YWÜXÝ[[[YTXÝ[ÜYฺ[[ู^XÝYู\Þ[Y[ÜฺLM[[YTXÝ[ศุ[ÛXุ[\]Y\Ý\ฺ
+[\ู]^XÝY\Þ[Y[
+H[[[ศฯศ฿JHKุู\Y]]ศ]J
+HJNย]\Z[YยB\Þ[ศÜ\ÛÛQÝÜู\ÛÛ^[[ส[[”XÛÜ
+NÛZ\ูOÝÜู\ÛÛ^[[ศ[Y[YยY
+[ุู[\[าYOOH•QH]\[Y[YยÛÛÝXÝ]HH\หุXÝ]SX\ู\หู]
+[Y
+NยÛÛÝXÝ]P[[ศHXÝ]Hศ\]QÝÜู\ÛÛ^[[ส[\หÛÜู\’YXÝ]K\ฺุ
+H[Y[YยÛÛÝ\XHH]ุZ]\หYู\[]\Ý][
+[Yศ\\ÜหÝÜู\—ุÛÛ^ุÝ[—JNยY
+Y\XJHยY
+XÝ]P[[สH]\XÝ]P[[ฮยÝศ]ศฺXูSX‘\ÜX‘\Ü”“ีิัT—ะำำ•Vะ’S‘S‘ืีSURSP“H•H^XÝQÝÜู\ÝÛ\ฺ\[[ศุ\ศÝ\XH]Z[XK\\Üศ[ูJJNยBÛÛÝ^[ุYH\XK^[ุYยÛÛÝ\XP[[ฮÝÜู\ÛÛ^[[ศHยฺXูWÛX—Ü[—ฺYÜฺLMÝ[ส^[ุYฺXูWÛX—Ü[—ฺYÜฺLMฯศKÝÜู\—ÝÛÜู\—ฺYÜฺLMÝ[ส^[ุYÝÜู\—ÝÛÜู\—ฺYÜฺLMฯศKÝÜู\—ÛX\ูWู\ฺุ[X\^[ุYÝÜู\—ÛX\ูWู\ฺุ
+KÝÜู\—ุÛÛ^ฺYÜฺLMÝ[ส^[ุYÝÜู\—ุÛÛ^ฺYÜฺLMฯศKNยY
+Z\ั^XÝÝÜู\ÛÛ^[[ส[\XP[[สB^[ุYฺุ[XHOOHÛÜXWÝฺXูWÛX—ุÝÜู\—ุÛÛ^ุ[[ืÝH^[ุY]\—ุ]\ÝYOOHYB^[ุY\ÝÜ[—ฺYÜฺLMOOHฺLM[\Ý[’Y
+B^[ุYÛX[\ÛุYุ][Û—ฺYÜฺLMOOHฺLM[ÛX[\ุYุ][Û’Y
+B
+XÝ]P[[ศOOH[Y[Y	\ุ[YQÝÜู\ÛÛ^[[ส\XP[[หXÝ]P[[สJJHยÝศ]ศฺXูSX‘\ÜX‘\Ü”“ีิัT—ะำำ•Vะ’S‘S‘ืำRTำPUา•H\XHQÝÜู\ÝÛ\ฺ\[[ศÛÛXÝYฺ]H\ู\Y[ÜÝ\[X\ูK\\Üศ[ูJJNยB]\\XP[[ฮยB\Þ[ศÜ\ฺ\Ý][ส[’YÝ[ห][ฮ\^OÛZ][\Ü
+ูÛXZ[ศK“X‘][[’Yู\H]NÛZ\ูOฺYยÛÛÝÝ[[H]ุZ]\หู\ฺ[[’Y
+NยÜ
+ÛÛÝ][ู][สHยÛÛÝÝ[[ูHH][^[ุY—ุุ\\WÜÝ[[ูH\ศXÛÜÝ[ห[ÛÝÛ[Y[YยÛÛÝ]ำุู\Y]HÝ[[ูOหXÛÜYุ]ฯศÝ[[ูOหุู\Yุ]ยÛÛÝ\ูYH\[ู]ำุู\Y]OOHÝ[ศศ]ศ]J]ำุู\Y]
+H]ศ]J
+NยÛÛÝ\[[ศHÝXÝูXÝ[[[ส][ÛÝ\ูK][^[ุYÝ[[NยÛÛÝÛÝ\Y^[ุYH][^[ุYย]ุZ]\หYู\\[][
+[’Y][ฺ[][ÛÝ\ูKYXÝ
+ศÛÝ\Y^[ุYÜ[\—ุ[[ฮศ[—ฺY[’Y\ÝÜ[—ฺYÜฺLMฺLMÝ[[\Ý[’Y
+HK\[[ศOOH[ศ฿HศÜูXÝÜ[—ุ[[ฮ\[[ศJHJK][Y\Rู^Hฯศ[Y[Y[X\\ำS\ูYู][YJ
+JHศ]ศ]J
+H\ูY
+NยY
+][ÛÝ\ูHOOHูXÝ	][ฺ[OOH]Y[ห[]ูXÝู][	\[[ศOOH[
+HยÛÛÝXูZ\H][^[ุYXูZ\\ศXÛÜÝ[ห[ÛÝÛ[Y[YยÝศ]ศฺXูSX‘\ÜX‘\Ü”“ัPีาS”UัU’QSัWัUS•HูXÝZXÝYÜÛÝ[Ý[[XYÝ[Ý\ÛHÛÜ[]HHÛÝ\YÞ[]Xศ[]Ü\][Û\\Üศ[ูKศ][ุÛูN\[ูXูZ\หÛูHOOHÝ[ศศXูZ\ÛูH[ÛÝÛJJNยBB][H]ุZ]\หู\ฺ[[’Y
+Nย]ุ[ÛXุ[ู\Üฺ[Û’YH[ุ[ÛXุ[ู\Üฺ[Û’Yย]XYYH[XYYย]ÝY\”ู\Üฺ[Û’YH[ÝY\”ู\Üฺ[Û’Yย]XูRYH[XูRYย]ÝY\‘\ฺุH[ÝY\‘\ฺุย]\’YH[\’YยÜ
+ÛÛÝ][ู][สHยÛÛÝ^[ุYH][^[ุY\ศXÛÜÝ[ห[ÛÝÛยหศÝÛ[ศูXÝฺ[ศ\H\ุXHÛHฺ[HÜYฺ[[ุ\\H[[ÜBหศุ\YYH^XÝ\X]]ÜY]][Xุ]YÞ[]Xศ[[หY
+][ÛÝ\ูHOOHูXÝ	ÝXÝูXÝ[[[ส][ÛÝ\ูK^[ุYÝ[[HOOH[
+HÛÛ[YNยY
+][ฺ[OOHู\Üฺ[ÛÜY[X[ืÜXูZ]YHยุ[ÛXุ[ู\Üฺ[Û’YHÝXRฺ[ุ[ÛXุ[Üู\Üฺ[Û—ฺYุ[ÛXุ[ู\Üฺ[Û’Y^XÝÝ[ส^[ุYู\Üฺ[Û’Y
+JNยÝY\”ู\Üฺ[Û’YHÝXRฺ[ÝY\—Üู\Üฺ[Û—ฺYÝY\”ู\Üฺ[Û’Y^XÝÝ[ส^[ุYฺXูPYู[ู\Üฺ[Û’Y
+JNยXูRYHÝXRฺ[XูWฺYXูRY^XÝÝ[ส^[ุY[ÜÛZ]XูRY
+JNยÝY\‘\ฺุH[ÛÝÛXั\ฺุ
+ÝY\‘\ฺุ^XÝ[]S[X\^[ุYÝY\ÛÛXÝ[Û‘\ฺุ
+JNยH[ูHY
+][ฺ[OOHÝY\ÛÛXÝ[Û—ู\ฺุHยÛÛÝXูZ\H^[ุYXูZ\	\[ู^[ุYXูZ\OOHุXÝศ^[ุYXูZ\\ศXÛÜÝ[ห[ÛÝÛ฿Nยุ[ÛXุ[ู\Üฺ[Û’YHÝXRฺ[ุ[ÛXุ[Üู\Üฺ[Û—ฺYุ[ÛXุ[ู\Üฺ[Û’Y^XÝÝ[ส^[ุYู\Üฺ[Û’Y
+JNยÝY\”ู\Üฺ[Û’YHÝXRฺ[ÝY\—Üู\Üฺ[Û—ฺYÝY\”ู\Üฺ[Û’Y^XÝÝ[ส^[ุYฺXูPYู[ู\Üฺ[Û’Y
+JNยXูRYHÝXRฺ[XูWฺYXูRY^XÝÝ[สXูZ\[ÜÛZ]XูRY
+JNยÝY\‘\ฺุH[ÛÝÛXั\ฺุ
+ÝY\‘\ฺุ^XÝ[]S[X\XูZ\ÝY\ÛÛXÝ[Û‘\ฺุ
+JNยH[ูHY
+][ฺ[OOHุ\\KÛ\ฺÝHยÛÛÝÛ\ฺÝH^[ุYÛ\ฺÝ	\[ู^[ุYÛ\ฺÝOOHุXÝศ^[ุYÛ\ฺÝ\ศXÛÜÝ[ห[ÛÝÛ฿NยÛÛÝู\Üฺ[ÛHÛ\ฺÝู\Üฺ[Û	\[ูÛ\ฺÝู\Üฺ[ÛOOHุXÝศÛ\ฺÝู\Üฺ[Û\ศXÛÜÝ[ห[ÛÝÛ฿Nยุ[ÛXุ[ู\Üฺ[Û’YHÝXRฺ[ุ[ÛXุ[Üู\Üฺ[Û—ฺYุ[ÛXุ[ู\Üฺ[Û’Y^XÝÝ[สู\Üฺ[Ûู\Üฺ[Û’Y
+JNยXYYHÝXRฺ[XYฺYXYY^XÝÝ[สู\Üฺ[ÛXYY
+JNยH[ูHY
+][ÛÝ\ูHOOHุ[ÛXุ[	][ฺ[OOHู\Üฺ[Û[[^YHยÛÛÝXูZ\H^[ุYXูZ\	\[ู^[ุYXูZ\OOHุXÝศ^[ุYXูZ\\ศXÛÜÝ[ห[ÛÝÛ฿NยÛÛÝ[ุÜ\HXูZ\ุ[ÛXุ[Ý[ุÜ\	\[ูXูZ\ุ[ÛXุ[Ý[ุÜ\OOHุXÝศXูZ\ุ[ÛXุ[Ý[ุÜ\\ศXÛÜÝ[ห[ÛÝÛ฿Nยุ[ÛXุ[ู\Üฺ[Û’YHÝXRฺ[ุ[ÛXุ[Üู\Üฺ[Û—ฺYุ[ÛXุ[ู\Üฺ[Û’Y^XÝÝ[ส[ุÜ\ู\Üฺ[Û—ฺY
+JNยXYYHÝXRฺ[XYฺYXYY^XÝÝ[ส[ุÜ\XYฺY
+JNยH[ูHY
+][ฺ[[ีฺ]
+ÛÜXK\JHยÛÛÝ]HH^[ุY]H	\[ู^[ุY]HOOHุXÝศ^[ุY]H\ศXÛÜÝ[ห[ÛÝÛ฿Nย\’YH^XÝÝ[ส]K\’Y
+Hฯศ\’YยBBY
+ุ[ÛXุ[ู\Üฺ[Û’YOOH[ุ[ÛXุ[ู\Üฺ[Û’YXYYOOH[XYYÝY\”ู\Üฺ[Û’YOOH[ÝY\”ู\Üฺ[Û’YXูRYOOH[XูRYÝY\‘\ฺุOOH[ÝY\‘\ฺุ\’YOOH[\’Y
+Hย[H]ุZ]\หYู\\]T[[Y[\ฺ[Ûศุ[ÛXุ[ู\Üฺ[Û’YXYYÝY\”ู\Üฺ[Û’YXูRYÝY\‘\ฺุ\’YJNยBB\Þ[ศÝ\Z[[^QZ[\J[’YÝ[ห\ÜX‘\ÜÜูYÝ]Oฮ[”Ý]JNÛZ\ูOฺYย][H]ุZ]\หู\ฺ[[’Y
+NยÛÛÝุ[ู[YH]ุZ]\หYู\ุ[ู[[[ิ[“Ü\][Ûส[Y[X‘\Ü”•S—ีT“RSUQ“Ü\][Ûุ\ศุ[ู[YXุ]\ูH]ศÝÛ[ศ[Xุ[YH\Z[[\\Üศ[ูKศ\Z[[ÜX\ÛÛ\ÜÛูHJJNยÜ
+ÛÛÝÜ\][Ûูุ[ู[Y
+H]ุZ]\หYู\\[][
+[YÜ\][Ûุ[ู[YÛÜู\ศÜ\][Û—ฺYÜ\][ÛYÜ\][Û—Ý\NÜ\][Û\KX\ÛÛ—ุÛูNÜ\][Û\ÜหÛูHฯศ”•S—ีT“RSUQKÜ\][ÛÛÜ\][ÛYNุ[ู[Y
+NยY
+T“RSSิ•S—ิีUTห\ส[Ý]JJHยY
+[Ý]HOOHÛÛ\]YHยÛÛÝXÛÝ\YH]ุZ]\หÜXÛÝ\”[[Nย]ุZ]\หÜ\ฺ\Ý][ส[YXÛÝ\Y][สNยB[H]ุZ]\หู\ฺ[[Y
+NยÛÛÝXÛÝ\TYูHH]ุZ]\หุ[][ส[Y
+NยÛÛÝÝÜู\“X\ูT[X\ูYH]ุZ]\หÜ[X\ูPÝÜู\“X\ูTÛู[Y
+NยÛÛÝ]PÛX[\ÛÛ\]HH]]Ü]]]S]PÛX[\ÛÛ\]JXÛÝ\TYูK][สH	]\ห]\\ิู\Üฺ[Û[Y
+H	ÝÜู\“X\ูT[X\ูYยY
+]PÛX[\ÛÛ\]H	\[ÛX[\ÛÛ\]JH[H]ุZ]\หYู\\]T[[Y[\ฺ[ÛศÛX[\ÛÛ\]NYK][[Û”]ฺÛQ][สXÛÝ\TYูK][สHJNยหศXZ[H]\Z[\ÝXศZ[\HX[Y\ÝY\]\HXÛÝ\Bหศ][\ÛศH[[ศXูZ\ุ[XÛÛYHH\XHÛÛ\]HXูZ\]ุZ]\หÜุ]QZ[\Q]Y[ูJ[[\Z[[\Üฯศ\ÜืJNย]\ยB][Y]ุZ]Y]\•\OฺXูPÝÜู\‘]\–ศXÜ—OHศ][ฮืK\YXÝฮืHNยY
+\ห]\\ิู\Üฺ[Û[Y
+JHยÛÛÝ[[^QÜ[H]ุZ]\หÛZ[[\YJ[ÛÜXK]ฺXูK[XYÛ[ศู\Üฺ[Û[[^H—Kู\Üฺ[Û[[^HNยÛÛÝÛX[\Ü[H]ุZ]\หÛZ[[\YJ[ÛÜXK]ฺXูK[XYÛ[ศู\Üฺ[ÛÛX[\—Kู\Üฺ[ÛÛX[\Nย[YH]ุZ]\ห]\XÜ
+[\ÜÛูK[[^QÜ[ฺู[ÛX[\Ü[ฺู[Nย]ุZ]\หÜ\ฺ\Ý][ส[Y[Y][สNย[H]ุZ]\หู\ฺ[[Y
+NยBÛÛÝXÛÝ\YH]ุZ]\หÜXÛÝ\”[[Nย[YHศ][ฮห[Y][หXÛÝ\Y][ืK\YXÝฮห[Y\YXÝหXÛÝ\Y\YXÝืHNย]ุZ]\หÜ\ฺ\Ý][ส[YXÛÝ\Y][สNย[H]ุZ]\หู\ฺ[[Y
+NยÛÛÝÝ]N[”Ý]HHÜูYÝ]Hฯศ
+\ÜÛูHOOHะTT‘WะีT”ำิ—ัะT\ÜÛูHOOHะTT‘WัRS—ีS”ีTิ•Q\ÜÛูHOOH”“ัPีาS”UัU’QSัWัUSศ[[YÝ\Ý\ÜÛูHOOH‘TึSQS•ำRTำPUาศ\Þ[Y[ÛZ\ÛX]ฺ\Üุ]YÛÜHOOH]]Ü^][Ûศ]]Ü^][Û—ูZ[Y\Üุ]YÛÜHOOHูXÝศูXÝูZ[Y\Üุ]YÛÜHOOHÝY\ศ[ÛÛÛ\ฺ]WÜÝY\Z[Yฺ\\ÜศNยÛÛÝ\XÝศH\]QZ[\U\XÝส[Ý]K[Y][สNยÛÛÝÝÜู\“X\ูT[X\ูYH]ุZ]\หÜ[X\ูPÝÜู\“X\ูTÛู[Y
+NยÛÛÝ]PÛX[\ÛÛ\]HH]]Ü]]]S]PÛX[\ÛÛ\]J[Y][สH	]\ห]\\ิู\Üฺ[Û[Y
+H	ÝÜู\“X\ูT[X\ูYย[H]ุZ]\หYู\\]T[[Y[\ฺ[ÛศÝ]K\XÝห\Z[[\Ü\ÜÛX[\ÛÛ\]N]PÛX[\ÛÛ\]K][[Û”]ฺÛQ][ส[Y][สHJNย]ุZ]\หYู\\[][
+[Y[ÜÝ]_XÛÜู\ศ\ÜK[Ü[YNÜÝ]_X
+Nย]ุZ]\หÜุ]QZ[\Q]Y[ูJ[\Ü[Y\YXÝสNยB\Þ[ศÜXÛÝ\”[[[”XÛÜ
+NÛZ\ูO]ุZ]Y]\•\OฺXูPÝÜู\‘]\–ศXÛÝ\—OยÛÛÝÛÛX[Y]ุZ]Y]\•\OฺXูPÝÜู\‘]\–ศXÛÝ\—OHศ][ฮืK\YXÝฮืHNยÛÛÝÝÜู\“X\ูHH]ุZ]\หYู\ู]ÝÜู\“X\ูJ[Y
+NยÛÛÝ[ุุ][Û‘YHH[ุ[ÛXุ[ู\Üฺ[Û’YOOH[	[XYYOOH[	[ÝY\”ู\Üฺ[Û’YOOH[	[XูRYOOH[	[ÝY\‘\ฺุOOH[	[\’YOOH[	ÝÜู\“X\ูHOOH[	]\ห]\\ิู\Üฺ[Û[Y
+NยÛÛÝXÛÝ\Q^XÝY\Þ[Y[H[ุุ][Û‘YH	\หÛÛYหXY[\Üี\ู]OOH[ศ\หÛÛYหXY[\Üี\ู]^XÝY\Þ[Y[[\ู]^XÝY\Þ[Y[ยÜ
+]][\Hศ][\ฮศ][\
+ฯHJHยÛÛÝXÛÝ\QÜ[H]ุZ]\หÛZ[[\YJ[ÛÜXK]ฺXูK[X\XÛÝ\Hศู\Üฺ[ÛXÛÝ\—Kู\Üฺ[ÛXÛÝ\[Y[YXÛÝ\Q^XÝY\Þ[Y[
+NยÛÛÝ\Ý[H]ุZ]\ห]\XÛÝ\[XÛÝ\QÜ[ฺู[NยÛÛX[Y][ห\ฺ
+\Ý[][สNยÛÛX[Y\YXÝห\ฺ
+\Ý[\YXÝสNยY
+\Ý[][หÛÛYJ
+][
+HO][ฺ[OOHÛX[\XÛÝ\H	][^[ุYÛÛ\]HOOHYJJHXZฮยY
+][\H]ุZ][^JL
+
+][\
+ศJJNยB]\ÛÛX[YยB\Þ[ศÜุ]QZ[\Q]Y[ูJ[[”XÛÜ\ÜX‘\Ü\YXÝฮ\^OศYÝ[ฮศฺ[Ý[ฮศÛÛ[\NÝ[ฮศ]\ฮY\ONÛZ\ูOฺYยÛÛÝ][ศH]ุZ]\หุ[][ส[Y
+NยÛÛÝÜ\][ÛศH]ุZ]\หYู\\ÝÜ\][Ûส[Y
+NยÛÛÝ]]]Y]H]ุZ]\หYู\\Ý]]]Y]
+[Y
+NยÛÛÝ\Üู\[ÛศH][X]Tุู[\[ะ\Üู\[Ûส[][ห][หÜ\][Ûห]]]Y]
+NยÛÛÝ\Üู\[Û’\\Üฮ\XÝึศ\\Üศ—HH\Üู\[Ûห\\Üห[Ý	\Üู\[Ûห\\Üห]\J
+\Üู\[ÛHO\Üู\[ÛÝ]\ศOOH\ÜศBศ\Üศ\Üู\[Ûห\\ÜหÛÛYJ
+\Üู\[ÛHO\Üู\[ÛÝ]\ศOOHZ[HศZ[[]Z[XHยÛÛÝ\Z[[][Hห][ห][ืK]\ูJ
+K[
+
+][
+HO][ฺ[OOH[Ü[Ý]_X
+NยÛÛÝ\XÝฮ\XÝศHย[\XÝห\\Üฮ[ุู[\[าYOOH•Qศ\Üู\[Û’\\Üศ[\XÝห\\Üห]Y[ูN\ÜÛูHOOH‘VT“SัU’QSัWัPQS‘WัVT‘QศZ[[ÛX[\ÛÛ\]Hศ
+\Üู\[Û’\\ÜศOOH\Üศศ\Üศ[]Z[XHHZ[NยÛÛÝ^\Ý[ั]Y[ูHH]ุZ]\หYู\ู]]Y[ูJ[Y
+NยY
+^\Ý[ั]Y[ูH	^\Ý[ั]Y[ูK]\ฺ[Û”ู\HH][ห]\Ý
+HยหศH]Hฺ]ศ]ศ\XH][ุ[Ý]Ü]HH]\Z[\ÝXยหศX[Y\Ý]Hุ[YHÝ\ÛÜH[ÜX[Y\Ý[XYHÛÛZ[ศBหศุ[YH\]Y\XÝศÛHHุXฺY[ฺXÝ[ÛX^HYศXุ]\ูBหศ]\ศ\]YY\H\[[ÛH]Y[ูH[ุXÝ[ÛÛÛÝ\ฺH]ุZ]\หู\ฺ[[Y
+NยY
+ุ[ÛXุ[\]Y\Ý\ฺ
+\ฺ\XÝสHOOHุ[ÛXุ[\]Y\Ý\ฺ
+\XÝสJH]ุZ]\หYู\\]T[\ฺY\ฺ\ฺ[Ûศ\XÝศJNย]\ยB]ุZ]\หÜX\ฺ[‘]Y[ูJย[’Y[Y\Z[[Ý]N[Ý]K\Z[[X\ÛÛ\ÜÛูK\XÝห\Z[[\Ü\ÜÜX]Y]\Z[[][ห]ฯศ][ห][ห]
+LJOห]ฯศ[\]Y]\ÜูNZ[\H[[[Û[U[[ุุ]Y[ุู[\[าYOOH•TฬH[ุู[\[าYOOH•Tฬ\YXÝหJNยÛÛÝ\ฺH]ุZ]\หู\ฺ[[Y
+Nย]ุZ]\หYู\\]T[\ฺY\ฺ\ฺ[Ûศ\XÝศJNยBส
+ÛH0ฉฬL\ฺ\Y\[[ÛH]Y[ูHZ[\Ü]\H\Z[[Ý]ÛÛYK
+ÝXุู\Üหุู\YูXÝÜÝY\YXÝห[[Y\Ýห]]Ü^][Û
+Z[\\ห]\\Ý\ศ[K\\ÛÝ\ูHูXÝ\]HXฺ\\ศY\ÛH[
+Z\][]Z[X[]KูZ[\HY[ฮศ^H]\ู]HÛX[\
+\ÜฺูH[K]\Yุ[ÛXุ[\YXÝÝÜศ[ุ^\ศY[HHXXย
+T’Kฺ\ฺÛศÛÛ[Y\Hุ[ÝÜX]HH[Û[ศÜÜูYY\[ูK
+ย\Þ[ศÜX\ฺ[‘]Y[ูJ[]ย[’YÝ[ฮย\Z[[Ý]N[”Ý]Nย\Z[[X\ÛÛÝ[ฮย\XÝฮ\XÝฮย\Z[[\ÜX‘\Ü[ยÜX]Y]]Nย\ÜูNÝ[ฮย[[[Û[U[[ุุ]YÛÛX[ย\YXÝฮ\^OศYÝ[ฮศฺ[Ý[ฮศÛÛ[\NÝ[ฮศ]\ฮY\OยJNÛZ\ูOฺYยÛÛÝ[H]ุZ]\หู\ฺ[[][’Y
+NยÛÛÝ]Y[ูQ^\\ะ]H
+[][[Û”\ูQYP]ฯศ]ศ]J[]ÜX]Y]ู][YJ
+H
+ศ[ุ\\TÛXÞK][[Û’Ý\ศ
+ือฬ
+JKาTำิÝ[ส
+Nย]ÜXXุ][Û“Ü\][ÛหXXุ][Û]]]Y]XXุ][Û\YXÝืHH]ุZ]ÛZ\ูK[
+ย\หYู\\ÝÜ\][Ûส[Y
+K\หYู\\Ý]]]Y]
+[Y
+K\หYู\\Ý\YXÝส[Y
+KJNยÛÛÝ[X\ฺY\YXÝ]\ศHXXุ][Û\YXÝหYXูJ
+Ý[\YXÝ
+HOÝ[
+ศ\YXÝ]\ห]S[Ý
+NยY
+[X\ฺY\YXÝ]\ศH—ฬฬ	]ุZ]\หYู\ู]]Y[ูJ[Y
+HOOH[
+HยÛÛÝ[]YH]ุZ]\หYู\[]U[X\ฺY\YXÝส[Y
+Nย]ุZ]\หYู\\[][
+[Y]Y[ูKÜ[—ุ\YXÝืÜ[YÛÜู\ย[]Yุ\YXÝุÛÝ[[]Y[]Yุ]WุÛÝ[[X\ฺY\YXÝ]\หุ[ÛXุ[Ü[—ุ[ÛÜ\][Û—ÛYู\ืÜ\ู\YYKX\ฺYÛX[Y\ÝุXู[YKK]Y[ูNÜ[YNÜ[X\YXÝห\[Y
+NยXXุ][Û\YXÝศHืNยBÛÛÝXXุ][Û”]\ฺ[Û’\ฺH]Y[ูTฺXÝ[Û’\ฺ
+ย\ÜูN[]\ÜูK\Z[[ÜÝ]N[]\Z[[Ý]K\Z[[ÜX\ÛÛ[]\Z[[X\ÛÛ\Z[[ู\Ü[]\Z[[\Ü\XÝฮ[]\XÝหÜX]Yุ][]ÜX]Y]าTำิÝ[ส
+K[—ÜฺXÝ[Ûยุู\Yู\Þ[Y[[ุู\Y\Þ[Y[ÛX[\ุÛÛ\]N[ÛX[\ÛÛ\]K][[Û—Ü\ูWูYWุ][][[Û”\ูQYP]หาTำิÝ[ส
+Hฯศ[][[Û—Ü\ูWÜ[[ฮ[][[Û”\ูT[[ห][[Û—Ü\ูWÝ\YYYุ][][[Û”\ูU\YYY]หาTำิÝ[ส
+Hฯศ[KÜ\][ÛฮXXุ][Û“Ü\][ÛหX\
+
+Ü\][ÛHO
+ยYÜ\][ÛY\NÜ\][Û\KÝ]NÜ\][ÛÝ]K][\ุÛÝ[Ü\][Û][\ÛÝ[\]Y\Ýฺ\ฺÜ\][Û\]Y\Ý\ฺ\Ý[ÜฺLMÜ\][Û\Ý[OOH[ศ[]Y[ูTฺXÝ[Û’\ฺ
+Ü\][Û\Ý[
+K\Ü—ÜฺLMÜ\][Û\ÜOOH[ศ[]Y[ูTฺXÝ[Û’\ฺ
+Ü\][Û\ÜK\]Yุ]Ü\][Û\]Y]าTำิÝ[ส
+KJJK]]Ü^][Û—ุ]Y]XXุ][Û]]]Y]X\
+
+]Y]
+HO
+ยY]Y]YXÝ[Û]Y]XÝ[Ûุ\X[]WฺWฺ\ฺ]Y]ุ\X[]RR\ฺ\Ý[Y[ฺ\ฺ]Y]\Ý[Y[\ฺÝ]ÛÛYN]Y]Ý]ÛÛYK]Z[ÜฺLM]Y[ูTฺXÝ[Û’\ฺ
+]Y]]Z[
+Kุู\Yุ]]Y]ุู\Y]าTำิÝ[ส
+KJJK\XWุ\YXÝฮXXุ][Û\YXÝหX\
+
+\YXÝ
+HO
+ยY\YXÝYฺ[\YXÝฺ[ÛÛ[Ý\N\YXÝÛÛ[\KฺLM\YXÝฺLMJJK[ÛÛZ[ืุ\YXÝฮ[]\YXÝหX\
+
+\YXÝ
+HO
+ยY\YXÝYฺ[\YXÝฺ[ÛÛ[Ý\N\YXÝÛÛ[\KฺLMฺLM\YXÝ]\สKJJKJNย]ุZ]\หYู\\[][
+[Y]Y[ูKXXุ][Û—Ü]\ฺ[ÛÛÜู\ศXXุ][Û—Ü]\ฺ[Û—ÜฺLMXXุ][Û”]\ฺ[Û’\ฺ\ÜูN[]\ÜูHK]Y[ูNÜ[YNXXุ][Ûฺ[]\Üู_NÜXXุ][Û”]\ฺ[Û’\ฺX
+NยÜ
+ÛÛÝ\YXÝู[]\YXÝสHยY
+\YXÝ]\ห]S[Ý—ฬฬ
+Hย]ุZ]\หYู\\[][
+[Y]Y[ูK\YXÝูÜYÛÜู\ศฺ[\YXÝฺ[X\ÛÛฺ^WÛ[Z]]WÛ[Ý\YXÝ]\ห]S[ÝK]Y[ูNÜ[YNÜฺLM\YXÝY
+_NÜY
+NยÛÛ[YNยB]ุZ]\หYู\ุ]P\YXÝ
+ศ\YXÝ[’Y[YฺLMฺLM\YXÝ]\สKÜX]Y][]ÜX]Y]JNยBÛÛÝ][YูHH]ุZ]\หุ[][ส[Y
+NยÛÛÝÜ\][ÛศH]ุZ]\หYู\\ÝÜ\][Ûส[Y
+NยÛÛÝ]]]Y]H]ุZ]\หYู\\Ý]]]Y]
+[Y
+NยÛÛÝYฮ]Y[ูTY–ืHHืNยÛÛÝÜYฺ[[\YXÝศH
+]ุZ]\หYู\\Ý\YXÝส[Y
+JK[\
+\YXÝ
+HO\YXÝฺ[OOHX[Y\Ýุ]XฺY[	\YXÝฺ[OOHุ\\WฺÛÛNยÜ
+ÛÛÝ\YXÝูÜYฺ[[\YXÝสHYห\ฺ
+ศฺ[\YXÝฺ[\ÛÝ\ูWฺYฺXูK[Xหุ\YXÝษุ\YXÝYXฺLM\YXÝฺLMÛÛ[Ý\N\YXÝÛÛ[\K]WÛ[Ý\YXÝ]\ห]S[Ý^\\ืุ]]Y[ูQ^\\ะ]JNยÛÛÝ][]Y[ูHH]ุZ]\หÜ\ฺ\Ý][ฺ[Üส[][YูK][ห]Y[ูQ^\\ะ]	ฺ[]\Üู_KIฺ[]\Z[[Ý]_KIู][YูK]\ÝX
+NยYห\ฺ
+][]Y[ูKYสNยÛÛÝX[Y\ÝYH]\Z[\ÝXี]ZY
+[Y	ฺ[]\Üู_Nฺ[]\Z[[Ý]_Nู][YูK]\ÝX
+NยÛÛÝฺXÝ[Û“Ý\ÝาYH]\Z[\ÝXี]ZY
+[Y	ฺ[]\Üู_Nฺ[]\Z[[Ý]_Nู][YูK]\ÝNฺXÝ[Û[Ý\Ýุ
+NยÛÛÝฺXÝ[Û“Ý\Ýฮ]Y[ูTฺXÝ[Û“Ý\ÝิXÛÜืHHืNยÛÛÝฺXÝ]Y[ูHH
+]Ý[ห[YN[ÛÝÛN[ÛÝÛOฺXÝ]Y[ูU[YJ][YKฺXÝ[Û“Ý\ÝาYฺXÝ[Û“Ý\ÝสNยÛÛÝฺXÝY\Z[[\ÜH[]\Z[[\ÜOOH[ศ[ฺXÝ]Y[ูJ\Z[[ู\Ü[]\Z[[\ÜNยÛÛÝXÜ]Z\YÝÜู\H][YูK][ห[
+
+][
+HO][ฺ[OOH\\ÜหÝÜู\—Ü[[YWุXÜ]Z\Y	][ÛÝ\ูHOOHุ[ÛXุ[NยÛÛÝูXÝ][ศH][YูK][ห[\
+][
+HO\ั^XÝÝ[ูXÝ][
+[][
+JNยÛÛÝ\ฺะÛX[\H\]U\ฺะÛX[\
+][YูK][ห[NยÛÛÝÝÜู\ÛÛ^ÛÜูYH]\ห]\\ิู\Üฺ[Û[Y
+H	][YูK][หÛÛYJ
+][
+HO][ฺ[OOHÛX[\ÝÜู\—ุÛÛ^ุXู[	][^[ุYÝÜู\—Û]\—ุ[ุุ]YOOHYB][ฺ[OOHÛX[\ÝÜู\—ุÛÛ^ุÛÜูY	][^[ุYÛÜูWÜ\ÛÛYOOHYH	][^[ุYÝÜู\—ÜYฺ\ÝWุXู[OOHYJNยÛÛÝÝÜู\“X\ูT[X\ูYH][YูK][หÛÛYJ
+][
+HO][ฺ[OOHÛX[\ÝÜู\—ÛX\ูWÜ[X\ูY	][^[ุYุ\ืู[]YOOHYB][ฺ[OOHÛX[\ÝÜู\—ÛX\ูWุXู[	][^[ุY]]Ü]]]WÛYู\—ÜXYOOHYJNยÛÛÝÝY\‘\ุÛÛXÝYHูXÝ][หÛÛYJ
+][
+HO][ฺ[OOHÝY\ÝYูH	ศÛÜูY[Y—K[ÛY\สÝ[ส][^[ุYÝYูJJJHXÛÝ\PÛÛ\Û[ÛÛ\]J][YูK][หฺXูWÜÝY\NยÛÛÝ]]ู\Üฺ[Û”]ฺูYH][YูK][หÛÛYJ]]ÛX[\ÛÛ\YY
+HXÛÝ\PÛÛ\Û[ÛÛ\]J][YูK][ห]]Üู\Üฺ[ÛศNยÛÛÝ]PÛX[\ÛÛ\]HH]]Ü]]]S]PÛX[\ÛÛ\]J][YูK][สNยÛÛÝ\Üู\[ÛศH][X]Tุู[\[ะ\Üู\[Ûส[][YูK][หÜ\][Ûห]]]Y]
+NยÛÛÝ]ÜP]\Ý][ÛH][YูK][ห[
+
+][
+HO][ÛÝ\ูHOOHุ[ÛXุ[	][ฺ[OOH^\[]\Ý][ÛWÜ]ÜWÜYฺ[—Ý\ฺศ	][^[ุY[[ืÝ[Y]YOOHYH	\[ู][^[ุYÛÛ[ÜฺLMOOHÝ[ศNยÛÛÝ]ÜTÛูH]ÜP]\Ý][Ûห^[ุY]Y[ูH\ศXÛÜÝ[ห[ÛÝÛ[Y[YยÛÛÝ]ÜR[Ý[ฺXÝ[ÛH]ÜP]\Ý][Û	]ÜTÛูศยÝ]\ฮ]Z[XHÛÝ\ูN]ÜWÜYฺ[—ูYMLNWุ]\Ý][Û]\Ý][Û—ฺYÜฺLMฺLMÝ[ส]ÜP]\Ý][Û^[ุY]\Ý][Û—ฺY
+JKÛÛ[ÜฺLM]ÜP]\Ý][Û^[ุYÛÛ[ÜฺLMYฺ\Ý\Yุ\ฺY]ÜTÛูYฺ\Ý\Yุ\ฺYYฺ[—Ý\ฺ[Û]ÜTÛูYฺ[—Ý\ฺ[ÛYฺ[—ÜXฺุYูWÜฺLM]ÜTÛูYฺ[—ÜXฺุYูWÜฺLM[Ý[ÜXูZ\ÜฺLM]ÜTÛู[Ý[ÜXูZ\ÜฺLM]ÜWÝ\ฺืฺYÜฺLM]ÜTÛู]ÜWÝ\ฺืฺYÜฺLM]ÜWÝXYฺYÜฺLM]ÜTÛู]ÜWÝXYฺYÜฺLM[Ý[Yุ]]ÜTÛู[Ý[Yุ]\ฺÝ\ฺืÜÝ\Yุ]]ÜTÛู\ฺÝ\ฺืÜÝ\Yุ]\ฺÝ\ฺืุÛÛ\]Yุ]]ÜTÛู\ฺÝ\ฺืุÛÛ\]Yุ]YฺÛ][ุุ[ุÛÝ[]ÜTÛูYฺÛ][ุุ[ุÛÝ[HศÝ]\ฮ[]Z[XHX\ÛÛ]ÜWุ]]ÜYฺ[Ý[ุ[ู\ฺÝ\ฺืุ]\Ý][Û—ÛÝุ]XฺYNยÛÛÝZ[\SÝÛ\H[]\Z[[\ÜOOH[ศ[[]\Z[[Ý]HOOHูXÝูZ[YศูXÝ[]\Z[[Ý]HOOH[ÛÛÛ\ฺ]WÜÝY\ศÝY\[]\Z[[Ý]HOOH]]Ü^][Û—ูZ[Yศ]][]\Z[[\Üุ]YÛÜHOOH]Y[ูHศ]Y[ูH\\ÜศยÛÛÝ[[[Û[U[]Z[XHH[][[[Û[U[[ุุ]YศศÝ]\ฮ[[[Û[WÝ[[ุุ]YÜWÜ\ÛÝ\ูHX\ÛÛุู[\[ืÜZXÝืุYÜWุÝÜู\—ÜÝY\—Üู\Üฺ[Û—ุ[ุุ][ÛH[ยÛÛÝX[Y\ÝHยÛÛXÝÝ\ฺ[ÛÛÜXKฺXูK[X]Y[ูKHฺุ[XWÝ\ฺ[ÛÛÜXKฺXูK[X]Y[ูKHุู[\[ืÝ\ฺ[Û[ุู[\[ี\ฺ[ÛX[Y\ÝฺYX[Y\ÝY\ฺ[Ûฮย\\Üฮ\หÛÛYห\\Üี\ฺ[ÛYฺ[\หÛÛYหYฺ[•\ฺ[ÛXÜ\หÛÛYหXÜ\ฺ[Ûู\XูWุÛÛ[Z]\หÛÛYหู\XูU\ฺ[Û]Y[ูWÜฺุ[XNÛÜXKฺXูK[X]Y[ูKHุู[\[ืุุ][ูฮ[ุู[\[ี\ฺ[ÛYฺ\Ý\Yุ\ยXฺXุ[ฺY\หÛÛYหYฺ\Ý\Y\YฯศศÝ]\ฮ[]Z[XHX\ÛÛYฺ\Ý\Yุ\ÝXฺXุ[ฺYÜ[[ืุÛÛYÝ\][ÛKYฺ[—ÜXฺุYูWÜฺLM\หÛÛYหYฺ[”XฺุYูTฺLM]ÜWฺ[Ý[ุ]\Ý][Û]ÜR[Ý[ฺXÝ[ÛKK\Üฺ]ÜWุÛÛ[Z]ฮศ\ูN\หÛÛYห\Üฺ]ÜP\ูTฺKุ[Y]N\หÛÛYห\Üฺ]ÜPุ[Y]TฺKÛXฺฮ\หÛÛYห\Üฺ]ÜTÛXฺิฺHK[—ฺY[Y\ÝÜ[—ฺY[\Ý[’Y\ÝÜ[ฺ\[ศ[ฺ\[ฺYÜฺLMฺLM[[ฺ\[Y
+K]ืฺY[YY\—ู^ÛYYYHKÛX[\ÛุYุ][ÛศÛX[\ÛุYุ][Û—ฺYÜฺLMฺLM[ÛX[\ุYุ][Û’Y
+K]ืฺY[YY\—ู^ÛYYYHK[\ÛY[[[\ÛY[ุู[\[ฮศY[ุู[\[าY\ฺ[Û[ุู[\[ี\ฺ[Û\ÛÝ\ูWุ[ุุ][Û[][[[Û[U[[ุุ]Yศ[[[Û[WÛÛHÜ[\Wู\ÞYYÜ]K[—ÛYXÞXÛNศÝ\Yุ][ÜX]Y]าTำิÝ[ส
+K[Yุ][]ÜX]Y]าTำิÝ[ส
+K\Z[[ÜÝ]N[]\Z[[Ý]K\Z[[ÜX\ÛÛ[]\Z[[X\ÛÛKู\YXุ][ÛยÝ]\ฮ[]\XÝห\\ÜศOOH\Üศ	[]\XÝห]Y[ูHOOH\Üศศู\YYY[]\XÝห\\ÜศOOH[]Z[XH[]\XÝห]Y[ูHOOH[]Z[XHศ[[ืู^\[ู]Y[ูHÝุู\YYY]\ฺ[Û—Üู\N][YูK]\Ý^XÝ][Û—Ý\Z[[ÜÝ]Wฺ[[]]XNYKÝ\[ÛX[Y\ÝÜฺ[\—ุY[ู\ืุ\[ÛÛNYKK\Z[[ÜÝ]N[]\Z[[Ý]K\Z[[ÜX\ÛÛ[]\Z[[X\ÛÛ\Z[[ู\ÜฺXÝY\Z[[\Ü\Þ[Y[ฺY[]Nย^XÝY[\ู]^XÝY\Þ[Y[ุู\Y[ุู\Y\Þ[Y[ุู\][Ûฮ][YูK][ห[\
+][
+HO][ฺ[OOH\Þ[Y[\YYY][ฺ[OOH\Þ[Y[]\YYYKX\
+
+][
+HO
+ย\ูN][ฺ[ุู\Yุ]][]าTำิÝ[ส
+KÛÛ\Û[ฮศÛ[][^[ุYÛ[Xฺู[][^[ุYXฺู[ฺXูN][^[ุYฺXูHKJJKK\Þ[Y[ู\[[ฺY\ฮย^XÝY[\ู]^XÝY\[[ฺY\หุู\][Ûฮ][YูK][ห[\
+][
+HO][ฺ[OOH\Þ[Y[\YYY][ฺ[OOH\Þ[Y[]\YYYKX\
+
+][
+HO
+ย\ูN][ฺ[ุู\Yุ]][]าTำิÝ[ส
+KÛÛ\Û[ฮศ[ูÜ\][^[ุY[ูÜ\KJJKKÝÜู\XÜ]Z\YÝÜู\ศย[ฺ[NXÜ]Z\YÝÜู\^[ุY[ฺ[K\ฺ[ÛXÜ]Z\YÝÜู\^[ุY\ฺ[ÛXY[\ÜฮÝ[—ุ]Ü[—ุXÜ]Z\ฺ][ÛÛÜู\—ฺYÜฺLMXÜ]Z\YÝÜู\^[ุYÛÜู\—ฺYÜฺLMÝÜู\—ÛX\ูWู\ฺุXÜ]Z\YÝÜู\^[ุYÝÜู\—ÛX\ูWู\ฺุÝÜู\—ุÛÛ^ฺYÜฺLMXÜ]Z\YÝÜู\^[ุYÝÜู\—ุÛÛ^ฺYÜฺLMฯศ[Ü\][Û—ฺYXÜ]Z\YÝÜู\^[ุYÜ\][Û—ฺYXÜ]Z\Yุ]XÜ]Z\YÝÜู\^[ุYXÜ]Z\Yุ]ู\XูWÝ\ฺ[ÛXÜ]Z\YÝÜู\^[ุYู\XูWÝ\ฺ[Û[ุุ][ÛศÝ]\ฮ\XWุXÜ]Z\YKHศ[ฺ[N[\ฺ[Û[XY[\Üฮ[]Z[XHÛÜู\—ฺYÜฺLM[ÝÜู\—ÛX\ูWู\ฺุ[ÝÜู\—ุÛÛ^ฺYÜฺLM[Ü\][Û—ฺY[XÜ]Z\Yุ][ู\XูWÝ\ฺ[Û[[ุุ][Û[[[Û[U[]Z[XHฯศศÝ]\ฮ[[YWุXÜ]Z\ฺ][Û—ÜXูZ\ÛZ\Üฺ[ศHK\XÝฮ[]\XÝหฺ[ฮ[][[[Û[U[[ุุ]YศศÝ]\ฮ[[[Û[WÝ[[ุุ]YÜWÜ\ÛÝ\ูHุ[ÛXุ[Üู\Üฺ[Û[[[Û[U[]Z[XKXY[[[Û[U[]Z[XKู[Z[WÜ[[YWÜู\Üฺ[Û[[[Û[U[]Z[XKÝY\—ุÛÛXÝ[Û—ู\ฺุ[[[Û[U[]Z[XK\[[[Û[U[]Z[XK[ÜÛZ][[[Û[U[]Z[XHHX[Y\Ýฺ[ส[KY\ÜุYูWÜ]\ฺ[ÛฮฺXÝ]Y[ูJY\ÜุYูWÜ]\ฺ[Ûศ[][[[Û[U[[ุุ]YศศÝ]\ฮ[[[Û[WÝ[[ุุ]YÜWÜ\ÛÝ\ูHX\ÛÛ[[[Û[U[]Z[XHKX\ÛÛÝÜฮืHHฺXÝY\ÜุYูT]\ฺ[Ûส[][YูK][สJK]\[ู\ฮฺXÝ]Y[ูJ]\[ู\ศฺXÝ]\[ู\ส[][YูK][หÜ\][ÛสJK[ุÜ\ืุ[Ý\ฮฺXÝ]Y[ูJ[ุÜ\ืุ[Ý\ศ[][[[Û[U[[ุุ]YศศÝ]\ฮ[[[Û[WÝ[[ุุ]YÜWÜ\ÛÝ\ูHX\ÛÛ[[[Û[U[]Z[XHKX\ÛÛÛÝ[][ÜYฮืHHฺXÝ][สูXÝ][ห
+][
+HO][ฺ[[ÛY\ส[ุÜ\H][ฺ[[ีฺ]
+ÛÜXK\ู\—Ý[ุÜ\H][ฺ[[ีฺ]
+ÛÜXK\Üฺ\Ý[Ý[ุÜ\H][ฺ[[ีฺ]
+ÛÜXK\JJKYYXWÜXูZ\ฮฺXÝ]Y[ูJYYXWÜXูZ\ศย[]ู[Y\ฮฺXÝ][ส][YูK][ห
+][
+HO][ฺ[OOH\\Üห[]ู[YWูÜุ\YK[]ÜูXÝÛYÜฮฺXÝ][สูXÝ][ห
+][
+HO][ฺ[OOH]Y[ห[]ูXÝÛYศK[]ÜูXÝÝ\ฮฺXÝ][สูXÝ][ห
+][
+HO][ฺ[OOH]Y[ห[]ูXÝÝ\KÝ]]ฺุ[ÜฮฺXÝ][สูXÝ][ห
+][
+HO][ฺ[OOH]Y[หÝ]]XูZ]Y][ฺ[OOH]Y[หÝ]]YืÜXูZ\K^XXฺืู\ฺฺ[\\[ÛฺXÝ][สูXÝ][ห
+][
+HO][ฺ[Ý\ีฺ]
+]Y[หÝ]]H	][ฺ[OOH]Y[หÝ]]XูZ]Y	][ฺ[OOH]Y[หÝ]]YืÜXูZ\KJKÛÛÜXูZ\ฮฺXÝ]Y[ูJÛÛÜXูZ\ศฺXÝ][สูXÝ][ห
+][
+HO][ฺ[OOHÛÛุ[][ฺ[[ÛY\สÛÛXุ[H][ฺ[[ÛY\สÛÛÜ\Ý[JJKZ[\—ÜXูZ\ฮฺXÝ]Y[ูJZ[\—ÜXูZ\ศฺXÝ][สูXÝ][ห
+][
+HO][ฺ[[ÛY\สZ[\H][ฺ[[ÛY\ส\ฺืÜÝ]HH][ฺ[[ÛY\สÛÛÛJJK\XWÜฺXÝ[ÛฮฺXÝ]Y[ูJ\XWÜฺXÝ[Ûศศู\Üฺ[Û—ู[[^][ÛฺXÝ][ส][YูK][ห
+][
+HO][ฺ[OOHู\Üฺ[Û[[^YK\ฺืุÛX[\\ฺะÛX[\JKZWุ\Üู\[ÛฮฺXÝ]Y[ูJZWุ\Üู\[ÛศฺXÝ][สูXÝ][ห
+][
+HO][ฺ[OOHZKฺXÝ[Û][ฺ[[ÛY\ส\YXÝJJK\YXÝÜY\[ู\ฮYหุÜY[ฺÝฮYห[\
+YHOYฺ[[ÛY\สุÜY[ฺÝJKY[ฮศÝ]\ฮ[]Z[XHX\ÛÛY[ืุุ\\Wู\ุXYÛÜ—ÛÝฺ[\[Y[YK]ืุ]Y[ฮศÝ]\ฮÝุุ\\YX\ÛÛ]XÞWูY][KY]XÜฮ\]Q]Y[ูSY]XÜส][YูK][หÜ\][ÛสKÛX[\ุ]Y]ยÝÜู\—ุÛÛ^ุÛÜูYÝÜู\ÛÛ^ÛÜูYÝÜู\—ÛX\ูWÜ[X\ูYÝÜู\“X\ูT[X\ูYÝY\—ู\ุÛÛXÝ[][[[Û[U[[ุุ]Yศ[[[Û[U[]Z[XHÝY\‘\ุÛÛXÝY]]Üู\Üฺ[Û—Ü]ฺูY[][[[Û[U[[ุุ]Yศ[[[Û[U[]Z[XH]]ู\Üฺ[Û”]ฺูYÞ[]XืÝ\ฺÜฮ\ฺะÛX[\]Wู^XÝ][Û—Ü\ÛÝ\ู\ืÞ\ฮ]PÛX[\ÛÛ\]KÛX[\ุÛÛ\]N[ÛX[\ÛÛ\]H	]PÛX[\ÛÛ\]H	ÝÜู\ÛÛ^ÛÜูY	ÝÜู\“X\ูT[X\ูYXÛÝ\WÜXูZ\ฮฺXÝ]Y[ูJÛX[\ุ]Y]ÜXÛÝ\WÜXูZ\ศ][YูK][ห[\
+][
+HO][ฺ[OOHÛX[\XÛÝ\HKX\
+
+][
+HO
+ศุู\Yุ]][]าTำิÝ[ส
+K][^[ุYJJJK][[Û—Ü\ูWูYWุ][][[Û”\ูQYP]หาTำิÝ[ส
+Hฯศ[][[Û—Ü\ูWÜ[[ฮ[][[Û”\ูT[[ห][[Û—Ü\ูY[][[Û”\ูU\YYY]OOH[KZ[\N[]\Z[[\ÜOOH[ศศÝÛ\[Û\ÜฺYXุ][Û[]Z[[HศÝÛ\Z[\SÝÛ\Û\ÜฺYXุ][Û[]\Z[[\ÜÛูK]Z[ฺXÝY\Z[[\ÜKÜ\][ÛฮฺXÝ]Y[ูJÜ\][ÛศÜ\][ÛหX\
+
+][JHO
+ศÜ\][Û—ฺY][KY\N][K\KÝ]N][KÝ]K][\ุÛÝ[][K][\ÛÝ[Y[\Ý[ÞWฺู^Wฺ\ฺฺLM][KY[\Ý[ÞRู^JK\]Y\Ýฺ\ฺ][K\]Y\Ý\ฺ\Ý[ฺXÝ]Y[ูJÜ\][Ûหษฺ][KYKÜ\Ý[][K\Ý[
+K\ÜฺXÝ]Y[ูJÜ\][Ûหษฺ][KYKู\Ü][K\ÜKÜX]Yุ]][KÜX]Y]าTำิÝ[ส
+K\]Yุ]][K\]Y]าTำิÝ[ส
+HJJJK]]Ü^][Û—ุ]Y]ฺXÝ]Y[ูJ]]Ü^][Û—ุ]Y]]]]Y]X\
+
+][JHO
+ศXÝ[Û][KXÝ[Ûุ\X[]WฺWฺ\ฺ][Kุ\X[]RR\ฺฯศ[\Ý[Y[ฺ\ฺ][K\Ý[Y[\ฺÝ]ÛÛYN][KÝ]ÛÛYK]Z[ฺXÝ]Y[ูJ]]Ü^][Û—ุ]Y]ษฺ][KYKู]Z[][K]Z[
+Kุู\Yุ]][Kุู\Y]าTำิÝ[ส
+HJJJK^\[ุ]\Ý][Ûฮ][YูK][ห[\
+][
+HO][ÛÝ\ูHOOHุ[ÛXุ[	][ฺ[Ý\ีฺ]
+^\[]\Ý][ÛH	][ฺ[OOH^\[]\Ý][Û—ÛÛูWุÛZ[YYKX\
+
+][
+HO
+ศฺ[][ฺ[ÛXูJ^\[]\Ý][Û[Ý
+K][Üู\N][ู\KÛÛ[ÜฺLM][^[ุYÛÛ[ÜฺLM]]Ü]N
+][^[ุY]Y[ูH\ศXÛÜÝ[ห[ÛÝÛ[Y[Y
+Oห]]Ü]Hฯศ[\ÜÝY\][^[ุY\ÜÝY\]]Ü]Wฺู^WฺY][^[ุY]]Ü]Wฺู^WฺYWÜฺLMฺLMÝ[ส][^[ุYJJK\]Y\Ýุ\Ý[Y[ÜฺLM][^[ุY\]Y\Ýุ\Ý[Y[ÜฺLMJJK][ÜÝX[N][]Y[ูK[^\Üู\[ÛฮฺXÝ]Y[ูJ\Üู\[Ûศ\Üู\[ÛสK[X[—ÜÝ[[X\N\Üู\[ÛหÝ[[X\KNยY
+ฺXÝ[Û“Ý\Ýห[Ý
+HยÛÛÝÝ\Ýิ^[ุYHศฺุ[XWÝ\ฺ[ÛÛÜXKฺXูK[X]Y[ูK\ฺXÝ[Û[Ý\ÝหH[—ฺY[YXÛÜฮฺXÝ[Û“Ý\ÝศNย\Üู\ิูXÜ]
+Ý\Ýิ^[ุY
+NยÛÛÝÝ\Ýะ]\ศH]ุZ]Þ\\Þ[สY\ÛJ”ำำÝ[ฺYJÝ\Ýิ^[ุY
+K]Kศ][HJNยY
+Ý\Ýะ]\ห]S[Ý—ฬฬ
+HÝศ]ศฺXูSX‘\ÜX‘\Ü‘U’QSัWิ“า‘PีSำ—ำี‘T‘“ีืีำืำT‘ัHÛÛ\\ÜูY]Y[ูHฺXÝ[ÛÝ\Ýศ^ูYYY]ศ\XHÝศุ\]Y[ูHJNยÛÛÝุ]YÝ\ÝศH]ุZ]\หYู\ุ]P\YXÝ
+ศYฺXÝ[Û“Ý\ÝาY[’Y[Yฺ[ุ\\WฺÛÛÛÛ[\N\Xุ][ÛูÞ\ฺLMฺLMÝ\Ýะ]\สK]\ฮÝ\Ýะ]\หÜX]Y][]ÜX]Y]JNยYห\ฺ
+ศฺ[]Y[ูWÜฺXÝ[Û—ÛÝ\Ýศ\ÛÝ\ูWฺYฺXูK[Xหุ\YXÝษÜุ]YÝ\ÝหYXฺLMุ]YÝ\ÝหฺLMÛÛ[Ý\Nุ]YÝ\ÝหÛÛ[\K]WÛ[Ýุ]YÝ\Ýห]\ห]S[Ý^\\ืุ]]Y[ูQ^\\ะ]JNยB\Üู\ิูXÜ]
+X[Y\Ý
+NยÛÛÝ]\ศHY\ÛJ”ำำÝ[ฺYJX[Y\Ý
+K]NยY
+]\ห]S[Ý—ฬฬ
+HÝศ]ศฺXูSX‘\ÜX‘\Ü‘U’QSัWำPS’Q‘TีีำืำT‘ัH•\Z[[]Y[ูHX[Y\Ý^ูYYY]ศ\XHÜÝÜ\ศุ\]Y[ูHJNยÛÛÝุ]YX[Y\ÝH]ุZ]\หYู\ุ]P\YXÝ
+ศYX[Y\ÝY[’Y[Yฺ[X[Y\Ýุ]XฺY[ÛÛ[\N\Xุ][ÛฺÛÛฺLMฺLM]\สK]\หÜX]Y][]ÜX]Y]JNยÛÛÝX[Y\ÝY]Y[ูTYHศฺ[X[Y\Ý\ÛÝ\ูWฺYฺXูK[Xหู]Y[ูKษÜุ]YX[Y\ÝYXฺLMุ]YX[Y\ÝฺLMÛÛ[Ý\Nุ]YX[Y\ÝÛÛ[\K]WÛ[Ýุ]YX[Y\Ý]\ห]S[Ý^\\ืุ]]Y[ูQ^\\ะ]Nย]ุZ]\หYู\ุ]Q]Y[ูJศ[’Y[YX[Y\ÝYุ]YX[Y\ÝYX[Y\ÝฺLMุ]YX[Y\ÝฺLMฺุ[XU\ฺ[ÛÛÜXKฺXูK[X]Y[ูKH]\ฺ[Û”ู\N][YูK]\Ý\YXÝYฮÛX[Y\ÝYYืKÜX]Y][]ÜX]Y]JNยB\Þ[ศุ[][ส[’YÝ[สNÛZ\ูO]ุZ]Y]\•\OฺXูSX“Yู\–ศ\Ý][ศ—OยÛÛÝ][ฮ[\Ü
+ูÛXZ[ศK“X‘][ืHHืNย]Ý\ÛÜHย]]\ÝHยศยÛÛÝYูHH]ุZ]\หYู\\Ý][ส[’YÝ\ÛÜL
+Nย]\ÝHYูK]\ÝยÜ
+ÛÛÝ][ูYูK][สHยÛÛÝ^XÝYHÝ\ÛÜ
+ศNยY
+][ู\HOOH^XÝY
+HÝศ]ศฺXูSX‘\ÜX‘\Ü‘U’QSัWัU‘S•ัะT‘\XH][Yู\ÛÛZ[ศHู\]Y[ูHุ\ศ]Y[ูHุ[ÝHู\YYY]Y[ูH[ูKศ^XÝYÜู\N^XÝYุู\YÜู\N][ู\HJJNย][ห\ฺ
+][
+NยÝ\ÛÜH][ู\NยBY
+YูK][ห[ÝOOH	Ý\ÛÜ]\Ý
+HÝศ]ศฺXูSX‘\ÜX‘\Ü‘U’QSัWัU‘S•ี•SะUSำ‘\XH][ุุ[ÝÜYYÜHHY\\ูY]\ÝÝ\ÛÜ]Y[ูH[ูKศÝ\ÛÜ]\ÝJJNยHฺ[H
+Ý\ÛÜ]\Ý
+Nย]\ศ][หY\]\ÝNยB\Þ[ศÜ\ฺ\Ý][ฺ[Üส[[”XÛÜ][ฮ[\Ü
+ูÛXZ[ศK“X‘][ืK^\\ะ]Ý[ห\ÜูNÝ[สHยÛÛÝYฮ\^Oศฺ[Ý[ฮศ\ÛÝ\ูWฺYÝ[ฮศฺLMÝ[ฮศÛÛ[Ý\NÝ[ฮศ]WÛ[Ý[X\ศ^\\ืุ]Ý[ศOHืNยÛÛÝฺ[Üฮ\^Oศ\ÝÜู\N[X\ศ\ÝÜู\N[X\ศÛÝ[[X\ศฺLMÝ[ฮศ\ÛÝ\ูWฺYÝ[ศOHืNย]ฺZ[H\X]
+
+NยÜ
+]ูู]Hศูู]][ห[Ýศูู]
+ฯHL
+HยÛÛÝÛXูHH][หÛXูJูู]ูู]
+ศL
+KX\
+
+][
+HO
+ศู\N][ู\Kฺ[][ฺ[ÛÝ\ูN][ÛÝ\ูKุู\Yุ]][]าTำิÝ[ส
+K^[ุY][^[ุYJJNย\Üู\ิูXÜ]
+ÛXูJNยÜ
+ÛÛÝ][ูÛXูJHฺZ[HฺLM	ฺุZ[NÜฺLM”ำำÝ[ฺYJ][
+J_X
+NยÛÛÝÛÛ\\ÜูYH]ุZ]Þ\\Þ[สY\ÛJ”ำำÝ[ฺYJศฺุ[XWÝ\ฺ[ÛÛÜXKฺXูK[X][หH[—ฺY[Y][ฮÛXูHJK]Kศ][HJNยY
+ÛÛ\\ÜูY]S[Ý—ฬฬ
+HÝศ]ศฺXูSX‘\ÜX‘\Ü‘U’QSัWัU‘S•ะาS’ืีำืำT‘ัHÛÛ\\ÜูY][]Y[ูHฺ[ศ^ูYYY]ศ\XHÝศุ\]Y[ูHJNยÛÛÝYู\ÝHฺLMÛÛ\\ÜูY
+NยÛÛÝYH]\Z[\ÝXี]ZY
+[Y	Ü\Üู_KY][หIÛูู]ศLX
+NยÛÛÝุ]YH]ุZ]\หYู\ุ]P\YXÝ
+ศY[’Y[Yฺ[ุ\\WฺÛÛÛÛ[\N\Xุ][ÛูÞ\ฺLMYู\Ý]\ฮÛÛ\\ÜูYÜX]Y]]ศ]J
+HJNยÛÛÝ\ÛÝ\ูRYHฺXูK[Xหุ\YXÝษÜุ]YYXยYห\ฺ
+ศฺ[][ฺุ[ศ\ÛÝ\ูWฺY\ÛÝ\ูRYฺLMุ]YฺLMÛÛ[Ý\Nุ]YÛÛ[\K]WÛ[Ýุ]Y]\ห]S[Ý^\\ืุ]^\\ะ]JNยฺ[Üห\ฺ
+ศ\ÝÜู\NÛXูVฬHKู\K\ÝÜู\NÛXูK]
+LJHKู\KÛÝ[ÛXูK[ÝฺLMุ]YฺLM\ÛÝ\ูWฺY\ÛÝ\ูRYJNยB]\ศYห[^ศฺุ[XWÝ\ฺ[ÛÛÜXKฺXูK[X][หH\ÝÜู\N][ึฬOหู\Hฯศ[\ÝÜู\N][ห]
+LJOหู\Hฯศ[ÛÝ[][ห[Ý[[ฺ\ฺฺุZ[ฺZ[ฺ[ÜศHNยB\Þ[ศÜ\ÛÛQ•ÛÜู\”ฺ]ÝÛ\J[’YÝ[ห\]Z\SÝÛYÛÛ^HYJNÛZ\ูO•ÛÜู\”ฺ]ÝÛ\H[ย\หู”Q\Ü]ฺ]\ู\ห[]J[’Y
+NยÛÛÝXÝ]HH\หุXÝ]SX\ู\หู]
+[’Y
+NยY
+XXÝ]JH]\[ยÛÛÝÜ[Ý\[X\ูK][YูWHH]ุZ]ÛZ\ูK[
+ย\หYู\ู][[’Y
+K\หYู\ู]ÝÜู\“X\ูJ[’Y
+K\หุ[][ส[’Y
+KJNยY
+\[[ุู[\[าYOOH•QT“RSSิ•S—ิีUTห\ส[Ý]JH[ÝY\”ู\Üฺ[Û’YOOH[[ÝY\‘\ฺุOOH[XÝ\[X\ูHÝ\[X\ูKÛÜู\’YOOH\หÛÜู\’YÝ\[X\ูKX\ูQ\ฺุOOHXÝ]K\ฺุ
+\]Z\SÝÛYÛÛ^	
+Ý\[X\ูK^\\ะ]H]ศ]J
+H]\ห]\\ิู\Üฺ[Û[’Y
+JJJH]\[ยÛÛÝÛÜู\’\ฺHฺLM\หÛÜู\’Y
+NยÛÛÝ[’\ฺHฺLM[Y
+NยÛÛÝÛX[\\ฺHฺLM[ÛX[\ุYุ][Û’Y
+NยÛÛÝÝY\”ู\Üฺ[Û’\ฺHฺLM[ÝY\”ู\Üฺ[Û’Y
+NยÛÛÝ^XÝYÛÛ^H\]QÝÜู\ÛÛ^[[ส[\หÛÜู\’YXÝ]K\ฺุ
+NยÛÛÝ[[ั][ศH][YูK][ห[\
+][
+HO][ฺ[OOH\\ÜหÝÜู\—ุÛÛ^ุÝ[	][ÛÝ\ูHOOHุ[ÛXุ[NยÛÛÝ[[YQ][ศH][YูK][ห[\
+][
+HO][ฺ[OOH\\ÜหÝÜู\—Ü[[YWุXÜ]Z\Y	][ÛÝ\ูHOOHุ[ÛXุ[NยÛÛÝ[[ั][H[[ั][ึฬNยÛÛÝ[[YQ][H[[YQ][ึฬNยÛÛÝ^XÝÝ\[[[ศH[[ั][ห[ÝOOHH	[[ั][OOH[Y[Y	\ั^XÝู^\ส[[ั][^[ุYยฺุ[XH\ÝÜ[—ฺYÜฺLMÛX[\ÛุYุ][Û—ฺYÜฺLMฺXูWÛX—Ü[—ฺYÜฺLMÝÜู\—ÝÛÜู\—ฺYÜฺLMÝÜู\—ÛX\ูWู\ฺุÝÜู\—ุÛÛ^ฺYÜฺLMÛÛ^ุ[ุุ][Û]\—ุ]\ÝY]ืÜ[—ÝÛÜู\—ุ[ุÛÛ^ฺY[YY\ืู^ÛYYJH	[[ั][^[ุYฺุ[XHOOHÛÜXWÝฺXูWÛX—ุÝÜู\—ุÛÛ^ุ[[ืÝH	[[ั][^[ุY\ÝÜ[—ฺYÜฺLMOOHฺLM[\Ý[’Y
+H	[[ั][^[ุYÛX[\ÛุYุ][Û—ฺYÜฺLMOOHÛX[\\ฺ	[[ั][^[ุYฺXูWÛX—Ü[—ฺYÜฺLMOOH[’\ฺ	[[ั][^[ุYÝÜู\—ÝÛÜู\—ฺYÜฺLMOOHÛÜู\’\ฺ	[[ั][^[ุYÝÜู\—ÛX\ูWู\ฺุOOHXÝ]K\ฺุ	[[ั][^[ุYÝÜู\—ุÛÛ^ฺYÜฺLMOOH^XÝYÛÛ^ÝÜู\—ุÛÛ^ฺYÜฺLM	[[ั][^[ุYÛÛ^ุ[ุุ][ÛOOH]\Z[\ÝXืÜ[—ÝÛÜู\—ÛX\ูWÝH	[[ั][^[ุY]\—ุ]\ÝYOOHYB	[[ั][^[ุY]ืÜ[—ÝÛÜู\—ุ[ุÛÛ^ฺY[YY\ืู^ÛYYOOHYNยÛÛÝ^XÝÝ\[[[YHH[[YQ][ห[ÝOOHH	[[YQ][OOH[Y[Y	\ั^XÝู^\ส[[YQ][^[ุYยÛÜู\—ฺYÜฺLMÝÜู\—ÛX\ูWู\ฺุÝÜู\—ุÛÛ^ฺYÜฺLMÜ\][Û—ฺY[ฺ[H\ฺ[Ûู\XูWÝ\ฺ[ÛXÜ]Z\Yุ]]ืÝÛÜู\—ฺY[YY\—ู^ÛYYJH	[[YQ][^[ุYÛÜู\—ฺYÜฺLMOOHÛÜู\’\ฺ	[[YQ][^[ุYÝÜู\—ÛX\ูWู\ฺุOOHXÝ]K\ฺุ	[[YQ][^[ุYÝÜู\—ุÛÛ^ฺYÜฺLMOOH^XÝYÛÛ^ÝÜู\—ุÛÛ^ฺYÜฺLM	\[ู[[YQ][^[ุYÜ\][Û—ฺYOOHÝ[ศ	\[ู[[YQ][^[ุY[ฺ[HOOHÝ[ศ	[[YQ][^[ุY[ฺ[K[Ý	\[ู[[YQ][^[ุY\ฺ[ÛOOHÝ[ศ	[[YQ][^[ุY\ฺ[Û[Ý	[[YQ][^[ุYู\XูWÝ\ฺ[ÛOOH\หÛÛYหู\XูU\ฺ[Û	\ะุ[ÛXุ[[Y\Ý[\
+[[YQ][^[ุYXÜ]Z\Yุ]
+B	[[YQ][^[ุY]ืÝÛÜู\—ฺY[YY\—ู^ÛYYOOHYH	[[ั][OOH[Y[Y	[[ั][ู\H[[YQ][ู\NยÛÛÝÝ\[[[ศH][YูK][ห[\
+][
+HO][ฺ[OOHูXÝ—ุÝÜู\—ÝÛÜู\—Ý\Z[][Û—ูY^WÜ[[ศ	][ÛÝ\ูHOOHุ[ÛXุ[	][^[ุYฺXูWÛX—Ü[—ฺYÜฺLMOOH[’\ฺ	][^[ุYÝÜู\—ÝÛÜู\—ฺYÜฺLMOOHÛÜู\’\ฺ	][^[ุYÝÜู\—ÛX\ูWู\ฺุOOHXÝ]K\ฺุ
+NยY
+Ý\[[[ห[ÝJHÝศ•ÛÜู\”ฺ]ÝÛÛÛXÝ
+•HÝ\[ÝÜู\X\ูH\ศ][\Hุุ[Y^H[[หNยÛÛÝ[[][HÝ\[[[ึฬNยÛÛÝ[[H[[][ห^[ุYยÛÛÝ[[\ฺุศH\^K\ะ\^J[[หÞ[—ÜÝY\—ุÛÛXÝ[Û—ู\ฺุสHศ[[Þ[—ÜÝY\—ุÛÛXÝ[Û—ู\ฺุศืNยÛÛÝ^XÝ[[H[[][OOH[Y[Y	[[OOH[Y[Y	\ั^XÝู^\ส[[ยฺุ[XH\Z[][Û—Ü\]Y\ÝฺYÜฺLMÛÛ[X[ู]Y[ูWÜฺLMฺXูWÛX—Ü[—ฺYÜฺLMÛX[\ÛุYุ][Û—ฺYÜฺLMÝY\—Üู\Üฺ[Û—ฺYÜฺLMÝY\—ุYZ\Üฺ[Û—ฺYÜฺLMÝY\—ุÛÛXÝ[Û—ู\ฺุÞ[—ÜÝY\—ุÛÛXÝ[Û—ู\ฺุศÝÜู\—ÝÛÜู\—ฺYÜฺLMÝÜู\—ÛX\ูWู\ฺุÝÜู\—ุÛÛ^ฺYÜฺLM[\—ุXÝ[Û—Ü\]Y\ÝÜฺLM\]Y\ÝYุ]]ืÜ[—ÛÜ\][Û—ÜÝY\—ุ[ุÝÜู\—ฺY[YY\ืู^ÛYYJH	[[ฺุ[XHOOHÛÜXWÝฺXูWÛX—ู—Ûุุ[ุÝÜู\—ÝÛÜู\—ูY^Wฺ[[ÝH	\ิฺLM[[\Z[][Û—Ü\]Y\ÝฺYÜฺLMH	\ิฺLM[[ÛÛ[X[ู]Y[ูWÜฺLMB	[[ฺXูWÛX—Ü[—ฺYÜฺLMOOH[’\ฺ	[[ÛX[\ÛุYุ][Û—ฺYÜฺLMOOHÛX[\\ฺ	[[ÝY\—Üู\Üฺ[Û—ฺYÜฺLMOOHÝY\”ู\Üฺ[Û’\ฺ	\ิฺLM[[ÝY\—ุYZ\Üฺ[Û—ฺYÜฺLMB	[[ÝY\—ุÛÛXÝ[Û—ู\ฺุOOH[ÝY\‘\ฺุ	[[\ฺุห[Ý	[[\ฺุห]\J
+\ฺุ[^
+HO[X\\ิุYR[Yู\\ฺุ
+H	[X\\ฺุ
+H	
+[^OOH[X\[[\ฺุึฺ[^HWJH[X\\ฺุ
+JJB	[[\ฺุห[ÛY\ส[ÝY\‘\ฺุ
+H	[[ÝÜู\—ÝÛÜู\—ฺYÜฺLMOOHÛÜู\’\ฺ	[[ÝÜู\—ÛX\ูWู\ฺุOOHXÝ]K\ฺุ	[[ÝÜู\—ุÛÛ^ฺYÜฺLMOOH^XÝYÛÛ^ÝÜู\—ุÛÛ^ฺYÜฺLM	\ิฺLM[[[\—ุXÝ[Û—Ü\]Y\ÝÜฺLMB	\ะุ[ÛXุ[[Y\Ý[\
+[[\]Y\ÝYุ]
+H	[[][]าTำิÝ[ส
+HOOH[[\]Y\ÝYุ]	[[]ืÜ[—ÛÜ\][Û—ÜÝY\—ุ[ุÝÜู\—ฺY[YY\ืู^ÛYYOOHYB	^XÝÝ\[[[ศ	^XÝÝ\[[[YH	[[YQ][OOH[Y[Y	[[YQ][ู\H[[][ู\B	]ศ]JÝ[ส[[YQ][^[ุYXÜ]Z\Yุ]
+JHH[[][]ยY
+[[][	Y^XÝ[[
+HÝศ•ÛÜู\”ฺ]ÝÛÛÛXÝ
+•HÝ\[ÝÜู\X\ูH\ศHX[ÜYYÜÜÜÜหXÝ[ุุ[Y^H[[NยY
+^XÝ[[
+H\หู”Q\Ü]ฺ]\ู\หY
+[’Y
+NยÛÛÝÛÛ[X[ศH][YูK][ห[\
+][
+HOยY
+][ฺ[OOH^\[]\Ý][Û—ุÝÜู\—ÝÛÜู\—Ý\Z[][Û—ุÛÛ[X[][ÛÝ\ูHOOHุ[ÛXุ[][^[ุY[[ืÝ[Y]YOOHYJH]\[ูNยÛÛÝ]Y[ูHH][^[ุY]Y[ูH\ศXÛÜÝ[ห[ÛÝÛ[Y[Yย]\]Y[ูOห[—ฺYÜฺLMOOH[’\ฺ	]Y[ูKÝÜู\—ÝÛÜู\—ฺYÜฺLMOOHÛÜู\’\ฺ	]Y[ูKÝÜู\—ÛX\ูWู\ฺุOOHXÝ]K\ฺุยJNยÛÛÝÝ\[Y^\ศH][YูK][ห[\
+][
+HO][ฺ[OOHูXÝ—ูุ]]ุ^WุÝÜู\—ÝÛÜู\—Ý\Z[][Û—ูÞ[	][ÛÝ\ูHOOHุ[ÛXุ[	][^[ุYฺXูWÛX—Ü[—ฺYÜฺLMOOH[’\ฺ	][^[ุYÝÜู\—ÝÛÜู\—ฺYÜฺLMOOHÛÜู\’\ฺ	][^[ุYÝÜู\—ÛX\ูWู\ฺุOOHXÝ]K\ฺุ
+NยY
+ÛÛ[X[ห[ÝOOH
+HยหศHุุ[[[\ศÛÛ[Z]YYÜHHÜÜÜห\ÝÜHุ]]ุ^Hุ[หศ]]\ู\ศÝY\ุÝÜู\]]][Û[[YYX][K]ุ[Ý]]Ü^Bหศฺ]ÝÛ[[Hุ]]ุ^HY^KÛÛ[X[[\Ü]ฺ[^\ÝY
+^XÝ[[
+H]\[ยY
+Ý\[Y^\ห[Ý
+HÝศ•ÛÜู\”ฺ]ÝÛÛÛXÝ
+•HÝ\[ÝÜู\X\ูH\ศHุ]]ุ^HY^Hฺ]Ý]]ศุุ[[[[ุ[ÛXุ[ÛÝ\ูHÛÛ[X[Nย]\[ยBY
+Y^XÝ[[Z[[][Z[[
+HÝศ•ÛÜู\”ฺ]ÝÛÛÛXÝ
+•Hุ[ÛXุ[\Z[][ÛÛÛ[X[YÝ]HÛH^XÝ[Üุุ[Y^H[[NยY
+ÛÛ[X[ห[ÝOOHJHÝศ•ÛÜู\”ฺ]ÝÛÛÛXÝ
+•HÝ\[ÝÜู\X\ูH\ศ][\Hุ[ÛXุ[\Z[][ÛÛÛ[X[หNยÛÛÝÛÛ[X[][HÛÛ[X[ึฬHNยÛÛÝÛÛ[X[H^XÝÛÝ\ูU[Y]Y•ÛÜู\ÛÛ[X[
+ÛÛ[X[][[\หÛÛYสNยY
+XÛÛ[X[
+HÝศ•ÛÜู\”ฺ]ÝÛÛÛXÝ
+•Hุ[ÛXุ[\Z[][ÛÛÛ[X[ÜÝ]ศÛÝ\ูK][Y][ÛÜ[[]]XHÛÛ[[[หNยÛÛÝ\Z[][Û”\]Y\ÝYฺLMHฺLMÝ[สÛÛ[X[\Z[][Û—Ü\]Y\ÝฺY
+JNยÛÛÝY^\ศHÝ\[Y^\ห[\
+][
+HO][^[ุY\Z[][Û—Ü\]Y\ÝฺYÜฺLMOOH\Z[][Û”\]Y\ÝYฺLMNยY
+Y^\ห[ÝOOHJHÝศ•ÛÜู\”ฺ]ÝÛÛÛXÝ
+•Hุ[ÛXุ[\Z[][ÛÛÛ[X[YÝ]HÛH^XÝุ]]ุ^HY^KNยÛÛÝY^Q][HY^\ึฬHNยÛÛÝY^HHY^Q][^[ุYยÛÛÝÞ[‘\ฺุศH\^K\ะ\^JÛÛ[X[Þ[—ÜÝY\—ุÛÛXÝ[Û—ู\ฺุสHศÛÛ[X[Þ[—ÜÝY\—ุÛÛXÝ[Û—ู\ฺุศืNยÛÛÝ\]Y\ÝY]H\[ูÛÛ[X[\]Y\ÝYุ]OOHÝ[ศศ]ศ]JÛÛ[X[\]Y\ÝYุ]
+H[ยÛÛÝ^XÝY^HH\ั^XÝู^\สY^Kยฺุ[XH\Z[][Û—Ü\]Y\ÝฺYÜฺLMY^WÜ\]Y\ÝÜฺLMฺXูWÛX—Ü[—ฺYÜฺLMÛX[\ÛุYุ][Û—ฺYÜฺLMÝY\—Üู\Üฺ[Û—ฺYÜฺLMÝY\—ุYZ\Üฺ[Û—ฺYÜฺLMÝY\—ุÛÛXÝ[Û—ู\ฺุÞ[—ÜÝY\—ุÛÛXÝ[Û—ู\ฺุศÝÜู\—ÝÛÜู\—ฺYÜฺLMÝÜู\—ÛX\ูWู\ฺุÝÜู\—ุÛÛ^ฺYÜฺLM[\—ุXÝ[Û—Ü\]Y\ÝÜฺLMุ]]ุ^WูÞ[]ืÜูXÝฺY[YY\ืู^ÛYYJH	Y^Kฺุ[XHOOHÛÜXWÝฺXูWÛX—ู—ูุ]]ุ^WูY^Wู][ÝH	Y^K\Z[][Û—Ü\]Y\ÝฺYÜฺLMOOH\Z[][Û”\]Y\ÝYฺLM	\ิฺLMY^KY^WÜ\]Y\ÝÜฺLMB	Y^KฺXูWÛX—Ü[—ฺYÜฺLMOOH[’\ฺ	Y^KÛX[\ÛุYุ][Û—ฺYÜฺLMOOHÛX[\\ฺ	Y^KÝY\—Üู\Üฺ[Û—ฺYÜฺLMOOHÝY\”ู\Üฺ[Û’\ฺ	Y^KÝY\—ุYZ\Üฺ[Û—ฺYÜฺLMOOHÛÛ[X[ÝY\—ุYZ\Üฺ[Û—ฺYÜฺLM	Y^KÝY\—ุÛÛXÝ[Û—ู\ฺุOOH[ÝY\‘\ฺุ	ุ[ÛXุ[\]Y\Ý\ฺ
+Y^KÞ[—ÜÝY\—ุÛÛXÝ[Û—ู\ฺุสHOOHุ[ÛXุ[\]Y\Ý\ฺ
+Þ[‘\ฺุสB	Y^KÝÜู\—ÝÛÜู\—ฺYÜฺLMOOHÛÜู\’\ฺ	Y^KÝÜู\—ÛX\ูWู\ฺุOOHXÝ]K\ฺุ	Y^KÝÜู\—ุÛÛ^ฺYÜฺLMOOH^XÝYÛÛ^ÝÜู\—ุÛÛ^ฺYÜฺLM	Y^K[\—ุXÝ[Û—Ü\]Y\ÝÜฺLMOOHÛÛ[X[[\—ุXÝ[Û—Ü\]Y\ÝÜฺLM	Y^Kุ]]ุ^WูÞ[OOHYH	Y^K]ืÜูXÝฺY[YY\ืู^ÛYYOOHYNยÛÛÝ^XÝ[[ศH^XÝÝ\[[[ศ	[[ั][OOH[Y[Y	[[ั][ู\H[[][ู\NยÛÛÝ^XÝ[[YHH^XÝÝ\[[[YH	[[YQ][OOH[Y[Y	[[YQ][ู\H[[][ู\NยÛÛÝ^XÝÛÛ[X[HÛÛ[X[[—ฺYÜฺLMOOH[’\ฺ	ÛÛ[X[ÛX[\ÛุYุ][Û—ฺYÜฺLMOOHÛX[\\ฺ	ÛÛ[X[ÝY\—Üู\Üฺ[Û—ฺYÜฺLMOOHÝY\”ู\Üฺ[Û’\ฺ	ÛÛ[X[ÝY\—ุÛÛXÝ[Û—ู\ฺุOOH[ÝY\‘\ฺุ	\^K\ะ\^JÞ[‘\ฺุสH	Þ[‘\ฺุห[Ý	Þ[‘\ฺุห]\J
+\ฺุ[^
+HO[X\\ิุYR[Yู\\ฺุ
+H	[X\\ฺุ
+H	
+[^OOH[X\Þ[‘\ฺุึฺ[^HWJH[X\\ฺุ
+JJB	Þ[‘\ฺุห[ÛY\ส[ÝY\‘\ฺุ
+H	ÛÛ[X[ÝÜู\—ÝÛÜู\—ฺYÜฺLMOOHÛÜู\’\ฺ	ÛÛ[X[ÝÜู\—ÛX\ูWู\ฺุOOHXÝ]K\ฺุ	ÛÛ[X[ÝÜู\—ุÛÛ^ฺYÜฺLMOOH^XÝYÛÛ^ÝÜู\—ุÛÛ^ฺYÜฺLM	ÛÛ[X[YÜWÝÛÜู\—ÛÝÛ\—ฺ[Ý[ูWฺYÜฺLMOOHÛÜู\’\ฺ	ÛÛ[X[YÜWÝÛÜู\—ÛÝÛ\—ÛY[X\ฺ\ุÛÝ[OOHB	ÛÛ[X[\ู]Üู\XูHOOHÛÜXK]ฺXูK[X]ÛÜู\	ÛÛ[X[\Z[][Û—Û[ูHOOH[\—Üู\XูWÜ\Ý\ÛÛWÜฺÝ	ÛÛ[X[ÛÜู\—Û]]][Û—ุ]]Ü^YOOHYH	ÛÛ[X[ูXÝÛ]]][Û—ุ]]Ü^YOOH[ูH	ÛÛ[X[ÛWÜฺÝOOHYNยÛÛÝ^XÝ[[ÛÛ[X[H[[\Z[][Û—Ü\]Y\ÝฺYÜฺLMOOH\Z[][Û”\]Y\ÝYฺLM	[[ÛÛ[X[ู]Y[ูWÜฺLMOOHุ[ÛXุ[\]Y\Ý\ฺ
+ÛÛ[X[
+B	[[ÝY\—ุYZ\Üฺ[Û—ฺYÜฺLMOOHÛÛ[X[ÝY\—ุYZ\Üฺ[Û—ฺYÜฺLM	ุ[ÛXุ[\]Y\Ý\ฺ
+[[Þ[—ÜÝY\—ุÛÛXÝ[Û—ู\ฺุสHOOHุ[ÛXุ[\]Y\Ý\ฺ
+Þ[‘\ฺุสB	[[[\—ุXÝ[Û—Ü\]Y\ÝÜฺLMOOHÛÛ[X[[\—ุXÝ[Û—Ü\]Y\ÝÜฺLM	[[\]Y\ÝYุ]OOHÛÛ[X[\]Y\ÝYุ]ยÛÛÝ^XÝÜ\H[[][ู\HY^Q][ู\H	Y^Q][ู\HÛÛ[X[][ู\H	\]Y\ÝY]OOH[	[X\\ั[]J\]Y\ÝY]ู][YJ
+JB	\]Y\ÝY]าTำิÝ[ส
+HOOHÛÛ[X[\]Y\ÝYุ]	\]Y\ÝY]HY^Q][]ยY
+Y^XÝY^HY^XÝ[[ศY^XÝ[[YHY^XÝ[[ÛÛ[X[Y^XÝÛÛ[X[Y^XÝÜ\HยÝศ•ÛÜู\”ฺ]ÝÛÛÛXÝ
+•H\Z[][ÛÛÛ[X[ุ]]ุ^HY^KÝÜู\ÝÛ\X\ูKÛÛ^ÝY\\ฺุหÜ\XHÜ\[ศYYNยBÛÛÝ\Ü]ฺÛZ[\ศH][YูK][ห[\
+][
+HO][ฺ[OOHูXÝ—Ü[\—ÝÛÜู\—ู\Ü]ฺุÛZ[YY	][ÛÝ\ูHOOHุ[ÛXุ[	][^[ุY\Z[][Û—Ü\]Y\ÝฺYÜฺLMOOH\Z[][Û”\]Y\ÝYฺLMNยY
+\Ü]ฺÛZ[\ห[ÝOOH
+Hย\หู”Q\Ü]ฺ]\ู\หY
+[’Y
+Nย]\[ยBY
+\Ü]ฺÛZ[\ห[ÝOOHJHÝศ•ÛÜู\”ฺ]ÝÛÛÛXÝ
+•H\Z[][ÛÛÛ[X[\ศ][\H\XH[\\Ü]ฺÛZ[\หNยÛÛÝ\Ü]ฺ][H\Ü]ฺÛZ[\ึฬHNยÛÛÝ\Ü]ฺH\Ü]ฺ][^[ุYยÛÛÝ\Ü]ฺÛÜHHศ\Ü]ฺNย[]H\Ü]ฺÛÜK\Ü]ฺุÛZ[WÜฺLMยÛÛÝ^XÝ\Ü]ฺH\ั^XÝู^\ส\Ü]ฺยฺุ[XH\Z[][Û—Ü\]Y\ÝฺYÜฺLMÛÛ[X[ุ]\Ý][Û—ฺYÜฺLMÛÛ[X[ุÛÛ[ÜฺLMÛÛ[X[ู][Üู\HÛÜู\—Üู\XูWฺYÜฺLMXÝ[Û—Ü\]Y\ÝÜฺLM\Ü]ฺุ][\ฺYÜฺLM\]Y\ÝYุ]]ืุXÝ[Û—ุ[ุ][\ฺY[YY\ืู^ÛYY\Ü]ฺุÛZ[WÜฺLMJH	\Ü]ฺฺุ[XHOOHÛÜXWÝฺXูWÛX—ู—Ü[\—ÝÛÜู\—ู\Ü]ฺุÛZ[WÝH	\Ü]ฺ\Z[][Û—Ü\]Y\ÝฺYÜฺLMOOH\Z[][Û”\]Y\ÝYฺLM	\Ü]ฺÛÛ[X[ุ]\Ý][Û—ฺYÜฺLMOOHฺLMÝ[สÛÛ[X[][^[ุY]\Ý][Û—ฺY
+JB	\Ü]ฺÛÛ[X[ุÛÛ[ÜฺLMOOHÛÛ[X[][^[ุYÛÛ[ÜฺLM	\Ü]ฺÛÛ[X[ู][Üู\HOOHÛÛ[X[][ู\B	\Ü]ฺÛÜู\—Üู\XูWฺYÜฺLMOOHÛÛ[X[ÛÜู\—Üู\XูWฺYÜฺLM	\Ü]ฺXÝ[Û—Ü\]Y\ÝÜฺLMOOHÛÛ[X[[\—ุXÝ[Û—Ü\]Y\ÝÜฺLM	\ิฺLM\Ü]ฺ\Ü]ฺุ][\ฺYÜฺLMH	\ะุ[ÛXุ[[Y\Ý[\
+\Ü]ฺ\]Y\ÝYุ]
+B	\Ü]ฺ]ืุXÝ[Û—ุ[ุ][\ฺY[YY\ืู^ÛYYOOHYB	\ิฺLM\Ü]ฺ\Ü]ฺุÛZ[WÜฺLMH	\Ü]ฺ\Ü]ฺุÛZ[WÜฺLMOOHุ[ÛXุ[\]Y\Ý\ฺ
+\Ü]ฺÛÜJB	ÛÛ[X[][ู\H\Ü]ฺ][ู\H	\Ü]ฺ][]าTำิÝ[ส
+HOOH\Ü]ฺ\]Y\ÝYุ]	ÛÛ[X[][]H\Ü]ฺ][]ยY
+Y^XÝ\Ü]ฺ
+HÝศ•ÛÜู\”ฺ]ÝÛÛÛXÝ
+•H\XH[\\Ü]ฺÛZ[HYÝ[H^XÝุ[ÛXุ[ÛÛ[X[ÛÜู\ู\XูK[ÛK\ฺÝXÝ[ÛNย]\ย[’Y\Z[][Û”\]Y\ÝYฺLMÛX[\ุYุ][Û’YฺLMÛX[\\ฺÜÝÛÜู\’YฺLMÛÜู\’\ฺÜÝÝÜู\“X\ูQ\ฺุXÝ]K\ฺุÝÜู\ÛÛ^YฺLM^XÝYÛÛ^ÝÜู\—ุÛÛ^ฺYÜฺLMÝY\”ู\Üฺ[Û’YฺLMÝY\”ู\Üฺ[Û’\ฺÝY\YZ\Üฺ[Û’YฺLMÝ[สÛÛ[X[ÝY\—ุYZ\Üฺ[Û—ฺYÜฺLMKÝY\ÛÛXÝ[Û‘\ฺุ[ÝY\‘\ฺุÞ[”ÝY\ÛÛXÝ[Û‘\ฺุฮÞ[‘\ฺุหX\
+[X\K[\XÝ[Û”\]Y\ÝฺLMÝ[สÛÛ[X[[\—ุXÝ[Û—Ü\]Y\ÝÜฺLMKุ]]ุ^QY^T\]Y\ÝฺLMÝ[สY^KY^WÜ\]Y\ÝÜฺLMKุ]]ุ^QY^Q][ู\NY^Q][ู\KÛÛ[X[][ู\NÛÛ[X[][ู\K[\‘\Ü]ฺÛZ[TฺLMÝ[ส\Ü]ฺ\Ü]ฺุÛZ[WÜฺLMK[\‘\Ü]ฺÛZ[Q][ู\N\Ü]ฺ][ู\KNยB\Þ[ศุ]ุZ]”Q\Ü]ฺฺ]ÝÛ\J[’YÝ[ห[Y[Ý]\ฮ[X\NÛZ\ูO•ÛÜู\”ฺ]ÝÛ\OยÛÛÝ[]X[X\ูHH\หุXÝ]SX\ู\หู]
+[’Y
+NยY
+Z[]X[X\ูH]\หู”Q\Ü]ฺ]\ู\ห\ส[’Y
+JHยÝศ•ÛÜู\”ฺ]ÝÛÛÛXÝ
+•HKY\Ü]ฺฺ]ÝÛุZ]ÜÝ]ศ^XÝุุ[Y^H[[ÜÝÜู\X\ูKNยBÛÛÝXY[HH]KÝส
+H
+ศ[Y[Ý]\ฮยฺ[H
+]KÝส
+HXY[JHยÛÛÝXÝ]SX\ูHH\หุXÝ]SX\ู\หู]
+[’Y
+NยY
+XXÝ]SX\ูHXÝ]SX\ูK\ฺุOOH[]X[X\ูK\ฺุ
+HยÝศ•ÛÜู\”ฺ]ÝÛÛÛXÝ
+•HKY\Ü]ฺฺ]ÝÛุZ]ÜÝ]ศ^XÝÝÜู\X\ูH\ฺุNยBÛÛÝX\X]Yู]\ศHXY[HH]KÝส
+NยY
+X\X]Yู]\ศH
+HXZฮยÛÛÝÝÛYH]ุZ]ฺ][Y[Ý]
+\หYู\X\X]ÝÜู\“X\ูJ[’Y\หÛÜู\’Y[]X[X\ูK\ฺุ\หÛÛYหÝÜู\“X\ูTูXÛÛห
+KX\X]Yู]\สNยY
+[ÝÛY
+HยÝศ•ÛÜู\”ฺ]ÝÛÛÛXÝ
+•HKY\Ü]ฺฺ]ÝÛุZ]ÛÝ[ÝะTห\[]ศ]ศ^XÝÝÜู\X\ูKNยBÛÛÝ\ÛÛ][ÛYู]\ศHXY[HH]KÝส
+NยY
+\ÛÛ][ÛYู]\ศH
+HXZฮยÛÛÝ\HH]ุZ]ฺ][Y[Ý]
+\หÜ\ÛÛQ•ÛÜู\”ฺ]ÝÛ\J[’Y
+K\ÛÛ][ÛYู]\สNยY
+\JH]\\NยY
+]\หู”Q\Ü]ฺ]\ู\ห\ส[’Y
+JHยÝศ•ÛÜู\”ฺ]ÝÛÛÛXÝ
+•HKY\Ü]ฺฺ]ÝÛุZ]ÜÝ]ศ[[]]XHุุ[Y^KZ[[[[หNยBÛÛÝ[XZ[[ำ\ศHXY[HH]KÝส
+NยY
+[XZ[[ำ\ศ
+H]ุZ][^JX]Z[—ิ‘WัTิUาิาUีำ—ิำำTห[XZ[[ำ\สJNยBÝศ•ÛÜู\”ฺ]ÝÛÛÛXÝ
+•HKY\Ü]ฺฺ]ÝÛÛÝ\ูHฺZ[YÝÛÛ\ูHYÜHHÝ[YÜXูHXY[KNยBÜ]ZY\ุูQ•ÛÜู\[’YÝ[ห\N•ÛÜู\”ฺ]ÝÛ\JNÛZ\ูOฺYยÛÛÝ^\Ý[ศH\หู”ฺ]ÝÛา[‘Yฺู]
+[’Y
+NยY
+^\Ý[สH]\^\Ý[ฮยÛÛÝ[[ศH\หÜ\ÜQ•ÛÜู\”]ZY\ุู[ูJ[’Y\JK[[J
+
+HO\หู”ฺ]ÝÛา[‘Yฺ[]J[’Y
+JNย\หู”ฺ]ÝÛา[‘Yฺู]
+[’Y[[สNย]\[[ฮยB\Þ[ศÜ\ÜQ•ÛÜู\”]ZY\ุู[ูJ[’YÝ[ห\YY•ÛÜู\”ฺ]ÝÛ\JNÛZ\ูOฺYยÛÛÝÝ\[H]ุZ]\หÜ\ÛÛQ•ÛÜู\”ฺ]ÝÛ\J[’YYJNยY
+XÝ\[ุ[ÛXุ[\]Y\Ý\ฺ
+Ý\[
+HOOHุ[ÛXุ[\]Y\Ý\ฺ
+\YY
+JHÝศ•ÛÜู\”ฺ]ÝÛÛÛXÝ
+•HÛÜู\ฺ]ÝÛ\Hฺ[ูYYÜHÝÜู\]ZY\ุู[ูKNย\หู”ฺ]ÝÛ\\หู]
+[’YÝ\[
+NยÛÛÝ\ÜHX‘\Ü”“ีิัT—ิัTิาSำ—ำิี•HÛÝ\ูK][Y]YÛÜู\\Ý\ÛÜูYHÝÛYÝÜู\ÛÛ^ศ]HYYXHÝ]Hุ[ÝHXÛÛÝXÝY\\Üศ[ูKย\Z[][Û—Ü\]Y\ÝฺYÜฺLMÝ\[\Z[][Û”\]Y\ÝYฺLMÛÝ\ูNÛÜู\—ูÜXูY[ู—Ü\Ý\JNยÛÛÝุ[ู[YH]ุZ]\หYู\ุ[ู[[[ิ[“Ü\][Ûส[’Y[X‘\Ü”•S—ีT“RSUQ“Ü\][Ûุ\ศุ[ู[YXุ]\ูH]ศÝÜู\ÛÜู\Xุ[YH\Z[[\\Üศ[ูKศ\Z[[ÜX\ÛÛ\ÜÛูHJJNยÜ
+ÛÛÝÜ\][Ûูุ[ู[Y
+H]ุZ]\หYู\\[][
+[’YÜ\][Ûุ[ู[YÛÜู\ศÜ\][Û—ฺYÜ\][ÛYÜ\][Û—Ý\NÜ\][Û\KX\ÛÛ—ุÛูNÜ\][Û\ÜหÛูHฯศ”•S—ีT“RSUQKÜ\][ÛÛÜ\][ÛYNุ[ู[Y
+NยÛÛÝÝÛY[H]ุZ]\หู\ฺ[[’Y
+NยÛÛÝูXÝÛX[\H]ุZ]\ห]\]ZY\ุูQ”ÝY\ÝÛY[ยÝÜู\ÛÛ^[[ฮยฺXูWÛX—Ü[—ฺYÜฺLMฺLMÝÛY[Y
+KÝÜู\—ÝÛÜู\—ฺYÜฺLMÝ\[ÜÝÛÜู\’YฺLMÝÜู\—ÛX\ูWู\ฺุÝ\[ÜÝÝÜู\“X\ูQ\ฺุÝÜู\—ุÛÛ^ฺYÜฺLMÝ\[ÝÜู\ÛÛ^YฺLMKÝY\”ู\Üฺ[Û’YฺLMÝ\[ÝY\”ู\Üฺ[Û’YฺLMÞ[”ÝY\ÛÛXÝ[Û‘\ฺุฮหÝ\[Þ[”ÝY\ÛÛXÝ[Û‘\ฺุืKJNย\Üู\^XÝ”ูXÝÛX[\XฺÛÝÛYู[Y[
+Ý\[ูXÝÛX[\
+NยหศÛÛ^\ÝXÝ[Û\ศÜ\YÝXÝHY\HูXÝ[ÝÛYู[Z[BหศÛÛXÝ[Û\ศ\ฺ\ÝY[XูZ]YHุ[ÛXุ[XูZ\Xฺห]ุZ]\ห]\ุ[ู[
+[’Y\ÜÛูJNยY
+\ห]\\ิู\Üฺ[Û[’Y
+JHÝศ•ÛÜู\”ฺ]ÝÛÛÛXÝ
+•HÝÛYÝÜู\ÛÛ^[XZ[Y]HY\Þ[ฺÛÝ\ศุ[ู[][ÛNยÛÛÝุู\Y]H]ุZ]\หุ\[•ÛÜู\”ฺ]ÝÛ“ุู\][ÛÝ\[ูXÝÛX[\
+Nย][H]ุZ]\หู\ฺ[[’Y
+NยY
+T“RSSิ•S—ิีUTห\ส[Ý]JJHยY
+[Ý]HOOHXÜYู]\—Ü\Ý\[\Z[[\ÜหÛูHOOH”“ีิัT—ิัTิาSำ—ำิีHÝศ•ÛÜู\”ฺ]ÝÛÛÛXÝ
+HY\[\Z[[Ý]ÛÛYHÛÛHฺ]ÝÛ[ฺ][ÛNยH[ูHยÛÛÝ\XÝศH\]QZ[\U\XÝส[XÜYู]\—Ü\Ý\ืJNย[H]ุZ][ฺ][Û”[\หYู\[XÜYู]\—Ü\Ý\ศ\Z[[\Ü\Ü\XÝหÛX[\ÛÛ\]N[ูHJNย]ุZ]\หYู\\[][
+[Y[XÜYู]\—Ü\Ý\ÛÜู\ศ\Üฺ]ÝÛ—Ûุู\Yุ]ุู\Y]าTำิÝ[ส
+HK[Ü[YNXÜYู]\—Ü\Ý\
+NยBÛÛÝ[X\ูYH]ุZ]\หYู\[X\ูPÝÜู\“X\ูJ[’Y\หÛÜู\’YÝ\[ÜÝÝÜู\“X\ูQ\ฺุ
+NยY
+\[X\ูY
+HÝศ•ÛÜู\”ฺ]ÝÛÛÛXÝ
+•HÛÜู\ÛÝ[ÝะTห\[X\ูHH^XÝÝÜู\X\ูHY\ÛÜฺ[ศ]ศÛÛ^Nย]ุZ]\หYู\\[][
+[’YÛX[\ÝÜู\—ÛX\ูWÜ[X\ูYÛÜู\ศÛÜู\—ฺYฺ\ฺÝ\[ÜÝÛÜู\’YฺLMX\ูWู\ฺุÝ\[ÜÝÝÜู\“X\ูQ\ฺุุ\ืู[]YYHKÛX[\Ü[’YNÝÜู\[X\ูX
+Nย\หุXÝ]SX\ู\ห[]J[’Y
+Nย\หู”Q\Ü]ฺ]\ู\ห[]J[’Y
+NยÛÛÝ\Z[[H]ุZ]\หู\ฺ[[’Y
+NยÛÛÝXÛÝ\YH]ุZ]\หÜXÛÝ\”[\Z[[
+Nย]ุZ]\หÜ\ฺ\Ý][ส[’YXÛÝ\Y][สNยหศูY\H[XÛÝ\K\[[ศ[[H\Ý[Ý\Xู[Y[ÛÜู\\ยหศ\XHุู\Y\ศÛ]ÛÜู\XÝÝ\ฺ\ูHHÛุู\ÜศÛÝ[หศX\ศÛX[\ÛÛ\]HYÜH[\\ศXÝX[H\XูY]X][ศยหศ\XHÝศ\ุÛÝ\XHH\Xู[Y[Ý\\]ุZ]\หÜุ]QZ[\Q]Y[ูJ]ุZ]\หู\ฺ[[’Y
+K\ÜXÛÝ\Y\YXÝสNยB\Þ[ศÛุู\Q‘ÜXูY[ÛÜู\”\Xู[Y[
+[[”XÛÜ
+NÛZ\ูOÝู]ุZ][ืÜ\Xู[Y[ุู\YยY
+[ุู[\[าYOOH•Q[Ý]HOOHXÜYู]\—Ü\Ý\[\Z[[\ÜหÛูHOOH”“ีิัT—ิัTิาSำ—ำิีH]\ÝูยÛÛÝู][YูKÝ\[X\ูWHH]ุZ]ÛZ\ูK[
+Ý\หุ[][ส[Y
+K\หYู\ู]ÝÜู\“X\ูJ[Y
+WJNยÛÛÝฺ]ÝÛศH][YูK][ห[\
+][
+HO][ฺ[OOH\X[]KÝÜู\—ÝÛÜู\—Üฺ]ÝÛ—Ûุู\YNยY
+ฺ]ÝÛห[ÝOOH
+H]\ÝูยY
+ฺ]ÝÛห[ÝOOHHÝ\[X\ูHOOH[\ห]\\ิู\Üฺ[Û[Y
+JHÝศ•ÛÜู\”ฺ]ÝÛÛÛXÝ
+HÜXูY[\Z[[[ÜÝ]ศ[\]YHฺ]ÝÛุู\][ÛÜXู[[X\ูHÝ[\KNยÛÛÝฺ]ÝÛHฺ]ÝÛึฬHNยÛÛÝÛูHฺ]ÝÛ^[ุYยÛÛÝÛู’ู^\ศHยฺุ[XH\Z[][Û—Ü\]Y\ÝฺYÜฺLMฺXูWÛX—Ü[—ฺYÜฺLMÛX[\ÛุYุ][Û—ฺYÜฺLMÜÝุÝÜู\—ÝÛÜู\—ฺYÜฺLMÜÝุÝÜู\—ÛX\ูWู\ฺุÝÜู\—ุÛÛ^ฺYÜฺLMÝY\—Üู\Üฺ[Û—ฺYÜฺLMÝY\—ุYZ\Üฺ[Û—ฺYÜฺLMÝY\—ุÛÛXÝ[Û—ู\ฺุÞ[—ÜÝY\—ุÛÛXÝ[Û—ู\ฺุศ[\—ุXÝ[Û—Ü\]Y\ÝÜฺLMุ]]ุ^WูY^WÜ\]Y\ÝÜฺLMุ]]ุ^WูY^Wู][Üู\HÛÛ[X[ู][Üู\H[\—ู\Ü]ฺุÛZ[WÜฺLM[\—ู\Ü]ฺุÛZ[Wู][Üู\HูXÝÜÝY\—ุÛX[\ุXฺÛÝÛYูYูXÝÜÝY\—ุÛX[\Üู][Y[ÜฺLMูXÝÜÝY\—ุÛÜูWÜXูZ\ุÛÝ[ูXÝÜÝY\—ุXÝ]][Û—ุXÜÜXูZ\ุÛÝ[ูXÝÜÝY\—ุÛX[\ู\ฺุÝ[[Û—ÛX]ฺ\ืูY^HÝÜู\—ุÛÛ^ุÛÜูYÛÝ\ูH]ืÜ[—ÝÛÜู\—ÛX\ูWุÛÛ^ุ[ÜูXÝฺY[YY\ืู^ÛYYุู\Yุ]H\ศÛÛÝยÛÛÝÛÛ[X[H][YูK][ห[
+
+][
+HO][ู\HOOHÛูÛÛ[X[ู][Üู\JNยÛÛÝY^HH][YูK][ห[
+
+][
+HO][ู\HOOHÛูุ]]ุ^WูY^Wู][Üู\JNยÛÛÝ\Ü]ฺH][YูK][ห[
+
+][
+HO][ู\HOOHÛู[\—ู\Ü]ฺุÛZ[Wู][Üู\JNยÛÛÝÛÛ[X[]Y[ูHHÛÛ[X[ศ^XÝÛÝ\ูU[Y]Y•ÛÜู\ÛÛ[X[
+ÛÛ[X[[\หÛÛYสH[ยÛÛÝ\Ü]ฺÛÜHH\Ü]ฺศศ\Ü]ฺ^[ุYH[ยY
+\Ü]ฺÛÜJH[]H\Ü]ฺÛÜK\Ü]ฺุÛZ[WÜฺLMยÛÛÝ^XÝÛูHฺ]ÝÛÛÝ\ูHOOHÛÜู\	\ั^XÝู^\สÛูÛู’ู^\สB	Ûูฺุ[XHOOHÛÜXWÝฺXูWÛX—ู—ุÝÜู\—ÝÛÜู\—Üฺ]ÝÛ—Ûุู\][Û—ÝH	ÛูฺXูWÛX—Ü[—ฺYÜฺLMOOHฺLM;๏ฝmขGงฒฺ๎ฦญyะ…อ…ต••มฑฝๅต•นะกัษ…นอษฅมะน•แม•ั•‘}‘•มฑฝๅต•นะฐษีธนั…ษ•ะน•แม•ั•‘•มฑฝๅต•นะค๑๐ัษ…นอษฅมะนษ…Ý}…ี‘ฅฝ}•แฑี‘•€๔๔ัษี”๑๐ัษ…นอษฅมะน‘ฅ•อั}…ฑฝษฅักด€๔๔€อกดศิุ๑๐ัษ…นอษฅมะน…นฝนฅ…ฑฅ้…ัฅฝธ€๔๔€ีัเตฉอฝธตอฝษะตญ•ๅฬตฝตม…ะต…อฅคตุฤคษ•ัีษธ…ฑอ”์(€ฅ€กัๅม•ฝัษ…นอษฅมะนอ•ออฅฝน}ฅ€๔๔€อัษฅน๑๐ัษ…นอษฅมะนอ•ออฅฝน}ฅนฑ•นั €๔๔๔€ภ๑๐ัๅม•ฝัษ…นอษฅมะนักษ•…‘}ฅ€๔๔€อัษฅน๑๐ัษ…นอษฅมะนักษ•…‘}ฅนฑ•นั €๔๔๔€ภคษ•ัีษธ…ฑอ”์(€ฅ€กษีธน…นฝนฅ…ฑM•ออฅฝน%€๔๔นีฑฐ€ัษ…นอษฅมะนอ•ออฅฝน}ฅ€๔๔ษีธน…นฝนฅ…ฑM•ออฅฝน%คษ•ัีษธ…ฑอ”์(€ฅ€กษีธนักษ•…‘%€๔๔นีฑฐ€ัษ…นอษฅมะนักษ•…‘}ฅ€๔๔ษีธนักษ•…‘%คษ•ัีษธ…ฑอ”์(€ฝนอะต•ออ…•ฬ€๔ษษ…ไนฅอษษ…ไกัษ…นอษฅมะนต•ออ…•ฬค€üัษ…นอษฅมะนต•ออ…•ฬ€่นีฑฐ์(€ฝนอะฝีน‘…ษฅ•ฬ€๔ษษ…ไนฅอษษ…ไกัษ…นอษฅมะนัีษน}ฝีน‘…ษฅ•ฬค€üัษ…นอษฅมะนัีษน}ฝีน‘…ษฅ•ฬ€่นีฑฐ์(€ฅ€ …ต•ออ…•ฬ๑๐€…ฝีน‘…ษฅ•ฬ๑๐€…9ีต•ศนฅอM…•%นั••ศกัษ…นอษฅมะนต•ออ…•}ษ•ูฅอฅฝธค๑๐9ีต•ศกัษ…นอษฅมะนต•ออ…•}ษ•ูฅอฅฝธค€๐€ภคษ•ัีษธ…ฑอ”์(€ฝนอะนฝษต…ฑฅ้•‘5•ออ…•ฬ่I•ฝษ๑อัษฅนฐีนญนฝÝธ๙mt€๔mt์(€ฝศ€กฑ•ะฅน‘•เ€๔€ภ์ฅน‘•เ€๐ต•ออ…•ฬนฑ•นั ์ฅน‘•เ€ฌ๔€ฤค์(€€€ฝนอะต•ออ…”€๔ต•ออ…•อmฅน‘•แt์(€€€ฅ€ …ต•ออ…”๑๐ัๅม•ฝต•ออ…”€๔๔€ฝฉ•ะ๑๐ษษ…ไนฅอษษ…ไกต•ออ…”คคษ•ัีษธ…ฑอ”์(€€€ฝนอะษฝÜ€๔ต•ออ…”…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘์(€€€ฝนอะญ•ๅฬ€๔=ฉ•ะนญ•ๅฬกษฝÜคนอฝษะ ค์(€€€ฝนอะ•แม•ั•‘-•ๅฬ€๔l…มมษฝแฅต…ั”ฐ€ฝนั•นะฐ€ษ•…ั•‘}…ะฐ€ฅน…ฐฐ€ต•ออ…•}ฅฐ€มษฝูฅ‘•ษ}•ู•นั}ฅฐ€ษ•‘…ัฅฝน}ฑ•ู•ฐฐ€ษฝฑ”ฐ€อ•ลี•น”ฐ€อฝีษ”ฐ€ัีษน}ฅtนอฝษะ ค์(€€€ฅ€กญ•ๅฬนฑ•นั €๔๔•แม•ั•‘-•ๅฬนฑ•นั ๑๐ญ•ๅฬนอฝต” กญ•ไฐญ•ๅ%น‘•เค€๔๘ญ•ไ€๔๔•แม•ั•‘-•ๅอmญ•ๅ%น‘•แtคคษ•ัีษธ…ฑอ”์(€€€ฅ€กัๅม•ฝษฝÜนต•ออ…•}ฅ€๔๔€อัษฅน๑๐ษฝÜนต•ออ…•}ฅนฑ•นั €๔๔๔€ภ๑๐ษฝÜนอ•ลี•น”€๔๔ฅน‘•เ€ฌ€ฤ๑๐€กษฝÜนษฝฑ”€๔๔€ีอ•ศ€ษฝÜนษฝฑ”€๔๔€…ออฅอั…นะค๑๐ัๅม•ฝษฝÜนฝนั•นะ€๔๔€อัษฅน๑๐€……นฝนฅ…ฑ%อผกษฝÜนษ•…ั•‘}…ะค๑๐ัๅม•ฝษฝÜนอฝีษ”€๔๔€อัษฅน๑๐ษฝÜนอฝีษ”นฑ•นั €๔๔๔€ภ๑๐ัๅม•ฝษฝÜนฅน…ฐ€๔๔€ฝฝฑ•…ธ๑๐ัๅม•ฝษฝÜน…มมษฝแฅต…ั”€๔๔€ฝฝฑ•…ธ๑๐€กษฝÜนัีษน}ฅ€๔๔นีฑฐ€ัๅม•ฝษฝÜนัีษน}ฅ€๔๔€อัษฅนค๑๐€กษฝÜนมษฝูฅ‘•ษ}•ู•นั}ฅ€๔๔นีฑฐ€ัๅม•ฝษฝÜนมษฝูฅ‘•ษ}•ู•นั}ฅ€๔๔€อัษฅนค๑๐ัๅม•ฝษฝÜนษ•‘…ัฅฝน}ฑ•ู•ฐ€๔๔€อัษฅนคษ•ัีษธ…ฑอ”์(€€€นฝษต…ฑฅ้•‘5•ออ…•ฬนมีอ กษฝÜค์(€๔(€ฝนอะฅนมีัฝีนะ€๔นฝษต…ฑฅ้•‘5•ออ…•ฬนฅฑั•ศ กต•ออ…”ค€๔๘ต•ออ…”นษฝฑ”€๔๔๔€ีอ•ศคนฑ•นั ์(€ฝนอะฝีัมีัฝีนะ€๔นฝษต…ฑฅ้•‘5•ออ…•ฬนฅฑั•ศ กต•ออ…”ค€๔๘ต•ออ…”นษฝฑ”€๔๔๔€…ออฅอั…นะคนฑ•นั ์(€ฅ€กัษ…นอษฅมะนต•ออ…•}ฝีนะ€๔๔นฝษต…ฑฅ้•‘5•ออ…•ฬนฑ•นั ๑๐ัษ…นอษฅมะนฅนมีั}ต•ออ…•}ฝีนะ€๔๔ฅนมีัฝีนะ๑๐ัษ…นอษฅมะนฝีัมีั}ต•ออ…•}ฝีนะ€๔๔ฝีัมีัฝีนะ๑๐ัษ…นอษฅมะนัีษน}ฝีน‘…ษๅ}ฝีนะ€๔๔ฝีน‘…ษฅ•ฬนฑ•นั คษ•ัีษธ…ฑอ”์(€ฅ€กัษ…นอษฅมะนมษฝูฅ‘•ษ}•แมฅษ•อ}…ะ€๔๔ษีธน•แมฅษ•อะนัฝ%M=Mัษฅน ค๑๐€……นฝนฅ…ฑ%อผกัษ…นอษฅมะนษ•ั•นัฅฝน}•แมฅษ•อ}…ะค๑๐ัษ…นอษฅมะนษ•ั•นัฅฝน}กฝีษฬ€๔๔ษีธน…มัีษ•Aฝฑฅไนษ•ั•นัฅฝน!ฝีษฬ๑๐ัษ…นอษฅมะนษ•ั•นัฅฝน}…นกฝศ€๔๔€ฅน…ฑฅ้•‘}…ะ๑๐ัๅม•ฝัษ…นอษฅมะนอกศิุ€๔๔€อัษฅน๑๐€ฝymตภดๅu์ุั๔ผนั•อะกัษ…นอษฅมะนอกศิุคคษ•ัีษธ…ฑอ”์(€ฅ€กอกศิุก…นฝนฅ…ฑอฅฅ)อฝธกนฝษต…ฑฅ้•‘5•ออ…•ฬคค€๔๔ัษ…นอษฅมะนอกศิุคษ•ัีษธ…ฑอ”์(€ฝนอะษ•ฝตมีั•‘	ฝีน‘…ษฅ•ฬ€๔…นฝนฅ…ฑQีษน	ฝีน‘…ษฅ•ฬกนฝษต…ฑฅ้•‘5•ออ…•ฬค์(€ษ•ัีษธ…นฝนฅ…ฑอฅฅ)อฝธกฝีน‘…ษฅ•ฬค€๔๔๔…นฝนฅ…ฑอฅฅ)อฝธกษ•ฝตมีั•‘	ฝีน‘…ษฅ•ฬค์)๔()ีนัฅฝธ…นฝนฅ…ฑQีษน	ฝีน‘…ษฅ•ฬกต•ออ…•ฬ่I•ฝษ๑อัษฅนฐีนญนฝÝธ๙mtค่ษษ…ไ๑I•ฝษ๑อัษฅนฐีนญนฝÝธ๘๘์(€ฝนอะษ•อีฑะ่ษษ…ไ๑I•ฝษ๑อัษฅนฐีนญนฝÝธ๘๘€๔mt์(€ฝศ€กฝนอะต•ออ…”ฝต•ออ…•ฬค์(€€€ฝนอะอ•ลี•น”€๔9ีต•ศกต•ออ…”นอ•ลี•น”ค์(€€€ฝนอะัีษน%€๔ต•ออ…”นัีษน}ฅ์(€€€ฝนอะมษฅฝศ€๔ษ•อีฑะน…ะ ดฤค์(€€€ฝนอะฝีน‘…ษไ€๔มษฅฝศ€มษฅฝศนัีษน}ฅ€๔๔๔ัีษน%€มษฅฝศนฑ…อั}อ•ลี•น”€๔๔๔อ•ลี•น”€ด€ฤ(€€€€€€üมษฅฝศ(€€€€€€่€  ค€๔๘์ฝนอะษ•…ั•€๔์ัีษน}ฅ่ัีษน%ฐฅษอั}อ•ลี•น”่อ•ลี•น”ฐฑ…อั}อ•ลี•น”่อ•ลี•น”ฐฅนมีั}ต•ออ…•}ฝีนะ่€ภฐฝีัมีั}ต•ออ…•}ฝีนะ่€ภ๔์ษ•อีฑะนมีอ กษ•…ั•ค์ษ•ัีษธษ•…ั•์๔ค ค์(€€€ฝีน‘…ษไนฑ…อั}อ•ลี•น”€๔อ•ลี•น”์(€€€ฝนอะฝีนั-•ไ€๔ต•ออ…”นษฝฑ”€๔๔๔€ีอ•ศ€ü€ฅนมีั}ต•ออ…•}ฝีนะ€่€ฝีัมีั}ต•ออ…•}ฝีนะ์(€€€ฝีน‘…ษๅmฝีนั-•ๅt€๔9ีต•ศกฝีน‘…ษๅmฝีนั-•ๅtค€ฌ€ฤ์(€๔(€ษ•ัีษธษ•อีฑะ์)๔()ีนัฅฝธ…นฝนฅ…ฑอฅฅ)อฝธกู…ฑี”่ีนญนฝÝธค่อัษฅน์(€ฅ€กษษ…ไนฅอษษ…ไกู…ฑี”คคษ•ัีษธl‘ํู…ฑี”นต…ภก…นฝนฅ…ฑอฅฅ)อฝธคนฉฝฅธ ฐฅ๕u€์(€ฅ€กู…ฑี”€ัๅม•ฝู…ฑี”€๔๔๔€ฝฉ•ะคษ•ัีษธ์‘ํ=ฉ•ะน•นัษฅ•ฬกู…ฑี”…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘คนอฝษะ กmฑ•ัtฐmษฅกัtค€๔๘ฑ•ะ€๐ษฅกะ€ü€ดฤ€่ฑ•ะ€๘ษฅกะ€ü€ฤ€่€ภคนต…ภ กmญ•ไฐกฅฑ‘tค€๔๘€‘ํ…อฅฅ)อฝนMัษฅนกญ•ไฅ๔่‘ํ…นฝนฅ…ฑอฅฅ)อฝธกกฅฑฅ๕€คนฉฝฅธ ฐฅ๕๕€์(€ฅ€กัๅม•ฝู…ฑี”€๔๔๔€อัษฅนคษ•ัีษธ…อฅฅ)อฝนMัษฅนกู…ฑี”ค์(€ษ•ัีษธ)M=8นอัษฅนฅไกู…ฑี”ค์)๔()ีนัฅฝธ…อฅฅ)อฝนMัษฅนกู…ฑี”่อัษฅนค่อัษฅน์(€ษ•ัีษธ)M=8นอัษฅนฅไกู…ฑี”คนษ•มฑ…” ฝmqิภภÝตqีtฝิฐ€กก…ษ…ั•ศค€๔๘์(€€€ฝนอะมฝฅนะ€๔ก…ษ…ั•ศนฝ‘•Aฝฅนัะ ภค์(€€€ฅ€กมฝฅนะ€๐๔€มแคษ•ัีษธqqิ‘ํมฝฅนะนัฝMัษฅน ฤุคนม…‘Mั…ษะ ะฐ€ภฅ๕€์(€€€ฝนอะ…‘ฉีอั•€๔มฝฅนะ€ด€มเฤภภภภ์(€€€ษ•ัีษธqqิ‘์ มแเภภ€ฌ€ก…‘ฉีอั•€๘๘€ฤภคคนัฝMัษฅน ฤุฅ๕qqิ‘์ มแ‘ภภ€ฌ€ก…‘ฉีอั•€€มเอคคนัฝMัษฅน ฤุฅ๕€์(€๔ค์)๔()ีนัฅฝธ…นฝนฅ…ฑ%อผกู…ฑี”่ีนญนฝÝธค่ฝฝฑ•…ธ์(€ฅ€กัๅม•ฝู…ฑี”€๔๔€อัษฅน๑๐€ฝyq‘์ั๔ตq‘์ษ๔ตq‘์ษ๕Qq‘์ษ๔้q‘์ษ๔้q‘์ษ๔ ü้pนq‘์ฤฐู๔คü ü้i๑lฌตuq‘์ษ๔้q‘์ษ๔คผนั•อะกู…ฑี”คคษ•ัีษธ…ฑอ”์(€ฝนอะม…ษอ•€๔น•Ü…ั”กู…ฑี”ค์(€ษ•ัีษธ€…9ีต•ศนฅอ9…8กม…ษอ•น•ัQฅต” คค์)๔()ีนัฅฝธ•แ…ััฅู•Q…ษ•ั•น•ู•นัฬ (€•ู•นัฬ่ฅตมฝษะ ธฝ‘ฝต…ฅธนฉฬคน1…ู•นัmtฐ(€ฝม•ษ…ัฅฝน%่อัษฅนฐ(€ั…ษ•ะ่I•ฝษ๑อัษฅนฐีนญนฝÝธ๘ฐ(€ญฅน่€ฝีัมีั}ษ•…ฑฅ้…ัฅฝธ๐€ัฝฝฑ}••ะฐ(ค่ฅตมฝษะ ธฝ‘ฝต…ฅธนฉฬคน1…ู•นัmt์(€ฝนอะอั…ฑ•%€๔ญฅน€๔๔๔€ฝีัมีั}ษ•…ฑฅ้…ัฅฝธ€üั…ษ•ะนอั…ฑ•}ฅ€่ั…ษ•ะนัฝฝฑ}…ฑฑ}ฅ€üüั…ษ•ะนอั…ฑ•}ฅ์(€ฝนอะ••ั=ษกีนฌ€๔ญฅน€๔๔๔€ฝีัมีั}ษ•…ฑฅ้…ัฅฝธ€üั…ษ•ะนกีนญ}ก…อ €่ั…ษ•ะน••ั}ฅ์(€ษ•ัีษธ•ู•นัฬนฅฑั•ศ ก•ู•นะค€๔๘์(€€€ฅ€ก•ู•นะนอฝีษ”€๔๔€ษฝÝอ•ศ๑๐•ู•นะนญฅน€๔๔€ก…ษน•อฬนมษฝ‘ีั}…ัฅู•}ั…ษ•ั}•น•คษ•ัีษธ…ฑอ”์(€€€ฝนอะษ••ฅมะ€๔•ู•นะนม…ๅฑฝ…์(€€€ฝนอะ•น•‘ะ€๔ัๅม•ฝษ••ฅมะน•น•‘}…ะ€๔๔๔€อัษฅน€ü…ั”นม…ษอ”กษ••ฅมะน•น•‘}…ะค€่9ีต•ศน9…8์(€€€ษ•ัีษธษ••ฅมะนอก•ต€๔๔๔€อฝมกฅ…}ูฝฅ•}ฑ…}…ัฅู•}ั…ษ•ั}•น•}ุฤ€ษ••ฅมะนฝม•ษ…ัฅฝน}ฅ€๔๔๔ฝม•ษ…ัฅฝน%(€€€€€€ษ••ฅมะนฑ…}•ู•นั}อ•ฤ€๔๔๔ั…ษ•ะน•ู•นั}อ•ฤ€ษ••ฅมะนญฅน€๔๔๔ญฅน€ษ••ฅมะนมษฝ‘ีั}•น•ษ…ัฅฝธ€๔๔๔ั…ษ•ะนมษฝ‘ีั}•น•ษ…ัฅฝธ€ษ••ฅมะนมษฝ‘ีั}อ•ฤ€๔๔๔ั…ษ•ะนมษฝ‘ีั}อ•ฤ(€€€€€€9ีต•ศนฅอM…•%นั••ศกษ••ฅมะนฝอ•ษู•‘}ักษฝีก}มษฝ‘ีั}อ•ฤค€9ีต•ศกษ••ฅมะนฝอ•ษู•‘}ักษฝีก}มษฝ‘ีั}อ•ฤค€๘๔9ีต•ศกั…ษ•ะนมษฝ‘ีั}อ•ฤค(€€€€€€ษ••ฅมะนอั…ฑ•}ฅ€๔๔๔อั…ฑ•%€ษ••ฅมะน••ั}ฝษ}กีนญ}ฅ€๔๔๔••ั=ษกีนฌ€ษ••ฅมะนมษฝูฅ‘•ษ}ฝนน•ัฅฝน}•มฝ €๔๔๔ั…ษ•ะนมษฝูฅ‘•ษ}ฝนน•ัฅฝน}•มฝ (€€€€€€ษ••ฅมะน…ัฅู”€๔๔๔ัษี”€…นฝนฅ…ฑ%อผกษ••ฅมะน•น•‘}…ะค€9ีต•ศนฅอฅนฅั”ก•น•‘ะค€5…ั น…ฬก•ู•นะน…ะน•ัQฅต” ค€ด•น•‘ะค€๐๔€ษ|ภภภ์(€๔ค์)๔()•แมฝษะีนัฅฝธ•แ…ั=ีัมีั1ฅ•ๅฑ•อัมฝ ก•ู•นัฬ่ฅตมฝษะ ธฝ‘ฝต…ฅธนฉฬคน1…ู•นัmtฐมษฝูฅ‘•ษมฝ ่นีต•ศฐ…ั•ษM•ฤ่นีต•ศค่ฝฝฑ•…ธ์(€ฝนอะฑฅ•ๅฑ•-ฅน‘ฬ€๔น•ÜM•ะกl…ี‘ฅผนฝีัมีะนอก•‘ีฑ•ฐ€…ี‘ฅผนฝีัมีะนอั…ษั•ฐ€…ี‘ฅผนฝีัมีะนฝตมฑ•ั•ฐ€…ี‘ฅผนฝีัมีะนฑีอก•ฐ€…ี‘ฅผนฝีัมีะน‘ษฝมม•tค์(€ฝนอะษฝÝฬ€๔•ู•นัฬนฅฑั•ศ ก•ู•นะค€๔๘•ู•นะนอฝีษ”€๔๔๔€มษฝ‘ีะ€ฑฅ•ๅฑ•-ฅน‘ฬนก…ฬก•ู•นะนญฅนคคนต…ภ ก•ู•นะค€๔๘€ก์•ู•นะฐษ••ฅมะ่•ู•นะนม…ๅฑฝ…นษ••ฅมะ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•๔คค(€€€€นฅฑั•ศ ก์ษ••ฅมะ๔ค€๔๘ัๅม•ฝษ••ฅมะüนษ•…ฑฅ้…ัฅฝน%€๔๔๔€อัษฅนค์(€ฝนอะษ•…ฑฅ้…ัฅฝน%‘ฬ€๔น•ÜM•ะกษฝÝฬนต…ภ ก์ษ••ฅมะ๔ค€๔๘Mัษฅนกษ••ฅมะüนษ•…ฑฅ้…ัฅฝน%คคค์(€ษ•ัีษธษ•…ฑฅ้…ัฅฝน%‘ฬนอฅ้”€๘€ภ€ษฝÝฬน•ู•ษไ ก์•ู•นะ๔ค€๔๘•ู•นะนอ•ฤ€๘…ั•ษM•ฤค€lธธนษ•…ฑฅ้…ัฅฝน%‘อtน•ู•ษไ กษ•…ฑฅ้…ัฅฝน%ค€๔๘์(€€€ฝนอะฑฅ•ๅฑ”€๔ษฝÝฬนฅฑั•ศ ก์ษ••ฅมะ๔ค€๔๘ษ••ฅมะüนษ•…ฑฅ้…ัฅฝน%€๔๔๔ษ•…ฑฅ้…ัฅฝน%คนอฝษะ กฑ•ะฐษฅกะค€๔๘ฑ•ะน•ู•นะนอ•ฤ€ดษฅกะน•ู•นะนอ•ฤค์(€€€ฝนอะอก•‘ีฑ•€๔ฑฅ•ๅฑ”นฅฑั•ศ ก์•ู•นะฐษ••ฅมะ๔ค€๔๘•ู•นะนญฅน€๔๔๔€…ี‘ฅผนฝีัมีะนอก•‘ีฑ•€ษ••ฅมะüนมก…อ”€๔๔๔€อก•‘ีฑ•ค์(€€€ฝนอะอั…ษั•€๔ฑฅ•ๅฑ”นฅฑั•ศ ก์•ู•นะฐษ••ฅมะ๔ค€๔๘•ู•นะนญฅน€๔๔๔€…ี‘ฅผนฝีัมีะนอั…ษั•€ษ••ฅมะüนมก…อ”€๔๔๔€อั…ษั•ค์(€€€ฝนอะั•ษตฅน…ฐ€๔ฑฅ•ๅฑ”นฅฑั•ศ ก์•ู•นะฐษ••ฅมะ๔ค€๔๘l…ี‘ฅผนฝีัมีะนฝตมฑ•ั•ฐ€…ี‘ฅผนฝีัมีะนฑีอก•ฐ€…ี‘ฅผนฝีัมีะน‘ษฝมม•tนฅนฑี‘•ฬก•ู•นะนญฅนค€lฝตมฑ•ั•ฐ€ฑีอก•ฐ€‘ษฝมม•tนฅนฑี‘•ฬกMัษฅนกษ••ฅมะüนมก…อ”คคค์(€€€ฝนอะ•มฝกฬ€๔น•ÜM•ะกฑฅ•ๅฑ”นต…ภ ก์ษ••ฅมะ๔ค€๔๘9ีต•ศกษ••ฅมะüนมษฝูฅ‘•ษฝนน•ัฅฝนมฝ คคค์(€€€ฝนอะ•น•ษ…ัฅฝนฬ€๔น•ÜM•ะกฑฅ•ๅฑ”นต…ภ ก์ษ••ฅมะ๔ค€๔๘9ีต•ศกษ••ฅมะüนมฑ…ๅ…ญ•น•ษ…ัฅฝธคคค์(€€€ษ•ัีษธอก•‘ีฑ•นฑ•นั €๔๔๔€ฤ€อั…ษั•นฑ•นั €๔๔๔€ฤ€ั•ษตฅน…ฐนฑ•นั €๔๔๔€ฤ€อก•‘ีฑ•‘lมtน•ู•นะนอ•ฤ€๐อั…ษั•‘lมtน•ู•นะนอ•ฤ€อั…ษั•‘lมtน•ู•นะนอ•ฤ€๐ั•ษตฅน…ฑlมtน•ู•นะนอ•ฤ(€€€€€€•มฝกฬนอฅ้”€๔๔๔€ฤ€•มฝกฬนก…ฬกมษฝูฅ‘•ษมฝ ค€•น•ษ…ัฅฝนฬนอฅ้”€๔๔๔€ฤ์(€๔ค์)๔()ฝนอะ%9%Q}Q==1}QI5%91}MQQL€๔น•ÜM•ะกlษ•อมฝน‘•ฐ€…น•ฑฑ•ต•ฝษ”ตอ•นฐ€…น•ฑฑ•ต…ั•ศตอ•นฐ€อีมมษ•ออ•ฐ€ษ•ฉ•ั•tค์)ฝนอะ%9%Q}Q==1}9=9QI5%91}MQQL€๔น•ÜM•ะกlีนญนฝÝธฐ€ม•น‘ฅนฐ€ษ••ฅู•ฐ€•แ•ีัฅนtค์()ีนัฅฝธ•แ…ัQ•ษตฅน…ฑ1…อัQฝฝฑ1ฅ•ๅฑ”กษฝÝฬ่ษษ…ไ๑์•ู•นะ่ฅตมฝษะ ธฝ‘ฝต…ฅธนฉฬคน1…ู•นะ์•นัษไ่I•ฝษ๑อัษฅนฐีนญนฝÝธ๘๔๘ฐั•ษตฅน…ฑั•ษM•ฤ€๔9ีต•ศน9Q%Y}%9%9%Qdค่ฝฝฑ•…ธ์(€ฅ€กษฝÝฬนฑ•นั €๔๔๔€ภ๑๐€…ษฝÝฬน•ู•ษไ ก์•นัษไ๔ค€๔๘%9%Q}Q==1}QI5%91}MQQLนก…ฬกMัษฅนก•นัษไนฅน…ฑMั…ั”คค๑๐%9%Q}Q==1}9=9QI5%91}MQQLนก…ฬกMัษฅนก•นัษไนฅน…ฑMั…ั”คคคคษ•ัีษธ…ฑอ”์(€ฝนอะั•ษตฅน…ฐ€๔ษฝÝฬนฅฑั•ศ ก์•นัษไ๔ค€๔๘%9%Q}Q==1}QI5%91}MQQLนก…ฬกMัษฅนก•นัษไนฅน…ฑMั…ั”คคค์(€ฝนอะฑ…อะ€๔ษฝÝฬนษ•‘ี” กฑ…ั•อะฐษฝÜค€๔๘ษฝÜน•ู•นะนอ•ฤ€๘ฑ…ั•อะน•ู•นะนอ•ฤ€üษฝÜ€่ฑ…ั•อะฐษฝÝอlมtค์(€ษ•ัีษธั•ษตฅน…ฐนฑ•นั €๔๔๔€ฤ€ั•ษตฅน…ฑlมt€๔๔๔ฑ…อะ€ั•ษตฅน…ฑlมtน•ู•นะนอ•ฤ€๘ั•ษตฅน…ฑั•ษM•ฤ์)๔()ีนัฅฝธฑ…ออฅๅLภษ5มษษฝศกษ•อมฝนอ•	ฝ‘ไ่อัษฅนค่อัษฅน๐นีฑฐ์(€ฝนอะ•แมฑฅฅะ€๔€ผ ü้•ษษฝษ}ฑ…ออ๑•ษษฝษ}ฝ‘”คqฬจ้qฬจกmตiumตhภดๅ}u์ศฐุอ๔คผน•แ•กษ•อมฝนอ•	ฝ‘ไคüนlลt์(€ฅ€ก•แมฑฅฅะคษ•ัีษธ•แมฑฅฅะ์(€ฅ€ ฝ%นู…ฑฅ…ษีต•นัฬ ü่ฝศัฝฝฐคüฝคนั•อะกษ•อมฝนอ•	ฝ‘ไคคษ•ัีษธ€5A}%9Y1%}IU59QL์(€ษ•ัีษธนีฑฐ์)๔()ีนัฅฝธก…อแ…ั-•ๅฬกู…ฑี”่I•ฝษ๑อัษฅนฐีนญนฝÝธ๘ฐญ•ๅฬ่ษ•…‘ฝนฑไอัษฅนmtค่ฝฝฑ•…ธ์(€ฝนอะ…ัี…ฐ€๔=ฉ•ะนญ•ๅฬกู…ฑี”คนอฝษะ ค์(€ฝนอะ•แม•ั•€๔lธธนญ•ๅอtนอฝษะ ค์(€ษ•ัีษธ…ัี…ฐนฑ•นั €๔๔๔•แม•ั•นฑ•นั €…ัี…ฐน•ู•ษไ กญ•ไฐฅน‘•เค€๔๘ญ•ไ€๔๔๔•แม•ั•‘mฅน‘•แtค์)๔()ีนัฅฝธ•แ…ัLภษMน…มอกฝะกู…ฑี”่ีนญนฝÝธค่LภษI•อฝีษ•Mน…มอกฝะ๐นีฑฐ์(€ฅ€ …ู…ฑี”๑๐ัๅม•ฝู…ฑี”€๔๔€ฝฉ•ะ๑๐ษษ…ไนฅอษษ…ไกู…ฑี”คคษ•ัีษธนีฑฐ์(€ฝนอะษ•ฝษ€๔ู…ฑี”…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘์(€ฝนอะญ•ๅฬ€๔l…ัฅู•}ษีน}ฝีนะฐ€ฝม•ษ…ัฅฝน}ฝีนะฐ€ษีน}•ู•นั}ีษอฝศฐ€ฅนมีั}ตีั…ัฅฝน}•ู•นั}ฝีนะฐ€ษฝÝอ•ษ}ฝนั•แั}ฝีนะฐ€…นฝนฅ…ฑ}อ•ออฅฝน}ฝีนะฐ€มษฝูฅ‘•ษ}อ•ออฅฝน}ฝีนะt…ฬฝนอะ์(€ฅ€ …ก…อแ…ั-•ๅฬกษ•ฝษฐญ•ๅฬค๑๐ญ•ๅฬนอฝต” กญ•ไค€๔๘€…9ีต•ศนฅอM…•%นั••ศกษ•ฝษ‘mญ•ๅtค๑๐9ีต•ศกษ•ฝษ‘mญ•ๅtค€๐€ภคคษ•ัีษธนีฑฐ์(€ษ•ัีษธ=ฉ•ะนษฝตนัษฅ•ฬกญ•ๅฬนต…ภ กญ•ไค€๔๘mญ•ไฐ9ีต•ศกษ•ฝษ‘mญ•ๅtฅtคค…ฬีนญนฝÝธ…ฬLภษI•อฝีษ•Mน…มอกฝะ์)๔()•แมฝษะีนัฅฝธฅอแ…ัLภษ5ม	ฝีน‘…ษๅAษฝ”ก•ู•นะ่ฅตมฝษะ ธฝ‘ฝต…ฅธนฉฬคน1…ู•นะฐมษ•ูฅฝีฬ่ฅตมฝษะ ธฝ‘ฝต…ฅธนฉฬคน1…ู•นะ๐นีฑฐ€๔นีฑฐค่ฝฝฑ•…ธ์(€ฅ€ก•ู•นะนญฅน€๔๔€อ•ีษฅัไนตม}ฝีน‘…ษๅ}มษฝ”๑๐•ู•นะนอฝีษ”€๔๔€…นฝนฅ…ฐคษ•ัีษธ…ฑอ”์(€ฝนอะม…ๅฑฝ…€๔•ู•นะนม…ๅฑฝ…์(€ฅ€ …ก…อแ…ั-•ๅฬกม…ๅฑฝ…ฐlอก•ตฐ€ู…ษฅ…นะฐ€มษฝ•}ฅ‘}อกศิุฐ€ษ•ลี•อะฐ€ษ•อมฝนอ”ฐ€…ี‘ฅั}ษ••ฅมัฬฐ€ษ•อฝีษ•}‘•ฑัtค๑๐ม…ๅฑฝ…นอก•ต€๔๔Lภษ}5A}	=U9Ie}AI=	}M!5คษ•ัีษธ…ฑอ”์(€ฅ€กัๅม•ฝม…ๅฑฝ…นู…ษฅ…นะ€๔๔€อัษฅน๑๐€…Lภษ}!QQA}YI%9QLนฅนฑี‘•ฬกม…ๅฑฝ…นู…ษฅ…นะ…ฬLภษ!ััมY…ษฅ…นะคคษ•ัีษธ…ฑอ”์(€ฝนอะู…ษฅ…นะ€๔ม…ๅฑฝ…นู…ษฅ…นะ…ฬLภษ!ััมY…ษฅ…นะ์(€ฝนอะ•แม•ั…ัฅฝธ€๔ฬภษ!ััมAษฝ•แม•ั…ัฅฝธกู…ษฅ…นะค์(€ฅ€กัๅม•ฝม…ๅฑฝ…นมษฝ•}ฅ‘}อกศิุ€๔๔€อัษฅน๑๐€ฝymตภดๅu์ุั๔ผนั•อะกม…ๅฑฝ…นมษฝ•}ฅ‘}อกศิุคคษ•ัีษธ…ฑอ”์(€ฅ€ …ม…ๅฑฝ…นษ•ลี•อะ๑๐ัๅม•ฝม…ๅฑฝ…นษ•ลี•อะ€๔๔€ฝฉ•ะ๑๐ษษ…ไนฅอษษ…ไกม…ๅฑฝ…นษ•ลี•อะคคษ•ัีษธ…ฑอ”์(€ฝนอะษ•ลี•อะ€๔ม…ๅฑฝ…นษ•ลี•อะ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘์(€ฅ€ …ก…อแ…ั-•ๅฬกษ•ลี•อะฐlฝนัษ…ะฐ€ฝนัษ…ั}อกศิุฐ€•น‘มฝฅนั}ฝษฅฅน}อกศิุฐ€ษ…Ý}ฝ‘ๅ}อกศิุฐ€…นฝนฅ…ฑ}ฝ‘ๅ}อกศิุฐ€ๅั•}ฑ•นั ฐ€อั…ษั•‘}…ะtคคษ•ัีษธ…ฑอ”์(€ฅ€ …ษ•ลี•อะนฝนัษ…ะ๑๐ัๅม•ฝษ•ลี•อะนฝนัษ…ะ€๔๔€ฝฉ•ะ๑๐ษษ…ไนฅอษษ…ไกษ•ลี•อะนฝนัษ…ะคคษ•ัีษธ…ฑอ”์(€ฝนอะฝนัษ…ะ€๔ษ•ลี•อะนฝนัษ…ะ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘์(€ฅ€ …ก…อแ…ั-•ๅฬกฝนัษ…ะฐlอก•ตฐ€ต•ักฝฐ€ม…ั ฐ€ฝนั•นั}ัๅม”ฐ€ฝ‘ๅ}ญฅนฐ€ฉอฝนษม}ต•ักฝฐ€ัฝฝฑ}น…ต”tค(€€€๑๐…นฝนฅ…ฑอฅฅ)อฝธกฝนัษ…ะค€๔๔…นฝนฅ…ฑอฅฅ)อฝธก•แม•ั…ัฅฝธนษ•ลี•อัฝนัษ…ะค(€€€๑๐ษ•ลี•อะนฝนัษ…ั}อกศิุ€๔๔…นฝนฅ…ฑI•ลี•อั!…อ ก•แม•ั…ัฅฝธนษ•ลี•อัฝนัษ…ะคคษ•ัีษธ…ฑอ”์(€ฝนอะษ•ลี•อั!…อก•ฬ€๔mษ•ลี•อะน•น‘มฝฅนั}ฝษฅฅน}อกศิุฐษ•ลี•อะนษ…Ý}ฝ‘ๅ}อกศิุฐษ•ลี•อะน…นฝนฅ…ฑ}ฝ‘ๅ}อกศิูt์(€ฅ€กษ•ลี•อั!…อก•ฬนอฝต” กก…อ ค€๔๘ัๅม•ฝก…อ €๔๔€อัษฅน๑๐€ฝymตภดๅu์ุั๔ผนั•อะกก…อ …ฬอัษฅนคค(€€€๑๐€…9ีต•ศนฅอM…•%นั••ศกษ•ลี•อะนๅั•}ฑ•นั ค๑๐9ีต•ศกษ•ลี•อะนๅั•}ฑ•นั ค€๐๔€ภ๑๐9ีต•ศกษ•ลี•อะนๅั•}ฑ•นั ค€๘€ศภม|ภภภ(€€€๑๐ู…ษฅ…นะ€๔๔๔€ฝู•ษอฅ้•‘}ฉอฝธ€9ีต•ศกษ•ลี•อะนๅั•}ฑ•นั ค€๐๔€ฤภม|ภภภ๑๐€……นฝนฅ…ฑ%อผกษ•ลี•อะนอั…ษั•‘}…ะคคษ•ัีษธ…ฑอ”์(€ฅ€ก•แม•ั…ัฅฝธน…ี‘ฅัUอ•อ	ฝีน‘•‘…ฑฑ…ฌ€ษ•ลี•อะน…นฝนฅ…ฑ}ฝ‘ๅ}อกศิุ€๔๔อกศิุ ฝีน‘•ตีนม…ษอ•ตษ•ลี•อะคคษ•ัีษธ…ฑอ”์((€ฅ€ …ม…ๅฑฝ…นษ•อมฝนอ”๑๐ัๅม•ฝม…ๅฑฝ…นษ•อมฝนอ”€๔๔€ฝฉ•ะ๑๐ษษ…ไนฅอษษ…ไกม…ๅฑฝ…นษ•อมฝนอ”คคษ•ัีษธ…ฑอ”์(€ฝนอะษ•อมฝนอ”€๔ม…ๅฑฝ…นษ•อมฝนอ”…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘์(€ฅ€ …ก…อแ…ั-•ๅฬกษ•อมฝนอ”ฐlกััม}อั…ัีฬฐ€•ษษฝษ}ฝ‘”ฐ€ฝ‘ๅ}อกศิุฐ€ๅั•}ฑ•นั ฐ€ฝนั•นั}ัๅม”ฐ€ฅน…ฑ}ฝษฅฅน}อกศิุฐ€ฅน…ฑ}ม…ั ฐ€ฑฝ…ัฅฝธฐ€ฝอ•ษู•‘}…ะtค(€€€๑๐ษ•อมฝนอ”นกััม}อั…ัีฬ€๔๔•แม•ั…ัฅฝธนกััมMั…ัีฬ๑๐ษ•อมฝนอ”น•ษษฝษ}ฝ‘”€๔๔•แม•ั…ัฅฝธน•ษษฝษฝ‘”(€€€๑๐ัๅม•ฝษ•อมฝนอ”นฝ‘ๅ}อกศิุ€๔๔€อัษฅน๑๐€ฝymตภดๅu์ุั๔ผนั•อะกษ•อมฝนอ”นฝ‘ๅ}อกศิุค(€€€๑๐€…9ีต•ศนฅอM…•%นั••ศกษ•อมฝนอ”นๅั•}ฑ•นั ค๑๐9ีต•ศกษ•อมฝนอ”นๅั•}ฑ•นั ค€๐๔€ภ๑๐9ีต•ศกษ•อมฝนอ”นๅั•}ฑ•นั ค€๘€ุี|ิฬุ(€€€๑๐€…l…มมฑฅ…ัฅฝธฝฉอฝธฐ€ั•แะฝ•ู•นะตอัษ•…ดtนฅนฑี‘•ฬกMัษฅนกษ•อมฝนอ”นฝนั•นั}ัๅม”คค(€€€๑๐ษ•อมฝนอ”นฅน…ฑ}ฝษฅฅน}อกศิุ€๔๔ษ•ลี•อะน•น‘มฝฅนั}ฝษฅฅน}อกศิุ๑๐ษ•อมฝนอ”นฅน…ฑ}ม…ั €๔๔€ฝตภ๑๐ษ•อมฝนอ”นฑฝ…ัฅฝธ€๔๔นีฑฐ๑๐€……นฝนฅ…ฑ%อผกษ•อมฝนอ”นฝอ•ษู•‘}…ะคคษ•ัีษธ…ฑอ”์((€ฅ€ …ษษ…ไนฅอษษ…ไกม…ๅฑฝ…น…ี‘ฅั}ษ••ฅมัฬค๑๐ม…ๅฑฝ…น…ี‘ฅั}ษ••ฅมัฬนฑ•นั €๔๔€ฤคษ•ัีษธ…ฑอ”์(€ฝนอะ…ี‘ฅัY…ฑี”€๔ม…ๅฑฝ…น…ี‘ฅั}ษ••ฅมัอlมt์(€ฅ€ ……ี‘ฅัY…ฑี”๑๐ัๅม•ฝ…ี‘ฅัY…ฑี”€๔๔€ฝฉ•ะ๑๐ษษ…ไนฅอษษ…ไก…ี‘ฅัY…ฑี”คคษ•ัีษธ…ฑอ”์(€ฝนอะ…ี‘ฅะ€๔…ี‘ฅัY…ฑี”…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘์(€ฝนอะ•แม•ั•‘ี‘ฅัษีต•นะ€๔•แม•ั…ัฅฝธน…ี‘ฅัUอ•อ	ฝีน‘•‘…ฑฑ…ฌ€üอกศิุ ฝีน‘•ตีนม…ษอ•ตษ•ลี•อะค€่ษ•ลี•อะน…นฝนฅ…ฑ}ฝ‘ๅ}อกศิุ์(€ฅ€ …ก…อแ…ั-•ๅฬก…ี‘ฅะฐl…ัฅฝธฐ€ฝีัฝต”ฐ€…ษีต•นั}อกศิุฐ€…ฑฑ•ษ}ม…ษัฅัฅฝน}ฅฐ€มษฝ•}ฅ‘}อกศิุฐ€ษ•ลี•อั}ฅ‘}อกศิุฐ€•ษษฝษ}ฑ…อฬฐ€ฝอ•ษู•‘}…ะtค(€€€๑๐…ี‘ฅะน…ัฅฝธ€๔๔•แม•ั…ัฅฝธน…ี‘ฅััฅฝธ๑๐…ี‘ฅะนฝีัฝต”€๔๔•แม•ั…ัฅฝธน…ี‘ฅั=ีัฝต”๑๐…ี‘ฅะน…ษีต•นั}อกศิุ€๔๔•แม•ั•‘ี‘ฅัษีต•นะ(€€€๑๐…ี‘ฅะนมษฝ•}ฅ‘}อกศิุ€๔๔ม…ๅฑฝ…นมษฝ•}ฅ‘}อกศิุ๑๐ัๅม•ฝ…ี‘ฅะนษ•ลี•อั}ฅ‘}อกศิุ€๔๔€อัษฅน๑๐€ฝymตภดๅu์ุั๔ผนั•อะก…ี‘ฅะนษ•ลี•อั}ฅ‘}อกศิุค(€€€๑๐ัๅม•ฝ…ี‘ฅะน…ฑฑ•ษ}ม…ษัฅัฅฝน}ฅ€๔๔€อัษฅน๑๐€ฝyภฤ้mตiต่ภดๅ|ตu์ฤฐฬษ๔้mตภดๅu์ุั๔ผนั•อะก…ี‘ฅะน…ฑฑ•ษ}ม…ษัฅัฅฝน}ฅค(€€€๑๐…ี‘ฅะน•ษษฝษ}ฑ…อฬ€๔๔•แม•ั…ัฅฝธน…ี‘ฅัษษฝษฑ…อฬ๑๐€……นฝนฅ…ฑ%อผก…ี‘ฅะนฝอ•ษู•‘}…ะคคษ•ัีษธ…ฑอ”์((€ฅ€ …ม…ๅฑฝ…นษ•อฝีษ•}‘•ฑั๑๐ัๅม•ฝม…ๅฑฝ…นษ•อฝีษ•}‘•ฑั€๔๔€ฝฉ•ะ๑๐ษษ…ไนฅอษษ…ไกม…ๅฑฝ…นษ•อฝีษ•}‘•ฑัคคษ•ัีษธ…ฑอ”์(€ฝนอะษ•อฝีษ••ฑั€๔ม…ๅฑฝ…นษ•อฝีษ•}‘•ฑั…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘์(€ฅ€ …ก…อแ…ั-•ๅฬกษ•อฝีษ••ฑัฐl•ฝษ”ฐ€…ั•ศtคคษ•ัีษธ…ฑอ”์(€ฝนอะ•ฝษ”€๔•แ…ัLภษMน…มอกฝะกษ•อฝีษ••ฑัน•ฝษ”ค์(€ฝนอะ…ั•ศ€๔•แ…ัLภษMน…มอกฝะกษ•อฝีษ••ฑัน…ั•ศค์(€ฅ€ …•ฝษ”๑๐€……ั•ศ๑๐…นฝนฅ…ฑอฅฅ)อฝธก•ฝษ”ค€๔๔…นฝนฅ…ฑอฅฅ)อฝธก…ั•ศค(€€€๑๐•ฝษ”น…ัฅู•}ษีน}ฝีนะ€๐€ฤ๑๐•ฝษ”นฝม•ษ…ัฅฝน}ฝีนะ€๐€ฤ๑๐•ฝษ”นฅนมีั}ตีั…ัฅฝน}•ู•นั}ฝีนะ€๔๔€ภ(€€€๑๐•ฝษ”นษฝÝอ•ษ}ฝนั•แั}ฝีนะ€๔๔€ภ๑๐•ฝษ”น…นฝนฅ…ฑ}อ•ออฅฝน}ฝีนะ€๔๔€ภ๑๐•ฝษ”นมษฝูฅ‘•ษ}อ•ออฅฝน}ฝีนะ€๔๔€ภ(€€€๑๐•ู•นะนอ•ฤ€๔๔…ั•ศนษีน}•ู•นั}ีษอฝศ€ฌ€ฤ๑๐มษ•ูฅฝีฬ€•ฝษ”นษีน}•ู•นั}ีษอฝศ€๔๔มษ•ูฅฝีฬนอ•ฤคษ•ัีษธ…ฑอ”์((€ฝนอะอั…ษั•‘ะ€๔น•Ü…ั”กMัษฅนกษ•ลี•อะนอั…ษั•‘}…ะคคน•ัQฅต” ค์(€ฝนอะ…ี‘ฅัะ€๔น•Ü…ั”กMัษฅนก…ี‘ฅะนฝอ•ษู•‘}…ะคคน•ัQฅต” ค์(€ฝนอะษ•อมฝนอ•ะ€๔น•Ü…ั”กMัษฅนกษ•อมฝนอ”นฝอ•ษู•‘}…ะคคน•ัQฅต” ค์(€ษ•ัีษธอั…ษั•‘ะ€๐๔…ี‘ฅัะ€…ี‘ฅัะ€๐๔ษ•อมฝนอ•ะ€ษ•อมฝนอ•ะ€๐๔•ู•นะน…ะน•ัQฅต” ค€•ู•นะน…ะน•ัQฅต” ค€ดอั…ษั•‘ะ€๐๔€ศม|ภภภ์)๔()ีนัฅฝธอ…ต••มฑฝๅต•นะกู…ฑี”่ีนญนฝÝธฐ•แม•ั•่IีนI•ฝษ‘lั…ษ•ะul•แม•ั•‘•มฑฝๅต•นะtค่ฝฝฑ•…ธ์(€ฅ€ …ู…ฑี”๑๐ัๅม•ฝู…ฑี”€๔๔€ฝฉ•ะ๑๐ษษ…ไนฅอษษ…ไกู…ฑี”คคษ•ัีษธ…ฑอ”์(€ฝนอะ‘•มฑฝๅต•นะ€๔ู…ฑี”…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘์(€ษ•ัีษธ=ฉ•ะนญ•ๅฬก‘•มฑฝๅต•นะคนฑ•นั €๔๔๔€ฬ€‘•มฑฝๅต•นะนษฝนั•น€๔๔๔•แม•ั•นษฝนั•น€‘•มฑฝๅต•นะน…ญ•น€๔๔๔•แม•ั•น…ญ•น€‘•มฑฝๅต•นะนูฝฅ”€๔๔๔•แม•ั•นูฝฅ”์)๔()ีนัฅฝธษ•ฝู•ษๅฝตมฝน•นัฝตมฑ•ั”ก•ู•นัฬ่ฅตมฝษะ ธฝ‘ฝต…ฅธนฉฬคน1…ู•นัmtฐฝตมฝน•นะ่€…นฝนฅ…ฑ}อ•ออฅฝธ๐€ูฝฅ•}มษฝูฅ‘•ศ๐€ีฅฑ‘•ศ๐€…ีัก}อ•ออฅฝนฬค่ฝฝฑ•…ธ์(€ษ•ัีษธ•ู•นัฬนอฝต” ก•ู•นะค€๔๘์(€€€ฅ€ก•ู•นะนญฅน€๔๔€ฑ•…นีภนษ•ฝู•ษไ๑๐•ู•นะนม…ๅฑฝ…นฝตมฑ•ั”€๔๔ัษี”คษ•ัีษธ…ฑอ”์(€€€ฝนอะษ••ฅมะ€๔•ู•นะนม…ๅฑฝ…นษ••ฅมะ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•์(€€€ฝนอะฝตมฝน•นัฬ€๔ษ••ฅมะüนฝตมฝน•นัฬ…ฬI•ฝษ๑อัษฅนฐI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๘๐ีน‘•ฅน•์(€€€ฝนอะอั…ัีฬ€๔ฝตมฝน•นัฬüนmฝตมฝน•นัtüนอั…ัีฬ์(€€€ษ•ัีษธษ••ฅมะüนฝตมฑ•ั”€๔๔๔ัษี”€ัๅม•ฝอั…ัีฬ€๔๔๔€อัษฅน€€…lม•น‘ฅนฐ€…ฅฑ•ฐ€ีน…ู…ฅฑ…ฑ”tนฅนฑี‘•ฬกอั…ัีฬค์(€๔ค์)๔()ีนัฅฝธต…นฅ•อั)ฝฅนฬกษีธ่IีนI•ฝษค่I•ฝษ๑อัษฅนฐีนญนฝÝธ๘์(€ฝนอะ…ู…ฅฑ…ฑ”€๔€๑P๘กู…ฑี”่P๐นีฑฐฐ…อ•นะ่อัษฅนค€๔๘ู…ฑี”€๔๔๔นีฑฐ€ü์ู…ฑี”่นีฑฐฐอั…ัีฬ่€ีน…ู…ฅฑ…ฑ”ฐษ•…อฝธ่…อ•นะ๔€่์ู…ฑี”ฐอั…ัีฬ่€…ู…ฅฑ…ฑ”ฐษ•…อฝธ่นีฑฐ๔์(€ษ•ัีษธ์(€€€…นฝนฅ…ฑ}อ•ออฅฝธ่…ู…ฅฑ…ฑ”กษีธน…นฝนฅ…ฑM•ออฅฝน%ฐ€…นฝนฅ…ฑ}อ•ออฅฝน}ฅ‘}นฝั}ฝอ•ษู•คฐ(€€€ักษ•…่…ู…ฅฑ…ฑ”กษีธนักษ•…‘%ฐ€…นฝนฅ…ฑ}ักษ•…‘}ฅ‘}นฝั}ฝอ•ษู•คฐ(€€€•ตฅนฅ}ษีนัฅต•}อ•ออฅฝธ่…ู…ฅฑ…ฑ”กษีธนมษฝูฅ‘•ษM•ออฅฝน%ฐ€มษฝูฅ‘•ษ}อ•ออฅฝน}ฅ‘}นฝั}ฝอ•ษู•คฐ(€€€มษฝูฅ‘•ษ}ฝนน•ัฅฝน}•มฝ ่…ู…ฅฑ…ฑ”กษีธนมษฝูฅ‘•ษมฝ ฐ€มษฝูฅ‘•ษ}•มฝก}นฝั}ฝอ•ษู•คฐ(€€€ัีษธ่…ู…ฅฑ…ฑ”กษีธนัีษน%ฐ€มษฝ‘ีั}ัีษน}ฅ‘}นฝั}ฝอ•ษู•คฐ(€€€ฑ…นอตฅั ่…ู…ฅฑ…ฑ”กษีธนัษ…•%ฐ€ัษ…•}ีน…ู…ฅฑ…ฑ”คฐ(€๔์)๔()ีนัฅฝธมษฝฉ•ั5•ออ…•I•ูฅอฅฝนฬกษีธ่IีนI•ฝษฐ•ู•นัฬ่ฅตมฝษะ ธฝ‘ฝต…ฅธนฉฬคน1…ู•นัmtค่I•ฝษ๑อัษฅนฐีนญนฝÝธ๘์(€ฝนอะฅน…ฑฅ้•€๔•ู•นัฬนฅน ก•ู•นะค€๔๘ฅอ…นฝนฅ…ฑฅน…ฑฅ้…ัฅฝนI••ฅมะกษีธฐ•ู•นะคค์(€ฝนอะัษ…นอษฅมะ€๔€กฅน…ฑฅ้•üนม…ๅฑฝ…นษ••ฅมะ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•คüน…นฝนฅ…ฑ}ัษ…นอษฅมะ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•์(€ฅ€ …ัษ…นอษฅมะคษ•ัีษธ์อั…ัีฬ่€ีน…ู…ฅฑ…ฑ”ฐษ•…อฝธ่€อัษฅั}…นฝนฅ…ฑ}ัษ…นอษฅมั}ีน…ู…ฅฑ…ฑ”ฐษฝÝฬ่mt๔์(€ฝนอะต•ออ…•ฬ€๔ัษ…นอษฅมะนต•ออ…•ฬ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๙mt์(€ษ•ัีษธ์(€€€อั…ัีฬ่€…ู…ฅฑ…ฑ”ฐ(€€€…ีักฝษฅั…ัฅู•}อฝีษ”่ัษ…นอษฅมะนอฝีษ”ฐ(€€€ต•ออ…•}ษ•ูฅอฅฝธ่ัษ…นอษฅมะนต•ออ…•}ษ•ูฅอฅฝธฐ(€€€ต•ออ…•}ฝีนะ่ัษ…นอษฅมะนต•ออ…•}ฝีนะฐ(€€€ฅนมีั}ต•ออ…•}ฝีนะ่ัษ…นอษฅมะนฅนมีั}ต•ออ…•}ฝีนะฐ(€€€ฝีัมีั}ต•ออ…•}ฝีนะ่ัษ…นอษฅมะนฝีัมีั}ต•ออ…•}ฝีนะฐ(€€€ัีษน}ฝีน‘…ษๅ}ฝีนะ่ัษ…นอษฅมะนัีษน}ฝีน‘…ษๅ}ฝีนะฐ(€€€ัษ…นอษฅมั}อกศิุ่ัษ…นอษฅมะนอกศิุฐ(€€€ต•ออ…•ฬ่ต•ออ…•ฬนต…ภ กต•ออ…”ค€๔๘€ก์ต•ออ…•}ฅ‘}ก…อ ่อกศิุกMัษฅนกต•ออ…”นต•ออ…•}ฅคคฐอ•ลี•น”่ต•ออ…”นอ•ลี•น”ฐษฝฑ”่ต•ออ…”นษฝฑ”ฐฅน…ฐ่ต•ออ…”นฅน…ฐฐ…มมษฝแฅต…ั”่ต•ออ…”น…มมษฝแฅต…ั”ฐัีษน}ฅ‘}ก…อ ่ต•ออ…”นัีษน}ฅ€๔๔๔นีฑฐ€üนีฑฐ€่อกศิุกMัษฅนกต•ออ…”นัีษน}ฅคคฐมษฝูฅ‘•ษ}•ู•นั}ฅ‘}ก…อ ่ต•ออ…”นมษฝูฅ‘•ษ}•ู•นั}ฅ€๔๔๔นีฑฐ€üนีฑฐ€่อกศิุกMัษฅนกต•ออ…”นมษฝูฅ‘•ษ}•ู•นั}ฅคคฐษ•‘…ัฅฝน}ฑ•ู•ฐ่ต•ออ…”นษ•‘…ัฅฝน}ฑ•ู•ฐฐฝนั•นั}อกศิุ่อกศิุกMัษฅนกต•ออ…”นฝนั•นะคคฐก…ษ…ั•ษ}ฑ•นั ่lธธนMัษฅนกต•ออ…”นฝนั•นะฅtนฑ•นั ฐษ•…ั•‘}…ะ่ต•ออ…”นษ•…ั•‘}…ะ๔คคฐ(€€€ัีษน}ฝีน‘…ษฅ•ฬ่ัษ…นอษฅมะนัีษน}ฝีน‘…ษฅ•ฬฐ(€๔์)๔()ีนัฅฝธมษฝฉ•ัUัั•ษ…น•ฬกษีธ่IีนI•ฝษฐ•ู•นัฬ่ฅตมฝษะ ธฝ‘ฝต…ฅธนฉฬคน1…ู•นัmtฐฝม•ษ…ัฅฝนฬ่ฅตมฝษะ ธฝ‘ฝต…ฅธนฉฬคน=ม•ษ…ัฅฝนI•ฝษ‘mtค่ษษ…ไ๑I•ฝษ๑อัษฅนฐีนญนฝÝธ๘๘์(€ฝนอะ•แ…ัAษฝ‘ีะ€๔•ู•นัฬนฅฑั•ศ ก•ู•นะค€๔๘ฅอแ…ั	ฝีน‘Aษฝ‘ีัู•นะกษีธฐ•ู•นะคค์(€ษ•ัีษธฝม•ษ…ัฅฝนฬนฅฑั•ศ กฝม•ษ…ัฅฝธค€๔๘ฝม•ษ…ัฅฝธนัๅม”€๔๔๔€อม•…ฌ๑๐ฝม•ษ…ัฅฝธนัๅม”€๔๔๔€…ษ•}ฅธคนต…ภ กฝม•ษ…ัฅฝธค€๔๘์(€€€ฝนอะต…ัก•ฬ€๔€ก•ู•นะ่ฅตมฝษะ ธฝ‘ฝต…ฅธนฉฬคน1…ู•นะค€๔๘•ู•นะนม…ๅฑฝ…นฝม•ษ…ัฅฝน}ฅ€๔๔๔ฝม•ษ…ัฅฝธนฅ๑๐€ก•ู•นะนม…ๅฑฝ…น‘…ั…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•คüนฝม•ษ…ัฅฝน}ฅ€๔๔๔ฝม•ษ…ัฅฝธนฅ์(€€€ฝนอะษ•อฝฑู•€๔•ู•นัฬนฅน ก•ู•นะค€๔๘•ู•นะนญฅน€๔๔๔€ีัั•ษ…น”นษ•อฝฑู•€ต…ัก•ฬก•ู•นะคค์(€€€ฝนอะอก•‘ีฑ•€๔•ู•นัฬนฅน ก•ู•นะค€๔๘•ู•นะนญฅน€๔๔๔€…ี‘ฅผนฅนมีะนอก•‘ีฑ•€ต…ัก•ฬก•ู•นะคค์(€€€ฝนอะอั…ษั•€๔•ู•นัฬนฅน ก•ู•นะค€๔๘•ู•นะนญฅน€๔๔๔€…ี‘ฅผนฅนมีะนอั…ษั•€ต…ัก•ฬก•ู•นะคค์(€€€ฝนอะฝตมฑ•ั•€๔•ู•นัฬนฅน ก•ู•นะค€๔๘•ู•นะนญฅน€๔๔๔€…ี‘ฅผนฅนมีะนฝตมฑ•ั•€ต…ัก•ฬก•ู•นะคค์(€€€ฝนอะมษฝ‘ีั1•ฬ€๔•แ…ัAษฝ‘ีะนฅฑั•ศ ก•ู•นะค€๔๘•ู•นะนญฅน€๔๔๔€…ี‘ฅผนฅนมีะนมษฝ‘ีั}ฑ•€€ก•ู•นะนม…ๅฑฝ…นษ••ฅมะ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•คüนฝม•ษ…ัฅฝน}ฅ€๔๔๔ฝม•ษ…ัฅฝธนฅค์(€€€ฝนอะมษฝ‘ีัQีษนฬ€๔•แ…ัAษฝ‘ีะนฅฑั•ศ ก•ู•นะค€๔๘•ู•นะนญฅน€๔๔๔€…ี‘ฅผนฅนมีะนมษฝ‘ีั}ัีษธ€€ก•ู•นะนม…ๅฑฝ…นษ••ฅมะ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•คüนฝม•ษ…ัฅฝน}ฅ€๔๔๔ฝม•ษ…ัฅฝธนฅค์(€€€ฝนอะัษ…นอษฅมัฅฝธ€๔มษฝ‘ีัQีษนฬนฅน ก•ู•นะค€๔๘€ก•ู•นะนม…ๅฑฝ…นษ••ฅมะ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•คüนอฝีษ”€๔๔๔€มษฝูฅ‘•ษ}ฅนมีั}ัษ…นอษฅมัฅฝธ€€ก•ู•นะนม…ๅฑฝ…นษ••ฅมะ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•คüนฝีัฝต”€๔๔๔€มษฝูฅ‘•ษ}ฅนมีั}ัษ…นอษฅมัฅฝน}ฝอ•ษู•ค์(€€€ฝนอะÝ…ุ€๔€กษ•อฝฑู•üนม…ๅฑฝ…นÝ…ุ€üüฝม•ษ…ัฅฝธนษ•อีฑะüนÝ…ุ€üüนีฑฐค…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐นีฑฐ์(€€€ษ•ัีษธ์(€€€€€ฝม•ษ…ัฅฝน}ฅ่ฝม•ษ…ัฅฝธนฅฐ(€€€€€ีัั•ษ…น•}ฅ่ษ•อฝฑู•üนม…ๅฑฝ…นีัั•ษ…น•}ฅ€üüฝม•ษ…ัฅฝธนษ•อีฑะüนีัั•ษ…น•}ฅ€üüนีฑฐฐ(€€€€€ั•อั}ษีน}ฅ่ษีธนั•อัIีน%ฐ(€€€€€ฅ‘•ตมฝั•นๅ}ญ•ๅ}ก…อ ่อกศิุกฝม•ษ…ัฅฝธนฅ‘•ตมฝั•นๅ-•ไคฐ(€€€€€อฝีษ•}ญฅน่ษ•อฝฑู•üนม…ๅฑฝ…นอฝีษ”€üüฝม•ษ…ัฅฝธนษ•อีฑะüนอฝีษ”€üüนีฑฐฐ(€€€€€อฝีษ•}ั•แั}ก…อ ่ษ•อฝฑู•üนม…ๅฑฝ…นอฝีษ•}ั•แั}ก…อ €üüฝม•ษ…ัฅฝธนษ•อีฑะüนอฝีษ•}ั•แั}ก…อ €üüนีฑฐฐ(€€€€€ฅแัีษ”่ษ•อฝฑู•üนม…ๅฑฝ…นฅแัีษ”€üüนีฑฐฐ(€€€€€อๅนัก•อฅฬ่ษ•อฝฑู•üนม…ๅฑฝ…นอๅนัก•อฅฬ€üüฝม•ษ…ัฅฝธนษ•อีฑะüนอๅนัก•อฅฬ€üüนีฑฐฐ(€€€€€…ี‘ฅผ่Ý…ุฐ(€€€€€อก•‘ีฑ•‘}…ะ่อก•‘ีฑ•üน…ะนัฝ%M=Mัษฅน ค€üüนีฑฐฐ(€€€€€อั…ษั•‘}…ะ่อั…ษั•üน…ะนัฝ%M=Mัษฅน ค€üüนีฑฐฐ(€€€€€ฝตมฑ•ั•‘}…ะ่ฝตมฑ•ั•üน…ะนัฝ%M=Mัษฅน ค€üüนีฑฐฐ(€€€€€ฅนั•นัฅฝน…ฑ}ฝู•ษฑ…ภ่ฝม•ษ…ัฅฝธนัๅม”€๔๔๔€…ษ•}ฅธฐ(€€€€€…ษ•}ั…ษ•ะ่ษ•อฝฑู•üนม…ๅฑฝ…น…ษ•}ั…ษ•ะ€üüนีฑฐฐ(€€€€€มษฝ‘ีั}ฅนมีั}ฑ•่มษฝ‘ีั1•ฬนฑ•นั €๔๔๔€ฤ€ü์อั…ัีฬ่€…ู…ฅฑ…ฑ”ฐ•ู•นั}อ•ฤ่มษฝ‘ีั1•อlมtนอ•ฤฐฝอ•ษู•‘}…ะ่มษฝ‘ีั1•อlมtน…ะนัฝ%M=Mัษฅน คฐษ••ฅมะ่มษฝ‘ีั1•อlมtนม…ๅฑฝ…นษ••ฅมะ๔€่์อั…ัีฬ่€ีน…ู…ฅฑ…ฑ”ฐษ•…อฝธ่มษฝ‘ีั1•ฬนฑ•นั €๔๔๔€ภ€ü€•แ…ั}มษฝ‘ีั}ฅนมีั}ฑ•}ีน…ู…ฅฑ…ฑ”€่€‘ีมฑฅ…ั•}มษฝ‘ีั}ฅนมีั}ฑ•}ษ••ฅมัฬ๔ฐ(€€€€€ก…ษน•ออ}มษฝ‘ีั}มต}ษ•ฝนฅฑฅ…ัฅฝธ่มษฝ‘ีั1•ฬนฑ•นั €๔๔๔€ฤ€üษ•ฝนฅฑ•Aษฝ‘ีั%นมีั1•ก•ู•นัฬฐฝม•ษ…ัฅฝธฐมษฝ‘ีั1•อlมtนม…ๅฑฝ…นษ••ฅมะ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘ค€่์ู•ษฅฅ•่…ฑอ”ฐษ•…อฝธ่€•แ…ั}มษฝ‘ีั}ฅนมีั}ฑ•}ีน…ู…ฅฑ…ฑ”๔ฐ(€€€€€มษฝ‘ีั}ฅนมีั}ัีษน}ษ••ฅมัฬ่มษฝ‘ีัQีษนฬนฑ•นั €๔๔๔€ภ€ü์อั…ัีฬ่€ีน…ู…ฅฑ…ฑ”ฐษ•…อฝธ่€•แ…ั}มษฝ‘ีั}ฅนมีั}ัีษน}ษ••ฅมัอ}ีน…ู…ฅฑ…ฑ”ฐษ••ฅมัฬ่mt๔€่์อั…ัีฬ่€…ู…ฅฑ…ฑ”ฐฝีนะ่มษฝ‘ีัQีษนฬนฑ•นั ฐษ••ฅมัฬ่มษฝ‘ีัQีษนฬนต…ภ ก•ู•นะค€๔๘€ก์•ู•นั}อ•ฤ่•ู•นะนอ•ฤฐฝอ•ษู•‘}…ะ่•ู•นะน…ะนัฝ%M=Mัษฅน คฐษ••ฅมะ่•ู•นะนม…ๅฑฝ…นษ••ฅมะ๔คค๔ฐ(€€€€€มษฝูฅ‘•ษ}ฅนมีั}ัษ…นอษฅมัฅฝธ่ัษ…นอษฅมัฅฝธ€ü์อั…ัีฬ่€…ู…ฅฑ…ฑ”ฐ•ู•นั}อ•ฤ่ัษ…นอษฅมัฅฝธนอ•ฤฐฝอ•ษู•‘}…ะ่ัษ…นอษฅมัฅฝธน…ะนัฝ%M=Mัษฅน คฐษ••ฅมะ่ัษ…นอษฅมัฅฝธนม…ๅฑฝ…นษ••ฅมะ๔€่์อั…ัีฬ่€ีน…ู…ฅฑ…ฑ”ฐษ•…อฝธ่€ฝม•ษ…ัฅฝน}ฝษษ•ฑ…ั•‘}ฝีน‘}มษฝ‘ีั}ัษ…นอษฅมัฅฝน}ีน…ู…ฅฑ…ฑ”๔ฐ(€€€€€ฝม•ษ…ัฅฝน}อั…ั”่ฝม•ษ…ัฅฝธนอั…ั”ฐ(€€€๔์(€๔ค์)๔()ีนัฅฝธมษฝฉ•ัู•นัฬก•ู•นัฬ่ฅตมฝษะ ธฝ‘ฝต…ฅธนฉฬคน1…ู•นัmtฐมษ•‘ฅ…ั”่€ก•ู•นะ่ฅตมฝษะ ธฝ‘ฝต…ฅธนฉฬคน1…ู•นะค€๔๘ฝฝฑ•…ธค่I•ฝษ๑อัษฅนฐีนญนฝÝธ๘์(€ฝนอะอ•ฑ•ั•€๔•ู•นัฬนฅฑั•ศกมษ•‘ฅ…ั”ค์(€ฝนอะฅนฑฅน”€๔อ•ฑ•ั•นอฑฅ” ภฐ€ศภภคนต…ภ ก•ู•นะค€๔๘€ก์•ู•นั}อ•ฤ่•ู•นะนอ•ฤฐญฅน่•ู•นะนญฅนฐฝอ•ษู•‘}…ะ่•ู•นะน…ะนัฝ%M=Mัษฅน คฐม…ๅฑฝ…่•ู•นะนม…ๅฑฝ…๔คค์(€ษ•ัีษธอ•ฑ•ั•นฑ•นั €๔๔๔€ภ(€€€€ü์อั…ัีฬ่€ีน…ู…ฅฑ…ฑ”ฐษ•…อฝธ่€ฝÝนฅน}ษ••ฅมัอ}นฝั}ฝอ•ษู•ฐฝีนะ่€ภฐ•ู•นั}ษ•ฬ่mt๔(€€€€่์อั…ัีฬ่€…ู…ฅฑ…ฑ”ฐฝีนะ่อ•ฑ•ั•นฑ•นั ฐฅษอั}อ•ฤ่อ•ฑ•ั•‘lมtนอ•ฤฐฑ…อั}อ•ฤ่อ•ฑ•ั•น…ะ ดฤคนอ•ฤฐฝตมฑ•ั•}ฅนฑฅน”่อ•ฑ•ั•นฑ•นั €๐๔ฅนฑฅน”นฑ•นั ฐ•ู•นั}ษ•ฬ่ฅนฑฅน”๔์)๔()ีนัฅฝธ‘•ษฅู•ูฅ‘•น•5•ัษฅฬก•ู•นัฬ่ฅตมฝษะ ธฝ‘ฝต…ฅธนฉฬคน1…ู•นัmtฐฝม•ษ…ัฅฝนฬ่ฅตมฝษะ ธฝ‘ฝต…ฅธนฉฬคน=ม•ษ…ัฅฝนI•ฝษ‘mtค่I•ฝษ๑อัษฅนฐีนญนฝÝธ๘์(€ฝนอะัฅตฅน€๔ฝม•ษ…ัฅฝนฬนฅฑั•ศ กฝม•ษ…ัฅฝธค€๔๘ฝม•ษ…ัฅฝธนัๅม”€๔๔๔€อม•…ฌ๑๐ฝม•ษ…ัฅฝธนัๅม”€๔๔๔€…ษ•}ฅธคนต…ภ กฝม•ษ…ัฅฝธค€๔๘์(€€€ฝนอะต…ัก•ฬ€๔€ก•ู•นะ่ฅตมฝษะ ธฝ‘ฝต…ฅธนฉฬคน1…ู•นะค€๔๘•ู•นะนม…ๅฑฝ…นฝม•ษ…ัฅฝน}ฅ€๔๔๔ฝม•ษ…ัฅฝธนฅ์(€€€ฝนอะอก•‘ีฑ•€๔•ู•นัฬนฅน ก•ู•นะค€๔๘•ู•นะนญฅน€๔๔๔€…ี‘ฅผนฅนมีะนอก•‘ีฑ•€ต…ัก•ฬก•ู•นะคค์(€€€ฝนอะอั…ษั•€๔•ู•นัฬนฅน ก•ู•นะค€๔๘•ู•นะนญฅน€๔๔๔€…ี‘ฅผนฅนมีะนอั…ษั•€ต…ัก•ฬก•ู•นะคค์(€€€ฝนอะฝตมฑ•ั•€๔•ู•นัฬนฅน ก•ู•นะค€๔๘•ู•นะนญฅน€๔๔๔€…ี‘ฅผนฅนมีะนฝตมฑ•ั•€ต…ัก•ฬก•ู•นะคค์(€€€ษ•ัีษธ์ฝม•ษ…ัฅฝน}ฅ่ฝม•ษ…ัฅฝธนฅฐอก•‘ีฑ•}ัฝ}อั…ษั}ตฬ่อก•‘ีฑ•€อั…ษั•€ü5…ั นต…เ ภฐอั…ษั•น…ะน•ัQฅต” ค€ดอก•‘ีฑ•น…ะน•ัQฅต” คค€่นีฑฐฐษ•…ฑฅ้•‘}‘ีษ…ัฅฝน}ตฬ่อั…ษั•€ฝตมฑ•ั•€ü5…ั นต…เ ภฐฝตมฑ•ั•น…ะน•ัQฅต” ค€ดอั…ษั•น…ะน•ัQฅต” คค€่นีฑฐ๔์(€๔ค์(€ฝนอะษ••ฅมัฬ€๔•ู•นัฬนฅฑั•ศ ก•ู•นะค€๔๘•ู•นะนญฅนนอั…ษัอ]ฅั  …ี‘ฅผนฝีัมีะธคคนต…ภ ก•ู•นะค€๔๘•ู•นะนม…ๅฑฝ…นษ••ฅมะ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•คนฅฑั•ศ กษ••ฅมะค่ษ••ฅมะฅฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘€๔๘ัๅม•ฝษ••ฅมะüนษ•…ฑฅ้…ัฅฝน%€๔๔๔€อัษฅนค์(€ฝนอะษ•…ฑฅ้…ัฅฝน-•ๅฬ€๔ษ••ฅมัฬนต…ภ กษ••ฅมะค€๔๘€‘ํษ••ฅมะนษ•…ฑฅ้…ัฅฝน%‘๕qิภภภภ‘ํษ••ฅมะนมษฝูฅ‘•ษฝนน•ัฅฝนมฝ €üü€นฝน”๕qิภภภภ‘ํษ••ฅมะนมฑ…ๅ…ญ•น•ษ…ัฅฝธ€üü€นฝน”๕€ค์(€ฝนอะมก…อ•-•ๅฬ€๔ษ••ฅมัฬนต…ภ กษ••ฅมะค€๔๘€‘ํษ••ฅมะนษ•…ฑฅ้…ัฅฝน%‘๕qิภภภภ‘ํษ••ฅมะนมษฝูฅ‘•ษฝนน•ัฅฝนมฝ €üü€นฝน”๕qิภภภภ‘ํษ••ฅมะนมฑ…ๅ…ญ•น•ษ…ัฅฝธ€üü€นฝน”๕qิภภภภ‘ํษ••ฅมะนมก…อ”€üü€ีนญนฝÝธ๕€ค์(€ฝนอะ‘ีมฑฅ…ั•Aก…อ•I••ฅมัฬ€๔มก…อ•-•ๅฬนฑ•นั €ดน•ÜM•ะกมก…อ•-•ๅฬคนอฅ้”์(€ษ•ัีษธ์ีัั•ษ…น•}ัฅตฅน่ัฅตฅนฐฝีัมีั}ษ•…ฑฅ้…ัฅฝน}ษ••ฅมั}ฝีนะ่ษ••ฅมัฬนฑ•นั ฐีนฅลี•}ฝีัมีั}ษ•…ฑฅ้…ัฅฝนฬ่น•ÜM•ะกษ•…ฑฅ้…ัฅฝน-•ๅฬคนอฅ้”ฐ‘ีมฑฅ…ั•}ษ•…ฑฅ้…ัฅฝน}ษ••ฅมัฬ่‘ีมฑฅ…ั•Aก…อ•I••ฅมัฬฐ‘ีมฑฅ…ั•}ษ•…ฑฅ้…ัฅฝน}มก…อ•}ษ••ฅมัฬ่‘ีมฑฅ…ั•Aก…อ•I••ฅมัฬ๔์)๔()ีนัฅฝธนีฑฑ…ฑ•!…อ กู…ฑี”่อัษฅน๐นีฑฐค่อัษฅน๐นีฑฐ์ษ•ัีษธู…ฑี”€๔๔๔นีฑฐ€üนีฑฐ€่อกศิุกู…ฑี”ค์๔()•แมฝษะีนัฅฝธษีน•ษัฅฅ…ัฅฝนAษฝฉ•ัฅฝธกู•ษ‘ฅัฬ่Y•ษ‘ฅัฬค่์อั…ัีฬ่€•ษัฅฅ•๐€ม•น‘ฅน}•แั•ษน…ฑ}•ูฅ‘•น”๐€นฝั}•ษัฅฅ•์ฝีัฝต”่อัษฅน์ษ•…อฝธ่อัษฅน๔์(€ฝนอะ‘•ฅอฅฝธ€๔•ษัฅฅ…ัฅฝนQ•ษตฅน…ฑ•ฅอฅฝธกู•ษ‘ฅัฬค์(€ฅ€กู•ษ‘ฅัฬนก…ษน•อฬ€๔๔๔€ม…อฬ€ู•ษ‘ฅัฬน•ูฅ‘•น”€๔๔๔€ม…อฬคษ•ัีษธ์อั…ัีฬ่€•ษัฅฅ•ฐฝีัฝต”่ก…ษน•ออ}•ูฅ‘•น•}•ษัฅฅ•‘}มษฝ‘ีั|‘ํู•ษ‘ฅัฬนมษฝ‘ีั๕€ฐษ•…อฝธ่‘•ฅอฅฝธนษ•…อฝธ๔์(€ฅ€กู•ษ‘ฅัฬนก…ษน•อฬ€๔๔๔€ีน…ู…ฅฑ…ฑ”๑๐ู•ษ‘ฅัฬน•ูฅ‘•น”€๔๔๔€ีน…ู…ฅฑ…ฑ”คษ•ัีษธ์อั…ัีฬ่€ม•น‘ฅน}•แั•ษน…ฑ}•ูฅ‘•น”ฐฝีัฝต”่€ม•น‘ฅน}•แั•ษน…ฑ}•ูฅ‘•น”ฐษ•…อฝธ่‘•ฅอฅฝธนษ•…อฝธ๔์(€ษ•ัีษธ์อั…ัีฬ่€นฝั}•ษัฅฅ•ฐฝีัฝต”่€ก…ษน•ออ}ฝษ}•ูฅ‘•น•}นฝั}•ษัฅฅ•ฐษ•…อฝธ่‘•ฅอฅฝธนษ•…อฝธ๔์)๔()•แมฝษะีนัฅฝธอีฅั••ษัฅฅ…ัฅฝนAษฝฉ•ัฅฝธกกฅฑ‘ษ•ธ่IีนI•ฝษ‘mtค่์(€อั…ัีฬ่€•ษัฅฅ•๐€ม•น‘ฅน๐€นฝั}•ษัฅฅ•์(€ฝีัฝต•}ฑ…•ฐ่อัษฅน์(€ก…ษน•ออ}•ูฅ‘•น•}•ษัฅฅ•‘}ฝีนะ่นีต•ศ์(€อีมมฝษั•‘}กฅฑ‘}ฝีนะ่นีต•ศ์(€มษฝ‘ีั}ฝีนัฬ่I•ฝษ๐ม…อฬ๐€ีน…ู…ฅฑ…ฑ”๐€…ฅฐ๐€ฅนฝนฑีอฅู”๐€ม•น‘ฅนฐนีต•ศ๘์(€ฝีัฝต•}ฝีนัฬ่I•ฝษ๑อัษฅนฐนีต•ศ๘์)๔์(€ฝนอะมษฝฉ•ัฅฝนฬ€๔กฅฑ‘ษ•ธนต…ภ กษีธค€๔๘ษีน•ษัฅฅ…ัฅฝนAษฝฉ•ัฅฝธกษีธนู•ษ‘ฅัฬคค์(€ฝนอะมษฝ‘ีัฝีนัฬ€๔์ม…อฬ่€ภฐีน…ู…ฅฑ…ฑ”่€ภฐ…ฅฐ่€ภฐฅนฝนฑีอฅู”่€ภฐม•น‘ฅน่€ภ๔์(€ฝศ€กฝนอะษีธฝกฅฑ‘ษ•ธคมษฝ‘ีัฝีนัอmษีธนู•ษ‘ฅัฬนมษฝ‘ีัt€ฌ๔€ฤ์(€ฝนอะฝีัฝต•ฝีนัฬ่I•ฝษ๑อัษฅนฐนีต•ศ๘€๔ํ๔์(€ฝศ€กฝนอะมษฝฉ•ัฅฝธฝมษฝฉ•ัฅฝนฬคฝีัฝต•ฝีนัอmมษฝฉ•ัฅฝธนฝีัฝต•t€๔€กฝีัฝต•ฝีนัอmมษฝฉ•ัฅฝธนฝีัฝต•t€üü€ภค€ฌ€ฤ์(€ฝนอะ•ษัฅฅ•‘ฝีนะ€๔มษฝฉ•ัฅฝนฬนฅฑั•ศ กมษฝฉ•ัฅฝธค€๔๘มษฝฉ•ัฅฝธนอั…ัีฬ€๔๔๔€•ษัฅฅ•คนฑ•นั ์(€ฝนอะอั…ัีฬ€๔มษฝฉ•ัฅฝนฬนอฝต” กมษฝฉ•ัฅฝธค€๔๘มษฝฉ•ัฅฝธนอั…ัีฬ€๔๔๔€ม•น‘ฅน}•แั•ษน…ฑ}•ูฅ‘•น”ค€ü€ม•น‘ฅน€่•ษัฅฅ•‘ฝีนะ€๔๔๔กฅฑ‘ษ•ธนฑ•นั €ü€•ษัฅฅ•€่€นฝั}•ษัฅฅ•์(€ฝนอะฝอ•ษู•‘Aษฝ‘ีั=ีัฝต•ฬ€๔€ก=ฉ•ะนญ•ๅฬกมษฝ‘ีัฝีนัฬค…ฬษษ…ไ๑ญ•ๅฝัๅม•ฝมษฝ‘ีัฝีนัฬ๘คนฅฑั•ศ กฝีัฝต”ค€๔๘มษฝ‘ีัฝีนัอmฝีัฝต•t€๘€ภค์(€ฝนอะฝีัฝต•1…•ฐ€๔อั…ัีฬ€๔๔€•ษัฅฅ•(€€€€üอั…ัีฬ€๔๔๔€ม•น‘ฅน€ü€อีมมฝษั•‘}กฅฑ‘ษ•น}ม•น‘ฅน}•แั•ษน…ฑ}•ูฅ‘•น”€่€อีมมฝษั•‘}กฅฑ‘ษ•น}นฝั}ก…ษน•ออ}•ูฅ‘•น•}•ษัฅฅ•(€€€€่กฅฑ‘ษ•ธนฑ•นั €๔๔๔€ภ€ü€นฝ}อีมมฝษั•‘}กฅฑ‘ษ•ธ(€€€€€€่ฝอ•ษู•‘Aษฝ‘ีั=ีัฝต•ฬนฑ•นั €๔๔๔€ฤ€üก…ษน•ออ}•ูฅ‘•น•}•ษัฅฅ•‘}…ฑฑ}มษฝ‘ีั|‘ํฝอ•ษู•‘Aษฝ‘ีั=ีัฝต•อlมu๕€(€€€€€€€€่€ก…ษน•ออ}•ูฅ‘•น•}•ษัฅฅ•‘}ตฅแ•‘}มษฝ‘ีั}ฝีัฝต•ฬ์(€ษ•ัีษธ์อั…ัีฬฐฝีัฝต•}ฑ…•ฐ่ฝีัฝต•1…•ฐฐก…ษน•ออ}•ูฅ‘•น•}•ษัฅฅ•‘}ฝีนะ่•ษัฅฅ•‘ฝีนะฐอีมมฝษั•‘}กฅฑ‘}ฝีนะ่กฅฑ‘ษ•ธนฑ•นั ฐมษฝ‘ีั}ฝีนัฬ่มษฝ‘ีัฝีนัฬฐฝีัฝต•}ฝีนัฬ่ฝีัฝต•ฝีนัฬ๔์)๔()•แมฝษะีนัฅฝธ•ษัฅฅ…ัฅฝนQ•ษตฅน…ฑ•ฅอฅฝธกู•ษ‘ฅัฬ่Y•ษ‘ฅัฬค่์อั…ั”่IีนMั…ั”์ษ•…อฝธ่อัษฅน๔์(€ฝนอะอั…ั”่IีนMั…ั”€๔ู•ษ‘ฅัฬนก…ษน•อฬ€๔๔๔€ีน…ู…ฅฑ…ฑ”๑๐ู•ษ‘ฅัฬน•ูฅ‘•น”€๔๔๔€ีน…ู…ฅฑ…ฑ”(€€€€ü€ม•น‘ฅน}•แั•ษน…ฑ}•ูฅ‘•น”(€€€€่ู•ษ‘ฅัฬนก…ษน•อฬ€๔๔๔€…ฅฐ€ü€…ฅฑ•‘}ก…ษน•อฬ(€€€€€€่ู•ษ‘ฅัฬน…ีั €๔๔๔€…ฅฐ€ü€…ีักฝษฅ้…ัฅฝน}…ฅฑ•(€€€€€€€€่ู•ษ‘ฅัฬนมษฝ‘ีะ€๔๔๔€…ฅฐ€ü€มษฝ‘ีั}…ฅฑ•(€€€€€€€€€€่ู•ษ‘ฅัฬนมษฝูฅ‘•ศ€๔๔๔€…ฅฐ€ü€ฅนฝนฑีอฅู•}มษฝูฅ‘•ศ€่€ฝตมฑ•ั•์(€ษ•ัีษธ์(€€€อั…ั”ฐ(€€€ษ•…อฝธ่อั…ั”€๔๔๔€ฝตมฑ•ั•(€€€€€€üก…ษน•ออ}•ูฅ‘•น•}•ษัฅฅ•‘}มษฝ‘ีั|‘ํู•ษ‘ฅัฬนมษฝ‘ีั๕}มษฝูฅ‘•ษ|‘ํู•ษ‘ฅัฬนมษฝูฅ‘•ษ๕€(€€€€€€่อั…ั”€๔๔๔€ม•น‘ฅน}•แั•ษน…ฑ}•ูฅ‘•น”€ü€ต…น‘…ัฝษๅ}อีมมฝษั•‘}…ออ•ษัฅฝนอ}…Ý…ฅัฅน}•แั•ษน…ฑ}•ูฅ‘•น”€่ู•ษ‘ฅั|‘ํอั…ั•๕€ฐ(€๔์)๔((ผจจMีฅั”•ษัฅฅ…ัฅฝธฅฬฅน‘•ม•น‘•นะฝกฅฑฬ•แ•ีัฅฝธฝีัฝต”ธภศต…ไ(€จัษีักีฑฑไฅนฅอ …ฬ…ฝษั•‘}‘ษฅู•ษ}ษ•อั…ษะ…นอัฅฑฐ•ษัฅไฅัฬ•แม•ั•(€จฑฝอฬฝษ•ฝู•ษไ•ก…ูฅฝศ…ั•ศฝÝนฅน•ูฅ‘•น”…ษษฅู•ฬธ€จผ)•แมฝษะีนัฅฝธอีฅั••ษัฅฅ…ัฅฝนMั…ั”กกฅฑ‘ษ•ธ่IีนI•ฝษ‘mtค่€ม•น‘ฅน๐€ฝตมฑ•ั•๐€…ฅฑ•์(€ฅ€กกฅฑ‘ษ•ธนอฝต” กษีธค€๔๘ษีธนอั…ั”€๔๔๔€ม•น‘ฅน}•แั•ษน…ฑ}•ูฅ‘•น”คคษ•ัีษธ€ม•น‘ฅน์(€ษ•ัีษธกฅฑ‘ษ•ธน•ู•ษไ กษีธค€๔๘ษีธนู•ษ‘ฅัฬนก…ษน•อฬ€๔๔๔€ม…อฬ€ษีธนู•ษ‘ฅัฬน•ูฅ‘•น”€๔๔๔€ม…อฬ€ษีธนฑ•…นีมฝตมฑ•ั”ค€ü€ฝตมฑ•ั•€่€…ฅฑ•์)๔()•แมฝษะีนัฅฝธ‘•ษฅู•ฝตมฑ•ั•‘Y•ษ‘ฅัฬกษีธ่IีนI•ฝษฐ•ู•นัฬ่ฅตมฝษะ ธฝ‘ฝต…ฅธนฉฬคน1…ู•นัmtฐฝม•ษ…ัฅฝนฬ่ฅตมฝษะ ธฝ‘ฝต…ฅธนฉฬคน=ม•ษ…ัฅฝนI•ฝษ‘mtฐ…ีักี‘ฅะ่ฅตมฝษะ ธฝฑ•‘•ศนฉฬคนีักี‘ฅัI•ฝษ‘mt€๔mtค่Y•ษ‘ฅัฬ์(€ฝนอะ•ฑฅฅฑ•ู•นัฬ€๔•ู•นัฬนฅฑั•ศ ก•ู•นะค€๔๘•ู•นะนอฝีษ”€๔๔€มษฝ‘ีะ๑๐ฅอแ…ั	ฝีน‘Aษฝ‘ีัู•นะกษีธฐ•ู•นะคค์(€ฝนอะญฅน‘ฬ€๔น•ÜM•ะก•ฑฅฅฑ•ู•นัฬนต…ภ ก•ู•นะค€๔๘•ู•นะนญฅนคค์(€ฝนอะ…ฅฑ•‘!…ษน•อฬ€๔•ู•นัฬนอฝต” ก•ู•นะค€๔๘•ู•นะนญฅน€๔๔๔€…ี‘ฅผนฅนมีะนษ•ฉ•ั•๑๐•ู•นะนญฅนนฅนฑี‘•ฬ ีษอฝษ}…ภค๑๐•ู•นะนญฅน€๔๔๔€ฑ•…นีภน…มัีษ•}ีน…ู…ฅฑ…ฑ”๑๐•ู•นะนญฅน€๔๔๔€…ี‘ฅผนฅนมีะนฅนั•ษษีมั•ค์(€ฝนอะั…อญฑ•…นีภ€๔‘•ษฅู•Q…อญฑ•…นีภก•ู•นัฬฐษีธค์(€ฝนอะฅน…ฑฅ้•€๔ญฅน‘ฬนก…ฬ อ•ออฅฝธนฅน…ฑฅ้•ค์(€ฝนอะมษฝูฅ‘•ษฑฝอ•€๔•ฑฅฅฑ•ู•นัฬนอฝต” ก•ู•นะค€๔๘•ู•นะนญฅน€๔๔๔€มษฝูฅ‘•ศนอั…”€lฑฝอ•ฐ€•น‘•tนฅนฑี‘•ฬกMัษฅนก•ู•นะนม…ๅฑฝ…นอั…”คคค์(€ฝนอะมษฝูฅ‘•ษ=อ•ษู•€๔ญฅน‘ฬนก…ฬ มษฝูฅ‘•ศนฝนน•ัฅฝน}•มฝ ค์(€ฝนอะมษฝูฅ‘•ษ•ษ…‘•€๔•ฑฅฅฑ•ู•นัฬนอฝต” ก•ู•นะค€๔๘•ู•นะนญฅน€๔๔๔€มษฝูฅ‘•ศนฝนน•ัฅฝน}•มฝ €€ก•ู•นะนม…ๅฑฝ…นษ••ฅมะ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•คüนมก…อ”€๔๔๔€‘•ษ…‘•ค์(€ฝนอะ…ีักฑ•…ธ€๔•ู•นัฬนอฝต”ก…ีักฑ•…นีมฝนฅษต•ค์(€ฝนอะฅนฉ•ั•‘=ม•ษ…ัฅฝนฬ€๔ฝม•ษ…ัฅฝนฬนฅฑั•ศ กฝม•ษ…ัฅฝธค€๔๘€กฝม•ษ…ัฅฝธนัๅม”€๔๔๔€อม•…ฌ๑๐ฝม•ษ…ัฅฝธนัๅม”€๔๔๔€…ษ•}ฅธค€ฝม•ษ…ัฅฝธนอั…ั”€๔๔๔€อี••‘•ค์(€ฝนอะนฝนMฅฑ•น•=ม•ษ…ัฅฝนฬ€๔ฅนฉ•ั•‘=ม•ษ…ัฅฝนฬนฅฑั•ศ กฝม•ษ…ัฅฝธค€๔๘€…Mัษฅนกฝม•ษ…ัฅฝธนฅนมีะนฅแัีษ•}ฅ€üü€คนัฝ1ฝÝ•ษ…อ” คนฅนฑี‘•ฬ อฅฑ•น”คค์(€ฝนอะฅนมีัQษ…นอษฅมะ€๔•ฑฅฅฑ•ู•นัฬนอฝต” ก•ู•นะค€๔๘•ู•นะนญฅนน•น‘อ]ฅั  นอฝมกฅนีอ•ษ}ัษ…นอษฅมะค๑๐•ู•นะนญฅน€๔๔๔€ัษ…นอษฅมะนฅนมีะนฅน…ฐค์(€ฝนอะ…ออฅอั…นัี‘ฅผ€๔ญฅน‘ฬนก…ฬ …ี‘ฅผนฝีัมีะนอั…ษั•ค์(€ฝนอะ…ออฅอั…นัQีษนน‘•€๔•ฑฅฅฑ•ู•นัฬนอฝต” ก•ู•นะค€๔๘•ู•นะนญฅนน•น‘อ]ฅั  นอฝมกฅนัีษธค€€ ก•ู•นะนม…ๅฑฝ…น‘…ั…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•คüนมก…อ”€๔๔๔€…•นั}•น‘•๑๐•ู•นะนม…ๅฑฝ…นมก…อ”€๔๔๔€…•นั}•น‘•คค์(€ฝนอะฅนฉ•ัฅฝนก…ฅนฬ€๔ฅนฉ•ั•‘=ม•ษ…ัฅฝนฬนฑ•นั €๘€ภ€ฅนฉ•ั•‘=ม•ษ…ัฅฝนฬน•ู•ษไ กฝม•ษ…ัฅฝธค€๔๘•แ…ัAษฝ‘ีั%นมีัก…ฅธก•ฑฅฅฑ•ู•นัฬฐฝม•ษ…ัฅฝธคค์(€ฝนอะ‘•ม•น‘•นๅY•ษฅฅ•€๔€กl‘•มฑฝๅต•นะนู•ษฅฅ•ฐ€‘•มฑฝๅต•นะนษ•ู•ษฅฅ•t…ฬฝนอะคน•ู•ษไ กญฅนค€๔๘•ฑฅฅฑ•ู•นัฬนอฝต” ก•ู•นะค€๔๘์(€€€ฅ€ก•ู•นะนญฅน€๔๔ญฅนคษ•ัีษธ…ฑอ”์(€€€ฝนอะฑ…นษ…ม €๔•ู•นะนม…ๅฑฝ…นฑ…นษ…ม ์(€€€ษ•ัีษธฑ…นษ…ม €๔๔นีฑฐ€ัๅม•ฝฑ…นษ…ม €๔๔๔€ฝฉ•ะ(€€€€€€€กฑ…นษ…ม …ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘คนฝตตฅั}อก€๔๔๔ษีธนั…ษ•ะน•แม•ั•‘•ม•น‘•นฅ•ฬนฑ…นษ…ม ์(€๔คค์(€ฝนอะ‘•มฑฝๅต•นัY•ษฅฅ•€๔€กlษฝนั•นฐ€…ญ•นฐ€ูฝฅ”t…ฬฝนอะคน•ู•ษไ กญ•ไค€๔๘ษีธนฝอ•ษู•‘•มฑฝๅต•นัmญ•ๅt€๔๔๔ษีธนั…ษ•ะน•แม•ั•‘•มฑฝๅต•นัmญ•ๅtค(€€€€‘•ม•น‘•นๅY•ษฅฅ•์(€ฝนอะฉฝฅนอฝตมฑ•ั”€๔ษีธน…นฝนฅ…ฑM•ออฅฝน%€๔๔นีฑฐ€ษีธนักษ•…‘%€๔๔นีฑฐ€ษีธนมษฝูฅ‘•ษM•ออฅฝน%€๔๔นีฑฐ€ษีธนมษฝูฅ‘•ษมฝ €๔๔นีฑฐ€€กนฝนMฅฑ•น•=ม•ษ…ัฅฝนฬนฑ•นั €๔๔๔€ภ๑๐ษีธนัีษน%€๔๔นีฑฐค์(€ฝนอะ…มัีษ•Aษฝู•ธ€๔ญฅน‘ฬนก…ฬ ก…ษน•อฬนฅนฅัฅ…ฑฅ้•ค€ญฅน‘ฬนก…ฬ ก…ษน•อฬนต•‘ฅ…}อัษ•…ต}ฅออี•ค€ญฅน‘ฬนก…ฬ อ•ออฅฝธนตฅษฝมกฝน•}อัษ•…ต}…ลีฅษ•ค์(€ฝนอะฑ•…นีมAษฝู•ธ€๔…ีักฝษฅั…ัฅู•1ฅู•ฑ•…นีมฝตมฑ•ั”ก•ู•นัฬค€€กญฅน‘ฬนก…ฬ ฑ•…นีภนษฝÝอ•ษ}ฑ•…อ•}ษ•ฑ•…อ•ค๑๐ญฅน‘ฬนก…ฬ ฑ•…นีภนษฝÝอ•ษ}ฑ•…อ•}…อ•นะคค€…ีักฑ•…ธ€มษฝูฅ‘•ษฑฝอ•€ั…อญฑ•…นีภนีนษ•อฝฑู•‘}ฝีนะ€๔๔๔€ภ์(€ฝนอะอ•น…ษฅฝู…ฑี…ัฅฝธ€๔•ู…ฑี…ั•M•น…ษฅฝออ•ษัฅฝนฬกษีธฐ•ฑฅฅฑ•ู•นัฬฐฝม•ษ…ัฅฝนฬฐ…ีักี‘ฅะค์(€ฝนอะอ•น…ษฅฝ!…อ…ฅฑีษ”€๔อ•น…ษฅฝู…ฑี…ัฅฝธนก…ษน•อฬนอฝต” ก…ออ•ษัฅฝธค€๔๘…ออ•ษัฅฝธนอั…ัีฬ€๔๔๔€…ฅฐค์(€ฝนอะอ•น…ษฅฝ!…อUน…ู…ฅฑ…ฑ”€๔อ•น…ษฅฝู…ฑี…ัฅฝธนก…ษน•อฬนฑ•นั €๔๔๔€ภ๑๐อ•น…ษฅฝู…ฑี…ัฅฝธนก…ษน•อฬนอฝต” ก…ออ•ษัฅฝธค€๔๘…ออ•ษัฅฝธนอั…ัีฬ€๔๔๔€ีน…ู…ฅฑ…ฑ”ค์(€ฅ€กษีธนอ•น…ษฅฝ%€๔๔๔€Xตภศคษ•ัีษธ์ก…ษน•อฬ่€ีน…ู…ฅฑ…ฑ”ฐมษฝ‘ีะ่€ีน…ู…ฅฑ…ฑ”ฐมษฝูฅ‘•ศ่€ีน…ู…ฅฑ…ฑ”ฐ…ีั ่€ีน…ู…ฅฑ…ฑ”ฐ•ูฅ‘•น”่€ีน…ู…ฅฑ…ฑ”๔์(€ฝนอะมษ•I•อฝีษ”€๔ษีธนอ•น…ษฅฝ%€๔๔๔€XตLภฤ๑๐ษีธนอ•น…ษฅฝ%€๔๔๔€XตLภศ์(€ฝนอะมษ•I•อฝีษ•ฑ•…นีภ€๔…ีักฝษฅั…ัฅู•1ฅู•ฑ•…นีมฝตมฑ•ั”ก•ู•นัฬค(€€€€ญฅน‘ฬนก…ฬ ฑ•…นีภนษฝÝอ•ษ}ฝนั•แั}…อ•นะค(€€€€•ฑฅฅฑ•ู•นัฬนอฝต” ก•ู•นะค€๔๘•ู•นะนญฅน€๔๔๔€ฑ•…นีภนษฝÝอ•ษ}ฑ•…อ•}…อ•นะ€•ู•นะนม…ๅฑฝ…น…ีักฝษฅั…ัฅู•}ฑ•‘•ษ}ษ•…€๔๔๔ัษี”ค์(€ฝนอะ…อ•!…ษน•ออA…อฬ€๔มษ•I•อฝีษ”(€€€€ü€……ฅฑ•‘!…ษน•อฬ€มษ•I•อฝีษ•ฑ•…นีภ(€€€€่€……ฅฑ•‘!…ษน•อฬ€ฅนฉ•ัฅฝนก…ฅนฬ€‘•มฑฝๅต•นัY•ษฅฅ•€ฉฝฅนอฝตมฑ•ั”€…มัีษ•Aษฝู•ธ€ฑ•…นีมAษฝู•ธ์(€ฝนอะก…ษน•อฬ่Y•ษ‘ฅัอlก…ษน•อฬt€๔€……อ•!…ษน•ออA…อฬ๑๐อ•น…ษฅฝ!…อ…ฅฑีษ”€ü€…ฅฐ€่อ•น…ษฅฝ!…อUน…ู…ฅฑ…ฑ”€ü€ีน…ู…ฅฑ…ฑ”€่€ม…อฬ์(€ฝนอะมษฝ‘ีัMั…ัีอ•ฬ€๔อ•น…ษฅฝู…ฑี…ัฅฝธนมษฝ‘ีะนต…ภ ก…ออ•ษัฅฝธค€๔๘…ออ•ษัฅฝธนอั…ัีฬค์(€ฝนอะมษฝ‘ีะ่Y•ษ‘ฅัอlมษฝ‘ีะt€๔มษ•I•อฝีษ”(€€€€ü€ีน…ู…ฅฑ…ฑ”(€€€€่€…ฅน…ฑฅ้•(€€€€ü€…ฅฐ(€€€€่มษฝ‘ีัMั…ัีอ•ฬนฑ•นั €๔๔๔€ภ๑๐มษฝ‘ีัMั…ัีอ•ฬน•ู•ษไ กอั…ัีฬค€๔๘อั…ัีฬ€๔๔๔€ีน…ู…ฅฑ…ฑ”ค(€€€€€€ü€ีน…ู…ฅฑ…ฑ”(€€€€€€่มษฝ‘ีัMั…ัีอ•ฬนอฝต” กอั…ัีฬค€๔๘อั…ัีฬ€๔๔๔€…ฅฐค(€€€€€€€€ü€…ฅฐ(€€€€€€€€่มษฝ‘ีัMั…ัีอ•ฬน•ู•ษไ กอั…ัีฬค€๔๘อั…ัีฬ€๔๔๔€ม…อฬค€ü€ม…อฬ€่€ฅนฝนฑีอฅู”์(€ษ•ัีษธ์(€€€ก…ษน•อฬฐ(€€€มษฝ‘ีะฐ(€€€มษฝูฅ‘•ศ่มษ•I•อฝีษ”€ü€ีน…ู…ฅฑ…ฑ”€่มษฝูฅ‘•ษ•ษ…‘•€ü€…ฅฐ€่มษฝูฅ‘•ษ=อ•ษู•€มษฝูฅ‘•ษฑฝอ•€ü€ม…อฬ€่€ฅนฝนฑีอฅู”ฐ(€€€…ีั ่มษ•I•อฝีษ”€ü€กษีธนอ•น…ษฅฝ%€๔๔๔€XตLภฤ€ก…ษน•อฬ€๔๔๔€ม…อฬ€ü€ม…อฬ€่€ีน…ู…ฅฑ…ฑ”ค€่…ีักฑ•…ธ€ü€ม…อฬ€่€…ฅฐฐ(€€€•ูฅ‘•น”่ก…ษน•อฬ€๔๔๔€ม…อฬ€€กมษ•I•อฝีษ”€üมษ•I•อฝีษ•ฑ•…นีภ€่ฅน…ฑฅ้•€ฑ•…นีมAษฝู•ธค€ü€ม…อฬ€่ก…ษน•อฬ€๔๔๔€ีน…ู…ฅฑ…ฑ”€ü€ีน…ู…ฅฑ…ฑ”€่€…ฅฐฐ(€๔์)๔()•แมฝษะัๅม”M•น…ษฅฝออ•ษัฅฝธ€๔์(€ฅ่อัษฅน์(€ฝÝน•ศ่€ก…ษน•อฬ๐€มษฝ‘ีะ์(€อั…ัีฬ่€ม…อฬ๐€…ฅฐ๐€ีน…ู…ฅฑ…ฑ”์(€•ูฅ‘•น•}อ•ลฬ่นีต•ษmt์(€ษ•…อฝธ่อัษฅน๐นีฑฐ์)๔์()•แมฝษะีนัฅฝธ…ออ•ษัI•อฝฑู•‘ี‘ฅฝ]ฅักฅน‘ตฅออฅฝธก…‘ตฅออฅฝธ่ีนญนฝÝธฐ‘ีษ…ัฅฝน5ฬ่นีต•ศฐๅั•1•นั ่นีต•ศค่ูฝฅ์(€ฝนอะษ••ฅมะ€๔…‘ตฅออฅฝธ€ัๅม•ฝ…‘ตฅออฅฝธ€๔๔๔€ฝฉ•ะ€ü…‘ตฅออฅฝธ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘€่ํ๔์(€ฝนอะษ•อ•ษู•‘ีษ…ัฅฝน5ฬ€๔9ีต•ศกษ••ฅมะน‘ีษ…ัฅฝน}ตฬค์(€ฝนอะษ•อ•ษู•‘	ๅั•ฬ€๔9ีต•ศกษ••ฅมะนๅั•ฬค์(€ฅ€ …9ีต•ศนฅอM…•%นั••ศกษ•อ•ษู•‘ีษ…ัฅฝน5ฬค๑๐ษ•อ•ษู•‘ีษ…ัฅฝน5ฬ€๐€ภ๑๐€…9ีต•ศนฅอM…•%นั••ศกษ•อ•ษู•‘	ๅั•ฬค๑๐ษ•อ•ษู•‘	ๅั•ฬ€๐€ภค์(€€€ักษฝÜน•ÜYฝฅ•1…ษษฝศกฑ…ษษฝศ U%=}5%MM%=9}I%AQ}%9Y1%ฐ€ีษ…ฑ”…ี‘ฅผ…‘ตฅออฅฝธษ••ฅมะฅฬตฅออฅนฝศต…ฑฝษต•ธฐ€ฝนฑฅะฐ…ฑอ”คค์(€๔(€ฅ€ …9ีต•ศนฅอM…•%นั••ศก‘ีษ…ัฅฝน5ฬค๑๐‘ีษ…ัฅฝน5ฬ€๐€ภ๑๐€…9ีต•ศนฅอM…•%นั••ศกๅั•1•นั ค๑๐ๅั•1•นั €๐€ภ๑๐‘ีษ…ัฅฝน5ฬ€๘ษ•อ•ษู•‘ีษ…ัฅฝน5ฬ๑๐ๅั•1•นั €๘ษ•อ•ษู•‘	ๅั•ฬค์(€€€ักษฝÜน•ÜYฝฅ•1…ษษฝศกฑ…ษษฝศ U%=}5%MM%=9}IMIYQ%=9}aฐ€I•อฝฑู•…ี‘ฅผ•แ••‘•ฅัฬ‘ีษ…ฑ”ษฝฑฑฅน…‘ตฅออฅฝธษ•อ•ษู…ัฅฝธ•ฝษ”ม…”ฝศมษฝูฅ‘•ศตีั…ัฅฝธธฐ€ฝนฑฅะฐ…ฑอ”ฐ์ษ•อ•ษู•‘}‘ีษ…ัฅฝน}ตฬ่ษ•อ•ษู•‘ีษ…ัฅฝน5ฬฐษ•อ•ษู•‘}ๅั•ฬ่ษ•อ•ษู•‘	ๅั•ฬฐษ•อฝฑู•‘}‘ีษ…ัฅฝน}ตฬ่‘ีษ…ัฅฝน5ฬฐษ•อฝฑู•‘}ๅั•ฬ่ๅั•1•นั ๔คค์(€๔)๔()•แมฝษะีนัฅฝธษ•ฝนฅฑ•Aษฝ‘ีั%นมีั1• (€•ู•นัฬ่ฅตมฝษะ ธฝ‘ฝต…ฅธนฉฬคน1…ู•นัmtฐ(€ฝม•ษ…ัฅฝธ่ฅตมฝษะ ธฝ‘ฝต…ฅธนฉฬคน=ม•ษ…ัฅฝนI•ฝษฐ(€ฑ•่I•ฝษ๑อัษฅนฐีนญนฝÝธ๘ฐ(ค่์ู•ษฅฅ•่ฝฝฑ•…ธ์ษ•…อฝธ่อัษฅน๐นีฑฐ์ษ…ต•}ฝีนะ่นีต•ศ์ๅั•}ฑ•นั ่นีต•ศ์นฝน้•ษฝ}ๅั•}ฝีนะ่นีต•ศ์ฝตมีั•‘}มต}อกศิู}ก…ฅธ่อัษฅน๐นีฑฐ๔์(€ฝนอะษ…ต•ฬ€๔•ู•นัฬ(€€€€นฅฑั•ศ ก•ู•นะค€๔๘•ู•นะนอฝีษ”€๔๔๔€ษฝÝอ•ศ€•ู•นะนญฅน€๔๔๔€ก…ษน•อฬนฅนมีั}ษ…ต•}ฝษÝ…ษ‘•€•ู•นะนม…ๅฑฝ…นฝม•ษ…ัฅฝน}ฅ€๔๔๔ฝม•ษ…ัฅฝธนฅค(€€€€นอฝษะ กฑ•ะฐษฅกะค€๔๘9ีต•ศกฑ•ะนม…ๅฑฝ…นษ…ต•}อ•ฤค€ด9ีต•ศกษฅกะนม…ๅฑฝ…นษ…ต•}อ•ฤคค์(€ฅ€ก•ู•นัฬนอฝต” ก•ู•นะค€๔๘•ู•นะนอฝีษ”€๔๔๔€ษฝÝอ•ศ€•ู•นะนญฅน€๔๔๔€ก…ษน•อฬนฅนมีั}ษ…ต•}ฝอ•ษู…ัฅฝน}…ฅฑ•€•ู•นะนม…ๅฑฝ…นฝม•ษ…ัฅฝน}ฅ€๔๔๔ฝม•ษ…ัฅฝธนฅคคษ•ัีษธ์ู•ษฅฅ•่…ฑอ”ฐษ•…อฝธ่€ก…ษน•ออ}ษ…ต•}‘ฅ•อั}…ฅฑ•ฐษ…ต•}ฝีนะ่ษ…ต•ฬนฑ•นั ฐๅั•}ฑ•นั ่€ภฐนฝน้•ษฝ}ๅั•}ฝีนะ่€ภฐฝตมีั•‘}มต}อกศิู}ก…ฅธ่นีฑฐ๔์(€ฅ€กษ…ต•ฬนฑ•นั €๔๔๔€ภคษ•ัีษธ์ู•ษฅฅ•่…ฑอ”ฐษ•…อฝธ่€ก…ษน•ออ}ษ…ต•}ษ••ฅมัอ}ีน…ู…ฅฑ…ฑ”ฐษ…ต•}ฝีนะ่€ภฐๅั•}ฑ•นั ่€ภฐนฝน้•ษฝ}ๅั•}ฝีนะ่€ภฐฝตมีั•‘}มต}อกศิู}ก…ฅธ่นีฑฐ๔์(€ฑ•ะก…ฅธ€๔	ี•ศน…ฑฑฝ ฬศค์(€ฑ•ะๅั•1•นั €๔€ภ์(€ฑ•ะนฝน้•ษฝ	ๅั•ฬ€๔€ภ์(€ฝศ€กฑ•ะฅน‘•เ€๔€ภ์ฅน‘•เ€๐ษ…ต•ฬนฑ•นั ์ฅน‘•เ€ฌ๔€ฤค์(€€€ฝนอะษ…ต”€๔ษ…ต•อmฅน‘•แt์(€€€ฝนอะอ•ลี•น”€๔9ีต•ศกษ…ต”นม…ๅฑฝ…นษ…ต•}อ•ฤค์(€€€ฝนอะ‘ฅ•อะ€๔ษ…ต”นม…ๅฑฝ…นอกศิุ์(€€€ฝนอะๅั•ฬ€๔9ีต•ศกษ…ต”นม…ๅฑฝ…นๅั•}ฑ•นั ค์(€€€ฝนอะนฝน้•ษผ€๔9ีต•ศกษ…ต”นม…ๅฑฝ…นนฝน้•ษฝ}ๅั•}ฝีนะค์(€€€ฅ€กอ•ลี•น”€๔๔ฅน‘•เ€ฌ€ฤ๑๐ัๅม•ฝ‘ฅ•อะ€๔๔€อัษฅน๑๐€ฝymตภดๅu์ุั๔ผนั•อะก‘ฅ•อะค๑๐€…9ีต•ศนฅอM…•%นั••ศกๅั•ฬค๑๐ๅั•ฬ€๐๔€ภ๑๐€…9ีต•ศนฅอM…•%นั••ศกนฝน้•ษผค๑๐นฝน้•ษผ€๐€ภ๑๐นฝน้•ษผ€๘ๅั•ฬคษ•ัีษธ์ู•ษฅฅ•่…ฑอ”ฐษ•…อฝธ่€ก…ษน•ออ}ษ…ต•}ษ••ฅมั}ฅนู…ฑฅฐษ…ต•}ฝีนะ่ษ…ต•ฬนฑ•นั ฐๅั•}ฑ•นั ่ๅั•1•นั ฐนฝน้•ษฝ}ๅั•}ฝีนะ่นฝน้•ษฝ	ๅั•ฬฐฝตมีั•‘}มต}อกศิู}ก…ฅธ่นีฑฐ๔์(€€€ฝนอะ•นฝ‘•‘M•ลี•น”€๔	ี•ศน…ฑฑฝ ะค์(€€€•นฝ‘•‘M•ลี•น”นÝษฅั•U%นะฬษ	กอ•ลี•น”ค์(€€€ก…ฅธ€๔	ี•ศนษฝดกอกศิุก	ี•ศนฝน…ะกmก…ฅธฐ	ี•ศนษฝดก‘ฅ•อะฐ€ก•เคฐ•นฝ‘•‘M•ลี•น•tคคฐ€ก•เค์(€€€ๅั•1•นั €ฌ๔ๅั•ฬ์(€€€นฝน้•ษฝ	ๅั•ฬ€ฌ๔นฝน้•ษผ์(€๔(€ฝนอะฝตมีั•€๔ก…ฅธนัฝMัษฅน ก•เค์(€ฝนอะอฅฑ•น”€๔Mัษฅนกฝม•ษ…ัฅฝธนฅนมีะนฅแัีษ•}ฅ€üü€คนัฝ1ฝÝ•ษ…อ” คนฅนฑี‘•ฬ อฅฑ•น”ค์(€ฝนอะู•ษฅฅ•€๔9ีต•ศกฑ•นษ…ต•}ฝีนะค€๔๔๔ษ…ต•ฬนฑ•นั (€€€€9ีต•ศกฑ•นๅั•}ฑ•นั ค€๔๔๔ๅั•1•นั (€€€€ฑ•นมต}‘ฅ•อั}…ฑฝษฅักด€๔๔๔€อกดศิุตก…ฅธตุฤ(€€€€ฑ•นมต}อกศิู}ก…ฅธ€๔๔๔ฝตมีั•(€€€€€กอฅฑ•น”€üนฝน้•ษฝ	ๅั•ฬ€๔๔๔€ภ€9ีต•ศกฑ•นนฝน้•ษฝ}อ…ตมฑ•}ฝีนะค€๔๔๔€ภ€่นฝน้•ษฝ	ๅั•ฬ€๘€ภ€9ีต•ศกฑ•นนฝน้•ษฝ}อ…ตมฑ•}ฝีนะค€๘€ภค์(€ษ•ัีษธ์ู•ษฅฅ•ฐษ•…อฝธ่ู•ษฅฅ•€üนีฑฐ€่€ก…ษน•ออ}มษฝ‘ีั}มต}‘ฅ•อั}ฝษ}ต•ัษฅ}ตฅอต…ั ฐษ…ต•}ฝีนะ่ษ…ต•ฬนฑ•นั ฐๅั•}ฑ•นั ่ๅั•1•นั ฐนฝน้•ษฝ}ๅั•}ฝีนะ่นฝน้•ษฝ	ๅั•ฬฐฝตมีั•‘}มต}อกศิู}ก…ฅธ่ฝตมีั•๔์)๔()ีนัฅฝธ•แ…ัAษฝ‘ีั%นมีัก…ฅธก•ู•นัฬ่ฅตมฝษะ ธฝ‘ฝต…ฅธนฉฬคน1…ู•นัmtฐฝม•ษ…ัฅฝธ่ฅตมฝษะ ธฝ‘ฝต…ฅธนฉฬคน=ม•ษ…ัฅฝนI•ฝษค่ฝฝฑ•…ธ์(€ฝนอะๅ=ม•ษ…ัฅฝธ€๔€กญฅน่อัษฅนค€๔๘•ู•นัฬนฅฑั•ศ ก•ู•นะค€๔๘•ู•นะนญฅน€๔๔๔ญฅน€•ู•นะนม…ๅฑฝ…นฝม•ษ…ัฅฝน}ฅ€๔๔๔ฝม•ษ…ัฅฝธนฅค์(€ฝนอะษ•อฝฑู•€๔ๅ=ม•ษ…ัฅฝธ ีัั•ษ…น”นษ•อฝฑู•ค์(€ฝนอะอก•‘ีฑ•€๔ๅ=ม•ษ…ัฅฝธ …ี‘ฅผนฅนมีะนอก•‘ีฑ•ค์(€ฝนอะอั…ษั•€๔ๅ=ม•ษ…ัฅฝธ …ี‘ฅผนฅนมีะนอั…ษั•ค์(€ฝนอะฝตมฑ•ั•€๔ๅ=ม•ษ…ัฅฝธ …ี‘ฅผนฅนมีะนฝตมฑ•ั•ค์(€ฅ€กษ•อฝฑู•นฑ•นั €๔๔€ฤ๑๐อก•‘ีฑ•นฑ•นั €๔๔€ฤ๑๐อั…ษั•นฑ•นั €๔๔€ฤ๑๐ฝตมฑ•ั•นฑ•นั €๔๔€ฤ๑๐ฝม•ษ…ัฅฝธนษ•อีฑะüนอก•‘ีฑ•}ษ••ฅมะ€๔๔๔ีน‘•ฅน•คษ•ัีษธ…ฑอ”์(€ฝนอะÝ…ุ€๔ษ•อฝฑู•‘lมtนม…ๅฑฝ…นÝ…ุ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•์(€ฝนอะีัั•ษ…น•%€๔ษ•อฝฑู•‘lมtนม…ๅฑฝ…นีัั•ษ…น•}ฅ์(€ฝนอะฑ•ฬ€๔•ู•นัฬนฅฑั•ศ ก•ู•นะค€๔๘•ู•นะนอฝีษ”€๔๔๔€มษฝ‘ีะ€•ู•นะนญฅน€๔๔๔€…ี‘ฅผนฅนมีะนมษฝ‘ีั}ฑ•€€ก•ู•นะนม…ๅฑฝ…นษ••ฅมะ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•คüนฝม•ษ…ัฅฝน}ฅ€๔๔๔ฝม•ษ…ัฅฝธนฅค์(€ฅ€กฑ•ฬนฑ•นั €๔๔€ฤคษ•ัีษธ…ฑอ”์(€ฝนอะฑ•€๔ฑ•อlมtนม…ๅฑฝ…นษ••ฅมะ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘์(€ฝนอะอฅฑ•น”€๔Mัษฅนกฝม•ษ…ัฅฝธนฅนมีะนฅแัีษ•}ฅ€üü€คนัฝ1ฝÝ•ษ…อ” คนฅนฑี‘•ฬ อฅฑ•น”ค์(€ฅ€กฑ•นอก•ต€๔๔€อฝมกฅ…}•ตฅนฅ}ฅนมีั}ฑ•}ุฤ๑๐ฑ•นอั…ัีฬ€๔๔€ู•ษฅฅ•๑๐ฑ•นีัั•ษ…น•}ฅ€๔๔ีัั•ษ…น•%๑๐ฑ•นอฝีษ•}อกศิุ€๔๔Ý…ุüนอกศิุ๑๐ฑ•น•แม•ั•‘}อฅฑ•น”€๔๔อฅฑ•น”๑๐ฑ•นษ…Ý}…ี‘ฅฝ}•แฑี‘•€๔๔ัษี”๑๐9ีต•ศกฑ•นษ…ต•}ฝีนะค€๐๔€ภ๑๐9ีต•ศกฑ•นอ…ตมฑ•}ฝีนะค€๐๔€ภ๑๐ฑ•นมต}‘ฅ•อั}…ฑฝษฅักด€๔๔€อกดศิุตก…ฅธตุฤ๑๐ัๅม•ฝฑ•นมต}อกศิู}ก…ฅธ€๔๔€อัษฅน๑๐€ฝymตภดๅu์ุั๔ผนั•อะกฑ•นมต}อกศิู}ก…ฅธคคษ•ัีษธ…ฑอ”์(€ฅ€ …ษ•ฝนฅฑ•Aษฝ‘ีั%นมีั1•ก•ู•นัฬฐฝม•ษ…ัฅฝธฐฑ•คนู•ษฅฅ•คษ•ัีษธ…ฑอ”์(€ฅ€กอฅฑ•น”€ü9ีต•ศกฑ•นนฝน้•ษฝ}อ…ตมฑ•}ฝีนะค€๔๔€ภ๑๐9ีต•ศกฑ•นมต}ษตฬค€๔๔€ภ๑๐9ีต•ศกฑ•นมต}ม•…ฌค€๔๔€ภ€่9ีต•ศกฑ•นนฝน้•ษฝ}อ…ตมฑ•}ฝีนะค€๐๔€ภ๑๐9ีต•ศกฑ•นมต}ษตฬค€๐๔€ภ๑๐9ีต•ศกฑ•นมต}ม•…ฌค€๐๔€ภคษ•ัีษธ…ฑอ”์(€ฝนอะัีษนฬ€๔•ู•นัฬนฅฑั•ศ ก•ู•นะค€๔๘•ู•นะนอฝีษ”€๔๔๔€มษฝ‘ีะ€•ู•นะนญฅน€๔๔๔€…ี‘ฅผนฅนมีะนมษฝ‘ีั}ัีษธ€€ก•ู•นะนม…ๅฑฝ…นษ••ฅมะ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•คüนฝม•ษ…ัฅฝน}ฅ€๔๔๔ฝม•ษ…ัฅฝธนฅคนต…ภ ก•ู•นะค€๔๘•ู•นะนม…ๅฑฝ…นษ••ฅมะ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘ค์(€ฅ€ …ัีษนฬน•ู•ษไ กษ••ฅมะค€๔๘ษ••ฅมะนอก•ต€๔๔๔€อฝมกฅ…}•ตฅนฅ}ฅนมีั}ัีษน}ุฤ€ษ••ฅมะนีัั•ษ…น•}ฅ€๔๔๔ีัั•ษ…น•%€ษ••ฅมะนษ…ต•}Ýฅน‘ฝÝ}ฅ€๔๔๔ฑ•นษ…ต•}Ýฅน‘ฝÝ}ฅ€ษ••ฅมะน•แม•ั•‘}อฅฑ•น”€๔๔๔อฅฑ•น”€ษ••ฅมะนษ…Ý}…ี‘ฅฝ}•แฑี‘•€๔๔๔ัษี”คคษ•ัีษธ…ฑอ”์(€ษ•ัีษธอฅฑ•น”(€€€€üัีษนฬนอฝต” กษ••ฅมะค€๔๘ษ••ฅมะนอฝีษ”€๔๔๔€อ•ััฑ•ต•นะ€ษ••ฅมะนฝีัฝต”€๔๔๔€นฝ}ีอ•ษ}ัีษน}ฝอ•ษู•ค€€…ัีษนฬนอฝต” กษ••ฅมะค€๔๘ษ••ฅมะนฝีัฝต”€๔๔๔€ีน•แม•ั•‘}ีอ•ษ}ัีษน}ฝอ•ษู•๑๐ษ••ฅมะนฝีัฝต”€๔๔๔€ีอ•ษ}ัีษน}ฝอ•ษู•ค(€€€€่ัีษนฬนอฝต” กษ••ฅมะค€๔๘ษ••ฅมะนอฝีษ”€๔๔๔€มษฝูฅ‘•ษ}ฅนมีั}ัษ…นอษฅมัฅฝธ€ษ••ฅมะนฝีัฝต”€๔๔๔€มษฝูฅ‘•ษ}ฅนมีั}ัษ…นอษฅมัฅฝน}ฝอ•ษู•ค€ัีษนฬนอฝต” กษ••ฅมะค€๔๘ษ••ฅมะนอฝีษ”€๔๔๔€มีฑฅ}ีอ•ษ}ัีษธ€ษ••ฅมะนฝีัฝต”€๔๔๔€มีฑฅ}ีอ•ษ}ัีษน}…•มั•ค์)๔()•แมฝษะัๅม”M•น…ษฅฝออ•ษัฅฝนู…ฑี…ัฅฝธ€๔์(€อ•น…ษฅฝ}ฅ่อัษฅน๐นีฑฐ์(€อ•น…ษฅฝ}ู•ษอฅฝธ่อัษฅน๐นีฑฐ์(€ก…ษน•อฬ่M•น…ษฅฝออ•ษัฅฝนmt์(€มษฝ‘ีะ่M•น…ษฅฝออ•ษัฅฝนmt์(€อีตต…ษไ่อัษฅน์)๔์((ผจจ(€จ…นฝนฅ…ฐอ•น…ษฅผ…ั•ฬธ5ฅออฅนฝÝนฅน•ูฅ‘•น”ฅฬีน…ู…ฅฑ…ฑ”ฐน•ู•ศ(€จม…อฬฅน•ษษ•ษฝด•ู•นะฝีนัฬฝศัฅตฅนมษฝแฅตฅัไธ(€จผ)•แมฝษะีนัฅฝธ•ู…ฑี…ั•M•น…ษฅฝออ•ษัฅฝนฬกษีธ่IีนI•ฝษฐ•ู•นัฬ่ฅตมฝษะ ธฝ‘ฝต…ฅธนฉฬคน1…ู•นัmtฐฝม•ษ…ัฅฝนฬ่ฅตมฝษะ ธฝ‘ฝต…ฅธนฉฬคน=ม•ษ…ัฅฝนI•ฝษ‘mtฐ…ีักี‘ฅะ่ฅตมฝษะ ธฝฑ•‘•ศนฉฬคนีักี‘ฅัI•ฝษ‘mt€๔mtค่M•น…ษฅฝออ•ษัฅฝนู…ฑี…ัฅฝธ์(€ฝนอะ•ฑฅฅฑ”€๔•ู•นัฬนฅฑั•ศ ก•ู•นะค€๔๘•ู•นะนอฝีษ”€๔๔€มษฝ‘ีะ๑๐ฅอแ…ั	ฝีน‘Aษฝ‘ีัู•นะกษีธฐ•ู•นะคค์(€ฝนอะฅนฉ•ั•€๔ฝม•ษ…ัฅฝนฬนฅฑั•ศ กฝม•ษ…ัฅฝธค€๔๘€กฝม•ษ…ัฅฝธนัๅม”€๔๔๔€อม•…ฌ๑๐ฝม•ษ…ัฅฝธนัๅม”€๔๔๔€…ษ•}ฅธค€ฝม•ษ…ัฅฝธนอั…ั”€๔๔๔€อี••‘•ค์(€ฝนอะมษฝ‘ีัู•นัฬ€๔•ฑฅฅฑ”นฅฑั•ศ ก•ู•นะค€๔๘•ู•นะนอฝีษ”€๔๔๔€มษฝ‘ีะค์(€ฝนอะๅ-ฅน€๔€กญฅน่อัษฅนค€๔๘•ฑฅฅฑ”นฅฑั•ศ ก•ู•นะค€๔๘•ู•นะนญฅน€๔๔๔ญฅนค์(€ฝนอะมษฝ‘ีั	ๅ-ฅน€๔€กญฅน่อัษฅนค€๔๘มษฝ‘ีัู•นัฬนฅฑั•ศ ก•ู•นะค€๔๘•ู•นะนญฅน€๔๔๔ญฅนค์(€ฝนอะ•แั•ษน…ฑัั•อั…ัฅฝนฬ€๔€กญฅน่อัษฅนค€๔๘•ฑฅฅฑ”นฅฑั•ศ ก•ู•นะค€๔๘์(€€€ฅ€ก•ู•นะนอฝีษ”€๔๔€…นฝนฅ…ฐ๑๐•ู•นะนญฅน€๔๔•แั•ษน…ฐน…ัั•อั…ัฅฝธธ‘ํญฅน‘๕€๑๐•ู•นะนม…ๅฑฝ…นอก•ต€๔๔€อฝมกฅ…}ูฝฅ•}ฑ…}•แั•ษน…ฑ}…ัั•อั…ัฅฝน}ุฤ๑๐•ู•นะนม…ๅฑฝ…นฅน‘ฅน}ู…ฑฅ‘…ั•€๔๔ัษี”๑๐•ู•นะนม…ๅฑฝ…นษ…Ý}ฅ‘•นัฅฅ•ษอ}•แฑี‘•€๔๔ัษี”(€€€€€๑๐•ู•นะนม…ๅฑฝ…นั•อั}ษีน}ฅ‘}อกศิุ€๔๔อกศิุกษีธนั•อัIีน%ค๑๐•ู•นะนม…ๅฑฝ…นฑ•…นีม}ฝฑฅ…ัฅฝน}ฅ‘}อกศิุ€๔๔อกศิุกษีธนฑ•…นีม=ฑฅ…ัฅฝน%ค๑๐•ู•นะนม…ๅฑฝ…นอ•น…ษฅฝ}ฅ€๔๔ษีธนอ•น…ษฅฝ%๑๐•ู•นะนม…ๅฑฝ…นอ•น…ษฅฝ}ู•ษอฅฝธ€๔๔ษีธนอ•น…ษฅฝY•ษอฅฝธ๑๐•ู•นะนม…ๅฑฝ…น•นูฅษฝนต•นะ€๔๔ษีธน•นูฅษฝนต•นะ(€€€€€๑๐…นฝนฅ…ฑI•ลี•อั!…อ ก•ู•นะนม…ๅฑฝ…น•แม•ั•‘}‘•มฑฝๅต•นะค€๔๔…นฝนฅ…ฑI•ลี•อั!…อ กษีธนั…ษ•ะน•แม•ั•‘•มฑฝๅต•นะค๑๐ัๅม•ฝ•ู•นะนม…ๅฑฝ…นฝนั•นั}อกศิุ€๔๔€อัษฅน(€€€€€๑๐ัๅม•ฝ•ู•นะนม…ๅฑฝ…นษ•ลี•อั}…ษีต•นั}อกศิุ€๔๔€อัษฅน๑๐ัๅม•ฝ•ู•นะนม…ๅฑฝ…นษ•ลี•อั}ฅ‘}อกศิุ€๔๔€อัษฅน(€€€€€๑๐€……ีักี‘ฅะนอฝต” ก…ี‘ฅะค€๔๘…ี‘ฅะน…ัฅฝธ€๔๔๔€•แั•ษน…ฑ}…ัั•อั…ัฅฝธน…ีัก•นัฅ…ั”€…ี‘ฅะนฝีัฝต”€๔๔๔€…ฑฑฝÝ•€…ี‘ฅะน…ษีต•นั!…อ €๔๔๔•ู•นะนม…ๅฑฝ…นษ•ลี•อั}…ษีต•นั}อกศิุ(€€€€€€€€…ี‘ฅะน‘•ั…ฅฐนษ•ลี•อั}ฅ‘}ก…อ €๔๔๔•ู•นะนม…ๅฑฝ…นษ•ลี•อั}ฅ‘}อกศิุ€…ี‘ฅะน‘•ั…ฅฐน…ัั•อั…ัฅฝน}ฅ‘}ก…อ €๔๔๔อกศิุกMัษฅนก•ู•นะนม…ๅฑฝ…น…ัั•อั…ัฅฝน}ฅคคคคษ•ัีษธ…ฑอ”์(€€€ฝนอะฝนั•นะ€๔์€ธธน•ู•นะนม…ๅฑฝ…๔์(€€€‘•ฑ•ั”ฝนั•นะนฝนั•นั}อกศิุ์(€€€ษ•ัีษธ…นฝนฅ…ฑI•ลี•อั!…อ กฝนั•นะค€๔๔๔•ู•นะนม…ๅฑฝ…นฝนั•นั}อกศิุ์(€๔ค์(€ฝนอะ•แ…ั=ม•ษ…ัฅฝธ€๔€ก•ู•นะ่ฅตมฝษะ ธฝ‘ฝต…ฅธนฉฬคน1…ู•นะฐฝม•ษ…ัฅฝน%่อัษฅนค€๔๘•ู•นะนม…ๅฑฝ…นฝม•ษ…ัฅฝน}ฅ€๔๔๔ฝม•ษ…ัฅฝน%๑๐€ก•ู•นะนม…ๅฑฝ…น‘…ั…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•คüนฝม•ษ…ัฅฝน}ฅ€๔๔๔ฝม•ษ…ัฅฝน%์(€ฝนอะก…ฅธ€๔€กฝม•ษ…ัฅฝน%่อัษฅนค€๔๘์(€€€ฝนอะษ•อฝฑู•€๔ๅ-ฅน ีัั•ษ…น”นษ•อฝฑู•คนฅฑั•ศ ก•ู•นะค€๔๘•แ…ั=ม•ษ…ัฅฝธก•ู•นะฐฝม•ษ…ัฅฝน%คค์(€€€ฝนอะอก•‘ีฑ•€๔ๅ-ฅน …ี‘ฅผนฅนมีะนอก•‘ีฑ•คนฅฑั•ศ ก•ู•นะค€๔๘•แ…ั=ม•ษ…ัฅฝธก•ู•นะฐฝม•ษ…ัฅฝน%คค์(€€€ฝนอะอั…ษั•€๔ๅ-ฅน …ี‘ฅผนฅนมีะนอั…ษั•คนฅฑั•ศ ก•ู•นะค€๔๘•แ…ั=ม•ษ…ัฅฝธก•ู•นะฐฝม•ษ…ัฅฝน%คค์(€€€ฝนอะฝตมฑ•ั•€๔ๅ-ฅน …ี‘ฅผนฅนมีะนฝตมฑ•ั•คนฅฑั•ศ ก•ู•นะค€๔๘•แ…ั=ม•ษ…ัฅฝธก•ู•นะฐฝม•ษ…ัฅฝน%คค์(€€€ฝนอะฝษÝ…ษ‘•€๔ๅ-ฅน ก…ษน•อฬนฅนมีั}ษ…ต•}ฝษÝ…ษ‘•คนฅฑั•ศ ก•ู•นะค€๔๘•แ…ั=ม•ษ…ัฅฝธก•ู•นะฐฝม•ษ…ัฅฝน%คค์(€€€ฝนอะมษฝ‘ีั1•ฬ€๔มษฝ‘ีั	ๅ-ฅน …ี‘ฅผนฅนมีะนมษฝ‘ีั}ฑ•คนฅฑั•ศ ก•ู•นะค€๔๘€ก•ู•นะนม…ๅฑฝ…นษ••ฅมะ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•คüนฝม•ษ…ัฅฝน}ฅ€๔๔๔ฝม•ษ…ัฅฝน%ค์(€€€ฝนอะมษฝ‘ีัQีษนฬ€๔มษฝ‘ีั	ๅ-ฅน …ี‘ฅผนฅนมีะนมษฝ‘ีั}ัีษธคนฅฑั•ศ ก•ู•นะค€๔๘€ก•ู•นะนม…ๅฑฝ…นษ••ฅมะ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•คüนฝม•ษ…ัฅฝน}ฅ€๔๔๔ฝม•ษ…ัฅฝน%ค์(€€€ฝนอะฝม•ษ…ัฅฝธ€๔ฝม•ษ…ัฅฝนฬนฅน ก…น‘ฅ‘…ั”ค€๔๘…น‘ฅ‘…ั”นฅ€๔๔๔ฝม•ษ…ัฅฝน%ค์(€€€ฝนอะอฅฑ•น”€๔Mัษฅนกฝม•ษ…ัฅฝธüนฅนมีะนฅแัีษ•}ฅ€üü€คนัฝ1ฝÝ•ษ…อ” คนฅนฑี‘•ฬ อฅฑ•น”ค์(€€€ฝนอะษ•อฝฑู•‘A…ๅฑฝ…€๔ษ•อฝฑู•‘lมtüนม…ๅฑฝ…์(€€€ฝนอะÝ…ุ€๔ษ•อฝฑู•‘A…ๅฑฝ…üนÝ…ุ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•์(€€€ฝนอะีัั•ษ…น•%€๔ษ•อฝฑู•‘A…ๅฑฝ…üนีัั•ษ…น•}ฅ์(€€€ฝนอะฑ•€๔มษฝ‘ีั1•อlมtüนม…ๅฑฝ…นษ••ฅมะ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•์(€€€ฝนอะฑ•	ฝีน€๔มษฝ‘ีั1•ฬนฑ•นั €๔๔๔€ฤ€ฑ•üนอก•ต€๔๔๔€อฝมกฅ…}•ตฅนฅ}ฅนมีั}ฑ•}ุฤ€ฑ•นอั…ัีฬ€๔๔๔€ู•ษฅฅ•€ฑ•นฝม•ษ…ัฅฝน}ฅ€๔๔๔ฝม•ษ…ัฅฝน%€ฑ•นีัั•ษ…น•}ฅ€๔๔๔ีัั•ษ…น•%€ฑ•นอฝีษ•}อกศิุ€๔๔๔Ý…ุüนอกศิุ€ฑ•น•แม•ั•‘}อฅฑ•น”€๔๔๔อฅฑ•น”€ฑ•นษ…Ý}…ี‘ฅฝ}•แฑี‘•€๔๔๔ัษี”€9ีต•ศกฑ•นษ…ต•}ฝีนะค€๘€ภ€9ีต•ศกฑ•นอ…ตมฑ•}ฝีนะค€๘€ภ€ัๅม•ฝฑ•นมต}อกศิู}ก…ฅธ€๔๔๔€อัษฅน€€ฝymตภดๅu์ุั๔ผนั•อะกฑ•นมต}อกศิู}ก…ฅธค€ฑ•นมต}‘ฅ•อั}…ฑฝษฅักด€๔๔๔€อกดศิุตก…ฅธตุฤ€ฝม•ษ…ัฅฝธ€๔๔ีน‘•ฅน•€ษ•ฝนฅฑ•Aษฝ‘ีั%นมีั1•ก•ฑฅฅฑ”ฐฝม•ษ…ัฅฝธฐฑ•คนู•ษฅฅ•์(€€€ฝนอะมษฝ‘ีัMฅน…ฐ€๔อฅฑ•น”(€€€€€€üฑ•	ฝีน€9ีต•ศกฑ•üนนฝน้•ษฝ}อ…ตมฑ•}ฝีนะค€๔๔๔€ภ€9ีต•ศกฑ•üนมต}ษตฬค€๔๔๔€ภ€9ีต•ศกฑ•üนมต}ม•…ฌค€๔๔๔€ภ(€€€€€€่ฑ•	ฝีน€9ีต•ศกฑ•üนนฝน้•ษฝ}อ…ตมฑ•}ฝีนะค€๘€ภ€9ีต•ศกฑ•üนมต}ษตฬค€๘€ภ€9ีต•ศกฑ•üนมต}ม•…ฌค€๘€ภ์(€€€ฝนอะัีษนI••ฅมัฬ€๔มษฝ‘ีัQีษนฬนต…ภ ก•ู•นะค€๔๘•ู•นะนม…ๅฑฝ…นษ••ฅมะ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘ค์(€€€ฝนอะัีษน	ฝีน€๔ัีษนI••ฅมัฬน•ู•ษไ กษ••ฅมะค€๔๘ษ••ฅมะนอก•ต€๔๔๔€อฝมกฅ…}•ตฅนฅ}ฅนมีั}ัีษน}ุฤ€ษ••ฅมะนฝม•ษ…ัฅฝน}ฅ€๔๔๔ฝม•ษ…ัฅฝน%€ษ••ฅมะนีัั•ษ…น•}ฅ€๔๔๔ีัั•ษ…น•%€ษ••ฅมะนษ…ต•}Ýฅน‘ฝÝ}ฅ€๔๔๔ฑ•üนษ…ต•}Ýฅน‘ฝÝ}ฅ€ษ••ฅมะน•แม•ั•‘}อฅฑ•น”€๔๔๔อฅฑ•น”€ษ••ฅมะนษ…Ý}…ี‘ฅฝ}•แฑี‘•€๔๔๔ัษี”ค์(€€€ฝนอะอ•ต…นัฅM•ััฑ•ต•นะ€๔อฅฑ•น”(€€€€€€üัีษน	ฝีน€ัีษนI••ฅมัฬนอฝต” กษ••ฅมะค€๔๘ษ••ฅมะนอฝีษ”€๔๔๔€อ•ััฑ•ต•นะ€ษ••ฅมะนฝีัฝต”€๔๔๔€นฝ}ีอ•ษ}ัีษน}ฝอ•ษู•ค€€…ัีษนI••ฅมัฬนอฝต” กษ••ฅมะค€๔๘ษ••ฅมะนฝีัฝต”€๔๔๔€ีน•แม•ั•‘}ีอ•ษ}ัีษน}ฝอ•ษู•๑๐ษ••ฅมะนฝีัฝต”€๔๔๔€ีอ•ษ}ัีษน}ฝอ•ษู•ค(€€€€€€่ัีษน	ฝีน€ัีษนI••ฅมัฬนอฝต” กษ••ฅมะค€๔๘ษ••ฅมะนอฝีษ”€๔๔๔€มษฝูฅ‘•ษ}ฅนมีั}ัษ…นอษฅมัฅฝธ€ษ••ฅมะนฝีัฝต”€๔๔๔€มษฝูฅ‘•ษ}ฅนมีั}ัษ…นอษฅมัฅฝน}ฝอ•ษู•ค€ัีษนI••ฅมัฬนอฝต” กษ••ฅมะค€๔๘ษ••ฅมะนอฝีษ”€๔๔๔€มีฑฅ}ีอ•ษ}ัีษธ€ษ••ฅมะนฝีัฝต”€๔๔๔€มีฑฅ}ีอ•ษ}ัีษน}…•มั•ค์(€€€ษ•ัีษธ์ษ•อฝฑู•ฐอก•‘ีฑ•ฐอั…ษั•ฐฝตมฑ•ั•ฐฝษÝ…ษ‘•ฐมษฝ‘ีั1•ฬฐมษฝ‘ีัQีษนฬฐ•แ…ะ่ษ•อฝฑู•นฑ•นั €๔๔๔€ฤ€อก•‘ีฑ•นฑ•นั €๔๔๔€ฤ€อั…ษั•นฑ•นั €๔๔๔€ฤ€ฝตมฑ•ั•นฑ•นั €๔๔๔€ฤ€ฝม•ษ…ัฅฝธüนษ•อีฑะüนอก•‘ีฑ•}ษ••ฅมะ€๔๔ีน‘•ฅน•€มษฝ‘ีัMฅน…ฐ€อ•ต…นัฅM•ััฑ•ต•นะ๔์(€๔์(€ฝนอะม…อฬ€๔€กฅ่อัษฅนฐฝÝน•ศ่M•น…ษฅฝออ•ษัฅฝนlฝÝน•ศtฐ•ูฅ‘•น”่ฅตมฝษะ ธฝ‘ฝต…ฅธนฉฬคน1…ู•นัmtฐษ•…อฝธ่อัษฅน๐นีฑฐ€๔นีฑฐค่M•น…ษฅฝออ•ษัฅฝธ€๔๘€ก์ฅฐฝÝน•ศฐอั…ัีฬ่€ม…อฬฐ•ูฅ‘•น•}อ•ลฬ่•ูฅ‘•น”นต…ภ ก•ู•นะค€๔๘•ู•นะนอ•ฤคฐษ•…อฝธ๔ค์(€ฝนอะ…ฅฐ€๔€กฅ่อัษฅนฐฝÝน•ศ่M•น…ษฅฝออ•ษัฅฝนlฝÝน•ศtฐ•ูฅ‘•น”่ฅตมฝษะ ธฝ‘ฝต…ฅธนฉฬคน1…ู•นัmtฐษ•…อฝธ่อัษฅนค่M•น…ษฅฝออ•ษัฅฝธ€๔๘€ก์ฅฐฝÝน•ศฐอั…ัีฬ่€…ฅฐฐ•ูฅ‘•น•}อ•ลฬ่•ูฅ‘•น”นต…ภ ก•ู•นะค€๔๘•ู•นะนอ•ฤคฐษ•…อฝธ๔ค์(€ฝนอะีน…ู…ฅฑ…ฑ”€๔€กฅ่อัษฅนฐฝÝน•ศ่M•น…ษฅฝออ•ษัฅฝนlฝÝน•ศtฐษ•…อฝธ่อัษฅนค่M•น…ษฅฝออ•ษัฅฝธ€๔๘€ก์ฅฐฝÝน•ศฐอั…ัีฬ่€ีน…ู…ฅฑ…ฑ”ฐ•ูฅ‘•น•}อ•ลฬ่mtฐษ•…อฝธ๔ค์(€ฝนอะก•ฌ€๔€กฅ่อัษฅนฐฝÝน•ศ่M•น…ษฅฝออ•ษัฅฝนlฝÝน•ศtฐฝน‘ฅัฅฝธ่ฝฝฑ•…ธฐ•ูฅ‘•น”่ฅตมฝษะ ธฝ‘ฝต…ฅธนฉฬคน1…ู•นัmtฐตฅออฅน่อัษฅนฐ…ฅฑีษ”€๔ตฅออฅนค่M•น…ษฅฝออ•ษัฅฝธ€๔๘•ูฅ‘•น”นฑ•นั €๔๔๔€ภ€üีน…ู…ฅฑ…ฑ”กฅฐฝÝน•ศฐตฅออฅนค€่ฝน‘ฅัฅฝธ€üม…อฬกฅฐฝÝน•ศฐ•ูฅ‘•น”ค€่…ฅฐกฅฐฝÝน•ศฐ•ูฅ‘•น”ฐ…ฅฑีษ”ค์(€ฝนอะก…ษน•อฬ่M•น…ษฅฝออ•ษัฅฝนmt€๔mt์(€ฝนอะมษฝ‘ีะ่M•น…ษฅฝออ•ษัฅฝนmt€๔mt์(€ฝนอะ…ฑฑก…ฅนู•นัฬ€๔ฅนฉ•ั•นฑ…ั5…ภ กฝม•ษ…ัฅฝธค€๔๘=ฉ•ะนู…ฑี•ฬกก…ฅธกฝม•ษ…ัฅฝธนฅคคนฑ…ั5…ภ กู…ฑี”ค€๔๘ษษ…ไนฅอษษ…ไกู…ฑี”ค€üู…ฑี”€่mtคค์(€ฝนอะ•แ…ัก…ฅนฬ€๔ฅนฉ•ั•นฑ•นั €๘€ภ€ฅนฉ•ั•น•ู•ษไ กฝม•ษ…ัฅฝธค€๔๘ก…ฅธกฝม•ษ…ัฅฝธนฅคน•แ…ะค์(€ฝนอะฅนั•ษู…ฑฬ€๔ฅนฉ•ั•นต…ภ กฝม•ษ…ัฅฝธค€๔๘€ก์ฝม•ษ…ัฅฝธฐอั…ษะ่ก…ฅธกฝม•ษ…ัฅฝธนฅคนอั…ษั•‘lมtฐฝตมฑ•ั”่ก…ฅธกฝม•ษ…ัฅฝธนฅคนฝตมฑ•ั•‘lมt๔คคนฅฑั•ศ กฅั•ดค€๔๘ฅั•ดนอั…ษะ€ฅั•ดนฝตมฑ•ั”คนอฝษะ กฑ•ะฐษฅกะค€๔๘ฑ•ะนอั…ษะนอ•ฤ€ดษฅกะนอั…ษะนอ•ฤค์(€ฝนอะนฝ=ู•ษฑ…ภ€๔ฅนั•ษู…ฑฬนฑ•นั €๔๔๔ฅนฉ•ั•นฑ•นั €ฅนั•ษู…ฑฬน•ู•ษไ กฅั•ดฐฅน‘•เค€๔๘ฅน‘•เ€๔๔๔€ภ๑๐ฅนั•ษู…ฑอmฅน‘•เ€ด€ลtนฝตมฑ•ั”นอ•ฤ€๐ฅั•ดนอั…ษะนอ•ฤค์((€อÝฅั €กษีธนอ•น…ษฅฝ%ค์(€€€…อ”€Xตภฤ่์(€€€€€ก…ษน•อฬนมีอ กฅนฉ•ั•นฑ•นั €๔๔๔€ุ€üม…อฬ ภฤนษ••ัฅน}มฑีอ}ฅู•}…‘…มัฅู•}ีัั•ษ…น•ฬฐ€ก…ษน•อฬฐ…ฑฑก…ฅนู•นัฬค€่…ฅฐ ภฤนษ••ัฅน}มฑีอ}ฅู•}…‘…มัฅู•}ีัั•ษ…น•ฬฐ€ก…ษน•อฬฐ…ฑฑก…ฅนู•นัฬฐฝอ•ษู•‘|‘ํฅนฉ•ั•นฑ•นัก๕€คค์(€€€€€ก…ษน•อฬนมีอ กก•ฌ ภฤนฅน‘•ม•น‘•นั}มต}ก…ฅนฬฐ€ก…ษน•อฬฐ•แ…ัก…ฅนฬฐ…ฑฑก…ฅนู•นัฬฐ€•แ…ั}อก•‘ีฑ•}อั…ษั}มต}ฝตมฑ•ั•}ก…ฅนอ}ีน…ู…ฅฑ…ฑ”คค์(€€€€€ก…ษน•อฬนมีอ กก•ฌ ภฤนนฝ}ีนฅนั•น‘•‘}ฝู•ษฑ…ภฐ€ก…ษน•อฬฐนฝ=ู•ษฑ…ภฐฅนั•ษู…ฑฬนฑ…ั5…ภ กฅั•ดค€๔๘mฅั•ดนอั…ษะฐฅั•ดนฝตมฑ•ั”…tคฐ€ฅนมีั}ฅนั•ษู…ฑอ}ีน…ู…ฅฑ…ฑ”คค์(€€€€€ฝนอะ•น‘•€๔มษฝ‘ีัู•นัฬนฅฑั•ศ ก•ู•นะค€๔๘•ู•นะนญฅนน•น‘อ]ฅั  นอฝมกฅนัีษธค€€ ก•ู•นะนม…ๅฑฝ…น‘…ั…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•คüนมก…อ”€๔๔๔€…•นั}•น‘•๑๐•ู•นะนม…ๅฑฝ…นมก…อ”€๔๔๔€…•นั}•น‘•คค์(€€€€€ฝนอะฝษ‘•ษ•‘%นมีัฬ€๔lธธนฅนฉ•ั•‘tนอฝษะ กฑ•ะฐษฅกะค€๔๘ฑ•ะนษ•…ั•‘ะน•ัQฅต” ค€ดษฅกะนษ•…ั•‘ะน•ัQฅต” คค์(€€€€€ฝนอะฝอ•ษู…ัฅฝนู•นัฬ่ฅตมฝษะ ธฝ‘ฝต…ฅธนฉฬคน1…ู•นัmt€๔mt์(€€€€€ฝนอะฝอ•ษู…ัฅฝนM•ลฬ€๔น•ÜM•ะ๑นีต•ศ๘ ค์(€€€€€ฝนอะฝอ•ษู…ัฅฝนQีษน%‘ฬ€๔น•ÜM•ะ๑อัษฅน๘ ค์(€€€€€ฝนอะ…‘…มัฅู”€๔ฝษ‘•ษ•‘%นมีัฬนฑ•นั €๔๔๔€ุ€ฝษ‘•ษ•‘%นมีัอlมtüนฅนมีะน…‘…มัฅู•}ฝอ•ษู…ัฅฝธ€๔๔๔ีน‘•ฅน•€ฝษ‘•ษ•‘%นมีัฬนอฑฅ” ฤคน•ู•ษไ กฝม•ษ…ัฅฝธฐฅน‘•เค€๔๘์(€€€€€€€ฝนอะฝอ•ษู…ัฅฝธ€๔ฝม•ษ…ัฅฝธนฅนมีะน…‘…มัฅู•}ฝอ•ษู…ัฅฝธ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•์(€€€€€€€ฝนอะ•ู•นัM•ฤ€๔9ีต•ศกฝอ•ษู…ัฅฝธüน•ู•นั}อ•ฤค์(€€€€€€€ฝนอะัีษน%€๔ฝอ•ษู…ัฅฝธüนัีษน}ฅ์(€€€€€€€ฝนอะ•แม•ั•‘ีษอฝศ€๔9ีต•ศกฝม•ษ…ัฅฝธนฅนมีะน•แม•ั•‘}ีษอฝศค์(€€€€€€€ฝนอะ•แม•ั•‘Qีษน%€๔ฝม•ษ…ัฅฝธนฅนมีะน•แม•ั•‘}ัีษน}ฅ์(€€€€€€€ฝนอะฝอ•ษู…ัฅฝนฑ…อฬ€๔ฝอ•ษู…ัฅฝธüนฝอ•ษู…ัฅฝน}ฑ…อฬ์(€€€€€€€ฝนอะฝฑฑฝÝีม%นั•นะ€๔ฝอ•ษู…ัฅฝธüนฝฑฑฝÝีม}ฅนั•นะ์(€€€€€€€ฝนอะั…ษ•ะ€๔•น‘•นฅน ก•ู•นะค€๔๘•ู•นะนอ•ฤ€๔๔๔•ู•นัM•ฤค์(€€€€€€€ฝนอะั…ษ•ั…ั€๔ั…ษ•ะüนม…ๅฑฝ…น‘…ั…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•์(€€€€€€€ฝนอะมษ•ูฅฝีอก…ฅธ€๔ก…ฅธกฝษ‘•ษ•‘%นมีัอmฅน‘•แtนฅค์(€€€€€€€ฝนอะีษษ•นัก…ฅธ€๔ก…ฅธกฝม•ษ…ัฅฝธนฅค์(€€€€€€€ฝนอะีษษ•นัMั…ษะ€๔ีษษ•นัก…ฅธนอั…ษั•‘lมt์(€€€€€€€ฝนอะมษ••‘ฅนน‘•€๔ีษษ•นัMั…ษะ€ü•น‘•นฅฑั•ศ ก•ู•นะค€๔๘•ู•นะนอ•ฤ€๐ีษษ•นัMั…ษะนอ•ฤคน…ะ ดฤค€่ีน‘•ฅน•์(€€€€€€€ฅ€กั…ษ•ะคฝอ•ษู…ัฅฝนู•นัฬนมีอ กั…ษ•ะค์(€€€€€€€ฝนอะ•แ…ะ€๔ั…ษ•ะ€๔๔ีน‘•ฅน•€มษ••‘ฅนน‘•üนอ•ฤ€๔๔๔ั…ษ•ะนอ•ฤ€ั…ษ•ั…ัüนมก…อ”€๔๔๔€…•นั}•น‘•€ั…ษ•ั…ันัีษน%€๔๔๔ัีษน%(€€€€€€€€€€•แม•ั•‘Qีษน%€๔๔๔ัีษน%€9ีต•ศนฅอM…•%นั••ศก•แม•ั•‘ีษอฝศค€•แม•ั•‘ีษอฝศ€๘๔•ู•นัM•ฤ(€€€€€€€€€€มษ•ูฅฝีอก…ฅธนฝตมฑ•ั•นฑ•นั €๔๔๔€ฤ€ีษษ•นัก…ฅธนอั…ษั•นฑ•นั €๔๔๔€ฤ€มษ•ูฅฝีอก…ฅธนฝตมฑ•ั•‘lมtนอ•ฤ€๐•ู•นัM•ฤ€•ู•นัM•ฤ€๐ีษษ•นัก…ฅธนอั…ษั•‘lมtนอ•ฤ(€€€€€€€€€€ฝม•ษ…ัฅฝธนษ•…ั•‘ะน•ัQฅต” ค€๘๔ั…ษ•ะน…ะน•ัQฅต” ค(€€€€€€€€€€l…ออฅอั…นั}ัีษน}ฝตมฑ•ั”ฐ€…ออฅอั…นั}ลี•อัฅฝธฐ€…ออฅอั…นั}ษ•อีฑะฐ€…ออฅอั…นั}ีน•ษั…ฅนัไฐ€…ออฅอั…นั}ฝตตฅัต•นะtนฅนฑี‘•ฬกMัษฅนกฝอ•ษู…ัฅฝนฑ…อฬคค(€€€€€€€€€€lฑ…ษฅไฐ€‘••ม•ธฐ€ู•ษฅไฐ€ษ•‘ฅษ•ะฐ€อีตต…ษฅ้”tนฅนฑี‘•ฬกMัษฅนกฝฑฑฝÝีม%นั•นะคค€€…ฝอ•ษู…ัฅฝนM•ลฬนก…ฬก•ู•นัM•ฤค(€€€€€€€€€€ัๅม•ฝัีษน%€๔๔๔€อัษฅน€ัีษน%นฑ•นั €๘€ภ€€…ฝอ•ษู…ัฅฝนQีษน%‘ฬนก…ฬกัีษน%ค์(€€€€€€€ฝอ•ษู…ัฅฝนM•ลฬน…‘ก•ู•นัM•ฤค์(€€€€€€€ฅ€กัๅม•ฝัีษน%€๔๔๔€อัษฅนคฝอ•ษู…ัฅฝนQีษน%‘ฬน…‘กัีษน%ค์(€€€€€€€ษ•ัีษธ•แ…ะ์(€€€€€๔ค์(€€€€€ก…ษน•อฬนมีอ กก•ฌ ภฤนฅู•}…‘…มัฅู•}ัีษน}ฝีน‘…ษฅ•ฬฐ€ก…ษน•อฬฐ…‘…มัฅู”ฐlธธน•น‘•ฐ€ธธนฝอ•ษู…ัฅฝนู•นัอtฐ€ฅู•}•แ…ั}ฝอ•ษู…ัฅฝน}ฝีน‘}ฝฑฑฝÝีมอ}ีน…ู…ฅฑ…ฑ”คค์(€€€€€ฝนอะัษ…นอษฅมัฬ€๔มษฝ‘ีั	ๅ-ฅน …ี‘ฅผนฅนมีะนมษฝ‘ีั}ัีษธคนฅฑั•ศ ก•ู•นะค€๔๘€ก•ู•นะนม…ๅฑฝ…นษ••ฅมะ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•คüนอฝีษ”€๔๔๔€มษฝูฅ‘•ษ}ฅนมีั}ัษ…นอษฅมัฅฝธ€€ก•ู•นะนม…ๅฑฝ…นษ••ฅมะ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•คüนฝีัฝต”€๔๔๔€มษฝูฅ‘•ษ}ฅนมีั}ัษ…นอษฅมัฅฝน}ฝอ•ษู•ค์(€€€€€ฝนอะฝษษ•ฑ…ั•€๔ฅนฉ•ั•นฑ•นั €๔๔๔€ุ€ฅนฉ•ั•น•ู•ษไ กฝม•ษ…ัฅฝธค€๔๘ัษ…นอษฅมัฬนฅฑั•ศ ก•ู•นะค€๔๘€ก•ู•นะนม…ๅฑฝ…นษ••ฅมะ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•คüนฝม•ษ…ัฅฝน}ฅ€๔๔๔ฝม•ษ…ัฅฝธนฅคนฑ•นั €๔๔๔€ฤค์(€€€€€ก…ษน•อฬนมีอ กก•ฌ ภฤนฝม•ษ…ัฅฝน}ัฝ}มษฝ‘ีั}ัษ…นอษฅมั}ฝษษ•ฑ…ัฅฝธฐ€ก…ษน•อฬฐฝษษ•ฑ…ั•ฐัษ…นอษฅมัฬฐ€…มม}…ีักฝษ•‘}ฝม•ษ…ัฅฝน}ัฝ}ัษ…นอษฅมั}ฝษษ•ฑ…ัฅฝน}ีน…ู…ฅฑ…ฑ”คค์(€€€€€€ผผQก”ษีนน•ศมษฝู•ฬ•แ…ะ…ีอ…ฐฝอ•ษู…ัฅฝธฅน‘ฅน…น‘•ฑ…ษ•ฅนั•นะ์(€€€€€€ผผกฅ‘‘•ธษ•…อฝนฅนมษฝู•น…น”ษ•ต…ฅนฬอีมมฑ•ต•นั…ฐมฑ…ัฝษด•ูฅ‘•น”ธ(€€€€€มษฝ‘ีะนมีอ กีน…ู…ฅฑ…ฑ” ภฤนอีมมฑ•ต•นั…ฑ}…‘…มัฅู•}…•นั}ษ•…อฝนฅน}มษฝู•น…น”ฐ€มษฝ‘ีะฐ€มฑ…ัฝษต}…ีักฝษ•‘}…‘…มัฅู•}‘•ฅอฅฝน}มษฝู•น…น•}นฝั}…ัั…ก•คค์(€€€€€มษฝ‘ีะนมีอ กก•ฌ ภฤนอฅแ}ฝษษ•ฑ…ั•‘}ัษ…นอษฅมัฬฐ€มษฝ‘ีะฐฝษษ•ฑ…ั•ฐัษ…นอษฅมัฬฐ€ฝม•ษ…ัฅฝน}ฝษษ•ฑ…ั•‘}ัษ…นอษฅมัอ}ีน…ู…ฅฑ…ฑ”คค์(€€€€€€ผผษ•…ฑฅ้…ัฅฝน%ฅฬกีนฌฅ‘•นัฅัไฐนฝะ…ธ…ออฅอั…นะตษ•อมฝนอ”ฅ‘•นัฅัไธ(€€€€€€ผผUนัฅฐัก”มษฝ‘ีะ•ตฅัฬัก”ษฝ้•ธฝม•ษ…ัฅฝธฝฅนมีะตัีษธ€ด๘…ออฅอั…นะ(€€€€€€ผผัีษธฝษ•อมฝนอ”€ด๘•ู•ษไฝีัมีะตกีนฌฑฅน•…”ฐอ…ต”ตษีธัีษธฝกีนฌฝีนัฬ(€€€€€€ผผ…นนฝะ•ษัฅไอฅเ…ีอ…ฐฐนฝธตอั…ญ•ษ•อมฝนอ•ฬธ(€€€€€มษฝ‘ีะนมีอ กีน…ู…ฅฑ…ฑ” ภฤนอฅแ}นฝนอั…ญ•‘}ษ•อมฝนอ•ฬฐ€มษฝ‘ีะฐ€มษฝ‘ีั}…ีักฝษ•‘}ฅนมีั}ฝม•ษ…ัฅฝน}ัฝ}…ออฅอั…นั}ัีษน}ษ•อมฝนอ•}ฝีัมีั}ฑฅน•…•}ีน…ู…ฅฑ…ฑ”คค์(€€€€€ษ•…ฌ์(€€€๔(€€€…อ”€Xตภศ่์(€€€€€ฝนอะฅแัีษ•%‘ฬ€๔ฅนฉ•ั•นต…ภ กฝม•ษ…ัฅฝธค€๔๘Mัษฅนกฝม•ษ…ัฅฝธนฅนมีะนฅแัีษ•}ฅ€üü€คค์(€€€€€ฝนอะ•แม•ั•€๔lภษ}อกฝษั}ฝตต…นฐ€ภษ}ฑฝน}ษฅ•ฐ€ภษ}อฅฑ•น”ฐ€ภษ}ัษ…ฅฑฅน}ม…ีอ”ฐ€ภษ}นฝฅอๅ}ฝตต…นt์(€€€€€ฝนอะษ•อฝฑู•€๔ๅ-ฅน ีัั•ษ…น”นษ•อฝฑู•คนฅฑั•ศ ก•ู•นะค€๔๘ฅนฉ•ั•นอฝต” กฝม•ษ…ัฅฝธค€๔๘•แ…ั=ม•ษ…ัฅฝธก•ู•นะฐฝม•ษ…ัฅฝธนฅคคค์(€€€€€ก…ษน•อฬนมีอ กฅแัีษ•%‘ฬนฑ•นั €๔๔๔€ิ€•แม•ั•น•ู•ษไ กฅค€๔๘ฅแัีษ•%‘ฬนฅนฑี‘•ฬกฅคค€üม…อฬ ภศน…ฑฑ}ฅู•}ฅแัีษ•}ฑ…ออ•ฬฐ€ก…ษน•อฬฐษ•อฝฑู•ค€่…ฅฐ ภศน…ฑฑ}ฅู•}ฅแัีษ•}ฑ…ออ•ฬฐ€ก…ษน•อฬฐษ•อฝฑู•ฐ€ษ•ลีฅษ•‘}ฅแัีษ•}ฑ…ออ}ตฅออฅน}ฝษ}‘ีมฑฅ…ั•คค์(€€€€€ฝนอะ…ััษฅีั…ฑ”€๔ษ•อฝฑู•นฑ•นั €๔๔๔€ิ€ษ•อฝฑู•น•ู•ษไ ก•ู•นะค€๔๘์(€€€€€€€ฝนอะฅแัีษ”€๔•ู•นะนม…ๅฑฝ…นฅแัีษ”…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•์(€€€€€€€ฝนอะอฝีษ•Q•แะ€๔ฅแัีษ”üนอฝีษ•Q•แะ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•์(€€€€€€€ษ•ัีษธัๅม•ฝฅแัีษ”üนฅแัีษ•Y•ษอฅฝธ€๔๔๔€อัษฅน€อฝีษ•Q•แะüนอั…ัีฬ€๔๔๔€…ู…ฅฑ…ฑ”€ัๅม•ฝอฝีษ•Q•แะนอกศิุ€๔๔๔€อัษฅน์(€€€€€๔ค์(€€€€€ก…ษน•อฬนมีอ กก•ฌ ภศนฅแัีษ•}…ััษฅีัฅฝน}ษ•มฑ…ๅ…ฑ”ฐ€ก…ษน•อฬฐ…ััษฅีั…ฑ”€•แ…ัก…ฅนฬฐlธธนษ•อฝฑู•ฐ€ธธน…ฑฑก…ฅนู•นัอtฐ€ฝู•ษน•‘}ฅแัีษ•}ฝษ}มต}ก…ฅน}ีน…ู…ฅฑ…ฑ”คค์(€€€€€ฝนอะอฅฑ•น”€๔ฅนฉ•ั•นฅน กฝม•ษ…ัฅฝธค€๔๘ฝม•ษ…ัฅฝธนฅนมีะนฅแัีษ•}ฅ€๔๔๔€ภษ}อฅฑ•น”ค์(€€€€€ฝนอะอฅฑ•น•ก…ฅธ€๔อฅฑ•น”€üก…ฅธกอฅฑ•น”นฅค€่นีฑฐ์(€€€€€ฝนอะอฅฑ•น•M•ต…นัฅ€๔อฅฑ•น”€üมษฝ‘ีั	ๅ-ฅน …ี‘ฅผนฅนมีะนมษฝ‘ีั}ัีษธคนฅฑั•ศ ก•ู•นะค€๔๘€ก•ู•นะนม…ๅฑฝ…นษ••ฅมะ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•คüนฝม•ษ…ัฅฝน}ฅ€๔๔๔อฅฑ•น”นฅ€€ก•ู•นะนม…ๅฑฝ…นษ••ฅมะ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•คüนฝีัฝต”€๔๔€นฝ}ีอ•ษ}ัีษน}ฝอ•ษู•ค€่mt์(€€€€€ฝนอะอฅฑ•น•M•ััฑ•€๔อฅฑ•น”€üมษฝ‘ีั	ๅ-ฅน …ี‘ฅผนฅนมีะนมษฝ‘ีั}ัีษธคนฅฑั•ศ ก•ู•นะค€๔๘์(€€€€€€€ฝนอะษ••ฅมะ€๔•ู•นะนม…ๅฑฝ…นษ••ฅมะ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•์(€€€€€€€ษ•ัีษธษ••ฅมะüนฝม•ษ…ัฅฝน}ฅ€๔๔๔อฅฑ•น”นฅ€ษ••ฅมะนอฝีษ”€๔๔๔€อ•ััฑ•ต•นะ€ษ••ฅมะนฝีัฝต”€๔๔๔€นฝ}ีอ•ษ}ัีษน}ฝอ•ษู•์(€€€€€๔ค€่mt์(€€€€€ก…ษน•อฬนมีอ  …อฅฑ•น”๑๐€…อฅฑ•น•ก…ฅธüน•แ…ะ(€€€€€€€€üีน…ู…ฅฑ…ฑ” ภศนอฅฑ•น•}นฝ}…ษฅ…ั•‘}ัีษธฐ€ก…ษน•อฬฐ€•แ…ั}มษฝ‘ีั}มต}…น‘}อ•ััฑ•ต•นั}ก…ฅน}ีน…ู…ฅฑ…ฑ”ค(€€€€€€€€่อฅฑ•น•M•ต…นัฅนฑ•นั €๘€ภ(€€€€€€€€€€ü…ฅฐ ภศนอฅฑ•น•}นฝ}…ษฅ…ั•‘}ัีษธฐ€ก…ษน•อฬฐอฅฑ•น•M•ต…นัฅฐ€ฝม•ษ…ัฅฝน}ฝษษ•ฑ…ั•‘}มษฝ‘ีั}อ•ต…นัฅ}ัีษน}ฝอ•ษู•‘}ฝษ}อฅฑ•น”ค(€€€€€€€€€€่อฅฑ•น•M•ััฑ•นฑ•นั €๔๔๔€ฤ(€€€€€€€€€€€€üม…อฬ ภศนอฅฑ•น•}นฝ}…ษฅ…ั•‘}ัีษธฐ€ก…ษน•อฬฐlธธนอฅฑ•น•ก…ฅธนมษฝ‘ีั1•ฬฐ€ธธนอฅฑ•น•M•ััฑ•‘tค(€€€€€€€€€€€€่ีน…ู…ฅฑ…ฑ” ภศนอฅฑ•น•}นฝ}…ษฅ…ั•‘}ัีษธฐ€ก…ษน•อฬฐ€มษฝ‘ีั}…ีักฝษ•‘}ฝม•ษ…ัฅฝน}ฝษษ•ฑ…ั•‘}อ•ััฑ•‘}นฝ}••ั}Ýฅน‘ฝÝ}ีน…ู…ฅฑ…ฑ”คค์(€€€€€มษฝ‘ีะนมีอ กีน…ู…ฅฑ…ฑ” ภศนฅแัีษ•}อ•ต…นัฅ}ักษ•อกฝฑ‘ฬฐ€มษฝ‘ีะฐ€ฝÝนฅน}อ•ต…นัฅ}ักษ•อกฝฑ‘}•ู…ฑี…ัฝษ}นฝั}…ัั…ก•คค์(€€€€€ษ•…ฌ์(€€€๔(€€€…อ”€Xตภฬ่์(€€€€€ฝนอะ•ูฅ‘•น”€๔ฅนฉ•ั•นฑ…ั5…ภ กฝม•ษ…ัฅฝธค€๔๘=ฉ•ะนู…ฑี•ฬกก…ฅธกฝม•ษ…ัฅฝธนฅคคนฑ…ั5…ภ กู…ฑี”ค€๔๘ษษ…ไนฅอษษ…ไกู…ฑี”ค€üู…ฑี”€่mtคค์(€€€€€ก…ษน•อฬนมีอ กฅนฉ•ั•นฑ•นั €๔๔๔€ฤ€üม…อฬ ภฬนอฅนฑ•}‘ีษ…ฑ•}ฝม•ษ…ัฅฝธฐ€ก…ษน•อฬฐ•ูฅ‘•น”ค€่…ฅฐ ภฬนอฅนฑ•}‘ีษ…ฑ•}ฝม•ษ…ัฅฝธฐ€ก…ษน•อฬฐ•ูฅ‘•น”ฐฝอ•ษู•‘|‘ํฅนฉ•ั•นฑ•นัก๕€คค์(€€€€€ฝนอะษ•มฑ…ๅฬ€๔ๅ-ฅน ฝม•ษ…ัฅฝธนอม•…ฌนฅ‘•ตมฝั•นั}ษ•มฑ…ไคนฅฑั•ศ ก•ู•นะค€๔๘ฅนฉ•ั•‘lมt€•ู•นะนม…ๅฑฝ…นฝม•ษ…ัฅฝน}ฅ€๔๔๔ฅนฉ•ั•‘lมtนฅ€•ู•นะนม…ๅฑฝ…น•แ…ั}ษ•ลี•อั}ก…อก}ษ•มฑ…ไ€๔๔๔ัษี”€•ู•นะนม…ๅฑฝ…นนฝ}น•Ý}ฝม•ษ…ัฅฝธ€๔๔๔ัษี”ค์(€€€€€ฝนอะฑฝออัั•อั…ัฅฝนฬ€๔•แั•ษน…ฑัั•อั…ัฅฝนฬ ภอ}กััม}ษ•อมฝนอ•}ฑฝอฬคนฅฑั•ศ ก•ู•นะค€๔๘์(€€€€€€€ฝนอะมษฝฝ€๔•ู•นะนม…ๅฑฝ…น•ูฅ‘•น”…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•์(€€€€€€€ษ•ัีษธฅนฉ•ั•‘lมt€๔๔ีน‘•ฅน•€มษฝฝüน…ีักฝษฅัไ€๔๔๔€•แั•ษน…ฑ}ตม}ฑฅ•นะ€มษฝฝนฝม•ษ…ัฅฝน}ฅ€๔๔๔ฅนฉ•ั•‘lมtนฅ€มษฝฝนษ•มฑ…ๅ•‘}ฝม•ษ…ัฅฝน}ฅ€๔๔๔ฅนฉ•ั•‘lมtนฅ(€€€€€€€€€€มษฝฝนษ•ลี•อั}อกศิุ€๔๔๔ฅนฉ•ั•‘lมtนษ•ลี•อั!…อ €มษฝฝนฅ‘•ตมฝั•นๅ}ญ•ๅ}อกศิุ€๔๔๔อกศิุกฅนฉ•ั•‘lมtนฅ‘•ตมฝั•นๅ-•ไค€มษฝฝนฅนฅัฅ…ฑ}ษ•อมฝนอ•}ฝอ•ษู•€๔๔๔…ฑอ”€มษฝฝนัษ…นอมฝษั}ฝีัฝต”€๔๔๔€ฝนน•ัฅฝน}ฑฝอ•‘}…ั•ษ}‘ีษ…ฑ•}…•มั…น”์(€€€€€๔ค์(€€€€€ก…ษน•อฬนมีอ กฑฝออัั•อั…ัฅฝนฬนฑ•นั €๔๔๔€ภ(€€€€€€€€üีน…ู…ฅฑ…ฑ” ภฬนฑฅ•นั}ษ•อมฝนอ•}ฑฝออ}ฝีน‘…ษไฐ€ก…ษน•อฬฐ€มษฅูฅฑ••‘}•แั•ษน…ฑ}ฑฅ•นั}ษ•อมฝนอ•}ฑฝออ}…ัั•อั…ัฅฝน}นฝั}…ัั…ก•ค(€€€€€€€€่ก•ฌ ภฬนฑฅ•นั}ษ•อมฝนอ•}ฑฝออ}ฝีน‘…ษไฐ€ก…ษน•อฬฐฑฝออัั•อั…ัฅฝนฬนฑ•นั €๔๔๔€ฤฐฑฝออัั•อั…ัฅฝนฬฐ€อฅนฑ•}•แ…ั}ฑฅ•นั}ษ•อมฝนอ•}ฑฝออ}…ัั•อั…ัฅฝน}ีน…ู…ฅฑ…ฑ”คค์(€€€€€ก…ษน•อฬนมีอ กฑฝออัั•อั…ัฅฝนฬนฑ•นั €๔๔๔€ภ(€€€€€€€€üีน…ู…ฅฑ…ฑ” ภฬนอ…ต•}ญ•ๅ}ฑฅ•นั}ษ•มฑ…ๅ}ษ•ัีษนอ}ฝษฅฅน…ฑ}ฝม•ษ…ัฅฝธฐ€ก…ษน•อฬฐ€ษ•อมฝนอ•}ฑฝออ}ฝีน‘…ษๅ}นฝั}•แั•ษน…ฑฑๅ}…ัั•อั•ค(€€€€€€€€่ก•ฌ ภฬนอ…ต•}ญ•ๅ}ฑฅ•นั}ษ•มฑ…ๅ}ษ•ัีษนอ}ฝษฅฅน…ฑ}ฝม•ษ…ัฅฝธฐ€ก…ษน•อฬฐฅนฉ•ั•นฑ•นั €๔๔๔€ฤ€ษ•มฑ…ๅฬนฑ•นั €๔๔๔€ฤ€ฑฝออัั•อั…ัฅฝนฬนฑ•นั €๔๔๔€ฤฐlธธนษ•มฑ…ๅฬฐ€ธธนฑฝออัั•อั…ัฅฝนอtฐ€อ…ต•}ญ•ๅ}ตม}ษ•มฑ…ๅ}‘ฅ‘}นฝั}ฉฝฅน}•แั•ษน…ฑ}ษ•อมฝนอ•}ฑฝออ}ษ••ฅมะคค์(€€€€€€ผผีอ•ศัษ…นอษฅมะ…ฑฝน”‘ฝ•ฬนฝะฝÝธฑ…ั•ศตฝ‘•ฐฝฝีัมีะฝัฝฝฐ••ะธ(€€€€€€ผผM…ต”ตษีธษ…น‘ฝด%ฬ…นฑฝ…ฐ…ษ‘ฅน…ฑฅัไ…ษ”•แมฑฅฅัฑไฅนอีฅฅ•นะ(€€€€€€ผผฝศฑฝอะตษ•อมฝนอ”…ะตตฝอะตฝน”มษฝฝธ(€€€€€มษฝ‘ีะนมีอ กีน…ู…ฅฑ…ฑ” ภฬน•แ…ัฑๅ}ฝน•}มษฝ‘ีั}ัีษน}••ะฐ€มษฝ‘ีะฐ€มษฝ‘ีั}…ีักฝษ•‘}ฅนมีั}ฝม•ษ…ัฅฝน}ัฝ}…ออฅอั…นั}ัีษน}ษ•อมฝนอ•}…น‘}…ญ•น‘}••ั}ฑฅน•…•}ีน…ู…ฅฑ…ฑ”คค์(€€€€€ษ•…ฌ์(€€€๔(€€€…อ”€Xต<ภฤ่์(€€€€€ฝนอะษ••ฅู•€๔มษฝ‘ีั	ๅ-ฅน …ี‘ฅผนฝีัมีะนษ••ฅู•ค์(€€€€€ฝนอะมษฝูฅ‘•ษกีนญฬ€๔มษฝ‘ีั	ๅ-ฅน …ี‘ฅผนฝีัมีะนมษฝูฅ‘•ษ}กีนฌค์(€€€€€ฝนอะมฑ…ๅ…ฌ€๔l…ี‘ฅผนฝีัมีะนอก•‘ีฑ•ฐ€…ี‘ฅผนฝีัมีะนอั…ษั•ฐ€…ี‘ฅผนฝีัมีะนฝตมฑ•ั•tนฑ…ั5…ภกมษฝ‘ีั	ๅ-ฅนค์(€€€€€ฝนอะฑ•ฬ€๔มษฝ‘ีั	ๅ-ฅน …ี‘ฅผนฝีัมีะนฑ•}ษ••ฅมะค์(€€€€€ฝนอะก…ฅนฬ€๔ฑ•ฬนต…ภ กฑ•ู•นะค€๔๘์(€€€€€€€ฝนอะฑ•€๔ฑ•ู•นะนม…ๅฑฝ…นษ••ฅมะ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•์(€€€€€€€ฝนอะษ•…ฑฅ้…ัฅฝน%€๔ัๅม•ฝฑ•üนษ•…ฑฅ้…ัฅฝน%€๔๔๔€อัษฅน€üฑ•นษ•…ฑฅ้…ัฅฝน%€่นีฑฐ์(€€€€€€€ฝนอะษ••ฅมัฬ€๔มฑ…ๅ…ฌนฅฑั•ศ ก•ู•นะค€๔๘€ก•ู•นะนม…ๅฑฝ…นษ••ฅมะ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•คüนษ•…ฑฅ้…ัฅฝน%€๔๔๔ษ•…ฑฅ้…ัฅฝน%ค์(€€€€€€€ฝนอะอก•‘ีฑ•€๔ษ••ฅมัฬนฅฑั•ศ ก•ู•นะค€๔๘€ก•ู•นะนม…ๅฑฝ…นษ••ฅมะ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•คüนมก…อ”€๔๔๔€อก•‘ีฑ•ค์(€€€€€€€ฝนอะอั…ษั•€๔ษ••ฅมัฬนฅฑั•ศ ก•ู•นะค€๔๘€ก•ู•นะนม…ๅฑฝ…นษ••ฅมะ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•คüนมก…อ”€๔๔๔€อั…ษั•ค์(€€€€€€€ฝนอะฝตมฑ•ั•€๔ษ••ฅมัฬนฅฑั•ศ ก•ู•นะค€๔๘€ก•ู•นะนม…ๅฑฝ…นษ••ฅมะ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•คüนมก…อ”€๔๔๔€ฝตมฑ•ั•ค์(€€€€€€€ฝนอะั•ษตฅน…ฐ€๔ฝตมฑ•ั•‘lมtüนม…ๅฑฝ…นษ••ฅมะ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•์(€€€€€€€ฝนอะษ••ฅู•‘ู•นะ€๔ษ••ฅู•นฅน ก•ู•นะค€๔๘์(€€€€€€€€€ฝนอะ‘ฅ…นฝอัฅ€๔•ู•นะนม…ๅฑฝ…น‘ฅ…นฝอัฅ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•์(€€€€€€€€€ษ•ัีษธ‘ฅ…นฝอัฅüนมษฝูฅ‘•ษI••ฅู•M•ลี•น”€๔๔๔ั•ษตฅน…ฐüนมษฝูฅ‘•ษI••ฅู•M•ลี•น”(€€€€€€€€€€€€‘ฅ…นฝอัฅüนมษฝูฅ‘•ษฝนน•ัฅฝนมฝ €๔๔๔ั•ษตฅน…ฐüนมษฝูฅ‘•ษฝนน•ัฅฝนมฝ (€€€€€€€€€€€€‘ฅ…นฝอัฅüนมฑ…ๅ…ญ•น•ษ…ัฅฝธ€๔๔๔ั•ษตฅน…ฐüนมฑ…ๅ…ญ•น•ษ…ัฅฝธ(€€€€€€€€€€€€‘ฅ…นฝอัฅüนษ•ฑ…ๅฝษษ•ฑ…ัฅฝน%€๔๔๔ั•ษตฅน…ฐüนษ•ฑ…ๅฝษษ•ฑ…ัฅฝน%(€€€€€€€€€€€€‘ฅ…นฝอัฅüนมษฝูฅ‘•ษI•ฑ…ๅM•ลี•น”€๔๔๔ั•ษตฅน…ฐüนมษฝูฅ‘•ษI•ฑ…ๅM•ลี•น”(€€€€€€€€€€€€‘ฅ…นฝอัฅüนมษฝูฅ‘•ษI••ฅู•‘ะ€๔๔๔ั•ษตฅน…ฐüนมษฝูฅ‘•ษI••ฅู•‘ะ(€€€€€€€€€€€€‘ฅ…นฝอัฅüนษ•อมฝนอ•%€๔๔๔ั•ษตฅน…ฐüนษ•อมฝนอ•%(€€€€€€€€€€€€‘ฅ…นฝอัฅüนมษฝูฅ‘•ษู•นั%€๔๔๔ั•ษตฅน…ฐüนมษฝูฅ‘•ษู•นั%์(€€€€€€€๔ค์(€€€€€€€ฝนอะกีนญู•นะ€๔มษฝูฅ‘•ษกีนญฬนฅน ก•ู•นะค€๔๘์(€€€€€€€€€ฝนอะ‘ฅ…นฝอัฅ€๔•ู•นะนม…ๅฑฝ…น‘ฅ…นฝอัฅ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•์(€€€€€€€€€ษ•ัีษธ‘ฅ…นฝอัฅüนมษฝูฅ‘•ษI••ฅู•M•ลี•น”€๔๔๔ั•ษตฅน…ฐüนมษฝูฅ‘•ษI••ฅู•M•ลี•น”(€€€€€€€€€€€€‘ฅ…นฝอัฅüนมษฝูฅ‘•ษฝนน•ัฅฝนมฝ €๔๔๔ั•ษตฅน…ฐüนมษฝูฅ‘•ษฝนน•ัฅฝนมฝ (€€€€€€€€€€€€‘ฅ…นฝอัฅüนมฑ…ๅ…ญ•น•ษ…ัฅฝธ€๔๔๔ั•ษตฅน…ฐüนมฑ…ๅ…ญ•น•ษ…ัฅฝธ(€€€€€€€€€€€€‘ฅ…นฝอัฅüนษ•ฑ…ๅฝษษ•ฑ…ัฅฝน%€๔๔๔ั•ษตฅน…ฐüนษ•ฑ…ๅฝษษ•ฑ…ัฅฝน%(€€€€€€€€€€€€‘ฅ…นฝอัฅüนมษฝูฅ‘•ษI•ฑ…ๅM•ลี•น”€๔๔๔ั•ษตฅน…ฐüนมษฝูฅ‘•ษI•ฑ…ๅM•ลี•น”(€€€€€€€€€€€€‘ฅ…นฝอัฅüนมษฝูฅ‘•ษI••ฅู•‘ะ€๔๔๔ั•ษตฅน…ฐüนมษฝูฅ‘•ษI••ฅู•‘ะ(€€€€€€€€€€€€‘ฅ…นฝอัฅüนกีนญ%น‘•เ€๔๔๔ั•ษตฅน…ฐüนกีนญ%น‘•เ(€€€€€€€€€€€€‘ฅ…นฝอัฅüนกีนญอ%นู•นะ€๔๔๔ั•ษตฅน…ฐüนกีนญอ%นู•นะ(€€€€€€€€€€€€‘ฅ…นฝอัฅüนกีนญ!…อ €๔๔๔ั•ษตฅน…ฐüนกีนญ!…อ (€€€€€€€€€€€€‘ฅ…นฝอัฅüนๅั•1•นั €๔๔๔ั•ษตฅน…ฐüนๅั•1•นั (€€€€€€€€€€€€‘ฅ…นฝอัฅüนอก•‘ีฑ•€๔๔๔ัษี”€‘ฅ…นฝอัฅüน‘ษฝมI•…อฝธ€๔๔๔นีฑฐ(€€€€€€€€€€€€€ฝymตภดๅu์ุั๔ผนั•อะกMัษฅนก‘ฅ…นฝอัฅüนกีนญ!…อ คค์(€€€€€€€๔ค์(€€€€€€€ฝนอะ•แ…ะ€๔ฑ•üนอก•ต€๔๔๔€อฝมกฅ…}•ตฅนฅ}ฝีัมีั}ฑ•}ุฤ€ฑ•นอั…ัีฬ€๔๔๔€ู•ษฅฅ•€ฑ•นฝตมฑ•ัฅฝนAก…อ”€๔๔๔€ฝตมฑ•ั•(€€€€€€€€€€€ฝymตภดๅu์ุั๔ผนั•อะกMัษฅนกฑ•นตฝนฅัฝษฅ•อัMกศิุคค€9ีต•ศกฑ•นตฝนฅัฝษษ…ต•ฝีนะค€๘€ภ€9ีต•ศกฑ•นตฝนฅัฝษ9ฝนMฅฑ•นัษ…ต•ฝีนะค€๘€ภ€ฑ•นษ…Ýี‘ฅฝแฑี‘•€๔๔๔ัษี”(€€€€€€€€€€อก•‘ีฑ•นฑ•นั €๔๔๔€ฤ€อั…ษั•นฑ•นั €๔๔๔€ฤ€ฝตมฑ•ั•นฑ•นั €๔๔๔€ฤ€ษ••ฅู•‘ู•นะ€๔๔ีน‘•ฅน•€กีนญู•นะ€๔๔ีน‘•ฅน•(€€€€€€€€€€ัๅม•ฝั•ษตฅน…ฐüนษ•อมฝนอ•%€๔๔๔€อัษฅน€ั•ษตฅน…ฐนษ•อมฝนอ•%นฑ•นั €๘€ภ(€€€€€€€€€€ฑ•นมษฝูฅ‘•ษกีนญฅน•ษมษฅนะ€๔๔๔ั•ษตฅน…ฐüนกีนญ!…อ €ฑ•นมษฝูฅ‘•ษฝนน•ัฅฝนมฝ €๔๔๔ั•ษตฅน…ฐüนมษฝูฅ‘•ษฝนน•ัฅฝนมฝ €ฑ•นมฑ…ๅ…ญ•น•ษ…ัฅฝธ€๔๔๔ั•ษตฅน…ฐüนมฑ…ๅ…ญ•น•ษ…ัฅฝธ(€€€€€€€€€€ษ••ฅู•‘ู•นะนอ•ฤ€๐กีนญู•นะนอ•ฤ€กีนญู•นะนอ•ฤ€๐อก•‘ีฑ•‘lมtนอ•ฤ€อก•‘ีฑ•‘lมtนอ•ฤ€๐อั…ษั•‘lมtนอ•ฤ€อั…ษั•‘lมtนอ•ฤ€๐ฝตมฑ•ั•‘lมtนอ•ฤ€ฝตมฑ•ั•‘lมtนอ•ฤ€๐ฑ•ู•นะนอ•ฤ(€€€€€€€€€€ัๅม•ฝฑ•นอก•‘ีฑ•‘ะ€๔๔๔€อัษฅน€ัๅม•ฝฑ•นฝตมฑ•ั•‘ะ€๔๔๔€อัษฅน€9ีต•ศกฑ•นตฝนฅัฝษีษ…ัฅฝน5ฬค€๘๔€ภ€9ีต•ศกั•ษตฅน…ฐüน‘ีษ…ัฅฝนM•ฝน‘ฬค€๘€ภ์(€€€€€€€ษ•ัีษธ์•แ…ะฐษ•…ฑฅ้…ัฅฝน%ฐฅน•ษมษฅนะ่ฑ•üนมษฝูฅ‘•ษกีนญฅน•ษมษฅนะฐษ••ฅู•‘M•ฤ่ษ••ฅู•‘ู•นะüนอ•ฤ€üüนีฑฐฐกีนญM•ฤ่กีนญู•นะüนอ•ฤ€üüนีฑฐฐ•ู•นัฬ่lธธธกษ••ฅู•‘ู•นะ€ümษ••ฅู•‘ู•นัt€่mtคฐ€ธธธกกีนญู•นะ€ümกีนญู•นัt€่mtคฐ€ธธนษ••ฅมัฬฐฑ•ู•นัt๔์(€€€€€๔ค์(€€€€€ฝนอะอก•‘ีฑ•‘I••ฅมัฬ€๔มฑ…ๅ…ฌนฅฑั•ศ ก•ู•นะค€๔๘€ก•ู•นะนม…ๅฑฝ…นษ••ฅมะ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•คüนมก…อ”€๔๔๔€อก•‘ีฑ•ค์(€€€€€ฝนอะอั…ษั•‘I••ฅมัฬ€๔มฑ…ๅ…ฌนฅฑั•ศ ก•ู•นะค€๔๘€ก•ู•นะนม…ๅฑฝ…นษ••ฅมะ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•คüนมก…อ”€๔๔๔€อั…ษั•ค์(€€€€€ฝนอะฝตมฑ•ั•‘I••ฅมัฬ€๔มฑ…ๅ…ฌนฅฑั•ศ ก•ู•นะค€๔๘€ก•ู•นะนม…ๅฑฝ…นษ••ฅมะ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•คüนมก…อ”€๔๔๔€ฝตมฑ•ั•ค์(€€€€€ฝนอะฝตมฑ•ั•‘I•…ฑฅ้…ัฅฝนฬ€๔ฝตมฑ•ั•‘I••ฅมัฬนต…ภ ก•ู•นะค€๔๘€ก•ู•นะนม…ๅฑฝ…นษ••ฅมะ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•คüนษ•…ฑฅ้…ัฅฝน%ค์(€€€€€ฝนอะษ••ฅู•‘ฝู•ษ…”€๔ษ••ฅู•นฑ•นั €๘€ภ€ษ••ฅู•น•ู•ษไ กษ••ฅู•‘ู•นะค€๔๘์(€€€€€€€ฝนอะ…ษ•…ั”€๔ษ••ฅู•‘ู•นะนม…ๅฑฝ…น‘ฅ…นฝอัฅ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•์(€€€€€€€ฝนอะษฝีภ€๔มษฝูฅ‘•ษกีนญฬนฅฑั•ศ ก•ู•นะค€๔๘์(€€€€€€€€€ฝนอะ‘ฅ…นฝอัฅ€๔•ู•นะนม…ๅฑฝ…น‘ฅ…นฝอัฅ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•์(€€€€€€€€€ษ•ัีษธ‘ฅ…นฝอัฅüนมษฝูฅ‘•ษI••ฅู•M•ลี•น”€๔๔๔…ษ•…ั”üนมษฝูฅ‘•ษI••ฅู•M•ลี•น”(€€€€€€€€€€€€‘ฅ…นฝอัฅüนมษฝูฅ‘•ษฝนน•ัฅฝนมฝ €๔๔๔…ษ•…ั”üนมษฝูฅ‘•ษฝนน•ัฅฝนมฝ (€€€€€€€€€€€€‘ฅ…นฝอัฅüนมฑ…ๅ…ญ•น•ษ…ัฅฝธ€๔๔๔…ษ•…ั”üนมฑ…ๅ…ญ•น•ษ…ัฅฝธ(€€€€€€€€€€€€‘ฅ…นฝอัฅüนษ•ฑ…ๅฝษษ•ฑ…ัฅฝน%€๔๔๔…ษ•…ั”üนษ•ฑ…ๅฝษษ•ฑ…ัฅฝน%(€€€€€€€€€€€€‘ฅ…นฝอัฅüนมษฝูฅ‘•ษI•ฑ…ๅM•ลี•น”€๔๔๔…ษ•…ั”üนมษฝูฅ‘•ษI•ฑ…ๅM•ลี•น”(€€€€€€€€€€€€‘ฅ…นฝอัฅüนมษฝูฅ‘•ษI••ฅู•‘ะ€๔๔๔…ษ•…ั”üนมษฝูฅ‘•ษI••ฅู•‘ะ์(€€€€€€€๔ค์(€€€€€€€ฝนอะฝีนะ€๔9ีต•ศก…ษ•…ั”üนกีนญอ%นู•นะค์(€€€€€€€ฝนอะฅน‘•แ•ฬ€๔ษฝีภนต…ภ ก•ู•นะค€๔๘9ีต•ศ ก•ู•นะนม…ๅฑฝ…น‘ฅ…นฝอัฅ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•คüนกีนญ%น‘•เคคนอฝษะ กฑ•ะฐษฅกะค€๔๘ฑ•ะ€ดษฅกะค์(€€€€€€€ษ•ัีษธ9ีต•ศนฅอM…•%นั••ศกฝีนะค€ฝีนะ€๘€ภ€ษฝีภนฑ•นั €๔๔๔ฝีนะ(€€€€€€€€€€ฅน‘•แ•ฬน•ู•ษไ กู…ฑี”ฐฅน‘•เค€๔๘ู…ฑี”€๔๔๔ฅน‘•เค(€€€€€€€€€€ัๅม•ฝ…ษ•…ั”üนษ•อมฝนอ•%€๔๔๔€อัษฅน€…ษ•…ั”นษ•อมฝนอ•%นฑ•นั €๘€ภ์(€€€€€๔ค์(€€€€€ฝนอะ•แ…ั9…ัีษ…ฑก…ฅนฬ€๔ก…ฅนฬนฑ•นั €๘€ภ€ก…ฅนฬน•ู•ษไ กก…ฅธค€๔๘ก…ฅธน•แ…ะค(€€€€€€€€ษ••ฅู•‘ฝู•ษ…”€มษฝูฅ‘•ษกีนญฬนฑ•นั €๔๔๔ก…ฅนฬนฑ•นั €อก•‘ีฑ•‘I••ฅมัฬนฑ•นั €๔๔๔ก…ฅนฬนฑ•นั €อั…ษั•‘I••ฅมัฬนฑ•นั €๔๔๔ก…ฅนฬนฑ•นั €ฝตมฑ•ั•‘I••ฅมัฬนฑ•นั €๔๔๔ก…ฅนฬนฑ•นั €มฑ…ๅ…ฌนฑ•นั €๔๔๔ก…ฅนฬนฑ•นั €จ€ฬ(€€€€€€€€น•ÜM•ะกก…ฅนฬนต…ภ กก…ฅธค€๔๘ก…ฅธนษ•…ฑฅ้…ัฅฝน%คคนอฅ้”€๔๔๔ก…ฅนฬนฑ•นั (€€€€€€€€น•ÜM•ะกก…ฅนฬนต…ภ กก…ฅธค€๔๘ก…ฅธนฅน•ษมษฅนะคคนอฅ้”€๔๔๔ก…ฅนฬนฑ•นั (€€€€€€€€น•ÜM•ะกก…ฅนฬนต…ภ กก…ฅธค€๔๘ก…ฅธนกีนญM•ฤคคนอฅ้”€๔๔๔ก…ฅนฬนฑ•นั (€€€€€€€€ฝตมฑ•ั•‘I•…ฑฅ้…ัฅฝนฬนฑ•นั €๔๔๔ก…ฅนฬนฑ•นั €น•ÜM•ะกฝตมฑ•ั•‘I•…ฑฅ้…ัฅฝนฬคนอฅ้”€๔๔๔ฝตมฑ•ั•‘I•…ฑฅ้…ัฅฝนฬนฑ•นั (€€€€€€€€น•ÜM•ะกอก•‘ีฑ•‘I••ฅมัฬนต…ภ ก•ู•นะค€๔๘€ก•ู•นะนม…ๅฑฝ…นษ••ฅมะ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•คüนษ•…ฑฅ้…ัฅฝน%คคนอฅ้”€๔๔๔ก…ฅนฬนฑ•นั (€€€€€€€€น•ÜM•ะกอั…ษั•‘I••ฅมัฬนต…ภ ก•ู•นะค€๔๘€ก•ู•นะนม…ๅฑฝ…นษ••ฅมะ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•คüนษ•…ฑฅ้…ัฅฝน%คคนอฅ้”€๔๔๔ก…ฅนฬนฑ•นั ์(€€€€€ก…ษน•อฬนมีอ กก•ฌ ผภฤนมษฝูฅ‘•ษ}กีนญ}ัฝ}มฑ…ๅ…ญ}ัฝ}ฝีัมีั}ฑ•}ฉฝฅธฐ€ก…ษน•อฬฐ•แ…ั9…ัีษ…ฑก…ฅนฬฐก…ฅนฬนฑ…ั5…ภ กก…ฅธค€๔๘ก…ฅธน•ู•นัฬคฐ€•แ…ั}•มฝก}•น•ษ…ัฅฝน}ฅน•ษมษฅนั}ษ•…ฑฅ้…ัฅฝน}…น‘}ัฅตฅน}ฉฝฅน}ีน…ู…ฅฑ…ฑ”คค์(€€€€€มษฝ‘ีะนมีอ กก•ฌ ผภฤนฝีัมีั}ต…ัก•อ}ษ•…ฑฅ้…ัฅฝธฐ€มษฝ‘ีะฐ•แ…ั9…ัีษ…ฑก…ฅนฬฐก…ฅนฬนฑ…ั5…ภ กก…ฅธค€๔๘ก…ฅธน•ู•นัฬคฐ€ฝีัมีั}ฑ•}…น‘}มฑ…ๅ…ญ}ฉฝฅน}ีน…ู…ฅฑ…ฑ”คค์(€€€€€ษ•…ฌ์(€€€๔(€€€…อ”€Xต<ภศ่์(€€€€€ฝนอะฅนู…ฑฅ‘…ั•€๔lธธนมษฝ‘ีั	ๅ-ฅน …ี‘ฅผนฝีัมีะนฑีอก•คฐ€ธธนมษฝ‘ีั	ๅ-ฅน …ี‘ฅผนฝีัมีะน‘ษฝมม•ฅt์(€€€€€ฝนอะษฝั…ัฅฝนฬ€๔ฝม•ษ…ัฅฝนฬนฅฑั•ศ กฝม•ษ…ัฅฝธค€๔๘ฝม•ษ…ัฅฝธนัๅม”€๔๔๔€ฝษ•}อฝญ•ั}ษฝั…ัฅฝธ€ฝม•ษ…ัฅฝธนอั…ั”€๔๔๔€อี••‘•ค์(€€€€€ฝนอะ…ีอ…ฐ€๔ษฝั…ัฅฝนฬนฑ…ั5…ภ กฝม•ษ…ัฅฝธค€๔๘์(€€€€€€€ฝนอะั…ษ•ะ€๔ฝม•ษ…ัฅฝธนฅนมีะน}…ีฑั}ั…ษ•ะ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•์(€€€€€€€ฝนอะฅั•€๔มษฝ‘ีั	ๅ-ฅน …ี‘ฅผนฝีัมีะนอั…ษั•คนฅน ก•ู•นะค€๔๘•ู•นะนอ•ฤ€๔๔๔9ีต•ศกั…ษ•ะüนฝีัมีั}•ู•นั}อ•ฤคค์(€€€€€€€ฝนอะฅั•‘I••ฅมะ€๔ฅั•üนม…ๅฑฝ…นษ••ฅมะ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•์(€€€€€€€ฝนอะั•ษตฅน…ฑฬ€๔ฅนู…ฑฅ‘…ั•นฅฑั•ศ ก•ู•นะค€๔๘์(€€€€€€€€€ฝนอะษ••ฅมะ€๔•ู•นะนม…ๅฑฝ…นษ••ฅมะ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•์(€€€€€€€€€ษ•ัีษธ•ู•นะนอ•ฤ€๘€กฅั•üนอ•ฤ€üü9ีต•ศน5a}M}%9QHค€ษ••ฅมะüนษ•…ฑฅ้…ัฅฝน%€๔๔๔ั…ษ•ะüนษ•…ฑฅ้…ัฅฝน}ฅ€9ีต•ศกษ••ฅมะüนมษฝูฅ‘•ษฝนน•ัฅฝนมฝ ค€๔๔๔9ีต•ศกั…ษ•ะüนมษฝูฅ‘•ษ}ฝนน•ัฅฝน}•มฝ ค€9ีต•ศกษ••ฅมะüนมฑ…ๅ…ญ•น•ษ…ัฅฝธค€๔๔๔9ีต•ศกั…ษ•ะüนมฑ…ๅ…ญ}•น•ษ…ัฅฝธค์(€€€€€€€๔ค์(€€€€€€€ฝนอะ•แ…ะ€๔ั…ษ•ะüน…ีฑั}ฅนั•นะ€๔๔๔€ฅนู…ฑฅ‘…ั•}…ัฅู•}ษ•…ฑฅ้…ัฅฝธ€ฅั•‘I••ฅมะüนมก…อ”€๔๔๔€อั…ษั•€ฅั•‘I••ฅมะนษ•…ฑฅ้…ัฅฝน%€๔๔๔ั…ษ•ะüนษ•…ฑฅ้…ัฅฝน}ฅ(€€€€€€€€€€9ีต•ศกฅั•‘I••ฅมะนมษฝูฅ‘•ษฝนน•ัฅฝนมฝ ค€๔๔๔9ีต•ศกั…ษ•ะüนมษฝูฅ‘•ษ}ฝนน•ัฅฝน}•มฝ ค€9ีต•ศกฅั•‘I••ฅมะนมฑ…ๅ…ญ•น•ษ…ัฅฝธค€๔๔๔9ีต•ศกั…ษ•ะüนมฑ…ๅ…ญ}•น•ษ…ัฅฝธค(€€€€€€€€€€ั•ษตฅน…ฑฬนฑ•นั €๔๔๔€ฤ€lฑีอก•ฐ€‘ษฝมม•tนฅนฑี‘•ฬกMัษฅน กั•ษตฅน…ฑอlมtนม…ๅฑฝ…นษ••ฅมะ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•คüนมก…อ”คค(€€€€€€€€€€ฝม•ษ…ัฅฝธนษ•อีฑะüนษฝั…ัฅฝน}ษ••ฅมะ€๔๔ีน‘•ฅน•์(€€€€€€€ษ•ัีษธm์•แ…ะฐั…ษ•ะฐ•ู•นัฬ่lธธธกฅั•€ümฅั•‘t€่mtคฐ€ธธนั•ษตฅน…ฑอt๕t์(€€€€€๔ค์(€€€€€ฝนอะ…ีอ…ฑA…อฬ€๔…ีอ…ฐนฑ•นั €๔๔๔€ฤ€…ีอ…ฑlมtน•แ…ะ์(€€€€€ฝนอะ…ีอ…ฑู•นัฬ€๔…ีอ…ฐนฑ…ั5…ภ กฅั•ดค€๔๘ฅั•ดน•ู•นัฬค์(€€€€€ก…ษน•อฬนมีอ กก•ฌ ผภศนฝู•ษน•‘}…ีฑั}ัฝ}•แ…ั}ษ•…ฑฅ้…ัฅฝน}ฅนู…ฑฅ‘…ัฅฝธฐ€ก…ษน•อฬฐ…ีอ…ฑA…อฬฐ…ีอ…ฑู•นัฬฐ€•แ…ั}ษฝั…ัฅฝน}…ีฑั}ั…ษ•ั}…น‘}ั•ษตฅน…ฑ}ษ•…ฑฅ้…ัฅฝน}ษ••ฅมั}ีน…ู…ฅฑ…ฑ”คค์(€€€€€ฝนอะมฝอั%นู…ฑฅ‘…ัฅฝนMั…ษัฬ€๔…ีอ…ฐนฑ…ั5…ภ กฅั•ดค€๔๘ฅั•ดน•ู•นัฬนฅฑั•ศ ก•ู•นะค€๔๘l…ี‘ฅผนฝีัมีะนฑีอก•ฐ€…ี‘ฅผนฝีัมีะน‘ษฝมม•tนฅนฑี‘•ฬก•ู•นะนญฅนคคนฑ…ั5…ภ กั•ษตฅน…ฐค€๔๘มษฝ‘ีั	ๅ-ฅน …ี‘ฅผนฝีัมีะนอั…ษั•คนฅฑั•ศ กอั…ษั•ค€๔๘์(€€€€€€€ฝนอะอั…ษั•‘I••ฅมะ€๔อั…ษั•นม…ๅฑฝ…นษ••ฅมะ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•์(€€€€€€€ฝนอะั•ษตฅน…ฑI••ฅมะ€๔ั•ษตฅน…ฐนม…ๅฑฝ…นษ••ฅมะ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•์(€€€€€€€ษ•ัีษธอั…ษั•นอ•ฤ€๘ั•ษตฅน…ฐนอ•ฤ€€กอั…ษั•‘I••ฅมะüนษ•…ฑฅ้…ัฅฝน%€๔๔๔ฅั•ดนั…ษ•ะüนษ•…ฑฅ้…ัฅฝน}ฅ๑๐€กัๅม•ฝฅั•ดนั…ษ•ะüนกีนญ}ก…อ €๔๔๔€อัษฅน€อั…ษั•‘I••ฅมะüนกีนญ!…อ €๔๔๔ฅั•ดนั…ษ•ะนกีนญ}ก…อ ค๑๐อั…ษั•‘I••ฅมะüนษ•…ฑฅ้…ัฅฝน%€๔๔๔ั•ษตฅน…ฑI••ฅมะüนษ•…ฑฅ้…ัฅฝน%ค์(€€€€€๔คคค์(€€€€€มษฝ‘ีะนมีอ ก…ีอ…ฑู•นัฬนฑ•นั €๔๔๔€ภ€üีน…ู…ฅฑ…ฑ” ผภศนนฝ}อั…ฑ•}มฑ…ๅ…ญ}…ั•ษ}ฅนู…ฑฅ‘…ัฅฝธฐ€มษฝ‘ีะฐ€ฅนู…ฑฅ‘…ัฅฝน}ษ••ฅมั}ีน…ู…ฅฑ…ฑ”ค€่มฝอั%นู…ฑฅ‘…ัฅฝนMั…ษัฬนฑ•นั €๔๔๔€ภ€üม…อฬ ผภศนนฝ}อั…ฑ•}มฑ…ๅ…ญ}…ั•ษ}ฅนู…ฑฅ‘…ัฅฝธฐ€มษฝ‘ีะฐ…ีอ…ฑู•นัฬค€่…ฅฐ ผภศนนฝ}อั…ฑ•}มฑ…ๅ…ญ}…ั•ษ}ฅนู…ฑฅ‘…ัฅฝธฐ€มษฝ‘ีะฐมฝอั%นู…ฑฅ‘…ัฅฝนMั…ษัฬฐ€อั…ฑ•}ษ•…ฑฅ้…ัฅฝน}ษ•อั…ษั•คค์(€€€€€ษ•…ฌ์(€€€๔(€€€…อ”€Xตภฤ่…อ”€Xตภศ่…อ”€Xตภฬ่…อ”€Xตภะ่์(€€€€€ฝนอะฉฝฅนู•นัฬ€๔มษฝ‘ีั	ๅ-ฅน มษฝ‘ีะนีฅฑ‘•ศตีคนอๅนัก•ัฅตีฅฑ‘•ศตฉฝฅธค์(€€€€€ฝนอะฉฝฅน…ีฑัฬ€๔มษฝ‘ีั	ๅ-ฅน มษฝ‘ีะนีฅฑ‘•ศตีคนอๅนัก•ัฅตีฅฑ‘•ศตฉฝฅธต…ีฑะค์(€€€€€ฝนอะัฝฝฑ1•‘•ษฬ€๔มษฝ‘ีัู•นัฬนฅฑั•ศ ก•ู•นะค€๔๘•ู•นะนญฅนนฅนฑี‘•ฬ •ตฅนคตัฝฝฐต…ฑฐตฑ•‘•ศคค์(€€€€€ฝนอะฉฝฅน-•ๅฬ€๔l(€€€€€€€€อก•ตฐ€ั•อั}ษีน}ฅฐ€อ•น…ษฅฝ}ฅฐ€อ•น…ษฅฝ}ู•ษอฅฝธฐ€ฝม•ษ…ัฅฝน}ฅฐ€ีัั•ษ…น•}ฅฐ€มษฝูฅ‘•ษ}ฅนมีั}อ•ลี•น”ฐ€ัฝฝฑ}…ฑฑ}ฅฐ€••ั}ฅฐ(€€€€€€€€มษฝูฅ‘•ษ}ฝนน•ัฅฝน}•มฝ ฐ€ษ•ฑ…ๅ}ฝษษ•ฑ…ัฅฝน}ฅฐ€ัฝฝฑ}น…ต”ฐ€ัฝฝฑ}อั…ั”ฐ€ีฅฑ‘•ษ}ฝม•ษ…ัฅฝน}ฅฐ€ม…ษ•นั}ักษ•…‘}ฅฐ€ั…อญ}ฅฐ€ักษ•…‘}ฅฐ€ษีน}ฅฐ€ีฅฑ‘}ฅฐ(€€€€€€€€…ษัฅ…ั}ฅฐ€…ษัฅ…ั}ม…ัก}อกศิุฐ€ีฅ}มษฝฉ•ัฅฝน}อั…ั”ฐ€…น•ฑ}ฝีนะฐ€นฝ}มฝอั}…น•ฑ}มีฑฅ…ัฅฝธฐ€อฝีษ•}ัฝฝฑ}ษ••ฅู•‘}…ะฐ€อฝีษ•}…ญ•น‘}…•มั•‘}…ะฐ(€€€€€€€€อฝีษ•}ัฝฝฑ}ษ•อมฝนอ•}อ•นั}…ะฐ€อฝีษ•}ีฅฑ‘•ษ}•ู•นั}ฅฐ€อฝีษ•}ีฅฑ‘•ษ}•ู•นั}…ะฐ€อฝีษ•}ีฅ}มษฝฉ•ั•‘}…ะฐ€อ•น…ษฅฝ}…ออ•ษัฅฝนฬฐ(€€€€€€€€ษ…Ý}ัษ…นอษฅมั}•แฑี‘•ฐ€ษ…Ý}…ษัฅ…ั}ฝนั•นั}•แฑี‘•ฐ€อ•ษ•ัอ}•แฑี‘•ฐ(€€€€€tนอฝษะ ค์(€€€€€ฝนอะ…ออ•ษัฅฝน-•ๅฬ€๔l…ษัฅ…ั}ษ•…ั•ฐ€…ษัฅ…ั}ูฅอฅฑ•}ีษษ•นะฐ€…•มั•‘}ัีษน}ฝีนะฐ€ัฝฝฑ}‘ฅอม…ัก}ฝีนะฐ€ฝÝน•‘}ั…อญ}ฝีนะฐ€อั…ฑ•}ั…อญ}ฅ‘•นัฅัไฐ€ษ•ูฅอฅฝน}ีม‘…ั•‘}อ…ต•}ั…อฌฐ€ีษษ•นั}•ก…ูฅฝษ}ษ•อีฑะฐ€…น•ฑ}ษ•ลี•อั}ฝีนะฐ€…น•ฑ}ั•ษตฅน…ฑ}อ•ััฑ•ฐ€นฝ}มฝอั}…น•ฑ}มีฑฅ…ัฅฝธtนอฝษะ ค์(€€€€€ฝนอะฅตตีั…ฑ•)ฝฅน-•ๅฬ€๔lั•อั}ษีน}ฅฐ€อ•น…ษฅฝ}ฅฐ€อ•น…ษฅฝ}ู•ษอฅฝธฐ€ฝม•ษ…ัฅฝน}ฅฐ€ีัั•ษ…น•}ฅฐ€มษฝูฅ‘•ษ}ฅนมีั}อ•ลี•น”ฐ€ัฝฝฑ}…ฑฑ}ฅฐ€••ั}ฅฐ€มษฝูฅ‘•ษ}ฝนน•ัฅฝน}•มฝ ฐ€ษ•ฑ…ๅ}ฝษษ•ฑ…ัฅฝน}ฅฐ€ัฝฝฑ}น…ต”ฐ€ีฅฑ‘•ษ}ฝม•ษ…ัฅฝน}ฅฐ€ม…ษ•นั}ักษ•…‘}ฅฐ€ั…อญ}ฅฐ€ักษ•…‘}ฅฐ€ีฅฑ‘}ฅฐ€อฝีษ•}ัฝฝฑ}ษ••ฅู•‘}…ะฐ€อฝีษ•}…ญ•น‘}…•มั•‘}…ะt์(€€€€€ฝนอะั•ษตฅน…ฑMั…ั•ฬ€๔น•ÜM•ะกlษ•อมฝน‘•ฐ€…น•ฑฑ•ต•ฝษ”ตอ•นฐ€…น•ฑฑ•ต…ั•ศตอ•นฐ€อีมมษ•ออ•ฐ€ษ•ฉ•ั•tค์(€€€€€ฝนอะีฅฑ‘•ษQฝฝฑ9…ต•ฬ€๔น•ÜM•ะกlอั…ษั}ีฅฑ‘•ษ}ั…อฌฐ€•‘ฅั}ีฅฑ‘•ษ}…ษัฅ…ะฐ€ก•ญ}…อๅน}ั…อฌฐ€ีม‘…ั•}…อๅน}ั…อฌฐ€…น•ฑ}…อๅน}ั…อฌฐ€ฑฅอั}…อๅน}ั…อญฬฐ€ฝษ•ูฅ•Ý}ษ•ลี•อั}…ษัฅ…ั}ีม‘…ั”tค์(€€€€€ฝนอะ•แ…ั)ฝฅนฬ€๔ฉฝฅนู•นัฬนต…ภ ก•ู•นะค€๔๘์(€€€€€€€ฝนอะฉฝฅธ€๔•ู•นะนม…ๅฑฝ…์(€€€€€€€ฝนอะมีฑฅ-•ๅฬ€๔=ฉ•ะนญ•ๅฬกฉฝฅธคนฅฑั•ศ กญ•ไค€๔๘ญ•ไ€๔๔€}มษฝ‘ีั}ษีน}ฅน‘ฅน€ญ•ไ€๔๔€}…มัีษ•}มษฝู•น…น”คนอฝษะ ค์(€€€€€€€ฝนอะ…ออ•ษัฅฝนฬ€๔ฉฝฅธนอ•น…ษฅฝ}…ออ•ษัฅฝนฬ€ัๅม•ฝฉฝฅธนอ•น…ษฅฝ}…ออ•ษัฅฝนฬ€๔๔๔€ฝฉ•ะ€€…ษษ…ไนฅอษษ…ไกฉฝฅธนอ•น…ษฅฝ}…ออ•ษัฅฝนฬค€üฉฝฅธนอ•น…ษฅฝ}…ออ•ษัฅฝนฬ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘€่นีฑฐ์(€€€€€€€ฝนอะอัษฅนฬ€๔lั•อั}ษีน}ฅฐ€อ•น…ษฅฝ}ฅฐ€อ•น…ษฅฝ}ู•ษอฅฝธฐ€ฝม•ษ…ัฅฝน}ฅฐ€ีัั•ษ…น•}ฅฐ€ัฝฝฑ}…ฑฑ}ฅฐ€••ั}ฅฐ€ษ•ฑ…ๅ}ฝษษ•ฑ…ัฅฝน}ฅฐ€ัฝฝฑ}น…ต”ฐ€ัฝฝฑ}อั…ั”ฐ€ีฅฑ‘•ษ}ฝม•ษ…ัฅฝน}ฅฐ€ม…ษ•นั}ักษ•…‘}ฅฐ€ั…อญ}ฅฐ€ักษ•…‘}ฅฐ€ษีน}ฅฐ€ีฅฑ‘}ฅฐ€อฝีษ•}ัฝฝฑ}ษ••ฅู•‘}…ะฐ€อฝีษ•}…ญ•น‘}…•มั•‘}…ะt์(€€€€€€€ฝนอะฝม•ษ…ัฅฝธ€๔ฅนฉ•ั•นฅน ก…น‘ฅ‘…ั”ค€๔๘…น‘ฅ‘…ั”นฅ€๔๔๔ฉฝฅธนฝม•ษ…ัฅฝน}ฅค์(€€€€€€€ฝนอะษ•อฝฑู•€๔ฝม•ษ…ัฅฝธ€üๅ-ฅน ีัั•ษ…น”นษ•อฝฑู•คนฅฑั•ศ ก…น‘ฅ‘…ั”ค€๔๘•แ…ั=ม•ษ…ัฅฝธก…น‘ฅ‘…ั”ฐฝม•ษ…ัฅฝธนฅค€…น‘ฅ‘…ั”นม…ๅฑฝ…นีัั•ษ…น•}ฅ€๔๔๔ฉฝฅธนีัั•ษ…น•}ฅค€่mt์(€€€€€€€ฝนอะ…•มั•‘Qีษนฬ€๔ฝม•ษ…ัฅฝธ€üมษฝ‘ีั	ๅ-ฅน …ี‘ฅผนฅนมีะนมษฝ‘ีั}ัีษธคนฅฑั•ศ ก…น‘ฅ‘…ั”ค€๔๘์(€€€€€€€€€ฝนอะษ••ฅมะ€๔…น‘ฅ‘…ั”นม…ๅฑฝ…นษ••ฅมะ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•์(€€€€€€€€€ษ•ัีษธษ••ฅมะüนอก•ต€๔๔๔€อฝมกฅ…}•ตฅนฅ}ฅนมีั}ัีษน}ุฤ€ษ••ฅมะนอๅนัก•ัฅ€๔๔๔ัษี”€ษ••ฅมะนั•อั}ษีน}ฅ€๔๔๔ษีธนั•อัIีน%€ษ••ฅมะนฝม•ษ…ัฅฝน}ฅ€๔๔๔ฝม•ษ…ัฅฝธนฅ€ษ••ฅมะนีัั•ษ…น•}ฅ€๔๔๔ฉฝฅธนีัั•ษ…น•}ฅ(€€€€€€€€€€€€ษ••ฅมะนอฝีษ”€๔๔๔€มีฑฅ}ีอ•ษ}ัีษธ€ษ••ฅมะนฝีัฝต”€๔๔๔€มีฑฅ}ีอ•ษ}ัีษน}…•มั•€ษ••ฅมะนมษฝูฅ‘•ษ}ษ••ฅู•}อ•ลี•น”€๔๔๔ฉฝฅธนมษฝูฅ‘•ษ}ฅนมีั}อ•ลี•น”€ษ••ฅมะนษ…Ý}…ี‘ฅฝ}•แฑี‘•€๔๔๔ัษี”์(€€€€€€€๔ค€่mt์(€€€€€€€ฝนอะต…ักฅน1•‘•ษฬ€๔ัฝฝฑ1•‘•ษฬนฅฑั•ศ ก…น‘ฅ‘…ั”ค€๔๘์(€€€€€€€€€ฝนอะ•นัษไ€๔…น‘ฅ‘…ั”นม…ๅฑฝ…น•นัษไ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•์(€€€€€€€€€ฅ€ …•นัษไคษ•ัีษธ…ฑอ”์(€€€€€€€€€ฝนอะัฝฝฑูฅ‘•น”€๔•นัษไüนอๅนัก•ัฅQฝฝฑูฅ‘•น”…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•์(€€€€€€€€€ฝนอะ…ญ•น‘)ฝฅธ€๔•นัษไüนอๅนัก•ัฅ	ีฅฑ‘•ษ)ฝฅธ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•์(€€€€€€€€€ษ•ัีษธ…น‘ฅ‘…ั”นอ•ฤ€๐•ู•นะนอ•ฤ€•นัษไüนัฝฝฑ…ฑฑ%€๔๔๔ฉฝฅธนัฝฝฑ}…ฑฑ}ฅ€•นัษไน••ั%€๔๔๔ฉฝฅธน••ั}ฅ€•นัษไนมษฝูฅ‘•ษฝนน•ัฅฝนมฝ €๔๔๔ฉฝฅธนมษฝูฅ‘•ษ}ฝนน•ัฅฝน}•มฝ (€€€€€€€€€€€€•นัษไนัฝฝฑ9…ต”€๔๔๔ฉฝฅธนัฝฝฑ}น…ต”€ั•ษตฅน…ฑMั…ั•ฬนก…ฬกMัษฅนก•นัษไนฅน…ฑMั…ั”คค€•นัษไนษ••ฅู•‘ะ€๔๔๔ฉฝฅธนอฝีษ•}ัฝฝฑ}ษ••ฅู•‘}…ะ€•นัษไนัฝฝฑI•อมฝนอ•M•นัะ€๔๔๔ฉฝฅธนอฝีษ•}ัฝฝฑ}ษ•อมฝนอ•}อ•นั}…ะ(€€€€€€€€€€€€ัฝฝฑูฅ‘•น”üนอก•ต€๔๔๔€อฝมกฅ…}อๅนัก•ัฅ}ัฝฝฑ}•ูฅ‘•น•}ุฤ€ัฝฝฑูฅ‘•น”นั•อั}ษีน}ฅ€๔๔๔ษีธนั•อัIีน%€ัฝฝฑูฅ‘•น”นอ•น…ษฅฝ}ฅ€๔๔๔ษีธนอ•น…ษฅฝ%€ัฝฝฑูฅ‘•น”นอ•น…ษฅฝ}ู•ษอฅฝธ€๔๔๔ษีธนอ•น…ษฅฝY•ษอฅฝธ(€€€€€€€€€€€€ัฝฝฑูฅ‘•น”นฝม•ษ…ัฅฝน}ฅ€๔๔๔ฉฝฅธนฝม•ษ…ัฅฝน}ฅ€ัฝฝฑูฅ‘•น”นีัั•ษ…น•}ฅ€๔๔๔ฉฝฅธนีัั•ษ…น•}ฅ€ัฝฝฑูฅ‘•น”นมษฝูฅ‘•ษ}ฅนมีั}อ•ลี•น”€๔๔๔ฉฝฅธนมษฝูฅ‘•ษ}ฅนมีั}อ•ลี•น”(€€€€€€€€€€€€ัฝฝฑูฅ‘•น”นัฝฝฑ}…ฑฑ}ฅ€๔๔๔ฉฝฅธนัฝฝฑ}…ฑฑ}ฅ€ัฝฝฑูฅ‘•น”น••ั}ฅ€๔๔๔ฉฝฅธน••ั}ฅ€ัฝฝฑูฅ‘•น”นมษฝูฅ‘•ษ}ฝนน•ัฅฝน}•มฝ €๔๔๔ฉฝฅธนมษฝูฅ‘•ษ}ฝนน•ัฅฝน}•มฝ (€€€€€€€€€€€€ัฝฝฑูฅ‘•น”นษ•ฑ…ๅ}ฝษษ•ฑ…ัฅฝน}ฅ€๔๔๔ฉฝฅธนษ•ฑ…ๅ}ฝษษ•ฑ…ัฅฝน}ฅ€ัฝฝฑูฅ‘•น”นัฝฝฑ}น…ต”€๔๔๔ฉฝฅธนัฝฝฑ}น…ต”€ัฝฝฑูฅ‘•น”นษ••ฅู•‘}…ะ€๔๔๔ฉฝฅธนอฝีษ•}ัฝฝฑ}ษ••ฅู•‘}…ะ(€€€€€€€€€€€€…ญ•น‘)ฝฅธ€๔๔ีน‘•ฅน•€ฅตตีั…ฑ•)ฝฅน-•ๅฬน•ู•ษไ กญ•ไค€๔๘…ญ•น‘)ฝฅนmญ•ๅt€๔๔๔ฉฝฅนmญ•ๅtค์(€€€€€€€๔ค์(€€€€€€€ฝนอะัฅต•ฬ€๔mฉฝฅธนอฝีษ•}ัฝฝฑ}ษ••ฅู•‘}…ะฐฉฝฅธนอฝีษ•}…ญ•น‘}…•มั•‘}…ะฐฉฝฅธนอฝีษ•}ัฝฝฑ}ษ•อมฝนอ•}อ•นั}…ะฐฉฝฅธนอฝีษ•}ีฅฑ‘•ษ}•ู•นั}…ะฐฉฝฅธนอฝีษ•}ีฅ}มษฝฉ•ั•‘}…ัt์(€€€€€€€ฝนอะัฅต•Y…ฑี•ฬ€๔ัฅต•ฬนต…ภ กู…ฑี”ค€๔๘ัๅม•ฝู…ฑี”€๔๔๔€อัษฅน€…นฝนฅ…ฑ%อผกู…ฑี”ค€ü…ั”นม…ษอ”กู…ฑี”ค€่9ีต•ศน9…8ค์(€€€€€€€ฝนอะ•แ…ะ€๔มีฑฅ-•ๅฬนฑ•นั €๔๔๔ฉฝฅน-•ๅฬนฑ•นั €มีฑฅ-•ๅฬน•ู•ษไ กญ•ไฐฅน‘•เค€๔๘ญ•ไ€๔๔๔ฉฝฅน-•ๅอmฅน‘•แtค(€€€€€€€€€€ฉฝฅธนอก•ต€๔๔๔€อฝมกฅ…}อๅนัก•ัฅ}ีฅฑ‘•ษ}ฉฝฅน}ุฤ€ฉฝฅธนั•อั}ษีน}ฅ€๔๔๔ษีธนั•อัIีน%€ฉฝฅธนอ•น…ษฅฝ}ฅ€๔๔๔ษีธนอ•น…ษฅฝ%€ฉฝฅธนอ•น…ษฅฝ}ู•ษอฅฝธ€๔๔๔ษีธนอ•น…ษฅฝY•ษอฅฝธ(€€€€€€€€€€อัษฅนฬน•ู•ษไ กญ•ไค€๔๘ัๅม•ฝฉฝฅนmญ•ๅt€๔๔๔€อัษฅน€Mัษฅนกฉฝฅนmญ•ๅtคนฑ•นั €๘€ภ€Mัษฅนกฉฝฅนmญ•ๅtคนฑ•นั €๐๔€ิฤศ€€…Mัษฅนกฉฝฅนmญ•ๅtคนฅนฑี‘•ฬ qิภภภภคค(€€€€€€€€€€9ีต•ศนฅอM…•%นั••ศกฉฝฅธนมษฝูฅ‘•ษ}ฅนมีั}อ•ลี•น”ค€9ีต•ศกฉฝฅธนมษฝูฅ‘•ษ}ฅนมีั}อ•ลี•น”ค€๘€ภ€9ีต•ศนฅอM…•%นั••ศกฉฝฅธนมษฝูฅ‘•ษ}ฝนน•ัฅฝน}•มฝ ค€9ีต•ศกฉฝฅธนมษฝูฅ‘•ษ}ฝนน•ัฅฝน}•มฝ ค€๘€ภ(€€€€€€€€€€9ีต•ศนฅอM…•%นั••ศกฉฝฅธน…น•ฑ}ฝีนะค€9ีต•ศกฉฝฅธน…น•ฑ}ฝีนะค€๘๔€ภ€ฉฝฅธนักษ•…‘}ฅ€๔๔๔ฉฝฅธนั…อญ}ฅ€ฉฝฅธนีฅฑ‘}ฅ€๔๔๔ฉฝฅธนีฅฑ‘•ษ}ฝม•ษ…ัฅฝน}ฅ(€€€€€€€€€€€กฉฝฅธน…ษัฅ…ั}ฅ€๔๔๔นีฑฐ๑๐ัๅม•ฝฉฝฅธน…ษัฅ…ั}ฅ€๔๔๔€อัษฅนค€€กฉฝฅธน…ษัฅ…ั}ม…ัก}อกศิุ€๔๔๔นีฑฐ๑๐€ฝymตภดๅu์ุั๔ผนั•อะกMัษฅนกฉฝฅธน…ษัฅ…ั}ม…ัก}อกศิุคคค(€€€€€€€€€€€กฉฝฅธนีฅ}มษฝฉ•ัฅฝน}อั…ั”€๔๔๔€…นู…อ}ีษษ•นะ๑๐ฉฝฅธนีฅ}มษฝฉ•ัฅฝน}อั…ั”€๔๔๔€…ษัฅ…ั}ูฅอฅฑ•}ีษษ•นะค€ัๅม•ฝฉฝฅธนอฝีษ•}ีฅฑ‘•ษ}•ู•นั}ฅ€๔๔๔€อัษฅน€ฉฝฅธนอฝีษ•}ีฅฑ‘•ษ}•ู•นั}ฅนฑ•นั €๘€ภ(€€€€€€€€€€ฉฝฅธนษ…Ý}ัษ…นอษฅมั}•แฑี‘•€๔๔๔ัษี”€ฉฝฅธนษ…Ý}…ษัฅ…ั}ฝนั•นั}•แฑี‘•€๔๔๔ัษี”€ฉฝฅธนอ•ษ•ัอ}•แฑี‘•€๔๔๔ัษี”€ฉฝฅธนนฝ}มฝอั}…น•ฑ}มีฑฅ…ัฅฝธ€๔๔๔ัษี”(€€€€€€€€€€…ออ•ษัฅฝนฬ€๔๔นีฑฐ€=ฉ•ะนญ•ๅฬก…ออ•ษัฅฝนฬคนอฝษะ คนฑ•นั €๔๔๔…ออ•ษัฅฝน-•ๅฬนฑ•นั €=ฉ•ะนญ•ๅฬก…ออ•ษัฅฝนฬคนอฝษะ คน•ู•ษไ กญ•ไฐฅน‘•เค€๔๘ญ•ไ€๔๔๔…ออ•ษัฅฝน-•ๅอmฅน‘•แtค(€€€€€€€€€€ัฅต•Y…ฑี•ฬน•ู•ษไก9ีต•ศนฅอฅนฅั”ค€ัฅต•Y…ฑี•ฬน•ู•ษไ กู…ฑี”ฐฅน‘•เค€๔๘ฅน‘•เ€๔๔๔€ภ๑๐ัฅต•Y…ฑี•อmฅน‘•เ€ด€ลt€๐๔ู…ฑี”ค(€€€€€€€€€€ฝม•ษ…ัฅฝธ€๔๔ีน‘•ฅน•€ษ•อฝฑู•นฑ•นั €๔๔๔€ฤ€…•มั•‘Qีษนฬนฑ•นั €๔๔๔€ฤ€…•มั•‘Qีษนอlมtนอ•ฤ€๐ต…ักฅน1•‘•ษอlมtüนอ•ฤ€ต…ักฅน1•‘•ษฬนฑ•นั €๔๔๔€ฤ์(€€€€€€€ษ•ัีษธ์•แ…ะฐ•ู•นะฐฉฝฅธฐ…ออ•ษัฅฝนฬฐฝม•ษ…ัฅฝธฐ…•มั•‘Qีษนฬฐต…ักฅน1•‘•ษฬ๔์(€€€€€๔ค์(€€€€€ฝนอะ•แ…ันัษฅ•ฬ€๔•แ…ั)ฝฅนฬนฅฑั•ศ กฅั•ดค€๔๘ฅั•ดน•แ…ะค์(€€€€€ฝนอะษ•ฑ•ู…นั	ีฅฑ‘•ษ1•‘•ษฬ€๔ัฝฝฑ1•‘•ษฬนต…ภ ก•ู•นะค€๔๘์(€€€€€€€ฝนอะ•นัษไ€๔•ู•นะนม…ๅฑฝ…น•นัษไ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•์(€€€€€€€ฝนอะัฝฝฑูฅ‘•น”€๔•นัษไüนอๅนัก•ัฅQฝฝฑูฅ‘•น”…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•์(€€€€€€€ฝนอะฉฝฅธ€๔•นัษไüนอๅนัก•ัฅ	ีฅฑ‘•ษ)ฝฅธ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•์(€€€€€€€ษ•ัีษธ์•ู•นะฐ•นัษไฐัฝฝฑูฅ‘•น”ฐฉฝฅธ๔์(€€€€€€ผผมษฝ‘ีัู•นัอ€ฅฬ…ฑษ•…‘ไษ•อัษฅั•ัผัก”•แ…ะ…มภต…ีักฝษ•ษีธ(€€€€€€ผผฅน‘ฅนธ…ั•ฝษฅ้”•ู•ษไญนฝÝธ	ีฅฑ‘•ศ‘ฅอม…ั ไัก”ฝÝนฅน•นัษไฬ(€€€€€€ผผัฝฝฐน…ต”•ฝษ”•แ…ตฅนฅนน•อั••ูฅ‘•น”่ตฅออฅนฝั น•อั•ษ••ฅมัฬ(€€€€€€ผผฅฬฅัอ•ฑต…น‘…ัฝษไ…ษ‘ฅน…ฑฅัไฝมษฝู•น…น”…ฅฑีษ”ฐนฝะษ•…อฝธัผ(€€€€€€ผผฝตฅะ…ธฝอ•ษู•‘ฅอม…ั ษฝดัก”…น‘ฅ‘…ั”อ•ะธ(€€€€€๔คนฅฑั•ศ ก์•นัษไ๔ค€๔๘ีฅฑ‘•ษQฝฝฑ9…ต•ฬนก…ฬกMัษฅนก•นัษไüนัฝฝฑ9…ต”คคค์(€€€€€ฝนอะ•แ…ั	ีฅฑ‘•ษ1•‘•ศ€๔€ก์•นัษไฐัฝฝฑูฅ‘•น”๔่€กัๅม•ฝษ•ฑ•ู…นั	ีฅฑ‘•ษ1•‘•ษฬฅmนีต•ษtค่ฝฝฑ•…ธ€๔๘ัๅม•ฝ•นัษไüนัฝฝฑ…ฑฑ%€๔๔๔€อัษฅน€ัๅม•ฝ•นัษไน••ั%€๔๔๔€อัษฅน(€€€€€€€€ัๅม•ฝ•นัษไนมษฝูฅ‘•ษฝนน•ัฅฝนมฝ €๔๔๔€นีต•ศ€ีฅฑ‘•ษQฝฝฑ9…ต•ฬนก…ฬกMัษฅนก•นัษไนัฝฝฑ9…ต”คค(€€€€€€€€ัฝฝฑูฅ‘•น”üนอก•ต€๔๔๔€อฝมกฅ…}อๅนัก•ัฅ}ัฝฝฑ}•ูฅ‘•น•}ุฤ€ัฝฝฑูฅ‘•น”นั•อั}ษีน}ฅ€๔๔๔ษีธนั•อัIีน%€ัฝฝฑูฅ‘•น”นอ•น…ษฅฝ}ฅ€๔๔๔ษีธนอ•น…ษฅฝ%€ัฝฝฑูฅ‘•น”นอ•น…ษฅฝ}ู•ษอฅฝธ€๔๔๔ษีธนอ•น…ษฅฝY•ษอฅฝธ(€€€€€€€€ัฝฝฑูฅ‘•น”นัฝฝฑ}…ฑฑ}ฅ€๔๔๔•นัษไนัฝฝฑ…ฑฑ%€ัฝฝฑูฅ‘•น”น••ั}ฅ€๔๔๔•นัษไน••ั%€ัฝฝฑูฅ‘•น”นมษฝูฅ‘•ษ}ฝนน•ัฅฝน}•มฝ €๔๔๔•นัษไนมษฝูฅ‘•ษฝนน•ัฅฝนมฝ €ัฝฝฑูฅ‘•น”นัฝฝฑ}น…ต”€๔๔๔•นัษไนัฝฝฑ9…ต”(€€€€€€€€ัๅม•ฝัฝฝฑูฅ‘•น”นฝม•ษ…ัฅฝน}ฅ€๔๔๔€อัษฅน€ัๅม•ฝัฝฝฑูฅ‘•น”นีัั•ษ…น•}ฅ€๔๔๔€อัษฅน€9ีต•ศนฅอM…•%นั••ศกัฝฝฑูฅ‘•น”นมษฝูฅ‘•ษ}ฅนมีั}อ•ลี•น”ค€9ีต•ศกัฝฝฑูฅ‘•น”นมษฝูฅ‘•ษ}ฅนมีั}อ•ลี•น”ค€๘€ภ์(€€€€€ฝนอะีฅฑ‘•ษษฝีมฬ€๔น•Ü5…ภ๑อัษฅนฐัๅม•ฝษ•ฑ•ู…นั	ีฅฑ‘•ษ1•‘•ษฬ๘ ค์(€€€€€ฝศ€กฝนอะษฝÜฝษ•ฑ•ู…นั	ีฅฑ‘•ษ1•‘•ษฬค์(€€€€€€€ฝนอะญ•ไ€๔€‘ํMัษฅนกษฝÜน•นัษไüนัฝฝฑ…ฑฑ%ฅ๕qิภภภภ‘ํMัษฅนกษฝÜน•นัษไüน••ั%ฅ๕€์(€€€€€€€ฝนอะษฝีภ€๔ีฅฑ‘•ษษฝีมฬน•ะกญ•ไค€üümt์(€€€€€€€ษฝีภนมีอ กษฝÜค์(€€€€€€€ีฅฑ‘•ษษฝีมฬนอ•ะกญ•ไฐษฝีภค์(€€€€€๔(€€€€€ฝนอะ•แ…ั	ีฅฑ‘•ษษฝีมฬ€๔lธธนีฅฑ‘•ษษฝีมฬนู…ฑี•ฬ ฅtน•ู•ษไ กษฝีภค€๔๘์(€€€€€€€ฝนอะั•ษตฅน…ฐ€๔ษฝีภนฅฑั•ศ ก์•นัษไ๔ค€๔๘ั•ษตฅน…ฑMั…ั•ฬนก…ฬกMัษฅนก•นัษไüนฅน…ฑMั…ั”คคค์(€€€€€€€ฝนอะฑ…อะ€๔ษฝีภนษ•‘ี” กฑ…ั•อะฐษฝÜค€๔๘ษฝÜน•ู•นะนอ•ฤ€๘ฑ…ั•อะน•ู•นะนอ•ฤ€üษฝÜ€่ฑ…ั•อะฐษฝีมlมtค์(€€€€€€€ษ•ัีษธษฝีภนฑ•นั €๘€ภ€ษฝีภน•ู•ษไก•แ…ั	ีฅฑ‘•ษ1•‘•ศค€ั•ษตฅน…ฐนฑ•นั €๔๔๔€ฤ€ั•ษตฅน…ฑlมt€๔๔๔ฑ…อะ€ั•ษตฅน…ฑlมtนฉฝฅธüนอก•ต€๔๔๔€อฝมกฅ…}อๅนัก•ัฅ}ีฅฑ‘•ษ}ฉฝฅน}ุฤ(€€€€€€€€€€ั•ษตฅน…ฑlมtนฉฝฅธüนั•อั}ษีน}ฅ€๔๔๔ษีธนั•อัIีน%€ั•ษตฅน…ฑlมtนฉฝฅธüนอ•น…ษฅฝ}ฅ€๔๔๔ษีธนอ•น…ษฅฝ%€ั•ษตฅน…ฑlมtนฉฝฅธüนอ•น…ษฅฝ}ู•ษอฅฝธ€๔๔๔ษีธนอ•น…ษฅฝY•ษอฅฝธ์(€€€€€๔ค์(€€€€€ฝนอะ…ฑฑQ…อญ1•‘•ษฬ€๔lธธนีฅฑ‘•ษษฝีมฬนู…ฑี•ฬ ฅtนฑ…ั5…ภ กษฝีภค€๔๘ษฝีภนฅฑั•ศ ก์•นัษไ๔ค€๔๘ั•ษตฅน…ฑMั…ั•ฬนก…ฬกMัษฅนก•นัษไüนฅน…ฑMั…ั”คคคค์(€€€€€ฝนอะั…อญ%‘ฬ€๔น•ÜM•ะก…ฑฑQ…อญ1•‘•ษฬนต…ภ กฅั•ดค€๔๘ฅั•ดนฉฝฅธüนั…อญ}ฅคค์(€€€€€ฝนอะัฝฝฑ…ฑฑ%‘ฬ€๔น•ÜM•ะก…ฑฑQ…อญ1•‘•ษฬนต…ภ กฅั•ดค€๔๘ฅั•ดน•นัษไüนัฝฝฑ…ฑฑ%คค์(€€€€€ฝนอะ••ั%‘ฬ€๔น•ÜM•ะก…ฑฑQ…อญ1•‘•ษฬนต…ภ กฅั•ดค€๔๘ฅั•ดน•นัษไüน••ั%คค์(€€€€€ฝนอะ…อ•แ…ะ€๔ฉฝฅน…ีฑัฬนฑ•นั €๔๔๔€ภ€ฉฝฅนู•นัฬนฑ•นั €๔๔๔€ฤ€•แ…ันัษฅ•ฬนฑ•นั €๔๔๔€ฤ€ีฅฑ‘•ษษฝีมฬนอฅ้”€๘€ภ€•แ…ั	ีฅฑ‘•ษษฝีมฬ(€€€€€€€€ั…อญ%‘ฬนอฅ้”€๔๔๔€ฤ€ัฝฝฑ…ฑฑ%‘ฬนอฅ้”€๔๔๔…ฑฑQ…อญ1•‘•ษฬนฑ•นั €••ั%‘ฬนอฅ้”€๔๔๔…ฑฑQ…อญ1•‘•ษฬนฑ•นั €…ฑฑQ…อญ1•‘•ษฬนฑ•นั €๔๔๔ีฅฑ‘•ษษฝีมฬนอฅ้”์(€€€€€ฝนอะ•แ…ะ€๔•แ…ันัษฅ•อlมt์(€€€€€ฝนอะ…ออ•ษัฅฝนฬ€๔•แ…ะüน…ออ•ษัฅฝนฬ์(€€€€€ฑ•ะอ•น…ษฅฝแ…ะ€๔…ฑอ”์(€€€€€ฅ€ก…อ•แ…ะ€…ออ•ษัฅฝนฬค์(€€€€€€€ฅ€กษีธนอ•น…ษฅฝ%€๔๔๔€Xตภฤคอ•น…ษฅฝแ…ะ€๔ฅนฉ•ั•นฑ•นั €๔๔๔€ฤ€…ฑฑQ…อญ1•‘•ษฬนฑ•นั €๔๔๔€ฤ€•แ…ะนฉฝฅธนัฝฝฑ}น…ต”€๔๔๔€อั…ษั}ีฅฑ‘•ษ}ั…อฌ€•แ…ะนฉฝฅธนีฅ}มษฝฉ•ัฅฝน}อั…ั”€๔๔๔€…ษัฅ…ั}ูฅอฅฑ•}ีษษ•นะ€•แ…ะนฉฝฅธน…ษัฅ…ั}ฅ€๔๔นีฑฐ€•แ…ะนฉฝฅธน…ษัฅ…ั}ม…ัก}อกศิุ€๔๔นีฑฐ(€€€€€€€€€€…ออ•ษัฅฝนฬน…ษัฅ…ั}ษ•…ั•€๔๔๔ัษี”€…ออ•ษัฅฝนฬน…ษัฅ…ั}ูฅอฅฑ•}ีษษ•นะ€๔๔๔ัษี”€…ออ•ษัฅฝนฬน…•มั•‘}ัีษน}ฝีนะ€๔๔๔€ฤ€…ออ•ษัฅฝนฬนัฝฝฑ}‘ฅอม…ัก}ฝีนะ€๔๔๔€ฤ€…ออ•ษัฅฝนฬนฝÝน•‘}ั…อญ}ฝีนะ€๔๔๔€ฤ€…ออ•ษัฅฝนฬนอั…ฑ•}ั…อญ}ฅ‘•นัฅัไ€๔๔๔ัษี”์(€€€€€€€ฅ€กษีธนอ•น…ษฅฝ%€๔๔๔€Xตภศคอ•น…ษฅฝแ…ะ€๔ฅนฉ•ั•นฑ•นั €๔๔๔€ฬ€…ฑฑQ…อญ1•‘•ษฬนฑ•นั €๔๔๔€ฤ€•แ…ะนฉฝฅธนัฝฝฑ}น…ต”€๔๔๔€อั…ษั}ีฅฑ‘•ษ}ั…อฌ€•แ…ะนฉฝฅธนีฅ}มษฝฉ•ัฅฝน}อั…ั”€๔๔๔€…ษัฅ…ั}ูฅอฅฑ•}ีษษ•นะ(€€€€€€€€€€…ออ•ษัฅฝนฬน…•มั•‘}ัีษน}ฝีนะ€๔๔๔€ฬ€…ออ•ษัฅฝนฬนัฝฝฑ}‘ฅอม…ัก}ฝีนะ€๔๔๔€ฤ€…ออ•ษัฅฝนฬนฝÝน•‘}ั…อญ}ฝีนะ€๔๔๔€ฤ€…ออ•ษัฅฝนฬนอั…ฑ•}ั…อญ}ฅ‘•นัฅัไ€๔๔๔ัษี”(€€€€€€€€€€น•ÜM•ะกฅนฉ•ั•นต…ภ กฝม•ษ…ัฅฝธค€๔๘ฝม•ษ…ัฅฝธนฅคคนอฅ้”€๔๔๔€ฬ€ฅนฉ•ั•น•ู•ษไ กฝม•ษ…ัฅฝธค€๔๘มษฝ‘ีั	ๅ-ฅน …ี‘ฅผนฅนมีะนมษฝ‘ีั}ัีษธคนอฝต” ก•ู•นะค€๔๘€ก•ู•นะนม…ๅฑฝ…นษ••ฅมะ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•คüนฝม•ษ…ัฅฝน}ฅ€๔๔๔ฝม•ษ…ัฅฝธนฅ€€ก•ู•นะนม…ๅฑฝ…นษ••ฅมะ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•คüนฝีัฝต”€๔๔๔€มีฑฅ}ีอ•ษ}ัีษน}…•มั•คค์(€€€€€€€ฅ€กษีธนอ•น…ษฅฝ%€๔๔๔€Xตภฬค์(€€€€€€€€€ฝนอะัฝฝฑฬ€๔น•ÜM•ะก…ฑฑQ…อญ1•‘•ษฬนต…ภ กฅั•ดค€๔๘ฅั•ดน•นัษไüนัฝฝฑ9…ต”คค์(€€€€€€€€€อ•น…ษฅฝแ…ะ€๔ฅนฉ•ั•นฑ•นั €๔๔๔€ศ€…ฑฑQ…อญ1•‘•ษฬนฑ•นั €๔๔๔€ศ€ัฝฝฑฬนก…ฬ อั…ษั}ีฅฑ‘•ษ}ั…อฌค€lธธนัฝฝฑอtนอฝต” กัฝฝฐค€๔๘lีม‘…ั•}…อๅน}ั…อฌฐ€•‘ฅั}ีฅฑ‘•ษ}…ษัฅ…ะฐ€ฝษ•ูฅ•Ý}ษ•ลี•อั}…ษัฅ…ั}ีม‘…ั”tนฅนฑี‘•ฬกMัษฅนกัฝฝฐคคค(€€€€€€€€€€€€•แ…ะนฉฝฅธนีฅ}มษฝฉ•ัฅฝน}อั…ั”€๔๔๔€…ษัฅ…ั}ูฅอฅฑ•}ีษษ•นะ€•แ…ะนฉฝฅธน…ษัฅ…ั}ฅ€๔๔นีฑฐ€•แ…ะนฉฝฅธน…ษัฅ…ั}ม…ัก}อกศิุ€๔๔นีฑฐ(€€€€€€€€€€€€…ออ•ษัฅฝนฬน…•มั•‘}ัีษน}ฝีนะ€๔๔๔€ศ€…ออ•ษัฅฝนฬนัฝฝฑ}‘ฅอม…ัก}ฝีนะ€๔๔๔€ศ€…ออ•ษัฅฝนฬนฝÝน•‘}ั…อญ}ฝีนะ€๔๔๔€ฤ€…ออ•ษัฅฝนฬนอั…ฑ•}ั…อญ}ฅ‘•นัฅัไ€๔๔๔ัษี”€…ออ•ษัฅฝนฬนษ•ูฅอฅฝน}ีม‘…ั•‘}อ…ต•}ั…อฌ€๔๔๔ัษี”€…ออ•ษัฅฝนฬนีษษ•นั}•ก…ูฅฝษ}ษ•อีฑะ€๔๔๔ัษี”์(€€€€€€€๔(€€€€€€€ฅ€กษีธนอ•น…ษฅฝ%€๔๔๔€Xตภะค์(€€€€€€€€€ฝนอะัฝฝฑฬ€๔น•ÜM•ะก…ฑฑQ…อญ1•‘•ษฬนต…ภ กฅั•ดค€๔๘ฅั•ดน•นัษไüนัฝฝฑ9…ต”คค์(€€€€€€€€€อ•น…ษฅฝแ…ะ€๔ฅนฉ•ั•นฑ•นั €๔๔๔€ศ€…ฑฑQ…อญ1•‘•ษฬนฑ•นั €๔๔๔€ศ€ัฝฝฑฬนก…ฬ อั…ษั}ีฅฑ‘•ษ}ั…อฌค€ัฝฝฑฬนก…ฬ …น•ฑ}…อๅน}ั…อฌค€•แ…ะนฉฝฅธนัฝฝฑ}น…ต”€๔๔๔€…น•ฑ}…อๅน}ั…อฌ(€€€€€€€€€€€€•แ…ะนฉฝฅธนัฝฝฑ}อั…ั”€๔๔๔€ั•ษตฅน…ฑ}อ•ััฑ•€•แ…ะนฉฝฅธนีฅ}มษฝฉ•ัฅฝน}อั…ั”€๔๔๔€…นู…อ}ีษษ•นะ€•แ…ะนฉฝฅธน…น•ฑ}ฝีนะ€๔๔๔€ฤ€•แ…ะนฉฝฅธน…ษัฅ…ั}ฅ€๔๔๔นีฑฐ€•แ…ะนฉฝฅธน…ษัฅ…ั}ม…ัก}อกศิุ€๔๔๔นีฑฐ(€€€€€€€€€€€€ัๅม•ฝ•แ…ะนฉฝฅธนอฝีษ•}ีฅฑ‘•ษ}•ู•นั}ฅ€๔๔๔€อัษฅน€•แ…ะนฉฝฅธนอฝีษ•}ีฅฑ‘•ษ}•ู•นั}ฅ€๔๔๔ฑ…นษ…ม ตษีธตั•ษตฅน…ฐ่‘ํ•แ…ะนฉฝฅธนษีน}ฅ‘๔้…น•ฑฑ•‘€(€€€€€€€€€€€€…ออ•ษัฅฝนฬน…•มั•‘}ัีษน}ฝีนะ€๔๔๔€ศ€…ออ•ษัฅฝนฬนัฝฝฑ}‘ฅอม…ัก}ฝีนะ€๔๔๔€ศ€…ออ•ษัฅฝนฬนฝÝน•‘}ั…อญ}ฝีนะ€๔๔๔€ฤ€…ออ•ษัฅฝนฬนอั…ฑ•}ั…อญ}ฅ‘•นัฅัไ€๔๔๔ัษี”(€€€€€€€€€€€€…ออ•ษัฅฝนฬน…น•ฑ}ษ•ลี•อั}ฝีนะ€๔๔๔€ฤ€…ออ•ษัฅฝนฬน…น•ฑ}ั•ษตฅน…ฑ}อ•ััฑ•€๔๔๔ัษี”€…ออ•ษัฅฝนฬนนฝ}มฝอั}…น•ฑ}มีฑฅ…ัฅฝธ€๔๔๔ัษี”€•แ…ะนฉฝฅธนนฝ}มฝอั}…น•ฑ}มีฑฅ…ัฅฝธ€๔๔๔ัษี”์(€€€€€€€๔(€€€€€๔(€€€€€ฝนอะ•ูฅ‘•น”€๔lธธนฉฝฅนู•นัฬฐ€ธธนฉฝฅน…ีฑัฬฐ€ธธนัฝฝฑ1•‘•ษฬฐ€ธธธก•แ…ะüน…•มั•‘Qีษนฬ€üümtฅt์(€€€€€ก…ษน•อฬนมีอ กฉฝฅนู•นัฬนฑ•นั €๔๔๔€ภ(€€€€€€€€üีน…ู…ฅฑ…ฑ”ก€‘ํษีธนอ•น…ษฅฝ%นัฝ1ฝÝ•ษ…อ” ฅ๔น•แ…ั}ีฅฑ‘•ษ}ฝÝน•ษอกฅม}ก…ฅน€ฐ€ก…ษน•อฬฐ€มษฝ‘ีั}…ีักฝษ•‘}อๅนัก•ัฅ}ีฅฑ‘•ษ}ฉฝฅน}ีน…ู…ฅฑ…ฑ”ค(€€€€€€€€่ก•ฌก€‘ํษีธนอ•น…ษฅฝ%นัฝ1ฝÝ•ษ…อ” ฅ๔น•แ…ั}ีฅฑ‘•ษ}ฝÝน•ษอกฅม}ก…ฅน€ฐ€ก…ษน•อฬฐอ•น…ษฅฝแ…ะฐ•ูฅ‘•น”ฐ€ฝม•ษ…ัฅฝน}ฅนมีั}ัีษน}ัฝฝฑ}••ั}ีฅฑ‘•ษ}ั…อญ}ษีน}…ษัฅ…ั}…น‘}มฝอั}ฝตตฅั}ีฅ}ฉฝฅน}…ฅฑ•คค์(€€€€€มษฝ‘ีะนมีอ กษีธนอ•น…ษฅฝ%€๔๔๔€Xตภศ(€€€€€€€€üีน…ู…ฅฑ…ฑ” ุตภศนฝÝนฅน}ีฅฑ‘•ษ}อ•ต…นัฅฬฐ€มษฝ‘ีะฐ€ฝÝนฅน}อั…ัีอ}ษ•มฑๅ}ัฝ}ีฅฑ‘•ษ}ั…อญ}อั…ั•}ษฝีน‘ฅน}ษ••ฅมั}ีน…ู…ฅฑ…ฑ”ค(€€€€€€€€่ฉฝฅนู•นัฬนฑ•นั €๔๔๔€ภ(€€€€€€€€€€üีน…ู…ฅฑ…ฑ”ก€‘ํษีธนอ•น…ษฅฝ%นัฝ1ฝÝ•ษ…อ” ฅ๔นฝÝนฅน}ีฅฑ‘•ษ}อ•ต…นัฅอ€ฐ€มษฝ‘ีะฐ€มษฝ‘ีั}…ีักฝษ•‘}อๅนัก•ัฅ}ีฅฑ‘•ษ}ฉฝฅน}ีน…ู…ฅฑ…ฑ”ค(€€€€€€€€€€่ก•ฌก€‘ํษีธนอ•น…ษฅฝ%นัฝ1ฝÝ•ษ…อ” ฅ๔นฝÝนฅน}ีฅฑ‘•ษ}อ•ต…นัฅอ€ฐ€มษฝ‘ีะฐอ•น…ษฅฝแ…ะฐ•ูฅ‘•น”ฐ€มษฝ‘ีั}ีฅฑ‘•ษ}อ•น…ษฅฝ}อ•ต…นัฅอ}ฝษ}•แ…ัฑๅ}ฝน•}ฉฝฅน}…ฅฑ•คค์(€€€€€ษ•…ฌ์(€€€๔(€€€…อ”€Xต$ภฤ่…อ”€Xต$ภศ่์(€€€€€ฝนอะ…ษ”€๔ฅนฉ•ั•นฅฑั•ศ กฝม•ษ…ัฅฝธค€๔๘ฝม•ษ…ัฅฝธนัๅม”€๔๔๔€…ษ•}ฅธค์(€€€€€ฝนอะั•ษตฅน…ฑฬ€๔lธธนมษฝ‘ีั	ๅ-ฅน …ี‘ฅผนฝีัมีะนฑีอก•คฐ€ธธนมษฝ‘ีั	ๅ-ฅน …ี‘ฅผนฝีัมีะน‘ษฝมม•ฅt์(€€€€€ฝนอะ…ีอ…ฐ€๔…ษ”นต…ภ กฝม•ษ…ัฅฝธค€๔๘์(€€€€€€€ฝนอะั…ษ•ะ€๔ฝม•ษ…ัฅฝธนฅนมีะน}…ษ•}ั…ษ•ะ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•์(€€€€€€€ฝนอะฅั•€๔มษฝ‘ีั	ๅ-ฅน …ี‘ฅผนฝีัมีะนอั…ษั•คนฅน ก•ู•นะค€๔๘•ู•นะนอ•ฤ€๔๔๔9ีต•ศกั…ษ•ะüน…ั•ษ}ฝีัมีั}•ู•นั}อ•ฤคค์(€€€€€€€ฝนอะฅั•‘I••ฅมะ€๔ฅั•üนม…ๅฑฝ…นษ••ฅมะ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•์(€€€€€€€ฝนอะฅนมีัMั…ษั•€๔ก…ฅธกฝม•ษ…ัฅฝธนฅคนอั…ษั•‘lมt์(€€€€€€€ฝนอะั…ษ•ัQ•ษตฅน…ฑฬ€๔ั•ษตฅน…ฑฬนฅฑั•ศ ก•ู•นะค€๔๘์(€€€€€€€€€ฝนอะษ••ฅมะ€๔•ู•นะนม…ๅฑฝ…นษ••ฅมะ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•์(€€€€€€€€€ษ•ัีษธ•ู•นะนอ•ฤ€๘€กฅนมีัMั…ษั•üนอ•ฤ€üü9ีต•ศน5a}M}%9QHค€ษ••ฅมะüนษ•…ฑฅ้…ัฅฝน%€๔๔๔ั…ษ•ะüนษ•…ฑฅ้…ัฅฝน}ฅ€9ีต•ศกษ••ฅมะüนมษฝูฅ‘•ษฝนน•ัฅฝนมฝ ค€๔๔๔9ีต•ศกั…ษ•ะüนมษฝูฅ‘•ษ}ฝนน•ัฅฝน}•มฝ ค€9ีต•ศกษ••ฅมะüนมฑ…ๅ…ญ•น•ษ…ัฅฝธค€๔๔๔9ีต•ศกั…ษ•ะüนมฑ…ๅ…ญ}•น•ษ…ัฅฝธค์(€€€€€€€๔ค์(€€€€€€€ฝนอะั…ษ•ัะ€๔ัๅม•ฝั…ษ•ะüนั…ษ•ั}อก•‘ีฑ•}…ะ€๔๔๔€อัษฅน€ü…ั”นม…ษอ”กั…ษ•ะนั…ษ•ั}อก•‘ีฑ•}…ะค€่9ีต•ศน9…8์(€€€€€€€ฝนอะฑ…ั•น•อฬ€๔ฅนมีัMั…ษั•€üฅนมีัMั…ษั•น…ะน•ัQฅต” ค€ดั…ษ•ัะ€่9ีต•ศนA=M%Q%Y}%9%9%Qd์(€€€€€€€ฝนอะฑีอกะ€๔ั…ษ•ัQ•ษตฅน…ฑอlมt€ü…ั”นม…ษอ”กMัษฅน กั…ษ•ัQ•ษตฅน…ฑอlมtนม…ๅฑฝ…นษ••ฅมะ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘คนัฅต•อั…ตภคค€่9ีต•ศน9…8์(€€€€€€€ฝนอะฑีอก1…ั•นไ€๔ฅนมีัMั…ษั•€üฑีอกะ€ดฅนมีัMั…ษั•น…ะน•ัQฅต” ค€่9ีต•ศนA=M%Q%Y}%9%9%Qd์(€€€€€€€ฝนอะ•แ…ะ€๔ฅั•‘I••ฅมะüนมก…อ”€๔๔๔€อั…ษั•€ฅั•‘I••ฅมะนษ•…ฑฅ้…ัฅฝน%€๔๔๔ั…ษ•ะüนษ•…ฑฅ้…ัฅฝน}ฅ€9ีต•ศกฅั•‘I••ฅมะนมษฝูฅ‘•ษฝนน•ัฅฝนมฝ ค€๔๔๔9ีต•ศกั…ษ•ะüนมษฝูฅ‘•ษ}ฝนน•ัฅฝน}•มฝ ค(€€€€€€€€€€9ีต•ศกฅั•‘I••ฅมะนมฑ…ๅ…ญ•น•ษ…ัฅฝธค€๔๔๔9ีต•ศกั…ษ•ะüนมฑ…ๅ…ญ}•น•ษ…ัฅฝธค€ั…ษ•ะüนษ••ฅมั}มก…อ”€๔๔๔€อั…ษั•€ั…ษ•ะüนฅนั•นัฅฝน…ฑ}ฝู•ษฑ…ภ€๔๔๔ัษี”(€€€€€€€€€€ฅนมีัMั…ษั•€๔๔ีน‘•ฅน•€9ีต•ศนฅอฅนฅั”กั…ษ•ัะค€ฑ…ั•น•อฬ€๘๔€ดิภ€ฑ…ั•น•อฬ€๐๔9ีต•ศกั…ษ•ะüนต…แ}ฑ…ั•น•ออ}ตฬค€ั…ษ•ัQ•ษตฅน…ฑฬนฑ•นั €๔๔๔€ฤ(€€€€€€€€€€9ีต•ศนฅอฅนฅั”กฑีอก1…ั•นไค€ฑีอก1…ั•นไ€๘๔€ภ€ฑีอก1…ั•นไ€๐๔€ล|ิภภ€ก…ฅธกฝม•ษ…ัฅฝธนฅคน•แ…ะ์(€€€€€€€ษ•ัีษธ์•แ…ะฐ•ู•นัฬ่lธธธกฅั•€ümฅั•‘t€่mtคฐ€ธธธกฅนมีัMั…ษั•€ümฅนมีัMั…ษั•‘t€่mtคฐ€ธธนั…ษ•ัQ•ษตฅน…ฑอt๔์(€€€€€๔ค์(€€€€€ฝนอะ•แ…ั	…ษ”€๔…ีอ…ฐนฑ•นั €๔๔๔€ฤ€…ีอ…ฑlมtน•แ…ะ์(€€€€€ฝนอะอั…ฑ•I•อั…ษัฬ€๔…ีอ…ฐนฑ…ั5…ภ กฅั•ดฐฅน‘•เค€๔๘์(€€€€€€€ฝนอะฝม•ษ…ัฅฝธ€๔…ษ•mฅน‘•แt์(€€€€€€€ฝนอะั…ษ•ะ€๔ฝม•ษ…ัฅฝธนฅนมีะน}…ษ•}ั…ษ•ะ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•์(€€€€€€€ฝนอะั•ษตฅน…ฑM•ฤ€๔ฅั•ดน•ู•นัฬนฅฑั•ศ ก•ู•นะค€๔๘l…ี‘ฅผนฝีัมีะนฑีอก•ฐ€…ี‘ฅผนฝีัมีะน‘ษฝมม•tนฅนฑี‘•ฬก•ู•นะนญฅนคคน…ะ ดฤคüนอ•ฤ€üü9ีต•ศน5a}M}%9QH์(€€€€€€€ษ•ัีษธมษฝ‘ีั	ๅ-ฅน …ี‘ฅผนฝีัมีะนอั…ษั•คนฅฑั•ศ ก•ู•นะค€๔๘์(€€€€€€€€€ฝนอะษ••ฅมะ€๔•ู•นะนม…ๅฑฝ…นษ••ฅมะ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•์(€€€€€€€€€ษ•ัีษธ•ู•นะนอ•ฤ€๘ั•ษตฅน…ฑM•ฤ€€กษ••ฅมะüนษ•…ฑฅ้…ัฅฝน%€๔๔๔ั…ษ•ะüนษ•…ฑฅ้…ัฅฝน}ฅ๑๐€กัๅม•ฝั…ษ•ะüนกีนญ}ก…อ €๔๔๔€อัษฅน€ษ••ฅมะüนกีนญ!…อ €๔๔๔ั…ษ•ะนกีนญ}ก…อ คค์(€€€€€€€๔ค์(€€€€€๔ค์(€€€€€ฝนอะ•แ…ั	…ษ•9ฝMั…ฑ”€๔•แ…ั	…ษ”€อั…ฑ•I•อั…ษัฬนฑ•นั €๔๔๔€ภ์(€€€€€ก…ษน•อฬนมีอ กก•ฌก€‘ํษีธนอ•น…ษฅฝ%นัฝ1ฝÝ•ษ…อ” ฅ๔น•แ…ั}…ษ•}…ีอ…ฑ}ก…ฅน€ฐ€ก…ษน•อฬฐ•แ…ั	…ษ•9ฝMั…ฑ”ฐlธธน…ีอ…ฐนฑ…ั5…ภ กฅั•ดค€๔๘ฅั•ดน•ู•นัฬคฐ€ธธนอั…ฑ•I•อั…ษัอtฐ€•แ…ั}ฅั•‘}ษ•…ฑฅ้…ัฅฝน}•มฝก}•น•ษ…ัฅฝน}ฅนมีั}อั…ษั}ฑีอก}ฑ…ั•นๅ}…น‘}นฝ}อั…ฑ•}ษ•อั…ษั}ก…ฅน}ีน…ู…ฅฑ…ฑ”คค์(€€€€€ฅ€กษีธนอ•น…ษฅฝ%€๔๔๔€Xต$ภศค์(€€€€€€€ฝนอะฝม•ษ…ัฅฝธ€๔…ษ•lมt์(€€€€€€€ฝนอะัฝฝฑQ…ษ•ะ€๔ฝม•ษ…ัฅฝธüนฅนมีะน}ัฝฝฑ}ั…ษ•ะ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•์(€€€€€€€ฝนอะั…ษ•ัู•นะ€๔ัๅม•ฝัฝฝฑQ…ษ•ะüน•ู•นั}อ•ฤ€๔๔๔€นีต•ศ€üมษฝ‘ีัู•นัฬนฅน ก•ู•นะค€๔๘•ู•นะนอ•ฤ€๔๔๔ัฝฝฑQ…ษ•ะน•ู•นั}อ•ฤ€•ู•นะนญฅนนฅนฑี‘•ฬ •ตฅนคตัฝฝฐต…ฑฐตฑ•‘•ศคค€่ีน‘•ฅน•์(€€€€€€€ฝนอะั…ษ•ันัษไ€๔ั…ษ•ัู•นะüนม…ๅฑฝ…น•นัษไ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•์(€€€€€€€ฝนอะั…ษ•ั…มัีษ”€๔ั…ษ•ัู•นะüนม…ๅฑฝ…น}…มัีษ•}มษฝู•น…น”…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•์(€€€€€€€ฝนอะั…ษ•ัูฅ‘•น”€๔ั…ษ•ันัษไüนอๅนัก•ัฅQฝฝฑูฅ‘•น”…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•์(€€€€€€€ฝนอะั•ษตฅน…ฑMั…ั•ฬ€๔น•ÜM•ะกlษ•อมฝน‘•ฐ€…น•ฑฑ•ต•ฝษ”ตอ•นฐ€…น•ฑฑ•ต…ั•ศตอ•นฐ€อีมมษ•ออ•ฐ€ษ•ฉ•ั•tค์(€€€€€€€ฝนอะษ•ฑ…ั•€๔มษฝ‘ีัู•นัฬนฅฑั•ศ ก•ู•นะค€๔๘์(€€€€€€€€€ฝนอะ•นัษไ€๔•ู•นะนม…ๅฑฝ…น•นัษไ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•์(€€€€€€€€€ษ•ัีษธ•ู•นะนญฅนนฅนฑี‘•ฬ •ตฅนคตัฝฝฐต…ฑฐตฑ•‘•ศค€€ก•นัษไüนัฝฝฑ…ฑฑ%€๔๔๔ัฝฝฑQ…ษ•ะüนัฝฝฑ}…ฑฑ}ฅ๑๐•นัษไüน••ั%€๔๔๔ัฝฝฑQ…ษ•ะüน••ั}ฅค์(€€€€€€€๔คนต…ภ ก•ู•นะค€๔๘€ก์•ู•นะฐ•นัษไ่•ู•นะนม…ๅฑฝ…น•นัษไ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๔คค์(€€€€€€€ฝนอะั•ษตฅน…ฑฬ€๔ษ•ฑ…ั•นฅฑั•ศ ก์•นัษไ๔ค€๔๘ั•ษตฅน…ฑMั…ั•ฬนก…ฬกMัษฅนก•นัษไนฅน…ฑMั…ั”คค€€กัๅม•ฝ•นัษไนัฝฝฑI•อมฝนอ•M•นัะ€๔๔๔€อัษฅน๑๐ัๅม•ฝ•นัษไน…น•ฑฑ•‘ะ€๔๔๔€อัษฅนคค์(€€€€€€€ฝนอะฅนมีัMั…ษั•€๔ฝม•ษ…ัฅฝธ€üก…ฅธกฝม•ษ…ัฅฝธนฅคนอั…ษั•‘lมt€่ีน‘•ฅน•์(€€€€€€€ฝนอะ•แม•ั•‘Q…ษ•ั%‘•นัฅัไ€๔อกศิุก€‘ํMัษฅนกัฝฝฑQ…ษ•ะüนัฝฝฑ}…ฑฑ}ฅฅ๕qิภภภภ‘ํMัษฅนกัฝฝฑQ…ษ•ะüน••ั}ฅฅ๕€ค์(€€€€€€€ฝนอะษ•ู…ฑฅ‘…ั•€๔ฝม•ษ…ัฅฝธ€üๅ-ฅน …ีฑะน…ัฅู•}ั…ษ•ั}ษ•ู…ฑฅ‘…ั•คนฅฑั•ศ ก•ู•นะค€๔๘•ู•นะนอฝีษ”€๔๔๔€…นฝนฅ…ฐ€•ู•นะนม…ๅฑฝ…นฝม•ษ…ัฅฝน}ฅ€๔๔๔ฝม•ษ…ัฅฝธนฅ€•ู•นะนม…ๅฑฝ…นั…ษ•ั}•ู•นั}อ•ฤ€๔๔๔ั…ษ•ัู•นะüนอ•ฤ€•ู•นะนม…ๅฑฝ…นั…ษ•ั}ญฅน€๔๔๔€ัฝฝฑ}••ะ(€€€€€€€€€€•ู•นะนม…ๅฑฝ…นั…ษ•ั}ฅ‘•นัฅัๅ}อกศิุ€๔๔๔•แม•ั•‘Q…ษ•ั%‘•นัฅัไ€9ีต•ศนฅอM…•%นั••ศก•ู•นะนม…ๅฑฝ…นฝอ•ษู•‘}ักษฝีก}อ•ฤค€9ีต•ศก•ู•นะนม…ๅฑฝ…นฝอ•ษู•‘}ักษฝีก}อ•ฤค€๘๔9ีต•ศกั…ษ•ัู•นะüนอ•ฤค€•ู•นะนม…ๅฑฝ…น…ัฅู”€๔๔๔ัษี”ค€่mt์(€€€€€€€ฝนอะ•น•€๔ฝม•ษ…ัฅฝธ€ัฝฝฑQ…ษ•ะ€ü•แ…ััฅู•Q…ษ•ั•น•ู•นัฬก•ู•นัฬฐฝม•ษ…ัฅฝธนฅฐัฝฝฑQ…ษ•ะฐ€ัฝฝฑ}••ะค€่mt์(€€€€€€€ฝนอะฝÝน•ศ€๔ฝม•ษ…ัฅฝนฬนฅน ก…น‘ฅ‘…ั”ค€๔๘…น‘ฅ‘…ั”นฅ€๔๔๔ัฝฝฑQ…ษ•ะüนฝÝน•ษ}ฝม•ษ…ัฅฝน}ฅ€€ก…น‘ฅ‘…ั”นัๅม”€๔๔๔€อม•…ฌ๑๐…น‘ฅ‘…ั”นัๅม”€๔๔๔€…ษ•}ฅธค€…น‘ฅ‘…ั”นอั…ั”€๔๔๔€อี••‘•ค์(€€€€€€€ฝนอะ•แ…ัูฅ‘•น”€๔€ก•นัษไ่I•ฝษ๑อัษฅนฐีนญนฝÝธ๘ค่ฝฝฑ•…ธ€๔๘์(€€€€€€€€€ฝนอะ•ูฅ‘•น”€๔•นัษไนอๅนัก•ัฅQฝฝฑูฅ‘•น”…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•์(€€€€€€€€€ษ•ัีษธ•นัษไนัฝฝฑ…ฑฑ%€๔๔๔ัฝฝฑQ…ษ•ะüนัฝฝฑ}…ฑฑ}ฅ€•นัษไน••ั%€๔๔๔ัฝฝฑQ…ษ•ะüน••ั}ฅ€•นัษไนมษฝูฅ‘•ษฝนน•ัฅฝนมฝ €๔๔๔ัฝฝฑQ…ษ•ะüนมษฝูฅ‘•ษ}ฝนน•ัฅฝน}•มฝ (€€€€€€€€€€€€•ูฅ‘•น”üนอก•ต€๔๔๔€อฝมกฅ…}อๅนัก•ัฅ}ัฝฝฑ}•ูฅ‘•น•}ุฤ€•ูฅ‘•น”นั•อั}ษีน}ฅ€๔๔๔ษีธนั•อัIีน%€•ูฅ‘•น”นอ•น…ษฅฝ}ฅ€๔๔๔ษีธนอ•น…ษฅฝ%€•ูฅ‘•น”นอ•น…ษฅฝ}ู•ษอฅฝธ€๔๔๔ษีธนอ•น…ษฅฝY•ษอฅฝธ(€€€€€€€€€€€€•ูฅ‘•น”นฝม•ษ…ัฅฝน}ฅ€๔๔๔ัฝฝฑQ…ษ•ะüนฝÝน•ษ}ฝม•ษ…ัฅฝน}ฅ€•ูฅ‘•น”นีัั•ษ…น•}ฅ€๔๔๔ัฝฝฑQ…ษ•ะüนฝÝน•ษ}ีัั•ษ…น•}ฅ€•ูฅ‘•น”นมษฝูฅ‘•ษ}ฅนมีั}อ•ลี•น”€๔๔๔ัฝฝฑQ…ษ•ะüนมษฝูฅ‘•ษ}ฅนมีั}อ•ลี•น”(€€€€€€€€€€€€•ูฅ‘•น”นัฝฝฑ}…ฑฑ}ฅ€๔๔๔ัฝฝฑQ…ษ•ะüนัฝฝฑ}…ฑฑ}ฅ€•ูฅ‘•น”น••ั}ฅ€๔๔๔ัฝฝฑQ…ษ•ะüน••ั}ฅ€•ูฅ‘•น”นมษฝูฅ‘•ษ}ฝนน•ัฅฝน}•มฝ €๔๔๔ัฝฝฑQ…ษ•ะüนมษฝูฅ‘•ษ}ฝนน•ัฅฝน}•มฝ ์(€€€€€€€๔์(€€€€€€€ฝนอะ•แ…ัQฝฝฐ€๔ฝม•ษ…ัฅฝธ€๔๔ีน‘•ฅน•€ัฝฝฑQ…ษ•ะüน…ัฅูฅัๅ}อั…ั”€๔๔๔€ฅน}ฑฅกะ€ั…ษ•ัู•นะ€๔๔ีน‘•ฅน•€ั…ษ•ันัษไüนฅน…ฑMั…ั”€๔๔๔€ีนญนฝÝธ€ัๅม•ฝั…ษ•ันัษไนษ••ฅู•‘ะ€๔๔๔€อัษฅน(€€€€€€€€€€ั…ษ•ันัษไนัฝฝฑI•อมฝนอ•M•นัะ€๔๔๔นีฑฐ€ั…ษ•ันัษไน…น•ฑฑ•‘ะ€๔๔๔นีฑฐ€ั…ษ•ันัษไนัฝฝฑ…ฑฑ%€๔๔๔ัฝฝฑQ…ษ•ะนัฝฝฑ}…ฑฑ}ฅ€ั…ษ•ันัษไน••ั%€๔๔๔ัฝฝฑQ…ษ•ะน••ั}ฅ(€€€€€€€€€€ั…ษ•ันัษไนมษฝูฅ‘•ษฝนน•ัฅฝนมฝ €๔๔๔ัฝฝฑQ…ษ•ะนมษฝูฅ‘•ษ}ฝนน•ัฅฝน}•มฝ €ั…ษ•ัูฅ‘•น”üนอก•ต€๔๔๔€อฝมกฅ…}อๅนัก•ัฅ}ัฝฝฑ}•ูฅ‘•น•}ุฤ€ั…ษ•ัูฅ‘•น”นั•อั}ษีน}ฅ€๔๔๔ษีธนั•อัIีน%(€€€€€€€€€€ั…ษ•ัูฅ‘•น”นฝม•ษ…ัฅฝน}ฅ€๔๔๔ัฝฝฑQ…ษ•ะนฝÝน•ษ}ฝม•ษ…ัฅฝน}ฅ€ั…ษ•ัูฅ‘•น”นีัั•ษ…น•}ฅ€๔๔๔ัฝฝฑQ…ษ•ะนฝÝน•ษ}ีัั•ษ…น•}ฅ€ั…ษ•ัูฅ‘•น”นมษฝูฅ‘•ษ}ฅนมีั}อ•ลี•น”€๔๔๔ัฝฝฑQ…ษ•ะนมษฝูฅ‘•ษ}ฅนมีั}อ•ลี•น”(€€€€€€€€€€ั…ษ•ัูฅ‘•น”นัฝฝฑ}…ฑฑ}ฅ€๔๔๔ัฝฝฑQ…ษ•ะนัฝฝฑ}…ฑฑ}ฅ€ั…ษ•ัูฅ‘•น”น••ั}ฅ€๔๔๔ัฝฝฑQ…ษ•ะน••ั}ฅ€ั…ษ•ั…มัีษ”üน•น•ษ…ัฅฝธ€๔๔๔ัฝฝฑQ…ษ•ะนมษฝ‘ีั}•น•ษ…ัฅฝธ€ั…ษ•ั…มัีษ”üนอ•ฤ€๔๔๔ัฝฝฑQ…ษ•ะนมษฝ‘ีั}อ•ฤ(€€€€€€€€€€ฝÝน•ศ€๔๔ีน‘•ฅน•€ฅนมีัMั…ษั•€๔๔ีน‘•ฅน•€ษ•ฑ…ั•น•ู•ษไ ก์•นัษไ๔ค€๔๘•แ…ัูฅ‘•น”ก•นัษไคค(€€€€€€€€€€ษ•ู…ฑฅ‘…ั•นฑ•นั €๔๔๔€ฤ€•น•นฑ•นั €๔๔๔€ฤ€ั…ษ•ัู•นะนอ•ฤ€๐ษ•ู…ฑฅ‘…ั•‘lมtนอ•ฤ€ษ•ู…ฑฅ‘…ั•‘lมtนอ•ฤ€๐•น•‘lมtนอ•ฤ€•น•‘lมtนอ•ฤ€๐ฅนมีัMั…ษั•นอ•ฤ€ั•ษตฅน…ฑฬนฑ•นั €๔๔๔€ฤ€ฅนมีัMั…ษั•นอ•ฤ€๐ั•ษตฅน…ฑอlมtน•ู•นะนอ•ฤ(€€€€€€€€€€ั•ษตฅน…ฑอlมtน•นัษไนัฝฝฑ…ฑฑ%€๔๔๔ัฝฝฑQ…ษ•ะนัฝฝฑ}…ฑฑ}ฅ€ั•ษตฅน…ฑอlมtน•นัษไน••ั%€๔๔๔ัฝฝฑQ…ษ•ะน••ั}ฅ(€€€€€€€€€€€กั•ษตฅน…ฑอlมtน•นัษไนอๅนัก•ัฅQฝฝฑูฅ‘•น”…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•คüนฝม•ษ…ัฅฝน}ฅ€๔๔๔ฝÝน•ศนฅ(€€€€€€€€€€ษ•ฑ…ั•นฅฑั•ศ ก์•นัษไ๔ค€๔๘ั•ษตฅน…ฑMั…ั•ฬนก…ฬกMัษฅนก•นัษไนฅน…ฑMั…ั”คคคนฑ•นั €๔๔๔€ฤ€•แ…ัQ•ษตฅน…ฑ1…อัQฝฝฑ1ฅ•ๅฑ”กษ•ฑ…ั•ฐฅนมีัMั…ษั•นอ•ฤค์(€€€€€€€ก…ษน•อฬนมีอ กก•ฌ ุตคภศนัฝฝฑ}ฝีน‘…ษๅ}ัฝั…ฑ}ฝษ‘•ษ}…น‘}…ั}ตฝอั}ฝน•}อ•ััฑ•ต•นะฐ€ก…ษน•อฬฐ•แ…ัQฝฝฐฐlธธนษ•ฑ…ั•นต…ภ กฅั•ดค€๔๘ฅั•ดน•ู•นะคฐ€ธธนษ•ู…ฑฅ‘…ั•ฐ€ธธน•น•‘tฐ€•แ…ั}ฝÝน•‘}ฅน}ฑฅกั}ัฝฝฑ}••ั}ษฝÝอ•ษ}…ัฝตฅ}•น•}…ษ•}ฝษ‘•ษ}…น‘}อฅนฑ•}ั•ษตฅน…ฑ}อ•ััฑ•ต•นั}ีน…ู…ฅฑ…ฑ”คค์(€€€€€€€€ผผQก”•แ…ะ••ะฝษ‘•ษฅนฝ…ษ‘ฅน…ฑฅัไฅฬต…กฅน”ตู•ษฅฅ…ฑ”…ฝู”ฐ(€€€€€€€€ผผีะัก”มษฝ‘ีะฝนัษ…ะ‘ฝ•ฬนฝะๅ•ะ•แมฝอ”…ธฝÝนฅนอ•ต…นัฅ(€€€€€€€€ผผษ••ฅมะฉฝฅนฅนัก”มฝอะต…ษ”…ออฅอั…นะมษฝตฅอ”ัผัก”…ัี…ฐัฝฝฐ(€€€€€€€€ผผั•ษตฅน…ฐฝีัฝต”ธ9•ู•ศฅน•ศัก…ะษ•ฑ…ัฅฝนอกฅภษฝดัษ…นอษฅมะ(€€€€€€€€ผผÝฝษ‘ฅนฝศัีษธมษฝแฅตฅัไธ(€€€€€€€มษฝ‘ีะนมีอ กีน…ู…ฅฑ…ฑ” ุตคภศนษ•ั…ฅน•‘}ฅนมีั}…น‘}…ั}ตฝอั}ฝน•}••ะฐ€มษฝ‘ีะฐ€ฝÝนฅน}มฝอั}…ษ•}มษฝตฅอ•}ัฝ}ัฝฝฑ}ฝีัฝต•}ษ••ฅมั}ีน…ู…ฅฑ…ฑ”คค์(€€€€€๔•ฑอ”มษฝ‘ีะนมีอ กก•ฌ ุตคภฤนษ•ั…ฅน•‘}ฅนมีั}…ั•ษ}ฑีอ ฐ€มษฝ‘ีะฐ•แ…ั	…ษ•9ฝMั…ฑ”ฐlธธน…ีอ…ฐนฑ…ั5…ภ กฅั•ดค€๔๘ฅั•ดน•ู•นัฬคฐ€ธธนอั…ฑ•I•อั…ษัอtฐ€ฝีน‘}…ษ•}ฅนมีั}ฑีอก}ฝษ}นฝ}อั…ฑ•}ฝีัมีั}ษ••ฅมั}ีน…ู…ฅฑ…ฑ”คค์(€€€€€ษ•…ฌ์(€€€๔(€€€…อ”€Xต8ภฤ่…อ”€Xต8ภศ่์(€€€€€ฝนอะษฝั…ัฅฝธ€๔ฝม•ษ…ัฅฝนฬนฅฑั•ศ กฝม•ษ…ัฅฝธค€๔๘ฝม•ษ…ัฅฝธนัๅม”€๔๔๔€ฝษ•}อฝญ•ั}ษฝั…ัฅฝธ€ฝม•ษ…ัฅฝธนอั…ั”€๔๔๔€อี••‘•ค์(€€€€€ฝนอะ•มฝกฬ€๔มษฝ‘ีั	ๅ-ฅน มษฝูฅ‘•ศนฝนน•ัฅฝน}•มฝ ค์(€€€€€ฝนอะฝม•ษ…ัฅฝธ€๔ษฝั…ัฅฝนlมt์(€€€€€ฝนอะมษฅฝษมฝ €๔9ีต•ศกฝม•ษ…ัฅฝธüนฅนมีะน•แม•ั•‘}อฝญ•ั}•มฝ ค์(€€€€€ฝนอะษ•อีฑัAษฝ‘ีะ€๔€กฝม•ษ…ัฅฝธüนษ•อีฑะüนษฝั…ัฅฝน}ษ••ฅมะ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•คüนมษฝ‘ีะ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•์(€€€€€ฝนอะษ•อัฝษ•‘มฝ €๔9ีต•ศกษ•อีฑัAษฝ‘ีะüนมษฝูฅ‘•ษฝนน•ัฅฝนมฝ ค์(€€€€€ฝนอะษ•อัฝษ•‘ู•นะ€๔•มฝกฬนฅน ก•ู•นะค€๔๘•ู•นะนอ•ฤ€๔๔๔9ีต•ศกษ•อีฑัAษฝ‘ีะüน}อ•ฤคค์(€€€€€ฝนอะษ•อัฝษ•‘I••ฅมะ€๔ษ•อัฝษ•‘ู•นะüนม…ๅฑฝ…นษ••ฅมะ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•์(€€€€€ฝนอะมษฅฝษู•นัฬ€๔•มฝกฬนฅฑั•ศ ก•ู•นะค€๔๘•ู•นะนอ•ฤ€๐€กษ•อัฝษ•‘ู•นะüนอ•ฤ€üü€ดฤคคนฅฑั•ศ ก•ู•นะค€๔๘์(€€€€€€€ฝนอะษ••ฅมะ€๔•ู•นะนม…ๅฑฝ…นษ••ฅมะ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•์(€€€€€€€ษ•ัีษธ9ีต•ศกษ••ฅมะüนมษฝูฅ‘•ษฝนน•ัฅฝนมฝ ค€๔๔๔มษฅฝษมฝ €ษ••ฅมะüนฝนัฅนีฅัๅMั…ั”€๔๔๔€…ัฅู”€lฝฝัอัษ…ภฐ€ษ•อัฝษ•tนฅนฑี‘•ฬกMัษฅนกษ••ฅมะüนมก…อ”คค์(€€€€€๔ค์(€€€€€ฝนอะษ•อัฝษ•€๔ษฝั…ัฅฝธนฑ•นั €๔๔๔€ฤ€9ีต•ศนฅอM…•%นั••ศกมษฅฝษมฝ ค€มษฅฝษู•นัฬนฑ•นั €๘๔€ฤ€ษ•อัฝษ•‘ู•นะ€๔๔ีน‘•ฅน•€ษ•อีฑัAษฝ‘ีะ€๔๔ีน‘•ฅน•(€€€€€€€€ษ•อีฑัAษฝ‘ีะนมก…อ”€๔๔๔€ษ•อัฝษ•€ษ•อีฑัAษฝ‘ีะนมษ•ูฅฝีอAษฝูฅ‘•ษฝนน•ัฅฝนมฝ €๔๔๔มษฅฝษมฝ €9ีต•ศกษ•อีฑัAษฝ‘ีะนมษฝูฅ‘•ษฝนน•ัฅฝนมฝ ค€๘มษฅฝษมฝ €ษ•อีฑัAษฝ‘ีะนฝนัฅนีฅัๅMั…ั”€๔๔๔€…ัฅู”(€€€€€€€€…นฝนฅ…ฑI•ลี•อั!…อ กษ•อัฝษ•‘I••ฅมะค€๔๔๔…นฝนฅ…ฑI•ลี•อั!…อ ก=ฉ•ะนษฝตนัษฅ•ฬก=ฉ•ะน•นัษฅ•ฬกษ•อีฑัAษฝ‘ีะคนฅฑั•ศ กmญ•ๅtค€๔๘ญ•ไ€๔๔€}อ•ฤคคค(€€€€€€€€ษ•อัฝษ•‘I••ฅมะüนมก…อ”€๔๔๔€ษ•อัฝษ•€ษ•อัฝษ•‘I••ฅมะนมษ•ูฅฝีอAษฝูฅ‘•ษฝนน•ัฅฝนมฝ €๔๔๔มษฅฝษมฝ €9ีต•ศกษ•อัฝษ•‘I••ฅมะนมษฝูฅ‘•ษฝนน•ัฅฝนมฝ ค€๘มษฅฝษมฝ €ษ•อัฝษ•‘I••ฅมะนฝนัฅนีฅัๅMั…ั”€๔๔๔€…ัฅู”์(€€€€€ก…ษน•อฬนมีอ กก•ฌก€‘ํษีธนอ•น…ษฅฝ%นัฝ1ฝÝ•ษ…อ” ฅ๔นษ•ลี•อั•‘}•มฝก}ัฝ}ษ•อัฝษ•‘}•มฝก€ฐ€ก…ษน•อฬฐษ•อัฝษ•ฐ•มฝกฬฐ€•แ…ั}ษ•ลี•อั•‘}มษฅฝษ}•มฝก}…น‘}…มม}…ีักฝษ•‘}ษ•อัฝษ•‘}ษ••ฅมั}ฉฝฅน}ีน…ู…ฅฑ…ฑ”คค์(€€€€€ฅ€กษีธนอ•น…ษฅฝ%€๔๔๔€Xต8ภศค์(€€€€€€€ฝนอะั…ษ•ะ€๔ฝม•ษ…ัฅฝธüนฅนมีะน}ฝตตฅั}ั…ษ•ะ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•์(€€€€€€€ฝนอะั…ษ•ัู•นะ€๔ัๅม•ฝั…ษ•ะüน•ู•นั}อ•ฤ€๔๔๔€นีต•ศ€üมษฝ‘ีัู•นัฬนฅน ก•ู•นะค€๔๘•ู•นะนอ•ฤ€๔๔๔ั…ษ•ะน•ู•นั}อ•ฤค€่ีน‘•ฅน•์(€€€€€€€ฝนอะั…ษ•ั-ฅน€๔ั…ษ•ะüนญฅน€๔๔๔€ฝีัมีั}ษ•…ฑฅ้…ัฅฝธ€ü€ฝีัมีั}ษ•…ฑฅ้…ัฅฝธ€่€ัฝฝฑ}••ะ์(€€€€€€€ฝนอะ•แม•ั•‘Q…ษ•ั%‘•นัฅัไ€๔อกศิุก€‘ํMัษฅนกั…ษ•ะüนอั…ฑ•}ฅฅ๕qิภภภภ‘ํMัษฅนกั…ษ•ั-ฅน€๔๔๔€ฝีัมีั}ษ•…ฑฅ้…ัฅฝธ€üั…ษ•ะüนกีนญ}ก…อ €่ั…ษ•ะüน••ั}ฅฅ๕€ค์(€€€€€€€ฝนอะษ•ู…ฑฅ‘…ั•€๔ฝม•ษ…ัฅฝธ€üๅ-ฅน …ีฑะน…ัฅู•}ั…ษ•ั}ษ•ู…ฑฅ‘…ั•คนฅฑั•ศ ก•ู•นะค€๔๘•ู•นะนอฝีษ”€๔๔๔€…นฝนฅ…ฐ€•ู•นะนม…ๅฑฝ…นฝม•ษ…ัฅฝน}ฅ€๔๔๔ฝม•ษ…ัฅฝธนฅ€•ู•นะนม…ๅฑฝ…นั…ษ•ั}•ู•นั}อ•ฤ€๔๔๔ั…ษ•ัู•นะüนอ•ฤ(€€€€€€€€€€•ู•นะนม…ๅฑฝ…นั…ษ•ั}ญฅน€๔๔๔ั…ษ•ั-ฅน€•ู•นะนม…ๅฑฝ…นั…ษ•ั}ฅ‘•นัฅัๅ}อกศิุ€๔๔๔•แม•ั•‘Q…ษ•ั%‘•นัฅัไ€9ีต•ศนฅอM…•%นั••ศก•ู•นะนม…ๅฑฝ…นฝอ•ษู•‘}ักษฝีก}อ•ฤค(€€€€€€€€€€9ีต•ศก•ู•นะนม…ๅฑฝ…นฝอ•ษู•‘}ักษฝีก}อ•ฤค€๘๔9ีต•ศกั…ษ•ัู•นะüนอ•ฤค€•ู•นะนม…ๅฑฝ…น…ัฅู”€๔๔๔ัษี”ค€่mt์(€€€€€€€ฝนอะ•น•€๔ฝม•ษ…ัฅฝธ€ั…ษ•ะ€ü•แ…ััฅู•Q…ษ•ั•น•ู•นัฬก•ู•นัฬฐฝม•ษ…ัฅฝธนฅฐั…ษ•ะฐั…ษ•ั-ฅนค€่mt์(€€€€€€€ฑ•ะ•แ…ั•ะ€๔…ฑอ”์(€€€€€€€ฑ•ะ••ัูฅ‘•น”่ฅตมฝษะ ธฝ‘ฝต…ฅธนฉฬคน1…ู•นัmt€๔ั…ษ•ัู•นะ€ümั…ษ•ัู•นัt€่mt์(€€€€€€€ฅ€กั…ษ•ะüนญฅน€๔๔๔€ฝีัมีั}ษ•…ฑฅ้…ัฅฝธ€ั…ษ•ะüน…ัฅูฅัๅ}อั…ั”€๔๔๔€ฅน}ฑฅกะ€ั…ษ•ัู•นะüนญฅน€๔๔๔€…ี‘ฅผนฝีัมีะนอั…ษั•ค์(€€€€€€€€€ฝนอะต…ักฅน€๔มษฝ‘ีัู•นัฬนฅฑั•ศ ก•ู•นะค€๔๘์(€€€€€€€€€€€ฝนอะษ••ฅมะ€๔•ู•นะนม…ๅฑฝ…นษ••ฅมะ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•์(€€€€€€€€€€€ษ•ัีษธษ••ฅมะüนษ•…ฑฅ้…ัฅฝน%€๔๔๔ั…ษ•ะนอั…ฑ•}ฅ๑๐€กัๅม•ฝั…ษ•ะนกีนญ}ก…อ €๔๔๔€อัษฅน€ษ••ฅมะüนกีนญ!…อ €๔๔๔ั…ษ•ะนกีนญ}ก…อ ค์(€€€€€€€€€๔ค์(€€€€€€€€€ฝนอะั…ษ•ัI••ฅมะ€๔ั…ษ•ัู•นะนม…ๅฑฝ…นษ••ฅมะ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•์(€€€€€€€€€ฝนอะั…ษ•ั…มัีษ”€๔ั…ษ•ัู•นะนม…ๅฑฝ…น}…มัีษ•}มษฝู•น…น”…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•์(€€€€€€€€€ฝนอะั•ษตฅน…ฑฬ€๔ต…ักฅนนฅฑั•ศ ก•ู•นะค€๔๘์(€€€€€€€€€€€ฝนอะษ••ฅมะ€๔•ู•นะนม…ๅฑฝ…นษ••ฅมะ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•์(€€€€€€€€€€€ษ•ัีษธ•ู•นะนอ•ฤ€๘€ก•น•‘lมtüนอ•ฤ€üü9ีต•ศน5a}M}%9QHค€l…ี‘ฅผนฝีัมีะนฝตมฑ•ั•ฐ€…ี‘ฅผนฝีัมีะนฑีอก•ฐ€…ี‘ฅผนฝีัมีะน‘ษฝมม•tนฅนฑี‘•ฬก•ู•นะนญฅนค(€€€€€€€€€€€€€€ษ••ฅมะüนษ•…ฑฅ้…ัฅฝน%€๔๔๔ั…ษ•ะนอั…ฑ•}ฅ€ษ••ฅมะüนกีนญ!…อ €๔๔๔ั…ษ•ะนกีนญ}ก…อ €9ีต•ศกษ••ฅมะüนมษฝูฅ‘•ษฝนน•ัฅฝนมฝ ค€๔๔๔มษฅฝษมฝ (€€€€€€€€€€€€€€9ีต•ศกษ••ฅมะüนมฑ…ๅ…ญ•น•ษ…ัฅฝธค€๔๔๔9ีต•ศกั…ษ•ะนมฑ…ๅ…ญ}•น•ษ…ัฅฝธค์(€€€€€€€€€๔ค์(€€€€€€€€€ฝนอะ…ฑฑQ•ษตฅน…ฑฬ€๔ต…ักฅนนฅฑั•ศ ก•ู•นะค€๔๘l…ี‘ฅผนฝีัมีะนฝตมฑ•ั•ฐ€…ี‘ฅผนฝีัมีะนฑีอก•ฐ€…ี‘ฅผนฝีัมีะน‘ษฝมม•tนฅนฑี‘•ฬก•ู•นะนญฅนคค์(€€€€€€€€€ฝนอะฝตม•ัฅนMั…ษัฬ€๔ต…ักฅนนฅฑั•ศ ก•ู•นะค€๔๘•ู•นะนญฅน€๔๔๔€…ี‘ฅผนฝีัมีะนอั…ษั•€•ู•นะนอ•ฤ€๔๔ั…ษ•ัู•นะนอ•ฤค์(€€€€€€€€€ฝนอะษ•มฑ…ๅ•‘ั•ษ•น”€๔ต…ักฅนนฅฑั•ศ ก•ู•นะค€๔๘•ู•นะนอ•ฤ€๘€ก•น•‘lมtüนอ•ฤ€üü9ีต•ศน5a}M}%9QHค€l…ี‘ฅผนฝีัมีะนอก•‘ีฑ•ฐ€…ี‘ฅผนฝีัมีะนอั…ษั•tนฅนฑี‘•ฬก•ู•นะนญฅนคค์(€€€€€€€€€ฝนอะษ•มฑ…ๅ•‘ั•ษQ•ษตฅน…ฐ€๔ั•ษตฅน…ฑฬนฑ•นั €๔๔๔€ฤ€üต…ักฅนนฅฑั•ศ ก•ู•นะค€๔๘•ู•นะนอ•ฤ€๘ั•ษตฅน…ฑอlมtนอ•ฤ€l…ี‘ฅผนฝีัมีะนอก•‘ีฑ•ฐ€…ี‘ฅผนฝีัมีะนอั…ษั•ฐ€…ี‘ฅผนฝีัมีะนฝตมฑ•ั•tนฅนฑี‘•ฬก•ู•นะนญฅนคค€่mt์(€€€€€€€€€•แ…ั•ะ€๔ั…ษ•ัI••ฅมะüนษ•…ฑฅ้…ัฅฝน%€๔๔๔ั…ษ•ะนอั…ฑ•}ฅ€ั…ษ•ัI••ฅมะüนกีนญ!…อ €๔๔๔ั…ษ•ะนกีนญ}ก…อ (€€€€€€€€€€€€ั…ษ•ัI••ฅมะüนมก…อ”€๔๔๔€อั…ษั•€9ีต•ศกั…ษ•ัI••ฅมะüนมษฝูฅ‘•ษฝนน•ัฅฝนมฝ ค€๔๔๔มษฅฝษมฝ €9ีต•ศกั…ษ•ัI••ฅมะüนมฑ…ๅ…ญ•น•ษ…ัฅฝธค€๔๔๔9ีต•ศกั…ษ•ะนมฑ…ๅ…ญ}•น•ษ…ัฅฝธค(€€€€€€€€€€€€ั…ษ•ั…มัีษ”üน•น•ษ…ัฅฝธ€๔๔๔ั…ษ•ะนมษฝ‘ีั}•น•ษ…ัฅฝธ€ั…ษ•ั…มัีษ”üนอ•ฤ€๔๔๔ั…ษ•ะนมษฝ‘ีั}อ•ฤ(€€€€€€€€€€€€ั•ษตฅน…ฑฬนฑ•นั €๔๔๔€ฤ€…ฑฑQ•ษตฅน…ฑฬนฑ•นั €๔๔๔€ฤ€ฝตม•ัฅนMั…ษัฬนฑ•นั €๔๔๔€ภ€ษ•มฑ…ๅ•‘ั•ษ•น”นฑ•นั €๔๔๔€ภ€ษ•มฑ…ๅ•‘ั•ษQ•ษตฅน…ฐนฑ•นั €๔๔๔€ภ€9ีต•ศนฅอM…•%นั••ศกษ•อัฝษ•‘มฝ ค€ษ•อัฝษ•‘มฝ €๘มษฅฝษมฝ ์(€€€€€€€€€••ัูฅ‘•น”€๔ต…ักฅน์(€€€€€€€๔•ฑอ”ฅ€กั…ษ•ะüนญฅน€๔๔๔€ัฝฝฑ}อ•ััฑ•ต•นะ€ั…ษ•ะüน…ัฅูฅัๅ}อั…ั”€๔๔๔€ฅน}ฑฅกะ€ั…ษ•ัู•นะüนญฅนนฅนฑี‘•ฬ •ตฅนคตัฝฝฐต…ฑฐตฑ•‘•ศคค์(€€€€€€€€€ฝนอะต…ักฅน€๔มษฝ‘ีัู•นัฬนฅฑั•ศ ก•ู•นะค€๔๘์(€€€€€€€€€€€ฝนอะ•นัษไ€๔•ู•นะนม…ๅฑฝ…น•นัษไ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•์(€€€€€€€€€€€ษ•ัีษธ•ู•นะนญฅนนฅนฑี‘•ฬ •ตฅนคตัฝฝฐต…ฑฐตฑ•‘•ศค€€ก•นัษไüนัฝฝฑ…ฑฑ%€๔๔๔ั…ษ•ะนอั…ฑ•}ฅ๑๐•นัษไüน••ั%€๔๔๔ั…ษ•ะน••ั}ฅค์(€€€€€€€€€๔ค์(€€€€€€€€€ฝนอะั•ษตฅน…ฐ€๔ต…ักฅนนฅฑั•ศ ก•ู•นะค€๔๘์(€€€€€€€€€€€ฝนอะ•นัษไ€๔•ู•นะนม…ๅฑฝ…น•นัษไ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•์(€€€€€€€€€€€ษ•ัีษธ•ู•นะนอ•ฤ€๘ั…ษ•ัู•นะนอ•ฤ€•นัษไüนัฝฝฑ…ฑฑ%€๔๔๔ั…ษ•ะนอั…ฑ•}ฅ€•นัษไüน••ั%€๔๔๔ั…ษ•ะน••ั}ฅ(€€€€€€€€€€€€€€lษ•อมฝน‘•ฐ€…น•ฑฑ•ต•ฝษ”ตอ•นฐ€…น•ฑฑ•ต…ั•ศตอ•นฐ€อีมมษ•ออ•ฐ€ษ•ฉ•ั•tนฅนฑี‘•ฬกMัษฅนก•นัษไüนฅน…ฑMั…ั”คค€€กัๅม•ฝ•นัษไüนัฝฝฑI•อมฝนอ•M•นัะ€๔๔๔€อัษฅน๑๐ัๅม•ฝ•นัษไüน…น•ฑฑ•‘ะ€๔๔๔€อัษฅนค์(€€€€€€€€€๔ค์(€€€€€€€€€ฝนอะ…ฑฑQ•ษตฅน…ฑฝษQฝฝฐ€๔ต…ักฅนนฅฑั•ศ ก•ู•นะค€๔๘์(€€€€€€€€€€€ฝนอะ•นัษไ€๔•ู•นะนม…ๅฑฝ…น•นัษไ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•์(€€€€€€€€€€€ษ•ัีษธlษ•อมฝน‘•ฐ€…น•ฑฑ•ต•ฝษ”ตอ•นฐ€…น•ฑฑ•ต…ั•ศตอ•นฐ€อีมมษ•ออ•ฐ€ษ•ฉ•ั•tนฅนฑี‘•ฬกMัษฅนก•นัษไüนฅน…ฑMั…ั”คค์(€€€€€€€€€๔ค์(€€€€€€€€€ฝนอะั…ษ•ันัษไ€๔ั…ษ•ัู•นะนม…ๅฑฝ…น•นัษไ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘์(€€€€€€€€€ฝนอะั…ษ•ัูฅ‘•น”€๔ั…ษ•ันัษไนอๅนัก•ัฅQฝฝฑูฅ‘•น”…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•์(€€€€€€€€€ฝนอะั…ษ•ั…มัีษ”€๔ั…ษ•ัู•นะนม…ๅฑฝ…น}…มัีษ•}มษฝู•น…น”…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•์(€€€€€€€€€ฝนอะฝÝน•ศ€๔ฝม•ษ…ัฅฝนฬนฅน ก…น‘ฅ‘…ั”ค€๔๘…น‘ฅ‘…ั”นฅ€๔๔๔ั…ษ•ะนฝÝน•ษ}ฝม•ษ…ัฅฝน}ฅ€€ก…น‘ฅ‘…ั”นัๅม”€๔๔๔€อม•…ฌ๑๐…น‘ฅ‘…ั”นัๅม”€๔๔๔€…ษ•}ฅธค€…น‘ฅ‘…ั”นอั…ั”€๔๔๔€อี••‘•ค์(€€€€€€€€€ฝนอะ•แ…ัQฝฝฑูฅ‘•น”€๔€ก•ู•นะ่ฅตมฝษะ ธฝ‘ฝต…ฅธนฉฬคน1…ู•นะค่ฝฝฑ•…ธ€๔๘์(€€€€€€€€€€€ฝนอะ•นัษไ€๔•ู•นะนม…ๅฑฝ…น•นัษไ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•์(€€€€€€€€€€€ฝนอะ•ูฅ‘•น”€๔•นัษไüนอๅนัก•ัฅQฝฝฑูฅ‘•น”…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•์(€€€€€€€€€€€ษ•ัีษธ•นัษไüนัฝฝฑ…ฑฑ%€๔๔๔ั…ษ•ะนอั…ฑ•}ฅ€•นัษไüน••ั%€๔๔๔ั…ษ•ะน••ั}ฅ€•นัษไüนมษฝูฅ‘•ษฝนน•ัฅฝนมฝ €๔๔๔ั…ษ•ะนมษฝูฅ‘•ษ}ฝนน•ัฅฝน}•มฝ (€€€€€€€€€€€€€€•ูฅ‘•น”üนอก•ต€๔๔๔€อฝมกฅ…}อๅนัก•ัฅ}ัฝฝฑ}•ูฅ‘•น•}ุฤ€•ูฅ‘•น”นั•อั}ษีน}ฅ€๔๔๔ษีธนั•อัIีน%€•ูฅ‘•น”นอ•น…ษฅฝ}ฅ€๔๔๔ษีธนอ•น…ษฅฝ%€•ูฅ‘•น”นอ•น…ษฅฝ}ู•ษอฅฝธ€๔๔๔ษีธนอ•น…ษฅฝY•ษอฅฝธ(€€€€€€€€€€€€€€•ูฅ‘•น”นฝม•ษ…ัฅฝน}ฅ€๔๔๔ั…ษ•ะนฝÝน•ษ}ฝม•ษ…ัฅฝน}ฅ€•ูฅ‘•น”นีัั•ษ…น•}ฅ€๔๔๔ั…ษ•ะนฝÝน•ษ}ีัั•ษ…น•}ฅ€•ูฅ‘•น”นมษฝูฅ‘•ษ}ฅนมีั}อ•ลี•น”€๔๔๔ั…ษ•ะนมษฝูฅ‘•ษ}ฅนมีั}อ•ลี•น”(€€€€€€€€€€€€€€•ูฅ‘•น”นัฝฝฑ}…ฑฑ}ฅ€๔๔๔ั…ษ•ะนอั…ฑ•}ฅ€•ูฅ‘•น”น••ั}ฅ€๔๔๔ั…ษ•ะน••ั}ฅ€•ูฅ‘•น”นมษฝูฅ‘•ษ}ฝนน•ัฅฝน}•มฝ €๔๔๔ั…ษ•ะนมษฝูฅ‘•ษ}ฝนน•ัฅฝน}•มฝ ์(€€€€€€€€€๔์(€€€€€€€€€•แ…ั•ะ€๔ั…ษ•ันัษไนฅน…ฑMั…ั”€๔๔๔€ีนญนฝÝธ€ั…ษ•ันัษไนัฝฝฑI•อมฝนอ•M•นัะ€๔๔๔นีฑฐ€ั…ษ•ันัษไน…น•ฑฑ•‘ะ€๔๔๔นีฑฐ€ั•ษตฅน…ฐนฑ•นั €๔๔๔€ฤ€…ฑฑQ•ษตฅน…ฑฝษQฝฝฐนฑ•นั €๔๔๔€ฤ(€€€€€€€€€€€€ั•ษตฅน…ฑlมtนอ•ฤ€๘€ก•น•‘lมtüนอ•ฤ€üü9ีต•ศน5a}M}%9QHค€9ีต•ศกั…ษ•ันัษไนมษฝูฅ‘•ษฝนน•ัฅฝนมฝ ค€๔๔๔มษฅฝษมฝ €ั…ษ•ั…มัีษ”üน•น•ษ…ัฅฝธ€๔๔๔ั…ษ•ะนมษฝ‘ีั}•น•ษ…ัฅฝธ€ั…ษ•ั…มัีษ”üนอ•ฤ€๔๔๔ั…ษ•ะนมษฝ‘ีั}อ•ฤ(€€€€€€€€€€€€ั…ษ•ัูฅ‘•น”üนฝม•ษ…ัฅฝน}ฅ€๔๔๔ั…ษ•ะนฝÝน•ษ}ฝม•ษ…ัฅฝน}ฅ€ฝÝน•ศ€๔๔ีน‘•ฅน•€ต…ักฅนน•ู•ษไก•แ…ัQฝฝฑูฅ‘•น”ค(€€€€€€€€€€€€•แ…ัQ•ษตฅน…ฑ1…อัQฝฝฑ1ฅ•ๅฑ”กต…ักฅนนต…ภ ก•ู•นะค€๔๘€ก์•ู•นะฐ•นัษไ่•ู•นะนม…ๅฑฝ…น•นัษไ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๔คคฐ•น•‘lมtüนอ•ฤ€üü9ีต•ศน5a}M}%9QHค(€€€€€€€€€€€€9ีต•ศนฅอM…•%นั••ศกษ•อัฝษ•‘มฝ ค€ษ•อัฝษ•‘มฝ €๘มษฅฝษมฝ ์(€€€€€€€€€••ัูฅ‘•น”€๔ต…ักฅน์(€€€€€€€๔(€€€€€€€ฝนอะ•แ…ัฝนัฅนีฅัไ€๔ษ•อัฝษ•€•แ…ั•ะ€ษ•ู…ฑฅ‘…ั•นฑ•นั €๔๔๔€ฤ€•น•นฑ•นั €๔๔๔€ฤ€ั…ษ•ัู•นะ€๔๔ีน‘•ฅน•€ษ•อัฝษ•‘ู•นะ€๔๔ีน‘•ฅน•(€€€€€€€€€€ั…ษ•ัู•นะนอ•ฤ€๐ษ•ู…ฑฅ‘…ั•‘lมtนอ•ฤ€ษ•ู…ฑฅ‘…ั•‘lมtนอ•ฤ€๐•น•‘lมtนอ•ฤ€•น•‘lมtนอ•ฤ€๐ษ•อัฝษ•‘ู•นะนอ•ฤ์(€€€€€€€ก…ษน•อฬนมีอ กก•ฌ ุตธภศนฝตตฅัั•‘}ฝีน‘…ษๅ}•แ…ัฑๅ}ฝน•}••ะฐ€ก…ษน•อฬฐ•แ…ัฝนัฅนีฅัไฐlธธน•มฝกฬฐ€ธธน••ัูฅ‘•น”ฐ€ธธนษ•ู…ฑฅ‘…ั•ฐ€ธธน•น•‘tฐ€•แ…ั}ฅน}ฑฅกั}…มม}ั…ษ•ั}ษฝÝอ•ษ}…ัฝตฅ}•น•}…น‘}•แ…ัฑๅ}ฝน•}ั•ษตฅน…ฑ}••ั}ีน…ู…ฅฑ…ฑ”คค์(€€€€€€€มษฝ‘ีะนมีอ กก•ฌ ุตธภศน•แ…ัฑๅ}ฝน•}ฝนัฅนีฅัๅ}••ะฐ€มษฝ‘ีะฐ•แ…ัฝนัฅนีฅัไฐlธธน•มฝกฬฐ€ธธน••ัูฅ‘•น”ฐ€ธธนษ•ู…ฑฅ‘…ั•ฐ€ธธน•น•‘tฐ€ฝÝนฅน}ฅน}ฑฅกั}•ู•นั}ฝษ}••ั}ฑ•‘•ษ}ีน…ู…ฅฑ…ฑ”คค์(€€€€€๔•ฑอ”์(€€€€€€€ฝนอะฝีัมีั1ฅ•ๅฑ•-ฅน‘ฬ€๔น•ÜM•ะกl…ี‘ฅผนฝีัมีะนอก•‘ีฑ•ฐ€…ี‘ฅผนฝีัมีะนอั…ษั•ฐ€…ี‘ฅผนฝีัมีะนฝตมฑ•ั•ฐ€…ี‘ฅผนฝีัมีะนฑีอก•ฐ€…ี‘ฅผนฝีัมีะน‘ษฝมม•tค์(€€€€€€€ฝนอะฝีัมีัI••ฅมัฬ€๔มษฝ‘ีัู•นัฬนฅฑั•ศ ก•ู•นะค€๔๘ฝีัมีั1ฅ•ๅฑ•-ฅน‘ฬนก…ฬก•ู•นะนญฅนคคนต…ภ ก•ู•นะค€๔๘€ก์•ู•นะฐษ••ฅมะ่•ู•นะนม…ๅฑฝ…นษ••ฅมะ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•๔คคนฅฑั•ศ ก์ษ••ฅมะ๔ค€๔๘ัๅม•ฝษ••ฅมะüนษ•…ฑฅ้…ัฅฝน%€๔๔๔€อัษฅนค์(€€€€€€€ฝนอะฅนมีั•ัฬ€๔มษฝ‘ีั	ๅ-ฅน …ี‘ฅผนฅนมีะนมษฝ‘ีั}ัีษธคนต…ภ ก•ู•นะค€๔๘€ก์•ู•นะฐษ••ฅมะ่•ู•นะนม…ๅฑฝ…นษ••ฅมะ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•๔คคนฅฑั•ศ ก์ษ••ฅมะ๔ค€๔๘ัๅม•ฝษ••ฅมะüนฝม•ษ…ัฅฝน}ฅ€๔๔๔€อัษฅนค์(€€€€€€€ฝนอะฅนมีั•ั-•ๅฬ€๔ฅนมีั•ัฬนต…ภ ก์ษ••ฅมะ๔ค€๔๘€‘ํษ••ฅมะüนฝม•ษ…ัฅฝน}ฅ‘๕qิภภภภ‘ํษ••ฅมะüนอฝีษ•๕qิภภภภ‘ํษ••ฅมะüนฝีัฝต•๕€ค์(€€€€€€€ฝนอะัฝฝฑ1•‘•ษIฝÝฬ€๔มษฝ‘ีัู•นัฬนฅฑั•ศ ก•ู•นะค€๔๘•ู•นะนญฅนนฅนฑี‘•ฬ •ตฅนคตัฝฝฐต…ฑฐตฑ•‘•ศคคนต…ภ ก•ู•นะค€๔๘€ก์•ู•นะฐ•นัษไ่•ู•นะนม…ๅฑฝ…น•นัษไ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•๔คค์(€€€€€€€ฝนอะู…ฑฅ‘QฝฝฑIฝÝฬ€๔ัฝฝฑ1•‘•ษIฝÝฬนฅฑั•ศ กษฝÜค่ษฝÜฅฬ์•ู•นะ่ฅตมฝษะ ธฝ‘ฝต…ฅธนฉฬคน1…ู•นะ์•นัษไ่I•ฝษ๑อัษฅนฐีนญนฝÝธ๘๔€๔๘ัๅม•ฝษฝÜน•นัษไüนัฝฝฑ…ฑฑ%€๔๔๔€อัษฅน€ัๅม•ฝษฝÜน•นัษไน••ั%€๔๔๔€อัษฅนค์(€€€€€€€ฝนอะัฝฝฑษฝีมฬ€๔น•Ü5…ภ๑อัษฅนฐัๅม•ฝู…ฑฅ‘QฝฝฑIฝÝฬ๘ ค์(€€€€€€€ฝศ€กฝนอะษฝÜฝู…ฑฅ‘QฝฝฑIฝÝฬค์(€€€€€€€€€ฝนอะญ•ไ€๔€‘ํMัษฅนกษฝÜน•นัษไนัฝฝฑ…ฑฑ%ฅ๕qิภภภภ‘ํMัษฅนกษฝÜน•นัษไน••ั%ฅ๕€์(€€€€€€€€€ฝนอะษฝีภ€๔ัฝฝฑษฝีมฬน•ะกญ•ไค€üümt์(€€€€€€€€€ษฝีภนมีอ กษฝÜค์(€€€€€€€€€ัฝฝฑษฝีมฬนอ•ะกญ•ไฐษฝีภค์(€€€€€€€๔(€€€€€€€ฝนอะัฝฝฑ…ฑฑ%‘ฬ€๔lธธนัฝฝฑษฝีมฬนู…ฑี•ฬ ฅtนต…ภ กษฝีภค€๔๘Mัษฅนกษฝีมlมtน•นัษไนัฝฝฑ…ฑฑ%คค์(€€€€€€€ฝนอะัฝฝฑ•ั%‘ฬ€๔lธธนัฝฝฑษฝีมฬนู…ฑี•ฬ ฅtนต…ภ กษฝีภค€๔๘Mัษฅนกษฝีมlมtน•นัษไน••ั%คค์(€€€€€€€ฝนอะ•แ…ัQฝฝฑ1ฅ•ๅฑ•ฬ€๔ัฝฝฑ1•‘•ษIฝÝฬนฑ•นั €๔๔๔ู…ฑฅ‘QฝฝฑIฝÝฬนฑ•นั €lธธนัฝฝฑษฝีมฬนู…ฑี•ฬ ฅtน•ู•ษไ กษฝีภค€๔๘•แ…ัQ•ษตฅน…ฑ1…อัQฝฝฑ1ฅ•ๅฑ”กษฝีภคค์(€€€€€€€ฝนอะมฝอัI•อัฝษ•%นมีัฬ€๔ษ•อัฝษ•‘ู•นะ€üฅนฉ•ั•นฅฑั•ศ ก…น‘ฅ‘…ั”ค€๔๘์(€€€€€€€€€ฝนอะฅนมีัก…ฅธ€๔ก…ฅธก…น‘ฅ‘…ั”นฅค์(€€€€€€€€€ฝนอะฑ•€๔ฅนมีัก…ฅธนมษฝ‘ีั1•อlมtüนม…ๅฑฝ…นษ••ฅมะ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•์(€€€€€€€€€ษ•ัีษธฅนมีัก…ฅธน•แ…ะ€ฅนมีัก…ฅธนอั…ษั•นฑ•นั €๔๔๔€ฤ€ฅนมีัก…ฅธนอั…ษั•‘lมtนอ•ฤ€๘ษ•อัฝษ•‘ู•นะนอ•ฤ€ฅนมีัก…ฅธนมษฝ‘ีัQีษนฬนอฝต” ก•ู•นะค€๔๘•ู•นะนอ•ฤ€๘ษ•อัฝษ•‘ู•นะนอ•ฤค(€€€€€€€€€€€€9ีต•ศกฑ•üนมษฝูฅ‘•ษ}ฝนน•ัฅฝน}•มฝ ค€๔๔๔ษ•อัฝษ•‘มฝ ์(€€€€€€€๔ค€่mt์(€€€€€€€ฝนอะ…•มั•‘%นมีัM•ฤ€๔มฝอัI•อัฝษ•%นมีัฬนฑ•นั €๔๔๔€ฤ€ü5…ั นต…เ ธธนก…ฅธกมฝอัI•อัฝษ•%นมีัอlมtนฅคนมษฝ‘ีัQีษนฬนต…ภ ก•ู•นะค€๔๘•ู•นะนอ•ฤคค€่9ีต•ศน5a}M}%9QH์(€€€€€€€ฝนอะนฝีมฑฅ…ั•]ฝษฌ€๔ฅนฉ•ั•นฑ•นั €๔๔๔€ฤ€มฝอัI•อัฝษ•%นมีัฬนฑ•นั €๔๔๔€ฤ€ฅนฉ•ั•น•ู•ษไ ก…น‘ฅ‘…ั”ค€๔๘ก…ฅธก…น‘ฅ‘…ั”นฅคน•แ…ะค(€€€€€€€€€€•แ…ั=ีัมีั1ฅ•ๅฑ•อัมฝ กมษฝ‘ีัู•นัฬฐษ•อัฝษ•‘มฝ ฐ…•มั•‘%นมีัM•ฤค€น•ÜM•ะกฅนมีั•ั-•ๅฬคนอฅ้”€๔๔๔ฅนมีั•ั-•ๅฬนฑ•นั (€€€€€€€€€€•แ…ัQฝฝฑ1ฅ•ๅฑ•ฬ€น•ÜM•ะกัฝฝฑ…ฑฑ%‘ฬคนอฅ้”€๔๔๔ัฝฝฑ…ฑฑ%‘ฬนฑ•นั €น•ÜM•ะกัฝฝฑ•ั%‘ฬคนอฅ้”€๔๔๔ัฝฝฑ•ั%‘ฬนฑ•นั ์(€€€€€€€ก…ษน•อฬนมีอ กก•ฌ ุตธภฤนนฝ}‘ีมฑฅ…ั•}อม••ก}ฝษ}ัฝฝฑ}Ýฝษฌฐ€ก…ษน•อฬฐนฝีมฑฅ…ั•]ฝษฌฐlธธน…ฑฑก…ฅนู•นัฬฐ€ธธนฝีัมีัI••ฅมัฬนต…ภ ก์•ู•นะ๔ค€๔๘•ู•นะคฐ€ธธนฅนมีั•ัฬนต…ภ ก์•ู•นะ๔ค€๔๘•ู•นะคฐ€ธธนัฝฝฑ1•‘•ษIฝÝฬนต…ภ ก์•ู•นะ๔ค€๔๘•ู•นะฅtฐ€•แ…ั}ฅนมีั}ฝีัมีั}…น‘}ัฝฝฑ}••ั}ฝนัฅนีฅัๅ}•ูฅ‘•น•}ีน…ู…ฅฑ…ฑ”คค์(€€€€€€€มษฝ‘ีะนมีอ กีน…ู…ฅฑ…ฑ” ุตธภฤน•แ…ัฑๅ}ฝน•}ฝนัฅนีฅัๅ}••ะฐ€มษฝ‘ีะฐนฝีมฑฅ…ั•]ฝษฌ€ษ•อัฝษ•€ü€มษฝ‘ีั}…ีักฝษ•‘}มฝอั}ษ•อัฝษ•}ฅนมีั}ัฝ}…ออฅอั…นั}ษ•อมฝนอ•}ฑฅน•…•}ีน…ู…ฅฑ…ฑ”€่€•แ…ั}มฝอั}ษ•อัฝษ•}ฅนมีั}ฝีัมีั}ฝนัฅนีฅัๅ}ษ••ฅมัอ}ีน…ู…ฅฑ…ฑ”คค์(€€€€€๔(€€€€€ษ•…ฌ์(€€€๔(€€€…อ”€Xตภฤ่์(€€€€€ฝนอะฅน…ฑฅ้•‘ู•นัฬ€๔ๅ-ฅน อ•ออฅฝธนฅน…ฑฅ้•ค์(€€€€€ฝนอะนฝนMฅฑ•น”€๔ฅนฉ•ั•นฅฑั•ศ กฝม•ษ…ัฅฝธค€๔๘€…Mัษฅนกฝม•ษ…ัฅฝธนฅนมีะนฅแัีษ•}ฅ€üü€คนัฝ1ฝÝ•ษ…อ” คนฅนฑี‘•ฬ อฅฑ•น”คค์(€€€€€ฝนอะ•แ…ั%นมีะ€๔นฝนMฅฑ•น”นฑ•นั €๔๔๔€ฤ€ก…ฅธกนฝนMฅฑ•น•lมtนฅคน•แ…ะ์(€€€€€ก…ษน•อฬนมีอ กก•ฌ ภฤนฝน•}•แ…ั}นฝน}อฅฑ•น•}ฅนมีั}ก…ฅธฐ€ก…ษน•อฬฐ•แ…ั%นมีะฐนฝนMฅฑ•น”นฑ…ั5…ภ กฝม•ษ…ัฅฝธค€๔๘=ฉ•ะนู…ฑี•ฬกก…ฅธกฝม•ษ…ัฅฝธนฅคคนฑ…ั5…ภ กู…ฑี”ค€๔๘ษษ…ไนฅอษษ…ไกู…ฑี”ค€üู…ฑี”€่mtคคฐ€ฝน•}ฝม•ษ…ัฅฝน}ฝษษ•ฑ…ั•‘}นฝน}อฅฑ•น•}ฅนมีั}ก…ฅน}ษ•ลีฅษ•คค์(€€€€€ฝนอะ…ออฅอั…นัQีษนฬ€๔มษฝ‘ีัู•นัฬนฅฑั•ศ ก•ู•นะค€๔๘•ู•นะนญฅนน•น‘อ]ฅั  นอฝมกฅนัีษธค€€ ก•ู•นะนม…ๅฑฝ…น‘…ั…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•คüนมก…อ”€๔๔๔€…•นั}•น‘•๑๐•ู•นะนม…ๅฑฝ…นมก…อ”€๔๔๔€…•นั}•น‘•คค์(€€€€€ก…ษน•อฬนมีอ กก•ฌ ภฤนฝตมฑ•ั•‘}…ออฅอั…นั}ัีษธฐ€ก…ษน•อฬฐ…ออฅอั…นัQีษนฬนฑ•นั €๘๔€ฤฐ…ออฅอั…นัQีษนฬฐ€ฝีน‘}…ออฅอั…นั}ัีษน}ฝตมฑ•ัฅฝน}ีน…ู…ฅฑ…ฑ”คค์(€€€€€ฝนอะอัษฅัฅน…ฑฅ้•€๔ฅน…ฑฅ้•‘ู•นัฬนฅฑั•ศ ก•ู•นะค€๔๘ฅอ…นฝนฅ…ฑฅน…ฑฅ้…ัฅฝนI••ฅมะกษีธฐ•ู•นะคค์(€€€€€ฝนอะนฝน•ตมัไ€๔อัษฅัฅน…ฑฅ้•นอฝต” ก•ู•นะค€๔๘์(€€€€€€€ฝนอะษ••ฅมะ€๔•ู•นะนม…ๅฑฝ…นษ••ฅมะ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘์(€€€€€€€ฝนอะัษ…นอษฅมะ€๔ษ••ฅมะน…นฝนฅ…ฑ}ัษ…นอษฅมะ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘์(€€€€€€€ษ•ัีษธ9ีต•ศกัษ…นอษฅมะนต•ออ…•}ฝีนะค€๘€ภ€9ีต•ศกัษ…นอษฅมะนฅนมีั}ต•ออ…•}ฝีนะค€๘€ภ€9ีต•ศกัษ…นอษฅมะนฝีัมีั}ต•ออ…•}ฝีนะค€๘€ภ€9ีต•ศกัษ…นอษฅมะนัีษน}ฝีน‘…ษๅ}ฝีนะค€๘€ภ์(€€€€€๔ค์(€€€€€ก…ษน•อฬนมีอ กก•ฌ ภฤนอัษฅั}นฝน•ตมัๅ}…นฝนฅ…ฑ}ฅน…ฑฅ้…ัฅฝธฐ€ก…ษน•อฬฐอัษฅัฅน…ฑฅ้•นฑ•นั €๔๔๔€ฤ€นฝน•ตมัไฐฅน…ฑฅ้•‘ู•นัฬฐ€อัษฅั}นฝน•ตมัๅ}ฝีน‘}…นฝนฅ…ฑ}ัษ…นอษฅมั}ษ••ฅมั}ีน…ู…ฅฑ…ฑ”คค์(€€€€€มษฝ‘ีะนมีอ กก•ฌ ภฤนีนฅฅ•‘}‘ีษ…ฑ•}ฅน…ฑฅ้•ศฐ€มษฝ‘ีะฐอัษฅัฅน…ฑฅ้•นฑ•นั €๔๔๔€ฤ€นฝน•ตมัไฐฅน…ฑฅ้•‘ู•นัฬฐ€‘ีษ…ฑ•}มษฝ‘ีั}ฅน…ฑฅ้•ษ}ษ••ฅมั}ีน…ู…ฅฑ…ฑ”คค์(€€€€€ษ•…ฌ์(€€€๔(€€€…อ”€Xตภฤ่์(€€€€€ฝนอะ…มัีษ•ู•นัฬ€๔มษฝ‘ีัู•นัฬนฅฑั•ศ ก•ู•นะค€๔๘์(€€€€€€€ฝนอะมษฝู•น…น”€๔•ู•นะนม…ๅฑฝ…น}…มัีษ•}มษฝู•น…น”…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•์(€€€€€€€ษ•ัีษธ9ีต•ศนฅอM…•%นั••ศกมษฝู•น…น”üน•น•ษ…ัฅฝธค€9ีต•ศนฅอM…•%นั••ศกมษฝู•น…น”üนอ•ฤค์(€€€€€๔ค์(€€€€€ฝนอะม…•ฬ€๔ๅ-ฅน …มัีษ”นมษฝ‘ีั}ม…”ค์(€€€€€ฝนอะมษฝ‘ีัฝฝษ‘ฅน…ั•ฬ€๔…มัีษ•ู•นัฬนต…ภ ก•ู•นะค€๔๘•ู•นะนม…ๅฑฝ…น}…มัีษ•}มษฝู•น…น”…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘ค์(€€€€€ฝนอะ•น•ษ…ัฅฝนฬ€๔น•ÜM•ะกมษฝ‘ีัฝฝษ‘ฅน…ั•ฬนต…ภ กู…ฑี”ค€๔๘9ีต•ศกู…ฑี”น•น•ษ…ัฅฝธคคค์(€€€€€ฝนอะมษฝ‘ีัM•ลฬ€๔มษฝ‘ีัฝฝษ‘ฅน…ั•ฬนต…ภ กู…ฑี”ค€๔๘9ีต•ศกู…ฑี”นอ•ฤคคนอฝษะ กฑ•ะฐษฅกะค€๔๘ฑ•ะ€ดษฅกะค์(€€€€€ฝนอะตฝนฝัฝนฅAษฝ‘ีะ€๔…มัีษ•ู•นัฬนฑ•นั €๘€ิภภ€•น•ษ…ัฅฝนฬนอฅ้”€๔๔๔€ฤ€มษฝ‘ีัM•ลอlมt€๔๔๔€ฤ€มษฝ‘ีัM•ลฬน•ู•ษไ กอ•ฤฐฅน‘•เค€๔๘ฅน‘•เ€๔๔๔€ภ๑๐อ•ฤ€๔๔๔มษฝ‘ีัM•ลอmฅน‘•เ€ด€ลt€ฌ€ฤค€น•ÜM•ะกมษฝ‘ีัM•ลฬคนอฅ้”€๔๔๔มษฝ‘ีัM•ลฬนฑ•นั ์(€€€€€ฝนอะม…•A…ๅฑฝ…‘ฬ€๔ม…•ฬนต…ภ ก•ู•นะค€๔๘•ู•นะนม…ๅฑฝ…ค์(€€€€€ฝนอะม…•€๔ม…•A…ๅฑฝ…‘ฬนฑ•นั €๘€ฤ€ม…•A…ๅฑฝ…‘ฬน•ู•ษไ กม…”ฐฅน‘•เค€๔๘์(€€€€€€€ฝนอะมษฅฝศ€๔ฅน‘•เ€๔๔๔€ภ€üนีฑฐ€่ม…•A…ๅฑฝ…‘อmฅน‘•เ€ด€ลt์(€€€€€€€ฝนอะษ•ลี•อั•€๔9ีต•ศกม…”นษ•ลี•อั•‘M•ฤค์(€€€€€€€ฝนอะษ•ัีษน•€๔9ีต•ศกม…”นษ•ัีษน•‘M•ฤค์(€€€€€€€ฝนอะฝฑ‘•อะ€๔9ีต•ศกม…”นฝฑ‘•อัM•ฤค์(€€€€€€€ฝนอะฑ…ั•อะ€๔9ีต•ศกม…”นฑ…ั•อัM•ฤค์(€€€€€€€ฝนอะ…ม…ฅัไ€๔9ีต•ศกม…”น…ม…ฅัไค์(€€€€€€€ฝนอะ‘ษฝมม•€๔9ีต•ศกม…”น‘ษฝมม•‘ฝีนะค์(€€€€€€€ฝนอะมษฅฝษษฝมม•€๔มษฅฝศ€๔๔๔นีฑฐ€ü€ภ€่9ีต•ศกมษฅฝศน‘ษฝมม•‘ฝีนะค์(€€€€€€€ฝนอะมษฅฝษ=ฑ‘•อะ€๔มษฅฝศ€๔๔๔นีฑฐ€ü€ฤ€่9ีต•ศกมษฅฝศนฝฑ‘•อัM•ฤค์(€€€€€€€ษ•ัีษธม…”น…ภ€๔๔๔…ฑอ”(€€€€€€€€€€ผผ‘ษฝมม•‘ฝีนะฅฬษฅน•ูฅัฅฝธ…ฝีนัฅนฐนฝะ•ูฅ‘•น”ฑฝอฬธ(€€€€€€€€€€ผผฝนัฅนีฝีอฑไ‘ษ…ฅน•ีษอฝศต…ไษ•ต…ฅธ…ก•…ฝฝฑ‘•อัM•ฤÝกฅฑ”(€€€€€€€€€€ผผ•ูฅัฅฝธษฅอ•ฬธQก”‘ีษ…ฑ”ีนฅฝธ•ฑฝÜตีอะอัฅฑฐ”ฝนัฅีฝีฬธ(€€€€€€€€€€9ีต•ศนฅอM…•%นั••ศก‘ษฝมม•ค€‘ษฝมม•€๘๔€ภ€‘ษฝมม•€๘๔มษฅฝษษฝมม•(€€€€€€€€€€9ีต•ศนฅอM…•%นั••ศก…ม…ฅัไค€…ม…ฅัไ€๘€ภ(€€€€€€€€€€9ีต•ศนฅอM…•%นั••ศกฝฑ‘•อะค€ฝฑ‘•อะ€๘๔€ฤ€ฝฑ‘•อะ€๐๔ฑ…ั•อะ€ฌ€ฤ€ฝฑ‘•อะ€๘๔มษฅฝษ=ฑ‘•อะ(€€€€€€€€€€9ีต•ศนฅอM…•%นั••ศกษ•ลี•อั•ค€9ีต•ศนฅอM…•%นั••ศกษ•ัีษน•ค€ษ•ัีษน•€๘๔ษ•ลี•อั•(€€€€€€€€€€€กมษฅฝศ€๔๔๔นีฑฐ๑๐ษ•ลี•อั•€๔๔๔9ีต•ศกมษฅฝศนษ•ัีษน•‘M•ฤคค(€€€€€€€€€€€กษ•ลี•อั•€๔๔๔€ภ๑๐ษ•ลี•อั•€๘๔ฝฑ‘•อะ€ด€ฤค์(€€€€€๔ค์(€€€€€ฝนอะฅน…ฑA…”€๔ม…•A…ๅฑฝ…‘ฬน…ะ ดฤค์(€€€€€ฝนอะษ•ฝนฅฑ•€๔ฅน…ฑA…”€๔๔ีน‘•ฅน•€9ีต•ศกฅน…ฑA…”นฑ…ั•อัM•ฤค€๔๔๔มษฝ‘ีัM•ลฬน…ะ ดฤค€9ีต•ศกฅน…ฑA…”นัฝั…ฑAษฝ‘ี•ค€๔๔๔…มัีษ•ู•นัฬนฑ•นั €9ีต•ศกฅน…ฑA…”นษ•ัีษน•‘M•ฤค€๔๔๔9ีต•ศกฅน…ฑA…”นฑ…ั•อัM•ฤค์(€€€€€ก…ษน•อฬนมีอ กก•ฌ ภฤนฝู•ษ|ิภม}ฝีน‘}มษฝ‘ีั}…มัีษ•}•ู•นัฬฐ€ก…ษน•อฬฐตฝนฝัฝนฅAษฝ‘ีะฐ…มัีษ•ู•นัฬฐ€ตฝษ•}ัก…น|ิภม}•แ…ั}ฝีน‘}มษฝ‘ีั}…มัีษ•}•นู•ฑฝม•อ}ีน…ู…ฅฑ…ฑ”คค์(€€€€€ก…ษน•อฬนมีอ กก•ฌ ภฤนษ•…‘}…ั•ษ}ต•ั…‘…ั…}ษ•ฝนฅฑ•ฐ€ก…ษน•อฬฐม…•€ษ•ฝนฅฑ•ฐม…•ฬฐ€…มัีษ•}•น•ษ…ัฅฝน}…ม…ฅัๅ}‘ษฝม}…น‘}ัฝั…ฑ}ต•ั…‘…ั…}ีน…ู…ฅฑ…ฑ•}ฝษ}ฅนฝนอฅอั•นะคค์(€€€€€มษฝ‘ีะนมีอ กีน…ู…ฅฑ…ฑ” ภฤนมษฝ‘ีั}…ั”ฐ€มษฝ‘ีะฐ€นฝั}…มมฑฅ…ฑ”คค์(€€€€€ษ•…ฌ์(€€€๔(€€€…อ”€Xต0ภฤ่์(€€€€€ฝนอะฅน…ฑฅ้•€๔ๅ-ฅน อ•ออฅฝธนฅน…ฑฅ้•ค์(€€€€€ฝนอะัษ…•ู•นัฬ€๔มษฝ‘ีั	ๅ-ฅน ัษ…”น…ีฑั}ษ••ฅมะค์(€€€€€ฝนอะัษ…•I••ฅมัฬ€๔ัษ…•ู•นัฬนต…ภ ก•ู•นะค€๔๘€ก์•ู•นะฐษ••ฅมะ่•ู•นะนม…ๅฑฝ…นษ••ฅมะ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•๔คค์(€€€€€ฝนอะ•แ…ัI••ฅมะ€๔€กษ••ฅมะ่I•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•ฐมก…อ”่€…มมฑฅ•๐€ษ•อัฝษ•ค€๔๘ษ••ฅมะüนอก•ต€๔๔๔€อฝมกฅ…}ูฝฅ•}ฑ…}ัษ…•}…ีฑั}ุฤ(€€€€€€€€ษ••ฅมะน…ีฑะ€๔๔๔€ฑ…นอตฅัก}ีน…ู…ฅฑ…ฑ”(€€€€€€€€ษ••ฅมะนมก…อ”€๔๔๔มก…อ”(€€€€€€€€ษ••ฅมะนมษฅนฅม…ฑ}ฅ€๔๔๔ษีธนมษฅนฅม…ฑ%(€€€€€€€€ษ••ฅมะนั•อั}ษีน}ฅ€๔๔๔ษีธนั•อัIีน%(€€€€€€€€ษ••ฅมะนอ•น…ษฅฝ}ฅ€๔๔๔€Xต0ภฤ(€€€€€€€€ษ••ฅมะนอ•น…ษฅฝ}ู•ษอฅฝธ€๔๔๔ษีธนอ•น…ษฅฝY•ษอฅฝธ(€€€€€€€€ษ••ฅมะน•นูฅษฝนต•นะ€๔๔๔ษีธน•นูฅษฝนต•นะ(€€€€€€€€อ…ต••มฑฝๅต•นะกษ••ฅมะน•แม•ั•‘}‘•มฑฝๅต•นะฐษีธนั…ษ•ะน•แม•ั•‘•มฑฝๅต•นะค(€€€€€€€€ษ••ฅมะนัษ…•}ีน…ู…ฅฑ…ฑ”€๔๔๔ัษี”(€€€€€€€€ษ••ฅมะน…นฝนฅ…ฑ}•ก…ูฅฝษ}ีนก…น•€๔๔๔ัษี”(€€€€€€€€…นฝนฅ…ฑ%อผกษ••ฅมะน…มมฑฅ•‘}…ะค(€€€€€€€€€กมก…อ”€๔๔๔€…มมฑฅ•€üษ••ฅมะนษ•อัฝษ•‘}…ะ€๔๔๔นีฑฐ€่…นฝนฅ…ฑ%อผกษ••ฅมะนษ•อัฝษ•‘}…ะคค์(€€€€€ฝนอะ…มมฑฅ•€๔ัษ…•I••ฅมัฬนฅฑั•ศ ก์ษ••ฅมะ๔ค€๔๘•แ…ัI••ฅมะกษ••ฅมะฐ€…มมฑฅ•คค์(€€€€€ฝนอะษ•อัฝษ•€๔ัษ…•I••ฅมัฬนฅฑั•ศ ก์ษ••ฅมะ๔ค€๔๘•แ…ัI••ฅมะกษ••ฅมะฐ€ษ•อัฝษ•คค์(€€€€€ฝนอะ…มมฑฅ•‘ะ€๔…มมฑฅ•‘lมtüนษ••ฅมะüน…มมฑฅ•‘}…ะ์(€€€€€ฝนอะ•แ…ั1ฅ•ๅฑ”€๔ัษ…•ู•นัฬนฑ•นั €๔๔๔€ศ€…มมฑฅ•นฑ•นั €๔๔๔€ฤ€ษ•อัฝษ•นฑ•นั €๔๔๔€ฤ(€€€€€€€€ษ•อัฝษ•‘lมtน•ู•นะนอ•ฤ€๘…มมฑฅ•‘lมtน•ู•นะนอ•ฤ(€€€€€€€€ษ•อัฝษ•‘lมtนษ••ฅมะน…มมฑฅ•‘}…ะ€๔๔๔…มมฑฅ•‘ะ(€€€€€€€€น•Ü…ั”กMัษฅนกษ•อัฝษ•‘lมtนษ••ฅมะนษ•อัฝษ•‘}…ะคคน•ัQฅต” ค€๘๔น•Ü…ั”กMัษฅนก…มมฑฅ•‘ะคคน•ัQฅต” ค์(€€€€€ฝนอะฝอ•ษู…ฅฑฅัไ€๔มษฝ‘ีั	ๅ-ฅน มษฝูฅ‘•ศนฝนน•ัฅฝน}ฝอ•ษู…ฅฑฅัไคนฅฑั•ศ ก•ู•นะค€๔๘•ู•นะนม…ๅฑฝ…นฑ…นอตฅักQษ…•Mั…ัีฬ€๔๔๔€ัษ…•}ีน…ู…ฅฑ…ฑ”(€€€€€€€€•ู•นะนม…ๅฑฝ…นฑ…นอตฅักQษ…•Uน…ู…ฅฑ…ฑ•I•…อฝธ€๔๔๔€ฝู•ษน•‘}อๅนัก•ัฅ}…ีฑะ(€€€€€€€€€ก•ู•นะนม…ๅฑฝ…นฑ…นอตฅักQษ…•%€๔๔๔นีฑฐ๑๐•ู•นะนม…ๅฑฝ…นฑ…นอตฅักQษ…•%€๔๔๔ีน‘•ฅน•คค์(€€€€€ก…ษน•อฬนมีอ กก•ฌ ฐภฤนฝู•ษน•‘}อีมมฑ•ต•นั…ฑ}ัษ…•}ฝีั…”ฐ€ก…ษน•อฬฐ•แ…ั1ฅ•ๅฑ”€ฝอ•ษู…ฅฑฅัไนฑ•นั €๘๔€ฤฐlธธนัษ…•ู•นัฬฐ€ธธนฝอ•ษู…ฅฑฅัๅtฐ€•แ…ั}…มม}…ีักฝษ•‘}ัษ…•}…ีฑั}…มมฑฅ•‘}ษ•อัฝษ•‘}…น‘}ีน…ู…ฅฑ…ฑ•}ษ••ฅมัอ}ตฅออฅนคค์(€€€€€ก…ษน•อฬนมีอ กก•ฌ ฐภฤนฑฝ…ฑ}•ูฅ‘•น•}ก…ฅน}อีษูฅู•ฬฐ€ก…ษน•อฬฐ•แ…ัก…ฅนฬ€ฅน…ฑฅ้•นฑ•นั €๔๔๔€ฤฐlธธน…ฑฑก…ฅนู•นัฬฐ€ธธนฅน…ฑฅ้•‘tฐ€ฑฝ…ฑ}ฅนมีั}ฝษ}ฅน…ฑฅ้…ัฅฝน}•ูฅ‘•น•}ีน…ู…ฅฑ…ฑ”คค์(€€€€€ฝนอะ•ก…ูฅฝศ€๔lธธนมษฝ‘ีั	ๅ-ฅน …ี‘ฅผนฝีัมีะนอั…ษั•คฐ€ธธนมษฝ‘ีัู•นัฬนฅฑั•ศ ก•ู•นะค€๔๘•ู•นะนญฅนน•น‘อ]ฅั  นอฝมกฅนัีษธคฅt์(€€€€€มษฝ‘ีะนมีอ กก•ฌ ฐภฤนมษฝ‘ีั}•ก…ูฅฝษ}ฝนัฅนี•อ}Ýฅักฝีั}ัษ…•}…‘…มั•ศฐ€มษฝ‘ีะฐ•ก…ูฅฝศนฑ•นั €๘€ภฐ•ก…ูฅฝศฐ€ฝีน‘}มษฝ‘ีั}•ก…ูฅฝษ}ษ••ฅมั}ีน…ู…ฅฑ…ฑ”คค์(€€€€€ษ•…ฌ์(€€€๔(€€€…อ”€Xต@ภฤ่์(€€€€€ฝนอะมฑ…ัฝษด€๔•แั•ษน…ฑัั•อั…ัฅฝนฬ ภภล}มฑ…ัฝษต}มฑีฅน}ั…อฌคนฅฑั•ศ ก•ู•นะค€๔๘์(€€€€€€€ฝนอะมษฝฝ€๔•ู•นะนม…ๅฑฝ…น•ูฅ‘•น”…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•์(€€€€€€€ฝนอะฅ‘ฬ€๔ษษ…ไนฅอษษ…ไกมษฝฝüนฝม•ษ…ัฅฝน}ฅ‘ฬค€üมษฝฝนฝม•ษ…ัฅฝน}ฅ‘ฬ€่mt์(€€€€€€€ฝนอะ…ฑฑฬ€๔ษษ…ไนฅอษษ…ไกมษฝฝüน…ฑฑฬค€üมษฝฝน…ฑฑฬ€่mt์(€€€€€€€ษ•ัีษธมษฝฝüน…ีักฝษฅัไ€๔๔๔€มฑ…ัฝษต}มฑีฅธ€มษฝฝนมษฝกฅฅั•‘}ัฝฝฑ}…ี‘ฅั}ม…ออ•€๔๔๔ัษี”€มษฝฝนษ…Ý}ฉ…ู…อษฅมั}ีอ•€๔๔๔…ฑอ”€มษฝฝนฑฝ…ฑ}ษีนน•ษ}ีอ•€๔๔๔…ฑอ”€มษฝฝนต…นี…ฑ}ั…ญ•ฝู•ษ}ีอ•€๔๔๔…ฑอ”(€€€€€€€€€€มษฝฝน•แ…ั}‘•มฑฝๅต•นั}‘ฅอฝู•ษ•€๔๔๔ัษี”€มษฝฝน…‘…มัฅู•}ฝฑฑฝÝีม}ฝตมฑ•ั•€๔๔๔ัษี”€9ีต•ศกมษฝฝนกฅก}ฑ•ู•ฑ}…ฑฑ}ฝีนะค€๔๔๔€ฤภ€…ฑฑฬนฑ•นั €๔๔๔€ฤภ(€€€€€€€€€€ฅ‘ฬน•ู•ษไ กฅค€๔๘ฝม•ษ…ัฅฝนฬนอฝต” กฝม•ษ…ัฅฝธค€๔๘ฝม•ษ…ัฅฝธนฅ€๔๔๔ฅคค์(€€€€€๔ค์(€€€€€€ผผ=ษ‘ฅน…ษไฝม•ษ…ัฅฝธฝ…ี‘ฅะษฝÝฬอัฅฑฐ…นนฝะอ•ฑต•ษัฅไฅนอั…ฑฑ…ัฅฝธธ(€€€€€€ผผQก”ฝนฑไม…ออฅนม…ั ฅฬมษฅูฅฑ••มฑ…ัฝษดต…ีักฝษ•…ัั•อั…ัฅฝธ(€€€€€€ผผ…ฑษ•…‘ไษฝอฬตฉฝฅน•ไัก”อ•ษูฅ”ัผ•แ…ะ5@…ี‘ฅัฬฝฝม•ษ…ัฅฝนฬธ(€€€€€ก…ษน•อฬนมีอ กมฑ…ัฝษดนฑ•นั €๔๔๔€ภ€üีน…ู…ฅฑ…ฑ” ภภฤนษ•อก}ษ•ฅอั•ษ•‘}มฑีฅน}ั…อฌฐ€ก…ษน•อฬฐ€มฑ…ัฝษต}…ีักฝษ•‘}มฑีฅน}…อ‘ญ}…มม}ฅนอั…ฑฑ}…น‘}ษ•อก}ั…อญ}มษฝู•น…น•}นฝั}…ัั…ก•ค€่ก•ฌ ภภฤนษ•อก}ษ•ฅอั•ษ•‘}มฑีฅน}ั…อฌฐ€ก…ษน•อฬฐมฑ…ัฝษดนฑ•นั €๔๔๔€ฤฐมฑ…ัฝษดฐ€มฑ…ัฝษต}มฑีฅน}…ัั•อั…ัฅฝน}ฝนฑฅั•‘}ฝษ}‘ีมฑฅ…ั•คค์(€€€€€มษฝ‘ีะนมีอ กีน…ู…ฅฑ…ฑ” ภภฤนมษฝ‘ีั}…ั”ฐ€มษฝ‘ีะฐ€นฝั}…มมฑฅ…ฑ”คค์(€€€€€ษ•…ฌ์(€€€๔(€€€…อ”€XตLภฤ่์(€€€€€ฝนอะมษฝ•ฬ€๔ๅ-ฅน อ•ีษฅัไนฅนู…ฑฅ‘}ษ…นั}มษฝ”ค์(€€€€€ฝนอะู…ษฅ…นัฬ€๔น•ÜM•ะกมษฝ•ฬนต…ภ ก•ู•นะค€๔๘•ู•นะนม…ๅฑฝ…นู…ษฅ…นะคค์(€€€€€ฝนอะษ•ฉ•ั•€๔มษฝ•ฬนฑ•นั €๔๔๔Lภล}I=9Q9}I9Q}YI%9QLนฑ•นั €Lภล}I=9Q9}I9Q}YI%9QLน•ู•ษไ กู…ษฅ…นะค€๔๘ู…ษฅ…นัฬนก…ฬกู…ษฅ…นะคค€มษฝ•ฬน•ู•ษไ ก•ู•นะค€๔๘•ู•นะนม…ๅฑฝ…นษ•ฉ•ั•€๔๔๔ัษี”€•ู•นะนม…ๅฑฝ…น•แ…ั}ษ•อมฝนอ•}ั…ษ•ะ€๔๔๔ัษี”€•ู•นะนม…ๅฑฝ…นนฝ}อ•ออฅฝน}ฝฝญฅ”€๔๔๔ัษี”€•ู•นะนม…ๅฑฝ…นนฝ}ษ•‘ฅษ•ะ€๔๔๔ัษี”ค์(€€€€€ก…ษน•อฬนมีอ กก•ฌ ฬภฤน…ฑฑ}ฅนู…ฑฅ‘}ษ…นัอ}ษ•ฉ•ั•ฐ€ก…ษน•อฬฐษ•ฉ•ั•ฐมษฝ•ฬฐ€ฝน•}ฝษ}ตฝษ•}ฅนู…ฑฅ‘}ษ…นั}ษ••ฅมัอ}ีน…ู…ฅฑ…ฑ•}ฝษ}…•มั•คค์(€€€€€ฝนอะฝ…ีั €๔ๅ-ฅน อ•ีษฅัไนฝ…ีัก}ฝีน‘…ษๅ}มษฝ”ค์(€€€€€ฝนอะฝ…ีักY…ษฅ…นัฬ€๔น•ÜM•ะกฝ…ีั นต…ภ ก•ู•นะค€๔๘•ู•นะนม…ๅฑฝ…นู…ษฅ…นะคค์(€€€€€ก…ษน•อฬนมีอ กก•ฌ ฬภฤนฝ…ีัก}ษ•อฝีษ•}อฝม•}…น‘}ษ•มฑ…ๅ}ษ•ฉ•ั•ฐ€ก…ษน•อฬฐฝ…ีั นฑ•นั €๔๔๔Lภล}=UQ!}YI%9QLนฑ•นั €Lภล}=UQ!}YI%9QLน•ู•ษไ กู…ษฅ…นะค€๔๘ฝ…ีักY…ษฅ…นัฬนก…ฬกู…ษฅ…นะคค€ฝ…ีั น•ู•ษไ ก•ู•นะค€๔๘•ู•นะนม…ๅฑฝ…นษ•ฉ•ั•€๔๔๔ัษี”คฐฝ…ีั ฐ€ฝ…ีัก}ตฅออฅน}ฅนู…ฑฅ‘}อฝม•}ษ•อฝีษ•}ฝษ}ษ•มฑ…ๅ}ษ••ฅมั}ีน…ู…ฅฑ…ฑ”คค์(€€€€€ฝนอะ‘ฅษ•ั…ีฑะ€๔ๅ-ฅน อ•ีษฅัไน‘ฅษ•ั}…ีฑั}อฝม•}มษฝ”ค์(€€€€€ก…ษน•อฬนมีอ กก•ฌ ฬภฤน…อ•}ษ•‘•นัฅ…ฑ}ก…อ}นฝ}…ีฑั}อฝม”ฐ€ก…ษน•อฬฐ‘ฅษ•ั…ีฑะนฑ•นั €๔๔๔€ฤ€‘ฅษ•ั…ีฑัlมtนม…ๅฑฝ…นษ•ฉ•ั•€๔๔๔ัษี”€‘ฅษ•ั…ีฑัlมtนม…ๅฑฝ…น…ีฑั}ษ•‘•นัฅ…ฑ}‘ฅอัฅนะ€๔๔๔ัษี”ฐ‘ฅษ•ั…ีฑะฐ€‘ฅษ•ั}…ีฑั}อฝม•}อ•ม…ษ…ัฅฝน}ีน…ู…ฅฑ…ฑ”คค์(€€€€€ฝนอะฝ…ีักฑ•…นีภ€๔ๅ-ฅน อ•ีษฅัไนฝ…ีัก}…ตฅฑๅ}ฑ•…นีภค์(€€€€€ก…ษน•อฬนมีอ กก•ฌ ฬภฤนฝ…ีัก}มษฝ•}…ตฅฑๅ}ษ•ูฝญ•ฐ€ก…ษน•อฬฐฝ…ีักฑ•…นีภนฑ•นั €๔๔๔€ฤ€ฝ…ีักฑ•…นีมlมtนม…ๅฑฝ…นฝตมฑ•ั”€๔๔๔ัษี”€ฝ…ีักฑ•…นีมlมtนม…ๅฑฝ…น…ีักฝษฅ้…ัฅฝน}ฝ‘•}ฑ•…นีม}ก…น‘ฑ•}ีอ•€๔๔๔ัษี”€ฝ…ีักฑ•…นีมlมtนม…ๅฑฝ…น…ีักฝษฅ้…ัฅฝน}ฝ‘•}…ตฅฑๅ}ั•ษตฅน…ฑฅ้•€๔๔๔ัษี”€ฝ…ีักฑ•…นีมlมtนม…ๅฑฝ…น…•ออ}ัฝญ•น}ฅออี•€๔๔๔ัษี”€ฝ…ีักฑ•…นีมlมtนม…ๅฑฝ…นษ•ษ•อก}ัฝญ•น}ฅออี•€๔๔๔ัษี”€ฝ…ีักฑ•…นีมlมtนม…ๅฑฝ…นษ•ษ•อก}…ตฅฑๅ}ษ•ูฝ…ัฅฝน}ษ••ฅมะ€๔๔๔ัษี”€ฝ…ีักฑ•…นีมlมtนม…ๅฑฝ…น…•ออ}ษ•ูฝ…ัฅฝน}ษ••ฅมะ€๔๔๔ัษี”€ฝ…ีักฑ•…นีมlมtนม…ๅฑฝ…น…•ออ}ัฝญ•น}‘•นฅ•‘}…ั•ษ}ษ•ูฝ…ัฅฝธ€๔๔๔ัษี”€ฝ…ีักฑ•…นีมlมtนม…ๅฑฝ…นษ•ษ•อก}ัฝญ•น}‘•นฅ•‘}…ั•ษ}ษ•ูฝ…ัฅฝธ€๔๔๔ัษี”€ฝ…ีักฑ•…นีมlมtนม…ๅฑฝ…น‘ีษ…ฑ•}ั•ษตฅน…ฑ}อั…ั•}ู•ษฅฅ•€๔๔๔ัษี”€ฝ…ีักฑ•…นีมlมtนม…ๅฑฝ…นษ…Ý}ัฝญ•นอ}•แฑี‘•€๔๔๔ัษี”ฐฝ…ีักฑ•…นีภฐ€ฝ…ีัก}มษฝ•}…ีักฝษฅ้…ัฅฝน}ฝ‘•}…•ออ}ฝษ}ษ•ษ•อก}…ตฅฑๅ}ษ•ต…ฅนอ}ฑฅู”คค์(€€€€€ฝนอะ้•ษผ€๔•ฑฅฅฑ”นฅฑั•ศ ก•ู•นะค€๔๘•ู•นะนญฅน€๔๔๔€ฑ•…นีภนษ•ฝู•ษไ๑๐•ู•นะนญฅน€๔๔๔€ฑ•…นีภนษฝÝอ•ษ}ฝนั•แั}…อ•นะ๑๐•ู•นะนญฅน€๔๔๔€ฑ•…นีภนษฝÝอ•ษ}ฑ•…อ•}…อ•นะ๑๐•ู•นะนญฅน€๔๔๔€อ•ีษฅัไนมษ•}ษ•อฝีษ•}…ฑฑฝ…ัฅฝน}•น”ค์(€€€€€ฝนอะ•น”€๔ๅ-ฅน อ•ีษฅัไนมษ•}ษ•อฝีษ•}…ฑฑฝ…ัฅฝน}•น”ค์(€€€€€ฝนอะนฝฑฑฝ…ัฅฝธ€๔•น”นฑ•นั €๔๔๔€ฤ€•น•lมtนม…ๅฑฝ…น…ัฅู•}ษีน}ฝีนั}ีนก…น•€๔๔๔ัษี”€•น•lมtนม…ๅฑฝ…นษฝÝอ•ษ}ฝนั•แั}…อ•นะ€๔๔๔ัษี”€•น•lมtนม…ๅฑฝ…นษฝÝอ•ษ}ฑ•…อ•}…อ•นะ€๔๔๔ัษี”€•น•lมtนม…ๅฑฝ…น…นฝนฅ…ฑ}อ•ออฅฝน}…อ•นะ€๔๔๔ัษี”€•น•lมtนม…ๅฑฝ…นมษฝูฅ‘•ษ}อ•ออฅฝน}…อ•นะ€๔๔๔ัษี”€•น•lมtนม…ๅฑฝ…นััอ}มษฝ•ออ}ฅนูฝ…ัฅฝนฬ€๔๔๔€ภ์(€€€€€ก…ษน•อฬนมีอ กก•ฌ ฬภฤนษ•ฉ•ั•‘}•ฝษ•}ษ•อฝีษ•}…ฑฑฝ…ัฅฝธฐ€ก…ษน•อฬฐนฝฑฑฝ…ัฅฝธ€…ีักฝษฅั…ัฅู•1ฅู•ฑ•…นีมฝตมฑ•ั”ก•ฑฅฅฑ”ค€ๅ-ฅน ฑ•…นีภนษฝÝอ•ษ}ฝนั•แั}…อ•นะคนฑ•นั €๔๔๔€ฤ€ๅ-ฅน ฑ•…นีภนษฝÝอ•ษ}ฑ•…อ•}…อ•นะคนอฝต” ก•ู•นะค€๔๘•ู•นะนม…ๅฑฝ…น…ีักฝษฅั…ัฅู•}ฑ•‘•ษ}ษ•…€๔๔๔ัษี”คฐ้•ษผฐ€…ีักฝษฅั…ัฅู•}้•ษฝ}ษ•อฝีษ•}ษ•ฝู•ษๅ}ีน…ู…ฅฑ…ฑ”คค์(€€€€€มษฝ‘ีะนมีอ กีน…ู…ฅฑ…ฑ” ฬภฤนนฝ}ฝษ‘ฅน…ษๅ}มษฝ‘ีั}ฅตม…ะฐ€มษฝ‘ีะฐ€นฝั}…มมฑฅ…ฑ•}มษ•}ษ•อฝีษ•}ษ•ฉ•ัฅฝธคค์(€€€€€ษ•…ฌ์(€€€๔(€€€…อ”€XตLภศ่์(€€€€€ฝนอะมษฝ•ฬ€๔ๅ-ฅน อ•ีษฅัไนมษ•}ษ•อฝีษ•}ู…ฑฅ‘…ัฅฝน}มษฝ”ค์(€€€€€ฝนอะู…ษฅ…นัฬ€๔น•ÜM•ะกมษฝ•ฬนต…ภ ก•ู•นะค€๔๘•ู•นะนม…ๅฑฝ…นู…ษฅ…นะคค์(€€€€€ฝนอะษ•ฉ•ั•€๔มษฝ•ฬนฑ•นั €๔๔๔Lภษ}Y1%Q%=9}YI%9QLนฑ•นั €Lภษ}Y1%Q%=9}YI%9QLน•ู•ษไ กู…ษฅ…นะค€๔๘ู…ษฅ…นัฬนก…ฬกู…ษฅ…นะคค€มษฝ•ฬน•ู•ษไ ก•ู•นะค€๔๘•ู•นะนม…ๅฑฝ…นษ•ฉ•ั•€๔๔๔ัษี”€•ู•นะนม…ๅฑฝ…น•แม•ั•‘}•ษษฝษ}ฑ…อฬ€๔๔๔•ู•นะนม…ๅฑฝ…นฝอ•ษู•‘}•ษษฝษ}ฑ…อฬ€ัๅม•ฝ•ู•นะนม…ๅฑฝ…นมษฝ‘ีัฅฝน}ู…ฑฅ‘…ัฝศ€๔๔๔€อัษฅนค์(€€€€€ก…ษน•อฬนมีอ กก•ฌ ฬภศนอก…ษ•‘}ู…ฑฅ‘…ัฝษอ}ษ•ฉ•ั}…ฑฑ}…อ•ฬฐ€ก…ษน•อฬฐษ•ฉ•ั•ฐมษฝ•ฬฐ€ต…ฑฝษต•‘}ต•‘ฅ…}ฝษ}ั…ษ•ั}ู…ฑฅ‘…ัฝษ}ษ••ฅมั}ตฅออฅนคค์(€€€€€ฝนอะ•ลีฅู…ฑ•น”€๔ๅ-ฅน อ•ีษฅัไนอก…ษ•‘}ู…ฑฅ‘…ัฝษ}•ลีฅู…ฑ•น”ค์(€€€€€ก…ษน•อฬนมีอ กก•ฌ ฬภศนฅนั•ษน…ฑ}ู…ฑฅ‘…ัฝษ}อีมมฑ•ต•นะฐ€ก…ษน•อฬฐ•ลีฅู…ฑ•น”นฑ•นั €๔๔๔€ฤ€•ลีฅู…ฑ•น•lมtนม…ๅฑฝ…นฅนั•ษน…ฑ}ู…ฑฅ‘…ัฝษ}อีมมฑ•ต•นะ€๔๔๔ัษี”€•ลีฅู…ฑ•น•lมtนม…ๅฑฝ…นู…ษฅ…นั}ฝีนะ€๔๔๔Lภษ}Y1%Q%=9}YI%9QLนฑ•นั €•ลีฅู…ฑ•น•lมtนม…ๅฑฝ…นมษฝ‘ีัฅฝน}ฝีน‘…ษๅ}…ออ•ษัฅฝธ€๔๔๔€อ•ีษฅัไนตม}ฝีน‘…ษๅ}มษฝ”ฐ•ลีฅู…ฑ•น”ฐ€ฅนั•ษน…ฑ}อก…ษ•‘}ู…ฑฅ‘…ัฝษ}อีมมฑ•ต•นั}ีน…ู…ฅฑ…ฑ”คค์(€€€€€ฝนอะอีษ…”€๔ๅ-ฅน อ•ีษฅัไนฬภษ}อีษ…•}ฝู•ษ…”ค์(€€€€€ฝนอะอีษ…•A…ๅฑฝ…€๔อีษ…•lมtüนม…ๅฑฝ…์(€€€€€ฝนอะฅแัีษ•Mั…ษัีภ€๔อีษ…•A…ๅฑฝ…üนฅแัีษ•}อั…ษัีม}ษ••ฅมะ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•์(€€€€€ฝนอะ•แ…ัMีษ…”€๔อีษ…”นฑ•นั €๔๔๔€ฤ€อีษ…•lมtนอฝีษ”€๔๔๔€…นฝนฅ…ฐ(€€€€€€€€ก…อแ…ั-•ๅฬกอีษ…•A…ๅฑฝ…ฐlอก•ตฐ€มีฑฅ}…ีัก•นัฅ…ั•‘}ตม}ู…ษฅ…นัฬฐ€ฅนั•ษน…ฑ}อั…ษัีม}ฝนฑๅ}ู…ษฅ…นัฬฐ€ีนอีมมฝษั•‘}ฅแัีษ•}มีฑฅ}ตภฐ€ษ…Ý}…ี‘ฅฝ}มีฑฅ}อีษ…”ฐ€ษ…Ý}…ี‘ฅฝ}อีษ…•}ษ•…อฝธฐ€ฅแัีษ•}อั…ษัีม}ษ••ฅมะtค(€€€€€€€€อีษ…•A…ๅฑฝ…นอก•ต€๔๔๔€อฝมกฅ…}ูฝฅ•}ฑ…}ฬภษ}อีษ…•}ฝู•ษ…•}ุฤ(€€€€€€€€…นฝนฅ…ฑอฅฅ)อฝธกอีษ…•A…ๅฑฝ…นมีฑฅ}…ีัก•นัฅ…ั•‘}ตม}ู…ษฅ…นัฬค€๔๔๔…นฝนฅ…ฑอฅฅ)อฝธกLภษ}!QQA}YI%9QLค(€€€€€€€€…นฝนฅ…ฑอฅฅ)อฝธกอีษ…•A…ๅฑฝ…นฅนั•ษน…ฑ}อั…ษัีม}ฝนฑๅ}ู…ษฅ…นัฬค€๔๔๔…นฝนฅ…ฑอฅฅ)อฝธกlฅแัีษ•}ต•ั…‘…ั…}ๅั•ฬฐ€ฅแัีษ•}ต•ั…‘…ั…}‘ีษ…ัฅฝธฐ€ต…ฑฝษต•‘}Ý…ุฐ€ฝู•ษอฅ้•‘}…ี‘ฅผtค(€€€€€€€€อีษ…•A…ๅฑฝ…นีนอีมมฝษั•‘}ฅแัีษ•}มีฑฅ}ตภ€๔๔๔ัษี”€อีษ…•A…ๅฑฝ…นษ…Ý}…ี‘ฅฝ}มีฑฅ}อีษ…”€๔๔๔…ฑอ”€อีษ…•A…ๅฑฝ…นษ…Ý}…ี‘ฅฝ}อีษ…•}ษ•…อฝธ€๔๔๔€นฝ}มีฑฅ}ษ…Ý}…ี‘ฅฝ}อีษ…”(€€€€€€€€ฅแัีษ•Mั…ษัีภ€๔๔ีน‘•ฅน•€ก…อแ…ั-•ๅฬกฅแัีษ•Mั…ษัีภฐlอก•ตฐ€อั…ัีฬฐ€•แม•ั•‘}ต…นฅ•อั}อกศิุฐ€ฝอ•ษู•‘}ต…นฅ•อั}อกศิุฐ€ต…นฅ•อั}ู•ษอฅฝธฐ€ฅแัีษ•}ฝีนะฐ€ฅตตีั…ฑ•}ฅฑ•อ}ู•ษฅฅ•ฐ€ษ…Ý}…ี‘ฅฝ}มีฑฅ}อีษ…”tค(€€€€€€€€ฅแัีษ•Mั…ษัีภนอก•ต€๔๔๔€อฝมกฅ…}ูฝฅ•}ฑ…}ฅแัีษ•}อั…ษัีม}ุฤ€ฅแัีษ•Mั…ษัีภนอั…ัีฬ€๔๔๔€ู•ษฅฅ•(€€€€€€€€ฅแัีษ•Mั…ษัีภน•แม•ั•‘}ต…นฅ•อั}อกศิุ€๔๔๔	U91}%aQUI}59%MQ}M!ศิุ(€€€€€€€€ฅแัีษ•Mั…ษัีภนฝอ•ษู•‘}ต…นฅ•อั}อกศิุ€๔๔๔	U91}%aQUI}59%MQ}M!ศิุ(€€€€€€€€ฅแัีษ•Mั…ษัีภน•แม•ั•‘}ต…นฅ•อั}อกศิุ€๔๔๔ฅแัีษ•Mั…ษัีภนฝอ•ษู•‘}ต…นฅ•อั}อกศิุ(€€€€€€€€ฅแัีษ•Mั…ษัีภนต…นฅ•อั}ู•ษอฅฝธ€๔๔๔€ฤ(€€€€€€€€9ีต•ศนฅอM…•%นั••ศกฅแัีษ•Mั…ษัีภนฅแัีษ•}ฝีนะค€9ีต•ศกฅแัีษ•Mั…ษัีภนฅแัีษ•}ฝีนะค€๘€ภ€ฅแัีษ•Mั…ษัีภนฅตตีั…ฑ•}ฅฑ•อ}ู•ษฅฅ•€๔๔๔ัษี”€ฅแัีษ•Mั…ษัีภนษ…Ý}…ี‘ฅฝ}มีฑฅ}อีษ…”€๔๔๔…ฑอ”์(€€€€€ก…ษน•อฬนมีอ กก•ฌ ฬภศนมีฑฅ}…น‘}อั…ษัีม}อีษ…•}อมฑฅะฐ€ก…ษน•อฬฐ•แ…ัMีษ…”ฐอีษ…”ฐ€มีฑฅ}ฅแัีษ•}ฝษ}ฅตตีั…ฑ•}อั…ษัีม}…ี‘ฅฝ}อีษ…•}ษ••ฅมั}ีน…ู…ฅฑ…ฑ”คค์(€€€€€ฝนอะฝีน‘…ษไ€๔ๅ-ฅน อ•ีษฅัไนตม}ฝีน‘…ษๅ}มษฝ”คนอฝษะ กฑ•ะฐษฅกะค€๔๘ฑ•ะนอ•ฤ€ดษฅกะนอ•ฤค์(€€€€€ฝนอะมษฝ•%‘ฬ€๔ฝีน‘…ษไนต…ภ ก•ู•นะค€๔๘•ู•นะนม…ๅฑฝ…นมษฝ•}ฅ‘}อกศิุค์(€€€€€ฝนอะษ•ลี•อั	ฝ‘ฅ•ฬ€๔ฝีน‘…ษไนต…ภ ก•ู•นะค€๔๘€ก•ู•นะนม…ๅฑฝ…นษ•ลี•อะ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•คüนษ…Ý}ฝ‘ๅ}อกศิุค์(€€€€€ฝนอะ…ี‘ฅัI•ลี•อั%‘ฬ€๔ฝีน‘…ษไนต…ภ ก•ู•นะค€๔๘€ ก•ู•นะนม…ๅฑฝ…น…ี‘ฅั}ษ••ฅมัฬ…ฬษษ…ไ๑I•ฝษ๑อัษฅนฐีนญนฝÝธ๘๘๐ีน‘•ฅน•คüนlมtคüนษ•ลี•อั}ฅ‘}อกศิุค์(€€€€€ฝนอะฝีน‘…ษๅI•ฉ•ั•€๔ฝีน‘…ษไนฑ•นั €๔๔๔Lภษ}!QQA}YI%9QLนฑ•นั (€€€€€€€€ฝีน‘…ษไน•ู•ษไ ก•ู•นะฐฅน‘•เค€๔๘•ู•นะนม…ๅฑฝ…นู…ษฅ…นะ€๔๔๔Lภษ}!QQA}YI%9QMmฅน‘•แt€ฅอแ…ัLภษ5ม	ฝีน‘…ษๅAษฝ”ก•ู•นะฐฅน‘•เ€๔๔๔€ภ€üนีฑฐ€่ฝีน‘…ษๅmฅน‘•เ€ด€ลtคค(€€€€€€€€น•ÜM•ะกมษฝ•%‘ฬคนอฅ้”€๔๔๔Lภษ}!QQA}YI%9QLนฑ•นั (€€€€€€€€น•ÜM•ะกษ•ลี•อั	ฝ‘ฅ•ฬคนอฅ้”€๔๔๔Lภษ}!QQA}YI%9QLนฑ•นั (€€€€€€€€น•ÜM•ะก…ี‘ฅัI•ลี•อั%‘ฬคนอฅ้”€๔๔๔Lภษ}!QQA}YI%9QLนฑ•นั ์(€€€€€ก…ษน•อฬนมีอ กก•ฌ ฬภศน‘•มฑฝๅ•‘}…ีัก•นัฅ…ั•‘}ตม}ฝีน‘…ษไฐ€ก…ษน•อฬฐฝีน‘…ษๅI•ฉ•ั•ฐฝีน‘…ษไฐ€มีฑฅ}ตม}ัษ…นอมฝษั}ม…ษอ•ษ}…ีัก}อก•ต…}…น‘}…ี‘ฅั}ษ•ฉ•ัฅฝนอ}ีน…ู…ฅฑ…ฑ”คค์(€€€€€ฝนอะ้•ษผ€๔•ฑฅฅฑ”นฅฑั•ศ ก•ู•นะค€๔๘•ู•นะนญฅนนอั…ษัอ]ฅั  ฑ•…นีภธค๑๐•ู•นะนญฅน€๔๔๔€อ•ีษฅัไนมษ•}ษ•อฝีษ•}…ฑฑฝ…ัฅฝน}•น”ค์(€€€€€ฝนอะ•น”€๔ๅ-ฅน อ•ีษฅัไนมษ•}ษ•อฝีษ•}…ฑฑฝ…ัฅฝน}•น”ค์(€€€€€ฝนอะนฝฑฑฝ…ัฅฝธ€๔•น”นฑ•นั €๔๔๔€ฤ€•น•lมtนม…ๅฑฝ…น…ัฅู•}ษีน}ฝีนั}ีนก…น•€๔๔๔ัษี”€•น•lมtนม…ๅฑฝ…นษฝÝอ•ษ}ฝนั•แั}…อ•นะ€๔๔๔ัษี”€•น•lมtนม…ๅฑฝ…นษฝÝอ•ษ}ฑ•…อ•}…อ•นะ€๔๔๔ัษี”€•น•lมtนม…ๅฑฝ…นมษฝูฅ‘•ษ}อ•ออฅฝน}…อ•นะ€๔๔๔ัษี”€•น•lมtนม…ๅฑฝ…นััอ}มษฝ•ออ}ฅนูฝ…ัฅฝนฬ€๔๔๔€ภ์(€€€€€ก…ษน•อฬนมีอ กก•ฌ ฬภศนนฝ}ษ•อฝีษ•}ฝษ}ฝษมก…ธฐ€ก…ษน•อฬฐนฝฑฑฝ…ัฅฝธ€…ีักฝษฅั…ัฅู•1ฅู•ฑ•…นีมฝตมฑ•ั”ก•ฑฅฅฑ”ค€ๅ-ฅน ฑ•…นีภนษฝÝอ•ษ}ฝนั•แั}…อ•นะคนฑ•นั €๔๔๔€ฤฐ้•ษผฐ€…ีักฝษฅั…ัฅู•}้•ษฝ}ษ•อฝีษ•}ษ•ฝู•ษๅ}ีน…ู…ฅฑ…ฑ”คค์(€€€€€มษฝ‘ีะนมีอ กีน…ู…ฅฑ…ฑ” ฬภศนนฝ}ีอ•ษ}…ฅน}ฅตม…ะฐ€มษฝ‘ีะฐ€นฝั}…มมฑฅ…ฑ•}มษ•}ษ•อฝีษ•}ษ•ฉ•ัฅฝธคค์(€€€€€ษ•…ฌ์(€€€๔(€€€…อ”€Xตภศ่์(€€€€€ฝนอะษ•…‘•ศ€๔ๅ-ฅน ‘ีษ…ฅฑฅัไนฅน‘•ม•น‘•นั}ฑ•‘•ษ}ษ•…‘•ศค์(€€€€€ก…ษน•อฬนมีอ กก•ฌ ภศนฅน‘•ม•น‘•นั}ฑ•‘•ษ}ษ•…‘•ษ}มษ•ฝน‘ฅัฅฝธฐ€ก…ษน•อฬฐษ•…‘•ศนฑ•นั €๔๔๔€ฤ€ษ•…‘•ษlมtนม…ๅฑฝ…น•แ…ั}ั•อั}ษีธ€๔๔๔ัษี”€ษ•…‘•ษlมtนม…ๅฑฝ…นตีั…ัฅฝน}ฝีนะ€๔๔๔€ภฐษ•…‘•ศฐ€ฅน‘•ม•น‘•นั}‘ีษ…ฑ•}ษ•…‘•ษ}ีน…ู…ฅฑ…ฑ”คค์(€€€€€ฝนอะ…มค€๔•แั•ษน…ฑัั•อั…ัฅฝนฬ ภษ}…มฅ}มษฝ•ออ}ษ•อั…ษะคนฅฑั•ศ ก•ู•นะค€๔๘์(€€€€€€€ฝนอะมษฝฝ€๔•ู•นะนม…ๅฑฝ…น•ูฅ‘•น”…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•์(€€€€€€€ฝนอะฝนัฅนีฅัไ€๔ภษ	ษฝÝอ•ษฝนัฅนีฅัๅAษฝฝMก•ตนอ…•A…ษอ”กมษฝฝüนษฝÝอ•ษ}ฝนัฅนีฅัๅ}มษฝฝค์(€€€€€€€ฝนอะฝม•ษ…ัฅฝธ€๔ฝม•ษ…ัฅฝนฬนฅน ก…น‘ฅ‘…ั”ค€๔๘…น‘ฅ‘…ั”นฅ€๔๔๔มษฝฝüนฝม•ษ…ัฅฝน}ฅค์(€€€€€€€ฝนอะษ•มฑ…ไ€๔ฝม•ษ…ัฅฝธ€ๅ-ฅนกฝม•ษ…ัฅฝธธ‘ํฝม•ษ…ัฅฝธนัๅม•๔นฅ‘•ตมฝั•นั}ษ•มฑ…ๅ€คนอฝต” ก…น‘ฅ‘…ั”ค€๔๘…น‘ฅ‘…ั”นม…ๅฑฝ…นฝม•ษ…ัฅฝน}ฅ€๔๔๔ฝม•ษ…ัฅฝธนฅ€…น‘ฅ‘…ั”นม…ๅฑฝ…น•แ…ั}ษ•ลี•อั}ก…อก}ษ•มฑ…ไ€๔๔๔ัษี”€…น‘ฅ‘…ั”นม…ๅฑฝ…นนฝ}น•Ý}ฝม•ษ…ัฅฝธ€๔๔๔ัษี”ค์(€€€€€€€ฝนอะฝตต…น€๔•แั•ษน…ฑัั•อั…ัฅฝนฬ ภษ}ษ•อั…ษั}ฝตต…นคนฅน ก…น‘ฅ‘…ั”ค€๔๘์(€€€€€€€€€ฝนอะฝตต…น‘Aษฝฝ€๔…น‘ฅ‘…ั”นม…ๅฑฝ…น•ูฅ‘•น”…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•์(€€€€€€€€€ษ•ัีษธัๅม•ฝฝตต…น‘Aษฝฝüนษ•อั…ษั}ษ•ลี•อั}ฅ€๔๔๔€อัษฅน€อกศิุกฝตต…น‘Aษฝฝนษ•อั…ษั}ษ•ลี•อั}ฅค€๔๔๔มษฝฝüนษ•อั…ษั}ษ•ลี•อั}ฅ‘}อกศิุ(€€€€€€€€€€€€ฝตต…น‘Aษฝฝนฝม•ษ…ัฅฝน}ฅ€๔๔๔มษฝฝüนฝม•ษ…ัฅฝน}ฅ€ฝตต…น‘Aษฝฝนษ•ลี•อั•‘}…ะ€๔๔๔มษฝฝüนษ•อั…ษั}ษ•ลี•อั•‘}…ะ€…น‘ฅ‘…ั”นอ•ฤ€๐•ู•นะนอ•ฤ์(€€€€€€€๔ค์(€€€€€€€ษ•ัีษธมษฝฝüน…ีักฝษฅัไ€๔๔๔€‘•มฑฝๅต•นั}ฝนัษฝฐ€ฝตต…น€๔๔ีน‘•ฅน•€ฝม•ษ…ัฅฝธ€๔๔ีน‘•ฅน•€ษ•มฑ…ไ€๔๔๔ัษี”€ฝนัฅนีฅัไนอี•อฬ(€€€€€€€€€€ฝนัฅนีฅัไน‘…ันษีน}ฅ‘}อกศิุ€๔๔๔อกศิุกษีธนฅค€ฝนัฅนีฅัไน‘…ันฝม•ษ…ัฅฝน}ฅ‘}อกศิุ€๔๔๔อกศิุกฝม•ษ…ัฅฝธนฅค(€€€€€€€€€€ฝนัฅนีฅัไน‘…ันษ•อั…ษั}ษ•ลี•อั}ฅ‘}อกศิุ€๔๔๔มษฝฝนษ•อั…ษั}ษ•ลี•อั}ฅ‘}อกศิุ€ฝนัฅนีฅัไน‘…ัน…ั•ษ}ฝฝั}ฅ‘}อกศิุ€๔๔๔มษฝฝน…ั•ษ}ฝฝั}ฅ‘}อกศิุ(€€€€€€€€€€ฝนัฅนีฅัไน‘…ันษฝÝอ•ษ}Ýฝษญ•ษ}ฅ‘}อกศิุ€๔๔๔มษฝฝนษฝÝอ•ษ}Ýฝษญ•ษ}ฅ‘}อกศิุ€ฝนัฅนีฅัไน‘…ันษฝÝอ•ษ}ฑ•…อ•}•มฝ €๔๔๔มษฝฝนษฝÝอ•ษ}ฑ•…อ•}•มฝ (€€€€€€€€€€มษฝฝนษ•ลี•อั}อกศิุ€๔๔๔ฝม•ษ…ัฅฝธนษ•ลี•อั!…อ €มษฝฝนฅ‘•ตมฝั•นๅ}ญ•ๅ}อกศิุ€๔๔๔อกศิุกฝม•ษ…ัฅฝธนฅ‘•ตมฝั•นๅ-•ไค(€€€€€€€€€€มษฝฝน•ฝษ•}ฝฝั}ฅ‘}อกศิุ€๔๔มษฝฝน…ั•ษ}ฝฝั}ฅ‘}อกศิุ€มษฝฝนฝษฅฅน…ฑ}ษ••ฅมั}อกศิุ€๔๔๔มษฝฝนษ•มฑ…ๅ}ษ••ฅมั}อกศิุ(€€€€€€€€€€ัๅม•ฝมษฝฝนมษฝูฅ‘•ษ}ษ•อั…ษั}ษ•ลี•อั}อกศิุ€๔๔๔€อัษฅน€€ฝymตภดๅu์ุั๔ผนั•อะกมษฝฝนมษฝูฅ‘•ษ}ษ•อั…ษั}ษ•ลี•อั}อกศิุค(€€€€€€€€€€ัๅม•ฝมษฝฝนมษฝูฅ‘•ษ}ษ•อั…ษั}…•มั•‘}ษ•อมฝนอ•}อกศิุ€๔๔๔€อัษฅน€€ฝymตภดๅu์ุั๔ผนั•อะกมษฝฝนมษฝูฅ‘•ษ}ษ•อั…ษั}…•มั•‘}ษ•อมฝนอ•}อกศิุค(€€€€€€€€€€ัๅม•ฝมษฝฝนฑฝ…ฑ}ฝนัษฝฑฑ•ษ}ษ••ฅมั}อกศิุ€๔๔๔€อัษฅน€€ฝymตภดๅu์ุั๔ผนั•อะกมษฝฝนฑฝ…ฑ}ฝนัษฝฑฑ•ษ}ษ••ฅมั}อกศิุค(€€€€€€€€€€มษฝฝนษฝÝอ•ษ}Ýฝษญ•ษ}ฝนัฅนีฅัไ€๔๔๔ัษี”€มษฝฝน‘ีมฑฅ…ั•}ฅนฉ•ัฅฝน}ฝีนะ€๔๔๔€ภ์(€€€€€๔ค์(€€€€€ฝนอะÝฝษญ•ษ1ฝออฑ…ฅตฬ€๔•แั•ษน…ฑัั•อั…ัฅฝนฬ ภษ}ษฝÝอ•ษ}Ýฝษญ•ษ}ฑฝอฬค์(€€€€€ฝนอะÝฝษญ•ษ1ฝอฬ€๔Ýฝษญ•ษ1ฝออฑ…ฅตฬนฅฑั•ศ ก•ู•นะค€๔๘์(€€€€€€€ฝนอะมษฝฝ€๔•ู•นะนม…ๅฑฝ…น•ูฅ‘•น”…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•์(€€€€€€€ฝนอะฝตต…น€๔•แั•ษน…ฑัั•อั…ัฅฝนฬ ภษ}ษฝÝอ•ษ}Ýฝษญ•ษ}ั•ษตฅน…ัฅฝน}ฝตต…นคนฅน ก…น‘ฅ‘…ั”ค€๔๘์(€€€€€€€€€ฝนอะฝตต…น‘Aษฝฝ€๔…น‘ฅ‘…ั”นม…ๅฑฝ…น•ูฅ‘•น”…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•์(€€€€€€€€€ษ•ัีษธัๅม•ฝฝตต…น‘Aษฝฝüนั•ษตฅน…ัฅฝน}ษ•ลี•อั}ฅ€๔๔๔€อัษฅน€อกศิุกฝตต…น‘Aษฝฝนั•ษตฅน…ัฅฝน}ษ•ลี•อั}ฅค€๔๔๔มษฝฝüนั•ษตฅน…ัฅฝน}ษ•ลี•อั}ฅ‘}อกศิุ(€€€€€€€€€€€€ฝตต…น‘Aษฝฝนษีน}ฅ‘}อกศิุ€๔๔๔มษฝฝüนษีน}ฅ‘}อกศิุ€ฝตต…น‘Aษฝฝนฑ•…นีม}ฝฑฅ…ัฅฝน}ฅ‘}อกศิุ€๔๔๔มษฝฝนฑ•…นีม}ฝฑฅ…ัฅฝน}ฅ‘}อกศิุ(€€€€€€€€€€€€ฝตต…น‘AษฝฝนÝฝษญ•ษ}อ•ษูฅ•}ฅ‘}อกศิุ€๔๔๔มษฝฝนÝฝษญ•ษ}อ•ษูฅ•}ฅ‘}อกศิุ€ฝตต…น‘Aษฝฝนมษฝูฅ‘•ษ}อ•ออฅฝน}ฅ‘}อกศิุ€๔๔๔มษฝฝนมษฝูฅ‘•ษ}อ•ออฅฝน}ฅ‘}อกศิุ(€€€€€€€€€€€€ฝตต…น‘Aษฝฝนมษฝูฅ‘•ษ}…‘ตฅออฅฝน}ฅ‘}อกศิุ€๔๔๔มษฝฝนมษฝูฅ‘•ษ}…‘ตฅออฅฝน}ฅ‘}อกศิุ€ฝตต…น‘Aษฝฝนมษฝูฅ‘•ษ}ฝนน•ัฅฝน}•มฝ €๔๔๔มษฝฝนมษฝูฅ‘•ษ}ฝนน•ัฅฝน}•มฝ (€€€€€€€€€€€€…นฝนฅ…ฑI•ลี•อั!…อ กฝตต…น‘Aษฝฝนษฝ้•น}มษฝูฅ‘•ษ}ฝนน•ัฅฝน}•มฝกฬค€๔๔๔…นฝนฅ…ฑI•ลี•อั!…อ กมษฝฝนษฝ้•น}มษฝูฅ‘•ษ}ฝนน•ัฅฝน}•มฝกฬค(€€€€€€€€€€€€ฝตต…น‘AษฝฝนษฝÝอ•ษ}ฝนั•แั}ฅ‘}อกศิุ€๔๔๔มษฝฝนษฝÝอ•ษ}ฝนั•แั}ฅ‘}อกศิุ€ฝตต…น‘AษฝฝนษฝÝอ•ษ}Ýฝษญ•ษ}ฅ‘}อกศิุ€๔๔๔มษฝฝนฑฝอั}Ýฝษญ•ษ}ฅ‘}อกศิุ(€€€€€€€€€€€€ฝตต…น‘AษฝฝนษฝÝอ•ษ}ฑ•…อ•}•มฝ €๔๔๔มษฝฝนฑฝอั}ษฝÝอ•ษ}ฑ•…อ•}•มฝ €ฝตต…น‘Aษฝฝน•ฝษ•}Ýฝษญ•ษ}‘•มฑฝๅ}ฅ‘}อกศิุ€๔๔๔มษฝฝน•ฝษ•}‘•มฑฝๅ}ฅ‘}อกศิุ(€€€€€€€€€€€€ฝตต…น‘Aษฝฝน•ฝษ•}Ýฝษญ•ษ}ฅนอั…น•}อ•ั}อกศิุ€๔๔๔มษฝฝน•ฝษ•}ฅนอั…น•}อ•ั}อกศิุ(€€€€€€€€€€€€ฝตต…น‘Aษฝฝน•ฝษ•}Ýฝษญ•ษ}ฝÝน•ษ}ฅนอั…น•}ฅ‘}อกศิุ€๔๔๔มษฝฝนฑฝอั}Ýฝษญ•ษ}ฝÝน•ษ}ฅนอั…น•}ฅ‘}อกศิุ(€€€€€€€€€€€€ฝตต…น‘Aษฝฝน•ฝษ•}Ýฝษญ•ษ}ฝÝน•ษ}ต•ต•ษอกฅม}ฝีนะ€๔๔๔€ฤ€มษฝฝนฑฝอั}Ýฝษญ•ษ}ฝÝน•ษ}ฅนอั…น•}ฅ‘}อกศิุ€๔๔๔มษฝฝนฑฝอั}Ýฝษญ•ษ}ฅ‘}อกศิุ(€€€€€€€€€€€€มษฝฝนฑฝอั}Ýฝษญ•ษ}มษ•อ•นั}•ฝษ•}ษ•อั…ษะ€๔๔๔ัษี”€มษฝฝนฑฝอั}Ýฝษญ•ษ}…อ•นั}…ั•ษ}ษ•อั…ษะ€๔๔๔ัษี”(€€€€€€€€€€€€ฝตต…น‘Aษฝฝนษ•น‘•ษ}…ัฅฝน}ษ•ลี•อั}อกศิุ€๔๔๔มษฝฝนษ•น‘•ษ}…ัฅฝน}ษ•ลี•อั}อกศิุ(€€€€€€€€€€€€ฝตต…น‘Aษฝฝนษ•ลี•อั•‘}…ะ€๔๔๔มษฝฝนฝตต…น‘}ษ•ลี•อั•‘}…ะ€…น‘ฅ‘…ั”นอ•ฤ€๐•ู•นะนอ•ฤ์(€€€€€€€๔ค์(€€€€€€€ฝนอะฑฝอฬ€๔ๅ-ฅน ‘ีษ…ฅฑฅัไนษฝÝอ•ษ}Ýฝษญ•ษ}ฑฝออ}ฝอ•ษู•คนฅน ก…น‘ฅ‘…ั”ค€๔๘…น‘ฅ‘…ั”นอ•ฤ€๔๔๔มษฝฝüนฑฝออ}•ู•นั}อ•ฤ(€€€€€€€€€€…น‘ฅ‘…ั”นม…ๅฑฝ…นฑฝอั}Ýฝษญ•ษ}ฅ‘}อกศิุ€๔๔๔มษฝฝüนฑฝอั}Ýฝษญ•ษ}ฅ‘}อกศิุ€…น‘ฅ‘…ั”นม…ๅฑฝ…นษ•มฑ…•ต•นั}Ýฝษญ•ษ}ฅ‘}อกศิุ€๔๔๔มษฝฝนษ•มฑ…•ต•นั}Ýฝษญ•ษ}ฅ‘}อกศิุ(€€€€€€€€€€…น‘ฅ‘…ั”นม…ๅฑฝ…นฑฝอั}ษฝÝอ•ษ}ฑ•…อ•}•มฝ €๔๔๔มษฝฝนฑฝอั}ษฝÝอ•ษ}ฑ•…อ•}•มฝ €…น‘ฅ‘…ั”นม…ๅฑฝ…นฑฝออ}ฝอ•ษู•‘}…ะ€๔๔๔มษฝฝนฑฝออ}ฝอ•ษู•‘}…ะค์(€€€€€€€ฝนอะ‘ฅอม…ั €๔ๅ-ฅน มษฝ‘ีะนภษ}ษ•น‘•ษ}Ýฝษญ•ษ}‘ฅอม…ัก}ฑ…ฅต•คนฅน ก…น‘ฅ‘…ั”ค€๔๘…น‘ฅ‘…ั”นอฝีษ”€๔๔๔€…นฝนฅ…ฐ(€€€€€€€€€€…น‘ฅ‘…ั”นม…ๅฑฝ…นั•ษตฅน…ัฅฝน}ษ•ลี•อั}ฅ‘}อกศิุ€๔๔๔มษฝฝüนั•ษตฅน…ัฅฝน}ษ•ลี•อั}ฅ‘}อกศิุ(€€€€€€€€€€…น‘ฅ‘…ั”นม…ๅฑฝ…น‘ฅอม…ัก}ฑ…ฅต}อกศิุ€๔๔๔มษฝฝüนษ•น‘•ษ}‘ฅอม…ัก}ฑ…ฅต}อกศิุ(€€€€€€€€€€…น‘ฅ‘…ั”นม…ๅฑฝ…นฝตต…น‘}…ัั•อั…ัฅฝน}ฅ‘}อกศิุ€๔๔๔อกศิุกMัษฅนกฝตต…นüนม…ๅฑฝ…น…ัั•อั…ัฅฝน}ฅคค(€€€€€€€€€€…น‘ฅ‘…ั”นม…ๅฑฝ…นฝตต…น‘}ฝนั•นั}อกศิุ€๔๔๔ฝตต…นüนม…ๅฑฝ…นฝนั•นั}อกศิุ€…น‘ฅ‘…ั”นม…ๅฑฝ…นฝตต…น‘}•ู•นั}อ•ฤ€๔๔๔ฝตต…นüนอ•ฤ(€€€€€€€€€€…น‘ฅ‘…ั”นม…ๅฑฝ…นÝฝษญ•ษ}อ•ษูฅ•}ฅ‘}อกศิุ€๔๔๔มษฝฝüนÝฝษญ•ษ}อ•ษูฅ•}ฅ‘}อกศิุ(€€€€€€€€€€…น‘ฅ‘…ั”นม…ๅฑฝ…น…ัฅฝน}ษ•ลี•อั}อกศิุ€๔๔๔มษฝฝüนษ•น‘•ษ}…ัฅฝน}ษ•ลี•อั}อกศิุ(€€€€€€€€€€…น‘ฅ‘…ั”นม…ๅฑฝ…นษ•ลี•อั•‘}…ะ€๔๔๔มษฝฝüน…ัฅฝน}ษ•ลี•อั•‘}…ะ(€€€€€€€€€€…น‘ฅ‘…ั”นม…ๅฑฝ…นษ…Ý}…ัฅฝน}…น‘}…ัั•ตมั}ฅ‘•นัฅฅ•ษอ}•แฑี‘•€๔๔๔ัษี”(€€€€€€€€€€…น‘ฅ‘…ั”นม…ๅฑฝ…น‘ฅอม…ัก}ฑ…ฅต}อกศิุ€๔๔๔…นฝนฅ…ฑI•ลี•อั!…อ ก=ฉ•ะนษฝตนัษฅ•ฬก=ฉ•ะน•นัษฅ•ฬก…น‘ฅ‘…ั”นม…ๅฑฝ…คนฅฑั•ศ กmญ•ๅtค€๔๘ญ•ไ€๔๔€‘ฅอม…ัก}ฑ…ฅต}อกศิุคคคค์(€€€€€€€ฝนอะอกีั‘ฝÝธ€๔ๅ-ฅน ‘ีษ…ฅฑฅัไนษฝÝอ•ษ}Ýฝษญ•ษ}อกีั‘ฝÝน}ฝอ•ษู•คนฅน ก…น‘ฅ‘…ั”ค€๔๘…น‘ฅ‘…ั”นอฝีษ”€๔๔๔€Ýฝษญ•ศ€ก…อแ…ั-•ๅฬก…น‘ฅ‘…ั”นม…ๅฑฝ…ฐl(€€€€€€€€€€อก•ตฐ€ั•ษตฅน…ัฅฝน}ษ•ลี•อั}ฅ‘}อกศิุฐ€ูฝฅ•}ฑ…}ษีน}ฅ‘}อกศิุฐ€ฑ•…นีม}ฝฑฅ…ัฅฝน}ฅ‘}อกศิุฐ(€€€€€€€€€€ฑฝอั}ษฝÝอ•ษ}Ýฝษญ•ษ}ฅ‘}อกศิุฐ€ฑฝอั}ษฝÝอ•ษ}ฑ•…อ•}•มฝ ฐ€ษฝÝอ•ษ}ฝนั•แั}ฅ‘}อกศิุฐ€มษฝูฅ‘•ษ}อ•ออฅฝน}ฅ‘}อกศิุฐ(€€€€€€€€€€มษฝูฅ‘•ษ}…‘ตฅออฅฝน}ฅ‘}อกศิุฐ€มษฝูฅ‘•ษ}ฝนน•ัฅฝน}•มฝ ฐ€ษฝ้•น}มษฝูฅ‘•ษ}ฝนน•ัฅฝน}•มฝกฬฐ€ษ•น‘•ษ}…ัฅฝน}ษ•ลี•อั}อกศิุฐ(€€€€€€€€€€…ั•Ý…ๅ}ษ••้•}ษ•ลี•อั}อกศิุฐ€…ั•Ý…ๅ}ษ••้•}•ู•นั}อ•ฤฐ€ฝตต…น‘}•ู•นั}อ•ฤฐ€ษ•น‘•ษ}‘ฅอม…ัก}ฑ…ฅต}อกศิุฐ(€€€€€€€€€€ษ•น‘•ษ}‘ฅอม…ัก}ฑ…ฅต}•ู•นั}อ•ฤฐ€มษฝ‘ีั}มษฝูฅ‘•ษ}ฑ•…นีม}…ญนฝÝฑ•‘•ฐ€มษฝ‘ีั}มษฝูฅ‘•ษ}ฑ•…นีม}อ•ััฑ•ต•นั}อกศิุฐ(€€€€€€€€€€มษฝ‘ีั}มษฝูฅ‘•ษ}ฑฝอ•}ษ••ฅมั}ฝีนะฐ€มษฝ‘ีั}มษฝูฅ‘•ษ}…ัฅู…ัฅฝน}…ฝษั}ษ••ฅมั}ฝีนะฐ€มษฝ‘ีั}มษฝูฅ‘•ษ}ฑ•…นีม}•มฝก}ีนฅฝน}ต…ัก•อ}ษ••้”ฐ(€€€€€€€€€€ษฝÝอ•ษ}ฝนั•แั}ฑฝอ•ฐ€อฝีษ”ฐ€ษ…Ý}ษีน}Ýฝษญ•ษ}ฑ•…อ•}ฝนั•แั}…น‘}มษฝ‘ีั}ฅ‘•นัฅฅ•ษอ}•แฑี‘•ฐ(€€€€€€€€€€ฝอ•ษู•‘}…ะฐ(€€€€€€€tค€…น‘ฅ‘…ั”นม…ๅฑฝ…นอก•ต€๔๔๔€อฝมกฅ…}ูฝฅ•}ฑ…}ภษ}ษฝÝอ•ษ}Ýฝษญ•ษ}อกีั‘ฝÝน}ฝอ•ษู…ัฅฝน}ุฤ(€€€€€€€€€€…น‘ฅ‘…ั”นม…ๅฑฝ…นั•ษตฅน…ัฅฝน}ษ•ลี•อั}ฅ‘}อกศิุ€๔๔๔มษฝฝüนั•ษตฅน…ัฅฝน}ษ•ลี•อั}ฅ‘}อกศิุ(€€€€€€€€€€…น‘ฅ‘…ั”นม…ๅฑฝ…นูฝฅ•}ฑ…}ษีน}ฅ‘}อกศิุ€๔๔๔มษฝฝüนษีน}ฅ‘}อกศิุ(€€€€€€€€€€…น‘ฅ‘…ั”นม…ๅฑฝ…นฑ•…นีม}ฝฑฅ…ัฅฝน}ฅ‘}อกศิุ€๔๔๔มษฝฝüนฑ•…นีม}ฝฑฅ…ัฅฝน}ฅ‘}อกศิุ(€€€€€€€€€€…น‘ฅ‘…ั”นม…ๅฑฝ…นฑฝอั}ษฝÝอ•ษ}Ýฝษญ•ษ}ฅ‘}อกศิุ€๔๔๔มษฝฝüนฑฝอั}Ýฝษญ•ษ}ฅ‘}อกศิุ(€€€€€€€€€€…น‘ฅ‘…ั”นม…ๅฑฝ…นฑฝอั}ษฝÝอ•ษ}ฑ•…อ•}•มฝ €๔๔๔มษฝฝüนฑฝอั}ษฝÝอ•ษ}ฑ•…อ•}•มฝ (€€€€€€€€€€…น‘ฅ‘…ั”นม…ๅฑฝ…นษฝÝอ•ษ}ฝนั•แั}ฅ‘}อกศิุ€๔๔๔มษฝฝüนษฝÝอ•ษ}ฝนั•แั}ฅ‘}อกศิุ(€€€€€€€€€€…น‘ฅ‘…ั”นม…ๅฑฝ…นมษฝูฅ‘•ษ}อ•ออฅฝน}ฅ‘}อกศิุ€๔๔๔มษฝฝüนมษฝูฅ‘•ษ}อ•ออฅฝน}ฅ‘}อกศิุ(€€€€€€€€€€…น‘ฅ‘…ั”นม…ๅฑฝ…นมษฝูฅ‘•ษ}…‘ตฅออฅฝน}ฅ‘}อกศิุ€๔๔๔มษฝฝüนมษฝูฅ‘•ษ}…‘ตฅออฅฝน}ฅ‘}อกศิุ(€€€€€€€€€€…น‘ฅ‘…ั”นม…ๅฑฝ…นมษฝูฅ‘•ษ}ฝนน•ัฅฝน}•มฝ €๔๔๔มษฝฝüนมษฝูฅ‘•ษ}ฝนน•ัฅฝน}•มฝ (€€€€€€€€€€…นฝนฅ…ฑI•ลี•อั!…อ ก…น‘ฅ‘…ั”นม…ๅฑฝ…นษฝ้•น}มษฝูฅ‘•ษ}ฝนน•ัฅฝน}•มฝกฬค€๔๔๔…นฝนฅ…ฑI•ลี•อั!…อ กมษฝฝüนษฝ้•น}มษฝูฅ‘•ษ}ฝนน•ัฅฝน}•มฝกฬค(€€€€€€€€€€…น‘ฅ‘…ั”นม…ๅฑฝ…นษ•น‘•ษ}…ัฅฝน}ษ•ลี•อั}อกศิุ€๔๔๔มษฝฝüนษ•น‘•ษ}…ัฅฝน}ษ•ลี•อั}อกศิุ(€€€€€€€€€€…น‘ฅ‘…ั”นม…ๅฑฝ…นฝตต…น‘}•ู•นั}อ•ฤ€๔๔๔ฝตต…นüนอ•ฤ€…น‘ฅ‘…ั”นม…ๅฑฝ…นษ•น‘•ษ}‘ฅอม…ัก}ฑ…ฅต}•ู•นั}อ•ฤ€๔๔๔‘ฅอม…ั üนอ•ฤ(€€€€€€€€€€…น‘ฅ‘…ั”นม…ๅฑฝ…นษ•น‘•ษ}‘ฅอม…ัก}ฑ…ฅต}อกศิุ€๔๔๔มษฝฝüนษ•น‘•ษ}‘ฅอม…ัก}ฑ…ฅต}อกศิุ(€€€€€€€€€€…น‘ฅ‘…ั”นม…ๅฑฝ…นมษฝ‘ีั}มษฝูฅ‘•ษ}ฑ•…นีม}…ญนฝÝฑ•‘•€๔๔๔ัษี”(€€€€€€€€€€ฅอMกศิุก…น‘ฅ‘…ั”นม…ๅฑฝ…นมษฝ‘ีั}มษฝูฅ‘•ษ}ฑ•…นีม}อ•ััฑ•ต•นั}อกศิุค(€€€€€€€€€€9ีต•ศนฅอM…•%นั••ศก…น‘ฅ‘…ั”นม…ๅฑฝ…นมษฝ‘ีั}มษฝูฅ‘•ษ}ฑฝอ•}ษ••ฅมั}ฝีนะค€9ีต•ศก…น‘ฅ‘…ั”นม…ๅฑฝ…นมษฝ‘ีั}มษฝูฅ‘•ษ}ฑฝอ•}ษ••ฅมั}ฝีนะค€๘๔€ภ(€€€€€€€€€€9ีต•ศนฅอM…•%นั••ศก…น‘ฅ‘…ั”นม…ๅฑฝ…นมษฝ‘ีั}มษฝูฅ‘•ษ}…ัฅู…ัฅฝน}…ฝษั}ษ••ฅมั}ฝีนะค€9ีต•ศก…น‘ฅ‘…ั”นม…ๅฑฝ…นมษฝ‘ีั}มษฝูฅ‘•ษ}…ัฅู…ัฅฝน}…ฝษั}ษ••ฅมั}ฝีนะค€๘๔€ภ(€€€€€€€€€€ษษ…ไนฅอษษ…ไก…น‘ฅ‘…ั”นม…ๅฑฝ…นษฝ้•น}มษฝูฅ‘•ษ}ฝนน•ัฅฝน}•มฝกฬค(€€€€€€€€€€9ีต•ศก…น‘ฅ‘…ั”นม…ๅฑฝ…นมษฝ‘ีั}มษฝูฅ‘•ษ}ฑฝอ•}ษ••ฅมั}ฝีนะค€ฌ9ีต•ศก…น‘ฅ‘…ั”นม…ๅฑฝ…นมษฝ‘ีั}มษฝูฅ‘•ษ}…ัฅู…ัฅฝน}…ฝษั}ษ••ฅมั}ฝีนะค€๔๔๔€ก…น‘ฅ‘…ั”นม…ๅฑฝ…นษฝ้•น}มษฝูฅ‘•ษ}ฝนน•ัฅฝน}•มฝกฬ…ฬีนญนฝÝนmtคนฑ•นั (€€€€€€€€€€…น‘ฅ‘…ั”นม…ๅฑฝ…นมษฝ‘ีั}มษฝูฅ‘•ษ}ฑ•…นีม}•มฝก}ีนฅฝน}ต…ัก•อ}ษ••้”€๔๔๔ัษี”(€€€€€€€€€€…น‘ฅ‘…ั”นม…ๅฑฝ…นษฝÝอ•ษ}ฝนั•แั}ฑฝอ•€๔๔๔ัษี”€…น‘ฅ‘…ั”นม…ๅฑฝ…นอฝีษ”€๔๔๔€Ýฝษญ•ษ}ษ…•ีฑ}ภษ}ษ•อั…ษะ(€€€€€€€€€€…น‘ฅ‘…ั”นม…ๅฑฝ…นษ…Ý}ษีน}Ýฝษญ•ษ}ฑ•…อ•}ฝนั•แั}…น‘}มษฝ‘ีั}ฅ‘•นัฅฅ•ษอ}•แฑี‘•€๔๔๔ัษี”(€€€€€€€€€€ฅอ…นฝนฅ…ฑQฅต•อั…ตภก…น‘ฅ‘…ั”นม…ๅฑฝ…นฝอ•ษู•‘}…ะค€…น‘ฅ‘…ั”น…ะนัฝ%M=Mัษฅน ค€๔๔๔…น‘ฅ‘…ั”นม…ๅฑฝ…นฝอ•ษู•‘}…ะค์(€€€€€€€ฝนอะ…ั•Ý…ๅษ••้”€๔อกีั‘ฝÝธ€üๅ-ฅน มษฝ‘ีะนภษ}…ั•Ý…ๅ}ษฝÝอ•ษ}Ýฝษญ•ษ}ั•ษตฅน…ัฅฝน}ษฝ้•ธคนฅน ก…น‘ฅ‘…ั”ค€๔๘…น‘ฅ‘…ั”นอฝีษ”€๔๔๔€…นฝนฅ…ฐ(€€€€€€€€€€…น‘ฅ‘…ั”นอ•ฤ€๔๔๔อกีั‘ฝÝธนม…ๅฑฝ…น…ั•Ý…ๅ}ษ••้•}•ู•นั}อ•ฤ(€€€€€€€€€€…น‘ฅ‘…ั”นม…ๅฑฝ…นอก•ต€๔๔๔€อฝมกฅ…}ูฝฅ•}ฑ…}ภษ}…ั•Ý…ๅ}ษ••้•}•ู•นั}ุฤ(€€€€€€€€€€…น‘ฅ‘…ั”นม…ๅฑฝ…นั•ษตฅน…ัฅฝน}ษ•ลี•อั}ฅ‘}อกศิุ€๔๔๔มษฝฝüนั•ษตฅน…ัฅฝน}ษ•ลี•อั}ฅ‘}อกศิุ(€€€€€€€€€€…น‘ฅ‘…ั”นม…ๅฑฝ…นษ••้•}ษ•ลี•อั}อกศิุ€๔๔๔อกีั‘ฝÝธนม…ๅฑฝ…น…ั•Ý…ๅ}ษ••้•}ษ•ลี•อั}อกศิุ(€€€€€€€€€€…น‘ฅ‘…ั”นม…ๅฑฝ…นษฝÝอ•ษ}Ýฝษญ•ษ}ฅ‘}อกศิุ€๔๔๔มษฝฝüนฑฝอั}Ýฝษญ•ษ}ฅ‘}อกศิุ(€€€€€€€€€€…น‘ฅ‘…ั”นม…ๅฑฝ…นษฝÝอ•ษ}ฑ•…อ•}•มฝ €๔๔๔มษฝฝüนฑฝอั}ษฝÝอ•ษ}ฑ•…อ•}•มฝ (€€€€€€€€€€…น‘ฅ‘…ั”นม…ๅฑฝ…นษฝÝอ•ษ}ฝนั•แั}ฅ‘}อกศิุ€๔๔๔มษฝฝüนษฝÝอ•ษ}ฝนั•แั}ฅ‘}อกศิุ(€€€€€€€€€€…น‘ฅ‘…ั”นม…ๅฑฝ…นษ•น‘•ษ}…ัฅฝน}ษ•ลี•อั}อกศิุ€๔๔๔มษฝฝüนษ•น‘•ษ}…ัฅฝน}ษ•ลี•อั}อกศิุ(€€€€€€€€€€…น‘ฅ‘…ั”นม…ๅฑฝ…น…ั•Ý…ๅ}ษฝ้•ธ€๔๔๔ัษี”ค€่ีน‘•ฅน•์(€€€€€€€ฝนอะ•แ…ั1ฝอฬ€๔ฑฝอฬüนอฝีษ”€๔๔๔€Ýฝษญ•ศ€ก…อแ…ั-•ๅฬกฑฝอฬนม…ๅฑฝ…ฐl(€€€€€€€€€€อก•ตฐ€ั•ษตฅน…ัฅฝน}ษ•ลี•อั}ฅ‘}อกศิุฐ€ฑฝอั}Ýฝษญ•ษ}ฅ‘}อกศิุฐ€ษ•มฑ…•ต•นั}Ýฝษญ•ษ}ฅ‘}อกศิุฐ(€€€€€€€€€€ฑฝอั}ษฝÝอ•ษ}ฑ•…อ•}•มฝ ฐ€ษฝÝอ•ษ}ฝนั•แั}ฅ‘}อกศิุฐ€ฝฑ‘}Ýฝษญ•ษ}อกีั‘ฝÝน}•ู•นั}อ•ฤฐ€ษ•น‘•ษ}‘ฅอม…ัก}ฑ…ฅต}อกศิุฐ(€€€€€€€€€€ษ•น‘•ษ}‘ฅอม…ัก}ฑ…ฅต}•ู•นั}อ•ฤฐ€ฑ•…อ•}•แมฅษ•‘}…ะฐ€ฑฝออ}ฝอ•ษู•‘}…ะฐ€ฑฝออ}อฝีษ”ฐ€ษ…Ý}Ýฝษญ•ษ}ฅ‘•นัฅฅ•ษอ}•แฑี‘•ฐ(€€€€€€€tค€ฑฝอฬนม…ๅฑฝ…นอก•ต€๔๔๔€อฝมกฅ…}ูฝฅ•}ฑ…}ภษ}ษฝÝอ•ษ}Ýฝษญ•ษ}ฑฝออ}ษฝออ}ฉฝฅน}ุฤ(€€€€€€€€€€ฑฝอฬนม…ๅฑฝ…นั•ษตฅน…ัฅฝน}ษ•ลี•อั}ฅ‘}อกศิุ€๔๔๔มษฝฝüนั•ษตฅน…ัฅฝน}ษ•ลี•อั}ฅ‘}อกศิุ(€€€€€€€€€€ฑฝอฬนม…ๅฑฝ…นษฝÝอ•ษ}ฝนั•แั}ฅ‘}อกศิุ€๔๔๔มษฝฝüนษฝÝอ•ษ}ฝนั•แั}ฅ‘}อกศิุ(€€€€€€€€€€ฑฝอฬนม…ๅฑฝ…นฝฑ‘}Ýฝษญ•ษ}อกีั‘ฝÝน}•ู•นั}อ•ฤ€๔๔๔อกีั‘ฝÝธüนอ•ฤ(€€€€€€€€€€ฑฝอฬนม…ๅฑฝ…นษ•น‘•ษ}‘ฅอม…ัก}ฑ…ฅต}อกศิุ€๔๔๔มษฝฝüนษ•น‘•ษ}‘ฅอม…ัก}ฑ…ฅต}อกศิุ(€€€€€€€€€€ฑฝอฬนม…ๅฑฝ…นษ•น‘•ษ}‘ฅอม…ัก}ฑ…ฅต}•ู•นั}อ•ฤ€๔๔๔‘ฅอม…ั üนอ•ฤ(€€€€€€€€€€ฑฝอฬนม…ๅฑฝ…นฑ•…อ•}•แมฅษ•‘}…ะ€๔๔๔นีฑฐ€ฑฝอฬนม…ๅฑฝ…นฑฝออ}อฝีษ”€๔๔๔€Ýฝษญ•ษ}ษ…•ีฑ}ภษ}ษ•อั…ษั}ษฝออ}ฉฝฅธ(€€€€€€€€€€ฑฝอฬนม…ๅฑฝ…นษ…Ý}Ýฝษญ•ษ}ฅ‘•นัฅฅ•ษอ}•แฑี‘•€๔๔๔ัษี”€ฅอ…นฝนฅ…ฑQฅต•อั…ตภกฑฝอฬนม…ๅฑฝ…นฑฝออ}ฝอ•ษู•‘}…ะค(€€€€€€€€€€ฑฝอฬน…ะนัฝ%M=Mัษฅน ค€๔๔๔ฑฝอฬนม…ๅฑฝ…นฑฝออ}ฝอ•ษู•‘}…ะ์(€€€€€€€ฝนอะษ•มฑ…•ต•นะ€๔ฑฝอฬ€อกีั‘ฝÝธ€üๅ-ฅน ‘ีษ…ฅฑฅัไนษฝÝอ•ษ}Ýฝษญ•ษ}ษ•มฑ…•ต•นั}ฝอ•ษู•คนฅน ก…น‘ฅ‘…ั”ค€๔๘…น‘ฅ‘…ั”นอฝีษ”€๔๔๔€Ýฝษญ•ศ€ก…อแ…ั-•ๅฬก…น‘ฅ‘…ั”นม…ๅฑฝ…ฐl(€€€€€€€€€€อก•ตฐ€ั•ษตฅน…ัฅฝน}ษ•ลี•อั}ฅ‘}อกศิุฐ€ฑฝอั}ษฝÝอ•ษ}Ýฝษญ•ษ}ฅ‘}อกศิุฐ€ษ•มฑ…•ต•นั}ษฝÝอ•ษ}Ýฝษญ•ษ}ฅ‘}อกศิุฐ(€€€€€€€€€€ฑฝอั}ษฝÝอ•ษ}ฑ•…อ•}•มฝ ฐ€ษฝÝอ•ษ}ฝนั•แั}ฅ‘}อกศิุฐ€ฝฑ‘}Ýฝษญ•ษ}อกีั‘ฝÝน}•ู•นั}อ•ฤฐ€ฑฝออ}•ู•นั}อ•ฤฐ(€€€€€€€€€€ษ•น‘•ษ}‘ฅอม…ัก}ฑ…ฅต}อกศิุฐ€อฝีษ”ฐ€ษ…Ý}Ýฝษญ•ษ}ฅ‘•นัฅฅ•ษอ}•แฑี‘•ฐ(€€€€€€€tค€…น‘ฅ‘…ั”นม…ๅฑฝ…นอก•ต€๔๔๔€อฝมกฅ…}ูฝฅ•}ฑ…}ภษ}ษฝÝอ•ษ}Ýฝษญ•ษ}ษ•มฑ…•ต•นั}ฝอ•ษู…ัฅฝน}ุฤ(€€€€€€€€€€…น‘ฅ‘…ั”นม…ๅฑฝ…นั•ษตฅน…ัฅฝน}ษ•ลี•อั}ฅ‘}อกศิุ€๔๔๔มษฝฝüนั•ษตฅน…ัฅฝน}ษ•ลี•อั}ฅ‘}อกศิุ(€€€€€€€€€€…น‘ฅ‘…ั”นม…ๅฑฝ…นฑฝอั}ษฝÝอ•ษ}Ýฝษญ•ษ}ฅ‘}อกศิุ€๔๔๔มษฝฝüนฑฝอั}Ýฝษญ•ษ}ฅ‘}อกศิุ(€€€€€€€€€€…น‘ฅ‘…ั”นม…ๅฑฝ…นษ•มฑ…•ต•นั}ษฝÝอ•ษ}Ýฝษญ•ษ}ฅ‘}อกศิุ€๔๔๔มษฝฝüนษ•มฑ…•ต•นั}Ýฝษญ•ษ}ฅ‘}อกศิุ(€€€€€€€€€€…น‘ฅ‘…ั”นม…ๅฑฝ…นฑฝอั}ษฝÝอ•ษ}ฑ•…อ•}•มฝ €๔๔๔มษฝฝüนฑฝอั}ษฝÝอ•ษ}ฑ•…อ•}•มฝ (€€€€€€€€€€…น‘ฅ‘…ั”นม…ๅฑฝ…นษฝÝอ•ษ}ฝนั•แั}ฅ‘}อกศิุ€๔๔๔มษฝฝüนษฝÝอ•ษ}ฝนั•แั}ฅ‘}อกศิุ(€€€€€€€€€€…น‘ฅ‘…ั”นม…ๅฑฝ…นฝฑ‘}Ýฝษญ•ษ}อกีั‘ฝÝน}•ู•นั}อ•ฤ€๔๔๔อกีั‘ฝÝธนอ•ฤ€…น‘ฅ‘…ั”นม…ๅฑฝ…นฑฝออ}•ู•นั}อ•ฤ€๔๔๔ฑฝอฬนอ•ฤ(€€€€€€€€€€…น‘ฅ‘…ั”นม…ๅฑฝ…นษ•น‘•ษ}‘ฅอม…ัก}ฑ…ฅต}อกศิุ€๔๔๔มษฝฝüนษ•น‘•ษ}‘ฅอม…ัก}ฑ…ฅต}อกศิุ(€€€€€€€€€€…น‘ฅ‘…ั”นม…ๅฑฝ…นอฝีษ”€๔๔๔€ษ•มฑ…•ต•นั}Ýฝษญ•ษ}อั…ษัีม}…ั•ษ}ษ…•ีฑ}ภษ}ษ•อั…ษะ(€€€€€€€€€€…น‘ฅ‘…ั”นม…ๅฑฝ…นษ…Ý}Ýฝษญ•ษ}ฅ‘•นัฅฅ•ษอ}•แฑี‘•€๔๔๔ัษี”ค€่ีน‘•ฅน•์(€€€€€€€ษ•ัีษธมษฝฝüน…ีักฝษฅัไ€๔๔๔€‘•มฑฝๅต•นั}ฝนัษฝฐ€ฝตต…น€๔๔ีน‘•ฅน•€‘ฅอม…ั €๔๔ีน‘•ฅน•€…ั•Ý…ๅษ••้”€๔๔ีน‘•ฅน•(€€€€€€€€€€อกีั‘ฝÝธ€๔๔ีน‘•ฅน•€•แ…ั1ฝอฬ€๔๔๔ัษี”€ฑฝอฬ€๔๔ีน‘•ฅน•€ษ•มฑ…•ต•นะ€๔๔ีน‘•ฅน•(€€€€€€€€€€ๅ-ฅน ‘ีษ…ฅฑฅัไนษฝÝอ•ษ}Ýฝษญ•ษ}อกีั‘ฝÝน}ฝอ•ษู•คนฑ•นั €๔๔๔€ฤ(€€€€€€€€€€ๅ-ฅน ‘ีษ…ฅฑฅัไนษฝÝอ•ษ}Ýฝษญ•ษ}ฑฝออ}ฝอ•ษู•คนฑ•นั €๔๔๔€ฤ(€€€€€€€€€€ๅ-ฅน ‘ีษ…ฅฑฅัไนษฝÝอ•ษ}Ýฝษญ•ษ}ษ•มฑ…•ต•นั}ฝอ•ษู•คนฑ•นั €๔๔๔€ฤ(€€€€€€€€€€…ั•Ý…ๅษ••้”นอ•ฤ€๐ฝตต…นนอ•ฤ€ฝตต…นนอ•ฤ€๐‘ฅอม…ั นอ•ฤ€‘ฅอม…ั นอ•ฤ€๐อกีั‘ฝÝธนอ•ฤ€อกีั‘ฝÝธนอ•ฤ€๐ฑฝอฬนอ•ฤ€ฑฝอฬนอ•ฤ€๐ษ•มฑ…•ต•นะนอ•ฤ€ษ•มฑ…•ต•นะนอ•ฤ€๐•ู•นะนอ•ฤ(€€€€€€€€€€มษฝฝนษีน}ฅ‘}อกศิุ€๔๔๔อกศิุกษีธนฅค€มษฝฝนฑ•…นีม}ฝฑฅ…ัฅฝน}ฅ‘}อกศิุ€๔๔๔อกศิุกษีธนฑ•…นีม=ฑฅ…ัฅฝน%ค(€€€€€€€€€€มษฝฝนฑฝอั}Ýฝษญ•ษ}ฅ‘}อกศิุ€๔๔มษฝฝนษ•มฑ…•ต•นั}Ýฝษญ•ษ}ฅ‘}อกศิุ€มษฝฝน…ัฅฝน}ญฅน€๔๔๔€ษ•น‘•ษ}Ýฝษญ•ษ}อ•ษูฅ•}ษ•อั…ษะ(€€€€€€€€€€มษฝฝนษ•อั…ษั}กััม}อั…ัีฬ€๔๔๔€ศภภ€มษฝฝนฝฑ‘}Ýฝษญ•ษ}ฅนอั…น•อ}…อ•นะ€๔๔๔ัษี”€มษฝฝนษ•มฑ…•ต•นั}Ýฝษญ•ษ}ฅนอั…น•อ}ฝอ•ษู•€๔๔๔ัษี”(€€€€€€€€€€มษฝฝนฑฝอั}Ýฝษญ•ษ}ฝÝน•ษ}ฅนอั…น•}ฅ‘}อกศิุ€๔๔๔มษฝฝนฑฝอั}Ýฝษญ•ษ}ฅ‘}อกศิุ€มษฝฝนฑฝอั}Ýฝษญ•ษ}มษ•อ•นั}•ฝษ•}ษ•อั…ษะ€๔๔๔ัษี”€มษฝฝนฑฝอั}Ýฝษญ•ษ}…อ•นั}…ั•ษ}ษ•อั…ษะ€๔๔๔ัษี”(€€€€€€€€€€มษฝฝน•ฝษ•}ฅนอั…น•}อ•ั}อกศิุ€๔๔มษฝฝน…ั•ษ}ฅนอั…น•}อ•ั}อกศิุ(€€€€€€€€€€ัๅม•ฝมษฝฝนษ•น‘•ษ}…ัฅฝน}ษ•ลี•อั}อกศิุ€๔๔๔€อัษฅน€ัๅม•ฝมษฝฝนษ•น‘•ษ}…ัฅฝน}…•มั•‘}ษ•อมฝนอ•}อกศิุ€๔๔๔€อัษฅน€ัๅม•ฝมษฝฝนษ•น‘•ษ}…ัฅฝน}อ•ััฑ•‘}อน…มอกฝั}อกศิุ€๔๔๔€อัษฅน(€€€€€€€€€€มษฝฝน…ั•Ý…ๅ}อ•ััฑ•ต•นั}ษ••ฅมั}ฅนฑี‘•€๔๔๔…ฑอ”€ษีธนอั…ั”€๔๔๔€…ฝษั•‘}‘ษฅู•ษ}ษ•อั…ษะ€ษีธนั•ษตฅน…ฑษษฝศüนฝ‘”€๔๔๔€	I=]MI}MMM%=9}1=MP์(€€€€€๔ค์(€€€€€ฝนอะ…ั•Ý…ๅM•ััฑ•ต•นัู•นัฬ€๔ๅ-ฅน มษฝ‘ีะนภษ}…ั•Ý…ๅ}ษฝÝอ•ษ}Ýฝษญ•ษ}ั•ษตฅน…ัฅฝน}อ•ััฑ•คนฅฑั•ศ ก•ู•นะค€๔๘•ู•นะนอฝีษ”€๔๔๔€…นฝนฅ…ฐค์(€€€€€ฝนอะ•แ…ั…ั•Ý…ๅM•ััฑ•ต•นัฬ€๔…ั•Ý…ๅM•ััฑ•ต•นัู•นัฬนฅฑั•ศ ก•ู•นะค€๔๘์(€€€€€€€ฅ€กÝฝษญ•ษ1ฝอฬนฑ•นั €๔๔€ฤ๑๐€…ก…อแ…ั-•ๅฬก•ู•นะนม…ๅฑฝ…ฐlอก•ตฐ€ั•ษตฅน…ัฅฝน}ษ•ลี•อั}ฅ‘}อกศิุฐ€อ•ััฑ•ต•นั}ษ•ลี•อั}อกศิุฐ€…ั•Ý…ๅ}ษ••ฅมั}อกศิุฐ€…ั•Ý…ๅ}ษ••ฅมะฐ€อฝีษ”ฐ€ษ…Ý}มษฝ‘ีั}ฅ‘•นัฅฅ•ษอ}•แฑี‘•tค(€€€€€€€€€๑๐•ู•นะนม…ๅฑฝ…นอก•ต€๔๔€อฝมกฅ…}ูฝฅ•}ฑ…}ภษ}…ั•Ý…ๅ}อ•ััฑ•ต•นั}•ู•นั}ุฤ๑๐•ู•นะนม…ๅฑฝ…นอฝีษ”€๔๔€…ั•Ý…ๅ}•ศิิฤๅ}อ•ััฑ•ต•นั}ษ••ฅมะ(€€€€€€€€€๑๐•ู•นะนม…ๅฑฝ…นษ…Ý}มษฝ‘ีั}ฅ‘•นัฅฅ•ษอ}•แฑี‘•€๔๔ัษี”คษ•ัีษธ…ฑอ”์(€€€€€€€ฝนอะมษฝฝ€๔Ýฝษญ•ษ1ฝออlมtนม…ๅฑฝ…น•ูฅ‘•น”…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•์(€€€€€€€ฝนอะฝตต…น‘ู•นะ€๔•แั•ษน…ฑัั•อั…ัฅฝนฬ ภษ}ษฝÝอ•ษ}Ýฝษญ•ษ}ั•ษตฅน…ัฅฝน}ฝตต…นคนฅน ก…น‘ฅ‘…ั”ค€๔๘์(€€€€€€€€€ฝนอะฝตต…น€๔…น‘ฅ‘…ั”นม…ๅฑฝ…น•ูฅ‘•น”…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•์(€€€€€€€€€ษ•ัีษธัๅม•ฝฝตต…นüนั•ษตฅน…ัฅฝน}ษ•ลี•อั}ฅ€๔๔๔€อัษฅน€อกศิุกฝตต…นนั•ษตฅน…ัฅฝน}ษ•ลี•อั}ฅค€๔๔๔มษฝฝüนั•ษตฅน…ัฅฝน}ษ•ลี•อั}ฅ‘}อกศิุ์(€€€€€€€๔ค์(€€€€€€€ฝนอะฝตต…น€๔ฝตต…น‘ู•นะüนม…ๅฑฝ…น•ูฅ‘•น”…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•์(€€€€€€€ฝนอะ‘ฅอม…ักฑ…ฅด€๔ๅ-ฅน มษฝ‘ีะนภษ}ษ•น‘•ษ}Ýฝษญ•ษ}‘ฅอม…ัก}ฑ…ฅต•คนฅน ก…น‘ฅ‘…ั”ค€๔๘…น‘ฅ‘…ั”นอฝีษ”€๔๔๔€…นฝนฅ…ฐ(€€€€€€€€€€…น‘ฅ‘…ั”นม…ๅฑฝ…นั•ษตฅน…ัฅฝน}ษ•ลี•อั}ฅ‘}อกศิุ€๔๔๔มษฝฝüนั•ษตฅน…ัฅฝน}ษ•ลี•อั}ฅ‘}อกศิุ(€€€€€€€€€€…น‘ฅ‘…ั”นม…ๅฑฝ…น‘ฅอม…ัก}ฑ…ฅต}อกศิุ€๔๔๔มษฝฝüนษ•น‘•ษ}‘ฅอม…ัก}ฑ…ฅต}อกศิุค์(€€€€€€€ฝนอะอกีั‘ฝÝนู•นัฬ€๔ๅ-ฅน ‘ีษ…ฅฑฅัไนษฝÝอ•ษ}Ýฝษญ•ษ}อกีั‘ฝÝน}ฝอ•ษู•ค์(€€€€€€€ฝนอะอัษฅัMกีั‘ฝÝธ€๔อกีั‘ฝÝนู•นัฬนฑ•นั €๔๔๔€ฤ€üอกีั‘ฝÝนู•นัอlมt€่ีน‘•ฅน•์(€€€€€€€ฝนอะษ••ฅมัI•อีฑะ€๔ภษ…ั•Ý…ๅM•ััฑ•ต•นัI••ฅมัMก•ตนอ…•A…ษอ”ก•ู•นะนม…ๅฑฝ…น…ั•Ý…ๅ}ษ••ฅมะค์(€€€€€€€ฅ€ …มษฝฝ๑๐€…ฝตต…น‘ู•นะ๑๐€…ฝตต…น๑๐€…‘ฅอม…ักฑ…ฅด๑๐€…อัษฅัMกีั‘ฝÝธ๑๐€…ษ••ฅมัI•อีฑะนอี•อฬ๑๐ษีธนมษฝูฅ‘•ษM•ออฅฝน%€๔๔๔นีฑฐคษ•ัีษธ…ฑอ”์(€€€€€€€ฝนอะษ••ฅมะ€๔ษ••ฅมัI•อีฑะน‘…ั์(€€€€€€€ฝนอะอ•ััฑ•ต•นัI•ลี•อะ€๔์(€€€€€€€€€อก•ต่€อฝมกฅ…}ูฝฅ•}ฑ…}…ั•Ý…ๅ}ษฝÝอ•ษ}Ýฝษญ•ษ}ั•ษตฅน…ัฅฝน}อ•ััฑ•ต•นั}ษ•ลี•อั}ุฤฐ(€€€€€€€€€ั•ษตฅน…ัฅฝน}ษ•ลี•อั}ฅ่ฝตต…นนั•ษตฅน…ัฅฝน}ษ•ลี•อั}ฅฐ(€€€€€€€€€ูฝฅ•}ฑ…}ษีน}ฅ‘}อกศิุ่มษฝฝนษีน}ฅ‘}อกศิุฐ(€€€€€€€€€ั•อั}ษีน}ฅ่ษีธนั•อัIีน%ฐ(€€€€€€€€€ฑ•…นีม}ฝฑฅ…ัฅฝน}ฅ่ษีธนฑ•…นีม=ฑฅ…ัฅฝน%ฐ(€€€€€€€€€มษฝูฅ‘•ษ}อ•ออฅฝน}ฅ่ษีธนมษฝูฅ‘•ษM•ออฅฝน%ฐ(€€€€€€€€€มษฝูฅ‘•ษ}…‘ตฅออฅฝน}ฅ‘}อกศิุ่มษฝฝนมษฝูฅ‘•ษ}…‘ตฅออฅฝน}ฅ‘}อกศิุฐ(€€€€€€€€€มษฝูฅ‘•ษ}ฝนน•ัฅฝน}•มฝ ่มษฝฝนมษฝูฅ‘•ษ}ฝนน•ัฅฝน}•มฝ ฐ(€€€€€€€€€ษฝ้•น}มษฝูฅ‘•ษ}ฝนน•ัฅฝน}•มฝกฬ่มษฝฝนษฝ้•น}มษฝูฅ‘•ษ}ฝนน•ัฅฝน}•มฝกฬฐ(€€€€€€€€€ษฝÝอ•ษ}Ýฝษญ•ษ}ฅ‘}อกศิุ่มษฝฝนฑฝอั}Ýฝษญ•ษ}ฅ‘}อกศิุฐ(€€€€€€€€€ษฝÝอ•ษ}ฑ•…อ•}•มฝ ่มษฝฝนฑฝอั}ษฝÝอ•ษ}ฑ•…อ•}•มฝ ฐ(€€€€€€€€€ษฝÝอ•ษ}ฝนั•แั}ฅ‘}อกศิุ่มษฝฝนษฝÝอ•ษ}ฝนั•แั}ฅ‘}อกศิุฐ(€€€€€€€€€ษ•น‘•ษ}…ัฅฝน}ษ•ลี•อั}อกศิุ่มษฝฝนษ•น‘•ษ}…ัฅฝน}ษ•ลี•อั}อกศิุฐ(€€€€€€€€€ษ•น‘•ษ}…ัฅฝน}…•มั•‘}ษ•อมฝนอ•}อกศิุ่มษฝฝนษ•น‘•ษ}…ัฅฝน}…•มั•‘}ษ•อมฝนอ•}อกศิุฐ(€€€€€€€€€ษ•น‘•ษ}…ัฅฝน}อ•ััฑ•‘}อน…มอกฝั}อกศิุ่มษฝฝนษ•น‘•ษ}…ัฅฝน}อ•ััฑ•‘}อน…มอกฝั}อกศิุฐ(€€€€€€€€€ฑฝออ}•ู•นั}อ•ฤ่มษฝฝนฑฝออ}•ู•นั}อ•ฤฐ(€€€€€€€€€ฑฝออ}ฝอ•ษู•‘}…ะ่มษฝฝนฑฝออ}ฝอ•ษู•‘}…ะฐ(€€€€€€€๔์(€€€€€€€ฝนอะฑฝออ=อ•ษู•€๔ๅ-ฅน ‘ีษ…ฅฑฅัไนษฝÝอ•ษ}Ýฝษญ•ษ}ฑฝออ}ฝอ•ษู•คนฅน ก…น‘ฅ‘…ั”ค€๔๘…น‘ฅ‘…ั”นอ•ฤ€๔๔๔มษฝฝนฑฝออ}•ู•นั}อ•ฤค์(€€€€€€€ษ•ัีษธ•ู•นะนม…ๅฑฝ…นั•ษตฅน…ัฅฝน}ษ•ลี•อั}ฅ‘}อกศิุ€๔๔๔มษฝฝนั•ษตฅน…ัฅฝน}ษ•ลี•อั}ฅ‘}อกศิุ(€€€€€€€€€€•ู•นะนม…ๅฑฝ…นอ•ััฑ•ต•นั}ษ•ลี•อั}อกศิุ€๔๔๔…นฝนฅ…ฑI•ลี•อั!…อ กอ•ััฑ•ต•นัI•ลี•อะค(€€€€€€€€€€•ู•นะนม…ๅฑฝ…น…ั•Ý…ๅ}ษ••ฅมั}อกศิุ€๔๔๔…นฝนฅ…ฑI•ลี•อั!…อ กษ••ฅมะค(€€€€€€€€€€ฝตต…น‘ู•นะนอ•ฤ€๐‘ฅอม…ักฑ…ฅดนอ•ฤ€‘ฅอม…ักฑ…ฅดนอ•ฤ€๐€กฑฝออ=อ•ษู•üนอ•ฤ€üü€ภค€€กฑฝออ=อ•ษู•üนอ•ฤ€üü9ีต•ศน5a}M}%9QHค€๐•ู•นะนอ•ฤ€•ู•นะนอ•ฤ€๐Ýฝษญ•ษ1ฝออlมtนอ•ฤ(€€€€€€€€€€ษ••ฅมะนั•ษตฅน…ัฅฝน}ษ•ลี•อั}ฅ‘}อกศิุ€๔๔๔มษฝฝนั•ษตฅน…ัฅฝน}ษ•ลี•อั}ฅ‘}อกศิุ(€€€€€€€€€€ษ••ฅมะนูฝฅ•}ฑ…}ษีน}ฅ‘}อกศิุ€๔๔๔อกศิุกษีธนฅค€ษ••ฅมะนั•อั}ษีน}ฅ‘}อกศิุ€๔๔๔อกศิุกษีธนั•อัIีน%ค(€€€€€€€€€€ษ••ฅมะนฑ•…นีม}ฝฑฅ…ัฅฝน}ฅ‘}อกศิุ€๔๔๔อกศิุกษีธนฑ•…นีม=ฑฅ…ัฅฝน%ค(€€€€€€€€€€ษ••ฅมะนอ•น…ษฅฝ}ฅ€๔๔๔ษีธนอ•น…ษฅฝ%€ษ••ฅมะนอ•น…ษฅฝ}ู•ษอฅฝธ€๔๔๔ษีธนอ•น…ษฅฝY•ษอฅฝธ€ษ••ฅมะน•นูฅษฝนต•นะ€๔๔๔ษีธน•นูฅษฝนต•นะ(€€€€€€€€€€…นฝนฅ…ฑI•ลี•อั!…อ กษ••ฅมะน•แม•ั•‘}‘•มฑฝๅต•นะค€๔๔๔…นฝนฅ…ฑI•ลี•อั!…อ กษีธนั…ษ•ะน•แม•ั•‘•มฑฝๅต•นะค(€€€€€€€€€€ษ••ฅมะนมษฝูฅ‘•ษ}อ•ออฅฝน}ฅ‘}อกศิุ€๔๔๔มษฝฝนมษฝูฅ‘•ษ}อ•ออฅฝน}ฅ‘}อกศิุ€ษ••ฅมะนมษฝูฅ‘•ษ}…‘ตฅออฅฝน}ฅ‘}อกศิุ€๔๔๔มษฝฝนมษฝูฅ‘•ษ}…‘ตฅออฅฝน}ฅ‘}อกศิุ(€€€€€€€€€€ษ••ฅมะนมษฝูฅ‘•ษ}ฝนน•ัฅฝน}•มฝ €๔๔๔มษฝฝนมษฝูฅ‘•ษ}ฝนน•ัฅฝน}•มฝ (€€€€€€€€€€…นฝนฅ…ฑI•ลี•อั!…อ กษ••ฅมะนษฝ้•น}มษฝูฅ‘•ษ}ฝนน•ัฅฝน}•มฝกฬค€๔๔๔…นฝนฅ…ฑI•ลี•อั!…อ กมษฝฝนษฝ้•น}มษฝูฅ‘•ษ}ฝนน•ัฅฝน}•มฝกฬค(€€€€€€€€€€ษ••ฅมะนษฝÝอ•ษ}Ýฝษญ•ษ}ฅ‘}อกศิุ€๔๔๔มษฝฝนฑฝอั}Ýฝษญ•ษ}ฅ‘}อกศิุ€ษ••ฅมะนษฝÝอ•ษ}ฑ•…อ•}•มฝ €๔๔๔มษฝฝนฑฝอั}ษฝÝอ•ษ}ฑ•…อ•}•มฝ (€€€€€€€€€€ษ••ฅมะนษฝÝอ•ษ}ฝนั•แั}ฅ‘}อกศิุ€๔๔๔มษฝฝนษฝÝอ•ษ}ฝนั•แั}ฅ‘}อกศิุ(€€€€€€€€€€ษ••ฅมะนษ•น‘•ษ}…ัฅฝน}ษ•ลี•อั}อกศิุ€๔๔๔มษฝฝนษ•น‘•ษ}…ัฅฝน}ษ•ลี•อั}อกศิุ(€€€€€€€€€€ษ••ฅมะนษ•น‘•ษ}…ัฅฝน}…•มั•‘}ษ•อมฝนอ•}อกศิุ€๔๔๔มษฝฝนษ•น‘•ษ}…ัฅฝน}…•มั•‘}ษ•อมฝนอ•}อกศิุ(€€€€€€€€€€ษ••ฅมะนษ•น‘•ษ}…ัฅฝน}อ•ััฑ•‘}อน…มอกฝั}อกศิุ€๔๔๔มษฝฝนษ•น‘•ษ}…ัฅฝน}อ•ััฑ•‘}อน…มอกฝั}อกศิุ(€€€€€€€€€€ษ••ฅมะนฑฝออ}•ู•นั}อ•ฤ€๔๔๔มษฝฝนฑฝออ}•ู•นั}อ•ฤ€ษ••ฅมะนฑฝออ}ฝอ•ษู•‘}…ะ€๔๔๔มษฝฝนฑฝออ}ฝอ•ษู•‘}…ะ(€€€€€€€€€€ษ••ฅมะนมษฝูฅ‘•ษ}อ•ััฑ•ต•นั}อกศิุ€๔๔๔อัษฅัMกีั‘ฝÝธนม…ๅฑฝ…นมษฝ‘ีั}มษฝูฅ‘•ษ}ฑ•…นีม}อ•ััฑ•ต•นั}อกศิุ(€€€€€€€€€€น•Ü…ั”กษ••ฅมะน‘…ั……อ•}ฝอ•ษู•‘}…ะคน•ัQฅต” ค€๘๔น•Ü…ั”กMัษฅนกมษฝฝนฑฝออ}ฝอ•ษู•‘}…ะคคน•ัQฅต” ค(€€€€€€€€€€ษ••ฅมะนฑ•…นีม}ฝฑฅ…ัฅฝน}อั…ั”€๔๔๔€ฑฝอ•€ษ••ฅมะน…นฝนฅ…ฑ}มษฝูฅ‘•ษ}อั…ั”€๔๔๔€ฑฝอ•€ษ••ฅมะน…นฝนฅ…ฑ}ม•น‘ฅน}•มฝ €๔๔๔นีฑฐ(€€€€€€€€€€ษ••ฅมะน…ฑฑ}ษฝ้•น}มษฝูฅ‘•ษ}•มฝกอ}ั•ษตฅน…ฐ€๔๔๔ัษี”€ษ••ฅมะนมษฝูฅ‘•ษ}…‘ตฅออฅฝน}…อ•นะ€๔๔๔ัษี”(€€€€€€€€€€ษ••ฅมะนูฝฅ•}มษฝูฅ‘•ษ}อ•ออฅฝน}…อ•นะ€๔๔๔ัษี”€ษ••ฅมะน…ั•Ý…ๅ}ษฝÝอ•ษ}ษ•ฑ…ๅ}…อ•นะ€๔๔๔ัษี”์(€€€€€๔ค์(€€€€€ฝนอะมษฝ‘ีัAษ•ฝน‘ฅัฅฝนฬ€๔ๅ-ฅน มษฝ‘ีะนภษ}…มฅ}มษฝ•ออ}ษ•อั…ษั}มษ•ฝน‘ฅัฅฝธคนฅฑั•ศ ก•ู•นะค€๔๘•ู•นะนอฝีษ”€๔๔๔€…นฝนฅ…ฐค์(€€€€€ฝนอะมษฝ‘ีัฝนัฅนีฅัฅ•ฬ€๔ๅ-ฅน มษฝ‘ีะนภษ}…มฅ}มษฝ•ออ}ษ•อั…ษั}ฝนัฅนีฅัไคนฅฑั•ศ ก•ู•นะค€๔๘•ู•นะนอฝีษ”€๔๔๔€…นฝนฅ…ฐค์(€€€€€ฝนอะ•แ…ัAษฝ‘ีัฝนัฅนีฅัฅ•ฬ€๔มษฝ‘ีัฝนัฅนีฅัฅ•ฬนฅฑั•ศ กฝนัฅนีฅัๅู•นะค€๔๘์(€€€€€€€ฅ€ก…มคนฑ•นั €๔๔€ฤ๑๐มษฝ‘ีัAษ•ฝน‘ฅัฅฝนฬนฑ•นั €๔๔€ฤ(€€€€€€€€€๑๐€…ก…อแ…ั-•ๅฬกมษฝ‘ีัAษ•ฝน‘ฅัฅฝนอlมtนม…ๅฑฝ…ฐlอก•ตฐ€มก…อ”ฐ€ษ•อั…ษั}ษ•ลี•อั}ฅ‘}อกศิุฐ€ฝอ•ษู…ัฅฝน}ษ•ลี•อั}อกศิุฐ€ฝอ•ษู…ัฅฝน}ษ••ฅมั}อกศิุฐ€…ั•Ý…ๅ}ษ••ฅมะฐ€อฝีษ”ฐ€ษ…Ý}มษฝ‘ีั}ฅ‘•นัฅฅ•ษอ}•แฑี‘•tค(€€€€€€€€€๑๐€…ก…อแ…ั-•ๅฬกฝนัฅนีฅัๅู•นะนม…ๅฑฝ…ฐlอก•ตฐ€มก…อ”ฐ€ษ•อั…ษั}ษ•ลี•อั}ฅ‘}อกศิุฐ€ฝอ•ษู…ัฅฝน}ษ•ลี•อั}อกศิุฐ€ฝอ•ษู…ัฅฝน}ษ••ฅมั}อกศิุฐ€มษฅฝษ}ฝอ•ษู…ัฅฝน}ษ••ฅมั}อกศิุฐ€…ั•Ý…ๅ}ษ••ฅมะฐ€อฝีษ”ฐ€ษ…Ý}มษฝ‘ีั}ฅ‘•นัฅฅ•ษอ}•แฑี‘•tคคษ•ัีษธ…ฑอ”์(€€€€€€€ฝนอะมษ•ฝน‘ฅัฅฝธ€๔มษฝ‘ีัAษ•ฝน‘ฅัฅฝนอlมt์(€€€€€€€ฝนอะฅน…ฑู•นะ€๔…มฅlมt์(€€€€€€€ฝนอะมษฝฝ€๔ฅน…ฑู•นะนม…ๅฑฝ…น•ูฅ‘•น”…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•์(€€€€€€€ฝนอะฝตต…น‘ู•นะ€๔•แั•ษน…ฑัั•อั…ัฅฝนฬ ภษ}ษ•อั…ษั}ฝตต…นคนฅน ก…น‘ฅ‘…ั”ค€๔๘์(€€€€€€€€€ฝนอะฝตต…น€๔…น‘ฅ‘…ั”นม…ๅฑฝ…น•ูฅ‘•น”…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•์(€€€€€€€€€ษ•ัีษธัๅม•ฝฝตต…นüนษ•อั…ษั}ษ•ลี•อั}ฅ€๔๔๔€อัษฅน€อกศิุกฝตต…นนษ•อั…ษั}ษ•ลี•อั}ฅค€๔๔๔มษฝฝüนษ•อั…ษั}ษ•ลี•อั}ฅ‘}อกศิุ์(€€€€€€€๔ค์(€€€€€€€ฝนอะฝม•ษ…ัฅฝธ€๔ฝม•ษ…ัฅฝนฬนฅน ก…น‘ฅ‘…ั”ค€๔๘…น‘ฅ‘…ั”นฅ€๔๔๔มษฝฝüนฝม•ษ…ัฅฝน}ฅค์(€€€€€€€ฝนอะษ•มฑ…ไ€๔ฝม•ษ…ัฅฝธ€ๅ-ฅนกฝม•ษ…ัฅฝธธ‘ํฝม•ษ…ัฅฝธนัๅม•๔นฅ‘•ตมฝั•นั}ษ•มฑ…ๅ€คนฅน ก…น‘ฅ‘…ั”ค€๔๘…น‘ฅ‘…ั”นม…ๅฑฝ…นฝม•ษ…ัฅฝน}ฅ€๔๔๔ฝม•ษ…ัฅฝธนฅ(€€€€€€€€€€…น‘ฅ‘…ั”นม…ๅฑฝ…น•แ…ั}ษ•ลี•อั}ก…อก}ษ•มฑ…ไ€๔๔๔ัษี”€…น‘ฅ‘…ั”นม…ๅฑฝ…นนฝ}น•Ý}ฝม•ษ…ัฅฝธ€๔๔๔ัษี”ค์(€€€€€€€ฝนอะฝตต…น€๔ฝตต…น‘ู•นะüนม…ๅฑฝ…น•ูฅ‘•น”…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•์(€€€€€€€ฝนอะ•ฝษ•I•อีฑะ€๔ภษ…ั•Ý…ๅฝนัฅนีฅัๅ=อ•ษู…ัฅฝนI••ฅมัMก•ตนอ…•A…ษอ”กมษ•ฝน‘ฅัฅฝธนม…ๅฑฝ…น…ั•Ý…ๅ}ษ••ฅมะค์(€€€€€€€ฝนอะ…ั•ษI•อีฑะ€๔ภษ…ั•Ý…ๅฝนัฅนีฅัๅ=อ•ษู…ัฅฝนI••ฅมัMก•ตนอ…•A…ษอ”กฝนัฅนีฅัๅู•นะนม…ๅฑฝ…น…ั•Ý…ๅ}ษ••ฅมะค์(€€€€€€€ฅ€ …มษฝฝ๑๐€…ฝตต…น‘ู•นะ๑๐€…ฝตต…น๑๐€…ฝม•ษ…ัฅฝธ๑๐€…ษ•มฑ…ไ๑๐€…•ฝษ•I•อีฑะนอี•อฬ๑๐€……ั•ษI•อีฑะนอี•อฬ(€€€€€€€€€๑๐ษีธน…นฝนฅ…ฑM•ออฅฝน%€๔๔๔นีฑฐ๑๐ษีธนักษ•…‘%€๔๔๔นีฑฐ๑๐ษีธนมษฝูฅ‘•ษM•ออฅฝน%€๔๔๔นีฑฐ๑๐ษีธนมษฝูฅ‘•ษมฝ €๔๔๔นีฑฐ(€€€€€€€€€๑๐ัๅม•ฝฝตต…นนษ•อั…ษั}ษ•ลี•อั}ฅ€๔๔€อัษฅน๑๐ัๅม•ฝฝตต…นนษ•ลี•อั•‘}…ะ€๔๔€อัษฅน๑๐ัๅม•ฝฝตต…นนมษฝูฅ‘•ษ}ษ•อั…ษั}ษ•ลี•อั}อกศิุ€๔๔€อัษฅนคษ•ัีษธ…ฑอ”์(€€€€€€€ฝนอะ•ฝษ”€๔•ฝษ•I•อีฑะน‘…ั์(€€€€€€€ฝนอะ…ั•ศ€๔…ั•ษI•อีฑะน‘…ั์(€€€€€€€ฝนอะ•ฝษ•Uนอฅน•่I•ฝษ๑อัษฅนฐีนญนฝÝธ๘€๔์€ธธน•ฝษ”๔์(€€€€€€€‘•ฑ•ั”•ฝษ•Uนอฅน•นอฅน…ัีษ”์(€€€€€€€ฝนอะ•ฝษ•ฝษ”€๔์€ธธน•ฝษ•Uนอฅน•๔์(€€€€€€€‘•ฑ•ั”•ฝษ•ฝษ”นษ••ฅมั}อกศิุ์(€€€€€€€ฝนอะ…ั•ษUนอฅน•่I•ฝษ๑อัษฅนฐีนญนฝÝธ๘€๔์€ธธน…ั•ศ๔์(€€€€€€€‘•ฑ•ั”…ั•ษUนอฅน•นอฅน…ัีษ”์(€€€€€€€ฝนอะ…ั•ษฝษ”€๔์€ธธน…ั•ษUนอฅน•๔์(€€€€€€€‘•ฑ•ั”…ั•ษฝษ”นษ••ฅมั}อกศิุ์(€€€€€€€ฝนอะ•ฝษ•I•ลี•อะ€๔์(€€€€€€€€€อก•ต่€อฝมกฅ…}ูฝฅ•}ฑ…}ภษ}มษฝ‘ีั}ฝนัฅนีฅัๅ}ฝอ•ษู…ัฅฝน}ษ•ลี•อั}ุฤฐ(€€€€€€€€€ษ•อั…ษั}ษ•ลี•อั}ฅ่ฝตต…นนษ•อั…ษั}ษ•ลี•อั}ฅฐ(€€€€€€€€€ฑ•…นีม}ฝฑฅ…ัฅฝน}ฅ่ษีธนฑ•…นีม=ฑฅ…ัฅฝน%ฐ(€€€€€€€€€มก…อ”่€•ฝษ•}…มฅ}ษ•อั…ษะฐ(€€€€€€€€€มษฝ‘ีั}อ•ษูฅ•}ฝฝั}ฅ‘}อกศิุ่มษฝฝน•ฝษ•}ฝฝั}ฅ‘}อกศิุฐ(€€€€€€€€€ษ•น‘•ษ}…ัฅฝน}ษ•ลี•อั}อกศิุ่มษฝฝนมษฝูฅ‘•ษ}ษ•อั…ษั}ษ•ลี•อั}อกศิุฐ(€€€€€€€€€มษฅฝษ}ฝอ•ษู…ัฅฝน}ษ••ฅมั}อกศิุ่นีฑฐฐ(€€€€€€€€€ฝอ•ษู•‘}…ะ่ฝตต…นนษ•ลี•อั•‘}…ะฐ(€€€€€€€๔์(€€€€€€€ฝนอะ…ั•ษI•ลี•อะ€๔์(€€€€€€€€€€ธธน•ฝษ•I•ลี•อะฐ(€€€€€€€€€มก…อ”่€…ั•ษ}…มฅ}ษ•อั…ษะฐ(€€€€€€€€€มษฝ‘ีั}อ•ษูฅ•}ฝฝั}ฅ‘}อกศิุ่มษฝฝน…ั•ษ}ฝฝั}ฅ‘}อกศิุฐ(€€€€€€€€€มษฅฝษ}ฝอ•ษู…ัฅฝน}ษ••ฅมั}อกศิุ่•ฝษ”นษ••ฅมั}อกศิุฐ(€€€€€€€€€ฝอ•ษู•‘}…ะ่มษฝฝนษ•มฑ…ๅ}ฝอ•ษู•‘}…ะฐ(€€€€€€€๔์(€€€€€€€ฝนอะมษฝฉ•ัฅฝธ€๔•ฝษ”นฝนัฅนีฅัๅ}มษฝฉ•ัฅฝธ์(€€€€€€€ฝนอะ•แ…ัAษฝฉ•ัฅฝธ€๔…นฝนฅ…ฑI•ลี•อั!…อ กมษฝฉ•ัฅฝธค€๔๔๔…นฝนฅ…ฑI•ลี•อั!…อ ก…ั•ศนฝนัฅนีฅัๅ}มษฝฉ•ัฅฝธค(€€€€€€€€€€มษฝฉ•ัฅฝธนูฝฅ•}ฑ…}ษีน}ฅ‘}อกศิุ€๔๔๔อกศิุกษีธนฅค€มษฝฉ•ัฅฝธนั•อั}ษีน}ฅ‘}อกศิุ€๔๔๔อกศิุกษีธนั•อัIีน%ค(€€€€€€€€€€มษฝฉ•ัฅฝธนฑ•…นีม}ฝฑฅ…ัฅฝน}ฅ‘}อกศิุ€๔๔๔อกศิุกษีธนฑ•…นีม=ฑฅ…ัฅฝน%ค(€€€€€€€€€€มษฝฉ•ัฅฝธนอ•ออฅฝน}ฅ‘}อกศิุ€๔๔๔อกศิุกษีธน…นฝนฅ…ฑM•ออฅฝน%ค€มษฝฉ•ัฅฝธนักษ•…‘}ฅ‘}อกศิุ€๔๔๔อกศิุกษีธนักษ•…‘%ค(€€€€€€€€€€มษฝฉ•ัฅฝธนมษฝูฅ‘•ษ}อ•ออฅฝน}ฅ‘}อกศิุ€๔๔๔อกศิุกษีธนมษฝูฅ‘•ษM•ออฅฝน%ค€มษฝฉ•ัฅฝธนมษฝูฅ‘•ษ}ฝนน•ัฅฝน}•มฝ €๔๔๔ษีธนมษฝูฅ‘•ษมฝ (€€€€€€€€€€มษฝฉ•ัฅฝธนษฝÝอ•ษ}Ýฝษญ•ษ}ฅ‘}อกศิุ€๔๔๔มษฝฝนษฝÝอ•ษ}Ýฝษญ•ษ}ฅ‘}อกศิุ€มษฝฉ•ัฅฝธนษฝÝอ•ษ}ฑ•…อ•}•มฝ €๔๔๔มษฝฝนษฝÝอ•ษ}ฑ•…อ•}•มฝ (€€€€€€€€€€…นฝนฅ…ฑI•ลี•อั!…อ กมษฝฉ•ัฅฝธน•แม•ั•‘}‘•มฑฝๅต•นะค€๔๔๔…นฝนฅ…ฑI•ลี•อั!…อ กษีธนั…ษ•ะน•แม•ั•‘•มฑฝๅต•นะค์(€€€€€€€ษ•ัีษธ•แ…ัAษฝฉ•ัฅฝธ(€€€€€€€€€€มษ•ฝน‘ฅัฅฝธนม…ๅฑฝ…นอก•ต€๔๔๔€อฝมกฅ…}ูฝฅ•}ฑ…}ภษ}มษฝ‘ีั}ฝนัฅนีฅัๅ}•ู•นั}ุฤ€ฝนัฅนีฅัๅู•นะนม…ๅฑฝ…นอก•ต€๔๔๔€อฝมกฅ…}ูฝฅ•}ฑ…}ภษ}มษฝ‘ีั}ฝนัฅนีฅัๅ}•ู•นั}ุฤ(€€€€€€€€€€มษ•ฝน‘ฅัฅฝธนม…ๅฑฝ…นมก…อ”€๔๔๔€•ฝษ•}…มฅ}ษ•อั…ษะ€ฝนัฅนีฅัๅู•นะนม…ๅฑฝ…นมก…อ”€๔๔๔€…ั•ษ}…มฅ}ษ•อั…ษะ(€€€€€€€€€€มษ•ฝน‘ฅัฅฝธนม…ๅฑฝ…นษ•อั…ษั}ษ•ลี•อั}ฅ‘}อกศิุ€๔๔๔มษฝฝนษ•อั…ษั}ษ•ลี•อั}ฅ‘}อกศิุ€ฝนัฅนีฅัๅู•นะนม…ๅฑฝ…นษ•อั…ษั}ษ•ลี•อั}ฅ‘}อกศิุ€๔๔๔มษฝฝนษ•อั…ษั}ษ•ลี•อั}ฅ‘}อกศิุ(€€€€€€€€€€มษ•ฝน‘ฅัฅฝธนม…ๅฑฝ…นฝอ•ษู…ัฅฝน}ษ•ลี•อั}อกศิุ€๔๔๔…นฝนฅ…ฑI•ลี•อั!…อ ก•ฝษ•I•ลี•อะค€ฝนัฅนีฅัๅู•นะนม…ๅฑฝ…นฝอ•ษู…ัฅฝน}ษ•ลี•อั}อกศิุ€๔๔๔…นฝนฅ…ฑI•ลี•อั!…อ ก…ั•ษI•ลี•อะค(€€€€€€€€€€มษ•ฝน‘ฅัฅฝธนม…ๅฑฝ…นฝอ•ษู…ัฅฝน}ษ••ฅมั}อกศิุ€๔๔๔•ฝษ”นษ••ฅมั}อกศิุ€ฝนัฅนีฅัๅู•นะนม…ๅฑฝ…นฝอ•ษู…ัฅฝน}ษ••ฅมั}อกศิุ€๔๔๔…ั•ศนษ••ฅมั}อกศิุ(€€€€€€€€€€ฝนัฅนีฅัๅู•นะนม…ๅฑฝ…นมษฅฝษ}ฝอ•ษู…ัฅฝน}ษ••ฅมั}อกศิุ€๔๔๔•ฝษ”นษ••ฅมั}อกศิุ(€€€€€€€€€€มษ•ฝน‘ฅัฅฝธนม…ๅฑฝ…นอฝีษ”€๔๔๔€…ั•Ý…ๅ}•ศิิฤๅ}ฑฝญ•‘}มษฝ‘ีั}ฝนัฅนีฅัไ€ฝนัฅนีฅัๅู•นะนม…ๅฑฝ…นอฝีษ”€๔๔๔€…ั•Ý…ๅ}•ศิิฤๅ}ฑฝญ•‘}มษฝ‘ีั}ฝนัฅนีฅัไ(€€€€€€€€€€มษ•ฝน‘ฅัฅฝธนม…ๅฑฝ…นษ…Ý}มษฝ‘ีั}ฅ‘•นัฅฅ•ษอ}•แฑี‘•€๔๔๔ัษี”€ฝนัฅนีฅัๅู•นะนม…ๅฑฝ…นษ…Ý}มษฝ‘ีั}ฅ‘•นัฅฅ•ษอ}•แฑี‘•€๔๔๔ัษี”(€€€€€€€€€€•ฝษ”นษ••ฅมั}อกศิุ€๔๔๔…นฝนฅ…ฑI•ลี•อั!…อ ก•ฝษ•ฝษ”ค€…ั•ศนษ••ฅมั}อกศิุ€๔๔๔…นฝนฅ…ฑI•ลี•อั!…อ ก…ั•ษฝษ”ค(€€€€€€€€€€•ฝษ”นษ•อั…ษั}ษ•ลี•อั}ฅ‘}อกศิุ€๔๔๔มษฝฝนษ•อั…ษั}ษ•ลี•อั}ฅ‘}อกศิุ€…ั•ศนษ•อั…ษั}ษ•ลี•อั}ฅ‘}อกศิุ€๔๔๔มษฝฝนษ•อั…ษั}ษ•ลี•อั}ฅ‘}อกศิุ(€€€€€€€€€€•ฝษ”นษ•ลี•อั}อกศิุ€๔๔๔…นฝนฅ…ฑI•ลี•อั!…อ ก•ฝษ•I•ลี•อะค€…ั•ศนษ•ลี•อั}อกศิุ€๔๔๔…นฝนฅ…ฑI•ลี•อั!…อ ก…ั•ษI•ลี•อะค(€€€€€€€€€€•ฝษ”นมษฝ‘ีั}อ•ษูฅ•}ฝฝั}ฅ‘}อกศิุ€๔๔๔มษฝฝน•ฝษ•}ฝฝั}ฅ‘}อกศิุ€…ั•ศนมษฝ‘ีั}อ•ษูฅ•}ฝฝั}ฅ‘}อกศิุ€๔๔๔มษฝฝน…ั•ษ}ฝฝั}ฅ‘}อกศิุ(€€€€€€€€€€•ฝษ”นษ•น‘•ษ}…ัฅฝน}ษ•ลี•อั}อกศิุ€๔๔๔มษฝฝนมษฝูฅ‘•ษ}ษ•อั…ษั}ษ•ลี•อั}อกศิุ€…ั•ศนษ•น‘•ษ}…ัฅฝน}ษ•ลี•อั}อกศิุ€๔๔๔มษฝฝนมษฝูฅ‘•ษ}ษ•อั…ษั}ษ•ลี•อั}อกศิุ(€€€€€€€€€€•ฝษ”นมษฅฝษ}ฝอ•ษู…ัฅฝน}ษ••ฅมั}อกศิุ€๔๔๔นีฑฐ€…ั•ศนมษฅฝษ}ฝอ•ษู…ัฅฝน}ษ••ฅมั}อกศิุ€๔๔๔•ฝษ”นษ••ฅมั}อกศิุ(€€€€€€€€€€ฝตต…นนมษฝูฅ‘•ษ}ษ•อั…ษั}ษ•ลี•อั}อกศิุ€๔๔๔มษฝฝนมษฝูฅ‘•ษ}ษ•อั…ษั}ษ•ลี•อั}อกศิุ(€€€€€€€€€€มษ•ฝน‘ฅัฅฝธนอ•ฤ€๐ฝตต…น‘ู•นะนอ•ฤ€ฝตต…น‘ู•นะนอ•ฤ€๐ษ•มฑ…ไนอ•ฤ€ษ•มฑ…ไนอ•ฤ€๐ฝนัฅนีฅัๅู•นะนอ•ฤ€ฝนัฅนีฅัๅู•นะนอ•ฤ€๐ฅน…ฑู•นะนอ•ฤ์(€€€€€๔ค์(€€€€€ก…ษน•อฬนมีอ ก…มคนฑ•นั €๔๔๔€ภ€üีน…ู…ฅฑ…ฑ” ภศนตม}…มฅ}มษฝ•ออ}ษ•อั…ษั}…น‘}ษ•…ัั… ฐ€ก…ษน•อฬฐ€มษฅูฅฑ••‘}‘•มฑฝๅต•นั}ษ•อั…ษั}…ัั•อั…ัฅฝน}นฝั}…ัั…ก•ค€่ก•ฌ ภศนตม}…มฅ}มษฝ•ออ}ษ•อั…ษั}…น‘}ษ•…ัั… ฐ€ก…ษน•อฬฐ…มคนฑ•นั €๔๔๔€ฤฐ…มคฐ€…มฅ}ษ•อั…ษั}…ัั•อั…ัฅฝน}ฝนฑฅั•‘}ฝษ}…ฅฑ•‘}ษฝออ}ฉฝฅธคค์(€€€€€ก…ษน•อฬนมีอ กÝฝษญ•ษ1ฝออฑ…ฅตฬนฑ•นั €๔๔๔€ภ(€€€€€€€€üีน…ู…ฅฑ…ฑ” ภศนษฝÝอ•ษ}Ýฝษญ•ษ}ั•ษตฅน…ัฅฝน}…ัฅฝธฐ€ก…ษน•อฬฐ€มษฅูฅฑ••‘}ษฝÝอ•ษ}Ýฝษญ•ษ}ั•ษตฅน…ัฅฝน}…ัั•อั…ัฅฝน}นฝั}…ัั…ก•ค(€€€€€€€€่ก•ฌ ภศนษฝÝอ•ษ}Ýฝษญ•ษ}ั•ษตฅน…ัฅฝน}…ัฅฝธฐ€ก…ษน•อฬฐÝฝษญ•ษ1ฝอฬนฑ•นั €๔๔๔€ฤฐÝฝษญ•ษ1ฝออฑ…ฅตฬฐ€ษฝÝอ•ษ}Ýฝษญ•ษ}ั•ษตฅน…ัฅฝน}…ัฅฝน}ฝนฑฅั•‘}ฝษ}…ฅฑ•‘}ษฝออ}ฉฝฅธคค์(€€€€€ก…ษน•อฬนมีอ กÝฝษญ•ษ1ฝอฬนฑ•นั €๔๔๔€ฤ(€€€€€€€€ü…ั•Ý…ๅM•ััฑ•ต•นัู•นัฬนฑ•นั €๔๔๔€ภ(€€€€€€€€€€üีน…ู…ฅฑ…ฑ” ภศนษฝÝอ•ษ}Ýฝษญ•ษ}ฑฝออ}…ฝษั}ษ•ฝู•ษไฐ€ก…ษน•อฬฐ€…ั•Ý…ๅ}ษฝÝอ•ษ}Ýฝษญ•ษ}ั•ษตฅน…ัฅฝน}อ•ััฑ•ต•นั}ษ••ฅมั}นฝั}…ัั…ก•ค(€€€€€€€€€€่ก•ฌ ภศนษฝÝอ•ษ}Ýฝษญ•ษ}ฑฝออ}…ฝษั}ษ•ฝู•ษไฐ€ก…ษน•อฬฐ•แ…ั…ั•Ý…ๅM•ััฑ•ต•นัฬนฑ•นั €๔๔๔€ฤฐlธธนÝฝษญ•ษ1ฝอฬฐ€ธธน…ั•Ý…ๅM•ััฑ•ต•นัู•นัอtฐ€…ั•Ý…ๅ}ษฝÝอ•ษ}Ýฝษญ•ษ}ั•ษตฅน…ัฅฝน}อ•ััฑ•ต•นั}ษ••ฅมั}นฝั}…ัั…ก•ฐ€…ั•Ý…ๅ}ษฝÝอ•ษ}Ýฝษญ•ษ}ั•ษตฅน…ัฅฝน}อ•ััฑ•ต•นั}ฝนฑฅั•‘}ฝษ}…ฅฑ•‘}ษฝออ}ฉฝฅธค(€€€€€€€€่Ýฝษญ•ษ1ฝออฑ…ฅตฬนฑ•นั €๔๔๔€ภ(€€€€€€€€€€üีน…ู…ฅฑ…ฑ” ภศนษฝÝอ•ษ}Ýฝษญ•ษ}ฑฝออ}…ฝษั}ษ•ฝู•ษไฐ€ก…ษน•อฬฐ€มษฅูฅฑ••‘}ษฝÝอ•ษ}Ýฝษญ•ษ}ั•ษตฅน…ัฅฝน}…ัั•อั…ัฅฝน}นฝั}…ัั…ก•ค(€€€€€€€€€€่…ฅฐ ภศนษฝÝอ•ษ}Ýฝษญ•ษ}ฑฝออ}…ฝษั}ษ•ฝู•ษไฐ€ก…ษน•อฬฐÝฝษญ•ษ1ฝออฑ…ฅตฬฐ€ษฝÝอ•ษ}Ýฝษญ•ษ}ั•ษตฅน…ัฅฝน}…ัฅฝน}ฝนฑฅั•‘}ฝษ}…ฅฑ•‘}ษฝออ}ฉฝฅธคค์(€€€€€มษฝ‘ีะนมีอ ก…มคนฑ•นั €๔๔๔€ภ๑๐€กมษฝ‘ีัAษ•ฝน‘ฅัฅฝนฬนฑ•นั €๔๔๔€ภ€มษฝ‘ีัฝนัฅนีฅัฅ•ฬนฑ•นั €๔๔๔€ภค(€€€€€€€€üีน…ู…ฅฑ…ฑ” ภศนมษฝ‘ีั}…ั”ฐ€มษฝ‘ีะฐ€•แ…ั}มษฝ‘ีั}อ•ออฅฝน}ักษ•…‘}มษฝูฅ‘•ษ}ฝนัฅนีฅัๅ}ษ••ฅมั}นฝั}…ัั…ก•ค(€€€€€€€€่ก•ฌ ภศนมษฝ‘ีั}…ั”ฐ€มษฝ‘ีะฐ•แ…ัAษฝ‘ีัฝนัฅนีฅัฅ•ฬนฑ•นั €๔๔๔€ฤฐlธธนมษฝ‘ีัAษ•ฝน‘ฅัฅฝนฬฐ€ธธนมษฝ‘ีัฝนัฅนีฅัฅ•ฬฐ€ธธน…มฅtฐ€•แ…ั}มษฝ‘ีั}อ•ออฅฝน}ักษ•…‘}มษฝูฅ‘•ษ}ฝนัฅนีฅัๅ}ษ••ฅมั}นฝั}…ัั…ก•ฐ€มษฝ‘ีั}อ•ออฅฝน}ักษ•…‘}มษฝูฅ‘•ษ}ฝนัฅนีฅัๅ}ษ••ฅมั}ฝนฑฅั•‘}ฝษ}…ฅฑ•‘}ษฝออ}ฉฝฅธคค์(€€€€€ษ•…ฌ์(€€€๔(€€€…อ”€Xตภศ่(€€€€€ก…ษน•อฬนมีอ กีน…ู…ฅฑ…ฑ” ุตภศนฝู•ษน•‘}มษฝ‘ีั}ฑฝฌฐ€ก…ษน•อฬฐ€ฝู•ษน•‘}มษฝ‘ีั}ฑฝญ}นฝั}…ู…ฅฑ…ฑ”คค์(€€€€€มษฝ‘ีะนมีอ กีน…ู…ฅฑ…ฑ” ุตภศนมษฝ‘ีั}…ั”ฐ€มษฝ‘ีะฐ€อ•น…ษฅฝ}นฝั}•แ•ีั•คค์(€€€€€ษ•…ฌ์(€€€‘•…ีฑะ่(€€€€€ก…ษน•อฬนมีอ กีน…ู…ฅฑ…ฑ” อ•น…ษฅผน…ั…ฑฝ}ฅน‘ฅนฐ€ก…ษน•อฬฐ€อ•น…ษฅฝ}นฝั}‘•ฑ…ษ•คค์(€€€€€มษฝ‘ีะนมีอ กีน…ู…ฅฑ…ฑ” อ•น…ษฅผนมษฝ‘ีั}…ั”ฐ€มษฝ‘ีะฐ€อ•น…ษฅฝ}นฝั}‘•ฑ…ษ•คค์(€๔(€ฝนอะม…ออ•€๔ก…ษน•อฬนฑ•นั €๘€ภ€ก…ษน•อฬน•ู•ษไ ก…ออ•ษัฅฝธค€๔๘…ออ•ษัฅฝธนอั…ัีฬ€๔๔๔€ม…อฬค์(€ษ•ัีษธ์อ•น…ษฅฝ}ฅ่ษีธนอ•น…ษฅฝ%ฐอ•น…ษฅฝ}ู•ษอฅฝธ่ษีธนอ•น…ษฅฝY•ษอฅฝธฐก…ษน•อฬฐมษฝ‘ีะฐอีตต…ษไ่ม…ออ•€üฑฐ€‘ํก…ษน•อฬนฑ•นัก๔ต…กฅน”ก…ษน•อฬ…ออ•ษัฅฝนฬม…ออ•น€€่!…ษน•อฬ•ษัฅฅ…ัฅฝธÝฅักก•ฑ่€‘ํก…ษน•อฬนฅฑั•ศ ก…ออ•ษัฅฝธค€๔๘…ออ•ษัฅฝธนอั…ัีฬ€๔๔€ม…อฬคนต…ภ ก…ออ•ษัฅฝธค€๔๘€‘ํ…ออ•ษัฅฝธนฅ‘๔๔‘ํ…ออ•ษัฅฝธนอั…ัีอ๕€คนฉฝฅธ ฐ€ฅ๔น€๔์)๔()•แมฝษะีนัฅฝธ‘•ษฅู•Q…อญฑ•…นีภก•ู•นัฬ่ฅตมฝษะ ธฝ‘ฝต…ฅธนฉฬคน1…ู•นัmtฐษีธü่IีนI•ฝษค่์ฝอ•ษู•‘}ฝีนะ่นีต•ศ์ีนษ•อฝฑู•‘}ฝีนะ่นีต•ศ์มษฝฝ่อัษฅน์ั…อญฬ่ษษ…ไ๑์ั…อญ}ฅ‘}ก…อ ่อัษฅน์ั•ษตฅน…ฐ่ฝฝฑ•…ธ์อั…ั”่อัษฅน๐นีฑฐ๔๘๔์(€ฝนอะ…ีักฝษฅั…ัฅู•i•ษผ€๔…ีักฝษฅั…ัฅู•1ฅู•ฑ•…นีมฝตมฑ•ั”ก•ู•นัฬค์(€ฝนอะฑ…ั•อะ€๔น•Ü5…ภ๑อัษฅนฐอัษฅน๐นีฑฐ๘ ค์(€ฝศ€กฝนอะ•ู•นะฝ•ู•นัฬค์(€€€ฅ€ก•ู•นะนอฝีษ”€๔๔๔€มษฝ‘ีะ€€ …ษีธ๑๐€…ฅอแ…ั	ฝีน‘Aษฝ‘ีัู•นะกษีธฐ•ู•นะคคคฝนัฅนี”์(€€€ฅ€ ก•ู•นะนญฅน€๔๔๔€ีฅฑ‘•ศนั…อญ}อั…ั”๑๐•ู•นะนญฅนน•น‘อ]ฅั  นอฝมกฅนีฅฑ‘•ษ}ั…อฌคคคฝนัฅนี”์(€€€ฝนอะั…อญ%€๔ฅน‘Mัษฅนก•ู•นะนม…ๅฑฝ…ฐlั…อญ%ฐ€ั…อญ}ฅtค์(€€€ฅ€ …ั…อญ%คฝนัฅนี”์(€€€ฝนอะอั…ั”€๔ฅน‘Mัษฅนก•ู•นะนม…ๅฑฝ…ฐlมก…อ”ฐ€อั…ัีฬฐ€อั…ั”tค์(€€€ฑ…ั•อะนอ•ะกั…อญ%ฐอั…ั”ค์(€๔(€ฝนอะั•ษตฅน…ฑMั…ั•ฬ€๔น•ÜM•ะกlฝตมฑ•ั•ฐ€ฝตมฑ•ั”ฐ€…น•ฑฑ•ฐ€…น•ฑ•ฐ€…ฅฑ•ฐ€อ•ััฑ•ฐ€‘ฝน”ฐ€ั•ษตฅน…ฐtค์(€ฝนอะั…อญฬ€๔lธธนฑ…ั•อะน•นัษฅ•ฬ ฅtนต…ภ กmั…อญ%ฐอั…ั•tค€๔๘€ก์ั…อญ}ฅ‘}ก…อ ่อกศิุกั…อญ%คฐั•ษตฅน…ฐ่…ีักฝษฅั…ัฅู•i•ษผ๑๐€กอั…ั”€๔๔นีฑฐ€ั•ษตฅน…ฑMั…ั•ฬนก…ฬกอั…ั”นัฝ1ฝÝ•ษ…อ” คคคฐอั…ั”๔คค์(€ฝนอะีนษ•อฝฑู•€๔ั…อญฬนฅฑั•ศ กั…อฌค€๔๘€…ั…อฌนั•ษตฅน…ฐคนฑ•นั ์(€ษ•ัีษธ์ฝอ•ษู•‘}ฝีนะ่ั…อญฬนฑ•นั ฐีนษ•อฝฑู•‘}ฝีนะ่…ีักฝษฅั…ัฅู•i•ษผ€ü€ภ€่5…ั นต…เ ฤฐีนษ•อฝฑู•คฐมษฝฝ่…ีักฝษฅั…ัฅู•i•ษผ€ü€…ั•Ý…ๅ}…ีักฝษฅั…ัฅู•}มฝอั}‘•ฑ•ั•}้•ษผ€่€…ีักฝษฅั…ัฅู•}ั…อญ}‘ฅอฝู•ษๅ}ฝษ}้•ษฝ}ีนฝนฅษต•ฐั…อญฬ๔์)๔()ีนัฅฝธ…ีักฝษฅั…ัฅู•1ฅู•ฑ•…นีมฝตมฑ•ั”ก•ู•นัฬ่ษษ…ไ๑์ญฅน่อัษฅน์ม…ๅฑฝ…่I•ฝษ๑อัษฅนฐีนญนฝÝธ๘๔๘ค่ฝฝฑ•…ธ์(€ษ•ัีษธ•ู•นัฬนอฝต” ก•ู•นะค€๔๘์(€€€ฅ€ก•ู•นะนญฅน€๔๔€ฑ•…นีภนษ•ฝู•ษไ๑๐•ู•นะนม…ๅฑฝ…นฝตมฑ•ั”€๔๔ัษี”คษ•ัีษธ…ฑอ”์(€€€ฝนอะษ••ฅมะ€๔•ู•นะนม…ๅฑฝ…นษ••ฅมะ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•์(€€€ฝนอะฝตมฝน•นัฬ€๔ษ••ฅมะüนฝตมฝน•นัฬ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•์(€€€ฝนอะีฅฑ‘•ศ€๔ฝตมฝน•นัฬüนีฅฑ‘•ศ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•์(€€€ฝนอะีฅฑ‘•ษI••ฅมะ€๔ีฅฑ‘•ศüนษ••ฅมะ€ัๅม•ฝีฅฑ‘•ศนษ••ฅมะ€๔๔๔€ฝฉ•ะ€üีฅฑ‘•ศนษ••ฅมะ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘€่ํ๔์(€€€ษ•ัีษธษ••ฅมะüนฝตมฑ•ั”€๔๔๔ัษี”€ษ••ฅมะüนฑฅู•}ฑ•…นีม}ฝตมฑ•ั”€๔๔๔ัษี”€ษ••ฅมะüนฑฅู•}ษ•อฝีษ•อ}้•ษผ€๔๔๔ัษี”€ีฅฑ‘•ศüนอั…ัีฬ€๔๔๔€ฝตมฑ•ั•€€กีฅฑ‘•ศüนฑ•…นีม}ฝตมฑ•ั”€üüีฅฑ‘•ษI••ฅมะนฑ•…นีม}ฝตมฑ•ั”ค€๔๔๔ัษี”€€กีฅฑ‘•ศüน‘ฅอฝู•ษๅ}ฝตมฑ•ั”€üüีฅฑ‘•ษI••ฅมะน‘ฅอฝู•ษๅ}ฝตมฑ•ั”ค€๔๔๔ัษี”€€กีฅฑ‘•ศüน…ีักฝษฅั…ัฅู•}้•ษฝ}ั…อญฬ€üüีฅฑ‘•ษI••ฅมะน…ีักฝษฅั…ัฅู•}้•ษฝ}ั…อญฬค€๔๔๔ัษี”€9ีต•ศนฅอ%นั••ศกีฅฑ‘•ศüน‘ฅอฝู•ษ•‘}ั…อญ}ฝีนะ€üüีฅฑ‘•ษI••ฅมะน‘ฅอฝู•ษ•‘}ั…อญ}ฝีนะค€9ีต•ศกีฅฑ‘•ศüน‘ฅอฝู•ษ•‘}ั…อญ}ฝีนะ€üüีฅฑ‘•ษI••ฅมะน‘ฅอฝู•ษ•‘}ั…อญ}ฝีนะค€๘๔€ภ์(€๔ค์)๔()ีนัฅฝธ…ีักฝษฅั…ัฅู•I•ั•นัฅฝนAีษ•ก•ู•นัฬ่ษษ…ไ๑์ญฅน่อัษฅน์ม…ๅฑฝ…่I•ฝษ๑อัษฅนฐีนญนฝÝธ๘๔๘ค่ฝฝฑ•…ธ์(€ษ•ัีษธ•ู•นัฬนอฝต” ก•ู•นะค€๔๘์(€€€ฅ€ก•ู•นะนญฅน€๔๔€ฑ•…นีภนษ•ฝู•ษไ๑๐•ู•นะนม…ๅฑฝ…นษ•ั•นัฅฝน}มีษ•€๔๔ัษี”คษ•ัีษธ…ฑอ”์(€€€ฝนอะษ••ฅมะ€๔•ู•นะนม…ๅฑฝ…นษ••ฅมะ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•์(€€€ษ•ัีษธษ••ฅมะüนษ•ั•นัฅฝน}มีษ•€๔๔๔ัษี”€ษ••ฅมะüนษ•ั•นัฅฝน}มีษ•}ม•น‘ฅน€๔๔๔…ฑอ”€ษ••ฅมะüนษ•ั•นัฅฝน}ต…ฅนั•น…น•}ฝตมฑ•ั”€๔๔๔ัษี”€ษ••ฅมะüนฑฅู•}ษ•อฝีษ•อ}้•ษผ€๔๔๔ัษี”์(€๔ค์)๔()ีนัฅฝธษ•ั•นัฅฝนA…ักษฝตู•นัฬก•ู•นัฬ่ษษ…ไ๑์ญฅน่อัษฅน์ม…ๅฑฝ…่I•ฝษ๑อัษฅนฐีนญนฝÝธ๘๔๘ค่A…ษัฅ…ฐ๑Aฅฌ๑ฅตมฝษะ ธฝฑ•‘•ศนฉฬคนIีนA…ั ฐ€ษ•ั•นัฅฝนAีษ•ี•ะ๐€ษ•ั•นัฅฝนAีษ•A•น‘ฅน๐€ษ•ั•นัฅฝนAีษ•Y•ษฅฅ•‘ะ๘๘์(€ฝนอะฑ…ั•อะ€๔lธธน•ู•นัอtนษ•ู•ษอ” คนฅน ก•ู•นะค€๔๘•ู•นะนญฅน€๔๔๔€ฑ•…นีภนษ•ฝู•ษไ€•ู•นะนม…ๅฑฝ…นฝตมฑ•ั”€๔๔๔ัษี”ค์(€ฅ€ …ฑ…ั•อะคษ•ัีษธํ๔์(€ฅ€กฑ…ั•อะนม…ๅฑฝ…นษ•ั•นัฅฝน}มีษ•€๔๔๔ัษี”คษ•ัีษธ์ษ•ั•นัฅฝนAีษ•A•น‘ฅน่…ฑอ”ฐษ•ั•นัฅฝนAีษ•Y•ษฅฅ•‘ะ่น•Ü…ั” ค๔์(€ฝนอะษ…Ü€๔ฑ…ั•อะนม…ๅฑฝ…นษ•ั•นัฅฝน}มีษ•}‘ี•}…ะ์(€ฅ€กฑ…ั•อะนม…ๅฑฝ…นษ•ั•นัฅฝน}มีษ•}ม•น‘ฅน€๔๔ัษี”๑๐ัๅม•ฝษ…Ü€๔๔€อัษฅนคษ•ัีษธํ๔์(€ฝนอะ‘ี”€๔น•Ü…ั”กษ…Üค์(€ฅ€ก9ีต•ศนฅอ9…8ก‘ี”น•ัQฅต” คค๑๐‘ี”นัฝ%M=Mัษฅน ค€๔๔ษ…ÜคักษฝÜน•ÜYฝฅ•1…ษษฝศกฑ…ษษฝศ IQ9Q%=9}I%AQ}%9Y1%ฐ€…ั•Ý…ไษ•ั•นัฅฝธษ••ฅมะ‘ฅนฝะฝนั…ฅธ…นฝนฅ…ฐ%M<มีษ”‘•…‘ฑฅน”ธฐ€•ูฅ‘•น”ฐ…ฑอ”คค์(€ษ•ัีษธ์ษ•ั•นัฅฝนAีษ•ี•ะ่‘ี”ฐษ•ั•นัฅฝนAีษ•A•น‘ฅน่ัษี”ฐษ•ั•นัฅฝนAีษ•Y•ษฅฅ•‘ะ่นีฑฐ๔์)๔()•แมฝษะีนัฅฝธ‘•ษฅู•…ฅฑีษ•Y•ษ‘ฅัฬกษีธ่IีนI•ฝษฐอั…ั”่IีนMั…ั”ฐฑ•…นีมู•นัฬ่ษษ…ไ๑์ญฅน่อัษฅน์ม…ๅฑฝ…่I•ฝษ๑อัษฅนฐีนญนฝÝธ๘๔๘ค่Y•ษ‘ฅัฬ์(€ฝนอะฑ•…นีมฝนฅษต•€๔ฑ•…นีมู•นัฬนอฝต”ก…ีักฑ•…นีมฝนฅษต•ค์(€ษ•ัีษธ์(€€€ก…ษน•อฬ่อั…ั”€๔๔๔€มษฝ‘ีั}…ฅฑ•๑๐อั…ั”€๔๔๔€ฅนฝนฑีอฅู•}มษฝูฅ‘•ศ€ü€กษีธนู•ษ‘ฅัฬนก…ษน•อฬ€๔๔๔€ม•น‘ฅน€ü€ฅนฝนฑีอฅู”€่ษีธนู•ษ‘ฅัฬนก…ษน•อฬค€่€…ฅฐฐ(€€€มษฝ‘ีะ่อั…ั”€๔๔๔€มษฝ‘ีั}…ฅฑ•€ü€…ฅฐ€่ษีธนู•ษ‘ฅัฬนมษฝ‘ีะ€๔๔๔€ม•น‘ฅน€ü€ฅนฝนฑีอฅู”€่ษีธนู•ษ‘ฅัฬนมษฝ‘ีะฐ(€€€มษฝูฅ‘•ศ่อั…ั”€๔๔๔€ฅนฝนฑีอฅู•}มษฝูฅ‘•ศ€ü€ฅนฝนฑีอฅู”€่ษีธนู•ษ‘ฅัฬนมษฝูฅ‘•ศ€๔๔๔€ม•น‘ฅน€ü€ีน…ู…ฅฑ…ฑ”€่ษีธนู•ษ‘ฅัฬนมษฝูฅ‘•ศฐ(€€€…ีั ่อั…ั”€๔๔๔€…ีักฝษฅ้…ัฅฝน}…ฅฑ•€ü€…ฅฐ€่ฑ•…นีมฝนฅษต•€ü€ม…อฬ€่ษีธนู•ษ‘ฅัฬน…ีั €๔๔๔€ม•น‘ฅน€ü€ีน…ู…ฅฑ…ฑ”€่ษีธนู•ษ‘ฅัฬน…ีั ฐ(€€€•ูฅ‘•น”่€ีน…ู…ฅฑ…ฑ”ฐ(€๔์)๔()ีนัฅฝธ…ีักฑ•…นีมฝนฅษต•ก•ู•นะ่์ญฅน่อัษฅน์ม…ๅฑฝ…่I•ฝษ๑อัษฅนฐีนญนฝÝธ๘๔ค่ฝฝฑ•…ธ์(€ฅ€ก•ู•นะนญฅน€๔๔€…ีั นอ•ออฅฝน}ฑ•…นีภคษ•ัีษธ…ฑอ”์(€ฅ€ก•ู•นะนม…ๅฑฝ…นอ•ออฅฝน}ษ•ูฝญ•€๔๔๔ัษี”€•ู•นะนม…ๅฑฝ…นฝฝญฅ•อ}ฑ•…ษ•€๔๔๔ัษี”คษ•ัีษธัษี”์(€ฝนอะษ••ฅมะ€๔•ู•นะนม…ๅฑฝ…นษ••ฅมะ…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•์(€ษ•ัีษธ•ู•นะนม…ๅฑฝ…นฝนฅษต•€๔๔๔ัษี”€ษ••ฅมะüนอ•ออฅฝน}ษ•ูฝญ•€๔๔๔ัษี”€ษ••ฅมะüนฝฝญฅ•อ}ฑ•…ษ•€๔๔๔ัษี”์)๔()ีนัฅฝธ•แ…ัMัษฅนกู…ฑี”่ีนญนฝÝธค่อัษฅน๐นีฑฐ์ษ•ัีษธัๅม•ฝู…ฑี”€๔๔๔€อัษฅน€ู…ฑี”นฑ•นั €๘€ภ€ู…ฑี”นฑ•นั €๐๔€ิฤศ€üู…ฑี”€่นีฑฐ์๔)•แมฝษะีนัฅฝธฅอแ…ั	ฝีน‘Aษฝ‘ีัู•นะกษีธ่IีนI•ฝษฐ•ู•นะ่Aฅฌ๑ฅตมฝษะ ธฝ‘ฝต…ฅธนฉฬคน1…ู•นะฐ€อฝีษ”๐€ม…ๅฑฝ…๘ค่ฝฝฑ•…ธ์(€ฅ€ก•ู•นะนอฝีษ”€๔๔€มษฝ‘ีะคษ•ัีษธ…ฑอ”์(€ฝนอะฅน‘ฅน€๔•ู•นะนม…ๅฑฝ…น}มษฝ‘ีั}ษีน}ฅน‘ฅน์(€ฅ€ …ฅน‘ฅน๑๐ัๅม•ฝฅน‘ฅน€๔๔€ฝฉ•ะ๑๐ษษ…ไนฅอษษ…ไกฅน‘ฅนคคษ•ัีษธ…ฑอ”์(€ฝนอะษ•ฝษ€๔ฅน‘ฅน…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘์(€ษ•ัีษธษ•ฝษน…มม}…ีัก•นัฅ…ั•€๔๔๔ัษี”(€€€€ษ•ฝษนอๅนัก•ัฅ€๔๔๔ัษี”(€€€€ษ•ฝษนั•อั}ษีน}ฅ‘}อกศิุ€๔๔๔อกศิุกษีธนั•อัIีน%ค(€€€€ษ•ฝษนมษฅนฅม…ฑ}ฅ‘}อกศิุ€๔๔๔อกศิุกษีธนมษฅนฅม…ฑ%ค(€€€€ษ•ฝษน•นูฅษฝนต•นะ€๔๔๔ษีธน•นูฅษฝนต•นะ(€€€€ษ•ฝษนอ•น…ษฅฝ}ฅ€๔๔๔ษีธนอ•น…ษฅฝ%(€€€€ษ•ฝษนอ•น…ษฅฝ}ู•ษอฅฝธ€๔๔๔ษีธนอ•น…ษฅฝY•ษอฅฝธ(€€€€ษ•ฝษนษ•ั•นัฅฝน}กฝีษฬ€๔๔๔ษีธน…มัีษ•Aฝฑฅไนษ•ั•นัฅฝน!ฝีษฬ(€€€€ษ•ฝษนมษฝูฅ‘•ษ}•แมฅษ•อ}…ะ€๔๔๔ษีธน•แมฅษ•อะนัฝ%M=Mัษฅน ค(€€€€ษ•ฝษนฑ•…นีม}ฝฑฅ…ัฅฝน}ฅ‘}อกศิุ€๔๔๔อกศิุกษีธนฑ•…นีม=ฑฅ…ัฅฝน%ค์)๔)ีนัฅฝธอัษฅัAษฝ‘ีัIีน	ฅน‘ฅนกอฝีษ”่อัษฅนฐม…ๅฑฝ…่I•ฝษ๑อัษฅนฐีนญนฝÝธ๘ฐ•แม•ั•่IีนI•ฝษค่I•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐นีฑฐ์(€ฅ€กอฝีษ”€๔๔€มษฝ‘ีะคษ•ัีษธนีฑฐ์(€ฝนอะฅน‘ฅน€๔ม…ๅฑฝ…น}…มม}อๅนัก•ัฅ}ฅน‘ฅน์(€ฅ€ …ฅน‘ฅน๑๐ัๅม•ฝฅน‘ฅน€๔๔€ฝฉ•ะ๑๐ษษ…ไนฅอษษ…ไกฅน‘ฅนคคษ•ัีษธนีฑฐ์(€ฝนอะษ•ฝษ€๔ฅน‘ฅน…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘์(€ฝนอะต…ัก•ฬ€๔ษ•ฝษน…มม}…ีัก•นัฅ…ั•€๔๔๔ัษี”(€€€€ษ•ฝษนอๅนัก•ัฅ€๔๔๔ัษี”(€€€€ษ•ฝษนั•อั}ษีน}ฅ‘}อกศิุ€๔๔๔อกศิุก•แม•ั•นั•อัIีน%ค(€€€€ษ•ฝษนมษฅนฅม…ฑ}ฅ‘}อกศิุ€๔๔๔อกศิุก•แม•ั•นมษฅนฅม…ฑ%ค(€€€€ษ•ฝษน•นูฅษฝนต•นะ€๔๔๔•แม•ั•น•นูฅษฝนต•นะ(€€€€ษ•ฝษนอ•น…ษฅฝ}ฅ€๔๔๔•แม•ั•นอ•น…ษฅฝ%(€€€€ษ•ฝษนอ•น…ษฅฝ}ู•ษอฅฝธ€๔๔๔•แม•ั•นอ•น…ษฅฝY•ษอฅฝธ(€€€€ษ•ฝษนษ•ั•นัฅฝน}กฝีษฬ€๔๔๔•แม•ั•น…มัีษ•Aฝฑฅไนษ•ั•นัฅฝน!ฝีษฬ(€€€€ษ•ฝษนมษฝูฅ‘•ษ}•แมฅษ•อ}…ะ€๔๔๔•แม•ั•น•แมฅษ•อะนัฝ%M=Mัษฅน ค(€€€€ษ•ฝษนฑ•…นีม}ฝฑฅ…ัฅฝน}ฅ‘}อกศิุ€๔๔๔อกศิุก•แม•ั•นฑ•…นีม=ฑฅ…ัฅฝน%ค์(€ฅ€ …ต…ัก•ฬคักษฝÜน•ÜYฝฅ•1…ษษฝศกฑ…ษษฝศ AI=UQ}IU9}	%9%9}5%M5Q ฐ€Aษฝ‘ีะ…มัีษ”มษฝู•น…น”‘ฅนฝะต…ั ัก”•แ…ะ…ีัก•นัฅ…ั•อๅนัก•ัฅษีธธฐ€ก…ษน•อฬฐ…ฑอ”คค์(€ษ•ัีษธ์(€€€…มม}…ีัก•นัฅ…ั•่ัษี”ฐ(€€€อๅนัก•ัฅ่ัษี”ฐ(€€€ั•อั}ษีน}ฅ‘}อกศิุ่ษ•ฝษนั•อั}ษีน}ฅ‘}อกศิุฐ(€€€มษฅนฅม…ฑ}ฅ‘}อกศิุ่ษ•ฝษนมษฅนฅม…ฑ}ฅ‘}อกศิุฐ(€€€•นูฅษฝนต•นะ่ษ•ฝษน•นูฅษฝนต•นะฐ(€€€อ•น…ษฅฝ}ฅ่ษ•ฝษนอ•น…ษฅฝ}ฅฐ(€€€อ•น…ษฅฝ}ู•ษอฅฝธ่ษ•ฝษนอ•น…ษฅฝ}ู•ษอฅฝธฐ(€€€ษ•ั•นัฅฝน}กฝีษฬ่ษ•ฝษนษ•ั•นัฅฝน}กฝีษฬฐ(€€€มษฝูฅ‘•ษ}•แมฅษ•อ}…ะ่ษ•ฝษนมษฝูฅ‘•ษ}•แมฅษ•อ}…ะฐ(€€€ฑ•…นีม}ฝฑฅ…ัฅฝน}ฅ‘}อกศิุ่ษ•ฝษนฑ•…นีม}ฝฑฅ…ัฅฝน}ฅ‘}อกศิุฐ(€๔์)๔)ีนัฅฝธ•แ…ัฅนฅั•9ีต•ศกู…ฑี”่ีนญนฝÝธค่นีต•ศ๐นีฑฐ์ษ•ัีษธัๅม•ฝู…ฑี”€๔๔๔€นีต•ศ€9ีต•ศนฅอM…•%นั••ศกู…ฑี”ค€ู…ฑี”€๘๔€ภ€üู…ฑี”€่นีฑฐ์๔)ีนัฅฝธอั…ฑ•)ฝฅธกน…ต”่อัษฅนฐีษษ•นะ่อัษฅน๐นีฑฐฐ…น‘ฅ‘…ั”่อัษฅน๐นีฑฐค่อัษฅน๐นีฑฐ์(€ฅ€ก…น‘ฅ‘…ั”€๔๔๔นีฑฐคษ•ัีษธีษษ•นะ์(€ฅ€กีษษ•นะ€๔๔นีฑฐ€ีษษ•นะ€๔๔…น‘ฅ‘…ั”คักษฝÜน•ÜYฝฅ•1…ษษฝศกฑ…ษษฝศ )=%9}=II1Q%=9}=91%Pฐฝนฑฅัฅน€‘ํน…ต•๔ู…ฑี•ฬÝ•ษ”ฝอ•ษู•ษฝดอัษฅะฝÝนฅนษ••ฅมัฬน€ฐ€ก…ษน•อฬฐ…ฑอ”ฐ์ฉฝฅธ่น…ต”ฐมษฅฝษ}ก…อ ่อกศิุกีษษ•นะคฐ…น‘ฅ‘…ั•}ก…อ ่อกศิุก…น‘ฅ‘…ั”ค๔คค์(€ษ•ัีษธ…น‘ฅ‘…ั”์)๔)ีนัฅฝธตฝนฝัฝนฅมฝ กีษษ•นะ่นีต•ศ๐นีฑฐฐ…น‘ฅ‘…ั”่นีต•ศ๐นีฑฐค่นีต•ศ๐นีฑฐ์(€ฅ€ก…น‘ฅ‘…ั”€๔๔๔นีฑฐคษ•ัีษธีษษ•นะ์(€ฅ€กีษษ•นะ€๔๔นีฑฐ€…น‘ฅ‘…ั”€๐ีษษ•นะคักษฝÜน•ÜYฝฅ•1…ษษฝศกฑ…ษษฝศ AI=Y%I}A=!}IIMM%=8ฐ€Aษฝูฅ‘•ศ•มฝ ษ•ษ•ออ•…ษฝอฬอัษฅะมษฝ‘ีะษ••ฅมัฬธฐ€ก…ษน•อฬฐ…ฑอ”ฐ์มษฅฝศ่ีษษ•นะฐ…น‘ฅ‘…ั”๔คค์(€ษ•ัีษธ…น‘ฅ‘…ั”์)๔()ีนัฅฝธ…ออ•ษั	…ษ•]ฅน‘ฝÜกั…ษ•ะ่I•ฝษ๑อัษฅนฐีนญนฝÝธ๘๐ีน‘•ฅน•ค่ูฝฅ์(€ฝนอะั…ษ•ัะ€๔ัๅม•ฝั…ษ•ะüนั…ษ•ั}อก•‘ีฑ•}…ะ€๔๔๔€อัษฅน€üน•Ü…ั”กั…ษ•ะนั…ษ•ั}อก•‘ีฑ•}…ะคน•ัQฅต” ค€่9ีต•ศน9…8์(€ฝนอะต…แ1…ั•น•อฬ€๔9ีต•ศกั…ษ•ะüนต…แ}ฑ…ั•น•ออ}ตฬค์(€ฝนอะฑ…ั•น•อฬ€๔…ั”นนฝÜ ค€ดั…ษ•ัะ์(€ฅ€ …9ีต•ศนฅอฅนฅั”กั…ษ•ัะค๑๐€…9ีต•ศนฅอฅนฅั”กต…แ1…ั•น•อฬค๑๐ต…แ1…ั•น•อฬ€๐€ภ๑๐ฑ…ั•น•อฬ€๘ต…แ1…ั•น•อฬคักษฝÜน•ÜYฝฅ•1…ษษฝศกฑ…ษษฝศ 	I}]%9=]}5%MMฐ€	…ษ”ตฅธ•แ•ีัฅฝธฝีฑนผฑฝน•ศต••ะัก”‘•ฑ…ษ•มฑ…ๅ…ฌตษ•ฑ…ัฅู”ัฅตฅนÝฅน‘ฝÜ•ฝษ”ม…”ตีั…ัฅฝธธฐ€ฝนฑฅะฐัษี”ฐ์ฑ…ั•น•ออ}ตฬ่9ีต•ศนฅอฅนฅั”กฑ…ั•น•อฬค€ü5…ั นต…เ ภฐฑ…ั•น•อฬค€่นีฑฐฐต…แ}ฑ…ั•น•ออ}ตฬ่9ีต•ศนฅอฅนฅั”กต…แ1…ั•น•อฬค€üต…แ1…ั•น•อฬ€่นีฑฐ๔คค์)๔()•แมฝษะีนัฅฝธฑ•…อ•!•…ษั•…ั%นั•ษู…ฑ5ฬกฝม•ษ…ัฅฝน1•…อ•M•ฝน‘ฬ่นีต•ศฐษฝÝอ•ษ1•…อ•M•ฝน‘ฬ่นีต•ศค่นีต•ศ์(€ษ•ัีษธ5…ั นต…เ ล|ภภภฐ5…ั นฑฝฝศก5…ั นตฅธกฝม•ษ…ัฅฝน1•…อ•M•ฝน‘ฬฐษฝÝอ•ษ1•…อ•M•ฝน‘ฬค€จ€ล|ภภภ€ผ€ฬคค์)๔()ีนัฅฝธฅน‘Mัษฅนกู…ฑี”่ีนญนฝÝธฐญ•ๅฬ่ษ•…‘ฝนฑไอัษฅนmtฐ‘•มั €๔€ภค่อัษฅน๐นีฑฐ์(€ฅ€ …ู…ฑี”๑๐ัๅม•ฝู…ฑี”€๔๔€ฝฉ•ะ๑๐‘•มั €๘€เคษ•ัีษธนีฑฐ์(€ฝศ€กฝนอะmญ•ไฐกฅฑ‘tฝ=ฉ•ะน•นัษฅ•ฬกู…ฑี”…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘คค์(€€€ฅ€กญ•ๅฬนฅนฑี‘•ฬกญ•ไค€ัๅม•ฝกฅฑ€๔๔๔€อัษฅน€กฅฑนฑ•นั €๘€ภคษ•ัีษธกฅฑ์(€๔(€ฝศ€กฝนอะกฅฑฝ=ฉ•ะนู…ฑี•ฬกู…ฑี”…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘คค์(€€€ฝนอะฝีน€๔ฅน‘Mัษฅนกกฅฑฐญ•ๅฬฐ‘•มั €ฌ€ฤค์(€€€ฅ€กฝีน€๔๔นีฑฐคษ•ัีษธฝีน์(€๔(€ษ•ัีษธนีฑฐ์)๔()ีนัฅฝธฅน‘ฅนฅั•9ีต•ศกู…ฑี”่ีนญนฝÝธฐญ•ๅฬ่ษ•…‘ฝนฑไอัษฅนmtฐ‘•มั €๔€ภค่นีต•ศ๐นีฑฐ์(€ฅ€ …ู…ฑี”๑๐ัๅม•ฝู…ฑี”€๔๔€ฝฉ•ะ๑๐‘•มั €๘€เคษ•ัีษธนีฑฐ์(€ฝศ€กฝนอะmญ•ไฐกฅฑ‘tฝ=ฉ•ะน•นัษฅ•ฬกู…ฑี”…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘คค์(€€€ฅ€กญ•ๅฬนฅนฑี‘•ฬกญ•ไค€ัๅม•ฝกฅฑ€๔๔๔€นีต•ศ€9ีต•ศนฅอฅนฅั”กกฅฑค€กฅฑ€๘๔€ภคษ•ัีษธกฅฑ์(€๔(€ฝศ€กฝนอะกฅฑฝ=ฉ•ะนู…ฑี•ฬกู…ฑี”…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘คค์(€€€ฝนอะฝีน€๔ฅน‘ฅนฅั•9ีต•ศกกฅฑฐญ•ๅฬฐ‘•มั €ฌ€ฤค์(€€€ฅ€กฝีน€๔๔นีฑฐคษ•ัีษธฝีน์(€๔(€ษ•ัีษธนีฑฐ์)๔()ีนัฅฝธ‘•ั•ษตฅนฅอัฅUีฅกษีน%่อัษฅนฐมีษมฝอ”่อัษฅนค่อัษฅน์(€ฝนอะอฝีษ”€๔อกศิุก€‘ํมีษมฝอ•๔่‘ํษีน%‘๕€คนอฑฅ” ภฐ€ฬศคนอมฑฅะ ค์(€อฝีษ•lฤษt€๔€ิ์(€อฝีษ•lฤูt€๔€กlเฐ€ไฐ€ฐ€t…ฬฝนอะฅm9ีต•ศนม…ษอ•%นะกอฝีษ•lฤูtฐ€ฤุค€”€ัt์(€ฝนอะก•เ€๔อฝีษ”นฉฝฅธ ค์(€ษ•ัีษธ€‘ํก•เนอฑฅ” ภฐ€เฅ๔ด‘ํก•เนอฑฅ” เฐ€ฤศฅ๔ด‘ํก•เนอฑฅ” ฤศฐ€ฤุฅ๔ด‘ํก•เนอฑฅ” ฤุฐ€ศภฅ๔ด‘ํก•เนอฑฅ” ศภฅ๕€์)๔((ผจจ(€จ!…อ ฅตตีั…ฑ”ฐ…ฑษ•…‘ไตม•ษอฅอั••ูฅ‘•น”Ýฅักฝีะษ•ีอฅนัก”มีฑฅษ•ลี•อะ(€จก…อ ฬฝน”ตต•…ๅั”…‘ตฅออฅฝธฝีนธQก”มษฝฉ•ัฅฝธ…ธฑ•ฅัฅต…ั•ฑไฝนั…ฅธ(€จษฝÝอ•ศ‘ฅ…นฝอัฅฑ…ษ•ศัก…ธัก…ะฝีนธ••…นฝนฅ…ฐ)M=8‘ฅษ•ัฑไัผ(€จัก”‘ฅ•อะอผ…‘ู…นฅน…ธ•ูฅ‘•น”ษ•ูฅอฅฝธษ•ต…ฅนฬ‘•ั•ษตฅนฅอัฅÝฅักฝีะ(€จ…ฑฑฝ…ัฅน…นฝัก•ศีฑฐอ•ษฅ…ฑฅ้•ฝมไฝัก”ษ•ั…ฅน••ูฅ‘•น”ธ(€จผ)ีนัฅฝธ•ูฅ‘•น•Aษฝฉ•ัฅฝน!…อ กฅนมีะ่ีนญนฝÝธค่อัษฅน์(€ฝนอะ‘ฅ•อะ€๔ษ•…ั•!…อ  อกศิุค์(€ฝนอะอ••ธ€๔น•Ü]•…ญM•ะ๑ฝฉ•ะ๘ ค์(€ฝนอะÝษฅั”€๔€กู…ฑี”่ีนญนฝÝธค่ูฝฅ€๔๘์(€€€ฅ€กู…ฑี”€๔๔๔นีฑฐ๑๐ัๅม•ฝู…ฑี”€๔๔๔€ฝฝฑ•…ธ๑๐ัๅม•ฝู…ฑี”€๔๔๔€นีต•ศ๑๐ัๅม•ฝู…ฑี”€๔๔๔€อัษฅนค์(€€€€€‘ฅ•อะนีม‘…ั”ก)M=8นอัษฅนฅไกู…ฑี”คค์(€€€€€ษ•ัีษธ์(€€€๔(€€€ฅ€กษษ…ไนฅอษษ…ไกู…ฑี”คค์(€€€€€ฅ€กอ••ธนก…ฬกู…ฑี”คคักษฝÜน•ÜYฝฅ•1…ษษฝศกฑ…ษษฝศ Y%9}AI=)Q%=9}%9Y1%ฐ€ูฅ‘•น”ษ•ูฅอฅฝธมษฝฉ•ัฅฝธฝนั…ฅนฬๅฑ”ธฐ€ฅนั•ษน…ฐฐ…ฑอ”คค์(€€€€€อ••ธน…‘กู…ฑี”ค์(€€€€€‘ฅ•อะนีม‘…ั” lค์(€€€€€ู…ฑี”นฝษ…  กกฅฑฐฅน‘•เค€๔๘์(€€€€€€€ฅ€กฅน‘•เ€๘€ภค‘ฅ•อะนีม‘…ั” ฐค์(€€€€€€€Ýษฅั”กกฅฑค์(€€€€€๔ค์(€€€€€‘ฅ•อะนีม‘…ั” tค์(€€€€€อ••ธน‘•ฑ•ั”กู…ฑี”ค์(€€€€€ษ•ัีษธ์(€€€๔(€€€ฅ€กู…ฑี”€ัๅม•ฝู…ฑี”€๔๔๔€ฝฉ•ะค์(€€€€€ฅ€กอ••ธนก…ฬกู…ฑี”คคักษฝÜน•ÜYฝฅ•1…ษษฝศกฑ…ษษฝศ Y%9}AI=)Q%=9}%9Y1%ฐ€ูฅ‘•น”ษ•ูฅอฅฝธมษฝฉ•ัฅฝธฝนั…ฅนฬๅฑ”ธฐ€ฅนั•ษน…ฐฐ…ฑอ”คค์(€€€€€อ••ธน…‘กู…ฑี”ค์(€€€€€‘ฅ•อะนีม‘…ั” ์ค์(€€€€€ฝนอะ•นัษฅ•ฬ€๔=ฉ•ะน•นัษฅ•ฬกู…ฑี”…ฬI•ฝษ๑อัษฅนฐีนญนฝÝธ๘ค(€€€€€€€€นฅฑั•ศ กlฐกฅฑ‘tค€๔๘กฅฑ€๔๔ีน‘•ฅน•€ัๅม•ฝกฅฑ€๔๔€ีนัฅฝธ€ัๅม•ฝกฅฑ€๔๔€อๅตฝฐค(€€€€€€€€นอฝษะ กmฑ•ัtฐmษฅกัtค€๔๘ฑ•ะนฑฝ…ฑ•ฝตม…ษ”กษฅกะคค์(€€€€€•นัษฅ•ฬนฝษ…  กmญ•ไฐกฅฑ‘tฐฅน‘•เค€๔๘์(€€€€€€€ฅ€กฅน‘•เ€๘€ภค‘ฅ•อะนีม‘…ั” ฐค์(€€€€€€€‘ฅ•อะนีม‘…ั”ก)M=8นอัษฅนฅไกญ•ไคค์(€€€€€€€‘ฅ•อะนีม‘…ั” ่ค์(€€€€€€€Ýษฅั”กกฅฑค์(€€€€€๔ค์(€€€€€‘ฅ•อะนีม‘…ั” ๔ค์(€€€€€อ••ธน‘•ฑ•ั”กู…ฑี”ค์(€€€€€ษ•ัีษธ์(€€€๔(€€€‘ฅ•อะนีม‘…ั” นีฑฐค์(€๔์(€Ýษฅั”กฅนมีะค์(€ษ•ัีษธ‘ฅ•อะน‘ฅ•อะ ก•เค์)๔()ฅนั•ษ…”ูฅ‘•น•Aษฝฉ•ัฅฝน=ู•ษฑฝÝI•ฝษ์(€ม…ั ่อัษฅน์(€ฝนั•นั}อกศิุ่อัษฅน์(€ๅั•}ฑ•นั ่นีต•ศ์(€ู…ฑี”่ีนญนฝÝธ์)๔()ีนัฅฝธมษฝฉ•ัูฅ‘•น•Y…ฑี”กม…ั ่อัษฅนฐู…ฑี”่ีนญนฝÝธฐฝู•ษฑฝÝ%่อัษฅนฐฝู•ษฑฝÜ่ูฅ‘•น•Aษฝฉ•ัฅฝน=ู•ษฑฝÝI•ฝษ‘mtค่ีนญนฝÝธ์(€ฅ€กู…ฑี”€๔๔๔นีฑฐคษ•ัีษธนีฑฐ์(€ฝนอะอ•ษฅ…ฑฅ้•€๔)M=8นอัษฅนฅไกู…ฑี”ค์(€ฅ€กอ•ษฅ…ฑฅ้•€๔๔๔ีน‘•ฅน•คษ•ัีษธนีฑฐ์(€ฝนอะๅั•1•นั €๔	ี•ศนๅั•1•นั กอ•ษฅ…ฑฅ้•ค์(€ฅ€กๅั•1•นั €๐๔€ุั|ภภภคษ•ัีษธู…ฑี”์(€ฝนอะฝนั•นัMกศิุ€๔•ูฅ‘•น•Aษฝฉ•ัฅฝน!…อ กู…ฑี”ค์(€ฝู•ษฑฝÜนมีอ ก์ม…ั ฐฝนั•นั}อกศิุ่ฝนั•นัMกศิุฐๅั•}ฑ•นั ่ๅั•1•นั ฐู…ฑี”๔ค์(€ษ•ัีษธ์(€€€อั…ัีฬ่€…ู…ฅฑ…ฑ•}ฅน}มษฝฉ•ัฅฝน}ฝู•ษฑฝÜฐ(€€€ษ•อฝีษ•}ฅ่ูฝฅ”ตฑ…่ผฝ…ษัฅ…ะผ‘ํฝู•ษฑฝÝ%‘๕€ฐ(€€€ม…ั ฐ(€€€ฝนั•นั}อกศิุ่ฝนั•นัMกศิุฐ(€€€ๅั•}ฑ•นั ่ๅั•1•นั ฐ(€๔์)๔()•แมฝษะีนัฅฝธ‘•ษฅู•ภษ	ษฝÝอ•ษฝนั•แั	ฅน‘ฅนกษีธ่IีนI•ฝษฐÝฝษญ•ษ%่อัษฅนฐฑ•…อ•มฝ ่นีต•ศค่ภษ	ษฝÝอ•ษฝนั•แั	ฅน‘ฅน์(€ฅ€กษีธนอ•น…ษฅฝ%€๔๔€Xตภศ๑๐ัๅม•ฝÝฝษญ•ษ%€๔๔€อัษฅน๑๐Ýฝษญ•ษ%นฑ•นั €๔๔๔€ภ๑๐€…9ีต•ศนฅอM…•%นั••ศกฑ•…อ•มฝ ค๑๐ฑ•…อ•มฝ €๐€ฤค์(€€€ักษฝÜน•ÜYฝฅ•1…ษษฝศกฑ…ษษฝศ 	I=]MI}=9QaQ}	%9%9}5%M5Q ฐ€‘•ั•ษตฅนฅอัฅษฝÝอ•ศฝนั•แะฅน‘ฅนษ•ลีฅษ•ฬฝน”•แ…ะXตภศษีธฐÝฝษญ•ศฐ…นมฝอฅัฅู”ฑ•…อ”•มฝ ธฐ€ก…ษน•อฬฐ…ฑอ”คค์(€๔(€ฝนอะÝฝษญ•ษ!…อ €๔อกศิุกÝฝษญ•ษ%ค์(€ฝนอะ…ฑฑฝ…ัฅฝน%€๔‘•ั•ษตฅนฅอัฅUีฅกษีธนฅฐษฝÝอ•ศตฝนั•แะต…ฑฑฝ…ัฅฝธ่‘ํÝฝษญ•ษ!…อก๔่‘ํฑ•…อ•มฝก๕€ค์(€ษ•ัีษธ์(€€€ูฝฅ•}ฑ…}ษีน}ฅ‘}อกศิุ่อกศิุกษีธนฅคฐ(€€€ษฝÝอ•ษ}Ýฝษญ•ษ}ฅ‘}อกศิุ่Ýฝษญ•ษ!…อ ฐ(€€€ษฝÝอ•ษ}ฑ•…อ•}•มฝ ่ฑ•…อ•มฝ ฐ(€€€ษฝÝอ•ษ}ฝนั•แั}ฅ‘}อกศิุ่อกศิุก…ฑฑฝ…ัฅฝน%คฐ(€๔์)๔()ีนัฅฝธฅอแ…ัภษ	ษฝÝอ•ษฝนั•แั	ฅน‘ฅนกษีธ่IีนI•ฝษฐฅน‘ฅน่ภษ	ษฝÝอ•ษฝนั•แั	ฅน‘ฅนค่ฝฝฑ•…ธ์(€ษ•ัีษธษีธนอ•น…ษฅฝ%€๔๔๔€Xตภศ(€€€€€ฝymตภดๅu์ุั๔ผนั•อะกฅน‘ฅนนูฝฅ•}ฑ…}ษีน}ฅ‘}อกศิุค(€€€€ฅน‘ฅนนูฝฅ•}ฑ…}ษีน}ฅ‘}อกศิุ€๔๔๔อกศิุกษีธนฅค(€€€€€ฝymตภดๅu์ุั๔ผนั•อะกฅน‘ฅนนษฝÝอ•ษ}Ýฝษญ•ษ}ฅ‘}อกศิุค(€€€€9ีต•ศนฅอM…•%นั••ศกฅน‘ฅนนษฝÝอ•ษ}ฑ•…อ•}•มฝ ค(€€€€ฅน‘ฅนนษฝÝอ•ษ}ฑ•…อ•}•มฝ €๘€ภ(€€€€€ฝymตภดๅu์ุั๔ผนั•อะกฅน‘ฅนนษฝÝอ•ษ}ฝนั•แั}ฅ‘}อกศิุค์)๔()ีนัฅฝธอ…ต•ภษ	ษฝÝอ•ษฝนั•แั	ฅน‘ฅนกฑ•ะ่ภษ	ษฝÝอ•ษฝนั•แั	ฅน‘ฅน๐ีน‘•ฅน•ฐษฅกะ่ภษ	ษฝÝอ•ษฝนั•แั	ฅน‘ฅน๐ีน‘•ฅน•ค่ฝฝฑ•…ธ์(€ฅ€กฑ•ะ€๔๔๔ีน‘•ฅน•๑๐ษฅกะ€๔๔๔ีน‘•ฅน•คษ•ัีษธฑ•ะ€๔๔๔ษฅกะ์(€ษ•ัีษธฑ•ะนูฝฅ•}ฑ…}ษีน}ฅ‘}อกศิุ€๔๔๔ษฅกะนูฝฅ•}ฑ…}ษีน}ฅ‘}อกศิุ(€€€€ฑ•ะนษฝÝอ•ษ}Ýฝษญ•ษ}ฅ‘}อกศิุ€๔๔๔ษฅกะนษฝÝอ•ษ}Ýฝษญ•ษ}ฅ‘}อกศิุ(€€€€ฑ•ะนษฝÝอ•ษ}ฑ•…อ•}•มฝ €๔๔๔ษฅกะนษฝÝอ•ษ}ฑ•…อ•}•มฝ (€€€€ฑ•ะนษฝÝอ•ษ}ฝนั•แั}ฅ‘}อกศิุ€๔๔๔ษฅกะนษฝÝอ•ษ}ฝนั•แั}ฅ‘}อกศิุ์)๔(
