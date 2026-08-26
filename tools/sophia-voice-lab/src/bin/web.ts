@@ -70,6 +70,7 @@ await ledger.recordAuthAudit({
 logWebBootStage("boot_audit_recorded");
 const server = await listen(createHttpApp(config, service, ledger, authenticator, oauth, oauthMaintenance, webBoot), config.port);
 logWebBootStage("http_listening");
+await logStartupReadiness(config.port);
 
 async function shutdown(): Promise<void> {
   await new Promise<void>((resolve) => server.close(() => resolve()));
@@ -79,3 +80,41 @@ async function shutdown(): Promise<void> {
 }
 process.once("SIGTERM", () => void shutdown());
 process.once("SIGINT", () => void shutdown());
+
+async function logStartupReadiness(port: number): Promise<void> {
+  try {
+    const response = await fetch(`http://127.0.0.1:${port}/readyz`);
+    const body = await response.json() as {
+      status?: string;
+      components?: {
+        database?: { ready?: boolean };
+        browser_worker?: { ready?: boolean; execution_gate_settled?: boolean };
+        target_environment?: { ok?: boolean; status?: string };
+        test_auth?: { ok?: boolean; status?: string; mutation_gate_order_safe?: boolean };
+        principal_provision?: { ready?: boolean; status?: string };
+        oauth?: { ready?: boolean; maintenance?: { ready?: boolean } };
+      };
+    };
+    console.log(JSON.stringify({
+      event: "voice_lab_web_startup_readiness",
+      http_status: response.status,
+      status: body.status ?? "unknown",
+      checks: {
+        database_ready: body.components?.database?.ready === true,
+        browser_worker_ready: body.components?.browser_worker?.ready === true,
+        worker_gate_settled: body.components?.browser_worker?.execution_gate_settled === true,
+        target_ready: body.components?.target_environment?.ok === true,
+        target_status: body.components?.target_environment?.status ?? "unknown",
+        test_auth_ready: body.components?.test_auth?.ok === true,
+        test_auth_status: body.components?.test_auth?.status ?? "unknown",
+        mutation_gate_order_safe: body.components?.test_auth?.mutation_gate_order_safe === true,
+        principal_ready: body.components?.principal_provision?.ready === true,
+        principal_status: body.components?.principal_provision?.status ?? "unknown",
+        oauth_ready: body.components?.oauth?.ready === true,
+        oauth_maintenance_ready: body.components?.oauth?.maintenance?.ready === true,
+      },
+    }));
+  } catch (error) {
+    console.log(JSON.stringify({ event: "voice_lab_web_startup_readiness", http_status: null, status: "probe_failed", error_class: error instanceof Error ? error.name : "Error" }));
+  }
+}
