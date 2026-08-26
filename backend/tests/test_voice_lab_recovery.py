@@ -1986,3 +1986,34 @@ def test_delayed_run_a_recovery_cannot_revoke_active_run_b(
     assert cursor.sessions == [("token-B", marker_b)]
     assert cursor.grants == [ledger_b]
     assert cursor.mutations == 0
+
+
+def test_allocation_free_recovery_preserves_ordinary_auth_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ordinary_session = ("ordinary-token", "Mozilla/5.0 ordinary-session")
+    cursor = _FakeCursor([ordinary_session], [])
+    monkeypatch.setenv("SOPHIA_VOICE_LAB_AUTH_DATABASE_URL", "postgres://safe-test")
+    monkeypatch.setenv("SOPHIA_VOICE_LAB_CAPABILITY_SECRET", CAPABILITY_SECRET)
+    monkeypatch.setenv("SOPHIA_VOICE_LAB_AUTH_TOMBSTONE_ACTIVE_KID", "v1")
+    monkeypatch.setenv(
+        "SOPHIA_VOICE_LAB_AUTH_TOMBSTONE_KEYS",
+        json.dumps({"v1": AUTH_TOMBSTONE_SECRET}),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "psycopg",
+        SimpleNamespace(connect=lambda *_args, **_kwargs: _FakeConnection(cursor)),
+    )
+
+    result = voice_lab_recovery._recover_auth_sessions_sync(_claims())
+
+    assert result == {
+        "status": "already_terminal",
+        "sessions_revoked": 0,
+        "grants_tombstoned": 0,
+        "ordinary_sessions_preserved": 1,
+    }
+    assert cursor.sessions == [ordinary_session]
+    assert cursor.grants == []
+    assert cursor.mutations == 1  # bounded deletion of expired revoked Lab grants

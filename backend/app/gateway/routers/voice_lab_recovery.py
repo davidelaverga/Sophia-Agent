@@ -3518,23 +3518,30 @@ def _recover_auth_sessions_sync(claims: VoiceLabClaims) -> dict[str, object]:
                     (token, _parse_session_marker(marker))
                     for token, marker in session_rows
                 ]
-                if any(marker is None for _, marker in parsed_sessions):
-                    return _component("failed", code="auth_non_lab_session_conflict")
+                # Ordinary product sessions are outside the Voice Lab cleanup
+                # obligation. Preserve them and apply all binding/conflict
+                # checks only to sessions carrying the signed Lab marker.
+                ordinary_sessions_preserved = sum(
+                    marker is None for _, marker in parsed_sessions
+                )
+                lab_sessions = [
+                    (token, marker)
+                    for token, marker in parsed_sessions
+                    if marker is not None
+                ]
                 if any(
                     marker.get("principal_id") != claims.principal_id
-                    for _, marker in parsed_sessions
-                    if marker is not None
+                    for _, marker in lab_sessions
                 ):
                     return _component("failed", code="auth_principal_binding_mismatch")
                 exact_sessions = [
                     (token, marker)
-                    for token, marker in parsed_sessions
-                    if marker is not None
-                    and marker.get("test_run_id") == claims.test_run_id
+                    for token, marker in lab_sessions
+                    if marker.get("test_run_id") == claims.test_run_id
                     and marker.get("cleanup_obligation_id")
                     == claims.cleanup_obligation_id
                 ]
-                if len(exact_sessions) != len(parsed_sessions):
+                if len(exact_sessions) != len(lab_sessions):
                     return _component("failed", code="auth_active_run_conflict")
 
                 cursor.execute(
@@ -3643,6 +3650,7 @@ def _recover_auth_sessions_sync(claims: VoiceLabClaims) -> dict[str, object]:
             "completed" if grants_revoked or sessions_revoked else "already_terminal",
             sessions_revoked=sessions_revoked,
             grants_tombstoned=grants_revoked,
+            ordinary_sessions_preserved=ordinary_sessions_preserved,
         )
     except Exception as exc:  # noqa: BLE001 - safe typed pending state only.
         return _component(
