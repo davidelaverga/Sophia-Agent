@@ -1637,11 +1637,22 @@ export class VoiceLabWorker {
   }): Promise<void> {
     const run = await this.#freshRun(input.runId);
     const evidenceExpiresAt = (run.retentionPurgeDueAt ?? new Date(input.createdAt.getTime() + run.capturePolicy.retentionHours * 3_600_000)).toISOString();
-    const [publicationOperations, publicationAuthAudit, publicationArtifacts] = await Promise.all([
+    let [publicationOperations, publicationAuthAudit, publicationArtifacts] = await Promise.all([
       this.ledger.listOperations(run.id),
       this.ledger.listAuthAudit(run.id),
       this.ledger.listArtifacts(run.id),
     ]);
+    const unpublishedArtifactBytes = publicationArtifacts.reduce((total, artifact) => total + artifact.bytes.byteLength, 0);
+    if (unpublishedArtifactBytes >= 6_000_000 && await this.ledger.getEvidence(run.id) === null) {
+      const deleted = await this.ledger.deleteUnpublishedArtifacts(run.id);
+      await this.ledger.appendEvent(run.id, "evidence.orphan_artifacts_pruned", "worker", {
+        deleted_artifact_count: deleted,
+        deleted_byte_count: unpublishedArtifactBytes,
+        canonical_run_and_operation_ledgers_preserved: true,
+        published_manifest_absent: true,
+      }, `evidence:${run.id}:orphan-artifacts-pruned`);
+      publicationArtifacts = [];
+    }
     const publicationRevisionHash = evidenceProjectionHash({
       purpose: input.purpose,
       terminal_state: input.terminalState,
@@ -1860,7 +1871,7 @@ export class VoiceLabWorker {
       assertNoSecret(overflowPayload);
       const overflowBytes = await gzipAsync(Buffer.from(JSON.stringify(overflowPayload), "utf8"), { level: 9 });
       if (overflowBytes.byteLength > 2_000_000) throw new VoiceLabError(labError("EVIDENCE_PROJECTION_OVERFLOW_TOO_LARGE", "Compressed evidence projection overflow exceeded its durable row cap.", "evidence"));
-      const savedOverflow = await this.ledger.saveArtifact({ id: projectionOverflowId, runId: run.id, kind: "evidence_projection_overflow", contentType: "application/gzip", sha256: sha256(overflowBytes), bytes: overflowBytes, createdAt: input.createdAt });
+      const savedOverflow = await this.ledger.saveArtifact({ id: projectionOverflowId, runId: run.id, kind: "capture_json", contentType: "application/gzip", sha256: sha256(overflowBytes), bytes: overflowBytes, createdAt: input.createdAt });
       refs.push({ kind: "evidence_projection_overflow", resource_id: `voice-lab://artifact/${savedOverflow.id}`, sha256: savedOverflow.sha256, content_type: savedOverflow.contentType, byte_length: savedOverflow.bytes.byteLength, expires_at: evidenceExpiresAt });
     }
     assertNoSecret(manifest);

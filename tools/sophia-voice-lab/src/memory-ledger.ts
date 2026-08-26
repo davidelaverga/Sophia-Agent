@@ -352,6 +352,18 @@ export class MemoryVoiceLabLedger implements VoiceLabLedger {
   }
   async getArtifact(artifactId: string): Promise<DurableArtifact | null> { return clone(this.#artifacts.get(artifactId) ?? null); }
   async listArtifacts(runId: string): Promise<DurableArtifact[]> { return clone([...this.#artifacts.values()].filter((artifact) => artifact.runId === runId).sort((left, right) => left.createdAt.getTime() - right.createdAt.getTime())); }
+  async deleteUnpublishedArtifacts(runId: string): Promise<number> {
+    const run = this.#runs.get(runId);
+    if (!run) throw notFound("RUN_NOT_FOUND", "Run was not found.");
+    if (!TERMINAL_RUN_STATES.has(run.state) || this.#evidence.has(runId)) throw conflict("EVIDENCE_ORPHAN_PRUNE_FORBIDDEN", "Only unpublished artifacts for a terminal run may be pruned.");
+    let deleted = 0;
+    for (const [artifactId, artifact] of this.#artifacts) {
+      if (artifact.runId !== runId) continue;
+      this.#artifacts.delete(artifactId);
+      deleted += 1;
+    }
+    return deleted;
+  }
 
   async upsertBrowserLease(runId: string, workerId: string, leaseSeconds: number): Promise<BrowserLease> {
     const prior = this.#browserLeases.get(runId);

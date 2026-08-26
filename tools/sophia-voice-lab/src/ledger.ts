@@ -230,6 +230,7 @@ export interface VoiceLabLedger {
   saveArtifact(artifact: DurableArtifact): Promise<DurableArtifact>;
   getArtifact(artifactId: string): Promise<DurableArtifact | null>;
   listArtifacts(runId: string): Promise<DurableArtifact[]>;
+  deleteUnpublishedArtifacts(runId: string): Promise<number>;
   upsertBrowserLease(runId: string, workerId: string, leaseSeconds: number): Promise<BrowserLease>;
   getBrowserLease(runId: string): Promise<BrowserLease | null>;
   heartbeatBrowserLease(runId: string, workerId: string, leaseEpoch: number, leaseSeconds: number): Promise<boolean>;

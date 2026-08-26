@@ -94,14 +94,20 @@ describe("service and durable memory-ledger contracts", () => {
     expect(await ledger.getEvidence(run.id)).toBeNull();
     expect((await ledger.listArtifacts(run.id)).filter((artifact) => artifact.kind === "manifest_attachment")).toHaveLength(1);
 
+    for (let index = 0; index < 4; index += 1) {
+      const bytes = Buffer.alloc(1_600_000, index + 1);
+      await ledger.saveArtifact({ id: randomUUID(), runId: run.id, kind: "capture_json", contentType: "application/json", sha256: sha256(bytes), bytes, createdAt: new Date() });
+    }
+
     const stale = await ledger.getRun(run.id);
     await ledger.updateRun(run.id, stale!.version, { observedDeployment: { frontend: SHA } });
     await expect(worker.maintainSessions()).resolves.toBeUndefined();
 
     const evidence = await ledger.getEvidence(run.id);
     expect(evidence).not.toBeNull();
-    expect((await ledger.listArtifacts(run.id)).filter((artifact) => artifact.kind === "manifest_attachment")).toHaveLength(2);
+    expect((await ledger.listArtifacts(run.id)).filter((artifact) => artifact.kind === "manifest_attachment")).toHaveLength(1);
     expect((await ledger.listEvents(run.id, 0, 100)).events.filter((event) => event.kind === "evidence.publication_revision")).toHaveLength(2);
+    expect((await ledger.listEvents(run.id, 0, 100)).events.filter((event) => event.kind === "evidence.orphan_artifacts_pruned")).toHaveLength(1);
   });
 
   it("reports the exact 21-scenario catalog, governed fixture classes, limits, and caller scope", async () => {

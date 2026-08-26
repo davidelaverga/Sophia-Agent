@@ -557,6 +557,23 @@ export class PostgresVoiceLabLedger implements VoiceLabLedger {
     const result = await this.pool.query(`select * from ${SCHEMA}.artifacts where run_id=$1 order by created_at asc,id asc`, [runId]);
     return result.rows.map(mapArtifact);
   }
+  async deleteUnpublishedArtifacts(runId: string): Promise<number> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("begin");
+      const locked = await client.query<{ state: string }>(`select state from ${SCHEMA}.runs where id=$1 for update`, [runId]);
+      if (!locked.rows[0]) throw notFound("RUN_NOT_FOUND", "Run was not found.");
+      const terminal = new Set(["pending_external_evidence", "completed", "product_failed", "invalid_test", "inconclusive_provider", "failed_harness", "authorization_failed", "deployment_mismatch", "aborted_driver_restart", "expired", "cancelled"]);
+      const published = await client.query(`select 1 from ${SCHEMA}.evidence_manifests where run_id=$1`, [runId]);
+      if (!terminal.has(locked.rows[0].state) || published.rows[0]) throw conflict("EVIDENCE_ORPHAN_PRUNE_FORBIDDEN", "Only unpublished artifacts for a terminal run may be pruned.");
+      const deleted = await client.query(`delete from ${SCHEMA}.artifacts where run_id=$1`, [runId]);
+      await client.query("commit");
+      return deleted.rowCount ?? 0;
+    } catch (error) {
+      await client.query("rollback");
+      throw translatePgError(error);
+    } finally { client.release(); }
+  }
 
   async upsertBrowserLease(runId: string, workerId: string, leaseSeconds: number): Promise<BrowserLease> {
     const client = await this.pool.connect();
