@@ -537,6 +537,44 @@ def test_cleanup_admission_keeps_other_fence_errors_fail_closed(
     tombstone.assert_not_called()
 
 
+def test_retired_cleanup_fence_replays_authoritative_global_zero(
+    monkeypatch: pytest.MonkeyPatch,
+    recovery_env: None,
+) -> None:
+    client, components = _client(monkeypatch)
+    monkeypatch.setattr(
+        voice_lab_recovery,
+        "_close_live_cleanup_admission",
+        Mock(
+            return_value={
+                "status": "already_terminal",
+                "admission_closed": True,
+                "cleanup_admissions_pending": 0,
+                "cleanup_fence_tombstone_verified": True,
+            }
+        ),
+    )
+
+    response = client.post(
+        "/internal/voice-lab/runs/run-001/recover",
+        headers=_headers(),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["complete"] is True
+    assert response.json()["live_resources_zero"] is True
+    assert response.json()["components"]["builder"] == {
+        "status": "completed",
+        "cleanup_complete": True,
+        "discovery_complete": True,
+        "authoritative_zero_tasks": True,
+        "discovered_task_count": 0,
+        "cleanup_fence_tombstone_verified": True,
+    }
+    for name in ("canonical", "provider", "builder", "auth"):
+        components[name].assert_not_called()
+
+
 @pytest.mark.anyio
 async def test_provider_terminal_readback_is_a_noop_after_admission_consumption(
     monkeypatch: pytest.MonkeyPatch,

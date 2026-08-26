@@ -3830,7 +3830,34 @@ async def recover_voice_lab_run(test_run_id: str, request: Request) -> JSONRespo
                 claims,
                 record,
             )
-    if cleanup_admission_fence.get("status") in _TERMINAL_COMPONENT_STATUSES:
+    retired_cleanup_fence = (
+        cleanup_admission_fence.get("status") == "already_terminal"
+        and cleanup_admission_fence.get("cleanup_fence_tombstone_verified") is True
+    )
+    if retired_cleanup_fence:
+        # The retention reaper can retire COMPLETE only after its shared DB
+        # barrier proves Builder, product, auth, admissions, and D02 sources
+        # globally zero and commits the strict recovery tombstone. Those raw
+        # discovery indexes are intentionally gone afterward, so replay the
+        # terminal zero fact instead of querying deleted retention data.
+        canonical = _component(
+            "already_terminal", cleanup_fence_tombstone_verified=True
+        )
+        voice_provider = _component(
+            "already_terminal", cleanup_fence_tombstone_verified=True
+        )
+        builder = _component(
+            "completed",
+            cleanup_complete=True,
+            discovery_complete=True,
+            authoritative_zero_tasks=True,
+            discovered_task_count=0,
+            cleanup_fence_tombstone_verified=True,
+        )
+        auth_sessions = _component(
+            "already_terminal", cleanup_fence_tombstone_verified=True
+        )
+    elif cleanup_admission_fence.get("status") in _TERMINAL_COMPONENT_STATUSES:
         canonical, record = await asyncio.to_thread(_recover_canonical_session, claims)
         voice_provider = await _recover_voice_provider(claims, record)
         builder = await _recover_builder(claims)
