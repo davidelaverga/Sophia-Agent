@@ -924,9 +924,6 @@ def capability_for_voice_lab_recovery(
     supplied = request.headers.get(VOICE_LAB_RECOVERY_INTERNAL_AUTH_HEADER)
     if not supplied or not hmac.compare_digest(supplied, recovery_secret):
         raise _failure("voice_lab_recovery_internal_auth_required", 401)
-    if not _is_true(os.getenv("SOPHIA_VOICE_LAB_ENABLED")):
-        raise _failure("voice_lab_disabled", 404)
-
     principal_id = _required_config("SOPHIA_VOICE_LAB_TEST_PRINCIPAL")
     environment = _required_config("SOPHIA_VOICE_LAB_ENVIRONMENT")
     backend_build = (

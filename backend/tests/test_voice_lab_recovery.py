@@ -400,6 +400,24 @@ def test_recovery_rejects_internal_auth_before_any_component(
         component.assert_not_called()
 
 
+def test_recovery_remains_available_with_product_admission_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+    recovery_env: None,
+) -> None:
+    """Closed product admission must not strand an owned cleanup obligation."""
+
+    monkeypatch.setenv("SOPHIA_VOICE_LAB_ENABLED", "false")
+    client, _components = _client(monkeypatch)
+
+    response = client.post(
+        "/internal/voice-lab/runs/run-001/recover",
+        headers=_headers(),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["complete"] is True
+
+
 @pytest.mark.parametrize(
     ("overrides", "code"),
     [
