@@ -102,6 +102,11 @@ export class PostgresVoiceLabLedger implements VoiceLabLedger {
         ) or (
           r.state=any($1::text[]) and r.cleanup_complete=true
           and (e.run_id is null or e.revision_seq < r.latest_cursor)
+          and not (
+            e.run_id is not null
+            and (select coalesce(sum(octet_length(a.bytes)), 0)
+                   from ${SCHEMA}.artifacts a where a.run_id=r.id) >= 7500000
+          )
         )
         order by r.updated_at asc limit $2`,
       [terminal, limit],

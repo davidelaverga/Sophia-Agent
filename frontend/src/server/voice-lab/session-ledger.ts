@@ -3145,16 +3145,19 @@ export async function rotateVoiceLabSession(
         + 'WHERE "userId" = $1 FOR UPDATE',
       [principalId],
     );
-    const now = Date.now();
     const parsedAllRows = result.rows.map((row) => ({ row, marker: parseMarker(row.userAgent) }));
-    if (parsedAllRows.some(({ marker }) => marker === null || marker.principal_id !== principalId)) {
+    const now = Date.now();
+    if (parsedAllRows.some(({ row, marker }) => (
+      marker?.principal_id !== principalId
+      && (marker !== null || new Date(row.expiresAt).getTime() > now)
+    ))) {
       throw new VoiceLabCapabilityError(
         'voice_lab_dedicated_principal_session_conflict',
         409,
       );
     }
     const expiredRows = parsedAllRows.filter(
-      ({ row }) => new Date(row.expiresAt).getTime() <= now,
+      ({ row, marker }) => marker !== null && new Date(row.expiresAt).getTime() <= now,
     );
     if (expiredRows.some(({ row, marker }) => (
       marker === null
@@ -3426,13 +3429,21 @@ export async function revokeVoiceLabSessions(
         + 'WHERE "userId" = $1 FOR UPDATE',
       [principalId],
     );
-    const parsed = result.rows.map((row) => ({ row, marker: parseMarker(row.userAgent) }));
-    if (parsed.some(({ marker }) => marker === null)) {
+    const parsedAllRows = result.rows.map((row) => ({ row, marker: parseMarker(row.userAgent) }));
+    const now = Date.now();
+    if (parsedAllRows.some(({ row, marker }) => (
+      marker === null && new Date(row.expiresAt).getTime() > now
+    ))) {
       throw new VoiceLabCapabilityError(
         'voice_lab_dedicated_principal_session_conflict',
         409,
       );
     }
+    // Better Auth can retain an already-expired ordinary session row. It is
+    // unusable and must not permanently deadlock the dedicated lab identity,
+    // but it is still non-lab state: preserve it exactly and only operate on
+    // rows carrying a verified Voice Lab marker.
+    const parsed = parsedAllRows.filter(({ marker }) => marker !== null);
     if (exactGrantRows.length === 0) {
       throw new VoiceLabCapabilityError('voice_lab_auth_run_not_found', 409);
     }

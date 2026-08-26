@@ -66,6 +66,15 @@ export class MemoryVoiceLabLedger implements VoiceLabLedger {
       if (!TERMINAL_RUN_STATES.has(run.state) || !run.cleanupComplete) return false;
       if (run.terminalError === null && run.state === "completed" && run.scenarioId !== "V-S01" && run.scenarioId !== "V-S02" && !settledEnd) return false;
       const evidence = this.#evidence.get(run.id);
+      const artifactBytes = [...this.#artifacts.values()]
+        .filter((artifact) => artifact.runId === run.id)
+        .reduce((total, artifact) => total + artifact.bytes.byteLength, 0);
+      // Published evidence is immutable. Once the per-run store is inside the
+      // reserved headroom for its hard 8 MB trigger, a later maintenance pass
+      // cannot safely publish another full revision. Keep the last verified
+      // manifest available and prevent a retry loop from starving recovery of
+      // unrelated runs.
+      if (evidence !== undefined && artifactBytes >= 7_500_000) return false;
       return evidence === undefined || evidence.revisionSeq < run.latestCursor;
     }).sort((left, right) => left.updatedAt.getTime() - right.updatedAt.getTime()).slice(0, limit));
   }

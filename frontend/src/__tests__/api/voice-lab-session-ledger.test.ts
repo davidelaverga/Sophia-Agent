@@ -1861,6 +1861,36 @@ describe('dedicated Voice Lab Better Auth session ledger', () => {
     expect(database.rows).toEqual([ordinary]);
   });
 
+  it('preserves an expired ordinary session while rotating and revoking only lab-marked rows', async () => {
+    const ordinary = {
+      token: 'expired-ordinary-token',
+      expiresAt: new Date(Date.now() - 1_000),
+      userAgent: 'Safari',
+    };
+    database.rows.push(ordinary);
+    const grant = claims();
+
+    const rotated = await rotateVoiceLabSession(
+      'voice-lab-user-1',
+      grant,
+      'lab-token',
+      new Date(Date.now() + 3_600_000),
+    );
+
+    expect(rotated).toMatchObject({
+      token: 'lab-token',
+      idempotentReplay: false,
+      expiredLabSessionsRevoked: 0,
+    });
+    expect(database.rows.map((row) => row.token)).toEqual([
+      'expired-ordinary-token',
+      'lab-token',
+    ]);
+
+    await expect(revokeVoiceLabSessions('voice-lab-user-1', grant)).resolves.toBe(1);
+    expect(database.rows).toEqual([ordinary]);
+  });
+
   it('revokes every lab-marked session for the exact dedicated principal', async () => {
     const expiry = new Date(Date.now() + 3_600_000);
     await rotateVoiceLabSession('voice-lab-user-1', claims(), 'token-one', expiry);
