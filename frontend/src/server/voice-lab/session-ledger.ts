@@ -3159,12 +3159,6 @@ export async function rotateVoiceLabSession(
     const expiredRows = parsedAllRows.filter(
       ({ row, marker }) => marker !== null && new Date(row.expiresAt).getTime() <= now,
     );
-    if (expiredRows.some(({ row, marker }) => (
-      marker === null
-      || !ledgerResult.rows.some((ledger) => markerMatchesLedger(marker, ledger, row.token))
-    ))) {
-      throw new VoiceLabCapabilityError('voice_lab_auth_ledger_binding_mismatch', 409);
-    }
     let expiredLabSessionsRevoked = 0;
     const expiredFingerprints = new Set<string>();
     for (const { row, marker } of expiredRows) {
@@ -3174,7 +3168,24 @@ export async function rotateVoiceLabSession(
         (candidate) => markerFingerprints.has(candidate.grant_fingerprint),
       );
       if (!ledger) {
-        throw new VoiceLabCapabilityError('voice_lab_expired_session_cleanup_unconfirmed', 503);
+        // Retention purge can remove the grant ledger and its cleanup
+        // obligation before Better Auth's expired-session row is swept. The
+        // row is already unusable, carries a structurally valid Voice Lab
+        // marker, and belongs to the dedicated synthetic principal, so delete
+        // only that exact expired row. Ordinary sessions remain untouched.
+        const deleted = await client.query(
+          'DELETE FROM public."session" WHERE "userId" = $1 AND "token" = $2 '
+            + 'AND "expiresAt" <= NOW()',
+          [principalId, row.token],
+        );
+        if ((deleted.rowCount || 0) !== 1) {
+          throw new VoiceLabCapabilityError('voice_lab_expired_session_cleanup_unconfirmed', 503);
+        }
+        expiredLabSessionsRevoked += 1;
+        continue;
+      }
+      if (!markerMatchesLedger(marker, ledger, row.token)) {
+        throw new VoiceLabCapabilityError('voice_lab_auth_ledger_binding_mismatch', 409);
       }
       const expiredFingerprint = ledger.grant_fingerprint;
       const tombstoneKid = ledger.tombstone_kid;

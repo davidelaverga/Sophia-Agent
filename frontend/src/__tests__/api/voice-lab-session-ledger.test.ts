@@ -1798,6 +1798,35 @@ describe('dedicated Voice Lab Better Auth session ledger', () => {
     expect(database.grants.map((row) => row.status)).toEqual(['revoked', 'active']);
   });
 
+  it('prunes an expired lab session after its retention ledger was purged', async () => {
+    const expired = new Date(Date.now() - 1_000);
+    await rotateVoiceLabSession('voice-lab-user-1', claims(), 'token-expired', expired);
+    database.grants.splice(0, database.grants.length);
+    database.obligations.splice(0, database.obligations.length);
+
+    const rotated = await rotateVoiceLabSession(
+      'voice-lab-user-1',
+      claims({
+        test_run_id: 'run-002',
+        iat: 2_000_000_001,
+        nbf: 2_000_000_001,
+        exp: 2_000_000_121,
+        jti: 'jti-002',
+        nonce: 'nonce-002',
+      }),
+      'token-current',
+      new Date(Date.now() + 3_600_000),
+    );
+
+    expect(rotated).toMatchObject({
+      token: 'token-current',
+      idempotentReplay: false,
+      expiredLabSessionsRevoked: 1,
+    });
+    expect(database.rows.map((row) => row.token)).toEqual(['token-current']);
+    expect(database.grants.map((row) => row.status)).toEqual(['active']);
+  });
+
   it('serializes grants and rejects an older valid grant without revoking the newer run', async () => {
     const expiry = new Date(Date.now() + 3_600_000);
     await rotateVoiceLabSession(
