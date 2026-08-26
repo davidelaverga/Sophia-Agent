@@ -4,7 +4,7 @@ import path from "node:path";
 
 import pg from "pg";
 
-import { acquireMigrationLock, configureMigrationSession, createMigrationClient, logMigrationStage } from "../migration-runtime.js";
+import { acquireMigrationLock, closeMigrationClient, configureMigrationSession, createMigrationClient, logMigrationStage } from "../migration-runtime.js";
 import { canonicalRequestHash } from "../security.js";
 import { attestVoiceLabSchema, inspectMigrationPreflight, readVoiceLabCatalog, VOICE_LAB_MIGRATION_SHA256, VOICE_LAB_SCHEMA_VERSION, VOICE_LAB_TABLES, writeReleaseSchemaSeal } from "../schema-attestation.js";
 
@@ -53,8 +53,14 @@ try {
   await client.query("rollback").catch(() => undefined);
   throw error;
 } finally {
-  if (locked) await client.query("select pg_advisory_unlock(hashtext('sophia_voice_lab_schema_v3'))").catch(() => undefined);
-  await client.end();
+  if (locked) {
+    logMigrationStage("migration_lock_releasing");
+    await client.query("select pg_advisory_unlock(hashtext('sophia_voice_lab_schema_v3'))").catch(() => undefined);
+    logMigrationStage("migration_lock_released");
+  }
+  logMigrationStage("database_disconnecting");
+  await closeMigrationClient(client);
+  logMigrationStage("database_disconnected");
 }
 
 async function buildReferenceCatalog(database: pg.Client, sourceSql: string): Promise<string> {

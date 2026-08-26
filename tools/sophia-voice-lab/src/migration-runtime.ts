@@ -5,6 +5,7 @@ const { Client } = pg;
 export const MIGRATION_CONNECT_TIMEOUT_MS = 15_000;
 export const MIGRATION_LOCK_WAIT_MS = 30_000;
 export const MIGRATION_LOCK_POLL_MS = 250;
+export const MIGRATION_DISCONNECT_TIMEOUT_MS = 5_000;
 
 type Queryable = Pick<pg.Client, "query">;
 
@@ -41,6 +42,37 @@ export async function acquireMigrationLock(
     if (result.rows[0]?.locked === true) return;
     if (now() - startedAt >= maxWaitMs) throw new Error("Timed out waiting for the Sophia Voice Lab schema migration lock.");
     await sleep(pollMs);
+  }
+}
+
+export async function closeMigrationClient(
+  database: pg.Client,
+  options: {
+    timeoutMs?: number;
+    setTimer?: typeof setTimeout;
+    clearTimer?: typeof clearTimeout;
+  } = {},
+): Promise<void> {
+  const timeoutMs = options.timeoutMs ?? MIGRATION_DISCONNECT_TIMEOUT_MS;
+  const setTimer = options.setTimer ?? setTimeout;
+  const clearTimer = options.clearTimer ?? clearTimeout;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      database.end(),
+      new Promise<void>((resolve) => {
+        timer = setTimer(() => {
+          // Supavisor can accept PostgreSQL's graceful termination packet yet
+          // keep the TLS socket open. The advisory lock is session-scoped, so
+          // destroying only this completed migration session is the safe,
+          // bounded fallback and cannot release another process's lock.
+          database.connection.stream.destroy();
+          resolve();
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimer(timer);
   }
 }
 

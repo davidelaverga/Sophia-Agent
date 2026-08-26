@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { acquireMigrationLock, configureMigrationSession, createMigrationClient, MIGRATION_CONNECT_TIMEOUT_MS } from "../src/migration-runtime.js";
+import { acquireMigrationLock, closeMigrationClient, configureMigrationSession, createMigrationClient, MIGRATION_CONNECT_TIMEOUT_MS } from "../src/migration-runtime.js";
 
 describe("migration runtime", () => {
   it("pins a bounded database connection timeout", () => {
@@ -36,5 +36,32 @@ describe("migration runtime", () => {
       now: () => clock,
       sleep: async () => { clock = 10; },
     })).rejects.toThrow("Timed out waiting for the Sophia Voice Lab schema migration lock.");
+  });
+
+  it("closes a completed migration connection gracefully", async () => {
+    const destroy = vi.fn();
+    const end = vi.fn().mockResolvedValue(undefined);
+    await closeMigrationClient({ end, connection: { stream: { destroy } } } as never);
+    expect(end).toHaveBeenCalledTimes(1);
+    expect(destroy).not.toHaveBeenCalled();
+  });
+
+  it("destroys only the migration socket when graceful disconnect stalls", async () => {
+    const destroy = vi.fn();
+    const end = vi.fn(() => new Promise<void>(() => undefined));
+    const clearTimer = vi.fn();
+    await closeMigrationClient(
+      { end, connection: { stream: { destroy } } } as never,
+      {
+        setTimer: ((callback: () => void) => {
+          queueMicrotask(callback);
+          return 1 as unknown as ReturnType<typeof setTimeout>;
+        }) as typeof setTimeout,
+        clearTimer: clearTimer as typeof clearTimeout,
+      },
+    );
+    expect(end).toHaveBeenCalledTimes(1);
+    expect(destroy).toHaveBeenCalledTimes(1);
+    expect(clearTimer).toHaveBeenCalledTimes(1);
   });
 });
