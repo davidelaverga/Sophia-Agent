@@ -3901,6 +3901,7 @@ async def recover_voice_lab_run(test_run_id: str, request: Request) -> JSONRespo
         "retention_purged": bool(stored.get("retention_purged")),
         "retention_purge_due_at": stored.get("retention_purge_due_at"),
         "test_run_id": stored["test_run_id"],
+        "cleanup_obligation_id": stored["cleanup_obligation_id"],
         "recovery_id": stored["recovery_id"],
         "attempt_id": stored["attempt_id"],
         "attempt_issued_at": stored["attempt_issued_at"],

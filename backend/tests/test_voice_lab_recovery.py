@@ -442,6 +442,7 @@ def test_recovery_is_kill_safe_and_separates_accepted_from_complete(
     assert complete.json()["ok"] is contract["responses"]["complete"]["ok"]
     assert complete.json()["complete"] is contract["responses"]["complete"]["complete"]
     assert complete.json()["live_cleanup_complete"] is True
+    assert complete.json()["cleanup_obligation_id"] == _payload()["cleanup_obligation_id"]
     assert set(contract["required_response_keys"]) <= set(complete.json())
     assert set(contract["required_builder_component_keys"]) <= set(
         complete.json()["components"]["builder"]

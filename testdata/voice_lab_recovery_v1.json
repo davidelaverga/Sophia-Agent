@@ -41,6 +41,7 @@
     "retention_purged",
     "retention_purge_due_at",
     "test_run_id",
+    "cleanup_obligation_id",
     "recovery_id",
     "attempt_id",
     "attempt_issued_at",
