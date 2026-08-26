@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { assertPageLocation, closeContextWithProof, drainProductCapture, isExactFinalizationResponse, PlaywrightVoiceDriver, requestBoundJson, validateAppSyntheticBinding, validateD02BrowserContextBinding, validateD02ProductCleanupEcho } from "../src/browser-driver.js";
+import { assertPageLocation, closeContextWithProof, drainProductCapture, establishDashboardMicRoute, isExactFinalizationResponse, PlaywrightVoiceDriver, requestBoundJson, validateAppSyntheticBinding, validateD02BrowserContextBinding, validateD02ProductCleanupEcho } from "../src/browser-driver.js";
 import { sha256 } from "../src/security.js";
 import { SHA, SHA_B, SHA_C, SHA_D, testConfig, testRun } from "./helpers.js";
 
@@ -102,6 +102,37 @@ describe("browser context closure proof", () => {
     expect(await closeContextWithProof(resolved, () => [resolved])).toEqual({ closed: false, errorClass: "BrowserRegistryStillOwnsContext" });
     const rejected: any = { close: async () => { throw new Error("refused"); } };
     expect(await closeContextWithProof(rejected, () => [])).toEqual({ closed: false, errorClass: "Error" });
+  });
+});
+
+describe("ordinary dashboard consent route", () => {
+  it("accepts through the visible consent UI before requiring the microphone CTA", async () => {
+    let now = 0;
+    let consentAccepted = false;
+    let waits = 0;
+    const result = await establishDashboardMicRoute({
+      isMicVisible: async () => consentAccepted && waits > 0,
+      isConsentVisible: async () => !consentAccepted,
+      acceptConsent: async () => { consentAccepted = true; },
+      wait: async () => { waits += 1; now += 100; },
+      timeoutMs: 1_000,
+      now: () => now,
+    });
+    expect(result).toBe("accepted");
+    expect(consentAccepted).toBe(true);
+  });
+
+  it("does not touch consent when the microphone CTA is already present", async () => {
+    let accepted = false;
+    const result = await establishDashboardMicRoute({
+      isMicVisible: async () => true,
+      isConsentVisible: async () => true,
+      acceptConsent: async () => { accepted = true; },
+      wait: async () => undefined,
+      timeoutMs: 1_000,
+    });
+    expect(result).toBe("already_consented");
+    expect(accepted).toBe(false);
   });
 });
 

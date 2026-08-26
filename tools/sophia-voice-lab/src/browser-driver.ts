@@ -104,6 +104,33 @@ interface BrowserSession {
   expectedBinding: { testRunId: string; cleanupObligationId: string; principalId: string; scenarioId: string | null; scenarioVersion: string | null; environment: string; retentionHours: number; providerExpiresAt: string; browserContextBinding?: D02BrowserContextBinding };
 }
 
+const CONSENT_ACCEPT_SELECTOR = '[data-voice-lab="consent-accept"]';
+
+export async function establishDashboardMicRoute(input: {
+  isMicVisible: () => Promise<boolean>;
+  isConsentVisible: () => Promise<boolean>;
+  acceptConsent: () => Promise<void>;
+  wait: () => Promise<void>;
+  timeoutMs: number;
+  now?: () => number;
+}): Promise<"already_consented" | "accepted"> {
+  const now = input.now ?? Date.now;
+  const deadline = now() + input.timeoutMs;
+  while (now() < deadline) {
+    if (await input.isMicVisible()) return "already_consented";
+    if (await input.isConsentVisible()) {
+      await input.acceptConsent();
+      while (now() < deadline) {
+        if (await input.isMicVisible()) return "accepted";
+        await input.wait();
+      }
+      throw new Error("The ordinary privacy-consent UI did not release the dashboard microphone route.");
+    }
+    await input.wait();
+  }
+  throw new Error("Neither the ordinary privacy-consent UI nor the dashboard microphone route became available.");
+}
+
 export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
   readonly #sessions = new Map<string, BrowserSession>();
   readonly #pendingContexts = new Map<string, BrowserContext>();
@@ -185,9 +212,17 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       this.#pendingContexts.delete(run.id);
       await page.goto(new URL("/", frontendOrigin).toString(), { waitUntil: "domcontentloaded", timeout: 30_000 });
       assertPageLocation(page.url(), frontendOrigin, (pathname) => pathname === "/", "ORDINARY_UI_ORIGIN_DRIFT");
-      ordinaryRouteStage = "dashboard_microphone_cta";
       const micAnchor = page.locator(this.config.onboardingMicSelector).first();
-      await micAnchor.waitFor({ state: "visible", timeout: 20_000 });
+      const consentAccept = page.locator(CONSENT_ACCEPT_SELECTOR).first();
+      ordinaryRouteStage = "dashboard_privacy_consent";
+      await establishDashboardMicRoute({
+        isMicVisible: () => micAnchor.isVisible(),
+        isConsentVisible: () => consentAccept.isVisible(),
+        acceptConsent: () => consentAccept.click({ timeout: 20_000 }),
+        wait: () => page.waitForTimeout(100),
+        timeoutMs: 20_000,
+      });
+      ordinaryRouteStage = "dashboard_microphone_cta";
       const anchoredButton = micAnchor.locator("xpath=ancestor::button[1]");
       const dashboardButton = await anchoredButton.count() > 0
         ? anchoredButton
@@ -214,6 +249,13 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       events.push(await this.#snapshotEvent(session, "startup"));
       return { observedDeployment, events, ...(exactBrowserContextBinding === undefined ? {} : { browserContextBinding: exactBrowserContextBinding }) };
     } catch (error) {
+      // A validated grant has allocated a Better Auth session. Retain that
+      // context for worker.abort(), which owns the separately minted cleanup
+      // capability and must revoke the login before closing the browser.
+      if (this.#sessions.get(run.id)?.context === context) {
+        if (error instanceof VoiceLabError) throw error;
+        throw new VoiceLabError(labError("ORDINARY_UI_ROUTE_FAILED", "The ordinary deployed Sophia voice route could not be established.", "harness", false, { stage: ordinaryRouteStage, cause: error instanceof Error ? error.message : String(error) }));
+      }
       const closed = await closeContextWithProof(context, () => this.#browser?.contexts() ?? []);
       if (closed.closed) { this.#sessions.delete(run.id); this.#pendingContexts.delete(run.id); }
       else throw new VoiceLabError(labError("BROWSER_CONTEXT_CLOSE_FAILED", "Failed start left a browser context that could not be proven closed.", "harness", true, { original_error_class: error instanceof VoiceLabError ? error.detail.code : error instanceof Error ? error.name : "Error", close_error_class: closed.errorClass }));

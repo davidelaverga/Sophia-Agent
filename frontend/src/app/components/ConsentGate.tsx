@@ -151,6 +151,7 @@ export function ConsentGate({ onReady }: { onReady: () => void }) {
           </button>
           <button
             type="button"
+            data-voice-lab="consent-accept"
             className="inline-flex flex-1 items-center justify-center rounded-2xl bg-sophia-purple px-4 py-3 text-sm font-semibold text-white transition hover:bg-sophia-glow disabled:opacity-60"
             onClick={handleAccept}
             disabled={state === "checking"}
@@ -185,6 +186,5 @@ function ConsentList({ title, items }: { title: string; items: readonly string[]
     </div>
   )
 }
-
 
 
