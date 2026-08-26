@@ -514,9 +514,23 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       const retentionPending = receipt?.retention_purge_pending === true && receipt?.retention_purged === false && receipt?.retention_maintenance_complete === false && purgeDueValid && canonicalEvidence?.status === "retention_pending";
       const retentionPurged = receipt?.retention_purge_pending === false && receipt?.retention_purged === true && receipt?.retention_maintenance_complete === true;
       const cleanupBound = receipt?.cleanup_obligation_id === run.cleanupObligationId;
-      const liveComplete = response.status === 200 && receipt?.ok === true && receipt?.complete === true && receipt?.live_cleanup_complete === true && receipt?.live_resources_zero === true && receipt?.test_run_id === run.testRunId && cleanupBound && liveComponentComplete && authoritativeBuilderZero && durable && (retentionPending || retentionPurged);
+      // Live resource cleanup is an independent terminal boundary. For an
+      // allocation-free failure, product evidence may not exist yet, so the
+      // first truthful receipt can prove live zero before a retention deadline
+      // is materialized. Evidence publication and retention remain separately
+      // governed below and must never hold browser/provider cleanup open.
+      const liveComplete = response.status === 200 && receipt?.ok === true && receipt?.complete === true && receipt?.live_cleanup_complete === true && receipt?.live_resources_zero === true && receipt?.test_run_id === run.testRunId && cleanupBound && liveComponentComplete && authoritativeBuilderZero && durable;
       const pending = response.status === 202 && receipt?.ok === true && receipt?.complete === false && receipt?.live_resources_zero !== true && receipt?.test_run_id === run.testRunId && cleanupBound && typeof receipt?.recovery_id === "string";
-      return { events: [{ kind: "cleanup.recovery", source: "canonical", payload: redact({ complete: liveComplete, pending, live_cleanup_complete: liveComplete, retention_purge_pending: retentionPending, retention_purged: retentionPurged, retention_purge_due_at: purgeDueValid ? purgeDueRaw : null, http_status: response.status, receipt }), dedupeKey: `recovery:${run.id}:${retentionPurged ? "retention-purged" : liveComplete ? "live-complete" : pending ? "pending" : "failed"}` }], artifacts: [] };
+      const recoveryState = retentionPurged
+        ? "retention-purged"
+        : liveComplete && retentionPending
+          ? "live-complete-retention-pending"
+          : liveComplete
+            ? "live-complete-retention-unsettled"
+            : pending
+              ? "pending"
+              : "failed";
+      return { events: [{ kind: "cleanup.recovery", source: "canonical", payload: redact({ complete: liveComplete, pending, live_cleanup_complete: liveComplete, retention_purge_pending: retentionPending, retention_purged: retentionPurged, retention_purge_due_at: purgeDueValid ? purgeDueRaw : null, http_status: response.status, receipt }), dedupeKey: `recovery:${run.id}:${recoveryState}` }], artifacts: [] };
     } catch (error) {
       return { events: [{ kind: "cleanup.recovery", source: "canonical", payload: { complete: false, pending: false, unavailable_reason: error instanceof Error ? error.name : "recovery_failed" }, dedupeKey: `recovery:${run.id}:unavailable` }], artifacts: [] };
     }

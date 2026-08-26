@@ -261,6 +261,36 @@ describe("out-of-band recovery retention contract", () => {
     expect(result.events[0]?.payload).toMatchObject({ receipt: { cleanup_obligation_id_sha256: sha256(run.cleanupObligationId) } });
   });
 
+  it("accepts allocation-free live cleanup before a retention deadline exists", async () => {
+    const run = testRun();
+    const payload = {
+      ...base,
+      test_run_id: run.testRunId,
+      cleanup_obligation_id: run.cleanupObligationId,
+      status: "live_cleanup_completed_retention_unsettled",
+      retention_maintenance_complete: false,
+      retention_purge_pending: true,
+      retention_purged: false,
+      retention_purge_due_at: null,
+      components: {
+        ...base.components,
+        canonical_evidence: { status: "not_found" },
+      },
+    };
+    const driver = new PlaywrightVoiceDriver(testConfig(), async () => new Response(JSON.stringify(payload), { status: 200, headers: { "content-type": "application/json" } }));
+    const result = await driver.recover(run, "signed-recovery-capability");
+    expect(result.events[0]).toMatchObject({
+      payload: {
+        complete: true,
+        live_cleanup_complete: true,
+        retention_purge_pending: false,
+        retention_purged: false,
+        retention_purge_due_at: null,
+      },
+      dedupeKey: `recovery:${run.id}:live-complete-retention-unsettled`,
+    });
+  });
+
   it("distinguishes final retention purge from live cleanup", async () => {
     const run = testRun();
     const payload = { ...base, test_run_id: run.testRunId, cleanup_obligation_id: run.cleanupObligationId, status: "completed", retention_maintenance_complete: true, retention_purge_pending: false, retention_purged: true, retention_purge_due_at: "2026-08-24T17:00:00.000Z", components: { ...base.components, canonical_evidence: { status: "completed" } } };
