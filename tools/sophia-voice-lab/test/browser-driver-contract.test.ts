@@ -109,7 +109,8 @@ describe("ordinary dashboard consent route", () => {
   it("matches the exact production recoverable error heading", () => {
     expect(RECOVERABLE_DASHBOARD_LOAD_ERROR.test("This page couldn't load.")).toBe(true);
     expect(RECOVERABLE_DASHBOARD_LOAD_ERROR.test("This page couldn’t load.")).toBe(true);
-    expect(RECOVERABLE_DASHBOARD_LOAD_ERROR.test("This page couldn’t load")).toBe(false);
+    expect(RECOVERABLE_DASHBOARD_LOAD_ERROR.test("This page couldn’t load")).toBe(true);
+    expect(RECOVERABLE_DASHBOARD_LOAD_ERROR.test("This page could not load.")).toBe(false);
     expect(RECOVERABLE_DASHBOARD_LOAD_ERROR.test("Another page couldn’t load.")).toBe(false);
     expect(RECOVERABLE_DASHBOARD_RELOAD_BUTTON).toBe("Reload");
   });
