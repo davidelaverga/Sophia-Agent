@@ -469,6 +469,34 @@ describe("OAuth 2.1 authorization server", () => {
     expect(wrongSecret.headers).not.toHaveProperty("location");
   });
 
+  it("keeps concurrent authorization tabs independently CSRF-bound", async () => {
+    const firstPage = await server.handleAuthorizationRequest(authorizationParams("state-concurrent-first-123"));
+    const secondPage = await server.handleAuthorizationRequest(authorizationParams("state-concurrent-second-123"));
+    const firstCookie = firstPage.headers["set-cookie"]?.split(";", 1)[0];
+    const secondCookie = secondPage.headers["set-cookie"]?.split(";", 1)[0];
+    if (!firstCookie || !secondCookie) throw new Error("missing concurrent authorization cookie");
+    expect(firstCookie.split("=", 1)[0]).not.toBe(secondCookie.split("=", 1)[0]);
+    const browserCookieHeader = `${firstCookie}; ${secondCookie}`;
+
+    const first = await server.handleAuthorizationDecision(new URLSearchParams({
+      request_id: hidden(firstPage.body, "request_id"),
+      csrf_token: hidden(firstPage.body, "csrf_token"),
+      consent_secret: CONSENT_SECRET,
+      decision: "approve",
+    }), browserCookieHeader);
+    expect(first.status).toBe(303);
+    expect(first.headers["set-cookie"]).toContain(`${firstCookie.split("=", 1)[0]}=`);
+
+    const second = await server.handleAuthorizationDecision(new URLSearchParams({
+      request_id: hidden(secondPage.body, "request_id"),
+      csrf_token: hidden(secondPage.body, "csrf_token"),
+      consent_secret: CONSENT_SECRET,
+      decision: "approve",
+    }), browserCookieHeader);
+    expect(second.status).toBe(303);
+    expect(second.headers["set-cookie"]).toContain(`${secondCookie.split("=", 1)[0]}=`);
+  });
+
   it("rejects a poisoned consumed authorization request before redirect or code issuance", async () => {
     const authorization = await server.handleAuthorizationRequest(authorizationParams("state-poisoned-request"));
     const requestId = hidden(authorization.body, "request_id");

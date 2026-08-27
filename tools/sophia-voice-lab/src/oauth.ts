@@ -373,7 +373,7 @@ const OAUTH_ERROR_DESCRIPTIONS: Readonly<Record<OAuthErrorCode, string>> = {
 };
 
 const TOKEN_ENDPOINT_ASSERTION_TYPE = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer";
-const CSRF_COOKIE = "__Host-sophia_voice_lab_oauth_csrf";
+const CSRF_COOKIE_PREFIX = "__Host-sophia_voice_lab_oauth_csrf_";
 const MAX_FORM_BYTES = 8_192;
 const MAX_TOKEN_BYTES = 8_192;
 const MAX_JSON_BYTES = 65_536;
@@ -617,6 +617,7 @@ export class OAuthAuthorizationServer implements RequestAuthenticator, OAuthToke
     const requestToken = this.#sealRecordToken("authorization_request", requestTokenId, request);
     request.requestHash = this.#tokenHash(requestToken);
     await this.#store.putAuthorizationRequest(request);
+    const csrfCookie = csrfCookieName(request.requestHash);
     return {
       status: 200,
       headers: {
@@ -625,7 +626,7 @@ export class OAuthAuthorizationServer implements RequestAuthenticator, OAuthToke
         pragma: "no-cache",
         "referrer-policy": "no-referrer",
         "content-security-policy": "default-src 'none'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
-        "set-cookie": `${CSRF_COOKIE}=${csrfToken}; Path=/; Max-Age=${this.#config.authorizationRequestTtlSeconds}; Secure; HttpOnly; SameSite=Lax`,
+        "set-cookie": `${csrfCookie}=${csrfToken}; Path=/; Max-Age=${this.#config.authorizationRequestTtlSeconds}; Secure; HttpOnly; SameSite=Lax`,
       },
       body: renderConsentPage(requestToken, csrfToken, scopes),
     };
@@ -641,10 +642,10 @@ export class OAuthAuthorizationServer implements RequestAuthenticator, OAuthToke
     if (!isBoundedOpaqueToken(requestToken) || !isBoundedOpaqueToken(csrfToken) || !["approve", "deny"].includes(decision)) {
       throw new OAuthProtocolError("invalid_request");
     }
-    const csrfCookie = parseCookie(cookieHeader, CSRF_COOKIE);
+    const requestHash = this.#tokenHash(requestToken);
+    const csrfCookie = parseCookie(cookieHeader, csrfCookieName(requestHash));
     if (csrfCookie === null || !safeEqual(csrfCookie, csrfToken)) throw new OAuthProtocolError("invalid_request", 403);
     const now = this.#now();
-    const requestHash = this.#tokenHash(requestToken);
     const csrfHash = this.#tokenHash(csrfToken);
     const request = await this.#store.consumeAuthorizationRequest(requestHash, csrfHash, now);
     if (request === null || request.requestHash !== requestHash || !this.#verifyRecordToken("authorization_request", requestToken, request) || request.csrfHash !== csrfHash
@@ -959,7 +960,7 @@ export class OAuthAuthorizationServer implements RequestAuthenticator, OAuthToke
         location: location.toString(),
         "cache-control": "no-store",
         pragma: "no-cache",
-        "set-cookie": `${CSRF_COOKIE}=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Lax`,
+        "set-cookie": `${csrfCookieName(request.requestHash)}=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Lax`,
       },
       body: "",
     };
@@ -1413,6 +1414,11 @@ function parseCookie(header: string | undefined, name: string): string | null {
   if (matches.length !== 1) return null;
   const value = matches[0]?.slice(name.length + 1) ?? "";
   return isBoundedOpaqueToken(value) ? value : null;
+}
+
+function csrfCookieName(requestHash: string): string {
+  if (!/^[a-f0-9]{64}$/.test(requestHash)) throw new OAuthProtocolError("invalid_request", 403);
+  return `${CSRF_COOKIE_PREFIX}${requestHash.slice(0, 24)}`;
 }
 
 function normalizeIssuer(value: string): string {
