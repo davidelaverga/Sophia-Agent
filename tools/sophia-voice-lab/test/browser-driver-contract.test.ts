@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { assertPageLocation, classifyBrowserStartCause, classifyClientCdpExceptionFrames, classifyClientConsoleErrorLocation, classifyClientPageError, closeContextWithProof, DASHBOARD_ROUTE_TIMEOUT_MS, drainProductCapture, establishDashboardMicRoute, isExactFinalizationResponse, PlaywrightVoiceDriver, RECOVERABLE_DASHBOARD_LOAD_ERROR, RECOVERABLE_DASHBOARD_RELOAD_BUTTON, requestBoundJson, requestBoundJsonWithOneTransientRetry, validateAppSyntheticBinding, validateD02BrowserContextBinding, validateD02ProductCleanupEcho } from "../src/browser-driver.js";
+import { assertPageLocation, classifyBrowserStartCause, classifyClientCdpExceptionFrames, classifyClientCdpPausedFrames, classifyClientConsoleErrorLocation, classifyClientPageError, closeContextWithProof, DASHBOARD_ROUTE_TIMEOUT_MS, drainProductCapture, establishDashboardMicRoute, isExactFinalizationResponse, PlaywrightVoiceDriver, RECOVERABLE_DASHBOARD_LOAD_ERROR, RECOVERABLE_DASHBOARD_RELOAD_BUTTON, requestBoundJson, requestBoundJsonWithOneTransientRetry, validateAppSyntheticBinding, validateD02BrowserContextBinding, validateD02ProductCleanupEcho } from "../src/browser-driver.js";
 import { sha256 } from "../src/security.js";
 import { SHA, SHA_B, SHA_C, SHA_D, testConfig, testRun } from "./helpers.js";
 
@@ -167,6 +167,25 @@ describe("ordinary dashboard consent route", () => {
     expect(classifyClientCdpExceptionFrames({
       stackTrace: { callFrames: [{ url: "https://attacker.example/_next/static/chunks/evil.js", lineNumber: 0, columnNumber: 0 }] },
     }, "https://www.sophia-ei.com")).toEqual([]);
+  });
+
+  it("projects only same-origin Next throw-site frames from Chromium debugger pauses", () => {
+    const diagnostic = classifyClientCdpPausedFrames({
+      reason: "exception",
+      data: { description: "secret exception text" },
+      callFrames: [
+        { url: "https://www.sophia-ei.com/_next/static/chunks/app-page.abc123.js?token=secret", location: { lineNumber: 4, columnNumber: 18 } },
+        { url: "https://attacker.example/_next/static/chunks/evil.js", location: { lineNumber: 8, columnNumber: 9 } },
+        { url: "https://www.sophia-ei.com/_next/static/chunks/react.987xyz.js", location: { lineNumber: 10, columnNumber: 20 } },
+      ],
+    }, "https://www.sophia-ei.com");
+
+    expect(diagnostic).toEqual([
+      { chunk: "app-page.abc123.js", line: 5, column: 19 },
+      { chunk: "react.987xyz.js", line: 11, column: 21 },
+    ]);
+    expect(JSON.stringify(diagnostic)).not.toContain("secret");
+    expect(JSON.stringify(diagnostic)).not.toContain("attacker");
   });
 
   it("hashes browser start causes instead of projecting request headers", () => {

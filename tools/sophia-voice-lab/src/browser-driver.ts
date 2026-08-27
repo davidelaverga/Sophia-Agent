@@ -154,6 +154,32 @@ export function classifyClientCdpExceptionFrames(details: unknown, expectedOrigi
   return safeFrames.slice(0, 5);
 }
 
+/** Debugger.paused observes an uncaught exception at its throw site, before
+ * React's effect machinery catches and rethrows it from framework internals.
+ * Retain only same-origin Next chunk coordinates and resume immediately. */
+export function classifyClientCdpPausedFrames(details: unknown, expectedOrigin: string): ClientChunkFrame[] {
+  const record = details && typeof details === "object" ? details as Record<string, unknown> : null;
+  const callFrames = Array.isArray(record?.callFrames) ? record.callFrames.slice(0, 40) : [];
+  const safeFrames: ClientChunkFrame[] = [];
+  for (const candidate of callFrames) {
+    if (!candidate || typeof candidate !== "object") continue;
+    const frame = candidate as Record<string, unknown>;
+    const location = frame.location && typeof frame.location === "object"
+      ? frame.location as Record<string, unknown>
+      : null;
+    const safe = classifyClientConsoleErrorLocation({
+      ...(typeof frame.url === "string" ? { url: frame.url } : {}),
+      ...(typeof location?.lineNumber === "number" ? { lineNumber: location.lineNumber } : {}),
+      ...(typeof location?.columnNumber === "number" ? { columnNumber: location.columnNumber } : {}),
+    }, expectedOrigin);
+    if (safe && !safeFrames.some((existing) => existing.chunk === safe.chunk && existing.line === safe.line && existing.column === safe.column)) {
+      safeFrames.push(safe);
+      if (safeFrames.length === 5) break;
+    }
+  }
+  return safeFrames;
+}
+
 function withClientConsoleFrames(
   diagnostic: ClientPageErrorDiagnostic | null,
   frames: ClientChunkFrame[],
@@ -313,6 +339,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
     let ordinaryRouteStage = "frontend_auth_grant";
     let latestClientPageError: ClientPageErrorDiagnostic | null = null;
     let latestClientConsoleFrames: ClientChunkFrame[] = [];
+    let latestClientPausedFrames: ClientChunkFrame[] = [];
     try {
       // No OS/browser microphone permission is granted. The init script's
       // page-owned MediaStreamDestination is the only accepted audio stream;
@@ -350,7 +377,14 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
         await cdp.send("Runtime.enable");
         cdp.on("Runtime.exceptionThrown", (event) => {
           const frames = classifyClientCdpExceptionFrames(event.exceptionDetails, frontendOrigin);
-          if (frames.length > 0) latestClientConsoleFrames = frames;
+          if (frames.length > 0 && latestClientPausedFrames.length === 0) latestClientConsoleFrames = frames;
+        });
+        await cdp.send("Debugger.enable");
+        await cdp.send("Debugger.setPauseOnExceptions", { state: "uncaught" });
+        cdp.on("Debugger.paused", (event) => {
+          const frames = classifyClientCdpPausedFrames(event, frontendOrigin);
+          if (frames.length > 0) latestClientPausedFrames = frames;
+          void cdp.send("Debugger.resume").catch(() => undefined);
         });
       } catch {
         // Diagnostic enrichment is fail-open and must not alter product flow.
@@ -410,13 +444,13 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       // capability and must revoke the login before closing the browser.
       if (this.#sessions.get(run.id)?.context === context) {
         if (error instanceof VoiceLabError) throw error;
-        throw new VoiceLabError(labError("ORDINARY_UI_ROUTE_FAILED", "The ordinary deployed Sophia voice route could not be established.", "harness", false, { stage: ordinaryRouteStage, cause: classifyBrowserStartCause(error), client_page_error: withClientConsoleFrames(latestClientPageError, latestClientConsoleFrames) }));
+        throw new VoiceLabError(labError("ORDINARY_UI_ROUTE_FAILED", "The ordinary deployed Sophia voice route could not be established.", "harness", false, { stage: ordinaryRouteStage, cause: classifyBrowserStartCause(error), client_page_error: withClientConsoleFrames(latestClientPageError, latestClientPausedFrames.length > 0 ? latestClientPausedFrames : latestClientConsoleFrames) }));
       }
       const closed = await closeContextWithProof(context, () => this.#browser?.contexts() ?? []);
       if (closed.closed) { this.#sessions.delete(run.id); this.#pendingContexts.delete(run.id); }
       else throw new VoiceLabError(labError("BROWSER_CONTEXT_CLOSE_FAILED", "Failed start left a browser context that could not be proven closed.", "harness", true, { original_error_class: error instanceof VoiceLabError ? error.detail.code : error instanceof Error ? error.name : "Error", close_error_class: closed.errorClass }));
       if (error instanceof VoiceLabError) throw error;
-      throw new VoiceLabError(labError("ORDINARY_UI_ROUTE_FAILED", "The ordinary deployed Sophia voice route could not be established.", "harness", false, { stage: ordinaryRouteStage, cause: classifyBrowserStartCause(error), client_page_error: withClientConsoleFrames(latestClientPageError, latestClientConsoleFrames) }));
+      throw new VoiceLabError(labError("ORDINARY_UI_ROUTE_FAILED", "The ordinary deployed Sophia voice route could not be established.", "harness", false, { stage: ordinaryRouteStage, cause: classifyBrowserStartCause(error), client_page_error: withClientConsoleFrames(latestClientPageError, latestClientPausedFrames.length > 0 ? latestClientPausedFrames : latestClientConsoleFrames) }));
     }
   }
 
