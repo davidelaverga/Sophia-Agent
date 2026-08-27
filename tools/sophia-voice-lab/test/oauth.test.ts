@@ -497,6 +497,30 @@ describe("OAuth 2.1 authorization server", () => {
     expect(second.headers["set-cookie"]).toContain(`${secondCookie.split("=", 1)[0]}=`);
   });
 
+  it("accepts a strictly attested same-origin browser consent when the hardened cookie is unavailable", async () => {
+    const page = await server.handleAuthorizationRequest(authorizationParams("state-same-origin-browser-123"));
+    const result = await server.handleAuthorizationDecision(new URLSearchParams({
+      request_id: hidden(page.body, "request_id"),
+      csrf_token: hidden(page.body, "csrf_token"),
+      consent_secret: CONSENT_SECRET,
+      decision: "approve",
+    }), undefined, "direct-client", true);
+    expect(result.status).toBe(303);
+    expect(new URL(result.headers.location ?? "").searchParams.get("code")).not.toBeNull();
+  });
+
+  it("rejects a cookieless consent without strict same-origin browser attestation", async () => {
+    const page = await server.handleAuthorizationRequest(authorizationParams("state-no-origin-browser-123"));
+    const result = await errorResult(server, () => server.handleAuthorizationDecision(new URLSearchParams({
+      request_id: hidden(page.body, "request_id"),
+      csrf_token: hidden(page.body, "csrf_token"),
+      consent_secret: CONSENT_SECRET,
+      decision: "approve",
+    }), undefined));
+    expect(result.status).toBe(403);
+    expect(JSON.parse(result.body)).toMatchObject({ error: "invalid_request" });
+  });
+
   it("rejects a poisoned consumed authorization request before redirect or code issuance", async () => {
     const authorization = await server.handleAuthorizationRequest(authorizationParams("state-poisoned-request"));
     const requestId = hidden(authorization.body, "request_id");
