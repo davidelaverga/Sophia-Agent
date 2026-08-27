@@ -51,6 +51,40 @@ export const SYNTHETIC_FINALIZATION_EXCLUSION_KEYS = [
 export const RECOVERABLE_DASHBOARD_LOAD_ERROR = /^This page couldn['’]t load\.?$/;
 export const RECOVERABLE_DASHBOARD_RELOAD_BUTTON = "Reload";
 
+type ClientPageErrorDiagnostic = {
+  error_class: string;
+  safe_signature: string;
+  next_chunk: string | null;
+  digest: string | null;
+};
+
+/** Keep production browser failures actionable without projecting arbitrary
+ * exception text, URLs, query strings, or user data into MCP error details. */
+export function classifyClientPageError(error: unknown): ClientPageErrorDiagnostic {
+  const record = error && typeof error === "object" ? error as Record<string, unknown> : null;
+  const errorClass = typeof record?.name === "string" && /^[A-Za-z][A-Za-z0-9_.-]{0,79}$/.test(record.name)
+    ? record.name
+    : "Error";
+  const message = typeof record?.message === "string" ? record.message : String(error);
+  const undefinedProperty = /^Cannot read properties of (undefined|null) \(reading ['"]([A-Za-z_$][A-Za-z0-9_$.-]{0,79})['"]\)$/.exec(message);
+  const missingIdentifier = /^([A-Za-z_$][A-Za-z0-9_$]{0,79}) is not defined$/.exec(message);
+  const reactCode = /Minified React error #(\d{1,6})/.exec(message);
+  const safeSignature = undefinedProperty
+    ? `${undefinedProperty[1]}_property:${undefinedProperty[2]}`
+    : missingIdentifier
+      ? `identifier_not_defined:${missingIdentifier[1]}`
+      : reactCode
+        ? `react_error:${reactCode[1]}`
+        : message === "Maximum call stack size exceeded"
+          ? "maximum_call_stack"
+          : `unclassified_sha256:${sha256(message)}`;
+  const stack = typeof record?.stack === "string" ? record.stack : "";
+  const nextChunk = /\/_next\/static\/chunks\/([A-Za-z0-9._-]{1,160}\.js)(?::\d+){0,2}/.exec(stack)?.[1] ?? null;
+  const rawDigest = record?.digest;
+  const digest = typeof rawDigest === "string" && /^[A-Za-z0-9_-]{6,128}$/.test(rawDigest) ? rawDigest : null;
+  return { error_class: errorClass, safe_signature: safeSignature, next_chunk: nextChunk, digest };
+}
+
 /** Validate only the cross-plane identity/retention/isolation envelope here.
  * The worker additionally validates and re-hashes the complete transcript. */
 export function hasExactFinalizationEnvelope(run: RunRecord, receipt: Record<string, unknown> | null | undefined, requireRawCleanupObligation = false): boolean {
@@ -199,6 +233,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
     const context = await browser.newContext({ ...(storageState === undefined ? {} : { storageState: storageState as any }), serviceWorkers: "block" });
     this.#pendingContexts.set(run.id, context);
     let ordinaryRouteStage = "frontend_auth_grant";
+    let latestClientPageError: ClientPageErrorDiagnostic | null = null;
     try {
       // No OS/browser microphone permission is granted. The init script's
       // page-owned MediaStreamDestination is the only accepted audio stream;
@@ -225,6 +260,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       await context.addInitScript({ content: buildVoiceLabInitScript({ pageOrigin: frontendOrigin, websocketOrigins: [...this.config.websocketOrigins], maxAudioBytes: this.config.maxAudioBytes, testRunId: run.testRunId, cleanupObligationId: run.cleanupObligationId }) });
       ordinaryRouteStage = "frontend_home_navigation";
       const page = await context.newPage();
+      page.on("pageerror", (error) => { latestClientPageError = classifyClientPageError(error); });
       const session: BrowserSession = { context, page, harnessCursor: 0, productCursor: null, latestProviderReceipt: null, contextExpiresAt: Number(grantReceipt.expires_at), expectedBinding: { testRunId: run.testRunId, cleanupObligationId: run.cleanupObligationId, principalId: run.principalId, scenarioId: run.scenarioId, scenarioVersion: run.scenarioVersion, environment: run.environment, retentionHours: run.capturePolicy.retentionHours, providerExpiresAt: run.expiresAt.toISOString(), ...(exactBrowserContextBinding === undefined ? {} : { browserContextBinding: exactBrowserContextBinding }) } };
       this.#sessions.set(run.id, session);
       this.#pendingContexts.delete(run.id);
@@ -280,13 +316,13 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       // capability and must revoke the login before closing the browser.
       if (this.#sessions.get(run.id)?.context === context) {
         if (error instanceof VoiceLabError) throw error;
-        throw new VoiceLabError(labError("ORDINARY_UI_ROUTE_FAILED", "The ordinary deployed Sophia voice route could not be established.", "harness", false, { stage: ordinaryRouteStage, cause: error instanceof Error ? error.message : String(error) }));
+        throw new VoiceLabError(labError("ORDINARY_UI_ROUTE_FAILED", "The ordinary deployed Sophia voice route could not be established.", "harness", false, { stage: ordinaryRouteStage, cause: error instanceof Error ? error.message : String(error), client_page_error: latestClientPageError }));
       }
       const closed = await closeContextWithProof(context, () => this.#browser?.contexts() ?? []);
       if (closed.closed) { this.#sessions.delete(run.id); this.#pendingContexts.delete(run.id); }
       else throw new VoiceLabError(labError("BROWSER_CONTEXT_CLOSE_FAILED", "Failed start left a browser context that could not be proven closed.", "harness", true, { original_error_class: error instanceof VoiceLabError ? error.detail.code : error instanceof Error ? error.name : "Error", close_error_class: closed.errorClass }));
       if (error instanceof VoiceLabError) throw error;
-      throw new VoiceLabError(labError("ORDINARY_UI_ROUTE_FAILED", "The ordinary deployed Sophia voice route could not be established.", "harness", false, { stage: ordinaryRouteStage, cause: error instanceof Error ? error.message : String(error) }));
+      throw new VoiceLabError(labError("ORDINARY_UI_ROUTE_FAILED", "The ordinary deployed Sophia voice route could not be established.", "harness", false, { stage: ordinaryRouteStage, cause: error instanceof Error ? error.message : String(error), client_page_error: latestClientPageError }));
     }
   }
 

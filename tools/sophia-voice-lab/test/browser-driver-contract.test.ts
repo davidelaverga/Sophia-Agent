@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { assertPageLocation, closeContextWithProof, DASHBOARD_ROUTE_TIMEOUT_MS, drainProductCapture, establishDashboardMicRoute, isExactFinalizationResponse, PlaywrightVoiceDriver, RECOVERABLE_DASHBOARD_LOAD_ERROR, RECOVERABLE_DASHBOARD_RELOAD_BUTTON, requestBoundJson, validateAppSyntheticBinding, validateD02BrowserContextBinding, validateD02ProductCleanupEcho } from "../src/browser-driver.js";
+import { assertPageLocation, classifyClientPageError, closeContextWithProof, DASHBOARD_ROUTE_TIMEOUT_MS, drainProductCapture, establishDashboardMicRoute, isExactFinalizationResponse, PlaywrightVoiceDriver, RECOVERABLE_DASHBOARD_LOAD_ERROR, RECOVERABLE_DASHBOARD_RELOAD_BUTTON, requestBoundJson, validateAppSyntheticBinding, validateD02BrowserContextBinding, validateD02ProductCleanupEcho } from "../src/browser-driver.js";
 import { sha256 } from "../src/security.js";
 import { SHA, SHA_B, SHA_C, SHA_D, testConfig, testRun } from "./helpers.js";
 
@@ -106,6 +106,30 @@ describe("browser context closure proof", () => {
 });
 
 describe("ordinary dashboard consent route", () => {
+  it("projects only a bounded signature from client page errors", () => {
+    const error = Object.assign(
+      new TypeError("Cannot read properties of undefined (reading 'profile')"),
+      { digest: "nextDigest_123" },
+    );
+    error.stack = "TypeError: hidden input must not escape\n    at https://www.sophia-ei.com/_next/static/chunks/app-page.abc123.js:12:34?token=secret";
+
+    expect(classifyClientPageError(error)).toEqual({
+      error_class: "TypeError",
+      safe_signature: "undefined_property:profile",
+      next_chunk: "app-page.abc123.js",
+      digest: "nextDigest_123",
+    });
+    expect(JSON.stringify(classifyClientPageError(error))).not.toContain("hidden input");
+    expect(JSON.stringify(classifyClientPageError(error))).not.toContain("token");
+  });
+
+  it("hashes unclassified client page error text", () => {
+    const diagnostic = classifyClientPageError(new Error("user-controlled detail"));
+    expect(diagnostic.error_class).toBe("Error");
+    expect(diagnostic.safe_signature).toMatch(/^unclassified_sha256:[a-f0-9]{64}$/);
+    expect(JSON.stringify(diagnostic)).not.toContain("user-controlled detail");
+  });
+
   it("matches the exact production recoverable error heading", () => {
     expect(RECOVERABLE_DASHBOARD_LOAD_ERROR.test("This page couldn't load.")).toBe(true);
     expect(RECOVERABLE_DASHBOARD_LOAD_ERROR.test("This page couldn’t load.")).toBe(true);
