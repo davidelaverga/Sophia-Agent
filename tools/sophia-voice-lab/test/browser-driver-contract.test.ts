@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { assertPageLocation, classifyClientConsoleErrorLocation, classifyClientPageError, closeContextWithProof, DASHBOARD_ROUTE_TIMEOUT_MS, drainProductCapture, establishDashboardMicRoute, isExactFinalizationResponse, PlaywrightVoiceDriver, RECOVERABLE_DASHBOARD_LOAD_ERROR, RECOVERABLE_DASHBOARD_RELOAD_BUTTON, requestBoundJson, validateAppSyntheticBinding, validateD02BrowserContextBinding, validateD02ProductCleanupEcho } from "../src/browser-driver.js";
+import { assertPageLocation, classifyBrowserStartCause, classifyClientConsoleErrorLocation, classifyClientPageError, closeContextWithProof, DASHBOARD_ROUTE_TIMEOUT_MS, drainProductCapture, establishDashboardMicRoute, isExactFinalizationResponse, PlaywrightVoiceDriver, RECOVERABLE_DASHBOARD_LOAD_ERROR, RECOVERABLE_DASHBOARD_RELOAD_BUTTON, requestBoundJson, requestBoundJsonWithOneTransientRetry, validateAppSyntheticBinding, validateD02BrowserContextBinding, validateD02ProductCleanupEcho } from "../src/browser-driver.js";
 import { sha256 } from "../src/security.js";
 import { SHA, SHA_B, SHA_C, SHA_D, testConfig, testRun } from "./helpers.js";
 
@@ -142,6 +142,13 @@ describe("ordinary dashboard consent route", () => {
       lineNumber: 0,
       columnNumber: 1,
     }, "https://www.sophia-ei.com")).toBeNull();
+  });
+
+  it("hashes browser start causes instead of projecting request headers", () => {
+    const diagnostic = classifyBrowserStartCause(new Error("X-Sophia-Voice-Lab-Capability: signed-secret"));
+    expect(diagnostic.error_class).toBe("Error");
+    expect(diagnostic.safe_signature).toMatch(/^sha256:[a-f0-9]{64}$/);
+    expect(JSON.stringify(diagnostic)).not.toContain("signed-secret");
   });
 
   it("matches the exact production recoverable error heading", () => {
@@ -327,6 +334,23 @@ describe("privileged browser boundary", () => {
       get: async () => { throw new Error("unexpected GET"); },
     } as any;
     await expect(requestBoundJson(wrongPath, "POST", "https://www.sophia-ei.com/api/voice-lab/auth/grant", 1_000, "signed-capability")).rejects.toMatchObject({ detail: { code: "PRIVILEGED_RESPONSE_TARGET_MISMATCH" } });
+  });
+
+  it("retries one transient grant response with the exact same capability", async () => {
+    const calls: Array<Record<string, unknown>> = [];
+    const request = {
+      post: async (url: string, options: Record<string, unknown>) => {
+        calls.push(options);
+        const status = calls.length === 1 ? 503 : 200;
+        return { url: () => url, status: () => status, ok: () => status === 200, headers: () => ({ "content-type": "application/json" }), json: async () => ({ ok: status === 200 }) };
+      },
+      get: async () => { throw new Error("unexpected GET"); },
+    } as any;
+    const { response } = await requestBoundJsonWithOneTransientRetry(request, "POST", "https://www.sophia-ei.com/api/voice-lab/auth/grant", 1_000, "signed-capability", 0);
+    expect(response.status()).toBe(200);
+    expect(calls).toHaveLength(2);
+    expect(calls[0]).toMatchObject({ headers: { "X-Sophia-Voice-Lab-Capability": "signed-capability" } });
+    expect(calls[1]).toEqual(calls[0]);
   });
 
   it("binds navigation and product finalization to exact frontend routes", () => {

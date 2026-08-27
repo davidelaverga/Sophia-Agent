@@ -60,6 +60,19 @@ type ClientPageErrorDiagnostic = {
 };
 type ClientChunkFrame = { chunk: string; line: number; column: number };
 
+export function classifyBrowserStartCause(error: unknown): {
+  error_class: string;
+  safe_signature: string;
+  character_length: number;
+} {
+  const record = error && typeof error === "object" ? error as Record<string, unknown> : null;
+  const errorClass = typeof record?.name === "string" && /^[A-Za-z][A-Za-z0-9_.-]{0,79}$/.test(record.name)
+    ? record.name
+    : "Error";
+  const message = typeof record?.message === "string" ? record.message : String(error);
+  return { error_class: errorClass, safe_signature: `sha256:${sha256(message)}`, character_length: message.length };
+}
+
 /** Keep production browser failures actionable without projecting arbitrary
  * exception text, URLs, query strings, or user data into MCP error details. */
 export function classifyClientPageError(error: unknown): ClientPageErrorDiagnostic {
@@ -274,7 +287,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       // if that replacement is absent, native gUM stays denied and startup
       // cannot allocate a provider from a physical microphone.
       const grantUrl = new URL(this.config.authGrantPath, frontendOrigin).toString();
-      const { response: grantResponse, payload: grantReceipt } = await requestBoundJson(context.request, "POST", grantUrl, 15_000, frontendCapability);
+      const { response: grantResponse, payload: grantReceipt } = await requestBoundJsonWithOneTransientRetry(context.request, "POST", grantUrl, 15_000, frontendCapability);
       if (!grantResponse.ok()) throw new VoiceLabError(labError("AUTH_GRANT_REJECTED", `Frontend test grant exchange was rejected with HTTP ${grantResponse.status()}.`, "authorization"));
       const nowSeconds = Math.floor(Date.now() / 1_000);
       const sessionState = grantReceipt?.auth_session_state;
@@ -355,13 +368,13 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       // capability and must revoke the login before closing the browser.
       if (this.#sessions.get(run.id)?.context === context) {
         if (error instanceof VoiceLabError) throw error;
-        throw new VoiceLabError(labError("ORDINARY_UI_ROUTE_FAILED", "The ordinary deployed Sophia voice route could not be established.", "harness", false, { stage: ordinaryRouteStage, cause: error instanceof Error ? error.message : String(error), client_page_error: withClientConsoleFrame(latestClientPageError, latestClientConsoleFrame) }));
+        throw new VoiceLabError(labError("ORDINARY_UI_ROUTE_FAILED", "The ordinary deployed Sophia voice route could not be established.", "harness", false, { stage: ordinaryRouteStage, cause: classifyBrowserStartCause(error), client_page_error: withClientConsoleFrame(latestClientPageError, latestClientConsoleFrame) }));
       }
       const closed = await closeContextWithProof(context, () => this.#browser?.contexts() ?? []);
       if (closed.closed) { this.#sessions.delete(run.id); this.#pendingContexts.delete(run.id); }
       else throw new VoiceLabError(labError("BROWSER_CONTEXT_CLOSE_FAILED", "Failed start left a browser context that could not be proven closed.", "harness", true, { original_error_class: error instanceof VoiceLabError ? error.detail.code : error instanceof Error ? error.name : "Error", close_error_class: closed.errorClass }));
       if (error instanceof VoiceLabError) throw error;
-      throw new VoiceLabError(labError("ORDINARY_UI_ROUTE_FAILED", "The ordinary deployed Sophia voice route could not be established.", "harness", false, { stage: ordinaryRouteStage, cause: error instanceof Error ? error.message : String(error), client_page_error: withClientConsoleFrame(latestClientPageError, latestClientConsoleFrame) }));
+      throw new VoiceLabError(labError("ORDINARY_UI_ROUTE_FAILED", "The ordinary deployed Sophia voice route could not be established.", "harness", false, { stage: ordinaryRouteStage, cause: classifyBrowserStartCause(error), client_page_error: withClientConsoleFrame(latestClientPageError, latestClientConsoleFrame) }));
     }
   }
 
@@ -877,6 +890,28 @@ export async function requestBoundJson(
   const payload = isJsonResponse(response) ? await response.json().catch(() => null) as Record<string, unknown> | null : null;
   if (response.ok() && (payload === null || typeof payload !== "object" || Array.isArray(payload))) throw new VoiceLabError(labError("PRIVILEGED_RECEIPT_INVALID", "Privileged browser API returned malformed JSON.", "authorization"));
   return { response, payload };
+}
+
+/** The frontend grant is idempotent for one exact capability. Retry only one
+ * transport failure or 5xx response, reusing that same capability so an
+ * uncertain first attempt cannot allocate a second logical session. */
+export async function requestBoundJsonWithOneTransientRetry(
+  request: Pick<APIRequestContext, "get" | "post">,
+  method: "GET" | "POST",
+  expectedUrl: string,
+  timeoutMs: number,
+  capability: string,
+  retryDelayMs = 250,
+): Promise<{ response: APIResponse; payload: Record<string, unknown> | null }> {
+  let first: { response: APIResponse; payload: Record<string, unknown> | null } | null = null;
+  try {
+    first = await requestBoundJson(request, method, expectedUrl, timeoutMs, capability);
+  } catch (error) {
+    if (error instanceof VoiceLabError) throw error;
+  }
+  if (first && first.response.status() < 500) return first;
+  if (retryDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+  return requestBoundJson(request, method, expectedUrl, timeoutMs, capability);
 }
 
 export function isExactFinalizationResponse(response: Pick<PlaywrightResponse, "url" | "request">, frontendOrigin: string): boolean {
