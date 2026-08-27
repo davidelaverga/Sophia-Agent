@@ -448,14 +448,14 @@ describe("OAuth 2.1 authorization server", () => {
 
     const requestId = hidden(page.body, "request_id");
     const csrf = hidden(page.body, "csrf_token");
-    const missingCookie = await errorResult(server, () => server.handleAuthorizationDecision(new URLSearchParams({
+    const cookielessBrowser = await server.handleAuthorizationDecision(new URLSearchParams({
       request_id: requestId,
       csrf_token: csrf,
       consent_secret: CONSENT_SECRET,
       decision: "approve",
-    }), undefined));
-    expect(missingCookie.status).toBe(403);
-    expect(missingCookie.body).not.toContain(CONSENT_SECRET);
+    }), undefined);
+    expect(cookielessBrowser.status).toBe(303);
+    expect(cookielessBrowser.body).not.toContain(CONSENT_SECRET);
 
     const wrongSecretPage = await server.handleAuthorizationRequest(authorizationParams("state-wrong-secret-123"));
     const wrongSecret = await errorResult(server, () => server.handleAuthorizationDecision(new URLSearchParams({
@@ -497,23 +497,23 @@ describe("OAuth 2.1 authorization server", () => {
     expect(second.headers["set-cookie"]).toContain(`${secondCookie.split("=", 1)[0]}=`);
   });
 
-  it("accepts a strictly attested same-origin browser consent when the hardened cookie is unavailable", async () => {
-    const page = await server.handleAuthorizationRequest(authorizationParams("state-same-origin-browser-123"));
+  it("accepts a valid one-time synchronizer token when the hardened cookie is unavailable", async () => {
+    const page = await server.handleAuthorizationRequest(authorizationParams("state-cookieless-browser-123"));
     const result = await server.handleAuthorizationDecision(new URLSearchParams({
       request_id: hidden(page.body, "request_id"),
       csrf_token: hidden(page.body, "csrf_token"),
       consent_secret: CONSENT_SECRET,
       decision: "approve",
-    }), undefined, "direct-client", true);
+    }), undefined);
     expect(result.status).toBe(303);
     expect(new URL(result.headers.location ?? "").searchParams.get("code")).not.toBeNull();
   });
 
-  it("rejects a cookieless consent without strict same-origin browser attestation", async () => {
-    const page = await server.handleAuthorizationRequest(authorizationParams("state-no-origin-browser-123"));
+  it("rejects a cookieless consent with a tampered synchronizer token", async () => {
+    const page = await server.handleAuthorizationRequest(authorizationParams("state-tampered-csrf-browser-123"));
     const result = await errorResult(server, () => server.handleAuthorizationDecision(new URLSearchParams({
       request_id: hidden(page.body, "request_id"),
-      csrf_token: hidden(page.body, "csrf_token"),
+      csrf_token: "csrf_tampered-browser-token-0123456789abcdef",
       consent_secret: CONSENT_SECRET,
       decision: "approve",
     }), undefined));

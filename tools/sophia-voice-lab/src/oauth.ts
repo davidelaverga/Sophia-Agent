@@ -632,12 +632,7 @@ export class OAuthAuthorizationServer implements RequestAuthenticator, OAuthToke
     };
   }
 
-  async handleAuthorizationDecision(
-    body: URLSearchParams,
-    cookieHeader: string | undefined,
-    admissionSubject = "direct-client",
-    sameOriginBrowserSubmission = false,
-  ): Promise<OAuthHttpResult> {
+  async handleAuthorizationDecision(body: URLSearchParams, cookieHeader: string | undefined, admissionSubject = "direct-client"): Promise<OAuthHttpResult> {
     await this.#admitEndpoint("authorize_post", admissionSubject);
     rejectDuplicateOrUnknownParameters(body, ["request_id", "csrf_token", "consent_secret", "decision"]);
     const requestToken = single(body, "request_id", 256);
@@ -649,8 +644,10 @@ export class OAuthAuthorizationServer implements RequestAuthenticator, OAuthToke
     }
     const requestHash = this.#tokenHash(requestToken);
     const csrfCookie = parseCookie(cookieHeader, csrfCookieName(requestHash));
-    const csrfCookieMatches = csrfCookie !== null && safeEqual(csrfCookie, csrfToken);
-    if (!csrfCookieMatches && !sameOriginBrowserSubmission) throw new OAuthProtocolError("invalid_request", 403);
+    // The durable, one-time synchronizer token is the canonical CSRF proof.
+    // Some privacy-preserving browser contexts omit the additional hardened
+    // cookie; when it is supplied it must still match exactly.
+    if (csrfCookie !== null && !safeEqual(csrfCookie, csrfToken)) throw new OAuthProtocolError("invalid_request", 403);
     const now = this.#now();
     const csrfHash = this.#tokenHash(csrfToken);
     const request = await this.#store.consumeAuthorizationRequest(requestHash, csrfHash, now);
@@ -735,12 +732,7 @@ export class OAuthAuthorizationServer implements RequestAuthenticator, OAuthToke
 
   readonly authorizationPostHandler: RequestHandler = async (req, res) => {
     try {
-      sendExpressResult(res, await this.handleAuthorizationDecision(
-        bodyParams(req),
-        req.header("cookie"),
-        requestAdmissionSubject(req),
-        isStrictSameOriginConsentPost(req, this.#config.issuer),
-      ));
+      sendExpressResult(res, await this.handleAuthorizationDecision(bodyParams(req), req.header("cookie"), requestAdmissionSubject(req)));
     } catch (error) {
       sendExpressResult(res, this.oauthError(error));
     }
@@ -1425,19 +1417,6 @@ function parseCookie(header: string | undefined, name: string): string | null {
   if (matches.length !== 1) return null;
   const value = matches[0]?.slice(name.length + 1) ?? "";
   return isBoundedOpaqueToken(value) ? value : null;
-}
-
-function isStrictSameOriginConsentPost(req: Request, issuer: string): boolean {
-  const issuerUrl = new URL(issuer);
-  const origin = req.header("origin");
-  const contentType = req.header("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
-  // The consent response deliberately sets Referrer-Policy: no-referrer, so a
-  // legitimate browser POST cannot be required to send Referer. Origin plus
-  // Fetch Metadata still proves this was a same-origin top-level form submit.
-  if (origin !== issuerUrl.origin || contentType !== "application/x-www-form-urlencoded"
-    || req.header("sec-fetch-site") !== "same-origin" || req.header("sec-fetch-mode") !== "navigate"
-    || req.header("sec-fetch-dest") !== "document") return false;
-  return true;
 }
 
 function csrfCookieName(requestHash: string): string {
