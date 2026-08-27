@@ -55,6 +55,7 @@ type ClientPageErrorDiagnostic = {
   error_class: string;
   safe_signature: string;
   next_chunk: string | null;
+  next_frames: Array<{ chunk: string; line: number; column: number }>;
   digest: string | null;
 };
 
@@ -80,9 +81,12 @@ export function classifyClientPageError(error: unknown): ClientPageErrorDiagnost
           : `unclassified_sha256:${sha256(message)}`;
   const stack = typeof record?.stack === "string" ? record.stack : "";
   const nextChunk = /\/_next\/static\/chunks\/([A-Za-z0-9._-]{1,160}\.js)(?::\d+){0,2}/.exec(stack)?.[1] ?? null;
+  const nextFrames = [...stack.matchAll(/\/_next\/static\/chunks\/([A-Za-z0-9._-]{1,160}\.js):(\d{1,8}):(\d{1,8})/g)]
+    .slice(0, 5)
+    .map((match) => ({ chunk: match[1]!, line: Number(match[2]), column: Number(match[3]) }));
   const rawDigest = record?.digest;
   const digest = typeof rawDigest === "string" && /^[A-Za-z0-9_-]{6,128}$/.test(rawDigest) ? rawDigest : null;
-  return { error_class: errorClass, safe_signature: safeSignature, next_chunk: nextChunk, digest };
+  return { error_class: errorClass, safe_signature: safeSignature, next_chunk: nextChunk, next_frames: nextFrames, digest };
 }
 
 /** Validate only the cross-plane identity/retention/isolation envelope here.

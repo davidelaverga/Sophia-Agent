@@ -117,6 +117,7 @@ describe("ordinary dashboard consent route", () => {
       error_class: "TypeError",
       safe_signature: "undefined_property:profile",
       next_chunk: "app-page.abc123.js",
+      next_frames: [{ chunk: "app-page.abc123.js", line: 12, column: 34 }],
       digest: "nextDigest_123",
     });
     expect(JSON.stringify(classifyClientPageError(error))).not.toContain("hidden input");
