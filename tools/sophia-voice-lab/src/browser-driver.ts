@@ -48,7 +48,7 @@ export const SYNTHETIC_FINALIZATION_EXCLUSION_KEYS = [
   "ordinary_user_projects", "shared_spaces", "debrief",
 ] as const;
 
-export const RECOVERABLE_DASHBOARD_LOAD_ERROR = "This page couldn’t load.";
+export const RECOVERABLE_DASHBOARD_LOAD_ERROR = /^This page couldn['’]t load\.$/;
 export const RECOVERABLE_DASHBOARD_RELOAD_BUTTON = "Reload";
 
 /** Validate only the cross-plane identity/retention/isolation envelope here.
@@ -146,7 +146,7 @@ export async function establishDashboardMicRoute(input: {
     }
     await input.wait();
   }
-  throw new Error("Neither the ordinary privacy-consent UI nor the dashboard microphone route became available.");
+  throw new Error(`Neither the ordinary privacy-consent UI nor the dashboard microphone route became available. recoverable_reload_attempted=${reloadAttempted}`);
 }
 
 export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
@@ -232,7 +232,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       assertPageLocation(page.url(), frontendOrigin, (pathname) => pathname === "/", "ORDINARY_UI_ORIGIN_DRIFT");
       const micAnchor = page.locator(this.config.onboardingMicSelector).first();
       const consentAccept = page.locator(CONSENT_ACCEPT_SELECTOR).first();
-      const recoverableLoadError = page.getByText(RECOVERABLE_DASHBOARD_LOAD_ERROR, { exact: true }).first();
+      const recoverableLoadError = page.getByRole("heading", { name: RECOVERABLE_DASHBOARD_LOAD_ERROR }).first();
       const recoverableLoadReload = page.getByRole("button", { name: RECOVERABLE_DASHBOARD_RELOAD_BUTTON, exact: true }).first();
       ordinaryRouteStage = "dashboard_privacy_consent";
       await establishDashboardMicRoute({
