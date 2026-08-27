@@ -74,6 +74,9 @@ type PassiveEffectBreakpoint = {
   effect_variable: string;
   owner_variable: string;
 };
+type PreloadedPassiveEffectBreakpoint = PassiveEffectBreakpoint & {
+  url_regex: string;
+};
 
 /** Locate React's minified passive-effect create call without depending on a
  * build-specific chunk name or byte offset. The returned identifiers are
@@ -101,6 +104,55 @@ export function findPassiveEffectCreateBreakpoint(source: string): PassiveEffect
     effect_variable: effectVariable,
     owner_variable: ownerVariable,
   };
+}
+
+/** Extract only bounded, same-origin Next.js chunk script URLs from the
+ * server-rendered document. This lets the worker arm a URL breakpoint before
+ * Chromium evaluates React instead of racing Debugger.scriptParsed. */
+export function extractNextChunkScriptUrls(html: string, frontendOrigin: string): string[] {
+  if (html.length === 0 || html.length > 2_000_000) return [];
+  const urls: string[] = [];
+  const scriptSource = /<script\b[^>]*\bsrc=(["'])([^"']+)\1/gi;
+  for (let match = scriptSource.exec(html); match && urls.length < 32; match = scriptSource.exec(html)) {
+    const raw = match[2]!.replaceAll("&amp;", "&");
+    try {
+      const url = new URL(raw, frontendOrigin);
+      if (url.origin !== frontendOrigin || !/^\/_next\/static\/chunks\/[A-Za-z0-9._~-]{1,160}\.js$/.test(url.pathname)) continue;
+      const serialized = url.toString();
+      if (!urls.includes(serialized)) urls.push(serialized);
+    } catch {
+      // Ignore malformed and cross-origin script attributes.
+    }
+  }
+  return urls;
+}
+
+async function preloadPassiveEffectBreakpoint(request: APIRequestContext, frontendOrigin: string): Promise<PreloadedPassiveEffectBreakpoint | null> {
+  const documentResponse = await request.get(new URL("/", frontendOrigin).toString(), {
+    failOnStatusCode: false,
+    maxRedirects: 0,
+    timeout: 10_000,
+  });
+  if (!documentResponse.ok()) return null;
+  const documentBytes = await documentResponse.body();
+  if (documentBytes.byteLength === 0 || documentBytes.byteLength > 2_000_000) return null;
+  const scriptUrls = extractNextChunkScriptUrls(documentBytes.toString("utf8"), frontendOrigin);
+  for (const scriptUrl of scriptUrls) {
+    try {
+      const response = await request.get(scriptUrl, { failOnStatusCode: false, maxRedirects: 0, timeout: 10_000 });
+      if (!response.ok()) continue;
+      const bytes = await response.body();
+      if (bytes.byteLength === 0 || bytes.byteLength > 5_000_000) continue;
+      const breakpoint = findPassiveEffectCreateBreakpoint(bytes.toString("utf8"));
+      if (!breakpoint) continue;
+      const parsed = new URL(scriptUrl);
+      const escapedPath = `${parsed.origin}${parsed.pathname}`.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      return { ...breakpoint, url_regex: `^${escapedPath}(?:\\?.*)?$` };
+    } catch {
+      // Preloading is diagnostic-only and remains fail-open.
+    }
+  }
+  return null;
 }
 
 export function classifyBrowserStartCause(error: unknown): {
@@ -468,6 +520,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       if (!authSession.ok() || authUser?.id !== run.principalId) throw new VoiceLabError(labError("AUTH_PRINCIPAL_MISMATCH", "The browser session is not bound to the exact dedicated Voice Lab principal.", "authorization", false, { observed_principal_sha256: typeof authUser?.id === "string" ? sha256(authUser.id) : null }));
       ordinaryRouteStage = "browser_init_script";
       await context.addInitScript({ content: buildVoiceLabInitScript({ pageOrigin: frontendOrigin, websocketOrigins: [...this.config.websocketOrigins], maxAudioBytes: this.config.maxAudioBytes, testRunId: run.testRunId, cleanupObligationId: run.cleanupObligationId }) });
+      const preloadedPassiveEffectBreakpoint = await preloadPassiveEffectBreakpoint(context.request, frontendOrigin).catch(() => null);
       ordinaryRouteStage = "frontend_home_navigation";
       const page = await context.newPage();
       page.on("pageerror", (error) => {
@@ -486,7 +539,6 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
         const scriptUrls = new Map<string, string>();
         const passiveEffectBreakpoints = new Map<string, PassiveEffectBreakpoint>();
         const passiveEffectScriptInspections = new Map<string, Promise<boolean>>();
-        let passiveEffectInstrumentationBreakpointId: string | null = null;
         const installPassiveEffectBreakpoint = (scriptId: string, scriptUrlValue: string): Promise<boolean> => {
           const existing = passiveEffectScriptInspections.get(scriptId);
           if (existing) return existing;
@@ -517,7 +569,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
         cdp.on("Debugger.scriptParsed", (event) => {
           if (typeof event.scriptId !== "string" || typeof event.url !== "string") return;
           scriptUrls.set(event.scriptId, event.url);
-          void installPassiveEffectBreakpoint(event.scriptId, event.url);
+          if (!preloadedPassiveEffectBreakpoint) void installPassiveEffectBreakpoint(event.scriptId, event.url);
         });
         await cdp.send("Runtime.enable");
         cdp.on("Runtime.exceptionThrown", (event) => {
@@ -525,28 +577,17 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
           if (frames.length > 0 && latestClientPausedFrames.length === 0) latestClientConsoleFrames = frames;
         });
         await cdp.send("Debugger.enable");
+        if (preloadedPassiveEffectBreakpoint) {
+          const installed = await cdp.send("Debugger.setBreakpointByUrl", {
+            lineNumber: preloadedPassiveEffectBreakpoint.line_number,
+            columnNumber: preloadedPassiveEffectBreakpoint.column_number,
+            urlRegex: preloadedPassiveEffectBreakpoint.url_regex,
+          });
+          passiveEffectBreakpoints.set(installed.breakpointId, preloadedPassiveEffectBreakpoint);
+        }
         await cdp.send("Debugger.setPauseOnExceptions", { state: "all" });
         cdp.on("Debugger.paused", (event) => {
           const hitBreakpoints = Array.isArray(event.hitBreakpoints) ? event.hitBreakpoints : [];
-          const isPassiveEffectInstrumentationPause = event.reason === "instrumentation"
-            || passiveEffectInstrumentationBreakpointId !== null && hitBreakpoints.includes(passiveEffectInstrumentationBreakpointId);
-          if (isPassiveEffectInstrumentationPause) {
-            void (async () => {
-              try {
-                const topFrame = Array.isArray(event.callFrames) ? event.callFrames[0] : undefined;
-                const scriptId = typeof topFrame?.location?.scriptId === "string" ? topFrame.location.scriptId : null;
-                const scriptUrl = scriptId === null ? null : scriptUrls.get(scriptId) ?? (typeof topFrame?.url === "string" ? topFrame.url : null);
-                if (scriptId !== null && scriptUrl !== null && await installPassiveEffectBreakpoint(scriptId, scriptUrl)
-                  && passiveEffectInstrumentationBreakpointId !== null) {
-                  await cdp.send("Debugger.removeBreakpoint", { breakpointId: passiveEffectInstrumentationBreakpointId }).catch(() => undefined);
-                  passiveEffectInstrumentationBreakpointId = null;
-                }
-              } finally {
-                await cdp.send("Debugger.resume").catch(() => undefined);
-              }
-            })();
-            return;
-          }
           const frames = classifyClientCdpPausedFrames(event, frontendOrigin);
           void (async () => {
             let effectProbe: ClientEffectProbe | undefined;
@@ -652,8 +693,6 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
             }
           })();
         });
-        const instrumentation = await cdp.send("Debugger.setInstrumentationBreakpoint", { instrumentation: "beforeScriptExecution" });
-        passiveEffectInstrumentationBreakpointId = instrumentation.breakpointId;
       } catch {
         // Diagnostic enrichment is fail-open and must not alter product flow.
       }

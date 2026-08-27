@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { assertPageLocation, classifyBrowserStartCause, classifyClientCdpExceptionFrames, classifyClientCdpPausedFrames, classifyClientConsoleErrorLocation, classifyClientPageError, closeContextWithProof, DASHBOARD_ROUTE_TIMEOUT_MS, drainProductCapture, establishDashboardMicRoute, findPassiveEffectCreateBreakpoint, isExactFinalizationResponse, PlaywrightVoiceDriver, RECOVERABLE_DASHBOARD_LOAD_ERROR, RECOVERABLE_DASHBOARD_RELOAD_BUTTON, requestBoundJson, requestBoundJsonWithOneTransientRetry, selectRecentClientEffectProbe, selectRecentClientPausedFrames, validateAppSyntheticBinding, validateD02BrowserContextBinding, validateD02ProductCleanupEcho, withClientDiagnosticFrames, withClientEffectProbe } from "../src/browser-driver.js";
+import { assertPageLocation, classifyBrowserStartCause, classifyClientCdpExceptionFrames, classifyClientCdpPausedFrames, classifyClientConsoleErrorLocation, classifyClientPageError, closeContextWithProof, DASHBOARD_ROUTE_TIMEOUT_MS, drainProductCapture, establishDashboardMicRoute, extractNextChunkScriptUrls, findPassiveEffectCreateBreakpoint, isExactFinalizationResponse, PlaywrightVoiceDriver, RECOVERABLE_DASHBOARD_LOAD_ERROR, RECOVERABLE_DASHBOARD_RELOAD_BUTTON, requestBoundJson, requestBoundJsonWithOneTransientRetry, selectRecentClientEffectProbe, selectRecentClientPausedFrames, validateAppSyntheticBinding, validateD02BrowserContextBinding, validateD02ProductCleanupEcho, withClientDiagnosticFrames, withClientEffectProbe } from "../src/browser-driver.js";
 import { sha256 } from "../src/security.js";
 import { SHA, SHA_B, SHA_C, SHA_D, testConfig, testRun } from "./helpers.js";
 
@@ -265,6 +265,19 @@ describe("ordinary dashboard consent route", () => {
       owner_variable: "t",
     });
     expect(findPassiveEffectCreateBreakpoint("function nope(e,t){return t.create}")).toBeNull();
+  });
+
+  it("extracts only bounded same-origin Next chunk URLs for pre-navigation breakpoint arming", () => {
+    expect(extractNextChunkScriptUrls([
+      '<script src="/_next/static/chunks/react.js?dpl=abc"></script>',
+      '<script src="https://www.sophia-ei.com/_next/static/chunks/app-page.js"></script>',
+      '<script src="https://other.example/_next/static/chunks/foreign.js"></script>',
+      '<script src="/ordinary.js"></script>',
+      '<script src="/_next/static/chunks/react.js?dpl=abc"></script>',
+    ].join(""), "https://www.sophia-ei.com")).toEqual([
+      "https://www.sophia-ei.com/_next/static/chunks/react.js?dpl=abc",
+      "https://www.sophia-ei.com/_next/static/chunks/app-page.js",
+    ]);
   });
 
   it("hashes browser start causes instead of projecting request headers", () => {
