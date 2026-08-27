@@ -125,12 +125,13 @@ export function classifyClientConsoleErrorLocation(location: {
 /** Chromium's Runtime.exceptionThrown event can preserve call frames when the
  * Playwright Error.stack and console location are incomplete. Project only a
  * same-origin Next chunk coordinate; never retain exception text or raw URLs. */
-export function classifyClientCdpExceptionDetails(details: unknown, expectedOrigin: string): ClientChunkFrame | null {
+export function classifyClientCdpExceptionFrames(details: unknown, expectedOrigin: string): ClientChunkFrame[] {
   const record = details && typeof details === "object" ? details as Record<string, unknown> : null;
   const stackTrace = record?.stackTrace && typeof record.stackTrace === "object"
     ? record.stackTrace as Record<string, unknown>
     : null;
-  const callFrames = Array.isArray(stackTrace?.callFrames) ? stackTrace.callFrames.slice(0, 20) : [];
+  const callFrames = Array.isArray(stackTrace?.callFrames) ? stackTrace.callFrames.slice(0, 40) : [];
+  const safeFrames: ClientChunkFrame[] = [];
   for (const candidate of callFrames) {
     if (!candidate || typeof candidate !== "object") continue;
     const frame = candidate as Record<string, unknown>;
@@ -139,22 +140,27 @@ export function classifyClientCdpExceptionDetails(details: unknown, expectedOrig
       ...(typeof frame.lineNumber === "number" ? { lineNumber: frame.lineNumber } : {}),
       ...(typeof frame.columnNumber === "number" ? { columnNumber: frame.columnNumber } : {}),
     }, expectedOrigin);
-    if (safe) return safe;
+    if (safe && !safeFrames.some((existing) => existing.chunk === safe.chunk && existing.line === safe.line && existing.column === safe.column)) {
+      safeFrames.push(safe);
+      if (safeFrames.length === 5) return safeFrames;
+    }
   }
-  return classifyClientConsoleErrorLocation({
+  const root = classifyClientConsoleErrorLocation({
     ...(typeof record?.url === "string" ? { url: record.url } : {}),
     ...(typeof record?.lineNumber === "number" ? { lineNumber: record.lineNumber } : {}),
     ...(typeof record?.columnNumber === "number" ? { columnNumber: record.columnNumber } : {}),
   }, expectedOrigin);
+  if (root && !safeFrames.some((existing) => existing.chunk === root.chunk && existing.line === root.line && existing.column === root.column)) safeFrames.push(root);
+  return safeFrames.slice(0, 5);
 }
 
-function withClientConsoleFrame(
+function withClientConsoleFrames(
   diagnostic: ClientPageErrorDiagnostic | null,
-  frame: ClientChunkFrame | null,
+  frames: ClientChunkFrame[],
 ): ClientPageErrorDiagnostic | null {
-  if (!diagnostic || !frame || diagnostic.next_frames.length > 0
-    || (diagnostic.next_chunk !== null && diagnostic.next_chunk !== frame.chunk)) return diagnostic;
-  return { ...diagnostic, next_chunk: diagnostic.next_chunk ?? frame.chunk, next_frames: [frame] };
+  if (!diagnostic || frames.length === 0 || diagnostic.next_frames.length > 0
+    || (diagnostic.next_chunk !== null && !frames.some((frame) => diagnostic.next_chunk === frame.chunk))) return diagnostic;
+  return { ...diagnostic, next_chunk: diagnostic.next_chunk ?? frames[0]!.chunk, next_frames: frames.slice(0, 5) };
 }
 
 /** Validate only the cross-plane identity/retention/isolation envelope here.
@@ -306,7 +312,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
     this.#pendingContexts.set(run.id, context);
     let ordinaryRouteStage = "frontend_auth_grant";
     let latestClientPageError: ClientPageErrorDiagnostic | null = null;
-    let latestClientConsoleFrame: ClientChunkFrame | null = null;
+    let latestClientConsoleFrames: ClientChunkFrame[] = [];
     try {
       // No OS/browser microphone permission is granted. The init script's
       // page-owned MediaStreamDestination is the only accepted audio stream;
@@ -337,14 +343,14 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       page.on("console", (message) => {
         if (message.type() !== "error") return;
         const frame = classifyClientConsoleErrorLocation(message.location(), frontendOrigin);
-        if (frame) latestClientConsoleFrame = frame;
+        if (frame) latestClientConsoleFrames = [frame];
       });
       try {
         const cdp = await context.newCDPSession(page);
         await cdp.send("Runtime.enable");
         cdp.on("Runtime.exceptionThrown", (event) => {
-          const frame = classifyClientCdpExceptionDetails(event.exceptionDetails, frontendOrigin);
-          if (frame) latestClientConsoleFrame = frame;
+          const frames = classifyClientCdpExceptionFrames(event.exceptionDetails, frontendOrigin);
+          if (frames.length > 0) latestClientConsoleFrames = frames;
         });
       } catch {
         // Diagnostic enrichment is fail-open and must not alter product flow.
@@ -404,13 +410,13 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       // capability and must revoke the login before closing the browser.
       if (this.#sessions.get(run.id)?.context === context) {
         if (error instanceof VoiceLabError) throw error;
-        throw new VoiceLabError(labError("ORDINARY_UI_ROUTE_FAILED", "The ordinary deployed Sophia voice route could not be established.", "harness", false, { stage: ordinaryRouteStage, cause: classifyBrowserStartCause(error), client_page_error: withClientConsoleFrame(latestClientPageError, latestClientConsoleFrame) }));
+        throw new VoiceLabError(labError("ORDINARY_UI_ROUTE_FAILED", "The ordinary deployed Sophia voice route could not be established.", "harness", false, { stage: ordinaryRouteStage, cause: classifyBrowserStartCause(error), client_page_error: withClientConsoleFrames(latestClientPageError, latestClientConsoleFrames) }));
       }
       const closed = await closeContextWithProof(context, () => this.#browser?.contexts() ?? []);
       if (closed.closed) { this.#sessions.delete(run.id); this.#pendingContexts.delete(run.id); }
       else throw new VoiceLabError(labError("BROWSER_CONTEXT_CLOSE_FAILED", "Failed start left a browser context that could not be proven closed.", "harness", true, { original_error_class: error instanceof VoiceLabError ? error.detail.code : error instanceof Error ? error.name : "Error", close_error_class: closed.errorClass }));
       if (error instanceof VoiceLabError) throw error;
-      throw new VoiceLabError(labError("ORDINARY_UI_ROUTE_FAILED", "The ordinary deployed Sophia voice route could not be established.", "harness", false, { stage: ordinaryRouteStage, cause: classifyBrowserStartCause(error), client_page_error: withClientConsoleFrame(latestClientPageError, latestClientConsoleFrame) }));
+      throw new VoiceLabError(labError("ORDINARY_UI_ROUTE_FAILED", "The ordinary deployed Sophia voice route could not be established.", "harness", false, { stage: ordinaryRouteStage, cause: classifyBrowserStartCause(error), client_page_error: withClientConsoleFrames(latestClientPageError, latestClientConsoleFrames) }));
     }
   }
 
