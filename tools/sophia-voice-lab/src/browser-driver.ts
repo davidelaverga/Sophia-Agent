@@ -485,28 +485,39 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
         const cdp = await context.newCDPSession(page);
         const scriptUrls = new Map<string, string>();
         const passiveEffectBreakpoints = new Map<string, PassiveEffectBreakpoint>();
-        cdp.on("Debugger.scriptParsed", (event) => {
-          if (typeof event.scriptId !== "string" || typeof event.url !== "string") return;
-          scriptUrls.set(event.scriptId, event.url);
-          void (async () => {
+        const passiveEffectScriptInspections = new Map<string, Promise<boolean>>();
+        let passiveEffectInstrumentationBreakpointId: string | null = null;
+        const installPassiveEffectBreakpoint = (scriptId: string, scriptUrlValue: string): Promise<boolean> => {
+          const existing = passiveEffectScriptInspections.get(scriptId);
+          if (existing) return existing;
+          const inspection = (async () => {
             try {
-              const scriptUrl = new URL(event.url);
-              if (scriptUrl.origin !== frontendOrigin || !/^\/_next\/static\/chunks\/[A-Za-z0-9._-]{1,160}\.js$/.test(scriptUrl.pathname)) return;
-              const sourceResult = await cdp.send("Debugger.getScriptSource", { scriptId: event.scriptId });
+              const scriptUrl = new URL(scriptUrlValue);
+              if (scriptUrl.origin !== frontendOrigin || !/^\/_next\/static\/chunks\/[A-Za-z0-9._-]{1,160}\.js$/.test(scriptUrl.pathname)) return false;
+              const sourceResult = await cdp.send("Debugger.getScriptSource", { scriptId });
               const breakpoint = findPassiveEffectCreateBreakpoint(sourceResult.scriptSource);
-              if (!breakpoint) return;
+              if (!breakpoint) return false;
               const installed = await cdp.send("Debugger.setBreakpoint", {
                 location: {
-                  scriptId: event.scriptId,
+                  scriptId,
                   lineNumber: breakpoint.line_number,
                   columnNumber: breakpoint.column_number,
                 },
               });
               passiveEffectBreakpoints.set(installed.breakpointId, breakpoint);
+              return true;
             } catch {
               // Passive-effect diagnostics are best-effort and never block load.
+              return false;
             }
           })();
+          passiveEffectScriptInspections.set(scriptId, inspection);
+          return inspection;
+        };
+        cdp.on("Debugger.scriptParsed", (event) => {
+          if (typeof event.scriptId !== "string" || typeof event.url !== "string") return;
+          scriptUrls.set(event.scriptId, event.url);
+          void installPassiveEffectBreakpoint(event.scriptId, event.url);
         });
         await cdp.send("Runtime.enable");
         cdp.on("Runtime.exceptionThrown", (event) => {
@@ -516,12 +527,30 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
         await cdp.send("Debugger.enable");
         await cdp.send("Debugger.setPauseOnExceptions", { state: "all" });
         cdp.on("Debugger.paused", (event) => {
+          const hitBreakpoints = Array.isArray(event.hitBreakpoints) ? event.hitBreakpoints : [];
+          const isPassiveEffectInstrumentationPause = event.reason === "instrumentation"
+            || passiveEffectInstrumentationBreakpointId !== null && hitBreakpoints.includes(passiveEffectInstrumentationBreakpointId);
+          if (isPassiveEffectInstrumentationPause) {
+            void (async () => {
+              try {
+                const topFrame = Array.isArray(event.callFrames) ? event.callFrames[0] : undefined;
+                const scriptId = typeof topFrame?.location?.scriptId === "string" ? topFrame.location.scriptId : null;
+                const scriptUrl = scriptId === null ? null : scriptUrls.get(scriptId) ?? (typeof topFrame?.url === "string" ? topFrame.url : null);
+                if (scriptId !== null && scriptUrl !== null && await installPassiveEffectBreakpoint(scriptId, scriptUrl)
+                  && passiveEffectInstrumentationBreakpointId !== null) {
+                  await cdp.send("Debugger.removeBreakpoint", { breakpointId: passiveEffectInstrumentationBreakpointId }).catch(() => undefined);
+                  passiveEffectInstrumentationBreakpointId = null;
+                }
+              } finally {
+                await cdp.send("Debugger.resume").catch(() => undefined);
+              }
+            })();
+            return;
+          }
           const frames = classifyClientCdpPausedFrames(event, frontendOrigin);
           void (async () => {
             let effectProbe: ClientEffectProbe | undefined;
-            const passiveBreakpointId = Array.isArray(event.hitBreakpoints)
-              ? event.hitBreakpoints.find((breakpointId) => passiveEffectBreakpoints.has(breakpointId))
-              : undefined;
+            const passiveBreakpointId = hitBreakpoints.find((breakpointId) => passiveEffectBreakpoints.has(breakpointId));
             const passiveBinding = passiveBreakpointId ? passiveEffectBreakpoints.get(passiveBreakpointId) : undefined;
             try {
               const callFrames = Array.isArray(event.callFrames) ? event.callFrames.slice(0, 12) : [];
@@ -623,6 +652,8 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
             }
           })();
         });
+        const instrumentation = await cdp.send("Debugger.setInstrumentationBreakpoint", { instrumentation: "beforeScriptExecution" });
+        passiveEffectInstrumentationBreakpointId = instrumentation.breakpointId;
       } catch {
         // Diagnostic enrichment is fail-open and must not alter product flow.
       }
