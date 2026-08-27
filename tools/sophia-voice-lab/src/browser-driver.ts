@@ -57,9 +57,17 @@ type ClientPageErrorDiagnostic = {
   next_chunk: string | null;
   next_frames: Array<{ chunk: string; line: number; column: number }>;
   digest: string | null;
+  effect_probe?: ClientEffectProbe;
 };
 type ClientChunkFrame = { chunk: string; line: number; column: number };
-type TimedClientChunkFrames = { observedAt: number; frames: ClientChunkFrame[] };
+type ClientEffectProbe = {
+  create_type: "undefined" | "function" | "object" | "boolean" | "number" | "string" | "symbol" | "bigint" | "other";
+  effect_tag: number | null;
+  owner_fiber_tag: number | null;
+  owner_props: "on_ready" | "on_authenticated" | "children_only" | "no_props" | "other" | "unavailable";
+  owner_frame: ClientChunkFrame | null;
+};
+type TimedClientChunkFrames = { observedAt: number; frames: ClientChunkFrame[]; effectProbe?: ClientEffectProbe };
 
 export function classifyBrowserStartCause(error: unknown): {
   error_class: string;
@@ -208,6 +216,25 @@ export function selectRecentClientPausedFrames(
     }
   }
   return selected;
+}
+
+export function selectRecentClientEffectProbe(
+  snapshots: TimedClientChunkFrames[],
+  pageErrorObservedAt: number,
+  windowMs = 1_500,
+): ClientEffectProbe | null {
+  return snapshots
+    .filter((snapshot) => snapshot.observedAt <= pageErrorObservedAt && snapshot.observedAt >= pageErrorObservedAt - windowMs)
+    .slice(-20)
+    .reverse()
+    .find((snapshot) => snapshot.effectProbe !== undefined)?.effectProbe ?? null;
+}
+
+export function withClientEffectProbe(
+  diagnostic: ClientPageErrorDiagnostic | null,
+  effectProbe: ClientEffectProbe | null,
+): ClientPageErrorDiagnostic | null {
+  return diagnostic && effectProbe ? { ...diagnostic, effect_probe: effectProbe } : diagnostic;
 }
 
 export function withClientDiagnosticFrames(
@@ -378,6 +405,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
     let latestClientPageError: ClientPageErrorDiagnostic | null = null;
     let latestClientConsoleFrames: ClientChunkFrame[] = [];
     let latestClientPausedFrames: ClientChunkFrame[] = [];
+    let latestClientEffectProbe: ClientEffectProbe | null = null;
     const recentClientPausedFrameSets: TimedClientChunkFrames[] = [];
     try {
       // No OS/browser microphone permission is granted. The init script's
@@ -409,6 +437,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
         const observedAt = Date.now();
         latestClientPageError = classifyClientPageError(error);
         latestClientPausedFrames = selectRecentClientPausedFrames(recentClientPausedFrameSets, observedAt);
+        latestClientEffectProbe = selectRecentClientEffectProbe(recentClientPausedFrameSets, observedAt);
       });
       page.on("console", (message) => {
         if (message.type() !== "error") return;
@@ -417,6 +446,10 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       });
       try {
         const cdp = await context.newCDPSession(page);
+        const scriptUrls = new Map<string, string>();
+        cdp.on("Debugger.scriptParsed", (event) => {
+          if (typeof event.scriptId === "string" && typeof event.url === "string") scriptUrls.set(event.scriptId, event.url);
+        });
         await cdp.send("Runtime.enable");
         cdp.on("Runtime.exceptionThrown", (event) => {
           const frames = classifyClientCdpExceptionFrames(event.exceptionDetails, frontendOrigin);
@@ -426,11 +459,93 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
         await cdp.send("Debugger.setPauseOnExceptions", { state: "all" });
         cdp.on("Debugger.paused", (event) => {
           const frames = classifyClientCdpPausedFrames(event, frontendOrigin);
-          if (frames.length > 0) {
-            recentClientPausedFrameSets.push({ observedAt: Date.now(), frames });
-            if (recentClientPausedFrameSets.length > 20) recentClientPausedFrameSets.splice(0, recentClientPausedFrameSets.length - 20);
-          }
-          void cdp.send("Debugger.resume").catch(() => undefined);
+          void (async () => {
+            let effectProbe: ClientEffectProbe | undefined;
+            try {
+              const callFrames = Array.isArray(event.callFrames) ? event.callFrames.slice(0, 8) : [];
+              const top = callFrames[0];
+              if (top && typeof top.callFrameId === "string") {
+                const createResult = await cdp.send("Debugger.evaluateOnCallFrame", {
+                  callFrameId: top.callFrameId,
+                  expression: `(() => { if (typeof n !== "object" || n === null || !("create" in n)) return null; const rawType = typeof n.create; const allowed = ["undefined","function","object","boolean","number","string","symbol","bigint"]; return { createType: allowed.includes(rawType) ? rawType : "other", effectTag: Number.isSafeInteger(n.tag) && n.tag >= 0 && n.tag <= 255 ? n.tag : null }; })()`,
+                  returnByValue: true,
+                  silent: true,
+                  throwOnSideEffect: true,
+                });
+                const createValue = createResult?.result?.value;
+                if (createValue && typeof createValue === "object") {
+                  const createRecord = createValue as Record<string, unknown>;
+                  const createType = createRecord.createType;
+                  const allowedTypes = new Set<ClientEffectProbe["create_type"]>(["undefined", "function", "object", "boolean", "number", "string", "symbol", "bigint", "other"]);
+                  if (typeof createType === "string" && allowedTypes.has(createType as ClientEffectProbe["create_type"])) {
+                    effectProbe = {
+                      create_type: createType as ClientEffectProbe["create_type"],
+                      effect_tag: Number.isInteger(createRecord.effectTag) ? Number(createRecord.effectTag) : null,
+                      owner_fiber_tag: null,
+                      owner_props: "unavailable",
+                      owner_frame: null,
+                    };
+                  }
+                }
+              }
+              if (effectProbe) {
+                for (const caller of callFrames.slice(1)) {
+                  if (typeof caller.callFrameId !== "string") continue;
+                  const ownerResult = await cdp.send("Debugger.evaluateOnCallFrame", {
+                    callFrameId: caller.callFrameId,
+                    expression: `(() => { if (typeof t !== "object" || t === null || !Number.isInteger(t.tag) || !("memoizedProps" in t)) return null; const props = t.memoizedProps; const keys = props && typeof props === "object" ? Object.keys(props).sort() : []; let ownerProps = "other"; if (keys.length === 0) ownerProps = "no_props"; else if (keys.length === 1 && keys[0] === "onReady") ownerProps = "on_ready"; else if (keys.length === 1 && keys[0] === "children") ownerProps = "children_only"; else if (keys.length === 2 && keys[0] === "children" && keys[1] === "onAuthenticated") ownerProps = "on_authenticated"; return { ownerFiberTag: t.tag >= 0 && t.tag <= 255 ? t.tag : null, ownerProps }; })()`,
+                    returnByValue: true,
+                    silent: true,
+                    throwOnSideEffect: true,
+                  });
+                  const ownerValue = ownerResult?.result?.value;
+                  if (!ownerValue || typeof ownerValue !== "object") continue;
+                  const ownerRecord = ownerValue as Record<string, unknown>;
+                  const ownerProps = ownerRecord.ownerProps;
+                  effectProbe.owner_fiber_tag = Number.isInteger(ownerRecord.ownerFiberTag) ? Number(ownerRecord.ownerFiberTag) : null;
+                  effectProbe.owner_props = ownerProps === "on_ready" || ownerProps === "on_authenticated" || ownerProps === "children_only" || ownerProps === "no_props" || ownerProps === "other"
+                    ? ownerProps
+                    : "unavailable";
+                  const functionResult = await cdp.send("Debugger.evaluateOnCallFrame", {
+                    callFrameId: caller.callFrameId,
+                    expression: `typeof t.elementType === "function" ? t.elementType : (t.elementType && typeof t.elementType.type === "function" ? t.elementType.type : (typeof t.type === "function" ? t.type : (t.type && typeof t.type.type === "function" ? t.type.type : null)))`,
+                    returnByValue: false,
+                    silent: true,
+                    throwOnSideEffect: true,
+                  });
+                  const objectId = functionResult?.result?.objectId;
+                  if (typeof objectId === "string") {
+                    try {
+                      const properties = await cdp.send("Runtime.getProperties", { objectId, ownProperties: false, accessorPropertiesOnly: false, generatePreview: false });
+                      const functionLocation = Array.isArray(properties?.internalProperties)
+                        ? properties.internalProperties.find((property: { name?: unknown }) => property?.name === "[[FunctionLocation]]")?.value?.value
+                        : null;
+                      if (functionLocation && typeof functionLocation === "object") {
+                        const location = functionLocation as Record<string, unknown>;
+                        const url = typeof location.scriptId === "string" ? scriptUrls.get(location.scriptId) : undefined;
+                        effectProbe.owner_frame = classifyClientConsoleErrorLocation({
+                          ...(url !== undefined ? { url } : {}),
+                          ...(typeof location.lineNumber === "number" ? { lineNumber: location.lineNumber } : {}),
+                          ...(typeof location.columnNumber === "number" ? { columnNumber: location.columnNumber } : {}),
+                        }, frontendOrigin);
+                      }
+                    } finally {
+                      await cdp.send("Runtime.releaseObject", { objectId }).catch(() => undefined);
+                    }
+                  }
+                  break;
+                }
+              }
+            } catch {
+              // Safe effect diagnostics are fail-open and never block resume.
+            } finally {
+              if (frames.length > 0 || effectProbe) {
+                recentClientPausedFrameSets.push({ observedAt: Date.now(), frames, ...(effectProbe ? { effectProbe } : {}) });
+                if (recentClientPausedFrameSets.length > 20) recentClientPausedFrameSets.splice(0, recentClientPausedFrameSets.length - 20);
+              }
+              await cdp.send("Debugger.resume").catch(() => undefined);
+            }
+          })();
         });
       } catch {
         // Diagnostic enrichment is fail-open and must not alter product flow.
@@ -490,13 +605,13 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       // capability and must revoke the login before closing the browser.
       if (this.#sessions.get(run.id)?.context === context) {
         if (error instanceof VoiceLabError) throw error;
-        throw new VoiceLabError(labError("ORDINARY_UI_ROUTE_FAILED", "The ordinary deployed Sophia voice route could not be established.", "harness", false, { stage: ordinaryRouteStage, cause: classifyBrowserStartCause(error), client_page_error: withClientDiagnosticFrames(latestClientPageError, latestClientPausedFrames.length > 0 ? latestClientPausedFrames : latestClientConsoleFrames, latestClientPausedFrames.length > 0) }));
+        throw new VoiceLabError(labError("ORDINARY_UI_ROUTE_FAILED", "The ordinary deployed Sophia voice route could not be established.", "harness", false, { stage: ordinaryRouteStage, cause: classifyBrowserStartCause(error), client_page_error: withClientEffectProbe(withClientDiagnosticFrames(latestClientPageError, latestClientPausedFrames.length > 0 ? latestClientPausedFrames : latestClientConsoleFrames, latestClientPausedFrames.length > 0), latestClientEffectProbe) }));
       }
       const closed = await closeContextWithProof(context, () => this.#browser?.contexts() ?? []);
       if (closed.closed) { this.#sessions.delete(run.id); this.#pendingContexts.delete(run.id); }
       else throw new VoiceLabError(labError("BROWSER_CONTEXT_CLOSE_FAILED", "Failed start left a browser context that could not be proven closed.", "harness", true, { original_error_class: error instanceof VoiceLabError ? error.detail.code : error instanceof Error ? error.name : "Error", close_error_class: closed.errorClass }));
       if (error instanceof VoiceLabError) throw error;
-      throw new VoiceLabError(labError("ORDINARY_UI_ROUTE_FAILED", "The ordinary deployed Sophia voice route could not be established.", "harness", false, { stage: ordinaryRouteStage, cause: classifyBrowserStartCause(error), client_page_error: withClientDiagnosticFrames(latestClientPageError, latestClientPausedFrames.length > 0 ? latestClientPausedFrames : latestClientConsoleFrames, latestClientPausedFrames.length > 0) }));
+      throw new VoiceLabError(labError("ORDINARY_UI_ROUTE_FAILED", "The ordinary deployed Sophia voice route could not be established.", "harness", false, { stage: ordinaryRouteStage, cause: classifyBrowserStartCause(error), client_page_error: withClientEffectProbe(withClientDiagnosticFrames(latestClientPageError, latestClientPausedFrames.length > 0 ? latestClientPausedFrames : latestClientConsoleFrames, latestClientPausedFrames.length > 0), latestClientEffectProbe) }));
     }
   }
 

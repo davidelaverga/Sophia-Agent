@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { assertPageLocation, classifyBrowserStartCause, classifyClientCdpExceptionFrames, classifyClientCdpPausedFrames, classifyClientConsoleErrorLocation, classifyClientPageError, closeContextWithProof, DASHBOARD_ROUTE_TIMEOUT_MS, drainProductCapture, establishDashboardMicRoute, isExactFinalizationResponse, PlaywrightVoiceDriver, RECOVERABLE_DASHBOARD_LOAD_ERROR, RECOVERABLE_DASHBOARD_RELOAD_BUTTON, requestBoundJson, requestBoundJsonWithOneTransientRetry, selectRecentClientPausedFrames, validateAppSyntheticBinding, validateD02BrowserContextBinding, validateD02ProductCleanupEcho, withClientDiagnosticFrames } from "../src/browser-driver.js";
+import { assertPageLocation, classifyBrowserStartCause, classifyClientCdpExceptionFrames, classifyClientCdpPausedFrames, classifyClientConsoleErrorLocation, classifyClientPageError, closeContextWithProof, DASHBOARD_ROUTE_TIMEOUT_MS, drainProductCapture, establishDashboardMicRoute, isExactFinalizationResponse, PlaywrightVoiceDriver, RECOVERABLE_DASHBOARD_LOAD_ERROR, RECOVERABLE_DASHBOARD_RELOAD_BUTTON, requestBoundJson, requestBoundJsonWithOneTransientRetry, selectRecentClientEffectProbe, selectRecentClientPausedFrames, validateAppSyntheticBinding, validateD02BrowserContextBinding, validateD02ProductCleanupEcho, withClientDiagnosticFrames, withClientEffectProbe } from "../src/browser-driver.js";
 import { sha256 } from "../src/security.js";
 import { SHA, SHA_B, SHA_C, SHA_D, testConfig, testRun } from "./helpers.js";
 
@@ -225,6 +225,24 @@ describe("ordinary dashboard consent route", () => {
       ],
     });
     expect(JSON.stringify(enriched)).not.toContain("opaque product failure");
+  });
+
+  it("attaches only the bounded correlated React effect probe", () => {
+    const diagnostic = classifyClientPageError(new TypeError("opaque product failure"));
+    const probe = {
+      create_type: "object" as const,
+      effect_tag: 9,
+      owner_fiber_tag: 0,
+      owner_props: "on_ready" as const,
+      owner_frame: { chunk: "app-page.js", line: 1, column: 77 },
+    };
+    expect(selectRecentClientEffectProbe([
+      { observedAt: 1_000, frames: [], effectProbe: probe },
+      { observedAt: 9_100, frames: [{ chunk: "react.js", line: 1, column: 100 }] },
+      { observedAt: 9_200, frames: [{ chunk: "react.js", line: 1, column: 200 }], effectProbe: probe },
+    ], 9_250)).toEqual(probe);
+    expect(withClientEffectProbe(diagnostic, probe)).toMatchObject({ effect_probe: probe });
+    expect(JSON.stringify(withClientEffectProbe(diagnostic, probe))).not.toContain("opaque product failure");
   });
 
   it("hashes browser start causes instead of projecting request headers", () => {
