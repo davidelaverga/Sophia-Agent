@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { assertPageLocation, classifyClientPageError, closeContextWithProof, DASHBOARD_ROUTE_TIMEOUT_MS, drainProductCapture, establishDashboardMicRoute, isExactFinalizationResponse, PlaywrightVoiceDriver, RECOVERABLE_DASHBOARD_LOAD_ERROR, RECOVERABLE_DASHBOARD_RELOAD_BUTTON, requestBoundJson, validateAppSyntheticBinding, validateD02BrowserContextBinding, validateD02ProductCleanupEcho } from "../src/browser-driver.js";
+import { assertPageLocation, classifyClientConsoleErrorLocation, classifyClientPageError, closeContextWithProof, DASHBOARD_ROUTE_TIMEOUT_MS, drainProductCapture, establishDashboardMicRoute, isExactFinalizationResponse, PlaywrightVoiceDriver, RECOVERABLE_DASHBOARD_LOAD_ERROR, RECOVERABLE_DASHBOARD_RELOAD_BUTTON, requestBoundJson, validateAppSyntheticBinding, validateD02BrowserContextBinding, validateD02ProductCleanupEcho } from "../src/browser-driver.js";
 import { sha256 } from "../src/security.js";
 import { SHA, SHA_B, SHA_C, SHA_D, testConfig, testRun } from "./helpers.js";
 
@@ -129,6 +129,19 @@ describe("ordinary dashboard consent route", () => {
     expect(diagnostic.error_class).toBe("Error");
     expect(diagnostic.safe_signature).toMatch(/^unclassified_sha256:[a-f0-9]{64}$/);
     expect(JSON.stringify(diagnostic)).not.toContain("user-controlled detail");
+  });
+
+  it("projects a Next console location without its URL", () => {
+    expect(classifyClientConsoleErrorLocation({
+      url: "https://www.sophia-ei.com/_next/static/chunks/app-page.abc123.js?token=secret",
+      lineNumber: 0,
+      columnNumber: 48123,
+    }, "https://www.sophia-ei.com")).toEqual({ chunk: "app-page.abc123.js", line: 1, column: 48124 });
+    expect(classifyClientConsoleErrorLocation({
+      url: "https://example.com/not-a-next-chunk.js",
+      lineNumber: 0,
+      columnNumber: 1,
+    }, "https://www.sophia-ei.com")).toBeNull();
   });
 
   it("matches the exact production recoverable error heading", () => {

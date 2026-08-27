@@ -58,6 +58,7 @@ type ClientPageErrorDiagnostic = {
   next_frames: Array<{ chunk: string; line: number; column: number }>;
   digest: string | null;
 };
+type ClientChunkFrame = { chunk: string; line: number; column: number };
 
 /** Keep production browser failures actionable without projecting arbitrary
  * exception text, URLs, query strings, or user data into MCP error details. */
@@ -87,6 +88,34 @@ export function classifyClientPageError(error: unknown): ClientPageErrorDiagnost
   const rawDigest = record?.digest;
   const digest = typeof rawDigest === "string" && /^[A-Za-z0-9_-]{6,128}$/.test(rawDigest) ? rawDigest : null;
   return { error_class: errorClass, safe_signature: safeSignature, next_chunk: nextChunk, next_frames: nextFrames, digest };
+}
+
+/** Chromium console events can retain a source location when Error.stack drops
+ * coordinates. Project only Next chunk coordinates and normalize Playwright's
+ * zero-based location to the one-based stack-frame convention. */
+export function classifyClientConsoleErrorLocation(location: {
+  url?: string;
+  lineNumber?: number;
+  columnNumber?: number;
+}, expectedOrigin: string): ClientChunkFrame | null {
+  let locationUrl: URL;
+  try { locationUrl = new URL(location.url ?? ""); } catch { return null; }
+  const chunk = /^\/_next\/static\/chunks\/([A-Za-z0-9._-]{1,160}\.js)$/.exec(locationUrl.pathname)?.[1];
+  const lineNumber = location.lineNumber;
+  const columnNumber = location.columnNumber;
+  if (locationUrl.origin !== expectedOrigin || !chunk || !Number.isInteger(lineNumber) || !Number.isInteger(columnNumber)
+    || Number(lineNumber) < 0 || Number(columnNumber) < 0
+    || Number(lineNumber) > 99_999_999 || Number(columnNumber) > 99_999_999) return null;
+  return { chunk, line: Number(lineNumber) + 1, column: Number(columnNumber) + 1 };
+}
+
+function withClientConsoleFrame(
+  diagnostic: ClientPageErrorDiagnostic | null,
+  frame: ClientChunkFrame | null,
+): ClientPageErrorDiagnostic | null {
+  if (!diagnostic || !frame || diagnostic.next_frames.length > 0
+    || (diagnostic.next_chunk !== null && diagnostic.next_chunk !== frame.chunk)) return diagnostic;
+  return { ...diagnostic, next_chunk: diagnostic.next_chunk ?? frame.chunk, next_frames: [frame] };
 }
 
 /** Validate only the cross-plane identity/retention/isolation envelope here.
@@ -238,6 +267,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
     this.#pendingContexts.set(run.id, context);
     let ordinaryRouteStage = "frontend_auth_grant";
     let latestClientPageError: ClientPageErrorDiagnostic | null = null;
+    let latestClientConsoleFrame: ClientChunkFrame | null = null;
     try {
       // No OS/browser microphone permission is granted. The init script's
       // page-owned MediaStreamDestination is the only accepted audio stream;
@@ -265,6 +295,11 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       ordinaryRouteStage = "frontend_home_navigation";
       const page = await context.newPage();
       page.on("pageerror", (error) => { latestClientPageError = classifyClientPageError(error); });
+      page.on("console", (message) => {
+        if (message.type() !== "error") return;
+        const frame = classifyClientConsoleErrorLocation(message.location(), frontendOrigin);
+        if (frame) latestClientConsoleFrame = frame;
+      });
       const session: BrowserSession = { context, page, harnessCursor: 0, productCursor: null, latestProviderReceipt: null, contextExpiresAt: Number(grantReceipt.expires_at), expectedBinding: { testRunId: run.testRunId, cleanupObligationId: run.cleanupObligationId, principalId: run.principalId, scenarioId: run.scenarioId, scenarioVersion: run.scenarioVersion, environment: run.environment, retentionHours: run.capturePolicy.retentionHours, providerExpiresAt: run.expiresAt.toISOString(), ...(exactBrowserContextBinding === undefined ? {} : { browserContextBinding: exactBrowserContextBinding }) } };
       this.#sessions.set(run.id, session);
       this.#pendingContexts.delete(run.id);
@@ -320,13 +355,13 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       // capability and must revoke the login before closing the browser.
       if (this.#sessions.get(run.id)?.context === context) {
         if (error instanceof VoiceLabError) throw error;
-        throw new VoiceLabError(labError("ORDINARY_UI_ROUTE_FAILED", "The ordinary deployed Sophia voice route could not be established.", "harness", false, { stage: ordinaryRouteStage, cause: error instanceof Error ? error.message : String(error), client_page_error: latestClientPageError }));
+        throw new VoiceLabError(labError("ORDINARY_UI_ROUTE_FAILED", "The ordinary deployed Sophia voice route could not be established.", "harness", false, { stage: ordinaryRouteStage, cause: error instanceof Error ? error.message : String(error), client_page_error: withClientConsoleFrame(latestClientPageError, latestClientConsoleFrame) }));
       }
       const closed = await closeContextWithProof(context, () => this.#browser?.contexts() ?? []);
       if (closed.closed) { this.#sessions.delete(run.id); this.#pendingContexts.delete(run.id); }
       else throw new VoiceLabError(labError("BROWSER_CONTEXT_CLOSE_FAILED", "Failed start left a browser context that could not be proven closed.", "harness", true, { original_error_class: error instanceof VoiceLabError ? error.detail.code : error instanceof Error ? error.name : "Error", close_error_class: closed.errorClass }));
       if (error instanceof VoiceLabError) throw error;
-      throw new VoiceLabError(labError("ORDINARY_UI_ROUTE_FAILED", "The ordinary deployed Sophia voice route could not be established.", "harness", false, { stage: ordinaryRouteStage, cause: error instanceof Error ? error.message : String(error), client_page_error: latestClientPageError }));
+      throw new VoiceLabError(labError("ORDINARY_UI_ROUTE_FAILED", "The ordinary deployed Sophia voice route could not be established.", "harness", false, { stage: ordinaryRouteStage, cause: error instanceof Error ? error.message : String(error), client_page_error: withClientConsoleFrame(latestClientPageError, latestClientConsoleFrame) }));
     }
   }
 
