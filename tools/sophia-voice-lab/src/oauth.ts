@@ -1430,17 +1430,14 @@ function parseCookie(header: string | undefined, name: string): string | null {
 function isStrictSameOriginConsentPost(req: Request, issuer: string): boolean {
   const issuerUrl = new URL(issuer);
   const origin = req.header("origin");
-  const referer = req.header("referer");
   const contentType = req.header("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
-  if (origin !== issuerUrl.origin || referer === undefined || contentType !== "application/x-www-form-urlencoded"
+  // The consent response deliberately sets Referrer-Policy: no-referrer, so a
+  // legitimate browser POST cannot be required to send Referer. Origin plus
+  // Fetch Metadata still proves this was a same-origin top-level form submit.
+  if (origin !== issuerUrl.origin || contentType !== "application/x-www-form-urlencoded"
     || req.header("sec-fetch-site") !== "same-origin" || req.header("sec-fetch-mode") !== "navigate"
     || req.header("sec-fetch-dest") !== "document") return false;
-  try {
-    const refererUrl = new URL(referer);
-    return refererUrl.origin === issuerUrl.origin && refererUrl.pathname === "/authorize";
-  } catch {
-    return false;
-  }
+  return true;
 }
 
 function csrfCookieName(requestHash: string): string {
