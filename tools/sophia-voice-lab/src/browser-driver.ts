@@ -92,12 +92,15 @@ export function classifyClientPageError(error: unknown): ClientPageErrorDiagnost
   const message = typeof record?.message === "string" ? record.message : String(error);
   const undefinedProperty = /^Cannot read properties of (undefined|null) \(reading ['"]([A-Za-z_$][A-Za-z0-9_$.-]{0,79})['"]\)$/.exec(message);
   const missingIdentifier = /^([A-Za-z_$][A-Za-z0-9_$]{0,79}) is not defined$/.exec(message);
+  const nonFunctionIdentifier = /^([A-Za-z_$][A-Za-z0-9_$]{0,79}) is not a function$/.exec(message);
   const reactCode = /Minified React error #(\d{1,6})/.exec(message);
   const safeSignature = undefinedProperty
     ? `${undefinedProperty[1]}_property:${undefinedProperty[2]}`
     : missingIdentifier
       ? `identifier_not_defined:${missingIdentifier[1]}`
-      : reactCode
+      : nonFunctionIdentifier
+        ? `identifier_not_function:${nonFunctionIdentifier[1]}`
+        : reactCode
         ? `react_error:${reactCode[1]}`
         : message === "Maximum call stack size exceeded"
           ? "maximum_call_stack"
@@ -462,15 +465,19 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
           void (async () => {
             let effectProbe: ClientEffectProbe | undefined;
             try {
-              const callFrames = Array.isArray(event.callFrames) ? event.callFrames.slice(0, 8) : [];
-              const top = callFrames[0];
-              if (top && typeof top.callFrameId === "string") {
+              const callFrames = Array.isArray(event.callFrames) ? event.callFrames.slice(0, 12) : [];
+              let effectFrame: (typeof callFrames)[number] | undefined;
+              for (const candidate of callFrames) {
+                if (typeof candidate.callFrameId !== "string") continue;
                 const createResult = await cdp.send("Debugger.evaluateOnCallFrame", {
-                  callFrameId: top.callFrameId,
+                  callFrameId: candidate.callFrameId,
                   expression: `(() => { if (typeof n !== "object" || n === null || !("create" in n)) return null; const rawType = typeof n.create; const allowed = ["undefined","function","object","boolean","number","string","symbol","bigint"]; return { createType: allowed.includes(rawType) ? rawType : "other", effectTag: Number.isSafeInteger(n.tag) && n.tag >= 0 && n.tag <= 255 ? n.tag : null }; })()`,
                   returnByValue: true,
                   silent: true,
-                  throwOnSideEffect: true,
+                  // This expression only reads the paused React effect record and
+                  // returns bounded primitives. Chromium cannot prove an IIFE is
+                  // side-effect free, so throwOnSideEffect would suppress the probe.
+                  throwOnSideEffect: false,
                 });
                 const createValue = createResult?.result?.value;
                 if (createValue && typeof createValue === "object") {
@@ -485,21 +492,26 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
                       owner_props: "unavailable",
                       owner_frame: null,
                     };
+                    effectFrame = candidate;
+                    break;
                   }
                 }
               }
-              if (effectProbe) {
-                for (const caller of callFrames.slice(1)) {
-                  if (typeof caller.callFrameId !== "string") continue;
-                  const ownerResult = await cdp.send("Debugger.evaluateOnCallFrame", {
-                    callFrameId: caller.callFrameId,
-                    expression: `(() => { if (typeof t !== "object" || t === null || !Number.isInteger(t.tag) || !("memoizedProps" in t)) return null; const props = t.memoizedProps; const keys = props && typeof props === "object" ? Object.keys(props).sort() : []; let ownerProps = "other"; if (keys.length === 0) ownerProps = "no_props"; else if (keys.length === 1 && keys[0] === "onReady") ownerProps = "on_ready"; else if (keys.length === 1 && keys[0] === "children") ownerProps = "children_only"; else if (keys.length === 2 && keys[0] === "children" && keys[1] === "onAuthenticated") ownerProps = "on_authenticated"; return { ownerFiberTag: t.tag >= 0 && t.tag <= 255 ? t.tag : null, ownerProps }; })()`,
-                    returnByValue: true,
-                    silent: true,
-                    throwOnSideEffect: true,
-                  });
-                  const ownerValue = ownerResult?.result?.value;
-                  if (!ownerValue || typeof ownerValue !== "object") continue;
+              if (effectProbe && effectFrame && typeof effectFrame.callFrameId === "string") {
+                // In React's passive-effect mount frame, `n` is the effect record
+                // and `t` is its owning fiber. They live in the same frame. If an
+                // effect body throws, that React frame may be below the throw site,
+                // which is why the scan above is not limited to callFrames[0].
+                const caller = effectFrame;
+                const ownerResult = await cdp.send("Debugger.evaluateOnCallFrame", {
+                  callFrameId: caller.callFrameId,
+                  expression: `(() => { if (typeof t !== "object" || t === null || !Number.isInteger(t.tag) || !("memoizedProps" in t)) return null; const props = t.memoizedProps; const keys = props && typeof props === "object" ? Object.keys(props).sort() : []; let ownerProps = "other"; if (keys.length === 0) ownerProps = "no_props"; else if (keys.length === 1 && keys[0] === "onReady") ownerProps = "on_ready"; else if (keys.length === 1 && keys[0] === "children") ownerProps = "children_only"; else if (keys.length === 2 && keys[0] === "children" && keys[1] === "onAuthenticated") ownerProps = "on_authenticated"; return { ownerFiberTag: t.tag >= 0 && t.tag <= 255 ? t.tag : null, ownerProps }; })()`,
+                  returnByValue: true,
+                  silent: true,
+                  throwOnSideEffect: false,
+                });
+                const ownerValue = ownerResult?.result?.value;
+                if (ownerValue && typeof ownerValue === "object") {
                   const ownerRecord = ownerValue as Record<string, unknown>;
                   const ownerProps = ownerRecord.ownerProps;
                   effectProbe.owner_fiber_tag = Number.isInteger(ownerRecord.ownerFiberTag) ? Number(ownerRecord.ownerFiberTag) : null;
@@ -533,7 +545,6 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
                       await cdp.send("Runtime.releaseObject", { objectId }).catch(() => undefined);
                     }
                   }
-                  break;
                 }
               }
             } catch {

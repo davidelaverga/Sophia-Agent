@@ -131,6 +131,15 @@ describe("ordinary dashboard consent route", () => {
     expect(JSON.stringify(diagnostic)).not.toContain("user-controlled detail");
   });
 
+  it("classifies a bounded non-function identifier without exposing other text", () => {
+    expect(classifyClientPageError(new TypeError("a is not a function"))).toMatchObject({
+      error_class: "TypeError",
+      safe_signature: "identifier_not_function:a",
+    });
+    expect(classifyClientPageError(new TypeError("private value is not a function")).safe_signature)
+      .toMatch(/^unclassified_sha256:[a-f0-9]{64}$/);
+  });
+
   it("projects a Next console location without its URL", () => {
     expect(classifyClientConsoleErrorLocation({
       url: "https://www.sophia-ei.com/_next/static/chunks/app-page.abc123.js?token=secret",
