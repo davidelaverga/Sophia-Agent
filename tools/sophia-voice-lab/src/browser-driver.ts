@@ -48,6 +48,8 @@ export const SYNTHETIC_FINALIZATION_EXCLUSION_KEYS = [
   "ordinary_user_projects", "shared_spaces", "debrief",
 ] as const;
 
+export const RECOVERABLE_DASHBOARD_LOAD_ERROR = "This page couldn’t load.";
+
 /** Validate only the cross-plane identity/retention/isolation envelope here.
  * The worker additionally validates and re-hashes the complete transcript. */
 export function hasExactFinalizationEnvelope(run: RunRecord, receipt: Record<string, unknown> | null | undefined, requireRawCleanupObligation = false): boolean {
@@ -229,7 +231,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       assertPageLocation(page.url(), frontendOrigin, (pathname) => pathname === "/", "ORDINARY_UI_ORIGIN_DRIFT");
       const micAnchor = page.locator(this.config.onboardingMicSelector).first();
       const consentAccept = page.locator(CONSENT_ACCEPT_SELECTOR).first();
-      const recoverableLoadError = page.getByText("This page couldn’t load", { exact: true }).first();
+      const recoverableLoadError = page.getByText(RECOVERABLE_DASHBOARD_LOAD_ERROR, { exact: true }).first();
       ordinaryRouteStage = "dashboard_privacy_consent";
       await establishDashboardMicRoute({
         isMicVisible: () => micAnchor.isVisible(),
