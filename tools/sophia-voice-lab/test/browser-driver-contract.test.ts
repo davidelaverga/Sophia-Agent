@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { assertPageLocation, closeContextWithProof, DASHBOARD_ROUTE_TIMEOUT_MS, drainProductCapture, establishDashboardMicRoute, isExactFinalizationResponse, PlaywrightVoiceDriver, RECOVERABLE_DASHBOARD_LOAD_ERROR, requestBoundJson, validateAppSyntheticBinding, validateD02BrowserContextBinding, validateD02ProductCleanupEcho } from "../src/browser-driver.js";
+import { assertPageLocation, closeContextWithProof, DASHBOARD_ROUTE_TIMEOUT_MS, drainProductCapture, establishDashboardMicRoute, isExactFinalizationResponse, PlaywrightVoiceDriver, RECOVERABLE_DASHBOARD_LOAD_ERROR, RECOVERABLE_DASHBOARD_RELOAD_BUTTON, requestBoundJson, validateAppSyntheticBinding, validateD02BrowserContextBinding, validateD02ProductCleanupEcho } from "../src/browser-driver.js";
 import { sha256 } from "../src/security.js";
 import { SHA, SHA_B, SHA_C, SHA_D, testConfig, testRun } from "./helpers.js";
 
@@ -108,6 +108,7 @@ describe("browser context closure proof", () => {
 describe("ordinary dashboard consent route", () => {
   it("matches the exact production recoverable error heading", () => {
     expect(RECOVERABLE_DASHBOARD_LOAD_ERROR).toBe("This page couldn’t load.");
+    expect(RECOVERABLE_DASHBOARD_RELOAD_BUTTON).toBe("Reload");
   });
 
   it("accepts through the visible consent UI before requiring the microphone CTA", async () => {

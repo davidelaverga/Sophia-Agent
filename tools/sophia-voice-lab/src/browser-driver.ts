@@ -49,6 +49,7 @@ export const SYNTHETIC_FINALIZATION_EXCLUSION_KEYS = [
 ] as const;
 
 export const RECOVERABLE_DASHBOARD_LOAD_ERROR = "This page couldn’t load.";
+export const RECOVERABLE_DASHBOARD_RELOAD_BUTTON = "Reload";
 
 /** Validate only the cross-plane identity/retention/isolation envelope here.
  * The worker additionally validates and re-hashes the complete transcript. */
@@ -232,6 +233,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       const micAnchor = page.locator(this.config.onboardingMicSelector).first();
       const consentAccept = page.locator(CONSENT_ACCEPT_SELECTOR).first();
       const recoverableLoadError = page.getByText(RECOVERABLE_DASHBOARD_LOAD_ERROR, { exact: true }).first();
+      const recoverableLoadReload = page.getByRole("button", { name: RECOVERABLE_DASHBOARD_RELOAD_BUTTON, exact: true }).first();
       ordinaryRouteStage = "dashboard_privacy_consent";
       await establishDashboardMicRoute({
         isMicVisible: () => micAnchor.isVisible(),
@@ -240,7 +242,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
         acceptConsent: () => consentAccept.click({ timeout: 20_000 }),
         isRecoverableLoadErrorVisible: () => recoverableLoadError.isVisible(),
         reload: async () => {
-          await page.reload({ waitUntil: "domcontentloaded", timeout: 30_000 });
+          await recoverableLoadReload.click({ timeout: 20_000 });
           assertPageLocation(page.url(), frontendOrigin, (pathname) => pathname === "/", "ORDINARY_UI_ORIGIN_DRIFT");
         },
         wait: () => page.waitForTimeout(100),
