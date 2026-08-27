@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { assertPageLocation, classifyBrowserStartCause, classifyClientCdpExceptionFrames, classifyClientCdpPausedFrames, classifyClientConsoleErrorLocation, classifyClientPageError, closeContextWithProof, DASHBOARD_ROUTE_TIMEOUT_MS, drainProductCapture, establishDashboardMicRoute, isExactFinalizationResponse, PlaywrightVoiceDriver, RECOVERABLE_DASHBOARD_LOAD_ERROR, RECOVERABLE_DASHBOARD_RELOAD_BUTTON, requestBoundJson, requestBoundJsonWithOneTransientRetry, selectRecentClientEffectProbe, selectRecentClientPausedFrames, validateAppSyntheticBinding, validateD02BrowserContextBinding, validateD02ProductCleanupEcho, withClientDiagnosticFrames, withClientEffectProbe } from "../src/browser-driver.js";
+import { assertPageLocation, classifyBrowserStartCause, classifyClientCdpExceptionFrames, classifyClientCdpPausedFrames, classifyClientConsoleErrorLocation, classifyClientPageError, closeContextWithProof, DASHBOARD_ROUTE_TIMEOUT_MS, drainProductCapture, establishDashboardMicRoute, findPassiveEffectCreateBreakpoint, isExactFinalizationResponse, PlaywrightVoiceDriver, RECOVERABLE_DASHBOARD_LOAD_ERROR, RECOVERABLE_DASHBOARD_RELOAD_BUTTON, requestBoundJson, requestBoundJsonWithOneTransientRetry, selectRecentClientEffectProbe, selectRecentClientPausedFrames, validateAppSyntheticBinding, validateD02BrowserContextBinding, validateD02ProductCleanupEcho, withClientDiagnosticFrames, withClientEffectProbe } from "../src/browser-driver.js";
 import { sha256 } from "../src/security.js";
 import { SHA, SHA_B, SHA_C, SHA_D, testConfig, testRun } from "./helpers.js";
 
@@ -252,6 +252,19 @@ describe("ordinary dashboard consent route", () => {
     ], 9_250)).toEqual(probe);
     expect(withClientEffectProbe(diagnostic, probe)).toMatchObject({ effect_probe: probe });
     expect(JSON.stringify(withClientEffectProbe(diagnostic, probe))).not.toContain("opaque product failure");
+  });
+
+  it("finds a minified React passive-effect create call without a build-specific offset", () => {
+    expect(findPassiveEffectCreateBreakpoint([
+      "function before(e){return e}",
+      "function iv(e,t){try{var n=t.updateQueue,r=null!==n?n.lastEffect:null;if(null!==r){var l=r.next;n=l;do{if((n.tag&e)===e){r=void 0;var a=n.create;n.inst.destroy=r=a()}n=n.next}while(n!==l)}}catch(e){throw e}}",
+    ].join("\n"))).toEqual({
+      line_number: 1,
+      column_number: 130,
+      effect_variable: "n",
+      owner_variable: "t",
+    });
+    expect(findPassiveEffectCreateBreakpoint("function nope(e,t){return t.create}")).toBeNull();
   });
 
   it("hashes browser start causes instead of projecting request headers", () => {

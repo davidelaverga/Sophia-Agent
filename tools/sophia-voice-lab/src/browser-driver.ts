@@ -68,6 +68,40 @@ type ClientEffectProbe = {
   owner_frame: ClientChunkFrame | null;
 };
 type TimedClientChunkFrames = { observedAt: number; frames: ClientChunkFrame[]; effectProbe?: ClientEffectProbe };
+type PassiveEffectBreakpoint = {
+  line_number: number;
+  column_number: number;
+  effect_variable: string;
+  owner_variable: string;
+};
+
+/** Locate React's minified passive-effect create call without depending on a
+ * build-specific chunk name or byte offset. The returned identifiers are
+ * restricted to JavaScript identifiers before they are used by CDP. */
+export function findPassiveEffectCreateBreakpoint(source: string): PassiveEffectBreakpoint | null {
+  if (source.length === 0 || source.length > 5_000_000) return null;
+  const createCall = /var ([A-Za-z_$][A-Za-z0-9_$]*)=([A-Za-z_$][A-Za-z0-9_$]*)\.create;\2\.inst\.destroy=([A-Za-z_$][A-Za-z0-9_$]*)=\1\(\)/.exec(source);
+  if (createCall?.index === undefined) return null;
+  const functionWindow = source.slice(Math.max(0, createCall.index - 1_000), createCall.index);
+  const functionPattern = /function [A-Za-z_$][A-Za-z0-9_$]*\(([^)]{1,160})\)\{/g;
+  let enclosing: RegExpExecArray | null = null;
+  for (let match = functionPattern.exec(functionWindow); match; match = functionPattern.exec(functionWindow)) enclosing = match;
+  const parameters = enclosing?.[1]?.split(",").map((value) => value.trim()) ?? [];
+  const ownerVariable = parameters[1];
+  const effectVariable = createCall[2];
+  if (!effectVariable || !ownerVariable
+    || !/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(effectVariable)
+    || !/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(ownerVariable)) return null;
+  const before = source.slice(0, createCall.index);
+  const lineNumber = (before.match(/\n/g) ?? []).length;
+  const lastNewline = before.lastIndexOf("\n");
+  return {
+    line_number: lineNumber,
+    column_number: createCall.index - lastNewline - 1,
+    effect_variable: effectVariable,
+    owner_variable: ownerVariable,
+  };
+}
 
 export function classifyBrowserStartCause(error: unknown): {
   error_class: string;
@@ -450,8 +484,29 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       try {
         const cdp = await context.newCDPSession(page);
         const scriptUrls = new Map<string, string>();
+        const passiveEffectBreakpoints = new Map<string, PassiveEffectBreakpoint>();
         cdp.on("Debugger.scriptParsed", (event) => {
-          if (typeof event.scriptId === "string" && typeof event.url === "string") scriptUrls.set(event.scriptId, event.url);
+          if (typeof event.scriptId !== "string" || typeof event.url !== "string") return;
+          scriptUrls.set(event.scriptId, event.url);
+          void (async () => {
+            try {
+              const scriptUrl = new URL(event.url);
+              if (scriptUrl.origin !== frontendOrigin || !/^\/_next\/static\/chunks\/[A-Za-z0-9._-]{1,160}\.js$/.test(scriptUrl.pathname)) return;
+              const sourceResult = await cdp.send("Debugger.getScriptSource", { scriptId: event.scriptId });
+              const breakpoint = findPassiveEffectCreateBreakpoint(sourceResult.scriptSource);
+              if (!breakpoint) return;
+              const installed = await cdp.send("Debugger.setBreakpoint", {
+                location: {
+                  scriptId: event.scriptId,
+                  lineNumber: breakpoint.line_number,
+                  columnNumber: breakpoint.column_number,
+                },
+              });
+              passiveEffectBreakpoints.set(installed.breakpointId, breakpoint);
+            } catch {
+              // Passive-effect diagnostics are best-effort and never block load.
+            }
+          })();
         });
         await cdp.send("Runtime.enable");
         cdp.on("Runtime.exceptionThrown", (event) => {
@@ -464,14 +519,19 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
           const frames = classifyClientCdpPausedFrames(event, frontendOrigin);
           void (async () => {
             let effectProbe: ClientEffectProbe | undefined;
+            const passiveBreakpointId = Array.isArray(event.hitBreakpoints)
+              ? event.hitBreakpoints.find((breakpointId) => passiveEffectBreakpoints.has(breakpointId))
+              : undefined;
+            const passiveBinding = passiveBreakpointId ? passiveEffectBreakpoints.get(passiveBreakpointId) : undefined;
             try {
               const callFrames = Array.isArray(event.callFrames) ? event.callFrames.slice(0, 12) : [];
               let effectFrame: (typeof callFrames)[number] | undefined;
               for (const candidate of callFrames) {
                 if (typeof candidate.callFrameId !== "string") continue;
+                const effectVariable = passiveBinding?.effect_variable ?? "n";
                 const createResult = await cdp.send("Debugger.evaluateOnCallFrame", {
                   callFrameId: candidate.callFrameId,
-                  expression: `(() => { if (typeof n !== "object" || n === null || !("create" in n)) return null; const rawType = typeof n.create; const allowed = ["undefined","function","object","boolean","number","string","symbol","bigint"]; return { createType: allowed.includes(rawType) ? rawType : "other", effectTag: Number.isSafeInteger(n.tag) && n.tag >= 0 && n.tag <= 255 ? n.tag : null }; })()`,
+                  expression: `(() => { if (typeof ${effectVariable} !== "object" || ${effectVariable} === null || !("create" in ${effectVariable})) return null; const rawType = typeof ${effectVariable}.create; const allowed = ["undefined","function","object","boolean","number","string","symbol","bigint"]; return { createType: allowed.includes(rawType) ? rawType : "other", effectTag: Number.isSafeInteger(${effectVariable}.tag) && ${effectVariable}.tag >= 0 && ${effectVariable}.tag <= 255 ? ${effectVariable}.tag : null }; })()`,
                   returnByValue: true,
                   silent: true,
                   // This expression only reads the paused React effect record and
@@ -484,7 +544,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
                   const createRecord = createValue as Record<string, unknown>;
                   const createType = createRecord.createType;
                   const allowedTypes = new Set<ClientEffectProbe["create_type"]>(["undefined", "function", "object", "boolean", "number", "string", "symbol", "bigint", "other"]);
-                  if (typeof createType === "string" && allowedTypes.has(createType as ClientEffectProbe["create_type"])) {
+                  if (typeof createType === "string" && createType !== "function" && allowedTypes.has(createType as ClientEffectProbe["create_type"])) {
                     effectProbe = {
                       create_type: createType as ClientEffectProbe["create_type"],
                       effect_tag: Number.isInteger(createRecord.effectTag) ? Number(createRecord.effectTag) : null,
@@ -503,9 +563,10 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
                 // effect body throws, that React frame may be below the throw site,
                 // which is why the scan above is not limited to callFrames[0].
                 const caller = effectFrame;
+                const ownerVariable = passiveBinding?.owner_variable ?? "t";
                 const ownerResult = await cdp.send("Debugger.evaluateOnCallFrame", {
                   callFrameId: caller.callFrameId,
-                  expression: `(() => { if (typeof t !== "object" || t === null || !Number.isInteger(t.tag) || !("memoizedProps" in t)) return null; const props = t.memoizedProps; const keys = props && typeof props === "object" ? Object.keys(props).sort() : []; let ownerProps = "other"; if (keys.length === 0) ownerProps = "no_props"; else if (keys.length === 1 && keys[0] === "onReady") ownerProps = "on_ready"; else if (keys.length === 1 && keys[0] === "children") ownerProps = "children_only"; else if (keys.length === 2 && keys[0] === "children" && keys[1] === "onAuthenticated") ownerProps = "on_authenticated"; return { ownerFiberTag: t.tag >= 0 && t.tag <= 255 ? t.tag : null, ownerProps }; })()`,
+                  expression: `(() => { if (typeof ${ownerVariable} !== "object" || ${ownerVariable} === null || !Number.isInteger(${ownerVariable}.tag) || !("memoizedProps" in ${ownerVariable})) return null; const props = ${ownerVariable}.memoizedProps; const keys = props && typeof props === "object" ? Object.keys(props).sort() : []; let ownerProps = "other"; if (keys.length === 0) ownerProps = "no_props"; else if (keys.length === 1 && keys[0] === "onReady") ownerProps = "on_ready"; else if (keys.length === 1 && keys[0] === "children") ownerProps = "children_only"; else if (keys.length === 2 && keys[0] === "children" && keys[1] === "onAuthenticated") ownerProps = "on_authenticated"; return { ownerFiberTag: ${ownerVariable}.tag >= 0 && ${ownerVariable}.tag <= 255 ? ${ownerVariable}.tag : null, ownerProps }; })()`,
                   returnByValue: true,
                   silent: true,
                   throwOnSideEffect: false,
@@ -520,7 +581,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
                     : "unavailable";
                   const functionResult = await cdp.send("Debugger.evaluateOnCallFrame", {
                     callFrameId: caller.callFrameId,
-                    expression: `typeof t.elementType === "function" ? t.elementType : (t.elementType && typeof t.elementType.type === "function" ? t.elementType.type : (typeof t.type === "function" ? t.type : (t.type && typeof t.type.type === "function" ? t.type.type : null)))`,
+                    expression: `typeof ${ownerVariable}.elementType === "function" ? ${ownerVariable}.elementType : (${ownerVariable}.elementType && typeof ${ownerVariable}.elementType.type === "function" ? ${ownerVariable}.elementType.type : (typeof ${ownerVariable}.type === "function" ? ${ownerVariable}.type : (${ownerVariable}.type && typeof ${ownerVariable}.type.type === "function" ? ${ownerVariable}.type.type : null)))`,
                     returnByValue: false,
                     silent: true,
                     throwOnSideEffect: true,
@@ -547,10 +608,14 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
                   }
                 }
               }
+              if (effectProbe && passiveBreakpointId) {
+                await cdp.send("Debugger.removeBreakpoint", { breakpointId: passiveBreakpointId }).catch(() => undefined);
+                passiveEffectBreakpoints.delete(passiveBreakpointId);
+              }
             } catch {
               // Safe effect diagnostics are fail-open and never block resume.
             } finally {
-              if (frames.length > 0 || effectProbe) {
+              if ((!passiveBinding && frames.length > 0) || effectProbe) {
                 recentClientPausedFrameSets.push({ observedAt: Date.now(), frames, ...(effectProbe ? { effectProbe } : {}) });
                 if (recentClientPausedFrameSets.length > 20) recentClientPausedFrameSets.splice(0, recentClientPausedFrameSets.length - 20);
               }
