@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { assertPageLocation, classifyBrowserStartCause, classifyClientCdpExceptionFrames, classifyClientCdpPausedFrames, classifyClientConsoleErrorLocation, classifyClientPageError, closeContextWithProof, DASHBOARD_ROUTE_TIMEOUT_MS, drainProductCapture, establishDashboardMicRoute, isExactFinalizationResponse, PlaywrightVoiceDriver, RECOVERABLE_DASHBOARD_LOAD_ERROR, RECOVERABLE_DASHBOARD_RELOAD_BUTTON, requestBoundJson, requestBoundJsonWithOneTransientRetry, validateAppSyntheticBinding, validateD02BrowserContextBinding, validateD02ProductCleanupEcho } from "../src/browser-driver.js";
+import { assertPageLocation, classifyBrowserStartCause, classifyClientCdpExceptionFrames, classifyClientCdpPausedFrames, classifyClientConsoleErrorLocation, classifyClientPageError, closeContextWithProof, DASHBOARD_ROUTE_TIMEOUT_MS, drainProductCapture, establishDashboardMicRoute, isExactFinalizationResponse, PlaywrightVoiceDriver, RECOVERABLE_DASHBOARD_LOAD_ERROR, RECOVERABLE_DASHBOARD_RELOAD_BUTTON, requestBoundJson, requestBoundJsonWithOneTransientRetry, selectRecentClientPausedFrames, validateAppSyntheticBinding, validateD02BrowserContextBinding, validateD02ProductCleanupEcho } from "../src/browser-driver.js";
 import { sha256 } from "../src/security.js";
 import { SHA, SHA_B, SHA_C, SHA_D, testConfig, testRun } from "./helpers.js";
 
@@ -186,6 +186,25 @@ describe("ordinary dashboard consent route", () => {
     ]);
     expect(JSON.stringify(diagnostic)).not.toContain("secret");
     expect(JSON.stringify(diagnostic)).not.toContain("attacker");
+  });
+
+  it("keeps the application throw when a later React rethrow shares the pageerror window", () => {
+    expect(selectRecentClientPausedFrames([
+      { observedAt: 1_000, frames: [{ chunk: "stale.js", line: 1, column: 1 }] },
+      { observedAt: 9_100, frames: [
+        { chunk: "app-page.js", line: 1, column: 77 },
+        { chunk: "react.js", line: 1, column: 100 },
+      ] },
+      { observedAt: 9_200, frames: [
+        { chunk: "react.js", line: 1, column: 200 },
+        { chunk: "react.js", line: 1, column: 220 },
+      ] },
+    ], 9_250)).toEqual([
+      { chunk: "react.js", line: 1, column: 200 },
+      { chunk: "app-page.js", line: 1, column: 77 },
+      { chunk: "react.js", line: 1, column: 220 },
+      { chunk: "react.js", line: 1, column: 100 },
+    ]);
   });
 
   it("hashes browser start causes instead of projecting request headers", () => {

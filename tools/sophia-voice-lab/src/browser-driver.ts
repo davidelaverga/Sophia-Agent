@@ -59,6 +59,7 @@ type ClientPageErrorDiagnostic = {
   digest: string | null;
 };
 type ClientChunkFrame = { chunk: string; line: number; column: number };
+type TimedClientChunkFrames = { observedAt: number; frames: ClientChunkFrame[] };
 
 export function classifyBrowserStartCause(error: unknown): {
   error_class: string;
@@ -178,6 +179,35 @@ export function classifyClientCdpPausedFrames(details: unknown, expectedOrigin: 
     }
   }
   return safeFrames;
+}
+
+/** Pair the pageerror with only the immediately preceding pause cluster. One
+ * top frame per pause is kept first so a later React rethrow cannot crowd out
+ * the earlier application throw site; remaining safe callers fill the bound. */
+export function selectRecentClientPausedFrames(
+  snapshots: TimedClientChunkFrames[],
+  pageErrorObservedAt: number,
+  windowMs = 1_500,
+): ClientChunkFrame[] {
+  const recent = snapshots
+    .filter((snapshot) => snapshot.observedAt <= pageErrorObservedAt && snapshot.observedAt >= pageErrorObservedAt - windowMs)
+    .slice(-20)
+    .reverse();
+  const selected: ClientChunkFrame[] = [];
+  const add = (frame: ClientChunkFrame | undefined) => {
+    if (frame && !selected.some((existing) => existing.chunk === frame.chunk && existing.line === frame.line && existing.column === frame.column)) selected.push(frame);
+  };
+  for (const snapshot of recent) {
+    add(snapshot.frames[0]);
+    if (selected.length === 5) return selected;
+  }
+  for (const snapshot of recent) {
+    for (const frame of snapshot.frames.slice(1)) {
+      add(frame);
+      if (selected.length === 5) return selected;
+    }
+  }
+  return selected;
 }
 
 function withClientConsoleFrames(
@@ -340,6 +370,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
     let latestClientPageError: ClientPageErrorDiagnostic | null = null;
     let latestClientConsoleFrames: ClientChunkFrame[] = [];
     let latestClientPausedFrames: ClientChunkFrame[] = [];
+    const recentClientPausedFrameSets: TimedClientChunkFrames[] = [];
     try {
       // No OS/browser microphone permission is granted. The init script's
       // page-owned MediaStreamDestination is the only accepted audio stream;
@@ -366,7 +397,11 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       await context.addInitScript({ content: buildVoiceLabInitScript({ pageOrigin: frontendOrigin, websocketOrigins: [...this.config.websocketOrigins], maxAudioBytes: this.config.maxAudioBytes, testRunId: run.testRunId, cleanupObligationId: run.cleanupObligationId }) });
       ordinaryRouteStage = "frontend_home_navigation";
       const page = await context.newPage();
-      page.on("pageerror", (error) => { latestClientPageError = classifyClientPageError(error); });
+      page.on("pageerror", (error) => {
+        const observedAt = Date.now();
+        latestClientPageError = classifyClientPageError(error);
+        latestClientPausedFrames = selectRecentClientPausedFrames(recentClientPausedFrameSets, observedAt);
+      });
       page.on("console", (message) => {
         if (message.type() !== "error") return;
         const frame = classifyClientConsoleErrorLocation(message.location(), frontendOrigin);
@@ -380,10 +415,13 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
           if (frames.length > 0 && latestClientPausedFrames.length === 0) latestClientConsoleFrames = frames;
         });
         await cdp.send("Debugger.enable");
-        await cdp.send("Debugger.setPauseOnExceptions", { state: "uncaught" });
+        await cdp.send("Debugger.setPauseOnExceptions", { state: "all" });
         cdp.on("Debugger.paused", (event) => {
           const frames = classifyClientCdpPausedFrames(event, frontendOrigin);
-          if (frames.length > 0) latestClientPausedFrames = frames;
+          if (frames.length > 0) {
+            recentClientPausedFrameSets.push({ observedAt: Date.now(), frames });
+            if (recentClientPausedFrameSets.length > 20) recentClientPausedFrameSets.splice(0, recentClientPausedFrameSets.length - 20);
+          }
           void cdp.send("Debugger.resume").catch(() => undefined);
         });
       } catch {
