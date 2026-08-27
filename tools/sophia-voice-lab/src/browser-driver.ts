@@ -122,6 +122,32 @@ export function classifyClientConsoleErrorLocation(location: {
   return { chunk, line: Number(lineNumber) + 1, column: Number(columnNumber) + 1 };
 }
 
+/** Chromium's Runtime.exceptionThrown event can preserve call frames when the
+ * Playwright Error.stack and console location are incomplete. Project only a
+ * same-origin Next chunk coordinate; never retain exception text or raw URLs. */
+export function classifyClientCdpExceptionDetails(details: unknown, expectedOrigin: string): ClientChunkFrame | null {
+  const record = details && typeof details === "object" ? details as Record<string, unknown> : null;
+  const stackTrace = record?.stackTrace && typeof record.stackTrace === "object"
+    ? record.stackTrace as Record<string, unknown>
+    : null;
+  const callFrames = Array.isArray(stackTrace?.callFrames) ? stackTrace.callFrames.slice(0, 20) : [];
+  for (const candidate of callFrames) {
+    if (!candidate || typeof candidate !== "object") continue;
+    const frame = candidate as Record<string, unknown>;
+    const safe = classifyClientConsoleErrorLocation({
+      ...(typeof frame.url === "string" ? { url: frame.url } : {}),
+      ...(typeof frame.lineNumber === "number" ? { lineNumber: frame.lineNumber } : {}),
+      ...(typeof frame.columnNumber === "number" ? { columnNumber: frame.columnNumber } : {}),
+    }, expectedOrigin);
+    if (safe) return safe;
+  }
+  return classifyClientConsoleErrorLocation({
+    ...(typeof record?.url === "string" ? { url: record.url } : {}),
+    ...(typeof record?.lineNumber === "number" ? { lineNumber: record.lineNumber } : {}),
+    ...(typeof record?.columnNumber === "number" ? { columnNumber: record.columnNumber } : {}),
+  }, expectedOrigin);
+}
+
 function withClientConsoleFrame(
   diagnostic: ClientPageErrorDiagnostic | null,
   frame: ClientChunkFrame | null,
@@ -313,6 +339,16 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
         const frame = classifyClientConsoleErrorLocation(message.location(), frontendOrigin);
         if (frame) latestClientConsoleFrame = frame;
       });
+      try {
+        const cdp = await context.newCDPSession(page);
+        await cdp.send("Runtime.enable");
+        cdp.on("Runtime.exceptionThrown", (event) => {
+          const frame = classifyClientCdpExceptionDetails(event.exceptionDetails, frontendOrigin);
+          if (frame) latestClientConsoleFrame = frame;
+        });
+      } catch {
+        // Diagnostic enrichment is fail-open and must not alter product flow.
+      }
       const session: BrowserSession = { context, page, harnessCursor: 0, productCursor: null, latestProviderReceipt: null, contextExpiresAt: Number(grantReceipt.expires_at), expectedBinding: { testRunId: run.testRunId, cleanupObligationId: run.cleanupObligationId, principalId: run.principalId, scenarioId: run.scenarioId, scenarioVersion: run.scenarioVersion, environment: run.environment, retentionHours: run.capturePolicy.retentionHours, providerExpiresAt: run.expiresAt.toISOString(), ...(exactBrowserContextBinding === undefined ? {} : { browserContextBinding: exactBrowserContextBinding }) } };
       this.#sessions.set(run.id, session);
       this.#pendingContexts.delete(run.id);

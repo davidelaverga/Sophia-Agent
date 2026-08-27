@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { assertPageLocation, classifyBrowserStartCause, classifyClientConsoleErrorLocation, classifyClientPageError, closeContextWithProof, DASHBOARD_ROUTE_TIMEOUT_MS, drainProductCapture, establishDashboardMicRoute, isExactFinalizationResponse, PlaywrightVoiceDriver, RECOVERABLE_DASHBOARD_LOAD_ERROR, RECOVERABLE_DASHBOARD_RELOAD_BUTTON, requestBoundJson, requestBoundJsonWithOneTransientRetry, validateAppSyntheticBinding, validateD02BrowserContextBinding, validateD02ProductCleanupEcho } from "../src/browser-driver.js";
+import { assertPageLocation, classifyBrowserStartCause, classifyClientCdpExceptionDetails, classifyClientConsoleErrorLocation, classifyClientPageError, closeContextWithProof, DASHBOARD_ROUTE_TIMEOUT_MS, drainProductCapture, establishDashboardMicRoute, isExactFinalizationResponse, PlaywrightVoiceDriver, RECOVERABLE_DASHBOARD_LOAD_ERROR, RECOVERABLE_DASHBOARD_RELOAD_BUTTON, requestBoundJson, requestBoundJsonWithOneTransientRetry, validateAppSyntheticBinding, validateD02BrowserContextBinding, validateD02ProductCleanupEcho } from "../src/browser-driver.js";
 import { sha256 } from "../src/security.js";
 import { SHA, SHA_B, SHA_C, SHA_D, testConfig, testRun } from "./helpers.js";
 
@@ -141,6 +141,27 @@ describe("ordinary dashboard consent route", () => {
       url: "https://example.com/not-a-next-chunk.js",
       lineNumber: 0,
       columnNumber: 1,
+    }, "https://www.sophia-ei.com")).toBeNull();
+  });
+
+  it("projects only a same-origin Next frame from Chromium exception details", () => {
+    const diagnostic = classifyClientCdpExceptionDetails({
+      text: "Uncaught secret detail",
+      url: "https://attacker.example/private.js?token=secret",
+      lineNumber: 8,
+      columnNumber: 9,
+      stackTrace: {
+        callFrames: [
+          { url: "https://attacker.example/private.js?token=secret", lineNumber: 1, columnNumber: 2 },
+          { url: "https://www.sophia-ei.com/_next/static/chunks/dashboard.abc123.js?token=secret", lineNumber: 11, columnNumber: 33 },
+        ],
+      },
+    }, "https://www.sophia-ei.com");
+
+    expect(diagnostic).toEqual({ chunk: "dashboard.abc123.js", line: 12, column: 34 });
+    expect(JSON.stringify(diagnostic)).not.toContain("secret");
+    expect(classifyClientCdpExceptionDetails({
+      stackTrace: { callFrames: [{ url: "https://attacker.example/_next/static/chunks/evil.js", lineNumber: 0, columnNumber: 0 }] },
     }, "https://www.sophia-ei.com")).toBeNull();
   });
 
