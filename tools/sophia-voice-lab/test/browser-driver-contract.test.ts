@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { assertPageLocation, classifyBrowserStartCause, classifyClientCdpExceptionFrames, classifyClientCdpPausedFrames, classifyClientConsoleErrorLocation, classifyClientPageError, closeContextWithProof, DASHBOARD_ROUTE_TIMEOUT_MS, drainProductCapture, establishDashboardMicRoute, isExactFinalizationResponse, PlaywrightVoiceDriver, RECOVERABLE_DASHBOARD_LOAD_ERROR, RECOVERABLE_DASHBOARD_RELOAD_BUTTON, requestBoundJson, requestBoundJsonWithOneTransientRetry, selectRecentClientPausedFrames, validateAppSyntheticBinding, validateD02BrowserContextBinding, validateD02ProductCleanupEcho } from "../src/browser-driver.js";
+import { assertPageLocation, classifyBrowserStartCause, classifyClientCdpExceptionFrames, classifyClientCdpPausedFrames, classifyClientConsoleErrorLocation, classifyClientPageError, closeContextWithProof, DASHBOARD_ROUTE_TIMEOUT_MS, drainProductCapture, establishDashboardMicRoute, isExactFinalizationResponse, PlaywrightVoiceDriver, RECOVERABLE_DASHBOARD_LOAD_ERROR, RECOVERABLE_DASHBOARD_RELOAD_BUTTON, requestBoundJson, requestBoundJsonWithOneTransientRetry, selectRecentClientPausedFrames, validateAppSyntheticBinding, validateD02BrowserContextBinding, validateD02ProductCleanupEcho, withClientDiagnosticFrames } from "../src/browser-driver.js";
 import { sha256 } from "../src/security.js";
 import { SHA, SHA_B, SHA_C, SHA_D, testConfig, testRun } from "./helpers.js";
 
@@ -205,6 +205,26 @@ describe("ordinary dashboard consent route", () => {
       { chunk: "react.js", line: 1, column: 220 },
       { chunk: "react.js", line: 1, column: 100 },
     ]);
+  });
+
+  it("prefers correlated paused throw sites over an existing React-only pageerror stack", () => {
+    const diagnostic = classifyClientPageError(Object.assign(new TypeError("opaque product failure"), {
+      stack: "TypeError: opaque product failure\n    at react (https://www.sophia-ei.com/_next/static/chunks/react.js:1:100)",
+    }));
+    const enriched = withClientDiagnosticFrames(diagnostic, [
+      { chunk: "app-page.js", line: 1, column: 77 },
+      { chunk: "react.js", line: 1, column: 200 },
+    ], true);
+
+    expect(enriched).toMatchObject({
+      next_chunk: "app-page.js",
+      next_frames: [
+        { chunk: "app-page.js", line: 1, column: 77 },
+        { chunk: "react.js", line: 1, column: 200 },
+        { chunk: "react.js", line: 1, column: 100 },
+      ],
+    });
+    expect(JSON.stringify(enriched)).not.toContain("opaque product failure");
   });
 
   it("hashes browser start causes instead of projecting request headers", () => {

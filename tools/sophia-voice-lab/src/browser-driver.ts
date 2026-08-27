@@ -210,11 +210,19 @@ export function selectRecentClientPausedFrames(
   return selected;
 }
 
-function withClientConsoleFrames(
+export function withClientDiagnosticFrames(
   diagnostic: ClientPageErrorDiagnostic | null,
   frames: ClientChunkFrame[],
+  preferCorrelatedFrames = false,
 ): ClientPageErrorDiagnostic | null {
-  if (!diagnostic || frames.length === 0 || diagnostic.next_frames.length > 0
+  if (!diagnostic || frames.length === 0) return diagnostic;
+  if (preferCorrelatedFrames) {
+    const nextFrames = [...frames, ...diagnostic.next_frames]
+      .filter((frame, index, all) => all.findIndex((candidate) => candidate.chunk === frame.chunk && candidate.line === frame.line && candidate.column === frame.column) === index)
+      .slice(0, 5);
+    return { ...diagnostic, next_chunk: nextFrames[0]?.chunk ?? diagnostic.next_chunk, next_frames: nextFrames };
+  }
+  if (diagnostic.next_frames.length > 0
     || (diagnostic.next_chunk !== null && !frames.some((frame) => diagnostic.next_chunk === frame.chunk))) return diagnostic;
   return { ...diagnostic, next_chunk: diagnostic.next_chunk ?? frames[0]!.chunk, next_frames: frames.slice(0, 5) };
 }
@@ -482,13 +490,13 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       // capability and must revoke the login before closing the browser.
       if (this.#sessions.get(run.id)?.context === context) {
         if (error instanceof VoiceLabError) throw error;
-        throw new VoiceLabError(labError("ORDINARY_UI_ROUTE_FAILED", "The ordinary deployed Sophia voice route could not be established.", "harness", false, { stage: ordinaryRouteStage, cause: classifyBrowserStartCause(error), client_page_error: withClientConsoleFrames(latestClientPageError, latestClientPausedFrames.length > 0 ? latestClientPausedFrames : latestClientConsoleFrames) }));
+        throw new VoiceLabError(labError("ORDINARY_UI_ROUTE_FAILED", "The ordinary deployed Sophia voice route could not be established.", "harness", false, { stage: ordinaryRouteStage, cause: classifyBrowserStartCause(error), client_page_error: withClientDiagnosticFrames(latestClientPageError, latestClientPausedFrames.length > 0 ? latestClientPausedFrames : latestClientConsoleFrames, latestClientPausedFrames.length > 0) }));
       }
       const closed = await closeContextWithProof(context, () => this.#browser?.contexts() ?? []);
       if (closed.closed) { this.#sessions.delete(run.id); this.#pendingContexts.delete(run.id); }
       else throw new VoiceLabError(labError("BROWSER_CONTEXT_CLOSE_FAILED", "Failed start left a browser context that could not be proven closed.", "harness", true, { original_error_class: error instanceof VoiceLabError ? error.detail.code : error instanceof Error ? error.name : "Error", close_error_class: closed.errorClass }));
       if (error instanceof VoiceLabError) throw error;
-      throw new VoiceLabError(labError("ORDINARY_UI_ROUTE_FAILED", "The ordinary deployed Sophia voice route could not be established.", "harness", false, { stage: ordinaryRouteStage, cause: classifyBrowserStartCause(error), client_page_error: withClientConsoleFrames(latestClientPageError, latestClientPausedFrames.length > 0 ? latestClientPausedFrames : latestClientConsoleFrames) }));
+      throw new VoiceLabError(labError("ORDINARY_UI_ROUTE_FAILED", "The ordinary deployed Sophia voice route could not be established.", "harness", false, { stage: ordinaryRouteStage, cause: classifyBrowserStartCause(error), client_page_error: withClientDiagnosticFrames(latestClientPageError, latestClientPausedFrames.length > 0 ? latestClientPausedFrames : latestClientConsoleFrames, latestClientPausedFrames.length > 0) }));
     }
   }
 
