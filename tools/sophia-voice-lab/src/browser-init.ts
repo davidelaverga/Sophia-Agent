@@ -97,6 +97,13 @@ export function buildVoiceLabInitScript(options: InitScriptOptions): string {
     try {
       const completedOnboarding = { state: { firstRun: { status: 'completed', currentStepId: null, completedSteps: [], skippedAt: null, completedAt: new Date().toISOString() }, contextualTips: {}, preferences: { voiceOverEnabled: true, reducedMotion: true }, legacyStep: 'complete' }, version: 2 };
       localStorage.setItem('sophia-onboarding-v2', JSON.stringify(completedOnboarding));
+      // The dedicated synthetic principal is forbidden from ordinary product
+      // mutation endpoints, including /api/consent/accept. Import the
+      // campaign-approved consent state before React hydrates so the ordinary
+      // dashboard can render without asking the isolated principal to cross
+      // that boundary. Synthetic telemetry remains independently fenced by
+      // the HttpOnly run-context markers.
+      localStorage.setItem('sophia_consent_accepted', 'true');
       localStorage.setItem('sophia.capture.enabled', '1');
     } catch {}
     const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
