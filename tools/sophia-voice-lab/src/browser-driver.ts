@@ -91,6 +91,8 @@ type PassiveEffectBreakpoint = (PassiveEffectBreakpointBase & {
   probe_kind: "create";
   create_variable: string;
 }) | (PassiveEffectBreakpointBase & {
+  probe_kind: "create_catch";
+}) | (PassiveEffectBreakpointBase & {
   probe_kind: "destroy";
   instance_variable: string;
   destroy_variable: string;
@@ -167,6 +169,31 @@ export function findPassiveEffectDestroyBreakpoint(source: string): PassiveEffec
   };
 }
 
+/** Locate React's passive-effect mount catch handler. The effect callback can
+ * itself be callable yet throw from product code; stopping only when React
+ * enters this catch avoids pausing the many successful effects on the page. */
+export function findPassiveEffectCreateCatchBreakpoint(source: string): PassiveEffectBreakpoint | null {
+  const create = findPassiveEffectCreateBreakpoint(source);
+  if (!create || create.probe_kind !== "create") return null;
+  const createCall = /var ([A-Za-z_$][A-Za-z0-9_$]*)=([A-Za-z_$][A-Za-z0-9_$]*)\.create;\2\.inst\.destroy=([A-Za-z_$][A-Za-z0-9_$]*)=\1\(\)/.exec(source);
+  if (createCall?.index === undefined) return null;
+  const ownerVariable = create.owner_variable;
+  const catchWindow = source.slice(createCall.index, Math.min(source.length, createCall.index + 2_000));
+  const identifierSource = "[A-Za-z_$][A-Za-z0-9_$]*";
+  const catchHandler = new RegExp(`\\}\\}catch\\((${identifierSource})\\)\\{(${identifierSource})\\(${ownerVariable},${ownerVariable}\\.return,\\1\\)`).exec(catchWindow);
+  const handlerVariable = catchHandler?.[2];
+  if (catchHandler?.index === undefined || !handlerVariable) return null;
+  const absoluteIndex = createCall.index + catchHandler.index + catchHandler[0].lastIndexOf(`${handlerVariable}(`);
+  const before = source.slice(0, absoluteIndex);
+  return {
+    probe_kind: "create_catch",
+    line_number: (before.match(/\n/g) ?? []).length,
+    column_number: absoluteIndex - before.lastIndexOf("\n") - 1,
+    effect_variable: create.effect_variable,
+    owner_variable: ownerVariable,
+  };
+}
+
 /** A non-callable create value is itself the fault, so one observation is
  * conclusive. Callable creates must remain armed because the product error can
  * be thrown from inside a later effect callback; the most recent bounded owner
@@ -181,6 +208,8 @@ export function shouldReleasePassiveEffectBreakpoint(createType: ClientEffectPro
 export function passiveEffectBreakpointCondition(breakpoint: PassiveEffectBreakpoint): string {
   return breakpoint.probe_kind === "create"
     ? `typeof ${breakpoint.create_variable} !== "function"`
+    : breakpoint.probe_kind === "create_catch"
+      ? "true"
     : `typeof ${breakpoint.destroy_variable} !== "undefined" && typeof ${breakpoint.destroy_variable} !== "function"`;
 }
 
@@ -223,7 +252,7 @@ async function preloadPassiveEffectBreakpoints(request: APIRequestContext, front
       const bytes = await response.body();
       if (bytes.byteLength === 0 || bytes.byteLength > 5_000_000) continue;
       const source = bytes.toString("utf8");
-      const candidates = [findPassiveEffectCreateBreakpoint(source), findPassiveEffectDestroyBreakpoint(source)].filter((value): value is PassiveEffectBreakpoint => value !== null);
+      const candidates = [findPassiveEffectCreateBreakpoint(source), findPassiveEffectCreateCatchBreakpoint(source), findPassiveEffectDestroyBreakpoint(source)].filter((value): value is PassiveEffectBreakpoint => value !== null);
       if (candidates.length === 0) continue;
       const parsed = new URL(scriptUrl);
       const escapedPath = `${parsed.origin}${parsed.pathname}`.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -671,6 +700,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
               const sourceResult = await cdp.send("Debugger.getScriptSource", { scriptId });
               const breakpoints = [
                 findPassiveEffectCreateBreakpoint(sourceResult.scriptSource),
+                findPassiveEffectCreateCatchBreakpoint(sourceResult.scriptSource),
                 findPassiveEffectDestroyBreakpoint(sourceResult.scriptSource),
               ].filter((value): value is PassiveEffectBreakpoint => value !== null);
               for (const breakpoint of breakpoints) {
@@ -873,6 +903,8 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
                 }
               }
               const conclusiveEffectProbe = effectProbe !== undefined && (
+                passiveBinding?.probe_kind === "create_catch"
+                ||
                 shouldReleasePassiveEffectBreakpoint(effectProbe.create_type)
                 || (effectProbe.destroy_type !== undefined && effectProbe.destroy_type !== "undefined" && effectProbe.destroy_type !== "function")
               );
@@ -887,6 +919,8 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
                 const snapshot = { observedAt: pausedObservedAt, frames, ...(effectProbe ? { effectProbe } : {}) };
                 recentClientPausedFrameSets.push(snapshot);
                 if (effectProbe && (
+                  passiveBinding?.probe_kind === "create_catch"
+                  ||
                   shouldReleasePassiveEffectBreakpoint(effectProbe.create_type)
                   || (effectProbe.destroy_type !== undefined && effectProbe.destroy_type !== "undefined" && effectProbe.destroy_type !== "function")
                 )) {
