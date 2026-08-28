@@ -135,16 +135,17 @@ export function extractNextChunkScriptUrls(html: string, frontendOrigin: string)
   return urls;
 }
 
-async function preloadPassiveEffectBreakpoint(request: APIRequestContext, frontendOrigin: string): Promise<PreloadedPassiveEffectBreakpoint | null> {
+async function preloadPassiveEffectBreakpoints(request: APIRequestContext, frontendOrigin: string): Promise<PreloadedPassiveEffectBreakpoint[]> {
   const documentResponse = await request.get(new URL("/", frontendOrigin).toString(), {
     failOnStatusCode: false,
     maxRedirects: 0,
     timeout: 10_000,
   });
-  if (!documentResponse.ok()) return null;
+  if (!documentResponse.ok()) return [];
   const documentBytes = await documentResponse.body();
-  if (documentBytes.byteLength === 0 || documentBytes.byteLength > 2_000_000) return null;
+  if (documentBytes.byteLength === 0 || documentBytes.byteLength > 2_000_000) return [];
   const scriptUrls = extractNextChunkScriptUrls(documentBytes.toString("utf8"), frontendOrigin);
+  const breakpoints: PreloadedPassiveEffectBreakpoint[] = [];
   for (const scriptUrl of scriptUrls) {
     try {
       const response = await request.get(scriptUrl, { failOnStatusCode: false, maxRedirects: 0, timeout: 10_000 });
@@ -155,12 +156,12 @@ async function preloadPassiveEffectBreakpoint(request: APIRequestContext, fronte
       if (!breakpoint) continue;
       const parsed = new URL(scriptUrl);
       const escapedPath = `${parsed.origin}${parsed.pathname}`.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      return { ...breakpoint, url_regex: `^${escapedPath}(?:\\?.*)?$` };
+      breakpoints.push({ ...breakpoint, url_regex: `^${escapedPath}(?:\\?.*)?$` });
     } catch {
       // Preloading is diagnostic-only and remains fail-open.
     }
   }
-  return null;
+  return breakpoints;
 }
 
 export function classifyBrowserStartCause(error: unknown): {
@@ -503,7 +504,24 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
     let latestClientConsoleFrames: ClientChunkFrame[] = [];
     let latestClientPausedFrames: ClientChunkFrame[] = [];
     let latestClientEffectProbe: ClientEffectProbe | null = null;
+    let latestClientPageErrorObservedAt: number | null = null;
     const recentClientPausedFrameSets: TimedClientChunkFrames[] = [];
+    const currentClientPageErrorDiagnostic = (): ClientPageErrorDiagnostic | null => {
+      if (latestClientPageErrorObservedAt !== null) {
+        // The paused-handler enrichment is asynchronous. Re-select here so a
+        // probe that completed after pageerror was emitted is not lost.
+        latestClientPausedFrames = selectRecentClientPausedFrames(recentClientPausedFrameSets, latestClientPageErrorObservedAt);
+        latestClientEffectProbe = selectRecentClientEffectProbe(recentClientPausedFrameSets, latestClientPageErrorObservedAt);
+      }
+      return withClientEffectProbe(
+        withClientDiagnosticFrames(
+          latestClientPageError,
+          latestClientPausedFrames.length > 0 ? latestClientPausedFrames : latestClientConsoleFrames,
+          latestClientPausedFrames.length > 0,
+        ),
+        latestClientEffectProbe,
+      );
+    };
     try {
       // No OS/browser microphone permission is granted. The init script's
       // page-owned MediaStreamDestination is the only accepted audio stream;
@@ -528,11 +546,12 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       if (!authSession.ok() || authUser?.id !== run.principalId) throw new VoiceLabError(labError("AUTH_PRINCIPAL_MISMATCH", "The browser session is not bound to the exact dedicated Voice Lab principal.", "authorization", false, { observed_principal_sha256: typeof authUser?.id === "string" ? sha256(authUser.id) : null }));
       ordinaryRouteStage = "browser_init_script";
       await context.addInitScript({ content: buildVoiceLabInitScript({ pageOrigin: frontendOrigin, websocketOrigins: [...this.config.websocketOrigins], maxAudioBytes: this.config.maxAudioBytes, testRunId: run.testRunId, cleanupObligationId: run.cleanupObligationId }) });
-      const preloadedPassiveEffectBreakpoint = await preloadPassiveEffectBreakpoint(context.request, frontendOrigin).catch(() => null);
+      const preloadedPassiveEffectBreakpoints = await preloadPassiveEffectBreakpoints(context.request, frontendOrigin).catch(() => []);
       ordinaryRouteStage = "frontend_home_navigation";
       const page = await context.newPage();
       page.on("pageerror", (error) => {
         const observedAt = Date.now();
+        latestClientPageErrorObservedAt = observedAt;
         latestClientPageError = classifyClientPageError(error);
         latestClientPausedFrames = selectRecentClientPausedFrames(recentClientPausedFrameSets, observedAt);
         latestClientEffectProbe = selectRecentClientEffectProbe(recentClientPausedFrameSets, observedAt);
@@ -577,7 +596,9 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
         cdp.on("Debugger.scriptParsed", (event) => {
           if (typeof event.scriptId !== "string" || typeof event.url !== "string") return;
           scriptUrls.set(event.scriptId, event.url);
-          if (!preloadedPassiveEffectBreakpoint) void installPassiveEffectBreakpoint(event.scriptId, event.url);
+          // Always inspect dynamically parsed chunks. A server-rendered document
+          // may preload one React runtime while navigation executes another.
+          void installPassiveEffectBreakpoint(event.scriptId, event.url);
         });
         await cdp.send("Runtime.enable");
         cdp.on("Runtime.exceptionThrown", (event) => {
@@ -585,7 +606,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
           if (frames.length > 0 && latestClientPausedFrames.length === 0) latestClientConsoleFrames = frames;
         });
         await cdp.send("Debugger.enable");
-        if (preloadedPassiveEffectBreakpoint) {
+        for (const preloadedPassiveEffectBreakpoint of preloadedPassiveEffectBreakpoints) {
           const installed = await cdp.send("Debugger.setBreakpointByUrl", {
             lineNumber: preloadedPassiveEffectBreakpoint.line_number,
             columnNumber: preloadedPassiveEffectBreakpoint.column_number,
@@ -595,6 +616,10 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
         }
         await cdp.send("Debugger.setPauseOnExceptions", { state: "all" });
         cdp.on("Debugger.paused", (event) => {
+          // Capture correlation time synchronously. CDP evaluation below is
+          // asynchronous and can finish after Playwright emits pageerror even
+          // though this pause causally preceded it.
+          const pausedObservedAt = Date.now();
           const hitBreakpoints = Array.isArray(event.hitBreakpoints) ? event.hitBreakpoints : [];
           const frames = classifyClientCdpPausedFrames(event, frontendOrigin);
           void (async () => {
@@ -694,7 +719,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
               // Safe effect diagnostics are fail-open and never block resume.
             } finally {
               if ((!passiveBinding && frames.length > 0) || effectProbe) {
-                recentClientPausedFrameSets.push({ observedAt: Date.now(), frames, ...(effectProbe ? { effectProbe } : {}) });
+                recentClientPausedFrameSets.push({ observedAt: pausedObservedAt, frames, ...(effectProbe ? { effectProbe } : {}) });
                 if (recentClientPausedFrameSets.length > 20) recentClientPausedFrameSets.splice(0, recentClientPausedFrameSets.length - 20);
               }
               await cdp.send("Debugger.resume").catch(() => undefined);
@@ -759,13 +784,13 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       // capability and must revoke the login before closing the browser.
       if (this.#sessions.get(run.id)?.context === context) {
         if (error instanceof VoiceLabError) throw error;
-        throw new VoiceLabError(labError("ORDINARY_UI_ROUTE_FAILED", "The ordinary deployed Sophia voice route could not be established.", "harness", false, { stage: ordinaryRouteStage, cause: classifyBrowserStartCause(error), client_page_error: withClientEffectProbe(withClientDiagnosticFrames(latestClientPageError, latestClientPausedFrames.length > 0 ? latestClientPausedFrames : latestClientConsoleFrames, latestClientPausedFrames.length > 0), latestClientEffectProbe) }));
+        throw new VoiceLabError(labError("ORDINARY_UI_ROUTE_FAILED", "The ordinary deployed Sophia voice route could not be established.", "harness", false, { stage: ordinaryRouteStage, cause: classifyBrowserStartCause(error), client_page_error: currentClientPageErrorDiagnostic() }));
       }
       const closed = await closeContextWithProof(context, () => this.#browser?.contexts() ?? []);
       if (closed.closed) { this.#sessions.delete(run.id); this.#pendingContexts.delete(run.id); }
       else throw new VoiceLabError(labError("BROWSER_CONTEXT_CLOSE_FAILED", "Failed start left a browser context that could not be proven closed.", "harness", true, { original_error_class: error instanceof VoiceLabError ? error.detail.code : error instanceof Error ? error.name : "Error", close_error_class: closed.errorClass }));
       if (error instanceof VoiceLabError) throw error;
-      throw new VoiceLabError(labError("ORDINARY_UI_ROUTE_FAILED", "The ordinary deployed Sophia voice route could not be established.", "harness", false, { stage: ordinaryRouteStage, cause: classifyBrowserStartCause(error), client_page_error: withClientEffectProbe(withClientDiagnosticFrames(latestClientPageError, latestClientPausedFrames.length > 0 ? latestClientPausedFrames : latestClientConsoleFrames, latestClientPausedFrames.length > 0), latestClientEffectProbe) }));
+      throw new VoiceLabError(labError("ORDINARY_UI_ROUTE_FAILED", "The ordinary deployed Sophia voice route could not be established.", "harness", false, { stage: ordinaryRouteStage, cause: classifyBrowserStartCause(error), client_page_error: currentClientPageErrorDiagnostic() }));
     }
   }
 
