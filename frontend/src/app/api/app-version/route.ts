@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 
 // Keep this endpoint source-bound so every governed Voice Lab candidate
 // produces a distinct Vercel build instead of being skipped by the
-// ignored-build gate, including focus-preserving microphone routing fixes.
+// ignored-build gate, including delayed session-choice routing fixes.
 function resolveBuildId(): string {
   return (
     process.env.NEXT_PUBLIC_APP_BUILD_ID
