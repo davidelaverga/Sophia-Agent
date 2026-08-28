@@ -277,6 +277,7 @@ describe("ordinary dashboard consent route", () => {
     ].join("\n"))).toEqual({
       line_number: 1,
       column_number: 145,
+      create_variable: "a",
       effect_variable: "n",
       owner_variable: "t",
     });

@@ -82,6 +82,7 @@ type TimedClientChunkFrames = { observedAt: number; frames: ClientChunkFrame[]; 
 type PassiveEffectBreakpoint = {
   line_number: number;
   column_number: number;
+  create_variable: string;
   effect_variable: string;
   owner_variable: string;
 };
@@ -102,8 +103,10 @@ export function findPassiveEffectCreateBreakpoint(source: string): PassiveEffect
   for (let match = functionPattern.exec(functionWindow); match; match = functionPattern.exec(functionWindow)) enclosing = match;
   const parameters = enclosing?.[1]?.split(",").map((value) => value.trim()) ?? [];
   const ownerVariable = parameters[1];
+  const createVariable = createCall[1];
   const effectVariable = createCall[2];
-  if (!effectVariable || !ownerVariable
+  if (!createVariable || !effectVariable || !ownerVariable
+    || !/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(createVariable)
     || !/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(effectVariable)
     || !/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(ownerVariable)) return null;
   const before = source.slice(0, createCall.index);
@@ -117,6 +120,7 @@ export function findPassiveEffectCreateBreakpoint(source: string): PassiveEffect
   return {
     line_number: lineNumber,
     column_number: createCall.index - lastNewline - 1 + assignmentOffset,
+    create_variable: createVariable,
     effect_variable: effectVariable,
     owner_variable: ownerVariable,
   };
@@ -673,37 +677,63 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
             try {
               const callFrames = Array.isArray(event.callFrames) ? event.callFrames.slice(0, 12) : [];
               let effectFrame: (typeof callFrames)[number] | undefined;
-              for (const candidate of callFrames) {
-                if (typeof candidate.callFrameId !== "string") continue;
-                bumpEffectProbeStatus("evaluation_attempts");
-                const effectVariable = passiveBinding?.effect_variable ?? "n";
-                const createResult = await cdp.send("Debugger.evaluateOnCallFrame", {
-                  callFrameId: candidate.callFrameId,
-                  expression: `(() => { if (typeof ${effectVariable} !== "object" || ${effectVariable} === null || !("create" in ${effectVariable})) return null; const rawType = typeof ${effectVariable}.create; const allowed = ["undefined","function","object","boolean","number","string","symbol","bigint"]; return { createType: allowed.includes(rawType) ? rawType : "other", effectTag: Number.isSafeInteger(${effectVariable}.tag) && ${effectVariable}.tag >= 0 && ${effectVariable}.tag <= 255 ? ${effectVariable}.tag : null }; })()`,
-                  returnByValue: true,
-                  silent: true,
-                  // This expression only reads the paused React effect record and
-                  // returns bounded primitives. Chromium cannot prove an IIFE is
-                  // side-effect free, so throwOnSideEffect would suppress the probe.
-                  throwOnSideEffect: false,
-                });
-                const createValue = createResult?.result?.value;
-                if (createValue && typeof createValue === "object") {
-                  const createRecord = createValue as Record<string, unknown>;
-                  const createType = createRecord.createType;
-                  const allowedTypes = new Set<ClientEffectProbe["create_type"]>(["undefined", "function", "object", "boolean", "number", "string", "symbol", "bigint", "other"]);
-                  if (typeof createType === "string" && allowedTypes.has(createType as ClientEffectProbe["create_type"])) {
-                    bumpEffectProbeStatus("effect_record_matches");
-                    effectProbe = {
-                      create_type: createType as ClientEffectProbe["create_type"],
-                      effect_tag: Number.isInteger(createRecord.effectTag) ? Number(createRecord.effectTag) : null,
-                      owner_fiber_tag: null,
-                      owner_props: "unavailable",
-                      owner_frame: null,
-                    };
-                    effectFrame = candidate;
-                    break;
-                  }
+              const knownPassiveBinding = passiveBinding ?? passiveEffectBreakpoints.values().next().value;
+              const allowedTypes = new Set<ClientEffectProbe["create_type"]>(["undefined", "function", "object", "boolean", "number", "string", "symbol", "bigint", "other"]);
+              const acceptCreateRecord = (candidate: (typeof callFrames)[number], createValue: unknown): boolean => {
+                if (!createValue || typeof createValue !== "object") return false;
+                const createRecord = createValue as Record<string, unknown>;
+                const createType = createRecord.createType;
+                if (typeof createType !== "string" || !allowedTypes.has(createType as ClientEffectProbe["create_type"])) return false;
+                bumpEffectProbeStatus("effect_record_matches");
+                effectProbe = {
+                  create_type: createType as ClientEffectProbe["create_type"],
+                  effect_tag: Number.isInteger(createRecord.effectTag) ? Number(createRecord.effectTag) : null,
+                  owner_fiber_tag: null,
+                  owner_props: "unavailable",
+                  owner_frame: null,
+                };
+                effectFrame = candidate;
+                return true;
+              };
+              if (knownPassiveBinding) {
+                // At the failing `a()` call the effect record can be shadowed by
+                // unrelated minified `n` bindings in earlier frames. Scan every
+                // frame for the exact local create binding first and require it
+                // to be identical to the effect record's create value. An
+                // undeclared local throws only inside this silent diagnostic
+                // evaluation and cannot be mistaken for an undefined create.
+                for (const candidate of callFrames) {
+                  if (typeof candidate.callFrameId !== "string") continue;
+                  bumpEffectProbeStatus("evaluation_attempts");
+                  const { create_variable: createVariable, effect_variable: effectVariable } = knownPassiveBinding;
+                  const localCreateResult = await cdp.send("Debugger.evaluateOnCallFrame", {
+                    callFrameId: candidate.callFrameId,
+                    expression: `(() => { if (typeof ${effectVariable} !== "object" || ${effectVariable} === null || !("create" in ${effectVariable}) || ${effectVariable}.create !== ${createVariable}) return null; const rawType = typeof ${createVariable}; const allowed = ["undefined","function","object","boolean","number","string","symbol","bigint"]; return { createType: allowed.includes(rawType) ? rawType : "other", effectTag: Number.isSafeInteger(${effectVariable}.tag) && ${effectVariable}.tag >= 0 && ${effectVariable}.tag <= 255 ? ${effectVariable}.tag : null }; })()`,
+                    returnByValue: true,
+                    silent: true,
+                    throwOnSideEffect: false,
+                  });
+                  if (acceptCreateRecord(candidate, localCreateResult?.result?.value)) break;
+                }
+              }
+              if (!effectProbe) {
+                // Retain the record-only fallback for callable effects and for
+                // runtime variants where the local binding is unavailable.
+                for (const candidate of callFrames) {
+                  if (typeof candidate.callFrameId !== "string") continue;
+                  bumpEffectProbeStatus("evaluation_attempts");
+                  const effectVariable = knownPassiveBinding?.effect_variable ?? "n";
+                  const createResult = await cdp.send("Debugger.evaluateOnCallFrame", {
+                    callFrameId: candidate.callFrameId,
+                    expression: `(() => { if (typeof ${effectVariable} !== "object" || ${effectVariable} === null || !("create" in ${effectVariable})) return null; const rawType = typeof ${effectVariable}.create; const allowed = ["undefined","function","object","boolean","number","string","symbol","bigint"]; return { createType: allowed.includes(rawType) ? rawType : "other", effectTag: Number.isSafeInteger(${effectVariable}.tag) && ${effectVariable}.tag >= 0 && ${effectVariable}.tag <= 255 ? ${effectVariable}.tag : null }; })()`,
+                    returnByValue: true,
+                    silent: true,
+                    // This expression only reads the paused React effect record and
+                    // returns bounded primitives. Chromium cannot prove an IIFE is
+                    // side-effect free, so throwOnSideEffect would suppress the probe.
+                    throwOnSideEffect: false,
+                  });
+                  if (acceptCreateRecord(candidate, createResult?.result?.value)) break;
                 }
               }
               if (effectProbe && effectFrame && typeof effectFrame.callFrameId === "string") {
@@ -712,7 +742,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
                 // effect body throws, that React frame may be below the throw site,
                 // which is why the scan above is not limited to callFrames[0].
                 const caller = effectFrame;
-                const ownerVariable = passiveBinding?.owner_variable ?? "t";
+                const ownerVariable = knownPassiveBinding?.owner_variable ?? "t";
                 const ownerResult = await cdp.send("Debugger.evaluateOnCallFrame", {
                   callFrameId: caller.callFrameId,
                   expression: `(() => { if (typeof ${ownerVariable} !== "object" || ${ownerVariable} === null || !Number.isInteger(${ownerVariable}.tag) || !("memoizedProps" in ${ownerVariable})) return null; const props = ${ownerVariable}.memoizedProps; const keys = props && typeof props === "object" ? Object.keys(props).sort() : []; let ownerProps = "other"; if (keys.length === 0) ownerProps = "no_props"; else if (keys.length === 1 && keys[0] === "onReady") ownerProps = "on_ready"; else if (keys.length === 1 && keys[0] === "children") ownerProps = "children_only"; else if (keys.length === 2 && keys[0] === "children" && keys[1] === "onAuthenticated") ownerProps = "on_authenticated"; return { ownerFiberTag: ${ownerVariable}.tag >= 0 && ${ownerVariable}.tag <= 255 ? ${ownerVariable}.tag : null, ownerProps }; })()`,
