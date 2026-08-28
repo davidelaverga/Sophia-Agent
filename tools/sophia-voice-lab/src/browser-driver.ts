@@ -540,6 +540,40 @@ export async function activateDashboardMicButton(page: Page, button: Locator): P
   await page.keyboard.press("Enter");
 }
 
+export async function establishSessionNavigation(
+  page: Page,
+  frontendOrigin: string,
+  freshButtonName: string,
+  timeoutMs = 45_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  const allowedChoices = [
+    page.getByRole("button", { name: new RegExp(`^${escapeRegex(freshButtonName)}$`, "i") }),
+    page.getByRole("button", { name: /^(?:Start open|Same ritual)$/i }),
+  ];
+  while (Date.now() < deadline) {
+    const current = new URL(page.url());
+    if (current.origin === frontendOrigin && /^\/session(?:\/|$)/.test(current.pathname) && current.hash === "") return;
+    let advanced = false;
+    for (const choices of allowedChoices) {
+      const count = Math.min(await choices.count(), 4);
+      for (let index = 0; index < count; index += 1) {
+        const choice = choices.nth(index);
+        if (!await choice.isVisible().catch(() => false) || !await choice.isEnabled().catch(() => false)) continue;
+        await choice.click({ timeout: 5_000 });
+        advanced = true;
+        break;
+      }
+      if (advanced) break;
+    }
+    await page.waitForTimeout(advanced ? 250 : 100);
+  }
+  await page.waitForURL(
+    (url) => url.origin === frontendOrigin && /^\/session(?:\/|$)/.test(url.pathname) && url.hash === "",
+    { timeout: 1 },
+  );
+}
+
 export async function establishDashboardMicRoute(input: {
   isMicVisible: () => Promise<boolean>;
   isConsentVisible: () => Promise<boolean>;
@@ -1017,10 +1051,8 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       const dashboardButton = await resolveDashboardMicButton(page, micAnchor);
       await activateDashboardMicButton(page, dashboardButton);
       ordinaryRouteStage = "fresh_session_choice";
-      const fresh = page.getByRole("button", { name: new RegExp(`^${escapeRegex(this.config.freshButtonName)}$`, "i") }).first();
-      if (await fresh.isVisible({ timeout: 1_200 }).catch(() => false)) await fresh.click();
       ordinaryRouteStage = "session_navigation";
-      await page.waitForURL((url) => url.origin === frontendOrigin && /^\/session(?:\/|$)/.test(url.pathname) && url.hash === "", { timeout: 20_000 });
+      await establishSessionNavigation(page, frontendOrigin, this.config.freshButtonName);
       assertPageLocation(page.url(), frontendOrigin, (pathname) => /^\/session(?:\/|$)/.test(pathname), "ORDINARY_UI_ORIGIN_DRIFT");
       ordinaryRouteStage = "voice_tab_selection";
       const voiceTab = page.getByRole("tab", { name: /^voice$/i }).first();
