@@ -95,7 +95,12 @@ describe("real Chromium dynamic media contract", () => {
       </style>
       <div id="stage">
         <span data-onboarding="mic-cta" aria-hidden="true"></span>
-        <button type="button" aria-label="Start open session" onclick="window.__micActivations += 1">microphone</button>
+        <button
+          type="button"
+          aria-label="Start open session"
+          onfocus="document.querySelector('[data-onboarding=mic-cta]').remove()"
+          onclick="window.__micActivations += 1"
+        >microphone</button>
       </div>
       <div id="visual-layer"></div>
       <script>window.__micActivations = 0;</script>
@@ -103,6 +108,7 @@ describe("real Chromium dynamic media contract", () => {
     const button = await resolveDashboardMicButton(page, page.locator('[data-onboarding="mic-cta"]'));
     await expect(button.click({ timeout: 500 })).rejects.toThrow(/Timeout/);
     await activateDashboardMicButton(page, button);
+    expect(await page.locator('[data-onboarding="mic-cta"]').count()).toBe(0);
     expect(await page.evaluate(() => (window as any).__micActivations)).toBe(1);
     await context.close();
   });
