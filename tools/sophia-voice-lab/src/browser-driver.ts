@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import { access } from "node:fs/promises";
 
-import { chromium, type APIRequestContext, type APIResponse, type Browser, type BrowserContext, type Page, type Response as PlaywrightResponse } from "playwright";
+import { chromium, type APIRequestContext, type APIResponse, type Browser, type BrowserContext, type Locator, type Page, type Response as PlaywrightResponse } from "playwright";
 
 import type { ResolvedAudio } from "./audio.js";
 import { buildVoiceLabInitScript } from "./browser-init.js";
@@ -512,6 +512,16 @@ interface BrowserSession {
 const CONSENT_ACCEPT_SELECTOR = '[data-voice-lab="consent-accept"]';
 export const DASHBOARD_ROUTE_TIMEOUT_MS = 60_000;
 
+export async function resolveDashboardMicButton(page: Page, micAnchor: Locator): Promise<Locator> {
+  // MicCTA renders the stable onboarding anchor as a sibling of the actual
+  // button so the spotlight can cover the full breathing-ring stage. Prefer
+  // that structural relationship: the button's accessible label can
+  // legitimately change while the dashboard is hydrating.
+  const siblingButton = micAnchor.locator("xpath=../button[1]");
+  if (await siblingButton.count() > 0) return siblingButton;
+  return page.getByRole("button", { name: /^Start (?:open session|prepare|debrief|reset|vent)$/i }).first();
+}
+
 export async function establishDashboardMicRoute(input: {
   isMicVisible: () => Promise<boolean>;
   isConsentVisible: () => Promise<boolean>;
@@ -986,10 +996,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
         timeoutMs: DASHBOARD_ROUTE_TIMEOUT_MS,
       });
       ordinaryRouteStage = "dashboard_microphone_cta";
-      const anchoredButton = micAnchor.locator("xpath=ancestor::button[1]");
-      const dashboardButton = await anchoredButton.count() > 0
-        ? anchoredButton
-        : page.getByRole("button", { name: /^Start (?:open session|prepare|debrief|reset|vent)$/i }).first();
+      const dashboardButton = await resolveDashboardMicButton(page, micAnchor);
       await dashboardButton.waitFor({ state: "visible", timeout: 5_000 });
       await dashboardButton.click();
       ordinaryRouteStage = "fresh_session_choice";
