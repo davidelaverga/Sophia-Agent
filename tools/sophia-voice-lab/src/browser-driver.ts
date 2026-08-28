@@ -534,7 +534,10 @@ export async function activateDashboardMicButton(page: Page, button: Locator): P
   // same native button/onClick path without depending on a stable hit-test
   // point. It does not call product handlers or navigation directly.
   await button.focus();
-  await button.press("Enter");
+  // Press through the page keyboard after focus. React/onboarding may replace
+  // the anchor used to resolve this locator during the focus event; asking the
+  // locator to press would then re-resolve a control that is already focused.
+  await page.keyboard.press("Enter");
 }
 
 export async function establishDashboardMicRoute(input: {
