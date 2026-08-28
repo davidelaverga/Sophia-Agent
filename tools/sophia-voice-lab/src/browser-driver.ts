@@ -109,13 +109,14 @@ export function findPassiveEffectCreateBreakpoint(source: string): PassiveEffect
   const before = source.slice(0, createCall.index);
   const lineNumber = (before.match(/\n/g) ?? []).length;
   const lastNewline = before.lastIndexOf("\n");
-  // Break at the invocation identifier rather than the declaration start.
-  // At this location V8 has assigned the callable local and exposes a concrete
-  // breakable call expression immediately before the possible TypeError.
-  const invocationOffset = createCall[0].lastIndexOf("=") + 1;
+  // Break at the destroy-assignment target rather than the invocation. At this
+  // location V8 has assigned the create local but has not called it yet; a
+  // breakpoint placed on the call identifier may resolve only after a
+  // successful invocation and therefore miss the non-callable fault itself.
+  const assignmentOffset = createCall[0].indexOf(`;${effectVariable}.inst.destroy`) + 1;
   return {
     line_number: lineNumber,
-    column_number: createCall.index - lastNewline - 1 + invocationOffset,
+    column_number: createCall.index - lastNewline - 1 + assignmentOffset,
     effect_variable: effectVariable,
     owner_variable: ownerVariable,
   };
