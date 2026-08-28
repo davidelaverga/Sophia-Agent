@@ -25,7 +25,7 @@ function harness() {
   class FakeAudioContext { constructor(_options?: unknown) { return audio; } }
   const storage = new Map<string, string>();
   const sandbox: any = {
-    console, crypto: webcrypto, atob, btoa, Uint8Array, DOMException, URL, Date, Map, Set, Object, Array, Number, Math, Error,
+    console, crypto: webcrypto, atob, btoa, Uint8Array, TextEncoder, DOMException, URL, Date, Map, Set, Object, Array, Number, Math, Error,
     setTimeout, clearTimeout,
     location: { href: "https://frontend.test/session", origin: "https://frontend.test" },
     localStorage: { setItem: (key: string, value: string) => storage.set(key, value) },
@@ -44,6 +44,29 @@ function harness() {
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 describe("page-owned dynamic WebAudio injection", () => {
+  it("permits one product observer wrapper without exposing or replacing native getUserMedia", async () => {
+    const { sandbox } = harness();
+    const syntheticGetUserMedia = sandbox.navigator.mediaDevices.getUserMedia.bind(sandbox.navigator.mediaDevices);
+    let observed = 0;
+    sandbox.navigator.mediaDevices.getUserMedia = async (constraints: unknown) => {
+      const stream = await syntheticGetUserMedia(constraints);
+      observed += 1;
+      return stream;
+    };
+
+    await sandbox.navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+
+    expect(observed).toBe(1);
+    expect(sandbox.__sophiaVoiceLab.drain(0).events).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "harness.media_observer_wrapper_installed", payload: { synthetic_pipeline_sealed: true } }),
+      expect.objectContaining({ kind: "harness.media_stream_issued", payload: expect.objectContaining({ replacement_active: true }) }),
+    ]));
+    expect(Object.getOwnPropertyDescriptor(sandbox.navigator.mediaDevices, "getUserMedia")?.configurable).toBe(false);
+    expect(() => {
+      sandbox.navigator.mediaDevices.getUserMedia = async () => null;
+    }).toThrow(/pipeline is sealed/);
+  });
+
   it("emits started only after the scheduled AudioContext boundary, then one natural terminal receipt", async () => {
     const { sandbox, audio, sources, productEvents } = harness();
     const bytes = Buffer.from("valid-audio-payload");

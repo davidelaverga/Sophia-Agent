@@ -79,6 +79,16 @@ describe("real Chromium dynamic media contract", () => {
     await context.addInitScript({ content: buildVoiceLabInitScript({ pageOrigin: origin, websocketOrigins: [origin.replace("http://", "ws://")], maxAudioBytes: 1_000_000, testRunId: "00000000-0000-4000-8000-000000000001", cleanupObligationId: "00000000-0000-4000-8000-000000000002" }) });
     const page = await context.newPage();
     await page.goto(origin);
+    await page.evaluate(() => {
+      const mediaDevices = navigator.mediaDevices;
+      const synthetic = mediaDevices.getUserMedia.bind(mediaDevices);
+      (window as any).__productMediaObserverCalls = 0;
+      mediaDevices.getUserMedia = async (constraints?: MediaStreamConstraints) => {
+        const stream = await synthetic(constraints);
+        (window as any).__productMediaObserverCalls += 1;
+        return stream;
+      };
+    });
     await page.evaluate(async (wsUrl) => {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
       const consumer = new AudioContext({ latencyHint: "interactive" });
@@ -113,8 +123,9 @@ describe("real Chromium dynamic media contract", () => {
       const events = (window as any).__sophiaVoiceLab.drain(0).events;
       return events.some((event: any) => event.kind === "audio.input.completed") && events.some((event: any) => event.kind === "harness.input_frame_forwarded");
     }, undefined, { timeout: 15_000 });
-    const result = await page.evaluate(() => ({ nativeCalls: (window as any).__nativeGumCalls, nonzeroCallbacks: (window as any).__realMedia.nonzeroCallbacks, events: (window as any).__sophiaVoiceLab.drain(0).events }));
+    const result = await page.evaluate(() => ({ nativeCalls: (window as any).__nativeGumCalls, productMediaObserverCalls: (window as any).__productMediaObserverCalls, nonzeroCallbacks: (window as any).__realMedia.nonzeroCallbacks, events: (window as any).__sophiaVoiceLab.drain(0).events }));
     expect(result.nativeCalls).toBe(0);
+    expect(result.productMediaObserverCalls).toBe(1);
     expect(result.nonzeroCallbacks).toBeGreaterThan(0);
     expect(result.events.filter((event: any) => event.kind === "harness.media_stream_issued")).toHaveLength(1);
     expect(result.events.filter((event: any) => event.kind === "audio.input.started")).toHaveLength(1);

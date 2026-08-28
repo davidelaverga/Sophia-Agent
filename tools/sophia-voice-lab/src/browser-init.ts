@@ -15,7 +15,7 @@ export function buildVoiceLabInitScript(options: InitScriptOptions): string {
     // media, storage, or sockets on a redirect target, popup, or foreign frame.
     if (location.origin !== options.pageOrigin || window.top !== window) return;
     const allowedWsOrigins = new Set(options.websocketOrigins);
-    const state = { seq: 0, events: [], sockets: [], socketEpoch: 0, originalGetUserMedia: null, activeInputs: new Map(), scheduleReceipts: new Map() };
+    const state = { seq: 0, events: [], sockets: [], socketEpoch: 0, activeInputs: new Map(), scheduleReceipts: new Map() };
     const emit = (kind, payload = {}) => {
       const event = { seq: ++state.seq, kind, observed_at: new Date().toISOString(), payload };
       state.events.push(event);
@@ -105,7 +105,12 @@ export function buildVoiceLabInitScript(options: InitScriptOptions): string {
     const destination = audioContext.createMediaStreamDestination();
     const mediaDevices = navigator.mediaDevices;
     if (!mediaDevices || typeof mediaDevices.getUserMedia !== 'function') { emit('harness.media_devices_unavailable'); return; }
-    state.originalGetUserMedia = mediaDevices.getUserMedia.bind(mediaDevices);
+    // Keep the native method unreachable after this point. The ordinary app's
+    // capture bridge is allowed to install one observer wrapper around the
+    // synthetic replacement, but it never receives the native function and
+    // therefore cannot escape to a physical microphone.
+    let activeGetUserMedia = null;
+    let observerWrapperInstalled = false;
     const replacement = async (constraints) => {
       const wantsAudio = constraints === undefined || constraints.audio !== false;
       const wantsVideo = Boolean(constraints && constraints.video);
@@ -114,11 +119,26 @@ export function buildVoiceLabInitScript(options: InitScriptOptions): string {
         throw new DOMException('Voice Lab only permits the synthetic audio-only stream.', 'NotAllowedError');
       }
       const trackIds = destination.stream.getAudioTracks().map((track) => track.id);
-      emit('harness.media_stream_issued', { audio_tracks: trackIds.length, stream_id_sha256: await hashText(destination.stream.id), track_id_sha256s: await Promise.all(trackIds.map(hashText)), replacement_active: mediaDevices.getUserMedia === replacement });
+      emit('harness.media_stream_issued', { audio_tracks: trackIds.length, stream_id_sha256: await hashText(destination.stream.id), track_id_sha256s: await Promise.all(trackIds.map(hashText)), replacement_active: activeGetUserMedia === replacement || observerWrapperInstalled });
       return destination.stream;
     };
-    try { Object.defineProperty(mediaDevices, 'getUserMedia', { configurable: true, writable: false, value: replacement }); }
-    catch { mediaDevices.getUserMedia = replacement; }
+    activeGetUserMedia = replacement;
+    Object.defineProperty(mediaDevices, 'getUserMedia', {
+      configurable: false,
+      enumerable: true,
+      get: () => activeGetUserMedia,
+      set: (candidate) => {
+        // SessionCaptureBridge reads the current replacement, binds it, then
+        // assigns one observer wrapper. Permit exactly that single layer. A
+        // later assignment cannot replace the sealed synthetic pipeline.
+        if (observerWrapperInstalled || typeof candidate !== 'function' || candidate === replacement) {
+          throw new TypeError('Voice Lab synthetic microphone pipeline is sealed.');
+        }
+        activeGetUserMedia = candidate;
+        observerWrapperInstalled = true;
+        emit('harness.media_observer_wrapper_installed', { synthetic_pipeline_sealed: true });
+      },
+    });
     const NativeWebSocket = window.WebSocket;
     class LabWebSocket extends NativeWebSocket {
       constructor(url, protocols) {
