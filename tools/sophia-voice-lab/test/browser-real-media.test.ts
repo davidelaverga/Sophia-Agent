@@ -8,7 +8,7 @@ import { chromium, type Browser } from "playwright";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { buildVoiceLabInitScript } from "../src/browser-init.js";
-import { activateDashboardMicButton, PlaywrightVoiceDriver, resolveDashboardMicButton } from "../src/browser-driver.js";
+import { activateDashboardMicButton, establishSessionNavigation, PlaywrightVoiceDriver, resolveDashboardMicButton } from "../src/browser-driver.js";
 
 function sineWav(durationMs = 600, sampleRate = 16_000): Buffer {
   const samples = Math.floor(sampleRate * durationMs / 1_000);
@@ -110,6 +110,36 @@ describe("real Chromium dynamic media contract", () => {
     await activateDashboardMicButton(page, button);
     expect(await page.locator('[data-onboarding="mic-cta"]').count()).toBe(0);
     expect(await page.evaluate(() => (window as any).__micActivations)).toBe(1);
+    await context.close();
+  });
+
+  it("follows delayed and nested fresh-session choices until ordinary session navigation completes", async () => {
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    await page.goto(origin);
+    await page.setContent(`
+      <button type="button" hidden>Start fresh</button>
+      <div id="choices"></div>
+      <script>
+        setTimeout(() => {
+          const choices = document.querySelector('#choices');
+          const fresh = document.createElement('button');
+          fresh.type = 'button';
+          fresh.textContent = 'Start fresh';
+          fresh.onclick = () => {
+            fresh.remove();
+            const open = document.createElement('button');
+            open.type = 'button';
+            open.textContent = 'Start open';
+            open.onclick = () => history.pushState({}, '', '/session');
+            choices.append(open);
+          };
+          choices.append(fresh);
+        }, 1_400);
+      </script>
+    `);
+    await establishSessionNavigation(page, origin, "Start fresh", 5_000);
+    expect(new URL(page.url()).pathname).toBe("/session");
     await context.close();
   });
 
