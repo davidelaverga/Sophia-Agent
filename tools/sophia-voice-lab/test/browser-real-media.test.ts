@@ -8,7 +8,7 @@ import { chromium, type Browser } from "playwright";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { buildVoiceLabInitScript } from "../src/browser-init.js";
-import { PlaywrightVoiceDriver } from "../src/browser-driver.js";
+import { PlaywrightVoiceDriver, resolveDashboardMicButton } from "../src/browser-driver.js";
 
 function sineWav(durationMs = 600, sampleRate = 16_000): Buffer {
   const samples = Math.floor(sampleRate * durationMs / 1_000);
@@ -67,6 +67,21 @@ describe("real Chromium dynamic media contract", () => {
     for (const socket of upgradedSockets) socket.destroy();
     await new Promise<void>((resolve) => server?.close(() => resolve()));
   }, 30_000);
+
+  it("resolves the dashboard mic button from the onboarding anchor's sibling structure", async () => {
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    await page.goto(origin);
+    await page.setContent(`
+      <div>
+        <span data-onboarding="mic-cta" aria-hidden="true"></span>
+        <button type="button" aria-label="Connecting to Sophia">microphone</button>
+      </div>
+    `);
+    const button = await resolveDashboardMicButton(page, page.locator('[data-onboarding="mic-cta"]'));
+    expect(await button.getAttribute("aria-label")).toBe("Connecting to Sophia");
+    await context.close();
+  });
 
   it("injects through a real MediaStream consumer with no native gUM and proves forwarded PCM", async () => {
     const context = await browser.newContext();
