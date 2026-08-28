@@ -260,7 +260,7 @@ describe("ordinary dashboard consent route", () => {
       "function iv(e,t){try{var n=t.updateQueue,r=null!==n?n.lastEffect:null;if(null!==r){var l=r.next;n=l;do{if((n.tag&e)===e){r=void 0;var a=n.create;n.inst.destroy=r=a()}n=n.next}while(n!==l)}}catch(e){throw e}}",
     ].join("\n"))).toEqual({
       line_number: 1,
-      column_number: 130,
+      column_number: 162,
       effect_variable: "n",
       owner_variable: "t",
     });

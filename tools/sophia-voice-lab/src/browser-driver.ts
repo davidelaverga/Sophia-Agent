@@ -58,6 +58,7 @@ type ClientPageErrorDiagnostic = {
   next_frames: Array<{ chunk: string; line: number; column: number }>;
   digest: string | null;
   effect_probe?: ClientEffectProbe;
+  effect_probe_status?: ClientEffectProbeStatus;
 };
 type ClientChunkFrame = { chunk: string; line: number; column: number };
 type ClientEffectProbe = {
@@ -66,6 +67,16 @@ type ClientEffectProbe = {
   owner_fiber_tag: number | null;
   owner_props: "on_ready" | "on_authenticated" | "children_only" | "no_props" | "other" | "unavailable";
   owner_frame: ClientChunkFrame | null;
+};
+type ClientEffectProbeStatus = {
+  preloaded_candidates: number;
+  preloaded_resolved_locations: number;
+  dynamic_breakpoints_installed: number;
+  breakpoint_pauses: number;
+  exception_pauses: number;
+  evaluation_attempts: number;
+  effect_record_matches: number;
+  snapshot_count: number;
 };
 type TimedClientChunkFrames = { observedAt: number; frames: ClientChunkFrame[]; effectProbe?: ClientEffectProbe };
 type PassiveEffectBreakpoint = {
@@ -98,9 +109,13 @@ export function findPassiveEffectCreateBreakpoint(source: string): PassiveEffect
   const before = source.slice(0, createCall.index);
   const lineNumber = (before.match(/\n/g) ?? []).length;
   const lastNewline = before.lastIndexOf("\n");
+  // Break at the invocation identifier rather than the declaration start.
+  // At this location V8 has assigned the callable local and exposes a concrete
+  // breakable call expression immediately before the possible TypeError.
+  const invocationOffset = createCall[0].lastIndexOf("=") + 1;
   return {
     line_number: lineNumber,
-    column_number: createCall.index - lastNewline - 1,
+    column_number: createCall.index - lastNewline - 1 + invocationOffset,
     effect_variable: effectVariable,
     owner_variable: ownerVariable,
   };
@@ -506,6 +521,19 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
     let latestClientEffectProbe: ClientEffectProbe | null = null;
     let latestClientPageErrorObservedAt: number | null = null;
     const recentClientPausedFrameSets: TimedClientChunkFrames[] = [];
+    const effectProbeStatus: ClientEffectProbeStatus = {
+      preloaded_candidates: 0,
+      preloaded_resolved_locations: 0,
+      dynamic_breakpoints_installed: 0,
+      breakpoint_pauses: 0,
+      exception_pauses: 0,
+      evaluation_attempts: 0,
+      effect_record_matches: 0,
+      snapshot_count: 0,
+    };
+    const bumpEffectProbeStatus = (key: keyof ClientEffectProbeStatus, amount = 1) => {
+      effectProbeStatus[key] = Math.min(255, effectProbeStatus[key] + amount);
+    };
     const currentClientPageErrorDiagnostic = (): ClientPageErrorDiagnostic | null => {
       if (latestClientPageErrorObservedAt !== null) {
         // The paused-handler enrichment is asynchronous. Re-select here so a
@@ -513,7 +541,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
         latestClientPausedFrames = selectRecentClientPausedFrames(recentClientPausedFrameSets, latestClientPageErrorObservedAt);
         latestClientEffectProbe = selectRecentClientEffectProbe(recentClientPausedFrameSets, latestClientPageErrorObservedAt);
       }
-      return withClientEffectProbe(
+      const enriched = withClientEffectProbe(
         withClientDiagnosticFrames(
           latestClientPageError,
           latestClientPausedFrames.length > 0 ? latestClientPausedFrames : latestClientConsoleFrames,
@@ -521,6 +549,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
         ),
         latestClientEffectProbe,
       );
+      return enriched ? { ...enriched, effect_probe_status: { ...effectProbeStatus } } : enriched;
     };
     try {
       // No OS/browser microphone permission is granted. The init script's
@@ -547,6 +576,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       ordinaryRouteStage = "browser_init_script";
       await context.addInitScript({ content: buildVoiceLabInitScript({ pageOrigin: frontendOrigin, websocketOrigins: [...this.config.websocketOrigins], maxAudioBytes: this.config.maxAudioBytes, testRunId: run.testRunId, cleanupObligationId: run.cleanupObligationId }) });
       const preloadedPassiveEffectBreakpoints = await preloadPassiveEffectBreakpoints(context.request, frontendOrigin).catch(() => []);
+      effectProbeStatus.preloaded_candidates = Math.min(32, preloadedPassiveEffectBreakpoints.length);
       ordinaryRouteStage = "frontend_home_navigation";
       const page = await context.newPage();
       page.on("pageerror", (error) => {
@@ -584,6 +614,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
                 },
               });
               passiveEffectBreakpoints.set(installed.breakpointId, breakpoint);
+              bumpEffectProbeStatus("dynamic_breakpoints_installed");
               return true;
             } catch {
               // Passive-effect diagnostics are best-effort and never block load.
@@ -613,6 +644,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
             urlRegex: preloadedPassiveEffectBreakpoint.url_regex,
           });
           passiveEffectBreakpoints.set(installed.breakpointId, preloadedPassiveEffectBreakpoint);
+          bumpEffectProbeStatus("preloaded_resolved_locations", Array.isArray(installed.locations) ? installed.locations.length : 0);
         }
         await cdp.send("Debugger.setPauseOnExceptions", { state: "all" });
         cdp.on("Debugger.paused", (event) => {
@@ -621,6 +653,8 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
           // though this pause causally preceded it.
           const pausedObservedAt = Date.now();
           const hitBreakpoints = Array.isArray(event.hitBreakpoints) ? event.hitBreakpoints : [];
+          if (hitBreakpoints.some((breakpointId) => passiveEffectBreakpoints.has(breakpointId))) bumpEffectProbeStatus("breakpoint_pauses");
+          if (event.reason === "exception") bumpEffectProbeStatus("exception_pauses");
           const frames = classifyClientCdpPausedFrames(event, frontendOrigin);
           void (async () => {
             let effectProbe: ClientEffectProbe | undefined;
@@ -631,6 +665,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
               let effectFrame: (typeof callFrames)[number] | undefined;
               for (const candidate of callFrames) {
                 if (typeof candidate.callFrameId !== "string") continue;
+                bumpEffectProbeStatus("evaluation_attempts");
                 const effectVariable = passiveBinding?.effect_variable ?? "n";
                 const createResult = await cdp.send("Debugger.evaluateOnCallFrame", {
                   callFrameId: candidate.callFrameId,
@@ -648,6 +683,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
                   const createType = createRecord.createType;
                   const allowedTypes = new Set<ClientEffectProbe["create_type"]>(["undefined", "function", "object", "boolean", "number", "string", "symbol", "bigint", "other"]);
                   if (typeof createType === "string" && allowedTypes.has(createType as ClientEffectProbe["create_type"])) {
+                    bumpEffectProbeStatus("effect_record_matches");
                     effectProbe = {
                       create_type: createType as ClientEffectProbe["create_type"],
                       effect_tag: Number.isInteger(createRecord.effectTag) ? Number(createRecord.effectTag) : null,
@@ -720,6 +756,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
             } finally {
               if ((!passiveBinding && frames.length > 0) || effectProbe) {
                 recentClientPausedFrameSets.push({ observedAt: pausedObservedAt, frames, ...(effectProbe ? { effectProbe } : {}) });
+                bumpEffectProbeStatus("snapshot_count");
                 if (recentClientPausedFrameSets.length > 20) recentClientPausedFrameSets.splice(0, recentClientPausedFrameSets.length - 20);
               }
               await cdp.send("Debugger.resume").catch(() => undefined);
