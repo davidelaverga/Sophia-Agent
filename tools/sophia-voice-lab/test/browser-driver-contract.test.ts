@@ -307,6 +307,7 @@ describe("ordinary dashboard consent route", () => {
       probe_kind: "create_catch",
       line_number: 0,
       column_number: source.indexOf("sN(t,t.return,e)"),
+      exception_variable: "e",
       effect_variable: "n",
       owner_variable: "t",
     });
