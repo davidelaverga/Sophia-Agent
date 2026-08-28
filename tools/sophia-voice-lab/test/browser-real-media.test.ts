@@ -143,6 +143,23 @@ describe("real Chromium dynamic media contract", () => {
     await context.close();
   });
 
+  it("activates a persistent asynchronous fresh-session choice only once", async () => {
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    await page.goto(origin);
+    await page.setContent(`
+      <button
+        type="button"
+        onclick="window.__freshActivations += 1; setTimeout(() => history.pushState({}, '', '/session'), 1_500)"
+      >Start fresh</button>
+      <script>window.__freshActivations = 0;</script>
+    `);
+    await establishSessionNavigation(page, origin, "Start fresh", 4_000);
+    expect(new URL(page.url()).pathname).toBe("/session");
+    expect(await page.evaluate(() => (window as any).__freshActivations)).toBe(1);
+    await context.close();
+  });
+
   it("injects through a real MediaStream consumer with no native gUM and proves forwarded PCM", async () => {
     const context = await browser.newContext();
     await context.addInitScript(() => {
