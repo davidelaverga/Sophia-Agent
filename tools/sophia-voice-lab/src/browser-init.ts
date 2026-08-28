@@ -97,6 +97,10 @@ export function buildVoiceLabInitScript(options: InitScriptOptions): string {
     try {
       const completedOnboarding = { state: { firstRun: { status: 'completed', currentStepId: null, completedSteps: [], skippedAt: null, completedAt: new Date().toISOString() }, contextualTips: {}, preferences: { voiceOverEnabled: true, reducedMotion: true }, legacyStep: 'complete' }, version: 2 };
       localStorage.setItem('sophia-onboarding-v2', JSON.stringify(completedOnboarding));
+      // The dashboard spotlight predates the v2 onboarding store and uses its
+      // own completion key. Seed both before hydration so its full-screen
+      // overlay cannot appear later and intercept the ordinary microphone CTA.
+      localStorage.setItem('sophia-onboarded', '1');
       // The dedicated synthetic principal is forbidden from ordinary product
       // mutation endpoints, including /api/consent/accept. Import the
       // campaign-approved consent state before React hydrates so the ordinary
