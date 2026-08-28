@@ -1024,8 +1024,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       if (await voiceTab.isVisible({ timeout: 2_000 }).catch(() => false) && await voiceTab.getAttribute("aria-selected") !== "true") await voiceTab.click();
       ordinaryRouteStage = "voice_start_button";
       const startButton = page.getByRole("button", { name: this.config.startButtonName, exact: true }).first();
-      await startButton.waitFor({ state: "visible", timeout: 20_000 });
-      await startButton.click();
+      await activateDashboardMicButton(page, startButton);
       ordinaryRouteStage = "voice_startup_readiness";
       const events = await this.#waitForStartupReadiness(run.id, session, 45_000);
       events.push(...await this.drain(run.id));
