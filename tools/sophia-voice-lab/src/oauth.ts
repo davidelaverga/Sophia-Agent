@@ -648,6 +648,10 @@ export class OAuthAuthorizationServer implements RequestAuthenticator, OAuthToke
     // Some privacy-preserving browser contexts omit the additional hardened
     // cookie; when it is supplied it must still match exactly.
     if (csrfCookie !== null && !safeEqual(csrfCookie, csrfToken)) throw new OAuthProtocolError("invalid_request", 403);
+    const suppliedHash = createHash("sha256").update(suppliedSecret).digest();
+    if (suppliedHash.length !== this.#consentSecretHash.length || !timingSafeEqual(suppliedHash, this.#consentSecretHash)) {
+      throw new OAuthProtocolError("access_denied", 403);
+    }
     const now = this.#now();
     const csrfHash = this.#tokenHash(csrfToken);
     const request = await this.#store.consumeAuthorizationRequest(requestHash, csrfHash, now);
@@ -661,10 +665,6 @@ export class OAuthAuthorizationServer implements RequestAuthenticator, OAuthToke
       || request.issuedAt > now || request.expiresAt <= now || request.expiresAt <= request.issuedAt
       || request.expiresAt - request.issuedAt > this.#config.authorizationRequestTtlSeconds
       || request.consumedAt !== now) throw new OAuthProtocolError("invalid_request", 403);
-    const suppliedHash = createHash("sha256").update(suppliedSecret).digest();
-    if (suppliedHash.length !== this.#consentSecretHash.length || !timingSafeEqual(suppliedHash, this.#consentSecretHash)) {
-      throw new OAuthProtocolError("access_denied", 403);
-    }
     if (decision === "deny") return this.#authorizationRedirect(request, { error: "access_denied" });
 
     const codeId = randomOpaque("oac", 32);

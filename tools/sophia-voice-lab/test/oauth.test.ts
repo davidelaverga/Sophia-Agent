@@ -469,6 +469,83 @@ describe("OAuth 2.1 authorization server", () => {
     expect(wrongSecret.headers).not.toHaveProperty("location");
   });
 
+  it("keeps one authorization request usable after a wrong secret and consumes it only after success", async () => {
+    const page = await server.handleAuthorizationRequest(authorizationParams("state-wrong-secret-retry-123"));
+    const requestId = hidden(page.body, "request_id");
+    const csrf = hidden(page.body, "csrf_token");
+    const cookie = page.headers["set-cookie"]?.split(";", 1)[0];
+    const submittedSecret = "incorrect-secret-never-reflect-9876543210";
+
+    const wrong = await errorResult(server, () => server.handleAuthorizationDecision(new URLSearchParams({
+      request_id: requestId,
+      csrf_token: csrf,
+      consent_secret: submittedSecret,
+      decision: "approve",
+    }), cookie));
+    expect(wrong.status).toBe(403);
+    expect(store.authorizationCodes.size).toBe(0);
+    expect([...store.authorizationRequests.values()][0]?.consumedAt).toBeNull();
+    expect(JSON.stringify(wrong)).not.toContain(submittedSecret);
+
+    const approved = await server.handleAuthorizationDecision(new URLSearchParams({
+      request_id: requestId,
+      csrf_token: csrf,
+      consent_secret: CONSENT_SECRET,
+      decision: "approve",
+    }), cookie);
+    expect(approved.status).toBe(303);
+    expect(store.authorizationCodes.size).toBe(1);
+
+    const replay = await errorResult(server, () => server.handleAuthorizationDecision(new URLSearchParams({
+      request_id: requestId,
+      csrf_token: csrf,
+      consent_secret: CONSENT_SECRET,
+      decision: "approve",
+    }), cookie));
+    expect(replay.status).toBe(403);
+    expect(store.authorizationCodes.size).toBe(1);
+    expect(JSON.stringify([approved, replay])).not.toContain(CONSENT_SECRET);
+  });
+
+  it("does not consume authorization requests on hardened-cookie or synchronizer-token CSRF errors", async () => {
+    const cookiePage = await server.handleAuthorizationRequest(authorizationParams("state-cookie-csrf-retry-123"));
+    const cookieRequestId = hidden(cookiePage.body, "request_id");
+    const cookieCsrf = hidden(cookiePage.body, "csrf_token");
+    const badCookie = `${cookiePage.headers["set-cookie"]?.split("=", 1)[0]}=csrf_wrong_cookie_value_0123456789abcdef`;
+    const cookieFailure = await errorResult(server, () => server.handleAuthorizationDecision(new URLSearchParams({
+      request_id: cookieRequestId,
+      csrf_token: cookieCsrf,
+      consent_secret: CONSENT_SECRET,
+      decision: "approve",
+    }), badCookie));
+    expect(cookieFailure.status).toBe(403);
+    expect([...store.authorizationRequests.values()].find((row) => row.consumedAt === null)).toBeDefined();
+    expect((await server.handleAuthorizationDecision(new URLSearchParams({
+      request_id: cookieRequestId,
+      csrf_token: cookieCsrf,
+      consent_secret: CONSENT_SECRET,
+      decision: "approve",
+    }), cookiePage.headers["set-cookie"]?.split(";", 1)[0])).status).toBe(303);
+
+    const tokenPage = await server.handleAuthorizationRequest(authorizationParams("state-token-csrf-retry-123"));
+    const tokenRequestId = hidden(tokenPage.body, "request_id");
+    const tokenCsrf = hidden(tokenPage.body, "csrf_token");
+    const tokenFailure = await errorResult(server, () => server.handleAuthorizationDecision(new URLSearchParams({
+      request_id: tokenRequestId,
+      csrf_token: "csrf_tampered_browser_token_0123456789abcdef",
+      consent_secret: CONSENT_SECRET,
+      decision: "approve",
+    }), undefined));
+    expect(tokenFailure.status).toBe(403);
+    expect((await server.handleAuthorizationDecision(new URLSearchParams({
+      request_id: tokenRequestId,
+      csrf_token: tokenCsrf,
+      consent_secret: CONSENT_SECRET,
+      decision: "approve",
+    }), undefined)).status).toBe(303);
+    expect(store.authorizationCodes.size).toBe(2);
+  });
+
   it("keeps concurrent authorization tabs independently CSRF-bound", async () => {
     const firstPage = await server.handleAuthorizationRequest(authorizationParams("state-concurrent-first-123"));
     const secondPage = await server.handleAuthorizationRequest(authorizationParams("state-concurrent-second-123"));
@@ -657,6 +734,46 @@ describe("OAuth 2.1 authorization server", () => {
     expect(revoked).toMatchObject({ status: 200, body: "" });
     await expect(server.authenticate(`Bearer ${fresh.access_token}`)).rejects.toMatchObject({ detail: { code: "UNAUTHORIZED" } });
     await expect(server.authenticate(`Bearer ${"unknown".repeat(8)}`)).rejects.toMatchObject({ detail: { code: "UNAUTHORIZED" } });
+  });
+
+  it("keeps five-minute access tokens inside one absolute seven-day refresh family", async () => {
+    let now = NOW;
+    const lifetimeStore = new DurableTestStore();
+    const lifetimeServer = new OAuthAuthorizationServer({
+      ...config(),
+      accessTokenTtlSeconds: 300,
+      refreshTokenTtlSeconds: 604_800,
+      now: () => new Date(now * 1_000),
+    }, lifetimeStore);
+    const first = tokenBody(await tokenForCode(lifetimeServer, (await authorize(lifetimeServer, "state-seven-day-family-123")).code));
+    const firstAccess = [...lifetimeStore.accessTokens.values()][0]!;
+    const firstRefresh = [...lifetimeStore.refreshTokens.values()][0]!;
+    expect(firstAccess.expiresAt - firstAccess.issuedAt).toBe(300);
+    expect(firstRefresh.expiresAt - firstRefresh.issuedAt).toBe(604_800);
+
+    now += 300;
+    const rotatedResult = await lifetimeServer.handleTokenRequest(new URLSearchParams({
+      grant_type: "refresh_token",
+      refresh_token: first.refresh_token,
+      client_id: CHATGPT_CLIENT_METADATA_URL,
+      resource: RESOURCE,
+    }));
+    expect(JSON.parse(rotatedResult.body)).toMatchObject({ expires_in: 300 });
+    const rotated = tokenBody(rotatedResult);
+    const rotatedRefresh = [...lifetimeStore.refreshTokens.values()].find((row) => row.parentTokenHash !== null)!;
+    const rotatedAccess = [...lifetimeStore.accessTokens.values()].find((row) => row.issuedAt === now)!;
+    expect(rotatedAccess.expiresAt - rotatedAccess.issuedAt).toBe(300);
+    expect(rotatedRefresh.expiresAt).toBe(firstRefresh.expiresAt);
+
+    now = firstRefresh.expiresAt;
+    const expired = await errorResult(lifetimeServer, () => lifetimeServer.handleTokenRequest(new URLSearchParams({
+      grant_type: "refresh_token",
+      refresh_token: rotated.refresh_token,
+      client_id: CHATGPT_CLIENT_METADATA_URL,
+      resource: RESOURCE,
+    })));
+    expect(expired.status).toBe(400);
+    expect(JSON.parse(expired.body)).toMatchObject({ error: "invalid_grant" });
   });
 
   it("validates private_key_jwt client assertions once and rejects their replay", async () => {

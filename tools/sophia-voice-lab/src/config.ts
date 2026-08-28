@@ -372,7 +372,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, processRole: "w
   const oauth = oauthValues.every((value): value is string => value !== null) ? {
     issuer: oauthValues[0]!, resource: oauthValues[1]!, metadataUrl: oauthValues[2]!, clientMetadataUrl: oauthValues[3]!, clientRedirectUri: oauthValues[4]!, operatorSubject: oauthValues[5]!, consentSecret: oauthValues[6]!, tokenPepper: oauthValues[7]!,
     accessTokenTtlSeconds: integer(env, "SOPHIA_VOICE_LAB_OAUTH_ACCESS_TOKEN_TTL_SECONDS", 300, 30, 900),
-    refreshTokenTtlSeconds: integer(env, "SOPHIA_VOICE_LAB_OAUTH_REFRESH_TOKEN_TTL_SECONDS", 86_400, 60, 2_592_000),
+    refreshTokenTtlSeconds: integer(env, "SOPHIA_VOICE_LAB_OAUTH_REFRESH_TOKEN_TTL_SECONDS", 604_800, 60, 2_592_000),
     endpointWindowSeconds: integer(env, "SOPHIA_VOICE_LAB_OAUTH_ENDPOINT_WINDOW_SECONDS", 900, 60, 3_600),
     authorizeRequestsPerWindow: integer(env, "SOPHIA_VOICE_LAB_OAUTH_AUTHORIZE_REQUESTS_PER_WINDOW", 30, 1, 100_000),
     tokenRequestsPerWindow: integer(env, "SOPHIA_VOICE_LAB_OAUTH_TOKEN_REQUESTS_PER_WINDOW", 120, 1, 100_000),

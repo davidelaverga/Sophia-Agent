@@ -163,6 +163,20 @@ describe("Voice Lab deployment health contract", () => {
         expect(serviceEnv.get(key), `${service.name}:${key}`).toMatchObject({ key, sync: false });
       }
     }
+
+    expect(requiredRuntimeValue(blueprint, "SOPHIA_VOICE_LAB_OAUTH_ACCESS_TOKEN_TTL_SECONDS")).toBe("300");
+    expect(requiredRuntimeValue(blueprint, "SOPHIA_VOICE_LAB_OAUTH_REFRESH_TOKEN_TTL_SECONDS")).toBe("604800");
+    const parsed = testConfig({
+      SOPHIA_VOICE_LAB_OAUTH_ISSUER: "https://voice-lab.test",
+      SOPHIA_VOICE_LAB_OAUTH_RESOURCE: "https://voice-lab.test/mcp",
+      SOPHIA_VOICE_LAB_OAUTH_RESOURCE_METADATA_URL: "https://voice-lab.test/.well-known/oauth-protected-resource/mcp",
+      SOPHIA_VOICE_LAB_OAUTH_CLIENT_METADATA_URL: "https://chatgpt.com/oauth/client.json",
+      SOPHIA_VOICE_LAB_OAUTH_CLIENT_REDIRECT_URI: "https://chatgpt.com/connector_platform_oauth_redirect",
+      SOPHIA_VOICE_LAB_OAUTH_OPERATOR_SUBJECT: "voice-lab-private-operator",
+      SOPHIA_VOICE_LAB_OAUTH_CONSENT_SECRET: "oauth-consent-secret-000000000000000001",
+      SOPHIA_VOICE_LAB_OAUTH_TOKEN_PEPPER: "oauth-token-pepper-0000000000000000002",
+    });
+    expect(parsed.oauth).toMatchObject({ accessTokenTtlSeconds: 300, refreshTokenTtlSeconds: 604_800 });
   });
 
   it("accepts the container-local health host while retaining explicit host validation", async () => {
