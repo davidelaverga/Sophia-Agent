@@ -106,6 +106,14 @@ export function findPassiveEffectCreateBreakpoint(source: string): PassiveEffect
   };
 }
 
+/** A non-callable create value is itself the fault, so one observation is
+ * conclusive. Callable creates must remain armed because the product error can
+ * be thrown from inside a later effect callback; the most recent bounded owner
+ * probe is then correlated with the page error. */
+export function shouldReleasePassiveEffectBreakpoint(createType: ClientEffectProbe["create_type"]): boolean {
+  return createType !== "function";
+}
+
 /** Extract only bounded, same-origin Next.js chunk script URLs from the
  * server-rendered document. This lets the worker arm a URL breakpoint before
  * Chromium evaluates React instead of racing Debugger.scriptParsed. */
@@ -614,7 +622,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
                   const createRecord = createValue as Record<string, unknown>;
                   const createType = createRecord.createType;
                   const allowedTypes = new Set<ClientEffectProbe["create_type"]>(["undefined", "function", "object", "boolean", "number", "string", "symbol", "bigint", "other"]);
-                  if (typeof createType === "string" && createType !== "function" && allowedTypes.has(createType as ClientEffectProbe["create_type"])) {
+                  if (typeof createType === "string" && allowedTypes.has(createType as ClientEffectProbe["create_type"])) {
                     effectProbe = {
                       create_type: createType as ClientEffectProbe["create_type"],
                       effect_tag: Number.isInteger(createRecord.effectTag) ? Number(createRecord.effectTag) : null,
@@ -678,7 +686,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
                   }
                 }
               }
-              if (effectProbe && passiveBreakpointId) {
+              if (effectProbe && passiveBreakpointId && shouldReleasePassiveEffectBreakpoint(effectProbe.create_type)) {
                 await cdp.send("Debugger.removeBreakpoint", { breakpointId: passiveBreakpointId }).catch(() => undefined);
                 passiveEffectBreakpoints.delete(passiveBreakpointId);
               }
