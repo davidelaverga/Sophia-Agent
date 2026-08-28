@@ -49,6 +49,7 @@ describe("page-owned dynamic WebAudio injection", () => {
 
     expect(storage.get("sophia_consent_accepted")).toBe("true");
     expect(storage.get("sophia.capture.enabled")).toBe("1");
+    expect(storage.get("sophia-onboarded")).toBe("1");
     expect(JSON.parse(storage.get("sophia-onboarding-v2") ?? "null")).toMatchObject({
       state: { firstRun: { status: "completed" } },
       version: 2,
