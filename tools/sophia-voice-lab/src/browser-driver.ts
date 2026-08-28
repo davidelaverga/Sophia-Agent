@@ -1,4 +1,4 @@
-éÖ½Ù÷7ÓÞõñï7÷N9íÎ[oŸçÍéöõßž}÷^ñÞœ{ÞûuÞžÛv½çß:å×›ïW_{F÷ß®¸import { randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import { access } from "node:fs/promises";
 
@@ -1138,7 +1138,204 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       browser_context_id_sha256: binding.browser_context_id_sha256,
       provider_session_id_sha256: request.providerSessionIdSha256,
       frozen_provider_connection_epochs: frozenEpochs,
-      browser_provider_cln|÷‹h‘éì¶»§q«^uplete, pending, live_cleanup_complete: liveComplete, retention_purge_pending: retentionPending, retention_purged: retentionPurged, retention_purge_due_at: purgeDueValid ? purgeDueRaw : null, http_status: response.status, receipt }), dedupeKey: `recovery:${run.id}:${recoveryState}` }], artifacts: [] };
+      browser_provider_close_receipt_count: accepted.browser_provider_close_receipts.length,
+      browser_provider_activation_abort_receipt_count: accepted.browser_provider_activation_abort_receipts.length,
+      settlement_acknowledgement_sha256: canonicalRequestHash(accepted),
+      raw_provider_and_receipt_identifiers_excluded: true,
+    };
+  }
+
+  async drain(runId: string): Promise<Omit<LabEvent, "runId" | "seq" | "at">[]> {
+    const session = this.#requireSession(runId);
+    const harness = await session.page.evaluate((after) => (window as any).__sophiaVoiceLab?.drain(after) ?? { min_seq: after + 1, latest_seq: after, events: [] }, session.harnessCursor);
+    if (harness.min_seq > session.harnessCursor + 1) throw cursorGap("harness", session.harnessCursor, harness.min_seq);
+    const events: Omit<LabEvent, "runId" | "seq" | "at">[] = [];
+    for (const event of harness.events as Array<{ seq: number; kind: string; payload: Record<string, unknown> }>) {
+      if (event.seq <= session.harnessCursor) continue;
+      session.harnessCursor = event.seq;
+      const observedAt = typeof (event as any).observed_at === "string" ? (event as any).observed_at : null;
+      events.push({ kind: event.kind, source: "browser", payload: redact({ ...event.payload, _capture_provenance: { source: "voice-lab-init", seq: event.seq, observed_at: observedAt } }), dedupeKey: `browser:${event.seq}` });
+    }
+    const productDrain = await drainProductCapture(session.productCursor, (cursor) => session.page.evaluate((requestedCursor) => {
+        const capture = (window as any).__sophiaCapture;
+        if (capture?.readAfter) return capture.readAfter(requestedCursor, 500);
+        return { unsupported: true, cursor: requestedCursor, metadata: null, events: [] };
+      }, cursor));
+    for (const page of productDrain.pages) {
+      // This is a content-free runner receipt over the product-authored ring
+      // metadata returned by readAfter. It lets the evidence evaluator prove
+      // pagination, generation continuity, capacity, and drop accounting
+      // without exposing application payloads.
+      events.push({
+        kind: "capture.product_page",
+        source: "browser",
+        payload: page,
+        dedupeKey: `product-page:${page.generation}:${page.requestedSeq}:${page.returnedSeq}`,
+      });
+    }
+    for (const event of productDrain.events) {
+        // synthetic_test is product-authored on the capture event envelope. It
+        // must never be reconstructed from runner state or copied from payload.
+        const appBinding = validateAppSyntheticBinding(event.synthetic_test, session.expectedBinding);
+        events.push({
+          kind: mapProductEvent(event),
+          source: "product",
+          payload: redact({
+            ...(event.payload ?? {}),
+            ...(appBinding === null ? {} : { _app_synthetic_binding: appBinding }),
+            _capture_provenance: { generation: event.generation, seq: event.seq, recorded_at: event.recordedAt ?? null, category: event.category ?? null, name: event.name ?? null },
+          }),
+          dedupeKey: `product:${event.generation}:${event.seq}`,
+        });
+        if (appBinding !== null && event.name === "gemini-provider-connection-epoch" && event.payload?.receipt && typeof event.payload.receipt === "object") session.latestProviderReceipt = { ...(event.payload.receipt as Record<string, unknown>), _seq: event.seq };
+    }
+    session.productCursor = productDrain.cursor;
+    return events;
+  }
+
+  async end(run: RunRecord, frontendFinalizeCapability: string, frontendCleanupCapability: string): Promise<DriverEndResult> {
+    const session = this.#requireSession(run.id);
+    const artifacts: DriverEndResult["artifacts"] = [];
+    {
+      const refreshUrl = new URL(this.config.authRefreshPath, new URL(run.target.frontendUrl).origin).toString();
+      const { response: refreshed } = await requestBoundJson(session.context.request, "POST", refreshUrl, 15_000, frontendFinalizeCapability);
+      if (!refreshed.ok()) throw new VoiceLabError(labError("FINALIZATION_GRANT_REJECTED", `Frontend finalization grant refresh was rejected with HTTP ${refreshed.status()}.`, "authorization"));
+      const frontendOrigin = new URL(run.target.frontendUrl).origin;
+      const finalizationResponse = session.page.waitForResponse((response) => isExactFinalizationResponse(response, frontendOrigin), { timeout: 20_000 }).catch(() => null);
+      const end = session.page.getByRole("button", { name: /^End session$/i }).first();
+      await end.waitFor({ state: "visible", timeout: 10_000 });
+      await end.click();
+      const confirm = session.page.getByRole("button", { name: /^end session$/i }).last();
+      await confirm.waitFor({ state: "visible", timeout: 5_000 });
+      await confirm.click();
+      const response = await finalizationResponse;
+      if (!response || response.status() !== 202 || !isJsonResponse(response)) throw new VoiceLabError(labError("PRODUCT_FINALIZATION_UNCONFIRMED", "The ordinary UI did not produce an exact-origin JSON 202 product finalization receipt.", "product", true, { status: response?.status() ?? null }));
+      const responseBody = await response.json().catch(() => null) as Record<string, unknown> | null;
+      const evidenceReceipt = responseBody?.evidence_receipt as Record<string, unknown> | undefined;
+      if (!hasExactFinalizationEnvelope(run, responseBody, true) || typeof evidenceReceipt?.sha256 !== "string") throw new VoiceLabError(labError("FINALIZATION_ISOLATION_UNCONFIRMED", "Finalization receipt did not prove the bound synthetic run, cleanup obligation, exact retention policy, durable evidence, and exact isolation exclusions.", "product", false));
+      const events: Omit<LabEvent, "runId" | "seq" | "at">[] = [];
+      const closeDeadline = Date.now() + 10_000;
+      let providerClosed = false;
+      while (Date.now() < closeDeadline) {
+        const batch = await this.drain(run.id);
+        events.push(...batch);
+        if (batch.some((event) => event.kind === "provider.stage" && isValidatedAppBinding(event.payload._app_synthetic_binding, session.expectedBinding) && (event.payload.stage === "closed" || event.payload.stage === "ended"))) { providerClosed = true; break; }
+        await session.page.waitForTimeout(100);
+      }
+      if (!providerClosed) throw new VoiceLabError(labError("PROVIDER_CLEANUP_UNCONFIRMED", "Product finalization succeeded but provider transport closure was not observed.", "product", true));
+      const finalDeployment = await this.#verifyDeployment(run);
+      events.push({ kind: "deployment.reverified", source: "canonical", payload: finalDeployment.components, dedupeKey: `deployment:${run.id}:final` });
+      events.push(await this.#snapshotEvent(session, "finalization"));
+      events.push({ kind: "session.finalized", source: "canonical", payload: redact({ http_status: response.status(), receipt: responseBody }), dedupeKey: `canonical:${run.id}:finalized` });
+      if (run.capturePolicy.screenshot) {
+        const bytes = await session.page.screenshot({ type: "jpeg", quality: 60, fullPage: false });
+        artifacts.push({ id: randomUUID(), kind: "final_screenshot", contentType: "image/jpeg", bytes });
+      }
+      const cleanupUrl = new URL(this.config.authCleanupPath, new URL(run.target.frontendUrl).origin).toString();
+      const { response: cleanup, payload: cleanupReceipt } = await requestBoundJson(session.context.request, "POST", cleanupUrl, 15_000, frontendCleanupCapability);
+      if (!cleanup.ok() || cleanupReceipt?.ok !== true || cleanupReceipt?.session_revoked !== true || cleanupReceipt?.cookies_cleared !== true || cleanupReceipt?.test_run_id !== run.testRunId || cleanupReceipt?.cleanup_obligation_id !== run.cleanupObligationId) throw new VoiceLabError(labError("AUTH_SESSION_CLEANUP_UNCONFIRMED", "Dedicated test auth session and cookie cleanup was not confirmed for this run.", "authorization", true, { status: cleanup.status() }));
+      events.push({ kind: "auth.session_cleanup", source: "canonical", payload: redact(cleanupReceipt), dedupeKey: `canonical:${run.id}:auth-cleanup` });
+      events.push(await this.#closeContextEvent(run.id, session.context, "normal_end"));
+      return { events, artifacts };
+    }
+  }
+
+  async abort(run: RunRecord, reason: string, frontendFinalizeCapability?: string, frontendCleanupCapability?: string): Promise<DriverEndResult> {
+    const session = this.#sessions.get(run.id);
+    if (!session) return { events: [{ kind: "cleanup.browser_absent", source: "browser", payload: { reason }, dedupeKey: `cleanup:${run.id}:absent` }], artifacts: [] };
+    const events: Omit<LabEvent, "runId" | "seq" | "at">[] = [];
+    const artifacts: DriverEndResult["artifacts"] = [];
+    {
+      try { events.push(...await this.drain(run.id)); } catch (error) { events.push({ kind: "cleanup.capture_unavailable", source: "browser", payload: { reason: error instanceof Error ? error.message : String(error) }, dedupeKey: `cleanup:${run.id}:capture-unavailable` }); }
+      try { events.push(await this.#snapshotEvent(session, "finalization")); } catch { /* typed event above is sufficient */ }
+      if (run.capturePolicy.screenshot) {
+        const bytes = await session.page.screenshot({ type: "jpeg", quality: 50, fullPage: false }).catch(() => null);
+        if (bytes) artifacts.push({ id: randomUUID(), kind: "final_screenshot", contentType: "image/jpeg", bytes });
+      }
+      if (frontendFinalizeCapability) {
+        try {
+          const refreshUrl = new URL(this.config.authRefreshPath, new URL(run.target.frontendUrl).origin).toString();
+          const { response: refreshed } = await requestBoundJson(session.context.request, "POST", refreshUrl, 10_000, frontendFinalizeCapability);
+          if (!refreshed.ok()) throw new Error(`finalize grant HTTP ${refreshed.status()}`);
+          const frontendOrigin = new URL(run.target.frontendUrl).origin;
+          const finalizationResponse = session.page.waitForResponse((response) => isExactFinalizationResponse(response, frontendOrigin), { timeout: 12_000 }).catch(() => null);
+          const endButton = session.page.getByRole("button", { name: /^End session$/i }).first();
+          await endButton.waitFor({ state: "visible", timeout: 5_000 });
+          await endButton.click();
+          const confirm = session.page.getByRole("button", { name: /^end session$/i }).last();
+          if (await confirm.isVisible({ timeout: 2_000 }).catch(() => false)) await confirm.click();
+          const response = await finalizationResponse;
+          const receipt = response && response.status() === 202 && isJsonResponse(response) ? await response.json().catch(() => null) as Record<string, unknown> | null : null;
+          const confirmed = Boolean(response?.ok() && hasExactFinalizationEnvelope(run, receipt, true));
+          events.push({ kind: "cleanup.product_finalization", source: "canonical", payload: redact({ confirmed, http_status: response?.status() ?? null, receipt }), dedupeKey: `cleanup:${run.id}:product-finalization` });
+          if (confirmed) events.push({ kind: "session.finalized", source: "canonical", payload: redact({ http_status: response?.status() ?? null, receipt }), dedupeKey: `canonical:${run.id}:finalized` });
+          if (confirmed) {
+            const deadline = Date.now() + 8_000;
+            while (Date.now() < deadline) {
+              const batch = await this.drain(run.id);
+              events.push(...batch);
+              if (batch.some((event) => event.kind === "provider.stage" && isValidatedAppBinding(event.payload._app_synthetic_binding, session.expectedBinding) && ["closed", "ended"].includes(String(event.payload.stage)))) break;
+              await session.page.waitForTimeout(100);
+            }
+          }
+        } catch (error) {
+          events.push({ kind: "cleanup.product_finalization", source: "canonical", payload: { confirmed: false, unavailable_reason: error instanceof Error ? error.message.slice(0, 200) : "unknown" }, dedupeKey: `cleanup:${run.id}:product-finalization` });
+        }
+      } else {
+        events.push({ kind: "cleanup.product_finalization", source: "canonical", payload: { confirmed: false, unavailable_reason: "finalization_capability_unavailable" }, dedupeKey: `cleanup:${run.id}:product-finalization` });
+      }
+      if (frontendCleanupCapability) {
+        const cleanupUrl = new URL(this.config.authCleanupPath, new URL(run.target.frontendUrl).origin).toString();
+        const cleanupResult = await requestBoundJson(session.context.request, "POST", cleanupUrl, 10_000, frontendCleanupCapability).catch(() => null);
+        const cleanup = cleanupResult?.response ?? null;
+        const receipt = cleanupResult?.payload ?? null;
+        events.push({ kind: "auth.session_cleanup", source: "canonical", payload: redact({ status: cleanup?.status() ?? null, receipt, confirmed: Boolean(cleanup?.ok() && (receipt as any)?.session_revoked === true && (receipt as any)?.cookies_cleared === true && (receipt as any)?.test_run_id === run.testRunId && (receipt as any)?.cleanup_obligation_id === run.cleanupObligationId) }), dedupeKey: `cleanup:${run.id}:auth` });
+      }
+      events.push(await this.#closeContextEvent(run.id, session.context, reason));
+      return { events, artifacts };
+    }
+  }
+
+  async recover(run: RunRecord, recoveryCapability: string): Promise<DriverEndResult> {
+    const origin = validateAllowedOrigin(run.target.gatewayUrl, this.config.allowedOrigins).origin;
+    const pathname = `${this.config.recoveryPathPrefix.replace(/\/$/, "")}/${encodeURIComponent(run.testRunId)}/recover`;
+    try {
+      const response = await this.fetchImpl(new URL(pathname, origin), {
+        method: "POST", redirect: "error", signal: AbortSignal.timeout(15_000),
+        headers: { accept: "application/json", "X-Sophia-Voice-Lab-Recovery-Auth": this.config.recoveryInternalSecret, "X-Sophia-Voice-Lab-Capability": recoveryCapability },
+      });
+      const receipt = await response.json().catch(() => null) as Record<string, unknown> | null;
+      const components = receipt?.components as Record<string, { status?: unknown }> | undefined;
+      const durableReceipt = receipt?.receipt as Record<string, unknown> | undefined;
+      const liveComponentComplete = components !== undefined && ["canonical_session", "voice_provider", "builder", "auth_sessions"].every((key) => typeof components[key]?.status === "string" && !["pending", "failed", "unavailable", "retention_pending"].includes(String(components[key]!.status)));
+      const builder = components?.builder as Record<string, unknown> | undefined;
+      const builderReceipt = builder?.receipt && typeof builder.receipt === "object" ? builder.receipt as Record<string, unknown> : {};
+      const authoritativeBuilderZero = builder?.status === "completed" && (builder?.cleanup_complete ?? builderReceipt.cleanup_complete) === true && (builder?.discovery_complete ?? builderReceipt.discovery_complete) === true && (builder?.authoritative_zero_tasks ?? builderReceipt.authoritative_zero_tasks) === true && Number.isInteger(builder?.discovered_task_count ?? builderReceipt.discovered_task_count) && Number(builder?.discovered_task_count ?? builderReceipt.discovered_task_count) >= 0;
+      const durable = typeof durableReceipt?.storage === "string" && typeof durableReceipt?.object_path === "string" && typeof durableReceipt?.sha256 === "string" && /^[a-f0-9]{64}$/.test(durableReceipt.sha256);
+      const canonicalEvidence = components?.canonical_evidence as Record<string, unknown> | undefined;
+      const purgeDueRaw = receipt?.retention_purge_due_at;
+      const purgeDue = typeof purgeDueRaw === "string" ? new Date(purgeDueRaw) : null;
+      const purgeDueValid = purgeDue !== null && !Number.isNaN(purgeDue.getTime()) && purgeDue.toISOString() === purgeDueRaw;
+      const retentionPending = receipt?.retention_purge_pending === true && receipt?.retention_purged === false && receipt?.retention_maintenance_complete === false && purgeDueValid && canonicalEvidence?.status === "retention_pending";
+      const retentionPurged = receipt?.retention_purge_pending === false && receipt?.retention_purged === true && receipt?.retention_maintenance_complete === true;
+      const cleanupBound = receipt?.cleanup_obligation_id === run.cleanupObligationId;
+      // Live resource cleanup is an independent terminal boundary. For an
+      // allocation-free failure, product evidence may not exist yet, so the
+      // first truthful receipt can prove live zero before a retention deadline
+      // is materialized. Evidence publication and retention remain separately
+      // governed below and must never hold browser/provider cleanup open.
+      const liveComplete = response.status === 200 && receipt?.ok === true && receipt?.complete === true && receipt?.live_cleanup_complete === true && receipt?.live_resources_zero === true && receipt?.test_run_id === run.testRunId && cleanupBound && liveComponentComplete && authoritativeBuilderZero && durable;
+      const pending = response.status === 202 && receipt?.ok === true && receipt?.complete === false && receipt?.live_resources_zero !== true && receipt?.test_run_id === run.testRunId && cleanupBound && typeof receipt?.recovery_id === "string";
+      const recoveryState = retentionPurged
+        ? "retention-purged"
+        : liveComplete && retentionPending
+          ? "live-complete-retention-pending"
+          : liveComplete
+            ? "live-complete-retention-unsettled"
+            : pending
+              ? "pending"
+              : "failed";
+      return { events: [{ kind: "cleanup.recovery", source: "canonical", payload: redact({ complete: liveComplete, pending, live_cleanup_complete: liveComplete, retention_purge_pending: retentionPending, retention_purged: retentionPurged, retention_purge_due_at: purgeDueValid ? purgeDueRaw : null, http_status: response.status, receipt }), dedupeKey: `recovery:${run.id}:${recoveryState}` }], artifacts: [] };
     } catch (error) {
       return { events: [{ kind: "cleanup.recovery", source: "canonical", payload: { complete: false, pending: false, unavailable_reason: error instanceof Error ? error.name : "recovery_failed" }, dedupeKey: `recovery:${run.id}:unavailable` }], artifacts: [] };
     }
