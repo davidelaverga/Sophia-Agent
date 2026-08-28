@@ -134,6 +134,13 @@ export function shouldReleasePassiveEffectBreakpoint(createType: ClientEffectPro
   return createType !== "function";
 }
 
+/** Pause only for the contract violation we are trying to identify. React runs
+ * many valid passive effects during startup; stopping on every callable effect
+ * can starve the worker heartbeat and turn a diagnostic into a harness outage. */
+export function passiveEffectBreakpointCondition(breakpoint: PassiveEffectBreakpoint): string {
+  return `typeof ${breakpoint.create_variable} !== "function"`;
+}
+
 /** Extract only bounded, same-origin Next.js chunk script URLs from the
  * server-rendered document. This lets the worker arm a URL breakpoint before
  * Chromium evaluates React instead of racing Debugger.scriptParsed. */
@@ -626,6 +633,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
                   lineNumber: breakpoint.line_number,
                   columnNumber: breakpoint.column_number,
                 },
+                condition: passiveEffectBreakpointCondition(breakpoint),
               });
               passiveEffectBreakpoints.set(installed.breakpointId, breakpoint);
               bumpEffectProbeStatus("dynamic_breakpoints_installed");
@@ -656,11 +664,15 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
             lineNumber: preloadedPassiveEffectBreakpoint.line_number,
             columnNumber: preloadedPassiveEffectBreakpoint.column_number,
             urlRegex: preloadedPassiveEffectBreakpoint.url_regex,
+            condition: passiveEffectBreakpointCondition(preloadedPassiveEffectBreakpoint),
           });
           passiveEffectBreakpoints.set(installed.breakpointId, preloadedPassiveEffectBreakpoint);
           bumpEffectProbeStatus("preloaded_resolved_locations", Array.isArray(installed.locations) ? installed.locations.length : 0);
         }
-        await cdp.send("Debugger.setPauseOnExceptions", { state: "all" });
+        // Caught framework exceptions are numerous and do not become page
+        // failures. Runtime.exceptionThrown still captures their bounded
+        // frames, while the debugger pauses only for an uncaught product fault.
+        await cdp.send("Debugger.setPauseOnExceptions", { state: "uncaught" });
         cdp.on("Debugger.paused", (event) => {
           // Capture correlation time synchronously. CDP evaluation below is
           // asynchronous and can finish after Playwright emits pageerror even
