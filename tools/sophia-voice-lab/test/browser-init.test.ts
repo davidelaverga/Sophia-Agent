@@ -38,12 +38,23 @@ function harness() {
   sandbox.window = sandbox;
   sandbox.top = sandbox;
   vm.runInNewContext(buildVoiceLabInitScript({ pageOrigin: "https://frontend.test", websocketOrigins: ["wss://provider.test"], maxAudioBytes: 1024, testRunId: "00000000-0000-4000-8000-000000000001", cleanupObligationId: "00000000-0000-4000-8000-000000000002" }), sandbox);
-  return { sandbox, audio, sources, listeners, productEvents };
+  return { sandbox, audio, sources, listeners, productEvents, storage };
 }
 
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 describe("page-owned dynamic WebAudio injection", () => {
+  it("imports campaign-approved consent without calling an ordinary product mutation route", () => {
+    const { storage } = harness();
+
+    expect(storage.get("sophia_consent_accepted")).toBe("true");
+    expect(storage.get("sophia.capture.enabled")).toBe("1");
+    expect(JSON.parse(storage.get("sophia-onboarding-v2") ?? "null")).toMatchObject({
+      state: { firstRun: { status: "completed" } },
+      version: 2,
+    });
+  });
+
   it("permits one product observer wrapper without exposing or replacing native getUserMedia", async () => {
     const { sandbox } = harness();
     const syntheticGetUserMedia = sandbox.navigator.mediaDevices.getUserMedia.bind(sandbox.navigator.mediaDevices);
