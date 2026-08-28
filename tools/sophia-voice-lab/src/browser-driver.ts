@@ -548,19 +548,26 @@ export async function establishSessionNavigation(
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   const allowedChoices = [
-    page.getByRole("button", { name: new RegExp(`^${escapeRegex(freshButtonName)}$`, "i") }),
-    page.getByRole("button", { name: /^(?:Start open|Same ritual)$/i }),
+    { id: "secondary", buttons: page.getByRole("button", { name: /^(?:Start open|Same ritual)$/i }) },
+    { id: "fresh", buttons: page.getByRole("button", { name: new RegExp(`^${escapeRegex(freshButtonName)}$`, "i") }) },
   ];
+  const activatedChoices = new Set<string>();
   while (Date.now() < deadline) {
     const current = new URL(page.url());
     if (current.origin === frontendOrigin && /^\/session(?:\/|$)/.test(current.pathname) && current.hash === "") return;
     let advanced = false;
-    for (const choices of allowedChoices) {
-      const count = Math.min(await choices.count(), 4);
+    for (const { id, buttons } of allowedChoices) {
+      // A session replacement can leave its button mounted while async end and
+      // start requests settle. Re-activating that same semantic choice restarts
+      // the handoff and can prevent navigation indefinitely. Each permitted
+      // transition is therefore activated at most once per route attempt.
+      if (activatedChoices.has(id)) continue;
+      const count = Math.min(await buttons.count(), 4);
       for (let index = 0; index < count; index += 1) {
-        const choice = choices.nth(index);
+        const choice = buttons.nth(index);
         if (!await choice.isVisible().catch(() => false) || !await choice.isEnabled().catch(() => false)) continue;
         await choice.click({ timeout: 5_000 });
+        activatedChoices.add(id);
         advanced = true;
         break;
       }
