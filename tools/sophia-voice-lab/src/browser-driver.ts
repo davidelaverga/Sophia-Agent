@@ -522,6 +522,21 @@ export async function resolveDashboardMicButton(page: Page, micAnchor: Locator):
   return page.getByRole("button", { name: /^Start (?:open session|prepare|debrief|reset|vent)$/i }).first();
 }
 
+export async function activateDashboardMicButton(page: Page, button: Locator): Promise<void> {
+  await button.waitFor({ state: "visible", timeout: 5_000 });
+  const deadline = Date.now() + 10_000;
+  while (!await button.isEnabled()) {
+    if (Date.now() >= deadline) throw new Error("The ordinary dashboard microphone control did not become enabled.");
+    await page.waitForTimeout(100);
+  }
+  // The dashboard deliberately animates the microphone stage and may place
+  // non-interactive visual layers above it. Keyboard activation exercises the
+  // same native button/onClick path without depending on a stable hit-test
+  // point. It does not call product handlers or navigation directly.
+  await button.focus();
+  await button.press("Enter");
+}
+
 export async function establishDashboardMicRoute(input: {
   isMicVisible: () => Promise<boolean>;
   isConsentVisible: () => Promise<boolean>;
@@ -997,8 +1012,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       });
       ordinaryRouteStage = "dashboard_microphone_cta";
       const dashboardButton = await resolveDashboardMicButton(page, micAnchor);
-      await dashboardButton.waitFor({ state: "visible", timeout: 5_000 });
-      await dashboardButton.click();
+      await activateDashboardMicButton(page, dashboardButton);
       ordinaryRouteStage = "fresh_session_choice";
       const fresh = page.getByRole("button", { name: new RegExp(`^${escapeRegex(this.config.freshButtonName)}$`, "i") }).first();
       if (await fresh.isVisible({ timeout: 1_200 }).catch(() => false)) await fresh.click();
