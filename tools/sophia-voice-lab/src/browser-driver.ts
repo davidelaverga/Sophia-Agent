@@ -338,8 +338,7 @@ export function selectRecentClientEffectProbe(
 ): ClientEffectProbe | null {
   return snapshots
     .filter((snapshot) => snapshot.observedAt <= pageErrorObservedAt && snapshot.observedAt >= pageErrorObservedAt - windowMs)
-    .slice(-20)
-    .reverse()
+    .sort((left, right) => right.observedAt - left.observedAt)
     .find((snapshot) => snapshot.effectProbe !== undefined)?.effectProbe ?? null;
 }
 
@@ -521,6 +520,10 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
     let latestClientEffectProbe: ClientEffectProbe | null = null;
     let latestClientPageErrorObservedAt: number | null = null;
     const recentClientPausedFrameSets: TimedClientChunkFrames[] = [];
+    // Invalid effect probes are rare and causally important. Keep them in a
+    // separate bounded buffer so concurrently completing callable-effect
+    // evaluations cannot evict the invalid record before pageerror arrives.
+    const recentInvalidClientEffectProbeSets: TimedClientChunkFrames[] = [];
     const effectProbeStatus: ClientEffectProbeStatus = {
       preloaded_candidates: 0,
       preloaded_resolved_locations: 0,
@@ -539,7 +542,10 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
         // The paused-handler enrichment is asynchronous. Re-select here so a
         // probe that completed after pageerror was emitted is not lost.
         latestClientPausedFrames = selectRecentClientPausedFrames(recentClientPausedFrameSets, latestClientPageErrorObservedAt);
-        latestClientEffectProbe = selectRecentClientEffectProbe(recentClientPausedFrameSets, latestClientPageErrorObservedAt);
+        latestClientEffectProbe = selectRecentClientEffectProbe(
+          [...recentClientPausedFrameSets, ...recentInvalidClientEffectProbeSets],
+          latestClientPageErrorObservedAt,
+        );
       }
       const enriched = withClientEffectProbe(
         withClientDiagnosticFrames(
@@ -584,7 +590,10 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
         latestClientPageErrorObservedAt = observedAt;
         latestClientPageError = classifyClientPageError(error);
         latestClientPausedFrames = selectRecentClientPausedFrames(recentClientPausedFrameSets, observedAt);
-        latestClientEffectProbe = selectRecentClientEffectProbe(recentClientPausedFrameSets, observedAt);
+        latestClientEffectProbe = selectRecentClientEffectProbe(
+          [...recentClientPausedFrameSets, ...recentInvalidClientEffectProbeSets],
+          observedAt,
+        );
       });
       page.on("console", (message) => {
         if (message.type() !== "error") return;
@@ -755,7 +764,12 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
               // Safe effect diagnostics are fail-open and never block resume.
             } finally {
               if ((!passiveBinding && frames.length > 0) || effectProbe) {
-                recentClientPausedFrameSets.push({ observedAt: pausedObservedAt, frames, ...(effectProbe ? { effectProbe } : {}) });
+                const snapshot = { observedAt: pausedObservedAt, frames, ...(effectProbe ? { effectProbe } : {}) };
+                recentClientPausedFrameSets.push(snapshot);
+                if (effectProbe && shouldReleasePassiveEffectBreakpoint(effectProbe.create_type)) {
+                  recentInvalidClientEffectProbeSets.push(snapshot);
+                  if (recentInvalidClientEffectProbeSets.length > 5) recentInvalidClientEffectProbeSets.splice(0, recentInvalidClientEffectProbeSets.length - 5);
+                }
                 bumpEffectProbeStatus("snapshot_count");
                 if (recentClientPausedFrameSets.length > 20) recentClientPausedFrameSets.splice(0, recentClientPausedFrameSets.length - 20);
               }

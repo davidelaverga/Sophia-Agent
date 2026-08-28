@@ -254,6 +254,22 @@ describe("ordinary dashboard consent route", () => {
     expect(JSON.stringify(withClientEffectProbe(diagnostic, probe))).not.toContain("opaque product failure");
   });
 
+  it("selects by pause time when asynchronous probe evaluations complete out of order", () => {
+    const invalidProbe = {
+      create_type: "object" as const,
+      effect_tag: 9,
+      owner_fiber_tag: 0,
+      owner_props: "other" as const,
+      owner_frame: { chunk: "app-page.js", line: 1, column: 77 },
+    };
+    const callableProbe = { ...invalidProbe, create_type: "function" as const };
+    expect(selectRecentClientEffectProbe([
+      { observedAt: 9_240, frames: [], effectProbe: callableProbe },
+      { observedAt: 9_100, frames: [], effectProbe: invalidProbe },
+      { observedAt: 9_200, frames: [], effectProbe: callableProbe },
+    ], 9_250)).toEqual(callableProbe);
+  });
+
   it("finds a minified React passive-effect create call without a build-specific offset", () => {
     expect(findPassiveEffectCreateBreakpoint([
       "function before(e){return e}",
