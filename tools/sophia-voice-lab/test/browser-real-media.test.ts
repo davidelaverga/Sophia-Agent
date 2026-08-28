@@ -8,7 +8,7 @@ import { chromium, type Browser } from "playwright";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { buildVoiceLabInitScript } from "../src/browser-init.js";
-import { PlaywrightVoiceDriver, resolveDashboardMicButton } from "../src/browser-driver.js";
+import { activateDashboardMicButton, PlaywrightVoiceDriver, resolveDashboardMicButton } from "../src/browser-driver.js";
 
 function sineWav(durationMs = 600, sampleRate = 16_000): Buffer {
   const samples = Math.floor(sampleRate * durationMs / 1_000);
@@ -80,6 +80,30 @@ describe("real Chromium dynamic media contract", () => {
     `);
     const button = await resolveDashboardMicButton(page, page.locator('[data-onboarding="mic-cta"]'));
     expect(await button.getAttribute("aria-label")).toBe("Connecting to Sophia");
+    await context.close();
+  });
+
+  it("activates the ordinary dashboard mic button while animated visual layers cover its hit point", async () => {
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    await page.goto(origin);
+    await page.setContent(`
+      <style>
+        @keyframes drift { from { transform: translateX(0); } to { transform: translateX(8px); } }
+        #stage { animation: drift 120ms infinite alternate; }
+        #visual-layer { position: fixed; inset: 0; z-index: 20; }
+      </style>
+      <div id="stage">
+        <span data-onboarding="mic-cta" aria-hidden="true"></span>
+        <button type="button" aria-label="Start open session" onclick="window.__micActivations += 1">microphone</button>
+      </div>
+      <div id="visual-layer"></div>
+      <script>window.__micActivations = 0;</script>
+    `);
+    const button = await resolveDashboardMicButton(page, page.locator('[data-onboarding="mic-cta"]'));
+    await expect(button.click({ timeout: 500 })).rejects.toThrow(/Timeout/);
+    await activateDashboardMicButton(page, button);
+    expect(await page.evaluate(() => (window as any).__micActivations)).toBe(1);
     await context.close();
   });
 
