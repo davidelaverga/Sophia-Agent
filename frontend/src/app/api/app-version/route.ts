@@ -1,7 +1,8 @@
 import { NextResponse } from 'next/server';
 
-// Keep this endpoint source-bound so a governed candidate always produces a
-// distinct Vercel build instead of being skipped by the ignored-build gate.
+// Keep this endpoint source-bound so every governed Voice Lab candidate
+// produces a distinct Vercel build instead of being skipped by the
+// ignored-build gate, including harness-only fixes.
 function resolveBuildId(): string {
   return (
     process.env.NEXT_PUBLIC_APP_BUILD_ID
