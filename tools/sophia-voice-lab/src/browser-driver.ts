@@ -61,8 +61,10 @@ type ClientPageErrorDiagnostic = {
   effect_probe_status?: ClientEffectProbeStatus;
 };
 type ClientChunkFrame = { chunk: string; line: number; column: number };
+type ClientValueType = "undefined" | "function" | "object" | "boolean" | "number" | "string" | "symbol" | "bigint" | "other";
 type ClientEffectProbe = {
-  create_type: "undefined" | "function" | "object" | "boolean" | "number" | "string" | "symbol" | "bigint" | "other";
+  create_type: ClientValueType;
+  destroy_type?: ClientValueType;
   effect_tag: number | null;
   owner_fiber_tag: number | null;
   owner_props: "on_ready" | "on_authenticated" | "children_only" | "no_props" | "other" | "unavailable";
@@ -79,13 +81,19 @@ type ClientEffectProbeStatus = {
   snapshot_count: number;
 };
 type TimedClientChunkFrames = { observedAt: number; frames: ClientChunkFrame[]; effectProbe?: ClientEffectProbe };
-type PassiveEffectBreakpoint = {
+type PassiveEffectBreakpointBase = {
   line_number: number;
   column_number: number;
-  create_variable: string;
   effect_variable: string;
   owner_variable: string;
 };
+type PassiveEffectBreakpoint = (PassiveEffectBreakpointBase & {
+  probe_kind: "create";
+  create_variable: string;
+}) | (PassiveEffectBreakpointBase & {
+  probe_kind: "destroy";
+  destroy_variable: string;
+});
 type PreloadedPassiveEffectBreakpoint = PassiveEffectBreakpoint & {
   url_regex: string;
 };
@@ -118,9 +126,37 @@ export function findPassiveEffectCreateBreakpoint(source: string): PassiveEffect
   // successful invocation and therefore miss the non-callable fault itself.
   const assignmentOffset = createCall[0].indexOf(`;${effectVariable}.inst.destroy`) + 1;
   return {
+    probe_kind: "create",
     line_number: lineNumber,
     column_number: createCall.index - lastNewline - 1 + assignmentOffset,
     create_variable: createVariable,
+    effect_variable: effectVariable,
+    owner_variable: ownerVariable,
+  };
+}
+
+/** Locate React's passive-effect cleanup call. A valid create callback may
+ * return a non-function value; React stores it as `inst.destroy` and the fault
+ * appears only when cleanup later invokes that value. */
+export function findPassiveEffectDestroyBreakpoint(source: string): PassiveEffectBreakpoint | null {
+  if (source.length === 0 || source.length > 5_000_000) return null;
+  const destroyCall = /var ([A-Za-z_$][A-Za-z0-9_$]*)=([A-Za-z_$][A-Za-z0-9_$]*)\.inst,([A-Za-z_$][A-Za-z0-9_$]*)=\1\.destroy;if\(void 0!==\3\)\{\1\.destroy=void 0,([A-Za-z_$][A-Za-z0-9_$]*)=([A-Za-z_$][A-Za-z0-9_$]*);try\{\3\(\)/.exec(source);
+  if (destroyCall?.index === undefined) return null;
+  const instanceVariable = destroyCall[1];
+  const effectVariable = destroyCall[2];
+  const destroyVariable = destroyCall[3];
+  const ownerVariable = destroyCall[5];
+  if (!instanceVariable || !effectVariable || !destroyVariable || !ownerVariable
+    || ![instanceVariable, effectVariable, destroyVariable, ownerVariable].every((value) => /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(value))) return null;
+  const before = source.slice(0, destroyCall.index);
+  const lineNumber = (before.match(/\n/g) ?? []).length;
+  const lastNewline = before.lastIndexOf("\n");
+  const tryOffset = destroyCall[0].lastIndexOf("try{");
+  return {
+    probe_kind: "destroy",
+    line_number: lineNumber,
+    column_number: destroyCall.index - lastNewline - 1 + tryOffset,
+    destroy_variable: destroyVariable,
     effect_variable: effectVariable,
     owner_variable: ownerVariable,
   };
@@ -138,7 +174,9 @@ export function shouldReleasePassiveEffectBreakpoint(createType: ClientEffectPro
  * many valid passive effects during startup; stopping on every callable effect
  * can starve the worker heartbeat and turn a diagnostic into a harness outage. */
 export function passiveEffectBreakpointCondition(breakpoint: PassiveEffectBreakpoint): string {
-  return `typeof ${breakpoint.create_variable} !== "function"`;
+  return breakpoint.probe_kind === "create"
+    ? `typeof ${breakpoint.create_variable} !== "function"`
+    : `typeof ${breakpoint.destroy_variable} !== "undefined" && typeof ${breakpoint.destroy_variable} !== "function"`;
 }
 
 /** Extract only bounded, same-origin Next.js chunk script URLs from the
@@ -179,11 +217,12 @@ async function preloadPassiveEffectBreakpoints(request: APIRequestContext, front
       if (!response.ok()) continue;
       const bytes = await response.body();
       if (bytes.byteLength === 0 || bytes.byteLength > 5_000_000) continue;
-      const breakpoint = findPassiveEffectCreateBreakpoint(bytes.toString("utf8"));
-      if (!breakpoint) continue;
+      const source = bytes.toString("utf8");
+      const candidates = [findPassiveEffectCreateBreakpoint(source), findPassiveEffectDestroyBreakpoint(source)].filter((value): value is PassiveEffectBreakpoint => value !== null);
+      if (candidates.length === 0) continue;
       const parsed = new URL(scriptUrl);
       const escapedPath = `${parsed.origin}${parsed.pathname}`.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      breakpoints.push({ ...breakpoint, url_regex: `^${escapedPath}(?:\\?.*)?$` });
+      for (const breakpoint of candidates) breakpoints.push({ ...breakpoint, url_regex: `^${escapedPath}(?:\\?.*)?$` });
     } catch {
       // Preloading is diagnostic-only and remains fail-open.
     }
@@ -625,19 +664,23 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
               const scriptUrl = new URL(scriptUrlValue);
               if (scriptUrl.origin !== frontendOrigin || !/^\/_next\/static\/chunks\/[A-Za-z0-9._-]{1,160}\.js$/.test(scriptUrl.pathname)) return false;
               const sourceResult = await cdp.send("Debugger.getScriptSource", { scriptId });
-              const breakpoint = findPassiveEffectCreateBreakpoint(sourceResult.scriptSource);
-              if (!breakpoint) return false;
-              const installed = await cdp.send("Debugger.setBreakpoint", {
-                location: {
-                  scriptId,
-                  lineNumber: breakpoint.line_number,
-                  columnNumber: breakpoint.column_number,
-                },
-                condition: passiveEffectBreakpointCondition(breakpoint),
-              });
-              passiveEffectBreakpoints.set(installed.breakpointId, breakpoint);
-              bumpEffectProbeStatus("dynamic_breakpoints_installed");
-              return true;
+              const breakpoints = [
+                findPassiveEffectCreateBreakpoint(sourceResult.scriptSource),
+                findPassiveEffectDestroyBreakpoint(sourceResult.scriptSource),
+              ].filter((value): value is PassiveEffectBreakpoint => value !== null);
+              for (const breakpoint of breakpoints) {
+                const installed = await cdp.send("Debugger.setBreakpoint", {
+                  location: {
+                    scriptId,
+                    lineNumber: breakpoint.line_number,
+                    columnNumber: breakpoint.column_number,
+                  },
+                  condition: passiveEffectBreakpointCondition(breakpoint),
+                });
+                passiveEffectBreakpoints.set(installed.breakpointId, breakpoint);
+                bumpEffectProbeStatus("dynamic_breakpoints_installed");
+              }
+              return breakpoints.length > 0;
             } catch {
               // Passive-effect diagnostics are best-effort and never block load.
               return false;
@@ -690,15 +733,18 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
               const callFrames = Array.isArray(event.callFrames) ? event.callFrames.slice(0, 12) : [];
               let effectFrame: (typeof callFrames)[number] | undefined;
               const knownPassiveBinding = passiveBinding ?? passiveEffectBreakpoints.values().next().value;
-              const allowedTypes = new Set<ClientEffectProbe["create_type"]>(["undefined", "function", "object", "boolean", "number", "string", "symbol", "bigint", "other"]);
+              const allowedTypes = new Set<ClientValueType>(["undefined", "function", "object", "boolean", "number", "string", "symbol", "bigint", "other"]);
               const acceptCreateRecord = (candidate: (typeof callFrames)[number], createValue: unknown): boolean => {
                 if (!createValue || typeof createValue !== "object") return false;
                 const createRecord = createValue as Record<string, unknown>;
                 const createType = createRecord.createType;
-                if (typeof createType !== "string" || !allowedTypes.has(createType as ClientEffectProbe["create_type"])) return false;
+                const destroyType = createRecord.destroyType;
+                if (typeof createType !== "string" || !allowedTypes.has(createType as ClientValueType)
+                  || (destroyType !== undefined && (typeof destroyType !== "string" || !allowedTypes.has(destroyType as ClientValueType)))) return false;
                 bumpEffectProbeStatus("effect_record_matches");
                 effectProbe = {
-                  create_type: createType as ClientEffectProbe["create_type"],
+                  create_type: createType as ClientValueType,
+                  ...(destroyType === undefined ? {} : { destroy_type: destroyType as ClientValueType }),
                   effect_tag: Number.isInteger(createRecord.effectTag) ? Number(createRecord.effectTag) : null,
                   owner_fiber_tag: null,
                   owner_props: "unavailable",
@@ -707,7 +753,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
                 effectFrame = candidate;
                 return true;
               };
-              if (knownPassiveBinding) {
+              if (knownPassiveBinding?.probe_kind === "create") {
                 // At the failing `a()` call the effect record can be shadowed by
                 // unrelated minified `n` bindings in earlier frames. Scan every
                 // frame for the exact local create binding first and require it
@@ -728,7 +774,26 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
                   if (acceptCreateRecord(candidate, localCreateResult?.result?.value)) break;
                 }
               }
-              if (!effectProbe) {
+              if (!effectProbe && knownPassiveBinding?.probe_kind === "destroy") {
+                // At cleanup, require the local destroy binding to be identical
+                // to the value React stored on this exact effect record. This
+                // distinguishes the invalid return value from unrelated
+                // minified locals without serializing the value itself.
+                for (const candidate of callFrames) {
+                  if (typeof candidate.callFrameId !== "string") continue;
+                  bumpEffectProbeStatus("evaluation_attempts");
+                  const { destroy_variable: destroyVariable, effect_variable: effectVariable } = knownPassiveBinding;
+                  const localDestroyResult = await cdp.send("Debugger.evaluateOnCallFrame", {
+                    callFrameId: candidate.callFrameId,
+                    expression: `(() => { if (typeof ${effectVariable} !== "object" || ${effectVariable} === null || typeof ${effectVariable}.inst !== "object" || ${effectVariable}.inst === null || ${effectVariable}.inst.destroy !== ${destroyVariable}) return null; const rawCreateType = typeof ${effectVariable}.create; const rawDestroyType = typeof ${destroyVariable}; const allowed = ["undefined","function","object","boolean","number","string","symbol","bigint"]; return { createType: allowed.includes(rawCreateType) ? rawCreateType : "other", destroyType: allowed.includes(rawDestroyType) ? rawDestroyType : "other", effectTag: Number.isSafeInteger(${effectVariable}.tag) && ${effectVariable}.tag >= 0 && ${effectVariable}.tag <= 255 ? ${effectVariable}.tag : null }; })()`,
+                    returnByValue: true,
+                    silent: true,
+                    throwOnSideEffect: false,
+                  });
+                  if (acceptCreateRecord(candidate, localDestroyResult?.result?.value)) break;
+                }
+              }
+              if (!effectProbe && knownPassiveBinding?.probe_kind !== "destroy") {
                 // Retain the record-only fallback for callable effects and for
                 // runtime variants where the local binding is unavailable.
                 for (const candidate of callFrames) {
@@ -799,7 +864,11 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
                   }
                 }
               }
-              if (effectProbe && passiveBreakpointId && shouldReleasePassiveEffectBreakpoint(effectProbe.create_type)) {
+              const conclusiveEffectProbe = effectProbe !== undefined && (
+                shouldReleasePassiveEffectBreakpoint(effectProbe.create_type)
+                || (effectProbe.destroy_type !== undefined && effectProbe.destroy_type !== "undefined" && effectProbe.destroy_type !== "function")
+              );
+              if (conclusiveEffectProbe && passiveBreakpointId) {
                 await cdp.send("Debugger.removeBreakpoint", { breakpointId: passiveBreakpointId }).catch(() => undefined);
                 passiveEffectBreakpoints.delete(passiveBreakpointId);
               }
@@ -809,7 +878,10 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
               if ((!passiveBinding && frames.length > 0) || effectProbe) {
                 const snapshot = { observedAt: pausedObservedAt, frames, ...(effectProbe ? { effectProbe } : {}) };
                 recentClientPausedFrameSets.push(snapshot);
-                if (effectProbe && shouldReleasePassiveEffectBreakpoint(effectProbe.create_type)) {
+                if (effectProbe && (
+                  shouldReleasePassiveEffectBreakpoint(effectProbe.create_type)
+                  || (effectProbe.destroy_type !== undefined && effectProbe.destroy_type !== "undefined" && effectProbe.destroy_type !== "function")
+                )) {
                   recentInvalidClientEffectProbeSets.push(snapshot);
                   if (recentInvalidClientEffectProbeSets.length > 5) recentInvalidClientEffectProbeSets.splice(0, recentInvalidClientEffectProbeSets.length - 5);
                 }

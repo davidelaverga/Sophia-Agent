@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { assertPageLocation, classifyBrowserStartCause, classifyClientCdpExceptionFrames, classifyClientCdpPausedFrames, classifyClientConsoleErrorLocation, classifyClientPageError, closeContextWithProof, DASHBOARD_ROUTE_TIMEOUT_MS, drainProductCapture, establishDashboardMicRoute, extractNextChunkScriptUrls, findPassiveEffectCreateBreakpoint, isExactFinalizationResponse, passiveEffectBreakpointCondition, PlaywrightVoiceDriver, RECOVERABLE_DASHBOARD_LOAD_ERROR, RECOVERABLE_DASHBOARD_RELOAD_BUTTON, requestBoundJson, requestBoundJsonWithOneTransientRetry, selectRecentClientEffectProbe, selectRecentClientPausedFrames, shouldReleasePassiveEffectBreakpoint, validateAppSyntheticBinding, validateD02BrowserContextBinding, validateD02ProductCleanupEcho, withClientDiagnosticFrames, withClientEffectProbe } from "../src/browser-driver.js";
+import { assertPageLocation, classifyBrowserStartCause, classifyClientCdpExceptionFrames, classifyClientCdpPausedFrames, classifyClientConsoleErrorLocation, classifyClientPageError, closeContextWithProof, DASHBOARD_ROUTE_TIMEOUT_MS, drainProductCapture, establishDashboardMicRoute, extractNextChunkScriptUrls, findPassiveEffectCreateBreakpoint, findPassiveEffectDestroyBreakpoint, isExactFinalizationResponse, passiveEffectBreakpointCondition, PlaywrightVoiceDriver, RECOVERABLE_DASHBOARD_LOAD_ERROR, RECOVERABLE_DASHBOARD_RELOAD_BUTTON, requestBoundJson, requestBoundJsonWithOneTransientRetry, selectRecentClientEffectProbe, selectRecentClientPausedFrames, shouldReleasePassiveEffectBreakpoint, validateAppSyntheticBinding, validateD02BrowserContextBinding, validateD02ProductCleanupEcho, withClientDiagnosticFrames, withClientEffectProbe } from "../src/browser-driver.js";
 import { sha256 } from "../src/security.js";
 import { SHA, SHA_B, SHA_C, SHA_D, testConfig, testRun } from "./helpers.js";
 
@@ -275,6 +275,7 @@ describe("ordinary dashboard consent route", () => {
       "function before(e){return e}",
       "function iv(e,t){try{var n=t.updateQueue,r=null!==n?n.lastEffect:null;if(null!==r){var l=r.next;n=l;do{if((n.tag&e)===e){r=void 0;var a=n.create;n.inst.destroy=r=a()}n=n.next}while(n!==l)}}catch(e){throw e}}",
     ].join("\n"))).toEqual({
+      probe_kind: "create",
       line_number: 1,
       column_number: 145,
       create_variable: "a",
@@ -282,6 +283,19 @@ describe("ordinary dashboard consent route", () => {
       owner_variable: "t",
     });
     expect(findPassiveEffectCreateBreakpoint("function nope(e,t){return t.create}")).toBeNull();
+  });
+
+  it("finds a minified React passive-effect destroy call and conditions on invalid cleanup values", () => {
+    const breakpoint = findPassiveEffectDestroyBreakpoint("function iy(e,t,n){try{var r=t.updateQueue,l=null!==r?r.lastEffect:null;if(null!==l){var a=l.next;r=a;do{if((r.tag&e)===e){var o=r.inst,i=o.destroy;if(void 0!==i){o.destroy=void 0,l=t;try{i()}catch(e){sN(l,n,e)}}}r=r.next}while(r!==a)}}catch(e){sN(t,t.return,e)}}");
+    expect(breakpoint).toMatchObject({
+      probe_kind: "destroy",
+      line_number: 0,
+      destroy_variable: "i",
+      effect_variable: "r",
+      owner_variable: "t",
+    });
+    expect(breakpoint?.column_number).toEqual(expect.any(Number));
+    expect(breakpoint && passiveEffectBreakpointCondition(breakpoint)).toBe('typeof i !== "undefined" && typeof i !== "function"');
   });
 
   it("keeps the passive-effect breakpoint armed across callable effects", () => {
@@ -292,6 +306,7 @@ describe("ordinary dashboard consent route", () => {
 
   it("pauses the passive-effect probe only for non-callable creates", () => {
     expect(passiveEffectBreakpointCondition({
+      probe_kind: "create",
       line_number: 1,
       column_number: 145,
       create_variable: "a",
