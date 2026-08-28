@@ -38,12 +38,12 @@ describe("migration runtime", () => {
     })).rejects.toThrow("Timed out waiting for the Sophia Voice Lab schema migration lock.");
   });
 
-  it("closes a completed migration connection gracefully", async () => {
+  it("closes a completed migration connection and its settled transport", async () => {
     const destroy = vi.fn();
     const end = vi.fn().mockResolvedValue(undefined);
     await closeMigrationClient({ end, connection: { stream: { destroy } } } as never);
     expect(end).toHaveBeenCalledTimes(1);
-    expect(destroy).not.toHaveBeenCalled();
+    expect(destroy).toHaveBeenCalledTimes(1);
   });
 
   it("destroys only the migration socket when graceful disconnect stalls", async () => {

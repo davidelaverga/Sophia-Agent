@@ -57,6 +57,12 @@ export async function closeMigrationClient(
   const setTimer = options.setTimer ?? setTimeout;
   const clearTimer = options.clearTimer ?? clearTimeout;
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let transportDestroyed = false;
+  const destroyTransport = (): void => {
+    if (transportDestroyed) return;
+    transportDestroyed = true;
+    database.connection.stream.destroy();
+  };
   try {
     await Promise.race([
       database.end(),
@@ -66,11 +72,16 @@ export async function closeMigrationClient(
           // keep the TLS socket open. The advisory lock is session-scoped, so
           // destroying only this completed migration session is the safe,
           // bounded fallback and cannot release another process's lock.
-          database.connection.stream.destroy();
+          destroyTransport();
           resolve();
         }, timeoutMs);
       }),
     ]);
+    // pg can resolve Client.end() after sending PostgreSQL's termination
+    // packet even when a Supavisor TLS transport remains referenced. Finish
+    // the already-completed migration session deterministically so a shell
+    // start command can advance from migrate.js to the long-lived service.
+    destroyTransport();
   } finally {
     if (timer) clearTimer(timer);
   }
