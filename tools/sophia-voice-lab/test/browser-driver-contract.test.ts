@@ -286,15 +286,17 @@ describe("ordinary dashboard consent route", () => {
   });
 
   it("finds a minified React passive-effect destroy call and conditions on invalid cleanup values", () => {
-    const breakpoint = findPassiveEffectDestroyBreakpoint("function iy(e,t,n){try{var r=t.updateQueue,l=null!==r?r.lastEffect:null;if(null!==l){var a=l.next;r=a;do{if((r.tag&e)===e){var o=r.inst,i=o.destroy;if(void 0!==i){o.destroy=void 0,l=t;try{i()}catch(e){sN(l,n,e)}}}r=r.next}while(r!==a)}}catch(e){sN(t,t.return,e)}}");
+    const source = "function iy(e,t,n){try{var r=t.updateQueue,l=null!==r?r.lastEffect:null;if(null!==l){var a=l.next;r=a;do{if((r.tag&e)===e){var o=r.inst,i=o.destroy;if(void 0!==i){o.destroy=void 0,l=t;try{i()}catch(e){sN(l,n,e)}}}r=r.next}while(r!==a)}}catch(e){sN(t,t.return,e)}}";
+    const breakpoint = findPassiveEffectDestroyBreakpoint(source);
     expect(breakpoint).toMatchObject({
       probe_kind: "destroy",
       line_number: 0,
+      instance_variable: "o",
       destroy_variable: "i",
       effect_variable: "r",
       owner_variable: "t",
     });
-    expect(breakpoint?.column_number).toEqual(expect.any(Number));
+    expect(breakpoint?.column_number).toBe(source.indexOf("i()}"));
     expect(breakpoint && passiveEffectBreakpointCondition(breakpoint)).toBe('typeof i !== "undefined" && typeof i !== "function"');
   });
 

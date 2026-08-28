@@ -92,6 +92,7 @@ type PassiveEffectBreakpoint = (PassiveEffectBreakpointBase & {
   create_variable: string;
 }) | (PassiveEffectBreakpointBase & {
   probe_kind: "destroy";
+  instance_variable: string;
   destroy_variable: string;
 });
 type PreloadedPassiveEffectBreakpoint = PassiveEffectBreakpoint & {
@@ -151,11 +152,15 @@ export function findPassiveEffectDestroyBreakpoint(source: string): PassiveEffec
   const before = source.slice(0, destroyCall.index);
   const lineNumber = (before.match(/\n/g) ?? []).length;
   const lastNewline = before.lastIndexOf("\n");
-  const tryOffset = destroyCall[0].lastIndexOf("try{");
+  const invocationOffset = destroyCall[0].lastIndexOf(`${destroyVariable}()`);
   return {
     probe_kind: "destroy",
     line_number: lineNumber,
-    column_number: destroyCall.index - lastNewline - 1 + tryOffset,
+    // V8 can resolve a breakpoint on `try` to the function entry, before the
+    // cleanup local exists. Stop on the actual invocation instead, where both
+    // the saved cleanup and its exact effect/instance locals are in scope.
+    column_number: destroyCall.index - lastNewline - 1 + invocationOffset,
+    instance_variable: instanceVariable,
     destroy_variable: destroyVariable,
     effect_variable: effectVariable,
     owner_variable: ownerVariable,
@@ -782,10 +787,13 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
                 for (const candidate of callFrames) {
                   if (typeof candidate.callFrameId !== "string") continue;
                   bumpEffectProbeStatus("evaluation_attempts");
-                  const { destroy_variable: destroyVariable, effect_variable: effectVariable } = knownPassiveBinding;
+                  const { instance_variable: instanceVariable, destroy_variable: destroyVariable, effect_variable: effectVariable } = knownPassiveBinding;
                   const localDestroyResult = await cdp.send("Debugger.evaluateOnCallFrame", {
                     callFrameId: candidate.callFrameId,
-                    expression: `(() => { if (typeof ${effectVariable} !== "object" || ${effectVariable} === null || typeof ${effectVariable}.inst !== "object" || ${effectVariable}.inst === null || ${effectVariable}.inst.destroy !== ${destroyVariable}) return null; const rawCreateType = typeof ${effectVariable}.create; const rawDestroyType = typeof ${destroyVariable}; const allowed = ["undefined","function","object","boolean","number","string","symbol","bigint"]; return { createType: allowed.includes(rawCreateType) ? rawCreateType : "other", destroyType: allowed.includes(rawDestroyType) ? rawDestroyType : "other", effectTag: Number.isSafeInteger(${effectVariable}.tag) && ${effectVariable}.tag >= 0 && ${effectVariable}.tag <= 255 ? ${effectVariable}.tag : null }; })()`,
+                    // React intentionally clears inst.destroy before invoking
+                    // the saved local. Bind through the still-identical effect
+                    // instance instead of comparing against the cleared field.
+                    expression: `(() => { if (typeof ${effectVariable} !== "object" || ${effectVariable} === null || typeof ${effectVariable}.inst !== "object" || ${effectVariable}.inst === null || ${effectVariable}.inst !== ${instanceVariable}) return null; const rawCreateType = typeof ${effectVariable}.create; const rawDestroyType = typeof ${destroyVariable}; const allowed = ["undefined","function","object","boolean","number","string","symbol","bigint"]; return { createType: allowed.includes(rawCreateType) ? rawCreateType : "other", destroyType: allowed.includes(rawDestroyType) ? rawDestroyType : "other", effectTag: Number.isSafeInteger(${effectVariable}.tag) && ${effectVariable}.tag >= 0 && ${effectVariable}.tag <= 255 ? ${effectVariable}.tag : null }; })()`,
                     returnByValue: true,
                     silent: true,
                     throwOnSideEffect: false,
