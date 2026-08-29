@@ -2361,14 +2361,29 @@ export class VoiceLabWorker {
   async #markDriverRestart(runId: string, lostLease?: import("./ledger.js").BrowserLease): Promise<void> {
     const run = await this.ledger.getRun(runId);
     if (!run || TERMINAL_RUN_STATES.has(run.state)) return;
-    if (lostLease) await this.ledger.appendEvent(run.id, "durability.browser_worker_loss_observed", "canonical", {
-      lost_worker_id_sha256: sha256(lostLease.workerId),
-      replacement_worker_id_sha256: sha256(this.workerId),
-      lost_browser_lease_epoch: lostLease.leaseEpoch,
-      lease_expired_at: lostLease.expiresAt.toISOString(),
-      loss_observed_at: new Date().toISOString(),
-      raw_worker_identifiers_excluded: true,
-    }, `browser-worker-loss:${run.id}:${lostLease.leaseEpoch}`);
+    if (lostLease) {
+      const dedupeKey = `browser-worker-loss:${run.id}:${lostLease.leaseEpoch}`;
+      const existing = (await this.#allEvents(run.id)).events.find((event) => event.dedupeKey === dedupeKey);
+      const fixedBinding = {
+        lost_worker_id_sha256: sha256(lostLease.workerId),
+        replacement_worker_id_sha256: sha256(this.workerId),
+        lost_browser_lease_epoch: lostLease.leaseEpoch,
+        lease_expired_at: lostLease.expiresAt.toISOString(),
+        raw_worker_identifiers_excluded: true,
+      };
+      if (existing) {
+        const existingBinding = { ...existing.payload };
+        delete existingBinding.loss_observed_at;
+        if (existing.kind !== "durability.browser_worker_loss_observed" || existing.source !== "canonical" || canonicalRequestHash(existingBinding) !== canonicalRequestHash(fixedBinding)) {
+          throw new VoiceLabError(labError("BROWSER_WORKER_LOSS_REPLAY_CONFLICT", "The replayed browser-worker loss observation drifted from its durable lease binding.", "harness", false));
+        }
+      } else {
+        await this.ledger.appendEvent(run.id, "durability.browser_worker_loss_observed", "canonical", {
+          ...fixedBinding,
+          loss_observed_at: new Date().toISOString(),
+        }, dedupeKey);
+      }
+    }
     const error = labError("BROWSER_SESSION_LOST", "Browser worker lease expired; live media state cannot be reconstructed honestly.", "harness");
     await this.#terminalizeFailure(run.id, error, "aborted_driver_restart");
   }
