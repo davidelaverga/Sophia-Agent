@@ -4390,4 +4390,3 @@ function sameD02BrowserContextBinding(left: D02BrowserContextBinding | undefined
     && left.browser_lease_epoch === right.browser_lease_epoch
     && left.browser_context_id_sha256 === right.browser_context_id_sha256;
 }
-
