@@ -56,7 +56,16 @@ export class MemoryVoiceLabLedger implements VoiceLabLedger {
     return [...this.#runs.values()].filter((run) => (!TERMINAL_RUN_STATES.has(run.state) || !run.cleanupComplete) && (callerId === undefined || run.callerId === callerId)).length;
   }
   async listExpiredRuns(now: Date, limit: number): Promise<RunRecord[]> { return clone([...this.#runs.values()].filter((run) => !TERMINAL_RUN_STATES.has(run.state) && run.expiresAt <= now).slice(0, limit)); }
-  async listRunsNeedingRecovery(limit: number): Promise<RunRecord[]> { return clone([...this.#runs.values()].filter((run) => TERMINAL_RUN_STATES.has(run.state) && !run.cleanupComplete).slice(0, limit)); }
+  async listRunsNeedingRecovery(limit: number): Promise<RunRecord[]> {
+    return clone([...this.#runs.values()].filter((run) => {
+      if (run.cleanupComplete) return false;
+      if (TERMINAL_RUN_STATES.has(run.state)) return true;
+      const operations = [...this.#operations.values()].filter((operation) => operation.runId === run.id);
+      const terminalFailure = operations.some((operation) => operation.state === "failed" || operation.state === "timed_out");
+      const liveOperation = operations.some((operation) => ["accepted", "queued", "leased", "executing"].includes(operation.state));
+      return terminalFailure && !liveOperation;
+    }).slice(0, limit));
+  }
   async listRunsPendingEvidence(limit: number): Promise<RunRecord[]> {
     return clone([...this.#runs.values()].filter((run) => {
       const operations = [...this.#operations.values()].filter((operation) => operation.runId === run.id);
