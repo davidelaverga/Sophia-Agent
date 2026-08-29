@@ -113,6 +113,29 @@ describe("real Chromium dynamic media contract", () => {
     await context.close();
   });
 
+  it("waits for a delayed ordinary session voice control within the caller's bound", async () => {
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    await page.goto(origin);
+    await page.setContent(`
+      <div id="session-controls"></div>
+      <script>
+        window.__voiceActivations = 0;
+        setTimeout(() => {
+          const button = document.createElement('button');
+          button.type = 'button';
+          button.setAttribute('aria-label', 'Tap to speak');
+          button.onclick = () => { window.__voiceActivations += 1; };
+          document.querySelector('#session-controls').append(button);
+        }, 150);
+      </script>
+    `);
+    const button = page.getByRole("button", { name: "Tap to speak", exact: true }).first();
+    await activateDashboardMicButton(page, button, 1_000);
+    expect(await page.evaluate(() => (window as any).__voiceActivations)).toBe(1);
+    await context.close();
+  });
+
   it("follows delayed and nested fresh-session choices until ordinary session navigation completes", async () => {
     const context = await browser.newContext();
     const page = await context.newPage();

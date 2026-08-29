@@ -512,6 +512,7 @@ interface BrowserSession {
 const CONSENT_ACCEPT_SELECTOR = '[data-voice-lab="consent-accept"]';
 export const DASHBOARD_ROUTE_TIMEOUT_MS = 60_000;
 export const SESSION_NAVIGATION_SETTLE_TIMEOUT_MS = 5_000;
+export const SESSION_VOICE_START_VISIBILITY_TIMEOUT_MS = 30_000;
 
 export async function resolveDashboardMicButton(page: Page, micAnchor: Locator): Promise<Locator> {
   // MicCTA renders the stable onboarding anchor as a sibling of the actual
@@ -523,8 +524,8 @@ export async function resolveDashboardMicButton(page: Page, micAnchor: Locator):
   return page.getByRole("button", { name: /^Start (?:open session|prepare|debrief|reset|vent)$/i }).first();
 }
 
-export async function activateDashboardMicButton(page: Page, button: Locator): Promise<void> {
-  await button.waitFor({ state: "visible", timeout: 5_000 });
+export async function activateDashboardMicButton(page: Page, button: Locator, visibilityTimeoutMs = 5_000): Promise<void> {
+  await button.waitFor({ state: "visible", timeout: visibilityTimeoutMs });
   const deadline = Date.now() + 10_000;
   while (!await button.isEnabled()) {
     if (Date.now() >= deadline) throw new Error("The ordinary dashboard microphone control did not become enabled.");
@@ -1133,7 +1134,12 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
         if (await voiceTab.isVisible({ timeout: 2_000 }).catch(() => false) && await voiceTab.getAttribute("aria-selected") !== "true") await voiceTab.click();
         ordinaryRouteStage = "voice_start_button";
         const startButton = page.getByRole("button", { name: this.config.startButtonName, exact: true }).first();
-        await activateDashboardMicButton(page, startButton);
+        // The URL can commit before the session client tree finishes
+        // hydrating. Keep the exact ordinary button contract and one native
+        // activation, but allow that post-navigation render its own bounded
+        // visibility window instead of inheriting the dashboard CTA's short
+        // five-second bound.
+        await activateDashboardMicButton(page, startButton, SESSION_VOICE_START_VISIBILITY_TIMEOUT_MS);
       };
       await activateVoiceStartWithClientErrorReload({
         activate: activateVoiceStart,
