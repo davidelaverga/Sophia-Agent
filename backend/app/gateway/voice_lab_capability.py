@@ -297,6 +297,14 @@ def _lab_enabled() -> bool:
     )
 
 
+def _cross_deploy_recovery_enabled() -> bool:
+    """Allow only an explicitly gated recovery while product admission is shut."""
+
+    return _is_true(
+        os.getenv("SOPHIA_VOICE_LAB_CROSS_DEPLOY_RECOVERY_ENABLED")
+    ) and _is_true(os.getenv("SOPHIA_VOICE_LAB_KILL_SWITCH"))
+
+
 def _required_config(name: str) -> str:
     value = (os.getenv(name) or "").strip()
     if not value:
@@ -426,6 +434,7 @@ def verify_capability(
     required_operation: str,
     expected_build_key: str,
     expected_build: str,
+    enforce_expected_build: bool = True,
     now_seconds: int | None = None,
 ) -> VoiceLabClaims:
     if not token:
@@ -469,7 +478,10 @@ def verify_capability(
         raise _failure("voice_lab_capability_wrong_environment", 403)
     if required_operation not in payload["allowed_ops"]:
         raise _failure("voice_lab_capability_operation_denied", 403)
-    if payload["expected_deployment"][expected_build_key] != expected_build:
+    if (
+        enforce_expected_build
+        and payload["expected_deployment"][expected_build_key] != expected_build
+    ):
         raise _failure("voice_lab_capability_deployment_mismatch", 409)
 
     return VoiceLabClaims(
@@ -943,6 +955,11 @@ def capability_for_voice_lab_recovery(
         required_operation="session:recover",
         expected_build_key="backend",
         expected_build=backend_build,
+        # Recovery is the only possible cross-deployment capability.  It is
+        # additionally gated by an explicit temporary flag while product
+        # admission is killed; the distinct internal secret and signed exact
+        # run/session binding remain mandatory throughout.
+        enforce_expected_build=not _cross_deploy_recovery_enabled(),
     )
     if claims.test_run_id != test_run_id:
         raise _failure("voice_lab_recovery_run_mismatch", 409)
