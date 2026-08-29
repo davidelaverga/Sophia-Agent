@@ -1653,6 +1653,61 @@ async def test_production_cleanup_retries_one_exact_trace_restore_receipt_until_
 
 
 @pytest.mark.anyio
+async def test_production_cleanup_terminalizes_owned_watch_when_browser_is_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_id = "gemini-prod-missing-browser"
+
+    class BrowserSessions:
+        def trace_fault_for_session(self, _session_id: str) -> None:
+            return None
+
+        def session_exists(self, _session_id: str) -> bool:
+            return False
+
+        def provider_epoch_snapshot(self, _session_id: str) -> tuple[int, ...]:
+            return ()
+
+        async def publish_provider_cleanup_control(
+            self,
+            _session_id: str,
+            **_kwargs: object,
+        ) -> bool:
+            return False
+
+        async def close_session(self, _session_id: str, **_kwargs: object) -> bool:
+            return False
+
+    manager = GeminiProductionBrowserSessionManager(BrowserSessions())  # type: ignore[arg-type]
+    watch = gemini_production_session._ProviderCleanupWatch(
+        admission_id="cleanup-admission-missing-browser",
+        cleanup_obligation_id="123e4567-e89b-42d3-a456-426614174000",
+        resource_id=session_id,
+        reserved_lease_expires_at="2026-08-23T12:01:00.000Z",
+        resource_expires_at="2026-08-23T12:30:00.000Z",
+    )
+    manager._cleanup_watches[session_id] = watch
+    actions: list[str] = []
+
+    async def callback(
+        _watch: object,
+        action: str,
+        *,
+        phase: str | None = None,
+        trace_fault: Mapping[str, object] | None = None,
+    ) -> dict[str, object]:
+        del phase, trace_fault
+        actions.append(action)
+        return {"completed": True}
+
+    monkeypatch.setattr(manager, "_post_cleanup_callback", callback)
+
+    assert await manager.request_browser_cleanup(session_id) is True
+    assert actions == ["complete"]
+    assert session_id not in manager._cleanup_watches
+
+
+@pytest.mark.anyio
 async def test_production_graceful_shutdown_persists_freeze_after_generic_close_race(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

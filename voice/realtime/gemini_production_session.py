@@ -339,12 +339,23 @@ class GeminiProductionBrowserSessionManager:
             if watch is None:
                 return False
             self._cleanup_closed_session_ids[session_id] = time.monotonic() + 600
-            return await self._browser_sessions.publish_provider_cleanup_control(
+            requested = await self._browser_sessions.publish_provider_cleanup_control(
                 session_id,
                 admission_id=watch.admission_id,
                 cleanup_obligation_id=watch.cleanup_obligation_id,
                 resource_expires_at=watch.resource_expires_at,
             )
+            if requested:
+                return True
+
+            # The owning Voice process can outlive a browser preconnect that
+            # disappeared before consuming its durable cleanup admission.  In
+            # that case there is no browser socket left to receive the control
+            # message, but this process still owns the exact admission watch.
+            # Close locally and publish the normal completion callback instead
+            # of leaving the durable admission stranded until process loss.
+            await self.close_session(session_id)
+            return session_id not in self._cleanup_watches
 
     def _cleanup_callback_url(self, watch: _ProviderCleanupWatch, action: str) -> str:
         base_url = (os.getenv("SOPHIA_GATEWAY_URL") or "").strip().rstrip("/")
