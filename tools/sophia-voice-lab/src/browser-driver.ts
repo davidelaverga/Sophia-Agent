@@ -279,6 +279,82 @@ export function classifyBrowserStartCause(error: unknown): {
   return { error_class: errorClass, safe_signature: `sha256:${sha256(message)}`, character_length: message.length };
 }
 
+export type SessionVoiceRouteDiagnostic = {
+  location: "expected_session" | "dashboard" | "same_origin_other" | "cross_origin" | "invalid";
+  voice_tab: "absent" | "hidden" | "disabled" | "selected" | "available";
+  voice_button: "absent" | "hidden" | "disabled" | "ready" | "active_listening" | "active_thinking" | "active_speaking" | "active_ptt";
+  dashboard_mic_visible: boolean;
+  consent_visible: boolean;
+  auth_gate_visible: boolean;
+  voice_fallback_visible: boolean;
+};
+
+/** Project only fixed, product-authored UI states. Never serialize arbitrary
+ * page text, URLs, attributes, or user data into an MCP error. */
+export async function classifySessionVoiceRoute(
+  page: Page,
+  frontendOrigin: string,
+  readyButtonName: string,
+): Promise<SessionVoiceRouteDiagnostic> {
+  let location: SessionVoiceRouteDiagnostic["location"] = "invalid";
+  try {
+    const current = new URL(page.url());
+    location = current.origin !== frontendOrigin
+      ? "cross_origin"
+      : /^\/session(?:\/|$)/.test(current.pathname) && current.hash === ""
+        ? "expected_session"
+        : current.pathname === "/" && current.hash === ""
+          ? "dashboard"
+          : "same_origin_other";
+  } catch {
+    location = "invalid";
+  }
+
+  const voiceTab = page.getByRole("tab", { name: /^voice$/i }).first();
+  const voiceTabCount = await voiceTab.count().catch(() => 0);
+  const voiceTabVisible = voiceTabCount > 0 && await voiceTab.isVisible().catch(() => false);
+  const voiceTabDisabled = voiceTabVisible && !await voiceTab.isEnabled().catch(() => false);
+  const voiceTabSelected = voiceTabVisible && await voiceTab.getAttribute("aria-selected").catch(() => null) === "true";
+  const voice_tab: SessionVoiceRouteDiagnostic["voice_tab"] = voiceTabCount === 0
+    ? "absent"
+    : !voiceTabVisible
+      ? "hidden"
+      : voiceTabDisabled
+        ? "disabled"
+        : voiceTabSelected
+          ? "selected"
+          : "available";
+
+  const buttonStates: Array<{ state: SessionVoiceRouteDiagnostic["voice_button"]; name: string }> = [
+    { state: "ready", name: readyButtonName },
+    { state: "active_listening", name: "Listening..." },
+    { state: "active_thinking", name: "Thinking..." },
+    { state: "active_speaking", name: "Speaking..." },
+    { state: "active_ptt", name: "Recording... release to send" },
+  ];
+  let voice_button: SessionVoiceRouteDiagnostic["voice_button"] = "absent";
+  for (const candidate of buttonStates) {
+    const button = page.getByRole("button", { name: candidate.name, exact: true }).first();
+    if (await button.count().catch(() => 0) === 0) continue;
+    if (!await button.isVisible().catch(() => false)) {
+      if (voice_button === "absent") voice_button = "hidden";
+      continue;
+    }
+    voice_button = !await button.isEnabled().catch(() => false) ? "disabled" : candidate.state;
+    break;
+  }
+
+  return {
+    location,
+    voice_tab,
+    voice_button,
+    dashboard_mic_visible: await page.locator('[data-onboarding="mic-cta"]').first().isVisible().catch(() => false),
+    consent_visible: await page.locator(CONSENT_ACCEPT_SELECTOR).first().isVisible().catch(() => false),
+    auth_gate_visible: await page.getByRole("button", { name: "Continue with Google", exact: true }).first().isVisible().catch(() => false),
+    voice_fallback_visible: await page.getByText("Voice input unavailable", { exact: true }).first().isVisible().catch(() => false),
+  };
+}
+
 /** Keep production browser failures actionable without projecting arbitrary
  * exception text, URLs, query strings, or user data into MCP error details. */
 export function classifyClientPageError(error: unknown): ClientPageErrorDiagnostic {
@@ -762,6 +838,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
     let ordinaryRouteStage = "frontend_auth_grant";
     let ordinaryRouteRecoveryReloaded = false;
     let latestClientPageError: ClientPageErrorDiagnostic | null = null;
+    let page: Page | null = null;
     let latestClientConsoleFrames: ClientChunkFrame[] = [];
     let latestClientPausedFrames: ClientChunkFrame[] = [];
     let latestClientEffectProbe: ClientEffectProbe | null = null;
@@ -831,7 +908,8 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       const preloadedPassiveEffectBreakpoints = await preloadPassiveEffectBreakpoints(context.request, frontendOrigin).catch(() => []);
       effectProbeStatus.preloaded_candidates = Math.min(32, preloadedPassiveEffectBreakpoints.length);
       ordinaryRouteStage = "frontend_home_navigation";
-      const page = await context.newPage();
+      const activePage = await context.newPage();
+      page = activePage;
       page.on("pageerror", (error) => {
         const observedAt = Date.now();
         latestClientPageErrorObservedAt = observedAt;
@@ -1128,12 +1206,12 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
         // Recovery is never allowed to turn an unknown route into a session.
         // The failing evidence must already attest the exact same-origin route;
         // the reload only rehydrates its client module graph.
-        assertPageLocation(page.url(), frontendOrigin, (pathname) => /^\/session(?:\/|$)/.test(pathname), "ORDINARY_UI_ORIGIN_DRIFT");
+        assertPageLocation(activePage.url(), frontendOrigin, (pathname) => /^\/session(?:\/|$)/.test(pathname), "ORDINARY_UI_ORIGIN_DRIFT");
         ordinaryRouteRecoveryReloaded = true;
-        await page.reload({ waitUntil: "domcontentloaded", timeout: 30_000 });
-        assertPageLocation(page.url(), frontendOrigin, (pathname) => /^\/session(?:\/|$)/.test(pathname), "ORDINARY_UI_ORIGIN_DRIFT");
+        await activePage.reload({ waitUntil: "domcontentloaded", timeout: 30_000 });
+        assertPageLocation(activePage.url(), frontendOrigin, (pathname) => /^\/session(?:\/|$)/.test(pathname), "ORDINARY_UI_ORIGIN_DRIFT");
       };
-      const session: BrowserSession = { context, page, harnessCursor: 0, productCursor: null, latestProviderReceipt: null, contextExpiresAt: Number(grantReceipt.expires_at), expectedBinding: { testRunId: run.testRunId, cleanupObligationId: run.cleanupObligationId, principalId: run.principalId, scenarioId: run.scenarioId, scenarioVersion: run.scenarioVersion, environment: run.environment, retentionHours: run.capturePolicy.retentionHours, providerExpiresAt: run.expiresAt.toISOString(), ...(exactBrowserContextBinding === undefined ? {} : { browserContextBinding: exactBrowserContextBinding }) } };
+      const session: BrowserSession = { context, page: activePage, harnessCursor: 0, productCursor: null, latestProviderReceipt: null, contextExpiresAt: Number(grantReceipt.expires_at), expectedBinding: { testRunId: run.testRunId, cleanupObligationId: run.cleanupObligationId, principalId: run.principalId, scenarioId: run.scenarioId, scenarioVersion: run.scenarioVersion, environment: run.environment, retentionHours: run.capturePolicy.retentionHours, providerExpiresAt: run.expiresAt.toISOString(), ...(exactBrowserContextBinding === undefined ? {} : { browserContextBinding: exactBrowserContextBinding }) } };
       this.#sessions.set(run.id, session);
       this.#pendingContexts.delete(run.id);
       await page.goto(new URL("/", frontendOrigin).toString(), { waitUntil: "domcontentloaded", timeout: 30_000 });
@@ -1151,9 +1229,9 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
         isRecoverableLoadErrorVisible: () => recoverableLoadError.isVisible(),
         reload: async () => {
           await recoverableLoadReload.click({ timeout: 20_000 });
-          assertPageLocation(page.url(), frontendOrigin, (pathname) => pathname === "/", "ORDINARY_UI_ORIGIN_DRIFT");
+          assertPageLocation(activePage.url(), frontendOrigin, (pathname) => pathname === "/", "ORDINARY_UI_ORIGIN_DRIFT");
         },
-        wait: () => page.waitForTimeout(100),
+        wait: () => activePage.waitForTimeout(100),
         timeoutMs: DASHBOARD_ROUTE_TIMEOUT_MS,
       });
       ordinaryRouteStage = "dashboard_microphone_cta";
@@ -1162,24 +1240,24 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       ordinaryRouteStage = "fresh_session_choice";
       ordinaryRouteStage = "session_navigation";
       await activateVoiceStartWithClientErrorReload({
-        activate: () => establishSessionNavigation(page, frontendOrigin, this.config.freshButtonName),
+        activate: () => establishSessionNavigation(activePage, frontendOrigin, this.config.freshButtonName),
         hasClientPageError: () => waitForClientPageError({
           probe: () => currentClientPageErrorDiagnostic() !== null,
-          wait: () => page.waitForTimeout(25),
+          wait: () => activePage.waitForTimeout(25),
         }),
         reload: () => reloadExactSessionRouteOnce("session_navigation_recovery_reload"),
       });
       assertPageLocation(page.url(), frontendOrigin, (pathname) => /^\/session(?:\/|$)/.test(pathname), "ORDINARY_UI_ORIGIN_DRIFT");
       const activateVoiceStart = async () => {
         ordinaryRouteStage = "voice_tab_selection";
-        const voiceTab = page.getByRole("tab", { name: /^voice$/i }).first();
+        const voiceTab = activePage.getByRole("tab", { name: /^voice$/i }).first();
         if (await voiceTab.isVisible({ timeout: 2_000 }).catch(() => false) && await voiceTab.getAttribute("aria-selected") !== "true") await voiceTab.click();
         ordinaryRouteStage = "voice_start_button";
         // The URL can commit before the session client tree finishes
         // hydrating. Keep the exact ordinary button contract and at most one
         // native activation. If the same product control has already advanced
         // to a known active label, do not toggle it back off.
-        await establishSessionVoiceStart(page, this.config.startButtonName);
+        await establishSessionVoiceStart(activePage, this.config.startButtonName);
       };
       await activateVoiceStartWithClientErrorReload({
         activate: activateVoiceStart,
@@ -1189,7 +1267,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
         // retries the locator nor broadens the recoverable error class.
         hasClientPageError: () => waitForClientPageError({
           probe: () => currentClientPageErrorDiagnostic() !== null,
-          wait: () => page.waitForTimeout(25),
+          wait: () => activePage.waitForTimeout(25),
         }),
         reload: () => reloadExactSessionRouteOnce("voice_start_recovery_reload"),
       });
@@ -1205,13 +1283,13 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       // capability and must revoke the login before closing the browser.
       if (this.#sessions.get(run.id)?.context === context) {
         if (error instanceof VoiceLabError) throw error;
-        throw new VoiceLabError(labError("ORDINARY_UI_ROUTE_FAILED", "The ordinary deployed Sophia voice route could not be established.", "harness", false, { stage: ordinaryRouteStage, cause: classifyBrowserStartCause(error), client_page_error: currentClientPageErrorDiagnostic() }));
+        throw new VoiceLabError(labError("ORDINARY_UI_ROUTE_FAILED", "The ordinary deployed Sophia voice route could not be established.", "harness", false, { stage: ordinaryRouteStage, cause: classifyBrowserStartCause(error), client_page_error: currentClientPageErrorDiagnostic(), route_state: ordinaryRouteStage.startsWith("voice_start") && page ? await classifySessionVoiceRoute(page, frontendOrigin, this.config.startButtonName) : null }));
       }
       const closed = await closeContextWithProof(context, () => this.#browser?.contexts() ?? []);
       if (closed.closed) { this.#sessions.delete(run.id); this.#pendingContexts.delete(run.id); }
       else throw new VoiceLabError(labError("BROWSER_CONTEXT_CLOSE_FAILED", "Failed start left a browser context that could not be proven closed.", "harness", true, { original_error_class: error instanceof VoiceLabError ? error.detail.code : error instanceof Error ? error.name : "Error", close_error_class: closed.errorClass }));
       if (error instanceof VoiceLabError) throw error;
-      throw new VoiceLabError(labError("ORDINARY_UI_ROUTE_FAILED", "The ordinary deployed Sophia voice route could not be established.", "harness", false, { stage: ordinaryRouteStage, cause: classifyBrowserStartCause(error), client_page_error: currentClientPageErrorDiagnostic() }));
+      throw new VoiceLabError(labError("ORDINARY_UI_ROUTE_FAILED", "The ordinary deployed Sophia voice route could not be established.", "harness", false, { stage: ordinaryRouteStage, cause: classifyBrowserStartCause(error), client_page_error: currentClientPageErrorDiagnostic(), route_state: ordinaryRouteStage.startsWith("voice_start") && page ? await classifySessionVoiceRoute(page, frontendOrigin, this.config.startButtonName) : null }));
     }
   }
 
