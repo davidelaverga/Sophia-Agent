@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { activateVoiceStartWithClientErrorReload, assertPageLocation, classifyBrowserStartCause, classifyClientCdpExceptionFrames, classifyClientCdpPausedFrames, classifyClientConsoleErrorLocation, classifyClientPageError, closeContextWithProof, DASHBOARD_ROUTE_TIMEOUT_MS, drainProductCapture, establishDashboardMicRoute, establishSessionNavigation, extractNextChunkScriptUrls, findPassiveEffectCreateBreakpoint, findPassiveEffectCreateCatchBreakpoint, findPassiveEffectDestroyBreakpoint, isExactFinalizationResponse, passiveEffectBreakpointCondition, PlaywrightVoiceDriver, RECOVERABLE_DASHBOARD_LOAD_ERROR, RECOVERABLE_DASHBOARD_RELOAD_BUTTON, requestBoundJson, requestBoundJsonWithOneTransientRetry, selectRecentClientEffectProbe, selectRecentClientPausedFrames, SESSION_NAVIGATION_SETTLE_TIMEOUT_MS, shouldReleasePassiveEffectBreakpoint, validateAppSyntheticBinding, validateD02BrowserContextBinding, validateD02ProductCleanupEcho, withClientDiagnosticFrames, withClientEffectProbe } from "../src/browser-driver.js";
+import { activateVoiceStartWithClientErrorReload, assertPageLocation, classifyBrowserStartCause, classifyClientCdpExceptionFrames, classifyClientCdpPausedFrames, classifyClientConsoleErrorLocation, classifyClientPageError, closeContextWithProof, DASHBOARD_ROUTE_TIMEOUT_MS, drainProductCapture, establishDashboardMicRoute, establishSessionNavigation, extractNextChunkScriptUrls, findPassiveEffectCreateBreakpoint, findPassiveEffectCreateCatchBreakpoint, findPassiveEffectDestroyBreakpoint, isExactFinalizationResponse, passiveEffectBreakpointCondition, PlaywrightVoiceDriver, RECOVERABLE_DASHBOARD_LOAD_ERROR, RECOVERABLE_DASHBOARD_RELOAD_BUTTON, requestBoundJson, requestBoundJsonWithOneTransientRetry, selectRecentClientEffectProbe, selectRecentClientPausedFrames, SESSION_NAVIGATION_SETTLE_TIMEOUT_MS, shouldReleasePassiveEffectBreakpoint, validateAppSyntheticBinding, validateD02BrowserContextBinding, validateD02ProductCleanupEcho, waitForClientPageError, withClientDiagnosticFrames, withClientEffectProbe } from "../src/browser-driver.js";
 import { sha256 } from "../src/security.js";
 import { SHA, SHA_B, SHA_C, SHA_D, testConfig, testRun } from "./helpers.js";
 
@@ -62,6 +62,29 @@ describe("ordinary session navigation settlement", () => {
 });
 
 describe("ordinary voice start recovery", () => {
+  it("settles a causally preceding page error within one bounded diagnostic window", async () => {
+    let clock = 0;
+    let probes = 0;
+    await expect(waitForClientPageError({
+      probe: () => ++probes === 3,
+      wait: async () => { clock += 25; },
+      timeoutMs: 100,
+      now: () => clock,
+    })).resolves.toBe(true);
+    expect(probes).toBe(3);
+  });
+
+  it("returns false when the bounded diagnostic window expires", async () => {
+    let clock = 0;
+    await expect(waitForClientPageError({
+      probe: () => false,
+      wait: async () => { clock += 25; },
+      timeoutMs: 50,
+      now: () => clock,
+    })).resolves.toBe(false);
+    expect(clock).toBe(50);
+  });
+
   it("reloads the exact session route once after a start-button timeout with a captured client error", async () => {
     const calls: string[] = [];
     const timeout = Object.assign(new Error("hidden browser detail"), { name: "TimeoutError" });
@@ -79,6 +102,21 @@ describe("ordinary voice start recovery", () => {
 
     expect(result).toBe("reloaded_after_client_error");
     expect(calls).toEqual(["activate", "reload", "activate"]);
+  });
+
+  it("accepts Playwright timeout-shaped values without relying on a JavaScript realm", async () => {
+    const timeout = { name: "TimeoutError" };
+    let activation = 0;
+    let reloads = 0;
+    await expect(activateVoiceStartWithClientErrorReload({
+      activate: async () => {
+        activation += 1;
+        if (activation === 1) throw timeout;
+      },
+      hasClientPageError: async () => true,
+      reload: async () => { reloads += 1; },
+    })).resolves.toBe("reloaded_after_client_error");
+    expect(reloads).toBe(1);
   });
 
   it("does not reload a timeout without a captured client page error", async () => {

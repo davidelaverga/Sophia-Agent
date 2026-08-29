@@ -543,7 +543,7 @@ export async function activateDashboardMicButton(page: Page, button: Locator): P
 
 export async function activateVoiceStartWithClientErrorReload(input: {
   activate: () => Promise<void>;
-  hasClientPageError: () => boolean;
+  hasClientPageError: () => boolean | Promise<boolean>;
   reload: () => Promise<void>;
 }): Promise<"activated" | "reloaded_after_client_error"> {
   try {
@@ -556,11 +556,27 @@ export async function activateVoiceStartWithClientErrorReload(input: {
     // failure: a bounded Playwright visibility timeout plus a captured product
     // page error. One same-origin hard reload rehydrates the ordinary route;
     // every other error, and any failure after the reload, remains terminal.
-    if (!(error instanceof Error) || error.name !== "TimeoutError" || !input.hasClientPageError()) throw error;
+    const errorName = error && typeof error === "object" && "name" in error ? (error as { name?: unknown }).name : null;
+    if (errorName !== "TimeoutError" || !(await input.hasClientPageError())) throw error;
   }
   await input.reload();
   await input.activate();
   return "reloaded_after_client_error";
+}
+
+export async function waitForClientPageError(input: {
+  probe: () => boolean;
+  wait: () => Promise<void>;
+  timeoutMs?: number;
+  now?: () => number;
+}): Promise<boolean> {
+  const now = input.now ?? Date.now;
+  const deadline = now() + (input.timeoutMs ?? 1_000);
+  while (true) {
+    if (input.probe()) return true;
+    if (now() >= deadline) return false;
+    await input.wait();
+  }
 }
 
 export async function establishSessionNavigation(
@@ -1102,7 +1118,14 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       };
       await activateVoiceStartWithClientErrorReload({
         activate: activateVoiceStart,
-        hasClientPageError: () => currentClientPageErrorDiagnostic() !== null,
+        // The Playwright locator deadline can reject one task before the
+        // browser publishes the causally preceding pageerror task. Give only
+        // that diagnostic signal a short bounded settle window; this neither
+        // retries the locator nor broadens the recoverable error class.
+        hasClientPageError: () => waitForClientPageError({
+          probe: () => currentClientPageErrorDiagnostic() !== null,
+          wait: () => page.waitForTimeout(25),
+        }),
         reload: async () => {
           ordinaryRouteStage = "voice_start_recovery_reload";
           await page.reload({ waitUntil: "domcontentloaded", timeout: 30_000 });
