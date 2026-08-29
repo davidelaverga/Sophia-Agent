@@ -132,6 +132,7 @@ describe("service and durable memory-ledger contracts", () => {
     expect(recovered).toMatchObject({ state: "failed_harness", terminalError: { code: "OPERATION_TIMEOUT" } });
     expect((await ledger.listEvents(run.id, 0, 100)).events).toContainEqual(expect.objectContaining({ kind: "run.failed_harness" }));
   });
+
   it("advances the evidence revision after an orphan manifest and changed run projection", async () => {
     const terminalError = labError(
       "ORDINARY_UI_ROUTE_FAILED",
