@@ -8,7 +8,7 @@ import { chromium, type Browser } from "playwright";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { buildVoiceLabInitScript } from "../src/browser-init.js";
-import { activateDashboardMicButton, classifySessionVoiceRoute, establishSessionNavigation, establishSessionVoiceStart, PlaywrightVoiceDriver, resolveDashboardMicButton } from "../src/browser-driver.js";
+import { activateDashboardMicButton, classifySessionVoiceRoute, establishSessionNavigation, establishSessionVoiceStart, PlaywrightVoiceDriver, resolveDashboardMicButton, settleDiagnosticWithinBudget } from "../src/browser-driver.js";
 
 function sineWav(durationMs = 600, sampleRate = 16_000): Buffer {
   const samples = Math.floor(sampleRate * durationMs / 1_000);
@@ -27,6 +27,12 @@ describe("real Chromium dynamic media contract", () => {
   let origin: string;
   let executablePath: string;
   const upgradedSockets = new Set<Socket>();
+
+  it("lets ordinary startup continue when optional diagnostics exceed their budget", async () => {
+    const slowDiagnostic = new Promise<string>((resolve) => setTimeout(() => resolve("late"), 50));
+    await expect(settleDiagnosticWithinBudget(slowDiagnostic, "fallback", 5)).resolves.toBe("fallback");
+    await expect(settleDiagnosticWithinBudget(Promise.resolve("ready"), "fallback", 50)).resolves.toBe("ready");
+  });
 
   beforeAll(async () => {
     server = createServer((_request, response) => {
