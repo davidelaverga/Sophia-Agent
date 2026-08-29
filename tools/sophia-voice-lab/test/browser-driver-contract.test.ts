@@ -59,6 +59,31 @@ describe("ordinary session navigation settlement", () => {
     await establishSessionNavigation(page as any, "https://www.sophia-ei.com", "Start fresh", 0);
     expect(waitForUrlCalled).toBe(false);
   });
+
+  it("can rehydrate an exact session route after a client-error navigation timeout", async () => {
+    let currentUrl = "https://www.sophia-ei.com/";
+    let attempts = 0;
+    let reloads = 0;
+    const emptyButtons = { count: async () => 0 };
+    const page = {
+      url: () => currentUrl,
+      getByRole: () => emptyButtons,
+      waitForTimeout: async () => undefined,
+      waitForURL: async () => {
+        attempts += 1;
+        currentUrl = "https://www.sophia-ei.com/session";
+        throw Object.assign(new Error("hidden browser detail"), { name: "TimeoutError" });
+      },
+    };
+
+    await expect(activateVoiceStartWithClientErrorReload({
+      activate: () => establishSessionNavigation(page as any, "https://www.sophia-ei.com", "Start fresh", 0),
+      hasClientPageError: async () => true,
+      reload: async () => { reloads += 1; },
+    })).resolves.toBe("reloaded_after_client_error");
+    expect(attempts).toBe(1);
+    expect(reloads).toBe(1);
+  });
 });
 
 describe("ordinary voice start recovery", () => {

@@ -717,6 +717,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
     const context = await browser.newContext({ ...(storageState === undefined ? {} : { storageState: storageState as any }), serviceWorkers: "block" });
     this.#pendingContexts.set(run.id, context);
     let ordinaryRouteStage = "frontend_auth_grant";
+    let ordinaryRouteRecoveryReloaded = false;
     let latestClientPageError: ClientPageErrorDiagnostic | null = null;
     let latestClientConsoleFrames: ClientChunkFrame[] = [];
     let latestClientPausedFrames: ClientChunkFrame[] = [];
@@ -1078,6 +1079,17 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       } catch {
         // Diagnostic enrichment is fail-open and must not alter product flow.
       }
+      const reloadExactSessionRouteOnce = async (stage: string): Promise<void> => {
+        ordinaryRouteStage = stage;
+        if (ordinaryRouteRecoveryReloaded) throw new Error("The bounded ordinary session-route recovery reload was already consumed.");
+        // Recovery is never allowed to turn an unknown route into a session.
+        // The failing evidence must already attest the exact same-origin route;
+        // the reload only rehydrates its client module graph.
+        assertPageLocation(page.url(), frontendOrigin, (pathname) => /^\/session(?:\/|$)/.test(pathname), "ORDINARY_UI_ORIGIN_DRIFT");
+        ordinaryRouteRecoveryReloaded = true;
+        await page.reload({ waitUntil: "domcontentloaded", timeout: 30_000 });
+        assertPageLocation(page.url(), frontendOrigin, (pathname) => /^\/session(?:\/|$)/.test(pathname), "ORDINARY_UI_ORIGIN_DRIFT");
+      };
       const session: BrowserSession = { context, page, harnessCursor: 0, productCursor: null, latestProviderReceipt: null, contextExpiresAt: Number(grantReceipt.expires_at), expectedBinding: { testRunId: run.testRunId, cleanupObligationId: run.cleanupObligationId, principalId: run.principalId, scenarioId: run.scenarioId, scenarioVersion: run.scenarioVersion, environment: run.environment, retentionHours: run.capturePolicy.retentionHours, providerExpiresAt: run.expiresAt.toISOString(), ...(exactBrowserContextBinding === undefined ? {} : { browserContextBinding: exactBrowserContextBinding }) } };
       this.#sessions.set(run.id, session);
       this.#pendingContexts.delete(run.id);
@@ -1106,7 +1118,14 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       await activateDashboardMicButton(page, dashboardButton);
       ordinaryRouteStage = "fresh_session_choice";
       ordinaryRouteStage = "session_navigation";
-      await establishSessionNavigation(page, frontendOrigin, this.config.freshButtonName);
+      await activateVoiceStartWithClientErrorReload({
+        activate: () => establishSessionNavigation(page, frontendOrigin, this.config.freshButtonName),
+        hasClientPageError: () => waitForClientPageError({
+          probe: () => currentClientPageErrorDiagnostic() !== null,
+          wait: () => page.waitForTimeout(25),
+        }),
+        reload: () => reloadExactSessionRouteOnce("session_navigation_recovery_reload"),
+      });
       assertPageLocation(page.url(), frontendOrigin, (pathname) => /^\/session(?:\/|$)/.test(pathname), "ORDINARY_UI_ORIGIN_DRIFT");
       const activateVoiceStart = async () => {
         ordinaryRouteStage = "voice_tab_selection";
@@ -1126,11 +1145,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
           probe: () => currentClientPageErrorDiagnostic() !== null,
           wait: () => page.waitForTimeout(25),
         }),
-        reload: async () => {
-          ordinaryRouteStage = "voice_start_recovery_reload";
-          await page.reload({ waitUntil: "domcontentloaded", timeout: 30_000 });
-          assertPageLocation(page.url(), frontendOrigin, (pathname) => /^\/session(?:\/|$)/.test(pathname), "ORDINARY_UI_ORIGIN_DRIFT");
-        },
+        reload: () => reloadExactSessionRouteOnce("voice_start_recovery_reload"),
       });
       ordinaryRouteStage = "voice_startup_readiness";
       const events = await this.#waitForStartupReadiness(run.id, session, 45_000);
