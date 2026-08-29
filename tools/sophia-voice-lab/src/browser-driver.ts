@@ -511,6 +511,7 @@ interface BrowserSession {
 
 const CONSENT_ACCEPT_SELECTOR = '[data-voice-lab="consent-accept"]';
 export const DASHBOARD_ROUTE_TIMEOUT_MS = 60_000;
+export const SESSION_NAVIGATION_SETTLE_TIMEOUT_MS = 5_000;
 
 export async function resolveDashboardMicButton(page: Page, micAnchor: Locator): Promise<Locator> {
   // MicCTA renders the stable onboarding anchor as a sibling of the actual
@@ -575,9 +576,17 @@ export async function establishSessionNavigation(
     }
     await page.waitForTimeout(advanced ? 250 : 100);
   }
+  // The ordinary session route can commit at the exact polling deadline. A
+  // one-millisecond terminal wait races that final navigation and can reject a
+  // page that is already on the exact governed route (the failure snapshot then
+  // truthfully shows `/session`). Re-check synchronously, then allow only a
+  // small bounded navigation-settlement grace; origin, path, and empty-hash
+  // checks remain unchanged.
+  const settled = new URL(page.url());
+  if (settled.origin === frontendOrigin && /^\/session(?:\/|$)/.test(settled.pathname) && settled.hash === "") return;
   await page.waitForURL(
     (url) => url.origin === frontendOrigin && /^\/session(?:\/|$)/.test(url.pathname) && url.hash === "",
-    { timeout: 1 },
+    { timeout: SESSION_NAVIGATION_SETTLE_TIMEOUT_MS },
   );
 }
 

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { assertPageLocation, classifyBrowserStartCause, classifyClientCdpExceptionFrames, classifyClientCdpPausedFrames, classifyClientConsoleErrorLocation, classifyClientPageError, closeContextWithProof, DASHBOARD_ROUTE_TIMEOUT_MS, drainProductCapture, establishDashboardMicRoute, extractNextChunkScriptUrls, findPassiveEffectCreateBreakpoint, findPassiveEffectCreateCatchBreakpoint, findPassiveEffectDestroyBreakpoint, isExactFinalizationResponse, passiveEffectBreakpointCondition, PlaywrightVoiceDriver, RECOVERABLE_DASHBOARD_LOAD_ERROR, RECOVERABLE_DASHBOARD_RELOAD_BUTTON, requestBoundJson, requestBoundJsonWithOneTransientRetry, selectRecentClientEffectProbe, selectRecentClientPausedFrames, shouldReleasePassiveEffectBreakpoint, validateAppSyntheticBinding, validateD02BrowserContextBinding, validateD02ProductCleanupEcho, withClientDiagnosticFrames, withClientEffectProbe } from "../src/browser-driver.js";
+import { assertPageLocation, classifyBrowserStartCause, classifyClientCdpExceptionFrames, classifyClientCdpPausedFrames, classifyClientConsoleErrorLocation, classifyClientPageError, closeContextWithProof, DASHBOARD_ROUTE_TIMEOUT_MS, drainProductCapture, establishDashboardMicRoute, establishSessionNavigation, extractNextChunkScriptUrls, findPassiveEffectCreateBreakpoint, findPassiveEffectCreateCatchBreakpoint, findPassiveEffectDestroyBreakpoint, isExactFinalizationResponse, passiveEffectBreakpointCondition, PlaywrightVoiceDriver, RECOVERABLE_DASHBOARD_LOAD_ERROR, RECOVERABLE_DASHBOARD_RELOAD_BUTTON, requestBoundJson, requestBoundJsonWithOneTransientRetry, selectRecentClientEffectProbe, selectRecentClientPausedFrames, SESSION_NAVIGATION_SETTLE_TIMEOUT_MS, shouldReleasePassiveEffectBreakpoint, validateAppSyntheticBinding, validateD02BrowserContextBinding, validateD02ProductCleanupEcho, withClientDiagnosticFrames, withClientEffectProbe } from "../src/browser-driver.js";
 import { sha256 } from "../src/security.js";
 import { SHA, SHA_B, SHA_C, SHA_D, testConfig, testRun } from "./helpers.js";
 
@@ -20,6 +20,44 @@ describe("generation-aware capture drain", () => {
     await expect(drainProductCapture({ generation: 1, seq: 10 }, async () => ({ cursor: { generation: 2, seq: 1 }, events: [], metadata: { gap: true, oldestSeq: 1, latestSeq: 1, gapReason: "generation_mismatch" } }))).rejects.toMatchObject({ detail: { code: "CAPTURE_CURSOR_GAP" } });
     await expect(drainProductCapture(null, async () => ({ unsupported: true, metadata: null, events: [] }))).rejects.toMatchObject({ detail: { code: "CAPTURE_DRAIN_UNSUPPORTED" } });
     await expect(drainProductCapture({ generation: 1, seq: 10 }, async () => ({ cursor: { generation: 1, seq: 10 }, events: [], metadata: { gap: false, oldestSeq: 1, latestSeq: 20 } }))).rejects.toMatchObject({ detail: { code: "CAPTURE_CURSOR_GAP" } });
+  });
+});
+
+describe("ordinary session navigation settlement", () => {
+  it("accepts an exact session route that commits at the polling deadline", async () => {
+    let currentUrl = "https://www.sophia-ei.com/";
+    const emptyButtons = {
+      count: async () => 0,
+      nth: () => { throw new Error("no button expected"); },
+    };
+    const page = {
+      url: () => currentUrl,
+      getByRole: () => emptyButtons,
+      waitForTimeout: async () => undefined,
+      waitForURL: async (predicate: (url: URL) => boolean, options: { timeout: number }) => {
+        expect(options.timeout).toBe(SESSION_NAVIGATION_SETTLE_TIMEOUT_MS);
+        currentUrl = "https://www.sophia-ei.com/session";
+        expect(predicate(new URL(currentUrl))).toBe(true);
+        expect(predicate(new URL("https://evil.invalid/session"))).toBe(false);
+        expect(predicate(new URL("https://www.sophia-ei.com/session#stale"))).toBe(false);
+      },
+    };
+
+    await establishSessionNavigation(page as any, "https://www.sophia-ei.com", "Start fresh", 0);
+    expect(SESSION_NAVIGATION_SETTLE_TIMEOUT_MS).toBe(5_000);
+  });
+
+  it("returns immediately when the exact route is already committed at the deadline", async () => {
+    let waitForUrlCalled = false;
+    const page = {
+      url: () => "https://www.sophia-ei.com/session",
+      getByRole: () => ({ count: async () => 0 }),
+      waitForTimeout: async () => undefined,
+      waitForURL: async () => { waitForUrlCalled = true; },
+    };
+
+    await establishSessionNavigation(page as any, "https://www.sophia-ei.com", "Start fresh", 0);
+    expect(waitForUrlCalled).toBe(false);
   });
 });
 
