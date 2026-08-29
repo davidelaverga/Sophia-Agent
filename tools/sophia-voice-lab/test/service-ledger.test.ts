@@ -107,6 +107,31 @@ describe("service and durable memory-ledger contracts", () => {
     expect((await ledger.listAuthAudit(run.id)).some((entry) => entry.action === "capability:session:recover" && entry.detail.recovery_runtime_rebound === true)).toBe(true);
   });
 
+  it("terminalizes a nonterminal run whose durable failed operation survived a worker restart", async () => {
+    const run = testRun({ state: "authenticating", cleanupComplete: false });
+    const operation = startOperation(run);
+    await ledger.createRunWithOperation(run, operation, { global: 1, caller: 1 });
+    const claimed = await ledger.claimNextOperation("crash-recovery-worker", 30);
+    expect(claimed?.operation.id).toBe(operation.id);
+    await ledger.markOperationExecuting(operation.id, "crash-recovery-worker", claimed!.operation.leaseEpoch);
+    const timeout = labError("OPERATION_TIMEOUT", "The bounded start operation timed out.", "harness", true, { operation_type: "start", deadline_seconds: 150 });
+    await ledger.finishOperation(operation.id, "crash-recovery-worker", claimed!.operation.leaseEpoch, "timed_out", null, timeout);
+
+    const driver = {
+      hasSession: () => false,
+      recover: async () => ({ events: [{ kind: "cleanup.recovery", source: "canonical", payload: { complete: true, live_cleanup_complete: true }, dedupeKey: `restart-recovery:${run.id}` }], artifacts: [] }),
+      readiness: async () => ({ ok: true, detail: "test-browser", engine: "chromium", version: "test" }),
+      close: async () => undefined,
+    } as any;
+    const config = testConfig();
+    const worker = new VoiceLabWorker("replacement-recovery-worker", ledger, config, audio, driver, new CapabilityCodec(config.capabilitySecret, config.capabilityIssuer, config.capabilityTtlSeconds));
+
+    await worker.maintainSessions();
+
+    const recovered = await ledger.getRun(run.id);
+    expect(recovered).toMatchObject({ state: "failed_harness", terminalError: { code: "OPERATION_TIMEOUT" } });
+    expect((await ledger.listEvents(run.id, 0, 100)).events).toContainEqual(expect.objectContaining({ kind: "run.failed_harness" }));
+  });
   it("advances the evidence revision after an orphan manifest and changed run projection", async () => {
     const terminalError = labError(
       "ORDINARY_UI_ROUTE_FAILED",
