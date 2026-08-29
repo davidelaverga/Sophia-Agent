@@ -87,7 +87,18 @@ export class PostgresVoiceLabLedger implements VoiceLabLedger {
   }
   async listRunsNeedingRecovery(limit: number): Promise<RunRecord[]> {
     const terminal = ["pending_external_evidence", "completed", "product_failed", "invalid_test", "inconclusive_provider", "failed_harness", "authorization_failed", "deployment_mismatch", "aborted_driver_restart", "expired", "cancelled"];
-    const result = await this.pool.query(`select * from ${SCHEMA}.runs where cleanup_complete=false and state=any($1::text[]) order by updated_at asc limit $2`, [terminal, limit]);
+    const result = await this.pool.query(
+      `select r.* from ${SCHEMA}.runs r
+        where r.cleanup_complete=false and (
+          r.state=any($1::text[])
+          or (
+            not (r.state=any($1::text[]))
+            and exists (select 1 from ${SCHEMA}.operations o where o.run_id=r.id and o.state in ('failed','timed_out'))
+            and not exists (select 1 from ${SCHEMA}.operations o where o.run_id=r.id and o.state in ('accepted','queued','leased','executing'))
+          )
+        ) order by r.updated_at asc limit $2`,
+      [terminal, limit],
+    );
     return result.rows.map(mapRun);
   }
   async listRunsPendingEvidence(limit: number): Promise<RunRecord[]> {
