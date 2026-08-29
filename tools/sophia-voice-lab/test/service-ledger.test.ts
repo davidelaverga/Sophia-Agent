@@ -9,7 +9,7 @@ import { SCENARIO_IDS } from "../src/scenarios.js";
 import { CapabilityCodec, sha256 } from "../src/security.js";
 import { VoiceLabService, assertFreshProductAdmissionProof, targetAdmissionBinding } from "../src/service.js";
 import { assertTransition } from "../src/state-machine.js";
-import { VoiceLabWorker, assertResolvedAudioWithinAdmission, certificationTerminalDecision, deriveCompletedVerdicts, evaluateScenarioAssertions, exactOutputLifecyclesAtEpoch, leaseHeartbeatIntervalMs, suiteCertificationProjection, suiteCertificationState } from "../src/worker.js";
+import { VoiceLabWorker, assertResolvedAudioWithinAdmission, augmentOperationTimeoutWithInterruptedDriverError, certificationTerminalDecision, deriveCompletedVerdicts, evaluateScenarioAssertions, exactOutputLifecyclesAtEpoch, leaseHeartbeatIntervalMs, suiteCertificationProjection, suiteCertificationState } from "../src/worker.js";
 import { caller, SHA, SHA_B, SHA_C, SHA_D, testConfig, testRun } from "./helpers.js";
 
 const target = {
@@ -31,6 +31,30 @@ describe("service and durable memory-ledger contracts", () => {
     audio = new AudioResolver(testConfig());
     await audio.initialize();
     service = new VoiceLabService(ledger, testConfig(), async () => audio.summaries());
+  });
+
+  it("retains only the fixed interrupted route stage on a global start timeout", () => {
+    const timeout = new VoiceLabError(labError("OPERATION_TIMEOUT", "bounded", "harness", true, { operation_type: "start", deadline_seconds: 150 }));
+    const interrupted = new VoiceLabError(labError("ORDINARY_UI_ROUTE_FAILED", "route", "harness", false, {
+      stage: "voice_startup_readiness",
+      unsafe_text: "must-not-be-projected",
+    }));
+
+    const enriched = augmentOperationTimeoutWithInterruptedDriverError(timeout, interrupted);
+
+    expect(enriched).toBeInstanceOf(VoiceLabError);
+    expect((enriched as VoiceLabError).detail).toMatchObject({
+      code: "OPERATION_TIMEOUT",
+      details: {
+        operation_type: "start",
+        deadline_seconds: 150,
+        interrupted_driver_error: {
+          code: "ORDINARY_UI_ROUTE_FAILED",
+          stage: "voice_startup_readiness",
+        },
+      },
+    });
+    expect(JSON.stringify((enriched as VoiceLabError).detail)).not.toContain("must-not-be-projected");
   });
 
   it("normalizes U+0000 from harness error detail before jsonb persistence", () => {
