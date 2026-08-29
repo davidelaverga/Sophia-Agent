@@ -541,6 +541,28 @@ export async function activateDashboardMicButton(page: Page, button: Locator): P
   await page.keyboard.press("Enter");
 }
 
+export async function activateVoiceStartWithClientErrorReload(input: {
+  activate: () => Promise<void>;
+  hasClientPageError: () => boolean;
+  reload: () => Promise<void>;
+}): Promise<"activated" | "reloaded_after_client_error"> {
+  try {
+    await input.activate();
+    return "activated";
+  } catch (error) {
+    // A client-side Next/Turbopack transition can commit the exact session
+    // route while leaving its client module graph unable to render the voice
+    // control. Recover only from the observable combination produced by that
+    // failure: a bounded Playwright visibility timeout plus a captured product
+    // page error. One same-origin hard reload rehydrates the ordinary route;
+    // every other error, and any failure after the reload, remains terminal.
+    if (!(error instanceof Error) || error.name !== "TimeoutError" || !input.hasClientPageError()) throw error;
+  }
+  await input.reload();
+  await input.activate();
+  return "reloaded_after_client_error";
+}
+
 export async function establishSessionNavigation(
   page: Page,
   frontendOrigin: string,
@@ -1070,12 +1092,23 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       ordinaryRouteStage = "session_navigation";
       await establishSessionNavigation(page, frontendOrigin, this.config.freshButtonName);
       assertPageLocation(page.url(), frontendOrigin, (pathname) => /^\/session(?:\/|$)/.test(pathname), "ORDINARY_UI_ORIGIN_DRIFT");
-      ordinaryRouteStage = "voice_tab_selection";
-      const voiceTab = page.getByRole("tab", { name: /^voice$/i }).first();
-      if (await voiceTab.isVisible({ timeout: 2_000 }).catch(() => false) && await voiceTab.getAttribute("aria-selected") !== "true") await voiceTab.click();
-      ordinaryRouteStage = "voice_start_button";
-      const startButton = page.getByRole("button", { name: this.config.startButtonName, exact: true }).first();
-      await activateDashboardMicButton(page, startButton);
+      const activateVoiceStart = async () => {
+        ordinaryRouteStage = "voice_tab_selection";
+        const voiceTab = page.getByRole("tab", { name: /^voice$/i }).first();
+        if (await voiceTab.isVisible({ timeout: 2_000 }).catch(() => false) && await voiceTab.getAttribute("aria-selected") !== "true") await voiceTab.click();
+        ordinaryRouteStage = "voice_start_button";
+        const startButton = page.getByRole("button", { name: this.config.startButtonName, exact: true }).first();
+        await activateDashboardMicButton(page, startButton);
+      };
+      await activateVoiceStartWithClientErrorReload({
+        activate: activateVoiceStart,
+        hasClientPageError: () => currentClientPageErrorDiagnostic() !== null,
+        reload: async () => {
+          ordinaryRouteStage = "voice_start_recovery_reload";
+          await page.reload({ waitUntil: "domcontentloaded", timeout: 30_000 });
+          assertPageLocation(page.url(), frontendOrigin, (pathname) => /^\/session(?:\/|$)/.test(pathname), "ORDINARY_UI_ORIGIN_DRIFT");
+        },
+      });
       ordinaryRouteStage = "voice_startup_readiness";
       const events = await this.#waitForStartupReadiness(run.id, session, 45_000);
       events.push(...await this.drain(run.id));

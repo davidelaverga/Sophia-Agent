@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { assertPageLocation, classifyBrowserStartCause, classifyClientCdpExceptionFrames, classifyClientCdpPausedFrames, classifyClientConsoleErrorLocation, classifyClientPageError, closeContextWithProof, DASHBOARD_ROUTE_TIMEOUT_MS, drainProductCapture, establishDashboardMicRoute, establishSessionNavigation, extractNextChunkScriptUrls, findPassiveEffectCreateBreakpoint, findPassiveEffectCreateCatchBreakpoint, findPassiveEffectDestroyBreakpoint, isExactFinalizationResponse, passiveEffectBreakpointCondition, PlaywrightVoiceDriver, RECOVERABLE_DASHBOARD_LOAD_ERROR, RECOVERABLE_DASHBOARD_RELOAD_BUTTON, requestBoundJson, requestBoundJsonWithOneTransientRetry, selectRecentClientEffectProbe, selectRecentClientPausedFrames, SESSION_NAVIGATION_SETTLE_TIMEOUT_MS, shouldReleasePassiveEffectBreakpoint, validateAppSyntheticBinding, validateD02BrowserContextBinding, validateD02ProductCleanupEcho, withClientDiagnosticFrames, withClientEffectProbe } from "../src/browser-driver.js";
+import { activateVoiceStartWithClientErrorReload, assertPageLocation, classifyBrowserStartCause, classifyClientCdpExceptionFrames, classifyClientCdpPausedFrames, classifyClientConsoleErrorLocation, classifyClientPageError, closeContextWithProof, DASHBOARD_ROUTE_TIMEOUT_MS, drainProductCapture, establishDashboardMicRoute, establishSessionNavigation, extractNextChunkScriptUrls, findPassiveEffectCreateBreakpoint, findPassiveEffectCreateCatchBreakpoint, findPassiveEffectDestroyBreakpoint, isExactFinalizationResponse, passiveEffectBreakpointCondition, PlaywrightVoiceDriver, RECOVERABLE_DASHBOARD_LOAD_ERROR, RECOVERABLE_DASHBOARD_RELOAD_BUTTON, requestBoundJson, requestBoundJsonWithOneTransientRetry, selectRecentClientEffectProbe, selectRecentClientPausedFrames, SESSION_NAVIGATION_SETTLE_TIMEOUT_MS, shouldReleasePassiveEffectBreakpoint, validateAppSyntheticBinding, validateD02BrowserContextBinding, validateD02ProductCleanupEcho, withClientDiagnosticFrames, withClientEffectProbe } from "../src/browser-driver.js";
 import { sha256 } from "../src/security.js";
 import { SHA, SHA_B, SHA_C, SHA_D, testConfig, testRun } from "./helpers.js";
 
@@ -58,6 +58,51 @@ describe("ordinary session navigation settlement", () => {
 
     await establishSessionNavigation(page as any, "https://www.sophia-ei.com", "Start fresh", 0);
     expect(waitForUrlCalled).toBe(false);
+  });
+});
+
+describe("ordinary voice start recovery", () => {
+  it("reloads the exact session route once after a start-button timeout with a captured client error", async () => {
+    const calls: string[] = [];
+    const timeout = Object.assign(new Error("hidden browser detail"), { name: "TimeoutError" });
+    let activation = 0;
+
+    const result = await activateVoiceStartWithClientErrorReload({
+      activate: async () => {
+        calls.push("activate");
+        activation += 1;
+        if (activation === 1) throw timeout;
+      },
+      hasClientPageError: () => true,
+      reload: async () => { calls.push("reload"); },
+    });
+
+    expect(result).toBe("reloaded_after_client_error");
+    expect(calls).toEqual(["activate", "reload", "activate"]);
+  });
+
+  it("does not reload a timeout without a captured client page error", async () => {
+    const timeout = Object.assign(new Error("hidden browser detail"), { name: "TimeoutError" });
+    let reloads = 0;
+
+    await expect(activateVoiceStartWithClientErrorReload({
+      activate: async () => { throw timeout; },
+      hasClientPageError: () => false,
+      reload: async () => { reloads += 1; },
+    })).rejects.toBe(timeout);
+    expect(reloads).toBe(0);
+  });
+
+  it("never loops when the reloaded route still cannot render the control", async () => {
+    const timeout = Object.assign(new Error("hidden browser detail"), { name: "TimeoutError" });
+    let reloads = 0;
+
+    await expect(activateVoiceStartWithClientErrorReload({
+      activate: async () => { throw timeout; },
+      hasClientPageError: () => true,
+      reload: async () => { reloads += 1; },
+    })).rejects.toBe(timeout);
+    expect(reloads).toBe(1);
   });
 });
 
