@@ -180,7 +180,7 @@ services:
     region: oregon
     numInstances: 1
     autoDeployTrigger: "off"
-    healthCheckPath: /readyz
+    healthCheckPath: /healthz
     envVars:
       - key: DATABASE_URL
         fromDatabase:

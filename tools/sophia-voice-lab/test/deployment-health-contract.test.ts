@@ -85,7 +85,7 @@ describe("Voice Lab deployment health contract", () => {
     vi.restoreAllMocks();
   });
 
-  it("uses Render readiness for the web service without baking a false HTTP probe into the shared worker image", async () => {
+  it("uses local liveness for Render while retaining full readiness as a separate campaign gate", async () => {
     const { blueprint, dockerfile } = await deploymentContract();
     const web = requiredService(blueprint, "sophia-voice-lab-mcp");
     const worker = requiredService(blueprint, "sophia-voice-lab-worker");
@@ -94,7 +94,7 @@ describe("Voice Lab deployment health contract", () => {
       type: "web",
       dockerfilePath: "./tools/sophia-voice-lab/Dockerfile",
       dockerCommand: "pnpm start:web",
-      healthCheckPath: "/readyz",
+      healthCheckPath: "/healthz",
     });
     expect(worker).toMatchObject({
       type: "worker",
