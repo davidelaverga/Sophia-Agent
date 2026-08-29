@@ -1271,6 +1271,51 @@ def test_owner_heartbeat_never_shortcuts_d02_provider_settlement(
     )[0].status == "credential_minted"
 
 
+@pytest.mark.anyio
+async def test_recovery_aborts_and_consumes_due_unactivated_ordinary_provider(
+    monkeypatch: pytest.MonkeyPatch,
+    voice_lab_env: None,
+) -> None:
+    from app.gateway.routers import voice_lab_recovery as recovery_router
+    from deerflow.sophia import cleanup_fence
+
+    admission, record, _state = _seed_provider_settlement(monkeypatch)
+    cleanup_fence.close_cleanup_obligation(
+        admission.cleanup_obligation_id,
+        record.metadata["synthetic_voice_lab"]["retention_expires_at"],
+        record.metadata["synthetic_voice_lab"]["provider_expires_at"],
+    )
+
+    class AfterProviderDeadline(datetime):
+        @classmethod
+        def now(cls, tz: object = None) -> datetime:
+            observed = datetime(2033, 5, 18, 4, 3, 21, tzinfo=UTC)
+            return observed if tz is not None else observed.replace(tzinfo=None)
+
+    monkeypatch.setattr(cleanup_fence, "datetime", AfterProviderDeadline)
+    monkeypatch.setattr(
+        voice_router,
+        "_disconnect_gemini_production_session",
+        AsyncMock(side_effect=AssertionError("never-activated provider is aborted")),
+    )
+    claims = _verify(_sign(_claims()))
+    assert claims is not None
+
+    result = await recovery_router._reconcile_overdue_cleanup_admissions(
+        claims,
+        record,
+    )
+
+    assert result == {
+        "status": "completed",
+        "cleanup_admissions_reconciled": 1,
+    }
+    assert cleanup_fence.cleanup_admissions(admission.cleanup_obligation_id) == ()
+    synthetic = record.metadata["synthetic_voice_lab"]
+    assert synthetic["voice_provider_resource_state"] == "closed"
+    assert len(synthetic["voice_provider_activation_abort_receipts"]) == 1
+
+
 def test_provider_settlement_aborts_never_created_initial_candidate_and_replays(
     monkeypatch: pytest.MonkeyPatch,
     voice_lab_env: None,

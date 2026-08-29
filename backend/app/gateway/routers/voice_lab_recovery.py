@@ -3045,6 +3045,31 @@ async def _reconcile_overdue_cleanup_admissions(
                         code="cleanup_admission_reserved_not_expired",
                     )
                 continue
+            if admission.status == "credential_minted":
+                # A due ordinary admission that never activated a WebSocket can
+                # be terminalized by the same canonical activation-abort receipt
+                # used for an owner heartbeat.  This recovery path is necessary
+                # after a rolling Voice deploy has removed the original local
+                # watch; D02 and every activated provider remain excluded by the
+                # helper's exact durable bindings.
+                try:
+                    aborted = await asyncio.to_thread(
+                        _abort_due_unactivated_provider_from_owner_heartbeat,
+                        admission,
+                    )
+                    consumed = bool(aborted) and await asyncio.to_thread(
+                        complete_cleanup_admission,
+                        aborted,
+                        basis="server_relay_zero",
+                    )
+                except Exception as exc:  # noqa: BLE001 - retain on ambiguity.
+                    return _component(
+                        "pending",
+                        code="cleanup_admission_activation_abort_unavailable",
+                        error_type=type(exc).__name__,
+                    )
+                if consumed:
+                    continue
             await voice._disconnect_gemini_production_session(
                 admission.resource_id,
                 capability=sign_retention_reaper_runtime_capability(
