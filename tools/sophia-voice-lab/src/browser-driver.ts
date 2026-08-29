@@ -1624,7 +1624,13 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
             : pending
               ? "pending"
               : "failed";
-      return { events: [{ kind: "cleanup.recovery", source: "canonical", payload: redact({ complete: liveComplete, pending, live_cleanup_complete: liveComplete, retention_purge_pending: retentionPending, retention_purged: retentionPurged, retention_purge_due_at: purgeDueValid ? purgeDueRaw : null, http_status: response.status, receipt }), dedupeKey: `recovery:${run.id}:${recoveryState}` }], artifacts: [] };
+      const recoveryPayload = redact({ complete: liveComplete, pending, live_cleanup_complete: liveComplete, retention_purge_pending: retentionPending, retention_purged: retentionPurged, retention_purge_due_at: purgeDueValid ? purgeDueRaw : null, http_status: response.status, receipt });
+      // Each Gateway recovery attempt is separately durable evidence. Pending
+      // attempts legitimately carry new attempt receipts, so a state-only key
+      // would collide even though the canonical payload changed. Hash the
+      // already-redacted payload so exact transport replays dedupe while later
+      // attempts remain append-only evidence.
+      return { events: [{ kind: "cleanup.recovery", source: "canonical", payload: recoveryPayload, dedupeKey: `recovery:${run.id}:${recoveryState}:${canonicalRequestHash(recoveryPayload)}` }], artifacts: [] };
     } catch (error) {
       return { events: [{ kind: "cleanup.recovery", source: "canonical", payload: { complete: false, pending: false, unavailable_reason: error instanceof Error ? error.name : "recovery_failed" }, dedupeKey: `recovery:${run.id}:unavailable` }], artifacts: [] };
     }
