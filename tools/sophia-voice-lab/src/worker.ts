@@ -2598,3 +2598,1796 @@ function canonicalTurnBoundaries(messages: Record<string, unknown>[]): Array<Rec
     boundary[countKey] = Number(boundary[countKey]) + 1;
   }
   return result;
+}
+
+function canonicalAsciiJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalAsciiJson).join(",")}]`;
+  if (value && typeof value === "object") return `{${Object.entries(value as Record<string, unknown>).sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0).map(([key, child]) => `${asciiJsonString(key)}:${canonicalAsciiJson(child)}`).join(",")}}`;
+  if (typeof value === "string") return asciiJsonString(value);
+  return JSON.stringify(value);
+}
+
+function asciiJsonString(value: string): string {
+  return JSON.stringify(value).replace(/[\u007f-\uffff]/gu, (character) => {
+    const point = character.codePointAt(0)!;
+    if (point <= 0xffff) return `\\u${point.toString(16).padStart(4, "0")}`;
+    const adjusted = point - 0x10000;
+    return `\\u${(0xd800 + (adjusted >> 10)).toString(16)}\\u${(0xdc00 + (adjusted & 0x3ff)).toString(16)}`;
+  });
+}
+
+function canonicalIso(value: unknown): boolean {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$/.test(value)) return false;
+  const parsed = new Date(value);
+  return !Number.isNaN(parsed.getTime());
+}
+
+function exactActiveTargetFenceEvents(
+  events: import("./domain.js").LabEvent[],
+  operationId: string,
+  target: Record<string, unknown>,
+  kind: "output_realization" | "tool_effect",
+): import("./domain.js").LabEvent[] {
+  const stableId = kind === "output_realization" ? target.stable_id : target.tool_call_id ?? target.stable_id;
+  const effectOrChunk = kind === "output_realization" ? target.chunk_hash : target.effect_id;
+  return events.filter((event) => {
+    if (event.source !== "browser" || event.kind !== "harness.product_active_target_fenced") return false;
+    const receipt = event.payload;
+    const fencedAt = typeof receipt.fenced_at === "string" ? Date.parse(receipt.fenced_at) : Number.NaN;
+    return receipt.schema === "sophia_voice_lab_active_target_fence_v1" && receipt.operation_id === operationId
+      && receipt.lab_event_seq === target.event_seq && receipt.kind === kind && receipt.product_generation === target.product_generation && receipt.product_seq === target.product_seq
+      && Number.isSafeInteger(receipt.observed_through_product_seq) && Number(receipt.observed_through_product_seq) >= Number(target.product_seq)
+      && receipt.stable_id === stableId && receipt.effect_or_chunk_id === effectOrChunk && receipt.provider_connection_epoch === target.provider_connection_epoch
+      && receipt.active === true && canonicalIso(receipt.fenced_at) && Number.isFinite(fencedAt) && Math.abs(event.at.getTime() - fencedAt) <= 2_000;
+  });
+}
+
+export function exactOutputLifecyclesAtEpoch(events: import("./domain.js").LabEvent[], providerEpoch: number, afterSeq: number): boolean {
+  const lifecycleKinds = new Set(["audio.output.scheduled", "audio.output.started", "audio.output.completed", "audio.output.flushed", "audio.output.dropped"]);
+  const rows = events.filter((event) => event.source === "product" && lifecycleKinds.has(event.kind)).map((event) => ({ event, receipt: event.payload.receipt as Record<string, unknown> | undefined }))
+    .filter(({ receipt }) => typeof receipt?.realizationId === "string");
+  const realizationIds = new Set(rows.map(({ receipt }) => String(receipt?.realizationId)));
+  return realizationIds.size > 0 && rows.every(({ event }) => event.seq > afterSeq) && [...realizationIds].every((realizationId) => {
+    const lifecycle = rows.filter(({ receipt }) => receipt?.realizationId === realizationId).sort((left, right) => left.event.seq - right.event.seq);
+    const scheduled = lifecycle.filter(({ event, receipt }) => event.kind === "audio.output.scheduled" && receipt?.phase === "scheduled");
+    const started = lifecycle.filter(({ event, receipt }) => event.kind === "audio.output.started" && receipt?.phase === "started");
+    const terminal = lifecycle.filter(({ event, receipt }) => ["audio.output.completed", "audio.output.flushed", "audio.output.dropped"].includes(event.kind) && ["completed", "flushed", "dropped"].includes(String(receipt?.phase)));
+    const epochs = new Set(lifecycle.map(({ receipt }) => Number(receipt?.providerConnectionEpoch)));
+    const generations = new Set(lifecycle.map(({ receipt }) => Number(receipt?.playbackGeneration)));
+    return scheduled.length === 1 && started.length === 1 && terminal.length === 1 && scheduled[0]!.event.seq < started[0]!.event.seq && started[0]!.event.seq < terminal[0]!.event.seq
+      && epochs.size === 1 && epochs.has(providerEpoch) && generations.size === 1;
+  });
+}
+
+const FINITE_TOOL_TERMINAL_STATES = new Set(["responded", "cancelled-before-send", "cancelled-after-send", "suppressed", "rejected"]);
+const FINITE_TOOL_NONTERMINAL_STATES = new Set(["unknown", "pending", "received", "executing"]);
+
+function exactTerminalLastToolLifecycle(rows: Array<{ event: import("./domain.js").LabEvent; entry: Record<string, unknown> }>, terminalAfterSeq = Number.NEGATIVE_INFINITY): boolean {
+  if (rows.length === 0 || !rows.every(({ entry }) => FINITE_TOOL_TERMINAL_STATES.has(String(entry.finalState)) || FINITE_TOOL_NONTERMINAL_STATES.has(String(entry.finalState)))) return false;
+  const terminal = rows.filter(({ entry }) => FINITE_TOOL_TERMINAL_STATES.has(String(entry.finalState)));
+  const last = rows.reduce((latest, row) => row.event.seq > latest.event.seq ? row : latest, rows[0]!);
+  return terminal.length === 1 && terminal[0] === last && terminal[0]!.event.seq > terminalAfterSeq;
+}
+
+function classifyS02McpError(responseBody: string): string | null {
+  const explicit = /"(?:error_class|error_code)"\s*:\s*"([A-Z][A-Z0-9_]{2,63})"/.exec(responseBody)?.[1];
+  if (explicit) return explicit;
+  if (/Invalid arguments(?: for tool)?/i.test(responseBody)) return "MCP_INVALID_ARGUMENTS";
+  return null;
+}
+
+function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
+  const actual = Object.keys(value).sort();
+  const expected = [...keys].sort();
+  return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
+}
+
+function exactS02Snapshot(value: unknown): S02ResourceSnapshot | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  const keys = ["active_run_count", "operation_count", "run_event_cursor", "input_mutation_event_count", "browser_context_count", "canonical_session_count", "provider_session_count"] as const;
+  if (!hasExactKeys(record, keys) || keys.some((key) => !Number.isSafeInteger(record[key]) || Number(record[key]) < 0)) return null;
+  return Object.fromEntries(keys.map((key) => [key, Number(record[key])])) as unknown as S02ResourceSnapshot;
+}
+
+export function isExactS02McpBoundaryProbe(event: import("./domain.js").LabEvent, previous: import("./domain.js").LabEvent | null = null): boolean {
+  if (event.kind !== "security.mcp_boundary_probe" || event.source !== "canonical") return false;
+  const payload = event.payload;
+  if (!hasExactKeys(payload, ["schema", "variant", "probe_id_sha256", "request", "response", "audit_receipts", "resource_delta"]) || payload.schema !== S02_MCP_BOUNDARY_PROBE_SCHEMA) return false;
+  if (typeof payload.variant !== "string" || !S02_HTTP_VARIANTS.includes(payload.variant as S02HttpVariant)) return false;
+  const variant = payload.variant as S02HttpVariant;
+  const expectation = s02HttpProbeExpectation(variant);
+  if (typeof payload.probe_id_sha256 !== "string" || !/^[a-f0-9]{64}$/.test(payload.probe_id_sha256)) return false;
+  if (!payload.request || typeof payload.request !== "object" || Array.isArray(payload.request)) return false;
+  const request = payload.request as Record<string, unknown>;
+  if (!hasExactKeys(request, ["contract", "contract_sha256", "endpoint_origin_sha256", "raw_body_sha256", "canonical_body_sha256", "byte_length", "started_at"])) return false;
+  if (!request.contract || typeof request.contract !== "object" || Array.isArray(request.contract)) return false;
+  const contract = request.contract as Record<string, unknown>;
+  if (!hasExactKeys(contract, ["schema", "method", "path", "content_type", "body_kind", "jsonrpc_method", "tool_name"])
+    || canonicalAsciiJson(contract) !== canonicalAsciiJson(expectation.requestContract)
+    || request.contract_sha256 !== canonicalRequestHash(expectation.requestContract)) return false;
+  const requestHashes = [request.endpoint_origin_sha256, request.raw_body_sha256, request.canonical_body_sha256];
+  if (requestHashes.some((hash) => typeof hash !== "string" || !/^[a-f0-9]{64}$/.test(hash as string))
+    || !Number.isSafeInteger(request.byte_length) || Number(request.byte_length) <= 0 || Number(request.byte_length) > 200_000
+    || variant === "oversized_json" && Number(request.byte_length) <= 100_000 || !canonicalIso(request.started_at)) return false;
+  if (expectation.auditUsesBoundedFallback && request.canonical_body_sha256 !== sha256("bounded-unparsed-request")) return false;
+
+  if (!payload.response || typeof payload.response !== "object" || Array.isArray(payload.response)) return false;
+  const response = payload.response as Record<string, unknown>;
+  if (!hasExactKeys(response, ["http_status", "error_code", "body_sha256", "byte_length", "content_type", "final_origin_sha256", "final_path", "location", "observed_at"])
+    || response.http_status !== expectation.httpStatus || response.error_code !== expectation.errorCode
+    || typeof response.body_sha256 !== "string" || !/^[a-f0-9]{64}$/.test(response.body_sha256)
+    || !Number.isSafeInteger(response.byte_length) || Number(response.byte_length) <= 0 || Number(response.byte_length) > 65_536
+    || !["application/json", "text/event-stream"].includes(String(response.content_type))
+    || response.final_origin_sha256 !== request.endpoint_origin_sha256 || response.final_path !== "/mcp" || response.location !== null || !canonicalIso(response.observed_at)) return false;
+
+  if (!Array.isArray(payload.audit_receipts) || payload.audit_receipts.length !== 1) return false;
+  const auditValue = payload.audit_receipts[0];
+  if (!auditValue || typeof auditValue !== "object" || Array.isArray(auditValue)) return false;
+  const audit = auditValue as Record<string, unknown>;
+  const expectedAuditArgument = expectation.auditUsesBoundedFallback ? sha256("bounded-unparsed-request") : request.canonical_body_sha256;
+  if (!hasExactKeys(audit, ["action", "outcome", "argument_sha256", "caller_partition_id", "probe_id_sha256", "request_id_sha256", "error_class", "observed_at"])
+    || audit.action !== expectation.auditAction || audit.outcome !== expectation.auditOutcome || audit.argument_sha256 !== expectedAuditArgument
+    || audit.probe_id_sha256 !== payload.probe_id_sha256 || typeof audit.request_id_sha256 !== "string" || !/^[a-f0-9]{64}$/.test(audit.request_id_sha256)
+    || typeof audit.caller_partition_id !== "string" || !/^cp1:[A-Za-z0-9_-]{1,32}:[a-f0-9]{64}$/.test(audit.caller_partition_id)
+    || audit.error_class !== expectation.auditErrorClass || !canonicalIso(audit.observed_at)) return false;
+
+  if (!payload.resource_delta || typeof payload.resource_delta !== "object" || Array.isArray(payload.resource_delta)) return false;
+  const resourceDelta = payload.resource_delta as Record<string, unknown>;
+  if (!hasExactKeys(resourceDelta, ["before", "after"])) return false;
+  const before = exactS02Snapshot(resourceDelta.before);
+  const after = exactS02Snapshot(resourceDelta.after);
+  if (!before || !after || canonicalAsciiJson(before) !== canonicalAsciiJson(after)
+    || before.active_run_count < 1 || before.operation_count < 1 || before.input_mutation_event_count !== 0
+    || before.browser_context_count !== 0 || before.canonical_session_count !== 0 || before.provider_session_count !== 0
+    || event.seq !== after.run_event_cursor + 1 || previous && before.run_event_cursor !== previous.seq) return false;
+
+  const startedAt = new Date(String(request.started_at)).getTime();
+  const auditAt = new Date(String(audit.observed_at)).getTime();
+  const responseAt = new Date(String(response.observed_at)).getTime();
+  return startedAt <= auditAt && auditAt <= responseAt && responseAt <= event.at.getTime() && event.at.getTime() - startedAt <= 20_000;
+}
+
+function sameDeployment(value: unknown, expected: RunRecord["target"]["expectedDeployment"]): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const deployment = value as Record<string, unknown>;
+  return Object.keys(deployment).length === 3 && deployment.frontend === expected.frontend && deployment.backend === expected.backend && deployment.voice === expected.voice;
+}
+
+function recoveryComponentComplete(events: import("./domain.js").LabEvent[], component: "canonical_session" | "voice_provider" | "builder" | "auth_sessions"): boolean {
+  return events.some((event) => {
+    if (event.kind !== "cleanup.recovery" || event.payload.complete !== true) return false;
+    const receipt = event.payload.receipt as Record<string, unknown> | undefined;
+    const components = receipt?.components as Record<string, Record<string, unknown>> | undefined;
+    const status = components?.[component]?.status;
+    return receipt?.complete === true && typeof status === "string" && !["pending", "failed", "unavailable"].includes(status);
+  });
+}
+
+function manifestJoins(run: RunRecord): Record<string, unknown> {
+  const available = <T>(value: T | null, absent: string) => value === null ? { value: null, status: "unavailable", reason: absent } : { value, status: "available", reason: null };
+  return {
+    canonical_session: available(run.canonicalSessionId, "canonical_session_id_not_observed"),
+    thread: available(run.threadId, "canonical_thread_id_not_observed"),
+    gemini_runtime_session: available(run.providerSessionId, "provider_session_id_not_observed"),
+    provider_connection_epoch: available(run.providerEpoch, "provider_epoch_not_observed"),
+    turn: available(run.turnId, "product_turn_id_not_observed"),
+    langsmith: available(run.traceId, "trace_unavailable"),
+  };
+}
+
+function projectMessageRevisions(run: RunRecord, events: import("./domain.js").LabEvent[]): Record<string, unknown> {
+  const finalized = events.find((event) => isCanonicalFinalizationReceipt(run, event));
+  const transcript = (finalized?.payload.receipt as Record<string, unknown> | undefined)?.canonical_transcript as Record<string, unknown> | undefined;
+  if (!transcript) return { status: "unavailable", reason: "strict_canonical_transcript_unavailable", rows: [] };
+  const messages = transcript.messages as Record<string, unknown>[];
+  return {
+    status: "available",
+    authoritative_source: transcript.source,
+    message_revision: transcript.message_revision,
+    message_count: transcript.message_count,
+    input_message_count: transcript.input_message_count,
+    output_message_count: transcript.output_message_count,
+    turn_boundary_count: transcript.turn_boundary_count,
+    transcript_sha256: transcript.sha256,
+    messages: messages.map((message) => ({ message_id_hash: sha256(String(message.message_id)), sequence: message.sequence, role: message.role, final: message.final, approximate: message.approximate, turn_id_hash: message.turn_id === null ? null : sha256(String(message.turn_id)), provider_event_id_hash: message.provider_event_id === null ? null : sha256(String(message.provider_event_id)), redaction_level: message.redaction_level, content_sha256: sha256(String(message.content)), character_length: [...String(message.content)].length, created_at: message.created_at })),
+    turn_boundaries: transcript.turn_boundaries,
+  };
+}
+
+function projectUtterances(run: RunRecord, events: import("./domain.js").LabEvent[], operations: import("./domain.js").OperationRecord[]): Array<Record<string, unknown>> {
+  const exactProduct = events.filter((event) => isExactBoundProductEvent(run, event));
+  return operations.filter((operation) => operation.type === "speak" || operation.type === "barge_in").map((operation) => {
+    const matches = (event: import("./domain.js").LabEvent) => event.payload.operation_id === operation.id || (event.payload.data as Record<string, unknown> | undefined)?.operation_id === operation.id;
+    const resolved = events.find((event) => event.kind === "utterance.resolved" && matches(event));
+    const scheduled = events.find((event) => event.kind === "audio.input.scheduled" && matches(event));
+    const started = events.find((event) => event.kind === "audio.input.started" && matches(event));
+    const completed = events.find((event) => event.kind === "audio.input.completed" && matches(event));
+    const productLegs = exactProduct.filter((event) => event.kind === "audio.input.product_leg" && (event.payload.receipt as Record<string, unknown> | undefined)?.operation_id === operation.id);
+    const productTurns = exactProduct.filter((event) => event.kind === "audio.input.product_turn" && (event.payload.receipt as Record<string, unknown> | undefined)?.operation_id === operation.id);
+    const transcription = productTurns.find((event) => (event.payload.receipt as Record<string, unknown> | undefined)?.source === "provider_input_transcription" && (event.payload.receipt as Record<string, unknown> | undefined)?.outcome === "provider_input_transcription_observed");
+    const wav = (resolved?.payload.wav ?? operation.result?.wav ?? null) as Record<string, unknown> | null;
+    return {
+      operation_id: operation.id,
+      utterance_id: resolved?.payload.utterance_id ?? operation.result?.utterance_id ?? null,
+      test_run_id: run.testRunId,
+      idempotency_key_hash: sha256(operation.idempotencyKey),
+      source_kind: resolved?.payload.source ?? operation.result?.source ?? null,
+      source_text_hash: resolved?.payload.source_text_hash ?? operation.result?.source_text_hash ?? null,
+      fixture: resolved?.payload.fixture ?? null,
+      synthesis: resolved?.payload.synthesis ?? operation.result?.synthesis ?? null,
+      audio: wav,
+      scheduled_at: scheduled?.at.toISOString() ?? null,
+      started_at: started?.at.toISOString() ?? null,
+      completed_at: completed?.at.toISOString() ?? null,
+      intentional_overlap: operation.type === "barge_in",
+      barge_target: resolved?.payload.barge_target ?? null,
+      product_input_leg: productLegs.length === 1 ? { status: "available", event_seq: productLegs[0]!.seq, observed_at: productLegs[0]!.at.toISOString(), receipt: productLegs[0]!.payload.receipt } : { status: "unavailable", reason: productLegs.length === 0 ? "exact_product_input_leg_unavailable" : "duplicate_product_input_leg_receipts" },
+      harness_product_pcm_reconciliation: productLegs.length === 1 ? reconcileProductInputLeg(events, operation, productLegs[0]!.payload.receipt as Record<string, unknown>) : { verified: false, reason: "exact_product_input_leg_unavailable" },
+      product_input_turn_receipts: productTurns.length === 0 ? { status: "unavailable", reason: "exact_product_input_turn_receipts_unavailable", receipts: [] } : { status: "available", count: productTurns.length, receipts: productTurns.map((event) => ({ event_seq: event.seq, observed_at: event.at.toISOString(), receipt: event.payload.receipt })) },
+      provider_input_transcription: transcription ? { status: "available", event_seq: transcription.seq, observed_at: transcription.at.toISOString(), receipt: transcription.payload.receipt } : { status: "unavailable", reason: "operation_correlated_bound_product_transcription_unavailable" },
+      operation_state: operation.state,
+    };
+  });
+}
+
+function projectEvents(events: import("./domain.js").LabEvent[], predicate: (event: import("./domain.js").LabEvent) => boolean): Record<string, unknown> {
+  const selected = events.filter(predicate);
+  const inline = selected.slice(0, 200).map((event) => ({ event_seq: event.seq, kind: event.kind, observed_at: event.at.toISOString(), payload: event.payload }));
+  return selected.length === 0
+    ? { status: "unavailable", reason: "owning_receipts_not_observed", count: 0, event_refs: [] }
+    : { status: "available", count: selected.length, first_seq: selected[0]!.seq, last_seq: selected.at(-1)!.seq, complete_inline: selected.length <= inline.length, event_refs: inline };
+}
+
+function deriveEvidenceMetrics(events: import("./domain.js").LabEvent[], operations: import("./domain.js").OperationRecord[]): Record<string, unknown> {
+  const timing = operations.filter((operation) => operation.type === "speak" || operation.type === "barge_in").map((operation) => {
+    const matches = (event: import("./domain.js").LabEvent) => event.payload.operation_id === operation.id;
+    const scheduled = events.find((event) => event.kind === "audio.input.scheduled" && matches(event));
+    const started = events.find((event) => event.kind === "audio.input.started" && matches(event));
+    const completed = events.find((event) => event.kind === "audio.input.completed" && matches(event));
+    return { operation_id: operation.id, schedule_to_start_ms: scheduled && started ? Math.max(0, started.at.getTime() - scheduled.at.getTime()) : null, realized_duration_ms: started && completed ? Math.max(0, completed.at.getTime() - started.at.getTime()) : null };
+  });
+  const receipts = events.filter((event) => event.kind.startsWith("audio.output.")).map((event) => event.payload.receipt as Record<string, unknown> | undefined).filter((receipt): receipt is Record<string, unknown> => typeof receipt?.realizationId === "string");
+  const realizationKeys = receipts.map((receipt) => `${receipt.realizationId}\u0000${receipt.providerConnectionEpoch ?? "none"}\u0000${receipt.playbackGeneration ?? "none"}`);
+  const phaseKeys = receipts.map((receipt) => `${receipt.realizationId}\u0000${receipt.providerConnectionEpoch ?? "none"}\u0000${receipt.playbackGeneration ?? "none"}\u0000${receipt.phase ?? "unknown"}`);
+  const duplicatePhaseReceipts = phaseKeys.length - new Set(phaseKeys).size;
+  return { utterance_timing: timing, output_realization_receipt_count: receipts.length, unique_output_realizations: new Set(realizationKeys).size, duplicate_realization_receipts: duplicatePhaseReceipts, duplicate_realization_phase_receipts: duplicatePhaseReceipts };
+}
+
+function nullableHash(value: string | null): string | null { return value === null ? null : sha256(value); }
+
+export function runCertificationProjection(verdicts: Verdicts): { status: "certified" | "pending_external_evidence" | "not_certified"; outcome: string; reason: string } {
+  const decision = certificationTerminalDecision(verdicts);
+  if (verdicts.harness === "pass" && verdicts.evidence === "pass") return { status: "certified", outcome: `harness_evidence_certified_product_${verdicts.product}`, reason: decision.reason };
+  if (verdicts.harness === "unavailable" || verdicts.evidence === "unavailable") return { status: "pending_external_evidence", outcome: "pending_external_evidence", reason: decision.reason };
+  return { status: "not_certified", outcome: "harness_or_evidence_not_certified", reason: decision.reason };
+}
+
+export function suiteCertificationProjection(children: RunRecord[]): {
+  status: "certified" | "pending" | "not_certified";
+  outcome_label: string;
+  harness_evidence_certified_count: number;
+  supported_child_count: number;
+  product_counts: Record<"pass" | "unavailable" | "fail" | "inconclusive" | "pending", number>;
+  outcome_counts: Record<string, number>;
+} {
+  const projections = children.map((run) => runCertificationProjection(run.verdicts));
+  const productCounts = { pass: 0, unavailable: 0, fail: 0, inconclusive: 0, pending: 0 };
+  for (const run of children) productCounts[run.verdicts.product] += 1;
+  const outcomeCounts: Record<string, number> = {};
+  for (const projection of projections) outcomeCounts[projection.outcome] = (outcomeCounts[projection.outcome] ?? 0) + 1;
+  const certifiedCount = projections.filter((projection) => projection.status === "certified").length;
+  const status = projections.some((projection) => projection.status === "pending_external_evidence") ? "pending" : certifiedCount === children.length ? "certified" : "not_certified";
+  const observedProductOutcomes = (Object.keys(productCounts) as Array<keyof typeof productCounts>).filter((outcome) => productCounts[outcome] > 0);
+  const outcomeLabel = status !== "certified"
+    ? status === "pending" ? "supported_children_pending_external_evidence" : "supported_children_not_harness_evidence_certified"
+    : children.length === 0 ? "no_supported_children"
+      : observedProductOutcomes.length === 1 ? `harness_evidence_certified_all_product_${observedProductOutcomes[0]}`
+        : "harness_evidence_certified_mixed_product_outcomes";
+  return { status, outcome_label: outcomeLabel, harness_evidence_certified_count: certifiedCount, supported_child_count: children.length, product_counts: productCounts, outcome_counts: outcomeCounts };
+}
+
+export function certificationTerminalDecision(verdicts: Verdicts): { state: RunState; reason: string } {
+  const state: RunState = verdicts.harness === "unavailable" || verdicts.evidence === "unavailable"
+    ? "pending_external_evidence"
+    : verdicts.harness === "fail" ? "failed_harness"
+      : verdicts.auth === "fail" ? "authorization_failed"
+        : verdicts.product === "fail" ? "product_failed"
+          : verdicts.provider === "fail" ? "inconclusive_provider" : "completed";
+  return {
+    state,
+    reason: state === "completed"
+      ? `harness_evidence_certified_product_${verdicts.product}_provider_${verdicts.provider}`
+      : state === "pending_external_evidence" ? "mandatory_supported_assertions_awaiting_external_evidence" : `verdict_${state}`,
+  };
+}
+
+/** Suite certification is independent of a child's execution outcome. D02 may
+ * truthfully finish as aborted_driver_restart and still certify its expected
+ * loss/recovery behavior after owning evidence arrives. */
+export function suiteCertificationState(children: RunRecord[]): "pending" | "completed" | "failed" {
+  if (children.some((run) => run.state === "pending_external_evidence")) return "pending";
+  return children.every((run) => run.verdicts.harness === "pass" && run.verdicts.evidence === "pass" && run.cleanupComplete) ? "completed" : "failed";
+}
+
+export function deriveCompletedVerdicts(run: RunRecord, events: import("./domain.js").LabEvent[], operations: import("./domain.js").OperationRecord[], authAudit: import("./ledger.js").AuthAuditRecord[] = []): Verdicts {
+  const eligibleEvents = events.filter((event) => event.source !== "product" || isExactBoundProductEvent(run, event));
+  const kinds = new Set(eligibleEvents.map((event) => event.kind));
+  const failedHarness = events.some((event) => event.kind === "audio.input.rejected" || event.kind.includes("cursor_gap") || event.kind === "cleanup.capture_unavailable" || event.kind === "audio.input.interrupted");
+  const taskCleanup = deriveTaskCleanup(events, run);
+  const finalized = kinds.has("session.finalized");
+  const providerClosed = eligibleEvents.some((event) => event.kind === "provider.stage" && ["closed", "ended"].includes(String(event.payload.stage)));
+  const providerObserved = kinds.has("provider.connection_epoch");
+  const providerDegraded = eligibleEvents.some((event) => event.kind === "provider.connection_epoch" && (event.payload.receipt as Record<string, unknown> | undefined)?.phase === "degraded");
+  const authClean = events.some(authCleanupConfirmed);
+  const injectedOperations = operations.filter((operation) => (operation.type === "speak" || operation.type === "barge_in") && operation.state === "succeeded");
+  const nonSilenceOperations = injectedOperations.filter((operation) => !String(operation.input.fixture_id ?? "").toLowerCase().includes("silence"));
+  const inputTranscript = eligibleEvents.some((event) => event.kind.endsWith(".sophia.user_transcript") || event.kind === "transcript.input.final");
+  const assistantAudio = kinds.has("audio.output.started");
+  const assistantTurnEnded = eligibleEvents.some((event) => event.kind.endsWith(".sophia.turn") && ((event.payload.data as Record<string, unknown> | undefined)?.phase === "agent_ended" || event.payload.phase === "agent_ended"));
+  const injectionChains = injectedOperations.length > 0 && injectedOperations.every((operation) => exactProductInputChain(eligibleEvents, operation));
+  const dependencyVerified = (["deployment.verified", "deployment.reverified"] as const).every((kind) => eligibleEvents.some((event) => {
+    if (event.kind !== kind) return false;
+    const langgraph = event.payload.langgraph;
+    return langgraph !== null && typeof langgraph === "object"
+      && (langgraph as Record<string, unknown>).commit_sha === run.target.expectedDependencies.langgraph;
+  }));
+  const deploymentVerified = (["frontend", "backend", "voice"] as const).every((key) => run.observedDeployment[key] === run.target.expectedDeployment[key])
+    && dependencyVerified;
+  const joinsComplete = run.canonicalSessionId !== null && run.threadId !== null && run.providerSessionId !== null && run.providerEpoch !== null && (nonSilenceOperations.length === 0 || run.turnId !== null);
+  const captureProven = kinds.has("harness.initialized") && kinds.has("harness.media_stream_issued") && kinds.has("session.microphone_stream_acquired");
+  const cleanupProven = authoritativeLiveCleanupComplete(events) && (kinds.has("cleanup.browser_lease_released") || kinds.has("cleanup.browser_lease_absent")) && authClean && providerClosed && taskCleanup.unresolved_count === 0;
+  const scenarioEvaluation = evaluateScenarioAssertions(run, eligibleEvents, operations, authAudit);
+  const scenarioHasFailure = scenarioEvaluation.harness.some((assertion) => assertion.status === "fail");
+  const scenarioHasUnavailable = scenarioEvaluation.harness.length === 0 || scenarioEvaluation.harness.some((assertion) => assertion.status === "unavailable");
+  if (run.scenarioId === "V-F02") return { harness: "unavailable", product: "unavailable", provider: "unavailable", auth: "unavailable", evidence: "unavailable" };
+  const preResource = run.scenarioId === "V-S01" || run.scenarioId === "V-S02";
+  const preResourceCleanup = authoritativeLiveCleanupComplete(events)
+    && kinds.has("cleanup.browser_context_absent")
+    && eligibleEvents.some((event) => event.kind === "cleanup.browser_lease_absent" && event.payload.authoritative_ledger_read === true);
+  const baseHarnessPass = preResource
+    ? !failedHarness && preResourceCleanup
+    : !failedHarness && injectionChains && deploymentVerified && joinsComplete && captureProven && cleanupProven;
+  const harness: Verdicts["harness"] = !baseHarnessPass || scenarioHasFailure ? "fail" : scenarioHasUnavailable ? "unavailable" : "pass";
+  const productStatuses = scenarioEvaluation.product.map((assertion) => assertion.status);
+  const product: Verdicts["product"] = preResource
+    ? "unavailable"
+    : !finalized
+    ? "fail"
+    : productStatuses.length === 0 || productStatuses.every((status) => status === "unavailable")
+      ? "unavailable"
+      : productStatuses.some((status) => status === "fail")
+        ? "fail"
+        : productStatuses.every((status) => status === "pass") ? "pass" : "inconclusive";
+  return {
+    harness,
+    product,
+    provider: preResource ? "unavailable" : providerDegraded ? "fail" : providerObserved && providerClosed ? "pass" : "inconclusive",
+    auth: preResource ? (run.scenarioId === "V-S01" && harness === "pass" ? "pass" : "unavailable") : authClean ? "pass" : "fail",
+    evidence: harness === "pass" && (preResource ? preResourceCleanup : finalized && cleanupProven) ? "pass" : harness === "unavailable" ? "unavailable" : "fail",
+  };
+}
+
+export type ScenarioAssertion = {
+  id: string;
+  owner: "harness" | "product";
+  status: "pass" | "fail" | "unavailable";
+  evidence_seqs: number[];
+  reason: string | null;
+};
+
+export function assertResolvedAudioWithinAdmission(admission: unknown, durationMs: number, byteLength: number): void {
+  const receipt = admission && typeof admission === "object" ? admission as Record<string, unknown> : {};
+  const reservedDurationMs = Number(receipt.duration_ms);
+  const reservedBytes = Number(receipt.bytes);
+  if (!Number.isSafeInteger(reservedDurationMs) || reservedDurationMs < 0 || !Number.isSafeInteger(reservedBytes) || reservedBytes < 0) {
+    throw new VoiceLabError(labError("AUDIO_ADMISSION_RECEIPT_INVALID", "Durable audio admission receipt is missing or malformed.", "conflict", false));
+  }
+  if (!Number.isSafeInteger(durationMs) || durationMs < 0 || !Number.isSafeInteger(byteLength) || byteLength < 0 || durationMs > reservedDurationMs || byteLength > reservedBytes) {
+    throw new VoiceLabError(labError("AUDIO_ADMISSION_RESERVATION_EXCEEDED", "Resolved audio exceeded its durable rolling admission reservation before page or provider mutation.", "conflict", false, { reserved_duration_ms: reservedDurationMs, reserved_bytes: reservedBytes, resolved_duration_ms: durationMs, resolved_bytes: byteLength }));
+  }
+}
+
+export function reconcileProductInputLeg(
+  events: import("./domain.js").LabEvent[],
+  operation: import("./domain.js").OperationRecord,
+  leg: Record<string, unknown>,
+): { verified: boolean; reason: string | null; frame_count: number; byte_length: number; nonzero_byte_count: number; computed_pcm_sha256_chain: string | null } {
+  const frames = events
+    .filter((event) => event.source === "browser" && event.kind === "harness.input_frame_forwarded" && event.payload.operation_id === operation.id)
+    .sort((left, right) => Number(left.payload.frame_seq) - Number(right.payload.frame_seq));
+  if (events.some((event) => event.source === "browser" && event.kind === "harness.input_frame_observation_failed" && event.payload.operation_id === operation.id)) return { verified: false, reason: "harness_frame_digest_failed", frame_count: frames.length, byte_length: 0, nonzero_byte_count: 0, computed_pcm_sha256_chain: null };
+  if (frames.length === 0) return { verified: false, reason: "harness_frame_receipts_unavailable", frame_count: 0, byte_length: 0, nonzero_byte_count: 0, computed_pcm_sha256_chain: null };
+  let chain = Buffer.alloc(32);
+  let byteLength = 0;
+  let nonzeroBytes = 0;
+  for (let index = 0; index < frames.length; index += 1) {
+    const frame = frames[index]!;
+    const sequence = Number(frame.payload.frame_seq);
+    const digest = frame.payload.sha256;
+    const bytes = Number(frame.payload.byte_length);
+    const nonzero = Number(frame.payload.nonzero_byte_count);
+    if (sequence !== index + 1 || typeof digest !== "string" || !/^[a-f0-9]{64}$/.test(digest) || !Number.isSafeInteger(bytes) || bytes <= 0 || !Number.isSafeInteger(nonzero) || nonzero < 0 || nonzero > bytes) return { verified: false, reason: "harness_frame_receipt_invalid", frame_count: frames.length, byte_length: byteLength, nonzero_byte_count: nonzeroBytes, computed_pcm_sha256_chain: null };
+    const encodedSequence = Buffer.alloc(4);
+    encodedSequence.writeUInt32BE(sequence);
+    chain = Buffer.from(sha256(Buffer.concat([chain, Buffer.from(digest, "hex"), encodedSequence])), "hex");
+    byteLength += bytes;
+    nonzeroBytes += nonzero;
+  }
+  const computed = chain.toString("hex");
+  const silence = String(operation.input.fixture_id ?? "").toLowerCase().includes("silence");
+  const verified = Number(leg.frame_count) === frames.length
+    && Number(leg.byte_length) === byteLength
+    && leg.pcm_digest_algorithm === "sha-256-chain-v1"
+    && leg.pcm_sha256_chain === computed
+    && (silence ? nonzeroBytes === 0 && Number(leg.nonzero_sample_count) === 0 : nonzeroBytes > 0 && Number(leg.nonzero_sample_count) > 0);
+  return { verified, reason: verified ? null : "harness_product_pcm_digest_or_metric_mismatch", frame_count: frames.length, byte_length: byteLength, nonzero_byte_count: nonzeroBytes, computed_pcm_sha256_chain: computed };
+}
+
+function exactProductInputChain(events: import("./domain.js").LabEvent[], operation: import("./domain.js").OperationRecord): boolean {
+  const byOperation = (kind: string) => events.filter((event) => event.kind === kind && event.payload.operation_id === operation.id);
+  const resolved = byOperation("utterance.resolved");
+  const scheduled = byOperation("audio.input.scheduled");
+  const started = byOperation("audio.input.started");
+  const completed = byOperation("audio.input.completed");
+  if (resolved.length !== 1 || scheduled.length !== 1 || started.length !== 1 || completed.length !== 1 || operation.result?.schedule_receipt === undefined) return false;
+  const wav = resolved[0]!.payload.wav as Record<string, unknown> | undefined;
+  const utteranceId = resolved[0]!.payload.utterance_id;
+  const legs = events.filter((event) => event.source === "product" && event.kind === "audio.input.product_leg" && (event.payload.receipt as Record<string, unknown> | undefined)?.operation_id === operation.id);
+  if (legs.length !== 1) return false;
+  const leg = legs[0]!.payload.receipt as Record<string, unknown>;
+  const silence = String(operation.input.fixture_id ?? "").toLowerCase().includes("silence");
+  if (leg.schema !== "sophia_gemini_input_leg_v1" || leg.status !== "verified" || leg.utterance_id !== utteranceId || leg.source_sha256 !== wav?.sha256 || leg.expected_silence !== silence || leg.raw_audio_excluded !== true || Number(leg.frame_count) <= 0 || Number(leg.sample_count) <= 0 || leg.pcm_digest_algorithm !== "sha-256-chain-v1" || typeof leg.pcm_sha256_chain !== "string" || !/^[a-f0-9]{64}$/.test(leg.pcm_sha256_chain)) return false;
+  if (!reconcileProductInputLeg(events, operation, leg).verified) return false;
+  if (silence ? Number(leg.nonzero_sample_count) !== 0 || Number(leg.pcm_rms) !== 0 || Number(leg.pcm_peak) !== 0 : Number(leg.nonzero_sample_count) <= 0 || Number(leg.pcm_rms) <= 0 || Number(leg.pcm_peak) <= 0) return false;
+  const turns = events.filter((event) => event.source === "product" && event.kind === "audio.input.product_turn" && (event.payload.receipt as Record<string, unknown> | undefined)?.operation_id === operation.id).map((event) => event.payload.receipt as Record<string, unknown>);
+  if (!turns.every((receipt) => receipt.schema === "sophia_gemini_input_turn_v1" && receipt.utterance_id === utteranceId && receipt.frame_window_id === leg.frame_window_id && receipt.expected_silence === silence && receipt.raw_audio_excluded === true)) return false;
+  return silence
+    ? turns.some((receipt) => receipt.source === "settlement" && receipt.outcome === "no_user_turn_observed") && !turns.some((receipt) => receipt.outcome === "unexpected_user_turn_observed" || receipt.outcome === "user_turn_observed")
+    : turns.some((receipt) => receipt.source === "provider_input_transcription" && receipt.outcome === "provider_input_transcription_observed") && turns.some((receipt) => receipt.source === "public_user_turn" && receipt.outcome === "public_user_turn_accepted");
+}
+
+export type ScenarioAssertionEvaluation = {
+  scenario_id: string | null;
+  scenario_version: string | null;
+  harness: ScenarioAssertion[];
+  product: ScenarioAssertion[];
+  summary: string;
+};
+
+/**
+ * Canonical scenario gates. Missing owning evidence is unavailable, never a
+ * pass inferred from event counts or timing proximity.
+ */
+export function evaluateScenarioAssertions(run: RunRecord, events: import("./domain.js").LabEvent[], operations: import("./domain.js").OperationRecord[], authAudit: import("./ledger.js").AuthAuditRecord[] = []): ScenarioAssertionEvaluation {
+  const eligible = events.filter((event) => event.source !== "product" || isExactBoundProductEvent(run, event));
+  const injected = operations.filter((operation) => (operation.type === "speak" || operation.type === "barge_in") && operation.state === "succeeded");
+  const productEvents = eligible.filter((event) => event.source === "product");
+  const byKind = (kind: string) => eligible.filter((event) => event.kind === kind);
+  const productByKind = (kind: string) => productEvents.filter((event) => event.kind === kind);
+  const externalAttestations = (kind: string) => eligible.filter((event) => {
+    if (event.source !== "canonical" || event.kind !== `external.attestation.${kind}` || event.payload.schema !== "sophia_voice_lab_external_attestation_v1" || event.payload.binding_validated !== true || event.payload.raw_identifiers_excluded !== true
+      || event.payload.test_run_id_sha256 !== sha256(run.testRunId) || event.payload.cleanup_obligation_id_sha256 !== sha256(run.cleanupObligationId) || event.payload.scenario_id !== run.scenarioId || event.payload.scenario_version !== run.scenarioVersion || event.payload.environment !== run.environment
+      || canonicalRequestHash(event.payload.expected_deployment) !== canonicalRequestHash(run.target.expectedDeployment) || typeof event.payload.content_sha256 !== "string"
+      || typeof event.payload.request_argument_sha256 !== "string" || typeof event.payload.request_id_sha256 !== "string"
+      || !authAudit.some((audit) => audit.action === "external_attestation.authenticate" && audit.outcome === "allowed" && audit.argumentHash === event.payload.request_argument_sha256
+        && audit.detail.request_id_hash === event.payload.request_id_sha256 && audit.detail.attestation_id_hash === sha256(String(event.payload.attestation_id)))) return false;
+    const content = { ...event.payload };
+    delete content.content_sha256;
+    return canonicalRequestHash(content) === event.payload.content_sha256;
+  });
+  const exactOperation = (event: import("./domain.js").LabEvent, operationId: string) => event.payload.operation_id === operationId || (event.payload.data as Record<string, unknown> | undefined)?.operation_id === operationId;
+  const chain = (operationId: string) => {
+    const resolved = byKind("utterance.resolved").filter((event) => exactOperation(event, operationId));
+    const scheduled = byKind("audio.input.scheduled").filter((event) => exactOperation(event, operationId));
+    const started = byKind("audio.input.started").filter((event) => exactOperation(event, operationId));
+    const completed = byKind("audio.input.completed").filter((event) => exactOperation(event, operationId));
+    const forwarded = byKind("harness.input_frame_forwarded").filter((event) => exactOperation(event, operationId));
+    const productLegs = productByKind("audio.input.product_leg").filter((event) => (event.payload.receipt as Record<string, unknown> | undefined)?.operation_id === operationId);
+    const productTurns = productByKind("audio.input.product_turn").filter((event) => (event.payload.receipt as Record<string, unknown> | undefined)?.operation_id === operationId);
+    const operation = operations.find((candidate) => candidate.id === operationId);
+    const silence = String(operation?.input.fixture_id ?? "").toLowerCase().includes("silence");
+    const resolvedPayload = resolved[0]?.payload;
+    const wav = resolvedPayload?.wav as Record<string, unknown> | undefined;
+    const utteranceId = resolvedPayload?.utterance_id;
+    const leg = productLegs[0]?.payload.receipt as Record<string, unknown> | undefined;
+    const legBound = productLegs.length === 1 && leg?.schema === "sophia_gemini_input_leg_v1" && leg.status === "verified" && leg.operation_id === operationId && leg.utterance_id === utteranceId && leg.source_sha256 === wav?.sha256 && leg.expected_silence === silence && leg.raw_audio_excluded === true && Number(leg.frame_count) > 0 && Number(leg.sample_count) > 0 && typeof leg.pcm_sha256_chain === "string" && /^[a-f0-9]{64}$/.test(leg.pcm_sha256_chain) && leg.pcm_digest_algorithm === "sha-256-chain-v1" && operation !== undefined && reconcileProductInputLeg(eligible, operation, leg).verified;
+    const productSignal = silence
+      ? legBound && Number(leg?.nonzero_sample_count) === 0 && Number(leg?.pcm_rms) === 0 && Number(leg?.pcm_peak) === 0
+      : legBound && Number(leg?.nonzero_sample_count) > 0 && Number(leg?.pcm_rms) > 0 && Number(leg?.pcm_peak) > 0;
+    const turnReceipts = productTurns.map((event) => event.payload.receipt as Record<string, unknown>);
+    const turnBound = turnReceipts.every((receipt) => receipt.schema === "sophia_gemini_input_turn_v1" && receipt.operation_id === operationId && receipt.utterance_id === utteranceId && receipt.frame_window_id === leg?.frame_window_id && receipt.expected_silence === silence && receipt.raw_audio_excluded === true);
+    const semanticSettlement = silence
+      ? turnBound && turnReceipts.some((receipt) => receipt.source === "settlement" && receipt.outcome === "no_user_turn_observed") && !turnReceipts.some((receipt) => receipt.outcome === "unexpected_user_turn_observed" || receipt.outcome === "user_turn_observed")
+      : turnBound && turnReceipts.some((receipt) => receipt.source === "provider_input_transcription" && receipt.outcome === "provider_input_transcription_observed") && turnReceipts.some((receipt) => receipt.source === "public_user_turn" && receipt.outcome === "public_user_turn_accepted");
+    return { resolved, scheduled, started, completed, forwarded, productLegs, productTurns, exact: resolved.length === 1 && scheduled.length === 1 && started.length === 1 && completed.length === 1 && operation?.result?.schedule_receipt !== undefined && productSignal && semanticSettlement };
+  };
+  const pass = (id: string, owner: ScenarioAssertion["owner"], evidence: import("./domain.js").LabEvent[], reason: string | null = null): ScenarioAssertion => ({ id, owner, status: "pass", evidence_seqs: evidence.map((event) => event.seq), reason });
+  const fail = (id: string, owner: ScenarioAssertion["owner"], evidence: import("./domain.js").LabEvent[], reason: string): ScenarioAssertion => ({ id, owner, status: "fail", evidence_seqs: evidence.map((event) => event.seq), reason });
+  const unavailable = (id: string, owner: ScenarioAssertion["owner"], reason: string): ScenarioAssertion => ({ id, owner, status: "unavailable", evidence_seqs: [], reason });
+  const check = (id: string, owner: ScenarioAssertion["owner"], condition: boolean, evidence: import("./domain.js").LabEvent[], missing: string, failure = missing): ScenarioAssertion => evidence.length === 0 ? unavailable(id, owner, missing) : condition ? pass(id, owner, evidence) : fail(id, owner, evidence, failure);
+  const harness: ScenarioAssertion[] = [];
+  const product: ScenarioAssertion[] = [];
+  const allChainEvents = injected.flatMap((operation) => Object.values(chain(operation.id)).flatMap((value) => Array.isArray(value) ? value : []));
+  const exactChains = injected.length > 0 && injected.every((operation) => chain(operation.id).exact);
+  const intervals = injected.map((operation) => ({ operation, start: chain(operation.id).started[0], complete: chain(operation.id).completed[0] })).filter((item) => item.start && item.complete).sort((left, right) => left.start!.seq - right.start!.seq);
+  const noOverlap = intervals.length === injected.length && intervals.every((item, index) => index === 0 || intervals[index - 1]!.complete!.seq < item.start!.seq);
+
+  switch (run.scenarioId) {
+    case "V-A01": {
+      harness.push(injected.length === 6 ? pass("a01.greeting_plus_five_adaptive_utterances", "harness", allChainEvents) : fail("a01.greeting_plus_five_adaptive_utterances", "harness", allChainEvents, `observed_${injected.length}`));
+      harness.push(check("a01.independent_pcm_chains", "harness", exactChains, allChainEvents, "exact_schedule_start_pcm_complete_chains_unavailable"));
+      harness.push(check("a01.no_unintended_overlap", "harness", noOverlap, intervals.flatMap((item) => [item.start!, item.complete!]), "input_intervals_unavailable"));
+      const ended = productEvents.filter((event) => event.kind.endsWith(".sophia.turn") && ((event.payload.data as Record<string, unknown> | undefined)?.phase === "agent_ended" || event.payload.phase === "agent_ended"));
+      const orderedInputs = [...injected].sort((left, right) => left.createdAt.getTime() - right.createdAt.getTime());
+      const observationEvents: import("./domain.js").LabEvent[] = [];
+      const observationSeqs = new Set<number>();
+      const observationTurnIds = new Set<string>();
+      const adaptive = orderedInputs.length === 6 && orderedInputs[0]?.input.adaptive_observation === undefined && orderedInputs.slice(1).every((operation, index) => {
+        const observation = operation.input.adaptive_observation as Record<string, unknown> | undefined;
+        const eventSeq = Number(observation?.event_seq);
+        const turnId = observation?.turn_id;
+        const expectedCursor = Number(operation.input.expected_cursor);
+        const expectedTurnId = operation.input.expected_turn_id;
+        const observationClass = observation?.observation_class;
+        const followupIntent = observation?.followup_intent;
+        const target = ended.find((event) => event.seq === eventSeq);
+        const targetData = target?.payload.data as Record<string, unknown> | undefined;
+        const previousChain = chain(orderedInputs[index]!.id);
+        const currentChain = chain(operation.id);
+        const currentStart = currentChain.started[0];
+        const precedingEnded = currentStart ? ended.filter((event) => event.seq < currentStart.seq).at(-1) : undefined;
+        if (target) observationEvents.push(target);
+        const exact = target !== undefined && precedingEnded?.seq === target.seq && targetData?.phase === "agent_ended" && targetData.turnId === turnId
+          && expectedTurnId === turnId && Number.isSafeInteger(expectedCursor) && expectedCursor >= eventSeq
+          && previousChain.completed.length === 1 && currentChain.started.length === 1 && previousChain.completed[0]!.seq < eventSeq && eventSeq < currentChain.started[0]!.seq
+          && operation.createdAt.getTime() >= target.at.getTime()
+          && ["assistant_turn_complete", "assistant_question", "assistant_result", "assistant_uncertainty", "assistant_commitment"].includes(String(observationClass))
+          && ["clarify", "deepen", "verify", "redirect", "summarize"].includes(String(followupIntent)) && !observationSeqs.has(eventSeq)
+          && typeof turnId === "string" && turnId.length > 0 && !observationTurnIds.has(turnId);
+        observationSeqs.add(eventSeq);
+        if (typeof turnId === "string") observationTurnIds.add(turnId);
+        return exact;
+      });
+      harness.push(check("a01.five_adaptive_turn_boundaries", "harness", adaptive, [...ended, ...observationEvents], "five_exact_observation_bound_followups_unavailable"));
+      const transcripts = productByKind("audio.input.product_turn").filter((event) => (event.payload.receipt as Record<string, unknown> | undefined)?.source === "provider_input_transcription" && (event.payload.receipt as Record<string, unknown> | undefined)?.outcome === "provider_input_transcription_observed");
+      const correlated = injected.length === 6 && injected.every((operation) => transcripts.filter((event) => (event.payload.receipt as Record<string, unknown> | undefined)?.operation_id === operation.id).length === 1);
+      harness.push(check("a01.operation_to_product_transcript_correlation", "harness", correlated, transcripts, "app_authored_operation_to_transcript_correlation_unavailable"));
+      // The runner proves exact causal observation binding and declared intent;
+      // hidden reasoning provenance remains supplemental platform evidence.
+      product.push(unavailable("a01.supplemental_adaptive_agent_reasoning_provenance", "product", "platform_authored_adaptive_decision_provenance_not_attached"));
+      product.push(check("a01.six_correlated_transcripts", "product", correlated, transcripts, "operation_correlated_transcripts_unavailable"));
+      // realizationId is a chunk identity, not an assistant-response identity.
+      // Until the product emits the frozen operation/input-turn -> assistant
+      // turn/response -> every output-chunk lineage, same-run turn/chunk counts
+      // cannot certify six causal, non-stacked responses.
+      product.push(unavailable("a01.six_nonstacked_responses", "product", "product_authored_input_operation_to_assistant_turn_response_output_lineage_unavailable"));
+      break;
+    }
+    case "V-A02": {
+      const fixtureIds = injected.map((operation) => String(operation.input.fixture_id ?? ""));
+      const expected = ["a02_short_command", "a02_long_brief", "a02_silence", "a02_trailing_pause", "a02_noisy_command"];
+      const resolved = byKind("utterance.resolved").filter((event) => injected.some((operation) => exactOperation(event, operation.id)));
+      harness.push(fixtureIds.length === 5 && expected.every((id) => fixtureIds.includes(id)) ? pass("a02.all_five_fixture_classes", "harness", resolved) : fail("a02.all_five_fixture_classes", "harness", resolved, "required_fixture_class_missing_or_duplicated"));
+      const attributable = resolved.length === 5 && resolved.every((event) => {
+        const fixture = event.payload.fixture as Record<string, unknown> | undefined;
+        const sourceText = fixture?.sourceText as Record<string, unknown> | undefined;
+        return typeof fixture?.fixtureVersion === "string" && sourceText?.status === "available" && typeof sourceText.sha256 === "string";
+      });
+      harness.push(check("a02.fixture_attribution_replayable", "harness", attributable && exactChains, [...resolved, ...allChainEvents], "governed_fixture_or_pcm_chain_unavailable"));
+      const silence = injected.find((operation) => operation.input.fixture_id === "a02_silence");
+      const silenceChain = silence ? chain(silence.id) : null;
+      const silenceSemantic = silence ? productByKind("audio.input.product_turn").filter((event) => (event.payload.receipt as Record<string, unknown> | undefined)?.operation_id === silence.id && (event.payload.receipt as Record<string, unknown> | undefined)?.outcome !== "no_user_turn_observed") : [];
+      const silenceSettled = silence ? productByKind("audio.input.product_turn").filter((event) => {
+        const receipt = event.payload.receipt as Record<string, unknown> | undefined;
+        return receipt?.operation_id === silence.id && receipt.source === "settlement" && receipt.outcome === "no_user_turn_observed";
+      }) : [];
+      harness.push(!silence || !silenceChain?.exact
+        ? unavailable("a02.silence_no_fabricated_turn", "harness", "exact_product_pcm_and_settlement_chain_unavailable")
+        : silenceSemantic.length > 0
+          ? fail("a02.silence_no_fabricated_turn", "harness", silenceSemantic, "operation_correlated_product_semantic_turn_observed_for_silence")
+          : silenceSettled.length === 1
+            ? pass("a02.silence_no_fabricated_turn", "harness", [...silenceChain.productLegs, ...silenceSettled])
+            : unavailable("a02.silence_no_fabricated_turn", "harness", "product_authored_operation_correlated_settled_no_effect_window_unavailable"));
+      product.push(unavailable("a02.fixture_semantic_thresholds", "product", "owning_semantic_threshold_evaluator_not_attached"));
+      break;
+    }
+    case "V-A03": {
+      const evidence = injected.flatMap((operation) => Object.values(chain(operation.id)).flatMap((value) => Array.isArray(value) ? value : []));
+      harness.push(injected.length === 1 ? pass("a03.single_durable_operation", "harness", evidence) : fail("a03.single_durable_operation", "harness", evidence, `observed_${injected.length}`));
+      const replays = byKind("operation.speak.idempotent_replay").filter((event) => injected[0] && event.payload.operation_id === injected[0].id && event.payload.exact_request_hash_replay === true && event.payload.no_new_operation === true);
+      const lossAttestations = externalAttestations("a03_http_response_loss").filter((event) => {
+        const proof = event.payload.evidence as Record<string, unknown> | undefined;
+        return injected[0] !== undefined && proof?.authority === "external_mcp_client" && proof.operation_id === injected[0].id && proof.replayed_operation_id === injected[0].id
+          && proof.request_sha256 === injected[0].requestHash && proof.idempotency_key_sha256 === sha256(injected[0].idempotencyKey) && proof.initial_response_observed === false && proof.transport_outcome === "connection_closed_after_durable_acceptance";
+      });
+      harness.push(lossAttestations.length === 0
+        ? unavailable("a03.client_response_loss_boundary", "harness", "privileged_external_client_response_loss_attestation_not_attached")
+        : check("a03.client_response_loss_boundary", "harness", lossAttestations.length === 1, lossAttestations, "single_exact_client_response_loss_attestation_unavailable"));
+      harness.push(lossAttestations.length === 0
+        ? unavailable("a03.same_key_client_replay_returns_original_operation", "harness", "response_loss_boundary_not_externally_attested")
+        : check("a03.same_key_client_replay_returns_original_operation", "harness", injected.length === 1 && replays.length === 1 && lossAttestations.length === 1, [...replays, ...lossAttestations], "same_key_mcp_replay_did_not_join_external_response_loss_receipt"));
+      // A user transcript alone does not own a later model/output/tool effect.
+      // Same-run random IDs and global cardinality are explicitly insufficient
+      // for lost-response at-most-once proof.
+      product.push(unavailable("a03.exactly_one_product_turn_effect", "product", "product_authored_input_operation_to_assistant_turn_response_and_backend_effect_lineage_unavailable"));
+      break;
+    }
+    case "V-O01": {
+      const received = productByKind("audio.output.received");
+      const providerChunks = productByKind("audio.output.provider_chunk");
+      const playback = ["audio.output.scheduled", "audio.output.started", "audio.output.completed"].flatMap(productByKind);
+      const legs = productByKind("audio.output.leg_receipt");
+      const chains = legs.map((legEvent) => {
+        const leg = legEvent.payload.receipt as Record<string, unknown> | undefined;
+        const realizationId = typeof leg?.realizationId === "string" ? leg.realizationId : null;
+        const receipts = playback.filter((event) => (event.payload.receipt as Record<string, unknown> | undefined)?.realizationId === realizationId);
+        const scheduled = receipts.filter((event) => (event.payload.receipt as Record<string, unknown> | undefined)?.phase === "scheduled");
+        const started = receipts.filter((event) => (event.payload.receipt as Record<string, unknown> | undefined)?.phase === "started");
+        const completed = receipts.filter((event) => (event.payload.receipt as Record<string, unknown> | undefined)?.phase === "completed");
+        const terminal = completed[0]?.payload.receipt as Record<string, unknown> | undefined;
+        const receivedEvent = received.find((event) => {
+          const diagnostic = event.payload.diagnostic as Record<string, unknown> | undefined;
+          return diagnostic?.providerReceiveSequence === terminal?.providerReceiveSequence
+            && diagnostic?.providerConnectionEpoch === terminal?.providerConnectionEpoch
+            && diagnostic?.playbackGeneration === terminal?.playbackGeneration
+            && diagnostic?.relayCorrelationId === terminal?.relayCorrelationId
+            && diagnostic?.providerRelaySequence === terminal?.providerRelaySequence
+            && diagnostic?.providerReceivedAt === terminal?.providerReceivedAt
+            && diagnostic?.responseId === terminal?.responseId
+            && diagnostic?.providerEventId === terminal?.providerEventId;
+        });
+        const chunkEvent = providerChunks.find((event) => {
+          const diagnostic = event.payload.diagnostic as Record<string, unknown> | undefined;
+          return diagnostic?.providerReceiveSequence === terminal?.providerReceiveSequence
+            && diagnostic?.providerConnectionEpoch === terminal?.providerConnectionEpoch
+            && diagnostic?.playbackGeneration === terminal?.playbackGeneration
+            && diagnostic?.relayCorrelationId === terminal?.relayCorrelationId
+            && diagnostic?.providerRelaySequence === terminal?.providerRelaySequence
+            && diagnostic?.providerReceivedAt === terminal?.providerReceivedAt
+            && diagnostic?.chunkIndex === terminal?.chunkIndex
+            && diagnostic?.chunksInEvent === terminal?.chunksInEvent
+            && diagnostic?.chunkHash === terminal?.chunkHash
+            && diagnostic?.byteLength === terminal?.byteLength
+            && diagnostic?.scheduled === true && diagnostic?.dropReason === null
+            && /^[a-f0-9]{64}$/.test(String(diagnostic?.chunkHash));
+        });
+        const exact = leg?.schema === "sophia_gemini_output_leg_v1" && leg.status === "verified" && leg.completionPhase === "completed"
+          && /^[a-f0-9]{64}$/.test(String(leg.monitorDigestSha256)) && Number(leg.monitorFrameCount) > 0 && Number(leg.monitorNonSilentFrameCount) > 0 && leg.rawAudioExcluded === true
+          && scheduled.length === 1 && started.length === 1 && completed.length === 1 && receivedEvent !== undefined && chunkEvent !== undefined
+          && typeof terminal?.responseId === "string" && terminal.responseId.length > 0
+          && leg.providerChunkFingerprint === terminal?.chunkHash && leg.providerConnectionEpoch === terminal?.providerConnectionEpoch && leg.playbackGeneration === terminal?.playbackGeneration
+          && receivedEvent.seq < chunkEvent.seq && chunkEvent.seq < scheduled[0]!.seq && scheduled[0]!.seq < started[0]!.seq && started[0]!.seq < completed[0]!.seq && completed[0]!.seq < legEvent.seq
+          && typeof leg.scheduledAt === "string" && typeof leg.completedAt === "string" && Number(leg.monitorDurationMs) >= 0 && Number(terminal?.durationSeconds) > 0;
+        return { exact, realizationId, fingerprint: leg?.providerChunkFingerprint, receivedSeq: receivedEvent?.seq ?? null, chunkSeq: chunkEvent?.seq ?? null, events: [...(receivedEvent ? [receivedEvent] : []), ...(chunkEvent ? [chunkEvent] : []), ...receipts, legEvent] };
+      });
+      const scheduledReceipts = playback.filter((event) => (event.payload.receipt as Record<string, unknown> | undefined)?.phase === "scheduled");
+      const startedReceipts = playback.filter((event) => (event.payload.receipt as Record<string, unknown> | undefined)?.phase === "started");
+      const completedReceipts = playback.filter((event) => (event.payload.receipt as Record<string, unknown> | undefined)?.phase === "completed");
+      const completedRealizations = completedReceipts.map((event) => (event.payload.receipt as Record<string, unknown> | undefined)?.realizationId);
+      const receivedCoverage = received.length > 0 && received.every((receivedEvent) => {
+        const aggregate = receivedEvent.payload.diagnostic as Record<string, unknown> | undefined;
+        const group = providerChunks.filter((event) => {
+          const diagnostic = event.payload.diagnostic as Record<string, unknown> | undefined;
+          return diagnostic?.providerReceiveSequence === aggregate?.providerReceiveSequence
+            && diagnostic?.providerConnectionEpoch === aggregate?.providerConnectionEpoch
+            && diagnostic?.playbackGeneration === aggregate?.playbackGeneration
+            && diagnostic?.relayCorrelationId === aggregate?.relayCorrelationId
+            && diagnostic?.providerRelaySequence === aggregate?.providerRelaySequence
+            && diagnostic?.providerReceivedAt === aggregate?.providerReceivedAt;
+        });
+        const count = Number(aggregate?.chunksInEvent);
+        const indexes = group.map((event) => Number((event.payload.diagnostic as Record<string, unknown> | undefined)?.chunkIndex)).sort((left, right) => left - right);
+        return Number.isSafeInteger(count) && count > 0 && group.length === count
+          && indexes.every((value, index) => value === index)
+          && typeof aggregate?.responseId === "string" && aggregate.responseId.length > 0;
+      });
+      const exactNaturalChains = chains.length > 0 && chains.every((chain) => chain.exact)
+        && receivedCoverage && providerChunks.length === chains.length && scheduledReceipts.length === chains.length && startedReceipts.length === chains.length && completedReceipts.length === chains.length && playback.length === chains.length * 3
+        && new Set(chains.map((chain) => chain.realizationId)).size === chains.length
+        && new Set(chains.map((chain) => chain.fingerprint)).size === chains.length
+        && new Set(chains.map((chain) => chain.chunkSeq)).size === chains.length
+        && completedRealizations.length === chains.length && new Set(completedRealizations).size === completedRealizations.length
+        && new Set(scheduledReceipts.map((event) => (event.payload.receipt as Record<string, unknown> | undefined)?.realizationId)).size === chains.length
+        && new Set(startedReceipts.map((event) => (event.payload.receipt as Record<string, unknown> | undefined)?.realizationId)).size === chains.length;
+      harness.push(check("o01.provider_chunk_to_playback_to_output_leg_join", "harness", exactNaturalChains, chains.flatMap((chain) => chain.events), "exact_epoch_generation_fingerprint_realization_and_timing_join_unavailable"));
+      product.push(check("o01.output_matches_realization", "product", exactNaturalChains, chains.flatMap((chain) => chain.events), "output_leg_and_playback_join_unavailable"));
+      break;
+    }
+    case "V-O02": {
+      const invalidated = [...productByKind("audio.output.flushed"), ...productByKind("audio.output.dropped")];
+      const rotations = operations.filter((operation) => operation.type === "force_socket_rotation" && operation.state === "succeeded");
+      const causal = rotations.flatMap((operation) => {
+        const target = operation.input._fault_target as Record<string, unknown> | undefined;
+        const cited = productByKind("audio.output.started").find((event) => event.seq === Number(target?.output_event_seq));
+        const citedReceipt = cited?.payload.receipt as Record<string, unknown> | undefined;
+        const terminals = invalidated.filter((event) => {
+          const receipt = event.payload.receipt as Record<string, unknown> | undefined;
+          return event.seq > (cited?.seq ?? Number.MAX_SAFE_INTEGER) && receipt?.realizationId === target?.realization_id && Number(receipt?.providerConnectionEpoch) === Number(target?.provider_connection_epoch) && Number(receipt?.playbackGeneration) === Number(target?.playback_generation);
+        });
+        const exact = target?.fault_intent === "invalidate_active_realization" && citedReceipt?.phase === "started" && citedReceipt.realizationId === target?.realization_id
+          && Number(citedReceipt.providerConnectionEpoch) === Number(target?.provider_connection_epoch) && Number(citedReceipt.playbackGeneration) === Number(target?.playback_generation)
+          && terminals.length === 1 && ["flushed", "dropped"].includes(String((terminals[0]!.payload.receipt as Record<string, unknown> | undefined)?.phase))
+          && operation.result?.rotation_receipt !== undefined;
+        return [{ exact, target, events: [...(cited ? [cited] : []), ...terminals] }];
+      });
+      const causalPass = causal.length === 1 && causal[0]!.exact;
+      const causalEvents = causal.flatMap((item) => item.events);
+      harness.push(check("o02.governed_fault_to_exact_realization_invalidation", "harness", causalPass, causalEvents, "exact_rotation_fault_target_and_terminal_realization_receipt_unavailable"));
+      const postInvalidationStarts = causal.flatMap((item) => item.events.filter((event) => ["audio.output.flushed", "audio.output.dropped"].includes(event.kind)).flatMap((terminal) => productByKind("audio.output.started").filter((started) => {
+        const startedReceipt = started.payload.receipt as Record<string, unknown> | undefined;
+        const terminalReceipt = terminal.payload.receipt as Record<string, unknown> | undefined;
+        return started.seq > terminal.seq && (startedReceipt?.realizationId === item.target?.realization_id || (typeof item.target?.chunk_hash === "string" && startedReceipt?.chunkHash === item.target.chunk_hash) || startedReceipt?.realizationId === terminalReceipt?.realizationId);
+      })));
+      product.push(causalEvents.length === 0 ? unavailable("o02.no_stale_playback_after_invalidation", "product", "invalidation_receipt_unavailable") : postInvalidationStarts.length === 0 ? pass("o02.no_stale_playback_after_invalidation", "product", causalEvents) : fail("o02.no_stale_playback_after_invalidation", "product", postInvalidationStarts, "stale_realization_restarted"));
+      break;
+    }
+    case "V-B01": case "V-B02": case "V-B03": case "V-B04": {
+      const joinEvents = productByKind("product.builder-ui.synthetic-builder-join");
+      const joinFaults = productByKind("product.builder-ui.synthetic-builder-join-fault");
+      const toolLedgers = productEvents.filter((event) => event.kind.includes("gemini-tool-call-ledger"));
+      const joinKeys = [
+        "schema", "test_run_id", "scenario_id", "scenario_version", "operation_id", "utterance_id", "provider_input_sequence", "tool_call_id", "effect_id",
+        "provider_connection_epoch", "relay_correlation_id", "tool_name", "tool_state", "builder_operation_id", "parent_thread_id", "task_id", "thread_id", "run_id", "build_id",
+        "artifact_id", "artifact_path_sha256", "ui_projection_state", "cancel_count", "no_post_cancel_publication", "source_tool_received_at", "source_backend_accepted_at",
+        "source_tool_response_sent_at", "source_builder_event_id", "source_builder_event_at", "source_ui_projected_at", "scenario_assertions",
+        "raw_transcript_excluded", "raw_artifact_content_excluded", "secrets_excluded",
+      ].sort();
+      const assertionKeys = ["artifact_created", "artifact_visible_current", "accepted_turn_count", "tool_dispatch_count", "owned_task_count", "stable_task_identity", "revision_updated_same_task", "current_behavior_result", "cancel_request_count", "cancel_terminal_settled", "no_post_cancel_publication"].sort();
+      const immutableJoinKeys = ["test_run_id", "scenario_id", "scenario_version", "operation_id", "utterance_id", "provider_input_sequence", "tool_call_id", "effect_id", "provider_connection_epoch", "relay_correlation_id", "tool_name", "builder_operation_id", "parent_thread_id", "task_id", "thread_id", "build_id", "source_tool_received_at", "source_backend_accepted_at"];
+      const terminalStates = new Set(["responded", "cancelled-before-send", "cancelled-after-send", "suppressed", "rejected"]);
+      const builderToolNames = new Set(["start_builder_task", "edit_builder_artifact", "check_async_task", "update_async_task", "cancel_async_task", "list_async_tasks", "coreview_request_artifact_update"]);
+      const exactJoins = joinEvents.map((event) => {
+        const join = event.payload;
+        const publicKeys = Object.keys(join).filter((key) => key !== "_product_run_binding" && key !== "_capture_provenance").sort();
+        const assertions = join.scenario_assertions && typeof join.scenario_assertions === "object" && !Array.isArray(join.scenario_assertions) ? join.scenario_assertions as Record<string, unknown> : null;
+        const strings = ["test_run_id", "scenario_id", "scenario_version", "operation_id", "utterance_id", "tool_call_id", "effect_id", "relay_correlation_id", "tool_name", "tool_state", "builder_operation_id", "parent_thread_id", "task_id", "thread_id", "run_id", "build_id", "source_tool_received_at", "source_backend_accepted_at"];
+        const operation = injected.find((candidate) => candidate.id === join.operation_id);
+        const resolved = operation ? byKind("utterance.resolved").filter((candidate) => exactOperation(candidate, operation.id) && candidate.payload.utterance_id === join.utterance_id) : [];
+        const acceptedTurns = operation ? productByKind("audio.input.product_turn").filter((candidate) => {
+          const receipt = candidate.payload.receipt as Record<string, unknown> | undefined;
+          return receipt?.schema === "sophia_gemini_input_turn_v1" && receipt.synthetic === true && receipt.test_run_id === run.testRunId && receipt.operation_id === operation.id && receipt.utterance_id === join.utterance_id
+            && receipt.source === "public_user_turn" && receipt.outcome === "public_user_turn_accepted" && receipt.provider_receive_sequence === join.provider_input_sequence && receipt.raw_audio_excluded === true;
+        }) : [];
+        const matchingLedgers = toolLedgers.filter((candidate) => {
+          const entry = candidate.payload.entry as Record<string, unknown> | undefined;
+          if (!entry) return false;
+          const toolEvidence = entry?.syntheticToolEvidence as Record<string, unknown> | undefined;
+          const backendJoin = entry?.syntheticBuilderJoin as Record<string, unknown> | undefined;
+          return candidate.seq < event.seq && entry?.toolCallId === join.tool_call_id && entry.effectId === join.effect_id && entry.providerConnectionEpoch === join.provider_connection_epoch
+            && entry.toolName === join.tool_name && terminalStates.has(String(entry.finalState)) && entry.receivedAt === join.source_tool_received_at && entry.toolResponseSentAt === join.source_tool_response_sent_at
+            && toolEvidence?.schema === "sophia_synthetic_tool_evidence_v1" && toolEvidence.test_run_id === run.testRunId && toolEvidence.scenario_id === run.scenarioId && toolEvidence.scenario_version === run.scenarioVersion
+            && toolEvidence.operation_id === join.operation_id && toolEvidence.utterance_id === join.utterance_id && toolEvidence.provider_input_sequence === join.provider_input_sequence
+            && toolEvidence.tool_call_id === join.tool_call_id && toolEvidence.effect_id === join.effect_id && toolEvidence.provider_connection_epoch === join.provider_connection_epoch
+            && toolEvidence.relay_correlation_id === join.relay_correlation_id && toolEvidence.tool_name === join.tool_name && toolEvidence.received_at === join.source_tool_received_at
+            && backendJoin !== undefined && immutableJoinKeys.every((key) => backendJoin[key] === join[key]);
+        });
+        const times = [join.source_tool_received_at, join.source_backend_accepted_at, join.source_tool_response_sent_at, join.source_builder_event_at, join.source_ui_projected_at];
+        const timeValues = times.map((value) => typeof value === "string" && canonicalIso(value) ? Date.parse(value) : Number.NaN);
+        const exact = publicKeys.length === joinKeys.length && publicKeys.every((key, index) => key === joinKeys[index])
+          && join.schema === "sophia_synthetic_builder_join_v1" && join.test_run_id === run.testRunId && join.scenario_id === run.scenarioId && join.scenario_version === run.scenarioVersion
+          && strings.every((key) => typeof join[key] === "string" && String(join[key]).length > 0 && String(join[key]).length <= 512 && !String(join[key]).includes("\u0000"))
+          && Number.isSafeInteger(join.provider_input_sequence) && Number(join.provider_input_sequence) > 0 && Number.isSafeInteger(join.provider_connection_epoch) && Number(join.provider_connection_epoch) > 0
+          && Number.isSafeInteger(join.cancel_count) && Number(join.cancel_count) >= 0 && join.thread_id === join.task_id && join.build_id === join.builder_operation_id
+          && (join.artifact_id === null || typeof join.artifact_id === "string") && (join.artifact_path_sha256 === null || /^[a-f0-9]{64}$/.test(String(join.artifact_path_sha256)))
+          && (join.ui_projection_state === "canvas_current" || join.ui_projection_state === "artifact_visible_current") && typeof join.source_builder_event_id === "string" && join.source_builder_event_id.length > 0
+          && join.raw_transcript_excluded === true && join.raw_artifact_content_excluded === true && join.secrets_excluded === true && join.no_post_cancel_publication === true
+          && assertions !== null && Object.keys(assertions).sort().length === assertionKeys.length && Object.keys(assertions).sort().every((key, index) => key === assertionKeys[index])
+          && timeValues.every(Number.isFinite) && timeValues.every((value, index) => index === 0 || timeValues[index - 1]! <= value)
+          && operation !== undefined && resolved.length === 1 && acceptedTurns.length === 1 && acceptedTurns[0]!.seq < matchingLedgers[0]?.seq! && matchingLedgers.length === 1;
+        return { exact, event, join, assertions, operation, acceptedTurns, matchingLedgers };
+      });
+      const exactEntries = exactJoins.filter((item) => item.exact);
+      const relevantBuilderLedgers = toolLedgers.map((event) => {
+        const entry = event.payload.entry as Record<string, unknown> | undefined;
+        const toolEvidence = entry?.syntheticToolEvidence as Record<string, unknown> | undefined;
+        const join = entry?.syntheticBuilderJoin as Record<string, unknown> | undefined;
+        return { event, entry, toolEvidence, join };
+      // `productEvents` is already restricted to the exact app-authored run
+      // binding. Categorize every known Builder dispatch by the owning entry's
+      // tool name before examining nested evidence: missing both nested receipts
+      // is itself a mandatory cardinality/provenance failure, not a reason to
+      // omit an observed dispatch from the candidate set.
+      }).filter(({ entry }) => builderToolNames.has(String(entry?.toolName)));
+      const exactBuilderLedger = ({ entry, toolEvidence }: (typeof relevantBuilderLedgers)[number]): boolean => typeof entry?.toolCallId === "string" && typeof entry.effectId === "string"
+        && typeof entry.providerConnectionEpoch === "number" && builderToolNames.has(String(entry.toolName))
+        && toolEvidence?.schema === "sophia_synthetic_tool_evidence_v1" && toolEvidence.test_run_id === run.testRunId && toolEvidence.scenario_id === run.scenarioId && toolEvidence.scenario_version === run.scenarioVersion
+        && toolEvidence.tool_call_id === entry.toolCallId && toolEvidence.effect_id === entry.effectId && toolEvidence.provider_connection_epoch === entry.providerConnectionEpoch && toolEvidence.tool_name === entry.toolName
+        && typeof toolEvidence.operation_id === "string" && typeof toolEvidence.utterance_id === "string" && Number.isSafeInteger(toolEvidence.provider_input_sequence) && Number(toolEvidence.provider_input_sequence) > 0;
+      const builderGroups = new Map<string, typeof relevantBuilderLedgers>();
+      for (const row of relevantBuilderLedgers) {
+        const key = `${String(row.entry?.toolCallId)}\u0000${String(row.entry?.effectId)}`;
+        const group = builderGroups.get(key) ?? [];
+        group.push(row);
+        builderGroups.set(key, group);
+      }
+      const exactBuilderGroups = [...builderGroups.values()].every((group) => {
+        const terminal = group.filter(({ entry }) => terminalStates.has(String(entry?.finalState)));
+        const last = group.reduce((latest, row) => row.event.seq > latest.event.seq ? row : latest, group[0]!);
+        return group.length > 0 && group.every(exactBuilderLedger) && terminal.length === 1 && terminal[0] === last && terminal[0]!.join?.schema === "sophia_synthetic_builder_join_v1"
+          && terminal[0]!.join?.test_run_id === run.testRunId && terminal[0]!.join?.scenario_id === run.scenarioId && terminal[0]!.join?.scenario_version === run.scenarioVersion;
+      });
+      const allTaskLedgers = [...builderGroups.values()].flatMap((group) => group.filter(({ entry }) => terminalStates.has(String(entry?.finalState))));
+      const taskIds = new Set(allTaskLedgers.map((item) => item.join?.task_id));
+      const toolCallIds = new Set(allTaskLedgers.map((item) => item.entry?.toolCallId));
+      const effectIds = new Set(allTaskLedgers.map((item) => item.entry?.effectId));
+      const baseExact = joinFaults.length === 0 && joinEvents.length === 1 && exactEntries.length === 1 && builderGroups.size > 0 && exactBuilderGroups
+        && taskIds.size === 1 && toolCallIds.size === allTaskLedgers.length && effectIds.size === allTaskLedgers.length && allTaskLedgers.length === builderGroups.size;
+      const exact = exactEntries[0];
+      const assertions = exact?.assertions;
+      let scenarioExact = false;
+      if (baseExact && assertions) {
+        if (run.scenarioId === "V-B01") scenarioExact = injected.length === 1 && allTaskLedgers.length === 1 && exact.join.tool_name === "start_builder_task" && exact.join.ui_projection_state === "artifact_visible_current" && exact.join.artifact_id !== null && exact.join.artifact_path_sha256 !== null
+          && assertions.artifact_created === true && assertions.artifact_visible_current === true && assertions.accepted_turn_count === 1 && assertions.tool_dispatch_count === 1 && assertions.owned_task_count === 1 && assertions.stable_task_identity === true;
+        if (run.scenarioId === "V-B02") scenarioExact = injected.length === 3 && allTaskLedgers.length === 1 && exact.join.tool_name === "start_builder_task" && exact.join.ui_projection_state === "artifact_visible_current"
+          && assertions.accepted_turn_count === 3 && assertions.tool_dispatch_count === 1 && assertions.owned_task_count === 1 && assertions.stable_task_identity === true
+          && new Set(injected.map((operation) => operation.id)).size === 3 && injected.every((operation) => productByKind("audio.input.product_turn").some((event) => (event.payload.receipt as Record<string, unknown> | undefined)?.operation_id === operation.id && (event.payload.receipt as Record<string, unknown> | undefined)?.outcome === "public_user_turn_accepted"));
+        if (run.scenarioId === "V-B03") {
+          const tools = new Set(allTaskLedgers.map((item) => item.entry?.toolName));
+          scenarioExact = injected.length === 2 && allTaskLedgers.length === 2 && tools.has("start_builder_task") && [...tools].some((tool) => ["update_async_task", "edit_builder_artifact", "coreview_request_artifact_update"].includes(String(tool)))
+            && exact.join.ui_projection_state === "artifact_visible_current" && exact.join.artifact_id !== null && exact.join.artifact_path_sha256 !== null
+            && assertions.accepted_turn_count === 2 && assertions.tool_dispatch_count === 2 && assertions.owned_task_count === 1 && assertions.stable_task_identity === true && assertions.revision_updated_same_task === true && assertions.current_behavior_result === true;
+        }
+        if (run.scenarioId === "V-B04") {
+          const tools = new Set(allTaskLedgers.map((item) => item.entry?.toolName));
+          scenarioExact = injected.length === 2 && allTaskLedgers.length === 2 && tools.has("start_builder_task") && tools.has("cancel_async_task") && exact.join.tool_name === "cancel_async_task"
+            && exact.join.tool_state === "terminal_settled" && exact.join.ui_projection_state === "canvas_current" && exact.join.cancel_count === 1 && exact.join.artifact_id === null && exact.join.artifact_path_sha256 === null
+            && typeof exact.join.source_builder_event_id === "string" && exact.join.source_builder_event_id === `langgraph-run-terminal:${exact.join.run_id}:cancelled`
+            && assertions.accepted_turn_count === 2 && assertions.tool_dispatch_count === 2 && assertions.owned_task_count === 1 && assertions.stable_task_identity === true
+            && assertions.cancel_request_count === 1 && assertions.cancel_terminal_settled === true && assertions.no_post_cancel_publication === true && exact.join.no_post_cancel_publication === true;
+        }
+      }
+      const evidence = [...joinEvents, ...joinFaults, ...toolLedgers, ...(exact?.acceptedTurns ?? [])];
+      harness.push(joinEvents.length === 0
+        ? unavailable(`${run.scenarioId.toLowerCase()}.exact_builder_ownership_chain`, "harness", "product_authored_synthetic_builder_join_unavailable")
+        : check(`${run.scenarioId.toLowerCase()}.exact_builder_ownership_chain`, "harness", scenarioExact, evidence, "operation_input_turn_tool_effect_builder_task_run_artifact_and_post_commit_ui_join_failed"));
+      product.push(run.scenarioId === "V-B02"
+        ? unavailable("v-b02.owning_builder_semantics", "product", "owning_status_reply_to_builder_task_state_grounding_receipt_unavailable")
+        : joinEvents.length === 0
+          ? unavailable(`${run.scenarioId.toLowerCase()}.owning_builder_semantics`, "product", "product_authored_synthetic_builder_join_unavailable")
+          : check(`${run.scenarioId.toLowerCase()}.owning_builder_semantics`, "product", scenarioExact, evidence, "product_builder_scenario_semantics_or_exactly_once_join_failed"));
+      break;
+    }
+    case "V-I01": case "V-I02": {
+      const barge = injected.filter((operation) => operation.type === "barge_in");
+      const terminals = [...productByKind("audio.output.flushed"), ...productByKind("audio.output.dropped")];
+      const causal = barge.map((operation) => {
+        const target = operation.input._barge_target as Record<string, unknown> | undefined;
+        const cited = productByKind("audio.output.started").find((event) => event.seq === Number(target?.after_output_event_seq));
+        const citedReceipt = cited?.payload.receipt as Record<string, unknown> | undefined;
+        const inputStarted = chain(operation.id).started[0];
+        const targetTerminals = terminals.filter((event) => {
+          const receipt = event.payload.receipt as Record<string, unknown> | undefined;
+          return event.seq > (inputStarted?.seq ?? Number.MAX_SAFE_INTEGER) && receipt?.realizationId === target?.realization_id && Number(receipt?.providerConnectionEpoch) === Number(target?.provider_connection_epoch) && Number(receipt?.playbackGeneration) === Number(target?.playback_generation);
+        });
+        const targetAt = typeof target?.target_schedule_at === "string" ? Date.parse(target.target_schedule_at) : Number.NaN;
+        const lateness = inputStarted ? inputStarted.at.getTime() - targetAt : Number.POSITIVE_INFINITY;
+        const flushAt = targetTerminals[0] ? Date.parse(String((targetTerminals[0]!.payload.receipt as Record<string, unknown>).timestamp)) : Number.NaN;
+        const flushLatency = inputStarted ? flushAt - inputStarted.at.getTime() : Number.POSITIVE_INFINITY;
+        const exact = citedReceipt?.phase === "started" && citedReceipt.realizationId === target?.realization_id && Number(citedReceipt.providerConnectionEpoch) === Number(target?.provider_connection_epoch)
+          && Number(citedReceipt.playbackGeneration) === Number(target?.playback_generation) && target?.receipt_phase === "started" && target?.intentional_overlap === true
+          && inputStarted !== undefined && Number.isFinite(targetAt) && lateness >= -50 && lateness <= Number(target?.max_lateness_ms) && targetTerminals.length === 1
+          && Number.isFinite(flushLatency) && flushLatency >= 0 && flushLatency <= 1_500 && chain(operation.id).exact;
+        return { exact, events: [...(cited ? [cited] : []), ...(inputStarted ? [inputStarted] : []), ...targetTerminals] };
+      });
+      const exactBarge = causal.length === 1 && causal[0]!.exact;
+      const staleRestarts = causal.flatMap((item, index) => {
+        const operation = barge[index]!;
+        const target = operation.input._barge_target as Record<string, unknown> | undefined;
+        const terminalSeq = item.events.filter((event) => ["audio.output.flushed", "audio.output.dropped"].includes(event.kind)).at(-1)?.seq ?? Number.MAX_SAFE_INTEGER;
+        return productByKind("audio.output.started").filter((event) => {
+          const receipt = event.payload.receipt as Record<string, unknown> | undefined;
+          return event.seq > terminalSeq && (receipt?.realizationId === target?.realization_id || (typeof target?.chunk_hash === "string" && receipt?.chunkHash === target.chunk_hash));
+        });
+      });
+      const exactBargeNoStale = exactBarge && staleRestarts.length === 0;
+      harness.push(check(`${run.scenarioId.toLowerCase()}.exact_barge_causal_chain`, "harness", exactBargeNoStale, [...causal.flatMap((item) => item.events), ...staleRestarts], "exact_cited_realization_epoch_generation_input_start_flush_latency_and_no_stale_restart_chain_unavailable"));
+      if (run.scenarioId === "V-I02") {
+        const operation = barge[0];
+        const toolTarget = operation?.input._tool_target as Record<string, unknown> | undefined;
+        const targetEvent = typeof toolTarget?.event_seq === "number" ? productEvents.find((event) => event.seq === toolTarget.event_seq && event.kind.includes("gemini-tool-call-ledger")) : undefined;
+        const targetEntry = targetEvent?.payload.entry as Record<string, unknown> | undefined;
+        const targetCapture = targetEvent?.payload._capture_provenance as Record<string, unknown> | undefined;
+        const targetEvidence = targetEntry?.syntheticToolEvidence as Record<string, unknown> | undefined;
+        const terminalStates = new Set(["responded", "cancelled-before-send", "cancelled-after-send", "suppressed", "rejected"]);
+        const related = productEvents.filter((event) => {
+          const entry = event.payload.entry as Record<string, unknown> | undefined;
+          return event.kind.includes("gemini-tool-call-ledger") && (entry?.toolCallId === toolTarget?.tool_call_id || entry?.effectId === toolTarget?.effect_id);
+        }).map((event) => ({ event, entry: event.payload.entry as Record<string, unknown> }));
+        const terminals = related.filter(({ entry }) => terminalStates.has(String(entry.finalState)) && (typeof entry.toolResponseSentAt === "string" || typeof entry.cancelledAt === "string"));
+        const inputStarted = operation ? chain(operation.id).started[0] : undefined;
+        const expectedTargetIdentity = sha256(`${String(toolTarget?.tool_call_id)}\u0000${String(toolTarget?.effect_id)}`);
+        const revalidated = operation ? byKind("fault.active_target_revalidated").filter((event) => event.source === "canonical" && event.payload.operation_id === operation.id && event.payload.target_event_seq === targetEvent?.seq && event.payload.target_kind === "tool_effect"
+          && event.payload.target_identity_sha256 === expectedTargetIdentity && Number.isSafeInteger(event.payload.observed_through_seq) && Number(event.payload.observed_through_seq) >= Number(targetEvent?.seq) && event.payload.active === true) : [];
+        const fenced = operation && toolTarget ? exactActiveTargetFenceEvents(events, operation.id, toolTarget, "tool_effect") : [];
+        const owner = operations.find((candidate) => candidate.id === toolTarget?.owner_operation_id && (candidate.type === "speak" || candidate.type === "barge_in") && candidate.state === "succeeded");
+        const exactEvidence = (entry: Record<string, unknown>): boolean => {
+          const evidence = entry.syntheticToolEvidence as Record<string, unknown> | undefined;
+          return entry.toolCallId === toolTarget?.tool_call_id && entry.effectId === toolTarget?.effect_id && entry.providerConnectionEpoch === toolTarget?.provider_connection_epoch
+            && evidence?.schema === "sophia_synthetic_tool_evidence_v1" && evidence.test_run_id === run.testRunId && evidence.scenario_id === run.scenarioId && evidence.scenario_version === run.scenarioVersion
+            && evidence.operation_id === toolTarget?.owner_operation_id && evidence.utterance_id === toolTarget?.owner_utterance_id && evidence.provider_input_sequence === toolTarget?.provider_input_sequence
+            && evidence.tool_call_id === toolTarget?.tool_call_id && evidence.effect_id === toolTarget?.effect_id && evidence.provider_connection_epoch === toolTarget?.provider_connection_epoch;
+        };
+        const exactTool = operation !== undefined && toolTarget?.activity_state === "in_flight" && targetEvent !== undefined && targetEntry?.finalState === "unknown" && typeof targetEntry.receivedAt === "string"
+          && targetEntry.toolResponseSentAt === null && targetEntry.cancelledAt === null && targetEntry.toolCallId === toolTarget.tool_call_id && targetEntry.effectId === toolTarget.effect_id
+          && targetEntry.providerConnectionEpoch === toolTarget.provider_connection_epoch && targetEvidence?.schema === "sophia_synthetic_tool_evidence_v1" && targetEvidence.test_run_id === run.testRunId
+          && targetEvidence.operation_id === toolTarget.owner_operation_id && targetEvidence.utterance_id === toolTarget.owner_utterance_id && targetEvidence.provider_input_sequence === toolTarget.provider_input_sequence
+          && targetEvidence.tool_call_id === toolTarget.tool_call_id && targetEvidence.effect_id === toolTarget.effect_id && targetCapture?.generation === toolTarget.product_generation && targetCapture?.seq === toolTarget.product_seq
+          && owner !== undefined && inputStarted !== undefined && related.every(({ entry }) => exactEvidence(entry))
+          && revalidated.length === 1 && fenced.length === 1 && targetEvent.seq < revalidated[0]!.seq && revalidated[0]!.seq < fenced[0]!.seq && fenced[0]!.seq < inputStarted.seq && terminals.length === 1 && inputStarted.seq < terminals[0]!.event.seq
+          && terminals[0]!.entry.toolCallId === toolTarget.tool_call_id && terminals[0]!.entry.effectId === toolTarget.effect_id
+          && (terminals[0]!.entry.syntheticToolEvidence as Record<string, unknown> | undefined)?.operation_id === owner.id
+          && related.filter(({ entry }) => terminalStates.has(String(entry.finalState))).length === 1 && exactTerminalLastToolLifecycle(related, inputStarted.seq);
+        harness.push(check("v-i02.tool_boundary_total_order_and_at_most_once_settlement", "harness", exactTool, [...related.map((item) => item.event), ...revalidated, ...fenced], "exact_owned_in_flight_tool_effect_browser_atomic_fence_barge_order_and_single_terminal_settlement_unavailable"));
+        // The exact effect ordering/cardinality is machine-verifiable above,
+        // but the product contract does not yet expose an owning semantic
+        // receipt joining the post-barge assistant promise to the actual tool
+        // terminal outcome. Never infer that relationship from transcript
+        // wording or turn proximity.
+        product.push(unavailable("v-i02.retained_input_and_at_most_once_effect", "product", "owning_post_barge_promise_to_tool_outcome_receipt_unavailable"));
+      } else product.push(check("v-i01.retained_input_after_flush", "product", exactBargeNoStale, [...causal.flatMap((item) => item.events), ...staleRestarts], "bound_barge_input_flush_or_no_stale_output_receipt_unavailable"));
+      break;
+    }
+    case "V-N01": case "V-N02": {
+      const rotation = operations.filter((operation) => operation.type === "force_socket_rotation" && operation.state === "succeeded");
+      const epochs = productByKind("provider.connection_epoch");
+      const operation = rotation[0];
+      const priorEpoch = Number(operation?.input.expected_socket_epoch);
+      const resultProduct = (operation?.result?.rotation_receipt as Record<string, unknown> | undefined)?.product as Record<string, unknown> | undefined;
+      const restoredEpoch = Number(resultProduct?.providerConnectionEpoch);
+      const restoredEvent = epochs.find((event) => event.seq === Number(resultProduct?._seq));
+      const restoredReceipt = restoredEvent?.payload.receipt as Record<string, unknown> | undefined;
+      const priorEvents = epochs.filter((event) => event.seq < (restoredEvent?.seq ?? -1)).filter((event) => {
+        const receipt = event.payload.receipt as Record<string, unknown> | undefined;
+        return Number(receipt?.providerConnectionEpoch) === priorEpoch && receipt?.continuityState === "active" && ["bootstrap", "restored"].includes(String(receipt?.phase));
+      });
+      const restored = rotation.length === 1 && Number.isSafeInteger(priorEpoch) && priorEvents.length >= 1 && restoredEvent !== undefined && resultProduct !== undefined
+        && resultProduct.phase === "restored" && resultProduct.previousProviderConnectionEpoch === priorEpoch && Number(resultProduct.providerConnectionEpoch) > priorEpoch && resultProduct.continuityState === "active"
+        && canonicalRequestHash(restoredReceipt) === canonicalRequestHash(Object.fromEntries(Object.entries(resultProduct).filter(([key]) => key !== "_seq")))
+        && restoredReceipt?.phase === "restored" && restoredReceipt.previousProviderConnectionEpoch === priorEpoch && Number(restoredReceipt.providerConnectionEpoch) > priorEpoch && restoredReceipt.continuityState === "active";
+      harness.push(check(`${run.scenarioId.toLowerCase()}.requested_epoch_to_restored_epoch`, "harness", restored, epochs, "exact_requested_prior_epoch_and_app_authored_restored_receipt_join_unavailable"));
+      if (run.scenarioId === "V-N02") {
+        const target = operation?.input._commit_target as Record<string, unknown> | undefined;
+        const targetEvent = typeof target?.event_seq === "number" ? productEvents.find((event) => event.seq === target.event_seq) : undefined;
+        const targetKind = target?.kind === "output_realization" ? "output_realization" : "tool_effect";
+        const expectedTargetIdentity = sha256(`${String(target?.stable_id)}\u0000${String(targetKind === "output_realization" ? target?.chunk_hash : target?.effect_id)}`);
+        const revalidated = operation ? byKind("fault.active_target_revalidated").filter((event) => event.source === "canonical" && event.payload.operation_id === operation.id && event.payload.target_event_seq === targetEvent?.seq
+          && event.payload.target_kind === targetKind && event.payload.target_identity_sha256 === expectedTargetIdentity && Number.isSafeInteger(event.payload.observed_through_seq)
+          && Number(event.payload.observed_through_seq) >= Number(targetEvent?.seq) && event.payload.active === true) : [];
+        const fenced = operation && target ? exactActiveTargetFenceEvents(events, operation.id, target, targetKind) : [];
+        let exactEffect = false;
+        let effectEvidence: import("./domain.js").LabEvent[] = targetEvent ? [targetEvent] : [];
+        if (target?.kind === "output_realization" && target?.activity_state === "in_flight" && targetEvent?.kind === "audio.output.started") {
+          const matching = productEvents.filter((event) => {
+            const receipt = event.payload.receipt as Record<string, unknown> | undefined;
+            return receipt?.realizationId === target.stable_id || (typeof target.chunk_hash === "string" && receipt?.chunkHash === target.chunk_hash);
+          });
+          const targetReceipt = targetEvent.payload.receipt as Record<string, unknown> | undefined;
+          const targetCapture = targetEvent.payload._capture_provenance as Record<string, unknown> | undefined;
+          const terminals = matching.filter((event) => {
+            const receipt = event.payload.receipt as Record<string, unknown> | undefined;
+            return event.seq > (fenced[0]?.seq ?? Number.MAX_SAFE_INTEGER) && ["audio.output.completed", "audio.output.flushed", "audio.output.dropped"].includes(event.kind)
+              && receipt?.realizationId === target.stable_id && receipt?.chunkHash === target.chunk_hash && Number(receipt?.providerConnectionEpoch) === priorEpoch
+              && Number(receipt?.playbackGeneration) === Number(target.playback_generation);
+          });
+          const allTerminals = matching.filter((event) => ["audio.output.completed", "audio.output.flushed", "audio.output.dropped"].includes(event.kind));
+          const competingStarts = matching.filter((event) => event.kind === "audio.output.started" && event.seq !== targetEvent.seq);
+          const replayedAfterFence = matching.filter((event) => event.seq > (fenced[0]?.seq ?? Number.MAX_SAFE_INTEGER) && ["audio.output.scheduled", "audio.output.started"].includes(event.kind));
+          const replayedAfterTerminal = terminals.length === 1 ? matching.filter((event) => event.seq > terminals[0]!.seq && ["audio.output.scheduled", "audio.output.started", "audio.output.completed"].includes(event.kind)) : [];
+          exactEffect = targetReceipt?.realizationId === target.stable_id && targetReceipt?.chunkHash === target.chunk_hash
+            && targetReceipt?.phase === "started" && Number(targetReceipt?.providerConnectionEpoch) === priorEpoch && Number(targetReceipt?.playbackGeneration) === Number(target.playback_generation)
+            && targetCapture?.generation === target.product_generation && targetCapture?.seq === target.product_seq
+            && terminals.length === 1 && allTerminals.length === 1 && competingStarts.length === 0 && replayedAfterFence.length === 0 && replayedAfterTerminal.length === 0 && Number.isSafeInteger(restoredEpoch) && restoredEpoch > priorEpoch;
+          effectEvidence = matching;
+        } else if (target?.kind === "tool_settlement" && target?.activity_state === "in_flight" && targetEvent?.kind.includes("gemini-tool-call-ledger")) {
+          const matching = productEvents.filter((event) => {
+            const entry = event.payload.entry as Record<string, unknown> | undefined;
+            return event.kind.includes("gemini-tool-call-ledger") && (entry?.toolCallId === target.stable_id || entry?.effectId === target.effect_id);
+          });
+          const terminal = matching.filter((event) => {
+            const entry = event.payload.entry as Record<string, unknown> | undefined;
+            return event.seq > targetEvent.seq && entry?.toolCallId === target.stable_id && entry?.effectId === target.effect_id
+              && ["responded", "cancelled-before-send", "cancelled-after-send", "suppressed", "rejected"].includes(String(entry?.finalState)) && (typeof entry?.toolResponseSentAt === "string" || typeof entry?.cancelledAt === "string");
+          });
+          const allTerminalForTool = matching.filter((event) => {
+            const entry = event.payload.entry as Record<string, unknown> | undefined;
+            return ["responded", "cancelled-before-send", "cancelled-after-send", "suppressed", "rejected"].includes(String(entry?.finalState));
+          });
+          const targetEntry = targetEvent.payload.entry as Record<string, unknown>;
+          const targetEvidence = targetEntry.syntheticToolEvidence as Record<string, unknown> | undefined;
+          const targetCapture = targetEvent.payload._capture_provenance as Record<string, unknown> | undefined;
+          const owner = operations.find((candidate) => candidate.id === target.owner_operation_id && (candidate.type === "speak" || candidate.type === "barge_in") && candidate.state === "succeeded");
+          const exactToolEvidence = (event: import("./domain.js").LabEvent): boolean => {
+            const entry = event.payload.entry as Record<string, unknown> | undefined;
+            const evidence = entry?.syntheticToolEvidence as Record<string, unknown> | undefined;
+            return entry?.toolCallId === target.stable_id && entry?.effectId === target.effect_id && entry?.providerConnectionEpoch === target.provider_connection_epoch
+              && evidence?.schema === "sophia_synthetic_tool_evidence_v1" && evidence.test_run_id === run.testRunId && evidence.scenario_id === run.scenarioId && evidence.scenario_version === run.scenarioVersion
+              && evidence.operation_id === target.owner_operation_id && evidence.utterance_id === target.owner_utterance_id && evidence.provider_input_sequence === target.provider_input_sequence
+              && evidence.tool_call_id === target.stable_id && evidence.effect_id === target.effect_id && evidence.provider_connection_epoch === target.provider_connection_epoch;
+          };
+          exactEffect = targetEntry.finalState === "unknown" && targetEntry.toolResponseSentAt === null && targetEntry.cancelledAt === null && terminal.length === 1 && allTerminalForTool.length === 1
+            && terminal[0]!.seq > (fenced[0]?.seq ?? Number.MAX_SAFE_INTEGER) && Number(targetEntry.providerConnectionEpoch) === priorEpoch && targetCapture?.generation === target.product_generation && targetCapture?.seq === target.product_seq
+            && targetEvidence?.operation_id === target.owner_operation_id && owner !== undefined && matching.every(exactToolEvidence)
+            && exactTerminalLastToolLifecycle(matching.map((event) => ({ event, entry: event.payload.entry as Record<string, unknown> })), fenced[0]?.seq ?? Number.MAX_SAFE_INTEGER)
+            && Number.isSafeInteger(restoredEpoch) && restoredEpoch > priorEpoch;
+          effectEvidence = matching;
+        }
+        const exactContinuity = restored && exactEffect && revalidated.length === 1 && fenced.length === 1 && targetEvent !== undefined && restoredEvent !== undefined
+          && targetEvent.seq < revalidated[0]!.seq && revalidated[0]!.seq < fenced[0]!.seq && fenced[0]!.seq < restoredEvent.seq;
+        harness.push(check("v-n02.committed_boundary_exactly_once_effect", "harness", exactContinuity, [...epochs, ...effectEvidence, ...revalidated, ...fenced], "exact_in_flight_app_target_browser_atomic_fence_and_exactly_once_terminal_effect_unavailable"));
+        product.push(check("v-n02.exactly_once_continuity_effect", "product", exactContinuity, [...epochs, ...effectEvidence, ...revalidated, ...fenced], "owning_in_flight_event_or_effect_ledger_unavailable"));
+      } else {
+        const outputLifecycleKinds = new Set(["audio.output.scheduled", "audio.output.started", "audio.output.completed", "audio.output.flushed", "audio.output.dropped"]);
+        const outputReceipts = productEvents.filter((event) => outputLifecycleKinds.has(event.kind)).map((event) => ({ event, receipt: event.payload.receipt as Record<string, unknown> | undefined })).filter(({ receipt }) => typeof receipt?.realizationId === "string");
+        const inputEffects = productByKind("audio.input.product_turn").map((event) => ({ event, receipt: event.payload.receipt as Record<string, unknown> | undefined })).filter(({ receipt }) => typeof receipt?.operation_id === "string");
+        const inputEffectKeys = inputEffects.map(({ receipt }) => `${receipt?.operation_id}\u0000${receipt?.source}\u0000${receipt?.outcome}`);
+        const toolLedgerRows = productEvents.filter((event) => event.kind.includes("gemini-tool-call-ledger")).map((event) => ({ event, entry: event.payload.entry as Record<string, unknown> | undefined }));
+        const validToolRows = toolLedgerRows.filter((row): row is { event: import("./domain.js").LabEvent; entry: Record<string, unknown> } => typeof row.entry?.toolCallId === "string" && typeof row.entry.effectId === "string");
+        const toolGroups = new Map<string, typeof validToolRows>();
+        for (const row of validToolRows) {
+          const key = `${String(row.entry.toolCallId)}\u0000${String(row.entry.effectId)}`;
+          const group = toolGroups.get(key) ?? [];
+          group.push(row);
+          toolGroups.set(key, group);
+        }
+        const toolCallIds = [...toolGroups.values()].map((group) => String(group[0]!.entry.toolCallId));
+        const toolEffectIds = [...toolGroups.values()].map((group) => String(group[0]!.entry.effectId));
+        const exactToolLifecycles = toolLedgerRows.length === validToolRows.length && [...toolGroups.values()].every((group) => exactTerminalLastToolLifecycle(group));
+        const postRestoreInputs = restoredEvent ? injected.filter((candidate) => {
+          const inputChain = chain(candidate.id);
+          const leg = inputChain.productLegs[0]?.payload.receipt as Record<string, unknown> | undefined;
+          return inputChain.exact && inputChain.started.length === 1 && inputChain.started[0]!.seq > restoredEvent.seq && inputChain.productTurns.some((event) => event.seq > restoredEvent.seq)
+            && Number(leg?.provider_connection_epoch) === restoredEpoch;
+        }) : [];
+        const acceptedInputSeq = postRestoreInputs.length === 1 ? Math.max(...chain(postRestoreInputs[0]!.id).productTurns.map((event) => event.seq)) : Number.MAX_SAFE_INTEGER;
+        const noDuplicateWork = injected.length === 1 && postRestoreInputs.length === 1 && injected.every((candidate) => chain(candidate.id).exact)
+          && exactOutputLifecyclesAtEpoch(productEvents, restoredEpoch, acceptedInputSeq) && new Set(inputEffectKeys).size === inputEffectKeys.length
+          && exactToolLifecycles && new Set(toolCallIds).size === toolCallIds.length && new Set(toolEffectIds).size === toolEffectIds.length;
+        harness.push(check("v-n01.no_duplicate_speech_or_tool_work", "harness", noDuplicateWork, [...allChainEvents, ...outputReceipts.map(({ event }) => event), ...inputEffects.map(({ event }) => event), ...toolLedgerRows.map(({ event }) => event)], "exact_input_output_and_tool_effect_continuity_evidence_unavailable"));
+        product.push(unavailable("v-n01.exactly_once_continuity_effect", "product", noDuplicateWork && restored ? "product_authored_post_restore_input_to_assistant_response_lineage_unavailable" : "exact_post_restore_input_output_continuity_receipts_unavailable"));
+      }
+      break;
+    }
+    case "V-F01": {
+      const finalizedEvents = byKind("session.finalized");
+      const nonSilence = injected.filter((operation) => !String(operation.input.fixture_id ?? "").toLowerCase().includes("silence"));
+      const exactInput = nonSilence.length === 1 && chain(nonSilence[0]!.id).exact;
+      harness.push(check("f01.one_exact_non_silence_input_chain", "harness", exactInput, nonSilence.flatMap((operation) => Object.values(chain(operation.id)).flatMap((value) => Array.isArray(value) ? value : [])), "one_operation_correlated_non_silence_input_chain_required"));
+      const assistantTurns = productEvents.filter((event) => event.kind.endsWith(".sophia.turn") && ((event.payload.data as Record<string, unknown> | undefined)?.phase === "agent_ended" || event.payload.phase === "agent_ended"));
+      harness.push(check("f01.completed_assistant_turn", "harness", assistantTurns.length >= 1, assistantTurns, "bound_assistant_turn_completion_unavailable"));
+      const strictFinalized = finalizedEvents.filter((event) => isCanonicalFinalizationReceipt(run, event));
+      const nonempty = strictFinalized.some((event) => {
+        const receipt = event.payload.receipt as Record<string, unknown>;
+        const transcript = receipt.canonical_transcript as Record<string, unknown>;
+        return Number(transcript.message_count) > 0 && Number(transcript.input_message_count) > 0 && Number(transcript.output_message_count) > 0 && Number(transcript.turn_boundary_count) > 0;
+      });
+      harness.push(check("f01.strict_nonempty_canonical_finalization", "harness", strictFinalized.length === 1 && nonempty, finalizedEvents, "strict_nonempty_bound_canonical_transcript_receipt_unavailable"));
+      product.push(check("f01.unified_durable_finalizer", "product", strictFinalized.length === 1 && nonempty, finalizedEvents, "durable_product_finalizer_receipt_unavailable"));
+      break;
+    }
+    case "V-D01": {
+      const captureEvents = productEvents.filter((event) => {
+        const provenance = event.payload._capture_provenance as Record<string, unknown> | undefined;
+        return Number.isSafeInteger(provenance?.generation) && Number.isSafeInteger(provenance?.seq);
+      });
+      const pages = byKind("capture.product_page");
+      const productCoordinates = captureEvents.map((event) => event.payload._capture_provenance as Record<string, unknown>);
+      const generations = new Set(productCoordinates.map((value) => Number(value.generation)));
+      const productSeqs = productCoordinates.map((value) => Number(value.seq)).sort((left, right) => left - right);
+      const monotonicProduct = captureEvents.length > 500 && generations.size === 1 && productSeqs[0] === 1 && productSeqs.every((seq, index) => index === 0 || seq === productSeqs[index - 1]! + 1) && new Set(productSeqs).size === productSeqs.length;
+      const pagePayloads = pages.map((event) => event.payload);
+      const paged = pagePayloads.length > 1 && pagePayloads.every((page, index) => {
+        const prior = index === 0 ? null : pagePayloads[index - 1]!;
+        const requested = Number(page.requestedSeq);
+        const returned = Number(page.returnedSeq);
+        const oldest = Number(page.oldestSeq);
+        const latest = Number(page.latestSeq);
+        const capacity = Number(page.capacity);
+        const dropped = Number(page.droppedCount);
+        const priorDropped = prior === null ? 0 : Number(prior.droppedCount);
+        const priorOldest = prior === null ? 1 : Number(prior.oldestSeq);
+        return page.gap === false
+          // droppedCount is ring eviction accounting, not evidence loss. A
+          // continuously drained cursor may remain ahead of oldestSeq while
+          // eviction rises. The durable union below must still be contiguous.
+          && Number.isSafeInteger(dropped) && dropped >= 0 && dropped >= priorDropped
+          && Number.isSafeInteger(capacity) && capacity > 0
+          && Number.isSafeInteger(oldest) && oldest >= 1 && oldest <= latest + 1 && oldest >= priorOldest
+          && Number.isSafeInteger(requested) && Number.isSafeInteger(returned) && returned >= requested
+          && (prior === null || requested === Number(prior.returnedSeq))
+          && (requested === 0 || requested >= oldest - 1);
+      });
+      const finalPage = pagePayloads.at(-1);
+      const reconciled = finalPage !== undefined && Number(finalPage.latestSeq) === productSeqs.at(-1) && Number(finalPage.totalProduced) === captureEvents.length && Number(finalPage.returnedSeq) === Number(finalPage.latestSeq);
+      harness.push(check("d01.over_500_bound_product_capture_events", "harness", monotonicProduct, captureEvents, "more_than_500_exact_bound_product_capture_envelopes_unavailable"));
+      harness.push(check("d01.read_after_metadata_reconciled", "harness", paged && reconciled, pages, "capture_generation_capacity_drop_and_total_metadata_unavailable_or_inconsistent"));
+      product.push(unavailable("d01.product_gate", "product", "not_applicable"));
+      break;
+    }
+    case "V-L01": {
+      const finalized = byKind("session.finalized");
+      const traceEvents = productByKind("trace.fault_receipt");
+      const traceReceipts = traceEvents.map((event) => ({ event, receipt: event.payload.receipt as Record<string, unknown> | undefined }));
+      const exactReceipt = (receipt: Record<string, unknown> | undefined, phase: "applied" | "restored") => receipt?.schema === "sophia_voice_lab_trace_fault_v1"
+        && receipt.fault === "langsmith_unavailable"
+        && receipt.phase === phase
+        && receipt.principal_id === run.principalId
+        && receipt.test_run_id === run.testRunId
+        && receipt.scenario_id === "V-L01"
+        && receipt.scenario_version === run.scenarioVersion
+        && receipt.environment === run.environment
+        && sameDeployment(receipt.expected_deployment, run.target.expectedDeployment)
+        && receipt.trace_unavailable === true
+        && receipt.canonical_behavior_unchanged === true
+        && canonicalIso(receipt.applied_at)
+        && (phase === "applied" ? receipt.restored_at === null : canonicalIso(receipt.restored_at));
+      const applied = traceReceipts.filter(({ receipt }) => exactReceipt(receipt, "applied"));
+      const restored = traceReceipts.filter(({ receipt }) => exactReceipt(receipt, "restored"));
+      const appliedAt = applied[0]?.receipt?.applied_at;
+      const exactLifecycle = traceEvents.length === 2 && applied.length === 1 && restored.length === 1
+        && restored[0]!.event.seq > applied[0]!.event.seq
+        && restored[0]!.receipt!.applied_at === appliedAt
+        && new Date(String(restored[0]!.receipt!.restored_at)).getTime() >= new Date(String(appliedAt)).getTime();
+      const observability = productByKind("provider.connection_observability").filter((event) => event.payload.langsmithTraceStatus === "trace_unavailable"
+        && event.payload.langsmithTraceUnavailableReason === "governed_synthetic_fault"
+        && (event.payload.langsmithTraceId === null || event.payload.langsmithTraceId === undefined));
+      harness.push(check("l01.governed_supplemental_trace_outage", "harness", exactLifecycle && observability.length >= 1, [...traceEvents, ...observability], "exact_app_authored_trace_fault_applied_restored_and_unavailable_receipts_missing"));
+      harness.push(check("l01.local_evidence_chain_survives", "harness", exactChains && finalized.length === 1, [...allChainEvents, ...finalized], "local_input_or_finalization_evidence_unavailable"));
+      const behavior = [...productByKind("audio.output.started"), ...productEvents.filter((event) => event.kind.endsWith(".sophia.turn"))];
+      product.push(check("l01.product_behavior_continues_without_trace_adapter", "product", behavior.length > 0, behavior, "bound_product_behavior_receipt_unavailable"));
+      break;
+    }
+    case "V-P01": {
+      const platform = externalAttestations("p01_platform_plugin_task").filter((event) => {
+        const proof = event.payload.evidence as Record<string, unknown> | undefined;
+        const ids = Array.isArray(proof?.operation_ids) ? proof.operation_ids : [];
+        const calls = Array.isArray(proof?.calls) ? proof.calls : [];
+        return proof?.authority === "platform_plugin" && proof.prohibited_tool_audit_passed === true && proof.raw_javascript_used === false && proof.local_runner_used === false && proof.manual_takeover_used === false
+          && proof.exact_deployment_discovered === true && proof.adaptive_followup_completed === true && Number(proof.high_level_call_count) === 10 && calls.length === 10
+          && ids.every((id) => operations.some((operation) => operation.id === id));
+      });
+      // Ordinary operation/audit rows still cannot self-certify installation.
+      // The only passing path is a privileged platform-authored attestation
+      // already cross-joined by the service to exact MCP audits/operations.
+      harness.push(platform.length === 0 ? unavailable("p01.fresh_registered_plugin_task", "harness", "platform_authored_plugin_asdk_app_install_and_fresh_task_provenance_not_attached") : check("p01.fresh_registered_plugin_task", "harness", platform.length === 1, platform, "platform_plugin_attestation_conflicted_or_duplicated"));
+      product.push(unavailable("p01.product_gate", "product", "not_applicable"));
+      break;
+    }
+    case "V-S01": {
+      const probes = byKind("security.invalid_grant_probe");
+      const variants = new Set(probes.map((event) => event.payload.variant));
+      const rejected = probes.length === S01_FRONTEND_GRANT_VARIANTS.length && S01_FRONTEND_GRANT_VARIANTS.every((variant) => variants.has(variant)) && probes.every((event) => event.payload.rejected === true && event.payload.exact_response_target === true && event.payload.no_session_cookie === true && event.payload.no_redirect === true);
+      harness.push(check("s01.all_invalid_grants_rejected", "harness", rejected, probes, "one_or_more_invalid_grant_receipts_unavailable_or_accepted"));
+      const oauth = byKind("security.oauth_boundary_probe");
+      const oauthVariants = new Set(oauth.map((event) => event.payload.variant));
+      harness.push(check("s01.oauth_resource_scope_and_replay_rejected", "harness", oauth.length === S01_OAUTH_VARIANTS.length && S01_OAUTH_VARIANTS.every((variant) => oauthVariants.has(variant)) && oauth.every((event) => event.payload.rejected === true), oauth, "oauth_missing_invalid_scope_resource_or_replay_receipt_unavailable"));
+      const directFault = byKind("security.direct_fault_scope_probe");
+      harness.push(check("s01.base_credential_has_no_fault_scope", "harness", directFault.length === 1 && directFault[0]!.payload.rejected === true && directFault[0]!.payload.fault_credential_distinct === true, directFault, "direct_fault_scope_separation_unavailable"));
+      const oauthCleanup = byKind("security.oauth_family_cleanup");
+      harness.push(check("s01.oauth_probe_family_revoked", "harness", oauthCleanup.length === 1 && oauthCleanup[0]!.payload.complete === true && oauthCleanup[0]!.payload.authorization_code_cleanup_handle_used === true && oauthCleanup[0]!.payload.authorization_code_family_terminalized === true && oauthCleanup[0]!.payload.access_token_issued === true && oauthCleanup[0]!.payload.refresh_token_issued === true && oauthCleanup[0]!.payload.refresh_family_revocation_receipt === true && oauthCleanup[0]!.payload.access_revocation_receipt === true && oauthCleanup[0]!.payload.access_token_denied_after_revocation === true && oauthCleanup[0]!.payload.refresh_token_denied_after_revocation === true && oauthCleanup[0]!.payload.durable_terminal_state_verified === true && oauthCleanup[0]!.payload.raw_tokens_excluded === true, oauthCleanup, "oauth_probe_authorization_code_access_or_refresh_family_remains_live"));
+      const zero = eligible.filter((event) => event.kind === "cleanup.recovery" || event.kind === "cleanup.browser_context_absent" || event.kind === "cleanup.browser_lease_absent" || event.kind === "security.pre_resource_allocation_fence");
+      const fence = byKind("security.pre_resource_allocation_fence");
+      const noAllocation = fence.length === 1 && fence[0]!.payload.active_run_count_unchanged === true && fence[0]!.payload.browser_context_absent === true && fence[0]!.payload.browser_lease_absent === true && fence[0]!.payload.canonical_session_absent === true && fence[0]!.payload.provider_session_absent === true && fence[0]!.payload.tts_process_invocations === 0;
+      harness.push(check("s01.rejected_before_resource_allocation", "harness", noAllocation && authoritativeLiveCleanupComplete(eligible) && byKind("cleanup.browser_context_absent").length === 1 && byKind("cleanup.browser_lease_absent").some((event) => event.payload.authoritative_ledger_read === true), zero, "authoritative_zero_resource_recovery_unavailable"));
+      product.push(unavailable("s01.no_ordinary_product_impact", "product", "not_applicable_pre_resource_rejection"));
+      break;
+    }
+    case "V-S02": {
+      const probes = byKind("security.pre_resource_validation_probe");
+      const variants = new Set(probes.map((event) => event.payload.variant));
+      const rejected = probes.length === S02_VALIDATION_VARIANTS.length && S02_VALIDATION_VARIANTS.every((variant) => variants.has(variant)) && probes.every((event) => event.payload.rejected === true && event.payload.expected_error_class === event.payload.observed_error_class && typeof event.payload.production_validator === "string");
+      harness.push(check("s02.shared_validators_reject_all_cases", "harness", rejected, probes, "malformed_media_or_target_validator_receipt_missing"));
+      const equivalence = byKind("security.shared_validator_equivalence");
+      harness.push(check("s02.internal_validator_supplement", "harness", equivalence.length === 1 && equivalence[0]!.payload.internal_validator_supplement === true && equivalence[0]!.payload.variant_count === S02_VALIDATION_VARIANTS.length && equivalence[0]!.payload.production_boundary_assertion === "security.mcp_boundary_probe", equivalence, "internal_shared_validator_supplement_unavailable"));
+      const surface = byKind("security.s02_surface_coverage");
+      const surfacePayload = surface[0]?.payload;
+      const fixtureStartup = surfacePayload?.fixture_startup_receipt as Record<string, unknown> | undefined;
+      const exactSurface = surface.length === 1 && surface[0]!.source === "canonical"
+        && hasExactKeys(surfacePayload!, ["schema", "public_authenticated_mcp_variants", "internal_startup_only_variants", "unsupported_fixture_public_mcp", "raw_audio_public_surface", "raw_audio_surface_reason", "fixture_startup_receipt"])
+        && surfacePayload!.schema === "sophia_voice_lab_s02_surface_coverage_v1"
+        && canonicalAsciiJson(surfacePayload!.public_authenticated_mcp_variants) === canonicalAsciiJson(S02_HTTP_VARIANTS)
+        && canonicalAsciiJson(surfacePayload!.internal_startup_only_variants) === canonicalAsciiJson(["fixture_metadata_bytes", "fixture_metadata_duration", "malformed_wav", "oversized_audio"])
+        && surfacePayload!.unsupported_fixture_public_mcp === true && surfacePayload!.raw_audio_public_surface === false && surfacePayload!.raw_audio_surface_reason === "no_public_raw_audio_surface"
+        && fixtureStartup !== undefined && hasExactKeys(fixtureStartup, ["schema", "status", "expected_manifest_sha256", "observed_manifest_sha256", "manifest_version", "fixture_count", "immutable_files_verified", "raw_audio_public_surface"])
+        && fixtureStartup.schema === "sophia_voice_lab_fixture_startup_v1" && fixtureStartup.status === "verified"
+        && fixtureStartup.expected_manifest_sha256 === BUNDLED_FIXTURE_MANIFEST_SHA256
+        && fixtureStartup.observed_manifest_sha256 === BUNDLED_FIXTURE_MANIFEST_SHA256
+        && fixtureStartup.expected_manifest_sha256 === fixtureStartup.observed_manifest_sha256
+        && fixtureStartup.manifest_version === 1
+        && Number.isSafeInteger(fixtureStartup.fixture_count) && Number(fixtureStartup.fixture_count) > 0 && fixtureStartup.immutable_files_verified === true && fixtureStartup.raw_audio_public_surface === false;
+      harness.push(check("s02.public_and_startup_surface_split", "harness", exactSurface, surface, "public_fixture_or_immutable_startup_audio_surface_receipt_unavailable"));
+      const boundary = byKind("security.mcp_boundary_probe").sort((left, right) => left.seq - right.seq);
+      const probeIds = boundary.map((event) => event.payload.probe_id_sha256);
+      const requestBodies = boundary.map((event) => (event.payload.request as Record<string, unknown> | undefined)?.raw_body_sha256);
+      const auditRequestIds = boundary.map((event) => ((event.payload.audit_receipts as Array<Record<string, unknown>> | undefined)?.[0])?.request_id_sha256);
+      const boundaryRejected = boundary.length === S02_HTTP_VARIANTS.length
+        && boundary.every((event, index) => event.payload.variant === S02_HTTP_VARIANTS[index] && isExactS02McpBoundaryProbe(event, index === 0 ? null : boundary[index - 1]!))
+        && new Set(probeIds).size === S02_HTTP_VARIANTS.length
+        && new Set(requestBodies).size === S02_HTTP_VARIANTS.length
+        && new Set(auditRequestIds).size === S02_HTTP_VARIANTS.length;
+      harness.push(check("s02.deployed_authenticated_mcp_boundary", "harness", boundaryRejected, boundary, "public_mcp_transport_parser_auth_schema_and_audit_rejections_unavailable"));
+      const zero = eligible.filter((event) => event.kind.startsWith("cleanup.") || event.kind === "security.pre_resource_allocation_fence");
+      const fence = byKind("security.pre_resource_allocation_fence");
+      const noAllocation = fence.length === 1 && fence[0]!.payload.active_run_count_unchanged === true && fence[0]!.payload.browser_context_absent === true && fence[0]!.payload.browser_lease_absent === true && fence[0]!.payload.provider_session_absent === true && fence[0]!.payload.tts_process_invocations === 0;
+      harness.push(check("s02.no_resource_or_orphan", "harness", noAllocation && authoritativeLiveCleanupComplete(eligible) && byKind("cleanup.browser_context_absent").length === 1, zero, "authoritative_zero_resource_recovery_unavailable"));
+      product.push(unavailable("s02.no_user_facing_impact", "product", "not_applicable_pre_resource_rejection"));
+      break;
+    }
+    case "V-D02": {
+      const reader = byKind("durability.independent_ledger_reader");
+      harness.push(check("d02.independent_ledger_reader_precondition", "harness", reader.length === 1 && reader[0]!.payload.exact_test_run === true && reader[0]!.payload.mutation_count === 0, reader, "independent_durable_reader_unavailable"));
+      const api = externalAttestations("d02_api_process_restart").filter((event) => {
+        const proof = event.payload.evidence as Record<string, unknown> | undefined;
+        const continuity = D02BrowserContinuityProofSchema.safeParse(proof?.browser_continuity_proof);
+        const operation = operations.find((candidate) => candidate.id === proof?.operation_id);
+        const replay = operation && byKind(`operation.${operation.type}.idempotent_replay`).some((candidate) => candidate.payload.operation_id === operation.id && candidate.payload.exact_request_hash_replay === true && candidate.payload.no_new_operation === true);
+        const command = externalAttestations("d02_restart_command").find((candidate) => {
+          const commandProof = candidate.payload.evidence as Record<string, unknown> | undefined;
+          return typeof commandProof?.restart_request_id === "string" && sha256(commandProof.restart_request_id) === proof?.restart_request_id_sha256
+            && commandProof.operation_id === proof?.operation_id && commandProof.requested_at === proof?.restart_requested_at && candidate.seq < event.seq;
+        });
+        return proof?.authority === "deployment_control" && command !== undefined && operation !== undefined && replay === true && continuity.success
+          && continuity.data.run_id_sha256 === sha256(run.id) && continuity.data.operation_id_sha256 === sha256(operation.id)
+          && continuity.data.restart_request_id_sha256 === proof.restart_request_id_sha256 && continuity.data.after_boot_id_sha256 === proof.after_boot_id_sha256
+          && continuity.data.browser_worker_id_sha256 === proof.browser_worker_id_sha256 && continuity.data.browser_lease_epoch === proof.browser_lease_epoch
+          && proof.request_sha256 === operation.requestHash && proof.idempotency_key_sha256 === sha256(operation.idempotencyKey)
+          && proof.before_boot_id_sha256 !== proof.after_boot_id_sha256 && proof.original_receipt_sha256 === proof.replay_receipt_sha256
+          && typeof proof.provider_restart_request_sha256 === "string" && /^[a-f0-9]{64}$/.test(proof.provider_restart_request_sha256)
+          && typeof proof.provider_restart_accepted_response_sha256 === "string" && /^[a-f0-9]{64}$/.test(proof.provider_restart_accepted_response_sha256)
+          && typeof proof.local_controller_receipt_sha256 === "string" && /^[a-f0-9]{64}$/.test(proof.local_controller_receipt_sha256)
+          && proof.browser_worker_continuity === true && proof.duplicate_injection_count === 0;
+      });
+      const workerLossClaims = externalAttestations("d02_browser_worker_loss");
+      const workerLoss = workerLossClaims.filter((event) => {
+        const proof = event.payload.evidence as Record<string, unknown> | undefined;
+        const command = externalAttestations("d02_browser_worker_termination_command").find((candidate) => {
+          const commandProof = candidate.payload.evidence as Record<string, unknown> | undefined;
+          return typeof commandProof?.termination_request_id === "string" && sha256(commandProof.termination_request_id) === proof?.termination_request_id_sha256
+            && commandProof.run_id_sha256 === proof?.run_id_sha256 && commandProof.cleanup_obligation_id_sha256 === proof.cleanup_obligation_id_sha256
+            && commandProof.worker_service_id_sha256 === proof.worker_service_id_sha256 && commandProof.provider_session_id_sha256 === proof.provider_session_id_sha256
+            && commandProof.provider_admission_id_sha256 === proof.provider_admission_id_sha256 && commandProof.provider_connection_epoch === proof.provider_connection_epoch
+            && canonicalRequestHash(commandProof.frozen_provider_connection_epochs) === canonicalRequestHash(proof.frozen_provider_connection_epochs)
+            && commandProof.browser_context_id_sha256 === proof.browser_context_id_sha256 && commandProof.browser_worker_id_sha256 === proof.lost_worker_id_sha256
+            && commandProof.browser_lease_epoch === proof.lost_browser_lease_epoch && commandProof.before_worker_deploy_id_sha256 === proof.before_deploy_id_sha256
+            && commandProof.before_worker_instance_set_sha256 === proof.before_instance_set_sha256
+            && commandProof.before_worker_owner_instance_id_sha256 === proof.lost_worker_owner_instance_id_sha256
+            && commandProof.before_worker_owner_membership_count === 1 && proof.lost_worker_owner_instance_id_sha256 === proof.lost_worker_id_sha256
+            && proof.lost_worker_present_before_restart === true && proof.lost_worker_absent_after_restart === true
+            && commandProof.render_action_request_sha256 === proof.render_action_request_sha256
+            && commandProof.requested_at === proof.command_requested_at && candidate.seq < event.seq;
+        });
+        const loss = byKind("durability.browser_worker_loss_observed").find((candidate) => candidate.seq === proof?.loss_event_seq
+          && candidate.payload.lost_worker_id_sha256 === proof?.lost_worker_id_sha256 && candidate.payload.replacement_worker_id_sha256 === proof.replacement_worker_id_sha256
+          && candidate.payload.lost_browser_lease_epoch === proof.lost_browser_lease_epoch && candidate.payload.loss_observed_at === proof.loss_observed_at);
+        const dispatch = byKind("product.d02_render_worker_dispatch_claimed").find((candidate) => candidate.source === "canonical"
+          && candidate.payload.termination_request_id_sha256 === proof?.termination_request_id_sha256
+          && candidate.payload.dispatch_claim_sha256 === proof?.render_dispatch_claim_sha256
+          && candidate.payload.command_attestation_id_sha256 === sha256(String(command?.payload.attestation_id))
+          && candidate.payload.command_content_sha256 === command?.payload.content_sha256 && candidate.payload.command_event_seq === command?.seq
+          && candidate.payload.worker_service_id_sha256 === proof?.worker_service_id_sha256
+          && candidate.payload.action_request_sha256 === proof?.render_action_request_sha256
+          && candidate.payload.requested_at === proof?.action_requested_at
+          && candidate.payload.raw_action_and_attempt_identifiers_excluded === true
+          && candidate.payload.dispatch_claim_sha256 === canonicalRequestHash(Object.fromEntries(Object.entries(candidate.payload).filter(([key]) => key !== "dispatch_claim_sha256"))));
+        const shutdown = byKind("durability.browser_worker_shutdown_observed").find((candidate) => candidate.source === "worker" && hasExactKeys(candidate.payload, [
+          "schema", "termination_request_id_sha256", "voice_lab_run_id_sha256", "cleanup_obligation_id_sha256",
+          "lost_browser_worker_id_sha256", "lost_browser_lease_epoch", "browser_context_id_sha256", "provider_session_id_sha256",
+          "provider_admission_id_sha256", "provider_connection_epoch", "frozen_provider_connection_epochs", "render_action_request_sha256",
+          "gateway_freeze_request_sha256", "gateway_freeze_event_seq", "command_event_seq", "render_dispatch_claim_sha256",
+          "render_dispatch_claim_event_seq", "product_provider_cleanup_acknowledged", "product_provider_cleanup_settlement_sha256",
+          "product_provider_close_receipt_count", "product_provider_activation_abort_receipt_count", "product_provider_cleanup_epoch_union_matches_freeze",
+          "browser_context_closed", "source", "raw_run_worker_lease_context_and_product_identifiers_excluded",
+          "observed_at",
+        ]) && candidate.payload.schema === "sophia_voice_lab_d02_browser_worker_shutdown_observation_v1"
+          && candidate.payload.termination_request_id_sha256 === proof?.termination_request_id_sha256
+          && candidate.payload.voice_lab_run_id_sha256 === proof?.run_id_sha256
+          && candidate.payload.cleanup_obligation_id_sha256 === proof?.cleanup_obligation_id_sha256
+          && candidate.payload.lost_browser_worker_id_sha256 === proof?.lost_worker_id_sha256
+          && candidate.payload.lost_browser_lease_epoch === proof?.lost_browser_lease_epoch
+          && candidate.payload.browser_context_id_sha256 === proof?.browser_context_id_sha256
+          && candidate.payload.provider_session_id_sha256 === proof?.provider_session_id_sha256
+          && candidate.payload.provider_admission_id_sha256 === proof?.provider_admission_id_sha256
+          && candidate.payload.provider_connection_epoch === proof?.provider_connection_epoch
+          && canonicalRequestHash(candidate.payload.frozen_provider_connection_epochs) === canonicalRequestHash(proof?.frozen_provider_connection_epochs)
+          && candidate.payload.render_action_request_sha256 === proof?.render_action_request_sha256
+          && candidate.payload.command_event_seq === command?.seq && candidate.payload.render_dispatch_claim_event_seq === dispatch?.seq
+          && candidate.payload.render_dispatch_claim_sha256 === proof?.render_dispatch_claim_sha256
+          && candidate.payload.product_provider_cleanup_acknowledged === true
+          && isSha256(candidate.payload.product_provider_cleanup_settlement_sha256)
+          && Number.isSafeInteger(candidate.payload.product_provider_close_receipt_count) && Number(candidate.payload.product_provider_close_receipt_count) >= 0
+          && Number.isSafeInteger(candidate.payload.product_provider_activation_abort_receipt_count) && Number(candidate.payload.product_provider_activation_abort_receipt_count) >= 0
+          && Array.isArray(candidate.payload.frozen_provider_connection_epochs)
+          && Number(candidate.payload.product_provider_close_receipt_count) + Number(candidate.payload.product_provider_activation_abort_receipt_count) === (candidate.payload.frozen_provider_connection_epochs as unknown[]).length
+          && candidate.payload.product_provider_cleanup_epoch_union_matches_freeze === true
+          && candidate.payload.browser_context_closed === true && candidate.payload.source === "worker_graceful_d02_restart"
+          && candidate.payload.raw_run_worker_lease_context_and_product_identifiers_excluded === true
+          && isCanonicalTimestamp(candidate.payload.observed_at) && candidate.at.toISOString() === candidate.payload.observed_at);
+        const gatewayFreeze = shutdown ? byKind("product.d02_gateway_browser_worker_termination_frozen").find((candidate) => candidate.source === "canonical"
+          && candidate.seq === shutdown.payload.gateway_freeze_event_seq
+          && candidate.payload.schema === "sophia_voice_lab_d02_gateway_freeze_event_v1"
+          && candidate.payload.termination_request_id_sha256 === proof?.termination_request_id_sha256
+          && candidate.payload.freeze_request_sha256 === shutdown.payload.gateway_freeze_request_sha256
+          && candidate.payload.browser_worker_id_sha256 === proof?.lost_worker_id_sha256
+          && candidate.payload.browser_lease_epoch === proof?.lost_browser_lease_epoch
+          && candidate.payload.browser_context_id_sha256 === proof?.browser_context_id_sha256
+          && candidate.payload.render_action_request_sha256 === proof?.render_action_request_sha256
+          && candidate.payload.gateway_frozen === true) : undefined;
+        const exactLoss = loss?.source === "worker" && hasExactKeys(loss.payload, [
+          "schema", "termination_request_id_sha256", "lost_worker_id_sha256", "replacement_worker_id_sha256",
+          "lost_browser_lease_epoch", "browser_context_id_sha256", "old_worker_shutdown_event_seq", "render_dispatch_claim_sha256",
+          "render_dispatch_claim_event_seq", "lease_expired_at", "loss_observed_at", "loss_source", "raw_worker_identifiers_excluded",
+        ]) && loss.payload.schema === "sophia_voice_lab_d02_browser_worker_loss_cross_join_v1"
+          && loss.payload.termination_request_id_sha256 === proof?.termination_request_id_sha256
+          && loss.payload.browser_context_id_sha256 === proof?.browser_context_id_sha256
+          && loss.payload.old_worker_shutdown_event_seq === shutdown?.seq
+          && loss.payload.render_dispatch_claim_sha256 === proof?.render_dispatch_claim_sha256
+          && loss.payload.render_dispatch_claim_event_seq === dispatch?.seq
+          && loss.payload.lease_expired_at === null && loss.payload.loss_source === "worker_graceful_d02_restart_cross_join"
+          && loss.payload.raw_worker_identifiers_excluded === true && isCanonicalTimestamp(loss.payload.loss_observed_at)
+          && loss.at.toISOString() === loss.payload.loss_observed_at;
+        const replacement = loss && shutdown ? byKind("durability.browser_worker_replacement_observed").find((candidate) => candidate.source === "worker" && hasExactKeys(candidate.payload, [
+          "schema", "termination_request_id_sha256", "lost_browser_worker_id_sha256", "replacement_browser_worker_id_sha256",
+          "lost_browser_lease_epoch", "browser_context_id_sha256", "old_worker_shutdown_event_seq", "loss_event_seq",
+          "render_dispatch_claim_sha256", "source", "raw_worker_identifiers_excluded",
+        ]) && candidate.payload.schema === "sophia_voice_lab_d02_browser_worker_replacement_observation_v1"
+          && candidate.payload.termination_request_id_sha256 === proof?.termination_request_id_sha256
+          && candidate.payload.lost_browser_worker_id_sha256 === proof?.lost_worker_id_sha256
+          && candidate.payload.replacement_browser_worker_id_sha256 === proof?.replacement_worker_id_sha256
+          && candidate.payload.lost_browser_lease_epoch === proof?.lost_browser_lease_epoch
+          && candidate.payload.browser_context_id_sha256 === proof?.browser_context_id_sha256
+          && candidate.payload.old_worker_shutdown_event_seq === shutdown.seq && candidate.payload.loss_event_seq === loss.seq
+          && candidate.payload.render_dispatch_claim_sha256 === proof?.render_dispatch_claim_sha256
+          && candidate.payload.source === "replacement_worker_startup_after_graceful_d02_restart"
+          && candidate.payload.raw_worker_identifiers_excluded === true) : undefined;
+        return proof?.authority === "deployment_control" && command !== undefined && dispatch !== undefined && gatewayFreeze !== undefined
+          && shutdown !== undefined && exactLoss === true && loss !== undefined && replacement !== undefined
+          && byKind("durability.browser_worker_shutdown_observed").length === 1
+          && byKind("durability.browser_worker_loss_observed").length === 1
+          && byKind("durability.browser_worker_replacement_observed").length === 1
+          && gatewayFreeze.seq < command.seq && command.seq < dispatch.seq && dispatch.seq < shutdown.seq && shutdown.seq < loss.seq && loss.seq < replacement.seq && replacement.seq < event.seq
+          && proof.run_id_sha256 === sha256(run.id) && proof.cleanup_obligation_id_sha256 === sha256(run.cleanupObligationId)
+          && proof.lost_worker_id_sha256 !== proof.replacement_worker_id_sha256 && proof.action_kind === "render_worker_service_restart"
+          && proof.restart_http_status === 200 && proof.old_worker_instances_absent === true && proof.replacement_worker_instances_observed === true
+          && proof.lost_worker_owner_instance_id_sha256 === proof.lost_worker_id_sha256 && proof.lost_worker_present_before_restart === true && proof.lost_worker_absent_after_restart === true
+          && proof.before_instance_set_sha256 !== proof.after_instance_set_sha256
+          && typeof proof.render_action_request_sha256 === "string" && typeof proof.render_action_accepted_response_sha256 === "string" && typeof proof.render_action_settled_snapshot_sha256 === "string"
+          && proof.gateway_settlement_receipt_included === false && run.state === "aborted_driver_restart" && run.terminalError?.code === "BROWSER_SESSION_LOST";
+      });
+      const gatewaySettlementEvents = byKind("product.d02_gateway_browser_worker_termination_settled").filter((event) => event.source === "canonical");
+      const exactGatewaySettlements = gatewaySettlementEvents.filter((event) => {
+        if (workerLoss.length !== 1 || !hasExactKeys(event.payload, ["schema", "termination_request_id_sha256", "settlement_request_sha256", "gateway_receipt_sha256", "gateway_receipt", "source", "raw_product_identifiers_excluded"])
+          || event.payload.schema !== "sophia_voice_lab_d02_gateway_settlement_event_v1" || event.payload.source !== "gateway_ed25519_settlement_receipt"
+          || event.payload.raw_product_identifiers_excluded !== true) return false;
+        const proof = workerLoss[0]!.payload.evidence as Record<string, unknown> | undefined;
+        const commandEvent = externalAttestations("d02_browser_worker_termination_command").find((candidate) => {
+          const command = candidate.payload.evidence as Record<string, unknown> | undefined;
+          return typeof command?.termination_request_id === "string" && sha256(command.termination_request_id) === proof?.termination_request_id_sha256;
+        });
+        const command = commandEvent?.payload.evidence as Record<string, unknown> | undefined;
+        const dispatchClaim = byKind("product.d02_render_worker_dispatch_claimed").find((candidate) => candidate.source === "canonical"
+          && candidate.payload.termination_request_id_sha256 === proof?.termination_request_id_sha256
+          && candidate.payload.dispatch_claim_sha256 === proof?.render_dispatch_claim_sha256);
+        const shutdownEvents = byKind("durability.browser_worker_shutdown_observed");
+        const strictShutdown = shutdownEvents.length === 1 ? shutdownEvents[0] : undefined;
+        const receiptResult = D02GatewaySettlementReceiptSchema.safeParse(event.payload.gateway_receipt);
+        if (!proof || !commandEvent || !command || !dispatchClaim || !strictShutdown || !receiptResult.success || run.providerSessionId === null) return false;
+        const receipt = receiptResult.data;
+        const settlementRequest = {
+          schema: "sophia_voice_lab_gateway_browser_worker_termination_settlement_request_v1",
+          termination_request_id: command.termination_request_id,
+          voice_lab_run_id_sha256: proof.run_id_sha256,
+          test_run_id: run.testRunId,
+          cleanup_obligation_id: run.cleanupObligationId,
+          provider_session_id: run.providerSessionId,
+          provider_admission_id_sha256: proof.provider_admission_id_sha256,
+          provider_connection_epoch: proof.provider_connection_epoch,
+          frozen_provider_connection_epochs: proof.frozen_provider_connection_epochs,
+          browser_worker_id_sha256: proof.lost_worker_id_sha256,
+          browser_lease_epoch: proof.lost_browser_lease_epoch,
+          browser_context_id_sha256: proof.browser_context_id_sha256,
+          render_action_request_sha256: proof.render_action_request_sha256,
+          render_action_accepted_response_sha256: proof.render_action_accepted_response_sha256,
+          render_action_settled_snapshot_sha256: proof.render_action_settled_snapshot_sha256,
+          loss_event_seq: proof.loss_event_seq,
+          loss_observed_at: proof.loss_observed_at,
+        };
+        const lossObserved = byKind("durability.browser_worker_loss_observed").find((candidate) => candidate.seq === proof.loss_event_seq);
+        return event.payload.termination_request_id_sha256 === proof.termination_request_id_sha256
+          && event.payload.settlement_request_sha256 === canonicalRequestHash(settlementRequest)
+          && event.payload.gateway_receipt_sha256 === canonicalRequestHash(receipt)
+          && commandEvent.seq < dispatchClaim.seq && dispatchClaim.seq < (lossObserved?.seq ?? 0) && (lossObserved?.seq ?? Number.MAX_SAFE_INTEGER) < event.seq && event.seq < workerLoss[0]!.seq
+          && receipt.termination_request_id_sha256 === proof.termination_request_id_sha256
+          && receipt.voice_lab_run_id_sha256 === sha256(run.id) && receipt.test_run_id_sha256 === sha256(run.testRunId)
+          && receipt.cleanup_obligation_id_sha256 === sha256(run.cleanupObligationId)
+          && receipt.scenario_id === run.scenarioId && receipt.scenario_version === run.scenarioVersion && receipt.environment === run.environment
+          && canonicalRequestHash(receipt.expected_deployment) === canonicalRequestHash(run.target.expectedDeployment)
+          && receipt.provider_session_id_sha256 === proof.provider_session_id_sha256 && receipt.provider_admission_id_sha256 === proof.provider_admission_id_sha256
+          && receipt.provider_connection_epoch === proof.provider_connection_epoch
+          && canonicalRequestHash(receipt.frozen_provider_connection_epochs) === canonicalRequestHash(proof.frozen_provider_connection_epochs)
+          && receipt.browser_worker_id_sha256 === proof.lost_worker_id_sha256 && receipt.browser_lease_epoch === proof.lost_browser_lease_epoch
+          && receipt.browser_context_id_sha256 === proof.browser_context_id_sha256
+          && receipt.render_action_request_sha256 === proof.render_action_request_sha256
+          && receipt.render_action_accepted_response_sha256 === proof.render_action_accepted_response_sha256
+          && receipt.render_action_settled_snapshot_sha256 === proof.render_action_settled_snapshot_sha256
+          && receipt.loss_event_seq === proof.loss_event_seq && receipt.loss_observed_at === proof.loss_observed_at
+          && receipt.provider_settlement_sha256 === strictShutdown.payload.product_provider_cleanup_settlement_sha256
+          && new Date(receipt.database_observed_at).getTime() >= new Date(String(proof.loss_observed_at)).getTime()
+          && receipt.cleanup_obligation_state === "closed" && receipt.canonical_provider_state === "closed" && receipt.canonical_pending_epoch === null
+          && receipt.all_frozen_provider_epochs_terminal === true && receipt.provider_admission_absent === true
+          && receipt.voice_provider_session_absent === true && receipt.gateway_browser_relay_absent === true;
+      });
+      const productPreconditions = byKind("product.d02_api_process_restart_precondition").filter((event) => event.source === "canonical");
+      const productContinuities = byKind("product.d02_api_process_restart_continuity").filter((event) => event.source === "canonical");
+      const exactProductContinuities = productContinuities.filter((continuityEvent) => {
+        if (api.length !== 1 || productPreconditions.length !== 1
+          || !hasExactKeys(productPreconditions[0]!.payload, ["schema", "phase", "restart_request_id_sha256", "observation_request_sha256", "observation_receipt_sha256", "gateway_receipt", "source", "raw_product_identifiers_excluded"])
+          || !hasExactKeys(continuityEvent.payload, ["schema", "phase", "restart_request_id_sha256", "observation_request_sha256", "observation_receipt_sha256", "prior_observation_receipt_sha256", "gateway_receipt", "source", "raw_product_identifiers_excluded"])) return false;
+        const precondition = productPreconditions[0]!;
+        const finalEvent = api[0]!;
+        const proof = finalEvent.payload.evidence as Record<string, unknown> | undefined;
+        const commandEvent = externalAttestations("d02_restart_command").find((candidate) => {
+          const command = candidate.payload.evidence as Record<string, unknown> | undefined;
+          return typeof command?.restart_request_id === "string" && sha256(command.restart_request_id) === proof?.restart_request_id_sha256;
+        });
+        const operation = operations.find((candidate) => candidate.id === proof?.operation_id);
+        const replay = operation && byKind(`operation.${operation.type}.idempotent_replay`).find((candidate) => candidate.payload.operation_id === operation.id
+          && candidate.payload.exact_request_hash_replay === true && candidate.payload.no_new_operation === true);
+        const command = commandEvent?.payload.evidence as Record<string, unknown> | undefined;
+        const beforeResult = D02GatewayContinuityObservationReceiptSchema.safeParse(precondition.payload.gateway_receipt);
+        const afterResult = D02GatewayContinuityObservationReceiptSchema.safeParse(continuityEvent.payload.gateway_receipt);
+        if (!proof || !commandEvent || !command || !operation || !replay || !beforeResult.success || !afterResult.success
+          || run.canonicalSessionId === null || run.threadId === null || run.providerSessionId === null || run.providerEpoch === null
+          || typeof command.restart_request_id !== "string" || typeof command.requested_at !== "string" || typeof command.provider_restart_request_sha256 !== "string") return false;
+        const before = beforeResult.data;
+        const after = afterResult.data;
+        const beforeUnsigned: Record<string, unknown> = { ...before };
+        delete beforeUnsigned.signature;
+        const beforeCore = { ...beforeUnsigned };
+        delete beforeCore.receipt_sha256;
+        const afterUnsigned: Record<string, unknown> = { ...after };
+        delete afterUnsigned.signature;
+        const afterCore = { ...afterUnsigned };
+        delete afterCore.receipt_sha256;
+        const beforeRequest = {
+          schema: "sophia_voice_lab_d02_product_continuity_observation_request_v1",
+          restart_request_id: command.restart_request_id,
+          cleanup_obligation_id: run.cleanupObligationId,
+          phase: "before_api_restart",
+          product_service_boot_id_sha256: proof.before_boot_id_sha256,
+          render_action_request_sha256: proof.provider_restart_request_sha256,
+          prior_observation_receipt_sha256: null,
+          observed_at: command.requested_at,
+        };
+        const afterRequest = {
+          ...beforeRequest,
+          phase: "after_api_restart",
+          product_service_boot_id_sha256: proof.after_boot_id_sha256,
+          prior_observation_receipt_sha256: before.receipt_sha256,
+          observed_at: proof.replay_observed_at,
+        };
+        const projection = before.continuity_projection;
+        const exactProjection = canonicalRequestHash(projection) === canonicalRequestHash(after.continuity_projection)
+          && projection.voice_lab_run_id_sha256 === sha256(run.id) && projection.test_run_id_sha256 === sha256(run.testRunId)
+          && projection.cleanup_obligation_id_sha256 === sha256(run.cleanupObligationId)
+          && projection.session_id_sha256 === sha256(run.canonicalSessionId) && projection.thread_id_sha256 === sha256(run.threadId)
+          && projection.provider_session_id_sha256 === sha256(run.providerSessionId) && projection.provider_connection_epoch === run.providerEpoch
+          && projection.browser_worker_id_sha256 === proof.browser_worker_id_sha256 && projection.browser_lease_epoch === proof.browser_lease_epoch
+          && canonicalRequestHash(projection.expected_deployment) === canonicalRequestHash(run.target.expectedDeployment);
+        return exactProjection
+          && precondition.payload.schema === "sophia_voice_lab_d02_product_continuity_event_v1" && continuityEvent.payload.schema === "sophia_voice_lab_d02_product_continuity_event_v1"
+          && precondition.payload.phase === "before_api_restart" && continuityEvent.payload.phase === "after_api_restart"
+          && precondition.payload.restart_request_id_sha256 === proof.restart_request_id_sha256 && continuityEvent.payload.restart_request_id_sha256 === proof.restart_request_id_sha256
+          && precondition.payload.observation_request_sha256 === canonicalRequestHash(beforeRequest) && continuityEvent.payload.observation_request_sha256 === canonicalRequestHash(afterRequest)
+          && precondition.payload.observation_receipt_sha256 === before.receipt_sha256 && continuityEvent.payload.observation_receipt_sha256 === after.receipt_sha256
+          && continuityEvent.payload.prior_observation_receipt_sha256 === before.receipt_sha256
+          && precondition.payload.source === "gateway_ed25519_locked_product_continuity" && continuityEvent.payload.source === "gateway_ed25519_locked_product_continuity"
+          && precondition.payload.raw_product_identifiers_excluded === true && continuityEvent.payload.raw_product_identifiers_excluded === true
+          && before.receipt_sha256 === canonicalRequestHash(beforeCore) && after.receipt_sha256 === canonicalRequestHash(afterCore)
+          && before.restart_request_id_sha256 === proof.restart_request_id_sha256 && after.restart_request_id_sha256 === proof.restart_request_id_sha256
+          && before.request_sha256 === canonicalRequestHash(beforeRequest) && after.request_sha256 === canonicalRequestHash(afterRequest)
+          && before.product_service_boot_id_sha256 === proof.before_boot_id_sha256 && after.product_service_boot_id_sha256 === proof.after_boot_id_sha256
+          && before.render_action_request_sha256 === proof.provider_restart_request_sha256 && after.render_action_request_sha256 === proof.provider_restart_request_sha256
+          && before.prior_observation_receipt_sha256 === null && after.prior_observation_receipt_sha256 === before.receipt_sha256
+          && command.provider_restart_request_sha256 === proof.provider_restart_request_sha256
+          && precondition.seq < commandEvent.seq && commandEvent.seq < replay.seq && replay.seq < continuityEvent.seq && continuityEvent.seq < finalEvent.seq;
+      });
+      harness.push(api.length === 0 ? unavailable("d02.mcp_api_process_restart_and_reattach", "harness", "privileged_deployment_restart_attestation_not_attached") : check("d02.mcp_api_process_restart_and_reattach", "harness", api.length === 1, api, "api_restart_attestation_conflicted_or_failed_cross_join"));
+      harness.push(workerLossClaims.length === 0
+        ? unavailable("d02.browser_worker_termination_action", "harness", "privileged_browser_worker_termination_attestation_not_attached")
+        : check("d02.browser_worker_termination_action", "harness", workerLoss.length === 1, workerLossClaims, "browser_worker_termination_action_conflicted_or_failed_cross_join"));
+      harness.push(workerLoss.length === 1
+        ? gatewaySettlementEvents.length === 0
+          ? unavailable("d02.browser_worker_loss_abort_recovery", "harness", "gateway_browser_worker_termination_settlement_receipt_not_attached")
+          : check("d02.browser_worker_loss_abort_recovery", "harness", exactGatewaySettlements.length === 1, [...workerLoss, ...gatewaySettlementEvents], "gateway_browser_worker_termination_settlement_receipt_not_attached", "gateway_browser_worker_termination_settlement_conflicted_or_failed_cross_join")
+        : workerLossClaims.length === 0
+          ? unavailable("d02.browser_worker_loss_abort_recovery", "harness", "privileged_browser_worker_termination_attestation_not_attached")
+          : fail("d02.browser_worker_loss_abort_recovery", "harness", workerLossClaims, "browser_worker_termination_action_conflicted_or_failed_cross_join"));
+      product.push(api.length === 0 || (productPreconditions.length === 0 && productContinuities.length === 0)
+        ? unavailable("d02.product_gate", "product", "exact_product_session_thread_provider_continuity_receipt_not_attached")
+        : check("d02.product_gate", "product", exactProductContinuities.length === 1, [...productPreconditions, ...productContinuities, ...api], "exact_product_session_thread_provider_continuity_receipt_not_attached", "product_session_thread_provider_continuity_receipt_conflicted_or_failed_cross_join"));
+      break;
+    }
+    case "V-F02":
+      harness.push(unavailable("v-f02.governed_product_clock", "harness", "governed_product_clock_not_available"));
+      product.push(unavailable("v-f02.product_gate", "product", "scenario_not_executed"));
+      break;
+    default:
+      harness.push(unavailable("scenario.catalog_binding", "harness", "scenario_not_declared"));
+      product.push(unavailable("scenario.product_gate", "product", "scenario_not_declared"));
+  }
+  const passed = harness.length > 0 && harness.every((assertion) => assertion.status === "pass");
+  return { scenario_id: run.scenarioId, scenario_version: run.scenarioVersion, harness, product, summary: passed ? `All ${harness.length} machine harness assertions passed.` : `Harness certification withheld: ${harness.filter((assertion) => assertion.status !== "pass").map((assertion) => `${assertion.id}=${assertion.status}`).join(", ")}.` };
+}
+
+export function deriveTaskCleanup(events: import("./domain.js").LabEvent[], run?: RunRecord): { observed_count: number; unresolved_count: number; proof: string; tasks: Array<{ task_id_hash: string; terminal: boolean; state: string | null }> } {
+  const authoritativeZero = authoritativeLiveCleanupComplete(events);
+  const latest = new Map<string, string | null>();
+  for (const event of events) {
+    if (event.source === "product" && (!run || !isExactBoundProductEvent(run, event))) continue;
+    if (!(event.kind === "builder.task_state" || event.kind.endsWith(".sophia.builder_task"))) continue;
+    const taskId = findString(event.payload, ["taskId", "task_id"]);
+    if (!taskId) continue;
+    const state = findString(event.payload, ["phase", "status", "state"]);
+    latest.set(taskId, state);
+  }
+  const terminalStates = new Set(["completed", "complete", "cancelled", "canceled", "failed", "settled", "done", "terminal"]);
+  const tasks = [...latest.entries()].map(([taskId, state]) => ({ task_id_hash: sha256(taskId), terminal: authoritativeZero || (state !== null && terminalStates.has(state.toLowerCase())), state }));
+  const unresolved = tasks.filter((task) => !task.terminal).length;
+  return { observed_count: tasks.length, unresolved_count: authoritativeZero ? 0 : Math.max(1, unresolved), proof: authoritativeZero ? "gateway_authoritative_post_delete_zero" : "authoritative_task_discovery_or_zero_unconfirmed", tasks };
+}
+
+function authoritativeLiveCleanupComplete(events: Array<{ kind: string; payload: Record<string, unknown> }>): boolean {
+  return events.some((event) => {
+    if (event.kind !== "cleanup.recovery" || event.payload.complete !== true) return false;
+    const receipt = event.payload.receipt as Record<string, unknown> | undefined;
+    const components = receipt?.components as Record<string, unknown> | undefined;
+    const builder = components?.builder as Record<string, unknown> | undefined;
+    const builderReceipt = builder?.receipt && typeof builder.receipt === "object" ? builder.receipt as Record<string, unknown> : {};
+    return receipt?.complete === true && receipt?.live_cleanup_complete === true && receipt?.live_resources_zero === true && builder?.status === "completed" && (builder?.cleanup_complete ?? builderReceipt.cleanup_complete) === true && (builder?.discovery_complete ?? builderReceipt.discovery_complete) === true && (builder?.authoritative_zero_tasks ?? builderReceipt.authoritative_zero_tasks) === true && Number.isInteger(builder?.discovered_task_count ?? builderReceipt.discovered_task_count) && Number(builder?.discovered_task_count ?? builderReceipt.discovered_task_count) >= 0;
+  });
+}
+
+function authoritativeRetentionPurged(events: Array<{ kind: string; payload: Record<string, unknown> }>): boolean {
+  return events.some((event) => {
+    if (event.kind !== "cleanup.recovery" || event.payload.retention_purged !== true) return false;
+    const receipt = event.payload.receipt as Record<string, unknown> | undefined;
+    return receipt?.retention_purged === true && receipt?.retention_purge_pending === false && receipt?.retention_maintenance_complete === true && receipt?.live_resources_zero === true;
+  });
+}
+
+function retentionPatchFromEvents(events: Array<{ kind: string; payload: Record<string, unknown> }>): Partial<Pick<import("./ledger.js").RunPatch, "retentionPurgeDueAt" | "retentionPurgePending" | "retentionPurgeVerifiedAt">> {
+  const latest = [...events].reverse().find((event) => event.kind === "cleanup.recovery" && event.payload.complete === true);
+  if (!latest) return {};
+  if (latest.payload.retention_purged === true) return { retentionPurgePending: false, retentionPurgeVerifiedAt: new Date() };
+  const raw = latest.payload.retention_purge_due_at;
+  if (latest.payload.retention_purge_pending !== true || typeof raw !== "string") return {};
+  const due = new Date(raw);
+  if (Number.isNaN(due.getTime()) || due.toISOString() !== raw) throw new VoiceLabError(labError("RETENTION_RECEIPT_INVALID", "Gateway retention receipt did not contain a canonical ISO purge deadline.", "evidence", false));
+  return { retentionPurgeDueAt: due, retentionPurgePending: true, retentionPurgeVerifiedAt: null };
+}
+
+export function deriveFailureVerdicts(run: RunRecord, state: RunState, cleanupEvents: Array<{ kind: string; payload: Record<string, unknown> }>): Verdicts {
+  const cleanupConfirmed = cleanupEvents.some(authCleanupConfirmed);
+  return {
+    harness: state === "product_failed" || state === "inconclusive_provider" ? (run.verdicts.harness === "pending" ? "inconclusive" : run.verdicts.harness) : "fail",
+    product: state === "product_failed" ? "fail" : run.verdicts.product === "pending" ? "inconclusive" : run.verdicts.product,
+    provider: state === "inconclusive_provider" ? "inconclusive" : run.verdicts.provider === "pending" ? "unavailable" : run.verdicts.provider,
+    auth: state === "authorization_failed" ? "fail" : cleanupConfirmed ? "pass" : run.verdicts.auth === "pending" ? "unavailable" : run.verdicts.auth,
+    evidence: "unavailable",
+  };
+}
+
+function authCleanupConfirmed(event: { kind: string; payload: Record<string, unknown> }): boolean {
+  if (event.kind !== "auth.session_cleanup") return false;
+  if (event.payload.session_revoked === true && event.payload.cookies_cleared === true) return true;
+  const receipt = event.payload.receipt as Record<string, unknown> | undefined;
+  return event.payload.confirmed === true && receipt?.session_revoked === true && receipt?.cookies_cleared === true;
+}
+
+function exactString(value: unknown): string | null { return typeof value === "string" && value.length > 0 && value.length <= 512 ? value : null; }
+export function isExactBoundProductEvent(run: RunRecord, event: Pick<import("./domain.js").LabEvent, "source" | "payload">): boolean {
+  if (event.source !== "product") return false;
+  const binding = event.payload._product_run_binding;
+  if (!binding || typeof binding !== "object" || Array.isArray(binding)) return false;
+  const record = binding as Record<string, unknown>;
+  return record.app_authenticated === true
+    && record.synthetic === true
+    && record.test_run_id_sha256 === sha256(run.testRunId)
+    && record.principal_id_sha256 === sha256(run.principalId)
+    && record.environment === run.environment
+    && record.scenario_id === run.scenarioId
+    && record.scenario_version === run.scenarioVersion
+    && record.retention_hours === run.capturePolicy.retentionHours
+    && record.provider_expires_at === run.expiresAt.toISOString()
+    && record.cleanup_obligation_id_sha256 === sha256(run.cleanupObligationId);
+}
+function strictProductRunBinding(source: string, payload: Record<string, unknown>, expected: RunRecord): Record<string, unknown> | null {
+  if (source !== "product") return null;
+  const binding = payload._app_synthetic_binding;
+  if (!binding || typeof binding !== "object" || Array.isArray(binding)) return null;
+  const record = binding as Record<string, unknown>;
+  const matches = record.app_authenticated === true
+    && record.synthetic === true
+    && record.test_run_id_sha256 === sha256(expected.testRunId)
+    && record.principal_id_sha256 === sha256(expected.principalId)
+    && record.environment === expected.environment
+    && record.scenario_id === expected.scenarioId
+    && record.scenario_version === expected.scenarioVersion
+    && record.retention_hours === expected.capturePolicy.retentionHours
+    && record.provider_expires_at === expected.expiresAt.toISOString()
+    && record.cleanup_obligation_id_sha256 === sha256(expected.cleanupObligationId);
+  if (!matches) throw new VoiceLabError(labError("PRODUCT_RUN_BINDING_MISMATCH", "Product capture provenance did not match the exact authenticated synthetic run.", "harness", false));
+  return {
+    app_authenticated: true,
+    synthetic: true,
+    test_run_id_sha256: record.test_run_id_sha256,
+    principal_id_sha256: record.principal_id_sha256,
+    environment: record.environment,
+    scenario_id: record.scenario_id,
+    scenario_version: record.scenario_version,
+    retention_hours: record.retention_hours,
+    provider_expires_at: record.provider_expires_at,
+    cleanup_obligation_id_sha256: record.cleanup_obligation_id_sha256,
+  };
+}
+function exactFiniteNumber(value: unknown): number | null { return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null; }
+function stableJoin(name: string, current: string | null, candidate: string | null): string | null {
+  if (candidate === null) return current;
+  if (current !== null && current !== candidate) throw new VoiceLabError(labError("JOIN_CORRELATION_CONFLICT", `Conflicting ${name} values were observed from strict owning receipts.`, "harness", false, { join: name, prior_hash: sha256(current), candidate_hash: sha256(candidate) }));
+  return candidate;
+}
+function monotonicEpoch(current: number | null, candidate: number | null): number | null {
+  if (candidate === null) return current;
+  if (current !== null && candidate < current) throw new VoiceLabError(labError("PROVIDER_EPOCH_REGRESSION", "Provider epoch regressed across strict product receipts.", "harness", false, { prior: current, candidate }));
+  return candidate;
+}
+
+function assertBargeWindow(target: Record<string, unknown> | undefined): void {
+  const targetAt = typeof target?.target_schedule_at === "string" ? new Date(target.target_schedule_at).getTime() : Number.NaN;
+  const maxLateness = Number(target?.max_lateness_ms);
+  const lateness = Date.now() - targetAt;
+  if (!Number.isFinite(targetAt) || !Number.isFinite(maxLateness) || maxLateness < 0 || lateness > maxLateness) throw new VoiceLabError(labError("BARGE_WINDOW_MISSED", "Barge-in execution could no longer meet the declared playback-relative timing window before page mutation.", "conflict", true, { lateness_ms: Number.isFinite(lateness) ? Math.max(0, lateness) : null, max_lateness_ms: Number.isFinite(maxLateness) ? maxLateness : null }));
+}
+
+export function leaseHeartbeatIntervalMs(operationLeaseSeconds: number, browserLeaseSeconds: number): number {
+  return Math.max(1_000, Math.floor(Math.min(operationLeaseSeconds, browserLeaseSeconds) * 1_000 / 3));
+}
+
+function findString(value: unknown, keys: readonly string[], depth = 0): string | null {
+  if (!value || typeof value !== "object" || depth > 8) return null;
+  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+    if (keys.includes(key) && typeof child === "string" && child.length > 0) return child;
+  }
+  for (const child of Object.values(value as Record<string, unknown>)) {
+    const found = findString(child, keys, depth + 1);
+    if (found !== null) return found;
+  }
+  return null;
+}
+
+function findFiniteNumber(value: unknown, keys: readonly string[], depth = 0): number | null {
+  if (!value || typeof value !== "object" || depth > 8) return null;
+  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+    if (keys.includes(key) && typeof child === "number" && Number.isFinite(child) && child >= 0) return child;
+  }
+  for (const child of Object.values(value as Record<string, unknown>)) {
+    const found = findFiniteNumber(child, keys, depth + 1);
+    if (found !== null) return found;
+  }
+  return null;
+}
+
+function deterministicUuid(runId: string, purpose: string): string {
+  const source = sha256(`${purpose}:${runId}`).slice(0, 32).split("");
+  source[12] = "5";
+  source[16] = (["8", "9", "a", "b"] as const)[Number.parseInt(source[16]!, 16) % 4]!;
+  const hex = source.join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+/**
+ * Hash immutable, already-persisted evidence without reusing the public request
+ * hash's one-megabyte admission bound. The projection can legitimately contain
+ * a browser diagnostic larger than that bound. Feed canonical JSON directly to
+ * the digest so advancing an evidence revision remains deterministic without
+ * allocating another full serialized copy of the retained evidence.
+ */
+function evidenceProjectionHash(input: unknown): string {
+  const digest = createHash("sha256");
+  const seen = new WeakSet<object>();
+  const write = (value: unknown): void => {
+    if (value === null || typeof value === "boolean" || typeof value === "number" || typeof value === "string") {
+      digest.update(JSON.stringify(value));
+      return;
+    }
+    if (Array.isArray(value)) {
+      if (seen.has(value)) throw new VoiceLabError(labError("EVIDENCE_PROJECTION_INVALID", "Evidence revision projection contains a cycle.", "internal", false));
+      seen.add(value);
+      digest.update("[");
+      value.forEach((child, index) => {
+        if (index > 0) digest.update(",");
+        write(child);
+      });
+      digest.update("]");
+      seen.delete(value);
+      return;
+    }
+    if (value && typeof value === "object") {
+      if (seen.has(value)) throw new VoiceLabError(labError("EVIDENCE_PROJECTION_INVALID", "Evidence revision projection contains a cycle.", "internal", false));
+      seen.add(value);
+      digest.update("{");
+      const entries = Object.entries(value as Record<string, unknown>)
+        .filter(([, child]) => child !== undefined && typeof child !== "function" && typeof child !== "symbol")
+        .sort(([left], [right]) => left.localeCompare(right));
+      entries.forEach(([key, child], index) => {
+        if (index > 0) digest.update(",");
+        digest.update(JSON.stringify(key));
+        digest.update(":");
+        write(child);
+      });
+      digest.update("}");
+      seen.delete(value);
+      return;
+    }
+    digest.update("null");
+  };
+  write(input);
+  return digest.digest("hex");
+}
+
+interface EvidenceProjectionOverflowRecord {
+  path: string;
+  content_sha256: string;
+  byte_length: number;
+  value: unknown;
+}
+
+function projectEvidenceValue(path: string, value: unknown, overflowId: string, overflow: EvidenceProjectionOverflowRecord[]): unknown {
+  if (value === null) return null;
+  const serialized = JSON.stringify(value);
+  if (serialized === undefined) return null;
+  const byteLength = Buffer.byteLength(serialized);
+  if (byteLength <= 64_000) return value;
+  const contentSha256 = evidenceProjectionHash(value);
+  overflow.push({ path, content_sha256: contentSha256, byte_length: byteLength, value });
+  return {
+    status: "available_in_projection_overflow",
+    resource_id: `voice-lab://artifact/${overflowId}`,
+    path,
+    content_sha256: contentSha256,
+    byte_length: byteLength,
+  };
+}
+
+export function deriveD02BrowserContextBinding(run: RunRecord, workerId: string, leaseEpoch: number): D02BrowserContextBinding {
+  if (run.scenarioId !== "V-D02" || typeof workerId !== "string" || workerId.length === 0 || !Number.isSafeInteger(leaseEpoch) || leaseEpoch < 1) {
+    throw new VoiceLabError(labError("BROWSER_CONTEXT_BINDING_MISMATCH", "A deterministic browser context binding requires one exact V-D02 run, worker, and positive lease epoch.", "harness", false));
+  }
+  const workerHash = sha256(workerId);
+  const allocationId = deterministicUuid(run.id, `browser-context-allocation:${workerHash}:${leaseEpoch}`);
+  return {
+    voice_lab_run_id_sha256: sha256(run.id),
+    browser_worker_id_sha256: workerHash,
+    browser_lease_epoch: leaseEpoch,
+    browser_context_id_sha256: sha256(allocationId),
+  };
+}
+
+function isExactD02BrowserContextBinding(run: RunRecord, binding: D02BrowserContextBinding): boolean {
+  return run.scenarioId === "V-D02"
+    && /^[a-f0-9]{64}$/.test(binding.voice_lab_run_id_sha256)
+    && binding.voice_lab_run_id_sha256 === sha256(run.id)
+    && /^[a-f0-9]{64}$/.test(binding.browser_worker_id_sha256)
+    && Number.isSafeInteger(binding.browser_lease_epoch)
+    && binding.browser_lease_epoch > 0
+    && /^[a-f0-9]{64}$/.test(binding.browser_context_id_sha256);
+}
+
+function sameD02BrowserContextBinding(left: D02BrowserContextBinding | undefined, right: D02BrowserContextBinding | undefined): boolean {
+  if (left === undefined || right === undefined) return left === right;
+  return left.voice_lab_run_id_sha256 === right.voice_lab_run_id_sha256
+    && left.browser_worker_id_sha256 === right.browser_worker_id_sha256
+    && left.browser_lease_epoch === right.browser_lease_epoch
+    && left.browser_context_id_sha256 === right.browser_context_id_sha256;
+}
+
