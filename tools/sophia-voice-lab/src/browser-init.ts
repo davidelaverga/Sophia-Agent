@@ -141,9 +141,16 @@ export function buildVoiceLabInitScript(options: InitScriptOptions): string {
       set: (candidate) => {
         // SessionCaptureBridge reads the current replacement, binds it, then
         // assigns one observer wrapper. Permit exactly that single layer. A
-        // later assignment cannot replace the sealed synthetic pipeline.
+        // later product effect may repeat its installation while React is
+        // settling the ordinary route; retain the already-attested wrapper
+        // instead of throwing into that effect. The candidate is never called
+        // or installed, so the sealed synthetic pipeline cannot be replaced.
         if (observerWrapperInstalled || typeof candidate !== 'function' || candidate === replacement) {
-          throw new TypeError('Voice Lab synthetic microphone pipeline is sealed.');
+          emit('harness.media_observer_wrapper_retained', {
+            synthetic_pipeline_sealed: true,
+            candidate_function: typeof candidate === 'function',
+          });
+          return;
         }
         activeGetUserMedia = candidate;
         observerWrapperInstalled = true;

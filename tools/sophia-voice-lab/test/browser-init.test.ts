@@ -56,7 +56,7 @@ describe("page-owned dynamic WebAudio injection", () => {
     });
   });
 
-  it("permits one product observer wrapper without exposing or replacing native getUserMedia", async () => {
+  it("permits one product observer wrapper and retains it across a repeated product effect", async () => {
     const { sandbox } = harness();
     const syntheticGetUserMedia = sandbox.navigator.mediaDevices.getUserMedia.bind(sandbox.navigator.mediaDevices);
     let observed = 0;
@@ -68,15 +68,23 @@ describe("page-owned dynamic WebAudio injection", () => {
 
     await sandbox.navigator.mediaDevices.getUserMedia({ audio: true, video: false });
 
-    expect(observed).toBe(1);
+    let rejectedCandidateCalls = 0;
+    expect(() => {
+      sandbox.navigator.mediaDevices.getUserMedia = async () => {
+        rejectedCandidateCalls += 1;
+        return null;
+      };
+    }).not.toThrow();
+    await sandbox.navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+
+    expect(observed).toBe(2);
+    expect(rejectedCandidateCalls).toBe(0);
     expect(sandbox.__sophiaVoiceLab.drain(0).events).toEqual(expect.arrayContaining([
       expect.objectContaining({ kind: "harness.media_observer_wrapper_installed", payload: { synthetic_pipeline_sealed: true } }),
+      expect.objectContaining({ kind: "harness.media_observer_wrapper_retained", payload: { synthetic_pipeline_sealed: true, candidate_function: true } }),
       expect.objectContaining({ kind: "harness.media_stream_issued", payload: expect.objectContaining({ replacement_active: true }) }),
     ]));
     expect(Object.getOwnPropertyDescriptor(sandbox.navigator.mediaDevices, "getUserMedia")?.configurable).toBe(false);
-    expect(() => {
-      sandbox.navigator.mediaDevices.getUserMedia = async () => null;
-    }).toThrow(/pipeline is sealed/);
   });
 
   it("emits started only after the scheduled AudioContext boundary, then one natural terminal receipt", async () => {
