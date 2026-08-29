@@ -542,6 +542,48 @@ export async function activateDashboardMicButton(page: Page, button: Locator, vi
   await page.keyboard.press("Enter");
 }
 
+const ACTIVE_SESSION_VOICE_BUTTON_NAMES = [
+  "Listening...",
+  "Thinking...",
+  "Speaking...",
+  "Recording... release to send",
+] as const;
+
+export async function establishSessionVoiceStart(
+  page: Page,
+  readyButtonName: string,
+  timeoutMs = SESSION_VOICE_START_VISIBILITY_TIMEOUT_MS,
+): Promise<"activated" | "already_active"> {
+  const deadline = Date.now() + timeoutMs;
+  const readyButton = page.getByRole("button", { name: readyButtonName, exact: true }).first();
+  const activeButtons = ACTIVE_SESSION_VOICE_BUTTON_NAMES.map((name) => (
+    page.getByRole("button", { name, exact: true }).first()
+  ));
+
+  while (Date.now() < deadline) {
+    if (await readyButton.isVisible().catch(() => false)) {
+      await activateDashboardMicButton(page, readyButton, Math.max(1, deadline - Date.now()));
+      return "activated";
+    }
+    for (const activeButton of activeButtons) {
+      if (await activeButton.isVisible().catch(() => false)) {
+        // The ordinary product control can advance from ready to connecting,
+        // listening, thinking, speaking, or press-to-talk before this worker
+        // observes the ready label. Those exact labels prove that the same
+        // product mic is already active. A second activation would cancel,
+        // mute, or barge into that live session, so continue without clicking.
+        return "already_active";
+      }
+    }
+    await page.waitForTimeout(50);
+  }
+
+  // Preserve Playwright's bounded TimeoutError contract so the existing
+  // same-origin client-page-error recovery remains the only reload path.
+  await readyButton.waitFor({ state: "visible", timeout: 1 });
+  throw new Error("The ordinary session voice control did not become visible.");
+}
+
 export async function activateVoiceStartWithClientErrorReload(input: {
   activate: () => Promise<void>;
   hasClientPageError: () => boolean | Promise<boolean>;
@@ -1133,13 +1175,11 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
         const voiceTab = page.getByRole("tab", { name: /^voice$/i }).first();
         if (await voiceTab.isVisible({ timeout: 2_000 }).catch(() => false) && await voiceTab.getAttribute("aria-selected") !== "true") await voiceTab.click();
         ordinaryRouteStage = "voice_start_button";
-        const startButton = page.getByRole("button", { name: this.config.startButtonName, exact: true }).first();
         // The URL can commit before the session client tree finishes
-        // hydrating. Keep the exact ordinary button contract and one native
-        // activation, but allow that post-navigation render its own bounded
-        // visibility window instead of inheriting the dashboard CTA's short
-        // five-second bound.
-        await activateDashboardMicButton(page, startButton, SESSION_VOICE_START_VISIBILITY_TIMEOUT_MS);
+        // hydrating. Keep the exact ordinary button contract and at most one
+        // native activation. If the same product control has already advanced
+        // to a known active label, do not toggle it back off.
+        await establishSessionVoiceStart(page, this.config.startButtonName);
       };
       await activateVoiceStartWithClientErrorReload({
         activate: activateVoiceStart,

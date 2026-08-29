@@ -8,7 +8,7 @@ import { chromium, type Browser } from "playwright";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { buildVoiceLabInitScript } from "../src/browser-init.js";
-import { activateDashboardMicButton, establishSessionNavigation, PlaywrightVoiceDriver, resolveDashboardMicButton } from "../src/browser-driver.js";
+import { activateDashboardMicButton, establishSessionNavigation, establishSessionVoiceStart, PlaywrightVoiceDriver, resolveDashboardMicButton } from "../src/browser-driver.js";
 
 function sineWav(durationMs = 600, sampleRate = 16_000): Buffer {
   const samples = Math.floor(sampleRate * durationMs / 1_000);
@@ -133,6 +133,28 @@ describe("real Chromium dynamic media contract", () => {
     const button = page.getByRole("button", { name: "Tap to speak", exact: true }).first();
     await activateDashboardMicButton(page, button, 1_000);
     expect(await page.evaluate(() => (window as any).__voiceActivations)).toBe(1);
+    await context.close();
+  });
+
+  it("does not toggle an ordinary session voice control that already advanced to an active state", async () => {
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    await page.goto(origin);
+    await page.setContent(`
+      <div id="session-controls"></div>
+      <script>
+        window.__voiceActivations = 0;
+        setTimeout(() => {
+          const button = document.createElement('button');
+          button.type = 'button';
+          button.setAttribute('aria-label', 'Listening...');
+          button.onclick = () => { window.__voiceActivations += 1; };
+          document.querySelector('#session-controls').append(button);
+        }, 150);
+      </script>
+    `);
+    await expect(establishSessionVoiceStart(page, "Tap to speak", 1_000)).resolves.toBe("already_active");
+    expect(await page.evaluate(() => (window as any).__voiceActivations)).toBe(0);
     await context.close();
   });
 
