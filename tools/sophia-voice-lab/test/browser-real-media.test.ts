@@ -8,7 +8,7 @@ import { chromium, type Browser } from "playwright";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { buildVoiceLabInitScript } from "../src/browser-init.js";
-import { activateDashboardMicButton, establishSessionNavigation, establishSessionVoiceStart, PlaywrightVoiceDriver, resolveDashboardMicButton } from "../src/browser-driver.js";
+import { activateDashboardMicButton, classifySessionVoiceRoute, establishSessionNavigation, establishSessionVoiceStart, PlaywrightVoiceDriver, resolveDashboardMicButton } from "../src/browser-driver.js";
 
 function sineWav(durationMs = 600, sampleRate = 16_000): Buffer {
   const samples = Math.floor(sampleRate * durationMs / 1_000);
@@ -155,6 +155,45 @@ describe("real Chromium dynamic media contract", () => {
     `);
     await expect(establishSessionVoiceStart(page, "Tap to speak", 1_000)).resolves.toBe("already_active");
     expect(await page.evaluate(() => (window as any).__voiceActivations)).toBe(0);
+    await context.close();
+  });
+
+  it("projects only fixed structural states when the session voice control is unavailable", async () => {
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    await page.goto(`${origin}/session`);
+    await page.setContent(`
+      <div role="tablist" aria-label="Interaction mode">
+        <button role="tab" aria-selected="false">voice</button>
+        <button role="tab" aria-selected="true">text</button>
+      </div>
+      <p>private user content that must not be projected</p>
+    `);
+    await expect(classifySessionVoiceRoute(page, origin, "Tap to speak")).resolves.toEqual({
+      location: "expected_session",
+      voice_tab: "available",
+      voice_button: "absent",
+      dashboard_mic_visible: false,
+      consent_visible: false,
+      auth_gate_visible: false,
+      voice_fallback_visible: false,
+    });
+    await context.close();
+  });
+
+  it("classifies a disabled ready mic without exposing its attributes", async () => {
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    await page.goto(`${origin}/session`);
+    await page.setContent(`
+      <button role="tab" aria-selected="true">voice</button>
+      <button aria-label="Tap to speak" data-private="do-not-project" disabled></button>
+    `);
+    const diagnostic = await classifySessionVoiceRoute(page, origin, "Tap to speak");
+    expect(diagnostic.location).toBe("expected_session");
+    expect(diagnostic.voice_tab).toBe("selected");
+    expect(diagnostic.voice_button).toBe("disabled");
+    expect(JSON.stringify(diagnostic)).not.toContain("do-not-project");
     await context.close();
   });
 
