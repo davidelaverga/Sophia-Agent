@@ -268,7 +268,27 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, processRole: "w
   for (const [name, value] of [["service deployment", serviceVersion], ["repository base", repositoryBaseSha], ["repository candidate", repositoryCandidateSha], ["repository rollback", repositoryRollbackSha]] as const) {
     if (!/^[a-f0-9]{40}$/i.test(value)) throw new VoiceLabError(labError("CONFIG_INVALID", `${name} identity must be an exact 40-character commit SHA.`, "internal"));
   }
-  if (serviceVersion.toLowerCase() !== repositoryCandidateSha.toLowerCase()) throw new VoiceLabError(labError("CONFIG_INVALID", "Repository candidate SHA must equal the exact running service commit.", "internal"));
+  if (serviceVersion.toLowerCase() !== repositoryCandidateSha.toLowerCase()) {
+    const identityDigest = (value: string) => createHash("sha256").update(value.toLowerCase()).digest("hex");
+    throw new VoiceLabError(labError(
+      "CONFIG_INVALID",
+      "Repository candidate SHA must equal the exact running service commit.",
+      "internal",
+      false,
+      {
+        service_version_source: env.RENDER_GIT_COMMIT?.trim()
+          ? "RENDER_GIT_COMMIT"
+          : env.COMMIT_SHA?.trim()
+            ? "COMMIT_SHA"
+            : "development_fallback",
+        service_version_sha256: identityDigest(serviceVersion),
+        repository_candidate_sha256: identityDigest(repositoryCandidateSha),
+        service_version_length: serviceVersion.length,
+        repository_candidate_length: repositoryCandidateSha.length,
+        raw_commit_identities_excluded: true,
+      },
+    ));
+  }
   const harnessVersion = campaignValue(env, nodeEnv, "SOPHIA_VOICE_LAB_HARNESS_VERSION", "0.1.0");
   const mcpVersion = campaignValue(env, nodeEnv, "SOPHIA_VOICE_LAB_MCP_VERSION", "0.1.0");
   const pluginVersion = campaignValue(env, nodeEnv, "SOPHIA_VOICE_LAB_PLUGIN_VERSION", "0.1.0");
