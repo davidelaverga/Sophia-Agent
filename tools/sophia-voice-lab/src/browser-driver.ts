@@ -266,6 +266,25 @@ async function preloadPassiveEffectBreakpoints(request: APIRequestContext, front
   return breakpoints;
 }
 
+/** Optional client diagnostics must never consume the product-route deadline.
+ * The underlying Playwright requests retain their own bounded timeouts and
+ * catch paths; this outer budget simply lets ordinary UI startup continue
+ * without waiting for every diagnostic-only chunk probe. */
+export async function settleDiagnosticWithinBudget<T>(work: Promise<T>, fallback: T, timeoutMs: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<T>((resolve) => {
+        timer = setTimeout(() => resolve(fallback), timeoutMs);
+        timer.unref();
+      }),
+    ]);
+  } finally {
+    if (timer !== null) clearTimeout(timer);
+  }
+}
+
 export function classifyBrowserStartCause(error: unknown): {
   error_class: string;
   safe_signature: string;
@@ -905,7 +924,11 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       if (!authSession.ok() || authUser?.id !== run.principalId) throw new VoiceLabError(labError("AUTH_PRINCIPAL_MISMATCH", "The browser session is not bound to the exact dedicated Voice Lab principal.", "authorization", false, { observed_principal_sha256: typeof authUser?.id === "string" ? sha256(authUser.id) : null }));
       ordinaryRouteStage = "browser_init_script";
       await context.addInitScript({ content: buildVoiceLabInitScript({ pageOrigin: frontendOrigin, websocketOrigins: [...this.config.websocketOrigins], maxAudioBytes: this.config.maxAudioBytes, testRunId: run.testRunId, cleanupObligationId: run.cleanupObligationId }) });
-      const preloadedPassiveEffectBreakpoints = await preloadPassiveEffectBreakpoints(context.request, frontendOrigin).catch(() => []);
+      const preloadedPassiveEffectBreakpoints = await settleDiagnosticWithinBudget(
+        preloadPassiveEffectBreakpoints(context.request, frontendOrigin).catch(() => []),
+        [],
+        5_000,
+      );
       effectProbeStatus.preloaded_candidates = Math.min(32, preloadedPassiveEffectBreakpoints.length);
       ordinaryRouteStage = "frontend_home_navigation";
       const activePage = await context.newPage();
