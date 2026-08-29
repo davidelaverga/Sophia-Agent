@@ -398,7 +398,10 @@ export class VoiceLabWorker {
     for (const pending of await this.ledger.listRunsNeedingRecovery(10)) {
       const replacement = await this.#observeD02GracefulWorkerReplacement(pending);
       if (replacement === "awaiting_replacement") continue;
-      await this.#terminalizeFailure(pending.id, pending.terminalError ?? labError("RECOVERY_PENDING", "Terminal run still requires durable zero-orphan recovery.", "harness", true), pending.state);
+      const operations = await this.ledger.listOperations(pending.id);
+      const failedOperation = [...operations].reverse().find((operation) => (operation.state === "failed" || operation.state === "timed_out") && operation.error !== null);
+      const recoveryError = pending.terminalError ?? failedOperation?.error ?? labError("RECOVERY_PENDING", "Terminal run still requires durable zero-orphan recovery.", "harness", true);
+      await this.#terminalizeFailure(pending.id, recoveryError, TERMINAL_RUN_STATES.has(pending.state) ? pending.state : undefined);
     }
     if (this.#killSwitchEngaged()) {
       // Accepted suites are durable scheduling intent. Engaging the kill switch
