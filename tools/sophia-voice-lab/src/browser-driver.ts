@@ -679,6 +679,49 @@ export async function establishSessionVoiceStart(
   throw new Error("The ordinary session voice control did not become visible.");
 }
 
+export async function establishSessionVoiceTab(
+  page: Page,
+  timeoutMs = 2_000,
+): Promise<"activated" | "already_selected" | "unavailable"> {
+  const deadline = Date.now() + timeoutMs;
+  let lastActivationError: unknown = null;
+
+  // The session client tree can replace ModeToggle while it reconciles the
+  // newly-created conversation. Resolve the ordinary tab again at most once;
+  // never leave an attribute read on a detached locator using Playwright's
+  // much larger page default timeout.
+  for (let attempt = 0; attempt < 2 && Date.now() < deadline; attempt += 1) {
+    const voiceTab = page.getByRole("tab", { name: /^voice$/i }).first();
+    const remaining = Math.max(1, deadline - Date.now());
+    if (!await voiceTab.isVisible({ timeout: Math.min(remaining, 1_000) }).catch(() => false)) {
+      return "unavailable";
+    }
+    const selected = await voiceTab
+      .getAttribute("aria-selected", { timeout: Math.min(remaining, 500) })
+      .catch(() => null);
+    if (selected === "true") return "already_selected";
+    if (selected !== "false") {
+      await page.waitForTimeout(25);
+      continue;
+    }
+    try {
+      await voiceTab.click({ timeout: Math.max(1, Math.min(deadline - Date.now(), 1_000)) });
+      return "activated";
+    } catch (error) {
+      lastActivationError = error;
+      const replacement = page.getByRole("tab", { name: /^voice$/i }).first();
+      const replacementSelected = await replacement
+        .getAttribute("aria-selected", { timeout: Math.max(1, Math.min(deadline - Date.now(), 250)) })
+        .catch(() => null);
+      if (replacementSelected === "true") return "already_selected";
+      await page.waitForTimeout(25);
+    }
+  }
+
+  if (lastActivationError) throw lastActivationError;
+  return "unavailable";
+}
+
 export async function activateVoiceStartWithClientErrorReload(input: {
   activate: () => Promise<void>;
   hasClientPageError: () => boolean | Promise<boolean>;
@@ -1273,8 +1316,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       assertPageLocation(page.url(), frontendOrigin, (pathname) => /^\/session(?:\/|$)/.test(pathname), "ORDINARY_UI_ORIGIN_DRIFT");
       const activateVoiceStart = async () => {
         ordinaryRouteStage = "voice_tab_selection";
-        const voiceTab = activePage.getByRole("tab", { name: /^voice$/i }).first();
-        if (await voiceTab.isVisible({ timeout: 2_000 }).catch(() => false) && await voiceTab.getAttribute("aria-selected") !== "true") await voiceTab.click();
+        await establishSessionVoiceTab(activePage);
         ordinaryRouteStage = "voice_start_button";
         // The URL can commit before the session client tree finishes
         // hydrating. Keep the exact ordinary button contract and at most one

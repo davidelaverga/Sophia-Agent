@@ -8,7 +8,7 @@ import { chromium, type Browser } from "playwright";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { buildVoiceLabInitScript } from "../src/browser-init.js";
-import { activateDashboardMicButton, classifySessionVoiceRoute, establishSessionNavigation, establishSessionVoiceStart, PlaywrightVoiceDriver, resolveDashboardMicButton, settleDiagnosticWithinBudget } from "../src/browser-driver.js";
+import { activateDashboardMicButton, classifySessionVoiceRoute, establishSessionNavigation, establishSessionVoiceStart, establishSessionVoiceTab, PlaywrightVoiceDriver, resolveDashboardMicButton, settleDiagnosticWithinBudget } from "../src/browser-driver.js";
 
 function sineWav(durationMs = 600, sampleRate = 16_000): Buffer {
   const samples = Math.floor(sampleRate * durationMs / 1_000);
@@ -161,6 +161,35 @@ describe("real Chromium dynamic media contract", () => {
     `);
     await expect(establishSessionVoiceStart(page, "Tap to speak", 1_000)).resolves.toBe("already_active");
     expect(await page.evaluate(() => (window as any).__voiceActivations)).toBe(0);
+    await context.close();
+  });
+
+  it("selects the ordinary voice tab once when a fresh session opens in text mode", async () => {
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    await page.goto(origin);
+    await page.setContent(`
+      <button role="tab" aria-selected="false">voice</button>
+      <button role="tab" aria-selected="true">text</button>
+      <script>
+        window.__voiceTabActivations = 0;
+        document.querySelector('[role="tab"]')?.addEventListener('click', (event) => {
+          window.__voiceTabActivations += 1;
+          event.currentTarget.setAttribute('aria-selected', 'true');
+        });
+      </script>
+    `);
+    await expect(establishSessionVoiceTab(page, 1_000)).resolves.toBe("activated");
+    expect(await page.evaluate(() => (window as any).__voiceTabActivations)).toBe(1);
+    await context.close();
+  });
+
+  it("does not fail startup when the voice tab is transiently absent during session hydration", async () => {
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    await page.goto(origin);
+    await page.setContent('<main aria-label="hydrating session"></main>');
+    await expect(establishSessionVoiceTab(page, 100)).resolves.toBe("unavailable");
     await context.close();
   });
 
