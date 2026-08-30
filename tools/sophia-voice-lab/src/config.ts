@@ -475,7 +475,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, processRole: "w
     ttsExpectedVersion,
     maxRunSeconds: integer(env, "SOPHIA_VOICE_LAB_MAX_RUN_SECONDS", 1_800, 60, 7_200),
     maxOperationSeconds: integer(env, "SOPHIA_VOICE_LAB_MAX_OPERATION_SECONDS", 45, 5, 300),
-    startOperationSeconds: integer(env, "SOPHIA_VOICE_LAB_START_OPERATION_SECONDS", 150, 90, 300),
+    startOperationSeconds: integer(env, "SOPHIA_VOICE_LAB_START_OPERATION_SECONDS", 300, 90, 300),
     endOperationSeconds: integer(env, "SOPHIA_VOICE_LAB_END_OPERATION_SECONDS", 120, 75, 300),
     faultOperationSeconds: integer(env, "SOPHIA_VOICE_LAB_FAULT_OPERATION_SECONDS", 60, 35, 300),
     maxWaitMs: integer(env, "SOPHIA_VOICE_LAB_MAX_WAIT_MS", 30_000, 100, 60_000),

@@ -98,7 +98,7 @@ envVarGroups:
       - key: SOPHIA_VOICE_LAB_MAX_OPERATION_SECONDS
         value: "45"
       - key: SOPHIA_VOICE_LAB_START_OPERATION_SECONDS
-        value: "150"
+        value: "300"
       - key: SOPHIA_VOICE_LAB_END_OPERATION_SECONDS
         value: "120"
       - key: SOPHIA_VOICE_LAB_FAULT_OPERATION_SECONDS

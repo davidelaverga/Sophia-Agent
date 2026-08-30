@@ -166,6 +166,7 @@ describe("Voice Lab deployment health contract", () => {
 
     expect(requiredRuntimeValue(blueprint, "SOPHIA_VOICE_LAB_OAUTH_ACCESS_TOKEN_TTL_SECONDS")).toBe("300");
     expect(requiredRuntimeValue(blueprint, "SOPHIA_VOICE_LAB_OAUTH_REFRESH_TOKEN_TTL_SECONDS")).toBe("604800");
+    expect(requiredRuntimeValue(blueprint, "SOPHIA_VOICE_LAB_START_OPERATION_SECONDS")).toBe("300");
     const parsed = testConfig({
       SOPHIA_VOICE_LAB_OAUTH_ISSUER: "https://voice-lab.test",
       SOPHIA_VOICE_LAB_OAUTH_RESOURCE: "https://voice-lab.test/mcp",
@@ -177,6 +178,7 @@ describe("Voice Lab deployment health contract", () => {
       SOPHIA_VOICE_LAB_OAUTH_TOKEN_PEPPER: "oauth-token-pepper-0000000000000000002",
     });
     expect(parsed.oauth).toMatchObject({ accessTokenTtlSeconds: 300, refreshTokenTtlSeconds: 604_800 });
+    expect(parsed.startOperationSeconds).toBe(300);
   });
 
   it("accepts the container-local health host while retaining explicit host validation", async () => {
