@@ -1967,6 +1967,7 @@ def _purge_expired_provisional_session(
     if recovery._durable_evidence_required() and not durable:
         return {"status": "pending", "code": "durable_purge_unavailable"}
     cleanup_handle_path: str | None = None
+    failure_stage = "cleanup_handle_prepare"
     try:
         if durable:
             cleanup_handle_path = recovery._ensure_retention_cleanup_handle(
@@ -1985,6 +1986,7 @@ def _purge_expired_provisional_session(
             # not a binding conflict.  Continue with the database-fenced
             # session purge; _finish_retention_cleanup_intent will reuse the
             # same tombstone while proving global product/auth zero.
+        failure_stage = "session_purge"
         _store.purge_synthetic_session(
             claims.principal_id,
             record.session_id,
@@ -1992,10 +1994,13 @@ def _purge_expired_provisional_session(
             retention_expires_at=str(synthetic["retention_expires_at"]),
             provider_expires_at=claims.provider_expires_at,
         )
+        failure_stage = "session_read_zero"
         if _store.find_session_by_run_id(claims.principal_id, claims.test_run_id) is not None:
             return {"status": "pending", "code": "provisional_session_purge_unconfirmed"}
+        failure_stage = "thread_unregister"
         unregister_thread(record.thread_id)
         if durable:
+            failure_stage = "cleanup_handle_complete"
             finished = recovery._finish_retention_cleanup_intent(
                 claims.cleanup_obligation_id,
                 expected_path=cleanup_handle_path,
@@ -2006,7 +2011,36 @@ def _purge_expired_provisional_session(
                     "status": "pending",
                     "code": "provisional_global_zero_unconfirmed",
                 }
-    except Exception:  # noqa: BLE001 - retry via the still-durable source/intent.
+    except Exception as exc:  # noqa: BLE001 - retry via durable source/intent.
+        message = str(exc).lower()
+        safe_reason = next(
+            (
+                reason
+                for signature, reason in (
+                    ("request is malformed", "request_malformed"),
+                    ("deadline is not canonical", "deadline_not_canonical"),
+                    ("deadline is malformed", "deadline_malformed"),
+                    ("purge fence is unavailable", "database_fence_unavailable"),
+                    ("session binding conflicts", "session_binding_conflict"),
+                    ("retention deletion is unavailable", "write_fence_unavailable"),
+                    ("read-zero conflicts", "database_read_zero_conflict"),
+                    ("status=401", "supabase_http_401"),
+                    ("status=403", "supabase_http_403"),
+                    ("status=404", "supabase_http_404"),
+                    ("status=409", "supabase_http_409"),
+                    ("status=500", "supabase_http_500"),
+                )
+                if signature in message
+            ),
+            "unclassified",
+        )
+        logger.warning(
+            "Voice Lab provisional retention purge pending stage=%s reason=%s "
+            "error_type=%s contentExcluded=true",
+            failure_stage,
+            safe_reason,
+            type(exc).__name__,
+        )
         return {"status": "pending", "code": "provisional_session_purge_unavailable"}
     return {
         "status": "completed",
