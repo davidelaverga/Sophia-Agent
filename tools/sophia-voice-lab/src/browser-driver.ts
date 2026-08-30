@@ -607,6 +607,7 @@ interface BrowserSession {
 const CONSENT_ACCEPT_SELECTOR = '[data-voice-lab="consent-accept"]';
 export const DASHBOARD_ROUTE_TIMEOUT_MS = 60_000;
 export const SESSION_NAVIGATION_SETTLE_TIMEOUT_MS = 5_000;
+export const SESSION_VOICE_TAB_TIMEOUT_MS = 30_000;
 export const SESSION_VOICE_START_VISIBILITY_TIMEOUT_MS = 30_000;
 
 export async function resolveDashboardMicButton(page: Page, micAnchor: Locator): Promise<Locator> {
@@ -656,9 +657,24 @@ export async function establishSessionVoiceStart(
   ));
 
   while (Date.now() < deadline) {
-    if (await readyButton.isVisible().catch(() => false)) {
-      await activateDashboardMicButton(page, readyButton, Math.max(1, deadline - Date.now()));
-      return "activated";
+    const remaining = Math.max(1, deadline - Date.now());
+    if (await readyButton.isVisible({ timeout: Math.min(remaining, 250) }).catch(() => false)) {
+      // Session hydration can replace the composer between visibility and
+      // focus. Keep every locator operation inside this helper's deadline and
+      // retry only before the native Enter activation has been issued.
+      const enabled = await readyButton
+        .isEnabled({ timeout: Math.min(remaining, 250) })
+        .catch(() => false);
+      if (enabled) {
+        try {
+          await readyButton.focus({ timeout: Math.min(remaining, 1_000) });
+        } catch {
+          await page.waitForTimeout(Math.min(50, Math.max(1, deadline - Date.now())));
+          continue;
+        }
+        await page.keyboard.press("Enter");
+        return "activated";
+      }
     }
     for (const activeButton of activeButtons) {
       if (await activeButton.isVisible().catch(() => false)) {
@@ -681,29 +697,43 @@ export async function establishSessionVoiceStart(
 
 export async function establishSessionVoiceTab(
   page: Page,
-  timeoutMs = 2_000,
+  timeoutMs = SESSION_VOICE_TAB_TIMEOUT_MS,
 ): Promise<"activated" | "already_selected" | "unavailable"> {
   const deadline = Date.now() + timeoutMs;
   let lastActivationError: unknown = null;
+  let activationAttempted = false;
 
   // The session client tree can replace ModeToggle while it reconciles the
-  // newly-created conversation. Resolve the ordinary tab again at most once;
-  // never leave an attribute read on a detached locator using Playwright's
-  // much larger page default timeout.
-  for (let attempt = 0; attempt < 2 && Date.now() < deadline; attempt += 1) {
+  // newly-created conversation, and it may be absent for part of that
+  // hydration. Resolve the ordinary tab on every bounded observation, but
+  // issue at most one native click so a delayed commit cannot toggle twice.
+  while (Date.now() < deadline) {
     const voiceTab = page.getByRole("tab", { name: /^voice$/i }).first();
     const remaining = Math.max(1, deadline - Date.now());
-    if (!await voiceTab.isVisible({ timeout: Math.min(remaining, 1_000) }).catch(() => false)) {
-      return "unavailable";
+    if (!await voiceTab.isVisible({ timeout: Math.min(remaining, 250) }).catch(() => false)) {
+      await page.waitForTimeout(Math.min(50, Math.max(1, deadline - Date.now())));
+      continue;
     }
     const selected = await voiceTab
       .getAttribute("aria-selected", { timeout: Math.min(remaining, 500) })
       .catch(() => null);
-    if (selected === "true") return "already_selected";
+    if (selected === "true") return activationAttempted ? "activated" : "already_selected";
     if (selected !== "false") {
-      await page.waitForTimeout(25);
+      await page.waitForTimeout(Math.min(25, Math.max(1, deadline - Date.now())));
       continue;
     }
+    if (activationAttempted) {
+      await page.waitForTimeout(Math.min(25, Math.max(1, deadline - Date.now())));
+      continue;
+    }
+    const enabled = await voiceTab
+      .isEnabled({ timeout: Math.min(remaining, 250) })
+      .catch(() => false);
+    if (!enabled) {
+      await page.waitForTimeout(Math.min(50, Math.max(1, deadline - Date.now())));
+      continue;
+    }
+    activationAttempted = true;
     try {
       await voiceTab.click({ timeout: Math.max(1, Math.min(deadline - Date.now(), 1_000)) });
       return "activated";
@@ -713,8 +743,8 @@ export async function establishSessionVoiceTab(
       const replacementSelected = await replacement
         .getAttribute("aria-selected", { timeout: Math.max(1, Math.min(deadline - Date.now(), 250)) })
         .catch(() => null);
-      if (replacementSelected === "true") return "already_selected";
-      await page.waitForTimeout(25);
+      if (replacementSelected === "true") return "activated";
+      await page.waitForTimeout(Math.min(25, Math.max(1, deadline - Date.now())));
     }
   }
 

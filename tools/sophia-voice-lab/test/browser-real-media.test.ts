@@ -164,6 +164,30 @@ describe("real Chromium dynamic media contract", () => {
     await context.close();
   });
 
+  it("re-resolves a replaced ready mic before issuing one native activation", async () => {
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    await page.goto(origin);
+    await page.setContent(`
+      <div id="session-controls">
+        <button type="button" aria-label="Tap to speak" disabled></button>
+      </div>
+      <script>
+        window.__voiceActivations = 0;
+        setTimeout(() => {
+          const button = document.createElement('button');
+          button.type = 'button';
+          button.setAttribute('aria-label', 'Tap to speak');
+          button.onclick = () => { window.__voiceActivations += 1; };
+          document.querySelector('#session-controls').replaceChildren(button);
+        }, 150);
+      </script>
+    `);
+    await expect(establishSessionVoiceStart(page, "Tap to speak", 1_000)).resolves.toBe("activated");
+    expect(await page.evaluate(() => (window as any).__voiceActivations)).toBe(1);
+    await context.close();
+  });
+
   it("selects the ordinary voice tab once when a fresh session opens in text mode", async () => {
     const context = await browser.newContext();
     const page = await context.newPage();
@@ -190,6 +214,33 @@ describe("real Chromium dynamic media contract", () => {
     await page.goto(origin);
     await page.setContent('<main aria-label="hydrating session"></main>');
     await expect(establishSessionVoiceTab(page, 100)).resolves.toBe("unavailable");
+    await context.close();
+  });
+
+  it("waits through session hydration and selects a delayed ordinary voice tab once", async () => {
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    await page.goto(origin);
+    await page.setContent(`
+      <main aria-label="hydrating session"></main>
+      <script>
+        window.__voiceTabActivations = 0;
+        setTimeout(() => {
+          const button = document.createElement('button');
+          button.type = 'button';
+          button.setAttribute('role', 'tab');
+          button.setAttribute('aria-selected', 'false');
+          button.textContent = 'voice';
+          button.onclick = () => {
+            window.__voiceTabActivations += 1;
+            button.setAttribute('aria-selected', 'true');
+          };
+          document.querySelector('main').append(button);
+        }, 150);
+      </script>
+    `);
+    await expect(establishSessionVoiceTab(page, 1_000)).resolves.toBe("activated");
+    expect(await page.evaluate(() => (window as any).__voiceTabActivations)).toBe(1);
     await context.close();
   });
 
