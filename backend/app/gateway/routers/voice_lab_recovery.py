@@ -286,7 +286,7 @@ def _require_voice_internal_callback(request: Request) -> None:
 def _abort_due_unactivated_provider_from_owner_heartbeat(
     admission: object,
 ) -> object | None:
-    """Fence a due, never-activated ordinary provider before owner teardown.
+    """Fence an expired, never-activated ordinary provider before teardown.
 
     The admission remains durable after this transition.  The owning Voice
     process must still observe ``activation_aborted``, close/read-zero its
@@ -297,7 +297,6 @@ def _abort_due_unactivated_provider_from_owner_heartbeat(
 
     from app.gateway.routers import sessions, voice
     from deerflow.sophia.cleanup_fence import (
-        close_cleanup_obligation_if_provider_due,
         close_cleanup_provider_session,
     )
 
@@ -322,6 +321,7 @@ def _abort_due_unactivated_provider_from_owner_heartbeat(
         record is None
         or synthetic.get("scenario_id") == "V-D02"
         or getattr(admission, "status", None) != "credential_minted"
+        or getattr(admission, "expired", False) is not True
         or synthetic.get("cleanup_obligation_id") != cleanup_id
         or synthetic.get("cleanup_provider_admission_id") != admission_id
         or synthetic.get("voice_runtime_session_id") != provider_session_id
@@ -339,14 +339,7 @@ def _abort_due_unactivated_provider_from_owner_heartbeat(
         provider_expires_at, str
     ):
         return None
-    due = close_cleanup_obligation_if_provider_due(
-        cleanup_id,
-        retention_expires_at,
-        provider_expires_at,
-    )
-    if due is None:
-        return None
-
+    aborted_at = _canonical_utc_millis(datetime.now(UTC))
     abort_model = voice.GeminiBrowserProviderActivationAbortReceipt.model_validate(
         {
             "schema": "sophia_gemini_browser_provider_activation_abort_v1",
@@ -355,7 +348,7 @@ def _abort_due_unactivated_provider_from_owner_heartbeat(
             "previous_activated_epoch": 0,
             "candidate_epoch": pending_epoch,
             "websocket_created": False,
-            "aborted_at": provider_expires_at,
+            "aborted_at": aborted_at,
         }
     )
     canonical_close, canonical_abort, settlement_sha256 = (
@@ -369,7 +362,7 @@ def _abort_due_unactivated_provider_from_owner_heartbeat(
     next_synthetic.update(
         {
             "voice_provider_resource_state": "closed",
-            "voice_provider_closed_at": provider_expires_at,
+            "voice_provider_closed_at": aborted_at,
             "voice_provider_pending_connection_epoch": None,
             "voice_provider_browser_close_receipts": canonical_close,
             "voice_provider_activation_abort_receipts": canonical_abort,
@@ -3471,6 +3464,26 @@ def _recover_canonical_evidence_retention(
     finalized_text = synthetic.get("finalized_at")
     retention_text = synthetic.get("retention_expires_at")
     provider_text = synthetic.get("provider_expires_at")
+    provisional = (
+        getattr(record, "status", None) in {"active", "open", "paused", "resumable"}
+        and getattr(record, "ended_at", None) is None
+        and synthetic.get("retention_anchor") == "session_created_at_provisional"
+        and finalized_text is None
+        and stored_receipt is None
+        and synthetic.get("retention_hours") == claims.retention_hours
+        and provider_text == claims.provider_expires_at
+        and isinstance(retention_text, str)
+        and metadata.get("expected_deployment") == claims.expected_deployment
+    )
+    if provisional:
+        return _component(
+            "retention_pending",
+            provider_spend_live=False,
+            canonical_evidence_retained=True,
+            provisional_cleanup_only=True,
+            retention_purge_pending=True,
+            retention_expires_at=retention_text,
+        )
     finalized_at = _parse_exact_utc_millis(finalized_text)
     retention_expires_at = _parse_exact_utc_millis(retention_text)
     exact_retention = (

@@ -769,6 +769,110 @@ async def test_provider_terminal_readback_is_a_noop_after_admission_consumption(
     disconnect.assert_not_awaited()
 
 
+def test_overdue_never_activated_provider_aborts_before_resource_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.gateway.routers import voice as voice_router
+    from deerflow.sophia import cleanup_fence
+
+    observed = datetime.now(UTC).replace(microsecond=0)
+    cleanup_id = _claims().cleanup_obligation_id
+    admission_id = "33333333-3333-4333-8333-333333333333"
+    provider_session_id = "provider-session-never-activated"
+    retention_text = (observed + timedelta(hours=24)).isoformat(
+        timespec="milliseconds"
+    ).replace("+00:00", "Z")
+    provider_text = (observed + timedelta(minutes=20)).isoformat(
+        timespec="milliseconds"
+    ).replace("+00:00", "Z")
+    synthetic = {
+        "scenario_id": "vt00-realtime-001",
+        "cleanup_obligation_id": cleanup_id,
+        "cleanup_provider_admission_id": admission_id,
+        "voice_runtime_session_id": provider_session_id,
+        "voice_provider_resource_state": "credential_minted",
+        "voice_provider_connection_epoch": None,
+        "voice_provider_pending_connection_epoch": 1,
+        "voice_provider_activation_receipt": None,
+        "retention_expires_at": retention_text,
+        "provider_expires_at": provider_text,
+    }
+    record = SimpleNamespace(
+        user_id="voice-lab-user-1",
+        session_id="synthetic-session",
+        metadata={"synthetic_voice_lab": synthetic},
+    )
+    monkeypatch.setattr(
+        sessions_router,
+        "_store",
+        SimpleNamespace(
+            find_session_by_cleanup_obligation_id=lambda value: (
+                record if value == cleanup_id else None
+            )
+        ),
+    )
+    admission = cleanup_fence.CleanupAdmission(
+        admission_id=admission_id,
+        cleanup_obligation_id=cleanup_id,
+        resource_kind="provider",
+        resource_id=provider_session_id,
+        lease_expires_at=observed - timedelta(seconds=1),
+        resource_expires_at=observed + timedelta(minutes=20),
+        status="credential_minted",
+        expired=True,
+    )
+    unexpired = cleanup_fence.CleanupAdmission(
+        admission_id=admission_id,
+        cleanup_obligation_id=cleanup_id,
+        resource_kind="provider",
+        resource_id=provider_session_id,
+        lease_expires_at=observed + timedelta(seconds=30),
+        resource_expires_at=observed + timedelta(minutes=20),
+        status="credential_minted",
+        expired=False,
+    )
+    assert (
+        voice_lab_recovery._abort_due_unactivated_provider_from_owner_heartbeat(
+            unexpired
+        )
+        is None
+    )
+    captured: dict[str, object] = {}
+
+    def close_provider(candidate, **kwargs):
+        captured.update(kwargs)
+        return candidate
+
+    monkeypatch.setattr(
+        cleanup_fence,
+        "close_cleanup_provider_session",
+        close_provider,
+    )
+
+    result = voice_lab_recovery._abort_due_unactivated_provider_from_owner_heartbeat(
+        admission
+    )
+
+    assert result is admission
+    assert captured["terminal_status"] == "activation_aborted"
+    assert captured["expected_provider_state"] == "credential_minted"
+    assert captured["provider_expires_at"] == provider_text
+    assert datetime.fromisoformat(provider_text.replace("Z", "+00:00")) > observed
+    abort_receipts = captured["metadata"]["synthetic_voice_lab"][
+        "voice_provider_activation_abort_receipts"
+    ]
+    abort_receipt = (
+        voice_router.GeminiBrowserProviderActivationAbortReceipt.model_validate(
+            abort_receipts[0]
+        )
+    )
+    assert abort_receipt.websocket_created is False
+    assert (
+        datetime.fromisoformat(abort_receipt.aborted_at.replace("Z", "+00:00"))
+        < datetime.fromisoformat(provider_text.replace("Z", "+00:00"))
+    )
+
+
 def _canonical_evidence_record(
     *,
     created_at: datetime,
@@ -829,6 +933,66 @@ def _claims_for_record(record: SessionRecord) -> VoiceLabClaims:
             "provider_expires_at"
         ]
     )
+
+
+def test_recovery_classifies_exact_provisional_session_as_retention_pending() -> None:
+    created_at = datetime.now(UTC).replace(microsecond=0)
+    retention_text = (created_at + timedelta(hours=24)).isoformat(
+        timespec="milliseconds"
+    ).replace("+00:00", "Z")
+    provider_text = (created_at + timedelta(minutes=30)).isoformat(
+        timespec="milliseconds"
+    ).replace("+00:00", "Z")
+    record = SessionRecord(
+        session_id="synthetic-session",
+        thread_id="synthetic-thread",
+        user_id="voice-lab-user-1",
+        status="active",
+        run_id="run-001",
+        created_at=created_at.isoformat(),
+        metadata={
+            "synthetic_voice_lab": {
+                "synthetic": True,
+                "principal_id": "voice-lab-user-1",
+                "test_run_id": "run-001",
+                "scenario_id": "vt00-realtime-001",
+                "scenario_version": "v1",
+                "environment": "production",
+                "retention_hours": 24,
+                "cleanup_obligation_id": "123e4567-e89b-42d3-a456-426614174000",
+                "provider_expires_at": provider_text,
+                "retention_anchor": "session_created_at_provisional",
+                "finalized_at": None,
+                "retention_expires_at": retention_text,
+            },
+            "expected_deployment": {
+                "frontend": BUILD,
+                "backend": BUILD,
+                "voice": BUILD,
+            },
+            "memory_retrieval_disabled": True,
+            "inactivity_finalization_disabled": True,
+            "offline_pipeline_disabled": True,
+            "memory_learning_disabled": True,
+            "ordinary_analytics_disabled": True,
+            "ordinary_projects_disabled": True,
+            "shared_spaces_disabled": True,
+        },
+    )
+
+    result = voice_lab_recovery._recover_canonical_evidence_retention(
+        _claims(provider_expires_at=provider_text),
+        record,
+    )
+
+    assert result == {
+        "status": "retention_pending",
+        "provider_spend_live": False,
+        "canonical_evidence_retained": True,
+        "provisional_cleanup_only": True,
+        "retention_purge_pending": True,
+        "retention_expires_at": retention_text,
+    }
 
 
 def _message_metadata(record: SessionRecord) -> dict[str, object]:
