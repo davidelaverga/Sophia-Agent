@@ -335,6 +335,10 @@ export type SessionVoiceRouteDiagnostic = {
   voice_fallback_visible: boolean;
 };
 
+export function shouldCaptureSessionVoiceRoute(stage: string): boolean {
+  return stage === "voice_tab_selection" || stage.startsWith("voice_start");
+}
+
 /** Project only fixed, product-authored UI states. Never serialize arbitrary
  * page text, URLs, attributes, or user data into an MCP error. */
 export async function classifySessionVoiceRoute(
@@ -1420,13 +1424,13 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       // capability and must revoke the login before closing the browser.
       if (this.#sessions.get(run.id)?.context === context) {
         if (error instanceof VoiceLabError) throw error;
-        throw new VoiceLabError(labError("ORDINARY_UI_ROUTE_FAILED", "The ordinary deployed Sophia voice route could not be established.", "harness", false, { stage: ordinaryRouteStage, cause: classifyBrowserStartCause(error), client_page_error: currentClientPageErrorDiagnostic(), route_state: ordinaryRouteStage.startsWith("voice_start") && page ? await classifySessionVoiceRoute(page, frontendOrigin, this.config.startButtonName) : null }));
+        throw new VoiceLabError(labError("ORDINARY_UI_ROUTE_FAILED", "The ordinary deployed Sophia voice route could not be established.", "harness", false, { stage: ordinaryRouteStage, cause: classifyBrowserStartCause(error), client_page_error: currentClientPageErrorDiagnostic(), route_state: shouldCaptureSessionVoiceRoute(ordinaryRouteStage) && page ? await classifySessionVoiceRoute(page, frontendOrigin, this.config.startButtonName) : null }));
       }
       const closed = await closeContextWithProof(context, () => this.#browser?.contexts() ?? []);
       if (closed.closed) { this.#sessions.delete(run.id); this.#pendingContexts.delete(run.id); }
       else throw new VoiceLabError(labError("BROWSER_CONTEXT_CLOSE_FAILED", "Failed start left a browser context that could not be proven closed.", "harness", true, { original_error_class: error instanceof VoiceLabError ? error.detail.code : error instanceof Error ? error.name : "Error", close_error_class: closed.errorClass }));
       if (error instanceof VoiceLabError) throw error;
-      throw new VoiceLabError(labError("ORDINARY_UI_ROUTE_FAILED", "The ordinary deployed Sophia voice route could not be established.", "harness", false, { stage: ordinaryRouteStage, cause: classifyBrowserStartCause(error), client_page_error: currentClientPageErrorDiagnostic(), route_state: ordinaryRouteStage.startsWith("voice_start") && page ? await classifySessionVoiceRoute(page, frontendOrigin, this.config.startButtonName) : null }));
+      throw new VoiceLabError(labError("ORDINARY_UI_ROUTE_FAILED", "The ordinary deployed Sophia voice route could not be established.", "harness", false, { stage: ordinaryRouteStage, cause: classifyBrowserStartCause(error), client_page_error: currentClientPageErrorDiagnostic(), route_state: shouldCaptureSessionVoiceRoute(ordinaryRouteStage) && page ? await classifySessionVoiceRoute(page, frontendOrigin, this.config.startButtonName) : null }));
     }
   }
 
