@@ -641,6 +641,51 @@ def test_service_role_delete_uses_bucket_scoped_prefix_contract(
     assert request.headers["authorization"] == "Bearer svc-role-key"
 
 
+def test_service_role_bounded_batch_delete_uses_exact_prefixes(monkeypatch) -> None:
+    _configure(monkeypatch)
+    captured: list[httpx.Request] = []
+    paths = [
+        "voice-lab/recovery/run-1/attempt-1.json",
+        "voice-lab/recovery/run-1/attempt-2.json",
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(200, json=[{"name": paths[0]}])
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    acknowledged = (
+        supabase_artifact_store.delete_artifact_objects_if_present_bounded(
+            paths,
+            client=client,
+        )
+    )
+
+    assert acknowledged == 1
+    assert len(captured) == 1
+    assert json.loads(captured[0].content) == {"prefixes": paths}
+
+
+def test_service_role_bounded_batch_delete_rejects_unexpected_object(
+    monkeypatch,
+) -> None:
+    _configure(monkeypatch)
+    client = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200,
+                json=[{"name": "voice-lab/recovery/other.json"}],
+            )
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="unexpected object"):
+        supabase_artifact_store.delete_artifact_objects_if_present_bounded(
+            ["voice-lab/recovery/run-1/attempt-1.json"],
+            client=client,
+        )
+
+
 @pytest.mark.parametrize(
     "response_records",
     [

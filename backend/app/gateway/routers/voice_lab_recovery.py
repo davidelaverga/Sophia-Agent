@@ -41,7 +41,8 @@ _RECOVERY_PURGE_ROOT = ".builder/voice_lab_evidence/recovery-tombstones/v1"
 _RETENTION_CLEANUP_HANDLE_ROOT = (
     ".builder/voice_lab_evidence/retention-cleanup-intents/v2"
 )
-_RECOVERY_RECEIPT_MAX_OBJECTS = 256
+_RECOVERY_RECEIPT_MAX_OBJECTS = 10_000
+_RECOVERY_RECEIPT_DELETE_BATCH = 100
 _RECOVERY_RECEIPT_MAX_DEPTH = 4
 _RECOVERY_TOMBSTONE_MAX_BYTES = 4 * 1024
 _RETENTION_CLEANUP_HANDLE_MAX_BYTES = 4 * 1024
@@ -2657,16 +2658,10 @@ def _complete_recovery_receipt_purge_for_id(
         raise RuntimeError("recovery purge fence regressed below its intent")
     if len(current_paths) > target_count:
         raise RuntimeError("recovery receipts appeared after the purge fence")
-    for object_path in current_paths:
-        supabase_artifact_store.delete_artifact_object_if_present(object_path)
-        if (
-            supabase_artifact_store.download_artifact_object_bounded(
-                object_path,
-                max_bytes=128 * 1024,
-            )
-            is not None
-        ):
-            raise RuntimeError("recovery receipt deletion was not verified")
+    for offset in range(0, len(current_paths), _RECOVERY_RECEIPT_DELETE_BATCH):
+        supabase_artifact_store.delete_artifact_objects_if_present_bounded(
+            current_paths[offset : offset + _RECOVERY_RECEIPT_DELETE_BATCH]
+        )
     if _list_recovery_receipt_objects_for_id(stable_id):
         raise RuntimeError("recovery receipt prefix was not emptied")
 

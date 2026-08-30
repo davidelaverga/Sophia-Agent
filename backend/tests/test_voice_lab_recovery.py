@@ -157,6 +157,11 @@ class _FakeRecoveryObjectStore:
         )
         monkeypatch.setattr(
             supabase_artifact_store,
+            "delete_artifact_objects_if_present_bounded",
+            self.delete_many,
+        )
+        monkeypatch.setattr(
+            supabase_artifact_store,
             "list_artifact_object_paths_bounded",
             self.list,
         )
@@ -242,6 +247,9 @@ class _FakeRecoveryObjectStore:
     def delete(self, object_path: str, **_kwargs: object) -> str:
         self.deleted.append(object_path)
         return "deleted" if self.objects.pop(object_path, None) is not None else "missing"
+
+    def delete_many(self, object_paths: list[str], **_kwargs: object) -> int:
+        return sum(self.delete(object_path) == "deleted" for object_path in object_paths)
 
     def list(
         self,
@@ -1169,6 +1177,32 @@ def test_late_receipt_between_initial_list_and_intent_is_fenced_and_purged(
     assert set(object_store.objects) == {tombstone_path}
 
 
+def test_recovery_purge_batches_more_than_legacy_receipt_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    object_store = _FakeRecoveryObjectStore()
+    object_store.install(monkeypatch)
+    claims = _claims()
+    prefix = voice_lab_recovery._recovery_receipt_prefix(claims)
+    for index in range(257):
+        object_store.objects[f"{prefix}/attempt-{index}.json"] = (
+            b'{}',
+            "application/json",
+        )
+
+    prepared = voice_lab_recovery._prepare_recovery_receipt_purge(claims)
+    tombstone, _receipt = voice_lab_recovery._complete_recovery_receipt_purge(
+        claims
+    )
+
+    assert prepared == {"already_purged": False, "target_count": 257}
+    assert tombstone["recovery_receipts_deleted"] == 257
+    assert len(
+        [path for path in object_store.deleted if path.startswith(f"{prefix}/")]
+    ) == 257
+    assert not any(path.startswith(f"{prefix}/") for path in object_store.objects)
+
+
 def test_persistence_barrier_rejects_new_raw_receipt_after_purge_intent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1230,7 +1264,7 @@ def test_recovery_receipt_prefix_limits_fail_closed_before_evidence_deletion(
     _install_finalization_receipt(object_store, current, store)
     prefix = voice_lab_recovery._recovery_receipt_prefix(_claims())
     if limit_case == "object_count":
-        for index in range(257):
+        for index in range(voice_lab_recovery._RECOVERY_RECEIPT_MAX_OBJECTS + 1):
             object_store.objects[f"{prefix}/r/attempts/{index}.json"] = (
                 b"{}",
                 "application/json",

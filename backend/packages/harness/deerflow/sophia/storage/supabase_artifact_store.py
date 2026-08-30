@@ -35,6 +35,7 @@ _MAX_INTERNAL_LIST_OBJECTS = 10_000
 _MAX_INTERNAL_LIST_DEPTH = 32
 _MAX_INTERNAL_LIST_PAGE_SIZE = 1_000
 _MAX_INTERNAL_LIST_PAGES = 1_000
+_MAX_INTERNAL_DELETE_OBJECTS = 100
 _MAX_STORAGE_ERROR_BODY_BYTES = 4_096
 _SAFE_SEGMENT_RE = re.compile(r"[^A-Za-z0-9._=-]+")
 _CREATE_ONLY_CONFLICT_STATUS_CODES = frozenset({400, 409})
@@ -1047,6 +1048,63 @@ def delete_artifact_object_if_present(
         if not isinstance(record, dict) or _record_name(record) != normalized_path:
             raise RuntimeError("Supabase artifact deletion did not acknowledge the exact object")
         return "deleted"
+    finally:
+        if owns_client:
+            http.close()
+
+
+def delete_artifact_objects_if_present_bounded(
+    object_paths: list[str],
+    *,
+    client: httpx.Client | None = None,
+) -> int:
+    """Delete a small exact batch of canonical internal object paths.
+
+    The response may omit paths that were already absent.  It may never
+    acknowledge a path outside the caller's exact normalized batch.  Callers
+    requiring ambiguity safety must re-list or read back the affected prefix.
+    """
+
+    if not isinstance(object_paths, list) or not 1 <= len(object_paths) <= _MAX_INTERNAL_DELETE_OBJECTS:
+        raise ValueError("artifact deletion batch must contain between 1 and 100 paths")
+    normalized_paths = [normalize_object_path(path) for path in object_paths]
+    if len(normalized_paths) != len(set(normalized_paths)):
+        raise ValueError("artifact deletion batch contains duplicate paths")
+    requested = set(normalized_paths)
+    config = _load_service_role_config()
+    if config is None:
+        raise RuntimeError("Supabase service-role artifact deletion is not configured")
+    headers = {
+        "Authorization": f"Bearer {config.service_role_key}",
+        "apikey": config.service_role_key,
+        "Content-Type": "application/json",
+    }
+    owns_client = client is None
+    http = client or httpx.Client(timeout=_REQUEST_TIMEOUT_SECONDS)
+    try:
+        response = http.request(
+            "DELETE",
+            f"{config.url}/storage/v1/object/{config.bucket}",
+            headers=headers,
+            json={"prefixes": normalized_paths},
+        )
+        response.raise_for_status()
+        try:
+            deleted = response.json()
+        except ValueError as exc:
+            raise RuntimeError("Supabase artifact deletion returned invalid JSON") from exc
+        if not isinstance(deleted, list):
+            raise RuntimeError("Supabase artifact deletion returned an invalid result")
+        acknowledged: set[str] = set()
+        for record in deleted:
+            raw_name = _record_name(record)
+            if raw_name is None:
+                raise RuntimeError("Supabase artifact deletion returned a nameless object")
+            acknowledged_path = normalize_object_path(raw_name)
+            if acknowledged_path not in requested or acknowledged_path in acknowledged:
+                raise RuntimeError("Supabase artifact deletion acknowledged an unexpected object")
+            acknowledged.add(acknowledged_path)
+        return len(acknowledged)
     finally:
         if owns_client:
             http.close()
