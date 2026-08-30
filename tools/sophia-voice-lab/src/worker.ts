@@ -2428,13 +2428,53 @@ function errorDetail(error: unknown): LabError {
   return labError("UNEXPECTED_WORKER_ERROR", "Voice Lab worker encountered an unexpected internal error.", "internal", false, { cause: error instanceof Error ? error.message.slice(0, 300) : String(error).slice(0, 300) });
 }
 
-/** Preserve only a fixed internal route stage when the global operation
+const INTERRUPTED_ROUTE_LOCATIONS = new Set(["expected_session", "dashboard", "same_origin_other", "cross_origin", "invalid"]);
+const INTERRUPTED_ROUTE_VOICE_TABS = new Set(["absent", "hidden", "disabled", "selected", "available"]);
+const INTERRUPTED_ROUTE_VOICE_BUTTONS = new Set(["absent", "hidden", "disabled", "ready", "active_listening", "active_thinking", "active_speaking", "active_ptt"]);
+
+function interruptedRouteDiagnostic(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  if (typeof record.location !== "string" || !INTERRUPTED_ROUTE_LOCATIONS.has(record.location)
+    || typeof record.voice_tab !== "string" || !INTERRUPTED_ROUTE_VOICE_TABS.has(record.voice_tab)
+    || typeof record.voice_button !== "string" || !INTERRUPTED_ROUTE_VOICE_BUTTONS.has(record.voice_button)
+    || typeof record.dashboard_mic_visible !== "boolean"
+    || typeof record.consent_visible !== "boolean"
+    || typeof record.auth_gate_visible !== "boolean"
+    || typeof record.voice_fallback_visible !== "boolean") return null;
+  return {
+    location: record.location,
+    voice_tab: record.voice_tab,
+    voice_button: record.voice_button,
+    dashboard_mic_visible: record.dashboard_mic_visible,
+    consent_visible: record.consent_visible,
+    auth_gate_visible: record.auth_gate_visible,
+    voice_fallback_visible: record.voice_fallback_visible,
+  };
+}
+
+function interruptedCauseDiagnostic(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  if (typeof record.error_class !== "string" || !/^[A-Za-z][A-Za-z0-9_.-]{0,79}$/.test(record.error_class)
+    || typeof record.safe_signature !== "string" || !/^sha256:[a-f0-9]{64}$/.test(record.safe_signature)
+    || !Number.isSafeInteger(record.character_length) || Number(record.character_length) < 0) return null;
+  return {
+    error_class: record.error_class,
+    safe_signature: record.safe_signature,
+    character_length: record.character_length,
+  };
+}
+
+/** Preserve only fixed, sanitized route diagnostics when the global operation
  * deadline closes Playwright before its own typed error can settle. */
 export function augmentOperationTimeoutWithInterruptedDriverError(reason: unknown, interrupted: unknown): unknown {
   if (!(reason instanceof VoiceLabError) || reason.detail.code !== "OPERATION_TIMEOUT"
     || !(interrupted instanceof VoiceLabError) || interrupted.detail.code !== "ORDINARY_UI_ROUTE_FAILED") return reason;
   const rawStage = interrupted.detail.details?.stage;
   const stage = typeof rawStage === "string" && /^[a-z][a-z0-9_]{0,79}$/.test(rawStage) ? rawStage : "unavailable";
+  const cause = interruptedCauseDiagnostic(interrupted.detail.details?.cause);
+  const routeState = interruptedRouteDiagnostic(interrupted.detail.details?.route_state);
   return new VoiceLabError(labError(
     reason.detail.code,
     reason.detail.message,
@@ -2445,6 +2485,8 @@ export function augmentOperationTimeoutWithInterruptedDriverError(reason: unknow
       interrupted_driver_error: {
         code: interrupted.detail.code,
         stage,
+        ...(cause === null ? {} : { cause }),
+        ...(routeState === null ? {} : { route_state: routeState }),
       },
     },
   ));

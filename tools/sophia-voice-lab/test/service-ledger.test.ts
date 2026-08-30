@@ -33,10 +33,26 @@ describe("service and durable memory-ledger contracts", () => {
     service = new VoiceLabService(ledger, testConfig(), async () => audio.summaries());
   });
 
-  it("retains only the fixed interrupted route stage on a global start timeout", () => {
+  it("retains only fixed sanitized interrupted route diagnostics on a global start timeout", () => {
     const timeout = new VoiceLabError(labError("OPERATION_TIMEOUT", "bounded", "harness", true, { operation_type: "start", deadline_seconds: 150 }));
     const interrupted = new VoiceLabError(labError("ORDINARY_UI_ROUTE_FAILED", "route", "harness", false, {
       stage: "voice_startup_readiness",
+      cause: {
+        error_class: "TimeoutError",
+        safe_signature: `sha256:${"a".repeat(64)}`,
+        character_length: 321,
+        unsafe_cause_text: "must-not-be-projected",
+      },
+      route_state: {
+        location: "expected_session",
+        voice_tab: "selected",
+        voice_button: "absent",
+        dashboard_mic_visible: false,
+        consent_visible: false,
+        auth_gate_visible: false,
+        voice_fallback_visible: true,
+        unsafe_route_text: "must-not-be-projected",
+      },
       unsafe_text: "must-not-be-projected",
     }));
 
@@ -51,10 +67,49 @@ describe("service and durable memory-ledger contracts", () => {
         interrupted_driver_error: {
           code: "ORDINARY_UI_ROUTE_FAILED",
           stage: "voice_startup_readiness",
+          cause: {
+            error_class: "TimeoutError",
+            safe_signature: `sha256:${"a".repeat(64)}`,
+            character_length: 321,
+          },
+          route_state: {
+            location: "expected_session",
+            voice_tab: "selected",
+            voice_button: "absent",
+            dashboard_mic_visible: false,
+            consent_visible: false,
+            auth_gate_visible: false,
+            voice_fallback_visible: true,
+          },
         },
       },
     });
     expect(JSON.stringify((enriched as VoiceLabError).detail)).not.toContain("must-not-be-projected");
+  });
+
+  it("drops malformed interrupted route diagnostics instead of projecting caller-shaped data", () => {
+    const timeout = new VoiceLabError(labError("OPERATION_TIMEOUT", "bounded", "harness", true));
+    const interrupted = new VoiceLabError(labError("ORDINARY_UI_ROUTE_FAILED", "route", "harness", false, {
+      stage: "voice_start_button",
+      cause: { error_class: "TimeoutError", safe_signature: "raw product text", character_length: 10 },
+      route_state: {
+        location: "expected_session",
+        voice_tab: "selected",
+        voice_button: "arbitrary-private-state",
+        dashboard_mic_visible: false,
+        consent_visible: false,
+        auth_gate_visible: false,
+        voice_fallback_visible: false,
+      },
+    }));
+
+    const detail = (augmentOperationTimeoutWithInterruptedDriverError(timeout, interrupted) as VoiceLabError).detail;
+    expect(detail.details?.interrupted_driver_error).toEqual({
+      code: "ORDINARY_UI_ROUTE_FAILED",
+      stage: "voice_start_button",
+    });
+    expect(JSON.stringify(detail)).not.toContain("raw product text");
+    expect(JSON.stringify(detail)).not.toContain("arbitrary-private-state");
   });
 
   it("normalizes U+0000 from harness error detail before jsonb persistence", () => {
