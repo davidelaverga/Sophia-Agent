@@ -8,7 +8,7 @@ import { chromium, type Browser } from "playwright";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { buildVoiceLabInitScript } from "../src/browser-init.js";
-import { activateDashboardMicButton, classifySessionVoiceRoute, establishSessionNavigation, establishSessionVoiceStart, establishSessionVoiceTab, PAUSING_CLIENT_DIAGNOSTICS_ENABLED, PlaywrightVoiceDriver, resolveDashboardMicButton, settleDiagnosticWithinBudget, settlePausedDiagnosticAndResume } from "../src/browser-driver.js";
+import { activateDashboardMicButton, classifySessionVoiceRoute, DIRECT_CDP_CLIENT_DIAGNOSTICS_ENABLED, establishSessionNavigation, establishSessionVoiceStart, establishSessionVoiceTab, PAUSING_CLIENT_DIAGNOSTICS_ENABLED, PlaywrightVoiceDriver, resolveDashboardMicButton, settleDiagnosticWithinBudget, settlePausedDiagnosticAndResume } from "../src/browser-driver.js";
 
 function sineWav(durationMs = 600, sampleRate = 16_000): Buffer {
   const samples = Math.floor(sampleRate * durationMs / 1_000);
@@ -35,6 +35,7 @@ describe("real Chromium dynamic media contract", () => {
   });
 
   it("keeps pause-capable debugger diagnostics out of production startup", () => {
+    expect(DIRECT_CDP_CLIENT_DIAGNOSTICS_ENABLED).toBe(false);
     expect(PAUSING_CLIENT_DIAGNOSTICS_ENABLED).toBe(false);
   });
 

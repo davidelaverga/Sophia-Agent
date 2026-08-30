@@ -51,10 +51,12 @@ export const SYNTHETIC_FINALIZATION_EXCLUSION_KEYS = [
 export const RECOVERABLE_DASHBOARD_LOAD_ERROR = /^This page couldn['’]t load\.?$/;
 export const RECOVERABLE_DASHBOARD_RELOAD_BUTTON = "Reload";
 
-/** Production startup diagnostics must never suspend the ordinary product
- * page. Runtime/page/console observations remain enabled below; the Debugger
- * domain is retained only as an offline-tested diagnostic implementation
- * until it can prove command-queue independence from the page it observes. */
+/** Production startup diagnostics must never share a direct CDP command queue
+ * with the ordinary product page. Playwright's pageerror/console observations
+ * remain enabled below; direct Runtime/Debugger observations are retained only
+ * as an offline-tested diagnostic implementation until they can prove command-
+ * queue independence from the page they observe. */
+export const DIRECT_CDP_CLIENT_DIAGNOSTICS_ENABLED = false;
 export const PAUSING_CLIENT_DIAGNOSTICS_ENABLED = false;
 
 type ClientPageErrorDiagnostic = {
@@ -1086,8 +1088,9 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
         const frame = classifyClientConsoleErrorLocation(message.location(), frontendOrigin);
         if (frame) latestClientConsoleFrames = [frame];
       });
-      try {
-        const cdp = await context.newCDPSession(page);
+      if (DIRECT_CDP_CLIENT_DIAGNOSTICS_ENABLED) {
+        try {
+          const cdp = await context.newCDPSession(page);
         await cdp.send("Runtime.enable");
         cdp.on("Runtime.exceptionThrown", (event) => {
           const frames = classifyClientCdpExceptionFrames(event.exceptionDetails, frontendOrigin);
@@ -1375,8 +1378,9 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
           });
         });
         }
-      } catch {
-        // Diagnostic enrichment is fail-open and must not alter product flow.
+        } catch {
+          // Diagnostic enrichment is fail-open and must not alter product flow.
+        }
       }
       const reloadExactSessionRouteOnce = async (stage: string): Promise<void> => {
         ordinaryRouteStage = stage;
