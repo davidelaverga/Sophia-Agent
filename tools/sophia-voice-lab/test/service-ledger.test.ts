@@ -53,6 +53,14 @@ describe("service and durable memory-ledger contracts", () => {
         voice_fallback_visible: true,
         unsafe_route_text: "must-not-be-projected",
       },
+      client_page_error: {
+        error_class: "TypeError",
+        safe_signature: "undefined_property:destroy",
+        next_chunk: "app-session-123.js",
+        next_frames: [{ chunk: "app-session-123.js", line: 42, column: 7, unsafe_frame_text: "must-not-be-projected" }],
+        digest: "safe_digest_123",
+        unsafe_page_text: "must-not-be-projected",
+      },
       unsafe_text: "must-not-be-projected",
     }));
 
@@ -81,6 +89,13 @@ describe("service and durable memory-ledger contracts", () => {
             auth_gate_visible: false,
             voice_fallback_visible: true,
           },
+          client_page_error: {
+            error_class: "TypeError",
+            safe_signature: "undefined_property:destroy",
+            next_chunk: "app-session-123.js",
+            next_frames: [{ chunk: "app-session-123.js", line: 42, column: 7 }],
+            digest: "safe_digest_123",
+          },
         },
       },
     });
@@ -92,6 +107,7 @@ describe("service and durable memory-ledger contracts", () => {
     const interrupted = new VoiceLabError(labError("ORDINARY_UI_ROUTE_FAILED", "route", "harness", false, {
       stage: "voice_start_button",
       cause: { error_class: "TimeoutError", safe_signature: "raw product text", character_length: 10 },
+      client_page_error: { error_class: "TypeError", safe_signature: "https://private.invalid/path", next_chunk: null, next_frames: [], digest: null },
       route_state: {
         location: "expected_session",
         voice_tab: "selected",

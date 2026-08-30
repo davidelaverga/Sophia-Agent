@@ -2466,6 +2466,32 @@ function interruptedCauseDiagnostic(value: unknown): Record<string, unknown> | n
   };
 }
 
+function interruptedClientPageErrorDiagnostic(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  if (typeof record.error_class !== "string" || !/^[A-Za-z][A-Za-z0-9_.-]{0,79}$/.test(record.error_class)
+    || typeof record.safe_signature !== "string" || !/^[A-Za-z0-9_.:-]{1,180}$/.test(record.safe_signature)
+    || !(record.next_chunk === null || (typeof record.next_chunk === "string" && /^[A-Za-z0-9._-]{1,160}\.js$/.test(record.next_chunk)))
+    || !(record.digest === null || (typeof record.digest === "string" && /^[A-Za-z0-9_-]{6,128}$/.test(record.digest)))
+    || !Array.isArray(record.next_frames) || record.next_frames.length > 5) return null;
+  const nextFrames: Array<{ chunk: string; line: number; column: number }> = [];
+  for (const frame of record.next_frames) {
+    if (!frame || typeof frame !== "object" || Array.isArray(frame)) return null;
+    const candidate = frame as Record<string, unknown>;
+    if (typeof candidate.chunk !== "string" || !/^[A-Za-z0-9._-]{1,160}\.js$/.test(candidate.chunk)
+      || !Number.isSafeInteger(candidate.line) || Number(candidate.line) < 0 || Number(candidate.line) > 99_999_999
+      || !Number.isSafeInteger(candidate.column) || Number(candidate.column) < 0 || Number(candidate.column) > 99_999_999) return null;
+    nextFrames.push({ chunk: candidate.chunk, line: Number(candidate.line), column: Number(candidate.column) });
+  }
+  return {
+    error_class: record.error_class,
+    safe_signature: record.safe_signature,
+    next_chunk: record.next_chunk,
+    next_frames: nextFrames,
+    digest: record.digest,
+  };
+}
+
 /** Preserve only fixed, sanitized route diagnostics when the global operation
  * deadline closes Playwright before its own typed error can settle. */
 export function augmentOperationTimeoutWithInterruptedDriverError(reason: unknown, interrupted: unknown): unknown {
@@ -2475,6 +2501,7 @@ export function augmentOperationTimeoutWithInterruptedDriverError(reason: unknow
   const stage = typeof rawStage === "string" && /^[a-z][a-z0-9_]{0,79}$/.test(rawStage) ? rawStage : "unavailable";
   const cause = interruptedCauseDiagnostic(interrupted.detail.details?.cause);
   const routeState = interruptedRouteDiagnostic(interrupted.detail.details?.route_state);
+  const clientPageError = interruptedClientPageErrorDiagnostic(interrupted.detail.details?.client_page_error);
   return new VoiceLabError(labError(
     reason.detail.code,
     reason.detail.message,
@@ -2487,6 +2514,7 @@ export function augmentOperationTimeoutWithInterruptedDriverError(reason: unknow
         stage,
         ...(cause === null ? {} : { cause }),
         ...(routeState === null ? {} : { route_state: routeState }),
+        ...(clientPageError === null ? {} : { client_page_error: clientPageError }),
       },
     },
   ));
