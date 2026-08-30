@@ -970,7 +970,10 @@ export function AuthGate({
 
   if (authState === "checking") {
     return (
-      <div className="midnightAtelierLoading">
+      <div
+        className="midnightAtelierLoading"
+        data-voice-lab-route-state="auth-checking"
+      >
         <div className="midnightAtelierSpinner" />
         <p>{t("auth.loading")}</p>
         <style jsx>{`

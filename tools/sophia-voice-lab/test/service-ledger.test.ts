@@ -51,6 +51,8 @@ describe("service and durable memory-ledger contracts", () => {
         dashboard_mic_button: "absent",
         consent_visible: false,
         auth_gate_visible: false,
+        auth_checking_visible: true,
+        session_store_loading_visible: false,
         voice_fallback_visible: true,
         unsafe_route_text: "must-not-be-projected",
       },
@@ -89,6 +91,8 @@ describe("service and durable memory-ledger contracts", () => {
             dashboard_mic_button: "absent",
             consent_visible: false,
             auth_gate_visible: false,
+            auth_checking_visible: true,
+            session_store_loading_visible: false,
             voice_fallback_visible: true,
           },
           client_page_error: {
@@ -118,6 +122,8 @@ describe("service and durable memory-ledger contracts", () => {
         dashboard_mic_button: "arbitrary-private-state",
         consent_visible: false,
         auth_gate_visible: false,
+        auth_checking_visible: false,
+        session_store_loading_visible: true,
         voice_fallback_visible: false,
       },
     }));

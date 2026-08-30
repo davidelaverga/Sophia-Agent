@@ -301,6 +301,8 @@ describe("real Chromium dynamic media contract", () => {
       dashboard_mic_button: "absent",
       consent_visible: false,
       auth_gate_visible: false,
+      auth_checking_visible: false,
+      session_store_loading_visible: false,
       voice_fallback_visible: false,
     });
     await context.close();
@@ -320,6 +322,8 @@ describe("real Chromium dynamic media contract", () => {
     expect(diagnostic.location).toBe("dashboard");
     expect(diagnostic.dashboard_mic_visible).toBe(true);
     expect(diagnostic.dashboard_mic_button).toBe("available");
+    expect(diagnostic.auth_checking_visible).toBe(false);
+    expect(diagnostic.session_store_loading_visible).toBe(false);
     expect(JSON.stringify(diagnostic)).not.toContain("do-not-project");
     await context.close();
   });

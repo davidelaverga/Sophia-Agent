@@ -333,6 +333,8 @@ export type SessionVoiceRouteDiagnostic = {
   dashboard_mic_button: "absent" | "hidden" | "disabled" | "available";
   consent_visible: boolean;
   auth_gate_visible: boolean;
+  auth_checking_visible: boolean;
+  session_store_loading_visible: boolean;
   voice_fallback_visible: boolean;
 };
 
@@ -420,6 +422,8 @@ export async function classifySessionVoiceRoute(
     dashboard_mic_button,
     consent_visible: await page.locator(CONSENT_ACCEPT_SELECTOR).first().isVisible().catch(() => false),
     auth_gate_visible: await page.getByRole("button", { name: "Continue with Google", exact: true }).first().isVisible().catch(() => false),
+    auth_checking_visible: await page.locator('[data-voice-lab-route-state="auth-checking"]').first().isVisible().catch(() => false),
+    session_store_loading_visible: await page.locator('[data-voice-lab-route-state="session-store-loading"]').first().isVisible().catch(() => false),
     voice_fallback_visible: await page.getByText("Voice input unavailable", { exact: true }).first().isVisible().catch(() => false),
   };
 }

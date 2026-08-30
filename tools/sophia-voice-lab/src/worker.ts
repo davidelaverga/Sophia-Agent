@@ -2443,6 +2443,8 @@ function interruptedRouteDiagnostic(value: unknown): Record<string, unknown> | n
     || typeof record.dashboard_mic_button !== "string" || !INTERRUPTED_ROUTE_DASHBOARD_MIC_BUTTONS.has(record.dashboard_mic_button)
     || typeof record.consent_visible !== "boolean"
     || typeof record.auth_gate_visible !== "boolean"
+    || typeof record.auth_checking_visible !== "boolean"
+    || typeof record.session_store_loading_visible !== "boolean"
     || typeof record.voice_fallback_visible !== "boolean") return null;
   return {
     location: record.location,
@@ -2452,6 +2454,8 @@ function interruptedRouteDiagnostic(value: unknown): Record<string, unknown> | n
     dashboard_mic_button: record.dashboard_mic_button,
     consent_visible: record.consent_visible,
     auth_gate_visible: record.auth_gate_visible,
+    auth_checking_visible: record.auth_checking_visible,
+    session_store_loading_visible: record.session_store_loading_visible,
     voice_fallback_visible: record.voice_fallback_visible,
   };
 }

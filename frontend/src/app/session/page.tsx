@@ -2583,7 +2583,10 @@ function SessionPageContent() {
   // Loading state — the breathing nebula IS the loading indicator (R41)
   if (shouldShowLoading) {
     return (
-      <div className="h-screen bg-[var(--bg)]">
+      <div
+        className="h-screen bg-[var(--bg)]"
+        data-voice-lab-route-state="session-store-loading"
+      >
         <PresenceField />
       </div>
     );
