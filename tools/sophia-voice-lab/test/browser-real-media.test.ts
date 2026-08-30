@@ -8,7 +8,7 @@ import { chromium, type Browser } from "playwright";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { buildVoiceLabInitScript } from "../src/browser-init.js";
-import { activateDashboardMicButton, classifySessionVoiceRoute, establishSessionNavigation, establishSessionVoiceStart, establishSessionVoiceTab, PlaywrightVoiceDriver, resolveDashboardMicButton, settleDiagnosticWithinBudget, settlePausedDiagnosticAndResume } from "../src/browser-driver.js";
+import { activateDashboardMicButton, classifySessionVoiceRoute, establishSessionNavigation, establishSessionVoiceStart, establishSessionVoiceTab, PAUSING_CLIENT_DIAGNOSTICS_ENABLED, PlaywrightVoiceDriver, resolveDashboardMicButton, settleDiagnosticWithinBudget, settlePausedDiagnosticAndResume } from "../src/browser-driver.js";
 
 function sineWav(durationMs = 600, sampleRate = 16_000): Buffer {
   const samples = Math.floor(sampleRate * durationMs / 1_000);
@@ -32,6 +32,10 @@ describe("real Chromium dynamic media contract", () => {
     const slowDiagnostic = new Promise<string>((resolve) => setTimeout(() => resolve("late"), 50));
     await expect(settleDiagnosticWithinBudget(slowDiagnostic, "fallback", 5)).resolves.toBe("fallback");
     await expect(settleDiagnosticWithinBudget(Promise.resolve("ready"), "fallback", 50)).resolves.toBe("ready");
+  });
+
+  it("keeps pause-capable debugger diagnostics out of production startup", () => {
+    expect(PAUSING_CLIENT_DIAGNOSTICS_ENABLED).toBe(false);
   });
 
   it("resumes a CDP-paused page when diagnostic evaluation never settles", async () => {

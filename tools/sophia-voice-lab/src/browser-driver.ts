@@ -51,6 +51,12 @@ export const SYNTHETIC_FINALIZATION_EXCLUSION_KEYS = [
 export const RECOVERABLE_DASHBOARD_LOAD_ERROR = /^This page couldn['’]t load\.?$/;
 export const RECOVERABLE_DASHBOARD_RELOAD_BUTTON = "Reload";
 
+/** Production startup diagnostics must never suspend the ordinary product
+ * page. Runtime/page/console observations remain enabled below; the Debugger
+ * domain is retained only as an offline-tested diagnostic implementation
+ * until it can prove command-queue independence from the page it observes. */
+export const PAUSING_CLIENT_DIAGNOSTICS_ENABLED = false;
+
 type ClientPageErrorDiagnostic = {
   error_class: string;
   safe_signature: string;
@@ -1082,6 +1088,12 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       });
       try {
         const cdp = await context.newCDPSession(page);
+        await cdp.send("Runtime.enable");
+        cdp.on("Runtime.exceptionThrown", (event) => {
+          const frames = classifyClientCdpExceptionFrames(event.exceptionDetails, frontendOrigin);
+          if (frames.length > 0) latestClientConsoleFrames = frames;
+        });
+        if (PAUSING_CLIENT_DIAGNOSTICS_ENABLED) {
         const scriptUrls = new Map<string, string>();
         const passiveEffectBreakpoints = new Map<string, PassiveEffectBreakpoint>();
         const passiveEffectScriptInspections = new Map<string, Promise<boolean>>();
@@ -1125,11 +1137,6 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
           // Always inspect dynamically parsed chunks. A server-rendered document
           // may preload one React runtime while navigation executes another.
           void installPassiveEffectBreakpoint(event.scriptId, event.url);
-        });
-        await cdp.send("Runtime.enable");
-        cdp.on("Runtime.exceptionThrown", (event) => {
-          const frames = classifyClientCdpExceptionFrames(event.exceptionDetails, frontendOrigin);
-          if (frames.length > 0 && latestClientPausedFrames.length === 0) latestClientConsoleFrames = frames;
         });
         await cdp.send("Debugger.enable");
         for (const preloadedPassiveEffectBreakpoint of preloadedPassiveEffectBreakpoints) {
@@ -1367,6 +1374,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
             }
           });
         });
+        }
       } catch {
         // Diagnostic enrichment is fail-open and must not alter product flow.
       }
