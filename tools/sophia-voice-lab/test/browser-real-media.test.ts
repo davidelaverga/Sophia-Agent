@@ -8,7 +8,7 @@ import { chromium, type Browser } from "playwright";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { buildVoiceLabInitScript } from "../src/browser-init.js";
-import { activateDashboardMicButton, classifySessionVoiceRoute, establishSessionNavigation, establishSessionVoiceStart, establishSessionVoiceTab, PlaywrightVoiceDriver, resolveDashboardMicButton, settleDiagnosticWithinBudget } from "../src/browser-driver.js";
+import { activateDashboardMicButton, classifySessionVoiceRoute, establishSessionNavigation, establishSessionVoiceStart, establishSessionVoiceTab, PlaywrightVoiceDriver, resolveDashboardMicButton, settleDiagnosticWithinBudget, settlePausedDiagnosticAndResume } from "../src/browser-driver.js";
 
 function sineWav(durationMs = 600, sampleRate = 16_000): Buffer {
   const samples = Math.floor(sampleRate * durationMs / 1_000);
@@ -32,6 +32,18 @@ describe("real Chromium dynamic media contract", () => {
     const slowDiagnostic = new Promise<string>((resolve) => setTimeout(() => resolve("late"), 50));
     await expect(settleDiagnosticWithinBudget(slowDiagnostic, "fallback", 5)).resolves.toBe("fallback");
     await expect(settleDiagnosticWithinBudget(Promise.resolve("ready"), "fallback", 50)).resolves.toBe("ready");
+  });
+
+  it("resumes a CDP-paused page when diagnostic evaluation never settles", async () => {
+    let resumeCalls = 0;
+    const neverSettles = new Promise<void>(() => undefined);
+    const settled = await settlePausedDiagnosticAndResume(
+      neverSettles,
+      async () => { resumeCalls += 1; },
+      5,
+    );
+    expect(settled).toBe(false);
+    expect(resumeCalls).toBe(1);
   });
 
   beforeAll(async () => {
@@ -67,6 +79,32 @@ describe("real Chromium dynamic media contract", () => {
     if (!executablePath) throw new Error(`Pinned Chromium executable is unavailable (expected ${preferred}).`);
     browser = await chromium.launch({ executablePath, headless: true, args: ["--autoplay-policy=no-user-gesture-required"] });
   }, 30_000);
+
+  it("releases a real Chromium debugger pause when enrichment never settles", async () => {
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    await page.goto(origin);
+    const cdp = await context.newCDPSession(page);
+    await cdp.send("Debugger.enable");
+    let resumeCalls = 0;
+    cdp.on("Debugger.paused", () => {
+      void settlePausedDiagnosticAndResume(
+        new Promise<void>(() => undefined),
+        async () => {
+          resumeCalls += 1;
+          await cdp.send("Debugger.resume");
+        },
+        25,
+      );
+    });
+    const execution = page.evaluate(() => {
+      debugger;
+      return "resumed";
+    });
+    await expect(execution).resolves.toBe("resumed");
+    expect(resumeCalls).toBe(1);
+    await context.close();
+  });
 
   afterAll(async () => {
     await browser?.close();

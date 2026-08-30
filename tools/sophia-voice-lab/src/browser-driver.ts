@@ -285,6 +285,33 @@ export async function settleDiagnosticWithinBudget<T>(work: Promise<T>, fallback
   }
 }
 
+/** A CDP pause is part of the product execution path even when the inspection
+ * is diagnostic-only. Bound the inspection on the worker clock and dispatch
+ * resume unconditionally so a missing CDP response cannot freeze the page (or
+ * the Playwright deadlines observing it). The boolean reports whether the
+ * diagnostic settled before the fail-open fence. */
+export async function settlePausedDiagnosticAndResume(
+  work: Promise<unknown>,
+  resume: () => Promise<unknown>,
+  timeoutMs: number,
+): Promise<boolean> {
+  const settled = await settleDiagnosticWithinBudget(
+    work.then(() => true, () => true),
+    false,
+    timeoutMs,
+  );
+  // Calling resume dispatches the CDP command synchronously. Do not await its
+  // acknowledgement: the page must be allowed to run even if the protocol
+  // reply itself is the command that has become wedged.
+  try {
+    void resume().catch(() => undefined);
+  } catch {
+    // A synchronously closed CDP session is already incapable of holding the
+    // page paused; keep the diagnostic path fail-open.
+  }
+  return settled;
+}
+
 export function classifyBrowserStartCause(error: unknown): {
   error_class: string;
   safe_signature: string;
@@ -1096,10 +1123,10 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
           if (hitBreakpoints.some((breakpointId) => passiveEffectBreakpoints.has(breakpointId))) bumpEffectProbeStatus("breakpoint_pauses");
           if (event.reason === "exception") bumpEffectProbeStatus("exception_pauses");
           const frames = classifyClientCdpPausedFrames(event, frontendOrigin);
-          void (async () => {
+          const passiveBreakpointId = hitBreakpoints.find((breakpointId) => passiveEffectBreakpoints.has(breakpointId));
+          const passiveBinding = passiveBreakpointId ? passiveEffectBreakpoints.get(passiveBreakpointId) : undefined;
+          const diagnosticWork = (async () => {
             let effectProbe: ClientEffectProbe | undefined;
-            const passiveBreakpointId = hitBreakpoints.find((breakpointId) => passiveEffectBreakpoints.has(breakpointId));
-            const passiveBinding = passiveBreakpointId ? passiveEffectBreakpoints.get(passiveBreakpointId) : undefined;
             try {
               const callFrames = Array.isArray(event.callFrames) ? event.callFrames.slice(0, 12) : [];
               let effectFrame: (typeof callFrames)[number] | undefined;
@@ -1289,9 +1316,21 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
                 bumpEffectProbeStatus("snapshot_count");
                 if (recentClientPausedFrameSets.length > 20) recentClientPausedFrameSets.splice(0, recentClientPausedFrameSets.length - 20);
               }
-              await cdp.send("Debugger.resume").catch(() => undefined);
             }
           })();
+          void settlePausedDiagnosticAndResume(
+            diagnosticWork,
+            () => cdp.send("Debugger.resume"),
+            1_000,
+          ).then((settled) => {
+            if (settled || !passiveBreakpointId) return;
+            // A breakpoint whose own diagnostic timed out is not safe to keep
+            // armed: it could repeatedly pause hydration. Resume was already
+            // dispatched above; removing the local binding prevents another
+            // diagnostic from depending on the same wedged location.
+            passiveEffectBreakpoints.delete(passiveBreakpointId);
+            void cdp.send("Debugger.removeBreakpoint", { breakpointId: passiveBreakpointId }).catch(() => undefined);
+          });
         });
       } catch {
         // Diagnostic enrichment is fail-open and must not alter product flow.
