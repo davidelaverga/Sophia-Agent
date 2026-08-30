@@ -1123,7 +1123,8 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
           if (hitBreakpoints.some((breakpointId) => passiveEffectBreakpoints.has(breakpointId))) bumpEffectProbeStatus("breakpoint_pauses");
           if (event.reason === "exception") bumpEffectProbeStatus("exception_pauses");
           const frames = classifyClientCdpPausedFrames(event, frontendOrigin);
-          const passiveBreakpointId = hitBreakpoints.find((breakpointId) => passiveEffectBreakpoints.has(breakpointId));
+          const passiveBreakpointIds = hitBreakpoints.filter((breakpointId) => passiveEffectBreakpoints.has(breakpointId));
+          const passiveBreakpointId = passiveBreakpointIds[0];
           const passiveBinding = passiveBreakpointId ? passiveEffectBreakpoints.get(passiveBreakpointId) : undefined;
           const diagnosticWork = (async () => {
             let effectProbe: ClientEffectProbe | undefined;
@@ -1323,13 +1324,15 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
             () => cdp.send("Debugger.resume"),
             1_000,
           ).then((settled) => {
-            if (settled || !passiveBreakpointId) return;
-            // A breakpoint whose own diagnostic timed out is not safe to keep
-            // armed: it could repeatedly pause hydration. Resume was already
-            // dispatched above; removing the local binding prevents another
-            // diagnostic from depending on the same wedged location.
-            passiveEffectBreakpoints.delete(passiveBreakpointId);
-            void cdp.send("Debugger.removeBreakpoint", { breakpointId: passiveBreakpointId }).catch(() => undefined);
+            if (settled || passiveBreakpointIds.length === 0) return;
+            // Breakpoints whose shared pause diagnostic timed out are not safe
+            // to keep armed: preloaded and dynamically installed probes can
+            // both resolve to the same location and otherwise pause hydration
+            // again. Resume was already dispatched above.
+            for (const breakpointId of passiveBreakpointIds) {
+              passiveEffectBreakpoints.delete(breakpointId);
+              void cdp.send("Debugger.removeBreakpoint", { breakpointId }).catch(() => undefined);
+            }
           });
         });
       } catch {
