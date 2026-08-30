@@ -2029,6 +2029,38 @@ def _purge_expired_provisional_session(
                     ("status=404", "supabase_http_404"),
                     ("status=409", "supabase_http_409"),
                     ("status=500", "supabase_http_500"),
+                    (
+                        "raw recovery receipts remain after purge tombstone",
+                        "raw_recovery_receipts_remain",
+                    ),
+                    (
+                        "retention cleanup intent deletion was not verified",
+                        "cleanup_handle_delete_unverified",
+                    ),
+                    (
+                        "cleanup sources reappeared before completion",
+                        "cleanup_sources_reappeared",
+                    ),
+                    (
+                        "did not acknowledge the exact object",
+                        "delete_acknowledgement_mismatch",
+                    ),
+                    (
+                        "recovery purge tombstone contract drifted",
+                        "recovery_tombstone_contract_drift",
+                    ),
+                    (
+                        "recovery purge tombstone conflicts",
+                        "recovery_tombstone_count_conflict",
+                    ),
+                    (
+                        "retention cleanup intent finish binding drifted",
+                        "cleanup_handle_finish_binding_drift",
+                    ),
+                    (
+                        "retention cleanup intent drifted",
+                        "cleanup_handle_contract_drift",
+                    ),
                 )
                 if signature in message
             ),
