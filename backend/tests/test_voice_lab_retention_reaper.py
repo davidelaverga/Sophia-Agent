@@ -6,7 +6,7 @@ import inspect
 import threading
 import time
 import uuid
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock
@@ -511,6 +511,83 @@ class _ArtifactRegistry:
 
     def synthetic_cleanup_obligation_records(self, *, cleanup_obligation_id: str):
         return []
+
+
+def test_provisional_retention_reuses_existing_recovery_tombstone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.gateway.routers import sessions
+    from deerflow.sophia import cleanup_fence
+    from deerflow.sophia.storage import supabase_artifact_store
+
+    now = datetime(2026, 8, 23, 12, 0, tzinfo=UTC)
+    record = _session(now, run_id="existing-recovery-tombstone")
+    obligation = retention_worker._obligation_from_session(record)
+    claims = obligation.claims(now=now)
+    events: list[str] = []
+
+    class _PurgeStore:
+        def purge_synthetic_session(self, *_args, **_kwargs):
+            events.append("session_purged")
+            return True
+
+        def find_session_by_run_id(self, *_args, **_kwargs):
+            return None
+
+    monkeypatch.setattr(sessions, "_store", _PurgeStore())
+    monkeypatch.setattr(
+        "app.gateway.inactivity_watcher.unregister_thread",
+        lambda _thread_id: events.append("thread_unregistered"),
+    )
+    monkeypatch.setattr(
+        supabase_artifact_store,
+        "is_configured",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        cleanup_fence,
+        "cleanup_retention_expired",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        voice_lab_recovery,
+        "_durable_evidence_required",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        voice_lab_recovery,
+        "_ensure_retention_cleanup_handle",
+        lambda *_args, **_kwargs: "retention-cleanup-intent.json",
+    )
+    monkeypatch.setattr(
+        voice_lab_recovery,
+        "_prepare_recovery_receipt_purge",
+        lambda _claims: {"already_purged": True, "target_count": 0},
+    )
+    monkeypatch.setattr(
+        voice_lab_recovery,
+        "_recovery_receipt_fence_lock",
+        lambda _stable_id: nullcontext(),
+    )
+    monkeypatch.setattr(
+        voice_lab_recovery,
+        "_finish_retention_cleanup_intent",
+        lambda *_args, **_kwargs: {"status": "completed"},
+    )
+
+    result = retention_worker._purge_expired_provisional_session(
+        claims,
+        record,
+        now,
+        database_due=True,
+    )
+
+    assert result == {
+        "status": "completed",
+        "canonical_evidence_purged": True,
+        "retention_purge_pending": False,
+    }
+    assert events == ["session_purged", "thread_unregistered"]
 
 
 @asynccontextmanager

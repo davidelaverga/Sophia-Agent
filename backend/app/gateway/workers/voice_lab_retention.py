@@ -1977,9 +1977,14 @@ def _purge_expired_provisional_session(
                 thread_id=record.thread_id,
             )
             with recovery._recovery_receipt_fence_lock(recovery._recovery_id(claims)):
-                prepared = recovery._prepare_recovery_receipt_purge(claims)
-            if prepared.get("already_purged") is True:
-                return {"status": "failed", "code": "provisional_purge_state_conflict"}
+                recovery._prepare_recovery_receipt_purge(claims)
+            # A prior cleanup attempt can have durably tombstoned recovery
+            # receipts before the provisional session reached its immutable
+            # retention deadline.  Loading that tombstone already proves the
+            # raw recovery prefix is empty, so this is a restart checkpoint,
+            # not a binding conflict.  Continue with the database-fenced
+            # session purge; _finish_retention_cleanup_intent will reuse the
+            # same tombstone while proving global product/auth zero.
         _store.purge_synthetic_session(
             claims.principal_id,
             record.session_id,
