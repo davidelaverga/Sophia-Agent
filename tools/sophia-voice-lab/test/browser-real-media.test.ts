@@ -298,10 +298,29 @@ describe("real Chromium dynamic media contract", () => {
       voice_tab: "available",
       voice_button: "absent",
       dashboard_mic_visible: false,
+      dashboard_mic_button: "absent",
       consent_visible: false,
       auth_gate_visible: false,
       voice_fallback_visible: false,
     });
+    await context.close();
+  });
+
+  it("projects the ordinary dashboard microphone button state without exposing its label", async () => {
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    await page.goto(origin);
+    await page.setContent(`
+      <div>
+        <span data-onboarding="mic-cta" aria-hidden="true" style="display:block;width:88px;height:88px"></span>
+        <button type="button" aria-label="Start open session" data-private="do-not-project"></button>
+      </div>
+    `);
+    const diagnostic = await classifySessionVoiceRoute(page, origin, "Tap to speak");
+    expect(diagnostic.location).toBe("dashboard");
+    expect(diagnostic.dashboard_mic_visible).toBe(true);
+    expect(diagnostic.dashboard_mic_button).toBe("available");
+    expect(JSON.stringify(diagnostic)).not.toContain("do-not-project");
     await context.close();
   });
 

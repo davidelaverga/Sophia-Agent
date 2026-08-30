@@ -330,13 +330,17 @@ export type SessionVoiceRouteDiagnostic = {
   voice_tab: "absent" | "hidden" | "disabled" | "selected" | "available";
   voice_button: "absent" | "hidden" | "disabled" | "ready" | "active_listening" | "active_thinking" | "active_speaking" | "active_ptt";
   dashboard_mic_visible: boolean;
+  dashboard_mic_button: "absent" | "hidden" | "disabled" | "available";
   consent_visible: boolean;
   auth_gate_visible: boolean;
   voice_fallback_visible: boolean;
 };
 
 export function shouldCaptureSessionVoiceRoute(stage: string): boolean {
-  return stage === "voice_tab_selection" || stage.startsWith("voice_start");
+  return stage === "dashboard_privacy_consent"
+    || stage === "dashboard_microphone_cta"
+    || stage === "voice_tab_selection"
+    || stage.startsWith("voice_start");
 }
 
 /** Project only fixed, product-authored UI states. Never serialize arbitrary
@@ -394,11 +398,26 @@ export async function classifySessionVoiceRoute(
     break;
   }
 
+  const micAnchor = page.locator('[data-onboarding="mic-cta"]').first();
+  const structuralMicButton = micAnchor.locator("xpath=../button[1]");
+  const semanticMicButton = page.getByRole("button", { name: /^Start (?:open session|prepare|debrief|reset|vent)$/i }).first();
+  const micButton = await structuralMicButton.count().catch(() => 0) > 0 ? structuralMicButton : semanticMicButton;
+  const micButtonCount = await micButton.count().catch(() => 0);
+  const micButtonVisible = micButtonCount > 0 && await micButton.isVisible().catch(() => false);
+  const dashboard_mic_button: SessionVoiceRouteDiagnostic["dashboard_mic_button"] = micButtonCount === 0
+    ? "absent"
+    : !micButtonVisible
+      ? "hidden"
+      : !await micButton.isEnabled().catch(() => false)
+        ? "disabled"
+        : "available";
+
   return {
     location,
     voice_tab,
     voice_button,
-    dashboard_mic_visible: await page.locator('[data-onboarding="mic-cta"]').first().isVisible().catch(() => false),
+    dashboard_mic_visible: await micAnchor.isVisible().catch(() => false),
+    dashboard_mic_button,
     consent_visible: await page.locator(CONSENT_ACCEPT_SELECTOR).first().isVisible().catch(() => false),
     auth_gate_visible: await page.getByRole("button", { name: "Continue with Google", exact: true }).first().isVisible().catch(() => false),
     voice_fallback_visible: await page.getByText("Voice input unavailable", { exact: true }).first().isVisible().catch(() => false),

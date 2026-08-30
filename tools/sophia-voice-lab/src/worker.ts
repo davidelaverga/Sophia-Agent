@@ -2431,6 +2431,7 @@ function errorDetail(error: unknown): LabError {
 const INTERRUPTED_ROUTE_LOCATIONS = new Set(["expected_session", "dashboard", "same_origin_other", "cross_origin", "invalid"]);
 const INTERRUPTED_ROUTE_VOICE_TABS = new Set(["absent", "hidden", "disabled", "selected", "available"]);
 const INTERRUPTED_ROUTE_VOICE_BUTTONS = new Set(["absent", "hidden", "disabled", "ready", "active_listening", "active_thinking", "active_speaking", "active_ptt"]);
+const INTERRUPTED_ROUTE_DASHBOARD_MIC_BUTTONS = new Set(["absent", "hidden", "disabled", "available"]);
 
 function interruptedRouteDiagnostic(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
@@ -2439,6 +2440,7 @@ function interruptedRouteDiagnostic(value: unknown): Record<string, unknown> | n
     || typeof record.voice_tab !== "string" || !INTERRUPTED_ROUTE_VOICE_TABS.has(record.voice_tab)
     || typeof record.voice_button !== "string" || !INTERRUPTED_ROUTE_VOICE_BUTTONS.has(record.voice_button)
     || typeof record.dashboard_mic_visible !== "boolean"
+    || typeof record.dashboard_mic_button !== "string" || !INTERRUPTED_ROUTE_DASHBOARD_MIC_BUTTONS.has(record.dashboard_mic_button)
     || typeof record.consent_visible !== "boolean"
     || typeof record.auth_gate_visible !== "boolean"
     || typeof record.voice_fallback_visible !== "boolean") return null;
@@ -2447,6 +2449,7 @@ function interruptedRouteDiagnostic(value: unknown): Record<string, unknown> | n
     voice_tab: record.voice_tab,
     voice_button: record.voice_button,
     dashboard_mic_visible: record.dashboard_mic_visible,
+    dashboard_mic_button: record.dashboard_mic_button,
     consent_visible: record.consent_visible,
     auth_gate_visible: record.auth_gate_visible,
     voice_fallback_visible: record.voice_fallback_visible,

@@ -28,8 +28,9 @@ describe("ordinary session navigation settlement", () => {
     expect(shouldCaptureSessionVoiceRoute("voice_tab_selection")).toBe(true);
     expect(shouldCaptureSessionVoiceRoute("voice_start_button")).toBe(true);
     expect(shouldCaptureSessionVoiceRoute("voice_startup_readiness")).toBe(true);
+    expect(shouldCaptureSessionVoiceRoute("dashboard_privacy_consent")).toBe(true);
+    expect(shouldCaptureSessionVoiceRoute("dashboard_microphone_cta")).toBe(true);
     expect(shouldCaptureSessionVoiceRoute("session_navigation")).toBe(false);
-    expect(shouldCaptureSessionVoiceRoute("dashboard_microphone_cta")).toBe(false);
   });
 
   it("accepts an exact session route that commits at the polling deadline", async () => {
