@@ -291,25 +291,30 @@ export async function settleDiagnosticWithinBudget<T>(work: Promise<T>, fallback
  * the Playwright deadlines observing it). The boolean reports whether the
  * diagnostic settled before the fail-open fence. */
 export async function settlePausedDiagnosticAndResume(
-  work: Promise<unknown>,
+  work: () => Promise<unknown>,
   resume: () => Promise<unknown>,
   timeoutMs: number,
 ): Promise<boolean> {
-  const settled = await settleDiagnosticWithinBudget(
-    work.then(() => true, () => true),
-    false,
-    timeoutMs,
-  );
-  // Calling resume dispatches the CDP command synchronously. Do not await its
-  // acknowledgement: the page must be allowed to run even if the protocol
-  // reply itself is the command that has become wedged.
+  // Dispatch resume before diagnostic work can enqueue any CDP evaluation.
+  // Otherwise a missing evaluateOnCallFrame response can occupy the protocol
+  // queue and keep the later resume command from ever reaching Chromium.
   try {
     void resume().catch(() => undefined);
   } catch {
     // A synchronously closed CDP session is already incapable of holding the
     // page paused; keep the diagnostic path fail-open.
   }
-  return settled;
+  let diagnostic: Promise<unknown>;
+  try {
+    diagnostic = work();
+  } catch {
+    return true;
+  }
+  return settleDiagnosticWithinBudget(
+    diagnostic.then(() => true, () => true),
+    false,
+    timeoutMs,
+  );
 }
 
 export function classifyBrowserStartCause(error: unknown): {
@@ -1153,7 +1158,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
           const passiveBreakpointIds = hitBreakpoints.filter((breakpointId) => passiveEffectBreakpoints.has(breakpointId));
           const passiveBreakpointId = passiveBreakpointIds[0];
           const passiveBinding = passiveBreakpointId ? passiveEffectBreakpoints.get(passiveBreakpointId) : undefined;
-          const diagnosticWork = (async () => {
+          const diagnosticWork = async () => {
             let effectProbe: ClientEffectProbe | undefined;
             try {
               const callFrames = Array.isArray(event.callFrames) ? event.callFrames.slice(0, 12) : [];
@@ -1345,7 +1350,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
                 if (recentClientPausedFrameSets.length > 20) recentClientPausedFrameSets.splice(0, recentClientPausedFrameSets.length - 20);
               }
             }
-          })();
+          };
           void settlePausedDiagnosticAndResume(
             diagnosticWork,
             () => cdp.send("Debugger.resume"),

@@ -36,14 +36,22 @@ describe("real Chromium dynamic media contract", () => {
 
   it("resumes a CDP-paused page when diagnostic evaluation never settles", async () => {
     let resumeCalls = 0;
+    const order: string[] = [];
     const neverSettles = new Promise<void>(() => undefined);
     const settled = await settlePausedDiagnosticAndResume(
-      neverSettles,
-      async () => { resumeCalls += 1; },
+      () => {
+        order.push("diagnostic");
+        return neverSettles;
+      },
+      async () => {
+        resumeCalls += 1;
+        order.push("resume");
+      },
       5,
     );
     expect(settled).toBe(false);
     expect(resumeCalls).toBe(1);
+    expect(order).toEqual(["resume", "diagnostic"]);
   });
 
   beforeAll(async () => {
@@ -80,16 +88,20 @@ describe("real Chromium dynamic media contract", () => {
     browser = await chromium.launch({ executablePath, headless: true, args: ["--autoplay-policy=no-user-gesture-required"] });
   }, 30_000);
 
-  it("releases a real Chromium debugger pause when enrichment never settles", async () => {
+  it("releases a real Chromium debugger pause before enrichment starts", async () => {
     const context = await browser.newContext();
     const page = await context.newPage();
     await page.goto(origin);
     const cdp = await context.newCDPSession(page);
     await cdp.send("Debugger.enable");
     let resumeCalls = 0;
+    let enrichmentObservedResumedPage = false;
     cdp.on("Debugger.paused", () => {
       void settlePausedDiagnosticAndResume(
-        new Promise<void>(() => undefined),
+        async () => {
+          enrichmentObservedResumedPage = await page.evaluate(() => true);
+          return new Promise<void>(() => undefined);
+        },
         async () => {
           resumeCalls += 1;
           await cdp.send("Debugger.resume");
@@ -103,6 +115,7 @@ describe("real Chromium dynamic media contract", () => {
     });
     await expect(execution).resolves.toBe("resumed");
     expect(resumeCalls).toBe(1);
+    await expect.poll(() => enrichmentObservedResumedPage).toBe(true);
     await context.close();
   });
 
