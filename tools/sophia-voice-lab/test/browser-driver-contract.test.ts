@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { activateVoiceStartWithClientErrorReload, assertPageLocation, classifyBrowserStartCause, classifyClientCdpExceptionFrames, classifyClientCdpPausedFrames, classifyClientConsoleErrorLocation, classifyClientPageError, closeContextWithProof, DASHBOARD_ROUTE_TIMEOUT_MS, drainProductCapture, establishDashboardMicRoute, establishSessionNavigation, extractNextChunkScriptUrls, findPassiveEffectCreateBreakpoint, findPassiveEffectCreateCatchBreakpoint, findPassiveEffectDestroyBreakpoint, isExactFinalizationResponse, passiveEffectBreakpointCondition, PlaywrightVoiceDriver, RECOVERABLE_DASHBOARD_LOAD_ERROR, RECOVERABLE_DASHBOARD_RELOAD_BUTTON, requestBoundJson, requestBoundJsonWithOneTransientRetry, selectRecentClientEffectProbe, selectRecentClientPausedFrames, SESSION_NAVIGATION_SETTLE_TIMEOUT_MS, shouldCaptureSessionVoiceRoute, shouldReleasePassiveEffectBreakpoint, validateAppSyntheticBinding, validateD02BrowserContextBinding, validateD02ProductCleanupEcho, waitForClientPageError, withClientDiagnosticFrames, withClientEffectProbe } from "../src/browser-driver.js";
+import { activateVoiceStartWithClientErrorReload, assertPageLocation, classifyBrowserStartCause, classifyClientCdpExceptionFrames, classifyClientCdpPausedFrames, classifyClientConsoleErrorLocation, classifyClientPageError, closeContextWithProof, DASHBOARD_ROUTE_TIMEOUT_MS, drainProductCapture, establishDashboardMicRoute, establishSessionNavigation, extractNextChunkScriptUrls, findPassiveEffectCreateBreakpoint, findPassiveEffectCreateCatchBreakpoint, findPassiveEffectDestroyBreakpoint, isExactFinalizationResponse, isRecoverableEmptySessionVoiceRoute, passiveEffectBreakpointCondition, PlaywrightVoiceDriver, RECOVERABLE_DASHBOARD_LOAD_ERROR, RECOVERABLE_DASHBOARD_RELOAD_BUTTON, requestBoundJson, requestBoundJsonWithOneTransientRetry, selectRecentClientEffectProbe, selectRecentClientPausedFrames, SESSION_NAVIGATION_SETTLE_TIMEOUT_MS, shouldCaptureSessionVoiceRoute, shouldReleasePassiveEffectBreakpoint, validateAppSyntheticBinding, validateD02BrowserContextBinding, validateD02ProductCleanupEcho, waitForClientPageError, waitOnWorkerClock, withClientDiagnosticFrames, withClientEffectProbe } from "../src/browser-driver.js";
 import { sha256 } from "../src/security.js";
 import { SHA, SHA_B, SHA_C, SHA_D, testConfig, testRun } from "./helpers.js";
 
@@ -96,6 +96,12 @@ describe("ordinary session navigation settlement", () => {
 });
 
 describe("ordinary voice start recovery", () => {
+  it("uses a worker-owned clock that does not depend on a page", async () => {
+    const started = Date.now();
+    await expect(waitOnWorkerClock(10)).resolves.toBeUndefined();
+    expect(Date.now() - started).toBeGreaterThanOrEqual(5);
+  });
+
   it("settles a causally preceding page error within one bounded diagnostic window", async () => {
     let clock = 0;
     let probes = 0;
@@ -163,6 +169,54 @@ describe("ordinary voice start recovery", () => {
       reload: async () => { reloads += 1; },
     })).rejects.toBe(timeout);
     expect(reloads).toBe(0);
+  });
+
+  it("reloads once for the exact empty session shell after the bounded startup timeout", async () => {
+    const timeout = Object.assign(new Error("hidden browser detail"), { name: "TimeoutError" });
+    let activation = 0;
+    let reloads = 0;
+    const route = {
+      location: "expected_session",
+      voice_tab: "absent",
+      voice_button: "absent",
+      dashboard_mic_visible: false,
+      dashboard_mic_button: "absent",
+      consent_visible: false,
+      auth_gate_visible: false,
+      auth_checking_visible: false,
+      session_store_loading_visible: false,
+      voice_fallback_visible: false,
+    } as const;
+
+    expect(isRecoverableEmptySessionVoiceRoute(route)).toBe(true);
+    await expect(activateVoiceStartWithClientErrorReload({
+      activate: async () => {
+        activation += 1;
+        if (activation === 1) throw timeout;
+      },
+      hasClientPageError: () => false,
+      hasRecoverableExactSessionShell: () => isRecoverableEmptySessionVoiceRoute(route),
+      reload: async () => { reloads += 1; },
+    })).resolves.toBe("reloaded_after_exact_session_shell");
+    expect(reloads).toBe(1);
+  });
+
+  it("rejects lookalike session states that still expose a loading or auth gate", () => {
+    const base = {
+      location: "expected_session",
+      voice_tab: "absent",
+      voice_button: "absent",
+      dashboard_mic_visible: false,
+      dashboard_mic_button: "absent",
+      consent_visible: false,
+      auth_gate_visible: false,
+      auth_checking_visible: false,
+      session_store_loading_visible: false,
+      voice_fallback_visible: false,
+    } as const;
+    expect(isRecoverableEmptySessionVoiceRoute({ ...base, session_store_loading_visible: true })).toBe(false);
+    expect(isRecoverableEmptySessionVoiceRoute({ ...base, auth_gate_visible: true })).toBe(false);
+    expect(isRecoverableEmptySessionVoiceRoute({ ...base, location: "same_origin_other" })).toBe(false);
   });
 
   it("never loops when the reloaded route still cannot render the control", async () => {

@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import { access } from "node:fs/promises";
+import { setTimeout as sleep } from "node:timers/promises";
 
 import { chromium, type APIRequestContext, type APIResponse, type Browser, type BrowserContext, type Locator, type Page, type Response as PlaywrightResponse } from "playwright";
 
@@ -58,6 +59,24 @@ export const RECOVERABLE_DASHBOARD_RELOAD_BUTTON = "Reload";
  * queue independence from the page they observe. */
 export const DIRECT_CDP_CLIENT_DIAGNOSTICS_ENABLED = false;
 export const PAUSING_CLIENT_DIAGNOSTICS_ENABLED = false;
+
+/** Polling delays must remain owned by the worker. A Playwright page timer is
+ * serviced by the renderer and can therefore outlive the worker watchdog when
+ * the ordinary product main thread is unresponsive. */
+export async function waitOnWorkerClock(delayMs: number): Promise<void> {
+  await sleep(Math.max(0, delayMs));
+}
+
+async function observeOnWorkerClock<T>(
+  operation: () => Promise<T>,
+  fallback: T,
+  timeoutMs = 250,
+): Promise<T> {
+  return Promise.race([
+    operation().then((value) => value, () => fallback),
+    sleep(timeoutMs).then(() => fallback),
+  ]);
+}
 
 type ClientPageErrorDiagnostic = {
   error_class: string;
@@ -380,10 +399,10 @@ export async function classifySessionVoiceRoute(
   }
 
   const voiceTab = page.getByRole("tab", { name: /^voice$/i }).first();
-  const voiceTabCount = await voiceTab.count().catch(() => 0);
-  const voiceTabVisible = voiceTabCount > 0 && await voiceTab.isVisible().catch(() => false);
-  const voiceTabDisabled = voiceTabVisible && !await voiceTab.isEnabled().catch(() => false);
-  const voiceTabSelected = voiceTabVisible && await voiceTab.getAttribute("aria-selected").catch(() => null) === "true";
+  const voiceTabCount = await observeOnWorkerClock(() => voiceTab.count(), 0);
+  const voiceTabVisible = voiceTabCount > 0 && await observeOnWorkerClock(() => voiceTab.isVisible(), false);
+  const voiceTabDisabled = voiceTabVisible && !await observeOnWorkerClock(() => voiceTab.isEnabled(), false);
+  const voiceTabSelected = voiceTabVisible && await observeOnWorkerClock(() => voiceTab.getAttribute("aria-selected"), null) === "true";
   const voice_tab: SessionVoiceRouteDiagnostic["voice_tab"] = voiceTabCount === 0
     ? "absent"
     : !voiceTabVisible
@@ -404,26 +423,26 @@ export async function classifySessionVoiceRoute(
   let voice_button: SessionVoiceRouteDiagnostic["voice_button"] = "absent";
   for (const candidate of buttonStates) {
     const button = page.getByRole("button", { name: candidate.name, exact: true }).first();
-    if (await button.count().catch(() => 0) === 0) continue;
-    if (!await button.isVisible().catch(() => false)) {
+    if (await observeOnWorkerClock(() => button.count(), 0) === 0) continue;
+    if (!await observeOnWorkerClock(() => button.isVisible(), false)) {
       if (voice_button === "absent") voice_button = "hidden";
       continue;
     }
-    voice_button = !await button.isEnabled().catch(() => false) ? "disabled" : candidate.state;
+    voice_button = !await observeOnWorkerClock(() => button.isEnabled(), false) ? "disabled" : candidate.state;
     break;
   }
 
   const micAnchor = page.locator('[data-onboarding="mic-cta"]').first();
   const structuralMicButton = micAnchor.locator("xpath=../button[1]");
   const semanticMicButton = page.getByRole("button", { name: /^Start (?:open session|prepare|debrief|reset|vent)$/i }).first();
-  const micButton = await structuralMicButton.count().catch(() => 0) > 0 ? structuralMicButton : semanticMicButton;
-  const micButtonCount = await micButton.count().catch(() => 0);
-  const micButtonVisible = micButtonCount > 0 && await micButton.isVisible().catch(() => false);
+  const micButton = await observeOnWorkerClock(() => structuralMicButton.count(), 0) > 0 ? structuralMicButton : semanticMicButton;
+  const micButtonCount = await observeOnWorkerClock(() => micButton.count(), 0);
+  const micButtonVisible = micButtonCount > 0 && await observeOnWorkerClock(() => micButton.isVisible(), false);
   const dashboard_mic_button: SessionVoiceRouteDiagnostic["dashboard_mic_button"] = micButtonCount === 0
     ? "absent"
     : !micButtonVisible
       ? "hidden"
-      : !await micButton.isEnabled().catch(() => false)
+      : !await observeOnWorkerClock(() => micButton.isEnabled(), false)
         ? "disabled"
         : "available";
 
@@ -431,14 +450,27 @@ export async function classifySessionVoiceRoute(
     location,
     voice_tab,
     voice_button,
-    dashboard_mic_visible: await micAnchor.isVisible().catch(() => false),
+    dashboard_mic_visible: await observeOnWorkerClock(() => micAnchor.isVisible(), false),
     dashboard_mic_button,
-    consent_visible: await page.locator(CONSENT_ACCEPT_SELECTOR).first().isVisible().catch(() => false),
-    auth_gate_visible: await page.getByRole("button", { name: "Continue with Google", exact: true }).first().isVisible().catch(() => false),
-    auth_checking_visible: await page.locator('[data-voice-lab-route-state="auth-checking"]').first().isVisible().catch(() => false),
-    session_store_loading_visible: await page.locator('[data-voice-lab-route-state="session-store-loading"]').first().isVisible().catch(() => false),
-    voice_fallback_visible: await page.getByText("Voice input unavailable", { exact: true }).first().isVisible().catch(() => false),
+    consent_visible: await observeOnWorkerClock(() => page.locator(CONSENT_ACCEPT_SELECTOR).first().isVisible(), false),
+    auth_gate_visible: await observeOnWorkerClock(() => page.getByRole("button", { name: "Continue with Google", exact: true }).first().isVisible(), false),
+    auth_checking_visible: await observeOnWorkerClock(() => page.locator('[data-voice-lab-route-state="auth-checking"]').first().isVisible(), false),
+    session_store_loading_visible: await observeOnWorkerClock(() => page.locator('[data-voice-lab-route-state="session-store-loading"]').first().isVisible(), false),
+    voice_fallback_visible: await observeOnWorkerClock(() => page.getByText("Voice input unavailable", { exact: true }).first().isVisible(), false),
   };
+}
+
+export function isRecoverableEmptySessionVoiceRoute(route: SessionVoiceRouteDiagnostic): boolean {
+  return route.location === "expected_session"
+    && route.voice_tab === "absent"
+    && route.voice_button === "absent"
+    && route.dashboard_mic_visible === false
+    && route.dashboard_mic_button === "absent"
+    && route.consent_visible === false
+    && route.auth_gate_visible === false
+    && route.auth_checking_visible === false
+    && route.session_store_loading_visible === false
+    && route.voice_fallback_visible === false;
 }
 
 /** Keep production browser failures actionable without projecting arbitrary
@@ -683,16 +715,16 @@ export async function resolveDashboardMicButton(page: Page, micAnchor: Locator):
   // that structural relationship: the button's accessible label can
   // legitimately change while the dashboard is hydrating.
   const siblingButton = micAnchor.locator("xpath=../button[1]");
-  if (await siblingButton.count() > 0) return siblingButton;
+  if (await observeOnWorkerClock(() => siblingButton.count(), 0) > 0) return siblingButton;
   return page.getByRole("button", { name: /^Start (?:open session|prepare|debrief|reset|vent)$/i }).first();
 }
 
 export async function activateDashboardMicButton(page: Page, button: Locator, visibilityTimeoutMs = 5_000): Promise<void> {
   await button.waitFor({ state: "visible", timeout: visibilityTimeoutMs });
   const deadline = Date.now() + 10_000;
-  while (!await button.isEnabled()) {
+  while (!await button.isEnabled({ timeout: Math.min(250, Math.max(1, deadline - Date.now())) }).catch(() => false)) {
     if (Date.now() >= deadline) throw new Error("The ordinary dashboard microphone control did not become enabled.");
-    await page.waitForTimeout(100);
+    await waitOnWorkerClock(100);
   }
   // The dashboard deliberately animates the microphone stage and may place
   // non-interactive visual layers above it. Keyboard activation exercises the
@@ -736,7 +768,7 @@ export async function establishSessionVoiceStart(
         try {
           await readyButton.focus({ timeout: Math.min(remaining, 1_000) });
         } catch {
-          await page.waitForTimeout(Math.min(50, Math.max(1, deadline - Date.now())));
+          await waitOnWorkerClock(Math.min(50, Math.max(1, deadline - Date.now())));
           continue;
         }
         await page.keyboard.press("Enter");
@@ -744,7 +776,7 @@ export async function establishSessionVoiceStart(
       }
     }
     for (const activeButton of activeButtons) {
-      if (await activeButton.isVisible().catch(() => false)) {
+      if (await activeButton.isVisible({ timeout: Math.min(remaining, 250) }).catch(() => false)) {
         // The ordinary product control can advance from ready to connecting,
         // listening, thinking, speaking, or press-to-talk before this worker
         // observes the ready label. Those exact labels prove that the same
@@ -753,7 +785,7 @@ export async function establishSessionVoiceStart(
         return "already_active";
       }
     }
-    await page.waitForTimeout(50);
+    await waitOnWorkerClock(Math.min(50, Math.max(1, deadline - Date.now())));
   }
 
   // Preserve Playwright's bounded TimeoutError contract so the existing
@@ -778,7 +810,7 @@ export async function establishSessionVoiceTab(
     const voiceTab = page.getByRole("tab", { name: /^voice$/i }).first();
     const remaining = Math.max(1, deadline - Date.now());
     if (!await voiceTab.isVisible({ timeout: Math.min(remaining, 250) }).catch(() => false)) {
-      await page.waitForTimeout(Math.min(50, Math.max(1, deadline - Date.now())));
+      await waitOnWorkerClock(Math.min(50, Math.max(1, deadline - Date.now())));
       continue;
     }
     const selected = await voiceTab
@@ -786,18 +818,18 @@ export async function establishSessionVoiceTab(
       .catch(() => null);
     if (selected === "true") return activationAttempted ? "activated" : "already_selected";
     if (selected !== "false") {
-      await page.waitForTimeout(Math.min(25, Math.max(1, deadline - Date.now())));
+      await waitOnWorkerClock(Math.min(25, Math.max(1, deadline - Date.now())));
       continue;
     }
     if (activationAttempted) {
-      await page.waitForTimeout(Math.min(25, Math.max(1, deadline - Date.now())));
+      await waitOnWorkerClock(Math.min(25, Math.max(1, deadline - Date.now())));
       continue;
     }
     const enabled = await voiceTab
       .isEnabled({ timeout: Math.min(remaining, 250) })
       .catch(() => false);
     if (!enabled) {
-      await page.waitForTimeout(Math.min(50, Math.max(1, deadline - Date.now())));
+      await waitOnWorkerClock(Math.min(50, Math.max(1, deadline - Date.now())));
       continue;
     }
     activationAttempted = true;
@@ -811,7 +843,7 @@ export async function establishSessionVoiceTab(
         .getAttribute("aria-selected", { timeout: Math.max(1, Math.min(deadline - Date.now(), 250)) })
         .catch(() => null);
       if (replacementSelected === "true") return "activated";
-      await page.waitForTimeout(Math.min(25, Math.max(1, deadline - Date.now())));
+      await waitOnWorkerClock(Math.min(25, Math.max(1, deadline - Date.now())));
     }
   }
 
@@ -822,8 +854,10 @@ export async function establishSessionVoiceTab(
 export async function activateVoiceStartWithClientErrorReload(input: {
   activate: () => Promise<void>;
   hasClientPageError: () => boolean | Promise<boolean>;
+  hasRecoverableExactSessionShell?: () => boolean | Promise<boolean>;
   reload: () => Promise<void>;
-}): Promise<"activated" | "reloaded_after_client_error"> {
+}): Promise<"activated" | "reloaded_after_client_error" | "reloaded_after_exact_session_shell"> {
+  let recovery: "client_error" | "exact_session_shell" | null = null;
   try {
     await input.activate();
     return "activated";
@@ -831,15 +865,20 @@ export async function activateVoiceStartWithClientErrorReload(input: {
     // A client-side Next/Turbopack transition can commit the exact session
     // route while leaving its client module graph unable to render the voice
     // control. Recover only from the observable combination produced by that
-    // failure: a bounded Playwright visibility timeout plus a captured product
-    // page error. One same-origin hard reload rehydrates the ordinary route;
-    // every other error, and any failure after the reload, remains terminal.
+    // failure: a bounded Playwright visibility timeout plus either a captured
+    // product page error or the exact fixed empty-session shell observed after
+    // both startup deadlines. One same-origin hard reload rehydrates the
+    // ordinary route; every other error, and any failure after the reload,
+    // remains terminal.
     const errorName = error && typeof error === "object" && "name" in error ? (error as { name?: unknown }).name : null;
-    if (errorName !== "TimeoutError" || !(await input.hasClientPageError())) throw error;
+    if (errorName !== "TimeoutError") throw error;
+    if (await input.hasClientPageError()) recovery = "client_error";
+    else if (input.hasRecoverableExactSessionShell && await input.hasRecoverableExactSessionShell()) recovery = "exact_session_shell";
+    else throw error;
   }
   await input.reload();
   await input.activate();
-  return "reloaded_after_client_error";
+  return recovery === "exact_session_shell" ? "reloaded_after_exact_session_shell" : "reloaded_after_client_error";
 }
 
 export async function waitForClientPageError(input: {
@@ -879,10 +918,11 @@ export async function establishSessionNavigation(
       // the handoff and can prevent navigation indefinitely. Each permitted
       // transition is therefore activated at most once per route attempt.
       if (activatedChoices.has(id)) continue;
-      const count = Math.min(await buttons.count(), 4);
+      const count = Math.min(await observeOnWorkerClock(() => buttons.count(), 0), 4);
       for (let index = 0; index < count; index += 1) {
         const choice = buttons.nth(index);
-        if (!await choice.isVisible().catch(() => false) || !await choice.isEnabled().catch(() => false)) continue;
+        if (!await observeOnWorkerClock(() => choice.isVisible(), false)
+          || !await observeOnWorkerClock(() => choice.isEnabled(), false)) continue;
         await choice.click({ timeout: 5_000 });
         activatedChoices.add(id);
         advanced = true;
@@ -890,7 +930,7 @@ export async function establishSessionNavigation(
       }
       if (advanced) break;
     }
-    await page.waitForTimeout(advanced ? 250 : 100);
+    await waitOnWorkerClock(advanced ? 250 : 100);
   }
   // The ordinary session route can commit at the exact polling deadline. A
   // one-millisecond terminal wait races that final navigation and can reject a
@@ -1413,7 +1453,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
           await recoverableLoadReload.click({ timeout: 20_000 });
           assertPageLocation(activePage.url(), frontendOrigin, (pathname) => pathname === "/", "ORDINARY_UI_ORIGIN_DRIFT");
         },
-        wait: () => activePage.waitForTimeout(100),
+        wait: () => waitOnWorkerClock(100),
         timeoutMs: DASHBOARD_ROUTE_TIMEOUT_MS,
       });
       ordinaryRouteStage = "dashboard_microphone_cta";
@@ -1425,7 +1465,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
         activate: () => establishSessionNavigation(activePage, frontendOrigin, this.config.freshButtonName),
         hasClientPageError: () => waitForClientPageError({
           probe: () => currentClientPageErrorDiagnostic() !== null,
-          wait: () => activePage.waitForTimeout(25),
+          wait: () => waitOnWorkerClock(25),
         }),
         reload: () => reloadExactSessionRouteOnce("session_navigation_recovery_reload"),
       });
@@ -1448,8 +1488,11 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
         // retries the locator nor broadens the recoverable error class.
         hasClientPageError: () => waitForClientPageError({
           probe: () => currentClientPageErrorDiagnostic() !== null,
-          wait: () => activePage.waitForTimeout(25),
+          wait: () => waitOnWorkerClock(25),
         }),
+        hasRecoverableExactSessionShell: async () => isRecoverableEmptySessionVoiceRoute(
+          await classifySessionVoiceRoute(activePage, frontendOrigin, this.config.startButtonName),
+        ),
         reload: () => reloadExactSessionRouteOnce("voice_start_recovery_reload"),
       });
       ordinaryRouteStage = "voice_startup_readiness";
@@ -1512,7 +1555,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       events.push(...batch);
       const candidate = session.latestProviderReceipt;
       if (candidate && Number(candidate._seq) > Number(productPrecondition?._seq ?? 0) && (candidate.phase === "restored" || candidate.phase === "degraded")) { restoration = candidate; break; }
-      await session.page.waitForTimeout(100);
+      await waitOnWorkerClock(100);
     }
     if (!restoration) throw new VoiceLabError(labError("SOCKET_ROTATION_TIMEOUT", "No product restored/degraded provider epoch receipt arrived before timeout.", "product", true, { expected_epoch: expectedEpoch }));
     if (restoration.phase === "degraded") throw new VoiceLabError(labError("SOCKET_ROTATION_DEGRADED", "Product continuity degraded after socket rotation.", "product", false, { expected_epoch: expectedEpoch, receipt: redact(restoration) }));
@@ -1570,7 +1613,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
         acknowledged = true;
       } catch (error) {
         lastErrorClass = error instanceof Error ? error.name : "ProductCleanupError";
-        if (Date.now() < deadline) await session.page.waitForTimeout(250);
+        if (Date.now() < deadline) await waitOnWorkerClock(250);
       }
     }
     if (!acknowledged) {
@@ -1667,7 +1710,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
         const batch = await this.drain(run.id);
         events.push(...batch);
         if (batch.some((event) => event.kind === "provider.stage" && isValidatedAppBinding(event.payload._app_synthetic_binding, session.expectedBinding) && (event.payload.stage === "closed" || event.payload.stage === "ended"))) { providerClosed = true; break; }
-        await session.page.waitForTimeout(100);
+        await waitOnWorkerClock(100);
       }
       if (!providerClosed) throw new VoiceLabError(labError("PROVIDER_CLEANUP_UNCONFIRMED", "Product finalization succeeded but provider transport closure was not observed.", "product", true));
       const finalDeployment = await this.#verifyDeployment(run);
@@ -1722,7 +1765,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
               const batch = await this.drain(run.id);
               events.push(...batch);
               if (batch.some((event) => event.kind === "provider.stage" && isValidatedAppBinding(event.payload._app_synthetic_binding, session.expectedBinding) && ["closed", "ended"].includes(String(event.payload.stage)))) break;
-              await session.page.waitForTimeout(100);
+              await waitOnWorkerClock(100);
             }
           }
         } catch (error) {
@@ -1932,7 +1975,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       const hasProviderReceipt = observed.has("provider.connection_epoch");
       const hasStreaming = observed.has("provider.connection_observability") || observed.has("provider.streaming_ready");
       if (hasHarness && hasCredentials && hasMedia && hasProviderReceipt && hasStreaming) return drained;
-      await session.page.waitForTimeout(100);
+      await waitOnWorkerClock(100);
     }
     throw new VoiceLabError(labError("VOICE_START_TIMEOUT", "The ordinary voice UI did not prove the page-owned synthetic stream, credentials, and provider readiness before timeout.", "product", true, { harness_initialized: observed.has("harness.initialized"), replacement_stream_issued: issuedIdentity !== null, product_stream_acquired: productIdentity !== null, synthetic_stream_correlated: issuedIdentity !== null && productIdentity !== null && issuedIdentity.stream === productIdentity.stream && JSON.stringify(issuedIdentity.tracks) === JSON.stringify(productIdentity.tracks) }));
   }
