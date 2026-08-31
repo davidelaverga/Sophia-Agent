@@ -43,8 +43,9 @@ describe("ordinary session navigation settlement", () => {
       url: () => currentUrl,
       getByRole: () => emptyButtons,
       waitForTimeout: async () => undefined,
-      waitForURL: async (predicate: (url: URL) => boolean, options: { timeout: number }) => {
+      waitForURL: async (predicate: (url: URL) => boolean, options: { timeout: number; waitUntil: string }) => {
         expect(options.timeout).toBe(SESSION_NAVIGATION_SETTLE_TIMEOUT_MS);
+        expect(options.waitUntil).toBe("commit");
         currentUrl = "https://www.sophia-ei.com/session";
         expect(predicate(new URL(currentUrl))).toBe(true);
         expect(predicate(new URL("https://evil.invalid/session"))).toBe(false);

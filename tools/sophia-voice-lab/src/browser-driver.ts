@@ -987,7 +987,12 @@ export async function establishSessionNavigation(
   if (settled.origin === frontendOrigin && /^\/session(?:\/|$)/.test(settled.pathname) && settled.hash === "") return;
   await page.waitForURL(
     (url) => url.origin === frontendOrigin && /^\/session(?:\/|$)/.test(url.pathname) && url.hash === "",
-    { timeout: SESSION_NAVIGATION_SETTLE_TIMEOUT_MS },
+    // The route predicate proves the exact same-origin session path. Waiting
+    // for the document `load` milestone here can reject a route that already
+    // committed and mounted its product capture while a non-critical resource
+    // is still pending. Recovery needs only the committed URL boundary; later
+    // helpers retain their own bounded hydration and voice-control checks.
+    { timeout: SESSION_NAVIGATION_SETTLE_TIMEOUT_MS, waitUntil: "commit" },
   );
 }
 
