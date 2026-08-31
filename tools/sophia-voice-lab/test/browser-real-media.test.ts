@@ -244,6 +244,20 @@ describe("real Chromium dynamic media contract", () => {
     await context.close();
   });
 
+  it("ends an absent voice-control wait on the worker deadline with a TimeoutError", async () => {
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    await page.goto(origin);
+    await page.setContent('<main aria-label="empty session shell"></main>');
+    const started = Date.now();
+    await expect(establishSessionVoiceStart(page, "Tap to speak", 75)).rejects.toMatchObject({
+      name: "TimeoutError",
+      message: "The ordinary session voice control did not become visible.",
+    });
+    expect(Date.now() - started).toBeLessThan(1_000);
+    await context.close();
+  });
+
   it("selects the ordinary voice tab once when a fresh session opens in text mode", async () => {
     const context = await browser.newContext();
     const page = await context.newPage();

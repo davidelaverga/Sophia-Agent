@@ -788,10 +788,14 @@ export async function establishSessionVoiceStart(
     await waitOnWorkerClock(Math.min(50, Math.max(1, deadline - Date.now())));
   }
 
-  // Preserve Playwright's bounded TimeoutError contract so the existing
-  // same-origin client-page-error recovery remains the only reload path.
-  await readyButton.waitFor({ state: "visible", timeout: 1 });
-  throw new Error("The ordinary session voice control did not become visible.");
+  // Preserve the TimeoutError-shaped recovery contract without dispatching a
+  // final renderer command. A locator.waitFor issued after this worker-owned
+  // deadline can remain queued behind an unresponsive renderer until the
+  // outer operation watchdog closes the page, preventing the exact-session
+  // recovery predicate from ever running.
+  const timeout = new Error("The ordinary session voice control did not become visible.");
+  timeout.name = "TimeoutError";
+  throw timeout;
 }
 
 export async function establishSessionVoiceTab(
