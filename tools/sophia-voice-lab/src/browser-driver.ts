@@ -714,32 +714,40 @@ export const SESSION_VOICE_RECOVERY_TAB_TIMEOUT_MS = 10_000;
 export const SESSION_VOICE_RECOVERY_START_TIMEOUT_MS = 15_000;
 export const SESSION_ROUTE_RECOVERY_RELOAD_TIMEOUT_MS = 15_000;
 
-export async function openFreshExactSessionPage(input: {
-  context: BrowserContext;
+export async function openFreshExactSessionContext(input: {
+  browser: Browser;
+  currentContext: BrowserContext;
   currentPage: Page;
+  storageState: { cookies: unknown[]; origins: unknown[] };
+  initScriptContent: string;
   frontendOrigin: string;
   attachDiagnostics: (page: Page) => void;
   timeoutMs?: number;
-}): Promise<Page> {
+}): Promise<{ context: BrowserContext; page: Page }> {
   const recoveryUrl = input.currentPage.url();
   assertPageLocation(recoveryUrl, input.frontendOrigin, (pathname) => /^\/session(?:\/|$)/.test(pathname), "ORDINARY_UI_ORIGIN_DRIFT");
-  const replacement = await input.context.newPage();
-  input.attachDiagnostics(replacement);
+  const replacementContext = await input.browser.newContext({
+    storageState: input.storageState as any,
+    serviceWorkers: "block",
+  });
   try {
-    await replacement.goto(recoveryUrl, {
+    await replacementContext.addInitScript({ content: input.initScriptContent });
+    const replacementPage = await replacementContext.newPage();
+    input.attachDiagnostics(replacementPage);
+    await replacementPage.goto(recoveryUrl, {
       waitUntil: "domcontentloaded",
       timeout: input.timeoutMs ?? SESSION_ROUTE_RECOVERY_RELOAD_TIMEOUT_MS,
     });
-    assertPageLocation(replacement.url(), input.frontendOrigin, (pathname) => /^\/session(?:\/|$)/.test(pathname), "ORDINARY_UI_ORIGIN_DRIFT");
+    assertPageLocation(replacementPage.url(), input.frontendOrigin, (pathname) => /^\/session(?:\/|$)/.test(pathname), "ORDINARY_UI_ORIGIN_DRIFT");
+    // The failed context no longer participates in recovery. Closing it is
+    // best-effort and worker-bounded; the Browser registry remains the final
+    // cleanup authority if Chromium cannot settle this command.
+    await observeOnWorkerClock(() => input.currentContext.close(), undefined, 1_000);
+    return { context: replacementContext, page: replacementPage };
   } catch (error) {
-    await observeOnWorkerClock(() => replacement.close({ runBeforeUnload: false }), undefined, 1_000);
+    await observeOnWorkerClock(() => replacementContext.close(), undefined, 1_000);
     throw error;
   }
-  // The failed renderer no longer participates in recovery. Closing it is
-  // best-effort and worker-bounded; the owning BrowserContext remains the
-  // authoritative cleanup boundary if Chromium cannot settle this command.
-  await observeOnWorkerClock(() => input.currentPage.close({ runBeforeUnload: false }), undefined, 1_000);
-  return replacement;
 }
 
 export async function resolveDashboardMicButton(page: Page, micAnchor: Locator): Promise<Locator> {
@@ -1069,7 +1077,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
     }
     const frontendOrigin = validateAllowedOrigin(run.target.frontendUrl, this.config.allowedOrigins).origin;
     const browser = await this.#ensureBrowser();
-    const context = await browser.newContext({ ...(storageState === undefined ? {} : { storageState: storageState as any }), serviceWorkers: "block" });
+    let context = await browser.newContext({ ...(storageState === undefined ? {} : { storageState: storageState as any }), serviceWorkers: "block" });
     this.#pendingContexts.set(run.id, context);
     let ordinaryRouteStage = "frontend_auth_grant";
     let ordinaryRouteRecoveryReloaded = false;
@@ -1140,7 +1148,13 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       const authUser = authIdentity?.user as Record<string, unknown> | undefined;
       if (!authSession.ok() || authUser?.id !== run.principalId) throw new VoiceLabError(labError("AUTH_PRINCIPAL_MISMATCH", "The browser session is not bound to the exact dedicated Voice Lab principal.", "authorization", false, { observed_principal_sha256: typeof authUser?.id === "string" ? sha256(authUser.id) : null }));
       ordinaryRouteStage = "browser_init_script";
-      await context.addInitScript({ content: buildVoiceLabInitScript({ pageOrigin: frontendOrigin, websocketOrigins: [...this.config.websocketOrigins], maxAudioBytes: this.config.maxAudioBytes, testRunId: run.testRunId, cleanupObligationId: run.cleanupObligationId }) });
+      const initScriptContent = buildVoiceLabInitScript({ pageOrigin: frontendOrigin, websocketOrigins: [...this.config.websocketOrigins], maxAudioBytes: this.config.maxAudioBytes, testRunId: run.testRunId, cleanupObligationId: run.cleanupObligationId });
+      await context.addInitScript({ content: initScriptContent });
+      // Capture only the already-authenticated BrowserContext state before any
+      // ordinary renderer command can become unhealthy. Recovery can then
+      // allocate a new isolated context without replaying or broadening the
+      // scoped frontend grant.
+      const authenticatedStorageState = await context.storageState() as { cookies: unknown[]; origins: unknown[] };
       const preloadedPassiveEffectBreakpoints = await settleDiagnosticWithinBudget(
         preloadPassiveEffectBreakpoints(context.request, frontendOrigin).catch(() => []),
         [],
@@ -1473,15 +1487,20 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
         // the reload only rehydrates its client module graph.
         assertPageLocation(activePage.url(), frontendOrigin, (pathname) => /^\/session(?:\/|$)/.test(pathname), "ORDINARY_UI_ORIGIN_DRIFT");
         ordinaryRouteRecoveryReloaded = true;
-        const replacement = await openFreshExactSessionPage({
-          context,
+        const replacement = await openFreshExactSessionContext({
+          browser,
+          currentContext: context,
           currentPage: activePage,
+          storageState: authenticatedStorageState,
+          initScriptContent,
           frontendOrigin,
           attachDiagnostics: attachPageDiagnostics,
         });
-        activePage = replacement;
-        page = replacement;
-        session.page = replacement;
+        context = replacement.context;
+        activePage = replacement.page;
+        page = replacement.page;
+        session.context = replacement.context;
+        session.page = replacement.page;
       };
       await page.goto(new URL("/", frontendOrigin).toString(), { waitUntil: "domcontentloaded", timeout: 30_000 });
       assertPageLocation(page.url(), frontendOrigin, (pathname) => pathname === "/", "ORDINARY_UI_ORIGIN_DRIFT");
