@@ -714,6 +714,34 @@ export const SESSION_VOICE_RECOVERY_TAB_TIMEOUT_MS = 10_000;
 export const SESSION_VOICE_RECOVERY_START_TIMEOUT_MS = 15_000;
 export const SESSION_ROUTE_RECOVERY_RELOAD_TIMEOUT_MS = 15_000;
 
+export async function openFreshExactSessionPage(input: {
+  context: BrowserContext;
+  currentPage: Page;
+  frontendOrigin: string;
+  attachDiagnostics: (page: Page) => void;
+  timeoutMs?: number;
+}): Promise<Page> {
+  const recoveryUrl = input.currentPage.url();
+  assertPageLocation(recoveryUrl, input.frontendOrigin, (pathname) => /^\/session(?:\/|$)/.test(pathname), "ORDINARY_UI_ORIGIN_DRIFT");
+  const replacement = await input.context.newPage();
+  input.attachDiagnostics(replacement);
+  try {
+    await replacement.goto(recoveryUrl, {
+      waitUntil: "domcontentloaded",
+      timeout: input.timeoutMs ?? SESSION_ROUTE_RECOVERY_RELOAD_TIMEOUT_MS,
+    });
+    assertPageLocation(replacement.url(), input.frontendOrigin, (pathname) => /^\/session(?:\/|$)/.test(pathname), "ORDINARY_UI_ORIGIN_DRIFT");
+  } catch (error) {
+    await observeOnWorkerClock(() => replacement.close({ runBeforeUnload: false }), undefined, 1_000);
+    throw error;
+  }
+  // The failed renderer no longer participates in recovery. Closing it is
+  // best-effort and worker-bounded; the owning BrowserContext remains the
+  // authoritative cleanup boundary if Chromium cannot settle this command.
+  await observeOnWorkerClock(() => input.currentPage.close({ runBeforeUnload: false }), undefined, 1_000);
+  return replacement;
+}
+
 export async function resolveDashboardMicButton(page: Page, micAnchor: Locator): Promise<Locator> {
   // MicCTA renders the stable onboarding anchor as a sibling of the actual
   // button so the spotlight can cover the full breathing-ring stage. Prefer
@@ -1120,23 +1148,26 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       );
       effectProbeStatus.preloaded_candidates = Math.min(32, preloadedPassiveEffectBreakpoints.length);
       ordinaryRouteStage = "frontend_home_navigation";
-      const activePage = await context.newPage();
+      let activePage = await context.newPage();
       page = activePage;
-      page.on("pageerror", (error) => {
-        const observedAt = Date.now();
-        latestClientPageErrorObservedAt = observedAt;
-        latestClientPageError = classifyClientPageError(error);
-        latestClientPausedFrames = selectRecentClientPausedFrames(recentClientPausedFrameSets, observedAt);
-        latestClientEffectProbe = selectRecentClientEffectProbe(
-          [...recentClientPausedFrameSets, ...recentInvalidClientEffectProbeSets],
-          observedAt,
-        );
-      });
-      page.on("console", (message) => {
-        if (message.type() !== "error") return;
-        const frame = classifyClientConsoleErrorLocation(message.location(), frontendOrigin);
-        if (frame) latestClientConsoleFrames = [frame];
-      });
+      const attachPageDiagnostics = (targetPage: Page): void => {
+        targetPage.on("pageerror", (error) => {
+          const observedAt = Date.now();
+          latestClientPageErrorObservedAt = observedAt;
+          latestClientPageError = classifyClientPageError(error);
+          latestClientPausedFrames = selectRecentClientPausedFrames(recentClientPausedFrameSets, observedAt);
+          latestClientEffectProbe = selectRecentClientEffectProbe(
+            [...recentClientPausedFrameSets, ...recentInvalidClientEffectProbeSets],
+            observedAt,
+          );
+        });
+        targetPage.on("console", (message) => {
+          if (message.type() !== "error") return;
+          const frame = classifyClientConsoleErrorLocation(message.location(), frontendOrigin);
+          if (frame) latestClientConsoleFrames = [frame];
+        });
+      };
+      attachPageDiagnostics(page);
       if (DIRECT_CDP_CLIENT_DIAGNOSTICS_ENABLED) {
         try {
           const cdp = await context.newCDPSession(page);
@@ -1431,6 +1462,9 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
           // Diagnostic enrichment is fail-open and must not alter product flow.
         }
       }
+      const session: BrowserSession = { context, page: activePage, harnessCursor: 0, productCursor: null, latestProviderReceipt: null, contextExpiresAt: Number(grantReceipt.expires_at), expectedBinding: { testRunId: run.testRunId, cleanupObligationId: run.cleanupObligationId, principalId: run.principalId, scenarioId: run.scenarioId, scenarioVersion: run.scenarioVersion, environment: run.environment, retentionHours: run.capturePolicy.retentionHours, providerExpiresAt: run.expiresAt.toISOString(), ...(exactBrowserContextBinding === undefined ? {} : { browserContextBinding: exactBrowserContextBinding }) } };
+      this.#sessions.set(run.id, session);
+      this.#pendingContexts.delete(run.id);
       const reloadExactSessionRouteOnce = async (stage: string): Promise<void> => {
         ordinaryRouteStage = stage;
         if (ordinaryRouteRecoveryReloaded) throw new Error("The bounded ordinary session-route recovery reload was already consumed.");
@@ -1439,12 +1473,16 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
         // the reload only rehydrates its client module graph.
         assertPageLocation(activePage.url(), frontendOrigin, (pathname) => /^\/session(?:\/|$)/.test(pathname), "ORDINARY_UI_ORIGIN_DRIFT");
         ordinaryRouteRecoveryReloaded = true;
-        await activePage.reload({ waitUntil: "domcontentloaded", timeout: SESSION_ROUTE_RECOVERY_RELOAD_TIMEOUT_MS });
-        assertPageLocation(activePage.url(), frontendOrigin, (pathname) => /^\/session(?:\/|$)/.test(pathname), "ORDINARY_UI_ORIGIN_DRIFT");
+        const replacement = await openFreshExactSessionPage({
+          context,
+          currentPage: activePage,
+          frontendOrigin,
+          attachDiagnostics: attachPageDiagnostics,
+        });
+        activePage = replacement;
+        page = replacement;
+        session.page = replacement;
       };
-      const session: BrowserSession = { context, page: activePage, harnessCursor: 0, productCursor: null, latestProviderReceipt: null, contextExpiresAt: Number(grantReceipt.expires_at), expectedBinding: { testRunId: run.testRunId, cleanupObligationId: run.cleanupObligationId, principalId: run.principalId, scenarioId: run.scenarioId, scenarioVersion: run.scenarioVersion, environment: run.environment, retentionHours: run.capturePolicy.retentionHours, providerExpiresAt: run.expiresAt.toISOString(), ...(exactBrowserContextBinding === undefined ? {} : { browserContextBinding: exactBrowserContextBinding }) } };
-      this.#sessions.set(run.id, session);
-      this.#pendingContexts.delete(run.id);
       await page.goto(new URL("/", frontendOrigin).toString(), { waitUntil: "domcontentloaded", timeout: 30_000 });
       assertPageLocation(page.url(), frontendOrigin, (pathname) => pathname === "/", "ORDINARY_UI_ORIGIN_DRIFT");
       const micAnchor = page.locator(this.config.onboardingMicSelector).first();
