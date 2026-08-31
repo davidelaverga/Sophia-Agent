@@ -708,6 +708,11 @@ export const DASHBOARD_ROUTE_TIMEOUT_MS = 60_000;
 export const SESSION_NAVIGATION_SETTLE_TIMEOUT_MS = 5_000;
 export const SESSION_VOICE_TAB_TIMEOUT_MS = 30_000;
 export const SESSION_VOICE_START_VISIBILITY_TIMEOUT_MS = 30_000;
+export const SESSION_VOICE_INITIAL_TAB_TIMEOUT_MS = 5_000;
+export const SESSION_VOICE_INITIAL_START_TIMEOUT_MS = 10_000;
+export const SESSION_VOICE_RECOVERY_TAB_TIMEOUT_MS = 10_000;
+export const SESSION_VOICE_RECOVERY_START_TIMEOUT_MS = 15_000;
+export const SESSION_ROUTE_RECOVERY_RELOAD_TIMEOUT_MS = 15_000;
 
 export async function resolveDashboardMicButton(page: Page, micAnchor: Locator): Promise<Locator> {
   // MicCTA renders the stable onboarding anchor as a sibling of the actual
@@ -1434,7 +1439,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
         // the reload only rehydrates its client module graph.
         assertPageLocation(activePage.url(), frontendOrigin, (pathname) => /^\/session(?:\/|$)/.test(pathname), "ORDINARY_UI_ORIGIN_DRIFT");
         ordinaryRouteRecoveryReloaded = true;
-        await activePage.reload({ waitUntil: "domcontentloaded", timeout: 30_000 });
+        await activePage.reload({ waitUntil: "domcontentloaded", timeout: SESSION_ROUTE_RECOVERY_RELOAD_TIMEOUT_MS });
         assertPageLocation(activePage.url(), frontendOrigin, (pathname) => /^\/session(?:\/|$)/.test(pathname), "ORDINARY_UI_ORIGIN_DRIFT");
       };
       const session: BrowserSession = { context, page: activePage, harnessCursor: 0, productCursor: null, latestProviderReceipt: null, contextExpiresAt: Number(grantReceipt.expires_at), expectedBinding: { testRunId: run.testRunId, cleanupObligationId: run.cleanupObligationId, principalId: run.principalId, scenarioId: run.scenarioId, scenarioVersion: run.scenarioVersion, environment: run.environment, retentionHours: run.capturePolicy.retentionHours, providerExpiresAt: run.expiresAt.toISOString(), ...(exactBrowserContextBinding === undefined ? {} : { browserContextBinding: exactBrowserContextBinding }) } };
@@ -1448,11 +1453,11 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       const recoverableLoadReload = page.getByRole("button", { name: RECOVERABLE_DASHBOARD_RELOAD_BUTTON, exact: true }).first();
       ordinaryRouteStage = "dashboard_privacy_consent";
       await establishDashboardMicRoute({
-        isMicVisible: () => micAnchor.isVisible(),
-        isConsentVisible: () => consentAccept.isVisible(),
-        isConsentEnabled: () => consentAccept.isEnabled(),
+        isMicVisible: () => observeOnWorkerClock(() => micAnchor.isVisible(), false),
+        isConsentVisible: () => observeOnWorkerClock(() => consentAccept.isVisible(), false),
+        isConsentEnabled: () => observeOnWorkerClock(() => consentAccept.isEnabled(), false),
         acceptConsent: () => consentAccept.click({ timeout: 20_000 }),
-        isRecoverableLoadErrorVisible: () => recoverableLoadError.isVisible(),
+        isRecoverableLoadErrorVisible: () => observeOnWorkerClock(() => recoverableLoadError.isVisible(), false),
         reload: async () => {
           await recoverableLoadReload.click({ timeout: 20_000 });
           assertPageLocation(activePage.url(), frontendOrigin, (pathname) => pathname === "/", "ORDINARY_UI_ORIGIN_DRIFT");
@@ -1474,15 +1479,25 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
         reload: () => reloadExactSessionRouteOnce("session_navigation_recovery_reload"),
       });
       assertPageLocation(page.url(), frontendOrigin, (pathname) => /^\/session(?:\/|$)/.test(pathname), "ORDINARY_UI_ORIGIN_DRIFT");
+      let voiceStartAttempt = 0;
       const activateVoiceStart = async () => {
+        voiceStartAttempt += 1;
+        const recovering = voiceStartAttempt > 1;
         ordinaryRouteStage = "voice_tab_selection";
-        await establishSessionVoiceTab(activePage);
+        await establishSessionVoiceTab(
+          activePage,
+          recovering ? SESSION_VOICE_RECOVERY_TAB_TIMEOUT_MS : SESSION_VOICE_INITIAL_TAB_TIMEOUT_MS,
+        );
         ordinaryRouteStage = "voice_start_button";
         // The URL can commit before the session client tree finishes
         // hydrating. Keep the exact ordinary button contract and at most one
         // native activation. If the same product control has already advanced
         // to a known active label, do not toggle it back off.
-        await establishSessionVoiceStart(activePage, this.config.startButtonName);
+        await establishSessionVoiceStart(
+          activePage,
+          this.config.startButtonName,
+          recovering ? SESSION_VOICE_RECOVERY_START_TIMEOUT_MS : SESSION_VOICE_INITIAL_START_TIMEOUT_MS,
+        );
       };
       await activateVoiceStartWithClientErrorReload({
         activate: activateVoiceStart,

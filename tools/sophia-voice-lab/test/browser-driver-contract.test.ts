@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { activateVoiceStartWithClientErrorReload, assertPageLocation, classifyBrowserStartCause, classifyClientCdpExceptionFrames, classifyClientCdpPausedFrames, classifyClientConsoleErrorLocation, classifyClientPageError, closeContextWithProof, DASHBOARD_ROUTE_TIMEOUT_MS, drainProductCapture, establishDashboardMicRoute, establishSessionNavigation, extractNextChunkScriptUrls, findPassiveEffectCreateBreakpoint, findPassiveEffectCreateCatchBreakpoint, findPassiveEffectDestroyBreakpoint, isExactFinalizationResponse, isRecoverableEmptySessionVoiceRoute, passiveEffectBreakpointCondition, PlaywrightVoiceDriver, RECOVERABLE_DASHBOARD_LOAD_ERROR, RECOVERABLE_DASHBOARD_RELOAD_BUTTON, requestBoundJson, requestBoundJsonWithOneTransientRetry, selectRecentClientEffectProbe, selectRecentClientPausedFrames, SESSION_NAVIGATION_SETTLE_TIMEOUT_MS, shouldCaptureSessionVoiceRoute, shouldReleasePassiveEffectBreakpoint, validateAppSyntheticBinding, validateD02BrowserContextBinding, validateD02ProductCleanupEcho, waitForClientPageError, waitOnWorkerClock, withClientDiagnosticFrames, withClientEffectProbe } from "../src/browser-driver.js";
+import { activateVoiceStartWithClientErrorReload, assertPageLocation, classifyBrowserStartCause, classifyClientCdpExceptionFrames, classifyClientCdpPausedFrames, classifyClientConsoleErrorLocation, classifyClientPageError, closeContextWithProof, DASHBOARD_ROUTE_TIMEOUT_MS, drainProductCapture, establishDashboardMicRoute, establishSessionNavigation, extractNextChunkScriptUrls, findPassiveEffectCreateBreakpoint, findPassiveEffectCreateCatchBreakpoint, findPassiveEffectDestroyBreakpoint, isExactFinalizationResponse, isRecoverableEmptySessionVoiceRoute, passiveEffectBreakpointCondition, PlaywrightVoiceDriver, RECOVERABLE_DASHBOARD_LOAD_ERROR, RECOVERABLE_DASHBOARD_RELOAD_BUTTON, requestBoundJson, requestBoundJsonWithOneTransientRetry, selectRecentClientEffectProbe, selectRecentClientPausedFrames, SESSION_NAVIGATION_SETTLE_TIMEOUT_MS, SESSION_ROUTE_RECOVERY_RELOAD_TIMEOUT_MS, SESSION_VOICE_INITIAL_START_TIMEOUT_MS, SESSION_VOICE_INITIAL_TAB_TIMEOUT_MS, SESSION_VOICE_RECOVERY_START_TIMEOUT_MS, SESSION_VOICE_RECOVERY_TAB_TIMEOUT_MS, shouldCaptureSessionVoiceRoute, shouldReleasePassiveEffectBreakpoint, validateAppSyntheticBinding, validateD02BrowserContextBinding, validateD02ProductCleanupEcho, waitForClientPageError, waitOnWorkerClock, withClientDiagnosticFrames, withClientEffectProbe } from "../src/browser-driver.js";
 import { sha256 } from "../src/security.js";
 import { SHA, SHA_B, SHA_C, SHA_D, testConfig, testRun } from "./helpers.js";
 
@@ -96,6 +96,21 @@ describe("ordinary session navigation settlement", () => {
 });
 
 describe("ordinary voice start recovery", () => {
+  it("reserves enough of the operation watchdog for one bounded reload and recovery attempt", () => {
+    expect(SESSION_VOICE_INITIAL_TAB_TIMEOUT_MS).toBe(5_000);
+    expect(SESSION_VOICE_INITIAL_START_TIMEOUT_MS).toBe(10_000);
+    expect(SESSION_ROUTE_RECOVERY_RELOAD_TIMEOUT_MS).toBe(15_000);
+    expect(SESSION_VOICE_RECOVERY_TAB_TIMEOUT_MS).toBe(10_000);
+    expect(SESSION_VOICE_RECOVERY_START_TIMEOUT_MS).toBe(15_000);
+    expect(
+      SESSION_VOICE_INITIAL_TAB_TIMEOUT_MS
+      + SESSION_VOICE_INITIAL_START_TIMEOUT_MS
+      + SESSION_ROUTE_RECOVERY_RELOAD_TIMEOUT_MS
+      + SESSION_VOICE_RECOVERY_TAB_TIMEOUT_MS
+      + SESSION_VOICE_RECOVERY_START_TIMEOUT_MS,
+    ).toBe(55_000);
+  });
+
   it("uses a worker-owned clock that does not depend on a page", async () => {
     const started = Date.now();
     await expect(waitOnWorkerClock(10)).resolves.toBeUndefined();
