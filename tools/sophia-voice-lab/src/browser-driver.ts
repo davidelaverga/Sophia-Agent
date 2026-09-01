@@ -705,7 +705,8 @@ interface BrowserSession {
 
 const CONSENT_ACCEPT_SELECTOR = '[data-voice-lab="consent-accept"]';
 export const DASHBOARD_ROUTE_TIMEOUT_MS = 60_000;
-export const SESSION_NAVIGATION_SETTLE_TIMEOUT_MS = 5_000;
+export const SESSION_NAVIGATION_ROUTE_TIMEOUT_MS = 75_000;
+export const SESSION_NAVIGATION_SETTLE_TIMEOUT_MS = 15_000;
 export const SESSION_VOICE_TAB_TIMEOUT_MS = 30_000;
 export const SESSION_VOICE_START_VISIBILITY_TIMEOUT_MS = 30_000;
 export const SESSION_VOICE_INITIAL_TAB_TIMEOUT_MS = 5_000;
@@ -963,7 +964,7 @@ export async function establishSessionNavigation(
   page: Page,
   frontendOrigin: string,
   freshButtonName: string,
-  timeoutMs = 45_000,
+  timeoutMs = SESSION_NAVIGATION_ROUTE_TIMEOUT_MS,
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   const allowedChoices = [
