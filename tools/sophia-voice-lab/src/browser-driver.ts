@@ -716,6 +716,18 @@ export const SESSION_VOICE_RECOVERY_START_TIMEOUT_MS = 15_000;
 export const SESSION_ROUTE_RECOVERY_RELOAD_TIMEOUT_MS = 15_000;
 export const SESSION_RECOVERY_STORAGE_CAPTURE_TIMEOUT_MS = 2_500;
 
+export function isolateBootstrapStorageState(
+  storageState: { cookies: unknown[]; origins: unknown[] },
+): { cookies: unknown[]; origins: unknown[] } {
+  // The encrypted bootstrap is retained only for its ordinary browser cookies.
+  // Persisted product origins can contain an unrelated prior session store and
+  // force the fresh private run through replacement/finalization UI before the
+  // scoped grant has created its own session. The grant below is authoritative
+  // for this run; product localStorage must therefore start empty and may only
+  // be repopulated by the ordinary UI in this isolated context.
+  return { cookies: storageState.cookies, origins: [] };
+}
+
 export async function captureSessionRecoveryStorageState(
   context: BrowserContext,
   authenticatedStorageState: { cookies: unknown[]; origins: unknown[] },
@@ -1101,7 +1113,10 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
     }
     const frontendOrigin = validateAllowedOrigin(run.target.frontendUrl, this.config.allowedOrigins).origin;
     const browser = await this.#ensureBrowser();
-    let context = await browser.newContext({ ...(storageState === undefined ? {} : { storageState: storageState as any }), serviceWorkers: "block" });
+    const bootstrapStorageState = storageState === undefined
+      ? undefined
+      : isolateBootstrapStorageState(storageState);
+    let context = await browser.newContext({ ...(bootstrapStorageState === undefined ? {} : { storageState: bootstrapStorageState as any }), serviceWorkers: "block" });
     this.#pendingContexts.set(run.id, context);
     let ordinaryRouteStage = "frontend_auth_grant";
     let ordinaryRouteRecoveryReloaded = false;

@@ -9,7 +9,7 @@ import { SCENARIO_IDS } from "../src/scenarios.js";
 import { CapabilityCodec, sha256 } from "../src/security.js";
 import { VoiceLabService, assertFreshProductAdmissionProof, targetAdmissionBinding } from "../src/service.js";
 import { assertTransition } from "../src/state-machine.js";
-import { VoiceLabWorker, assertResolvedAudioWithinAdmission, augmentOperationTimeoutWithInterruptedDriverError, certificationTerminalDecision, deriveCompletedVerdicts, evaluateScenarioAssertions, exactOutputLifecyclesAtEpoch, leaseHeartbeatIntervalMs, suiteCertificationProjection, suiteCertificationState } from "../src/worker.js";
+import { VoiceLabWorker, assertResolvedAudioWithinAdmission, augmentOperationTimeoutWithInterruptedDriverError, certificationTerminalDecision, deriveCompletedVerdicts, evaluateScenarioAssertions, exactOutputLifecyclesAtEpoch, leaseHeartbeatIntervalMs, settleInterruptedExecution, suiteCertificationProjection, suiteCertificationState } from "../src/worker.js";
 import { caller, SHA, SHA_B, SHA_C, SHA_D, testConfig, testRun } from "./helpers.js";
 
 const target = {
@@ -31,6 +31,16 @@ describe("service and durable memory-ledger contracts", () => {
     audio = new AudioResolver(testConfig());
     await audio.initialize();
     service = new VoiceLabService(ledger, testConfig(), async () => audio.summaries());
+  });
+
+  it("bounds settlement when an interrupted browser driver never resolves", async () => {
+    const interrupted = await settleInterruptedExecution(new Promise(() => undefined), 0);
+
+    expect(interrupted).toBeInstanceOf(VoiceLabError);
+    expect((interrupted as VoiceLabError).detail).toMatchObject({
+      code: "DRIVER_CANCELLATION_TIMEOUT",
+      details: { timeout_ms: 0 },
+    });
   });
 
   it("retains only fixed sanitized interrupted route diagnostics on a global start timeout", () => {

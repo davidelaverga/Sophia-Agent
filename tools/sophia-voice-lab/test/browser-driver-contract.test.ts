@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { activateVoiceStartWithClientErrorReload, assertPageLocation, captureSessionRecoveryStorageState, classifyBrowserStartCause, classifyClientCdpExceptionFrames, classifyClientCdpPausedFrames, classifyClientConsoleErrorLocation, classifyClientPageError, closeContextWithProof, DASHBOARD_ROUTE_TIMEOUT_MS, drainProductCapture, establishDashboardMicRoute, establishSessionNavigation, extractNextChunkScriptUrls, findPassiveEffectCreateBreakpoint, findPassiveEffectCreateCatchBreakpoint, findPassiveEffectDestroyBreakpoint, isExactFinalizationResponse, isRecoverableEmptySessionVoiceRoute, openFreshExactSessionContext, passiveEffectBreakpointCondition, PlaywrightVoiceDriver, RECOVERABLE_DASHBOARD_LOAD_ERROR, RECOVERABLE_DASHBOARD_RELOAD_BUTTON, requestBoundJson, requestBoundJsonWithOneTransientRetry, selectRecentClientEffectProbe, selectRecentClientPausedFrames, SESSION_NAVIGATION_ROUTE_TIMEOUT_MS, SESSION_NAVIGATION_SETTLE_TIMEOUT_MS, SESSION_RECOVERY_STORAGE_CAPTURE_TIMEOUT_MS, SESSION_ROUTE_RECOVERY_RELOAD_TIMEOUT_MS, SESSION_VOICE_INITIAL_START_TIMEOUT_MS, SESSION_VOICE_INITIAL_TAB_TIMEOUT_MS, SESSION_VOICE_RECOVERY_START_TIMEOUT_MS, SESSION_VOICE_RECOVERY_TAB_TIMEOUT_MS, shouldCaptureSessionVoiceRoute, shouldReleasePassiveEffectBreakpoint, validateAppSyntheticBinding, validateD02BrowserContextBinding, validateD02ProductCleanupEcho, waitForClientPageError, waitOnWorkerClock, withClientDiagnosticFrames, withClientEffectProbe } from "../src/browser-driver.js";
+import { activateVoiceStartWithClientErrorReload, assertPageLocation, captureSessionRecoveryStorageState, classifyBrowserStartCause, classifyClientCdpExceptionFrames, classifyClientCdpPausedFrames, classifyClientConsoleErrorLocation, classifyClientPageError, closeContextWithProof, DASHBOARD_ROUTE_TIMEOUT_MS, drainProductCapture, establishDashboardMicRoute, establishSessionNavigation, extractNextChunkScriptUrls, findPassiveEffectCreateBreakpoint, findPassiveEffectCreateCatchBreakpoint, findPassiveEffectDestroyBreakpoint, isolateBootstrapStorageState, isExactFinalizationResponse, isRecoverableEmptySessionVoiceRoute, openFreshExactSessionContext, passiveEffectBreakpointCondition, PlaywrightVoiceDriver, RECOVERABLE_DASHBOARD_LOAD_ERROR, RECOVERABLE_DASHBOARD_RELOAD_BUTTON, requestBoundJson, requestBoundJsonWithOneTransientRetry, selectRecentClientEffectProbe, selectRecentClientPausedFrames, SESSION_NAVIGATION_ROUTE_TIMEOUT_MS, SESSION_NAVIGATION_SETTLE_TIMEOUT_MS, SESSION_RECOVERY_STORAGE_CAPTURE_TIMEOUT_MS, SESSION_ROUTE_RECOVERY_RELOAD_TIMEOUT_MS, SESSION_VOICE_INITIAL_START_TIMEOUT_MS, SESSION_VOICE_INITIAL_TAB_TIMEOUT_MS, SESSION_VOICE_RECOVERY_START_TIMEOUT_MS, SESSION_VOICE_RECOVERY_TAB_TIMEOUT_MS, shouldCaptureSessionVoiceRoute, shouldReleasePassiveEffectBreakpoint, validateAppSyntheticBinding, validateD02BrowserContextBinding, validateD02ProductCleanupEcho, waitForClientPageError, waitOnWorkerClock, withClientDiagnosticFrames, withClientEffectProbe } from "../src/browser-driver.js";
 import { sha256 } from "../src/security.js";
 import { SHA, SHA_B, SHA_C, SHA_D, testConfig, testRun } from "./helpers.js";
 
@@ -98,6 +98,16 @@ describe("ordinary session navigation settlement", () => {
 });
 
 describe("ordinary voice start recovery", () => {
+  it("drops inherited product origins while preserving bootstrap cookies", () => {
+    const cookies = [{ name: "auth", value: "opaque" }];
+    const storage = isolateBootstrapStorageState({
+      cookies,
+      origins: [{ origin: "https://www.sophia-ei.com", localStorage: [{ name: "sophia-session-store", value: "stale" }] }],
+    });
+
+    expect(storage).toEqual({ cookies, origins: [] });
+  });
+
   it("refreshes recovery storage with the session persisted before route commit", async () => {
     const authenticated = { cookies: [{ name: "auth" }], origins: [] };
     const withSession = {

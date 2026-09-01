@@ -314,8 +314,7 @@ export class VoiceLabWorker {
           if (this.#d02ShutdownArms.has(claimed.run.id)) void execution.catch(() => undefined);
           else {
             await this.driver.cancel(claimed.run.id, errorDetail(controller.signal.reason).code).catch(() => undefined);
-            let interruptedExecutionError: unknown = null;
-            await execution.catch((executionError) => { interruptedExecutionError = executionError; });
+            const interruptedExecutionError = await settleInterruptedExecution(execution);
             throw augmentOperationTimeoutWithInterruptedDriverError(controller.signal.reason, interruptedExecutionError);
           }
           throw controller.signal.reason;
@@ -2629,6 +2628,31 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(() => reject(new VoiceLabError(labError("OPERATION_TIMEOUT", "Operation exceeded its bounded execution time.", "harness", true))), timeoutMs);
     promise.then((value) => { clearTimeout(timer); resolve(value); }, (error) => { clearTimeout(timer); reject(error); });
+  });
+}
+
+export const INTERRUPTED_DRIVER_SETTLEMENT_TIMEOUT_MS = 5_000;
+
+export function settleInterruptedExecution(
+  execution: Promise<unknown>,
+  timeoutMs = INTERRUPTED_DRIVER_SETTLEMENT_TIMEOUT_MS,
+): Promise<unknown> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (value: unknown) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(value);
+    };
+    const timer = setTimeout(() => finish(new VoiceLabError(labError(
+      "DRIVER_CANCELLATION_TIMEOUT",
+      "The interrupted browser driver did not settle within the bounded cancellation window.",
+      "harness",
+      true,
+      { timeout_ms: timeoutMs },
+    ))), timeoutMs);
+    execution.then(() => finish(null), finish);
   });
 }
 
