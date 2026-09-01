@@ -10,7 +10,7 @@
 'use client';
 
 import { Mic, Send, X, Check } from 'lucide-react';
-import { useState, useEffect, useRef, type KeyboardEvent } from 'react';
+import { useState, useEffect, useRef, type KeyboardEvent, type MouseEvent } from 'react';
 
 import { haptic } from '../../hooks/useHaptics';
 import { useLongPress } from '../../hooks/useLongPress';
@@ -155,6 +155,17 @@ export function VoiceFirstComposer({
     if (disabled) return;
     onMicClick();
   };
+
+  const handleMicKeyboardClick = (event: MouseEvent<HTMLButtonElement>) => {
+    // Pointer activation is owned by useLongPress so it can distinguish a
+    // short press from press-to-talk. Keyboard activation and the ordinary
+    // HTMLElement.click() accessibility path do not emit pointer events and
+    // arrive with detail=0; handle exactly that path here. Ignoring pointer-
+    // generated click events prevents one physical press from toggling voice
+    // a second time after onPointerUp already handled it.
+    if (event.detail !== 0) return;
+    handleMicClickInternal();
+  };
   
   const handleTextToggle = () => {
     if (disabled) return;
@@ -276,6 +287,7 @@ export function VoiceFirstComposer({
               type="button"
               data-onboarding={micOnboardingId}
               {...longPressHandlers}
+              onClick={handleMicKeyboardClick}
               disabled={disabled || voiceStatus === 'thinking'}
               aria-label={isPTT ? 'Recording... release to send' : VOICE_STATUS_LABELS[voiceStatus]}
               aria-pressed={isActive || isPTT}

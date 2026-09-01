@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react"
+import { fireEvent, render, screen } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { createRef } from "react"
 import { describe, it, expect, vi, beforeEach } from "vitest"
@@ -55,6 +55,24 @@ describe("VoiceFirstComposer", () => {
     it("renders mic button", () => {
       renderComposer()
       expect(screen.getByRole("button", { name: /tap to speak/i })).toBeInTheDocument()
+    })
+
+    it("activates the ordinary mic button from its keyboard click path", () => {
+      const onMicClick = vi.fn()
+      renderComposer({ onMicClick })
+
+      fireEvent.click(screen.getByRole("button", { name: /tap to speak/i }), { detail: 0 })
+
+      expect(onMicClick).toHaveBeenCalledTimes(1)
+    })
+
+    it("leaves pointer-generated clicks to the long-press handlers", () => {
+      const onMicClick = vi.fn()
+      renderComposer({ onMicClick })
+
+      fireEvent.click(screen.getByRole("button", { name: /tap to speak/i }), { detail: 1 })
+
+      expect(onMicClick).not.toHaveBeenCalled()
     })
 
     it("keeps text input hidden by default", () => {
