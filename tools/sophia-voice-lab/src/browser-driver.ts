@@ -719,13 +719,32 @@ export const SESSION_RECOVERY_STORAGE_CAPTURE_TIMEOUT_MS = 2_500;
 export function isolateBootstrapStorageState(
   storageState: { cookies: unknown[]; origins: unknown[] },
 ): { cookies: unknown[]; origins: unknown[] } {
-  // The encrypted bootstrap is retained only for its ordinary browser cookies.
-  // Persisted product origins can contain an unrelated prior session store and
-  // force the fresh private run through replacement/finalization UI before the
-  // scoped grant has created its own session. The grant below is authoritative
-  // for this run; product localStorage must therefore start empty and may only
-  // be repopulated by the ordinary UI in this isolated context.
-  return { cookies: storageState.cookies, origins: [] };
+  // Preserve ordinary UI preferences (completed onboarding, privacy consent,
+  // dashboard spotlight, theme) from the encrypted browser bootstrap. Removing
+  // the complete origin sends a fresh lab context back through onboarding and
+  // prevents the dashboard microphone route from becoming available. Only the
+  // product state that can bind the context to a previous logical session is
+  // unsafe to inherit. This is the same session-key boundary used by the live
+  // Sophia media E2E bootstrap; the scoped grant below remains authoritative
+  // for the new session created in this isolated context.
+  const exactSessionKeys = new Set([
+    "sophia-session-bootstrap",
+    "sophia-session-store",
+    "sophia-session",
+  ]);
+  const origins = storageState.origins.map((origin) => {
+    if (origin === null || typeof origin !== "object" || Array.isArray(origin)) return origin;
+    const record = origin as Record<string, unknown>;
+    if (!Array.isArray(record.localStorage)) return origin;
+    const localStorage = record.localStorage.filter((entry) => {
+      if (entry === null || typeof entry !== "object" || Array.isArray(entry)) return true;
+      const name = (entry as Record<string, unknown>).name;
+      return typeof name !== "string"
+        || (!exactSessionKeys.has(name) && !name.startsWith("sophia.session.snapshot"));
+    });
+    return { ...record, localStorage };
+  });
+  return { cookies: storageState.cookies, origins };
 }
 
 export async function captureSessionRecoveryStorageState(

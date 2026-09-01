@@ -98,14 +98,37 @@ describe("ordinary session navigation settlement", () => {
 });
 
 describe("ordinary voice start recovery", () => {
-  it("drops inherited product origins while preserving bootstrap cookies", () => {
+  it("drops only inherited session state while preserving cookies and ordinary UI preferences", () => {
     const cookies = [{ name: "auth", value: "opaque" }];
     const storage = isolateBootstrapStorageState({
       cookies,
-      origins: [{ origin: "https://www.sophia-ei.com", localStorage: [{ name: "sophia-session-store", value: "stale" }] }],
+      origins: [{
+        origin: "https://www.sophia-ei.com",
+        localStorage: [
+          { name: "sophia-session-bootstrap", value: "stale-bootstrap" },
+          { name: "sophia-session-store", value: "stale-store" },
+          { name: "sophia-session", value: "stale-session" },
+          { name: "sophia.session.snapshot.v1:old", value: "stale-snapshot" },
+          { name: "sophia-onboarding-v2", value: "completed" },
+          { name: "sophia_consent_accepted", value: "true" },
+          { name: "sophia:dashboard-spotlight-complete:v1", value: "1" },
+          { name: "sophia-theme", value: "dark" },
+        ],
+      }],
     });
 
-    expect(storage).toEqual({ cookies, origins: [] });
+    expect(storage).toEqual({
+      cookies,
+      origins: [{
+        origin: "https://www.sophia-ei.com",
+        localStorage: [
+          { name: "sophia-onboarding-v2", value: "completed" },
+          { name: "sophia_consent_accepted", value: "true" },
+          { name: "sophia:dashboard-spotlight-complete:v1", value: "1" },
+          { name: "sophia-theme", value: "dark" },
+        ],
+      }],
+    });
   });
 
   it("refreshes recovery storage with the session persisted before route commit", async () => {
