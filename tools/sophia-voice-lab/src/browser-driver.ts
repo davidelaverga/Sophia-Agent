@@ -713,6 +713,24 @@ export const SESSION_VOICE_INITIAL_START_TIMEOUT_MS = 10_000;
 export const SESSION_VOICE_RECOVERY_TAB_TIMEOUT_MS = 10_000;
 export const SESSION_VOICE_RECOVERY_START_TIMEOUT_MS = 15_000;
 export const SESSION_ROUTE_RECOVERY_RELOAD_TIMEOUT_MS = 15_000;
+export const SESSION_RECOVERY_STORAGE_CAPTURE_TIMEOUT_MS = 2_500;
+
+export async function captureSessionRecoveryStorageState(
+  context: BrowserContext,
+  authenticatedStorageState: { cookies: unknown[]; origins: unknown[] },
+  timeoutMs = SESSION_RECOVERY_STORAGE_CAPTURE_TIMEOUT_MS,
+): Promise<{ cookies: unknown[]; origins: unknown[] }> {
+  // The dashboard persists the newly created session before committing
+  // /session. Recovery must carry that product-authored localStorage forward;
+  // the pre-navigation authentication snapshot alone renders an empty session
+  // shell. Keep capture worker-bounded so diagnostics cannot consume the outer
+  // operation watchdog if the old renderer is already unhealthy.
+  return observeOnWorkerClock(
+    () => context.storageState() as Promise<{ cookies: unknown[]; origins: unknown[] }>,
+    authenticatedStorageState,
+    timeoutMs,
+  );
+}
 
 export async function openFreshExactSessionContext(input: {
   browser: Browser;
@@ -1160,6 +1178,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       // allocate a new isolated context without replaying or broadening the
       // scoped frontend grant.
       const authenticatedStorageState = await context.storageState() as { cookies: unknown[]; origins: unknown[] };
+      let sessionRecoveryStorageState = authenticatedStorageState;
       const preloadedPassiveEffectBreakpoints = await settleDiagnosticWithinBudget(
         preloadPassiveEffectBreakpoints(context.request, frontendOrigin).catch(() => []),
         [],
@@ -1496,7 +1515,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
           browser,
           currentContext: context,
           currentPage: activePage,
-          storageState: authenticatedStorageState,
+          storageState: sessionRecoveryStorageState,
           initScriptContent,
           frontendOrigin,
           attachDiagnostics: attachPageDiagnostics,
@@ -1541,6 +1560,14 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
         reload: () => reloadExactSessionRouteOnce("session_navigation_recovery_reload"),
       });
       assertPageLocation(page.url(), frontendOrigin, (pathname) => /^\/session(?:\/|$)/.test(pathname), "ORDINARY_UI_ORIGIN_DRIFT");
+      // useSessionStart writes the active session to its persisted store before
+      // router.push('/session'). Snapshot that state immediately after the
+      // exact route commits, while the original context is still authoritative.
+      // A later fresh-context reload must not fall back to auth-only storage.
+      sessionRecoveryStorageState = await captureSessionRecoveryStorageState(
+        context,
+        authenticatedStorageState,
+      );
       let voiceStartAttempt = 0;
       const activateVoiceStart = async () => {
         voiceStartAttempt += 1;
