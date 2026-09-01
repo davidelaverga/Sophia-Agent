@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { activateVoiceStartWithClientErrorReload, assertPageLocation, captureSessionRecoveryStorageState, classifyBrowserStartCause, classifyClientCdpExceptionFrames, classifyClientCdpPausedFrames, classifyClientConsoleErrorLocation, classifyClientPageError, closeContextWithProof, DASHBOARD_ROUTE_TIMEOUT_MS, drainProductCapture, establishDashboardMicRoute, establishSessionNavigation, extractNextChunkScriptUrls, findPassiveEffectCreateBreakpoint, findPassiveEffectCreateCatchBreakpoint, findPassiveEffectDestroyBreakpoint, isolateBootstrapStorageState, isExactFinalizationResponse, isRecoverableEmptyDashboardVoiceRoute, isRecoverableEmptySessionVoiceRoute, openFreshExactSessionContext, passiveEffectBreakpointCondition, PlaywrightVoiceDriver, RECOVERABLE_DASHBOARD_LOAD_ERROR, RECOVERABLE_DASHBOARD_RELOAD_BUTTON, requestBoundJson, requestBoundJsonWithOneTransientRetry, selectRecentClientEffectProbe, selectRecentClientPausedFrames, SESSION_NAVIGATION_ROUTE_TIMEOUT_MS, SESSION_NAVIGATION_SETTLE_TIMEOUT_MS, SESSION_RECOVERY_STORAGE_CAPTURE_TIMEOUT_MS, SESSION_ROUTE_RECOVERY_RELOAD_TIMEOUT_MS, SESSION_VOICE_INITIAL_START_TIMEOUT_MS, SESSION_VOICE_INITIAL_TAB_TIMEOUT_MS, SESSION_VOICE_RECOVERY_START_TIMEOUT_MS, SESSION_VOICE_RECOVERY_TAB_TIMEOUT_MS, shouldCaptureSessionVoiceRoute, shouldReleasePassiveEffectBreakpoint, validateAppSyntheticBinding, validateD02BrowserContextBinding, validateD02ProductCleanupEcho, waitForClientPageError, waitOnWorkerClock, withClientDiagnosticFrames, withClientEffectProbe } from "../src/browser-driver.js";
+import { activateVoiceStartWithClientErrorReload, assertPageLocation, captureSessionRecoveryStorageState, classifyBrowserStartCause, classifyClientCdpExceptionFrames, classifyClientCdpPausedFrames, classifyClientConsoleErrorLocation, classifyClientPageError, closeContextWithProof, DASHBOARD_ROUTE_TIMEOUT_MS, drainProductCapture, establishDashboardMicRoute, establishSessionNavigation, extractNextChunkScriptUrls, findPassiveEffectCreateBreakpoint, findPassiveEffectCreateCatchBreakpoint, findPassiveEffectDestroyBreakpoint, isolateBootstrapStorageState, isExactFinalizationResponse, isRecoverableEmptyDashboardVoiceRoute, isRecoverableEmptySessionVoiceRoute, openFreshExactDashboardContext, openFreshExactSessionContext, passiveEffectBreakpointCondition, PlaywrightVoiceDriver, RECOVERABLE_DASHBOARD_LOAD_ERROR, RECOVERABLE_DASHBOARD_RELOAD_BUTTON, requestBoundJson, requestBoundJsonWithOneTransientRetry, selectRecentClientEffectProbe, selectRecentClientPausedFrames, SESSION_NAVIGATION_ROUTE_TIMEOUT_MS, SESSION_NAVIGATION_SETTLE_TIMEOUT_MS, SESSION_RECOVERY_STORAGE_CAPTURE_TIMEOUT_MS, SESSION_ROUTE_RECOVERY_RELOAD_TIMEOUT_MS, SESSION_VOICE_INITIAL_START_TIMEOUT_MS, SESSION_VOICE_INITIAL_TAB_TIMEOUT_MS, SESSION_VOICE_RECOVERY_START_TIMEOUT_MS, SESSION_VOICE_RECOVERY_TAB_TIMEOUT_MS, shouldCaptureSessionVoiceRoute, shouldReleasePassiveEffectBreakpoint, validateAppSyntheticBinding, validateD02BrowserContextBinding, validateD02ProductCleanupEcho, waitForClientPageError, waitOnWorkerClock, withClientDiagnosticFrames, withClientEffectProbe } from "../src/browser-driver.js";
 import { sha256 } from "../src/security.js";
 import { SHA, SHA_B, SHA_C, SHA_D, testConfig, testRun } from "./helpers.js";
 
@@ -188,6 +188,42 @@ describe("ordinary voice start recovery", () => {
       "new-page",
       "attach",
       `goto:https://www.sophia-ei.com/session:${JSON.stringify({ waitUntil: "domcontentloaded", timeout: SESSION_ROUTE_RECOVERY_RELOAD_TIMEOUT_MS })}`,
+      "close-current-context",
+    ]);
+  });
+
+  it("rehydrates the exact empty dashboard in a fresh isolated context with the same authenticated state", async () => {
+    const calls: string[] = [];
+    const currentPage = { url: () => "https://www.sophia-ei.com/" };
+    const replacementPage = {
+      url: () => "https://www.sophia-ei.com/",
+      goto: async (url: string, options: unknown) => { calls.push(`goto:${url}:${JSON.stringify(options)}`); },
+    };
+    const currentContext = { close: async () => { calls.push("close-current-context"); } };
+    const replacementContext = {
+      addInitScript: async () => { calls.push("add-init"); },
+      newPage: async () => { calls.push("new-page"); return replacementPage; },
+      close: async () => { calls.push("close-replacement-context"); },
+    };
+    const browser = {
+      newContext: async (options: unknown) => { calls.push(`new-context:${JSON.stringify(options)}`); return replacementContext; },
+    };
+
+    await expect(openFreshExactDashboardContext({
+      browser: browser as any,
+      currentContext: currentContext as any,
+      currentPage: currentPage as any,
+      storageState: { cookies: [], origins: [] },
+      initScriptContent: "sealed-init",
+      frontendOrigin: "https://www.sophia-ei.com",
+      attachDiagnostics: (page) => { expect(page).toBe(replacementPage); calls.push("attach"); },
+    })).resolves.toEqual({ context: replacementContext, page: replacementPage });
+    expect(calls).toEqual([
+      `new-context:${JSON.stringify({ storageState: { cookies: [], origins: [] }, serviceWorkers: "block" })}`,
+      "add-init",
+      "new-page",
+      "attach",
+      `goto:https://www.sophia-ei.com/:${JSON.stringify({ waitUntil: "domcontentloaded", timeout: SESSION_ROUTE_RECOVERY_RELOAD_TIMEOUT_MS })}`,
       "close-current-context",
     ]);
   });

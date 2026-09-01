@@ -775,7 +775,7 @@ export async function captureSessionRecoveryStorageState(
   );
 }
 
-export async function openFreshExactSessionContext(input: {
+type FreshExactRouteContextInput = {
   browser: Browser;
   currentContext: BrowserContext;
   currentPage: Page;
@@ -784,9 +784,14 @@ export async function openFreshExactSessionContext(input: {
   frontendOrigin: string;
   attachDiagnostics: (page: Page) => void;
   timeoutMs?: number;
-}): Promise<{ context: BrowserContext; page: Page }> {
+};
+
+async function openFreshExactRouteContext(
+  input: FreshExactRouteContextInput,
+  acceptsPath: (pathname: string) => boolean,
+): Promise<{ context: BrowserContext; page: Page }> {
   const recoveryUrl = input.currentPage.url();
-  assertPageLocation(recoveryUrl, input.frontendOrigin, (pathname) => /^\/session(?:\/|$)/.test(pathname), "ORDINARY_UI_ORIGIN_DRIFT");
+  assertPageLocation(recoveryUrl, input.frontendOrigin, acceptsPath, "ORDINARY_UI_ORIGIN_DRIFT");
   const replacementContext = await input.browser.newContext({
     storageState: input.storageState as any,
     serviceWorkers: "block",
@@ -799,7 +804,7 @@ export async function openFreshExactSessionContext(input: {
       waitUntil: "domcontentloaded",
       timeout: input.timeoutMs ?? SESSION_ROUTE_RECOVERY_RELOAD_TIMEOUT_MS,
     });
-    assertPageLocation(replacementPage.url(), input.frontendOrigin, (pathname) => /^\/session(?:\/|$)/.test(pathname), "ORDINARY_UI_ORIGIN_DRIFT");
+    assertPageLocation(replacementPage.url(), input.frontendOrigin, acceptsPath, "ORDINARY_UI_ORIGIN_DRIFT");
     // The failed context no longer participates in recovery. Closing it is
     // best-effort and worker-bounded; the Browser registry remains the final
     // cleanup authority if Chromium cannot settle this command.
@@ -809,6 +814,18 @@ export async function openFreshExactSessionContext(input: {
     await observeOnWorkerClock(() => replacementContext.close(), undefined, 1_000);
     throw error;
   }
+}
+
+export async function openFreshExactSessionContext(
+  input: FreshExactRouteContextInput,
+): Promise<{ context: BrowserContext; page: Page }> {
+  return openFreshExactRouteContext(input, (pathname) => /^\/session(?:\/|$)/.test(pathname));
+}
+
+export async function openFreshExactDashboardContext(
+  input: FreshExactRouteContextInput,
+): Promise<{ context: BrowserContext; page: Page }> {
+  return openFreshExactRouteContext(input, (pathname) => pathname === "/");
 }
 
 export async function resolveDashboardMicButton(page: Page, micAnchor: Locator): Promise<Locator> {
@@ -1591,10 +1608,16 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       };
       await page.goto(new URL("/", frontendOrigin).toString(), { waitUntil: "domcontentloaded", timeout: 30_000 });
       assertPageLocation(page.url(), frontendOrigin, (pathname) => pathname === "/", "ORDINARY_UI_ORIGIN_DRIFT");
-      const micAnchor = page.locator(this.config.onboardingMicSelector).first();
-      const consentAccept = page.locator(CONSENT_ACCEPT_SELECTOR).first();
-      const recoverableLoadError = page.getByText(RECOVERABLE_DASHBOARD_LOAD_ERROR).first();
-      const recoverableLoadReload = page.getByRole("button", { name: RECOVERABLE_DASHBOARD_RELOAD_BUTTON, exact: true }).first();
+      let micAnchor = activePage.locator(this.config.onboardingMicSelector).first();
+      let consentAccept = activePage.locator(CONSENT_ACCEPT_SELECTOR).first();
+      let recoverableLoadError = activePage.getByText(RECOVERABLE_DASHBOARD_LOAD_ERROR).first();
+      let recoverableLoadReload = activePage.getByRole("button", { name: RECOVERABLE_DASHBOARD_RELOAD_BUTTON, exact: true }).first();
+      const rebindDashboardControls = (): void => {
+        micAnchor = activePage.locator(this.config.onboardingMicSelector).first();
+        consentAccept = activePage.locator(CONSENT_ACCEPT_SELECTOR).first();
+        recoverableLoadError = activePage.getByText(RECOVERABLE_DASHBOARD_LOAD_ERROR).first();
+        recoverableLoadReload = activePage.getByRole("button", { name: RECOVERABLE_DASHBOARD_RELOAD_BUTTON, exact: true }).first();
+      };
       ordinaryRouteStage = "dashboard_privacy_consent";
       await establishDashboardMicRoute({
         isMicVisible: () => observeOnWorkerClock(() => micAnchor.isVisible(), false),
@@ -1610,8 +1633,21 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
           await classifySessionVoiceRoute(activePage, frontendOrigin, this.config.startButtonName),
         ),
         reloadEmptyRoute: async () => {
-          await activePage.reload({ waitUntil: "domcontentloaded", timeout: 30_000 });
-          assertPageLocation(activePage.url(), frontendOrigin, (pathname) => pathname === "/", "ORDINARY_UI_ORIGIN_DRIFT");
+          const replacement = await openFreshExactDashboardContext({
+            browser,
+            currentContext: context,
+            currentPage: activePage,
+            storageState: authenticatedStorageState,
+            initScriptContent,
+            frontendOrigin,
+            attachDiagnostics: attachPageDiagnostics,
+          });
+          context = replacement.context;
+          activePage = replacement.page;
+          page = replacement.page;
+          session.context = replacement.context;
+          session.page = replacement.page;
+          rebindDashboardControls();
         },
         wait: () => waitOnWorkerClock(100),
         timeoutMs: DASHBOARD_ROUTE_TIMEOUT_MS,
