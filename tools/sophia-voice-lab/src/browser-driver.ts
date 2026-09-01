@@ -884,21 +884,21 @@ export async function establishSessionVoiceStart(
         .isEnabled({ timeout: Math.min(remaining, 250) })
         .catch(() => false);
       if (enabled) {
-        // Dispatch the exact button's native click from one bounded renderer
-        // evaluation. React invokes the ordinary onClick path synchronously
-        // but does not await the async media startup it begins, so the
-        // evaluation acknowledges before Chromium enters the provider-media
-        // transition. A page.keyboard.press command can deliver the key and
-        // then remain unresolved inside Input.dispatchKeyEvent; that poisoned
-        // the same Playwright command lane needed to read the authoritative
-        // startup receipts. HTMLElement.click neither calls a product handler
-        // directly nor retries: it activates this already-visible, enabled
-        // ordinary control exactly once.
+        // Schedule the exact button's native click for the renderer's next
+        // task, then acknowledge this evaluation before React enters the
+        // provider-media transition. Dispatching element.click() inside the
+        // evaluation still shares its completion boundary with a synchronous
+        // product handler; production media startup can then strand the same
+        // Playwright command lane needed to read authoritative receipts. This
+        // remains a one-shot activation of the visible, enabled ordinary
+        // control and never calls a product handler directly.
         await readyButton.evaluate((element) => {
           if (!(element instanceof HTMLButtonElement) || element.disabled) {
             throw new Error("The ordinary session voice control was replaced before activation.");
           }
-          element.click();
+          setTimeout(() => {
+            if (element.isConnected && !element.disabled) element.click();
+          }, 0);
         }, undefined, { timeout: Math.min(1_000, Math.max(1, deadline - Date.now())) });
         return "activated";
       }

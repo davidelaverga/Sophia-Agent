@@ -265,6 +265,29 @@ describe("real Chromium dynamic media contract", () => {
     await context.close();
   });
 
+  it("acknowledges activation before a synchronous media transition occupies the renderer", async () => {
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    await page.goto(origin);
+    await page.setContent(`
+      <button type="button" aria-label="Tap to speak">microphone</button>
+      <script>
+        window.__voiceActivations = 0;
+        document.querySelector('button').onclick = () => {
+          window.__voiceActivations += 1;
+          const deadline = performance.now() + 600;
+          while (performance.now() < deadline) {}
+        };
+      </script>
+    `);
+    const started = Date.now();
+    await expect(establishSessionVoiceStart(page, "Tap to speak", 1_500)).resolves.toBe("activated");
+    expect(Date.now() - started).toBeLessThan(400);
+    await page.waitForFunction(() => (window as any).__voiceActivations === 1);
+    expect(await page.evaluate(() => (window as any).__voiceActivations)).toBe(1);
+    await context.close();
+  });
+
   it("ends an absent voice-control wait on the worker deadline with a TimeoutError", async () => {
     const context = await browser.newContext();
     const page = await context.newPage();
