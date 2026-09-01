@@ -244,6 +244,33 @@ describe("real Chromium dynamic media contract", () => {
     await context.close();
   });
 
+  it("does not press the voice control twice when Chromium withholds the native key acknowledgement", async () => {
+    let presses = 0;
+    const ready = {
+      first: () => ready,
+      isVisible: async () => true,
+      isEnabled: async () => true,
+      focus: async () => undefined,
+    };
+    const absent = {
+      first: () => absent,
+      isVisible: async () => false,
+    };
+    const page = {
+      getByRole: (_role: string, options: { name: string }) => options.name === "Tap to speak" ? ready : absent,
+      keyboard: {
+        press: async () => {
+          presses += 1;
+          await new Promise<void>(() => undefined);
+        },
+      },
+    };
+    const started = Date.now();
+    await expect(establishSessionVoiceStart(page as any, "Tap to speak", 1_500)).resolves.toBe("activated");
+    expect(presses).toBe(1);
+    expect(Date.now() - started).toBeLessThan(1_400);
+  });
+
   it("ends an absent voice-control wait on the worker deadline with a TimeoutError", async () => {
     const context = await browser.newContext();
     const page = await context.newPage();

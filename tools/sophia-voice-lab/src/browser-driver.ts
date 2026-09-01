@@ -890,7 +890,19 @@ export async function establishSessionVoiceStart(
           await waitOnWorkerClock(Math.min(50, Math.max(1, deadline - Date.now())));
           continue;
         }
-        await page.keyboard.press("Enter");
+        // Chromium can deliver the native key event to the product and still
+        // fail to acknowledge Input.dispatchKeyEvent when the renderer is
+        // simultaneously opening the live media session.  Never issue a
+        // second activation in that ambiguous state: the startup receipt
+        // quorum below is the authoritative proof that the product acted.
+        // Bounding only the acknowledgement keeps the worker watchdog from
+        // misclassifying an already-started provider as a 300-second harness
+        // timeout while preserving the at-most-once activation contract.
+        await observeOnWorkerClock(
+          () => page.keyboard.press("Enter").then(() => true),
+          false,
+          Math.min(1_000, Math.max(1, deadline - Date.now())),
+        );
         return "activated";
       }
     }
