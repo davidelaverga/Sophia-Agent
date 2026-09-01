@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { activateVoiceStartWithClientErrorReload, assertPageLocation, captureSessionRecoveryStorageState, classifyBrowserStartCause, classifyClientCdpExceptionFrames, classifyClientCdpPausedFrames, classifyClientConsoleErrorLocation, classifyClientPageError, closeContextWithProof, DASHBOARD_ROUTE_TIMEOUT_MS, drainProductCapture, establishDashboardMicRoute, establishSessionNavigation, extractNextChunkScriptUrls, findPassiveEffectCreateBreakpoint, findPassiveEffectCreateCatchBreakpoint, findPassiveEffectDestroyBreakpoint, isolateBootstrapStorageState, isExactFinalizationResponse, isRecoverableEmptySessionVoiceRoute, openFreshExactSessionContext, passiveEffectBreakpointCondition, PlaywrightVoiceDriver, RECOVERABLE_DASHBOARD_LOAD_ERROR, RECOVERABLE_DASHBOARD_RELOAD_BUTTON, requestBoundJson, requestBoundJsonWithOneTransientRetry, selectRecentClientEffectProbe, selectRecentClientPausedFrames, SESSION_NAVIGATION_ROUTE_TIMEOUT_MS, SESSION_NAVIGATION_SETTLE_TIMEOUT_MS, SESSION_RECOVERY_STORAGE_CAPTURE_TIMEOUT_MS, SESSION_ROUTE_RECOVERY_RELOAD_TIMEOUT_MS, SESSION_VOICE_INITIAL_START_TIMEOUT_MS, SESSION_VOICE_INITIAL_TAB_TIMEOUT_MS, SESSION_VOICE_RECOVERY_START_TIMEOUT_MS, SESSION_VOICE_RECOVERY_TAB_TIMEOUT_MS, shouldCaptureSessionVoiceRoute, shouldReleasePassiveEffectBreakpoint, validateAppSyntheticBinding, validateD02BrowserContextBinding, validateD02ProductCleanupEcho, waitForClientPageError, waitOnWorkerClock, withClientDiagnosticFrames, withClientEffectProbe } from "../src/browser-driver.js";
+import { activateVoiceStartWithClientErrorReload, assertPageLocation, captureSessionRecoveryStorageState, classifyBrowserStartCause, classifyClientCdpExceptionFrames, classifyClientCdpPausedFrames, classifyClientConsoleErrorLocation, classifyClientPageError, closeContextWithProof, DASHBOARD_ROUTE_TIMEOUT_MS, drainProductCapture, establishDashboardMicRoute, establishSessionNavigation, extractNextChunkScriptUrls, findPassiveEffectCreateBreakpoint, findPassiveEffectCreateCatchBreakpoint, findPassiveEffectDestroyBreakpoint, isolateBootstrapStorageState, isExactFinalizationResponse, isRecoverableEmptyDashboardVoiceRoute, isRecoverableEmptySessionVoiceRoute, openFreshExactSessionContext, passiveEffectBreakpointCondition, PlaywrightVoiceDriver, RECOVERABLE_DASHBOARD_LOAD_ERROR, RECOVERABLE_DASHBOARD_RELOAD_BUTTON, requestBoundJson, requestBoundJsonWithOneTransientRetry, selectRecentClientEffectProbe, selectRecentClientPausedFrames, SESSION_NAVIGATION_ROUTE_TIMEOUT_MS, SESSION_NAVIGATION_SETTLE_TIMEOUT_MS, SESSION_RECOVERY_STORAGE_CAPTURE_TIMEOUT_MS, SESSION_ROUTE_RECOVERY_RELOAD_TIMEOUT_MS, SESSION_VOICE_INITIAL_START_TIMEOUT_MS, SESSION_VOICE_INITIAL_TAB_TIMEOUT_MS, SESSION_VOICE_RECOVERY_START_TIMEOUT_MS, SESSION_VOICE_RECOVERY_TAB_TIMEOUT_MS, shouldCaptureSessionVoiceRoute, shouldReleasePassiveEffectBreakpoint, validateAppSyntheticBinding, validateD02BrowserContextBinding, validateD02ProductCleanupEcho, waitForClientPageError, waitOnWorkerClock, withClientDiagnosticFrames, withClientEffectProbe } from "../src/browser-driver.js";
 import { sha256 } from "../src/security.js";
 import { SHA, SHA_B, SHA_C, SHA_D, testConfig, testRun } from "./helpers.js";
 
@@ -744,6 +744,44 @@ describe("ordinary dashboard consent route", () => {
     });
     expect(result).toBe("already_consented");
     expect(reloads).toBe(1);
+  });
+
+  it("reloads one exact empty dashboard shell only after the hydration grace", async () => {
+    let now = 0;
+    let reloads = 0;
+    const result = await establishDashboardMicRoute({
+      isMicVisible: async () => reloads === 1,
+      isConsentVisible: async () => false,
+      isConsentEnabled: async () => false,
+      acceptConsent: async () => undefined,
+      isRecoverableEmptyRoute: async () => reloads === 0,
+      reloadEmptyRoute: async () => { reloads += 1; },
+      emptyRouteGraceMs: 300,
+      wait: async () => { now += 100; },
+      timeoutMs: 1_000,
+      now: () => now,
+    });
+    expect(result).toBe("already_consented");
+    expect(now).toBe(300);
+    expect(reloads).toBe(1);
+  });
+
+  it("classifies only a fixed empty dashboard route as reloadable", () => {
+    const empty = {
+      location: "dashboard",
+      voice_tab: "absent",
+      voice_button: "absent",
+      dashboard_mic_visible: false,
+      dashboard_mic_button: "absent",
+      consent_visible: false,
+      auth_gate_visible: false,
+      auth_checking_visible: false,
+      session_store_loading_visible: false,
+      voice_fallback_visible: false,
+    } as const;
+    expect(isRecoverableEmptyDashboardVoiceRoute(empty)).toBe(true);
+    expect(isRecoverableEmptyDashboardVoiceRoute({ ...empty, auth_gate_visible: true })).toBe(false);
+    expect(isRecoverableEmptyDashboardVoiceRoute({ ...empty, location: "same_origin_other" })).toBe(false);
   });
 });
 

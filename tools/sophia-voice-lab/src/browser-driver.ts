@@ -461,7 +461,18 @@ export async function classifySessionVoiceRoute(
 }
 
 export function isRecoverableEmptySessionVoiceRoute(route: SessionVoiceRouteDiagnostic): boolean {
-  return route.location === "expected_session"
+  return isRecoverableEmptyVoiceRoute(route, "expected_session");
+}
+
+export function isRecoverableEmptyDashboardVoiceRoute(route: SessionVoiceRouteDiagnostic): boolean {
+  return isRecoverableEmptyVoiceRoute(route, "dashboard");
+}
+
+function isRecoverableEmptyVoiceRoute(
+  route: SessionVoiceRouteDiagnostic,
+  location: "expected_session" | "dashboard",
+): boolean {
+  return route.location === location
     && route.voice_tab === "absent"
     && route.voice_button === "absent"
     && route.dashboard_mic_visible === false
@@ -1053,12 +1064,16 @@ export async function establishDashboardMicRoute(input: {
   acceptConsent: () => Promise<void>;
   isRecoverableLoadErrorVisible?: () => Promise<boolean>;
   reload?: () => Promise<void>;
+  isRecoverableEmptyRoute?: () => Promise<boolean>;
+  reloadEmptyRoute?: () => Promise<void>;
+  emptyRouteGraceMs?: number;
   wait: () => Promise<void>;
   timeoutMs: number;
   now?: () => number;
 }): Promise<"already_consented" | "accepted"> {
   const now = input.now ?? Date.now;
-  const deadline = now() + input.timeoutMs;
+  const startedAt = now();
+  const deadline = startedAt + input.timeoutMs;
   let reloadAttempted = false;
   while (now() < deadline) {
     if (await input.isMicVisible()) return "already_consented";
@@ -1078,6 +1093,19 @@ export async function establishDashboardMicRoute(input: {
       && await input.isRecoverableLoadErrorVisible()) {
       reloadAttempted = true;
       await input.reload();
+      continue;
+    }
+    // A successful same-origin document navigation can very occasionally
+    // leave only the empty protected-route shell mounted: no auth gate,
+    // consent, dashboard CTA, or typed error surface exists to activate. Give
+    // ordinary hydration a bounded grace period, then reload that exact `/`
+    // route once. The caller must prove the fixed empty-dashboard state before
+    // this recovery is available, so an unknown page can never be reloaded.
+    if (!reloadAttempted && input.isRecoverableEmptyRoute && input.reloadEmptyRoute
+      && now() - startedAt >= (input.emptyRouteGraceMs ?? 5_000)
+      && await input.isRecoverableEmptyRoute()) {
+      reloadAttempted = true;
+      await input.reloadEmptyRoute();
       continue;
     }
     await input.wait();
@@ -1576,6 +1604,13 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
         isRecoverableLoadErrorVisible: () => observeOnWorkerClock(() => recoverableLoadError.isVisible(), false),
         reload: async () => {
           await recoverableLoadReload.click({ timeout: 20_000 });
+          assertPageLocation(activePage.url(), frontendOrigin, (pathname) => pathname === "/", "ORDINARY_UI_ORIGIN_DRIFT");
+        },
+        isRecoverableEmptyRoute: async () => isRecoverableEmptyDashboardVoiceRoute(
+          await classifySessionVoiceRoute(activePage, frontendOrigin, this.config.startButtonName),
+        ),
+        reloadEmptyRoute: async () => {
+          await activePage.reload({ waitUntil: "domcontentloaded", timeout: 30_000 });
           assertPageLocation(activePage.url(), frontendOrigin, (pathname) => pathname === "/", "ORDINARY_UI_ORIGIN_DRIFT");
         },
         wait: () => waitOnWorkerClock(100),
