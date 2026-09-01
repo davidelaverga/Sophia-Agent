@@ -288,6 +288,34 @@ describe("real Chromium dynamic media contract", () => {
     await context.close();
   });
 
+  it("advances after one delivered activation when its protocol acknowledgement never resolves", async () => {
+    let activationDispatches = 0;
+    const readyButton = {
+      first: () => readyButton,
+      isVisible: async () => true,
+      isEnabled: async () => true,
+      evaluate: () => {
+        activationDispatches += 1;
+        return new Promise<void>(() => undefined);
+      },
+    };
+    const inactiveButton = {
+      first: () => inactiveButton,
+      isVisible: async () => false,
+    };
+    const page = {
+      getByRole: (_role: string, options: { name: string }) => options.name === "Tap to speak" ? readyButton : inactiveButton,
+    } as any;
+
+    const result = await Promise.race([
+      establishSessionVoiceStart(page, "Tap to speak", 1_000),
+      new Promise<"deadline">((resolve) => setTimeout(() => resolve("deadline"), 100)),
+    ]);
+
+    expect(result).toBe("activated");
+    expect(activationDispatches).toBe(1);
+  });
+
   it("ends an absent voice-control wait on the worker deadline with a TimeoutError", async () => {
     const context = await browser.newContext();
     const page = await context.newPage();

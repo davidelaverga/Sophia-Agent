@@ -925,7 +925,7 @@ export async function establishSessionVoiceStart(
         // Playwright command lane needed to read authoritative receipts. This
         // remains a one-shot activation of the visible, enabled ordinary
         // control and never calls a product handler directly.
-        await readyButton.evaluate((element) => {
+        const activationAcknowledgement = readyButton.evaluate((element) => {
           if (!(element instanceof HTMLButtonElement) || element.disabled) {
             throw new Error("The ordinary session voice control was replaced before activation.");
           }
@@ -933,6 +933,17 @@ export async function establishSessionVoiceStart(
             if (element.isConnected && !element.disabled) element.click();
           }, 0);
         }, undefined, { timeout: Math.min(1_000, Math.max(1, deadline - Date.now())) });
+        // The renderer can execute the scheduling function, deliver the
+        // ordinary click, and still leave Playwright's locator evaluation
+        // acknowledgement unresolved while media startup owns the renderer
+        // task lane. Waiting for that acknowledgement poisoned the start
+        // operation for the complete 300-second deadline. Dispatch exactly
+        // once, yield one worker-owned turn so Chromium can receive and run
+        // the already-issued evaluation, consume any eventual rejection, and
+        // let the page-owned push receipts below provide the authoritative
+        // activation proof.
+        void activationAcknowledgement.catch(() => undefined);
+        await waitOnWorkerClock(Math.min(25, Math.max(1, deadline - Date.now())));
         return "activated";
       }
     }
