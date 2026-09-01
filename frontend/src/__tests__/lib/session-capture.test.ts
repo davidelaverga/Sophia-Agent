@@ -105,4 +105,26 @@ describe('session capture cursor drain', () => {
     expect(event.synthetic_test).toEqual(syntheticTest);
     expect(window.__sophiaCapture?.snapshot().metadata.synthetic_test).toEqual(syntheticTest);
   });
+
+  it('mirrors each exact recorded event to the private page notification lane', () => {
+    let mirrored: unknown = null;
+    const listener = (event: Event) => {
+      mirrored = (event as CustomEvent).detail;
+    };
+    window.addEventListener('sophia:capture-event', listener, { once: true });
+
+    recordSophiaCaptureEvent({
+      category: 'voice-session',
+      name: 'gemini-provider-connection-epoch',
+      payload: { receipt: { providerConnectionEpoch: 3 } },
+    });
+
+    expect(mirrored).toMatchObject({
+      generation: 1,
+      seq: 1,
+      category: 'voice-session',
+      name: 'gemini-provider-connection-epoch',
+      payload: { receipt: { providerConnectionEpoch: 3 } },
+    });
+  });
 });

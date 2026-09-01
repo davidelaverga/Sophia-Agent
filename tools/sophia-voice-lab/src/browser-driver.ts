@@ -712,7 +712,23 @@ interface BrowserSession {
   latestProviderReceipt: (Record<string, unknown> & { _seq: number }) | null;
   contextExpiresAt: number;
   expectedBinding: { testRunId: string; cleanupObligationId: string; principalId: string; scenarioId: string | null; scenarioVersion: string | null; environment: string; retentionHours: number; providerExpiresAt: string; browserContextBinding?: D02BrowserContextBinding };
+  startupPush: StartupPushState;
 }
+
+type StartupPushEnvelope = {
+  page: Page;
+  channel: "harness" | "product";
+  payload: unknown;
+};
+
+type StartupPushState = {
+  active: boolean;
+  overflow: boolean;
+  queue: StartupPushEnvelope[];
+};
+
+const PAGE_PUSH_BINDING_NAME = "__sophiaVoiceLabPushV1";
+const MAX_STARTUP_PUSH_EVENTS = 4_096;
 
 const CONSENT_ACCEPT_SELECTOR = '[data-voice-lab="consent-accept"]';
 export const DASHBOARD_ROUTE_TIMEOUT_MS = 60_000;
@@ -784,6 +800,7 @@ type FreshExactRouteContextInput = {
   initScriptContent: string;
   frontendOrigin: string;
   attachDiagnostics: (page: Page) => void;
+  installBindings?: (context: BrowserContext) => Promise<void>;
   timeoutMs?: number;
 };
 
@@ -798,6 +815,7 @@ async function openFreshExactRouteContext(
     serviceWorkers: "block",
   });
   try {
+    if (input.installBindings) await input.installBindings(replacementContext);
     await replacementContext.addInitScript({ content: input.initScriptContent });
     const replacementPage = await replacementContext.newPage();
     input.attachDiagnostics(replacementPage);
@@ -1190,7 +1208,22 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
     const bootstrapStorageState = storageState === undefined
       ? undefined
       : isolateBootstrapStorageState(storageState);
+    const startupPush: StartupPushState = { active: true, overflow: false, queue: [] };
+    const installPushBinding = async (targetContext: BrowserContext): Promise<void> => {
+      await targetContext.exposeBinding(PAGE_PUSH_BINDING_NAME, (source, raw: unknown) => {
+        if (!startupPush.active || raw === null || typeof raw !== "object" || Array.isArray(raw)) return;
+        const envelope = raw as Record<string, unknown>;
+        if (envelope.schema !== "sophia_voice_lab_page_push_v1"
+          || (envelope.channel !== "harness" && envelope.channel !== "product")) return;
+        if (startupPush.queue.length >= MAX_STARTUP_PUSH_EVENTS) {
+          startupPush.overflow = true;
+          return;
+        }
+        startupPush.queue.push({ page: source.page, channel: envelope.channel, payload: envelope.payload });
+      });
+    };
     let context = await browser.newContext({ ...(bootstrapStorageState === undefined ? {} : { storageState: bootstrapStorageState as any }), serviceWorkers: "block" });
+    await installPushBinding(context);
     this.#pendingContexts.set(run.id, context);
     let ordinaryRouteStage = "frontend_auth_grant";
     let ordinaryRouteRecoveryReloaded = false;
@@ -1590,7 +1623,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
           // Diagnostic enrichment is fail-open and must not alter product flow.
         }
       }
-      const session: BrowserSession = { context, page: activePage, harnessCursor: 0, productCursor: null, latestProviderReceipt: null, contextExpiresAt: Number(grantReceipt.expires_at), expectedBinding: { testRunId: run.testRunId, cleanupObligationId: run.cleanupObligationId, principalId: run.principalId, scenarioId: run.scenarioId, scenarioVersion: run.scenarioVersion, environment: run.environment, retentionHours: run.capturePolicy.retentionHours, providerExpiresAt: run.expiresAt.toISOString(), ...(exactBrowserContextBinding === undefined ? {} : { browserContextBinding: exactBrowserContextBinding }) } };
+      const session: BrowserSession = { context, page: activePage, harnessCursor: 0, productCursor: null, latestProviderReceipt: null, contextExpiresAt: Number(grantReceipt.expires_at), expectedBinding: { testRunId: run.testRunId, cleanupObligationId: run.cleanupObligationId, principalId: run.principalId, scenarioId: run.scenarioId, scenarioVersion: run.scenarioVersion, environment: run.environment, retentionHours: run.capturePolicy.retentionHours, providerExpiresAt: run.expiresAt.toISOString(), ...(exactBrowserContextBinding === undefined ? {} : { browserContextBinding: exactBrowserContextBinding }) }, startupPush };
       this.#sessions.set(run.id, session);
       this.#pendingContexts.delete(run.id);
       const reloadExactSessionRouteOnce = async (stage: string): Promise<void> => {
@@ -1609,6 +1642,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
           initScriptContent,
           frontendOrigin,
           attachDiagnostics: attachPageDiagnostics,
+          installBindings: installPushBinding,
         });
         context = replacement.context;
         activePage = replacement.page;
@@ -1651,6 +1685,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
             initScriptContent,
             frontendOrigin,
             attachDiagnostics: attachPageDiagnostics,
+            installBindings: installPushBinding,
           });
           context = replacement.context;
           activePage = replacement.page;
@@ -1728,12 +1763,19 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       // before startup evidence performs its first renderer read.
       await waitOnWorkerClock(SESSION_VOICE_ACTIVATION_SETTLE_MS);
       ordinaryRouteStage = "voice_startup_readiness";
-      const events = await this.#waitForStartupReadiness(run.id, session, 45_000);
-      events.push(...await this.drain(run.id));
+      const events = await this.#waitForStartupReadiness(session, 45_000);
+      events.push(...this.#drainStartupPush(session));
       events.push({ kind: "deployment.verified", source: "canonical", payload: deployment.components, dedupeKey: `deployment:${run.id}:startup` });
-      events.push(await this.#snapshotEvent(session, "startup"));
+      // A renderer snapshot is intentionally deferred until after start has
+      // released the worker operation lease. The push receipts above already
+      // prove the exact page-owned stream and product/provider binding, while
+      // a new Runtime.evaluate at this boundary can monopolize the same
+      // command lane that the just-started media stack is settling.
+      events.push({ kind: "capture.snapshot", source: "product", payload: { stage: "startup", snapshot: null, unavailable_reason: "deferred_until_post_start_renderer_command" }, dedupeKey: `snapshot:startup:${Date.now()}` });
+      startupPush.active = false;
       return { observedDeployment, events, ...(exactBrowserContextBinding === undefined ? {} : { browserContextBinding: exactBrowserContextBinding }) };
     } catch (error) {
+      startupPush.active = false;
       // A validated grant has allocated a Better Auth session. Retain that
       // context for worker.abort(), which owns the separately minted cleanup
       // capability and must revoke the login before closing the browser.
@@ -1912,6 +1954,67 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
         if (appBinding !== null && event.name === "gemini-provider-connection-epoch" && event.payload?.receipt && typeof event.payload.receipt === "object") session.latestProviderReceipt = { ...(event.payload.receipt as Record<string, unknown>), _seq: event.seq };
     }
     session.productCursor = productDrain.cursor;
+    return events;
+  }
+
+  #drainStartupPush(session: BrowserSession): Omit<LabEvent, "runId" | "seq" | "at">[] {
+    if (session.startupPush.overflow) {
+      throw new VoiceLabError(labError("STARTUP_PUSH_OVERFLOW", "Startup capture exceeded the bounded worker push queue.", "harness", false));
+    }
+    const queued = session.startupPush.queue.splice(0);
+    const events: Omit<LabEvent, "runId" | "seq" | "at">[] = [];
+    for (const envelope of queued) {
+      // Fresh-context recovery can leave the old page alive briefly while its
+      // best-effort close settles. Only the currently owned exact page may
+      // advance startup cursors.
+      if (envelope.page !== session.page || envelope.payload === null
+        || typeof envelope.payload !== "object" || Array.isArray(envelope.payload)) continue;
+      const raw = envelope.payload as Record<string, unknown>;
+      if (envelope.channel === "harness") {
+        if (!Number.isSafeInteger(raw.seq) || Number(raw.seq) < 1 || typeof raw.kind !== "string"
+          || raw.payload === null || typeof raw.payload !== "object" || Array.isArray(raw.payload)) continue;
+        const seq = Number(raw.seq);
+        if (seq <= session.harnessCursor) continue;
+        if (seq !== session.harnessCursor + 1) throw cursorGap("harness", session.harnessCursor, seq, "startup_push_sequence_gap");
+        session.harnessCursor = seq;
+        events.push({
+          kind: raw.kind,
+          source: "browser",
+          payload: redact({ ...(raw.payload as Record<string, unknown>), _capture_provenance: { source: "voice-lab-init-push", seq, observed_at: typeof raw.observed_at === "string" ? raw.observed_at : null } }),
+          dedupeKey: `browser:${seq}`,
+        });
+        continue;
+      }
+      if (!Number.isSafeInteger(raw.generation) || Number(raw.generation) < 1
+        || !Number.isSafeInteger(raw.seq) || Number(raw.seq) < 1) continue;
+      const generation = Number(raw.generation);
+      const seq = Number(raw.seq);
+      if (session.productCursor) {
+        if (generation === session.productCursor.generation && seq <= session.productCursor.seq) continue;
+        if (generation !== session.productCursor.generation || seq !== session.productCursor.seq + 1) {
+          throw cursorGap("product", session.productCursor.seq, seq, "startup_push_sequence_gap");
+        }
+      } else if (seq !== 1) {
+        throw cursorGap("product", 0, seq, "startup_push_initial_gap");
+      }
+      const product = raw as ProductCaptureEvent;
+      const appBinding = validateAppSyntheticBinding(product.synthetic_test, session.expectedBinding);
+      session.productCursor = { generation, seq };
+      events.push({
+        kind: mapProductEvent(product),
+        source: "product",
+        payload: redact({
+          ...(product.payload ?? {}),
+          ...(appBinding === null ? {} : { _app_synthetic_binding: appBinding }),
+          _capture_provenance: { generation, seq, recorded_at: product.recordedAt ?? null, category: product.category ?? null, name: product.name ?? null },
+        }),
+        dedupeKey: `product:${generation}:${seq}`,
+      });
+      if (appBinding !== null && product.name === "gemini-provider-connection-epoch"
+        && product.payload?.receipt && typeof product.payload.receipt === "object") {
+        session.latestProviderReceipt = { ...(product.payload.receipt as Record<string, unknown>), _seq: seq };
+      }
+    }
     return events;
   }
 
@@ -2182,14 +2285,14 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
     return { kind: "cleanup.browser_context_close_failed", source: "browser", payload: { reason, close_resolved: false, browser_registry_absent: false, error_class: result.errorClass }, dedupeKey: `cleanup:${runId}:browser-close-failed` };
   }
 
-  async #waitForStartupReadiness(runId: string, session: BrowserSession, timeoutMs: number): Promise<Omit<LabEvent, "runId" | "seq" | "at">[]> {
+  async #waitForStartupReadiness(session: BrowserSession, timeoutMs: number): Promise<Omit<LabEvent, "runId" | "seq" | "at">[]> {
     const deadline = Date.now() + timeoutMs;
     const drained: Omit<LabEvent, "runId" | "seq" | "at">[] = [];
     const observed = new Set<string>();
     let issuedIdentity: { stream: string; tracks: string[] } | null = null;
     let productIdentity: { stream: string; tracks: string[] } | null = null;
     while (Date.now() < deadline) {
-      const batch = await this.drain(runId);
+      const batch = this.#drainStartupPush(session);
       drained.push(...batch);
       for (const event of batch) {
         if (event.source === "product" && !isValidatedAppBinding(event.payload._app_synthetic_binding, session.expectedBinding)) continue;

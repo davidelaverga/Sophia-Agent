@@ -18,8 +18,9 @@ class FakeSource {
 
 function harness() {
   const sources: FakeSource[] = [];
-  const listeners = new Map<string, () => void>();
+  const listeners = new Map<string, (event?: unknown) => void>();
   const productEvents: Array<{ type: string; detail: Record<string, unknown> }> = [];
+  const pagePushes: Array<Record<string, unknown>> = [];
   const audio = { currentTime: 0, state: "running", resume: async () => { audio.state = "running"; }, createMediaStreamDestination: () => ({ stream: { getAudioTracks: () => [{}] } }), decodeAudioData: async () => ({ duration: 0.1 }), createBufferSource: () => { const source = new FakeSource(); sources.push(source); return source; } };
   class FakeWebSocket { static CONNECTING=0; static OPEN=1; static CLOSING=2; static CLOSED=3; readyState=1; constructor(_url: string, _protocols?: unknown) {} close() { this.readyState=3; } }
   class FakeAudioContext { constructor(_options?: unknown) { return audio; } }
@@ -33,17 +34,38 @@ function harness() {
     AudioContext: FakeAudioContext, WebSocket: FakeWebSocket,
     CustomEvent: class { type: string; detail: Record<string, unknown>; constructor(type: string, init: { detail: Record<string, unknown> }) { this.type = type; this.detail = init.detail; } },
     dispatchEvent: (event: { type: string; detail: Record<string, unknown> }) => { productEvents.push(event); return true; },
-    addEventListener: (name: string, listener: () => void) => listeners.set(name, listener),
+    addEventListener: (name: string, listener: (event?: unknown) => void) => listeners.set(name, listener),
+    __sophiaVoiceLabPushV1: async (value: Record<string, unknown>) => { pagePushes.push(value); },
   };
   sandbox.window = sandbox;
   sandbox.top = sandbox;
   vm.runInNewContext(buildVoiceLabInitScript({ pageOrigin: "https://frontend.test", websocketOrigins: ["wss://provider.test"], maxAudioBytes: 1024, testRunId: "00000000-0000-4000-8000-000000000001", cleanupObligationId: "00000000-0000-4000-8000-000000000002" }), sandbox);
-  return { sandbox, audio, sources, listeners, productEvents, storage };
+  return { sandbox, audio, sources, listeners, productEvents, pagePushes, storage };
 }
 
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 describe("page-owned dynamic WebAudio injection", () => {
+  it("pushes harness and product startup receipts through the private binding lane", async () => {
+    const { sandbox, listeners, pagePushes } = harness();
+    await wait(0);
+    expect(pagePushes).toContainEqual(expect.objectContaining({
+      schema: "sophia_voice_lab_page_push_v1",
+      channel: "harness",
+      payload: expect.objectContaining({ kind: "harness.initialized", seq: 1 }),
+    }));
+
+    listeners.get("sophia:capture-event")?.(new sandbox.CustomEvent("sophia:capture-event", {
+      detail: { generation: 1, seq: 1, name: "gemini-provider-connection-epoch" },
+    }));
+    await wait(0);
+    expect(pagePushes).toContainEqual({
+      schema: "sophia_voice_lab_page_push_v1",
+      channel: "product",
+      payload: { generation: 1, seq: 1, name: "gemini-provider-connection-epoch" },
+    });
+  });
+
   it("imports campaign-approved consent without calling an ordinary product mutation route", () => {
     const { storage } = harness();
 

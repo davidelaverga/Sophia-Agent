@@ -950,7 +950,7 @@ export function recordSophiaCaptureEvent({
 
   state.seq += 1;
   state.totalProduced += 1;
-  state.events.push({
+  const event = {
     generation: state.generation,
     seq: state.seq,
     recordedAt: new Date().toISOString(),
@@ -960,7 +960,16 @@ export function recordSophiaCaptureEvent({
     ...(state.syntheticTest
       ? { synthetic_test: clonePayload(state.syntheticTest) as GeminiSyntheticTestContext }
       : {}),
-  });
+  };
+  state.events.push(event);
+
+  // The production capture ring remains authoritative. This content-carrying
+  // notification only mirrors the exact newly-recorded event to the private
+  // Voice Lab init script, whose worker binding validates synthetic provenance
+  // before it can become evidence. Ordinary sessions have no listener.
+  window.dispatchEvent(new CustomEvent('sophia:capture-event', {
+    detail: clonePayload(event),
+  }));
 
   if (state.events.length > MAX_CAPTURE_EVENTS) {
     const dropped = state.events.length - MAX_CAPTURE_EVENTS;

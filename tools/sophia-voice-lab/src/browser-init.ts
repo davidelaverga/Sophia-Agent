@@ -16,12 +16,33 @@ export function buildVoiceLabInitScript(options: InitScriptOptions): string {
     if (location.origin !== options.pageOrigin || window.top !== window) return;
     const allowedWsOrigins = new Set(options.websocketOrigins);
     const state = { seq: 0, events: [], sockets: [], socketEpoch: 0, activeInputs: new Map(), scheduleReceipts: new Map() };
+    const pushToWorker = (channel, payload) => {
+      try {
+        const binding = window.__sophiaVoiceLabPushV1;
+        if (typeof binding !== 'function') return;
+        Promise.resolve(binding({
+          schema: 'sophia_voice_lab_page_push_v1',
+          channel,
+          payload,
+        })).catch(() => undefined);
+      } catch {}
+    };
     const emit = (kind, payload = {}) => {
       const event = { seq: ++state.seq, kind, observed_at: new Date().toISOString(), payload };
       state.events.push(event);
       if (state.events.length > 2048) state.events.splice(0, state.events.length - 2048);
+      // Push startup receipts over Playwright's exposed-binding event lane.
+      // This is observation-only: the durable runner still validates every
+      // sequence and product binding before accepting evidence. Avoiding a
+      // new Runtime.evaluate after the ordinary mic activation prevents a
+      // renderer command acknowledgement from owning the startup watchdog.
+      pushToWorker('harness', event);
       return event;
     };
+    addEventListener('sophia:capture-event', (event) => {
+      if (!(event instanceof CustomEvent) || !event.detail) return;
+      pushToWorker('product', event.detail);
+    });
     const emitProductInputBoundary = (phase, detail) => {
       // This content-free event is only correlation metadata. The product must
       // independently prove the authenticated synthetic run and the PCM bytes
