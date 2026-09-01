@@ -724,6 +724,7 @@ export const SESSION_VOICE_INITIAL_TAB_TIMEOUT_MS = 5_000;
 export const SESSION_VOICE_INITIAL_START_TIMEOUT_MS = 10_000;
 export const SESSION_VOICE_RECOVERY_TAB_TIMEOUT_MS = 10_000;
 export const SESSION_VOICE_RECOVERY_START_TIMEOUT_MS = 15_000;
+export const SESSION_VOICE_ACTIVATION_SETTLE_MS = 3_000;
 export const SESSION_ROUTE_RECOVERY_RELOAD_TIMEOUT_MS = 15_000;
 export const SESSION_RECOVERY_STORAGE_CAPTURE_TIMEOUT_MS = 2_500;
 
@@ -1718,6 +1719,14 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
         ),
         reload: () => reloadExactSessionRouteOnce("voice_start_recovery_reload"),
       });
+      // The native click is intentionally scheduled after its renderer
+      // evaluation acknowledges. Do not immediately enqueue a new Runtime
+      // evaluation behind that click: Chromium can dispatch the media-start
+      // task first and leave the newly queued command waiting on the same
+      // activation boundary indefinitely. A worker-owned grace lets the
+      // ordinary click, getUserMedia, and provider bootstrap task chain settle
+      // before startup evidence performs its first renderer read.
+      await waitOnWorkerClock(SESSION_VOICE_ACTIVATION_SETTLE_MS);
       ordinaryRouteStage = "voice_startup_readiness";
       const events = await this.#waitForStartupReadiness(run.id, session, 45_000);
       events.push(...await this.drain(run.id));
