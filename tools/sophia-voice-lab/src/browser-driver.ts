@@ -884,25 +884,22 @@ export async function establishSessionVoiceStart(
         .isEnabled({ timeout: Math.min(remaining, 250) })
         .catch(() => false);
       if (enabled) {
-        try {
-          await readyButton.focus({ timeout: Math.min(remaining, 1_000) });
-        } catch {
-          await waitOnWorkerClock(Math.min(50, Math.max(1, deadline - Date.now())));
-          continue;
-        }
-        // Chromium can deliver the native key event to the product and still
-        // fail to acknowledge Input.dispatchKeyEvent when the renderer is
-        // simultaneously opening the live media session.  Never issue a
-        // second activation in that ambiguous state: the startup receipt
-        // quorum below is the authoritative proof that the product acted.
-        // Bounding only the acknowledgement keeps the worker watchdog from
-        // misclassifying an already-started provider as a 300-second harness
-        // timeout while preserving the at-most-once activation contract.
-        await observeOnWorkerClock(
-          () => page.keyboard.press("Enter").then(() => true),
-          false,
-          Math.min(1_000, Math.max(1, deadline - Date.now())),
-        );
+        // Dispatch the exact button's native click from one bounded renderer
+        // evaluation. React invokes the ordinary onClick path synchronously
+        // but does not await the async media startup it begins, so the
+        // evaluation acknowledges before Chromium enters the provider-media
+        // transition. A page.keyboard.press command can deliver the key and
+        // then remain unresolved inside Input.dispatchKeyEvent; that poisoned
+        // the same Playwright command lane needed to read the authoritative
+        // startup receipts. HTMLElement.click neither calls a product handler
+        // directly nor retries: it activates this already-visible, enabled
+        // ordinary control exactly once.
+        await readyButton.evaluate((element) => {
+          if (!(element instanceof HTMLButtonElement) || element.disabled) {
+            throw new Error("The ordinary session voice control was replaced before activation.");
+          }
+          element.click();
+        }, undefined, { timeout: Math.min(1_000, Math.max(1, deadline - Date.now())) });
         return "activated";
       }
     }

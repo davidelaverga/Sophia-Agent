@@ -244,31 +244,25 @@ describe("real Chromium dynamic media contract", () => {
     await context.close();
   });
 
-  it("does not press the voice control twice when Chromium withholds the native key acknowledgement", async () => {
-    let presses = 0;
-    const ready = {
-      first: () => ready,
-      isVisible: async () => true,
-      isEnabled: async () => true,
-      focus: async () => undefined,
-    };
-    const absent = {
-      first: () => absent,
-      isVisible: async () => false,
-    };
-    const page = {
-      getByRole: (_role: string, options: { name: string }) => options.name === "Tap to speak" ? ready : absent,
-      keyboard: {
-        press: async () => {
-          presses += 1;
-          await new Promise<void>(() => undefined);
-        },
-      },
-    };
+  it("activates the exact voice control once without awaiting its async media handler", async () => {
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    await page.goto(origin);
+    await page.setContent(`
+      <button type="button" aria-label="Tap to speak">microphone</button>
+      <script>
+        window.__voiceActivations = 0;
+        document.querySelector('button').onclick = () => {
+          window.__voiceActivations += 1;
+          return new Promise(() => undefined);
+        };
+      </script>
+    `);
     const started = Date.now();
-    await expect(establishSessionVoiceStart(page as any, "Tap to speak", 1_500)).resolves.toBe("activated");
-    expect(presses).toBe(1);
+    await expect(establishSessionVoiceStart(page, "Tap to speak", 1_500)).resolves.toBe("activated");
+    expect(await page.evaluate(() => (window as any).__voiceActivations)).toBe(1);
     expect(Date.now() - started).toBeLessThan(1_400);
+    await context.close();
   });
 
   it("ends an absent voice-control wait on the worker deadline with a TimeoutError", async () => {
