@@ -9,7 +9,7 @@
 
 'use client';
 
-import { useState, useCallback } from 'react';
+import { useCallback, useState } from 'react';
 
 import { AuthGate } from './AuthGate';
 import { ConsentGate } from './ConsentGate';
@@ -21,28 +21,25 @@ interface ProtectedRouteProps {
 }
 
 export function ProtectedRoute({ children, skipConsent = false }: ProtectedRouteProps) {
-  const [isAuthReady, setIsAuthReady] = useState(false);
   const [isConsentReady, setIsConsentReady] = useState(skipConsent);
-
-  const handleAuthReady = useCallback(() => {
-    setIsAuthReady(true);
-  }, []);
 
   const handleConsentReady = useCallback(() => {
     setIsConsentReady(true);
   }, []);
 
-  // Flow: Auth → Consent → Content
-  // ConsentGate only shows after auth is complete (unless skipped)
-  const showConsentGate = isAuthReady && !isConsentReady && !skipConsent;
-  const showContent = isAuthReady && isConsentReady;
+  // AuthGate is already the authoritative authentication boundary: it renders
+  // none of these children until its session is authenticated. Keeping a
+  // second effect-driven auth flag here can strand the protected route as an
+  // empty shell even after AuthGate has released it. Once this subtree exists,
+  // only consent remains to be resolved.
+  const showConsentGate = !isConsentReady && !skipConsent;
 
   return (
-    <AuthGate onAuthenticated={handleAuthReady}>
+    <AuthGate>
       {showConsentGate && (
         <ConsentGate onReady={handleConsentReady} />
       )}
-      {showContent && (
+      {isConsentReady && (
         <>
           {children}
         </>
