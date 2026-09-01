@@ -234,7 +234,7 @@ describe("ordinary voice start recovery", () => {
     expect(SESSION_ROUTE_RECOVERY_RELOAD_TIMEOUT_MS).toBe(15_000);
     expect(SESSION_VOICE_RECOVERY_TAB_TIMEOUT_MS).toBe(10_000);
     expect(SESSION_VOICE_RECOVERY_START_TIMEOUT_MS).toBe(15_000);
-    expect(SESSION_VOICE_ACTIVATION_SETTLE_MS).toBe(3_000);
+    expect(SESSION_VOICE_ACTIVATION_SETTLE_MS).toBe(15_000);
     expect(
       SESSION_VOICE_INITIAL_TAB_TIMEOUT_MS
       + SESSION_VOICE_INITIAL_START_TIMEOUT_MS
@@ -242,7 +242,7 @@ describe("ordinary voice start recovery", () => {
       + SESSION_VOICE_RECOVERY_TAB_TIMEOUT_MS
       + SESSION_VOICE_RECOVERY_START_TIMEOUT_MS
       + SESSION_VOICE_ACTIVATION_SETTLE_MS,
-    ).toBe(58_000);
+    ).toBe(70_000);
   });
 
   it("uses a worker-owned clock that does not depend on a page", async () => {
