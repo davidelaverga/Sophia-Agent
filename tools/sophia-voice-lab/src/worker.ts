@@ -684,7 +684,15 @@ export class VoiceLabWorker {
       const browserContextBinding = await this.#resolveD02BrowserContextBinding(run);
       const grant = await this.#mintAndVerify(run, "sophia-voice-lab-frontend", startOps, "auth:session", browserContextBinding);
       await this.#fenceMutation(claimed, signal);
-      const started = await this.driver.start(run, grant.token, browserContextBinding);
+      let startupStageSequence = 0;
+      const started = await this.driver.start(run, grant.token, browserContextBinding, async (stage) => {
+        startupStageSequence += 1;
+        await this.ledger.appendEvent(run.id, "harness.startup_stage", "worker", {
+          operation_id: operation.id,
+          stage,
+          stage_sequence: startupStageSequence,
+        }, `startup-stage:${operation.id}:${startupStageSequence}`);
+      });
       if (!sameD02BrowserContextBinding(started.browserContextBinding, browserContextBinding)) throw new VoiceLabError(labError("BROWSER_CONTEXT_BINDING_MISMATCH", "The browser driver did not attest the exact V-D02 run, worker, lease, and context allocation.", "harness", false));
       if (browserContextBinding) {
         await this.ledger.appendEvent(run.id, "harness.browser_context_bound", "canonical", {

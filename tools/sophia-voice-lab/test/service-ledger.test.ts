@@ -1256,7 +1256,11 @@ describe("service and durable memory-ledger contracts", () => {
     };
     const driver = {
       hasSession: () => false,
-      start: async () => { throw new VoiceLabError(labError("START_HARNESS_FAILURE", "Synthetic startup failed in the harness test.", "harness")); },
+      start: async (_run: unknown, _token: string, _binding: unknown, onStage?: (stage: "session_navigation" | "voice_start_button") => Promise<void>) => {
+        await onStage?.("session_navigation");
+        await onStage?.("voice_start_button");
+        throw new VoiceLabError(labError("START_HARNESS_FAILURE", "Synthetic startup failed in the harness test.", "harness"));
+      },
       recover: async () => ({
         events: [
           { kind: "cleanup.browser_context_absent", source: "worker", payload: { browser_never_allocated: true }, dedupeKey: `cleanup:${run.id}:context-absent` },
@@ -1271,6 +1275,13 @@ describe("service and durable memory-ledger contracts", () => {
     const config = testConfig();
     const worker = new VoiceLabWorker("worker-failure-evidence", ledger, config, audio, driver, new CapabilityCodec(config.capabilitySecret, config.capabilityIssuer, config.capabilityTtlSeconds));
     expect(await worker.runOnce()).toBe(true);
+    const startupStages = (await ledger.listEvents(run.id, 0, 100)).events.filter((event) => event.kind === "harness.startup_stage");
+    expect(startupStages.map((event) => event.payload)).toEqual([
+      { operation_id: expect.any(String), stage: "session_navigation", stage_sequence: 1 },
+      { operation_id: expect.any(String), stage: "voice_start_button", stage_sequence: 2 },
+    ]);
+    expect(startupStages[0]?.dedupeKey).toMatch(/^startup-stage:[0-9a-f-]+:1$/);
+    expect(startupStages[1]?.dedupeKey).toMatch(/^startup-stage:[0-9a-f-]+:2$/);
     const failed = await ledger.getRun(run.id);
     expect(failed).toMatchObject({ state: "failed_harness", cleanupComplete: true });
     const evidence = await ledger.getEvidence(run.id);
