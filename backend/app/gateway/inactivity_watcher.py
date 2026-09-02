@@ -14,6 +14,7 @@ import asyncio
 import logging
 import time
 
+from deerflow.sophia.memory_governance.flags import memory_feature_flags_for_owner
 from deerflow.sophia.session_store import SessionStore
 
 logger = logging.getLogger(__name__)
@@ -26,6 +27,24 @@ CHECK_INTERVAL = 60  # Check every 60 seconds
 _active_threads: dict[str, dict] = {}
 _watcher_task: asyncio.Task | None = None
 _store = SessionStore()
+
+
+def _enqueue_idle_memory_extraction(user_id: str, session_id: str) -> None:
+    """Persist MEM00 work before an idle session leaves the retrying watcher."""
+
+    from deerflow.sophia.memory_governance.extraction_service import (
+        MemoryExtractionService,
+    )
+    from deerflow.sophia.memory_governance.refs import keyed_ref
+    from deerflow.sophia.memory_governance.store import configured_memory_store
+
+    service = MemoryExtractionService(
+        governance_store=configured_memory_store(),
+        session_store=_store,
+        lease_owner=keyed_ref("worker", "gateway-inactivity-enqueue-only"),
+        service_name="sophia-gateway",
+    )
+    service.enqueue_finalized_session(user_id=user_id, session_id=session_id)
 
 
 def register_activity(
@@ -73,20 +92,28 @@ def _pause_tracked_session(user_id: str, session_id: str) -> None:
 async def _check_inactive_threads() -> None:
     """Check for idle threads and fire the offline pipeline for each."""
     now = time.time()
-    idle_threads = [
-        (tid, info)
-        for tid, info in list(_active_threads.items())
-        if now - info["last_active"] > INACTIVITY_TIMEOUT
-    ]
+    idle_threads = [(tid, info) for tid, info in list(_active_threads.items()) if now - info["last_active"] > INACTIVITY_TIMEOUT]
 
     for thread_id, info in idle_threads:
         user_id = info["user_id"]
         session_id = info["session_id"]
+        memory_enqueue_required = memory_feature_flags_for_owner(user_id).candidate_ledger_write
+        durable_memory_ready = not memory_enqueue_required
         logger.info(
             "Thread %s idle for >%ds — firing offline pipeline (user=%s, session=%s)",
-            thread_id, INACTIVITY_TIMEOUT, user_id, session_id,
+            thread_id,
+            INACTIVITY_TIMEOUT,
+            user_id,
+            session_id,
         )
         try:
+            if memory_enqueue_required:
+                await asyncio.to_thread(
+                    _enqueue_idle_memory_extraction,
+                    user_id,
+                    session_id,
+                )
+                durable_memory_ready = True
             from deerflow.sophia.offline_pipeline import run_offline_pipeline
 
             await asyncio.to_thread(
@@ -98,16 +125,25 @@ async def _check_inactive_threads() -> None:
             )
         except Exception:
             logger.warning(
-                "Offline pipeline failed for idle thread %s", thread_id, exc_info=True,
+                "Offline pipeline failed for idle thread %s",
+                thread_id,
+                exc_info=True,
             )
-        finally:
-            try:
-                _pause_tracked_session(user_id, session_id)
-            except Exception:
-                logger.warning(
-                    "Failed to persist paused status for idle thread %s", thread_id, exc_info=True,
-                )
-            _active_threads.pop(thread_id, None)
+        if not durable_memory_ready:
+            logger.warning(
+                "MEM00 durable enqueue unavailable for idle thread %s; retaining for retry",
+                thread_id,
+            )
+            continue
+        try:
+            _pause_tracked_session(user_id, session_id)
+        except Exception:
+            logger.warning(
+                "Failed to persist paused status for idle thread %s",
+                thread_id,
+                exc_info=True,
+            )
+        _active_threads.pop(thread_id, None)
 
 
 async def _watcher_loop() -> None:

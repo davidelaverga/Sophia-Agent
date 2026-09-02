@@ -15,6 +15,7 @@ from typing import Any
 try:
     from cachetools import TTLCache
 except ImportError:  # pragma: no cover - exercised from the slim voice runtime
+
     class TTLCache(dict):  # type: ignore[no-redef]
         def __init__(self, *, maxsize: int, ttl: int):
             super().__init__()
@@ -51,6 +52,7 @@ except ImportError:  # pragma: no cover - exercised from the slim voice runtime
                 super().pop(key, None)
                 self._expires_at.pop(key, None)
 
+
 from deerflow.sophia.review_metadata_store import reconcile_review_metadata_entries, upsert_review_metadata
 
 logger = logging.getLogger(__name__)
@@ -66,14 +68,30 @@ _CONTEXT_CATEGORIES: dict[str, set[str]] = {
 # All custom categories (base 9 + context-specific)
 CUSTOM_CATEGORIES: list[str] = [
     # Base 9 (from spec — apply across all contexts)
-    "fact", "feeling", "decision", "lesson", "commitment",
-    "preference", "relationship", "pattern", "ritual_context",
+    "fact",
+    "feeling",
+    "decision",
+    "lesson",
+    "commitment",
+    "preference",
+    "relationship",
+    "pattern",
+    "ritual_context",
     # Work context
-    "project", "colleague", "career", "deadline",
+    "project",
+    "colleague",
+    "career",
+    "deadline",
     # Gaming context
-    "game", "achievement", "gaming_team", "strategy",
+    "game",
+    "achievement",
+    "gaming_team",
+    "strategy",
     # Life context
-    "family", "health", "personal_goal", "life_event",
+    "family",
+    "health",
+    "personal_goal",
+    "life_event",
 ]
 
 _CACHE_TTL = 60  # seconds
@@ -120,23 +138,20 @@ def _get_client():
             _client_initialized = True
             return _client
         try:
-            from mem0 import MemoryClient
+            from deerflow.sophia.memory_governance.mem0_projection_adapter import LegacyMem0Facade
+
+            _client = LegacyMem0Facade()
+            _client.ensure_client()
+            _client_unavailable_reason = None
+            logger.info("[Mem0] Client initialized successfully")
         except ImportError:
             logger.warning("mem0 package not installed — memory retrieval disabled")
             _client = None
             _client_unavailable_reason = "missing_mem0_sdk"
-        else:
-            try:
-                _client = MemoryClient(
-                    api_key=api_key,
-                    host=(os.environ.get("MEM0_BASE_URL") or None),
-                )
-                _client_unavailable_reason = None
-                logger.info("[Mem0] Client initialized successfully")
-            except Exception:
-                logger.warning("Mem0 client initialization failed", exc_info=True)
-                _client = None
-                _client_unavailable_reason = "client_initialization_failed"
+        except Exception:
+            logger.warning("Mem0 client initialization failed", exc_info=True)
+            _client = None
+            _client_unavailable_reason = "client_initialization_failed"
         _client_initialized = True
         return _client
 
@@ -198,6 +213,14 @@ def warm_up() -> None:
     """
     global _warm_up_completed
 
+    from deerflow.sophia.memory_governance.flags import memory_feature_flags
+
+    if memory_feature_flags().governed_runtime_read:
+        # Governed retrieval has no content-bearing warmup query. Adapter and
+        # database availability are exercised by readiness/canary probes.
+        _warm_up_completed = True
+        return
+
     if _warm_up_completed:
         return
 
@@ -233,6 +256,7 @@ def search_memories(
     limit: int = 10,
     log_content_previews: bool = True,
     raise_on_error: bool = False,
+    caller: str = "legacy_facade",
 ) -> list[dict]:
     """Search Mem0 for memories matching the query, categories, and context.
 
@@ -257,6 +281,7 @@ def search_memories(
         limit=limit,
         log_content_previews=log_content_previews,
         raise_on_error=raise_on_error,
+        caller=caller,
     )
     return result["memories"]
 
@@ -269,8 +294,58 @@ def search_memories_with_diagnostics(
     limit: int = 10,
     log_content_previews: bool = True,
     raise_on_error: bool = False,
+    caller: str = "legacy_facade",
 ) -> dict[str, Any]:
     """Search Mem0 and return privacy-safe provider diagnostics with results."""
+    from deerflow.sophia.memory_governance.flags import (
+        memory_feature_flags_for_owner,
+    )
+
+    if memory_feature_flags_for_owner(user_id).governed_runtime_read:
+        from deerflow.sophia.memory_governance.mem0_projection_adapter import (
+            Mem0ProjectionAdapter,
+        )
+        from deerflow.sophia.memory_governance.reader import GovernedMemoryReader
+        from deerflow.sophia.memory_governance.service import MemoryProviderContract
+        from deerflow.sophia.memory_governance.store import configured_memory_store
+
+        started = time.perf_counter()
+        reader = GovernedMemoryReader(
+            store=configured_memory_store(),
+            adapter=Mem0ProjectionAdapter(),
+            provider=MemoryProviderContract.from_environ(),
+            service_name=(os.getenv("RENDER_SERVICE_NAME") or "sophia-langgraph"),
+        )
+        governed = reader.retrieve(
+            owner_id=user_id,
+            caller=caller,
+            scope=context_mode or "global",
+            query=query,
+            limit=limit,
+        )
+        memories = [
+            {
+                "id": str(memory.memory_id),
+                "content": memory.canonical_content,
+                "category": memory.category or "",
+                "score": memory.score,
+                "content_revision": memory.content_revision,
+                "memory_governance_revision": memory.memory_governance_revision,
+                "authority": "sophia_canonical",
+            }
+            for memory in governed.memories
+        ]
+        if categories:
+            memories = [item for item in memories if item["category"] in categories]
+        return {
+            "memories": memories,
+            "provider_status": governed.receipt.provider_status,
+            "provider_reason": governed.receipt.safe_reason_code or "governed",
+            "provider_transport": "mem0_ids_canonical_join",
+            "cache_status": "disabled_governed",
+            "latency_ms": int((time.perf_counter() - started) * 1000),
+            "retrieval_receipt": governed.receipt.model_dump(mode="json"),
+        }
     cache_key = f"{user_id}:{query}:{','.join(sorted(categories or []))}:{context_mode or ''}:{limit}"
 
     # Check cache (thread-safe)
@@ -327,12 +402,14 @@ def search_memories_with_diagnostics(
                 if isinstance(r, dict):
                     meta = r.get("metadata") or {}
                     score = r.get("score", r.get("relevance_score"))
-                    memories.append({
-                        "id": r.get("id", ""),
-                        "content": r.get("memory", r.get("content", "")),
-                        "category": meta.get("category", "") if isinstance(meta, dict) else "",
-                        "score": score,
-                    })
+                    memories.append(
+                        {
+                            "id": r.get("id", ""),
+                            "content": r.get("memory", r.get("content", "")),
+                            "category": meta.get("category", "") if isinstance(meta, dict) else "",
+                            "score": score,
+                        }
+                    )
 
         # Filter by categories if specified
         pre_filter_count = len(memories)
@@ -346,9 +423,7 @@ def search_memories_with_diagnostics(
         if context_mode:
             context_categories = _CONTEXT_CATEGORIES.get(context_mode, set())
             memories.sort(
-                key=lambda m: (
-                    0 if m.get("category") in context_categories else 1,
-                ),
+                key=lambda m: (0 if m.get("category") in context_categories else 1,),
             )
 
         # Log each retrieved memory with score and content preview when allowed.
@@ -356,14 +431,19 @@ def search_memories_with_diagnostics(
         # duplicate raw memory text outside the actual tool result.
         logger.info(
             "[Mem0Search] %d results in %.0fms (query='%s')",
-            len(memories), api_ms, query[:60],
+            len(memories),
+            api_ms,
+            query[:60],
         )
         if log_content_previews:
             for i, mem in enumerate(memories):
                 score_str = f" score={mem['score']:.3f}" if mem.get("score") is not None else ""
                 logger.info(
                     "[Mem0Search]   [%d] [%s]%s %s",
-                    i, mem.get("category", "?"), score_str, (mem.get("content", ""))[:120],
+                    i,
+                    mem.get("category", "?"),
+                    score_str,
+                    (mem.get("content", ""))[:120],
                 )
 
         # Update cache (thread-safe, bounded by TTLCache maxsize)
@@ -401,6 +481,16 @@ def memory_provider_available() -> bool:
 
 def memory_provider_status() -> dict[str, Any]:
     """Return privacy-safe Mem0 availability details for diagnostics."""
+    from deerflow.sophia.memory_governance.flags import memory_feature_flags
+
+    if memory_feature_flags().governed_runtime_read:
+        configured = bool(os.environ.get("MEM0_API_KEY", "").strip()) and bool(os.environ.get("SOPHIA_MEMORY_PROVIDER_PROJECT", "").strip())
+        return {
+            "available": configured,
+            "provider_status": "available" if configured else "unavailable",
+            "provider_reason": "governed_contract" if configured else "governed_contract_unconfigured",
+            "provider_transport": "mem0_ids_canonical_join" if configured else "none",
+        }
     try:
         return _memory_provider_status_from_client()
     except Exception:
@@ -421,21 +511,20 @@ def _search_memories_via_rest(*, user_id: str, query: str, limit: int) -> dict[s
     if not api_key:
         raise MemoryProviderUnavailableError("missing_api_key")
 
-    host = (os.environ.get("MEM0_BASE_URL") or "https://api.mem0.ai").rstrip("/")
-    with httpx.Client(
-        base_url=host,
-        headers={"Authorization": f"Token {api_key}"},
-        timeout=30.0,
-    ) as client:
-        response = client.post(
-            "/v2/memories/search/",
-            json={"query": query, "filters": {"user_id": user_id}, "limit": limit},
-        )
-        response.raise_for_status()
-        result = response.json()
-    if isinstance(result, list):
-        return {"results": result}
-    return result if isinstance(result, dict) else {"results": []}
+    from deerflow.sophia.memory_governance.mem0_projection_adapter import (
+        PINNED_MEM0_HOST,
+        legacy_search_via_rest,
+    )
+
+    host = (os.environ.get("MEM0_BASE_URL") or PINNED_MEM0_HOST).rstrip("/")
+    return legacy_search_via_rest(
+        httpx_module=httpx,
+        api_key=api_key,
+        host=host,
+        user_id=user_id,
+        query=query,
+        limit=limit,
+    )
 
 
 def add_memories(
@@ -459,6 +548,12 @@ def add_memories(
     Returns the result from the SDK (typically a list of memory dicts),
     or an empty list if Mem0 is unavailable or the call fails.
     """
+    from deerflow.sophia.memory_governance.flags import (
+        memory_feature_flags_for_owner,
+    )
+
+    if memory_feature_flags_for_owner(user_id).candidate_ledger_write:
+        raise MemoryProviderUnavailableError("raw_memory_write_disabled_by_mem00")
     client = _get_client()
     if client is None:
         return []
@@ -695,23 +790,18 @@ def _extract_memory_text(memory: dict, messages: list[dict]) -> str:
 
 
 def _update_memory_metadata_via_rest(*, client, memory_id: str, metadata: dict) -> dict:
-    params = {}
-    if getattr(client, "org_id", None):
-        params["org_id"] = client.org_id
-    if getattr(client, "project_id", None):
-        params["project_id"] = client.project_id
-
-    response = client.client.put(
-        f"/v1/memories/{memory_id}/",
-        json={"metadata": metadata},
-        params=params or None,
-    )
-    response.raise_for_status()
-    result = response.json()
-    return result if isinstance(result, dict) else {}
+    if not hasattr(client, "update_metadata"):
+        raise MemoryProviderUnavailableError("metadata_update_boundary_unavailable")
+    return client.update_metadata(memory_id=memory_id, metadata=metadata)
 
 
 def reconcile_review_metadata_with_mem0(user_id: str) -> int:
+    from deerflow.sophia.memory_governance.flags import (
+        memory_feature_flags_for_owner,
+    )
+
+    if memory_feature_flags_for_owner(user_id).candidate_ledger_write:
+        return 0
     client = _get_client()
     if client is None:
         return 0
@@ -746,6 +836,7 @@ def invalidate_user_cache(user_id: str) -> None:
 def _startup_warm_up() -> None:
     """Background thread target — initializes client and pings Mem0."""
     warm_up()
+
 
 _warmup_thread = threading.Thread(target=_startup_warm_up, daemon=True, name="mem0-warmup")
 _warmup_thread.start()

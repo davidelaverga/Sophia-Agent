@@ -60,7 +60,9 @@ export async function PUT(
       return NextResponse.json({ error: 'Synthetic memories cannot be updated' }, { status: 400 });
     }
 
-    const body = await req.json().catch(() => null);
+    const body = typeof req.json === 'function'
+      ? await req.json().catch(() => null)
+      : null;
     if (!body || typeof body !== 'object' || Array.isArray(body)) {
       return NextResponse.json({ error: 'Invalid update payload' }, { status: 400 });
     }
@@ -94,6 +96,26 @@ export async function DELETE(
 
     if (isBlockedSyntheticMemoryId(memoryId)) {
       return new NextResponse(null, { status: 204 });
+    }
+
+    const body = typeof req.json === 'function'
+      ? await req.json().catch(() => null)
+      : null;
+    if (
+      body
+      && typeof body === 'object'
+      && !Array.isArray(body)
+      && Number.isInteger(body.expected_governance_revision)
+      && typeof body.idempotency_key === 'string'
+    ) {
+      const backendResponse = await fetchSophiaApi(
+        `/api/sophia/${encodeURIComponent(userId)}/memories/${encodeURIComponent(memoryId)}/permanent-delete`,
+        {
+          method: 'POST',
+          body: JSON.stringify(body),
+        },
+      );
+      return passthroughBackendResponse(backendResponse);
     }
 
     const backendResponse = await fetchSophiaApi(

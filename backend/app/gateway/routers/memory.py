@@ -1,6 +1,6 @@
 """Memory API router for retrieving and managing global memory data."""
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from app.gateway.auth import require_authenticated_user
@@ -12,6 +12,18 @@ router = APIRouter(
     tags=["memory"],
     dependencies=[Depends(require_authenticated_user)],
 )
+
+
+def _reject_when_mem00_owns_sophia_memory(user_id: str) -> None:
+    from deerflow.sophia.memory_governance.flags import (
+        memory_feature_flags_for_owner,
+    )
+
+    if memory_feature_flags_for_owner(user_id).governed_runtime_read:
+        raise HTTPException(
+            status_code=410,
+            detail="Generic DeerFlow memory is quarantined from Sophia under MEM00",
+        )
 
 
 class ContextSection(BaseModel):
@@ -83,7 +95,9 @@ class MemoryStatusResponse(BaseModel):
     summary="Get Memory Data",
     description="Retrieve the current global memory data including user context, history, and facts.",
 )
-async def get_memory() -> MemoryResponse:
+async def get_memory(
+    user_id: str = Depends(require_authenticated_user),
+) -> MemoryResponse:
     """Get the current global memory data.
 
     Returns:
@@ -117,6 +131,7 @@ async def get_memory() -> MemoryResponse:
         }
         ```
     """
+    _reject_when_mem00_owns_sophia_memory(user_id)
     memory_data = get_memory_data()
     return MemoryResponse(**memory_data)
 
@@ -128,7 +143,9 @@ async def get_memory() -> MemoryResponse:
     description="Reload memory data from the storage file, refreshing the in-memory cache.",
     dependencies=[Depends(require_authenticated_user)],
 )
-async def reload_memory() -> MemoryResponse:
+async def reload_memory(
+    user_id: str = Depends(require_authenticated_user),
+) -> MemoryResponse:
     """Reload memory data from file.
 
     This forces a reload of the memory data from the storage file,
@@ -137,6 +154,7 @@ async def reload_memory() -> MemoryResponse:
     Returns:
         The reloaded memory data.
     """
+    _reject_when_mem00_owns_sophia_memory(user_id)
     memory_data = reload_memory_data()
     return MemoryResponse(**memory_data)
 
@@ -147,7 +165,9 @@ async def reload_memory() -> MemoryResponse:
     summary="Get Memory Configuration",
     description="Retrieve the current memory system configuration.",
 )
-async def get_memory_config_endpoint() -> MemoryConfigResponse:
+async def get_memory_config_endpoint(
+    user_id: str = Depends(require_authenticated_user),
+) -> MemoryConfigResponse:
     """Get the memory system configuration.
 
     Returns:
@@ -166,6 +186,7 @@ async def get_memory_config_endpoint() -> MemoryConfigResponse:
         }
         ```
     """
+    _reject_when_mem00_owns_sophia_memory(user_id)
     config = get_memory_config()
     return MemoryConfigResponse(
         enabled=config.enabled,
@@ -184,12 +205,15 @@ async def get_memory_config_endpoint() -> MemoryConfigResponse:
     summary="Get Memory Status",
     description="Retrieve both memory configuration and current data in a single request.",
 )
-async def get_memory_status() -> MemoryStatusResponse:
+async def get_memory_status(
+    user_id: str = Depends(require_authenticated_user),
+) -> MemoryStatusResponse:
     """Get the memory system status including configuration and data.
 
     Returns:
         Combined memory configuration and current data.
     """
+    _reject_when_mem00_owns_sophia_memory(user_id)
     config = get_memory_config()
     memory_data = get_memory_data()
 

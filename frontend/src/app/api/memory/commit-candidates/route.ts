@@ -9,9 +9,10 @@
 
 import { type NextRequest, NextResponse } from 'next/server';
 
-import { logger } from '../../../lib/error-logger';
-import { fetchSophiaApi, isSyntheticMemoryId, resolveSophiaUserId } from '../../_lib/sophia';
 import { voiceLabOrdinaryProductBoundaryResponse } from '@/server/voice-lab/ordinary-route-isolation';
+
+import { logger } from '../../../lib/error-logger';
+import { fetchSophiaApi, resolveSophiaUserId } from '../../_lib/sophia';
 
 // =============================================================================
 // TYPES
@@ -27,6 +28,8 @@ interface CommitDecision {
     session_type?: string;
     preset?: string;
   };
+  expected_candidate_revision?: number;
+  idempotency_key?: string;
 }
 
 interface CommitRequest {
@@ -91,65 +94,30 @@ export async function POST(request: NextRequest) {
       }
     }
     
-    const outcome = await Promise.allSettled(body.decisions.map(async (decision) => {
-      if (decision.decision === 'discard') {
-        if (!isSyntheticMemoryId(decision.candidate_id)) {
-          const response = await fetchSophiaApi(
-            `/api/sophia/${encodeURIComponent(userId)}/memories/${encodeURIComponent(decision.candidate_id)}`,
-            { method: 'DELETE' }
-          );
-
-          if (!response.ok && response.status !== 204) {
-            throw new Error(`Discard failed: ${response.status}`);
-          }
-        }
-
-        return { kind: 'discarded' as const, candidateId: decision.candidate_id };
-      }
-
-      if (!decision.text.trim()) {
-        throw new Error('Missing memory text');
-      }
-
-      const metadata = {
-        status: 'approved',
-        source: decision.source,
-        session_id: body.session_id,
-        ...(decision.metadata || {}),
-      };
-
-      const response = !isSyntheticMemoryId(decision.candidate_id)
-        ? await fetchSophiaApi(
-            `/api/sophia/${encodeURIComponent(userId)}/memories/${encodeURIComponent(decision.candidate_id)}`,
-            {
-              method: 'PUT',
-              body: JSON.stringify({
-                text: decision.text,
-                metadata,
-              }),
-            }
-          )
-        : await fetchSophiaApi(
-            `/api/sophia/${encodeURIComponent(userId)}/memories`,
-            {
-              method: 'POST',
-              body: JSON.stringify({
-                text: decision.text,
-                ...(decision.category ? { category: decision.category } : {}),
-                metadata: {
-                  ...metadata,
-                  original_memory_id: decision.candidate_id,
-                },
-              }),
-            }
-          );
-
-      if (!response.ok) {
-        throw new Error(`Commit failed: ${response.status}`);
-      }
-
-      return { kind: 'committed' as const, candidateId: decision.candidate_id };
-    }));
+    const response = await fetchSophiaApi(
+      `/api/sophia/${encodeURIComponent(userId)}/memories/bulk-review`,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          items: body.decisions.map((decision) => ({
+            id: decision.candidate_id,
+            action: decision.decision === 'discard' ? 'discard' : 'approve',
+            expected_candidate_revision: decision.expected_candidate_revision,
+            reviewed_text: decision.text.trim() || undefined,
+            category: decision.category || 'fact',
+            scope: 'global',
+            tier: 'none',
+            idempotency_key: decision.idempotency_key,
+          })),
+        }),
+      },
+    );
+    if (!response.ok) {
+      throw new Error(`Commit failed: ${response.status}`);
+    }
+    const payload = await response.json() as {
+      results?: Array<{ id?: string; action?: string; status?: string; error?: string }>;
+    };
 
     const result: CommitResponse = {
       committed: [],
@@ -157,22 +125,18 @@ export async function POST(request: NextRequest) {
       errors: [],
     };
 
-    outcome.forEach((item, index) => {
-      const candidateId = body.decisions[index].candidate_id;
-      if (item.status === 'fulfilled') {
-        if (item.value.kind === 'committed') {
-          result.committed.push(item.value.candidateId);
-        } else {
-          result.discarded.push(item.value.candidateId);
-        }
-        return;
+    for (const [index, decision] of body.decisions.entries()) {
+      const item = payload.results?.[index];
+      if (item?.id === decision.candidate_id && item.status === 'ok') {
+        if (decision.decision === 'discard') result.discarded.push(decision.candidate_id);
+        else result.committed.push(decision.candidate_id);
+      } else {
+        result.errors.push({
+          candidate_id: decision.candidate_id,
+          message: item?.error || 'Unknown error',
+        });
       }
-
-      result.errors.push({
-        candidate_id: candidateId,
-        message: item.reason instanceof Error ? item.reason.message : 'Unknown error',
-      });
-    });
+    }
 
     return NextResponse.json(result);
     
@@ -196,7 +160,7 @@ export async function GET() {
   return NextResponse.json({
     endpoint: '/api/memory/commit-candidates',
     method: 'POST',
-    description: 'Commit user-approved memory candidates to Mem0',
+    description: 'Commit user review decisions to the canonical memory authority',
     body: {
       session_id: 'string (required)',
       thread_id: 'string (optional)',
@@ -211,6 +175,8 @@ export async function GET() {
             session_type: 'string (optional)',
             preset: 'string (optional)',
           },
+          expected_candidate_revision: 'number (required after MEM00 cutover)',
+          idempotency_key: 'string (required after MEM00 cutover)',
         },
       ],
     },

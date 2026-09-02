@@ -81,11 +81,11 @@ describe('useRecapMemoryActions', () => {
     expect(result.current.actionRetry).toBeTypeOf('function');
   });
 
-  it('persists discard state for real memory ids without deleting the record', async () => {
+  it('persists discard through the revision-bound canonical review bridge', async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       status: 200,
-      json: async () => ({ id: 'mem-real', metadata: { status: 'discarded' } }),
+      json: async () => ({ committed: [], discarded: ['mem-real'], errors: [] }),
     });
     vi.stubGlobal('fetch', fetchMock);
 
@@ -100,7 +100,7 @@ describe('useRecapMemoryActions', () => {
           sessionType: 'open',
           contextMode: 'life',
           status: 'ready',
-          memoryCandidates: [{ id: 'mem-real', text: 'Memory 1', category: 'identity_profile' }],
+          memoryCandidates: [{ id: 'mem-real', text: 'Memory 1', category: 'identity_profile', candidateRevision: 3 }],
         },
         decisions: [],
         sessionId: 's1',
@@ -117,16 +117,22 @@ describe('useRecapMemoryActions', () => {
     });
 
     await waitFor(() => {
-      expect(fetchMock).toHaveBeenCalledWith('/api/memories/mem-real', {
-        method: 'PUT',
+      expect(fetchMock).toHaveBeenCalledWith('/api/memory/commit-candidates', {
+        method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          metadata: {
-            status: 'discarded',
+          session_id: 's1',
+          decisions: [{
+            candidate_id: 'mem-real',
+            decision: 'discard',
+            text: 'Memory 1',
             category: 'identity_profile',
-          },
+            source: 'recap',
+            expected_candidate_revision: 3,
+            idempotency_key: 'recap-discard:s1:mem-real:3',
+          }],
         }),
       });
     });

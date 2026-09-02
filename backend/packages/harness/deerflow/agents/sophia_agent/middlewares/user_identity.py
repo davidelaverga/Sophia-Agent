@@ -44,6 +44,14 @@ class UserIdentityMiddleware(AgentMiddleware[UserIdentityState]):
         if state.get("user_id") != self._user_id:
             updates["user_id"] = self._user_id
 
+        from deerflow.sophia.memory_governance.flags import (
+            memory_feature_flags_for_owner,
+        )
+
+        if memory_feature_flags_for_owner(self._user_id).candidate_ledger_write:
+            log_middleware("UserIdentity", "disabled (MEM00 unversioned identity)", _t0)
+            return updates or None
+
         try:
             identity_path = safe_user_path(USERS_DIR, self._user_id, "identity.md")
         except ValueError:

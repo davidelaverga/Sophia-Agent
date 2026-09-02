@@ -123,11 +123,15 @@ def build_sophia_realtime_context(
     context_mode = _normalize_context_mode(request.context_mode)
     ritual = _clean_optional_text(request.ritual)
     platform = _clean_optional_text(request.platform) or "voice"
+    from deerflow.sophia.memory_governance.flags import (
+        memory_feature_flags_for_owner,
+    )
 
-    identity_file_status = _user_context_file_status(safe_user_id, "identity.md")
-    handoff_file_status = _user_context_file_status(safe_user_id, "handoffs", "latest.md")
-    identity_text = _read_user_context_file(safe_user_id, "identity.md")
-    handoff_text = _read_user_context_file(safe_user_id, "handoffs", "latest.md")
+    mem00_containment = memory_feature_flags_for_owner(safe_user_id).candidate_ledger_write
+    identity_file_status = "quarantined_mem00" if mem00_containment else _user_context_file_status(safe_user_id, "identity.md")
+    handoff_file_status = "quarantined_mem00" if mem00_containment else _user_context_file_status(safe_user_id, "handoffs", "latest.md")
+    identity_text = None if mem00_containment else _read_user_context_file(safe_user_id, "identity.md")
+    handoff_text = None if mem00_containment else _read_user_context_file(safe_user_id, "handoffs", "latest.md")
     identity_excerpt = _bounded_text(identity_text, IDENTITY_EXCERPT_MAX_CHARS)
     handoff_excerpt = _bounded_text(handoff_text, HANDOFF_EXCERPT_MAX_CHARS)
 
@@ -218,6 +222,7 @@ def retrieve_sophia_realtime_memories(
             limit=limit,
             log_content_previews=False,
             raise_on_error=True,
+            caller="voice_dynamic_retrieval",
         )
         raw_memories = search_result.get("memories", []) if isinstance(search_result, Mapping) else []
         if not isinstance(raw_memories, list):
@@ -225,11 +230,7 @@ def retrieve_sophia_realtime_memories(
         overlaid_memories = _apply_review_metadata_overlays_readonly(safe_user_id, raw_memories)
         return {
             **dict(search_result),
-            "memories": [
-                memory
-                for memory in overlaid_memories
-                if _memory_visible_for_realtime(memory)
-            ],
+            "memories": [memory for memory in overlaid_memories if _memory_visible_for_realtime(memory)],
         }
 
     result = retrieve_memories_for_realtime(
@@ -331,15 +332,20 @@ def build_realtime_memory_retrieve_error_envelope(
     ritual = _clean_optional_text(request.ritual) if request else None
     limit = _coerce_dynamic_memory_limit(request.limit if request else None)
     query = _bounded_text(request.query, 500) if request else ""
-    safe_status = status if status in {
-        "success",
-        "no_results",
-        "unavailable",
-        "error",
-        "unauthorized",
-        "expired_grant",
-        "invalid_request",
-    } else "error"
+    safe_status = (
+        status
+        if status
+        in {
+            "success",
+            "no_results",
+            "unavailable",
+            "error",
+            "unauthorized",
+            "expired_grant",
+            "invalid_request",
+        }
+        else "error"
+    )
     safe_provider_status = _safe_reason(provider_status) or "unavailable"
     safe_provider_reason = _safe_reason(provider_reason) or "unknown"
     envelope: dict[str, Any] = {
@@ -352,10 +358,7 @@ def build_realtime_memory_retrieve_error_envelope(
         "provider_status": safe_provider_status,
         "provider_reason": safe_provider_reason,
         "message": "Memory retrieval is unavailable right now. Continue using the current conversation context.",
-        "guidance": (
-            "Memory retrieval is unavailable right now. Do not say the memory does not exist; "
-            "say you cannot check stored memory at the moment."
-        ),
+        "guidance": ("Memory retrieval is unavailable right now. Do not say the memory does not exist; say you cannot check stored memory at the moment."),
         "trusted_user_id_source": "authenticated_realtime_session",
         "dynamic_retrieval_source": "gateway",
         "raw_memory_text_bounded": True,
@@ -381,13 +384,7 @@ def build_realtime_memory_retrieve_error_envelope(
         "memory_limit": limit,
     }
     if diagnostics:
-        envelope["diagnostics"].update(
-            {
-                str(key): _safe_diagnostic_value(value)
-                for key, value in diagnostics.items()
-                if value is not None
-            }
-        )
+        envelope["diagnostics"].update({str(key): _safe_diagnostic_value(value) for key, value in diagnostics.items() if value is not None})
     return envelope
 
 
@@ -449,6 +446,7 @@ def _search_realtime_memories(
             limit=limit,
             log_content_previews=False,
             raise_on_error=True,
+            caller="voice_setup",
         )
     except Exception:
         logger.warning("realtime.context mem0 search failed", exc_info=True)
@@ -491,6 +489,7 @@ def _search_preferred_name_memories(
             limit=5,
             log_content_previews=False,
             raise_on_error=True,
+            caller="voice_preferred_name",
         )
     except Exception:
         logger.warning("realtime.context preferred-name mem0 search failed", exc_info=True)
@@ -500,10 +499,7 @@ def _search_preferred_name_memories(
     if not isinstance(raw_memories, list):
         raw_memories = []
     overlaid_memories = _apply_review_metadata_overlays_readonly(user_id, raw_memories)
-    visible_memories = [
-        memory for memory in overlaid_memories
-        if _memory_visible_for_realtime(memory)
-    ]
+    visible_memories = [memory for memory in overlaid_memories if _memory_visible_for_realtime(memory)]
 
     candidates: list[_PreferredNameCandidate] = []
     for index, memory in enumerate(visible_memories):
@@ -526,6 +522,8 @@ def _search_preferred_name_memories(
 def _apply_review_metadata_overlays_readonly(user_id: str, memories: list[dict]) -> list[dict]:
     if not memories:
         return []
+    if all(memory.get("authority") == "sophia_canonical" for memory in memories):
+        return memories
 
     try:
         store = review_metadata_store._load_store(user_id)
@@ -649,8 +647,7 @@ def _user_context_file_status(user_id: str, *segments: str) -> str:
 
 def _memory_context_query(*, context_mode: str, ritual: str | None) -> str:
     parts = [
-        "stable facts, preferred name, communication preferences, relationships, commitments, "
-        "emotional patterns, and useful context about this user",
+        "stable facts, preferred name, communication preferences, relationships, commitments, emotional patterns, and useful context about this user",
         f"current context mode: {context_mode}",
     ]
     if ritual:
@@ -703,9 +700,7 @@ def _finalize_realtime_memory_retrieve_envelope(
         result["status"] = status
     result["schema"] = REALTIME_MEMORY_RETRIEVE_RESPONSE_SCHEMA
     result["count"] = len(memories)
-    result["provider_status"] = _safe_reason(result.get("provider_status")) or (
-        "available" if bool(result.get("ok")) else "unavailable"
-    )
+    result["provider_status"] = _safe_reason(result.get("provider_status")) or ("available" if bool(result.get("ok")) else "unavailable")
     result["provider_reason"] = _safe_reason(result.get("provider_reason")) or "unknown"
     result.setdefault("ok", False)
     result.setdefault("trusted_user_id_source", "authenticated_realtime_session")
@@ -1012,10 +1007,7 @@ def _safe_diagnostic_value(value: object) -> object:
     if isinstance(value, list):
         return [_safe_diagnostic_value(item) for item in value[:20]]
     if isinstance(value, Mapping):
-        return {
-            str(key)[:80]: _safe_diagnostic_value(item)
-            for key, item in list(value.items())[:20]
-        }
+        return {str(key)[:80]: _safe_diagnostic_value(item) for key, item in list(value.items())[:20]}
     return str(type(value).__name__)
 
 

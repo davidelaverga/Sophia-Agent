@@ -179,16 +179,8 @@ def _source_metadata_for_message(messages: list[dict], index: int) -> dict:
     if index + 1 < len(messages) and messages[index + 1].get("role") in {"assistant", "ai"}:
         source_messages.append(messages[index + 1])
 
-    sequences = [
-        sequence
-        for message in source_messages
-        if isinstance((sequence := _message_sequence(message)), int)
-    ]
-    message_ids = [
-        message_id
-        for message in source_messages
-        if isinstance((message_id := _message_id(message)), str) and message_id
-    ]
+    sequences = [sequence for message in source_messages if isinstance((sequence := _message_sequence(message)), int)]
+    message_ids = [message_id for message in source_messages if isinstance((message_id := _message_id(message)), str) and message_id]
 
     metadata: dict[str, object] = {}
     if sequences:
@@ -449,23 +441,11 @@ def _clean_explicit_preferred_name(value: str) -> str | None:
 
 def _merge_deterministic_entries(extracted: list, deterministic_entries: list[dict]) -> list[dict]:
     normalized = [entry for entry in extracted if isinstance(entry, dict)]
-    existing_content = {
-        _normalize_entry_content(str(entry.get("content") or ""))
-        for entry in normalized
-        if isinstance(entry, dict) and entry.get("content")
-    }
+    existing_content = {_normalize_entry_content(str(entry.get("content") or "")) for entry in normalized if isinstance(entry, dict) and entry.get("content")}
 
     if deterministic_entries:
-        normalized = [
-            entry
-            for entry in normalized
-            if not _is_duplicate_of_deterministic_entry(entry, deterministic_entries)
-        ]
-        existing_content = {
-            _normalize_entry_content(str(entry.get("content") or ""))
-            for entry in normalized
-            if isinstance(entry, dict) and entry.get("content")
-        }
+        normalized = [entry for entry in normalized if not _is_duplicate_of_deterministic_entry(entry, deterministic_entries)]
+        existing_content = {_normalize_entry_content(str(entry.get("content") or "")) for entry in normalized if isinstance(entry, dict) and entry.get("content")}
 
     for entry in deterministic_entries:
         if not isinstance(entry, dict):
@@ -483,11 +463,7 @@ def _is_duplicate_of_deterministic_entry(entry: dict, deterministic_entries: lis
     content = str(entry.get("content") or "")
     if not content:
         return False
-    return any(
-        _content_near_duplicate(content, str(deterministic.get("content") or ""))
-        for deterministic in deterministic_entries
-        if isinstance(deterministic, dict)
-    )
+    return any(_content_near_duplicate(content, str(deterministic.get("content") or "")) for deterministic in deterministic_entries if isinstance(deterministic, dict))
 
 
 def _content_near_duplicate(left: str, right: str) -> bool:
@@ -510,11 +486,7 @@ def _content_near_duplicate(left: str, right: str) -> bool:
 
 
 def _content_tokens(content: str) -> set[str]:
-    return {
-        token
-        for token in re.findall(r"[a-z0-9]+", content.casefold())
-        if len(token) > 2 and token not in _DUPLICATE_STOPWORDS
-    }
+    return {token for token in re.findall(r"[a-z0-9]+", content.casefold()) if len(token) > 2 and token not in _DUPLICATE_STOPWORDS}
 
 
 def _filter_policy_rejected_entries(extracted: list[dict]) -> list[dict]:
@@ -632,14 +604,16 @@ def _write_extracted_memories(
         if require_memory_write and not result:
             raise MemoryWriteError("mem0_write_failed")
 
-        written_memories.append({
-            "content": entry["content"],
-            "category": entry.get("category", "fact"),
-            "importance": importance_label,
-            "importance_score": importance_score,
-            "metadata": mem0_metadata,
-            "mem0_result": result,
-        })
+        written_memories.append(
+            {
+                "content": entry["content"],
+                "category": entry.get("category", "fact"),
+                "importance": importance_label,
+                "importance_score": importance_score,
+                "metadata": mem0_metadata,
+                "mem0_result": result,
+            }
+        )
 
         logger.info(
             "session.finalization extraction_memory_written user_id=%s session_id=%s category=%s importance=%s",
@@ -659,12 +633,15 @@ def extract_session_memories(
     session_metadata: dict | None = None,
     *,
     require_memory_write: bool = False,
+    candidate_only: bool = False,
 ) -> list[dict]:
     """Extract memories from a completed session transcript.
 
     Loads the mem0_extraction.md template, fills it with the session
-    transcript and metadata, calls Claude Haiku to extract structured
-    observations, then writes each memory to Mem0 via add_memories().
+    transcript and metadata, and calls Claude Haiku to extract structured
+    observations.  ``candidate_only=True`` returns vetted candidates without
+    calling Mem0; MEM00's durable extraction worker is the sole user of that
+    mode.  The default preserves the pre-cutover legacy path.
 
     Args:
         user_id: The user ID.
@@ -677,15 +654,22 @@ def extract_session_memories(
         List of memory dicts that were written to Mem0. Empty list on
         error or if no memories were extracted.
     """
+    log_user_id = user_id
+    log_session_id = session_id
+    if candidate_only:
+        from deerflow.sophia.memory_governance.refs import keyed_ref
+
+        log_user_id = keyed_ref("owner", user_id)
+        log_session_id = keyed_ref("session", session_id)
     logger.info(
         "session.finalization extraction_start user_id=%s session_id=%s message_count=%s",
-        user_id,
-        session_id,
+        log_user_id,
+        log_session_id,
         len(messages),
     )
 
     if not messages:
-        logger.info("Empty transcript for session %s — skipping extraction", session_id)
+        logger.info("Empty transcript for session %s — skipping extraction", log_session_id)
         return []
 
     metadata = session_metadata or {}
@@ -694,7 +678,7 @@ def extract_session_memories(
     # Format the transcript
     transcript = _format_transcript(messages)
     if not transcript.strip():
-        logger.info("No user/assistant content in session %s — skipping extraction", session_id)
+        logger.info("No user/assistant content in session %s — skipping extraction", log_session_id)
         return []
     explicit_remember_analysis = analyze_explicit_remember_messages(messages)
     explicit_remember_entries = explicit_remember_analysis["entries"]
@@ -705,8 +689,8 @@ def extract_session_memories(
             rejection_reasons[reason] = rejection_reasons.get(reason, 0) + 1
         logger.info(
             "session.finalization explicit_remember_analyzed user_id=%s session_id=%s explicit_count=%s deterministic_candidates=%s rejection_reasons=%s",
-            user_id,
-            session_id,
+            log_user_id,
+            log_session_id,
             explicit_remember_analysis["explicit_count"],
             len(explicit_remember_entries),
             sorted(rejection_reasons.items()),
@@ -725,6 +709,8 @@ def extract_session_memories(
             if require_memory_write:
                 raise MemoryWriteError("extraction_template_missing")
             return []
+        if candidate_only:
+            return deterministic_entries
         return _write_extracted_memories(
             user_id=user_id,
             session_id=session_id,
@@ -760,11 +746,13 @@ def extract_session_memories(
         )
         response_text = response.content[0].text
     except Exception:
-        logger.error("Anthropic API call failed for session %s", session_id, exc_info=True)
+        logger.error("Anthropic API call failed for session %s", log_session_id, exc_info=True)
         if not deterministic_entries:
             if require_memory_write:
                 raise MemoryWriteError("extractor_failed")
             return []
+        if candidate_only:
+            return deterministic_entries
         return _write_extracted_memories(
             user_id=user_id,
             session_id=session_id,
@@ -780,8 +768,8 @@ def extract_session_memories(
     except (json.JSONDecodeError, TypeError):
         logger.error(
             "Failed to parse extraction response for session %s: %s",
-            session_id,
-            response_text[:200] if response_text else "(empty)",
+            log_session_id,
+            "content_excluded" if candidate_only else (response_text[:200] if response_text else "(empty)"),
         )
         if not deterministic_entries:
             if require_memory_write:
@@ -790,7 +778,7 @@ def extract_session_memories(
         extracted = deterministic_entries
 
     if not isinstance(extracted, list):
-        logger.error("Extraction response is not a list for session %s", session_id)
+        logger.error("Extraction response is not a list for session %s", log_session_id)
         if not deterministic_entries:
             if require_memory_write:
                 raise MemoryWriteError("extractor_invalid_response")
@@ -802,10 +790,13 @@ def extract_session_memories(
 
     logger.info(
         "session.finalization extraction_candidates user_id=%s session_id=%s candidate_count=%s",
-        user_id,
-        session_id,
+        log_user_id,
+        log_session_id,
         len(extracted),
     )
+
+    if candidate_only:
+        return extracted
 
     # Write each extracted memory to Mem0
     written_memories = _write_extracted_memories(
@@ -818,8 +809,8 @@ def extract_session_memories(
 
     logger.info(
         "session.finalization extraction_complete user_id=%s session_id=%s written_count=%s candidate_count=%s",
-        user_id,
-        session_id,
+        log_user_id,
+        log_session_id,
         len(written_memories),
         len(extracted),
     )

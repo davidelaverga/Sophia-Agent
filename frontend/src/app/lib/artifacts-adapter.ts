@@ -209,6 +209,12 @@ function normalizeMemoryCandidate(
       ? Math.min(1, Math.max(0, raw.confidence)) 
       : undefined,
     reason: raw.reason || raw.source,
+    candidateRevision: typeof raw.candidate_revision === 'number'
+      ? raw.candidate_revision
+      : undefined,
+    reviewState: typeof raw.review_state === 'string' ? raw.review_state : undefined,
+    projectionState: typeof raw.projection_state === 'string' ? raw.projection_state : undefined,
+    authority: typeof raw.authority === 'string' ? raw.authority : undefined,
   };
 }
 

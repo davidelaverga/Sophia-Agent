@@ -43,6 +43,10 @@ from app.gateway.workers.deck_quality_publication_worker import (
     install_deck_quality_publication_worker,
     stop_deck_quality_publication_worker,
 )
+from app.gateway.workers.memory_governance import (
+    build_configured_memory_governance_worker,
+    install_memory_governance_worker,
+)
 from app.gateway.workers.voice_lab_retention import (
     build_configured_voice_lab_retention_reaper,
     get_voice_lab_retention_reaper_or_none,
@@ -72,9 +76,7 @@ _ARTIFACT_UPSERT_AUTH_PATCH = "artifact_upsert_auth_v2"
 _DECK_QUALITY_READINESS_ATTR = "_deck_quality_readiness"
 _DEPLOYMENT_SHA_PATTERN = re.compile(r"^[a-f0-9]{40}$")
 _SAFE_STARTUP_FAILURE_CODE = re.compile(r"^[a-z0-9_]{1,96}$")
-_VOICE_LAB_RECOVERY_PATH = re.compile(
-    r"^/internal/voice-lab/runs/[^/]+/recover$"
-)
+_VOICE_LAB_RECOVERY_PATH = re.compile(r"^/internal/voice-lab/runs/[^/]+/recover$")
 
 
 def _deck_quality_component(
@@ -105,19 +107,12 @@ def _initial_deck_quality_readiness(*, enabled: bool | None) -> dict[str, object
         "status": "starting" if enabled else "not_started",
         "publication": _deck_quality_component("starting" if enabled else "not_started"),
         "dispatcher": _deck_quality_component("starting" if enabled else "not_started"),
-        "producer_failure_signal": _deck_quality_component(
-            "starting" if enabled else "not_started"
-        ),
+        "producer_failure_signal": _deck_quality_component("starting" if enabled else "not_started"),
     }
 
 
 def _gateway_version_metadata() -> dict[str, str | None]:
-    commit_sha = (
-        os.getenv("RENDER_GIT_COMMIT")
-        or os.getenv("RENDER_GIT_COMMIT_SHA")
-        or os.getenv("GIT_COMMIT_SHA")
-        or os.getenv("SOURCE_COMMIT")
-    )
+    commit_sha = os.getenv("RENDER_GIT_COMMIT") or os.getenv("RENDER_GIT_COMMIT_SHA") or os.getenv("GIT_COMMIT_SHA") or os.getenv("SOURCE_COMMIT")
     return {
         "commit_sha": commit_sha,
         "build_timestamp": os.getenv("RENDER_BUILD_TIMESTAMP") or os.getenv("BUILD_TIMESTAMP"),
@@ -132,9 +127,7 @@ def _gateway_startup_failure_code(exc: Exception) -> str:
 
     if isinstance(exc, HTTPException) and isinstance(exc.detail, dict):
         detail_code = exc.detail.get("code")
-        if isinstance(detail_code, str) and _SAFE_STARTUP_FAILURE_CODE.fullmatch(
-            detail_code
-        ):
+        if isinstance(detail_code, str) and _SAFE_STARTUP_FAILURE_CODE.fullmatch(detail_code):
             return detail_code
     message = str(exc)
     if _SAFE_STARTUP_FAILURE_CODE.fullmatch(message):
@@ -145,11 +138,7 @@ def _gateway_startup_failure_code(exc: Exception) -> str:
 def _gateway_protected_plane_readiness() -> dict[str, object]:
     metadata = _gateway_version_metadata()
     build = str(metadata.get("commit_sha") or "")
-    production = bool(
-        os.getenv("RENDER")
-        or os.getenv("RENDER_SERVICE_ID")
-        or (os.getenv("ENVIRONMENT") or "").strip().lower() == "production"
-    )
+    production = bool(os.getenv("RENDER") or os.getenv("RENDER_SERVICE_ID") or (os.getenv("ENVIRONMENT") or "").strip().lower() == "production")
     if production and not _DEPLOYMENT_SHA_PATTERN.fullmatch(build):
         raise ValueError("gateway_deployment_identity_unavailable")
     internal_secret = (os.getenv("SOPHIA_VOICE_INTERNAL_AUTH_SECRET") or "").strip()
@@ -157,10 +146,7 @@ def _gateway_protected_plane_readiness() -> dict[str, object]:
         raise ValueError("gateway_voice_internal_auth_configuration_invalid")
 
     lab_enabled = (os.getenv("SOPHIA_VOICE_LAB_ENABLED") or "").strip().lower() == "true"
-    lab_kill_switch_engaged = (
-        (os.getenv("SOPHIA_VOICE_LAB_KILL_SWITCH") or "true").strip().lower()
-        != "false"
-    )
+    lab_kill_switch_engaged = (os.getenv("SOPHIA_VOICE_LAB_KILL_SWITCH") or "true").strip().lower() != "false"
     d02_required = (
         "SOPHIA_VOICE_LAB_D02_GATEWAY_DATABASE_URL",
         "SOPHIA_VOICE_LAB_D02_GATEWAY_CAPABILITY_SECRET",
@@ -172,6 +158,7 @@ def _gateway_protected_plane_readiness() -> dict[str, object]:
         "SOPHIA_VOICE_LAB_D02_SETTLEMENT_AUTHORITY_KEY_ID",
         "SOPHIA_VOICE_LAB_D02_SETTLEMENT_ED25519_PUBLIC_KEYRING_JSON",
     )
+
     def _d02_value_present(name: str) -> bool:
         value = os.getenv(name)
         if name == "SOPHIA_VOICE_LAB_D02_DATABASE_FINALIZE_HMAC_SECRET":
@@ -180,24 +167,18 @@ def _gateway_protected_plane_readiness() -> dict[str, object]:
 
     def _d02_activation_material_present(name: str) -> bool:
         value = os.getenv(name)
-        if (
-            name
-            == "SOPHIA_VOICE_LAB_D02_SETTLEMENT_ED25519_PUBLIC_KEYRING_JSON"
-            and (value or "").strip() == "{}"
-        ):
+        if name == "SOPHIA_VOICE_LAB_D02_SETTLEMENT_ED25519_PUBLIC_KEYRING_JSON" and (value or "").strip() == "{}":
             return False
         return _d02_value_present(name)
 
     # Empty example-file placeholders and the documented non-secret default
     # key id do not activate the plane in a local disabled checkout. Any
     # material DSN/key/secret does, and then the whole bundle is mandatory.
-    d02_provisioned = production or lab_enabled or any(
-        _d02_activation_material_present(name)
-        for name in d02_required
-        if name != "SOPHIA_VOICE_LAB_D02_DATABASE_FINALIZE_HMAC_KEY_ID"
-    ) or (
-        (os.getenv("SOPHIA_VOICE_LAB_D02_DATABASE_FINALIZE_HMAC_KEY_ID") or "").strip()
-        not in ("", "d02-db-finalize-v1")
+    d02_provisioned = (
+        production
+        or lab_enabled
+        or any(_d02_activation_material_present(name) for name in d02_required if name != "SOPHIA_VOICE_LAB_D02_DATABASE_FINALIZE_HMAC_KEY_ID")
+        or ((os.getenv("SOPHIA_VOICE_LAB_D02_DATABASE_FINALIZE_HMAC_KEY_ID") or "").strip() not in ("", "d02-db-finalize-v1"))
     )
     if lab_enabled:
         required = (
@@ -208,10 +189,7 @@ def _gateway_protected_plane_readiness() -> dict[str, object]:
             "SOPHIA_VOICE_LAB_AUTH_DATABASE_URL",
             *d02_required,
         )
-        if any(
-            not (_d02_value_present(name) if name in d02_required else (os.getenv(name) or "").strip())
-            for name in required
-        ):
+        if any(not (_d02_value_present(name) if name in d02_required else (os.getenv(name) or "").strip()) for name in required):
             raise ValueError("gateway_voice_lab_configuration_missing")
 
     # D02 is a protected production authority even while campaign admission is
@@ -223,9 +201,7 @@ def _gateway_protected_plane_readiness() -> dict[str, object]:
         from app.gateway.routers import voice_lab_recovery as voice_lab_recovery_router
 
         try:
-            _active_tombstone_kid, tombstone_keys = (
-                voice_lab_recovery_router._auth_tombstone_keyring()
-            )
+            _active_tombstone_kid, tombstone_keys = voice_lab_recovery_router._auth_tombstone_keyring()
         except RuntimeError as exc:
             raise ValueError("gateway_voice_lab_auth_tombstone_keyring_invalid") from exc
         secret_values = [
@@ -243,19 +219,13 @@ def _gateway_protected_plane_readiness() -> dict[str, object]:
         ]
         # The DB-finalize secret is deliberately byte-exact: edge spaces are
         # valid and must hash identically in the operator, SQL, and Gateway.
-        finalize_secret = os.getenv(
-            "SOPHIA_VOICE_LAB_D02_DATABASE_FINALIZE_HMAC_SECRET"
-        )
+        finalize_secret = os.getenv("SOPHIA_VOICE_LAB_D02_DATABASE_FINALIZE_HMAC_SECRET")
         if finalize_secret is not None:
             secret_values.append(finalize_secret.encode())
         secret_values.extend(tombstone_keys.values())
         if any(len(secret) < 32 for secret in secret_values):
             raise ValueError("gateway_voice_lab_configuration_invalid")
-        if any(
-            hmac.compare_digest(left, right)
-            for index, left in enumerate(secret_values)
-            for right in secret_values[index + 1 :]
-        ):
+        if any(hmac.compare_digest(left, right) for index, left in enumerate(secret_values) for right in secret_values[index + 1 :]):
             raise ValueError("gateway_voice_lab_secrets_not_distinct")
         from app.gateway.routers import (
             voice_lab_d02_settlement as voice_lab_d02_settlement_router,
@@ -264,28 +234,20 @@ def _gateway_protected_plane_readiness() -> dict[str, object]:
         try:
             voice_lab_d02_settlement_router._receipt_private_key()
         except (HTTPException, KeyError, ValueError) as exc:
-            raise ValueError(
-                "gateway_voice_lab_d02_private_signing_configuration_invalid"
-            ) from exc
+            raise ValueError("gateway_voice_lab_d02_private_signing_configuration_invalid") from exc
         try:
             voice_lab_d02_settlement_router._receipt_public_keyring()
         except (HTTPException, KeyError, ValueError) as exc:
-            raise ValueError(
-                "gateway_voice_lab_d02_public_signing_configuration_invalid"
-            ) from exc
+            raise ValueError("gateway_voice_lab_d02_public_signing_configuration_invalid") from exc
         try:
             voice_lab_d02_settlement_router.assert_d02_gateway_database_ready()
         except HTTPException as exc:
             detail_code = _gateway_startup_failure_code(exc)
             if detail_code.startswith("voice_lab_d02_gateway_database_"):
                 raise ValueError(f"gateway_{detail_code}") from exc
-            raise ValueError(
-                "gateway_voice_lab_d02_gateway_database_configuration_invalid"
-            ) from exc
+            raise ValueError("gateway_voice_lab_d02_gateway_database_configuration_invalid") from exc
         except (KeyError, ValueError) as exc:
-            raise ValueError(
-                "gateway_voice_lab_d02_gateway_database_configuration_invalid"
-            ) from exc
+            raise ValueError("gateway_voice_lab_d02_gateway_database_configuration_invalid") from exc
 
     if lab_enabled:
         try:
@@ -296,11 +258,7 @@ def _gateway_protected_plane_readiness() -> dict[str, object]:
             raise ValueError("gateway_voice_lab_configuration_invalid")
         if (os.getenv("SOPHIA_SESSION_STORE") or "").strip().lower() != "supabase":
             raise ValueError("gateway_voice_lab_session_store_not_durable")
-        if (
-            (os.getenv("SOPHIA_VOICE_RUNTIME_MODE") or "").strip() != "gemini_live"
-            or (os.getenv("SOPHIA_VOICE_GEMINI_PRODUCTION_ROUTE_ENABLED") or "").strip().lower()
-            != "true"
-        ):
+        if (os.getenv("SOPHIA_VOICE_RUNTIME_MODE") or "").strip() != "gemini_live" or (os.getenv("SOPHIA_VOICE_GEMINI_PRODUCTION_ROUTE_ENABLED") or "").strip().lower() != "true":
             raise ValueError("gateway_voice_lab_provider_route_not_ready")
     return {
         "status": "ready",
@@ -321,9 +279,7 @@ def _live_deck_quality_readiness(
     result = dict(snapshot)
     result["publication"] = dict(snapshot.get("publication") or {})
     result["dispatcher"] = dict(snapshot.get("dispatcher") or {})
-    result["producer_failure_signal"] = dict(
-        snapshot.get("producer_failure_signal") or {}
-    )
+    result["producer_failure_signal"] = dict(snapshot.get("producer_failure_signal") or {})
     if snapshot.get("enabled") is not True:
         return result
     publication_worker = get_deck_quality_publication_worker_or_none(app)
@@ -342,9 +298,7 @@ def _live_deck_quality_readiness(
             "degraded",
             reason="worker_not_running",
         )
-    producer_failure_signal = (
-        builder_events.get_producer_failure_signal_readiness(app)
-    )
+    producer_failure_signal = builder_events.get_producer_failure_signal_readiness(app)
     if producer_failure_signal is not None:
         result["producer_failure_signal"] = producer_failure_signal
     component_statuses = {
@@ -356,9 +310,7 @@ def _live_deck_quality_readiness(
         )
         if isinstance(component, dict)
     }
-    result["status"] = (
-        "ready" if component_statuses == {"ready"} else "degraded"
-    )
+    result["status"] = "ready" if component_statuses == {"ready"} else "degraded"
     return result
 
 
@@ -385,9 +337,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         _gateway_protected_plane_readiness()
     except Exception as exc:
         failure_code = _gateway_startup_failure_code(exc)
-        raise RuntimeError(
-            "gateway protected-plane startup readiness failed: " + failure_code
-        ) from exc
+        raise RuntimeError("gateway protected-plane startup readiness failed: " + failure_code) from exc
 
     # Hard retention is an independent product obligation. It must keep
     # running after admission is disabled or kill-switched because the runner
@@ -398,15 +348,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # A false lease result is expected during a rolling deploy while the old
     # healthy replica owns the global pass. Only inability to probe the lease
     # or durable indexes is a startup failure; the new worker keeps retrying.
-    if (
-        voice_lab_retention_reaper_required()
-        and initial_retention_cycle.discovery_failed
-    ):
+    if voice_lab_retention_reaper_required() and initial_retention_cycle.discovery_failed:
         raise RuntimeError("gateway_voice_lab_retention_reaper_probe_failed")
     voice_lab_retention_reaper.start()
-    logger.info(
-        "Voice Lab retention reaper started independentOfLabGates=true contentExcluded=true"
-    )
+    logger.info("Voice Lab retention reaper started independentOfLabGates=true contentExcluded=true")
 
     deck_quality_readiness = _initial_deck_quality_readiness(enabled=app_config.deck_quality.enabled)
     setattr(app.state, _DECK_QUALITY_READINESS_ATTR, deck_quality_readiness)
@@ -444,30 +389,20 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         try:
             probe_builder_event_auth()
             failure_signal_startup_phase = "setup"
-            producer_failure_signal_store = (
-                configured_producer_failure_signal_store()
-            )
+            producer_failure_signal_store = configured_producer_failure_signal_store()
             if producer_failure_signal_store is None:
-                raise RuntimeError(
-                    "enabled DQ1 producer failure signal requires durable persistence"
-                )
+                raise RuntimeError("enabled DQ1 producer failure signal requires durable persistence")
             failure_signal_startup_phase = "probe"
             await producer_failure_signal_store.probe()
             failure_signal_startup_phase = "readiness"
-            failure_signal_readiness = (
-                await producer_failure_signal_store.readiness()
-            )
+            failure_signal_readiness = await producer_failure_signal_store.readiness()
             failure_signal_component = failure_signal_readiness.component()
-            deck_quality_readiness["producer_failure_signal"] = (
-                failure_signal_component
-            )
+            deck_quality_readiness["producer_failure_signal"] = failure_signal_component
             builder_events.set_producer_failure_signal_readiness(
                 app,
                 failure_signal_component,
             )
-            logger.info(
-                "DQ1 producer failure signal channel ready contentExcluded=true"
-            )
+            logger.info("DQ1 producer failure signal channel ready contentExcluded=true")
         except Exception as exc:  # noqa: BLE001 - delivery stays authoritative.
             logger.error(
                 "DQ1 producer failure signal channel unavailable at startup phase=%s error_type=%s contentExcluded=true",
@@ -484,11 +419,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                         exc_info=False,
                     )
             producer_failure_signal_store = None
-            failure_signal_reason = (
-                "producer_failure_signal_auth_unavailable"
-                if failure_signal_startup_phase == "auth"
-                else f"{failure_signal_startup_phase}_failed"
-            )
+            failure_signal_reason = "producer_failure_signal_auth_unavailable" if failure_signal_startup_phase == "auth" else f"{failure_signal_startup_phase}_failed"
             failure_signal_component: dict[str, object] = {
                 "status": "degraded",
                 "reason": failure_signal_reason,
@@ -498,9 +429,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                     "error_type": exc.__class__.__name__,
                 },
             }
-            deck_quality_readiness["producer_failure_signal"] = (
-                failure_signal_component
-            )
+            deck_quality_readiness["producer_failure_signal"] = failure_signal_component
             builder_events.set_producer_failure_signal_readiness(
                 app,
                 failure_signal_component,
@@ -649,6 +578,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             )
     install_deck_quality_dispatcher(app, deck_quality_dispatcher)
 
+    # MEM00 runs through this existing Gateway-owned claim loop. With all
+    # default-closed flags off, no store/provider is initialized and current
+    # production behavior is unchanged.
+    memory_governance_worker = build_configured_memory_governance_worker()
+    install_memory_governance_worker(app, memory_governance_worker)
+    if memory_governance_worker is not None:
+        memory_governance_worker.start()
+        logger.info("MEM00 governance worker started contentExcluded=true")
+
     if app_config.deck_quality.enabled:
         component_statuses = {
             str(component["status"])
@@ -707,6 +645,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         logger.exception("Failed to start Telegram session tracker")
 
     yield
+
+    if memory_governance_worker is not None:
+        try:
+            await memory_governance_worker.stop()
+            logger.info("MEM00 governance worker stopped contentExcluded=true")
+        except Exception:
+            logger.error(
+                "MEM00 governance worker shutdown failed contentExcluded=true",
+                exc_info=False,
+            )
 
     try:
         await voice_lab_retention_reaper.stop()
@@ -887,17 +835,9 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
         # credentials.  Do not feed that capability through the ordinary
         # product-route fence first or recovery is categorically denied before
         # the stronger dual-auth handler can run.
-        private_recovery = (
-            request.method.upper() == "POST"
-            and _VOICE_LAB_RECOVERY_PATH.fullmatch(request.url.path) is not None
-            and bool(request.headers.get(VOICE_LAB_RECOVERY_INTERNAL_AUTH_HEADER))
-        )
+        private_recovery = request.method.upper() == "POST" and _VOICE_LAB_RECOVERY_PATH.fullmatch(request.url.path) is not None and bool(request.headers.get(VOICE_LAB_RECOVERY_INTERNAL_AUTH_HEADER))
 
-        if not private_recovery and (
-            authorization.lower().startswith("bearer ")
-            or request.headers.get(VOICE_LAB_CAPABILITY_HEADER)
-            or request.headers.get(VOICE_LAB_PROVIDER_CLEANUP_HEADER)
-        ):
+        if not private_recovery and (authorization.lower().startswith("bearer ") or request.headers.get(VOICE_LAB_CAPABILITY_HEADER) or request.headers.get(VOICE_LAB_PROVIDER_CLEANUP_HEADER)):
             from fastapi import HTTPException
             from fastapi.responses import JSONResponse
 
@@ -1036,20 +976,13 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
             # Ordinary Gateway readiness remains healthy, but synthetic
             # admission consumes this explicit plane-specific bit and fails
             # closed after any persistent discovery/processing/purge debt.
-            protected_plane_ready = bool(
-                retention_readiness.get("running") is True
-                and retention_readiness.get("status") == "ready"
-            )
+            protected_plane_ready = bool(retention_readiness.get("running") is True and retention_readiness.get("status") == "ready")
             result["voice_lab_protected_plane_ready"] = protected_plane_ready
             # Frontend principal provisioning consumes the retention/admission
             # fence while product mutations are intentionally still disabled.
             # Keep that bootstrap authority separate from the campaign gate.
             result["voice_lab_admission_ready"] = protected_plane_ready
-            result["voice_lab_mutation_ready"] = bool(
-                protected_plane_ready
-                and result.get("voice_lab_enabled") is True
-                and result.get("voice_lab_kill_switch_engaged") is False
-            )
+            result["voice_lab_mutation_ready"] = bool(protected_plane_ready and result.get("voice_lab_enabled") is True and result.get("voice_lab_kill_switch_engaged") is False)
             return result
         except ValueError as exc:
             from fastapi import HTTPException

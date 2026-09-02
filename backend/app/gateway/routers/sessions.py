@@ -252,7 +252,7 @@ async def _create_langgraph_thread(
                     "metadata": {
                         "graph_id": SOPHIA_COMPANION_GRAPH_ID,
                         **(metadata or {}),
-                    }
+                    },
                 },
             )
             response.raise_for_status()
@@ -301,15 +301,8 @@ async def _delete_langgraph_thread_authoritatively(thread_id: str) -> bool:
                     before_payload = before.json()
                 except ValueError:
                     before_payload = None
-                before_metadata = (
-                    before_payload.get("metadata")
-                    if isinstance(before_payload, dict)
-                    else None
-                )
-                if (
-                    isinstance(before_metadata, dict)
-                    and before_metadata.get("synthetic_cleanup_fence") is True
-                ):
+                before_metadata = before_payload.get("metadata") if isinstance(before_payload, dict) else None
+                if isinstance(before_metadata, dict) and before_metadata.get("synthetic_cleanup_fence") is True:
                     return True
             deleted = await client.delete(f"{base_url}/threads/{thread_id}")
             if deleted.status_code not in {200, 202, 204, 404}:
@@ -422,11 +415,7 @@ def _records_for_voice_lab_claims(
 ) -> list[SessionRecord]:
     if claims is None:
         return records
-    return [
-        record
-        for record in records
-        if voice_lab_session_record_matches(record, claims)
-    ]
+    return [record for record in records if voice_lab_session_record_matches(record, claims)]
 
 
 def _synthetic_message_metadata(record: SessionRecord) -> dict[str, Any]:
@@ -500,11 +489,7 @@ def _synthetic_transcript_response(
         session_id,
         record,
     )
-    visible = [
-        response
-        for response in (_message_record_to_response(message) for message in records)
-        if response is not None
-    ]
+    visible = [response for response in (_message_record_to_response(message) for message in records) if response is not None]
     synthetic_metadata = _synthetic_message_metadata(latest_record)
     return {
         **_session_messages_payload(
@@ -670,11 +655,7 @@ async def start_session(
         thread_id = await _create_langgraph_thread(
             {
                 **(synthetic_context or {}),
-                **(
-                    {"scenario_version": voice_lab_claims.scenario_version}
-                    if voice_lab_claims and voice_lab_claims.scenario_version
-                    else {}
-                ),
+                **({"scenario_version": voice_lab_claims.scenario_version} if voice_lab_claims and voice_lab_claims.scenario_version else {}),
             }
             if synthetic_context
             else None,
@@ -697,9 +678,7 @@ async def start_session(
                 cleanup_admission,
             )
             if not authorized:
-                admission_releasable = await _delete_langgraph_thread_authoritatively(
-                    thread_id
-                )
+                admission_releasable = await _delete_langgraph_thread_authoritatively(thread_id)
                 raise HTTPException(
                     status_code=409,
                     detail={"code": "voice_lab_cleanup_obligation_closed"},
@@ -740,9 +719,7 @@ async def start_session(
         admission_releasable = True
     except BaseException:
         if thread_created and allocated_thread_ids and not admission_releasable:
-            admission_releasable = await _delete_langgraph_threads_authoritatively(
-                allocated_thread_ids
-            )
+            admission_releasable = await _delete_langgraph_threads_authoritatively(allocated_thread_ids)
         raise
     finally:
         if cleanup_admission is not None and admission_releasable:
@@ -966,6 +943,34 @@ def _cleanup_session_ledger(owner_user_id: str, thread_id: str | None) -> None:
         logger.warning("Delegation-ledger cleanup failed: thread_id=%s", thread_id, exc_info=True)
 
 
+def _invalidate_memory_source_before_delete(
+    owner_user_id: str,
+    record: SessionRecord,
+) -> None:
+    """Fence unapproved derived memory before a source transcript disappears."""
+
+    from deerflow.sophia.memory_governance.flags import (
+        memory_feature_flags_for_owner,
+    )
+
+    if not memory_feature_flags_for_owner(owner_user_id).candidate_ledger_write:
+        return
+    from deerflow.sophia.memory_governance.refs import keyed_ref
+    from deerflow.sophia.memory_governance.service import CanonicalMemoryService
+
+    idempotency_key = keyed_ref(
+        "source-delete",
+        f"{owner_user_id}:{record.session_id}:{record.message_revision}",
+    )
+    CanonicalMemoryService(owner_id=owner_user_id).invalidate_source_session(
+        session_id=record.session_id,
+        current_transcript_revision=None,
+        detach_source=True,
+        idempotency_key=idempotency_key,
+        safe_reason_code="source_session_deleted",
+    )
+
+
 @router.delete("/bulk", response_model=SessionBulkDeleteResponse)
 async def delete_all_sessions(
     request: Request,
@@ -988,14 +993,25 @@ async def delete_all_sessions(
             detail={"code": "voice_lab_canonical_session_delete_forbidden"},
         )
     owner_user_id = normalized_user_id
-    deleted_records = _store.delete_all(normalized_user_id)
-
-    if not deleted_records:
+    records_to_delete = _store.list_sessions(normalized_user_id)
+    if not records_to_delete:
         legacy_user_id = _legacy_user_id_for(normalized_user_id)
         if legacy_user_id is not None:
-            deleted_records = _store.delete_all(legacy_user_id)
-            if deleted_records:
+            records_to_delete = _store.list_sessions(legacy_user_id)
+            if records_to_delete:
                 owner_user_id = legacy_user_id
+
+    try:
+        for record in records_to_delete:
+            _invalidate_memory_source_before_delete(owner_user_id, record)
+    except Exception as exc:
+        logger.error("Memory source invalidation failed before bulk session deletion", exc_info=True)
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "memory_source_invalidation_unavailable"},
+        ) from exc
+
+    deleted_records = _store.delete_all(owner_user_id) if records_to_delete else []
 
     if deleted_records:
         from app.gateway.inactivity_watcher import unregister_thread
@@ -1034,6 +1050,15 @@ async def delete_session(
             status_code=409,
             detail={"code": "voice_lab_canonical_session_delete_forbidden"},
         )
+    try:
+        if record is not None:
+            _invalidate_memory_source_before_delete(owner_user_id, record)
+    except Exception as exc:
+        logger.error("Memory source invalidation failed before session deletion", exc_info=True)
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "memory_source_invalidation_unavailable"},
+        ) from exc
     deleted = _store.delete(owner_user_id, session_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Session not found.")
@@ -1069,7 +1094,46 @@ async def end_session(
             status_code=409,
             detail={"code": "voice_lab_canonical_finalization_required"},
         )
-    record = _store.end(owner_user_id, body.session_id)
+    from deerflow.sophia.memory_governance.flags import (
+        memory_feature_flags_for_owner,
+    )
+
+    record = None
+    if memory_feature_flags_for_owner(owner_user_id).candidate_ledger_write:
+        try:
+            from deerflow.sophia.memory_governance.extraction_service import (
+                MemoryExtractionService,
+            )
+            from deerflow.sophia.memory_governance.refs import keyed_ref
+            from deerflow.sophia.memory_governance.store import (
+                configured_memory_store,
+            )
+
+            extraction = MemoryExtractionService(
+                governance_store=configured_memory_store(),
+                session_store=_store,
+                lease_owner=keyed_ref("worker", "gateway-session-end-enqueue-only"),
+                service_name="sophia-gateway",
+            )
+            durable_run = extraction.finalize_and_enqueue_session(
+                user_id=owner_user_id,
+                session_id=body.session_id,
+                ended_at=datetime.now(UTC).isoformat(),
+            )
+            record = _store.get(owner_user_id, body.session_id)
+            if durable_run is None:
+                record = _store.end(owner_user_id, body.session_id)
+        except Exception as exc:
+            logger.error(
+                "MEM00 durable finalization failed for session end",
+                exc_info=True,
+            )
+            raise HTTPException(
+                status_code=503,
+                detail={"code": "memory_finalization_unavailable"},
+            ) from exc
+    else:
+        record = _store.end(owner_user_id, body.session_id)
     if record is None:
         raise HTTPException(status_code=404, detail="Session not found.")
 

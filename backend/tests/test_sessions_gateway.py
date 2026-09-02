@@ -5,7 +5,7 @@ import json
 import time
 import uuid
 from datetime import UTC, datetime, timedelta
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient
 import app.gateway.routers.sessions as sessions_router
 from app.gateway.auth import require_authenticated_user
 from app.gateway.routers.sessions import router
+from deerflow.sophia.memory_governance.flags import MemoryFeatureFlags
 from deerflow.sophia.session_store import SessionMessageRecord, SessionRecord, SessionStore
 
 app = FastAPI()
@@ -39,9 +40,7 @@ client = TestClient(app)
 
 VOICE_LAB_BUILD = "41a9b127af780bbe9d88acf34566a6aaf443e6b0"
 VOICE_LAB_SECRET = "capability-secret-at-least-thirty-two-bytes"
-VOICE_LAB_PROVIDER_EXPIRES_AT = (
-    datetime.now(UTC) + timedelta(minutes=30)
-).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+VOICE_LAB_PROVIDER_EXPIRES_AT = (datetime.now(UTC) + timedelta(minutes=30)).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 def _cleanup_id(test_run_id: str) -> str:
@@ -78,9 +77,7 @@ def _session_create_capability(**overrides: object) -> str:
     }
     claims.update(overrides)
     claims.setdefault("cleanup_obligation_id", _cleanup_id(str(claims["test_run_id"])))
-    encoded = base64.urlsafe_b64encode(
-        json.dumps(claims, separators=(",", ":")).encode("utf-8")
-    ).rstrip(b"=")
+    encoded = base64.urlsafe_b64encode(json.dumps(claims, separators=(",", ":")).encode("utf-8")).rstrip(b"=")
     signature = hmac.new(VOICE_LAB_SECRET.encode(), encoded, hashlib.sha256).digest()
     return f"{encoded.decode()}.{base64.urlsafe_b64encode(signature).rstrip(b'=').decode()}"
 
@@ -122,9 +119,7 @@ def _synthetic_session_record(
                 "retention_hours": 24,
                 "provider_expires_at": VOICE_LAB_PROVIDER_EXPIRES_AT,
                 "retention_anchor": "session_created_at_provisional",
-                "retention_expires_at": (created_at + timedelta(days=1)).isoformat(
-                    timespec="milliseconds"
-                ).replace("+00:00", "Z"),
+                "retention_expires_at": (created_at + timedelta(days=1)).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
             },
             "expected_deployment": {
                 "frontend": VOICE_LAB_BUILD,
@@ -303,9 +298,7 @@ def test_sessions_gateway_rejects_public_requests_before_store_access(
     original_override = app.dependency_overrides.pop(require_authenticated_user)
     try:
         with patch.object(isolated_session_store, "get") as mock_get:
-            response = client.get(
-                "/api/v1/sessions/synthetic-session?user_id=voice-lab-user-1"
-            )
+            response = client.get("/api/v1/sessions/synthetic-session?user_id=voice-lab-user-1")
     finally:
         app.dependency_overrides[require_authenticated_user] = original_override
 
@@ -320,9 +313,7 @@ def test_sessions_gateway_rejects_authenticated_scope_mismatch_before_store(
     app.dependency_overrides[require_authenticated_user] = lambda: "ordinary-user"
     try:
         with patch.object(isolated_session_store, "get") as mock_get:
-            response = client.get(
-                "/api/v1/sessions/synthetic-session?user_id=voice-lab-user-1"
-            )
+            response = client.get("/api/v1/sessions/synthetic-session?user_id=voice-lab-user-1")
     finally:
         app.dependency_overrides[require_authenticated_user] = original_override
 
@@ -337,9 +328,7 @@ def test_synthetic_session_read_requires_capability_before_store(
     _enable_voice_lab(monkeypatch)
     isolated_session_store.create(_synthetic_session_record())
     with patch.object(isolated_session_store, "get", wraps=isolated_session_store.get) as mock_get:
-        response = client.get(
-            "/api/v1/sessions/synthetic-session?user_id=voice-lab-user-1"
-        )
+        response = client.get("/api/v1/sessions/synthetic-session?user_id=voice-lab-user-1")
 
     assert response.status_code == 401
     assert response.json()["detail"] == {"code": "voice_lab_capability_missing"}
@@ -357,8 +346,7 @@ def test_synthetic_late_touch_is_content_free_and_never_reopens_or_registers_wat
         patch("app.gateway.inactivity_watcher.register_activity") as mock_register,
     ):
         response = client.post(
-            "/api/v1/sessions/synthetic-session/touch"
-            "?user_id=voice-lab-user-1&message_preview=private-content",
+            "/api/v1/sessions/synthetic-session/touch?user_id=voice-lab-user-1&message_preview=private-content",
             headers={"X-Sophia-Voice-Lab-Capability": _session_create_capability()},
         )
 
@@ -428,11 +416,7 @@ def test_synthetic_transcript_write_is_canonical_revisioned_and_isolated(
 
     read = client.get(
         "/api/v1/sessions/synthetic-session/messages?user_id=voice-lab-user-1",
-        headers={
-            "X-Sophia-Voice-Lab-Capability": _session_create_capability(
-                allowed_ops=["session:read"]
-            )
-        },
+        headers={"X-Sophia-Voice-Lab-Capability": _session_create_capability(allowed_ops=["session:read"])},
     )
     assert read.status_code == 200
     assert read.json()["message_revision"] == 1
@@ -444,26 +428,18 @@ def test_cross_run_touch_is_rejected_without_store_or_watcher_mutation(
     isolated_session_store,
 ):
     _enable_voice_lab(monkeypatch)
-    isolated_session_store.create(
-        _synthetic_session_record(test_run_id="run-B")
-    )
+    isolated_session_store.create(_synthetic_session_record(test_run_id="run-B"))
     with (
         patch.object(isolated_session_store, "update", wraps=isolated_session_store.update) as mock_update,
         patch("app.gateway.inactivity_watcher.register_activity") as mock_register,
     ):
         response = client.post(
             "/api/v1/sessions/synthetic-session/touch?user_id=voice-lab-user-1",
-            headers={
-                "X-Sophia-Voice-Lab-Capability": _session_create_capability(
-                    test_run_id="run-A"
-                )
-            },
+            headers={"X-Sophia-Voice-Lab-Capability": _session_create_capability(test_run_id="run-A")},
         )
 
     assert response.status_code == 409
-    assert response.json()["detail"] == {
-        "code": "voice_lab_session_binding_mismatch"
-    }
+    assert response.json()["detail"] == {"code": "voice_lab_session_binding_mismatch"}
     mock_update.assert_not_called()
     mock_register.assert_not_called()
 
@@ -476,18 +452,12 @@ def test_generic_end_cannot_bypass_synthetic_canonical_finalization(
     isolated_session_store.create(_synthetic_session_record())
     response = client.post(
         "/api/v1/sessions/end",
-        headers={
-            "X-Sophia-Voice-Lab-Capability": _session_create_capability(
-                allowed_ops=["session:finalize"]
-            )
-        },
+        headers={"X-Sophia-Voice-Lab-Capability": _session_create_capability(allowed_ops=["session:finalize"])},
         json={"user_id": "voice-lab-user-1", "session_id": "synthetic-session"},
     )
 
     assert response.status_code == 409
-    assert response.json()["detail"] == {
-        "code": "voice_lab_canonical_finalization_required"
-    }
+    assert response.json()["detail"] == {"code": "voice_lab_canonical_finalization_required"}
     record = isolated_session_store.get("voice-lab-user-1", "synthetic-session")
     assert record is not None and record.status == "open"
 
@@ -711,6 +681,56 @@ def test_end_session_unregisters_thread(isolated_session_store):
     assert response.json()["session_id"] == "session-to-end"
     assert response.json()["turn_count"] == 3
     mock_unregister_thread.assert_called_once_with("thread-to-end")
+
+
+def test_end_session_uses_atomic_mem00_finalization_for_enabled_owner(
+    isolated_session_store,
+    monkeypatch,
+):
+    isolated_session_store.create(
+        SessionRecord(
+            session_id="session-mem00-end",
+            thread_id="thread-mem00-end",
+            user_id="mem00-cert-owner",
+            status="open",
+        )
+    )
+    monkeypatch.setenv("SOPHIA_MEMORY_REFERENCE_HMAC_SECRET", "m" * 32)
+    extraction = MagicMock()
+
+    def _atomic_finalize(**payload):
+        isolated_session_store.end(payload["user_id"], payload["session_id"])
+        return object()
+
+    extraction.finalize_and_enqueue_session.side_effect = _atomic_finalize
+
+    with (
+        patch(
+            "deerflow.sophia.memory_governance.flags.memory_feature_flags_for_owner",
+            return_value=MemoryFeatureFlags(candidate_ledger_write=True),
+        ),
+        patch(
+            "deerflow.sophia.memory_governance.extraction_service.MemoryExtractionService",
+            return_value=extraction,
+        ),
+        patch("deerflow.sophia.memory_governance.store.configured_memory_store"),
+        patch("app.gateway.inactivity_watcher.unregister_thread") as mock_unregister_thread,
+    ):
+        response = client.post(
+            "/api/v1/sessions/end",
+            json={
+                "session_id": "session-mem00-end",
+                "user_id": "mem00-cert-owner",
+                "offer_debrief": False,
+            },
+        )
+
+    assert response.status_code == 200
+    extraction.finalize_and_enqueue_session.assert_called_once()
+    call = extraction.finalize_and_enqueue_session.call_args.kwargs
+    assert call["user_id"] == "mem00-cert-owner"
+    assert call["session_id"] == "session-mem00-end"
+    mock_unregister_thread.assert_called_once_with("thread-mem00-end")
 
 
 def test_update_session_can_pause_and_resume_resumable_sessions(isolated_session_store):

@@ -31,7 +31,16 @@ def _patch_search(monkeypatch: pytest.MonkeyPatch, behaviour) -> dict:
     """
     captured: dict = {"calls": []}
 
-    def fake(user_id, query, categories=None, context_mode=None, limit=10):
+    def fake(
+        user_id,
+        query,
+        categories=None,
+        context_mode=None,
+        limit=10,
+        log_content_previews=True,
+        raise_on_error=False,
+        caller="legacy_facade",
+    ):
         captured["calls"].append(
             {
                 "user_id": user_id,
@@ -39,6 +48,9 @@ def _patch_search(monkeypatch: pytest.MonkeyPatch, behaviour) -> dict:
                 "categories": categories,
                 "context_mode": context_mode,
                 "limit": limit,
+                "log_content_previews": log_content_previews,
+                "raise_on_error": raise_on_error,
+                "caller": caller,
             }
         )
         if callable(behaviour):
@@ -118,9 +130,7 @@ class TestUserIdResolution:
 
 class TestRetrievalAsync:
     @pytest.mark.anyio
-    async def test_happy_path_injects_contents_and_block(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_happy_path_injects_contents_and_block(self, monkeypatch: pytest.MonkeyPatch) -> None:
         captured = _patch_search(
             monkeypatch,
             [
@@ -152,6 +162,8 @@ class TestRetrievalAsync:
         # Ensure search was called with normalized_brief, not raw message.
         assert captured["calls"][0]["query"] == "Compare AR glasses."
         assert captured["calls"][0]["user_id"] == "user-abc"
+        assert captured["calls"][0]["caller"] == "builder_context"
+        assert captured["calls"][0]["log_content_previews"] is False
 
     @pytest.mark.anyio
     async def test_no_user_id_skips(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -172,9 +184,7 @@ class TestRetrievalAsync:
         assert captured["calls"] == []
 
     @pytest.mark.anyio
-    async def test_empty_results_returns_none(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_empty_results_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _patch_search(monkeypatch, [])
         mw = BuilderMem0RetrievalMiddleware()
         state = {
@@ -184,9 +194,7 @@ class TestRetrievalAsync:
         assert await mw.abefore_agent(state, runtime=None) is None
 
     @pytest.mark.anyio
-    async def test_timeout_swallowed_returns_none(
-        self, monkeypatch: pytest.MonkeyPatch, caplog
-    ) -> None:
+    async def test_timeout_swallowed_returns_none(self, monkeypatch: pytest.MonkeyPatch, caplog) -> None:
         # Simulate a slow Mem0 call that exceeds the 0.05s timeout we set.
         import time as _time
 
@@ -206,9 +214,7 @@ class TestRetrievalAsync:
         assert "system_prompt_blocks" not in state
 
     @pytest.mark.anyio
-    async def test_search_error_swallowed_returns_none(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_search_error_swallowed_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         def boom(*_args, **_kwargs):
             raise RuntimeError("Mem0 down")
 
@@ -222,9 +228,7 @@ class TestRetrievalAsync:
         assert result is None
 
     @pytest.mark.anyio
-    async def test_existing_contents_merged_and_deduplicated(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_existing_contents_merged_and_deduplicated(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # Companion-path injects 5 snippets via start_builder_task; this
         # middleware adds its own. Overlap should be deduped, ordering
         # preserved (companion-side first).
@@ -250,9 +254,7 @@ class TestRetrievalAsync:
         assert result["injected_memories"] == ["existing-id", "m2", "m1"]
 
     @pytest.mark.anyio
-    async def test_generic_artifact_style_memory_filtered(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_generic_artifact_style_memory_filtered(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _patch_search(
             monkeypatch,
             [
@@ -275,15 +277,11 @@ class TestRetrievalAsync:
 
         result = await mw.abefore_agent(state, runtime=None)
 
-        assert result["injected_memory_contents"] == [
-            "User is evaluating LangGraph orchestration tradeoffs."
-        ]
+        assert result["injected_memory_contents"] == ["User is evaluating LangGraph orchestration tradeoffs."]
         assert result["injected_memories"] == ["subject"]
 
     @pytest.mark.anyio
-    async def test_same_modality_broad_style_memory_kept(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_same_modality_broad_style_memory_kept(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _patch_search(
             monkeypatch,
             [
@@ -308,12 +306,8 @@ class TestRetrievalAsync:
         mw = BuilderMem0RetrievalMiddleware()
         state = {
             "user_id": "u",
-            "delegation_context": {
-                "normalized_brief": "Create a presentation on Kubernetes orchestration."
-            },
-            "messages": [
-                {"type": "human", "content": "Create a presentation on Kubernetes orchestration."}
-            ],
+            "delegation_context": {"normalized_brief": "Create a presentation on Kubernetes orchestration."},
+            "messages": [{"type": "human", "content": "Create a presentation on Kubernetes orchestration."}],
         }
 
         result = await mw.abefore_agent(state, runtime=None)
@@ -326,9 +320,7 @@ class TestRetrievalAsync:
         assert result["injected_memories"] == ["style", "neon", "subject"]
 
     @pytest.mark.anyio
-    async def test_task_specific_artifact_style_memory_kept(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_task_specific_artifact_style_memory_kept(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _patch_search(
             monkeypatch,
             [
@@ -347,15 +339,11 @@ class TestRetrievalAsync:
 
         result = await mw.abefore_agent(state, runtime=None)
 
-        assert result["injected_memory_contents"] == [
-            "For LangGraph reports, user prefers a light diagram palette."
-        ]
+        assert result["injected_memory_contents"] == ["For LangGraph reports, user prefers a light diagram palette."]
         assert result["injected_memories"] == ["style"]
 
     @pytest.mark.anyio
-    async def test_long_snippet_truncated(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_long_snippet_truncated(self, monkeypatch: pytest.MonkeyPatch) -> None:
         long_text = "x" * (_MAX_SNIPPET_CHARS + 100)
         _patch_search(monkeypatch, [{"id": "m1", "content": long_text}])
         mw = BuilderMem0RetrievalMiddleware()

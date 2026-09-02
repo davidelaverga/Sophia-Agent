@@ -17,6 +17,7 @@ from app.gateway.inactivity_watcher import (
 from app.gateway.inactivity_watcher import (
     reset_watcher as reset_watcher_state,
 )
+from deerflow.sophia.memory_governance.flags import MemoryFeatureFlags
 
 
 @pytest.fixture(autouse=True)
@@ -95,4 +96,52 @@ class TestCheckInactiveThreads:
             asyncio.run(_check_inactive_threads())
             mock_pause.assert_called_once_with("user1", "sess1")
 
+        assert "t1" not in _active_threads
+
+    def test_mem00_enqueue_failure_retains_idle_thread_for_retry(self):
+        register_activity("t1", "mem00-cert-owner", "sess1")
+        _active_threads["t1"]["last_active"] = time.time() - INACTIVITY_TIMEOUT - 60
+
+        with (
+            patch(
+                "app.gateway.inactivity_watcher.memory_feature_flags_for_owner",
+                return_value=MemoryFeatureFlags(candidate_ledger_write=True),
+            ),
+            patch(
+                "app.gateway.inactivity_watcher._enqueue_idle_memory_extraction",
+                side_effect=RuntimeError("synthetic governance outage"),
+            ),
+            patch("deerflow.sophia.offline_pipeline.run_offline_pipeline") as mock_pipeline,
+            patch("app.gateway.inactivity_watcher._store.pause") as mock_pause,
+        ):
+            asyncio.run(_check_inactive_threads())
+
+        mock_pipeline.assert_not_called()
+        mock_pause.assert_not_called()
+        assert "t1" in _active_threads
+
+    def test_mem00_enqueue_precedes_idle_pipeline_and_allows_cleanup(self):
+        register_activity("t1", "mem00-cert-owner", "sess1")
+        _active_threads["t1"]["last_active"] = time.time() - INACTIVITY_TIMEOUT - 60
+        calls = []
+
+        with (
+            patch(
+                "app.gateway.inactivity_watcher.memory_feature_flags_for_owner",
+                return_value=MemoryFeatureFlags(candidate_ledger_write=True),
+            ),
+            patch(
+                "app.gateway.inactivity_watcher._enqueue_idle_memory_extraction",
+                side_effect=lambda *_: calls.append("enqueue"),
+            ),
+            patch(
+                "deerflow.sophia.offline_pipeline.run_offline_pipeline",
+                side_effect=lambda *_: calls.append("pipeline"),
+            ),
+            patch("app.gateway.inactivity_watcher._store.pause") as mock_pause,
+        ):
+            asyncio.run(_check_inactive_threads())
+
+        assert calls == ["enqueue", "pipeline"]
+        mock_pause.assert_called_once_with("mem00-cert-owner", "sess1")
         assert "t1" not in _active_threads

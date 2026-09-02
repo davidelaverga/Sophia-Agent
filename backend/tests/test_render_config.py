@@ -189,6 +189,39 @@ def test_render_services_pin_the_same_supabase_project() -> None:
     assert langgraph["SOPHIA_EXPECTED_SUPABASE_PROJECT_REF"]["value"] == expected
 
 
+def test_gateway_and_langgraph_share_the_default_closed_mem00_contract() -> None:
+    gateway = _service_env("sophia-gateway")
+    langgraph = _service_env("sophia-langgraph")
+    shared_secret_keys = {
+        "MEM0_API_KEY",
+        "MEM0_ORG_ID",
+        "MEM0_PROJECT_ID",
+        "SOPHIA_MEMORY_REFERENCE_HMAC_SECRET",
+        "SOPHIA_MEMORY_CERTIFICATION_PRINCIPAL",
+        "SOPHIA_MEMORY_COHORT_PRINCIPALS",
+    }
+    shared_values = {
+        "SOPHIA_MEMORY_PROVIDER": "mem0",
+        "SOPHIA_MEMORY_PROVIDER_PROJECT": "proj_q1I90sXEFJXjVt3Mvghj2P7nKEfzPvT9h0t9Ft3Z",
+        "SOPHIA_MEMORY_PROVIDER_ENVIRONMENT": "production",
+        "SOPHIA_MEMORY_SUPPORTED_CONTRACT_EPOCH": "1",
+        "SOPHIA_MEMORY_CANDIDATE_LEDGER_WRITE": "false",
+        "SOPHIA_MEMORY_CANDIDATE_LEDGER_READ": "false",
+        "SOPHIA_MEMORY_CANONICAL_POOL_READ": "false",
+        "SOPHIA_MEMORY_PROVIDER_PROJECTION": "false",
+        "SOPHIA_MEMORY_GOVERNED_RUNTIME_READ": "false",
+        "SOPHIA_MEMORY_LEGACY_INVENTORY": "false",
+        "SOPHIA_MEMORY_LEGACY_IMPORT": "false",
+        "SOPHIA_MEMORY_FAULT_INJECTION": "false",
+        "SOPHIA_MEMORY_LANGSMITH_EXPORT": "false",
+    }
+
+    for key in shared_secret_keys:
+        assert gateway[key] == langgraph[key] == {"key": key, "sync": False}
+    for key, value in shared_values.items():
+        assert gateway[key]["value"] == langgraph[key]["value"] == value
+
+
 def test_langgraph_receives_the_dashboard_managed_voice_lab_principal() -> None:
     langgraph = _service_env("sophia-langgraph")
 
@@ -200,9 +233,7 @@ def test_langgraph_receives_the_dashboard_managed_voice_lab_principal() -> None:
 
 def test_voice_disables_onnx_posix_telemetry_before_smart_turn_import() -> None:
     voice = _service_env("sophia-voice")
-    dockerfile = (
-        Path(__file__).resolve().parents[2] / "voice" / "Dockerfile"
-    ).read_text(encoding="utf-8")
+    dockerfile = (Path(__file__).resolve().parents[2] / "voice" / "Dockerfile").read_text(encoding="utf-8")
 
     assert voice["ORT_DISABLE_TELEMETRY"] == {
         "key": "ORT_DISABLE_TELEMETRY",
@@ -222,12 +253,8 @@ def test_product_render_services_require_ordered_manual_deploys() -> None:
 
 def test_voice_lab_database_and_services_use_separate_ordered_blueprints() -> None:
     root = Path(__file__).resolve().parents[2]
-    database = yaml.safe_load(
-        (root / "render.voice-lab.database.yaml").read_text(encoding="utf-8")
-    )
-    services = yaml.safe_load(
-        (root / "render.voice-lab.yaml").read_text(encoding="utf-8")
-    )
+    database = yaml.safe_load((root / "render.voice-lab.database.yaml").read_text(encoding="utf-8"))
+    services = yaml.safe_load((root / "render.voice-lab.yaml").read_text(encoding="utf-8"))
 
     assert set(database) == {"databases"}
     assert database["databases"] == [
@@ -258,16 +285,8 @@ def test_voice_lab_database_and_services_use_separate_ordered_blueprints() -> No
             "sync": False,
         }
 
-    web_env = {
-        entry.get("key"): entry
-        for entry in by_name["sophia-voice-lab-mcp"]["envVars"]
-        if "key" in entry
-    }
-    worker_env = {
-        entry.get("key"): entry
-        for entry in by_name["sophia-voice-lab-worker"]["envVars"]
-        if "key" in entry
-    }
+    web_env = {entry.get("key"): entry for entry in by_name["sophia-voice-lab-mcp"]["envVars"] if "key" in entry}
+    worker_env = {entry.get("key"): entry for entry in by_name["sophia-voice-lab-worker"]["envVars"] if "key" in entry}
     assert web_env["SOPHIA_VOICE_LAB_PROVISIONING_ENABLED"]["sync"] is False
     assert web_env["SOPHIA_VOICE_LAB_PROVISION_OPERATOR_BEARER_TOKEN"]["sync"] is False
     assert "SOPHIA_VOICE_LAB_PROVISIONING_ENABLED" not in worker_env

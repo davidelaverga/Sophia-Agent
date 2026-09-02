@@ -111,6 +111,13 @@ export const useRecapStore = create<RecapState>()(
           const currentDecisions = state.decisions[sessionId] || [];
           const existingIndex = currentDecisions.findIndex(d => d.candidateId === candidateId);
           
+          const candidate = state.artifacts[sessionId]?.memoryCandidates?.find(item => item.id === candidateId);
+          const sameRequest = existingIndex >= 0
+            && currentDecisions[existingIndex].decision === decision
+            && currentDecisions[existingIndex].editedText === editedText;
+          const idempotencyKey = sameRequest
+            ? currentDecisions[existingIndex].idempotencyKey
+            : `recap:${sessionId}:${candidateId}:${candidate?.candidateRevision ?? 0}:${Date.now()}:${Math.random().toString(36).slice(2)}`;
           const newDecision: MemoryDecisionState = {
             candidateId,
             decision,
@@ -118,6 +125,9 @@ export const useRecapStore = create<RecapState>()(
                     decision === 'discarded' ? 'discarded' :
                     decision === 'edited' ? 'edited' : 'approved',
             editedText,
+            expectedCandidateRevision: candidate?.candidateRevision,
+            category: candidate?.category,
+            idempotencyKey,
             timestamp: new Date().toISOString(),
           };
           
@@ -232,7 +242,9 @@ export const useRecapStore = create<RecapState>()(
                   candidate_id: decision.candidateId,
                   decision: 'approve',
                   text: (decision.editedText || candidate?.text || '').trim(),
-                  category: candidate?.category,
+                  category: decision.category || candidate?.category,
+                  expected_candidate_revision: decision.expectedCandidateRevision ?? candidate?.candidateRevision,
+                  idempotency_key: decision.idempotencyKey,
                   source: 'recap',
                   metadata: {
                     session_type: artifacts?.sessionType,
@@ -251,7 +263,6 @@ export const useRecapStore = create<RecapState>()(
           result.discarded = [
             ...new Set([...result.discarded, ...discardedCandidates.map(d => d.candidateId)]),
           ];
-          
           // Update statuses based on response
           for (const id of result.committed) {
             get().updateDecisionStatus(sessionId, id, 'committed');

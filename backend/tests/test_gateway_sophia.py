@@ -16,14 +16,13 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from deerflow.sophia.memory_governance.store import MemoryGovernanceConflict
 from deerflow.sophia.session_store import SessionMessageRecord, SessionRecord, SessionStore
 
 VOICE_LAB_BUILD = "41a9b127af780bbe9d88acf34566a6aaf443e6b0"
 VOICE_LAB_SECRET = "capability-secret-at-least-thirty-two-bytes"
 VOICE_LAB_SESSION_CREATED_AT = datetime.now(UTC).replace(microsecond=0)
-VOICE_LAB_PROVIDER_EXPIRES_AT = (
-    VOICE_LAB_SESSION_CREATED_AT + timedelta(minutes=30)
-).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+VOICE_LAB_PROVIDER_EXPIRES_AT = (VOICE_LAB_SESSION_CREATED_AT + timedelta(minutes=30)).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 def _cleanup_id(test_run_id: str) -> str:
@@ -59,9 +58,7 @@ def _voice_lab_finalization_token(**overrides: object) -> str:
     }
     claims.update(overrides)
     claims.setdefault("cleanup_obligation_id", _cleanup_id(str(claims["test_run_id"])))
-    encoded = base64.urlsafe_b64encode(
-        json.dumps(claims, separators=(",", ":")).encode("utf-8")
-    ).rstrip(b"=")
+    encoded = base64.urlsafe_b64encode(json.dumps(claims, separators=(",", ":")).encode("utf-8")).rstrip(b"=")
     signature = hmac.new(
         VOICE_LAB_SECRET.encode("utf-8"),
         encoded,
@@ -92,9 +89,7 @@ def _synthetic_voice_lab_session_record(
     from deerflow.sophia.cleanup_fence import assert_cleanup_obligation_open
 
     created_at = VOICE_LAB_SESSION_CREATED_AT
-    retention_expires_at = (created_at + timedelta(days=1)).isoformat(
-        timespec="milliseconds"
-    ).replace("+00:00", "Z")
+    retention_expires_at = (created_at + timedelta(days=1)).isoformat(timespec="milliseconds").replace("+00:00", "Z")
     cleanup_obligation_id = _cleanup_id(test_run_id)
     assert_cleanup_obligation_open(
         cleanup_obligation_id,
@@ -137,9 +132,11 @@ def _synthetic_voice_lab_session_record(
         },
     )
 
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture
 def client():
@@ -194,6 +191,7 @@ def mock_review_store():
 # ---------------------------------------------------------------------------
 # User ID Validation
 # ---------------------------------------------------------------------------
+
 
 class TestUserIdValidation:
     def test_invalid_user_id_returns_400(self, client):
@@ -580,10 +578,7 @@ class TestRealtimeContext:
         def fake_search(**kwargs):  # noqa: ANN202
             calls.append(dict(kwargs))
             return {
-                "memories": [
-                    {"id": f"m{i}", "content": f"Memory {i}", "category": "fact"}
-                    for i in range(12)
-                ],
+                "memories": [{"id": f"m{i}", "content": f"Memory {i}", "category": "fact"} for i in range(12)],
                 "provider_status": "available",
                 "provider_reason": "sdk_client",
             }
@@ -621,10 +616,7 @@ class TestRealtimeContext:
         def fake_search(**kwargs):  # noqa: ANN202
             calls.append(dict(kwargs))
             return {
-                "memories": [
-                    {"id": f"m{i}", "content": f"Memory {i}", "category": "preference"}
-                    for i in range(8)
-                ],
+                "memories": [{"id": f"m{i}", "content": f"Memory {i}", "category": "preference"} for i in range(8)],
                 "provider_status": "available",
                 "provider_reason": "sdk_client",
                 "provider_transport": "mem0_sdk",
@@ -895,6 +887,7 @@ class TestRealtimeContext:
 # Memory List
 # ---------------------------------------------------------------------------
 
+
 class TestListMemories:
     def test_returns_memories(self, client, mock_mem0):
         mock_mem0.get_all.return_value = [
@@ -1137,7 +1130,131 @@ class TestListMemories:
 # Memory Create
 # ---------------------------------------------------------------------------
 
+
 class TestCreateMemory:
+    def test_canonical_manual_create_uses_single_authority_and_projection_obligation(self, client, mock_mem0):
+        memory_id = uuid.uuid4()
+        receipt = MagicMock(memory_id=memory_id)
+        memory = MagicMock(
+            memory_id=memory_id,
+            canonical_content="Explicit canonical memory",
+            category="fact",
+            lifecycle="active",
+            user_tier="none",
+            scope="global",
+            projection_state="desired",
+            current_content_revision=1,
+            memory_governance_revision=1,
+            created_at=datetime.now(UTC),
+            updated_at=datetime.now(UTC),
+        )
+        service = MagicMock()
+        service.manual_create.return_value = receipt
+        service.list_pool.return_value = (memory,)
+        flags = MagicMock(canonical_pool_read=True)
+
+        with (
+            patch("app.gateway.routers.sophia._memory_flags", return_value=flags),
+            patch(
+                "app.gateway.routers.sophia._canonical_memory_service",
+                return_value=service,
+            ),
+        ):
+            response = client.post(
+                "/api/sophia/test_user/memories",
+                json={
+                    "text": "Explicit canonical memory",
+                    "category": "fact",
+                    "scope": "global",
+                    "tier": "none",
+                    "idempotency_key": "manual-create-operation",
+                },
+            )
+
+        assert response.status_code == 200
+        assert response.json()["metadata"]["authority"] == "sophia_canonical"
+        service.manual_create.assert_called_once_with(
+            content="Explicit canonical memory",
+            category="fact",
+            scope="global",
+            user_tier="none",
+            idempotency_key="manual-create-operation",
+        )
+        mock_mem0.add.assert_not_called()
+
+    def test_canonical_manual_create_revision_conflict_is_not_reported_as_outage(self, client):
+        service = MagicMock()
+        service.manual_create.side_effect = MemoryGovernanceConflict("governance_revision_conflict")
+        flags = MagicMock(canonical_pool_read=True)
+
+        with (
+            patch("app.gateway.routers.sophia._memory_flags", return_value=flags),
+            patch(
+                "app.gateway.routers.sophia._canonical_memory_service",
+                return_value=service,
+            ),
+        ):
+            response = client.post(
+                "/api/sophia/test_user/memories",
+                json={
+                    "text": "Conflict probe",
+                    "idempotency_key": "manual-conflict-operation",
+                },
+            )
+
+        assert response.status_code == 409
+        assert response.json() == {"detail": "Canonical memory operation conflict"}
+
+
+class TestCanonicalMemoryLifecycle:
+    @pytest.mark.parametrize("operation", ["forget", "restore", "permanent-delete"])
+    def test_revision_conflicts_are_not_reported_as_governance_outages(
+        self,
+        client,
+        operation: str,
+    ) -> None:
+        memory_id = uuid.uuid4()
+        service = MagicMock()
+        method = {
+            "forget": service.forget,
+            "restore": service.restore,
+            "permanent-delete": service.permanently_delete,
+        }[operation]
+        method.side_effect = MemoryGovernanceConflict("governance_revision_conflict")
+        flags = MagicMock(canonical_pool_read=True)
+
+        with (
+            patch("app.gateway.routers.sophia._memory_flags", return_value=flags),
+            patch(
+                "app.gateway.routers.sophia._canonical_memory_service",
+                return_value=service,
+            ),
+        ):
+            response = client.post(
+                f"/api/sophia/test_user/memories/{memory_id}/{operation}",
+                json={
+                    "expected_governance_revision": 1,
+                    "idempotency_key": f"{operation}-conflict-operation",
+                },
+            )
+
+        assert response.status_code == 409
+        assert response.json() == {"detail": "Canonical memory revision conflict"}
+
+    def test_legacy_import_is_default_closed(self, client, mock_mem0):
+        response = client.post(
+            "/api/sophia/test_user/memories/legacy-import",
+            json={
+                "provider_memory_id": "provider-1",
+                "approval_evidence_ref": "hmac-sha256:review-receipt:" + "a" * 64,
+                "text": "Legacy approved memory",
+                "idempotency_key": "legacy-import-operation",
+            },
+        )
+
+        assert response.status_code == 404
+        mock_mem0.add.assert_not_called()
+
     def test_create_memory_returns_item(self, client, mock_mem0, mock_review_store):
         mock_mem0.add.return_value = [{"id": "m1", "memory": "Likes pizza", "categories": ["food"]}]
         with patch("deerflow.sophia.mem0_client.invalidate_user_cache") as mock_invalidate:
@@ -1182,6 +1299,7 @@ class TestCreateMemory:
 # Memory Update
 # ---------------------------------------------------------------------------
 
+
 class TestUpdateMemory:
     def test_update_text(self, client, mock_mem0, mock_review_store):
         mock_mem0.update.return_value = {"id": "m1", "memory": "Updated text"}
@@ -1215,7 +1333,9 @@ class TestUpdateMemory:
             )
         assert resp.status_code == 200
         mock_mem0.update.assert_called_once_with(
-            memory_id="m1", text="Updated text", metadata={"status": "approved"},
+            memory_id="m1",
+            text="Updated text",
+            metadata={"status": "approved"},
         )
         mock_review_store["upsert"].assert_called_once_with(
             "test_user",
@@ -1237,6 +1357,7 @@ class TestUpdateMemory:
 # ---------------------------------------------------------------------------
 # Memory Delete
 # ---------------------------------------------------------------------------
+
 
 class TestDeleteMemory:
     def test_delete_returns_204(self, client, mock_mem0, mock_review_store):
@@ -1288,10 +1409,12 @@ class TestBulkReview:
         mock_mem0.delete.return_value = None
         resp = client.post(
             "/api/sophia/test_user/memories/bulk-review",
-            json={"items": [
-                {"id": "m1", "action": "approve"},
-                {"id": "m2", "action": "discard"},
-            ]},
+            json={
+                "items": [
+                    {"id": "m1", "action": "approve"},
+                    {"id": "m2", "action": "discard"},
+                ]
+            },
         )
         assert resp.status_code == 200
         data = resp.json()
@@ -1304,10 +1427,12 @@ class TestBulkReview:
         mock_mem0.delete.side_effect = Exception("Failed")
         resp = client.post(
             "/api/sophia/test_user/memories/bulk-review",
-            json={"items": [
-                {"id": "m1", "action": "approve"},
-                {"id": "m2", "action": "discard"},
-            ]},
+            json={
+                "items": [
+                    {"id": "m1", "action": "approve"},
+                    {"id": "m2", "action": "discard"},
+                ]
+            },
         )
         assert resp.status_code == 200
         data = resp.json()
@@ -1327,6 +1452,7 @@ class TestBulkReview:
 # ---------------------------------------------------------------------------
 # Reflect
 # ---------------------------------------------------------------------------
+
 
 class TestReflect:
     def test_reflect_success(self, client):
@@ -1352,7 +1478,94 @@ class TestReflect:
 # Journal
 # ---------------------------------------------------------------------------
 
+
 class TestJournal:
+    def test_canonical_forgotten_shelf_is_explicit_and_management_only(self, client):
+        active = MagicMock(
+            memory_id=uuid.uuid4(),
+            canonical_content="active canonical",
+            category="fact",
+            lifecycle="active",
+            user_tier="none",
+            scope="global",
+            projection_state="active",
+            current_content_revision=1,
+            memory_governance_revision=1,
+            created_at=datetime.now(UTC),
+        )
+        forgotten = MagicMock(
+            memory_id=uuid.uuid4(),
+            canonical_content="forgotten canonical",
+            category="fact",
+            lifecycle="forgotten",
+            user_tier="none",
+            scope="global",
+            projection_state="purge_pending",
+            current_content_revision=1,
+            memory_governance_revision=2,
+            created_at=datetime.now(UTC),
+        )
+        service = MagicMock()
+        service.list_pool.return_value = (active, forgotten)
+        flags = MagicMock(canonical_pool_read=True)
+
+        with (
+            patch("app.gateway.routers.sophia._memory_flags", return_value=flags),
+            patch(
+                "app.gateway.routers.sophia._canonical_memory_service",
+                return_value=service,
+            ),
+        ):
+            response = client.get("/api/sophia/test_user/journal?status=forgotten")
+
+        assert response.status_code == 200
+        assert response.json()["count"] == 1
+        assert response.json()["entries"][0]["metadata"]["lifecycle"] == "forgotten"
+        service.list_pool.assert_called_once_with(include_forgotten=True)
+
+    def test_canonical_default_journal_excludes_forgotten(self, client):
+        active = MagicMock(
+            memory_id=uuid.uuid4(),
+            canonical_content="active canonical",
+            category="fact",
+            lifecycle="active",
+            user_tier="none",
+            scope="global",
+            projection_state="active",
+            current_content_revision=1,
+            memory_governance_revision=1,
+            created_at=datetime.now(UTC),
+        )
+        forgotten = MagicMock(
+            memory_id=uuid.uuid4(),
+            canonical_content="forgotten canonical",
+            category="fact",
+            lifecycle="forgotten",
+            user_tier="none",
+            scope="global",
+            projection_state="purge_pending",
+            current_content_revision=1,
+            memory_governance_revision=2,
+            created_at=datetime.now(UTC),
+        )
+        service = MagicMock()
+        service.list_pool.return_value = (active, forgotten)
+        flags = MagicMock(canonical_pool_read=True)
+
+        with (
+            patch("app.gateway.routers.sophia._memory_flags", return_value=flags),
+            patch(
+                "app.gateway.routers.sophia._canonical_memory_service",
+                return_value=service,
+            ),
+        ):
+            response = client.get("/api/sophia/test_user/journal")
+
+        assert response.status_code == 200
+        assert response.json()["count"] == 1
+        assert response.json()["entries"][0]["metadata"]["lifecycle"] == "active"
+        service.list_pool.assert_called_once_with(include_forgotten=False)
+
     def test_returns_entries(self, client, mock_mem0):
         mock_mem0.get_all.return_value = [
             {"id": "m1", "memory": "Likes pizza", "categories": ["food"]},
@@ -1434,6 +1647,7 @@ class TestJournal:
 # Session Recap
 # ---------------------------------------------------------------------------
 
+
 class TestSessionRecap:
     def test_returns_persisted_recap(self, client, tmp_path):
         recap_dir = tmp_path / "test_user" / "recaps"
@@ -1462,10 +1676,10 @@ class TestSessionRecap:
 # Visual Weekly
 # ---------------------------------------------------------------------------
 
+
 class TestVisualWeekly:
     def test_empty_traces(self, client, tmp_path):
-        with patch("app.gateway.routers.sophia.safe_user_path", return_value=tmp_path / "traces", create=True), \
-             patch("app.gateway.routers.sophia.USERS_DIR", tmp_path, create=True):
+        with patch("app.gateway.routers.sophia.safe_user_path", return_value=tmp_path / "traces", create=True), patch("app.gateway.routers.sophia.USERS_DIR", tmp_path, create=True):
             resp = client.get("/api/sophia/test_user/visual/weekly")
         assert resp.status_code == 200
         assert resp.json()["data_points"] == []
@@ -1478,6 +1692,7 @@ class TestVisualWeekly:
 # ---------------------------------------------------------------------------
 # Visual Decisions / Commitments
 # ---------------------------------------------------------------------------
+
 
 class TestVisualCategories:
     def test_decisions(self, client, mock_mem0):
@@ -1498,6 +1713,7 @@ class TestVisualCategories:
 # ---------------------------------------------------------------------------
 # Background Task Control
 # ---------------------------------------------------------------------------
+
 
 class TestTaskStatus:
     def test_returns_running_task_progress_and_diagnostics(self, client):
@@ -1721,6 +1937,7 @@ class TestTaskStatus:
 # Session End
 # ---------------------------------------------------------------------------
 
+
 class TestSessionEnd:
     def test_synthetic_missing_capability_rejects_before_every_finalization_side_effect(
         self,
@@ -1732,9 +1949,7 @@ class TestSessionEnd:
             patch("app.gateway.routers.sophia._read_session_recap") as mock_read_recap,
             patch("app.gateway.routers.sophia._persist_end_session_transcript") as mock_transcript,
             patch("app.gateway.routers.sophia._write_session_recap") as mock_write_recap,
-            patch(
-                "app.gateway.routers.sophia._finalize_synthetic_session_atomically"
-            ) as mock_synthetic_record,
+            patch("app.gateway.routers.sophia._finalize_synthetic_session_atomically") as mock_synthetic_record,
             patch("app.gateway.routers.sophia._queue_offline_pipeline") as mock_queue,
         ):
             response = client.post(
@@ -1757,18 +1972,12 @@ class TestSessionEnd:
     ):
         _configure_voice_lab_finalization(monkeypatch)
         with (
-            patch(
-                "app.gateway.routers.sophia._finalize_synthetic_session_atomically"
-            ) as mock_synthetic_record,
+            patch("app.gateway.routers.sophia._finalize_synthetic_session_atomically") as mock_synthetic_record,
             patch("app.gateway.routers.sophia._queue_offline_pipeline") as mock_queue,
         ):
             response = client.post(
                 "/api/sophia/voice-lab-user-1/end-session",
-                headers={
-                    "X-Sophia-Voice-Lab-Capability": _voice_lab_finalization_token(
-                        aud="sophia-voice-runtime"
-                    )
-                },
+                headers={"X-Sophia-Voice-Lab-Capability": _voice_lab_finalization_token(aud="sophia-voice-runtime")},
                 json={"session_id": "sess-lab", "thread_id": "thread-lab"},
             )
 
@@ -1829,9 +2038,7 @@ class TestSessionEnd:
         ):
             response = client.post(
                 "/api/sophia/voice-lab-user-1/end-session",
-                headers={
-                    "X-Sophia-Voice-Lab-Capability": _voice_lab_finalization_token()
-                },
+                headers={"X-Sophia-Voice-Lab-Capability": _voice_lab_finalization_token()},
                 json=payload,
             )
 
@@ -1840,12 +2047,8 @@ class TestSessionEnd:
         assert response_payload["status"] == "synthetic_isolated"
         assert response_payload["session_id"] == "sess-lab"
         assert response_payload["ended_at"] == response_payload["finalized_at"]
-        finalized_at = datetime.fromisoformat(
-            response_payload["finalized_at"].replace("Z", "+00:00")
-        )
-        retention_expires_at = datetime.fromisoformat(
-            response_payload["retention_expires_at"].replace("Z", "+00:00")
-        )
+        finalized_at = datetime.fromisoformat(response_payload["finalized_at"].replace("Z", "+00:00"))
+        retention_expires_at = datetime.fromisoformat(response_payload["retention_expires_at"].replace("Z", "+00:00"))
         assert response_payload["finalized_at"].endswith("Z")
         assert response_payload["retention_hours"] == 24
         assert response_payload["retention_anchor"] == "finalized_at"
@@ -1870,10 +2073,7 @@ class TestSessionEnd:
         assert len(canonical["sha256"]) == 64
         assert response_payload["evidence_receipt"] == {
             "storage": "postgres_session",
-            "object_path": (
-                "public.sophia_sessions/sess-lab/metadata/"
-                "synthetic_voice_lab/finalization_receipt"
-            ),
+            "object_path": ("public.sophia_sessions/sess-lab/metadata/synthetic_voice_lab/finalization_receipt"),
             "sha256": response_payload["evidence_receipt"]["sha256"],
         }
         mock_read_recap.assert_not_called()
@@ -1888,25 +2088,14 @@ class TestSessionEnd:
         ended_synthetic = ended_record.metadata["synthetic_voice_lab"]
         assert ended_synthetic["retention_anchor"] == "finalized_at"
         assert ended_synthetic["finalized_at"] == response_payload["finalized_at"]
-        assert (
-            ended_synthetic["retention_expires_at"]
-            == response_payload["retention_expires_at"]
-        )
+        assert ended_synthetic["retention_expires_at"] == response_payload["retention_expires_at"]
         assert ended_synthetic["provider_expires_at"] == VOICE_LAB_PROVIDER_EXPIRES_AT
         stored_receipt = ended_synthetic["finalization_receipt"]
-        assert stored_receipt["schema"] == (
-            "sophia_voice_lab_postgres_finalization_receipt_v1"
-        )
-        assert stored_receipt["sha256"] == response_payload["evidence_receipt"][
-            "sha256"
-        ]
+        assert stored_receipt["schema"] == ("sophia_voice_lab_postgres_finalization_receipt_v1")
+        assert stored_receipt["sha256"] == response_payload["evidence_receipt"]["sha256"]
         assert stored_receipt["transcript_sha256"] == canonical["sha256"]
-        assert stored_receipt["capability_jti_sha256"] == hashlib.sha256(
-            b"jti-finalize-001"
-        ).hexdigest()
-        assert not (
-            tmp_path / "voice-lab-user-1" / "synthetic_voice_lab" / "finalizations"
-        ).exists()
+        assert stored_receipt["capability_jti_sha256"] == hashlib.sha256(b"jti-finalize-001").hexdigest()
+        assert not (tmp_path / "voice-lab-user-1" / "synthetic_voice_lab" / "finalizations").exists()
         assert not (tmp_path / "voice-lab-user-1" / "recaps").exists()
         stored_messages = store.list_messages("voice-lab-user-1", "sess-lab")
         assert len(stored_messages) == 2
@@ -1929,16 +2118,14 @@ class TestSessionEnd:
             milliseconds=1,
         )
         synthetic = dict(record.metadata["synthetic_voice_lab"])
-        synthetic["retention_expires_at"] = (
-            created_at + timedelta(hours=24)
-        ).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+        synthetic["retention_expires_at"] = (created_at + timedelta(hours=24)).isoformat(timespec="milliseconds").replace("+00:00", "Z")
         record = record.model_copy(
             update={
                 "created_at": created_at.isoformat(),
                 "metadata": {
                     **record.metadata,
                     "synthetic_voice_lab": synthetic,
-                }
+                },
             }
         )
         store.create(record)
@@ -1962,27 +2149,18 @@ class TestSessionEnd:
         ):
             response = client.post(
                 "/api/sophia/voice-lab-user-1/end-session",
-                headers={
-                    "X-Sophia-Voice-Lab-Capability": _voice_lab_finalization_token()
-                },
+                headers={"X-Sophia-Voice-Lab-Capability": _voice_lab_finalization_token()},
                 json=payload,
             )
 
         assert response.status_code == 410
-        assert response.json()["detail"] == {
-            "code": "voice_lab_provisional_retention_expired"
-        }
+        assert response.json()["detail"] == {"code": "voice_lab_provisional_retention_expired"}
         unchanged = store.get("voice-lab-user-1", "sess-lab")
         assert unchanged is not None
         assert unchanged.status == "open"
         assert unchanged.message_revision == 0
         assert store.list_messages("voice-lab-user-1", "sess-lab") == []
-        assert not (
-            tmp_path
-            / "voice-lab-user-1"
-            / "synthetic_voice_lab"
-            / "finalizations"
-        ).exists()
+        assert not (tmp_path / "voice-lab-user-1" / "synthetic_voice_lab" / "finalizations").exists()
         mock_queue.assert_not_called()
 
     def test_synthetic_finalization_is_idempotent_and_conflicting_run_reuse_is_rejected(
@@ -1993,13 +2171,9 @@ class TestSessionEnd:
     ):
         _configure_voice_lab_finalization(monkeypatch)
         store = SessionStore(tmp_path / "session-store")
-        original_record = _synthetic_voice_lab_session_record(
-            "sess-lab", "thread-lab"
-        )
+        original_record = _synthetic_voice_lab_session_record("sess-lab", "thread-lab")
         store.create(original_record)
-        headers = {
-            "X-Sophia-Voice-Lab-Capability": _voice_lab_finalization_token()
-        }
+        headers = {"X-Sophia-Voice-Lab-Capability": _voice_lab_finalization_token()}
         payload = {
             "session_id": "sess-lab",
             "thread_id": "thread-lab",
@@ -2021,11 +2195,7 @@ class TestSessionEnd:
                 headers=headers,
                 json={**payload, "ended_at": "2026-08-23T10:03:00+00:00"},
             )
-            store.create(
-                original_record.model_copy(
-                    update={"session_id": "different-session"}
-                )
-            )
+            store.create(original_record.model_copy(update={"session_id": "different-session"}))
             conflict = client.post(
                 "/api/sophia/voice-lab-user-1/end-session",
                 headers=headers,
@@ -2038,9 +2208,7 @@ class TestSessionEnd:
         assert duplicate.json()["canonical_transcript"] == first.json()["canonical_transcript"]
         assert duplicate.json()["retention_expires_at"] == first.json()["retention_expires_at"]
         assert conflict.status_code == 409
-        assert conflict.json()["detail"] == {
-            "code": "voice_lab_session_cleanup_binding_mismatch"
-        }
+        assert conflict.json()["detail"] == {"code": "voice_lab_session_cleanup_binding_mismatch"}
         mock_queue.assert_not_called()
 
     def test_synthetic_terminal_retry_cannot_mutate_canonical_transcript(
@@ -2052,9 +2220,7 @@ class TestSessionEnd:
         _configure_voice_lab_finalization(monkeypatch)
         store = SessionStore(tmp_path / "session-store")
         store.create(_synthetic_voice_lab_session_record("sess-lab", "thread-lab"))
-        headers = {
-            "X-Sophia-Voice-Lab-Capability": _voice_lab_finalization_token()
-        }
+        headers = {"X-Sophia-Voice-Lab-Capability": _voice_lab_finalization_token()}
         payload = {
             "session_id": "sess-lab",
             "thread_id": "thread-lab",
@@ -2109,20 +2275,14 @@ class TestSessionEnd:
 
         assert first.status_code == 202
         assert exact_replay.status_code == 202
-        assert exact_replay.json()["canonical_transcript"]["sha256"] == first.json()[
-            "canonical_transcript"
-        ]["sha256"]
+        assert exact_replay.json()["canonical_transcript"]["sha256"] == first.json()["canonical_transcript"]["sha256"]
         assert changed.status_code == 409
-        assert changed.json()["detail"] == {
-            "code": "voice_lab_finalization_transcript_conflict"
-        }
+        assert changed.json()["detail"] == {"code": "voice_lab_finalization_transcript_conflict"}
         after_conflict = store.get("voice-lab-user-1", "sess-lab")
         after_messages = store.list_messages("voice-lab-user-1", "sess-lab")
         assert before_conflict is not None and after_conflict is not None
         assert after_conflict.message_revision == before_conflict.message_revision == 1
-        assert [message.model_dump() for message in after_messages] == [
-            message.model_dump() for message in before_messages
-        ]
+        assert [message.model_dump() for message in after_messages] == [message.model_dump() for message in before_messages]
 
     def test_synthetic_finalization_rejects_cross_run_session_before_receipt_or_lifecycle(
         self,
@@ -2142,25 +2302,17 @@ class TestSessionEnd:
         with (
             patch("app.gateway.routers.sophia.USERS_DIR", tmp_path),
             patch("app.gateway.routers.sophia._session_store", store),
-            patch(
-                "app.gateway.routers.sophia._finalize_synthetic_session_atomically"
-            ) as mock_persist,
+            patch("app.gateway.routers.sophia._finalize_synthetic_session_atomically") as mock_persist,
             patch("app.gateway.inactivity_watcher.unregister_thread") as mock_unregister,
         ):
             response = client.post(
                 "/api/sophia/voice-lab-user-1/end-session",
-                headers={
-                    "X-Sophia-Voice-Lab-Capability": _voice_lab_finalization_token(
-                        test_run_id="run-A"
-                    )
-                },
+                headers={"X-Sophia-Voice-Lab-Capability": _voice_lab_finalization_token(test_run_id="run-A")},
                 json={"session_id": "sess-run-b", "thread_id": "thread-run-b"},
             )
 
         assert response.status_code == 409
-        assert response.json()["detail"] == {
-            "code": "voice_lab_session_binding_mismatch"
-        }
+        assert response.json()["detail"] == {"code": "voice_lab_session_binding_mismatch"}
         mock_persist.assert_not_called()
         mock_unregister.assert_not_called()
         record = store.get("voice-lab-user-1", "sess-run-b")
@@ -2188,16 +2340,12 @@ class TestSessionEnd:
         ):
             response = client.post(
                 "/api/sophia/voice-lab-user-1/end-session",
-                headers={
-                    "X-Sophia-Voice-Lab-Capability": _voice_lab_finalization_token()
-                },
+                headers={"X-Sophia-Voice-Lab-Capability": _voice_lab_finalization_token()},
                 json={"session_id": "sess-lab", "thread_id": "thread-lab"},
             )
 
         assert response.status_code == 503
-        assert response.json()["detail"] == {
-            "code": "voice_lab_finalization_transaction_failed"
-        }
+        assert response.json()["detail"] == {"code": "voice_lab_finalization_transaction_failed"}
         mock_unregister.assert_not_called()
         mock_queue.assert_not_called()
         record = store.get("voice-lab-user-1", "sess-lab")
@@ -2225,9 +2373,7 @@ class TestSessionEnd:
         ):
             response = client.post(
                 "/api/sophia/voice-lab-user-1/end-session",
-                headers={
-                    "X-Sophia-Voice-Lab-Capability": _voice_lab_finalization_token()
-                },
+                headers={"X-Sophia-Voice-Lab-Capability": _voice_lab_finalization_token()},
                 json={"session_id": "sess-lab", "thread_id": "thread-lab"},
             )
 
@@ -2236,9 +2382,7 @@ class TestSessionEnd:
         record = store.get("voice-lab-user-1", "sess-lab")
         assert record is not None
         assert record.status == "ended"
-        assert not (
-            tmp_path / "voice-lab-user-1" / "synthetic_voice_lab" / "finalizations"
-        ).exists()
+        assert not (tmp_path / "voice-lab-user-1" / "synthetic_voice_lab" / "finalizations").exists()
         mock_queue.assert_not_called()
         mock_unregister.assert_called_once_with("thread-lab")
 
@@ -2267,19 +2411,14 @@ class TestSessionEnd:
         ):
             response = client.post(
                 "/api/sophia/voice-lab-user-1/end-session",
-                headers={
-                    "X-Sophia-Voice-Lab-Capability": _voice_lab_finalization_token()
-                },
+                headers={"X-Sophia-Voice-Lab-Capability": _voice_lab_finalization_token()},
                 json={"session_id": "sess-lab", "thread_id": "thread-lab"},
             )
 
         assert response.status_code == 202
         receipt = response.json()["evidence_receipt"]
         assert receipt["storage"] == "postgres_session"
-        assert receipt["object_path"] == (
-            "public.sophia_sessions/sess-lab/metadata/"
-            "synthetic_voice_lab/finalization_receipt"
-        )
+        assert receipt["object_path"] == ("public.sophia_sessions/sess-lab/metadata/synthetic_voice_lab/finalization_receipt")
         assert len(receipt["sha256"]) == 64
         mock_create_receipt.assert_not_called()
 
@@ -2294,9 +2433,7 @@ class TestSessionEnd:
             )
         )
 
-        with patch("app.gateway.routers.sophia._queue_offline_pipeline") as mock_queue, \
-             patch("app.gateway.routers.sophia.USERS_DIR", tmp_path), \
-             patch("app.gateway.routers.sophia._session_store", store):
+        with patch("app.gateway.routers.sophia._queue_offline_pipeline") as mock_queue, patch("app.gateway.routers.sophia.USERS_DIR", tmp_path), patch("app.gateway.routers.sophia._session_store", store):
             resp = client.post(
                 "/api/sophia/test_user/end-session",
                 json={
@@ -2403,9 +2540,7 @@ class TestSessionEnd:
         mock_queue.assert_called_once()
         assert mock_queue.call_args.args[2] == "thread-stale-end"
         assert mock_queue.call_args.args[3] is None
-        saved = json.loads(
-            (tmp_path / "test_user" / "recaps" / "sess-stale-end.json").read_text(encoding="utf-8")
-        )
+        saved = json.loads((tmp_path / "test_user" / "recaps" / "sess-stale-end.json").read_text(encoding="utf-8"))
         assert saved["thread_id"] == "thread-stale-end"
 
     def test_duplicate_end_session_reuses_existing_recap_and_queues_once(self, client, tmp_path):
@@ -2433,9 +2568,7 @@ class TestSessionEnd:
             ],
         }
 
-        with patch("app.gateway.routers.sophia._queue_offline_pipeline") as mock_queue, \
-             patch("app.gateway.routers.sophia.USERS_DIR", tmp_path), \
-             patch("app.gateway.routers.sophia._session_store", store):
+        with patch("app.gateway.routers.sophia._queue_offline_pipeline") as mock_queue, patch("app.gateway.routers.sophia.USERS_DIR", tmp_path), patch("app.gateway.routers.sophia._session_store", store):
             first = client.post("/api/sophia/test_user/end-session", json=payload)
             second_payload = {**payload, "ended_at": "2026-04-05T10:05:00+00:00"}
             second = client.post("/api/sophia/test_user/end-session", json=second_payload)
@@ -2469,15 +2602,17 @@ class TestSessionEnd:
         recap_path = tmp_path / "test_user" / "recaps" / "sess-continued.json"
         recap_path.parent.mkdir(parents=True, exist_ok=True)
         recap_path.write_text(
-            json.dumps({
-                "session_id": "sess-continued",
-                "thread_id": "thread-continued",
-                "started_at": "2026-04-05T09:52:00+00:00",
-                "ended_at": "2026-04-05T10:00:00+00:00",
-                "turn_count": 2,
-                "status": "ready",
-                "recap_artifacts": {"takeaway": "first segment"},
-            }),
+            json.dumps(
+                {
+                    "session_id": "sess-continued",
+                    "thread_id": "thread-continued",
+                    "started_at": "2026-04-05T09:52:00+00:00",
+                    "ended_at": "2026-04-05T10:00:00+00:00",
+                    "turn_count": 2,
+                    "status": "ready",
+                    "recap_artifacts": {"takeaway": "first segment"},
+                }
+            ),
             encoding="utf-8",
         )
 
@@ -2498,9 +2633,7 @@ class TestSessionEnd:
             ],
         }
 
-        with patch("app.gateway.routers.sophia._queue_offline_pipeline") as mock_queue, \
-             patch("app.gateway.routers.sophia.USERS_DIR", tmp_path), \
-             patch("app.gateway.routers.sophia._session_store", store):
+        with patch("app.gateway.routers.sophia._queue_offline_pipeline") as mock_queue, patch("app.gateway.routers.sophia.USERS_DIR", tmp_path), patch("app.gateway.routers.sophia._session_store", store):
             response = client.post("/api/sophia/test_user/end-session", json=payload)
 
         assert response.status_code == 202

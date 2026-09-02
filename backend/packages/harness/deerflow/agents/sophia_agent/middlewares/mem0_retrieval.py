@@ -75,6 +75,7 @@ _DEFAULT_TIMEOUT_SECONDS = 2.0
 # multi-paragraph memories that would dominate the prompt.
 _MAX_SNIPPET_CHARS = 600
 
+
 class BuilderMem0RetrievalState(AgentState):
     user_id: NotRequired[str]
     system_prompt_blocks: NotRequired[list[str]]
@@ -102,9 +103,7 @@ class BuilderMem0RetrievalMiddleware(AgentMiddleware[BuilderMem0RetrievalState])
     # --- sync path -------------------------------------------------------
 
     @override
-    def before_agent(
-        self, state: BuilderMem0RetrievalState, runtime: Runtime
-    ) -> dict | None:
+    def before_agent(self, state: BuilderMem0RetrievalState, runtime: Runtime) -> dict | None:
         """Sync hook: skip retrieval (only async path performs the call).
 
         The sync path exists so a sync agent invocation doesn't crash, but
@@ -118,9 +117,7 @@ class BuilderMem0RetrievalMiddleware(AgentMiddleware[BuilderMem0RetrievalState])
     # --- async path ------------------------------------------------------
 
     @override
-    async def abefore_agent(
-        self, state: BuilderMem0RetrievalState, runtime: Runtime
-    ) -> dict | None:
+    async def abefore_agent(self, state: BuilderMem0RetrievalState, runtime: Runtime) -> dict | None:
         _t0 = time.perf_counter()
 
         runtime_config = getattr(runtime, "config", None)
@@ -164,8 +161,7 @@ class BuilderMem0RetrievalMiddleware(AgentMiddleware[BuilderMem0RetrievalState])
         update = self._build_state_update(state, memory_ids, memory_contents)
         log_middleware(
             "BuilderMem0Retrieval",
-            f"injected {len(memory_contents)} snippets "
-            f"(total contents={len(update['injected_memory_contents'])})",
+            f"injected {len(memory_contents)} snippets (total contents={len(update['injected_memory_contents'])})",
             _t0,
         )
         return update
@@ -190,11 +186,13 @@ class BuilderMem0RetrievalMiddleware(AgentMiddleware[BuilderMem0RetrievalState])
             return await asyncio.wait_for(
                 asyncio.to_thread(
                     search_memories,
-                    user_id,
-                    query,
-                    None,  # categories — None keeps all
-                    None,  # context_mode — None keeps all
-                    self.top_k,
+                    user_id=user_id,
+                    query=query,
+                    categories=None,
+                    context_mode=None,
+                    limit=self.top_k,
+                    log_content_previews=False,
+                    caller="builder_context",
                 ),
                 timeout=self.timeout_seconds,
             )
@@ -263,10 +261,7 @@ class BuilderMem0RetrievalMiddleware(AgentMiddleware[BuilderMem0RetrievalState])
         """
         existing_contents = state.get("injected_memory_contents") or []
         merged_contents = self._dedupe_preserve_order(existing_contents, memory_contents)[:_DEFAULT_TOP_K]
-        admitted_new = [
-            item for item in memory_contents
-            if item in merged_contents and item not in set(existing_contents)
-        ]
+        admitted_new = [item for item in memory_contents if item in merged_contents and item not in set(existing_contents)]
 
         existing_ids = state.get("injected_memories") or []
         merged_ids = self._dedupe_preserve_order(existing_ids, memory_ids)[:_DEFAULT_TOP_K]
@@ -302,9 +297,7 @@ class BuilderMem0RetrievalMiddleware(AgentMiddleware[BuilderMem0RetrievalState])
         return None
 
     @staticmethod
-    def _user_id_sources(
-        state: BuilderMem0RetrievalState, runtime: Runtime
-    ) -> list:
+    def _user_id_sources(state: BuilderMem0RetrievalState, runtime: Runtime) -> list:
         """Return an ordered list of zero-arg callables that yield user_id candidates.
 
         Each callable returns either a non-empty string or None/anything
@@ -314,16 +307,8 @@ class BuilderMem0RetrievalMiddleware(AgentMiddleware[BuilderMem0RetrievalState])
         """
         return [
             lambda: state.get("user_id"),
-            lambda: ((getattr(runtime, "context", None) or {}).get("user_id"))
-            if runtime is not None
-            else None,
-            lambda: (
-                ((getattr(runtime, "config", None) or {}).get("configurable", {}) or {}).get(
-                    "user_id"
-                )
-            )
-            if runtime is not None
-            else None,
+            lambda: ((getattr(runtime, "context", None) or {}).get("user_id")) if runtime is not None else None,
+            lambda: (((getattr(runtime, "config", None) or {}).get("configurable", {}) or {}).get("user_id")) if runtime is not None else None,
         ]
 
     @staticmethod
@@ -366,14 +351,8 @@ class BuilderMem0RetrievalMiddleware(AgentMiddleware[BuilderMem0RetrievalState])
     @staticmethod
     def _format_memory_block(memory_contents: list[str]) -> str:
         """Render a <memory> system-prompt block from the retrieved snippets."""
-        lines = "\n".join(f"- {m}" for m in memory_contents[: _DEFAULT_TOP_K])
-        return (
-            "<memory>\n"
-            "Relevant memories about this user (Mem0 brief-scoped retrieval). "
-            "Treat as background context — do not echo back unless directly relevant.\n"
-            f"{lines}\n"
-            "</memory>"
-        )
+        lines = "\n".join(f"- {m}" for m in memory_contents[:_DEFAULT_TOP_K])
+        return f"<memory>\nRelevant memories about this user (Mem0 brief-scoped retrieval). Treat as background context — do not echo back unless directly relevant.\n{lines}\n</memory>"
 
 
 def _generic_artifact_style_memory(

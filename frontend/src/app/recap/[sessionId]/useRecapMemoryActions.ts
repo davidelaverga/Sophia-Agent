@@ -39,17 +39,6 @@ function isLegacyCandidateId(candidateId: string): boolean {
   return candidateId.startsWith('candidate-') || /^mem_\d+$/.test(candidateId);
 }
 
-function buildDiscardMetadata(category?: string): { status: 'discarded'; category?: string } {
-  if (category) {
-    return {
-      status: 'discarded',
-      category,
-    };
-  }
-
-  return { status: 'discarded' };
-}
-
 export function useRecapMemoryActions({
   artifacts,
   decisions,
@@ -91,31 +80,35 @@ export function useRecapMemoryActions({
     if (isLegacyCandidateId(candidateId)) {
       setDecision(sessionId, candidateId, 'discarded');
       removeCandidateFromArtifacts(candidateId);
-      showToast({
-        message: 'Memory discarded.',
-        variant: 'info',
-        durationMs: 1800,
-      });
+      showToast({ message: 'Memory discarded.', variant: 'info', durationMs: 1800 });
       return;
     }
 
     setDeletingIds((prev) => ({ ...prev, [candidateId]: true }));
 
     try {
-      const response = await fetch(`/api/memories/${encodeURIComponent(candidateId)}`, {
-        method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+      const response = await fetch('/api/memory/commit-candidates', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          metadata: buildDiscardMetadata(candidate.category),
+          session_id: sessionId,
+          decisions: [{
+            candidate_id: candidateId,
+            decision: 'discard',
+            text: candidate.text,
+            category: candidate.category,
+            source: 'recap',
+            expected_candidate_revision: candidate.candidateRevision,
+            idempotency_key: `recap-discard:${sessionId}:${candidateId}:${candidate.candidateRevision ?? 0}`,
+          }],
         }),
       });
-
-      if (!response.ok) {
+      const result = response.ok
+        ? await response.json() as { discarded?: string[]; errors?: unknown[] }
+        : null;
+      if (!response.ok || !result?.discarded?.includes(candidateId) || (result.errors?.length ?? 0) > 0) {
         throw new Error(`Discard failed: ${response.status}`);
       }
-
       setDecision(sessionId, candidateId, 'discarded');
       removeCandidateFromArtifacts(candidateId);
       showToast({

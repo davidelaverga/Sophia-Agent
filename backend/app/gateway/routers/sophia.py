@@ -10,6 +10,7 @@ import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
@@ -32,6 +33,7 @@ from app.gateway.voice_lab_capability import (
 )
 from deerflow.agents.sophia_agent.paths import USERS_DIR
 from deerflow.agents.sophia_agent.utils import safe_user_path
+from deerflow.sophia.memory_governance.store import MemoryGovernanceConflict
 from deerflow.sophia.review_metadata_store import (
     apply_review_metadata_overlays,
     remove_review_metadata,
@@ -65,10 +67,12 @@ _LEGACY_SESSION_USER_ID = "dev-user"
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _validate_user(user_id: str) -> str:
     """Validate user_id and return it, or raise 400."""
     try:
         from deerflow.agents.sophia_agent.utils import validate_user_id
+
         return validate_user_id(user_id)
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid user_id format")
@@ -112,15 +116,51 @@ async def _parse_realtime_memory_retrieve_request(
 
 
 def _get_mem0_client():
-    """Get Mem0 MemoryClient or raise 503."""
+    """Get the flags-off Mem0 compatibility facade or raise 503."""
     try:
-        from mem0 import MemoryClient
+        from deerflow.sophia.memory_governance.mem0_projection_adapter import LegacyMem0Facade
+
         api_key = os.environ.get("MEM0_API_KEY")
         if not api_key:
             raise HTTPException(status_code=503, detail="MEM0_API_KEY not configured")
-        return MemoryClient(api_key=api_key)
+        client = LegacyMem0Facade()
+        client.ensure_client()
+        return client
     except ImportError:
         raise HTTPException(status_code=503, detail="mem0 package not installed")
+
+
+def _memory_flags(user_id: str):
+    from deerflow.sophia.memory_governance.flags import (
+        memory_feature_flags_for_owner,
+    )
+
+    return memory_feature_flags_for_owner(user_id)
+
+
+def _canonical_memory_service(user_id: str):
+    from deerflow.sophia.memory_governance.service import CanonicalMemoryService
+
+    return CanonicalMemoryService(owner_id=user_id)
+
+
+def _canonical_to_memory_item(memory) -> MemoryItem:
+    return MemoryItem(
+        id=str(memory.memory_id),
+        content=memory.canonical_content or "",
+        category=memory.category,
+        metadata={
+            "lifecycle": memory.lifecycle,
+            "tier": memory.user_tier,
+            "scope": memory.scope,
+            "content_revision": memory.current_content_revision,
+            "memory_governance_revision": memory.memory_governance_revision,
+            "projection_state": memory.projection_state,
+            "authority": "sophia_canonical",
+        },
+        created_at=str(memory.created_at) if memory.created_at else None,
+        updated_at=str(memory.updated_at) if memory.updated_at else None,
+    )
 
 
 def _resolve_session_record_owner(user_id: str, session_id: str) -> tuple[str, SessionRecord | None]:
@@ -152,6 +192,7 @@ def _resolve_session_record_owner(user_id: str, session_id: str) -> tuple[str, S
 # Response Models
 # ---------------------------------------------------------------------------
 
+
 class MemoryItem(BaseModel):
     id: str = Field(..., description="Memory ID")
     content: str = Field(default="", description="Memory content text")
@@ -180,17 +221,39 @@ class MemoryListResponse(BaseModel):
 class MemoryUpdateRequest(BaseModel):
     text: str | None = Field(default=None, description="Updated memory text")
     metadata: dict | None = Field(default=None, description="Updated metadata")
+    expected_content_revision: int | None = Field(default=None, gt=0)
+    expected_governance_revision: int | None = Field(default=None, gt=0)
+    idempotency_key: str | None = Field(default=None, min_length=8, max_length=200)
 
 
 class MemoryCreateRequest(BaseModel):
     text: str = Field(..., min_length=1, description="Memory content text")
     category: str | None = Field(default=None, description="Optional memory category")
     metadata: dict | None = Field(default=None, description="Optional memory metadata")
+    scope: str = Field(default="global", min_length=1, max_length=80)
+    tier: Literal["conscious", "subconscious", "none"] = "none"
+    idempotency_key: str | None = Field(default=None, min_length=8, max_length=200)
+
+
+class LegacyMemoryImportRequest(BaseModel):
+    provider_memory_id: str = Field(min_length=1, max_length=256)
+    approval_evidence_ref: str = Field(pattern=r"^hmac-sha256:[a-z0-9._-]+:[a-f0-9]{64}$")
+    text: str = Field(min_length=1)
+    category: str = Field(default="fact", min_length=1, max_length=80)
+    scope: str = Field(default="global", min_length=1, max_length=80)
+    tier: Literal["conscious", "subconscious", "none"] = "none"
+    idempotency_key: str = Field(min_length=8, max_length=200)
 
 
 class BulkReviewItem(BaseModel):
     id: str = Field(..., description="Memory ID")
     action: Literal["approve", "discard"] = Field(..., description="Action to take")
+    expected_candidate_revision: int | None = Field(default=None, gt=0)
+    reviewed_text: str | None = Field(default=None, min_length=1)
+    category: str = "fact"
+    scope: str = "global"
+    tier: Literal["conscious", "subconscious", "none"] = "none"
+    idempotency_key: str | None = Field(default=None, min_length=8, max_length=200)
 
 
 class BulkReviewRequest(BaseModel):
@@ -206,6 +269,26 @@ class BulkReviewResult(BaseModel):
 
 class BulkReviewResponse(BaseModel):
     results: list[BulkReviewResult] = Field(default_factory=list)
+
+
+class MemoryLifecycleRequest(BaseModel):
+    expected_governance_revision: int = Field(gt=0)
+    idempotency_key: str = Field(min_length=8, max_length=200)
+
+
+class MemoryGovernanceReceiptResponse(BaseModel):
+    status: str
+    memory_id: str
+    content_revision: int | None = None
+    memory_governance_revision: int | None = None
+    user_catalog_generation: int
+    user_revocation_epoch: int
+    provider_purge: str | None = None
+    canonical_memory_fence: str | None = None
+    source_transcript: str | None = None
+    derived_artifacts: str | None = None
+    cache_invalidation: str | None = None
+    other_account_data: str = "not_covered_by_mem00"
 
 
 class ReflectRequest(BaseModel):
@@ -419,9 +502,7 @@ class SyntheticCanonicalTranscript(BaseModel):
     retention_anchor: Literal["finalized_at"]
     retention_expires_at: str = Field(min_length=1)
     provider_expires_at: str = Field(min_length=1)
-    cleanup_obligation_id: str = Field(
-        pattern=r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
-    )
+    cleanup_obligation_id: str = Field(pattern=r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
     raw_audio_excluded: Literal[True]
     messages: list[SyntheticCanonicalTranscriptMessage]
     turn_boundaries: list[SyntheticCanonicalTurnBoundary]
@@ -452,8 +533,7 @@ class SyntheticCanonicalTranscript(BaseModel):
             or retention_expires_at is None
             or provider_expires_at is None
             or provider_expires_at > retention_expires_at
-            or retention_expires_at
-            != finalized_at + timedelta(hours=self.retention_hours)
+            or retention_expires_at != finalized_at + timedelta(hours=self.retention_hours)
         ):
             raise ValueError("canonical transcript identity mismatch")
         return self
@@ -498,31 +578,21 @@ class SessionEndResponse(BaseModel):
             raise ValueError("synthetic finalization evidence is required")
         if self.synthetic_isolated:
             finalized_at = _parse_exact_utc_millis(self.finalized_at)
-            retention_expires_at = _parse_exact_utc_millis(
-                self.retention_expires_at
-            )
-            provider_expires_at = _parse_exact_utc_millis(
-                self.provider_expires_at
-            )
+            retention_expires_at = _parse_exact_utc_millis(self.retention_expires_at)
+            provider_expires_at = _parse_exact_utc_millis(self.provider_expires_at)
             if (
                 finalized_at is None
                 or retention_expires_at is None
                 or provider_expires_at is None
                 or provider_expires_at > retention_expires_at
-                or retention_expires_at
-                != finalized_at + timedelta(hours=self.retention_hours or 0)
+                or retention_expires_at != finalized_at + timedelta(hours=self.retention_hours or 0)
                 or self.canonical_transcript is None
                 or self.canonical_transcript.finalized_at != self.finalized_at
-                or self.canonical_transcript.retention_hours
-                != self.retention_hours
-                or self.canonical_transcript.retention_anchor
-                != self.retention_anchor
-                or self.canonical_transcript.retention_expires_at
-                != self.retention_expires_at
-                or self.canonical_transcript.provider_expires_at
-                != self.provider_expires_at
-                or self.canonical_transcript.cleanup_obligation_id
-                != self.cleanup_obligation_id
+                or self.canonical_transcript.retention_hours != self.retention_hours
+                or self.canonical_transcript.retention_anchor != self.retention_anchor
+                or self.canonical_transcript.retention_expires_at != self.retention_expires_at
+                or self.canonical_transcript.provider_expires_at != self.provider_expires_at
+                or self.canonical_transcript.cleanup_obligation_id != self.cleanup_obligation_id
             ):
                 raise ValueError("synthetic finalization retention mismatch")
         return self
@@ -583,6 +653,7 @@ class TaskStatusResponse(BaseModel):
 # Helper: normalize Mem0 memory to MemoryItem
 # ---------------------------------------------------------------------------
 
+
 def _get_primary_category(mem: dict) -> str | None:
     categories = mem.get("categories") if isinstance(mem, dict) else None
     if isinstance(categories, list):
@@ -593,6 +664,7 @@ def _get_primary_category(mem: dict) -> str | None:
 
     category = mem.get("category") if isinstance(mem, dict) else None
     return category if isinstance(category, str) and category else None
+
 
 def _to_memory_item(mem: dict) -> MemoryItem:
     metadata = mem.get("metadata") if isinstance(mem, dict) else None
@@ -629,10 +701,7 @@ def _merge_memory_detail(summary: dict, detail: dict | None) -> dict:
 
 
 def _should_hydrate_memory_detail(mem: dict) -> bool:
-    return isinstance(mem, dict) and (
-        mem.get("metadata") is None
-        or (not mem.get("categories") and mem.get("category") is None)
-    )
+    return isinstance(mem, dict) and (mem.get("metadata") is None or (not mem.get("categories") and mem.get("category") is None))
 
 
 def _has_memory_status(mem: dict) -> bool:
@@ -660,21 +729,10 @@ def _hydrate_memories_for_review(
 ) -> tuple[list[dict], dict[str, Any]]:
     scoped_overlay_session_id = session_id if status == "pending_review" else None
     memories = apply_review_metadata_overlays(user_id, memories, session_id=scoped_overlay_session_id)
-    local_overlay_count = sum(
-        1
-        for memory in memories
-        if isinstance(memory, dict) and isinstance(memory.get("id"), str) and memory["id"].startswith("local:")
-    )
+    local_overlay_count = sum(1 for memory in memories if isinstance(memory, dict) and isinstance(memory.get("id"), str) and memory["id"].startswith("local:"))
 
     if session_id and status == "pending_review":
-        filtered = [
-            memory
-            for memory in memories
-            if isinstance(memory, dict)
-            and isinstance(memory.get("metadata"), dict)
-            and memory["metadata"].get("status") == status
-            and _memory_session_id(memory) == session_id
-        ]
+        filtered = [memory for memory in memories if isinstance(memory, dict) and isinstance(memory.get("metadata"), dict) and memory["metadata"].get("status") == status and _memory_session_id(memory) == session_id]
         return filtered, {
             "source": "local_review_overlay",
             "local_overlay_count": local_overlay_count,
@@ -693,10 +751,7 @@ def _hydrate_memories_for_review(
         memory_id = memory.get("id") if isinstance(memory, dict) else None
         has_status = status is not None and _has_memory_status(memory)
 
-        needs_hydration = memory_id and (
-            (status is not None and not has_status)
-            or (_should_hydrate_memory_detail(memory) and not has_status)
-        )
+        needs_hydration = memory_id and ((status is not None and not has_status) or (_should_hydrate_memory_detail(memory) and not has_status))
 
         if needs_hydration:
             detail_hydration_count += 1
@@ -712,21 +767,13 @@ def _hydrate_memories_for_review(
     hydrated = apply_review_metadata_overlays(user_id, hydrated, session_id=scoped_overlay_session_id)
     local_overlay_count = max(
         local_overlay_count,
-        sum(
-            1
-            for memory in hydrated
-            if isinstance(memory, dict) and isinstance(memory.get("id"), str) and memory["id"].startswith("local:")
-        ),
+        sum(1 for memory in hydrated if isinstance(memory, dict) and isinstance(memory.get("id"), str) and memory["id"].startswith("local:")),
     )
 
     if not status:
         filtered = hydrated
     else:
-        filtered = [
-            memory
-            for memory in hydrated
-            if isinstance(memory.get("metadata"), dict) and memory["metadata"].get("status") == status
-        ]
+        filtered = [memory for memory in hydrated if isinstance(memory.get("metadata"), dict) and memory["metadata"].get("status") == status]
 
     if session_id and status == "pending_review":
         filtered = [memory for memory in filtered if _memory_session_id(memory) == session_id]
@@ -783,11 +830,7 @@ _SYNTHETIC_TRANSCRIPT_MAX_TOTAL_BYTES = 1024 * 1024
 
 
 def _canonical_utc_millis(value: datetime) -> str:
-    return (
-        value.astimezone(UTC)
-        .isoformat(timespec="milliseconds")
-        .replace("+00:00", "Z")
-    )
+    return value.astimezone(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 def _parse_exact_utc_millis(value: object) -> datetime | None:
@@ -809,9 +852,7 @@ def _synthetic_message_metadata(
 ) -> dict[str, Any]:
     record_metadata = record.metadata if isinstance(record.metadata, dict) else {}
     synthetic = record_metadata.get("synthetic_voice_lab")
-    retention_expires_at = (
-        synthetic.get("retention_expires_at") if isinstance(synthetic, dict) else None
-    )
+    retention_expires_at = synthetic.get("retention_expires_at") if isinstance(synthetic, dict) else None
     if not isinstance(retention_expires_at, str) or not retention_expires_at:
         raise HTTPException(
             status_code=409,
@@ -823,11 +864,7 @@ def _synthetic_message_metadata(
         "expected_deployment": dict(claims.expected_deployment),
         "retention_hours": synthetic.get("retention_hours"),
         "retention_anchor": synthetic.get("retention_anchor"),
-        **(
-            {"finalized_at": synthetic.get("finalized_at")}
-            if isinstance(synthetic.get("finalized_at"), str)
-            else {}
-        ),
+        **({"finalized_at": synthetic.get("finalized_at")} if isinstance(synthetic.get("finalized_at"), str) else {}),
         "retention_expires_at": retention_expires_at,
         "memory_retrieval_excluded": True,
         "memory_learning_excluded": True,
@@ -869,9 +906,7 @@ def _synthetic_finalization_messages(
     """Build a bounded transcript without performing a pre-finalization write."""
 
     _validate_synthetic_finalization_transcript(body)
-    existing = canonical_visible_messages(
-        _session_store.list_messages(user_id, body.session_id)
-    )
+    existing = canonical_visible_messages(_session_store.list_messages(user_id, body.session_id))
     if not body.messages:
         return existing, max(0, int(record.message_revision))
     if body.base_revision is None:
@@ -880,9 +915,7 @@ def _synthetic_finalization_messages(
             detail={"code": "voice_lab_transcript_base_revision_required"},
         )
     return (
-        canonical_visible_messages(
-            _synthetic_records_from_end_request(body, record, claims)
-        ),
+        canonical_visible_messages(_synthetic_records_from_end_request(body, record, claims)),
         body.base_revision,
     )
 
@@ -916,10 +949,7 @@ def _synthetic_records_from_end_request(
                 thread_id=record.thread_id,
                 role=role,
                 content=content,
-                created_at=_canonical_synthetic_message_timestamp(
-                    message.created_at
-                    or _canonical_utc_millis(datetime.now(UTC))
-                ),
+                created_at=_canonical_synthetic_message_timestamp(message.created_at or _canonical_utc_millis(datetime.now(UTC))),
                 source=message.source or body.platform or record.platform or "voice",
                 final=True,
                 approximate=bool(message.approximate),
@@ -957,20 +987,12 @@ def _assert_synthetic_terminal_transcript_replay(
     claims: VoiceLabClaims,
 ) -> tuple[SessionRecord, list[SessionMessageRecord]]:
     """Verify a terminal retry without granting any transcript mutation."""
-    stored = canonical_visible_messages(
-        _session_store.list_messages(user_id, body.session_id)
-    )
+    stored = canonical_visible_messages(_session_store.list_messages(user_id, body.session_id))
     current = _session_store.get(user_id, body.session_id) or record
     if body.messages:
         _validate_synthetic_finalization_transcript(body)
-        incoming = canonical_visible_messages(
-            _synthetic_records_from_end_request(body, current, claims)
-        )
-        if [
-            _synthetic_message_replay_identity(message) for message in incoming
-        ] != [
-            _synthetic_message_replay_identity(message) for message in stored
-        ]:
+        incoming = canonical_visible_messages(_synthetic_records_from_end_request(body, current, claims))
+        if [_synthetic_message_replay_identity(message) for message in incoming] != [_synthetic_message_replay_identity(message) for message in stored]:
             raise HTTPException(
                 status_code=409,
                 detail={"code": "voice_lab_finalization_transcript_conflict"},
@@ -984,17 +1006,8 @@ def _assert_synthetic_provisional_retention_open(
     *,
     now: datetime | None = None,
 ) -> None:
-    synthetic = (
-        record.metadata.get("synthetic_voice_lab")
-        if isinstance(record.metadata, dict)
-        else None
-    )
-    deadline = (
-        _parse_exact_utc_millis(synthetic.get("retention_expires_at"))
-        if isinstance(synthetic, dict)
-        and synthetic.get("retention_anchor") == "session_created_at_provisional"
-        else None
-    )
+    synthetic = record.metadata.get("synthetic_voice_lab") if isinstance(record.metadata, dict) else None
+    deadline = _parse_exact_utc_millis(synthetic.get("retention_expires_at")) if isinstance(synthetic, dict) and synthetic.get("retention_anchor") == "session_created_at_provisional" else None
     if deadline is None:
         raise HTTPException(
             status_code=409,
@@ -1048,13 +1061,9 @@ def _finalize_synthetic_session_atomically(
         "shared_spaces_excluded": True,
     }
     canonical_transcript_json = _canonical_synthetic_messages_json(messages)
-    canonical_transcript_sha256 = hashlib.sha256(
-        canonical_transcript_json.encode("utf-8")
-    ).hexdigest()
+    canonical_transcript_sha256 = hashlib.sha256(canonical_transcript_json.encode("utf-8")).hexdigest()
     try:
-        started_at = datetime.fromisoformat(
-            str(body.started_at or record.created_at).replace("Z", "+00:00")
-        )
+        started_at = datetime.fromisoformat(str(body.started_at or record.created_at).replace("Z", "+00:00"))
     except ValueError as exc:
         raise HTTPException(
             status_code=422,
@@ -1083,24 +1092,17 @@ def _finalize_synthetic_session_atomically(
             canonical_transcript_json=canonical_transcript_json,
             finalization_started_at=finalization_started_at,
             turn_count=turn_count,
-            capability_jti_sha256=hashlib.sha256(
-                claims.jti.encode("utf-8")
-            ).hexdigest(),
+            capability_jti_sha256=hashlib.sha256(claims.jti.encode("utf-8")).hexdigest(),
         )
     except (OSError, RuntimeError, SessionStoreError) as exc:
         reason = str(exc).lower()
-        if "provisional" in reason and (
-            "expired" in reason or "deadline" in reason
-        ):
+        if "provisional" in reason and ("expired" in reason or "deadline" in reason):
             status_code = 410
             code = "voice_lab_provisional_retention_expired"
         elif "revision" in reason:
             status_code = 409
             code = "voice_lab_transcript_revision_conflict"
-        elif any(
-            marker in reason
-            for marker in ("closed", "unavailable", "binding", "conflict")
-        ):
+        elif any(marker in reason for marker in ("closed", "unavailable", "binding", "conflict")):
             status_code = 409
             code = "voice_lab_finalization_unavailable"
         else:
@@ -1130,9 +1132,7 @@ def _canonical_synthetic_messages(
             "sequence": message.sequence,
             "role": message.role,
             "content": message.content,
-            "created_at": _canonical_synthetic_message_timestamp(
-                message.created_at
-            ),
+            "created_at": _canonical_synthetic_message_timestamp(message.created_at),
             "source": message.source,
             "final": message.final,
             "approximate": message.approximate,
@@ -1174,9 +1174,7 @@ def _canonical_synthetic_messages_json(
 def _canonical_synthetic_messages_sha256(
     messages: list[SessionMessageRecord],
 ) -> str:
-    return hashlib.sha256(
-        _canonical_synthetic_messages_json(messages).encode("utf-8")
-    ).hexdigest()
+    return hashlib.sha256(_canonical_synthetic_messages_json(messages).encode("utf-8")).hexdigest()
 
 
 def _synthetic_transcript_evidence(
@@ -1190,12 +1188,7 @@ def _synthetic_transcript_evidence(
     for message in canonical_messages:
         turn_id = message["turn_id"]
         boundary = next(
-            (
-                candidate
-                for candidate in reversed(turn_boundaries)
-                if candidate["turn_id"] == turn_id
-                and candidate["last_sequence"] == message["sequence"] - 1
-            ),
+            (candidate for candidate in reversed(turn_boundaries) if candidate["turn_id"] == turn_id and candidate["last_sequence"] == message["sequence"] - 1),
             None,
         )
         if boundary is None:
@@ -1208,11 +1201,7 @@ def _synthetic_transcript_evidence(
             }
             turn_boundaries.append(boundary)
         boundary["last_sequence"] = message["sequence"]
-        boundary[
-            "input_message_count"
-            if message["role"] == "user"
-            else "output_message_count"
-        ] += 1
+        boundary["input_message_count" if message["role"] == "user" else "output_message_count"] += 1
     payload = {
         "schema": "sophia_voice_lab_canonical_transcript_v1",
         "source": "sophia_session_messages",
@@ -1227,12 +1216,8 @@ def _synthetic_transcript_evidence(
         "expected_deployment": dict(claims.expected_deployment),
         "message_revision": max(0, int(record.message_revision)),
         "message_count": len(canonical_messages),
-        "input_message_count": sum(
-            1 for message in canonical_messages if message["role"] == "user"
-        ),
-        "output_message_count": sum(
-            1 for message in canonical_messages if message["role"] == "assistant"
-        ),
+        "input_message_count": sum(1 for message in canonical_messages if message["role"] == "user"),
+        "output_message_count": sum(1 for message in canonical_messages if message["role"] == "assistant"),
         "turn_boundary_count": len(turn_boundaries),
         "digest_algorithm": "sha-256",
         "canonicalization": "utf8-json-sort-keys-compact-ascii-v1",
@@ -1267,24 +1252,25 @@ def _synthetic_finalization_path(user_id: str, cleanup_obligation_id: str) -> Pa
 
 
 def _synthetic_finalization_object_path(payload: dict[str, Any]) -> str:
-    return (
-        ".builder/voice_lab_evidence/finalizations/v2/"
-        f"{payload['cleanup_obligation_id']}.json"
-    )
+    return f".builder/voice_lab_evidence/finalizations/v2/{payload['cleanup_obligation_id']}.json"
 
 
 def _synthetic_finalization_identity(payload: dict[str, Any]) -> tuple[object, ...]:
     transcript = payload.get("canonical_transcript")
     transcript_identity = (
-        transcript.get("message_revision"),
-        transcript.get("message_count"),
-        transcript.get("sha256"),
-        transcript.get("finalized_at"),
-        transcript.get("retention_hours"),
-        transcript.get("retention_anchor"),
-        transcript.get("retention_expires_at"),
-        transcript.get("provider_expires_at"),
-    ) if isinstance(transcript, dict) else None
+        (
+            transcript.get("message_revision"),
+            transcript.get("message_count"),
+            transcript.get("sha256"),
+            transcript.get("finalized_at"),
+            transcript.get("retention_hours"),
+            transcript.get("retention_anchor"),
+            transcript.get("retention_expires_at"),
+            transcript.get("provider_expires_at"),
+        )
+        if isinstance(transcript, dict)
+        else None
+    )
     return (
         payload.get("schema"),
         payload.get("principal_id"),
@@ -1308,29 +1294,18 @@ def _postgres_synthetic_finalization_payload(
 ) -> tuple[dict[str, Any], dict[str, str]]:
     """Read back the immutable finalization projection committed by Postgres."""
 
-    synthetic = (
-        record.metadata.get("synthetic_voice_lab")
-        if isinstance(record.metadata, dict)
-        else None
-    )
-    stored = (
-        synthetic.get("finalization_receipt")
-        if isinstance(synthetic, dict)
-        else None
-    )
+    synthetic = record.metadata.get("synthetic_voice_lab") if isinstance(record.metadata, dict) else None
+    stored = synthetic.get("finalization_receipt") if isinstance(synthetic, dict) else None
     if (
         not isinstance(stored, dict)
-        or stored.get("schema")
-        != "sophia_voice_lab_postgres_finalization_receipt_v1"
+        or stored.get("schema") != "sophia_voice_lab_postgres_finalization_receipt_v1"
         or stored.get("storage") != "postgres_session"
         or stored.get("cleanup_obligation_id") != claims.cleanup_obligation_id
         or stored.get("transcript_sha256") != canonical_transcript.get("sha256")
         or stored.get("finalized_at") != canonical_transcript.get("finalized_at")
-        or stored.get("retention_expires_at")
-        != canonical_transcript.get("retention_expires_at")
+        or stored.get("retention_expires_at") != canonical_transcript.get("retention_expires_at")
         or stored.get("provider_expires_at") != claims.provider_expires_at
-        or stored.get("message_revision")
-        != canonical_transcript.get("message_revision")
+        or stored.get("message_revision") != canonical_transcript.get("message_revision")
         or stored.get("message_count") != canonical_transcript.get("message_count")
         or not isinstance(stored.get("started_at"), str)
         or not isinstance(stored.get("turn_count"), int)
@@ -1383,12 +1358,8 @@ def _build_synthetic_finalization_response(
     started_at = payload.get("started_at") if isinstance(payload.get("started_at"), str) else body.started_at
     turn_count = payload.get("turn_count") if isinstance(payload.get("turn_count"), int) else 0
     try:
-        canonical_transcript = SyntheticCanonicalTranscript.model_validate(
-            payload.get("canonical_transcript")
-        )
-        validated_receipt = SyntheticFinalizationEvidenceReceipt.model_validate(
-            evidence_receipt
-        )
+        canonical_transcript = SyntheticCanonicalTranscript.model_validate(payload.get("canonical_transcript"))
+        validated_receipt = SyntheticFinalizationEvidenceReceipt.model_validate(evidence_receipt)
     except ValidationError as exc:
         raise HTTPException(
             status_code=503,
@@ -1499,9 +1470,7 @@ def _get_memory_extraction_window(user_id: str, session_id: str) -> tuple[int, i
     if record is None:
         return 0, 0, True
 
-    visible_messages = canonical_visible_messages(
-        _session_store.list_messages(owner_user_id, session_id)
-    )
+    visible_messages = canonical_visible_messages(_session_store.list_messages(owner_user_id, session_id))
     current_max = max((message.sequence for message in visible_messages), default=0)
     last_processed = max(0, int(record.memory_processed_until_sequence or 0))
     return last_processed, current_max, current_max > last_processed
@@ -1518,9 +1487,7 @@ def _build_thread_state_from_end_request(
                 "content": message.content,
             }
             for message in body.messages
-            if message.content.strip()
-            and (message.role in {"user", "assistant", "sophia"})
-            and (message.final if message.final is not None else not bool(message.incomplete))
+            if message.content.strip() and (message.role in {"user", "assistant", "sophia"}) and (message.final if message.final is not None else not bool(message.incomplete))
         ]
     else:
         serialized_messages = [
@@ -1529,9 +1496,7 @@ def _build_thread_state_from_end_request(
                 "content": message.content,
             }
             for message in authoritative_messages
-            if message.content.strip()
-            and message.role in {"user", "assistant"}
-            and message.final
+            if message.content.strip() and message.role in {"user", "assistant"} and message.final
         ]
     recap_artifacts = body.recap_artifacts.model_dump(exclude_none=True) if body.recap_artifacts else None
 
@@ -1563,9 +1528,7 @@ def _persist_end_session_transcript(
     if record is None:
         return None
 
-    existing_visible = canonical_visible_messages(
-        _session_store.list_messages(owner_user_id, body.session_id)
-    )
+    existing_visible = canonical_visible_messages(_session_store.list_messages(owner_user_id, body.session_id))
     if not body.messages:
         return existing_visible
 
@@ -1672,8 +1635,43 @@ def _build_debrief_prompt(body: SessionEndRequest, recap_artifacts: dict | None,
     return "Want a quick debrief before you go?"
 
 
-def _queue_offline_pipeline(user_id: str, session_id: str, thread_id: str, thread_state: dict | None) -> None:
+def _queue_offline_pipeline(
+    user_id: str,
+    session_id: str,
+    thread_id: str,
+    thread_state: dict | None,
+    ended_at: str,
+) -> None:
+    from deerflow.sophia.memory_governance.flags import (
+        memory_feature_flags_for_owner,
+    )
     from deerflow.sophia.offline_pipeline import run_offline_pipeline
+
+    memory_flags = memory_feature_flags_for_owner(user_id)
+    if memory_flags.candidate_ledger_write:
+        from deerflow.sophia.memory_governance.extraction_service import (
+            MemoryExtractionService,
+        )
+        from deerflow.sophia.memory_governance.refs import keyed_ref
+        from deerflow.sophia.memory_governance.store import configured_memory_store
+
+        extraction = MemoryExtractionService(
+            governance_store=configured_memory_store(),
+            session_store=_session_store,
+            lease_owner=keyed_ref("worker", "gateway-finalization-enqueue-only"),
+            service_name="sophia-gateway",
+        )
+        durable_run = extraction.finalize_and_enqueue_session(
+            user_id=user_id,
+            session_id=session_id,
+            ended_at=ended_at,
+        )
+        if durable_run is None:
+            raise RuntimeError("memory_extraction_range_unavailable")
+        logger.info(
+            "session.finalization durable_memory_enqueued extraction_run_ref=%s contentExcluded=true",
+            keyed_ref("extraction-run", str(durable_run.extraction_run_id)),
+        )
 
     logger.info(
         "session.finalization queue_pipeline user_id=%s session_id=%s thread_id=%s has_thread_state=%s message_count=%s artifact_count=%s",
@@ -1724,6 +1722,7 @@ def _mark_session_record_ended(user_id: str, session_id: str, ended_at: str) -> 
 # ---------------------------------------------------------------------------
 # 1. Realtime Context
 # ---------------------------------------------------------------------------
+
 
 @router.post(
     "/{user_id}/realtime/context",
@@ -1806,6 +1805,7 @@ async def retrieve_realtime_memories_internal(
 # 2. Memory List
 # ---------------------------------------------------------------------------
 
+
 @router.get(
     "/{user_id}/memories/recent",
     response_model=MemoryListResponse,
@@ -1818,6 +1818,66 @@ async def list_memories(
     session_id: str | None = Query(default=None, description="Optional diagnostic source session identifier"),
 ) -> MemoryListResponse:
     _validate_user(user_id)
+    flags = _memory_flags(user_id)
+    if flags.candidate_ledger_read:
+        try:
+            store = _canonical_memory_service(user_id).store
+            if status in {None, "pending_review"}:
+                candidates = store.list_candidates(
+                    user_id=user_id,
+                    session_id=session_id,
+                    state=status or "pending_review",
+                )
+                items = [
+                    MemoryItem(
+                        id=str(candidate.candidate_id),
+                        content=candidate.content or "",
+                        category=candidate.category,
+                        metadata={
+                            "authority": "sophia_candidate_ledger",
+                            "review_state": candidate.review_state,
+                            "candidate_revision": candidate.current_candidate_revision,
+                            "projection_state": "absent",
+                        },
+                        created_at=str(candidate.created_at) if candidate.created_at else None,
+                    )
+                    for candidate in candidates
+                ]
+                return MemoryListResponse(
+                    memories=items,
+                    count=len(items),
+                    source="sophia_candidate_ledger",
+                    candidate_count=len(items),
+                    session_id_received=bool(session_id),
+                    empty_reason=None if items else "terminal_zero_candidates",
+                )
+            if flags.canonical_pool_read and status in {"approved", "active", "forgotten"}:
+                memories = _canonical_memory_service(user_id).list_pool(include_forgotten=status == "forgotten")
+                if status == "forgotten":
+                    memories = tuple(item for item in memories if item.lifecycle == "forgotten")
+                items = [_canonical_to_memory_item(memory) for memory in memories]
+                return MemoryListResponse(
+                    memories=items,
+                    count=len(items),
+                    source="sophia_canonical",
+                    candidate_count=0,
+                    session_id_received=bool(session_id),
+                    empty_reason=None if items else "terminal_zero_canonical",
+                )
+            return MemoryListResponse(
+                memories=[],
+                count=0,
+                source="sophia_governance_denied",
+                candidate_count=0,
+                session_id_received=bool(session_id),
+                empty_reason="review_state_not_exposed",
+            )
+        except Exception as exc:
+            logger.warning(
+                "MEM00 list unavailable error_type=%s contentExcluded=true",
+                exc.__class__.__name__,
+            )
+            raise HTTPException(status_code=503, detail="Memory governance unavailable")
     client = _get_mem0_client()
     trace_id = f"memrecent-{datetime.now(UTC).strftime('%Y%m%d%H%M%S%f')}"
     try:
@@ -1854,9 +1914,7 @@ async def list_memories(
             candidate_count=len(items),
             session_id_received=bool(session_id),
             local_overlay_count=int(diagnostics.get("local_overlay_count") or 0),
-            skipped_mem0_hydration_for_session_scope=bool(
-                diagnostics.get("skipped_mem0_hydration_for_session_scope")
-            ),
+            skipped_mem0_hydration_for_session_scope=bool(diagnostics.get("skipped_mem0_hydration_for_session_scope")),
             empty_reason=diagnostics.get("empty_reason") if isinstance(diagnostics.get("empty_reason"), str) else None,
             trace_id=trace_id,
         )
@@ -1869,6 +1927,7 @@ async def list_memories(
 # 3. Memory CRUD
 # ---------------------------------------------------------------------------
 
+
 @router.post(
     "/{user_id}/memories",
     response_model=MemoryItem,
@@ -1876,6 +1935,30 @@ async def list_memories(
 )
 async def create_memory(user_id: str, body: MemoryCreateRequest) -> MemoryItem:
     _validate_user(user_id)
+    if _memory_flags(user_id).canonical_pool_read:
+        if not body.idempotency_key:
+            raise HTTPException(status_code=409, detail="Memory idempotency key required")
+        try:
+            service = _canonical_memory_service(user_id)
+            receipt = service.manual_create(
+                content=body.text,
+                category=body.category or "fact",
+                scope=body.scope,
+                user_tier=body.tier,
+                idempotency_key=body.idempotency_key,
+            )
+            memory = next(item for item in service.list_pool() if item.memory_id == receipt.memory_id)
+            return _canonical_to_memory_item(memory)
+        except StopIteration:
+            raise HTTPException(status_code=503, detail="Canonical memory receipt unavailable")
+        except (ValueError, MemoryGovernanceConflict):
+            raise HTTPException(status_code=409, detail="Canonical memory operation conflict")
+        except Exception as exc:
+            logger.warning(
+                "MEM00 manual create failed error_type=%s contentExcluded=true",
+                exc.__class__.__name__,
+            )
+            raise HTTPException(status_code=503, detail="Memory governance unavailable")
     client = _get_mem0_client()
     try:
         memory_metadata = dict(body.metadata or {})
@@ -1896,6 +1979,7 @@ async def create_memory(user_id: str, body: MemoryCreateRequest) -> MemoryItem:
             result = client.add(**add_kwargs)
 
         from deerflow.sophia.mem0_client import invalidate_user_cache
+
         invalidate_user_cache(user_id)
 
         if isinstance(result, dict):
@@ -1938,6 +2022,40 @@ async def create_memory(user_id: str, body: MemoryCreateRequest) -> MemoryItem:
         logger.warning("Failed to create memory for %s: %s", user_id, e)
         raise HTTPException(status_code=503, detail="Memory service unavailable")
 
+
+@router.post(
+    "/{user_id}/memories/legacy-import",
+    response_model=MemoryItem,
+    summary="Import one exact evidence-approved legacy memory",
+)
+async def import_legacy_memory(user_id: str, body: LegacyMemoryImportRequest) -> MemoryItem:
+    _validate_user(user_id)
+    flags = _memory_flags(user_id)
+    if not flags.legacy_inventory or not flags.legacy_import:
+        raise HTTPException(status_code=404, detail="Legacy memory import is not enabled")
+    try:
+        service = _canonical_memory_service(user_id)
+        receipt = service.import_approved_legacy(
+            provider_memory_id=body.provider_memory_id,
+            approval_evidence_ref=body.approval_evidence_ref,
+            content=body.text,
+            category=body.category,
+            scope=body.scope,
+            user_tier=body.tier,
+            idempotency_key=body.idempotency_key,
+        )
+        memory = next(item for item in service.list_pool() if item.memory_id == receipt.memory_id)
+        return _canonical_to_memory_item(memory)
+    except (ValueError, StopIteration, MemoryGovernanceConflict):
+        raise HTTPException(status_code=409, detail="Legacy approval evidence conflict")
+    except Exception as exc:
+        logger.warning(
+            "MEM00 legacy import failed error_type=%s contentExcluded=true",
+            exc.__class__.__name__,
+        )
+        raise HTTPException(status_code=503, detail="Memory governance unavailable")
+
+
 @router.put(
     "/{user_id}/memories/{memory_id}",
     response_model=MemoryItem,
@@ -1945,6 +2063,32 @@ async def create_memory(user_id: str, body: MemoryCreateRequest) -> MemoryItem:
 )
 async def update_memory(user_id: str, memory_id: str, body: MemoryUpdateRequest) -> MemoryItem:
     _validate_user(user_id)
+    if _memory_flags(user_id).canonical_pool_read:
+        if body.text is None or body.expected_content_revision is None or body.expected_governance_revision is None or not body.idempotency_key:
+            raise HTTPException(status_code=409, detail="Expected revisions and idempotency key required")
+        try:
+            service = _canonical_memory_service(user_id)
+            metadata = body.metadata or {}
+            receipt = service.edit(
+                memory_id=UUID(memory_id),
+                expected_content_revision=body.expected_content_revision,
+                expected_governance_revision=body.expected_governance_revision,
+                content=body.text,
+                category=str(metadata.get("category") or "fact"),
+                scope=str(metadata.get("scope") or "global"),
+                user_tier=str(metadata.get("tier") or "none"),
+                idempotency_key=body.idempotency_key,
+            )
+            memory = next(item for item in service.list_pool() if item.memory_id == receipt.memory_id)
+            return _canonical_to_memory_item(memory)
+        except (ValueError, StopIteration, MemoryGovernanceConflict):
+            raise HTTPException(status_code=409, detail="Canonical memory revision conflict")
+        except Exception as exc:
+            logger.warning(
+                "MEM00 edit failed error_type=%s contentExcluded=true",
+                exc.__class__.__name__,
+            )
+            raise HTTPException(status_code=503, detail="Memory governance unavailable")
     local_content_hash = _local_content_hash_from_memory_id(memory_id)
     if local_content_hash:
         if body.text is None and body.metadata is None:
@@ -1974,6 +2118,7 @@ async def update_memory(user_id: str, memory_id: str, body: MemoryUpdateRequest)
             raise HTTPException(status_code=422, detail="At least text or metadata must be provided")
         result = client.update(memory_id=memory_id, **update_data)
         from deerflow.sophia.mem0_client import invalidate_user_cache
+
         invalidate_user_cache(user_id)
         mem = result if isinstance(result, dict) else {}
         upsert_review_metadata(
@@ -1998,6 +2143,11 @@ async def update_memory(user_id: str, memory_id: str, body: MemoryUpdateRequest)
 )
 async def delete_memory(user_id: str, memory_id: str):
     _validate_user(user_id)
+    if _memory_flags(user_id).canonical_pool_read:
+        raise HTTPException(
+            status_code=409,
+            detail="Use the revision-bound MEM00 privacy deletion endpoint",
+        )
     local_content_hash = _local_content_hash_from_memory_id(memory_id)
     if local_content_hash:
         remove_review_metadata(user_id, content_hash=local_content_hash)
@@ -2007,11 +2157,120 @@ async def delete_memory(user_id: str, memory_id: str):
     try:
         client.delete(memory_id=memory_id)
         from deerflow.sophia.mem0_client import invalidate_user_cache
+
         invalidate_user_cache(user_id)
         remove_review_metadata(user_id, memory_id=memory_id)
     except Exception as e:
         logger.warning("Failed to delete memory %s: %s", memory_id, e)
         raise HTTPException(status_code=503, detail="Memory service unavailable")
+
+
+@router.post(
+    "/{user_id}/memories/{memory_id}/forget",
+    response_model=MemoryGovernanceReceiptResponse,
+    summary="Forget a canonical memory",
+)
+async def forget_memory(user_id: str, memory_id: str, body: MemoryLifecycleRequest) -> MemoryGovernanceReceiptResponse:
+    _validate_user(user_id)
+    if not _memory_flags(user_id).canonical_pool_read:
+        raise HTTPException(status_code=404, detail="Canonical memory is not enabled")
+    try:
+        receipt = _canonical_memory_service(user_id).forget(
+            memory_id=UUID(memory_id),
+            expected_governance_revision=body.expected_governance_revision,
+            idempotency_key=body.idempotency_key,
+        )
+        return MemoryGovernanceReceiptResponse(
+            status="forgotten",
+            memory_id=str(receipt.memory_id),
+            content_revision=receipt.content_revision,
+            memory_governance_revision=receipt.memory_governance_revision,
+            user_catalog_generation=receipt.user_catalog_generation,
+            user_revocation_epoch=receipt.user_revocation_epoch,
+            provider_purge=receipt.provider_purge,
+        )
+    except (ValueError, MemoryGovernanceConflict):
+        raise HTTPException(status_code=409, detail="Canonical memory revision conflict")
+    except Exception as exc:
+        logger.warning(
+            "MEM00 forget failed error_type=%s contentExcluded=true",
+            exc.__class__.__name__,
+        )
+        raise HTTPException(status_code=503, detail="Memory governance unavailable")
+
+
+@router.post(
+    "/{user_id}/memories/{memory_id}/restore",
+    response_model=MemoryGovernanceReceiptResponse,
+    summary="Restore a forgotten canonical memory",
+)
+async def restore_memory(user_id: str, memory_id: str, body: MemoryLifecycleRequest) -> MemoryGovernanceReceiptResponse:
+    _validate_user(user_id)
+    if not _memory_flags(user_id).canonical_pool_read:
+        raise HTTPException(status_code=404, detail="Canonical memory is not enabled")
+    try:
+        receipt = _canonical_memory_service(user_id).restore(
+            memory_id=UUID(memory_id),
+            expected_governance_revision=body.expected_governance_revision,
+            idempotency_key=body.idempotency_key,
+        )
+        return MemoryGovernanceReceiptResponse(
+            status="active_projection_pending",
+            memory_id=str(receipt.memory_id),
+            content_revision=receipt.content_revision,
+            memory_governance_revision=receipt.memory_governance_revision,
+            user_catalog_generation=receipt.user_catalog_generation,
+            user_revocation_epoch=receipt.user_revocation_epoch,
+        )
+    except (ValueError, MemoryGovernanceConflict):
+        raise HTTPException(status_code=409, detail="Canonical memory revision conflict")
+    except Exception as exc:
+        logger.warning(
+            "MEM00 restore failed error_type=%s contentExcluded=true",
+            exc.__class__.__name__,
+        )
+        raise HTTPException(status_code=503, detail="Memory governance unavailable")
+
+
+@router.post(
+    "/{user_id}/memories/{memory_id}/permanent-delete",
+    response_model=MemoryGovernanceReceiptResponse,
+    summary="Fence and permanently delete canonical memory content",
+)
+async def permanently_delete_memory(user_id: str, memory_id: str, body: MemoryLifecycleRequest) -> MemoryGovernanceReceiptResponse:
+    _validate_user(user_id)
+    if not _memory_flags(user_id).canonical_pool_read:
+        raise HTTPException(status_code=404, detail="Canonical memory is not enabled")
+    try:
+        privacy = _canonical_memory_service(user_id).permanently_delete(
+            memory_id=UUID(memory_id),
+            expected_governance_revision=body.expected_governance_revision,
+            idempotency_key=body.idempotency_key,
+        )
+        receipt = privacy.receipt
+        if receipt is None:
+            raise RuntimeError("memory_privacy_receipt_missing")
+        return MemoryGovernanceReceiptResponse(
+            status=privacy.status,
+            memory_id=str(receipt.memory_id),
+            content_revision=receipt.content_revision,
+            memory_governance_revision=receipt.memory_governance_revision,
+            user_catalog_generation=receipt.user_catalog_generation,
+            user_revocation_epoch=receipt.user_revocation_epoch,
+            provider_purge=privacy.provider_purge,
+            canonical_memory_fence=privacy.canonical_memory_fence,
+            source_transcript=privacy.source_transcript,
+            derived_artifacts=privacy.derived_artifacts,
+            cache_invalidation=privacy.cache_invalidation,
+        )
+    except (ValueError, MemoryGovernanceConflict):
+        raise HTTPException(status_code=409, detail="Canonical memory revision conflict")
+    except Exception as exc:
+        logger.warning(
+            "MEM00 permanent delete failed error_type=%s contentExcluded=true",
+            exc.__class__.__name__,
+        )
+        raise HTTPException(status_code=503, detail="Memory governance unavailable")
 
 
 @router.post(
@@ -2021,6 +2280,46 @@ async def delete_memory(user_id: str, memory_id: str):
 )
 async def bulk_review(user_id: str, body: BulkReviewRequest) -> BulkReviewResponse:
     _validate_user(user_id)
+    if _memory_flags(user_id).candidate_ledger_read:
+        service = _canonical_memory_service(user_id)
+        candidates = {candidate.candidate_id: candidate for candidate in service.store.list_candidates(user_id=user_id)}
+        results = []
+        for item in body.items:
+            try:
+                candidate_id = UUID(item.id)
+                candidate = candidates.get(candidate_id)
+                if candidate is None:
+                    raise ValueError("candidate_not_pending")
+                revision = item.expected_candidate_revision
+                if revision is None or not item.idempotency_key:
+                    raise ValueError("candidate_revision_or_idempotency_missing")
+                if item.action == "approve":
+                    service.approve_candidate(
+                        candidate_id=candidate_id,
+                        expected_candidate_revision=revision,
+                        reviewed_content=item.reviewed_text or candidate.content or "",
+                        category=item.category,
+                        scope=item.scope,
+                        user_tier=item.tier,
+                        idempotency_key=item.idempotency_key,
+                    )
+                else:
+                    service.reject_candidate(
+                        candidate_id=candidate_id,
+                        expected_candidate_revision=revision,
+                        idempotency_key=item.idempotency_key,
+                    )
+                results.append(BulkReviewResult(id=item.id, action=item.action, status="ok"))
+            except Exception as exc:
+                results.append(
+                    BulkReviewResult(
+                        id=item.id,
+                        action=item.action,
+                        status="error",
+                        error=exc.__class__.__name__,
+                    )
+                )
+        return BulkReviewResponse(results=results)
     client = _get_mem0_client()
     results = []
     for item in body.items:
@@ -2055,6 +2354,7 @@ async def bulk_review(user_id: str, body: BulkReviewRequest) -> BulkReviewRespon
             results.append(BulkReviewResult(id=item.id, action=item.action, status="error", error=str(e)))
     try:
         from deerflow.sophia.mem0_client import invalidate_user_cache
+
         invalidate_user_cache(user_id)
     except Exception:
         pass
@@ -2064,6 +2364,7 @@ async def bulk_review(user_id: str, body: BulkReviewRequest) -> BulkReviewRespon
 # ---------------------------------------------------------------------------
 # 3. Reflect
 # ---------------------------------------------------------------------------
+
 
 @router.post(
     "/{user_id}/reflect",
@@ -2075,6 +2376,7 @@ async def reflect(user_id: str, body: ReflectRequest) -> ReflectResponse:
     _validate_user(user_id)
     try:
         from deerflow.sophia.reflection import generate_reflection
+
         result = await asyncio.to_thread(
             generate_reflection,
             user_id=user_id,
@@ -2093,6 +2395,7 @@ async def reflect(user_id: str, body: ReflectRequest) -> ReflectResponse:
 # 4. Journal
 # ---------------------------------------------------------------------------
 
+
 @router.get(
     "/{user_id}/journal",
     response_model=JournalResponse,
@@ -2106,6 +2409,42 @@ async def journal(
     status: str | None = Query(default=None, description="Filter by metadata.status"),
 ) -> JournalResponse:
     _validate_user(user_id)
+    if _memory_flags(user_id).canonical_pool_read:
+        try:
+            include_forgotten = status == "forgotten"
+            memories = _canonical_memory_service(user_id).list_pool(include_forgotten=include_forgotten)
+            if include_forgotten:
+                memories = tuple(memory for memory in memories if memory.lifecycle == "forgotten")
+            else:
+                memories = tuple(memory for memory in memories if memory.lifecycle == "active")
+            selected_category = category or memory_type
+            normalized_search = search.strip().lower() if search and search.strip() else None
+            entries = [
+                JournalEntry(
+                    id=str(memory.memory_id),
+                    content=memory.canonical_content or "",
+                    category=memory.category,
+                    metadata={
+                        "authority": "sophia_canonical",
+                        "lifecycle": memory.lifecycle,
+                        "tier": memory.user_tier,
+                        "scope": memory.scope,
+                        "projection_state": memory.projection_state,
+                        "content_revision": memory.current_content_revision,
+                        "memory_governance_revision": memory.memory_governance_revision,
+                    },
+                    created_at=str(memory.created_at) if memory.created_at else None,
+                )
+                for memory in memories
+                if (not selected_category or memory.category == selected_category) and (not normalized_search or normalized_search in (memory.canonical_content or "").lower())
+            ]
+            return JournalResponse(entries=entries, count=len(entries))
+        except Exception as exc:
+            logger.warning(
+                "MEM00 journal failed error_type=%s contentExcluded=true",
+                exc.__class__.__name__,
+            )
+            raise HTTPException(status_code=503, detail="Memory governance unavailable")
     client = _get_mem0_client()
     try:
         selected_category = category or memory_type
@@ -2173,6 +2512,7 @@ async def journal(
 # 5. Session Recap
 # ---------------------------------------------------------------------------
 
+
 @router.get(
     "/{user_id}/sessions/{session_id}/recap",
     response_model=SessionRecapResponse,
@@ -2195,6 +2535,7 @@ async def get_session_recap(user_id: str, session_id: str) -> SessionRecapRespon
 # ---------------------------------------------------------------------------
 # 6. Visual Artifacts
 # ---------------------------------------------------------------------------
+
 
 @router.get(
     "/{user_id}/visual/weekly",
@@ -2255,6 +2596,10 @@ async def visual_weekly(user_id: str) -> WeeklyVisualResponse:
 )
 async def visual_decisions(user_id: str) -> CategoryMemoryResponse:
     _validate_user(user_id)
+    if _memory_flags(user_id).canonical_pool_read:
+        memories = tuple(memory for memory in _canonical_memory_service(user_id).list_pool() if memory.category == "decision")
+        items = [_canonical_to_memory_item(memory) for memory in memories]
+        return CategoryMemoryResponse(memories=items, count=len(items))
     client = _get_mem0_client()
     try:
         result = client.get_all(filters={"user_id": user_id, "categories": "decision"})
@@ -2273,6 +2618,10 @@ async def visual_decisions(user_id: str) -> CategoryMemoryResponse:
 )
 async def visual_commitments(user_id: str) -> CategoryMemoryResponse:
     _validate_user(user_id)
+    if _memory_flags(user_id).canonical_pool_read:
+        memories = tuple(memory for memory in _canonical_memory_service(user_id).list_pool() if memory.category == "commitment")
+        items = [_canonical_to_memory_item(memory) for memory in memories]
+        return CategoryMemoryResponse(memories=items, count=len(items))
     client = _get_mem0_client()
     try:
         result = client.get_all(filters={"user_id": user_id, "categories": "commitment"})
@@ -2497,11 +2846,13 @@ def _build_activity_log(result: object) -> list[dict[str, Any]]:
             # AI message with text only — planning/thinking step
             content = message.get("content")
             if isinstance(content, str) and content.strip() and msg_index == 0:
-                entries.append({
-                    "type": "thinking",
-                    "title": "Analyzing task",
-                    "status": "done",
-                })
+                entries.append(
+                    {
+                        "type": "thinking",
+                        "title": "Analyzing task",
+                        "status": "done",
+                    }
+                )
             continue
 
         for tool_call in tool_calls:
@@ -2516,10 +2867,7 @@ def _build_activity_log(result: object) -> list[dict[str, Any]]:
             detail = _summarize_tool_args(tool_name, args if isinstance(args, dict) else None)
 
             is_last_message = msg_index == len(ai_messages) - 1
-            is_terminal = getattr(result, "status", None) not in (None,) and (
-                hasattr(result, "status")
-                and getattr(result.status, "value", None) in ("completed", "failed", "timed_out", "cancelled")
-            )
+            is_terminal = getattr(result, "status", None) not in (None,) and (hasattr(result, "status") and getattr(result.status, "value", None) in ("completed", "failed", "timed_out", "cancelled"))
             status = "done" if not is_last_message or is_terminal else "running"
 
             entry: dict[str, Any] = {
@@ -2551,42 +2899,19 @@ def _build_task_status_debug(result: object, status_value: str, builder_result: 
 
     return TaskStatusDebug(
         last_tool_names=_task_summary_tool_names(last_summary),
-        last_has_emit_builder_artifact=(
-            bool(last_summary.get("has_emit_builder_artifact"))
-            if isinstance(last_summary, dict) and "has_emit_builder_artifact" in last_summary
-            else None
-        ),
+        last_has_emit_builder_artifact=(bool(last_summary.get("has_emit_builder_artifact")) if isinstance(last_summary, dict) and "has_emit_builder_artifact" in last_summary else None),
         late_tool_names=_task_summary_tool_names(late_summary),
-        late_has_emit_builder_artifact=(
-            bool(late_summary.get("has_emit_builder_artifact"))
-            if isinstance(late_summary, dict) and "has_emit_builder_artifact" in late_summary
-            else None
-        ),
+        late_has_emit_builder_artifact=(bool(late_summary.get("has_emit_builder_artifact")) if isinstance(late_summary, dict) and "has_emit_builder_artifact" in late_summary else None),
         timeout_observed_during_stream=bool(getattr(result, "timeout_observed_during_stream", False)),
-        timed_out_at=(
-            getattr(result, "timed_out_at", None).isoformat()
-            if getattr(result, "timed_out_at", None) is not None
-            else None
-        ),
+        timed_out_at=(getattr(result, "timed_out_at", None).isoformat() if getattr(result, "timed_out_at", None) is not None else None),
         final_state_present=isinstance(getattr(result, "final_state", None), dict),
         builder_result_present=isinstance(builder_result, dict) and bool(builder_result),
         suspected_blocker=suspected_blocker,
         suspected_blocker_detail=blocker_detail,
         last_shell_command=(
-            dict(getattr(result, "live_state", {}).get("last_shell_command"))
-            if isinstance(getattr(result, "live_state", None), dict)
-            and isinstance(getattr(result, "live_state", {}).get("last_shell_command"), dict)
-            else None
+            dict(getattr(result, "live_state", {}).get("last_shell_command")) if isinstance(getattr(result, "live_state", None), dict) and isinstance(getattr(result, "live_state", {}).get("last_shell_command"), dict) else None
         ),
-        recent_shell_commands=(
-            [
-                dict(entry)
-                for entry in getattr(result, "live_state", {}).get("recent_shell_commands", [])
-                if isinstance(entry, dict)
-            ]
-            if isinstance(getattr(result, "live_state", None), dict)
-            else []
-        ),
+        recent_shell_commands=([dict(entry) for entry in getattr(result, "live_state", {}).get("recent_shell_commands", []) if isinstance(entry, dict)] if isinstance(getattr(result, "live_state", None), dict) else []),
     )
 
 
@@ -2648,6 +2973,7 @@ def _build_task_status_description(result: object, builder_result: dict | None) 
 # ---------------------------------------------------------------------------
 # 7. Background Task Control
 # ---------------------------------------------------------------------------
+
 
 @router.get(
     "/{user_id}/tasks/active",
@@ -2713,6 +3039,7 @@ async def get_active_task(
         activity_log=_build_activity_log(result),
     )
 
+
 @router.get(
     "/{user_id}/tasks/{task_id}",
     response_model=TaskStatusResponse,
@@ -2770,6 +3097,7 @@ async def get_task_status(user_id: str, task_id: str) -> TaskStatusResponse:
         activity_log=_build_activity_log(result),
     )
 
+
 @router.post(
     "/{user_id}/tasks/{task_id}/cancel",
     response_model=TaskCancelResponse,
@@ -2809,6 +3137,7 @@ async def cancel_task(user_id: str, task_id: str) -> TaskCancelResponse:
 # 8. Session End Trigger
 # ---------------------------------------------------------------------------
 
+
 @router.post(
     "/{user_id}/end-session",
     response_model=SessionEndResponse,
@@ -2845,20 +3174,13 @@ async def end_session(
             )
         assert_voice_lab_session_record(session_record, voice_lab_claims)
         try:
-            cleanup_bound_record = (
-                _session_store.find_session_by_cleanup_obligation_id(
-                    voice_lab_claims.cleanup_obligation_id
-                )
-            )
+            cleanup_bound_record = _session_store.find_session_by_cleanup_obligation_id(voice_lab_claims.cleanup_obligation_id)
         except (OSError, RuntimeError, SessionStoreError) as exc:
             raise HTTPException(
                 status_code=409,
                 detail={"code": "voice_lab_session_cleanup_binding_mismatch"},
             ) from exc
-        if (
-            cleanup_bound_record is None
-            or cleanup_bound_record.session_id != session_record.session_id
-        ):
+        if cleanup_bound_record is None or cleanup_bound_record.session_id != session_record.session_id:
             raise HTTPException(
                 status_code=409,
                 detail={"code": "voice_lab_session_cleanup_binding_mismatch"},
@@ -2870,13 +3192,11 @@ async def end_session(
             _assert_synthetic_provisional_retention_open(session_record)
         terminal_messages: list[SessionMessageRecord] | None = None
         if session_record.status == "ended":
-            session_record, terminal_messages = (
-                _assert_synthetic_terminal_transcript_replay(
-                    user_id,
-                    body,
-                    session_record,
-                    voice_lab_claims,
-                )
+            session_record, terminal_messages = _assert_synthetic_terminal_transcript_replay(
+                user_id,
+                body,
+                session_record,
+                voice_lab_claims,
             )
         (
             canonical_record,
@@ -2941,9 +3261,7 @@ async def end_session(
         user_id,
         body.session_id,
     )
-    authoritative_thread_id = (
-        authoritative_record.thread_id if authoritative_record is not None else body.thread_id
-    )
+    authoritative_thread_id = authoritative_record.thread_id if authoritative_record is not None else body.thread_id
     last_processed_sequence, current_max_sequence, has_new_messages = _get_memory_extraction_window(
         user_id,
         body.session_id,
@@ -2958,6 +3276,7 @@ async def end_session(
         _mark_session_record_ended(user_id, body.session_id, existing_ended_at)
         try:
             from app.gateway.inactivity_watcher import unregister_thread
+
             unregister_thread(authoritative_thread_id)
         except ImportError:
             pass
@@ -3010,11 +3329,18 @@ async def end_session(
             current_max_sequence,
         )
 
-    _mark_session_record_ended(user_id, body.session_id, ended_at)
+    from deerflow.sophia.memory_governance.flags import (
+        memory_feature_flags_for_owner,
+    )
+
+    atomic_memory_finalization = memory_feature_flags_for_owner(user_id).candidate_ledger_write
+    if not atomic_memory_finalization:
+        _mark_session_record_ended(user_id, body.session_id, ended_at)
 
     # Remove from inactivity tracking — session explicitly ended
     try:
         from app.gateway.inactivity_watcher import unregister_thread
+
         unregister_thread(authoritative_thread_id)
     except ImportError:
         pass
@@ -3025,6 +3351,7 @@ async def end_session(
             body.session_id,
             authoritative_thread_id,
             _build_thread_state_from_end_request(body, authoritative_transcript),
+            ended_at,
         )
         logger.info(
             "session.finalization end_session_queued user_id=%s session_id=%s thread_id=%s recapPipelineQueued=%s",

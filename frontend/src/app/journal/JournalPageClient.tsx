@@ -386,8 +386,10 @@ function classNames(...values: Array<string | false | null | undefined>): string
 
 type PendingEntryAction = {
   id: string
-  kind: 'save' | 'delete'
+  kind: 'save' | 'delete' | 'forget' | 'restore'
 }
+
+type JournalShelf = 'active' | 'forgotten'
 
 export function JournalPageClient() {
   const router = useRouter()
@@ -405,6 +407,7 @@ export function JournalPageClient() {
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [hoveredId, setHoveredId] = useState<string | null>(null)
   const [viewMode, setViewMode] = useState<JournalViewMode>('pool')
+  const [shelf, setShelf] = useState<JournalShelf>('active')
   const [periodMenuOpen, setPeriodMenuOpen] = useState(false)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null)
@@ -475,11 +478,14 @@ export function JournalPageClient() {
       setError(null)
 
       try {
-        const response = await fetch('/api/journal', {
+        const response = await fetch(
+          shelf === 'forgotten' ? '/api/journal?status=forgotten&savedOnly=false' : '/api/journal',
+          {
           method: 'GET',
           signal: controller.signal,
           cache: 'no-store',
-        })
+          },
+        )
 
         if (!response.ok) {
           throw new Error(`Journal request failed: ${response.status}`)
@@ -503,7 +509,7 @@ export function JournalPageClient() {
     void loadJournal()
 
     return () => controller.abort()
-  }, [])
+  }, [shelf])
 
   useEffect(() => {
     if (sceneEntries.length === 0 || highlightSet.size === 0) {
@@ -694,12 +700,26 @@ export function JournalPageClient() {
     setEntryActionError(null)
 
     try {
+      const isCanonicalMemory = entry.metadata?.authority === 'sophia_canonical'
+      const requestBody = isCanonicalMemory
+        ? {
+            text: nextText,
+            metadata: {
+              category: entry.category ?? 'fact',
+              scope: String(entry.metadata?.scope ?? 'global'),
+              tier: String(entry.metadata?.tier ?? 'none'),
+            },
+            expected_content_revision: Number(entry.metadata?.content_revision),
+            expected_governance_revision: Number(entry.metadata?.memory_governance_revision),
+            idempotency_key: `journal-edit-${crypto.randomUUID()}`,
+          }
+        : { text: nextText }
       const response = await fetch(`/api/memories/${encodeURIComponent(entry.id)}`, {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ text: nextText }),
+        body: JSON.stringify(requestBody),
       })
 
       if (!response.ok) {
@@ -739,8 +759,20 @@ export function JournalPageClient() {
     setEntryActionError(null)
 
     try {
+      const isCanonicalMemory = entry.metadata?.authority === 'sophia_canonical'
       const response = await fetch(`/api/memories/${encodeURIComponent(entry.id)}`, {
         method: 'DELETE',
+        ...(isCanonicalMemory
+          ? {
+              headers: {
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({
+                expected_governance_revision: Number(entry.metadata?.memory_governance_revision),
+                idempotency_key: `journal-delete-${crypto.randomUUID()}`,
+              }),
+            }
+          : {}),
       })
 
       if (!response.ok) {
@@ -767,6 +799,66 @@ export function JournalPageClient() {
       ))
     }
   }, [editingId, selectedId])
+
+  const forgetEntry = useCallback(async (entry: SceneEntry) => {
+    setPendingEntryAction({ id: entry.id, kind: 'forget' })
+    setEntryActionError(null)
+
+    try {
+      const response = await fetch(`/api/memories/${encodeURIComponent(entry.id)}/forget`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          expected_governance_revision: Number(entry.metadata?.memory_governance_revision),
+          idempotency_key: `journal-forget-${crypto.randomUUID()}`,
+        }),
+      })
+      if (!response.ok) {
+        throw new Error(`Journal memory forget failed: ${response.status}`)
+      }
+      setEntries((current) => current.filter((existing) => existing.id !== entry.id))
+      setSelectedId((current) => (current === entry.id ? null : current))
+      haptic('success')
+    } catch (error) {
+      logger.logError(error, { component: 'Journal', action: 'forget_memory' })
+      setEntryActionError("Couldn't forget this memory right now.")
+      haptic('error')
+    } finally {
+      setPendingEntryAction((current) => (
+        current?.id === entry.id && current.kind === 'forget' ? null : current
+      ))
+    }
+  }, [])
+
+  const restoreEntry = useCallback(async (entry: SceneEntry) => {
+    setPendingEntryAction({ id: entry.id, kind: 'restore' })
+    setEntryActionError(null)
+
+    try {
+      const response = await fetch(`/api/memories/${encodeURIComponent(entry.id)}/restore`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          expected_governance_revision: Number(entry.metadata?.memory_governance_revision),
+          idempotency_key: `journal-restore-${crypto.randomUUID()}`,
+        }),
+      })
+      if (!response.ok) {
+        throw new Error(`Journal memory restore failed: ${response.status}`)
+      }
+      setEntries((current) => current.filter((existing) => existing.id !== entry.id))
+      setSelectedId((current) => (current === entry.id ? null : current))
+      haptic('success')
+    } catch (error) {
+      logger.logError(error, { component: 'Journal', action: 'restore_memory' })
+      setEntryActionError("Couldn't restore this memory right now.")
+      haptic('error')
+    } finally {
+      setPendingEntryAction((current) => (
+        current?.id === entry.id && current.kind === 'restore' ? null : current
+      ))
+    }
+  }, [])
 
   const renderDeleteConfirm = useCallback((entry: SceneEntry) => {
     if (deleteConfirmId !== entry.id) {
@@ -1680,12 +1772,27 @@ export function JournalPageClient() {
       <div className={styles.page}>
         <div className={styles.overlayState}>
           <div className={styles.stateIcon}><LayoutGrid className={styles.stateGlyph} /></div>
-          <h1 className={styles.stateTitle}>No saved memories yet</h1>
-          <p className={styles.stateText}>After a session recap, the memories you keep will appear here.</p>
+          <h1 className={styles.stateTitle}>{shelf === 'forgotten' ? 'Forgotten shelf is empty' : 'No saved memories yet'}</h1>
+          <p className={styles.stateText}>
+            {shelf === 'forgotten'
+              ? 'Forgotten memories stay out of every Sophia response and can be restored only from this shelf.'
+              : 'After a session recap, the memories you keep will appear here.'}
+          </p>
           <div className={styles.overlayActions}>
-            <button className={styles.primaryAction} onClick={() => router.push('/')}>
-              Start a session
+            <button
+              className={styles.primaryAction}
+              onClick={() => {
+                setShelf((current) => (current === 'active' ? 'forgotten' : 'active'))
+                setViewMode('list')
+              }}
+            >
+              {shelf === 'forgotten' ? 'Back to memories' : 'View forgotten shelf'}
             </button>
+            {shelf === 'active' && (
+              <button className={styles.secondaryAction} onClick={() => router.push('/')}>
+                Start a session
+              </button>
+            )}
           </div>
         </div>
       </div>
@@ -1749,6 +1856,25 @@ export function JournalPageClient() {
         </div>
 
         <div className={styles.topRight}>
+          <div className={styles.viewToggle} aria-label="Memory shelf">
+            <button
+              type="button"
+              className={classNames(styles.viewToggleButton, shelf === 'active' && styles.viewToggleButtonActive)}
+              onClick={() => setShelf('active')}
+            >
+              Memories
+            </button>
+            <button
+              type="button"
+              className={classNames(styles.viewToggleButton, shelf === 'forgotten' && styles.viewToggleButtonActive)}
+              onClick={() => {
+                setShelf('forgotten')
+                setViewMode('list')
+              }}
+            >
+              Forgotten
+            </button>
+          </div>
           <div className={styles.periodControl}>
             <button
               ref={periodButtonRef}
@@ -1940,6 +2066,16 @@ export function JournalPageClient() {
                       Save
                     </button>
                   </>
+                ) : shelf === 'forgotten' ? (
+                  <button
+                    type="button"
+                    className={classNames(styles.detailActionButton, styles.detailActionPrimary)}
+                    onClick={() => void restoreEntry(selectedEntry)}
+                    disabled={pendingEntryAction?.id === selectedEntry.id}
+                  >
+                    {pendingEntryAction?.id === selectedEntry.id && pendingEntryAction.kind === 'restore' ? <Loader2 className={styles.actionSpinner} /> : <Check className={styles.actionIcon} />}
+                    Restore
+                  </button>
                 ) : (
                   <button
                     type="button"
@@ -1951,18 +2087,30 @@ export function JournalPageClient() {
                     Edit
                   </button>
                 )}
-                <button
-                  type="button"
-                  className={classNames(styles.detailActionButton, styles.detailActionDanger)}
-                  onClick={() => requestDeleteEntry(selectedEntry)}
-                  disabled={pendingEntryAction?.id === selectedEntry.id}
-                >
-                  {pendingEntryAction?.id === selectedEntry.id && pendingEntryAction.kind === 'delete' ? <Loader2 className={styles.actionSpinner} /> : <Trash2 className={styles.actionIcon} />}
-                  Delete
-                </button>
+                {shelf === 'forgotten' || selectedEntry.metadata?.authority !== 'sophia_canonical' ? (
+                  <button
+                    type="button"
+                    className={classNames(styles.detailActionButton, styles.detailActionDanger)}
+                    onClick={() => requestDeleteEntry(selectedEntry)}
+                    disabled={pendingEntryAction?.id === selectedEntry.id}
+                  >
+                    {pendingEntryAction?.id === selectedEntry.id && pendingEntryAction.kind === 'delete' ? <Loader2 className={styles.actionSpinner} /> : <Trash2 className={styles.actionIcon} />}
+                    Permanently delete
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    className={classNames(styles.detailActionButton, styles.detailActionDanger)}
+                    onClick={() => void forgetEntry(selectedEntry)}
+                    disabled={pendingEntryAction?.id === selectedEntry.id}
+                  >
+                    {pendingEntryAction?.id === selectedEntry.id && pendingEntryAction.kind === 'forget' ? <Loader2 className={styles.actionSpinner} /> : <Trash2 className={styles.actionIcon} />}
+                    Forget
+                  </button>
+                )}
               </div>
               {renderDeleteConfirm(selectedEntry)}
-              {entryActionError && (editingId === selectedEntry.id || deleteConfirmId === selectedEntry.id) && (
+              {entryActionError && (
                 <div className={styles.detailError}>
                   <AlertCircle className={styles.detailErrorIcon} />
                   {entryActionError}
@@ -2064,6 +2212,16 @@ export function JournalPageClient() {
                             Save
                           </button>
                         </>
+                      ) : shelf === 'forgotten' ? (
+                        <button
+                          type="button"
+                          className={classNames(styles.listActionButton, styles.listActionPrimary)}
+                          onClick={() => void restoreEntry(entry)}
+                          disabled={isPendingEntry}
+                        >
+                          {isPendingEntry && pendingEntryAction?.kind === 'restore' ? <Loader2 className={styles.actionSpinner} /> : <Check className={styles.actionIcon} />}
+                          Restore
+                        </button>
                       ) : (
                         <button
                           type="button"
@@ -2075,18 +2233,30 @@ export function JournalPageClient() {
                           Edit
                         </button>
                       )}
-                      <button
-                        type="button"
-                        className={classNames(styles.listActionButton, styles.listActionDanger)}
-                        onClick={() => requestDeleteEntry(entry)}
-                        disabled={isPendingEntry}
-                      >
-                        {isPendingEntry && pendingEntryAction?.kind === 'delete' ? <Loader2 className={styles.actionSpinner} /> : <Trash2 className={styles.actionIcon} />}
-                        Delete
-                      </button>
+                      {shelf === 'forgotten' || entry.metadata?.authority !== 'sophia_canonical' ? (
+                        <button
+                          type="button"
+                          className={classNames(styles.listActionButton, styles.listActionDanger)}
+                          onClick={() => requestDeleteEntry(entry)}
+                          disabled={isPendingEntry}
+                        >
+                          {isPendingEntry && pendingEntryAction?.kind === 'delete' ? <Loader2 className={styles.actionSpinner} /> : <Trash2 className={styles.actionIcon} />}
+                          Permanently delete
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          className={classNames(styles.listActionButton, styles.listActionDanger)}
+                          onClick={() => void forgetEntry(entry)}
+                          disabled={isPendingEntry}
+                        >
+                          {isPendingEntry && pendingEntryAction?.kind === 'forget' ? <Loader2 className={styles.actionSpinner} /> : <Trash2 className={styles.actionIcon} />}
+                          Forget
+                        </button>
+                      )}
                     </div>
                     {renderDeleteConfirm(entry)}
-                    {entryActionError && (isEditingEntry || deleteConfirmId === entry.id) && (
+                    {entryActionError && selectedId === entry.id && (
                       <div className={styles.listError}>
                         <AlertCircle className={styles.detailErrorIcon} />
                         {entryActionError}

@@ -26,6 +26,68 @@ def _reset_mem0_client():
 
 
 class TestSearchMemories:
+    def test_governed_search_returns_only_reader_canonical_text_and_consumer_attribution(self):
+        from deerflow.sophia.mem0_client import search_memories_with_diagnostics
+
+        memory = SimpleNamespace(
+            memory_id="canonical-id",
+            canonical_content="CANONICAL TEXT",
+            category="fact",
+            score=0.9,
+            content_revision=4,
+            memory_governance_revision=6,
+        )
+        governed = SimpleNamespace(
+            memories=(memory,),
+            receipt=SimpleNamespace(
+                provider_status="ok",
+                safe_reason_code=None,
+                model_dump=lambda **_: {"provider_status": "ok"},
+            ),
+        )
+        reader = MagicMock()
+        reader.retrieve.return_value = governed
+        with (
+            patch.dict(
+                "os.environ",
+                {
+                    "SOPHIA_MEMORY_CANDIDATE_LEDGER_WRITE": "true",
+                    "SOPHIA_MEMORY_CANDIDATE_LEDGER_READ": "true",
+                    "SOPHIA_MEMORY_CANONICAL_POOL_READ": "true",
+                    "SOPHIA_MEMORY_PROVIDER_PROJECTION": "true",
+                    "SOPHIA_MEMORY_GOVERNED_RUNTIME_READ": "true",
+                    "SOPHIA_MEMORY_COHORT_PRINCIPALS": "owner-1",
+                    "SOPHIA_MEMORY_PROVIDER_PROJECT": "existing-project",
+                    "SOPHIA_ENV": "production",
+                },
+                clear=False,
+            ),
+            patch(
+                "deerflow.sophia.memory_governance.reader.GovernedMemoryReader",
+                return_value=reader,
+            ),
+            patch("deerflow.sophia.memory_governance.store.configured_memory_store"),
+            patch("deerflow.sophia.memory_governance.mem0_projection_adapter.Mem0ProjectionAdapter"),
+        ):
+            result = search_memories_with_diagnostics(
+                "owner-1",
+                "untrusted provider query",
+                caller="builder_context",
+            )
+
+        assert result["memories"] == [
+            {
+                "id": "canonical-id",
+                "content": "CANONICAL TEXT",
+                "category": "fact",
+                "score": 0.9,
+                "content_revision": 4,
+                "memory_governance_revision": 6,
+                "authority": "sophia_canonical",
+            }
+        ]
+        assert reader.retrieve.call_args.kwargs["caller"] == "builder_context"
+
     def test_returns_empty_when_no_api_key(self):
         from deerflow.sophia.mem0_client import search_memories
 
@@ -92,17 +154,13 @@ class TestSearchMemories:
         assert result["provider_status"] == "available"
         assert result["provider_transport"] == "mem0_rest"
         assert result["memories"][0]["content"] == "fact 1"
-        assert fake_client.posts == [
-            ("/v2/memories/search/", {"query": "query", "filters": {"user_id": "user1"}, "limit": 3})
-        ]
+        assert fake_client.posts == [("/v2/memories/search/", {"query": "query", "filters": {"user_id": "user1"}, "limit": 3})]
 
     def test_cache_hit_returns_same_results(self):
         from deerflow.sophia.mem0_client import search_memories
 
         mock_client = MagicMock()
-        mock_client.search.return_value = [
-            {"id": "m1", "memory": "fact 1", "metadata": {"category": "fact"}}
-        ]
+        mock_client.search.return_value = [{"id": "m1", "memory": "fact 1", "metadata": {"category": "fact"}}]
         with patch("deerflow.sophia.mem0_client._get_client", return_value=mock_client):
             r1 = search_memories("user1", "query")
             r2 = search_memories("user1", "query")
@@ -115,9 +173,7 @@ class TestSearchMemories:
         from deerflow.sophia.mem0_client import search_memories
 
         mock_client = MagicMock()
-        mock_client.search.return_value = [
-            {"id": "m1", "memory": "fact 1", "metadata": {"category": "fact"}}
-        ]
+        mock_client.search.return_value = [{"id": "m1", "memory": "fact 1", "metadata": {"category": "fact"}}]
         with patch("deerflow.sophia.mem0_client._get_client", return_value=mock_client):
             result = search_memories("user1", "query")
             assert len(result) == 1
@@ -175,9 +231,7 @@ class TestSearchMemories:
         from deerflow.sophia.mem0_client import search_memories
 
         mock_client = MagicMock()
-        mock_client.search.return_value = {
-            "results": [{"id": "m1", "memory": "fact 1", "metadata": {"category": "fact"}}]
-        }
+        mock_client.search.return_value = {"results": [{"id": "m1", "memory": "fact 1", "metadata": {"category": "fact"}}]}
         with patch("deerflow.sophia.mem0_client._get_client", return_value=mock_client):
             result = search_memories("user1", "query")
             assert len(result) == 1
@@ -187,9 +241,7 @@ class TestSearchMemories:
         from deerflow.sophia.mem0_client import search_memories
 
         mock_client = MagicMock()
-        mock_client.search.return_value = [
-            {"id": "m1", "memory": "fact 1", "metadata": {"category": "fact"}}
-        ]
+        mock_client.search.return_value = [{"id": "m1", "memory": "fact 1", "metadata": {"category": "fact"}}]
         with patch("deerflow.sophia.mem0_client._get_client", return_value=mock_client):
             result = search_memories("user1", "query")
             assert len(result) == 1
@@ -363,9 +415,7 @@ class TestAddMemories:
         from deerflow.sophia.mem0_client import add_memories
 
         mock_client = MagicMock()
-        mock_client.add.return_value = {
-            "results": [{"id": "m1", "memory": "fact"}]
-        }
+        mock_client.add.return_value = {"results": [{"id": "m1", "memory": "fact"}]}
         with patch("deerflow.sophia.mem0_client._get_client", return_value=mock_client):
             result = add_memories(
                 user_id="user1",

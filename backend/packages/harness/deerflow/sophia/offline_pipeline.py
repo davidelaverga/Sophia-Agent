@@ -34,6 +34,7 @@ from deerflow.sophia.extraction import analyze_explicit_remember_messages, extra
 from deerflow.sophia.handoffs import generate_handoff
 from deerflow.sophia.identity import maybe_update_identity
 from deerflow.sophia.mem0_client import reconcile_review_metadata_with_mem0
+from deerflow.sophia.memory_governance.flags import memory_feature_flags_for_owner
 from deerflow.sophia.session_store import (
     SessionMessageRecord,
     SessionStore,
@@ -91,17 +92,9 @@ def _synthetic_pipeline_exclusion(
     )
     return {
         "status": "synthetic_excluded",
-        "reason": (
-            "voice_lab_ordinary_consumers_excluded"
-            if exact_isolation
-            else "canonical_isolation_binding_invalid"
-        ),
+        "reason": ("voice_lab_ordinary_consumers_excluded" if exact_isolation else "canonical_isolation_binding_invalid"),
         "session_id": session_id,
-        **(
-            {"test_run_id": record.run_id}
-            if exact_isolation and isinstance(record.run_id, str)
-            else {}
-        ),
+        **({"test_run_id": record.run_id} if exact_isolation and isinstance(record.run_id, str) else {}),
         "steps": {
             "trace": "excluded",
             "extraction": "excluded",
@@ -215,6 +208,7 @@ def run_offline_pipeline(
     )
 
     steps: dict[str, str] = {}
+    memory_flags = memory_feature_flags_for_owner(user_id)
     extraction_scope = _load_incremental_extraction_scope(user_id, session_id)
     processing_key = _build_processing_key(session_id, extraction_scope, messages)
 
@@ -257,143 +251,171 @@ def run_offline_pipeline(
     # Step 2: Memory extraction
     # ------------------------------------------------------------------
     extracted_memories: list[dict] = []
-    try:
-        extraction_run_id = f"extract-{uuid.uuid4()}"
-        if extraction_scope is not None:
-            serialized_messages = [
-                _message_record_to_extraction_message(message)
-                for message in extraction_scope["selected_messages"]
-            ]
-            source_message_ids = [
-                message.message_id
-                for message in extraction_scope["selected_messages"]
-                if message.message_id
-            ]
-            session_metadata.update(
-                {
-                    "thread_id": thread_id,
-                    "sequence_start": extraction_scope["range_start"],
-                    "sequence_end": extraction_scope["range_end"],
-                    "source_message_ids": source_message_ids,
-                    "extraction_run_id": extraction_run_id,
-                }
+    if memory_flags.candidate_ledger_write:
+        # Finalization synchronously committed the durable extraction run.
+        # The service-owned claimant completes candidates independently of
+        # this best-effort legacy pipeline.
+        steps["extraction"] = "durable_worker_owned"
+    else:
+        try:
+            extraction_run_id = f"extract-{uuid.uuid4()}"
+            if extraction_scope is not None:
+                serialized_messages = [_message_record_to_extraction_message(message) for message in extraction_scope["selected_messages"]]
+                source_message_ids = [message.message_id for message in extraction_scope["selected_messages"] if message.message_id]
+                session_metadata.update(
+                    {
+                        "thread_id": thread_id,
+                        "sequence_start": extraction_scope["range_start"],
+                        "sequence_end": extraction_scope["range_end"],
+                        "source_message_ids": source_message_ids,
+                        "extraction_run_id": extraction_run_id,
+                    }
+                )
+            else:
+                serialized_messages = _serialize_messages(messages)
+                session_metadata.update(
+                    {
+                        "thread_id": thread_id,
+                        "extraction_run_id": extraction_run_id,
+                    }
+                )
+            extracted_memories = extract_session_memories(
+                user_id,
+                session_id,
+                serialized_messages,
+                session_metadata,
+                require_memory_write=True,
             )
-        else:
-            serialized_messages = _serialize_messages(messages)
-            session_metadata.update(
-                {
-                    "thread_id": thread_id,
-                    "extraction_run_id": extraction_run_id,
-                }
+            reconcile_review_metadata_with_mem0(user_id)
+            if extraction_scope is not None:
+                _mark_memory_extraction_success(
+                    extraction_scope,
+                    extraction_run_id=extraction_run_id,
+                    diagnostics=_build_memory_extraction_diagnostics(
+                        serialized_messages,
+                        extracted_memories,
+                    ),
+                )
+            steps["extraction"] = "ok"
+            logger.info(
+                "session.finalization pipeline_extraction_complete user_id=%s session_id=%s memory_count=%s",
+                user_id,
+                session_id,
+                len(extracted_memories),
             )
-        extracted_memories = extract_session_memories(
-            user_id,
-            session_id,
-            serialized_messages,
-            session_metadata,
-            require_memory_write=True,
-        )
-        reconcile_review_metadata_with_mem0(user_id)
-        if extraction_scope is not None:
-            _mark_memory_extraction_success(
-                extraction_scope,
-                extraction_run_id=extraction_run_id,
-                diagnostics=_build_memory_extraction_diagnostics(
-                    serialized_messages,
-                    extracted_memories,
-                ),
+        except Exception:
+            logger.error(
+                "Pipeline step 'extraction' failed for session %s",
+                session_id,
+                exc_info=True,
             )
-        steps["extraction"] = "ok"
-        logger.info(
-            "session.finalization pipeline_extraction_complete user_id=%s session_id=%s memory_count=%s",
-            user_id,
-            session_id,
-            len(extracted_memories),
-        )
-    except Exception:
-        logger.error("Pipeline step 'extraction' failed for session %s", session_id, exc_info=True)
-        if extraction_scope is not None:
-            _mark_memory_extraction_failure(extraction_scope)
-        steps["extraction"] = "error"
-        with _processed_lock:
-            _processed_sessions.discard(processing_key)
+            if extraction_scope is not None:
+                _mark_memory_extraction_failure(extraction_scope)
+            steps["extraction"] = "error"
+            with _processed_lock:
+                _processed_sessions.discard(processing_key)
 
     # ------------------------------------------------------------------
     # Step 3: Smart opener generation
     # ------------------------------------------------------------------
     smart_opener_text: str = ""
-    try:
-        session_summary = _build_session_summary(messages)
-        recent_memories = _format_memories_for_opener(extracted_memories)
-        smart_opener_text = generate_smart_opener(
-            user_id,
-            session_summary,
-            recent_memories=recent_memories,
-        )
-        steps["smart_opener"] = "ok"
-    except Exception:
-        logger.error("Pipeline step 'smart_opener' failed for session %s", session_id, exc_info=True)
-        steps["smart_opener"] = "error"
+    if memory_flags.candidate_ledger_write:
+        steps["smart_opener"] = "disabled_mem00_containment"
+    else:
+        try:
+            session_summary = _build_session_summary(messages)
+            recent_memories = _format_memories_for_opener(extracted_memories)
+            smart_opener_text = generate_smart_opener(
+                user_id,
+                session_summary,
+                recent_memories=recent_memories,
+            )
+            steps["smart_opener"] = "ok"
+        except Exception:
+            logger.error(
+                "Pipeline step 'smart_opener' failed for session %s",
+                session_id,
+                exc_info=True,
+            )
+            steps["smart_opener"] = "error"
 
     # ------------------------------------------------------------------
     # Step 4: Notification (placeholder)
     # ------------------------------------------------------------------
     try:
-        logger.info("Memory candidates ready for review (user=%s, session=%s)", user_id, session_id)
+        logger.info(
+            "Memory candidates ready for review (user=%s, session=%s)",
+            user_id,
+            session_id,
+        )
         steps["notification"] = "ok"
     except Exception:
-        logger.error("Pipeline step 'notification' failed for session %s", session_id, exc_info=True)
+        logger.error(
+            "Pipeline step 'notification' failed for session %s",
+            session_id,
+            exc_info=True,
+        )
         steps["notification"] = "error"
 
     # ------------------------------------------------------------------
     # Step 5: Handoff generation
     # ------------------------------------------------------------------
-    try:
-        generate_handoff(
-            user_id,
-            session_id,
-            messages,
-            artifacts=artifacts,
-            extracted_memories=extracted_memories,
-            smart_opener_text=smart_opener_text or None,
-        )
-        steps["handoff"] = "ok"
-    except Exception:
-        logger.error("Pipeline step 'handoff' failed for session %s", session_id, exc_info=True)
-        steps["handoff"] = "error"
+    if memory_flags.candidate_ledger_write:
+        steps["handoff"] = "disabled_mem00_containment"
+    else:
+        try:
+            generate_handoff(
+                user_id,
+                session_id,
+                messages,
+                artifacts=artifacts,
+                extracted_memories=extracted_memories,
+                smart_opener_text=smart_opener_text or None,
+            )
+            steps["handoff"] = "ok"
+        except Exception:
+            logger.error(
+                "Pipeline step 'handoff' failed for session %s",
+                session_id,
+                exc_info=True,
+            )
+            steps["handoff"] = "error"
 
     # ------------------------------------------------------------------
     # Step 5b: Recap envelope
     # ------------------------------------------------------------------
-    # Channel-originated sessions (Telegram today, iOS / future channels
-    # tomorrow) never trigger the web flow's POST /sessions/{id}/end, so
-    # without this step they would have no ``users/{user_id}/recaps/{session_id}.json``
-    # and the frontend ``/recap/<session>`` page would 404. The recap we
-    # write here is sparse (status="processing", recap_artifacts=null) —
-    # the frontend's ``hydratePayloadWithRemoteMemories`` then pulls the
-    # Mem0 candidates from ``/api/memory/recent?session_id=...`` and shows
-    # them.  Idempotency guard: never overwrite an existing file, because
-    # the web flow writes a richer envelope with takeaway / reflection
-    # synthesized via a client-side LLM call.
     try:
         steps["recap"] = _write_offline_recap(
-            user_id, session_id, thread_id, session_metadata, len(messages),
+            user_id,
+            session_id,
+            thread_id,
+            session_metadata,
+            len(messages),
         )
     except Exception:
         logger.error(
-            "Pipeline step 'recap' failed for session %s", session_id, exc_info=True,
+            "Pipeline step 'recap' failed for session %s",
+            session_id,
+            exc_info=True,
         )
         steps["recap"] = "error"
 
     # ------------------------------------------------------------------
     # Step 6: Identity update
     # ------------------------------------------------------------------
-    try:
-        maybe_update_identity(user_id, extracted_memories)
-        steps["identity"] = "ok"
-    except Exception:
-        logger.error("Pipeline step 'identity' failed for session %s", session_id, exc_info=True)
-        steps["identity"] = "error"
+    if memory_flags.candidate_ledger_write:
+        steps["identity"] = "disabled_mem00_containment"
+    else:
+        try:
+            maybe_update_identity(user_id, extracted_memories)
+            steps["identity"] = "ok"
+        except Exception:
+            logger.error(
+                "Pipeline step 'identity' failed for session %s",
+                session_id,
+                exc_info=True,
+            )
+            steps["identity"] = "error"
 
     # ------------------------------------------------------------------
     # Step 7: Visual artifact check (placeholder)
@@ -402,7 +424,8 @@ def run_offline_pipeline(
         sessions_this_week = _count_placeholder_sessions()
         logger.info(
             "Visual artifact check: %d sessions this week (user=%s)",
-            sessions_this_week, user_id,
+            sessions_this_week,
+            user_id,
         )
         steps["visual_check"] = "ok"
     except Exception:
@@ -453,11 +476,7 @@ def _load_incremental_extraction_scope(user_id: str, session_id: str) -> dict[st
 
     last_processed = max(0, int(record.memory_processed_until_sequence or 0))
     current_max = max((message.sequence for message in visible_messages), default=0)
-    selected_messages = [
-        message
-        for message in visible_messages
-        if last_processed < message.sequence <= current_max
-    ]
+    selected_messages = [message for message in visible_messages if last_processed < message.sequence <= current_max]
     range_start = selected_messages[0].sequence if selected_messages else None
     range_end = selected_messages[-1].sequence if selected_messages else None
 
@@ -481,11 +500,7 @@ def _build_processing_key(
 ) -> str:
     if extraction_scope is None:
         return f"{session_id}:legacy:{len(messages)}"
-    return (
-        f"{session_id}:"
-        f"{extraction_scope['last_processed_sequence']}:"
-        f"{extraction_scope['current_max_sequence']}"
-    )
+    return f"{session_id}:{extraction_scope['last_processed_sequence']}:{extraction_scope['current_max_sequence']}"
 
 
 def _scope_range_for_result(extraction_scope: dict[str, Any] | None) -> dict[str, int | None] | None:
@@ -622,7 +637,9 @@ def _write_offline_recap(
     recap_path = safe_user_path(USERS_DIR, user_id, "recaps", f"{session_id}.json")
     if recap_path.exists():
         logger.info(
-            "Recap already exists for %s/%s — skipping offline write", user_id, session_id,
+            "Recap already exists for %s/%s — skipping offline write",
+            user_id,
+            session_id,
         )
         return "skipped_exists"
 
@@ -636,7 +653,9 @@ def _write_offline_recap(
     except Exception:
         logger.warning(
             "session.finalization recap_session_lookup_failed user=%s session=%s",
-            user_id, session_id, exc_info=True,
+            user_id,
+            session_id,
+            exc_info=True,
         )
 
     payload = {
@@ -657,7 +676,10 @@ def _write_offline_recap(
     recap_path.parent.mkdir(parents=True, exist_ok=True)
     recap_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     logger.info(
-        "Recap written for user %s session %s at %s", user_id, session_id, recap_path,
+        "Recap written for user %s session %s at %s",
+        user_id,
+        session_id,
+        recap_path,
     )
     return "ok"
 
@@ -671,18 +693,9 @@ def _build_session_metadata(thread_state: dict[str, Any]) -> dict[str, Any]:
     configurable = thread_state.get("configurable", {})
 
     return {
-        "platform": (
-            thread_state.get("platform")
-            or configurable.get("platform", "text")
-        ),
-        "context_mode": (
-            thread_state.get("context_mode")
-            or configurable.get("context_mode", "life")
-        ),
-        "ritual": (
-            thread_state.get("active_ritual")
-            or configurable.get("ritual")
-        ),
+        "platform": (thread_state.get("platform") or configurable.get("platform", "text")),
+        "context_mode": (thread_state.get("context_mode") or configurable.get("context_mode", "life")),
+        "ritual": (thread_state.get("active_ritual") or configurable.get("ritual")),
     }
 
 
@@ -718,11 +731,7 @@ def _flatten_content(content: Any) -> str:
     unchanged.
     """
     if isinstance(content, list):
-        return " ".join(
-            p.get("text", "")
-            for p in content
-            if isinstance(p, dict) and p.get("type") == "text"
-        )
+        return " ".join(p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text")
     return str(content or "")
 
 
@@ -757,10 +766,12 @@ def _serialize_messages(messages: list) -> list[dict]:
         else:
             role = getattr(msg, "type", "unknown")
             content = getattr(msg, "content", "")
-        result.append({
-            "role": _ROLE_MAP.get(role, role),
-            "content": _flatten_content(content),
-        })
+        result.append(
+            {
+                "role": _ROLE_MAP.get(role, role),
+                "content": _flatten_content(content),
+            }
+        )
     return result
 
 
@@ -782,9 +793,7 @@ def _build_session_summary(messages: list) -> str:
             role = getattr(msg, "type", "")
             content = getattr(msg, "content", "")
             if isinstance(content, list):
-                content = " ".join(
-                    p.get("text", "") for p in content if isinstance(p, dict)
-                )
+                content = " ".join(p.get("text", "") for p in content if isinstance(p, dict))
 
         content = str(content).strip()
         if not content:

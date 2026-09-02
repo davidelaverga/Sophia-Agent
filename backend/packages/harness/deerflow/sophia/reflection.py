@@ -76,7 +76,12 @@ def _gather_memories(user_id: str, query: str) -> str:
     try:
         from deerflow.sophia.mem0_client import search_memories
 
-        results = search_memories(user_id=user_id, query=query)
+        results = search_memories(
+            user_id=user_id,
+            query=query,
+            log_content_previews=False,
+            caller="reflection",
+        )
         if not results:
             return "(No memories available)"
         lines = []

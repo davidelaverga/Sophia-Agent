@@ -64,6 +64,14 @@ class SessionStateMiddleware(AgentMiddleware[SessionStateState]):
             log_middleware("SessionState", "skipped (crisis)", _t0)
             return None
 
+        from deerflow.sophia.memory_governance.flags import (
+            memory_feature_flags_for_owner,
+        )
+
+        if memory_feature_flags_for_owner(self._user_id).candidate_ledger_write:
+            log_middleware("SessionState", "disabled (MEM00 unversioned handoff)", _t0)
+            return None
+
         turn_count = state.get("turn_count", 0)
         if turn_count != 0:
             log_middleware("SessionState", "skipped (not turn 0)", _t0)
@@ -90,17 +98,12 @@ class SessionStateMiddleware(AgentMiddleware[SessionStateState]):
 
                 if is_greeting:
                     # Low-signal greeting → deliver the smart opener
-                    block = (
-                        "<first_turn_instruction>\n"
-                        f"This is the first turn of a new session. Open with: \"{opener}\"\n"
-                        "Deliver this as your opening line before the user says anything.\n"
-                        "</first_turn_instruction>"
-                    )
+                    block = f'<first_turn_instruction>\nThis is the first turn of a new session. Open with: "{opener}"\nDeliver this as your opening line before the user says anything.\n</first_turn_instruction>'
                 else:
                     # User led with real content → provide opener as context only
                     block = (
                         "<session_context>\n"
-                        f"Planned opener for this session: \"{opener}\"\n"
+                        f'Planned opener for this session: "{opener}"\n'
                         "However, the user already opened with something specific. "
                         "Respond to what they said. Use the opener context to inform "
                         "your understanding but do NOT deliver it as a greeting.\n"

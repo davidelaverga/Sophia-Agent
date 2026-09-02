@@ -24,6 +24,10 @@ type NormalizedMemory = {
   confidence?: number;
   reason?: string;
   metadata?: Record<string, unknown> | null;
+  candidate_revision?: number;
+  review_state?: string;
+  projection_state?: string;
+  authority?: string;
 };
 
 type GatewayMemoryListPayload = {
@@ -140,6 +144,16 @@ function normalizeGatewayMemory(memory: GatewayMemory): NormalizedMemory | null 
     confidence,
     reason,
     metadata,
+    candidate_revision: typeof metadata?.candidate_revision === 'number'
+      ? metadata.candidate_revision
+      : undefined,
+    review_state: typeof metadata?.review_state === 'string'
+      ? metadata.review_state
+      : undefined,
+    projection_state: typeof metadata?.projection_state === 'string'
+      ? metadata.projection_state
+      : undefined,
+    authority: typeof metadata?.authority === 'string' ? metadata.authority : undefined,
   };
 }
 

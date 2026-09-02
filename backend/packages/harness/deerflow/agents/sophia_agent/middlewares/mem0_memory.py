@@ -54,15 +54,9 @@ _VOICE_MEMORY_LIMIT = 4
 _DEFAULT_MEMORY_LIMIT = 10
 _VOICE_WARMUP_USER_ID = "__voice_warmup__"
 _QUERY_TOKEN_RE = re.compile(r"[a-z0-9']+")
-_VOICE_LOW_SIGNAL_RE = re.compile(
-    r"\b(thanks|thank you|appreciate it|got it|okay|ok|alright|all right|sounds good|that helps|helpful|nice|cool|wow|i see|makes sense)\b"
-)
-_VOICE_EXPLICIT_MEMORY_RE = re.compile(
-    r"\b(remember|remind me|what do you know|what do you remember|have i mentioned|last time we|patterns about me|my patterns|do i usually)\b"
-)
-_VOICE_CONTINUATION_RE = re.compile(
-    r"\b(actually|also|and|but|so|that|tell me more|could you|can you|what about|how about|go on|continue|wait)\b"
-)
+_VOICE_LOW_SIGNAL_RE = re.compile(r"\b(thanks|thank you|appreciate it|got it|okay|ok|alright|all right|sounds good|that helps|helpful|nice|cool|wow|i see|makes sense)\b")
+_VOICE_EXPLICIT_MEMORY_RE = re.compile(r"\b(remember|remind me|what do you know|what do you remember|have i mentioned|last time we|patterns about me|my patterns|do i usually)\b")
+_VOICE_CONTINUATION_RE = re.compile(r"\b(actually|also|and|but|so|that|tell me more|could you|can you|what about|how about|go on|continue|wait)\b")
 _QUERY_STOPWORDS = {
     "about",
     "actually",
@@ -139,19 +133,11 @@ class Mem0MemoryMiddleware(AgentMiddleware[Mem0MemoryState]):
 
     @staticmethod
     def _query_tokens(query: str) -> set[str]:
-        return {
-            token
-            for token in _QUERY_TOKEN_RE.findall(query.lower())
-            if len(token) >= 3
-        }
+        return {token for token in _QUERY_TOKEN_RE.findall(query.lower()) if len(token) >= 3}
 
     @staticmethod
     def _content_tokens(query: str) -> set[str]:
-        return {
-            token
-            for token in _QUERY_TOKEN_RE.findall(query.lower())
-            if len(token) >= 3 and token not in _QUERY_STOPWORDS
-        }
+        return {token for token in _QUERY_TOKEN_RE.findall(query.lower()) if len(token) >= 3 and token not in _QUERY_STOPWORDS}
 
     @staticmethod
     def _is_low_signal_voice_query(query: str) -> bool:
@@ -193,6 +179,12 @@ class Mem0MemoryMiddleware(AgentMiddleware[Mem0MemoryState]):
         query: str,
         turn_count: int | None,
     ) -> list[dict] | None:
+        from deerflow.sophia.memory_governance.flags import (
+            memory_feature_flags_for_owner,
+        )
+
+        if memory_feature_flags_for_owner(self._user_id).governed_runtime_read:
+            return None
         if platform not in ("voice", "ios_voice") or not thread_id:
             return None
 
@@ -239,11 +231,7 @@ class Mem0MemoryMiddleware(AgentMiddleware[Mem0MemoryState]):
                 return cached["results"]
 
             cached_turn_count = cached.get("turn_count")
-            if (
-                turn_count is not None
-                and cached_turn_count is not None
-                and turn_count - cached_turn_count < _VOICE_FAST_CACHE_RECENT_TURN_WINDOW
-            ):
+            if turn_count is not None and cached_turn_count is not None and turn_count - cached_turn_count < _VOICE_FAST_CACHE_RECENT_TURN_WINDOW:
                 logger.info(
                     "[Mem0Memory] voice recent-cache hit | thread_id=%s | reason=recent_turn_window | turn_delta=%s",
                     thread_id,
@@ -284,10 +272,18 @@ class Mem0MemoryMiddleware(AgentMiddleware[Mem0MemoryState]):
         results: list[dict],
         turn_count: int | None,
     ) -> None:
+        from deerflow.sophia.memory_governance.flags import (
+            memory_feature_flags_for_owner,
+        )
+
+        if memory_feature_flags_for_owner(self._user_id).governed_runtime_read:
+            return
         if platform not in ("voice", "ios_voice") or not thread_id or not results:
             logger.info(
                 "[Mem0Memory] fastcache_store_skipped | platform=%s | thread=%s | results=%d",
-                platform, (thread_id[:8] if thread_id else "-"), len(results) if results else 0,
+                platform,
+                (thread_id[:8] if thread_id else "-"),
+                len(results) if results else 0,
             )
             return
 
@@ -304,7 +300,9 @@ class Mem0MemoryMiddleware(AgentMiddleware[Mem0MemoryState]):
             size_after = len(_VOICE_FASTCACHE)
         logger.info(
             "[Mem0Memory] fastcache_stored | thread=%s | results=%d | cache_size=%d",
-            thread_id[:8], len(results), size_after,
+            thread_id[:8],
+            len(results),
+            size_after,
         )
 
     @override
@@ -329,7 +327,9 @@ class Mem0MemoryMiddleware(AgentMiddleware[Mem0MemoryState]):
         # Diagnostic: verify cache pre-conditions
         logger.info(
             "[Mem0Memory] cache_precheck | platform=%s | thread_id=%s | turn=%s",
-            platform, thread_id, turn_count,
+            platform,
+            thread_id,
+            turn_count,
         )
 
         categories = _select_categories(ritual, active_skill, messages, context_mode)
@@ -368,10 +368,20 @@ class Mem0MemoryMiddleware(AgentMiddleware[Mem0MemoryState]):
             )
             search_ms = 0.0
 
-        logger.info(
-            "[Mem0Memory] query='%s' | categories=%s | context_mode=%s | ritual=%s | skill=%s",
-            query[:80], categories, context_mode, ritual, active_skill,
+        from deerflow.sophia.memory_governance.flags import (
+            memory_feature_flags_for_owner,
         )
+
+        governed_runtime = memory_feature_flags_for_owner(self._user_id).governed_runtime_read
+        if not governed_runtime:
+            logger.info(
+                "[Mem0Memory] query='%s' | categories=%s | context_mode=%s | ritual=%s | skill=%s",
+                query[:80],
+                categories,
+                context_mode,
+                ritual,
+                active_skill,
+            )
 
         if results is None:
             _t_search = time.perf_counter()
@@ -382,6 +392,8 @@ class Mem0MemoryMiddleware(AgentMiddleware[Mem0MemoryState]):
                     categories=categories,
                     context_mode=context_mode,
                     limit=memory_limit,
+                    log_content_previews=not governed_runtime,
+                    caller="text_automatic_context" if platform not in ("voice", "ios_voice") else "voice_direct_fallback",
                 )
             except Exception:
                 logger.warning("Mem0 retrieval failed for user %s", self._user_id, exc_info=True)
@@ -409,15 +421,19 @@ class Mem0MemoryMiddleware(AgentMiddleware[Mem0MemoryState]):
             category_counts[cat] = category_counts.get(cat, 0) + 1
         logger.info(
             "[Mem0Memory] %d results | search: %.0fms | breakdown: %s",
-            len(results), search_ms,
+            len(results),
+            search_ms,
             " | ".join(f"{cat}: {count}" for cat, count in sorted(category_counts.items())),
         )
         # Log each memory's content preview for debugging
-        for i, mem in enumerate(results[:memory_limit]):
-            logger.debug(
-                "[Mem0Memory]   [%d] [%s] %s",
-                i, mem.get("category", "?"), (mem.get("content", ""))[:100],
-            )
+        if not governed_runtime:
+            for i, mem in enumerate(results[:memory_limit]):
+                logger.debug(
+                    "[Mem0Memory]   [%d] [%s] %s",
+                    i,
+                    mem.get("category", "?"),
+                    (mem.get("content", ""))[:100],
+                )
 
         # Format memories for prompt injection
         memory_lines = []

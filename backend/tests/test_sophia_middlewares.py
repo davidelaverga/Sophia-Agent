@@ -1838,6 +1838,8 @@ class TestRetrieveMemoriesTool:
                 categories=[],
                 context_mode=None,
                 limit=15,
+                log_content_previews=False,
+                caller="text_retrieval_tool",
             )
             assert "test memory" in result
 
@@ -1851,11 +1853,27 @@ class TestRetrieveMemoriesTool:
 
         with patch("deerflow.sophia.mem0_client.search_memories", return_value=[]) as mock_search:
             tool_a.invoke({"query": "q"})
-            mock_search.assert_called_with(user_id="user_A", query="q", categories=[], context_mode=None, limit=15)
+            mock_search.assert_called_with(
+                user_id="user_A",
+                query="q",
+                categories=[],
+                context_mode=None,
+                limit=15,
+                log_content_previews=False,
+                caller="text_retrieval_tool",
+            )
 
             mock_search.reset_mock()
             tool_b.invoke({"query": "q"})
-            mock_search.assert_called_with(user_id="user_B", query="q", categories=[], context_mode=None, limit=15)
+            mock_search.assert_called_with(
+                user_id="user_B",
+                query="q",
+                categories=[],
+                context_mode=None,
+                limit=15,
+                log_content_previews=False,
+                caller="text_retrieval_tool",
+            )
 
     def test_no_results_returns_message(self):
         from unittest.mock import patch

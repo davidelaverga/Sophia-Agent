@@ -116,6 +116,36 @@ describe('memory item route', () => {
     );
   });
 
+  it('routes revision-bound deletion through the canonical tombstone endpoint', async () => {
+    fetchSophiaApiMock.mockResolvedValue(new Response(JSON.stringify({
+      status: 'accepted_and_fenced',
+      provider_purge: 'purge_pending',
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+    const req = {
+      nextUrl: new URL('http://localhost:3000/api/memories/mem-123'),
+      json: async () => ({
+        expected_governance_revision: 4,
+        idempotency_key: 'journal-delete-operation',
+      }),
+    } as unknown as NextRequest;
+
+    const response = await deleteMemory(req, {
+      params: Promise.resolve({ memoryId: 'mem-123' }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(fetchSophiaApiMock).toHaveBeenCalledWith(
+      '/api/sophia/user-123/memories/mem-123/permanent-delete',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({
+          expected_governance_revision: 4,
+          idempotency_key: 'journal-delete-operation',
+        }),
+      }),
+    );
+  });
+
   it('forwards DELETE requests for local review memory ids', async () => {
     isSyntheticMemoryIdMock.mockReturnValue(true);
     fetchSophiaApiMock.mockResolvedValue(new Response(null, { status: 204 }));

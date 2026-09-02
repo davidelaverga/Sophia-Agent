@@ -44,6 +44,45 @@ services:
         sync: false
       - key: MEM0_API_KEY
         sync: false
+      # MEM00 uses the existing Mem0 organization/project only. The SDK receives
+      # both identities explicitly and refuses a mismatch with the canonical
+      # provider contract; these declarations do not create or change a project.
+      - key: MEM0_ORG_ID
+        sync: false
+      - key: MEM0_PROJECT_ID
+        sync: false
+      - key: SOPHIA_MEMORY_PROVIDER
+        value: mem0
+      - key: SOPHIA_MEMORY_PROVIDER_PROJECT
+        value: proj_q1I90sXEFJXjVt3Mvghj2P7nKEfzPvT9h0t9Ft3Z
+      - key: SOPHIA_MEMORY_PROVIDER_ENVIRONMENT
+        value: production
+      - key: SOPHIA_MEMORY_SUPPORTED_CONTRACT_EPOCH
+        value: "1"
+      - key: SOPHIA_MEMORY_REFERENCE_HMAC_SECRET
+        sync: false
+      - key: SOPHIA_MEMORY_CERTIFICATION_PRINCIPAL
+        sync: false
+      - key: SOPHIA_MEMORY_COHORT_PRINCIPALS
+        sync: false
+      - key: SOPHIA_MEMORY_CANDIDATE_LEDGER_WRITE
+        value: "false"
+      - key: SOPHIA_MEMORY_CANDIDATE_LEDGER_READ
+        value: "false"
+      - key: SOPHIA_MEMORY_CANONICAL_POOL_READ
+        value: "false"
+      - key: SOPHIA_MEMORY_PROVIDER_PROJECTION
+        value: "false"
+      - key: SOPHIA_MEMORY_GOVERNED_RUNTIME_READ
+        value: "false"
+      - key: SOPHIA_MEMORY_LEGACY_INVENTORY
+        value: "false"
+      - key: SOPHIA_MEMORY_LEGACY_IMPORT
+        value: "false"
+      - key: SOPHIA_MEMORY_FAULT_INJECTION
+        value: "false"
+      - key: SOPHIA_MEMORY_LANGSMITH_EXPORT
+        value: "false"
       - key: SOPHIA_SESSION_STORE
         value: supabase
       - key: SOPHIA_ARTIFACT_REGISTRY_STORE
@@ -157,6 +196,46 @@ services:
         sync: false
       - key: MEM0_API_KEY
         sync: false
+      # MEM00 Gateway authority/worker contract. These values mirror the
+      # LangGraph declarations above so routes, workers, and consumers cannot
+      # observe mixed provider/project/epoch state. All rollout gates remain
+      # false in the dark deployment.
+      - key: MEM0_ORG_ID
+        sync: false
+      - key: MEM0_PROJECT_ID
+        sync: false
+      - key: SOPHIA_MEMORY_PROVIDER
+        value: mem0
+      - key: SOPHIA_MEMORY_PROVIDER_PROJECT
+        value: proj_q1I90sXEFJXjVt3Mvghj2P7nKEfzPvT9h0t9Ft3Z
+      - key: SOPHIA_MEMORY_PROVIDER_ENVIRONMENT
+        value: production
+      - key: SOPHIA_MEMORY_SUPPORTED_CONTRACT_EPOCH
+        value: "1"
+      - key: SOPHIA_MEMORY_REFERENCE_HMAC_SECRET
+        sync: false
+      - key: SOPHIA_MEMORY_CERTIFICATION_PRINCIPAL
+        sync: false
+      - key: SOPHIA_MEMORY_COHORT_PRINCIPALS
+        sync: false
+      - key: SOPHIA_MEMORY_CANDIDATE_LEDGER_WRITE
+        value: "false"
+      - key: SOPHIA_MEMORY_CANDIDATE_LEDGER_READ
+        value: "false"
+      - key: SOPHIA_MEMORY_CANONICAL_POOL_READ
+        value: "false"
+      - key: SOPHIA_MEMORY_PROVIDER_PROJECTION
+        value: "false"
+      - key: SOPHIA_MEMORY_GOVERNED_RUNTIME_READ
+        value: "false"
+      - key: SOPHIA_MEMORY_LEGACY_INVENTORY
+        value: "false"
+      - key: SOPHIA_MEMORY_LEGACY_IMPORT
+        value: "false"
+      - key: SOPHIA_MEMORY_FAULT_INJECTION
+        value: "false"
+      - key: SOPHIA_MEMORY_LANGSMITH_EXPORT
+        value: "false"
       - key: SOPHIA_SESSION_STORE
         value: supabase
       - key: SOPHIA_ARTIFACT_REGISTRY_STORE

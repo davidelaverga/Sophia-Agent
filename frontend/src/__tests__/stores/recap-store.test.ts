@@ -37,6 +37,7 @@ describe('Recap Store', () => {
           id: 'candidate-1',
           text: 'I recover faster when I pause for breath.',
           category: 'emotional_patterns',
+          candidateRevision: 4,
         },
       ],
     });
@@ -57,6 +58,8 @@ describe('Recap Store', () => {
           decision: 'approve',
           text: 'I recover faster when I pause for breath.',
           category: 'emotional_patterns',
+          expected_candidate_revision: 4,
+          idempotency_key: expect.stringMatching(/^recap:session-1:candidate-1:4:/),
           source: 'recap',
           metadata: {
             session_type: 'open',

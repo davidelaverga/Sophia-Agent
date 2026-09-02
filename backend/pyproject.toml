@@ -33,7 +33,9 @@ dependencies = [
     "langgraph-sdk>=0.1.51",
     "deepagents>=0.6.0,<0.7.0",
     "markdown-to-mrkdwn>=0.3.1",
-    "mem0ai>=1.0.9",
+    # MEM00 pins the exact deployed provider contract. Do not widen this
+    # without a separately reviewed provider-modernization amendment.
+    "mem0ai==1.0.9",
     # Builder document-generation runtime.
     # These libraries are imported by skill scripts the builder executes
     # (ppt-generation, data-analysis, image-generation) and by any PDF/DOCX

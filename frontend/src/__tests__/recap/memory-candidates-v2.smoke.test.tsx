@@ -198,7 +198,7 @@ describe('Memory Candidates v2 smoke', () => {
             takeaway: 'Session takeaway',
             reflection_candidate: { prompt: 'Reflect', tag: 'growth' },
             memory_candidates: [
-              { id: 'mem-real', text: 'Real memory candidate', category: 'identity' },
+              { id: 'mem-real', text: 'Real memory candidate', category: 'identity', candidate_revision: 2 },
               { id: 'candidate-legacy-1', text: 'Legacy candidate', category: 'general' },
               { id: 'mem-fail', text: 'Will fail to delete', category: 'general' },
             ],
@@ -207,12 +207,15 @@ describe('Memory Candidates v2 smoke', () => {
         );
       }
 
-      if (url.endsWith('/api/memories/mem-real') && method === 'PUT') {
-        return new Response(JSON.stringify({ status: 'deleted' }), { status: 200, headers: { 'Content-Type': 'application/json' } });
-      }
-
-      if (url.endsWith('/api/memories/mem-fail') && method === 'PUT') {
-        return new Response(JSON.stringify({ error: 'failed' }), { status: 500, headers: { 'Content-Type': 'application/json' } });
+      if (url.endsWith('/api/memory/commit-candidates') && method === 'POST') {
+        const body = JSON.parse(String(init?.body || '{}'));
+        const candidateId = body.decisions?.[0]?.candidate_id;
+        if (candidateId === 'mem-real') {
+          return new Response(JSON.stringify({ committed: [], discarded: ['mem-real'], errors: [] }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+        }
+        if (candidateId === 'mem-fail') {
+          return new Response(JSON.stringify({ error: 'failed' }), { status: 500, headers: { 'Content-Type': 'application/json' } });
+        }
       }
 
       return new Response(JSON.stringify({ error: 'unexpected request' }), { status: 500 });
@@ -232,27 +235,35 @@ describe('Memory Candidates v2 smoke', () => {
     expect(renderState.container.textContent).not.toContain('Real memory candidate');
 
     const firstDiscardCalls = fetchMock.mock.calls.filter(([request, init]) =>
-      String(request).endsWith('/api/memories/mem-real') && (init?.method || 'GET') === 'PUT'
+      String(request).endsWith('/api/memory/commit-candidates')
+        && (init?.method || 'GET') === 'POST'
+        && JSON.parse(String(init?.body || '{}')).decisions?.[0]?.candidate_id === 'mem-real'
     );
     expect(firstDiscardCalls).toHaveLength(1);
     expect(firstDiscardCalls[0]?.[1]).toMatchObject({
-      method: 'PUT',
+      method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
     });
     expect(JSON.parse(String(firstDiscardCalls[0]?.[1]?.body))).toEqual({
-      metadata: {
-        status: 'discarded',
+      session_id: 'test-session',
+      decisions: [{
+        candidate_id: 'mem-real',
+        decision: 'discard',
+        text: 'Real memory candidate',
         category: 'identity',
-      },
+        source: 'recap',
+        expected_candidate_revision: 2,
+        idempotency_key: 'recap-discard:test-session:mem-real:2',
+      }],
     });
 
     await clickButton(findButtonByAria(renderState.container, 'Let this memory go'));
     await advanceTimers(700);
 
     const legacyDiscardCalls = fetchMock.mock.calls.filter(([request, init]) =>
-      String(request).includes('/api/memories/candidate-legacy-1') && (init?.method || 'GET') === 'PUT'
+      String(request).includes('candidate-legacy-1') && (init?.method || 'GET') === 'POST'
     );
     expect(legacyDiscardCalls).toHaveLength(0);
 

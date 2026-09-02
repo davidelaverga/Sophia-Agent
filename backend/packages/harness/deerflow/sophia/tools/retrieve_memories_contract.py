@@ -52,34 +52,14 @@ _NO_RESULTS_GUIDANCE = (
     "treat it as current-session knowledge unless offline memory writeback later "
     "confirms persistence. Do not promise to remember it permanently."
 )
-_UNAVAILABLE_GUIDANCE = (
-    "Memory retrieval is unavailable right now. Do not say the memory does not "
-    "exist or that you do not remember; say you cannot check stored memory at the "
-    "moment and continue from setup or current-session context."
-)
-_ERROR_GUIDANCE = (
-    "Memory retrieval failed right now. Do not expose provider details, do not say "
-    "the memory does not exist, and do not pretend to remember. Say you cannot "
-    "check stored memory at the moment."
-)
-_INVALID_QUERY_GUIDANCE = (
-    "Ask the user for a clearer memory question if needed. Do not search again "
-    "with a vague query and do not guess as if it were stored memory."
-)
+_UNAVAILABLE_GUIDANCE = "Memory retrieval is unavailable right now. Do not say the memory does not exist or that you do not remember; say you cannot check stored memory at the moment and continue from setup or current-session context."
+_ERROR_GUIDANCE = "Memory retrieval failed right now. Do not expose provider details, do not say the memory does not exist, and do not pretend to remember. Say you cannot check stored memory at the moment."
+_INVALID_QUERY_GUIDANCE = "Ask the user for a clearer memory question if needed. Do not search again with a vague query and do not guess as if it were stored memory."
 RETRIEVE_MEMORIES_GUIDANCE = _SUCCESS_GUIDANCE
 
-_NO_RESULTS_MESSAGE = (
-    "No relevant stored memories were found. Ask the user directly if the missing "
-    "context matters."
-)
-_UNAVAILABLE_MESSAGE = (
-    "Memory retrieval is unavailable right now. Continue using the current "
-    "conversation context."
-)
-_INVALID_QUERY_MESSAGE = (
-    "Memory retrieval needs a specific non-empty query. Ask the user directly if "
-    "the missing context matters."
-)
+_NO_RESULTS_MESSAGE = "No relevant stored memories were found. Ask the user directly if the missing context matters."
+_UNAVAILABLE_MESSAGE = "Memory retrieval is unavailable right now. Continue using the current conversation context."
+_INVALID_QUERY_MESSAGE = "Memory retrieval needs a specific non-empty query. Ask the user directly if the missing context matters."
 _NULL_LIKE_STRINGS = {"", "null", "none", "undefined", "n/a", "na", "(none)"}
 _WHITESPACE_RE = re.compile(r"\s+")
 
@@ -197,9 +177,7 @@ def redacted_retrieve_memories_diagnostic(response: Mapping[str, Any]) -> dict[s
         "provider_status": str(response.get("provider_status") or safe_diagnostics.get("provider_status") or "unknown"),
         "provider_reason": str(response.get("provider_reason") or safe_diagnostics.get("provider_reason") or "unknown"),
         "trusted_user_id_source": str(response.get("trusted_user_id_source") or "unknown"),
-        "ignored_model_arg_names": [
-            str(name) for name in response.get("ignored_model_arg_names") or [] if isinstance(name, str)
-        ],
+        "ignored_model_arg_names": [str(name) for name in response.get("ignored_model_arg_names") or [] if isinstance(name, str)],
         "raw_memory_text_excluded": True,
         "raw_query_excluded": True,
         "diagnostics": safe_diagnostics,
@@ -289,13 +267,18 @@ def _retrieve_memories_core(
         raw_results, search_diagnostics = _extract_search_result(raw_search_result)
     except Exception as exc:
         provider_reason = _exception_reason(exc, fallback="provider_exception")
-        status = "unavailable" if provider_reason in {
-            "missing_api_key",
-            "missing_mem0_sdk",
-            "missing_httpx",
-            "client_unavailable",
-            "client_initialization_failed",
-        } else "error"
+        status = (
+            "unavailable"
+            if provider_reason
+            in {
+                "missing_api_key",
+                "missing_mem0_sdk",
+                "missing_httpx",
+                "client_unavailable",
+                "client_initialization_failed",
+            }
+            else "error"
+        )
         return _status_response(
             ok=False,
             status=status,
@@ -381,10 +364,7 @@ def _status_response(
     if include_guidance:
         response["guidance"] = _guidance_for_status(status)
     if include_guidance and status == "success":
-        response["answer_hint"] = (
-            "The memories are ranked. For a specific recall question, answer from "
-            "the highest-ranked returned memory that directly matches the user's question."
-        )
+        response["answer_hint"] = "The memories are ranked. For a specific recall question, answer from the highest-ranked returned memory that directly matches the user's question."
     result_fingerprints = _result_fingerprints(result_memories, query=query)
     query_terms = _query_terms(query)
     response["diagnostics"] = {
@@ -403,9 +383,7 @@ def _status_response(
         "provider_reason": provider_reason,
         "cache_status": cache_status,
         "internal_category_count": len(categories),
-        "result_categories": [
-            memory["category"] for memory in result_memories if isinstance(memory.get("category"), str)
-        ],
+        "result_categories": [memory["category"] for memory in result_memories if isinstance(memory.get("category"), str)],
         "result_text_lengths": [len(str(memory.get("text") or "")) for memory in result_memories],
         "result_fingerprints": result_fingerprints,
         "result_preview_included": False,
@@ -415,9 +393,7 @@ def _status_response(
             (fingerprint["query_terms_matched_count"] for fingerprint in result_fingerprints),
             default=0,
         ),
-        "any_result_exact_query_terms_present": any(
-            bool(fingerprint["exact_query_terms_present"]) for fingerprint in result_fingerprints
-        ),
+        "any_result_exact_query_terms_present": any(bool(fingerprint["exact_query_terms_present"]) for fingerprint in result_fingerprints),
     }
     if provider_transport:
         response["diagnostics"]["provider_transport"] = provider_transport
@@ -538,11 +514,7 @@ def _result_fingerprints(memories: list[dict[str, Any]], *, query: str) -> list[
 
 def _query_terms(query: str) -> set[str]:
     normalized = _normalize_for_fingerprint(query)
-    return {
-        term
-        for term in re.findall(r"[a-z0-9']+", normalized)
-        if len(term) >= 3 and term not in _QUERY_STOPWORDS
-    }
+    return {term for term in re.findall(r"[a-z0-9']+", normalized) if len(term) >= 3 and term not in _QUERY_STOPWORDS}
 
 
 def _matched_query_terms(query_terms: set[str], text: str) -> set[str]:
@@ -670,13 +642,7 @@ def _safe_result_fingerprints(value: Any) -> list[dict[str, Any]]:
     for item in value:
         if not isinstance(item, Mapping):
             continue
-        fingerprints.append(
-            {
-                key: _safe_diagnostic_value(item[key])
-                for key in _SAFE_RESULT_FINGERPRINT_KEYS
-                if key in item
-            }
-        )
+        fingerprints.append({key: _safe_diagnostic_value(item[key]) for key in _SAFE_RESULT_FINGERPRINT_KEYS if key in item})
     return fingerprints
 
 
@@ -686,11 +652,7 @@ def _safe_diagnostic_value(value: Any) -> Any:
     if isinstance(value, list):
         return [_safe_diagnostic_value(item) for item in value]
     if isinstance(value, Mapping):
-        return {
-            str(key): _safe_diagnostic_value(item)
-            for key, item in value.items()
-            if isinstance(key, str)
-        }
+        return {str(key): _safe_diagnostic_value(item) for key, item in value.items() if isinstance(key, str)}
     return str(value)
 
 
@@ -763,6 +725,7 @@ def _default_realtime_search_memories(
         limit=limit,
         log_content_previews=False,
         raise_on_error=True,
+        caller="voice_retrieval_tool",
     )
 
 
@@ -782,4 +745,6 @@ def _default_text_search_memories(
         categories=categories,
         context_mode=context_mode,
         limit=limit,
+        log_content_previews=False,
+        caller="text_retrieval_tool",
     )

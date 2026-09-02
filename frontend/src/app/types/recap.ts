@@ -72,6 +72,14 @@ export interface MemoryCandidateV1 {
   
   /** Why Sophia suggests this memory (for trust UI) */
   reason?: string;
+
+  /** Canonical candidate-ledger revision used for stale-tab fencing. */
+  candidateRevision?: number;
+
+  /** Server-owned review/projection state; display only, never authority. */
+  reviewState?: string;
+  projectionState?: string;
+  authority?: string;
 }
 
 // =============================================================================
@@ -96,6 +104,9 @@ export interface MemoryDecisionState {
   decision: MemoryDecision;
   status: MemoryDecisionStatus;
   editedText?: string;
+  expectedCandidateRevision?: number;
+  category?: string;
+  idempotencyKey?: string;
   errorMessage?: string;
   timestamp: string;
 }
@@ -133,6 +144,10 @@ export interface BackendArtifactsPayload {
     confidence?: number;
     reason?: string;
     source?: string;
+    candidate_revision?: number;
+    review_state?: string;
+    projection_state?: string;
+    authority?: string;
   }>;
   signals?: {
     top_emotions?: string[];
@@ -157,6 +172,8 @@ export interface CommitMemoriesRequest {
       session_type?: string;
       preset?: string;
     };
+    expected_candidate_revision?: number;
+    idempotency_key?: string;
   }>;
 }
 

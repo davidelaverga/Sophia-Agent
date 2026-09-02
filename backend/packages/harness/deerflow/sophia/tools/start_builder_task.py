@@ -89,6 +89,7 @@ def _validate_user_id(user_id: str) -> str:
 
     return validate_user_id(user_id)
 
+
 logger = logging.getLogger(__name__)
 
 __all__ = [
@@ -264,9 +265,7 @@ _MAX_SLUG_SOURCE_CHARS = 60
 # ``view_image_tool(image_path="...gif")`` call. If upstream ever adds
 # GIF support, add it here AND verify the builder briefing wording in
 # ``BuilderTaskMiddleware`` still matches.
-_BUILDER_COPY_IMAGE_EXTENSIONS: frozenset[str] = frozenset(
-    {".jpg", ".jpeg", ".png", ".webp"}
-)
+_BUILDER_COPY_IMAGE_EXTENSIONS: frozenset[str] = frozenset({".jpg", ".jpeg", ".png", ".webp"})
 
 
 # Strict allow-list for filenames that may be copied into the builder's
@@ -497,9 +496,7 @@ def _match_is_topical_pdf_mention(text: str, match: re.Match[str]) -> bool:
     return bool(_TOPICAL_PDF_CONTEXT_BEFORE_RE.search(prefix))
 
 
-def _first_affirmative_match(
-    pattern: re.Pattern[str], text: str, *, source_veto: bool = False
-) -> re.Match[str] | None:
+def _first_affirmative_match(pattern: re.Pattern[str], text: str, *, source_veto: bool = False) -> re.Match[str] | None:
     """First hit that is neither negated nor source-positioned."""
     for match in pattern.finditer(text):
         prefix = text[max(0, match.start() - _NEGATION_LOOKBACK_CHARS) : match.start()]
@@ -525,9 +522,7 @@ def _first_affirmative_match(
     return None
 
 
-def _pattern_affirmative_match(
-    pattern: re.Pattern[str], text: str, *, source_veto: bool = False
-) -> bool:
+def _pattern_affirmative_match(pattern: re.Pattern[str], text: str, *, source_veto: bool = False) -> bool:
     """True when ``pattern`` has at least one hit that survives vetoes."""
     return _first_affirmative_match(pattern, text, source_veto=source_veto) is not None
 
@@ -557,9 +552,7 @@ def _document_or_report_precedes_topical_presentation_word(
     obj_end = obj_match.end()
     search_start = max(obj_end, pptx_match.start())
     search_end = max(search_start, pptx_match.end())
-    presentation_word = _PRESENTATION_FORMAT_WORD_RE.search(
-        text, search_start, search_end
-    )
+    presentation_word = _PRESENTATION_FORMAT_WORD_RE.search(text, search_start, search_end)
     if presentation_word is None:
         return False
     bridge = text[obj_end : presentation_word.start()]
@@ -568,14 +561,8 @@ def _document_or_report_precedes_topical_presentation_word(
     return True
 
 
-def _missing_presentation_rule_was_negated(
-    reason: str, text: str, vetoed: list[str]
-) -> bool:
-    return (
-        reason == "explicit_presentation_deck"
-        and "explicit_presentation_deck" not in vetoed
-        and _has_negated_presentation_format_mention(text)
-    )
+def _missing_presentation_rule_was_negated(reason: str, text: str, vetoed: list[str]) -> bool:
+    return reason == "explicit_presentation_deck" and "explicit_presentation_deck" not in vetoed and _has_negated_presentation_format_mention(text)
 
 
 def _pdf_source_precedes_pptx_output(
@@ -598,17 +585,12 @@ def _extension_from_affirmative_pattern(
     reason: str,
     pattern: re.Pattern[str],
 ) -> tuple[str, str] | None:
-    match = _first_affirmative_match(
-        pattern, text, source_veto=reason in _SOURCE_VETO_RULES
-    )
+    match = _first_affirmative_match(pattern, text, source_veto=reason in _SOURCE_VETO_RULES)
     if match is None:
         return None
-    if (
-        reason == "explicit_presentation_deck"
-        and _document_or_report_precedes_topical_presentation_word(
-            text,
-            pptx_match=match,
-        )
+    if reason == "explicit_presentation_deck" and _document_or_report_precedes_topical_presentation_word(
+        text,
+        pptx_match=match,
     ):
         # Topical presentation/deck mention inside a document/report request: VETO
         # this PPTX match and keep scanning the remaining explicit-format patterns
@@ -631,11 +613,7 @@ def _requested_output_extension_match_with_vetoes(
         return "pdf", "explicit_pdf_deck_deliverable", vetoed
     pdf_match = _first_affirmative_match(_PDF_OUTPUT_RE, text, source_veto=True)
     pptx_match = _first_affirmative_match(_PPTX_OUTPUT_RE, text, source_veto=True)
-    if (
-        pdf_match is not None
-        and (pptx_match is None or pdf_match.start() <= pptx_match.start())
-        and not _pdf_source_precedes_pptx_output(text, pdf_match, pptx_match)
-    ):
+    if pdf_match is not None and (pptx_match is None or pdf_match.start() <= pptx_match.start()) and not _pdf_source_precedes_pptx_output(text, pdf_match, pptx_match):
         if _has_negated_presentation_format_mention(text):
             vetoed.append("explicit_presentation_deck")
         return "pdf", "explicit_pdf_deliverable", vetoed
@@ -690,12 +668,8 @@ def _resolve_target_format(
     description: str | None,
     task_type: str | None,
 ) -> _TargetFormatResolution:
-    user_ext, user_rule, user_vetoed = _requested_output_extension_match_with_vetoes(
-        current_user_text
-    )
-    context_ext, context_rule, context_vetoed = _requested_output_extension_match_with_vetoes(
-        description
-    )
+    user_ext, user_rule, user_vetoed = _requested_output_extension_match_with_vetoes(current_user_text)
+    context_ext, context_rule, context_vetoed = _requested_output_extension_match_with_vetoes(description)
     vetoed = tuple(dict.fromkeys([*user_vetoed, *context_vetoed]))
     if user_ext:
         return _TargetFormatResolution(
@@ -731,11 +705,7 @@ def _suggest_artifact_filename(
     description: str | None,
     ext_override: str | None = None,
 ) -> str:
-    ext = (
-        ext_override
-        or _requested_output_extension(description)
-        or _TASK_TYPE_EXTENSIONS.get(task_type or "", "md")
-    )
+    ext = ext_override or _requested_output_extension(description) or _TASK_TYPE_EXTENSIONS.get(task_type or "", "md")
     if ext == "pdf" and isinstance(description, str) and _SIMPLE_PRODUCT_REVIEW_RE.search(description):
         return "simple-product-review.pdf"
     slug = _slugify_for_filename(description or _FALLBACK_TASK_SLUG)
@@ -753,7 +723,7 @@ def _suggest_artifact_target_path(
 def _rewrite_output_artifact_prefix(cleaned: str) -> str | None:
     for prefix, canonical_prefix in _OUTPUT_PATH_PREFIX_REWRITES:
         if cleaned.startswith(prefix):
-            return f"{canonical_prefix}{cleaned[len(prefix):]}"
+            return f"{canonical_prefix}{cleaned[len(prefix) :]}"
     return None
 
 
@@ -829,13 +799,7 @@ def _builder_task_candidate_ids(
     requested_task_id: str | None,
 ) -> list[str]:
     task_ids = [requested_task_id] if requested_task_id else []
-    task_ids.extend(
-        str(key)
-        for key, value in tasks.items()
-        if isinstance(value, dict)
-        and value.get("agent_name") == _ASYNC_BUILDER_AGENT_NAME
-        and str(key) not in task_ids
-    )
+    task_ids.extend(str(key) for key, value in tasks.items() if isinstance(value, dict) and value.get("agent_name") == _ASYNC_BUILDER_AGENT_NAME and str(key) not in task_ids)
     return [candidate for candidate in task_ids if candidate]
 
 
@@ -1162,10 +1126,7 @@ def _resolve_companion_artifact(
         ("previous_artifact", state.get("previous_artifact"), "previous_artifact_state"),
     )
 
-    diagnostics = {
-        f"{name}_present": _artifact_payload_present(payload)
-        for name, payload, _source in artifacts
-    }
+    diagnostics = {f"{name}_present": _artifact_payload_present(payload) for name, payload, _source in artifacts}
     for _name, payload, source in artifacts:
         if isinstance(payload, dict) and payload:
             return dict(payload), source, diagnostics
@@ -1380,9 +1341,7 @@ def _build_enriched_description(
     # the conversation's build-relevant substance into the brief. Placed
     # directly after the description, before memories.
     if delegation_digest:
-        sections.append(
-            f"Conversation decisions relevant to this build:\n{delegation_digest}"
-        )
+        sections.append(f"Conversation decisions relevant to this build:\n{delegation_digest}")
 
     if memory_snippets:
         formatted = "\n".join(f"- {m}" for m in memory_snippets[:5])
@@ -1464,11 +1423,7 @@ def _visual_expectations_line(
             "into the image), plus at most one visual asset inside the HTML slide shell; "
             f"minimal/plain wording means restrained design, not a non-visual workflow.{style_note}"
         )
-    return (
-        "Visual expectations: create a polished, visual artifact. Use generated "
-        "imagery for hero/section/illustrative assets when useful; use charts "
-        f"and Excalidraw-style diagrams for factual visuals.{style_note}"
-    )
+    return f"Visual expectations: create a polished, visual artifact. Use generated imagery for hero/section/illustrative assets when useful; use charts and Excalidraw-style diagrams for factual visuals.{style_note}"
 
 
 def _build_delegation_context(
@@ -1691,9 +1646,7 @@ def _select_copyable_images(
             continue
         if not _SAFE_COPY_FILENAME.match(f.name):
             logger.warning(
-                "[Builder] skipping image with unsafe filename %r from parent thread %s — "
-                "name contains characters outside the [A-Za-z0-9._-] allow-list "
-                "(prompt-injection guard).",
+                "[Builder] skipping image with unsafe filename %r from parent thread %s — name contains characters outside the [A-Za-z0-9._-] allow-list (prompt-injection guard).",
                 f.name,
                 parent_thread_id,
             )
@@ -1713,9 +1666,7 @@ def _select_copyable_images(
             continue
         if size > max_bytes:
             logger.warning(
-                "[Builder] skipping oversized image %s (%d bytes > %d cap) "
-                "from parent thread %s — the builder's vision tool would "
-                "trip Anthropic's request-size limit.",
+                "[Builder] skipping oversized image %s (%d bytes > %d cap) from parent thread %s — the builder's vision tool would trip Anthropic's request-size limit.",
                 f.name,
                 size,
                 max_bytes,
@@ -1881,9 +1832,7 @@ def _copy_parent_uploaded_images(
     # may not exist yet on this container. Scoped to the current-turn
     # whitelist; ``None`` (legacy callers / tests) skips the fetch.
     if current_turn_attachments:
-        _materialize_current_turn_images_from_supabase(
-            parent_thread_id, parent_uploads, current_turn_attachments
-        )
+        _materialize_current_turn_images_from_supabase(parent_thread_id, parent_uploads, current_turn_attachments)
 
     if not parent_uploads.is_dir():
         return []
@@ -1936,9 +1885,7 @@ def _synthetic_admission_metadata(
     """Return the exact safe identity persisted on a synthetic task thread."""
 
     if not isinstance(parent_thread_id, str) or not parent_thread_id.strip():
-        raise SyntheticBuilderContextError(
-            "synthetic_builder_parent_thread_id_invalid"
-        )
+        raise SyntheticBuilderContextError("synthetic_builder_parent_thread_id_invalid")
     projection = synthetic_builder_projection(context)
     return {
         "synthetic": True,
@@ -1957,14 +1904,10 @@ def _synthetic_thread_ttl_minutes(context: dict[str, Any]) -> int:
     try:
         expiry = dt.datetime.fromisoformat(raw_expiry.replace("Z", "+00:00"))
     except ValueError:
-        raise SyntheticBuilderContextError(
-            "synthetic_builder_retention_invalid"
-        ) from None
+        raise SyntheticBuilderContextError("synthetic_builder_retention_invalid") from None
     if expiry.tzinfo is None:
         expiry = expiry.replace(tzinfo=dt.UTC)
-    remaining_seconds = (
-        expiry.astimezone(dt.UTC) - dt.datetime.now(dt.UTC)
-    ).total_seconds()
+    remaining_seconds = (expiry.astimezone(dt.UTC) - dt.datetime.now(dt.UTC)).total_seconds()
     if remaining_seconds < 60 or remaining_seconds > 7 * 24 * 60 * 60:
         raise SyntheticBuilderContextError("synthetic_builder_retention_invalid")
     # LangGraph TTLs are minute-granular. Floor to avoid extending the
@@ -1999,9 +1942,7 @@ async def _synthetic_cleanup_obligation_admission_barrier(
             resource_id=resource_id,
         )
     except CleanupFenceError as exc:
-        raise SyntheticBuilderContextError(
-            "synthetic_builder_cleanup_obligation_closed"
-        ) from exc
+        raise SyntheticBuilderContextError("synthetic_builder_cleanup_obligation_closed") from exc
     yield admission
 
 
@@ -2015,19 +1956,10 @@ async def _synthetic_builder_run_commit_barrier(
     """Serialize the final metadata check + run create with CLOSED."""
 
     cleanup_id = admission.cleanup_obligation_id
-    dsn = (
-        os.getenv("SOPHIA_VOICE_LAB_AUTH_DATABASE_URL")
-        or os.getenv("BETTER_AUTH_DATABASE_URL")
-        or ""
-    ).strip()
+    dsn = (os.getenv("SOPHIA_VOICE_LAB_AUTH_DATABASE_URL") or os.getenv("BETTER_AUTH_DATABASE_URL") or "").strip()
     if not dsn:
-        if (
-            (os.getenv("RENDER") or "").strip().lower() == "true"
-            or bool((os.getenv("RENDER_SERVICE_ID") or "").strip())
-        ):
-            raise SyntheticBuilderContextError(
-                "synthetic_builder_cleanup_barrier_unavailable"
-            )
+        if (os.getenv("RENDER") or "").strip().lower() == "true" or bool((os.getenv("RENDER_SERVICE_ID") or "").strip()):
+            raise SyntheticBuilderContextError("synthetic_builder_cleanup_barrier_unavailable")
         lock = _LOCAL_SYNTHETIC_CLEANUP_BARRIERS.setdefault(
             cleanup_id,
             asyncio.Lock(),
@@ -2039,9 +1971,7 @@ async def _synthetic_builder_run_commit_barrier(
             )
 
             if not await asyncio.to_thread(cleanup_admission_authorized, admission):
-                raise SyntheticBuilderContextError(
-                    "synthetic_builder_cleanup_obligation_closed"
-                )
+                raise SyntheticBuilderContextError("synthetic_builder_cleanup_obligation_closed")
             await asyncio.to_thread(
                 assert_cleanup_obligation_open,
                 cleanup_id,
@@ -2087,9 +2017,7 @@ async def _synthetic_builder_run_commit_barrier(
                 ),
             )
             if await result.fetchone() is None:
-                raise SyntheticBuilderContextError(
-                    "synthetic_builder_cleanup_obligation_closed"
-                )
+                raise SyntheticBuilderContextError("synthetic_builder_cleanup_obligation_closed")
             yield
     finally:
         await connection.close()
@@ -2115,8 +2043,7 @@ async def _discard_unverified_synthetic_thread(
         await client.threads.delete(thread_id)
     except Exception as exc:  # noqa: BLE001 - TTL still bounds the empty thread.
         logger.error(
-            "[Builder] could not confirm removal of an unverified synthetic "
-            "thread; bounded TTL remains (error_type=%s)",
+            "[Builder] could not confirm removal of an unverified synthetic thread; bounded TTL remains (error_type=%s)",
             type(exc).__name__,
         )
         return False
@@ -2182,9 +2109,7 @@ async def _dispatch_via_asgi_unfenced(
             durable_thread = await client.threads.get(thread_id)
         except Exception as exc:  # noqa: BLE001 - do not allocate a run.
             await _discard_unverified_synthetic_thread(client, thread_id)
-            raise RuntimeError(
-                "synthetic_builder_admission_unverified"
-            ) from exc
+            raise RuntimeError("synthetic_builder_admission_unverified") from exc
         if not _thread_has_exact_synthetic_admission(
             durable_thread,
             synthetic_admission,
@@ -2209,11 +2134,7 @@ async def _dispatch_via_asgi_unfenced(
             edit_context=edit_context,
         )
         description = (
-            f"{description}\n\n"
-            "[Runtime materialization]\n"
-            f"The source artifact is available inside this builder sandbox at "
-            f"`{materialized_edit_context['materialized_source_path']}`. "
-            "Read that file before writing the revised deliverable."
+            f"{description}\n\n[Runtime materialization]\nThe source artifact is available inside this builder sandbox at `{materialized_edit_context['materialized_source_path']}`. Read that file before writing the revised deliverable."
         )
 
     # ``parent_thread_id`` and ``parent_user_id`` are also embedded in
@@ -2243,11 +2164,7 @@ async def _dispatch_via_asgi_unfenced(
         )
     except (TypeError, ValueError):
         max_wall_clock_seconds = 0
-    deadline_epoch_ms = (
-        kickoff_ms + max_wall_clock_seconds * 1000
-        if max_wall_clock_seconds > 0
-        else 0
-    )
+    deadline_epoch_ms = kickoff_ms + max_wall_clock_seconds * 1000 if max_wall_clock_seconds > 0 else 0
     build_id = new_build_id()
     operation_id = new_operation_id()
     delegation_with_parent["build_id"] = build_id
@@ -2306,9 +2223,7 @@ async def _dispatch_via_asgi_unfenced(
         # time — explicit is safe.
         "graph_id": _ASYNC_BUILDER_AGENT_NAME,
         "task_type": task_type,
-        "artifact_target_ext": Path(
-            str(delegation_context.get("artifact_target_path") or "")
-        ).suffix.lower(),
+        "artifact_target_ext": Path(str(delegation_context.get("artifact_target_path") or "")).suffix.lower(),
         "build_id": build_id,
         "operation_id": operation_id,
     }
@@ -2353,12 +2268,8 @@ async def _dispatch_via_asgi_unfenced(
                 raise RuntimeError("synthetic_builder_cleanup_admission_missing")
             async with _synthetic_builder_run_commit_barrier(
                 synthetic_cleanup_admission,
-                retention_expires_at=str(
-                    synthetic_context.get("retention_expires_at") or ""
-                ),
-                provider_expires_at=str(
-                    synthetic_context.get("provider_expires_at") or ""
-                ),
+                retention_expires_at=str(synthetic_context.get("retention_expires_at") or ""),
+                provider_expires_at=str(synthetic_context.get("provider_expires_at") or ""),
             ):
                 durable_thread = await client.threads.get(thread_id)
                 if not _thread_has_exact_synthetic_admission(
@@ -2435,9 +2346,7 @@ async def _dispatch_via_asgi(
 
     cleanup_obligation_id = synthetic_context.get("cleanup_obligation_id")
     if not isinstance(cleanup_obligation_id, str):
-        raise SyntheticBuilderContextError(
-            "synthetic_builder_cleanup_obligation_id_invalid"
-        )
+        raise SyntheticBuilderContextError("synthetic_builder_cleanup_obligation_id_invalid")
     requested_thread_id = str(uuid.uuid4())
     async with _synthetic_cleanup_obligation_admission_barrier(
         cleanup_obligation_id,
@@ -2461,9 +2370,7 @@ async def _dispatch_via_asgi(
                 cleanup_admission_authorized,
                 cleanup_admission,
             ):
-                raise SyntheticBuilderContextError(
-                    "synthetic_builder_cleanup_obligation_closed"
-                )
+                raise SyntheticBuilderContextError("synthetic_builder_cleanup_obligation_closed")
             _synthetic_thread_ttl_minutes(synthetic_context)
         except BaseException:
             cleanup_confirmed = await _discard_synthetic_builder_allocation(
@@ -2595,23 +2502,14 @@ async def _start_builder_task_impl(
     # would orphan the just-created LangGraph thread/run: the lifecycle
     # tools resolve tasks from ``state["async_tasks"]`` which we wouldn't
     # have written. Refuse to launch instead.
-    tool_call_id = (
-        runtime.tool_call_id
-        if runtime is not None and getattr(runtime, "tool_call_id", None)
-        else ""
-    )
+    tool_call_id = runtime.tool_call_id if runtime is not None and getattr(runtime, "tool_call_id", None) else ""
     if not tool_call_id:
         logger.error(
-            "[Builder] %s invoked without tool_call_id "
-            "(runtime=%s); refusing to launch (would orphan the builder run).",
+            "[Builder] %s invoked without tool_call_id (runtime=%s); refusing to launch (would orphan the builder run).",
             tool_name,
             "missing" if runtime is None else "runtime present but tool_call_id empty",
         )
-        return (
-            "Cannot launch builder task right now: tool_call_id was not "
-            "available on the tool runtime. No background work was started; "
-            "safe to retry."
-        )
+        return "Cannot launch builder task right now: tool_call_id was not available on the tool runtime. No background work was started; safe to retry."
 
     raw_state = runtime.state if runtime is not None else {}
     if raw_state is None:
@@ -2624,18 +2522,10 @@ async def _start_builder_task_impl(
             getattr(runtime, "config", None),
         )
     except SyntheticBuilderContextError:
-        logger.warning(
-            "[Builder] refusing synthetic dispatch with incomplete isolation identity"
-        )
-        return (
-            "Cannot launch builder task: synthetic_builder_identity_invalid. "
-            "No background work was started."
-        )
+        logger.warning("[Builder] refusing synthetic dispatch with incomplete isolation identity")
+        return "Cannot launch builder task: synthetic_builder_identity_invalid. No background work was started."
     if synthetic_context is not None and edit_context is not None:
-        return (
-            "Cannot launch builder edit: synthetic_builder_project_edit_excluded. "
-            "No background work was started."
-        )
+        return "Cannot launch builder edit: synthetic_builder_project_edit_excluded. No background work was started."
 
     trace_id = _runtime_trace_id(runtime)
 
@@ -2652,23 +2542,21 @@ async def _start_builder_task_impl(
             f"Pick the lifecycle tool that matches the user's intent, then emit_artifact "
             f"ONCE with a short ack and end the turn:\n"
             f"- Modify scope (add/remove/change section, length, format): "
-            f"update_async_task(task_id=\"{existing_task_id}\", message=<delta as builder instructions>) "
-            f"→ ack like \"Got it, updating the build to include X.\"\n"
-            f"- Status / progress check: check_async_task(task_id=\"{existing_task_id}\") "
-            f"→ ack like \"Let me check on it now.\"\n"
-            f"- User wants to stop the build: cancel_async_task(task_id=\"{existing_task_id}\") "
-            f"→ ack like \"Got it, cancelling the build now.\"\n"
+            f'update_async_task(task_id="{existing_task_id}", message=<delta as builder instructions>) '
+            f'→ ack like "Got it, updating the build to include X."\n'
+            f'- Status / progress check: check_async_task(task_id="{existing_task_id}") '
+            f'→ ack like "Let me check on it now."\n'
+            f'- User wants to stop the build: cancel_async_task(task_id="{existing_task_id}") '
+            f'→ ack like "Got it, cancelling the build now."\n'
             f"- User referenced multiple tasks: list_async_tasks() "
             f"(no status_filter — pending and interrupted are also active; let the "
-            f"caller see all builds) → ack like \"Pulling up your in-flight builds.\"\n"
+            f'caller see all builds) → ack like "Pulling up your in-flight builds."\n'
             f"Use the FULL task_id verbatim — never truncate. Do not respond in plain text "
             f"without calling one of these. Never chain two lifecycle tools on the same turn."
         )
 
     if synthetic_context is None:
-        companion_artifact, artifact_source, artifact_diagnostics = (
-            _resolve_companion_artifact(state)
-        )
+        companion_artifact, artifact_source, artifact_diagnostics = _resolve_companion_artifact(state)
     else:
         # Synthetic tests may not inherit an ordinary user-owned project or
         # artifact. New isolated deliverables are allowed; edit admission is
@@ -2682,14 +2570,8 @@ async def _start_builder_task_impl(
         configured_user_id=configured_user_id,
         explicit_tool_arg=user_id_arg,
     )
-    if (
-        synthetic_context is not None
-        and user_id != synthetic_context["test_principal_id"]
-    ):
-        return (
-            "Cannot launch builder task: synthetic_builder_principal_mismatch. "
-            "No background work was started."
-        )
+    if synthetic_context is not None and user_id != synthetic_context["test_principal_id"]:
+        return "Cannot launch builder task: synthetic_builder_principal_mismatch. No background work was started."
     handoff_resolution = {
         "user_id_source": user_id_source,
         "artifact_source": artifact_source,
@@ -2697,15 +2579,9 @@ async def _start_builder_task_impl(
         **artifact_diagnostics,
     }
 
-    active_ritual = (
-        state.get("active_ritual") if synthetic_context is None else None
-    )
-    ritual_phase = (
-        state.get("ritual_phase") if synthetic_context is None else None
-    )
-    memory_snippets = (
-        _resolve_memory_snippets(state) if synthetic_context is None else []
-    )
+    active_ritual = state.get("active_ritual") if synthetic_context is None else None
+    ritual_phase = state.get("ritual_phase") if synthetic_context is None else None
+    memory_snippets = _resolve_memory_snippets(state) if synthetic_context is None else []
 
     # Resolve the literal current turn before demo normalization.  Stale
     # companion state must never replace a concrete deliverable brief, and an
@@ -2726,10 +2602,7 @@ async def _start_builder_task_impl(
         edit_context=edit_context,
         companion_artifact=companion_artifact,
         current_user_text=current_user_text,
-        explicit_output_ext=(
-            live_format_resolution.user_requested_ext
-            or live_format_resolution.context_inferred_ext
-        ),
+        explicit_output_ext=(live_format_resolution.user_requested_ext or live_format_resolution.context_inferred_ext),
     )
     format_resolution = _resolve_target_format(
         current_user_text=current_user_text,
@@ -2757,19 +2630,13 @@ async def _start_builder_task_impl(
     # normalization and policy/budget derivation, so every downstream surface
     # agrees on the same live-request truth.
     override_path = _canonical_output_artifact_path(artifact_target_path_override)
-    if (
-        override_path
-        and format_resolution.user_requested_ext
-        and Path(override_path).suffix.lower().lstrip(".") != format_resolution.user_requested_ext
-    ):
+    if override_path and format_resolution.user_requested_ext and Path(override_path).suffix.lower().lstrip(".") != format_resolution.user_requested_ext:
         # Edit flows derive the override from the SOURCE artifact's path; an
         # explicit current-turn format ask ("make this an actual PDF") is a
         # conversion/rebuild, not "continue editing this .pptx" — re-suffix
         # the target to the user's format. The materialized source stays
         # readable in the sandbox either way.
-        override_path = str(
-            Path(override_path).with_suffix(f".{format_resolution.user_requested_ext}")
-        )
+        override_path = str(Path(override_path).with_suffix(f".{format_resolution.user_requested_ext}"))
         format_resolution = _TargetFormatResolution(
             final_ext=format_resolution.user_requested_ext,
             rule=format_resolution.rule,
@@ -2778,15 +2645,9 @@ async def _start_builder_task_impl(
             context_inferred_ext=format_resolution.context_inferred_ext,
             vetoed_rules=format_resolution.vetoed_rules,
         )
-    artifact_target_path = override_path or _suggest_artifact_target_path(
-        task_type, description, ext_override=format_resolution.final_ext
-    )
+    artifact_target_path = override_path or _suggest_artifact_target_path(task_type, description, ext_override=format_resolution.final_ext)
     target_ext = Path(artifact_target_path).suffix.lower().lstrip(".")
-    target_ext_source = (
-        format_resolution.rule
-        if override_path is None or format_resolution.source == "current_user_turn_conversion"
-        else "explicit_target_override"
-    )
+    target_ext_source = format_resolution.rule if override_path is None or format_resolution.source == "current_user_turn_conversion" else "explicit_target_override"
     parent_thread_id = _resolve_thread_id(runtime)
     parent_model = _runtime_parent_model(runtime)
 
@@ -2798,9 +2659,7 @@ async def _start_builder_task_impl(
         cost_model_key=parent_model,
     )
 
-    delegation_digest, delegation_ledger_stats, dispatched_at_turn = _resolve_dispatch_digest(
-        state, user_id, parent_thread_id
-    )
+    delegation_digest, delegation_ledger_stats, dispatched_at_turn = _resolve_dispatch_digest(state, user_id, parent_thread_id)
 
     enriched_description = _build_enriched_description(
         description,
@@ -3031,11 +2890,7 @@ async def _edit_builder_artifact_impl(
 
     existing_task_id = _has_active_builder_task(state)
     if existing_task_id:
-        return (
-            f"A builder task is still active (task_id={existing_task_id}). "
-            "For an active build modification, call update_async_task with that task_id. "
-            "edit_builder_artifact is only for completed artifacts."
-        )
+        return f"A builder task is still active (task_id={existing_task_id}). For an active build modification, call update_async_task with that task_id. edit_builder_artifact is only for completed artifacts."
 
     source = _resolve_edit_source_artifact(
         state,
@@ -3043,11 +2898,7 @@ async def _edit_builder_artifact_impl(
         task_id=task_id,
     )
     if source is None:
-        return (
-            "Cannot edit a completed builder artifact yet because no durable source artifact "
-            "path is available in this session. Ask the user which file to edit, or start a "
-            "fresh build only if they clearly want a rebuild."
-        )
+        return "Cannot edit a completed builder artifact yet because no durable source artifact path is available in this session. Ask the user which file to edit, or start a fresh build only if they clearly want a rebuild."
 
     source_path = str(source["artifact_path"])
     revision_path = _revision_artifact_path(source_path, message)
