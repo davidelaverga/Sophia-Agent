@@ -9,7 +9,9 @@
 
 'use client';
 
-import { useCallback, useState } from 'react';
+import { useCallback, useLayoutEffect, useState } from 'react';
+
+import { authBypassEnabled } from '../lib/auth/dev-bypass';
 
 import { AuthGate } from './AuthGate';
 import { ConsentGate } from './ConsentGate';
@@ -20,8 +22,32 @@ interface ProtectedRouteProps {
   skipConsent?: boolean;
 }
 
+const CONSENT_CACHE_KEY = 'sophia_consent_accepted';
+
+function hasCachedConsent(): boolean {
+  if (typeof window === 'undefined') return false;
+
+  try {
+    return window.localStorage.getItem(CONSENT_CACHE_KEY) === 'true';
+  } catch {
+    return false;
+  }
+}
+
 export function ProtectedRoute({ children, skipConsent = false }: ProtectedRouteProps) {
   const [isConsentReady, setIsConsentReady] = useState(skipConsent);
+
+  // ConsentGate deliberately renders nothing when the durable consent cache is
+  // already satisfied, then announces readiness from a passive effect. A
+  // client-route recovery can otherwise commit an authenticated but empty
+  // protected shell when another passive effect aborts that handoff. Resolve
+  // the same durable signal in a layout effect so protected content is released
+  // before paint without making the server and hydration renders disagree.
+  useLayoutEffect(() => {
+    if (!isConsentReady && (skipConsent || authBypassEnabled || hasCachedConsent())) {
+      setIsConsentReady(true);
+    }
+  }, [isConsentReady, skipConsent]);
 
   const handleConsentReady = useCallback(() => {
     setIsConsentReady(true);
