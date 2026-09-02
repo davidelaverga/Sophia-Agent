@@ -739,6 +739,8 @@ type StartupPushState = {
   active: boolean;
   overflow: boolean;
   queue: StartupPushEnvelope[];
+  voiceActivationArmed: boolean;
+  voiceActivationPage: Page | null;
 };
 
 const PAGE_PUSH_BINDING_NAME = "__sophiaVoiceLabPushV1";
@@ -1166,18 +1168,35 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
     const bootstrapStorageState = storageState === undefined
       ? undefined
       : isolateBootstrapStorageState(storageState);
-    const startupPush: StartupPushState = { active: true, overflow: false, queue: [] };
+    const startupPush: StartupPushState = {
+      active: true,
+      overflow: false,
+      queue: [],
+      voiceActivationArmed: false,
+      voiceActivationPage: null,
+    };
     const installPushBinding = async (targetContext: BrowserContext): Promise<void> => {
       await targetContext.exposeBinding(PAGE_PUSH_BINDING_NAME, (source, raw: unknown) => {
-        if (!startupPush.active || raw === null || typeof raw !== "object" || Array.isArray(raw)) return;
+        if (!startupPush.active || raw === null || typeof raw !== "object" || Array.isArray(raw)) return undefined;
         const envelope = raw as Record<string, unknown>;
-        if (envelope.schema !== "sophia_voice_lab_page_push_v1"
-          || (envelope.channel !== "harness" && envelope.channel !== "product")) return;
+        if (envelope.schema !== "sophia_voice_lab_page_push_v1") return undefined;
+        if (envelope.channel === "control") {
+          const payload = envelope.payload;
+          const activationRequested = payload !== null && typeof payload === "object" && !Array.isArray(payload)
+            && (payload as Record<string, unknown>).kind === "harness.voice_control_activation_request";
+          return {
+            authorized: activationRequested
+              && startupPush.voiceActivationArmed
+              && source.page === startupPush.voiceActivationPage,
+          };
+        }
+        if (envelope.channel !== "harness" && envelope.channel !== "product") return undefined;
         if (startupPush.queue.length >= MAX_STARTUP_PUSH_EVENTS) {
           startupPush.overflow = true;
-          return;
+          return undefined;
         }
         startupPush.queue.push({ page: source.page, channel: envelope.channel, payload: envelope.payload });
+        return undefined;
       });
     };
     let context = await browser.newContext({ ...(bootstrapStorageState === undefined ? {} : { storageState: bootstrapStorageState as any }), serviceWorkers: "block" });
@@ -1273,6 +1292,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       effectProbeStatus.preloaded_candidates = Math.min(32, preloadedPassiveEffectBreakpoints.length);
       await enterStage("frontend_home_navigation");
       let activePage = await context.newPage();
+      startupPush.voiceActivationPage = activePage;
       page = activePage;
       const attachPageDiagnostics = (targetPage: Page): void => {
         targetPage.on("pageerror", (error) => {
@@ -1609,6 +1629,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
         });
         context = replacement.context;
         activePage = replacement.page;
+        startupPush.voiceActivationPage = replacement.page;
         page = replacement.page;
         session.context = replacement.context;
         session.page = replacement.page;
@@ -1652,6 +1673,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
           });
           context = replacement.context;
           activePage = replacement.page;
+          startupPush.voiceActivationPage = replacement.page;
           page = replacement.page;
           session.context = replacement.context;
           session.page = replacement.page;
@@ -1685,12 +1707,18 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       const activateVoiceStart = async () => {
         voiceStartAttempt += 1;
         const recovering = voiceStartAttempt > 1;
+        startupPush.voiceActivationArmed = false;
         await enterStage("voice_tab_selection");
         await establishSessionVoiceTab(
           activePage,
           recovering ? SESSION_VOICE_RECOVERY_TAB_TIMEOUT_MS : SESSION_VOICE_INITIAL_TAB_TIMEOUT_MS,
         );
         await enterStage("voice_start_button");
+        // All route/tab renderer commands have acknowledged. Authorize only
+        // the exact active page; its already-running init harness will settle
+        // this binding response and schedule the native click in a later page
+        // task, leaving no worker-issued renderer command across media startup.
+        startupPush.voiceActivationArmed = true;
         // The page-owned init harness observes and activates the exact visible,
         // enabled native button once. Waiting only on its already-pushed receipt
         // avoids issuing any renderer command after media startup begins.

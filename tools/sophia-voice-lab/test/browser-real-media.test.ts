@@ -215,9 +215,12 @@ describe("real Chromium dynamic media contract", () => {
 
   it("uses the page-owned harness to activate the exact ordinary voice button once", async () => {
     const pushed: Array<Record<string, any>> = [];
+    let activationAuthorized = false;
     const context = await browser.newContext();
     await context.exposeBinding("__sophiaVoiceLabPushV1", (_source, raw: Record<string, any>) => {
+      if (raw?.channel === "control") return { authorized: activationAuthorized };
       pushed.push(raw);
+      return undefined;
     });
     await context.addInitScript({ content: buildVoiceLabInitScript({
       pageOrigin: origin,
@@ -241,6 +244,9 @@ describe("real Chromium dynamic media contract", () => {
       }
     });
 
+    await new Promise((resolve) => setTimeout(resolve, 125));
+    expect(await page.evaluate(() => (window as any).__voiceActivations)).toBe(0);
+    activationAuthorized = true;
     await expect.poll(() => pushed.some((entry) => entry?.payload?.kind === "harness.voice_control_activation_scheduled")).toBe(true);
     await expect.poll(() => page.evaluate(() => (window as any).__voiceActivations)).toBe(1);
     await page.evaluate(() => document.querySelector('button')?.setAttribute('class', 'settled'));
