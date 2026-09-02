@@ -203,6 +203,19 @@ async function createFixture(drift: Drift): Promise<Fixture> {
     content_type: "application/json",
     byte_length: manifestBytes.byteLength,
   };
+  const observationReceipt = {
+    schema: "sophia_voice_lab_observation_receipt_v1",
+    run_id: runId,
+    test_run_id: testRunId,
+    scenario_id: "V-P01",
+    scenario_version: "vt00.scenarios.v1",
+    deployment_identity_sha256: sha256(JSON.stringify(expectedDeployment)),
+    event_seq: 55,
+    turn_id: "turn-product-1",
+    observation_class: "assistant_result",
+    issued_at: new Date(base.getTime() + 3_000).toISOString(),
+    receipt_sha256: sha256("p01-observation-receipt"),
+  };
 
   const tools = ["get_capabilities", "start_voice_run", "wait_for_turn", "speak", "wait_for_turn", "speak", "wait_for_turn", "inspect_voice_run", "end_voice_run", "export_voice_evidence"];
   const argumentsList: Record<string, unknown>[] = [
@@ -229,7 +242,10 @@ async function createFixture(drift: Drift): Promise<Fixture> {
       run_id: runId,
       text: "Clarify that result in one sentence.",
       idempotency_key: "p01-adaptive-speak",
-      adaptive_observation: { event_seq: 55, turn_id: "turn-product-1", observation_class: "assistant_result", followup_intent: "clarify" },
+      expected_cursor: 55,
+      expected_provider_epoch: 1,
+      expected_turn_id: "turn-product-1",
+      adaptive_observation: { receipt: observationReceipt, followup_intent: "clarify" },
       timing_policy: { delay_ms: 0, schedule_timeout_ms: 10_000 },
     },
     { run_id: runId, after_cursor: 55, condition: "assistant_turn_complete", timeout_ms: 10_000 },
@@ -244,7 +260,7 @@ async function createFixture(drift: Drift): Promise<Fixture> {
     { replay: false, submission_outcome: "durably_accepted", operation_state: "accepted" },
     { condition_satisfied: true },
     { replay: false, submission_outcome: "durably_accepted", operation_state: "succeeded" },
-    { condition_satisfied: true, matched: [{ seq: 55, turn_id: "turn-product-1" }] },
+    { condition_satisfied: true, matched: [{ seq: 55, turn_id: "turn-product-1" }], observation_receipts: [observationReceipt] },
     { replay: false, submission_outcome: "durably_accepted", operation_state: "succeeded" },
     { condition_satisfied: true },
     { run_state: "active" },
@@ -267,6 +283,7 @@ async function createFixture(drift: Drift): Promise<Fixture> {
       run_id: index === 0 ? null : runId,
       operation_id: operations.get(index) ?? null,
       status: statuses[index],
+      provider_connection_epoch: index === 4 ? 1 : null,
       deployment_identity: { expected: expectedDeployment, observed: expectedDeployment },
       evidence_references: index >= 8 ? [manifestReference] : [],
       data: data[index],

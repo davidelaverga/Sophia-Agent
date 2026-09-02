@@ -593,6 +593,40 @@ describe("service and durable memory-ledger contracts", () => {
     expect(followup.input.adaptive_observation).toMatchObject({ event_seq: turn.seq, turn_id: "turn-a01-1", followup_intent: "clarify" });
   });
 
+  it("mints and verifies one service-authenticated V-P01 observation receipt", async () => {
+    const run = testRun({ scenarioId: "V-P01", state: "ready" });
+    await ledger.createRunWithOperation(run, startOperation(run), { global: 1, caller: 1 });
+    const start = await ledger.claimNextOperation("p01-receipt-worker", 30);
+    await ledger.markOperationExecuting(start!.operation.id, "p01-receipt-worker", start!.operation.leaseEpoch);
+    await ledger.finishOperation(start!.operation.id, "p01-receipt-worker", start!.operation.leaseEpoch, "succeeded", {}, null);
+    await ledger.upsertBrowserLease(run.id, "p01-receipt-worker", 60);
+    const first = await ledger.createOperation({ id: randomUUID(), runId: run.id, callerId: caller.subject, type: "speak", idempotencyKey: "p01-first", requestHash: sha256("p01-first"), input: { text: "initial utterance" } });
+    const claimedFirst = await ledger.claimNextOperation("p01-receipt-worker", 30);
+    await ledger.markOperationExecuting(claimedFirst!.operation.id, "p01-receipt-worker", claimedFirst!.operation.leaseEpoch);
+    await ledger.finishOperation(claimedFirst!.operation.id, "p01-receipt-worker", claimedFirst!.operation.leaseEpoch, "succeeded", { schedule_receipt: {} }, null);
+    expect(claimedFirst!.operation.id).toBe(first.operation.id);
+    const binding = { app_authenticated: true, synthetic: true, test_run_id_sha256: sha256(run.testRunId), cleanup_obligation_id_sha256: sha256(run.cleanupObligationId), principal_id_sha256: sha256(run.principalId), environment: run.environment, scenario_id: run.scenarioId, scenario_version: run.scenarioVersion, retention_hours: run.capturePolicy.retentionHours, provider_expires_at: run.expiresAt.toISOString() };
+    const turn = await ledger.appendEvent(run.id, "product.voice-sse.sophia.turn", "product", { _product_run_binding: binding, data: { phase: "agent_ended", turnId: "turn-p01-1" } });
+    await ledger.appendEvent(run.id, "provider.connection_epoch", "product", { receipt: { providerConnectionEpoch: 7 } });
+    const beforeFollowup = await ledger.getRun(run.id);
+    await ledger.updateRun(run.id, beforeFollowup!.version, { providerEpoch: 7, turnId: "turn-p01-1" });
+    const waited = await service.waitForTurn(caller, { run_id: run.id, after_cursor: 0, condition: "assistant_turn_complete", timeout_ms: 100 });
+    const receipts = waited.data.observation_receipts as Array<Record<string, unknown>>;
+    expect(receipts).toHaveLength(1);
+    expect(receipts[0]).toMatchObject({ schema: "sophia_voice_lab_observation_receipt_v1", run_id: run.id, test_run_id: run.testRunId, scenario_id: "V-P01", scenario_version: "vt00.scenarios.v1", event_seq: turn.seq, turn_id: "turn-p01-1", observation_class: "assistant_turn_complete" });
+    expect(receipts[0]!.deployment_identity_sha256).toMatch(/^[a-f0-9]{64}$/);
+    expect(receipts[0]!.receipt_sha256).toMatch(/^[a-f0-9]{64}$/);
+    const current = await ledger.getRun(run.id);
+    await expect(service.speak(caller, { run_id: run.id, text: "tampered follow-up", idempotency_key: "p01-tampered", expected_cursor: current!.latestCursor, expected_provider_epoch: 7, expected_turn_id: "turn-p01-1", adaptive_observation: { receipt: { ...receipts[0], receipt_sha256: "0".repeat(64) }, followup_intent: "clarify" }, timing_policy: { schedule_timeout_ms: 100 } })).rejects.toMatchObject({ detail: { code: "ADAPTIVE_OBSERVATION_INTEGRITY_FAILED" } });
+    const followupInput = { run_id: run.id, text: "receipt-bound follow-up", idempotency_key: "p01-receipt-followup", expected_cursor: current!.latestCursor, expected_provider_epoch: 7, expected_turn_id: "turn-p01-1", adaptive_observation: { receipt: receipts[0], followup_intent: "clarify" }, timing_policy: { schedule_timeout_ms: 100 } };
+    const accepted = await service.speak(caller, followupInput);
+    expect(accepted).toMatchObject({ status: "timeout", data: { replay: false, submission_outcome: "durably_accepted" } });
+    const postAccepted = await ledger.getRun(run.id);
+    await expect(service.speak(caller, { ...followupInput, idempotency_key: "p01-receipt-reuse", expected_cursor: postAccepted!.latestCursor })).rejects.toMatchObject({ detail: { code: "P01_UTTERANCE_LIMIT" } });
+    const replay = await service.speak(caller, followupInput);
+    expect(replay).toMatchObject({ operation_id: accepted.operation_id, status: "timeout", data: { replay: true, submission_outcome: "idempotent_replay" } });
+  });
+
   it("bounded-waits in end so the next and final export call deterministically returns evidence", async () => {
     const run = testRun({ state: "active" });
     await ledger.createRunWithOperation(run, startOperation(run), { global: 1, caller: 1 });

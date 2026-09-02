@@ -489,12 +489,18 @@ function validateAndDeriveCalls(items: readonly z.infer<typeof McpToolItemSchema
   }
   const firstSpeak = toolInputSchemas.speak.parse(items[3]!.arguments);
   const adaptiveSpeak = toolInputSchemas.speak.parse(items[5]!.arguments);
-  if (firstSpeak.adaptive_observation !== undefined || adaptiveSpeak.adaptive_observation === undefined) throw new Error("P01 adaptive follow-up was not derived only after the first observation.");
+  if (firstSpeak.adaptive_observation !== undefined || adaptiveSpeak.adaptive_observation === undefined || !("receipt" in adaptiveSpeak.adaptive_observation)) throw new Error("P01 adaptive follow-up was not derived from one typed service receipt after the first observation.");
   const observationEnvelope = envelopes[4]!;
   const matchedEvents = Array.isArray(observationEnvelope.data.matched) ? observationEnvelope.data.matched : [];
-  const exactObservation = matchedEvents.some((entry) => isRecord(entry) && entry.seq === adaptiveSpeak.adaptive_observation!.event_seq
-    && (entry.turn_id === adaptiveSpeak.adaptive_observation!.turn_id || isRecord(entry.payload) && entry.payload.turn_id === adaptiveSpeak.adaptive_observation!.turn_id));
-  if (!exactObservation) throw new Error("P01 adaptive speak did not bind the exact event/turn returned by call five.");
+  const returnedReceipts = Array.isArray(observationEnvelope.data.observation_receipts) ? observationEnvelope.data.observation_receipts : [];
+  const receipt = adaptiveSpeak.adaptive_observation.receipt;
+  const exactObservation = matchedEvents.some((entry) => isRecord(entry) && entry.seq === receipt.event_seq
+    && (entry.turn_id === receipt.turn_id || isRecord(entry.payload) && (entry.payload.turn_id === receipt.turn_id || isRecord(entry.payload.data) && entry.payload.data.turnId === receipt.turn_id)));
+  if (returnedReceipts.length !== 1 || canonicalRequestHash(returnedReceipts[0]) !== canonicalRequestHash(receipt) || !exactObservation
+    || receipt.run_id !== runId || receipt.test_run_id !== testRunId || receipt.scenario_id !== "V-P01" || receipt.scenario_version !== "vt00.scenarios.v1"
+    || adaptiveSpeak.expected_cursor === undefined || adaptiveSpeak.expected_cursor < receipt.event_seq
+    || adaptiveSpeak.expected_provider_epoch === undefined || adaptiveSpeak.expected_provider_epoch !== observationEnvelope.provider_connection_epoch
+    || adaptiveSpeak.expected_turn_id !== receipt.turn_id) throw new Error("P01 adaptive speak did not bind the exact authenticated event/turn receipt and current execution preconditions returned by call five.");
   const endManifest = exactManifestReference(envelopes[8]!);
   const exportManifest = exactManifestReference(envelopes[9]!);
   if (canonicalRequestHash(endManifest) !== canonicalRequestHash(exportManifest)) throw new Error("P01 end and export did not return the identical immutable manifest.");

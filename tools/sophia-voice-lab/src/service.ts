@@ -1,4 +1,4 @@
-import { createPublicKey, randomUUID, verify as verifySignature } from "node:crypto";
+import { createHmac, createPublicKey, randomUUID, timingSafeEqual, verify as verifySignature } from "node:crypto";
 
 import { z } from "zod";
 
@@ -43,12 +43,36 @@ const AudioInputSchema = z.object({
   fixture_id: z.string().min(1).max(128).regex(/^[A-Za-z0-9._:-]+$/).optional(),
 }).refine((value) => Number(value.text !== undefined) + Number(value.fixture_id !== undefined) === 1, "Exactly one of text or fixture_id is required.");
 
-const AdaptiveObservationSchema = z.object({
+const FollowupIntentSchema = z.enum(["clarify", "deepen", "verify", "redirect", "summarize"]);
+const ObservationClassSchema = z.enum(["assistant_turn_complete", "assistant_question", "assistant_result", "assistant_uncertainty", "assistant_commitment"]);
+
+const LegacyAdaptiveObservationSchema = z.object({
   event_seq: z.number().int().positive(),
   turn_id: z.string().min(1).max(128).regex(/^[A-Za-z0-9._:-]+$/),
-  observation_class: z.enum(["assistant_turn_complete", "assistant_question", "assistant_result", "assistant_uncertainty", "assistant_commitment"]),
-  followup_intent: z.enum(["clarify", "deepen", "verify", "redirect", "summarize"]),
+  observation_class: ObservationClassSchema,
+  followup_intent: FollowupIntentSchema,
 }).strict();
+
+const ObservationReceiptSchema = z.object({
+  schema: z.literal("sophia_voice_lab_observation_receipt_v1"),
+  run_id: RunIdSchema,
+  test_run_id: RunIdSchema,
+  scenario_id: z.literal("V-P01"),
+  scenario_version: z.literal(SCENARIO_CATALOG_VERSION),
+  deployment_identity_sha256: z.string().regex(/^[a-f0-9]{64}$/),
+  event_seq: z.number().int().positive(),
+  turn_id: z.string().min(1).max(128).regex(/^[A-Za-z0-9._:-]+$/),
+  observation_class: ObservationClassSchema,
+  issued_at: z.string().datetime({ offset: true }),
+  receipt_sha256: z.string().regex(/^[a-f0-9]{64}$/),
+}).strict();
+
+const P01AdaptiveObservationSchema = z.object({
+  receipt: ObservationReceiptSchema,
+  followup_intent: FollowupIntentSchema,
+}).strict();
+
+const AdaptiveObservationSchema = z.union([LegacyAdaptiveObservationSchema, P01AdaptiveObservationSchema]);
 
 const SpeakSchema = z.object({
   run_id: RunIdSchema,
@@ -474,6 +498,19 @@ function publicSpeakArgumentHash(operation: OperationRecord | undefined): string
   if (!parsed.success || parsed.data.run_id !== operation.runId || parsed.data.idempotency_key !== operation.idempotencyKey
     || canonicalRequestHash(parsed.data) !== canonicalRequestHash(publicInput)) return null;
   return canonicalRequestHash(publicInput);
+}
+
+function p01ObservationReceiptMac(secret: string, receipt: Omit<z.infer<typeof ObservationReceiptSchema>, "receipt_sha256">): string {
+  return createHmac("sha256", secret)
+    .update("sophia-voice-lab-observation-receipt-v1\n", "utf8")
+    .update(canonicalRequestHash(receipt), "ascii")
+    .digest("hex");
+}
+
+function p01ObservationReceiptMacMatches(secret: string, receipt: z.infer<typeof ObservationReceiptSchema>): boolean {
+  const { receipt_sha256: actual, ...core } = receipt;
+  const expected = p01ObservationReceiptMac(secret, core);
+  return timingSafeEqual(Buffer.from(actual, "hex"), Buffer.from(expected, "hex"));
 }
 
 function publicP01OperationArgumentHash(operation: OperationRecord): string | null {
@@ -1400,10 +1437,13 @@ export class VoiceLabService {
     // provider work. Ownership is checked first, so this does not become a
     // fixture-enumeration side channel for unrelated callers.
     const reservation = await reserveAudioInput(input, await this.fixtures(), this.config);
-    await this.assertInputPreconditions(caller, input.run_id, input);
     const run = await this.ownedRun(caller, input.run_id);
-    await this.assertAdaptiveObservation(run, input);
     const operationInput = { ...(input as unknown as Record<string, unknown>), _admission: reservation };
+    const existing = (await this.ledger.listOperations(run.id)).find((operation) => operation.type === "speak" && operation.idempotencyKey === input.idempotency_key);
+    if (!existing) {
+      await this.assertInputPreconditions(caller, input.run_id, input);
+      await this.assertAdaptiveObservation(run, input);
+    }
     const rolling = this.rollingAudioFence(run, caller.subject, "speak", input.idempotency_key, operationInput, reservation);
     const accepted = await this.queueRunOperation(caller, input.run_id, "speak", input.idempotency_key, operationInput, true, rolling);
     return this.awaitSchedulingReceipt(caller, accepted, input.timing_policy?.schedule_timeout_ms ?? 10_000);
@@ -1602,7 +1642,10 @@ export class VoiceLabService {
       if (returnedEvents.length > 500) returnedEvents.splice(0, returnedEvents.length - 500);
       if (page.events.length > 0) scanCursor = page.events.at(-1)!.seq;
       if (matches.length > 0) {
-        return envelope({ run, after: input.after_cursor, status: TERMINAL_RUN_STATES.has(run.state) ? "completed" : "ok", data: { condition: input.condition, condition_satisfied: true, matched: matches.map((event) => publicEvent(event, run.id, run.testRunId)), events: returnedEvents, terminal: TERMINAL_RUN_STATES.has(run.state), scanned_event_count: scanned, scan_cursor: scanCursor } });
+        const observationReceipts = run.scenarioId === "V-P01"
+          ? matches.map((event) => this.mintP01ObservationReceipt(run, event)).filter((receipt) => receipt !== null)
+          : [];
+        return envelope({ run, after: input.after_cursor, status: TERMINAL_RUN_STATES.has(run.state) ? "completed" : "ok", data: { condition: input.condition, condition_satisfied: true, matched: matches.map((event) => publicEvent(event, run.id, run.testRunId)), ...(observationReceipts.length > 0 ? { observation_receipts: observationReceipts } : {}), events: returnedEvents, terminal: TERMINAL_RUN_STATES.has(run.state), scanned_event_count: scanned, scan_cursor: scanCursor } });
       }
       if (TERMINAL_RUN_STATES.has(run.state)) {
         return envelope({ run, after: input.after_cursor, status: "unavailable", warnings: [{ code: "CONDITION_UNMATCHED_TERMINAL", message: "Run became terminal without the requested exact observation." }], retryability: "not_retryable", data: { condition: input.condition, condition_satisfied: false, matched: [], events: returnedEvents, terminal: true, scanned_event_count: scanned, scan_cursor: scanCursor } });
@@ -1756,10 +1799,29 @@ export class VoiceLabService {
   }
 
   private async assertAdaptiveObservation(run: RunRecord, input: z.infer<typeof SpeakSchema>): Promise<void> {
-    const priorInputs = (await this.ledger.listOperations(run.id))
+    const allInputs = (await this.ledger.listOperations(run.id))
+      .filter((operation) => operation.type === "speak" || operation.type === "barge_in")
+      .sort((left, right) => left.createdAt.getTime() - right.createdAt.getTime());
+    const priorInputs = allInputs
       .filter((operation) => (operation.type === "speak" || operation.type === "barge_in") && operation.state === "succeeded")
       .sort((left, right) => left.createdAt.getTime() - right.createdAt.getTime());
     const ordinal = priorInputs.length + 1;
+    if (run.scenarioId === "V-P01") {
+      const otherSubmissions = allInputs.filter((operation) => operation.idempotencyKey !== input.idempotency_key);
+      const submissionOrdinal = otherSubmissions.length + 1;
+      if (submissionOrdinal === 1) {
+        if (input.adaptive_observation !== undefined) throw new VoiceLabError(labError("ADAPTIVE_OBSERVATION_NOT_ALLOWED", "The first V-P01 utterance must not claim a prior assistant observation.", "validation", false));
+        return;
+      }
+      if (submissionOrdinal > 2) throw new VoiceLabError(labError("P01_UTTERANCE_LIMIT", "V-P01 accepts exactly one initial utterance and one receipt-bound adaptive follow-up.", "validation", false));
+      if (otherSubmissions[0]?.state !== "succeeded") throw new VoiceLabError(labError("ADAPTIVE_OBSERVATION_PREDECESSOR_PENDING", "The first V-P01 utterance must durably succeed before its receipt-bound follow-up is submitted.", "conflict", true));
+      const adaptive = input.adaptive_observation;
+      if (!adaptive || !("receipt" in adaptive) || input.expected_cursor === undefined || input.expected_provider_epoch === undefined || input.expected_turn_id === undefined) {
+        throw new VoiceLabError(labError("ADAPTIVE_OBSERVATION_REQUIRED", "The V-P01 follow-up must carry one service-minted observation receipt and the current cursor, provider epoch, and turn preconditions.", "validation", false));
+      }
+      await this.assertP01ObservationReceipt(run, adaptive.receipt, input.expected_cursor, input.expected_provider_epoch, input.expected_turn_id, otherSubmissions);
+      return;
+    }
     if (run.scenarioId !== "V-A01") {
       if (input.adaptive_observation !== undefined) throw new VoiceLabError(labError("ADAPTIVE_OBSERVATION_NOT_ALLOWED", "Adaptive observation receipts are accepted only for V-A01 follow-up utterances.", "validation", false));
       return;
@@ -1770,7 +1832,7 @@ export class VoiceLabService {
     }
     if (ordinal > 6) throw new VoiceLabError(labError("A01_UTTERANCE_LIMIT", "V-A01 accepts exactly one greeting and five adaptive follow-ups.", "validation", false));
     const observation = input.adaptive_observation;
-    if (!observation || input.expected_cursor === undefined || input.expected_turn_id === undefined) throw new VoiceLabError(labError("ADAPTIVE_OBSERVATION_REQUIRED", "V-A01 follow-ups must cite the current durable cursor and exact prior app-authored assistant turn.", "validation", false, { utterance_ordinal: ordinal }));
+    if (!observation || "receipt" in observation || input.expected_cursor === undefined || input.expected_turn_id === undefined) throw new VoiceLabError(labError("ADAPTIVE_OBSERVATION_REQUIRED", "V-A01 follow-ups must cite the current durable cursor and exact prior app-authored assistant turn.", "validation", false, { utterance_ordinal: ordinal }));
     if (observation.turn_id !== input.expected_turn_id || observation.event_seq > input.expected_cursor) throw new VoiceLabError(labError("ADAPTIVE_OBSERVATION_MISMATCH", "V-A01 follow-up observation fields do not agree with the caller's strict preconditions.", "conflict", true));
     const page = await this.ledger.listEvents(run.id, observation.event_seq - 1, 1);
     const cited = page.events.find((event) => event.seq === observation.event_seq);
@@ -1794,6 +1856,52 @@ export class VoiceLabService {
     if (completedTurns.at(-1)?.seq !== cited.seq) throw new VoiceLabError(labError("ADAPTIVE_OBSERVATION_STALE", "V-A01 follow-up must cite the immediately preceding completed assistant turn.", "conflict", true));
     const used = new Set(priorInputs.map((operation) => (operation.input.adaptive_observation as Record<string, unknown> | undefined)?.event_seq).filter((value): value is number => Number.isSafeInteger(value)));
     if (used.has(observation.event_seq)) throw new VoiceLabError(labError("ADAPTIVE_OBSERVATION_REUSED", "Each V-A01 follow-up must derive from a distinct preceding assistant turn.", "conflict", false));
+  }
+
+  private mintP01ObservationReceipt(run: RunRecord, event: { seq: number; kind: string; source: string; at: Date; payload: Record<string, unknown> }): z.infer<typeof ObservationReceiptSchema> | null {
+    const data = event.payload.data as Record<string, unknown> | undefined;
+    if (!isExactBoundProductEventForService(run, event) || !event.kind.endsWith(".sophia.turn") || data?.phase !== "agent_ended" || typeof data.turnId !== "string" || !/^[A-Za-z0-9._:-]{1,128}$/.test(data.turnId)) return null;
+    const core = {
+      schema: "sophia_voice_lab_observation_receipt_v1" as const,
+      run_id: run.id,
+      test_run_id: run.testRunId,
+      scenario_id: "V-P01" as const,
+      scenario_version: SCENARIO_CATALOG_VERSION,
+      deployment_identity_sha256: canonicalRequestHash({ expected: run.target.expectedDeployment, observed: run.observedDeployment }),
+      event_seq: event.seq,
+      turn_id: data.turnId,
+      observation_class: "assistant_turn_complete" as const,
+      issued_at: event.at.toISOString(),
+    };
+    const secret = this.config.callerPartitionKeys.keys[this.config.callerPartitionKeys.activeKeyId]!;
+    return { ...core, receipt_sha256: p01ObservationReceiptMac(secret, core) };
+  }
+
+  private async assertP01ObservationReceipt(
+    run: RunRecord,
+    receipt: z.infer<typeof ObservationReceiptSchema>,
+    expectedCursor: number,
+    expectedProviderEpoch: number,
+    expectedTurnId: string,
+    priorInputs: OperationRecord[],
+  ): Promise<void> {
+    if (run.providerEpoch !== expectedProviderEpoch || run.turnId !== expectedTurnId || receipt.run_id !== run.id || receipt.test_run_id !== run.testRunId
+      || receipt.scenario_id !== "V-P01" || receipt.scenario_version !== run.scenarioVersion || receipt.turn_id !== expectedTurnId
+      || receipt.event_seq > expectedCursor || receipt.deployment_identity_sha256 !== canonicalRequestHash({ expected: run.target.expectedDeployment, observed: run.observedDeployment })) {
+      throw new VoiceLabError(labError("ADAPTIVE_OBSERVATION_MISMATCH", "The V-P01 observation receipt does not match the current run, deployment, cursor, provider epoch, and turn.", "conflict", true));
+    }
+    const validMac = Object.values(this.config.callerPartitionKeys.keys).some((secret) => p01ObservationReceiptMacMatches(secret, receipt));
+    if (!validMac) throw new VoiceLabError(labError("ADAPTIVE_OBSERVATION_INTEGRITY_FAILED", "The V-P01 observation receipt failed service authentication.", "authorization", false));
+    const page = await this.ledger.listEvents(run.id, receipt.event_seq - 1, 1);
+    const cited = page.events.find((event) => event.seq === receipt.event_seq);
+    const minted = cited ? this.mintP01ObservationReceipt(run, cited) : null;
+    if (!minted || canonicalRequestHash(minted) !== canonicalRequestHash(receipt)) throw new VoiceLabError(labError("ADAPTIVE_OBSERVATION_MISMATCH", "The V-P01 observation receipt does not reproduce from the exact durable assistant turn.", "conflict", false));
+    const used = priorInputs.some((operation) => {
+      const adaptive = operation.input.adaptive_observation as Record<string, unknown> | undefined;
+      const priorReceipt = adaptive?.receipt as Record<string, unknown> | undefined;
+      return priorReceipt?.receipt_sha256 === receipt.receipt_sha256;
+    });
+    if (used) throw new VoiceLabError(labError("ADAPTIVE_OBSERVATION_REUSED", "The V-P01 observation receipt was already consumed by a successful follow-up.", "conflict", false));
   }
 
   private async ownedRun(caller: AuthenticatedCaller, runId: string): Promise<RunRecord> {

@@ -7,7 +7,7 @@ All tools return a versioned common envelope containing `contract_version`, `req
 - `get_capabilities`: read-only server/plugin/scenario/fixture/fault/evidence versions and caller scope.
 - `start_voice_run`: validate exact target identities and reserve an isolated authenticated production browser. Required inputs include environment, target, expected frontend/Gateway/Voice identities, capture policy, and idempotency key.
 - `speak`: schedule either text-generated speech or an allowlisted fixture. It succeeds only after a page receipt. Retry the same request with the same idempotency key.
-- `wait_for_turn`: wait from an event cursor for a declared input transcript, assistant first audio, turn completion, tool/task state, UI projection, or lifecycle condition. A timeout is a typed observation.
+- `wait_for_turn`: wait from an event cursor for a declared input transcript, assistant first audio, turn completion, tool/task state, UI projection, or lifecycle condition. A timeout is a typed observation. A satisfied V-P01 assistant-turn wait returns one service-authenticated `sophia_voice_lab_observation_receipt_v1`; pass that object unchanged to the adaptive follow-up.
 - `inspect_voice_run`: safe bounded snapshot without mutation.
 - `barge_in`: schedule speech relative to an observed output realization. It returns utterance plus interruption/flush handles.
 - `force_socket_rotation`: restricted fault operation tied to an expected epoch. It never exposes or accepts a provider resumption handle.
