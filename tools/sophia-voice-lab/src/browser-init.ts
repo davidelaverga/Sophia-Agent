@@ -5,6 +5,7 @@ export interface InitScriptOptions {
   testRunId: string;
   cleanupObligationId: string;
   startButtonName: string;
+  voiceActivationToken: string;
 }
 
 export function buildVoiceLabInitScript(options: InitScriptOptions): string {
@@ -27,20 +28,6 @@ export function buildVoiceLabInitScript(options: InitScriptOptions): string {
           payload,
         })).catch(() => undefined);
       } catch {}
-    };
-    const requestVoiceActivationAuthorization = async () => {
-      try {
-        const binding = window.__sophiaVoiceLabPushV1;
-        if (typeof binding !== 'function') return false;
-        const response = await binding({
-          schema: 'sophia_voice_lab_page_push_v1',
-          channel: 'control',
-          payload: { kind: 'harness.voice_control_activation_request' },
-        });
-        return response?.authorized === true;
-      } catch {
-        return false;
-      }
     };
     const emit = (kind, payload = {}) => {
       const event = { seq: ++state.seq, kind, observed_at: new Date().toISOString(), payload };
@@ -244,7 +231,12 @@ export function buildVoiceLabInitScript(options: InitScriptOptions): string {
     }
     Object.defineProperties(LabWebSocket, { CONNECTING: { value: NativeWebSocket.CONNECTING }, OPEN: { value: NativeWebSocket.OPEN }, CLOSING: { value: NativeWebSocket.CLOSING }, CLOSED: { value: NativeWebSocket.CLOSED } });
     window.WebSocket = LabWebSocket;
+    let armOrdinaryVoiceControl = () => false;
     const bridge = Object.freeze({
+      armVoiceActivation: (token) => {
+        if (token !== options.voiceActivationToken) return false;
+        return armOrdinaryVoiceControl();
+      },
       schedule: async ({ operationId, utteranceId, audioBase64, sha256, delayMs = 0, expectedSilence = false, settlementWindowMs, activeTarget = null }) => {
         const replay = state.scheduleReceipts.get(operationId);
         if (replay) return replay;
@@ -342,15 +334,15 @@ export function buildVoiceLabInitScript(options: InitScriptOptions): string {
     emit('harness.initialized', { page_owned_audio_context: true, synthetic_audio_tracks: destination.stream.getAudioTracks().length });
     // Discover the exact ordinary voice control from the page-owned harness,
     // but do not activate it until the worker has finished every route/tab
-    // command and authorizes this exact page through the already-installed
-    // exposed binding. The binding response settles before the page schedules
-    // its native click, so no Playwright renderer command remains queued across
-    // product media startup.
+    // command and arms this exact document with the per-run nonce. The arm
+    // acknowledgement settles before the page schedules its native click, so
+    // no Playwright renderer command remains queued across product media
+    // startup.
     if (typeof document !== 'undefined' && typeof MutationObserver === 'function') {
       let voiceActivationIssued = false;
       let voiceActivationPending = false;
+      let voiceActivationArmed = false;
       let voiceControlObserver = null;
-      let voiceActivationRetryTimer = null;
       const normalizedControlName = (button) => (button.getAttribute('aria-label') || button.textContent || '').trim();
       const visibleOrdinaryControl = (button) => {
         if (!(button instanceof HTMLButtonElement) || button.disabled || !button.isConnected) return false;
@@ -359,39 +351,33 @@ export function buildVoiceLabInitScript(options: InitScriptOptions): string {
         return style.display !== 'none' && style.visibility !== 'hidden' && button.getClientRects().length > 0;
       };
       const activateOrdinaryVoiceControl = () => {
-        if (voiceActivationIssued || voiceActivationPending || location.origin !== options.pageOrigin
+        if (!voiceActivationArmed || voiceActivationIssued || voiceActivationPending || location.origin !== options.pageOrigin
           || (location.pathname !== '/session' && !location.pathname.startsWith('/session/'))) return;
         const button = Array.from(document.querySelectorAll('button')).find(visibleOrdinaryControl);
         if (!button) return;
         voiceActivationPending = true;
-        void requestVoiceActivationAuthorization().then((authorized) => {
-          if (!authorized) {
+        // The nonce-bound worker arm has already acknowledged before this
+        // later page task runs. No Playwright renderer command therefore
+        // remains pending across the ordinary product media startup.
+        setTimeout(() => {
+          if (!visibleOrdinaryControl(button)) {
             voiceActivationPending = false;
-            clearTimeout(voiceActivationRetryTimer);
-            voiceActivationRetryTimer = setTimeout(activateOrdinaryVoiceControl, 50);
+            emit('harness.voice_control_activation_aborted', { reason: 'ordinary_control_replaced_before_dispatch' });
+            activateOrdinaryVoiceControl();
             return;
           }
-          // Yield a distinct page task after the binding response. This keeps
-          // the authorization acknowledgement causally before the ordinary
-          // click even when the click immediately starts getUserMedia.
-          setTimeout(() => {
-            if (!visibleOrdinaryControl(button)) {
-              voiceActivationPending = false;
-              emit('harness.voice_control_activation_aborted', { reason: 'ordinary_control_replaced_before_dispatch' });
-              activateOrdinaryVoiceControl();
-              return;
-            }
-            voiceActivationIssued = true;
-            voiceActivationPending = false;
-            emit('harness.voice_control_activation_scheduled', { ordinary_native_button: true, exact_name: true });
-            emit('harness.voice_control_activation_dispatch_started', { ordinary_native_button: true, exact_name: true });
-            button.click();
-          }, 0);
-        }).catch(() => {
+          voiceActivationIssued = true;
           voiceActivationPending = false;
-          clearTimeout(voiceActivationRetryTimer);
-          voiceActivationRetryTimer = setTimeout(activateOrdinaryVoiceControl, 50);
-        });
+          emit('harness.voice_control_activation_scheduled', { ordinary_native_button: true, exact_name: true });
+          emit('harness.voice_control_activation_dispatch_started', { ordinary_native_button: true, exact_name: true });
+          button.click();
+        }, 0);
+      };
+      armOrdinaryVoiceControl = () => {
+        if (voiceActivationArmed || voiceActivationIssued) return false;
+        voiceActivationArmed = true;
+        queueMicrotask(activateOrdinaryVoiceControl);
+        return true;
       };
       const installVoiceControlObserver = () => {
         if (voiceControlObserver || !document.documentElement) return;

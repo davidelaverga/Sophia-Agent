@@ -8,7 +8,7 @@ import { chromium, type Browser } from "playwright";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { buildVoiceLabInitScript } from "../src/browser-init.js";
-import { activateDashboardMicButton, classifySessionVoiceRoute, DIRECT_CDP_CLIENT_DIAGNOSTICS_ENABLED, establishSessionNavigation, establishSessionVoiceTab, PAUSING_CLIENT_DIAGNOSTICS_ENABLED, PlaywrightVoiceDriver, resolveDashboardMicButton, settleDiagnosticWithinBudget, settlePausedDiagnosticAndResume, waitForPageOwnedVoiceActivation } from "../src/browser-driver.js";
+import { activateDashboardMicButton, armPageOwnedVoiceActivation, classifySessionVoiceRoute, DIRECT_CDP_CLIENT_DIAGNOSTICS_ENABLED, establishSessionNavigation, establishSessionVoiceTab, PAUSING_CLIENT_DIAGNOSTICS_ENABLED, PlaywrightVoiceDriver, resolveDashboardMicButton, settleDiagnosticWithinBudget, settlePausedDiagnosticAndResume, waitForPageOwnedVoiceActivation } from "../src/browser-driver.js";
 
 function sineWav(durationMs = 600, sampleRate = 16_000): Buffer {
   const samples = Math.floor(sampleRate * durationMs / 1_000);
@@ -215,10 +215,8 @@ describe("real Chromium dynamic media contract", () => {
 
   it("uses the page-owned harness to activate the exact ordinary voice button once", async () => {
     const pushed: Array<Record<string, any>> = [];
-    let activationAuthorized = false;
     const context = await browser.newContext();
     await context.exposeBinding("__sophiaVoiceLabPushV1", (_source, raw: Record<string, any>) => {
-      if (raw?.channel === "control") return { authorized: activationAuthorized };
       pushed.push(raw);
       return undefined;
     });
@@ -229,6 +227,7 @@ describe("real Chromium dynamic media contract", () => {
       testRunId: "00000000-0000-4000-8000-000000000001",
       cleanupObligationId: "00000000-0000-4000-8000-000000000002",
       startButtonName: "Tap to speak",
+      voiceActivationToken: "activation-token",
     }) });
     const page = await context.newPage();
     await page.goto(`${origin}/session`);
@@ -246,7 +245,8 @@ describe("real Chromium dynamic media contract", () => {
 
     await new Promise((resolve) => setTimeout(resolve, 125));
     expect(await page.evaluate(() => (window as any).__voiceActivations)).toBe(0);
-    activationAuthorized = true;
+    expect(await page.evaluate(() => (window as any).__sophiaVoiceLab.armVoiceActivation("wrong-token"))).toBe(false);
+    await expect(armPageOwnedVoiceActivation(page, "activation-token")).resolves.toBe("armed");
     await expect.poll(() => pushed.some((entry) => entry?.payload?.kind === "harness.voice_control_activation_scheduled")).toBe(true);
     await expect.poll(() => page.evaluate(() => (window as any).__voiceActivations)).toBe(1);
     await page.evaluate(() => document.querySelector('button')?.setAttribute('class', 'settled'));
@@ -428,7 +428,7 @@ describe("real Chromium dynamic media contract", () => {
       const native = mediaDevices.getUserMedia.bind(mediaDevices);
       Object.defineProperty(mediaDevices, "getUserMedia", { configurable: true, writable: true, value: (...args: Parameters<typeof native>) => { (window as any).__nativeGumCalls += 1; return native(...args); } });
     });
-    await context.addInitScript({ content: buildVoiceLabInitScript({ pageOrigin: origin, websocketOrigins: [origin.replace("http://", "ws://")], maxAudioBytes: 1_000_000, testRunId: "00000000-0000-4000-8000-000000000001", cleanupObligationId: "00000000-0000-4000-8000-000000000002", startButtonName: "Tap to speak" }) });
+    await context.addInitScript({ content: buildVoiceLabInitScript({ pageOrigin: origin, websocketOrigins: [origin.replace("http://", "ws://")], maxAudioBytes: 1_000_000, testRunId: "00000000-0000-4000-8000-000000000001", cleanupObligationId: "00000000-0000-4000-8000-000000000002", startButtonName: "Tap to speak", voiceActivationToken: "activation-token" }) });
     const page = await context.newPage();
     await page.goto(origin);
     await page.evaluate(() => {
