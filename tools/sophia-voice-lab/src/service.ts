@@ -347,17 +347,28 @@ export const D02BrowserWorkerLossObservationSchema = D02BrowserWorkerLossObserva
 });
 export type D02BrowserWorkerLossObservation = z.infer<typeof D02BrowserWorkerLossObservationSchema>;
 const PlatformToolNameSchema = z.enum(["get_capabilities", "start_voice_run", "wait_for_turn", "speak", "inspect_voice_run", "end_voice_run", "export_voice_evidence"]);
-const PlatformCallSchema = z.object({
-  ordinal: z.number().int().min(1).max(10),
-  observed_order: z.number().int().min(1).max(60),
+const PlatformCallFields = {
   tool_name: PlatformToolNameSchema,
   argument_sha256: ExternalShaSchema,
   response_sha256: ExternalShaSchema,
   result_request_id_sha256: ExternalShaSchema,
   run_id_sha256: ExternalShaSchema.nullable(),
   operation_id_sha256: ExternalShaSchema.nullable(),
+  polled_operation_id_sha256: ExternalShaSchema.nullable(),
+} as const;
+const PlatformCallSchema = z.object({
+  ...PlatformCallFields,
+  spine_ordinal: z.number().int().min(1).max(10),
+  chronological_ordinal: z.number().int().min(1).max(30),
 }).strict();
-const PlatformPollingCallSchema = PlatformCallSchema.extend({ tool_name: z.enum(["wait_for_turn", "inspect_voice_run"]), operation_id_sha256: z.null() }).strict();
+const PlatformPollingCallSchema = z.object({
+  ...PlatformCallFields,
+  tool_name: z.literal("wait_for_turn"),
+  operation_id_sha256: z.null(),
+  poll_ordinal: z.number().int().min(1).max(20),
+  chronological_ordinal: z.number().int().min(1).max(30),
+  polled_operation_id_sha256: ExternalShaSchema,
+}).strict();
 export const ExternalAttestationEvidenceSchema = z.discriminatedUnion("kind", [
   z.object({
     kind: z.literal("a03_http_response_loss"), authority: z.literal("external_mcp_client"), operation_id: z.string().uuid(), replayed_operation_id: z.string().uuid(),
@@ -418,7 +429,7 @@ export const ExternalAttestationEvidenceSchema = z.discriminatedUnion("kind", [
     kind: z.literal("p01_platform_plugin_task"), authority: z.literal("platform_plugin"), registered_app_id: z.string().regex(/^plugin_asdk_app[0-9A-Za-z_-]{4,112}$/), plugin_version: z.string().regex(FINAL_CODEX_PLUGIN_VERSION_PATTERN),
     platform_task_id_sha256: ExternalShaSchema, platform_thread_id_sha256: ExternalShaSchema, install_receipt_sha256: ExternalShaSchema,
     plugin_package_sha256: ExternalShaSchema, installed_at: ExternalTimestampSchema, fresh_task_started_at: ExternalTimestampSchema, fresh_task_completed_at: ExternalTimestampSchema, high_level_call_count: z.number().int().min(1).max(10),
-    calls: z.array(PlatformCallSchema).length(10), polling_call_count: z.number().int().min(0).max(50), polling_calls: z.array(PlatformPollingCallSchema).max(50), operation_ids: z.array(z.string().uuid()).min(4).max(10),
+    calls: z.array(PlatformCallSchema).length(10), polling_call_count: z.number().int().min(0).max(20), polling_calls: z.array(PlatformPollingCallSchema).max(20), operation_ids: z.array(z.string().uuid()).min(4).max(10),
     adaptive_observation_call_ordinal: z.literal(5), adaptive_followup_call_ordinal: z.literal(6),
     prohibited_tool_audit_passed: z.literal(true), raw_javascript_used: z.literal(false), local_runner_used: z.literal(false), manual_takeover_used: z.literal(false), exact_deployment_discovered: z.literal(true), adaptive_followup_completed: z.literal(true),
   }).strict(),
@@ -1322,39 +1333,78 @@ export class VoiceLabService {
       const referencedTypes = new Set(referencedOperations.map((operation) => operation.type));
       const currentEvidence = await this.ledger.getEvidence(run.id);
       const expectedTools = ["get_capabilities", "start_voice_run", "wait_for_turn", "speak", "wait_for_turn", "speak", "wait_for_turn", "inspect_voice_run", "end_voice_run", "export_voice_evidence"] as const;
-      const expectedStatuses = ["ok", "accepted", "ok", "completed", "ok", "completed", "ok", "running", "completed", "completed"] as const;
       const oauthClientHash = this.config.oauth ? sha256(this.config.oauth.clientMetadataUrl) : null;
-      const exactCalls = evidence.calls.every((call, index) => call.ordinal === index + 1 && call.tool_name === expectedTools[index]);
-      const exactPollingCalls = evidence.polling_call_count === evidence.polling_calls.length && evidence.polling_calls.every((call, index) => call.ordinal === index + 1);
-      const attestedTimeline = [...evidence.calls, ...evidence.polling_calls].sort((left, right) => left.observed_order - right.observed_order);
+      const exactCalls = evidence.calls.every((call, index) => call.spine_ordinal === index + 1 && call.tool_name === expectedTools[index]);
+      const exactPollingCalls = evidence.polling_call_count === evidence.polling_calls.length && evidence.polling_calls.every((call, index) => call.poll_ordinal === index + 1);
+      const attestedTimeline = [...evidence.calls, ...evidence.polling_calls].sort((left, right) => left.chronological_ordinal - right.chronological_ordinal);
       const exactTimeline = attestedTimeline.length === auditedCalls.length && attestedTimeline.every((call, index) => {
         const record = auditedCalls[index];
         const expectedRunHash = call.tool_name === "get_capabilities" ? null : sha256(run.id);
-        return record !== undefined && call.observed_order === index + 1 && record.argumentHash === call.argument_sha256 && record.detail.tool === call.tool_name && record.detail.response_sha256 === call.response_sha256
+        return record !== undefined && call.chronological_ordinal === index + 1 && record.argumentHash === call.argument_sha256 && record.detail.tool === call.tool_name && record.detail.response_sha256 === call.response_sha256
           && record.detail.result_request_id_sha256 === call.result_request_id_sha256 && call.run_id_sha256 === expectedRunHash && record.detail.run_id_sha256 === expectedRunHash
-          && record.detail.operation_id_sha256 === call.operation_id_sha256 && record.detail.authorization_kind === "oauth" && record.detail.oauth_client_id_sha256 === oauthClientHash && typeof record.detail.oauth_token_id_sha256 === "string";
+          && record.detail.operation_id_sha256 === call.operation_id_sha256 && record.detail.polled_operation_id_sha256 === call.polled_operation_id_sha256
+          && record.detail.authorization_kind === "oauth" && record.detail.oauth_client_id_sha256 === oauthClientHash && typeof record.detail.oauth_token_id_sha256 === "string";
       });
+      const pollCounts = new Map<string, number>();
+      const conclusivelySettled = new Set<string>();
+      const mutationPolicyByOperation = new Map<string, { mutationCall: (typeof evidence.calls)[number]; boundaryCall: (typeof evidence.calls)[number]; requiresPoll: boolean }>();
+      for (const [mutationIndex, boundaryIndex] of [[3, 4], [5, 6], [8, 9]] as const) {
+        const mutationCall = evidence.calls[mutationIndex]!;
+        const boundaryCall = evidence.calls[boundaryIndex]!;
+        const mutationRecord = auditedCalls[mutationCall.chronological_ordinal - 1];
+        if (mutationCall.operation_id_sha256) mutationPolicyByOperation.set(mutationCall.operation_id_sha256, {
+          mutationCall,
+          boundaryCall,
+          requiresPoll: mutationRecord?.detail.operation_state !== "succeeded",
+        });
+      }
+      const exactPollSemantics = [...evidence.polling_calls].sort((left, right) => left.chronological_ordinal - right.chronological_ordinal).every((call) => {
+        const record = auditedCalls[call.chronological_ordinal - 1];
+        const policy = mutationPolicyByOperation.get(call.polled_operation_id_sha256);
+        const count = (pollCounts.get(call.polled_operation_id_sha256) ?? 0) + 1;
+        pollCounts.set(call.polled_operation_id_sha256, count);
+        if (count > 10 || conclusivelySettled.has(call.polled_operation_id_sha256) || !policy || !policy.requiresPoll
+          || call.chronological_ordinal <= policy.mutationCall.chronological_ordinal || call.chronological_ordinal >= policy.boundaryCall.chronological_ordinal
+          || record?.detail.polled_operation_id_sha256 !== call.polled_operation_id_sha256 || record.detail.wait_condition !== "operation_terminal"
+          || typeof record.detail.wait_timeout_ms !== "number" || record.detail.wait_timeout_ms > 10_000
+          || !["timeout", "ok", "completed"].includes(String(record.detail.status))) return false;
+        if (record.detail.condition_satisfied === true) {
+          if (record.detail.observed_operation_state !== "succeeded") return false;
+          conclusivelySettled.add(call.polled_operation_id_sha256);
+        } else if (record.detail.status !== "timeout") return false;
+        return true;
+      });
+      const exactPollCoverage = [...mutationPolicyByOperation].every(([operationHash, policy]) => policy.requiresPoll
+        ? conclusivelySettled.has(operationHash)
+        : !pollCounts.has(operationHash));
       const referencedOperationCalls = referencedOperations.every((operation) => {
         const tool = operation.type === "start" ? "start_voice_run" : operation.type === "end" ? "end_voice_run" : operation.type;
         const publicArgumentHash = publicP01OperationArgumentHash(operation);
         return publicArgumentHash !== null && evidence.calls.some((call) => call.tool_name === tool && call.argument_sha256 === publicArgumentHash && call.operation_id_sha256 === sha256(operation.id));
       });
       const exactSuccessfulCanonicalCalls = currentEvidence !== null && evidence.calls.every((call, index) => {
-        const record = auditedCalls[call.observed_order - 1];
-        if (!record || record.detail.status !== expectedStatuses[index]) return false;
+        const record = auditedCalls[call.chronological_ordinal - 1];
+        if (!record) return false;
         if (["get_capabilities", "wait_for_turn", "inspect_voice_run", "export_voice_evidence"].includes(call.tool_name) && record.detail.operation_id_sha256 !== null) return false;
-        if (call.tool_name === "wait_for_turn" && record.detail.condition_satisfied !== true) return false;
-        if (call.tool_name === "start_voice_run") return record.detail.submission_outcome === "durably_accepted" && record.detail.replay === false && record.detail.operation_state === "accepted";
-        if (call.tool_name === "speak") return record.detail.submission_outcome === "durably_accepted" && record.detail.replay === false && record.detail.operation_state === "succeeded";
+        if (index === 0) return record.detail.status === "ok" && call.polled_operation_id_sha256 === null;
+        if (index === 2) return record.detail.status === "ok" && record.detail.condition_satisfied === true && record.detail.observed_operation_state === "succeeded"
+          && record.detail.wait_condition === "operation_terminal" && typeof record.detail.wait_timeout_ms === "number" && record.detail.wait_timeout_ms <= 10_000
+          && call.polled_operation_id_sha256 === evidence.calls[1]!.operation_id_sha256;
+        if (index === 4 || index === 6) return record.detail.status === "ok" && record.detail.condition_satisfied === true && call.polled_operation_id_sha256 === null;
+        if (call.tool_name === "start_voice_run" || call.tool_name === "speak") return record.detail.submission_outcome === "durably_accepted" && record.detail.replay === false
+          && ["accepted", "queued", "leased", "executing", "succeeded"].includes(String(record.detail.operation_state))
+          && (call.tool_name === "start_voice_run" || record.detail.operation_state === "succeeded" || call.operation_id_sha256 !== null && conclusivelySettled.has(call.operation_id_sha256));
         if (call.tool_name === "inspect_voice_run") return record.detail.run_state === run.state || record.detail.run_state === "active" || record.detail.run_state === "ready";
-        if (call.tool_name === "end_voice_run") return record.detail.submission_outcome === "durably_accepted" && record.detail.replay === false && record.detail.operation_state === "succeeded" && record.detail.cleanup_complete === true && record.detail.evidence_state === "available"
-          && record.detail.manifest_id_sha256 === sha256(currentEvidence.manifestId) && record.detail.manifest_sha256 === currentEvidence.manifestSha256;
-        if (call.tool_name === "export_voice_evidence") return record.detail.evidence_state === "available"
+        if (call.tool_name === "end_voice_run") return record.detail.submission_outcome === "durably_accepted" && record.detail.replay === false
+          && (["accepted", "queued", "leased", "executing"].includes(String(record.detail.operation_state)) ? call.operation_id_sha256 !== null && conclusivelySettled.has(call.operation_id_sha256)
+            : record.detail.operation_state === "succeeded" && record.detail.cleanup_complete === true && record.detail.evidence_state === "available"
+              && record.detail.manifest_id_sha256 === sha256(currentEvidence.manifestId) && record.detail.manifest_sha256 === currentEvidence.manifestSha256);
+        if (call.tool_name === "export_voice_evidence") return record.detail.status === "completed" && record.detail.evidence_state === "available"
           && record.detail.manifest_id_sha256 === sha256(currentEvidence.manifestId) && record.detail.manifest_sha256 === currentEvidence.manifestSha256;
         return true;
       });
       if (run.scenarioId !== "V-P01" || this.config.registeredAppId === null || evidence.registered_app_id !== this.config.registeredAppId || evidence.plugin_version !== this.config.pluginVersion || evidence.plugin_package_sha256 !== this.config.pluginPackageSha256
-        || evidence.high_level_call_count !== 10 || evidence.calls.length !== 10 || auditedCalls.length !== 10 + evidence.polling_call_count || !exactCalls || !exactPollingCalls || !exactTimeline
+        || evidence.high_level_call_count !== 10 || evidence.calls.length !== 10 || auditedCalls.length !== 10 + evidence.polling_call_count || !exactCalls || !exactPollingCalls || !exactTimeline || !exactPollSemantics || !exactPollCoverage
         || new Set(evidence.operation_ids).size !== evidence.operation_ids.length || evidence.operation_ids.length !== 4 || referencedOperations.length !== evidence.operation_ids.length || operations.length !== 4
         || !referencedTypes.has("start") || referencedOperations.filter((operation) => operation.type === "speak").length !== 2 || !referencedTypes.has("end") || !referencedOperationCalls
         || referencedOperations.some((operation) => operation.state !== "succeeded") || !TERMINAL_RUN_STATES.has(run.state) || run.terminalError !== null || run.cleanupComplete !== true || currentEvidence === null || !exactSuccessfulCanonicalCalls

@@ -490,7 +490,12 @@ The fresh task must have exactly these ten high-level calls:
 10 export_voice_evidence
 ```
 
-There are no extra polling calls. After verifying the pinned binary signature,
+The ten calls form the semantic spine. When a `speak` or `end_voice_run`
+response is durably accepted but not yet succeeded, the task may insert only
+audited `wait_for_turn` polls for that exact operation between the mutation and
+the next spine call. Each poll has an explicit timeout no greater than ten
+seconds; the task stops at the first terminal event and is bounded at ten polls
+per operation and twenty polls total. After verifying the pinned binary signature,
 version, and complete package tree, the collector records the raw CLI stdout,
 stderr, exit status, and package hashes. It then launches `codex app-server
 --stdio`, records every raw JSONL frame, and performs this source-owned
@@ -502,14 +507,15 @@ sequence:
    `plugin_asdk_app…` ID;
 4. `skills/list` with `forceReload: true` from the exact installed package;
 5. one `turn/start` with the exact skill and registered-app mention;
-6. exactly ten `item/started` to `item/completed` MCP lifecycles, each with the
+6. the ten semantic `item/started` to `item/completed` MCP lifecycles plus any
+   allowed bounded poll lifecycles, each with the
    same plugin ID, app/connector ID, OAuth link, server, action, arguments, and
    completed structured response;
 7. one successful `turn/completed`;
 8. a direct `mcpServer/resource/read` of the call-10 immutable manifest (not an
    eleventh tool call); and
-9. `thread/read` with `includeTurns: true`, which must replay the same ten
-   completed items byte-semantically.
+9. `thread/read` with `includeTurns: true`, which must replay the same semantic
+   spine and bounded poll items byte-semantically.
 
 All tool arguments, including schema defaults, must be explicit so their
 public hashes equal the durable operation hashes. The manifest must bind the

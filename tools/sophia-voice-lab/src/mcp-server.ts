@@ -106,6 +106,10 @@ export function createVoiceLabMcpServer(
         };
         const manifestId = typeof result.data.manifest_id === "string" && /^[0-9a-f-]{36}$/i.test(result.data.manifest_id) ? result.data.manifest_id : null;
         const manifestSha256 = typeof result.data.manifest_sha256 === "string" && /^[a-f0-9]{64}$/.test(result.data.manifest_sha256) ? result.data.manifest_sha256 : null;
+        const publicInput = input && typeof input === "object" ? input as Record<string, unknown> : {};
+        const polledOperationId = definition.name === "wait_for_turn" && publicInput.condition === "operation_terminal" && typeof publicInput.operation_id === "string" && /^[0-9a-f-]{36}$/i.test(publicInput.operation_id) ? publicInput.operation_id : null;
+        const matched = Array.isArray(result.data.matched) ? result.data.matched : [];
+        const terminalMatch = matched.find((entry) => entry && typeof entry === "object" && ["operation.succeeded", "operation.failed"].includes(String((entry as Record<string, unknown>).kind))) as Record<string, unknown> | undefined;
         const detail = {
           status: result.status,
           error_class: result.error_class,
@@ -119,6 +123,10 @@ export function createVoiceLabMcpServer(
           operation_state: typeof result.data.operation_state === "string" ? result.data.operation_state : null,
           run_state: typeof result.data.run_state === "string" ? result.data.run_state : null,
           condition_satisfied: result.data.condition_satisfied === true,
+          polled_operation_id_sha256: polledOperationId ? sha256(polledOperationId) : null,
+          wait_condition: definition.name === "wait_for_turn" && typeof publicInput.condition === "string" ? publicInput.condition : null,
+          wait_timeout_ms: definition.name === "wait_for_turn" && typeof publicInput.timeout_ms === "number" ? publicInput.timeout_ms : null,
+          observed_operation_state: terminalMatch?.kind === "operation.succeeded" ? "succeeded" : terminalMatch?.kind === "operation.failed" ? "failed" : null,
           terminal: result.data.terminal === true,
           cleanup_complete: result.data.cleanup_complete === true,
           evidence_state: typeof result.data.evidence_state === "string" ? result.data.evidence_state : null,

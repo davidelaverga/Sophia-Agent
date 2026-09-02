@@ -239,7 +239,8 @@ async function p01Fixture(
     const resultRequestIdSha256 = sha256(`p01-result-request-${ordinal}`);
     const runIdSha256 = ordinal === 1 ? null : sha256(run.id);
     const operationIdSha256 = operation ? sha256(operation.id) : null;
-    calls.push({ ordinal, observed_order: ordinal, tool_name: tools[index], argument_sha256: argumentSha256, response_sha256: responseSha256, result_request_id_sha256: resultRequestIdSha256, run_id_sha256: runIdSha256, operation_id_sha256: operationIdSha256 });
+    const polledOperationIdSha256 = ordinal === 3 ? sha256(start.id) : null;
+    calls.push({ spine_ordinal: ordinal, chronological_ordinal: ordinal, tool_name: tools[index], argument_sha256: argumentSha256, response_sha256: responseSha256, result_request_id_sha256: resultRequestIdSha256, run_id_sha256: runIdSha256, operation_id_sha256: operationIdSha256, polled_operation_id_sha256: polledOperationIdSha256 });
     const status = statusOverrides[ordinal] ?? statuses[index];
     const detail: Record<string, unknown> = {
       tool: tools[index], status, response_sha256: responseSha256, result_request_id_sha256: resultRequestIdSha256, run_id_sha256: runIdSha256, operation_id_sha256: operationIdSha256,
@@ -247,7 +248,11 @@ async function p01Fixture(
       submission_outcome: [2, 4, 6, 9].includes(ordinal) ? (submissionDriftOrdinal === ordinal ? null : "durably_accepted") : null,
       operation_state: ordinal === 2 ? "accepted" : [4, 6, 9].includes(ordinal) ? "succeeded" : null,
       run_state: ordinal === 8 ? "active" : ordinal >= 9 ? terminal.state : "ready",
-      condition_satisfied: [3, 5, 7].includes(ordinal), cleanup_complete: ordinal >= 9, evidence_state: ordinal >= 9 ? "available" : null,
+      condition_satisfied: [3, 5, 7].includes(ordinal), polled_operation_id_sha256: polledOperationIdSha256,
+      wait_condition: ordinal === 3 ? "operation_terminal" : [5, 7].includes(ordinal) ? "assistant_turn_complete" : null,
+      wait_timeout_ms: [3, 5, 7].includes(ordinal) ? 10_000 : null,
+      observed_operation_state: ordinal === 3 ? "succeeded" : null,
+      cleanup_complete: ordinal >= 9, evidence_state: ordinal >= 9 ? "available" : null,
       manifest_id_sha256: ordinal >= 9 ? sha256(manifestId) : null, manifest_sha256: ordinal >= 9 ? manifestSha256 : null,
     };
     await ledger.recordAuthAudit({ runId: ordinal === 1 ? null : run.id, callerId: run.callerId, action: "mcp.tool_response", argumentHash: argumentSha256, outcome: "allowed", detail, observedAt: new Date(run.createdAt.getTime() + ordinal * 10) });
@@ -267,9 +272,21 @@ async function p01Fixture(
 describe("source-owned external attestation boundary", () => {
   it("requires successful canonical P01 calls, succeeded operations, cleanup, and the exact exported manifest", async () => {
     await expect((await p01Fixture()).validate()).resolves.toBeUndefined();
-    await expect((await p01Fixture({ 9: "timeout" })).validate()).rejects.toMatchObject({ detail: { code: "ATTESTATION_CROSS_JOIN_FAILED" } });
+    await expect((await p01Fixture({ 9: "timeout" })).validate()).resolves.toBeUndefined();
     await expect((await p01Fixture({ 10: "unavailable" })).validate()).rejects.toMatchObject({ detail: { code: "ATTESTATION_CROSS_JOIN_FAILED" } });
     await expect((await p01Fixture({}, "valid", 4)).validate()).rejects.toMatchObject({ detail: { code: "ATTESTATION_CROSS_JOIN_FAILED" } });
+  });
+
+  it("rejects P01 evidence with overlapping or noncontiguous chronological ordinals", async () => {
+    const overlapping = await p01Fixture();
+    const overlapEvidence = structuredClone(overlapping.evidence);
+    (overlapEvidence.calls as Array<Record<string, unknown>>)[5]!.chronological_ordinal = 5;
+    await expect(overlapping.validate(overlapEvidence)).rejects.toMatchObject({ detail: { code: "ATTESTATION_CROSS_JOIN_FAILED" } });
+
+    const gapped = await p01Fixture();
+    const gapEvidence = structuredClone(gapped.evidence);
+    (gapEvidence.calls as Array<Record<string, unknown>>)[9]!.chronological_ordinal = 11;
+    await expect(gapped.validate(gapEvidence)).rejects.toMatchObject({ detail: { code: "ATTESTATION_CROSS_JOIN_FAILED" } });
   });
 
   it("joins public P01 speak arguments only through one exact augmented admission", async () => {

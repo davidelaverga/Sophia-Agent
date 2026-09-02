@@ -30,7 +30,7 @@ afterEach(async () => {
   await Promise.all(temporaryDirectories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
 });
 
-type Drift = "none" | "missing_app_join" | "missing_submission_outcome" | "thread_replay";
+type Drift = "none" | "missing_app_join" | "missing_submission_outcome" | "thread_replay" | "poll_timeout_inflation" | "poll_after_conclusive";
 
 interface Fixture {
   controllerInput: Record<string, unknown>;
@@ -67,6 +67,7 @@ describe("P01 official-source collector", () => {
       registered_app_id: APP_ID,
       plugin_version: VERSION,
       high_level_call_count: 10,
+      polling_call_count: 1,
       operation_ids: expect.arrayContaining([expect.any(String), expect.any(String), expect.any(String), expect.any(String)]),
       prohibited_tool_audit_passed: true,
       raw_javascript_used: false,
@@ -121,6 +122,19 @@ describe("P01 official-source collector", () => {
       dependencies: fixture.dependencies,
     })).rejects.toThrow(/distinguish one fresh durable submission/i);
     expect(persisted).toBe(false);
+  });
+
+  it("rejects timeout inflation and polling after the first conclusive terminal receipt", async () => {
+    for (const drift of ["poll_timeout_inflation", "poll_after_conclusive"] as const) {
+      const fixture = await createFixture(drift);
+      await expect(collectAndSignP01Claim({
+        controllerInput: fixture.controllerInput,
+        publicConfig: fixture.publicConfig,
+        platformPrivateKeyPath: fixture.platformKeyPath,
+        persistCapture: async () => { throw new Error("must not persist"); },
+        dependencies: fixture.dependencies,
+      })).rejects.toThrow(/poll|ten seconds/i);
+    }
   });
 
   it("rejects package drift before invoking the state-changing plugin command", async () => {
@@ -217,6 +231,12 @@ async function createFixture(drift: Drift): Promise<Fixture> {
     receipt_sha256: sha256("p01-observation-receipt"),
   };
 
+  const startOperationId = randomUUID();
+  const firstSpeakOperationId = randomUUID();
+  const secondSpeakOperationId = randomUUID();
+  const endOperationId = randomUUID();
+  const operations = new Map<number, string>([[1, startOperationId], [3, firstSpeakOperationId], [5, secondSpeakOperationId], [8, endOperationId]]);
+
   const tools = ["get_capabilities", "start_voice_run", "wait_for_turn", "speak", "wait_for_turn", "speak", "wait_for_turn", "inspect_voice_run", "end_voice_run", "export_voice_evidence"];
   const argumentsList: Record<string, unknown>[] = [
     {},
@@ -235,7 +255,7 @@ async function createFixture(drift: Drift): Promise<Fixture> {
       capture_policy: { raw_audio: false, screenshot: true, video: false, retention_hours: 24 },
       idempotency_key: "p01-start-operation",
     },
-    { run_id: runId, after_cursor: 0, condition: "assistant_turn_complete", timeout_ms: 10_000 },
+    { run_id: runId, after_cursor: 0, condition: "operation_terminal", operation_id: startOperationId, timeout_ms: 10_000 },
     { run_id: runId, text: "Give one concise greeting.", idempotency_key: "p01-first-speak", timing_policy: { delay_ms: 0, schedule_timeout_ms: 10_000 } },
     { run_id: runId, after_cursor: 20, condition: "assistant_turn_complete", timeout_ms: 10_000 },
     {
@@ -253,13 +273,12 @@ async function createFixture(drift: Drift): Promise<Fixture> {
     { run_id: runId, idempotency_key: "p01-end-operation" },
     { run_id: runId },
   ];
-  const statuses = ["ok", "accepted", "ok", "completed", "ok", "completed", "ok", "running", "completed", "completed"];
-  const operations = new Map<number, string>([[1, randomUUID()], [3, randomUUID()], [5, randomUUID()], [8, randomUUID()]]);
+  const statuses = ["ok", "accepted", "ok", "timeout", "ok", "completed", "ok", "running", "completed", "completed"];
   const data: Record<string, unknown>[] = [
     { deployment_discovered: true },
     { replay: false, submission_outcome: "durably_accepted", operation_state: "accepted" },
-    { condition_satisfied: true },
-    { replay: false, submission_outcome: "durably_accepted", operation_state: "succeeded" },
+    { condition_satisfied: true, matched: [{ kind: "operation.succeeded", payload: { operation_id: startOperationId } }] },
+    { replay: false, submission_outcome: "durably_accepted", operation_state: "executing" },
     { condition_satisfied: true, matched: [{ seq: 55, turn_id: "turn-product-1" }], observation_receipts: [observationReceipt] },
     { replay: false, submission_outcome: "durably_accepted", operation_state: "succeeded" },
     { condition_satisfied: true },
@@ -268,7 +287,7 @@ async function createFixture(drift: Drift): Promise<Fixture> {
     { cleanup_complete: true, evidence_state: "available", manifest_id: manifestId, manifest_sha256: manifestSha256 },
   ];
   if (drift === "missing_submission_outcome") delete data[1]!.submission_outcome;
-  const completedItems = tools.map((tool, index) => {
+  const completedSpineItems = tools.map((tool, index) => {
     const appContext = {
       connectorId: drift === "missing_app_join" && index === 5 ? "plugin_asdk_app_wrong" : APP_ID,
       linkId: "oauth-link-p01",
@@ -303,9 +322,40 @@ async function createFixture(drift: Drift): Promise<Fixture> {
       durationMs: index + 1,
     };
   });
+  const pollTimeout = drift === "poll_timeout_inflation" ? 10_001 : 10_000;
+  const pollItem = {
+    type: "mcpToolCall",
+    id: "mcp-poll-1",
+    server: APP_RUNTIME,
+    tool: "wait_for_turn",
+    status: "completed",
+    arguments: { run_id: runId, after_cursor: 0, condition: "operation_terminal", operation_id: firstSpeakOperationId, timeout_ms: pollTimeout },
+    appContext: { connectorId: APP_ID, linkId: "oauth-link-p01", resourceUri: null, appName: APP_RUNTIME, actionName: "wait_for_turn" },
+    pluginId: PLUGIN_ID,
+    readOnlyHint: true,
+    result: {
+      content: [],
+      structuredContent: {
+        contract_version: "sophia.voice-lab.v1",
+        request_id: randomUUID(),
+        test_run_id: testRunId,
+        run_id: runId,
+        operation_id: null,
+        status: "ok",
+        provider_connection_epoch: null,
+        deployment_identity: { expected: expectedDeployment, observed: expectedDeployment },
+        evidence_references: [],
+        data: { condition_satisfied: true, matched: [{ kind: "operation.succeeded", payload: { operation_id: firstSpeakOperationId } }] },
+      },
+      _meta: null,
+    },
+    error: null,
+    durationMs: 5,
+  };
+  const completedItems = [...completedSpineItems.slice(0, 4), pollItem, ...(drift === "poll_after_conclusive" ? [{ ...structuredClone(pollItem), id: "mcp-poll-2" }] : []), ...completedSpineItems.slice(4)];
   const startedItems = completedItems.map((item) => ({ ...item, status: "inProgress", result: null, durationMs: null }));
   const replayItems = structuredClone(completedItems);
-  if (drift === "thread_replay") replayItems[9]!.arguments = { run_id: randomUUID() };
+  if (drift === "thread_replay") replayItems[replayItems.length - 1]!.arguments = { run_id: randomUUID() };
 
   const appServerFixture = {
     cwd: directory,
