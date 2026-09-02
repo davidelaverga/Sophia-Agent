@@ -790,20 +790,58 @@ export function isolateBootstrapStorageState(
 }
 
 export async function captureSessionRecoveryStorageState(
-  context: BrowserContext,
+  page: Page,
   authenticatedStorageState: { cookies: unknown[]; origins: unknown[] },
+  frontendOrigin: string,
   timeoutMs = SESSION_RECOVERY_STORAGE_CAPTURE_TIMEOUT_MS,
 ): Promise<{ cookies: unknown[]; origins: unknown[] }> {
   // The dashboard persists the newly created session before committing
   // /session. Recovery must carry that product-authored localStorage forward;
   // the pre-navigation authentication snapshot alone renders an empty session
-  // shell. Keep capture worker-bounded so diagnostics cannot consume the outer
-  // operation watchdog if the old renderer is already unhealthy.
-  return observeOnWorkerClock(
-    () => context.storageState() as Promise<{ cookies: unknown[]; origins: unknown[] }>,
-    authenticatedStorageState,
-    timeoutMs,
-  );
+  // shell. Read only the allowlisted session keys from the current renderer.
+  // Unlike BrowserContext.storageState(), this Runtime.evaluate has a native
+  // Playwright deadline and cannot leave a non-cancellable storage command
+  // queued ahead of the voice-control renderer work.
+  const exactSessionKeys = [
+    "sophia-session-bootstrap",
+    "sophia-session-store",
+    "sophia-session",
+  ];
+  const sessionEntries = await page.locator("html").evaluate(
+    (_element, names) => {
+      const exact = new Set(names);
+      const entries: Array<{ name: string; value: string }> = [];
+      for (let index = 0; index < localStorage.length; index += 1) {
+        const name = localStorage.key(index);
+        if (name === null || (!exact.has(name) && !name.startsWith("sophia.session.snapshot"))) continue;
+        const value = localStorage.getItem(name);
+        if (value !== null) entries.push({ name, value });
+      }
+      return entries;
+    },
+    exactSessionKeys,
+    { timeout: timeoutMs },
+  ).catch(() => null);
+  if (!sessionEntries || sessionEntries.length === 0) return authenticatedStorageState;
+
+  let frontendOriginFound = false;
+  const origins = authenticatedStorageState.origins.map((origin) => {
+    if (origin === null || typeof origin !== "object" || Array.isArray(origin)) return origin;
+    const record = origin as Record<string, unknown>;
+    if (record.origin !== frontendOrigin) return origin;
+    frontendOriginFound = true;
+    const existing = Array.isArray(record.localStorage)
+      ? record.localStorage.filter((entry) => {
+        if (entry === null || typeof entry !== "object" || Array.isArray(entry)) return true;
+        const name = (entry as Record<string, unknown>).name;
+        return typeof name !== "string"
+          || (!exactSessionKeys.includes(name) && !name.startsWith("sophia.session.snapshot"));
+      })
+      : [];
+    return { ...record, localStorage: [...existing, ...sessionEntries] };
+  });
+  if (!frontendOriginFound) origins.push({ origin: frontendOrigin, localStorage: sessionEntries });
+  return { cookies: authenticatedStorageState.cookies, origins };
 }
 
 type FreshExactRouteContextInput = {
@@ -1283,7 +1321,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       // allocate a new isolated context without replaying or broadening the
       // scoped frontend grant.
       const authenticatedStorageState = await context.storageState() as { cookies: unknown[]; origins: unknown[] };
-      const sessionRecoveryStorageState = authenticatedStorageState;
+      let sessionRecoveryStorageState = authenticatedStorageState;
       const preloadedPassiveEffectBreakpoints = await settleDiagnosticWithinBudget(
         preloadPassiveEffectBreakpoints(context.request, frontendOrigin).catch(() => []),
         [],
@@ -1692,14 +1730,15 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
         reload: () => reloadExactSessionRouteOnce("session_navigation_recovery_reload"),
       });
       assertPageLocation(page.url(), frontendOrigin, (pathname) => /^\/session(?:\/|$)/.test(pathname), "ORDINARY_UI_ORIGIN_DRIFT");
-      // Do not enqueue context.storageState() behind the just-committed client
-      // transition. Chromium can leave that non-cancellable protocol command
-      // pending while the session renderer starts media; a worker-clock race
-      // only returns a fallback and does not remove the queued command. Keep
-      // the already-authenticated snapshot for the one bounded recovery path.
-      // If recovery needs product-local session state that is unavailable in
-      // this snapshot, the exact-shell check fails with a typed route error
-      // instead of monopolizing the complete start-operation deadline.
+      // Capture only the product-authored session keys through the current
+      // renderer. A fresh recovery context then retains the exact logical
+      // session without enqueuing BrowserContext.storageState() behind the
+      // newly committed client transition.
+      sessionRecoveryStorageState = await captureSessionRecoveryStorageState(
+        activePage,
+        authenticatedStorageState,
+        frontendOrigin,
+      );
       let voiceStartAttempt = 0;
       const activateVoiceStart = async () => {
         voiceStartAttempt += 1;

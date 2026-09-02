@@ -132,23 +132,46 @@ describe("ordinary voice start recovery", () => {
   });
 
   it("refreshes recovery storage with the session persisted before route commit", async () => {
-    const authenticated = { cookies: [{ name: "auth" }], origins: [] };
-    const withSession = {
+    const authenticated = {
       cookies: [{ name: "auth" }],
-      origins: [{ origin: "https://www.sophia-ei.com", localStorage: [{ name: "sophia-session-store", value: "persisted-session" }] }],
+      origins: [{
+        origin: "https://www.sophia-ei.com",
+        localStorage: [{ name: "sophia-theme", value: "dark" }],
+      }],
     };
-    const context = { storageState: async () => withSession };
+    const page = {
+      locator: () => ({
+        evaluate: async (_callback: unknown, names: string[], options: { timeout: number }) => {
+          expect(names).toEqual(["sophia-session-bootstrap", "sophia-session-store", "sophia-session"]);
+          expect(options.timeout).toBe(100);
+          return [
+            { name: "sophia-session-store", value: "persisted-session" },
+            { name: "sophia.session.snapshot.v1:current", value: "persisted-snapshot" },
+          ];
+        },
+      }),
+    };
 
-    await expect(captureSessionRecoveryStorageState(context as any, authenticated, 100))
-      .resolves.toEqual(withSession);
+    await expect(captureSessionRecoveryStorageState(page as any, authenticated, "https://www.sophia-ei.com", 100))
+      .resolves.toEqual({
+        cookies: [{ name: "auth" }],
+        origins: [{
+          origin: "https://www.sophia-ei.com",
+          localStorage: [
+            { name: "sophia-theme", value: "dark" },
+            { name: "sophia-session-store", value: "persisted-session" },
+            { name: "sophia.session.snapshot.v1:current", value: "persisted-snapshot" },
+          ],
+        }],
+      });
     expect(SESSION_RECOVERY_STORAGE_CAPTURE_TIMEOUT_MS).toBe(2_500);
   });
 
-  it("retains authenticated recovery storage when the post-commit snapshot exceeds its worker budget", async () => {
+  it("retains authenticated recovery storage when the bounded renderer snapshot fails", async () => {
     const authenticated = { cookies: [{ name: "auth" }], origins: [] };
-    const context = { storageState: () => new Promise(() => undefined) };
+    const page = { locator: () => ({ evaluate: async () => { throw new Error("renderer unavailable"); } }) };
 
-    await expect(captureSessionRecoveryStorageState(context as any, authenticated, 10))
+    await expect(captureSessionRecoveryStorageState(page as any, authenticated, "https://www.sophia-ei.com", 10))
       .resolves.toBe(authenticated);
   });
 
