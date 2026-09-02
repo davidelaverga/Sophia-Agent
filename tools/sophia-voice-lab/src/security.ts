@@ -1,4 +1,4 @@
-import { createDecipheriv, createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 
 import type { DeploymentIdentity } from "./domain.js";
 import { VoiceLabError, labError } from "./domain.js";
@@ -290,22 +290,6 @@ export function resolveAllowedOriginPath(rawOrigin: string, rawPath: string, all
     throw new VoiceLabError(labError("TARGET_NOT_ALLOWED", "Target path escaped the exact origin allowlist.", "authorization"));
   }
   return endpoint;
-}
-
-export function decryptStorageState(ciphertext: string, keyBase64: string): unknown {
-  const packed = Buffer.from(ciphertext, "base64");
-  const key = Buffer.from(keyBase64, "base64");
-  if (key.length !== 32 || packed.length < 29) throw new VoiceLabError(labError("STORAGE_STATE_INVALID", "Encrypted storage state configuration is invalid.", "authorization"));
-  const iv = packed.subarray(0, 12);
-  const tag = packed.subarray(12, 28);
-  const body = packed.subarray(28);
-  try {
-    const decipher = createDecipheriv("aes-256-gcm", key, iv);
-    decipher.setAuthTag(tag);
-    return JSON.parse(Buffer.concat([decipher.update(body), decipher.final()]).toString("utf8"));
-  } catch {
-    throw new VoiceLabError(labError("STORAGE_STATE_DECRYPT_FAILED", "Encrypted storage state could not be decrypted.", "authorization"));
-  }
 }
 
 const SENSITIVE_KEY = /(authorization|cookie|token|secret|password|storage.?state|capability|api[_-]?key|client[_-]?secret|resumption[_-]?handle|continuation[_-]?handle|ephemeral[_-]?(?:credential|token)|signed[_-]?url)/i;

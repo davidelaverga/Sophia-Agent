@@ -10,7 +10,7 @@ import type { ResolvedAudio } from "./audio.js";
 import { buildVoiceLabInitScript } from "./browser-init.js";
 import type { VoiceLabConfig } from "./config.js";
 import { VoiceLabError, labError, type DeploymentDependencies, type DeploymentIdentity, type LabEvent, type RunRecord } from "./domain.js";
-import { canonicalRequestHash, decryptStorageState, redact, sha256, validateAllowedOrigin } from "./security.js";
+import { canonicalRequestHash, redact, sha256, validateAllowedOrigin } from "./security.js";
 
 export interface DriverStartResult {
   observedDeployment: DeploymentIdentity;
@@ -871,148 +871,6 @@ export const SESSION_VOICE_RECOVERY_TAB_TIMEOUT_MS = 10_000;
 export const SESSION_VOICE_RECOVERY_START_TIMEOUT_MS = 15_000;
 export const SESSION_VOICE_ACTIVATION_SETTLE_MS = 15_000;
 export const SESSION_ROUTE_RECOVERY_RELOAD_TIMEOUT_MS = 15_000;
-export const SESSION_RECOVERY_STORAGE_CAPTURE_TIMEOUT_MS = 2_500;
-
-export function isolateBootstrapStorageState(
-  storageState: { cookies: unknown[]; origins: unknown[] },
-): { cookies: unknown[]; origins: unknown[] } {
-  // Preserve ordinary UI preferences (completed onboarding, privacy consent,
-  // dashboard spotlight, theme) from the encrypted browser bootstrap. Removing
-  // the complete origin sends a fresh lab context back through onboarding and
-  // prevents the dashboard microphone route from becoming available. Only the
-  // product state that can bind the context to a previous logical session is
-  // unsafe to inherit. This is the same session-key boundary used by the live
-  // Sophia media E2E bootstrap; the scoped grant below remains authoritative
-  // for the new session created in this isolated context.
-  const exactSessionKeys = new Set([
-    "sophia-session-bootstrap",
-    "sophia-session-store",
-    "sophia-session",
-  ]);
-  const origins = storageState.origins.map((origin) => {
-    if (origin === null || typeof origin !== "object" || Array.isArray(origin)) return origin;
-    const record = origin as Record<string, unknown>;
-    if (!Array.isArray(record.localStorage)) return origin;
-    const localStorage = record.localStorage.filter((entry) => {
-      if (entry === null || typeof entry !== "object" || Array.isArray(entry)) return true;
-      const name = (entry as Record<string, unknown>).name;
-      return typeof name !== "string"
-        || (!exactSessionKeys.has(name) && !name.startsWith("sophia.session.snapshot"));
-    });
-    return { ...record, localStorage };
-  });
-  return { cookies: storageState.cookies, origins };
-}
-
-export async function captureSessionRecoveryStorageState(
-  page: Page,
-  authenticatedStorageState: { cookies: unknown[]; origins: unknown[] },
-  frontendOrigin: string,
-  timeoutMs = SESSION_RECOVERY_STORAGE_CAPTURE_TIMEOUT_MS,
-): Promise<{ cookies: unknown[]; origins: unknown[] }> {
-  // The dashboard persists the newly created session before committing
-  // /session. Recovery must carry that product-authored localStorage forward;
-  // the pre-navigation authentication snapshot alone renders an empty session
-  // shell. Read only the allowlisted session keys from the current renderer.
-  // Unlike BrowserContext.storageState(), this Runtime.evaluate has a native
-  // Playwright deadline and cannot leave a non-cancellable storage command
-  // queued ahead of the voice-control renderer work.
-  const exactSessionKeys = [
-    "sophia-session-bootstrap",
-    "sophia-session-store",
-    "sophia-session",
-  ];
-  const sessionEntries = await page.locator("html").evaluate(
-    (_element, names) => {
-      const exact = new Set(names);
-      const entries: Array<{ name: string; value: string }> = [];
-      for (let index = 0; index < localStorage.length; index += 1) {
-        const name = localStorage.key(index);
-        if (name === null || (!exact.has(name) && !name.startsWith("sophia.session.snapshot"))) continue;
-        const value = localStorage.getItem(name);
-        if (value !== null) entries.push({ name, value });
-      }
-      return entries;
-    },
-    exactSessionKeys,
-    { timeout: timeoutMs },
-  ).catch(() => null);
-  if (!sessionEntries || sessionEntries.length === 0) return authenticatedStorageState;
-
-  let frontendOriginFound = false;
-  const origins = authenticatedStorageState.origins.map((origin) => {
-    if (origin === null || typeof origin !== "object" || Array.isArray(origin)) return origin;
-    const record = origin as Record<string, unknown>;
-    if (record.origin !== frontendOrigin) return origin;
-    frontendOriginFound = true;
-    const existing = Array.isArray(record.localStorage)
-      ? record.localStorage.filter((entry) => {
-        if (entry === null || typeof entry !== "object" || Array.isArray(entry)) return true;
-        const name = (entry as Record<string, unknown>).name;
-        return typeof name !== "string"
-          || (!exactSessionKeys.includes(name) && !name.startsWith("sophia.session.snapshot"));
-      })
-      : [];
-    return { ...record, localStorage: [...existing, ...sessionEntries] };
-  });
-  if (!frontendOriginFound) origins.push({ origin: frontendOrigin, localStorage: sessionEntries });
-  return { cookies: authenticatedStorageState.cookies, origins };
-}
-
-type FreshExactRouteContextInput = {
-  browser: Browser;
-  currentContext: BrowserContext;
-  currentPage: Page;
-  storageState: { cookies: unknown[]; origins: unknown[] };
-  initScriptContent: string;
-  frontendOrigin: string;
-  attachDiagnostics: (page: Page) => void;
-  installBindings?: (context: BrowserContext) => Promise<void>;
-  timeoutMs?: number;
-};
-
-async function openFreshExactRouteContext(
-  input: FreshExactRouteContextInput,
-  acceptsPath: (pathname: string) => boolean,
-): Promise<{ context: BrowserContext; page: Page }> {
-  const recoveryUrl = input.currentPage.url();
-  assertPageLocation(recoveryUrl, input.frontendOrigin, acceptsPath, "ORDINARY_UI_ORIGIN_DRIFT");
-  const replacementContext = await input.browser.newContext({
-    storageState: input.storageState as any,
-    serviceWorkers: "block",
-  });
-  try {
-    if (input.installBindings) await input.installBindings(replacementContext);
-    await replacementContext.addInitScript({ content: input.initScriptContent });
-    const replacementPage = await replacementContext.newPage();
-    input.attachDiagnostics(replacementPage);
-    await replacementPage.goto(recoveryUrl, {
-      waitUntil: "domcontentloaded",
-      timeout: input.timeoutMs ?? SESSION_ROUTE_RECOVERY_RELOAD_TIMEOUT_MS,
-    });
-    assertPageLocation(replacementPage.url(), input.frontendOrigin, acceptsPath, "ORDINARY_UI_ORIGIN_DRIFT");
-    // The failed context no longer participates in recovery. Closing it is
-    // best-effort and worker-bounded; the Browser registry remains the final
-    // cleanup authority if Chromium cannot settle this command.
-    await observeOnWorkerClock(() => input.currentContext.close(), undefined, 1_000);
-    return { context: replacementContext, page: replacementPage };
-  } catch (error) {
-    await observeOnWorkerClock(() => replacementContext.close(), undefined, 1_000);
-    throw error;
-  }
-}
-
-export async function openFreshExactSessionContext(
-  input: FreshExactRouteContextInput,
-): Promise<{ context: BrowserContext; page: Page }> {
-  return openFreshExactRouteContext(input, (pathname) => /^\/session(?:\/|$)/.test(pathname));
-}
-
-export async function openFreshExactDashboardContext(
-  input: FreshExactRouteContextInput,
-): Promise<{ context: BrowserContext; page: Page }> {
-  return openFreshExactRouteContext(input, (pathname) => pathname === "/");
-}
 
 export async function resolveDashboardMicButton(page: Page, micAnchor: Locator): Promise<Locator> {
   // MicCTA renders the stable onboarding anchor as a sibling of the actual
@@ -1330,25 +1188,16 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
     const prepared = await (async () => {
       const exactBrowserContextBinding = validateD02BrowserContextBinding(run, browserContextBinding);
       const deployment = await this.#verifyDeployment(run);
-      let storageState: { cookies: unknown[]; origins: unknown[] } | undefined;
-      if (this.config.storageStateCiphertext || this.config.storageStateKey) {
-        if (!this.config.storageStateCiphertext || !this.config.storageStateKey) throw new VoiceLabError(labError("STORAGE_STATE_INVALID", "Both encrypted storageState values must be configured together.", "authorization"));
-        storageState = decryptStorageState(this.config.storageStateCiphertext, this.config.storageStateKey) as { cookies: unknown[]; origins: unknown[] };
-        if (!Array.isArray(storageState.cookies) || !Array.isArray(storageState.origins)) throw new VoiceLabError(labError("STORAGE_STATE_INVALID", "Decrypted storageState has an invalid shape.", "authorization"));
-      }
       const frontendOrigin = validateAllowedOrigin(run.target.frontendUrl, this.config.allowedOrigins).origin;
       const ownership = await this.#launchOwnedBrowserProcess(run);
       this.#pendingProcesses.set(run.id, ownership);
-      return { exactBrowserContextBinding, deployment, storageState, frontendOrigin, ownership };
+      return { exactBrowserContextBinding, deployment, frontendOrigin, ownership };
     })().finally(() => {
       this.#startingRuns.delete(run.id);
     });
-    const { exactBrowserContextBinding, deployment, storageState, frontendOrigin, ownership } = prepared;
+    const { exactBrowserContextBinding, deployment, frontendOrigin, ownership } = prepared;
     const observedDeployment = deployment.identity;
     const browser = ownership.browser;
-    const bootstrapStorageState = storageState === undefined
-      ? undefined
-      : isolateBootstrapStorageState(storageState);
     const startupPush: StartupPushState = { active: true, overflow: false, queue: [] };
     const installPushBinding = async (targetContext: BrowserContext): Promise<void> => {
       await targetContext.exposeBinding(PAGE_PUSH_BINDING_NAME, (source, raw: unknown) => {
@@ -1366,7 +1215,11 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
     };
     let context: BrowserContext;
     try {
-      context = await browser.newContext({ ...(bootstrapStorageState === undefined ? {} : { storageState: bootstrapStorageState as any }), serviceWorkers: "block" });
+      // The server-issued grant creates the dedicated synthetic Better Auth
+      // session inside this new context. Importing cookies or Web Storage from
+      // another browser is forbidden: every run begins with an empty origin
+      // store and acquires all authority through the bound grant response.
+      context = await browser.newContext({ serviceWorkers: "block" });
       await installPushBinding(context);
     } catch (error) {
       await this.#closeOwnedBrowserProcess(ownership);

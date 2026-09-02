@@ -133,8 +133,10 @@ Execution-unlock progress is monotonic:
 - server-authorized `VoiceLabControlAdapter`: closed deployment green;
 - disposable Chromium process ownership and execution-epoch fencing: closed
   deployment green at `0b505c40928fedf6a6ca7bdd5fe874ab64208c26`;
-- driver/process death plus provider/session cleanup ordering: implemented in
-  `execution-epoch-cleanup.md`, closed deployment assertion required;
+- driver/process death plus provider/session cleanup ordering: closed deployment
+  green at `8f0cb46a1c9ca23a2e2b7950fb12e6d125e5f35b`;
+- storage transplant removal: implemented in `storage-isolation.md`, closed
+  deployment assertion required;
 - controller parity, cancellation, 20/20 real built-app trials, and five
   consecutive deployed canaries: pending.
 

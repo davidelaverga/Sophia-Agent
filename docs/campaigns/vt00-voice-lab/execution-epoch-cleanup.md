@@ -1,6 +1,6 @@
 # Voice Lab execution-epoch terminal cleanup
 
-Status: `IMPLEMENTED — CLOSED DEPLOYMENT ASSERTION REQUIRED`
+Status: `CLOSED DEPLOYMENT GREEN — 8f0cb46a1c9ca23a2e2b7950fb12e6d125e5f35b`
 
 Falsifiable hypothesis: a run that allocated a disposable Chromium process cannot
 release its browser lease, enter final evidence settlement, or certify cleanup
@@ -33,3 +33,8 @@ cross-epoch drift, and the pre-allocation case. Production gates stay closed unt
 the exact candidate is deployed and aggregate readiness again reports zero active
 runs, one settled worker, exact build identity on all components, and every mutation
 gate closed.
+
+The exact candidate was deployed on every component and the aggregate readiness
+attestation returned HTTP 200 with all six component identities exact, one settled
+worker, zero active runs, OAuth and test auth verified, and every product mutation
+and execution gate closed before the storage-isolation repair began.

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { activateVoiceStartWithClientErrorReload, assertPageLocation, browserProcessOwnershipHashes, captureSessionRecoveryStorageState, classifyBrowserStartCause, classifyClientCdpExceptionFrames, classifyClientCdpPausedFrames, classifyClientConsoleErrorLocation, classifyClientPageError, closeContextWithProof, DASHBOARD_ROUTE_TIMEOUT_MS, disposableBrowserProcessIsActive, drainProductCapture, establishDashboardMicRoute, establishSessionNavigation, extractNextChunkScriptUrls, findPassiveEffectCreateBreakpoint, findPassiveEffectCreateCatchBreakpoint, findPassiveEffectDestroyBreakpoint, isolateBootstrapStorageState, isExactFinalizationResponse, isRecoverableEmptyDashboardVoiceRoute, isRecoverableEmptySessionVoiceRoute, openFreshExactDashboardContext, openFreshExactSessionContext, passiveEffectBreakpointCondition, PlaywrightVoiceDriver, RECOVERABLE_DASHBOARD_LOAD_ERROR, RECOVERABLE_DASHBOARD_RELOAD_BUTTON, requestBoundJson, requestBoundJsonWithOneTransientRetry, selectRecentClientEffectProbe, selectRecentClientPausedFrames, SESSION_NAVIGATION_ROUTE_TIMEOUT_MS, SESSION_NAVIGATION_SETTLE_TIMEOUT_MS, SESSION_RECOVERY_STORAGE_CAPTURE_TIMEOUT_MS, SESSION_ROUTE_RECOVERY_RELOAD_TIMEOUT_MS, SESSION_VOICE_ACTIVATION_SETTLE_MS, SESSION_VOICE_INITIAL_START_TIMEOUT_MS, SESSION_VOICE_INITIAL_TAB_TIMEOUT_MS, SESSION_VOICE_RECOVERY_START_TIMEOUT_MS, SESSION_VOICE_RECOVERY_TAB_TIMEOUT_MS, shouldCaptureSessionVoiceRoute, shouldReleasePassiveEffectBreakpoint, validateAppSyntheticBinding, validateD02BrowserContextBinding, validateD02ProductCleanupEcho, validateVoiceLabControlAdapterReceipt, waitForClientPageError, waitOnWorkerClock, withClientDiagnosticFrames, withClientEffectProbe } from "../src/browser-driver.js";
+import { activateVoiceStartWithClientErrorReload, assertPageLocation, browserProcessOwnershipHashes, classifyBrowserStartCause, classifyClientCdpExceptionFrames, classifyClientCdpPausedFrames, classifyClientConsoleErrorLocation, classifyClientPageError, closeContextWithProof, DASHBOARD_ROUTE_TIMEOUT_MS, disposableBrowserProcessIsActive, drainProductCapture, establishDashboardMicRoute, establishSessionNavigation, extractNextChunkScriptUrls, findPassiveEffectCreateBreakpoint, findPassiveEffectCreateCatchBreakpoint, findPassiveEffectDestroyBreakpoint, isExactFinalizationResponse, isRecoverableEmptyDashboardVoiceRoute, isRecoverableEmptySessionVoiceRoute, passiveEffectBreakpointCondition, PlaywrightVoiceDriver, RECOVERABLE_DASHBOARD_LOAD_ERROR, RECOVERABLE_DASHBOARD_RELOAD_BUTTON, requestBoundJson, requestBoundJsonWithOneTransientRetry, selectRecentClientEffectProbe, selectRecentClientPausedFrames, SESSION_NAVIGATION_ROUTE_TIMEOUT_MS, SESSION_NAVIGATION_SETTLE_TIMEOUT_MS, SESSION_ROUTE_RECOVERY_RELOAD_TIMEOUT_MS, SESSION_VOICE_ACTIVATION_SETTLE_MS, SESSION_VOICE_INITIAL_START_TIMEOUT_MS, SESSION_VOICE_INITIAL_TAB_TIMEOUT_MS, SESSION_VOICE_RECOVERY_START_TIMEOUT_MS, SESSION_VOICE_RECOVERY_TAB_TIMEOUT_MS, shouldCaptureSessionVoiceRoute, shouldReleasePassiveEffectBreakpoint, validateAppSyntheticBinding, validateD02BrowserContextBinding, validateD02ProductCleanupEcho, validateVoiceLabControlAdapterReceipt, waitForClientPageError, waitOnWorkerClock, withClientDiagnosticFrames, withClientEffectProbe } from "../src/browser-driver.js";
 import { sha256 } from "../src/security.js";
 import { SHA, SHA_B, SHA_C, SHA_D, testConfig, testRun } from "./helpers.js";
 
@@ -190,157 +190,13 @@ describe("ordinary session navigation settlement", () => {
 });
 
 describe("ordinary voice start recovery", () => {
-  it("drops only inherited session state while preserving cookies and ordinary UI preferences", () => {
-    const cookies = [{ name: "auth", value: "opaque" }];
-    const storage = isolateBootstrapStorageState({
-      cookies,
-      origins: [{
-        origin: "https://www.sophia-ei.com",
-        localStorage: [
-          { name: "sophia-session-bootstrap", value: "stale-bootstrap" },
-          { name: "sophia-session-store", value: "stale-store" },
-          { name: "sophia-session", value: "stale-session" },
-          { name: "sophia.session.snapshot.v1:old", value: "stale-snapshot" },
-          { name: "sophia-onboarding-v2", value: "completed" },
-          { name: "sophia_consent_accepted", value: "true" },
-          { name: "sophia:dashboard-spotlight-complete:v1", value: "1" },
-          { name: "sophia-theme", value: "dark" },
-        ],
-      }],
+  it("does not expose or honor legacy browser-storage import configuration", () => {
+    const config = testConfig({
+      SOPHIA_VOICE_LAB_STORAGE_STATE_ENCRYPTED: "legacy-ciphertext-must-be-ignored",
+      SOPHIA_VOICE_LAB_STORAGE_STATE_KEY: "legacy-key-must-be-ignored",
     });
-
-    expect(storage).toEqual({
-      cookies,
-      origins: [{
-        origin: "https://www.sophia-ei.com",
-        localStorage: [
-          { name: "sophia-onboarding-v2", value: "completed" },
-          { name: "sophia_consent_accepted", value: "true" },
-          { name: "sophia:dashboard-spotlight-complete:v1", value: "1" },
-          { name: "sophia-theme", value: "dark" },
-        ],
-      }],
-    });
-  });
-
-  it("refreshes recovery storage with the session persisted before route commit", async () => {
-    const authenticated = {
-      cookies: [{ name: "auth" }],
-      origins: [{
-        origin: "https://www.sophia-ei.com",
-        localStorage: [{ name: "sophia-theme", value: "dark" }],
-      }],
-    };
-    const page = {
-      locator: () => ({
-        evaluate: async (_callback: unknown, names: string[], options: { timeout: number }) => {
-          expect(names).toEqual(["sophia-session-bootstrap", "sophia-session-store", "sophia-session"]);
-          expect(options.timeout).toBe(100);
-          return [
-            { name: "sophia-session-store", value: "persisted-session" },
-            { name: "sophia.session.snapshot.v1:current", value: "persisted-snapshot" },
-          ];
-        },
-      }),
-    };
-
-    await expect(captureSessionRecoveryStorageState(page as any, authenticated, "https://www.sophia-ei.com", 100))
-      .resolves.toEqual({
-        cookies: [{ name: "auth" }],
-        origins: [{
-          origin: "https://www.sophia-ei.com",
-          localStorage: [
-            { name: "sophia-theme", value: "dark" },
-            { name: "sophia-session-store", value: "persisted-session" },
-            { name: "sophia.session.snapshot.v1:current", value: "persisted-snapshot" },
-          ],
-        }],
-      });
-    expect(SESSION_RECOVERY_STORAGE_CAPTURE_TIMEOUT_MS).toBe(2_500);
-  });
-
-  it("retains authenticated recovery storage when the bounded renderer snapshot fails", async () => {
-    const authenticated = { cookies: [{ name: "auth" }], origins: [] };
-    const page = { locator: () => ({ evaluate: async () => { throw new Error("renderer unavailable"); } }) };
-
-    await expect(captureSessionRecoveryStorageState(page as any, authenticated, "https://www.sophia-ei.com", 10))
-      .resolves.toBe(authenticated);
-  });
-
-  it("rehydrates the exact session URL in a fresh isolated context with the same authenticated state", async () => {
-    const calls: string[] = [];
-    const currentPage = {
-      url: () => "https://www.sophia-ei.com/session",
-    };
-    const replacementPage = {
-      url: () => "https://www.sophia-ei.com/session",
-      goto: async (url: string, options: unknown) => { calls.push(`goto:${url}:${JSON.stringify(options)}`); },
-    };
-    const currentContext = {
-      close: async () => { calls.push("close-current-context"); },
-    };
-    const replacementContext = {
-      addInitScript: async () => { calls.push("add-init"); },
-      newPage: async () => { calls.push("new-page"); return replacementPage; },
-      close: async () => { calls.push("close-replacement-context"); },
-    };
-    const browser = {
-      newContext: async (options: unknown) => { calls.push(`new-context:${JSON.stringify(options)}`); return replacementContext; },
-    };
-
-    await expect(openFreshExactSessionContext({
-      browser: browser as any,
-      currentContext: currentContext as any,
-      currentPage: currentPage as any,
-      storageState: { cookies: [], origins: [] },
-      initScriptContent: "sealed-init",
-      frontendOrigin: "https://www.sophia-ei.com",
-      attachDiagnostics: (page) => { expect(page).toBe(replacementPage); calls.push("attach"); },
-    })).resolves.toEqual({ context: replacementContext, page: replacementPage });
-    expect(calls).toEqual([
-      `new-context:${JSON.stringify({ storageState: { cookies: [], origins: [] }, serviceWorkers: "block" })}`,
-      "add-init",
-      "new-page",
-      "attach",
-      `goto:https://www.sophia-ei.com/session:${JSON.stringify({ waitUntil: "domcontentloaded", timeout: SESSION_ROUTE_RECOVERY_RELOAD_TIMEOUT_MS })}`,
-      "close-current-context",
-    ]);
-  });
-
-  it("rehydrates the exact empty dashboard in a fresh isolated context with the same authenticated state", async () => {
-    const calls: string[] = [];
-    const currentPage = { url: () => "https://www.sophia-ei.com/" };
-    const replacementPage = {
-      url: () => "https://www.sophia-ei.com/",
-      goto: async (url: string, options: unknown) => { calls.push(`goto:${url}:${JSON.stringify(options)}`); },
-    };
-    const currentContext = { close: async () => { calls.push("close-current-context"); } };
-    const replacementContext = {
-      addInitScript: async () => { calls.push("add-init"); },
-      newPage: async () => { calls.push("new-page"); return replacementPage; },
-      close: async () => { calls.push("close-replacement-context"); },
-    };
-    const browser = {
-      newContext: async (options: unknown) => { calls.push(`new-context:${JSON.stringify(options)}`); return replacementContext; },
-    };
-
-    await expect(openFreshExactDashboardContext({
-      browser: browser as any,
-      currentContext: currentContext as any,
-      currentPage: currentPage as any,
-      storageState: { cookies: [], origins: [] },
-      initScriptContent: "sealed-init",
-      frontendOrigin: "https://www.sophia-ei.com",
-      attachDiagnostics: (page) => { expect(page).toBe(replacementPage); calls.push("attach"); },
-    })).resolves.toEqual({ context: replacementContext, page: replacementPage });
-    expect(calls).toEqual([
-      `new-context:${JSON.stringify({ storageState: { cookies: [], origins: [] }, serviceWorkers: "block" })}`,
-      "add-init",
-      "new-page",
-      "attach",
-      `goto:https://www.sophia-ei.com/:${JSON.stringify({ waitUntil: "domcontentloaded", timeout: SESSION_ROUTE_RECOVERY_RELOAD_TIMEOUT_MS })}`,
-      "close-current-context",
-    ]);
+    expect("storageStateCiphertext" in config).toBe(false);
+    expect("storageStateKey" in config).toBe(false);
   });
 
   it("reserves enough of the operation watchdog for one bounded reload and recovery attempt", () => {

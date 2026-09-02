@@ -182,8 +182,6 @@ export interface VoiceLabConfig {
   authReadinessPath: string;
   authProvisionPath: string;
   recoveryPathPrefix: string;
-  storageStateCiphertext: string | null;
-  storageStateKey: string | null;
   fixtureManifestPath: string;
   fixtureRoot: string;
   fixtureManifestSha256: string;
@@ -441,8 +439,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, processRole: "w
     authReadinessPath: env.SOPHIA_VOICE_LAB_AUTH_READINESS_PATH?.trim() || "/api/voice-lab/auth/readiness",
     authProvisionPath: env.SOPHIA_VOICE_LAB_AUTH_PROVISION_PATH?.trim() || "/api/voice-lab/auth/provision",
     recoveryPathPrefix: env.SOPHIA_VOICE_LAB_RECOVERY_PATH_PREFIX?.trim() || "/internal/voice-lab/runs",
-    storageStateCiphertext: env.SOPHIA_VOICE_LAB_STORAGE_STATE_ENCRYPTED?.trim() || null,
-    storageStateKey: env.SOPHIA_VOICE_LAB_STORAGE_STATE_KEY?.trim() || null,
     fixtureManifestPath: nodeEnv === "test" && fixtureManifestOverride ? path.resolve(fixtureManifestOverride) : BUNDLED_FIXTURE_MANIFEST_PATH,
     fixtureRoot: nodeEnv === "test" && fixtureRootOverride ? path.resolve(fixtureRootOverride) : BUNDLED_FIXTURE_ROOT,
     fixtureManifestSha256: nodeEnv === "test" && fixtureDigestOverride ? fixtureDigestOverride : BUNDLED_FIXTURE_MANIFEST_SHA256,
