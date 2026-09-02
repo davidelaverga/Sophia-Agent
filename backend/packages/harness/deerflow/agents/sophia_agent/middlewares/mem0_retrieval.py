@@ -198,14 +198,16 @@ class BuilderMem0RetrievalMiddleware(AgentMiddleware[BuilderMem0RetrievalState])
             )
         except TimeoutError:
             logger.warning(
-                "mem0_retrieval.timeout user_id=%s timeout_s=%.2f query_len=%d",
-                user_id,
+                "mem0_retrieval.timeout ownerExcluded=true timeout_s=%.2f query_len=%d contentExcluded=true",
                 self.timeout_seconds,
                 len(query),
             )
             return None
         except Exception:
-            logger.warning("mem0_retrieval.error user_id=%s", user_id, exc_info=True)
+            logger.warning(
+                "mem0_retrieval.error ownerExcluded=true contentExcluded=true",
+                exc_info=True,
+            )
             return None
 
     @staticmethod

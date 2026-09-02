@@ -758,7 +758,10 @@ def _hydrate_memories_for_review(
             try:
                 merged_memory = _merge_memory_detail(memory, client.get(memory_id))
             except Exception:
-                logger.warning("Failed to hydrate memory detail for %s", memory_id, exc_info=True)
+                logger.warning(
+                    "Failed to hydrate memory detail providerIdExcluded=true contentExcluded=true",
+                    exc_info=True,
+                )
         elif status is not None and has_status:
             skipped_detail_hydration_count += 1
 
@@ -1882,8 +1885,7 @@ async def list_memories(
     trace_id = f"memrecent-{datetime.now(UTC).strftime('%Y%m%d%H%M%S%f')}"
     try:
         logger.info(
-            "session.finalization list_memories_request user_id=%s status=%s session_id_received=%s trace_id=%s",
-            user_id,
+            "session.finalization list_memories_request ownerExcluded=true status=%s session_id_received=%s trace_id=%s",
             status or "<none>",
             bool(session_id),
             trace_id,
@@ -1900,8 +1902,7 @@ async def list_memories(
         memories_raw = _dedupe_memories_by_id(memories_raw)
         items = [_to_memory_item(m) for m in memories_raw]
         logger.info(
-            "session.finalization list_memories_result user_id=%s status=%s count=%s source=%s trace_id=%s",
-            user_id,
+            "session.finalization list_memories_result ownerExcluded=true status=%s count=%s source=%s trace_id=%s",
             status or "<none>",
             len(items),
             diagnostics.get("source"),
@@ -1918,8 +1919,11 @@ async def list_memories(
             empty_reason=diagnostics.get("empty_reason") if isinstance(diagnostics.get("empty_reason"), str) else None,
             trace_id=trace_id,
         )
-    except Exception as e:
-        logger.warning("Failed to list memories for %s: %s", user_id, e)
+    except Exception as exc:
+        logger.warning(
+            "Failed to list memories error_type=%s ownerExcluded=true contentExcluded=true",
+            exc.__class__.__name__,
+        )
         raise HTTPException(status_code=503, detail="Memory service unavailable")
 
 
@@ -2018,8 +2022,11 @@ async def create_memory(user_id: str, body: MemoryCreateRequest) -> MemoryItem:
             category=body.category or memory_metadata.get("category"),
             metadata=memory_metadata or None,
         )
-    except Exception as e:
-        logger.warning("Failed to create memory for %s: %s", user_id, e)
+    except Exception as exc:
+        logger.warning(
+            "Failed to create memory error_type=%s ownerExcluded=true contentExcluded=true",
+            exc.__class__.__name__,
+        )
         raise HTTPException(status_code=503, detail="Memory service unavailable")
 
 
@@ -2131,8 +2138,11 @@ async def update_memory(user_id: str, memory_id: str, body: MemoryUpdateRequest)
         return _to_memory_item(mem) if mem.get("id") else MemoryItem(id=memory_id, content=body.text or "")
     except HTTPException:
         raise
-    except Exception as e:
-        logger.warning("Failed to update memory %s: %s", memory_id, e)
+    except Exception as exc:
+        logger.warning(
+            "Failed to update memory error_type=%s memoryIdExcluded=true contentExcluded=true",
+            exc.__class__.__name__,
+        )
         raise HTTPException(status_code=503, detail="Memory service unavailable")
 
 
@@ -2160,8 +2170,11 @@ async def delete_memory(user_id: str, memory_id: str):
 
         invalidate_user_cache(user_id)
         remove_review_metadata(user_id, memory_id=memory_id)
-    except Exception as e:
-        logger.warning("Failed to delete memory %s: %s", memory_id, e)
+    except Exception as exc:
+        logger.warning(
+            "Failed to delete memory error_type=%s memoryIdExcluded=true contentExcluded=true",
+            exc.__class__.__name__,
+        )
         raise HTTPException(status_code=503, detail="Memory service unavailable")
 
 
@@ -2386,8 +2399,11 @@ async def reflect(user_id: str, body: ReflectRequest) -> ReflectResponse:
         return ReflectResponse(**result)
     except ImportError:
         raise HTTPException(status_code=503, detail="Reflection service not available")
-    except Exception as e:
-        logger.warning("Reflect failed for %s: %s", user_id, e)
+    except Exception as exc:
+        logger.warning(
+            "Reflect failed error_type=%s ownerExcluded=true contentExcluded=true",
+            exc.__class__.__name__,
+        )
         raise HTTPException(status_code=503, detail="Reflection service error")
 
 
@@ -2503,8 +2519,11 @@ async def journal(
             for m in memories_raw
         ]
         return JournalResponse(entries=entries, count=len(entries))
-    except Exception as e:
-        logger.warning("Journal failed for %s: %s", user_id, e)
+    except Exception as exc:
+        logger.warning(
+            "Journal failed error_type=%s ownerExcluded=true contentExcluded=true",
+            exc.__class__.__name__,
+        )
         raise HTTPException(status_code=503, detail="Memory service unavailable")
 
 

@@ -135,7 +135,15 @@ class GovernedMemoryReader:
                 provider_namespace=before.provider_subject,
                 hits=hits,
             )
-            authorized = tuple((memory, score) for memory, score in authorized if memory.scope == scope or memory.scope == "global")[: max(limit, 0)]
+            scope_authorized = tuple(
+                (memory, score)
+                for memory, score in authorized
+                if memory.scope == scope or memory.scope == "global"
+            )
+            scope_denied = len(authorized) - len(scope_authorized)
+            if scope_denied:
+                denials["scope_denied"] = denials.get("scope_denied", 0) + scope_denied
+            authorized = scope_authorized[: max(limit, 0)]
             after = self.store.get_user_governance(owner_id)
             if after.user_revocation_epoch != before.user_revocation_epoch or after.user_catalog_generation != before.user_catalog_generation:
                 authorized, retry_denials = self.store.authorize_provider_hits(
@@ -147,7 +155,15 @@ class GovernedMemoryReader:
                     hits=hits,
                 )
                 denials.update(retry_denials)
-                authorized = tuple((memory, score) for memory, score in authorized if memory.scope == scope or memory.scope == "global")[: max(limit, 0)]
+                scope_authorized = tuple(
+                    (memory, score)
+                    for memory, score in authorized
+                    if memory.scope == scope or memory.scope == "global"
+                )
+                scope_denied = len(authorized) - len(scope_authorized)
+                if scope_denied:
+                    denials["scope_denied"] = denials.get("scope_denied", 0) + scope_denied
+                authorized = scope_authorized[: max(limit, 0)]
             canonical = tuple(
                 AuthorizedMemory(
                     memory_id=memory.memory_id,

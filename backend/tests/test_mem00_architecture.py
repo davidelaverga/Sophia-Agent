@@ -33,3 +33,42 @@ def test_mem0_network_paths_exist_only_in_provider_adapter() -> None:
             if "api.mem0.ai" in text or "/v1/memories/" in text or "/v2/memories/" in text:
                 violations.append(str(path.relative_to(BACKEND)))
     assert violations == []
+
+
+def test_memory_consumer_logs_do_not_embed_raw_query_content_or_identifiers() -> None:
+    targets = (
+        BACKEND / "packages" / "harness" / "deerflow" / "sophia" / "mem0_client.py",
+        BACKEND
+        / "packages"
+        / "harness"
+        / "deerflow"
+        / "agents"
+        / "sophia_agent"
+        / "middlewares"
+        / "mem0_memory.py",
+        BACKEND
+        / "packages"
+        / "harness"
+        / "deerflow"
+        / "agents"
+        / "sophia_agent"
+        / "middlewares"
+        / "mem0_retrieval.py",
+    )
+    denied_fragments = (
+        "query='%s'",
+        "query=\"%s\"",
+        "memory's content preview",
+        "content preview for debugging",
+        "failed for user %s",
+        "thread_id=%s",
+        "first_item_id=%s",
+    )
+
+    violations = {
+        str(path.relative_to(BACKEND)): fragment
+        for path in targets
+        for fragment in denied_fragments
+        if fragment in path.read_text()
+    }
+    assert violations == {}

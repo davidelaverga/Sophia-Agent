@@ -2076,6 +2076,7 @@ BEGIN
                AND memory.lifecycle = 'active'
                AND memory.current_content_revision = (manifest_item->>'content_revision')::bigint
                AND memory.memory_governance_revision = (manifest_item->>'memory_governance_revision')::bigint
+               AND (version.scope = 'global' OR version.scope = p_scope)
                AND version.canonical_content IS NOT NULL
                AND version.content_ref IS NOT NULL
                AND NOT EXISTS (

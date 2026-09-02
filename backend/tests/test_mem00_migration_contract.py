@@ -132,6 +132,7 @@ def test_prompt_admission_rechecks_governance_and_exact_projection_atomically() 
     assert "user_catalog_generation <> p_catalog_generation_checked" in admission
     assert "user_revocation_epoch <> p_revocation_epoch_checked" in admission
     assert "memory.lifecycle = 'active'" in admission
+    assert "(version.scope = 'global' OR version.scope = p_scope)" in admission
     assert "binding.binding_state = 'eligible'" in admission
     assert "binding.metadata_verification_state = 'verified'" in admission
     assert "NOT EXISTS" in admission

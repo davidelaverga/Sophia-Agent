@@ -251,6 +251,59 @@ def test_mem0_adapter_initial_write_preserves_metadata(monkeypatch: pytest.Monke
     assert not hasattr(result, "content")
 
 
+def test_legacy_mem0_facade_never_logs_query_memory_owner_or_provider_id(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import deerflow.sophia.mem0_client as mem0_client
+
+    sensitive = {
+        "owner": "SENSITIVE-OWNER-REF",
+        "query": "SENSITIVE-QUERY-TEXT",
+        "memory": "SENSITIVE-MEMORY-TEXT",
+        "provider_id": "SENSITIVE-PROVIDER-ID",
+    }
+
+    class Client:
+        def search(self, **kwargs):
+            return {
+                "results": [
+                    {
+                        "id": sensitive["provider_id"],
+                        "memory": sensitive["memory"],
+                        "metadata": {"category": "fact"},
+                        "score": 0.9,
+                    }
+                ]
+            }
+
+    monkeypatch.setattr(mem0_client, "_get_client", lambda: Client())
+    monkeypatch.setattr(
+        mem0_client,
+        "memory_provider_status",
+        lambda: {
+            "available": True,
+            "provider_status": "available",
+            "provider_reason": "sdk_client",
+            "provider_transport": "mem0_sdk",
+        },
+    )
+    with mem0_client._cache_lock:
+        mem0_client._cache.clear()
+
+    with caplog.at_level("DEBUG"):
+        result = mem0_client.search_memories_with_diagnostics(
+            user_id=sensitive["owner"],
+            query=sensitive["query"],
+            log_content_previews=True,
+        )
+
+    assert result["memories"][0]["content"] == sensitive["memory"]
+    for value in sensitive.values():
+        assert value not in caplog.text
+    assert "contentExcluded=true" in caplog.text
+
+
 class _ReaderStore:
     def __init__(self, *, unavailable_after_search: bool = False, catalog_changes: bool = False) -> None:
         self.unavailable_after_search = unavailable_after_search
@@ -325,6 +378,27 @@ def test_governed_reader_discards_provider_text_and_renders_canonical_only() -> 
     assert result.receipt.provider_hit_count == 1
     assert store.prompt_payload["authorized_manifest"][0]["content_revision"] == 3
     assert store.prompt_payload["provider_project"] == "existing-project"
+
+
+def test_governed_reader_counts_wrong_scope_and_admits_zero_memory() -> None:
+    class WrongScopeStore(_ReaderStore):
+        def authorize_provider_hits(self, **kwargs):
+            memory = super().authorize_provider_hits(**kwargs)[0][0][0]
+            return ((memory.model_copy(update={"scope": "work"}), 0.91),), {}
+
+    store = WrongScopeStore()
+    result = _reader(store).retrieve(
+        owner_id="owner-1",
+        caller="builder_context",
+        scope="life",
+        query="scope mismatch",
+    )
+
+    assert result.memories == ()
+    assert result.context_text == ""
+    assert result.receipt.denial_counts_by_reason == {"scope_denied": 1}
+    assert store.prompt_payload["authorized_manifest"] == []
+    assert store.prompt_payload["denial_counts"] == {"scope_denied": 1}
 
 
 def test_governed_reader_rejects_unknown_schema_before_provider_search() -> None:

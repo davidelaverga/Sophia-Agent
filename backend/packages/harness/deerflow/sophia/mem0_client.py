@@ -362,7 +362,11 @@ def search_memories_with_diagnostics(
                 "latency_ms": 0,
             }
 
-    logger.info("[Mem0Cache] MISS — calling Mem0 API (query='%s' limit=%d)", query[:80], limit)
+    logger.info(
+        "[Mem0Cache] MISS — calling Mem0 API (query_len=%d limit=%d contentExcluded=true)",
+        len(query),
+        limit,
+    )
     provider_status = memory_provider_status()
     if not provider_status.get("available"):
         if raise_on_error:
@@ -426,25 +430,14 @@ def search_memories_with_diagnostics(
                 key=lambda m: (0 if m.get("category") in context_categories else 1,),
             )
 
-        # Log each retrieved memory with score and content preview when allowed.
-        # Realtime voice tools disable this so telemetry/log diagnostics do not
-        # duplicate raw memory text outside the actual tool result.
+        # Emit only structural search diagnostics. The compatibility argument
+        # remains accepted, but raw memory/query previews are never logged.
         logger.info(
-            "[Mem0Search] %d results in %.0fms (query='%s')",
+            "[Mem0Search] %d results in %.0fms (query_len=%d contentExcluded=true)",
             len(memories),
             api_ms,
-            query[:60],
+            len(query),
         )
-        if log_content_previews:
-            for i, mem in enumerate(memories):
-                score_str = f" score={mem['score']:.3f}" if mem.get("score") is not None else ""
-                logger.info(
-                    "[Mem0Search]   [%d] [%s]%s %s",
-                    i,
-                    mem.get("category", "?"),
-                    score_str,
-                    (mem.get("content", ""))[:120],
-                )
 
         # Update cache (thread-safe, bounded by TTLCache maxsize)
         with _cache_lock:
@@ -461,7 +454,11 @@ def search_memories_with_diagnostics(
 
     except Exception:
         elapsed_ms = int((time.perf_counter() - _t0) * 1000)
-        logger.warning("Mem0 search failed for user %s (%.0fms)", user_id, elapsed_ms, exc_info=True)
+        logger.warning(
+            "Mem0 search failed (%.0fms ownerExcluded=true contentExcluded=true)",
+            elapsed_ms,
+            exc_info=True,
+        )
         if raise_on_error:
             raise MemoryProviderSearchError("provider_exception")
         return {
@@ -570,12 +567,9 @@ def add_memories(
         normalized_result = _normalize_add_result(result)
         first_item = normalized_result[0] if normalized_result else None
         logger.info(
-            "session.finalization mem0_add_response user_id=%s session_id=%s result_type=%s normalized_count=%s first_item_id=%s metadata_keys=%s first_item_keys=%s",
-            user_id,
-            session_id,
+            "session.finalization mem0_add_response ownerExcluded=true sessionExcluded=true result_type=%s normalized_count=%s metadata_keys=%s first_item_keys=%s",
             type(result).__name__,
             len(normalized_result),
-            first_item.get("id") if isinstance(first_item, dict) else None,
             sorted(metadata.keys()) if isinstance(metadata, dict) else None,
             sorted(first_item.keys()) if isinstance(first_item, dict) else None,
         )
@@ -596,7 +590,10 @@ def add_memories(
         return normalized_result
 
     except Exception:
-        logger.warning("Mem0 add failed for user %s", user_id, exc_info=True)
+        logger.warning(
+            "Mem0 add failed ownerExcluded=true sessionExcluded=true contentExcluded=true",
+            exc_info=True,
+        )
         return []
 
 
@@ -659,10 +656,7 @@ def _apply_metadata_updates(
 
         try:
             logger.info(
-                "session.finalization mem0_update_attempt user_id=%s session_id=%s memory_id=%s metadata_keys=%s",
-                user_id,
-                session_id,
-                memory_id,
+                "session.finalization mem0_update_attempt ownerExcluded=true sessionExcluded=true providerIdExcluded=true metadata_keys=%s",
                 sorted(metadata.keys()),
             )
             updated_memory = _update_memory_metadata_via_rest(
@@ -680,10 +674,7 @@ def _apply_metadata_updates(
             )
         except Exception:
             logger.warning(
-                "Mem0 metadata update failed for user %s session %s memory %s",
-                user_id,
-                session_id,
-                memory_id,
+                "Mem0 metadata update failed ownerExcluded=true sessionExcluded=true providerIdExcluded=true contentExcluded=true",
                 exc_info=True,
             )
             upsert_review_metadata(
@@ -730,9 +721,7 @@ def _resolve_memory_id_for_update(
             recent_memories = client.get_all(filters={"user_id": user_id})
         except Exception:
             logger.warning(
-                "Mem0 memory-id resolution failed for user %s session %s",
-                user_id,
-                session_id,
+                "Mem0 memory-id resolution failed ownerExcluded=true sessionExcluded=true providerIdExcluded=true contentExcluded=true",
                 exc_info=True,
             )
             return None
@@ -745,10 +734,7 @@ def _resolve_memory_id_for_update(
             recent_id = recent_memory.get("id")
             if recent_id and recent_text == resolved_memory_text:
                 logger.info(
-                    "session.finalization mem0_id_resolved_from_get_all user_id=%s session_id=%s memory_id=%s attempt=%s",
-                    user_id,
-                    session_id,
-                    recent_id,
+                    "session.finalization mem0_id_resolved_from_get_all ownerExcluded=true sessionExcluded=true providerIdExcluded=true attempt=%s",
                     attempt + 1,
                 )
                 return recent_id
@@ -757,9 +743,7 @@ def _resolve_memory_id_for_update(
             time.sleep(0.25)
 
     logger.warning(
-        "Mem0 returned no usable id for user %s session %s",
-        user_id,
-        session_id,
+        "Mem0 returned no usable id ownerExcluded=true sessionExcluded=true providerIdExcluded=true",
     )
     return None
 
@@ -809,13 +793,19 @@ def reconcile_review_metadata_with_mem0(user_id: str) -> int:
     try:
         result = client.get_all(filters={"user_id": user_id})
     except Exception:
-        logger.warning("Mem0 reconciliation fetch failed for user %s", user_id, exc_info=True)
+        logger.warning(
+            "Mem0 reconciliation fetch failed ownerExcluded=true contentExcluded=true",
+            exc_info=True,
+        )
         return 0
 
     reconciled = reconcile_review_metadata_entries(user_id, _normalize_get_all_result(result))
     if reconciled:
         invalidate_user_cache(user_id)
-        logger.info("session.finalization review_metadata_reconciled user_id=%s count=%s", user_id, reconciled)
+        logger.info(
+            "session.finalization review_metadata_reconciled ownerExcluded=true count=%s",
+            reconciled,
+        )
     return reconciled
 
 

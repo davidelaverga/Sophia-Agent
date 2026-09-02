@@ -305,7 +305,7 @@ BEGIN
 
     first_create := public.sophia_memory_manual_create(
         'owner-projection', 'SYNTHETIC-PROJECTION-A', 'hmac-sha256:projection:a',
-        'fact', 'global', 'none', 'user', 'create-projection-a', 'digest-projection-a',
+        'fact', 'work', 'none', 'user', 'create-projection-a', 'digest-projection-a',
         'mem0', 'production', 'existing-project'
     );
     second_create := public.sophia_memory_manual_create(
@@ -323,7 +323,7 @@ BEGIN
       FROM public.sophia_memory_user_governance
      WHERE user_id = 'owner-projection';
     admission_id := public.sophia_memory_record_prompt_admission(
-        gen_random_uuid(), 'owner-projection', 'text', 'global',
+        gen_random_uuid(), 'owner-projection', 'text', 'work',
         'hmac-sha256:query:projection', 'mem0', 'production',
         'existing-project', governance.provider_subject, 'ok', 1,
         governance.user_catalog_generation, governance.user_revocation_epoch,
@@ -339,6 +339,22 @@ BEGIN
     ) THEN
         RAISE EXCEPTION 'atomic prompt admission was not recorded';
     END IF;
+    BEGIN
+        PERFORM public.sophia_memory_record_prompt_admission(
+            gen_random_uuid(), 'owner-projection', 'builder_context', 'life',
+            'hmac-sha256:query:wrong-scope', 'mem0', 'production',
+            'existing-project', governance.provider_subject, 'ok', 1,
+            governance.user_catalog_generation, governance.user_revocation_epoch,
+            jsonb_build_array(jsonb_build_object(
+                'memory_id', first_create->>'memory_id',
+                'content_revision', 1,
+                'memory_governance_revision', 1
+            )), '{"scope_denied":1}'::jsonb, 'authorized', NULL, '{}'::jsonb
+        );
+        RAISE EXCEPTION 'wrong-scope prompt admission unexpectedly succeeded';
+    EXCEPTION WHEN serialization_failure THEN
+        NULL;
+    END;
     SELECT * INTO STRICT second_lease FROM public.sophia_memory_claim_projection('projection-claimant-b', 120);
     second_completion := public.sophia_memory_complete_projection(
         'owner-projection', second_lease.projection_job_id, second_lease.lease_token,
@@ -355,7 +371,7 @@ BEGIN
     END IF;
     BEGIN
         PERFORM public.sophia_memory_record_prompt_admission(
-            gen_random_uuid(), 'owner-projection', 'text', 'global',
+            gen_random_uuid(), 'owner-projection', 'text', 'work',
             'hmac-sha256:query:held', 'mem0', 'production',
             'existing-project', governance.provider_subject, 'ok', 1,
             governance.user_catalog_generation, governance.user_revocation_epoch,

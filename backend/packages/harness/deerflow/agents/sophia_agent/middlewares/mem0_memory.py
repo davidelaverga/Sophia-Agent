@@ -193,8 +193,8 @@ class Mem0MemoryMiddleware(AgentMiddleware[Mem0MemoryState]):
             cached = _VOICE_FASTCACHE.get(cache_key)
             cache_size = len(_VOICE_FASTCACHE)
         logger.info(
-            "[Mem0Memory] fastcache_lookup | key_thread=%s | key_ctx=%s | cats=%d | hit=%s | cache_size=%d",
-            thread_id[:8] if thread_id else "-",
+            "[Mem0Memory] fastcache_lookup | thread_present=%s | key_ctx=%s | cats=%d | hit=%s | cache_size=%d | identifiersExcluded=true",
+            bool(thread_id),
             context_mode or "-",
             len(categories),
             "yes" if cached else "no",
@@ -211,8 +211,7 @@ class Mem0MemoryMiddleware(AgentMiddleware[Mem0MemoryState]):
 
         if self._is_low_signal_voice_query(query):
             logger.info(
-                "[Mem0Memory] voice recent-cache hit | thread_id=%s | reason=low_signal | age_ms=%.0f",
-                thread_id,
+                "[Mem0Memory] voice recent-cache hit | reason=low_signal | age_ms=%.0f | identifiersExcluded=true",
                 age_seconds * 1000,
             )
             return cached["results"]
@@ -224,8 +223,7 @@ class Mem0MemoryMiddleware(AgentMiddleware[Mem0MemoryState]):
         if not self._is_clear_topic_shift(query, cached_content_tokens):
             if age_seconds <= _VOICE_FAST_CACHE_STICKY_SECONDS:
                 logger.info(
-                    "[Mem0Memory] voice recent-cache hit | thread_id=%s | reason=sticky | age_ms=%.0f",
-                    thread_id,
+                    "[Mem0Memory] voice recent-cache hit | reason=sticky | age_ms=%.0f | identifiersExcluded=true",
                     age_seconds * 1000,
                 )
                 return cached["results"]
@@ -233,8 +231,7 @@ class Mem0MemoryMiddleware(AgentMiddleware[Mem0MemoryState]):
             cached_turn_count = cached.get("turn_count")
             if turn_count is not None and cached_turn_count is not None and turn_count - cached_turn_count < _VOICE_FAST_CACHE_RECENT_TURN_WINDOW:
                 logger.info(
-                    "[Mem0Memory] voice recent-cache hit | thread_id=%s | reason=recent_turn_window | turn_delta=%s",
-                    thread_id,
+                    "[Mem0Memory] voice recent-cache hit | reason=recent_turn_window | turn_delta=%s | identifiersExcluded=true",
                     turn_count - cached_turn_count,
                 )
                 return cached["results"]
@@ -242,7 +239,9 @@ class Mem0MemoryMiddleware(AgentMiddleware[Mem0MemoryState]):
         query_tokens = self._query_tokens(query)
         cached_tokens = cached["query_tokens"]
         if not query_tokens:
-            logger.info("[Mem0Memory] voice recent-cache hit | thread_id=%s | reason=empty_query_tokens", thread_id)
+            logger.info(
+                "[Mem0Memory] voice recent-cache hit | reason=empty_query_tokens | identifiersExcluded=true"
+            )
             return cached["results"]
 
         overlap_count = len(query_tokens & cached_tokens)
@@ -253,8 +252,7 @@ class Mem0MemoryMiddleware(AgentMiddleware[Mem0MemoryState]):
         overlap = overlap_count / union_count if union_count else 1.0
         if len(query_tokens) <= _VOICE_FAST_CACHE_SHORT_QUERY_TOKENS or overlap >= _VOICE_FAST_CACHE_MIN_OVERLAP:
             logger.info(
-                "[Mem0Memory] voice recent-cache hit | thread_id=%s | overlap=%.2f | age_ms=%.0f",
-                thread_id,
+                "[Mem0Memory] voice recent-cache hit | overlap=%.2f | age_ms=%.0f | identifiersExcluded=true",
                 overlap,
                 age_seconds * 1000,
             )
@@ -280,9 +278,9 @@ class Mem0MemoryMiddleware(AgentMiddleware[Mem0MemoryState]):
             return
         if platform not in ("voice", "ios_voice") or not thread_id or not results:
             logger.info(
-                "[Mem0Memory] fastcache_store_skipped | platform=%s | thread=%s | results=%d",
+                "[Mem0Memory] fastcache_store_skipped | platform=%s | thread_present=%s | results=%d | identifiersExcluded=true",
                 platform,
-                (thread_id[:8] if thread_id else "-"),
+                bool(thread_id),
                 len(results) if results else 0,
             )
             return
@@ -299,8 +297,7 @@ class Mem0MemoryMiddleware(AgentMiddleware[Mem0MemoryState]):
             }
             size_after = len(_VOICE_FASTCACHE)
         logger.info(
-            "[Mem0Memory] fastcache_stored | thread=%s | results=%d | cache_size=%d",
-            thread_id[:8],
+            "[Mem0Memory] fastcache_stored | results=%d | cache_size=%d | identifiersExcluded=true",
             len(results),
             size_after,
         )
@@ -326,9 +323,9 @@ class Mem0MemoryMiddleware(AgentMiddleware[Mem0MemoryState]):
 
         # Diagnostic: verify cache pre-conditions
         logger.info(
-            "[Mem0Memory] cache_precheck | platform=%s | thread_id=%s | turn=%s",
+            "[Mem0Memory] cache_precheck | platform=%s | thread_present=%s | turn=%s | identifiersExcluded=true",
             platform,
-            thread_id,
+            bool(thread_id),
             turn_count,
         )
 
@@ -375,8 +372,8 @@ class Mem0MemoryMiddleware(AgentMiddleware[Mem0MemoryState]):
         governed_runtime = memory_feature_flags_for_owner(self._user_id).governed_runtime_read
         if not governed_runtime:
             logger.info(
-                "[Mem0Memory] query='%s' | categories=%s | context_mode=%s | ritual=%s | skill=%s",
-                query[:80],
+                "[Mem0Memory] query_len=%d | categories=%s | context_mode=%s | ritual=%s | skill=%s | contentExcluded=true",
+                len(query),
                 categories,
                 context_mode,
                 ritual,
@@ -396,7 +393,10 @@ class Mem0MemoryMiddleware(AgentMiddleware[Mem0MemoryState]):
                     caller="text_automatic_context" if platform not in ("voice", "ios_voice") else "voice_direct_fallback",
                 )
             except Exception:
-                logger.warning("Mem0 retrieval failed for user %s", self._user_id, exc_info=True)
+                logger.warning(
+                    "Mem0 retrieval failed ownerExcluded=true contentExcluded=true",
+                    exc_info=True,
+                )
                 log_middleware("Mem0Memory", "retrieval failed", _t0)
                 return None
             search_ms = (time.perf_counter() - _t_search) * 1000
@@ -425,16 +425,6 @@ class Mem0MemoryMiddleware(AgentMiddleware[Mem0MemoryState]):
             search_ms,
             " | ".join(f"{cat}: {count}" for cat, count in sorted(category_counts.items())),
         )
-        # Log each memory's content preview for debugging
-        if not governed_runtime:
-            for i, mem in enumerate(results[:memory_limit]):
-                logger.debug(
-                    "[Mem0Memory]   [%d] [%s] %s",
-                    i,
-                    mem.get("category", "?"),
-                    (mem.get("content", ""))[:100],
-                )
-
         # Format memories for prompt injection
         memory_lines = []
         memory_ids = []
@@ -462,5 +452,7 @@ class Mem0MemoryMiddleware(AgentMiddleware[Mem0MemoryState]):
         # Here we just log that the session should be processed.
         thread_id = runtime.context.get("thread_id")
         if thread_id:
-            logger.debug("Session %s queued for offline Mem0 extraction", thread_id)
+            logger.debug(
+                "Session queued for offline Mem0 extraction threadExcluded=true"
+            )
         return None
