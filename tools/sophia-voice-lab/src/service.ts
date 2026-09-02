@@ -1728,7 +1728,7 @@ export class VoiceLabService {
     if (run.callerId !== caller.subject) throw new VoiceLabError(labError("RUN_NOT_FOUND", "Run was not found.", "validation"));
     const evidence = await this.ledger.getEvidence(run.id);
     if (!evidence) return envelope({ run, status: "unavailable", warnings: [{ code: "EVIDENCE_PENDING", message: "Evidence is not durable yet; retry after finalization." }], retryability: "retryable", data: { evidence_state: "pending" } });
-    return envelope({ run, status: "completed", evidence: evidence.artifactRefs, data: { evidence_state: "available", manifest_id: evidence.manifestId, manifest_sha256: evidence.manifestSha256, schema_version: evidence.schemaVersion, created_at: evidence.createdAt.toISOString() } });
+    return envelope({ run, status: "completed", evidence: evidence.artifactRefs, data: { cleanup_complete: run.cleanupComplete, evidence_state: "available", manifest_id: evidence.manifestId, manifest_sha256: evidence.manifestSha256, schema_version: evidence.schemaVersion, created_at: evidence.createdAt.toISOString() } });
   }
 
   async runRegressionSuite(caller: AuthenticatedCaller, raw: unknown): Promise<LabEnvelope> {

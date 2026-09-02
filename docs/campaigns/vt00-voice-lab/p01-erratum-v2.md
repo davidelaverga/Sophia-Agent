@@ -20,8 +20,8 @@ Documentation status alone is not implementation evidence.
 | Submission versus durable state | A mutating response is treated as both submission success and terminal operation proof. | The response records a truthful submission outcome separately from the durable operation state. A submitted or accepted mutation is not `succeeded`; later bounded observation must prove the exact operation terminal state. | `CLOSED DEPLOYMENT GREEN — 669c37b959c10f30bf50dceddd32aa61429146b6` |
 | Strict adaptive policy | V-P01 supplies a caller-authored adaptive object while the service accepts adaptive observations only for V-A01. | The first `speak` is non-adaptive. The second `speak` is accepted only when it cites the exact fresh V-P01 observation receipt returned after the first assistant result. Missing, stale, cross-run, cross-turn, reused, or caller-invented receipts fail closed. | `CLOSED DEPLOYMENT GREEN — bc49414dcf2222a760e4f91ff53c3296f6d7a2d2` |
 | Run-bound observation receipt | The caller reconstructs an observation from public event fields. | `wait_for_turn` mints a typed receipt bound to run ID, test-run ID, scenario/version, deployment identity, event sequence, turn ID, observation class, issue time, and a service-verifiable integrity value. The follow-up submits that receipt unchanged plus its intent. | `CLOSED DEPLOYMENT GREEN — bc49414dcf2222a760e4f91ff53c3296f6d7a2d2` |
-| Semantic spine and polling | The collector requires exactly ten MCP items and records zero polls even when durable settlement requires observation. | V-P01 has exactly ten semantic spine calls. Bounded audited read-only polling may occur between spine calls and is excluded from the ten-call count, but every poll is recorded and joined to the same task, run, deployment, and audit window. Polling may not mutate, substitute for, or reorder a spine call. | `IMPLEMENTED — CLOSED DEPLOYMENT ASSERTION REQUIRED` |
-| Ordinal domains | `ordinal` and `observed_order` are overloaded, so inserting a poll collides with spine numbering. | Evidence carries separate `spine_ordinal`, `poll_ordinal`, and `chronological_ordinal` domains. Spine ordinals are exactly 1–10; poll ordinals are exactly 1–N; chronological ordinals are unique and contiguous across all 10+N calls. | `IMPLEMENTED — CLOSED DEPLOYMENT ASSERTION REQUIRED` |
+| Semantic spine and polling | The collector requires exactly ten MCP items and records zero polls even when durable settlement requires observation. | V-P01 has exactly ten semantic spine calls. Bounded audited read-only polling may occur between spine calls and is excluded from the ten-call count, but every poll is recorded and joined to the same task, run, deployment, and audit window. Polling may not mutate, substitute for, or reorder a spine call. | `CLOSED DEPLOYMENT GREEN — 5f2cd711e60f83c26d1d0dcd71af5c65e094c4f3` |
+| Ordinal domains | `ordinal` and `observed_order` are overloaded, so inserting a poll collides with spine numbering. | Evidence carries separate `spine_ordinal`, `poll_ordinal`, and `chronological_ordinal` domains. Spine ordinals are exactly 1–10; poll ordinals are exactly 1–N; chronological ordinals are unique and contiguous across all 10+N calls. | `CLOSED DEPLOYMENT GREEN — 5f2cd711e60f83c26d1d0dcd71af5c65e094c4f3` |
 
 ## Canonical ten-call semantic spine
 
@@ -103,6 +103,18 @@ public semantics. Focused tests and every affected full suite must pass before a
 candidate is published. Deployment evidence must then show all six exact component
 identities, one settled worker, zero active runs, and every mutation/execution gate
 closed before the next repair iteration.
+
+Implementation status: `IMPLEMENTED — CLOSED DEPLOYMENT ASSERTION REQUIRED`.
+`test/p01-live-boundary-helper.ts` obtains every envelope and authorization audit
+from the actual MCP/service boundary, replays those exact items through the actual
+collector, attaches its signed claim to the same durable run, and verifies the
+stored attestation. The identical assertion runs in
+`test/p01-live-boundary.test.ts` for the memory ledger and in the opt-in,
+dedicated-database `test/postgres-integration.test.ts` suite for real PostgreSQL.
+It includes a timeout followed by bounded audited operation polling and a
+service-minted adaptive observation receipt. The proof also requires the actual
+export envelope to attest `cleanup_complete`; omission now fails the integration
+test instead of being hidden by a handcrafted fixture.
 
 ## Execution unlocks that remain outside this erratum
 

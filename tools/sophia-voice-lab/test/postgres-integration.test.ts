@@ -11,6 +11,7 @@ import { PostgresOAuthLedgerStore } from "../src/oauth-postgres-store.js";
 import { PostgresVoiceLabLedger } from "../src/postgres-ledger.js";
 import { canonicalRequestHash, sha256 } from "../src/security.js";
 import { testRun } from "./helpers.js";
+import { proveP01LiveBoundary } from "./p01-live-boundary-helper.js";
 
 const { Client } = pg;
 const execFileAsync = promisify(execFile);
@@ -167,6 +168,12 @@ describePostgres("real PostgreSQL Voice Lab adapter", () => {
       await retiredTooEarly.close();
     }
   }, 180_000);
+
+  it("collects real P01 MCP envelopes/audits and attaches the signed claim to the same PostgreSQL run", async () => {
+    const result = await proveP01LiveBoundary(ledger!);
+    expect(result.runId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(result.pollingCallCount).toBe(4);
+  }, 60_000);
 
   it("serializes refresh replay/rotation/revocation by family and rolls back a mid-family failure", async () => {
     const now = Math.floor(Date.now() / 1_000);
