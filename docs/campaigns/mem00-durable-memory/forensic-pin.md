@@ -68,7 +68,7 @@ The participating product services are now converged on remote head `7d1e6b6a`; 
 
 ## Default-closed feature snapshot
 
-All new flags are absent in the latest signed-in Gateway environment read and default false in code. The existing environment still exposes only the eight expected legacy Mem0 key names (`MEM0_API_KEY`, `MEM0_ENABLED`, `MEM0_MAX_SEARCH_RESULTS`, `MEM0_ORG_ID`, `MEM0_PROJECT_ID`, `MEM0_REFERENCE_DATE_ENABLED`, `MEM0_REMOVE_CATEGORY_FILTER_ENABLED`, and `MEM0_USER_ID_PREFIX`); secret values are excluded.
+All new flags are absent in the latest signed-in service environment reads and default false in code. Gateway and LangGraph each expose the same eight legacy Mem0 key names (`MEM0_API_KEY`, `MEM0_ENABLED`, `MEM0_MAX_SEARCH_RESULTS`, `MEM0_ORG_ID`, `MEM0_PROJECT_ID`, `MEM0_REFERENCE_DATE_ENABLED`, `MEM0_REMOVE_CATEGORY_FILTER_ENABLED`, and `MEM0_USER_ID_PREFIX`). Voice exposes six: it omits the two reference-date/category-filter toggles. Vercel exposes no `SOPHIA_MEMORY_*`, `MEM0_*`, or `NEXT_PUBLIC_*MEMORY*` key. Secret values are excluded.
 
 `candidate_ledger_write`, `candidate_ledger_read`, `canonical_pool_read`, `provider_projection`, `governed_runtime_read`, `legacy_inventory`, `legacy_import`, and `memory_fault_injection`.
 
