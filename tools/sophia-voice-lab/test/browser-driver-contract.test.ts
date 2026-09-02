@@ -1,8 +1,38 @@
 import { describe, expect, it } from "vitest";
 
-import { activateVoiceStartWithClientErrorReload, assertPageLocation, captureSessionRecoveryStorageState, classifyBrowserStartCause, classifyClientCdpExceptionFrames, classifyClientCdpPausedFrames, classifyClientConsoleErrorLocation, classifyClientPageError, closeContextWithProof, DASHBOARD_ROUTE_TIMEOUT_MS, drainProductCapture, establishDashboardMicRoute, establishSessionNavigation, extractNextChunkScriptUrls, findPassiveEffectCreateBreakpoint, findPassiveEffectCreateCatchBreakpoint, findPassiveEffectDestroyBreakpoint, isolateBootstrapStorageState, isExactFinalizationResponse, isRecoverableEmptyDashboardVoiceRoute, isRecoverableEmptySessionVoiceRoute, openFreshExactDashboardContext, openFreshExactSessionContext, passiveEffectBreakpointCondition, PlaywrightVoiceDriver, RECOVERABLE_DASHBOARD_LOAD_ERROR, RECOVERABLE_DASHBOARD_RELOAD_BUTTON, requestBoundJson, requestBoundJsonWithOneTransientRetry, selectRecentClientEffectProbe, selectRecentClientPausedFrames, SESSION_NAVIGATION_ROUTE_TIMEOUT_MS, SESSION_NAVIGATION_SETTLE_TIMEOUT_MS, SESSION_RECOVERY_STORAGE_CAPTURE_TIMEOUT_MS, SESSION_ROUTE_RECOVERY_RELOAD_TIMEOUT_MS, SESSION_VOICE_ACTIVATION_SETTLE_MS, SESSION_VOICE_INITIAL_START_TIMEOUT_MS, SESSION_VOICE_INITIAL_TAB_TIMEOUT_MS, SESSION_VOICE_RECOVERY_START_TIMEOUT_MS, SESSION_VOICE_RECOVERY_TAB_TIMEOUT_MS, shouldCaptureSessionVoiceRoute, shouldReleasePassiveEffectBreakpoint, validateAppSyntheticBinding, validateD02BrowserContextBinding, validateD02ProductCleanupEcho, waitForClientPageError, waitOnWorkerClock, withClientDiagnosticFrames, withClientEffectProbe } from "../src/browser-driver.js";
+import { activateVoiceStartWithClientErrorReload, assertPageLocation, captureSessionRecoveryStorageState, classifyBrowserStartCause, classifyClientCdpExceptionFrames, classifyClientCdpPausedFrames, classifyClientConsoleErrorLocation, classifyClientPageError, closeContextWithProof, DASHBOARD_ROUTE_TIMEOUT_MS, drainProductCapture, establishDashboardMicRoute, establishSessionNavigation, extractNextChunkScriptUrls, findPassiveEffectCreateBreakpoint, findPassiveEffectCreateCatchBreakpoint, findPassiveEffectDestroyBreakpoint, isolateBootstrapStorageState, isExactFinalizationResponse, isRecoverableEmptyDashboardVoiceRoute, isRecoverableEmptySessionVoiceRoute, openFreshExactDashboardContext, openFreshExactSessionContext, passiveEffectBreakpointCondition, PlaywrightVoiceDriver, RECOVERABLE_DASHBOARD_LOAD_ERROR, RECOVERABLE_DASHBOARD_RELOAD_BUTTON, requestBoundJson, requestBoundJsonWithOneTransientRetry, selectRecentClientEffectProbe, selectRecentClientPausedFrames, SESSION_NAVIGATION_ROUTE_TIMEOUT_MS, SESSION_NAVIGATION_SETTLE_TIMEOUT_MS, SESSION_RECOVERY_STORAGE_CAPTURE_TIMEOUT_MS, SESSION_ROUTE_RECOVERY_RELOAD_TIMEOUT_MS, SESSION_VOICE_ACTIVATION_SETTLE_MS, SESSION_VOICE_INITIAL_START_TIMEOUT_MS, SESSION_VOICE_INITIAL_TAB_TIMEOUT_MS, SESSION_VOICE_RECOVERY_START_TIMEOUT_MS, SESSION_VOICE_RECOVERY_TAB_TIMEOUT_MS, shouldCaptureSessionVoiceRoute, shouldReleasePassiveEffectBreakpoint, validateAppSyntheticBinding, validateD02BrowserContextBinding, validateD02ProductCleanupEcho, validateVoiceLabControlAdapterReceipt, waitForClientPageError, waitOnWorkerClock, withClientDiagnosticFrames, withClientEffectProbe } from "../src/browser-driver.js";
 import { sha256 } from "../src/security.js";
 import { SHA, SHA_B, SHA_C, SHA_D, testConfig, testRun } from "./helpers.js";
+
+describe("server-authorized Voice Lab control adapter", () => {
+  it("accepts only an exact, current run/scenario/deployment/cleanup/action epoch", () => {
+    const run = testRun({
+      testRunId: "run-control-001",
+      cleanupObligationId: "123e4567-e89b-42d3-a456-426614174000",
+    });
+    const receipt = {
+      ok: true,
+      schema: "sophia_voice_lab_control_adapter_v1",
+      action: "session-start",
+      test_run_id: run.testRunId,
+      scenario_id: run.scenarioId,
+      scenario_version: run.scenarioVersion,
+      cleanup_obligation_id: run.cleanupObligationId,
+      expected_deployment: { ...run.target.expectedDeployment },
+      control_epoch_sha256: "e".repeat(64),
+      expires_at: 1_800_000_120,
+      ordinary_user_access: false,
+    };
+
+    expect(validateVoiceLabControlAdapterReceipt(receipt, "session-start", run, 1_800_000_000)).toEqual(receipt);
+    expect(validateVoiceLabControlAdapterReceipt({ ...receipt, action: "voice-start" }, "session-start", run, 1_800_000_000)).toBeNull();
+    expect(validateVoiceLabControlAdapterReceipt({ ...receipt, test_run_id: "run-other" }, "session-start", run, 1_800_000_000)).toBeNull();
+    expect(validateVoiceLabControlAdapterReceipt({ ...receipt, cleanup_obligation_id: "223e4567-e89b-42d3-a456-426614174111" }, "session-start", run, 1_800_000_000)).toBeNull();
+    expect(validateVoiceLabControlAdapterReceipt({ ...receipt, expected_deployment: { ...run.target.expectedDeployment, voice: SHA_D } }, "session-start", run, 1_800_000_000)).toBeNull();
+    expect(validateVoiceLabControlAdapterReceipt({ ...receipt, expires_at: 1_800_000_000 }, "session-start", run, 1_800_000_000)).toBeNull();
+    expect(validateVoiceLabControlAdapterReceipt({ ...receipt, unexpected: true }, "session-start", run, 1_800_000_000)).toBeNull();
+  });
+});
 
 describe("generation-aware capture drain", () => {
   it("pages beyond the 500-event ring without loss or duplicate", async () => {

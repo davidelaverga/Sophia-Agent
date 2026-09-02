@@ -400,6 +400,7 @@ function readinessPayload(config: ReturnType<typeof testConfig>, init?: RequestI
     voice_lab_enabled: !config.killSwitch,
     kill_switch_engaged: config.killSwitch,
     provisioning_enabled: config.provisioningEnabled,
+    control_adapter_enabled: !config.killSwitch,
     auth_ledger_ready: true,
     auth_ledger_migration_sha256: MIGRATION_SHA,
     frontend_build: SHA,
@@ -497,6 +498,25 @@ describe('principal bootstrap readiness', () => {
       ok: status === 'verified',
       status,
       frontend_voice_lab_enabled: observedEnabled,
+    });
+    vi.unstubAllGlobals();
+  });
+
+  it.each([
+    ['closed', true, false, 'verified', false],
+    ['open', false, true, 'verified', true],
+    ['open with adapter disabled', false, false, 'unverified', null],
+  ] as const)('binds the control adapter gate while %s', async (_label, mcpWebEngaged, adapterEnabled, status, observedEnabled) => {
+    const config = targetConfig({
+      SOPHIA_VOICE_LAB_KILL_SWITCH: String(mcpWebEngaged),
+      SOPHIA_VOICE_LAB_PROVISIONING_ENABLED: 'false',
+    });
+    vi.stubGlobal('fetch', readinessFetch(config, 'provisioned', { control_adapter_enabled: adapterEnabled }));
+
+    await expect(probeTestAuth(config)).resolves.toMatchObject({
+      ok: status === 'verified',
+      status,
+      frontend_control_adapter_enabled: observedEnabled,
     });
     vi.unstubAllGlobals();
   });

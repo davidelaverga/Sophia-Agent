@@ -231,7 +231,7 @@ function mintPreparedCapability(config: VoiceLabConfig, record: StoredCapability
 const READINESS_KEYS = new Set([
   'schema', 'ok', 'ready', 'provisioned', 'principal_record_present', 'principal_record_provisioned',
   'provider_account_provisioned', 'provider_account_count', 'active_session_count', 'auth_ledger_ready',
-  'voice_lab_enabled', 'kill_switch_engaged', 'provisioning_enabled',
+  'voice_lab_enabled', 'kill_switch_engaged', 'provisioning_enabled', 'control_adapter_enabled',
   'auth_ledger_migration_sha256', 'frontend_build', 'test_run_id', 'cleanup_obligation_id', 'environment',
   'expected_deployment', 'deployment_identity', 'capability_jti_sha256', 'principal_id_sha256',
 ]);
@@ -293,6 +293,7 @@ async function reconcileExpiredCapability(
     && typeof value.principal_record_present === 'boolean' && typeof value.principal_record_provisioned === 'boolean'
     && typeof value.voice_lab_enabled === 'boolean'
     && value.kill_switch_engaged === true && value.provisioning_enabled === true
+    && value.control_adapter_enabled === false
     && Number.isInteger(value.provider_account_count) && Number(value.provider_account_count) >= 0
     && Number.isInteger(value.active_session_count) && Number(value.active_session_count) >= 0;
   const provisioned = common && value.ready === true && value.provisioned === true

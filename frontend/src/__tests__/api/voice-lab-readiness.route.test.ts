@@ -137,6 +137,7 @@ describe('/api/voice-lab/auth/readiness POST', () => {
       voice_lab_enabled: true,
       kill_switch_engaged: true,
       provisioning_enabled: true,
+      control_adapter_enabled: false,
       auth_ledger_ready: true,
       auth_ledger_migration_sha256: '9a0987a52699a513cc19cc3f944c88113d591ce35924df6e297f051cede1eb45',
       frontend_build: BUILD,

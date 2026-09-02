@@ -50,6 +50,8 @@ describe('Voice Lab same-origin API default deny', () => {
     ['/api/sophia/builder/threads/thread-1/canvas/snapshot', 'GET'],
     ['/api/threads/thread-1/artifacts/mnt/user-data/outputs/page.html', 'GET'],
     ['/api/voice-lab/auth/cleanup', 'POST'],
+    ['/api/voice-lab/control/session-start', 'POST'],
+    ['/api/voice-lab/control/voice-start', 'POST'],
   ])('admits only a governed route for its downstream capability check: %s', (path, method) => {
     expect(voiceLabFrontendApiAccessAllowed(method, path)).toBe(true);
     expect(middleware(request(path, method)).status).toBe(200);

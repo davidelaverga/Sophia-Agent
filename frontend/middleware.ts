@@ -15,6 +15,7 @@ const VOICE_LAB_GOVERNED_API_ROUTES: ReadonlyArray<{
 }> = [
   { methods: new Set(['GET']), path: /^\/api\/(?:app-version|health)$/ },
   { methods: new Set(['GET', 'POST']), path: /^\/api\/voice-lab\/auth\/(?:grant|provision|continue|refresh|cleanup|readiness)$/ },
+  { methods: new Set(['POST']), path: /^\/api\/voice-lab\/control\/(?:session-start|voice-start)$/ },
   { methods: new Set(['GET']), path: /^\/api\/auth\/(?:get-session|session)$/ },
   { methods: new Set(['POST']), path: /^\/api\/auth\/sign-out$/ },
   { methods: new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE']), path: /^\/api\/sessions(?:\/.*)?$/ },

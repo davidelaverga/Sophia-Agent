@@ -467,6 +467,7 @@ environment_ownership:
       - SOPHIA_VOICE_LAB_ENABLED
       - SOPHIA_VOICE_LAB_KILL_SWITCH
       - SOPHIA_VOICE_LAB_PROVISIONING_ENABLED
+      - SOPHIA_VOICE_LAB_CONTROL_ADAPTER_ENABLED
       - SOPHIA_VOICE_LAB_TEST_PRINCIPAL
       - SOPHIA_VOICE_LAB_TEST_EMAIL
       - SOPHIA_VOICE_LAB_TEST_NAME
@@ -596,6 +597,7 @@ kill_switch:
       frontend_voice_lab_enabled: false
       frontend_kill_switch_engaged: true
       frontend_provisioning_enabled: true
+      frontend_control_adapter_enabled: false
       gateway_voice_lab_admission_ready: true
       gateway_voice_lab_mutation_ready: false
       voice_voice_lab_mutation_ready: false
@@ -605,12 +607,14 @@ kill_switch:
       frontend_voice_lab_enabled: false
       frontend_kill_switch_engaged: true
       frontend_provisioning_enabled: false
+      frontend_control_adapter_enabled: false
     campaign_open_required_before_worker:
       frontend_build: source.final_candidate_b_sha
       frontend_deploy_id: deployment_identity.frontend.campaign_open_deploy_id
       frontend_voice_lab_enabled: true
       frontend_kill_switch_engaged: false
       frontend_provisioning_enabled: false
+      frontend_control_adapter_enabled: true
       frontend_signed_readiness_status: unpassed
       gateway_voice_lab_enabled: true
       gateway_voice_lab_kill_switch_engaged: false
@@ -624,6 +628,7 @@ kill_switch:
       frontend_voice_lab_enabled: false
       frontend_kill_switch_engaged: true
       frontend_provisioning_enabled: false
+      frontend_control_adapter_enabled: false
       frontend_signed_readiness_status: unpassed
     mcp_open_requires_product_mutation_gates_open: true
     fresh_api_and_worker_admission_reprobe_required: true

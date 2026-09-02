@@ -7,6 +7,7 @@ import { useConnectivity } from '../../hooks/useConnectivity';
 import { useFocusTrap } from '../../hooks/useFocusTrap';
 import { haptic } from '../../hooks/useHaptics';
 import { useSessionStart } from '../../hooks/useSessionStart';
+import { useVoiceLabControlAdapter } from '../../hooks/useVoiceLabControlAdapter';
 import { fetchBootstrapOpener, type BootstrapOpenerResponse } from '../../lib/api/bootstrap-api';
 import { endSession as endSessionAPI, isSuccess } from '../../lib/api/sessions-api';
 import { authBypassEnabled, authBypassUserId } from '../../lib/auth/dev-bypass';
@@ -342,6 +343,12 @@ export function useDashboardEntryState() {
     setMicState('idle');
     haptic('light');
   }, [micState, selectedRitual, handleStartSession]);
+
+  const handleVoiceLabSessionStart = useCallback(
+    () => handleStartSession(true),
+    [handleStartSession],
+  );
+  useVoiceLabControlAdapter('session-start', handleVoiceLabSessionStart);
 
   useEffect(() => {
     if (!showReplaceSessionConfirm) return;

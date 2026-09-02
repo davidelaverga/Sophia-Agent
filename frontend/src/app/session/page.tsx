@@ -99,6 +99,7 @@ import {
   type RegisterArtifactInput,
 } from '../lib/session-artifact-index';
 import { recordSophiaCaptureEvent } from '../lib/session-capture';
+import { useVoiceLabControlAdapter } from '../hooks/useVoiceLabControlAdapter';
 import { cn } from '../lib/utils';
 import { useUiStore } from '../stores/ui-store';
 import type { BuilderCompletionEventV1 } from '../types/builder-completion';
@@ -508,6 +509,10 @@ function SessionPageContent() {
     memoryHighlightsCount: memoryHighlights?.length ?? 0,
     artifactReviewActive: showArtifacts && Boolean(selectedBuilderArtifactPath || storedBuilderArtifact),
   });
+  const handleVoiceLabVoiceStart = useCallback(() => {
+    baseHandleMicClick();
+  }, [baseHandleMicClick]);
+  useVoiceLabControlAdapter('voice-start', handleVoiceLabVoiceStart);
 
   const removeInternalDebriefTriggerBubble = useCallback((triggerText: string) => {
     setChatMessages((prev) => {

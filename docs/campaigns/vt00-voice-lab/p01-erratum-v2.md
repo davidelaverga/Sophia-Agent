@@ -120,7 +120,8 @@ test instead of being hidden by a handcrafted fixture.
 
 Even after this composition contract is implemented, V-P01 remains blocked until
 the campaign separately proves the server-authorized, default-disabled
-`VoiceLabControlAdapter`; disposable Chromium process ownership; execution-epoch
+`VoiceLabControlAdapter` (implementation tracked in `control-adapter.md`);
+disposable Chromium process ownership; execution-epoch
 fencing; driver/process death; provider/session cleanup; controller parity;
 cancellation; 20/20 real built-app trials; and five consecutive deployed canaries.
 No dashboard label, DOM click, MutationObserver activation, storage transplant,

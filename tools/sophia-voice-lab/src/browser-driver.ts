@@ -44,6 +44,34 @@ export interface DriverOperationResult { receipt: Record<string, unknown>; event
 export interface DriverEndResult { events: Omit<LabEvent, "runId" | "seq" | "at">[]; artifacts: { id: string; kind: string; contentType: string; bytes: Buffer }[]; }
 export type ActiveProductTarget = Record<string, unknown>;
 
+const CONTROL_ADAPTER_RECEIPT_KEYS = [
+  "ok", "schema", "action", "test_run_id", "scenario_id", "scenario_version",
+  "cleanup_obligation_id", "expected_deployment", "control_epoch_sha256",
+  "expires_at", "ordinary_user_access",
+] as const;
+
+export function validateVoiceLabControlAdapterReceipt(
+  receipt: unknown,
+  action: "session-start" | "voice-start",
+  run: Pick<RunRecord, "testRunId" | "scenarioId" | "scenarioVersion" | "cleanupObligationId" | "target">,
+  nowSeconds = Math.floor(Date.now() / 1_000),
+): Record<string, unknown> | null {
+  if (receipt === null || typeof receipt !== "object" || Array.isArray(receipt)) return null;
+  const value = receipt as Record<string, unknown>;
+  const expected = value.expected_deployment;
+  const keys = Object.keys(value).sort();
+  const allowed = [...CONTROL_ADAPTER_RECEIPT_KEYS].sort();
+  if (keys.length !== allowed.length || keys.some((key, index) => key !== allowed[index])) return null;
+  if (value.ok !== true || value.schema !== "sophia_voice_lab_control_adapter_v1" || value.action !== action
+    || value.test_run_id !== run.testRunId || value.scenario_id !== run.scenarioId || value.scenario_version !== run.scenarioVersion
+    || value.cleanup_obligation_id !== run.cleanupObligationId || value.ordinary_user_access !== false
+    || typeof value.control_epoch_sha256 !== "string" || !/^[a-f0-9]{64}$/.test(value.control_epoch_sha256)
+    || !Number.isSafeInteger(value.expires_at) || Number(value.expires_at) <= nowSeconds
+    || !expected || typeof expected !== "object" || Array.isArray(expected)
+    || canonicalRequestHash(expected) !== canonicalRequestHash(run.target.expectedDeployment)) return null;
+  return value;
+}
+
 export const SYNTHETIC_FINALIZATION_EXCLUSION_KEYS = [
   "memory", "offline_pipeline", "learning", "ordinary_product_analytics",
   "ordinary_user_projects", "shared_spaces", "debrief",
@@ -692,6 +720,8 @@ export type BrowserStartStage =
   | "frontend_auth_session"
   | "browser_init_script"
   | "frontend_home_navigation"
+  | "control_adapter_session_start"
+  | "control_adapter_voice_start"
   | "dashboard_privacy_consent"
   | "dashboard_microphone_cta"
   | "session_navigation"
@@ -731,7 +761,7 @@ interface BrowserSession {
 
 type StartupPushEnvelope = {
   page: Page;
-  channel: "harness" | "product";
+  channel: "harness" | "product" | "control";
   payload: unknown;
 };
 
@@ -1244,7 +1274,6 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       ordinaryRouteStage = stage;
       await onStage?.(stage);
     };
-    let ordinaryRouteRecoveryReloaded = false;
     let latestClientPageError: ClientPageErrorDiagnostic | null = null;
     let page: Page | null = null;
     let latestClientConsoleFrames: ClientChunkFrame[] = [];
@@ -1316,12 +1345,6 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       const voiceActivationToken = randomUUID();
       const initScriptContent = buildVoiceLabInitScript({ pageOrigin: frontendOrigin, websocketOrigins: [...this.config.websocketOrigins], maxAudioBytes: this.config.maxAudioBytes, testRunId: run.testRunId, cleanupObligationId: run.cleanupObligationId, startButtonName: this.config.startButtonName, voiceActivationToken });
       await context.addInitScript({ content: initScriptContent });
-      // Capture only the already-authenticated BrowserContext state before any
-      // ordinary renderer command can become unhealthy. Recovery can then
-      // allocate a new isolated context without replaying or broadening the
-      // scoped frontend grant.
-      const authenticatedStorageState = await context.storageState() as { cookies: unknown[]; origins: unknown[] };
-      let sessionRecoveryStorageState = authenticatedStorageState;
       const preloadedPassiveEffectBreakpoints = await settleDiagnosticWithinBudget(
         preloadPassiveEffectBreakpoints(context.request, frontendOrigin).catch(() => []),
         [],
@@ -1346,6 +1369,29 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
           if (message.type() !== "error") return;
           const frame = classifyClientConsoleErrorLocation(message.location(), frontendOrigin);
           if (frame) latestClientConsoleFrames = [frame];
+        });
+        targetPage.on("response", (response) => {
+          if (!startupPush.active || response.status() !== 200) return;
+          let action: "session-start" | "voice-start" | null = null;
+          try {
+            const target = new URL(response.url());
+            if (target.origin !== frontendOrigin) return;
+            if (target.pathname === "/api/voice-lab/control/session-start") action = "session-start";
+            if (target.pathname === "/api/voice-lab/control/voice-start") action = "voice-start";
+          } catch {
+            return;
+          }
+          if (action === null) return;
+          void response.json().then((receipt: unknown) => {
+            if (!startupPush.active) return;
+            const value = validateVoiceLabControlAdapterReceipt(receipt, action, run);
+            if (!value) return;
+            if (startupPush.queue.length >= MAX_STARTUP_PUSH_EVENTS) {
+              startupPush.overflow = true;
+              return;
+            }
+            startupPush.queue.push({ page: targetPage, channel: "control", payload: value });
+          }).catch(() => undefined);
         });
       };
       attachPageDiagnostics(page);
@@ -1646,146 +1692,15 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       const session: BrowserSession = { context, page: activePage, harnessCursor: 0, productCursor: null, latestProviderReceipt: null, contextExpiresAt: Number(grantReceipt.expires_at), expectedBinding: { testRunId: run.testRunId, cleanupObligationId: run.cleanupObligationId, principalId: run.principalId, scenarioId: run.scenarioId, scenarioVersion: run.scenarioVersion, environment: run.environment, retentionHours: run.capturePolicy.retentionHours, providerExpiresAt: run.expiresAt.toISOString(), ...(exactBrowserContextBinding === undefined ? {} : { browserContextBinding: exactBrowserContextBinding }) }, startupPush };
       this.#sessions.set(run.id, session);
       this.#pendingContexts.delete(run.id);
-      const reloadExactSessionRouteOnce = async (stage: "session_navigation_recovery_reload" | "voice_start_recovery_reload"): Promise<void> => {
-        await enterStage(stage);
-        if (ordinaryRouteRecoveryReloaded) throw new Error("The bounded ordinary session-route recovery reload was already consumed.");
-        // Recovery is never allowed to turn an unknown route into a session.
-        // The failing evidence must already attest the exact same-origin route;
-        // the reload only rehydrates its client module graph.
-        assertPageLocation(activePage.url(), frontendOrigin, (pathname) => /^\/session(?:\/|$)/.test(pathname), "ORDINARY_UI_ORIGIN_DRIFT");
-        ordinaryRouteRecoveryReloaded = true;
-        const replacement = await openFreshExactSessionContext({
-          browser,
-          currentContext: context,
-          currentPage: activePage,
-          storageState: sessionRecoveryStorageState,
-          initScriptContent,
-          frontendOrigin,
-          attachDiagnostics: attachPageDiagnostics,
-          installBindings: installPushBinding,
-        });
-        context = replacement.context;
-        activePage = replacement.page;
-        page = replacement.page;
-        session.context = replacement.context;
-        session.page = replacement.page;
-      };
       await page.goto(new URL("/", frontendOrigin).toString(), { waitUntil: "domcontentloaded", timeout: 30_000 });
       assertPageLocation(page.url(), frontendOrigin, (pathname) => pathname === "/", "ORDINARY_UI_ORIGIN_DRIFT");
-      let micAnchor = activePage.locator(this.config.onboardingMicSelector).first();
-      let consentAccept = activePage.locator(CONSENT_ACCEPT_SELECTOR).first();
-      let recoverableLoadError = activePage.getByText(RECOVERABLE_DASHBOARD_LOAD_ERROR).first();
-      let recoverableLoadReload = activePage.getByRole("button", { name: RECOVERABLE_DASHBOARD_RELOAD_BUTTON, exact: true }).first();
-      const rebindDashboardControls = (): void => {
-        micAnchor = activePage.locator(this.config.onboardingMicSelector).first();
-        consentAccept = activePage.locator(CONSENT_ACCEPT_SELECTOR).first();
-        recoverableLoadError = activePage.getByText(RECOVERABLE_DASHBOARD_LOAD_ERROR).first();
-        recoverableLoadReload = activePage.getByRole("button", { name: RECOVERABLE_DASHBOARD_RELOAD_BUTTON, exact: true }).first();
-      };
-      await enterStage("dashboard_privacy_consent");
-      await establishDashboardMicRoute({
-        isMicVisible: () => observeOnWorkerClock(() => micAnchor.isVisible(), false),
-        isConsentVisible: () => observeOnWorkerClock(() => consentAccept.isVisible(), false),
-        isConsentEnabled: () => observeOnWorkerClock(() => consentAccept.isEnabled(), false),
-        acceptConsent: () => consentAccept.click({ timeout: 20_000 }),
-        isRecoverableLoadErrorVisible: () => observeOnWorkerClock(() => recoverableLoadError.isVisible(), false),
-        reload: async () => {
-          await recoverableLoadReload.click({ timeout: 20_000 });
-          assertPageLocation(activePage.url(), frontendOrigin, (pathname) => pathname === "/", "ORDINARY_UI_ORIGIN_DRIFT");
-        },
-        isRecoverableEmptyRoute: async () => isRecoverableEmptyDashboardVoiceRoute(
-          await classifySessionVoiceRoute(activePage, frontendOrigin, this.config.startButtonName),
-        ),
-        reloadEmptyRoute: async () => {
-          const replacement = await openFreshExactDashboardContext({
-            browser,
-            currentContext: context,
-            currentPage: activePage,
-            storageState: authenticatedStorageState,
-            initScriptContent,
-            frontendOrigin,
-            attachDiagnostics: attachPageDiagnostics,
-            installBindings: installPushBinding,
-          });
-          context = replacement.context;
-          activePage = replacement.page;
-          page = replacement.page;
-          session.context = replacement.context;
-          session.page = replacement.page;
-          rebindDashboardControls();
-        },
-        wait: () => waitOnWorkerClock(100),
-        timeoutMs: DASHBOARD_ROUTE_TIMEOUT_MS,
-      });
-      await enterStage("dashboard_microphone_cta");
-      const dashboardButton = await resolveDashboardMicButton(page, micAnchor);
-      await activateDashboardMicButton(page, dashboardButton);
-      await enterStage("session_navigation");
-      await activateVoiceStartWithClientErrorReload({
-        activate: () => establishSessionNavigation(activePage, frontendOrigin, this.config.freshButtonName),
-        hasClientPageError: () => waitForClientPageError({
-          probe: () => currentClientPageErrorDiagnostic() !== null,
-          wait: () => waitOnWorkerClock(25),
-        }),
-        reload: () => reloadExactSessionRouteOnce("session_navigation_recovery_reload"),
-      });
-      assertPageLocation(page.url(), frontendOrigin, (pathname) => /^\/session(?:\/|$)/.test(pathname), "ORDINARY_UI_ORIGIN_DRIFT");
-      // Capture only the product-authored session keys through the current
-      // renderer. A fresh recovery context then retains the exact logical
-      // session without enqueuing BrowserContext.storageState() behind the
-      // newly committed client transition.
-      sessionRecoveryStorageState = await captureSessionRecoveryStorageState(
-        activePage,
-        authenticatedStorageState,
-        frontendOrigin,
+      await enterStage("control_adapter_session_start");
+      await activePage.waitForURL(
+        (url) => url.origin === frontendOrigin && /^\/session(?:\/|$)/.test(url.pathname) && url.hash === "",
+        { timeout: SESSION_NAVIGATION_ROUTE_TIMEOUT_MS, waitUntil: "commit" },
       );
-      let voiceStartAttempt = 0;
-      const activateVoiceStart = async () => {
-        voiceStartAttempt += 1;
-        const recovering = voiceStartAttempt > 1;
-        await enterStage("voice_tab_selection");
-        await establishSessionVoiceTab(
-          activePage,
-          recovering ? SESSION_VOICE_RECOVERY_TAB_TIMEOUT_MS : SESSION_VOICE_INITIAL_TAB_TIMEOUT_MS,
-        );
-        await enterStage("voice_start_button");
-        // All route/tab renderer commands have acknowledged. Arm the exact
-        // active page's injected harness with its per-run nonce; the harness
-        // returns before scheduling the ordinary native click on a later page
-        // task, so no renderer command spans product media startup.
-        await armPageOwnedVoiceActivation(activePage, voiceActivationToken);
-        // The page-owned init harness observes and activates the exact visible,
-        // enabled native button once. Waiting only on its already-pushed receipt
-        // avoids issuing any renderer command after media startup begins.
-        await waitForPageOwnedVoiceActivation(
-          () => startupPush.queue.some((envelope) => {
-            if (envelope.page !== activePage || envelope.channel !== "harness"
-              || envelope.payload === null || typeof envelope.payload !== "object" || Array.isArray(envelope.payload)) return false;
-            return (envelope.payload as Record<string, unknown>).kind === "harness.voice_control_activation_scheduled";
-          }),
-          recovering ? SESSION_VOICE_RECOVERY_START_TIMEOUT_MS : SESSION_VOICE_INITIAL_START_TIMEOUT_MS,
-        );
-      };
-      await activateVoiceStartWithClientErrorReload({
-        activate: activateVoiceStart,
-        // The Playwright locator deadline can reject one task before the
-        // browser publishes the causally preceding pageerror task. Give only
-        // that diagnostic signal a short bounded settle window; this neither
-        // retries the locator nor broadens the recoverable error class.
-        hasClientPageError: () => waitForClientPageError({
-          probe: () => currentClientPageErrorDiagnostic() !== null,
-          wait: () => waitOnWorkerClock(25),
-        }),
-        hasRecoverableExactSessionShell: async () => isRecoverableEmptySessionVoiceRoute(
-          await classifySessionVoiceRoute(activePage, frontendOrigin, this.config.startButtonName),
-        ),
-        reload: () => reloadExactSessionRouteOnce("voice_start_recovery_reload"),
-      });
-      // No Playwright renderer command is issued at the activation boundary.
-      // A worker-owned grace lets the ordinary click, getUserMedia, and
-      // provider bootstrap task chain settle before startup evidence drains the
-      // exposed-binding queue.
-      await waitOnWorkerClock(SESSION_VOICE_ACTIVATION_SETTLE_MS);
+      assertPageLocation(page.url(), frontendOrigin, (pathname) => /^\/session(?:\/|$)/.test(pathname), "ORDINARY_UI_ORIGIN_DRIFT");
+      await enterStage("control_adapter_voice_start");
       await enterStage("voice_startup_readiness");
       const events = await this.#waitForStartupReadiness(session, 45_000);
       events.push(...this.#drainStartupPush(session));
@@ -1994,6 +1909,15 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       if (envelope.page !== session.page || envelope.payload === null
         || typeof envelope.payload !== "object" || Array.isArray(envelope.payload)) continue;
       const raw = envelope.payload as Record<string, unknown>;
+      if (envelope.channel === "control") {
+        events.push({
+          kind: `control.adapter_authorized.${String(raw.action)}`,
+          source: "canonical",
+          payload: redact(raw),
+          dedupeKey: `control-adapter:${String(raw.action)}:${String(raw.control_epoch_sha256)}`,
+        });
+        continue;
+      }
       if (envelope.channel === "harness") {
         if (!Number.isSafeInteger(raw.seq) || Number(raw.seq) < 1 || typeof raw.kind !== "string"
           || raw.payload === null || typeof raw.payload !== "object" || Array.isArray(raw.payload)) continue;
@@ -2333,7 +2257,9 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       const hasMedia = observed.has("session.microphone_stream_acquired") && productIdentity !== null && issuedIdentity !== null && issuedIdentity.stream === productIdentity.stream && JSON.stringify(issuedIdentity.tracks) === JSON.stringify(productIdentity.tracks);
       const hasProviderReceipt = observed.has("provider.connection_epoch");
       const hasStreaming = observed.has("provider.connection_observability") || observed.has("provider.streaming_ready");
-      if (hasHarness && hasCredentials && hasMedia && hasProviderReceipt && hasStreaming) return drained;
+      const hasControlAdapter = observed.has("control.adapter_authorized.session-start")
+        && observed.has("control.adapter_authorized.voice-start");
+      if (hasControlAdapter && hasHarness && hasCredentials && hasMedia && hasProviderReceipt && hasStreaming) return drained;
       await waitOnWorkerClock(100);
     }
     throw new VoiceLabError(labError("VOICE_START_TIMEOUT", "The ordinary voice UI did not prove the page-owned synthetic stream, credentials, and provider readiness before timeout.", "product", true, { harness_initialized: observed.has("harness.initialized"), replacement_stream_issued: issuedIdentity !== null, product_stream_acquired: productIdentity !== null, synthetic_stream_correlated: issuedIdentity !== null && productIdentity !== null && issuedIdentity.stream === productIdentity.stream && JSON.stringify(issuedIdentity.tracks) === JSON.stringify(productIdentity.tracks) }));

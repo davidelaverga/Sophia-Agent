@@ -61,6 +61,7 @@ export async function POST(request: NextRequest) {
       voice_lab_enabled: gates.voiceLabEnabled,
       kill_switch_engaged: gates.killSwitchEngaged,
       provisioning_enabled: gates.provisioningEnabled,
+      control_adapter_enabled: gates.controlAdapterEnabled,
       auth_ledger_ready: ledgerReadiness.ready,
       auth_ledger_migration_sha256: ledgerReadiness.migrationSha256,
       frontend_build: frontendBuild,

@@ -496,7 +496,7 @@ export async function probeTestAuth(config: VoiceLabConfig): Promise<Record<stri
     // fifteen-second ceiling as the other authenticated frontend operations.
     const response = await fetch(endpoint, { method: "POST", redirect: "error", signal: AbortSignal.timeout(15_000), headers: { accept: "application/json", "X-Sophia-Voice-Lab-Capability": minted.token } });
     const payload = response.ok ? await response.json() as Record<string, unknown> : {};
-    const readinessKeys = new Set(['schema', 'ok', 'ready', 'provisioned', 'principal_record_present', 'principal_record_provisioned', 'provider_account_provisioned', 'provider_account_count', 'active_session_count', 'voice_lab_enabled', 'kill_switch_engaged', 'provisioning_enabled', 'auth_ledger_ready', 'auth_ledger_migration_sha256', 'frontend_build', 'test_run_id', 'cleanup_obligation_id', 'environment', 'expected_deployment', 'deployment_identity', 'capability_jti_sha256', 'principal_id_sha256']);
+    const readinessKeys = new Set(['schema', 'ok', 'ready', 'provisioned', 'principal_record_present', 'principal_record_provisioned', 'provider_account_provisioned', 'provider_account_count', 'active_session_count', 'voice_lab_enabled', 'kill_switch_engaged', 'provisioning_enabled', 'control_adapter_enabled', 'auth_ledger_ready', 'auth_ledger_migration_sha256', 'frontend_build', 'test_run_id', 'cleanup_obligation_id', 'environment', 'expected_deployment', 'deployment_identity', 'capability_jti_sha256', 'principal_id_sha256']);
     const exactShape = Object.keys(payload).length === readinessKeys.size && Object.keys(payload).every((key) => readinessKeys.has(key));
     const deploymentIdentity = payload.deployment_identity && typeof payload.deployment_identity === "object" && !Array.isArray(payload.deployment_identity) ? payload.deployment_identity as Record<string, unknown> : {};
     const expectedDeployment = payload.expected_deployment && typeof payload.expected_deployment === 'object' && !Array.isArray(payload.expected_deployment) ? payload.expected_deployment as Record<string, unknown> : {};
@@ -510,8 +510,10 @@ export async function probeTestAuth(config: VoiceLabConfig): Promise<Record<stri
       && expectedDeployment.frontend === target.expectedDeployment.frontend && expectedDeployment.backend === target.expectedDeployment.backend && expectedDeployment.voice === target.expectedDeployment.voice
       && typeof payload.principal_record_present === 'boolean' && typeof payload.principal_record_provisioned === 'boolean'
       && typeof payload.voice_lab_enabled === 'boolean'
+      && typeof payload.control_adapter_enabled === 'boolean'
       && typeof payload.kill_switch_engaged === 'boolean' && typeof payload.provisioning_enabled === 'boolean'
       && (config.killSwitch || payload.voice_lab_enabled === true)
+      && (config.killSwitch || payload.control_adapter_enabled === true)
       && Number.isInteger(payload.provider_account_count) && Number(payload.provider_account_count) >= 0
       && Number.isInteger(payload.active_session_count) && Number(payload.active_session_count) >= 0;
     const provisioned = commonBound && payload.ready === true && payload.provisioned === true
@@ -528,6 +530,9 @@ export async function probeTestAuth(config: VoiceLabConfig): Promise<Record<stri
     const frontendVoiceLabEnabled = response.ok && (provisioned || unprovisioned)
       ? payload.voice_lab_enabled as boolean
       : null;
+    const frontendControlAdapterEnabled = response.ok && (provisioned || unprovisioned)
+      ? payload.control_adapter_enabled as boolean
+      : null;
     const mutationGateOrderSafe = frontendKillSwitchEngaged !== null
       && (config.killSwitch || frontendKillSwitchEngaged === false);
     const status = response.ok && provisioned ? 'verified' : response.ok && unprovisioned ? 'provisioning_required' : 'unverified';
@@ -537,6 +542,7 @@ export async function probeTestAuth(config: VoiceLabConfig): Promise<Record<stri
       http_status: response.status,
       principal_hash: sha256(config.principalId),
       frontend_voice_lab_enabled: frontendVoiceLabEnabled,
+      frontend_control_adapter_enabled: frontendControlAdapterEnabled,
       frontend_kill_switch_engaged: frontendKillSwitchEngaged,
       mcp_web_kill_switch_engaged: config.killSwitch,
       mutation_gate_order_safe: mutationGateOrderSafe,
@@ -548,6 +554,7 @@ export async function probeTestAuth(config: VoiceLabConfig): Promise<Record<stri
       reason: error instanceof Error ? error.name : "probe_failed",
       principal_hash: sha256(config.principalId),
       frontend_voice_lab_enabled: null,
+      frontend_control_adapter_enabled: null,
       frontend_kill_switch_engaged: null,
       mcp_web_kill_switch_engaged: config.killSwitch,
       mutation_gate_order_safe: false,

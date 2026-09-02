@@ -72,7 +72,7 @@ export type VoiceLabCapabilityClaims = {
   nonce: string;
 };
 
-type VoiceLabRunBindingClaims = {
+export type VoiceLabRunBindingClaims = {
   v: 1;
   iss: typeof VOICE_LAB_FRONTEND_ISSUER;
   aud: typeof VOICE_LAB_RUN_BINDING_AUDIENCE;
@@ -185,11 +185,13 @@ export function getVoiceLabControlGates(): {
   voiceLabEnabled: boolean;
   killSwitchEngaged: boolean;
   provisioningEnabled: boolean;
+  controlAdapterEnabled: boolean;
 } {
   return {
     voiceLabEnabled: isVoiceLabRuntimeEnabled(),
     killSwitchEngaged: strictBooleanConfig('SOPHIA_VOICE_LAB_KILL_SWITCH'),
     provisioningEnabled: strictBooleanConfig('SOPHIA_VOICE_LAB_PROVISIONING_ENABLED'),
+    controlAdapterEnabled: isTrue(process.env.SOPHIA_VOICE_LAB_CONTROL_ADAPTER_ENABLED),
   };
 }
 
@@ -660,6 +662,34 @@ export function verifyFrontendGrant(
   nowSeconds = Math.floor(Date.now() / 1000),
 ): VoiceLabCapabilityClaims {
   return verifyFrontendCapability(token, 'auth:session', nowSeconds);
+}
+
+export function verifyVoiceLabControlCapability(
+  token: string | null | undefined,
+  requiredOperation: 'session:create' | 'voice:start',
+  nowSeconds = Math.floor(Date.now() / 1000),
+): VoiceLabCapabilityClaims {
+  assertVoiceLabOperationAllowed(requiredOperation);
+  const config = getVoiceLabPrincipalConfig();
+  return verifyVoiceLabCapability(
+    token,
+    requiredSecret('SOPHIA_VOICE_LAB_CAPABILITY_SECRET'),
+    {
+      audience: VOICE_LAB_GATEWAY_AUDIENCE,
+      issuer: VOICE_LAB_FRONTEND_ISSUER,
+      requiredOperation,
+      principalId: config.principalId,
+      environment: config.environment,
+      expectedFrontendBuild: getCurrentFrontendBuild(),
+    },
+    nowSeconds,
+  );
+}
+
+export function assertVoiceLabControlAdapterEnabled(): void {
+  if (process.env.SOPHIA_VOICE_LAB_CONTROL_ADAPTER_ENABLED?.trim().toLowerCase() !== 'true') {
+    throw new VoiceLabCapabilityError('voice_lab_control_adapter_disabled', 404);
+  }
 }
 
 const ORDINARY_ANALYTICS_POLICY: SyntheticIsolationPolicy = {
