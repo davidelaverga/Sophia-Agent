@@ -1239,6 +1239,19 @@ describe("service and durable memory-ledger contracts", () => {
   it("publishes the same complete append-only manifest shape for a harness failure and uses canonical saved artifact identities", async () => {
     const run = testRun({ scenarioId: "V-A01", state: "reserved" });
     await ledger.createRunWithOperation(run, startOperation(run), { global: 1, caller: 1 });
+    const originalAppendEvent = ledger.appendEvent.bind(ledger);
+    let releaseFirstStageWrite = () => undefined;
+    const firstStageWriteBlocked = new Promise<void>((resolve) => {
+      releaseFirstStageWrite = resolve;
+    });
+    let firstStageCallbackReleasedBeforePersistence = false;
+    ledger.appendEvent = async (...args) => {
+      const [,, , payload] = args;
+      if (args[1] === "harness.startup_stage" && payload.stage_sequence === 1) {
+        await firstStageWriteBlocked;
+      }
+      return originalAppendEvent(...args);
+    };
     const receiptBytes = Buffer.from('{"safe":"failure-receipt"}');
     const canonicalArtifactId = randomUUID();
     const proposedArtifactId = randomUUID();
@@ -1258,6 +1271,8 @@ describe("service and durable memory-ledger contracts", () => {
       hasSession: () => false,
       start: async (_run: unknown, _token: string, _binding: unknown, onStage?: (stage: "session_navigation" | "voice_start_button") => Promise<void>) => {
         await onStage?.("session_navigation");
+        firstStageCallbackReleasedBeforePersistence = true;
+        releaseFirstStageWrite();
         await onStage?.("voice_start_button");
         throw new VoiceLabError(labError("START_HARNESS_FAILURE", "Synthetic startup failed in the harness test.", "harness"));
       },
@@ -1275,6 +1290,7 @@ describe("service and durable memory-ledger contracts", () => {
     const config = testConfig();
     const worker = new VoiceLabWorker("worker-failure-evidence", ledger, config, audio, driver, new CapabilityCodec(config.capabilitySecret, config.capabilityIssuer, config.capabilityTtlSeconds));
     expect(await worker.runOnce()).toBe(true);
+    expect(firstStageCallbackReleasedBeforePersistence).toBe(true);
     const startupStages = (await ledger.listEvents(run.id, 0, 100)).events.filter((event) => event.kind === "harness.startup_stage");
     expect(startupStages.map((event) => event.payload)).toEqual([
       { operation_id: expect.any(String), stage: "session_navigation", stage_sequence: 1 },

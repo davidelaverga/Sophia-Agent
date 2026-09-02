@@ -5,7 +5,7 @@ import { gzip } from "node:zlib";
 import pino, { type Logger } from "pino";
 
 import { assertAudioByteLimit, parseWav, type AudioResolver } from "./audio.js";
-import { hasExactFinalizationEnvelope, type D02BrowserContextBinding, type D02ProductCleanupAcknowledgement, type VoiceBrowserDriver } from "./browser-driver.js";
+import { hasExactFinalizationEnvelope, type BrowserStartStage, type D02BrowserContextBinding, type D02ProductCleanupAcknowledgement, type DriverStartResult, type VoiceBrowserDriver } from "./browser-driver.js";
 import { BUNDLED_FIXTURE_MANIFEST_SHA256, type VoiceLabConfig } from "./config.js";
 import { D02GatewayContinuityObservationReceiptSchema, D02GatewaySettlementReceiptSchema } from "./d02-gateway.js";
 import { TERMINAL_RUN_STATES, VoiceLabError, initialVerdicts, labError, type EvidenceRef, type LabError, type RunRecord, type RunState, type SuiteRecord, type Verdicts } from "./domain.js";
@@ -685,14 +685,40 @@ export class VoiceLabWorker {
       const grant = await this.#mintAndVerify(run, "sophia-voice-lab-frontend", startOps, "auth:session", browserContextBinding);
       await this.#fenceMutation(claimed, signal);
       let startupStageSequence = 0;
-      const started = await this.driver.start(run, grant.token, browserContextBinding, async (stage) => {
-        startupStageSequence += 1;
-        await this.ledger.appendEvent(run.id, "harness.startup_stage", "worker", {
-          operation_id: operation.id,
-          stage,
-          stage_sequence: startupStageSequence,
-        }, `startup-stage:${operation.id}:${startupStageSequence}`);
-      });
+      let startupStagePersistenceError: unknown = null;
+      let startupStagePersistence: Promise<void> = Promise.resolve();
+      const recordStartupStage = async (stage: BrowserStartStage): Promise<void> => {
+        const stageSequence = ++startupStageSequence;
+        // Stage audit writes are ordered and must be durable before READY, but
+        // they must not own the browser's route/renderer critical path. A
+        // transiently slow Postgres connection previously held the ordinary UI
+        // between session navigation and voice activation until the global
+        // start deadline expired. Keep one serial persistence chain, capture
+        // its first failure without creating an unhandled rejection, and drain
+        // it before the start operation can succeed or publish a route failure.
+        startupStagePersistence = startupStagePersistence.then(async () => {
+          if (startupStagePersistenceError !== null) return;
+          try {
+            await this.ledger.appendEvent(run.id, "harness.startup_stage", "worker", {
+              operation_id: operation.id,
+              stage,
+              stage_sequence: stageSequence,
+            }, `startup-stage:${operation.id}:${stageSequence}`);
+          } catch (error) {
+            startupStagePersistenceError = error;
+          }
+        });
+      };
+      let started: DriverStartResult;
+      try {
+        started = await this.driver.start(run, grant.token, browserContextBinding, recordStartupStage);
+      } catch (error) {
+        await startupStagePersistence;
+        if (startupStagePersistenceError !== null) throw startupStagePersistenceError;
+        throw error;
+      }
+      await startupStagePersistence;
+      if (startupStagePersistenceError !== null) throw startupStagePersistenceError;
       if (!sameD02BrowserContextBinding(started.browserContextBinding, browserContextBinding)) throw new VoiceLabError(labError("BROWSER_CONTEXT_BINDING_MISMATCH", "The browser driver did not attest the exact V-D02 run, worker, lease, and context allocation.", "harness", false));
       if (browserContextBinding) {
         await this.ledger.appendEvent(run.id, "harness.browser_context_bound", "canonical", {
