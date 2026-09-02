@@ -1,6 +1,6 @@
 # Voice Lab disposable browser ownership
 
-Status: `IMPLEMENTED — CLOSED DEPLOYMENT ASSERTION REQUIRED`
+Status: `CLOSED DEPLOYMENT GREEN — 0b505c40928fedf6a6ca7bdd5fe874ab64208c26`
 
 Falsifiable hypothesis: every production Voice Lab run owns one newly launched
 Chromium server process, one connection to that process, and one execution epoch
@@ -26,6 +26,6 @@ when both the context registry and the run-owned process are proven absent.
 Contract tests prove deterministic redacted binding, run/process separation,
 active-versus-fenced classification, and rejection of malformed ownership input.
 A real Chromium test proves two runs obtain distinct processes and epochs and that
-both children exit. Production gates remain closed until the exact candidate is
-deployed and the aggregate readiness attestation reports zero active runs, one
-settled worker, and every mutation gate closed.
+both children exit. The exact candidate was deployed on every component and the
+aggregate readiness attestation reported zero active runs, one settled worker,
+and every mutation gate closed before the terminal-cleanup repair began.

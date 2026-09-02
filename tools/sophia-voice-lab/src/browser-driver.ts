@@ -2111,14 +2111,16 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       if (!hasExactFinalizationEnvelope(run, responseBody, true) || typeof evidenceReceipt?.sha256 !== "string") throw new VoiceLabError(labError("FINALIZATION_ISOLATION_UNCONFIRMED", "Finalization receipt did not prove the bound synthetic run, cleanup obligation, exact retention policy, durable evidence, and exact isolation exclusions.", "product", false));
       const events: Omit<LabEvent, "runId" | "seq" | "at">[] = [];
       const closeDeadline = Date.now() + 10_000;
-      let providerClosed = false;
+      let providerClosedEvent: Omit<LabEvent, "runId" | "seq" | "at"> | null = null;
       while (Date.now() < closeDeadline) {
         const batch = await this.drain(run.id);
         events.push(...batch);
-        if (batch.some((event) => event.kind === "provider.stage" && isValidatedAppBinding(event.payload._app_synthetic_binding, session.expectedBinding) && (event.payload.stage === "closed" || event.payload.stage === "ended"))) { providerClosed = true; break; }
+        providerClosedEvent = batch.find((event) => event.kind === "provider.stage" && isValidatedAppBinding(event.payload._app_synthetic_binding, session.expectedBinding) && (event.payload.stage === "closed" || event.payload.stage === "ended")) ?? null;
+        if (providerClosedEvent) break;
         await waitOnWorkerClock(100);
       }
-      if (!providerClosed) throw new VoiceLabError(labError("PROVIDER_CLEANUP_UNCONFIRMED", "Product finalization succeeded but provider transport closure was not observed.", "product", true));
+      if (!providerClosedEvent) throw new VoiceLabError(labError("PROVIDER_CLEANUP_UNCONFIRMED", "Product finalization succeeded but provider transport closure was not observed.", "product", true));
+      events.push(this.#providerTransportClosedEvent(run, session, providerClosedEvent));
       const finalDeployment = await this.#verifyDeployment(run);
       events.push({ kind: "deployment.reverified", source: "canonical", payload: finalDeployment.components, dedupeKey: `deployment:${run.id}:final` });
       events.push(await this.#snapshotEvent(session, "finalization"));
@@ -2130,7 +2132,15 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       const cleanupUrl = new URL(this.config.authCleanupPath, new URL(run.target.frontendUrl).origin).toString();
       const { response: cleanup, payload: cleanupReceipt } = await requestBoundJson(session.context.request, "POST", cleanupUrl, 15_000, frontendCleanupCapability);
       if (!cleanup.ok() || cleanupReceipt?.ok !== true || cleanupReceipt?.session_revoked !== true || cleanupReceipt?.cookies_cleared !== true || cleanupReceipt?.test_run_id !== run.testRunId || cleanupReceipt?.cleanup_obligation_id !== run.cleanupObligationId) throw new VoiceLabError(labError("AUTH_SESSION_CLEANUP_UNCONFIRMED", "Dedicated test auth session and cookie cleanup was not confirmed for this run.", "authorization", true, { status: cleanup.status() }));
-      events.push({ kind: "auth.session_cleanup", source: "canonical", payload: redact(cleanupReceipt), dedupeKey: `canonical:${run.id}:auth-cleanup` });
+      events.push({ kind: "auth.session_cleanup", source: "canonical", payload: redact({
+        ...cleanupReceipt,
+        cleanup_proof_schema: "sophia_voice_lab_execution_epoch_auth_cleanup_v1",
+        voice_lab_run_id_sha256: sha256(run.id),
+        cleanup_obligation_id_sha256: sha256(run.cleanupObligationId),
+        process_id_sha256: session.ownership.processIdSha256,
+        browser_boot_id_sha256: session.ownership.bootIdSha256,
+        execution_epoch_sha256: session.ownership.executionEpochSha256,
+      }), dedupeKey: `canonical:${run.id}:auth-cleanup` });
       events.push(await this.#closeContextEvent(run.id, session.context, "normal_end"));
       return { events, artifacts };
     }
@@ -2167,12 +2177,15 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
           if (confirmed) events.push({ kind: "session.finalized", source: "canonical", payload: redact({ http_status: response?.status() ?? null, receipt }), dedupeKey: `canonical:${run.id}:finalized` });
           if (confirmed) {
             const deadline = Date.now() + 8_000;
+            let providerClosedEvent: Omit<LabEvent, "runId" | "seq" | "at"> | null = null;
             while (Date.now() < deadline) {
               const batch = await this.drain(run.id);
               events.push(...batch);
-              if (batch.some((event) => event.kind === "provider.stage" && isValidatedAppBinding(event.payload._app_synthetic_binding, session.expectedBinding) && ["closed", "ended"].includes(String(event.payload.stage)))) break;
+              providerClosedEvent = batch.find((event) => event.kind === "provider.stage" && isValidatedAppBinding(event.payload._app_synthetic_binding, session.expectedBinding) && ["closed", "ended"].includes(String(event.payload.stage))) ?? null;
+              if (providerClosedEvent) break;
               await waitOnWorkerClock(100);
             }
+            if (providerClosedEvent) events.push(this.#providerTransportClosedEvent(run, session, providerClosedEvent));
           }
         } catch (error) {
           events.push({ kind: "cleanup.product_finalization", source: "canonical", payload: { confirmed: false, unavailable_reason: error instanceof Error ? error.message.slice(0, 200) : "unknown" }, dedupeKey: `cleanup:${run.id}:product-finalization` });
@@ -2185,7 +2198,17 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
         const cleanupResult = await requestBoundJson(session.context.request, "POST", cleanupUrl, 10_000, frontendCleanupCapability).catch(() => null);
         const cleanup = cleanupResult?.response ?? null;
         const receipt = cleanupResult?.payload ?? null;
-        events.push({ kind: "auth.session_cleanup", source: "canonical", payload: redact({ status: cleanup?.status() ?? null, receipt, confirmed: Boolean(cleanup?.ok() && (receipt as any)?.session_revoked === true && (receipt as any)?.cookies_cleared === true && (receipt as any)?.test_run_id === run.testRunId && (receipt as any)?.cleanup_obligation_id === run.cleanupObligationId) }), dedupeKey: `cleanup:${run.id}:auth` });
+        events.push({ kind: "auth.session_cleanup", source: "canonical", payload: redact({
+          status: cleanup?.status() ?? null,
+          receipt,
+          confirmed: Boolean(cleanup?.ok() && (receipt as any)?.session_revoked === true && (receipt as any)?.cookies_cleared === true && (receipt as any)?.test_run_id === run.testRunId && (receipt as any)?.cleanup_obligation_id === run.cleanupObligationId),
+          cleanup_proof_schema: "sophia_voice_lab_execution_epoch_auth_cleanup_v1",
+          voice_lab_run_id_sha256: sha256(run.id),
+          cleanup_obligation_id_sha256: sha256(run.cleanupObligationId),
+          process_id_sha256: session.ownership.processIdSha256,
+          browser_boot_id_sha256: session.ownership.bootIdSha256,
+          execution_epoch_sha256: session.ownership.executionEpochSha256,
+        }), dedupeKey: `cleanup:${run.id}:auth` });
       }
       events.push(await this.#closeContextEvent(run.id, session.context, reason));
       return { events, artifacts };
@@ -2362,6 +2385,30 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
     return session;
   }
 
+  #providerTransportClosedEvent(
+    run: RunRecord,
+    session: BrowserSession,
+    providerEvent: Omit<LabEvent, "runId" | "seq" | "at">,
+  ): Omit<LabEvent, "runId" | "seq" | "at"> {
+    return {
+      kind: "cleanup.provider_transport_closed",
+      source: "canonical",
+      payload: {
+        schema: "sophia_voice_lab_execution_epoch_provider_cleanup_v1",
+        voice_lab_run_id_sha256: sha256(run.id),
+        cleanup_obligation_id_sha256: sha256(run.cleanupObligationId),
+        process_id_sha256: session.ownership.processIdSha256,
+        browser_boot_id_sha256: session.ownership.bootIdSha256,
+        execution_epoch_sha256: session.ownership.executionEpochSha256,
+        provider_stage: String(providerEvent.payload.stage),
+        provider_event_sha256: canonicalRequestHash({ kind: providerEvent.kind, payload: redact(providerEvent.payload) }),
+        exact_product_binding_validated: true,
+        raw_process_and_provider_identifiers_excluded: true,
+      },
+      dedupeKey: `cleanup:${run.id}:provider:${session.ownership.executionEpochSha256}`,
+    };
+  }
+
   async #closeContextEvent(runId: string, context: BrowserContext, reason: string): Promise<Omit<LabEvent, "runId" | "seq" | "at">> {
     const session = this.#sessions.get(runId);
     const ownership = session?.ownership ?? this.#pendingProcesses.get(runId);
@@ -2374,6 +2421,9 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       if (this.#pendingContexts.get(runId) === context) this.#pendingContexts.delete(runId);
       this.#pendingProcesses.delete(runId);
       return { kind: "cleanup.browser_context_closed", source: "browser", payload: {
+        schema: "sophia_voice_lab_execution_epoch_browser_cleanup_v1",
+        voice_lab_run_id_sha256: sha256(runId),
+        cleanup_obligation_id_sha256: session ? sha256(session.expectedBinding.cleanupObligationId) : null,
         reason,
         close_resolved: true,
         browser_registry_absent: true,

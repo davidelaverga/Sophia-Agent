@@ -128,6 +128,16 @@ No dashboard label, DOM click, MutationObserver activation, storage transplant,
 CDP/React probe, route reload heuristic, direct provider shortcut, or text shortcut
 may serve as the canonical path or fallback.
 
+Execution-unlock progress is monotonic:
+
+- server-authorized `VoiceLabControlAdapter`: closed deployment green;
+- disposable Chromium process ownership and execution-epoch fencing: closed
+  deployment green at `0b505c40928fedf6a6ca7bdd5fe874ab64208c26`;
+- driver/process death plus provider/session cleanup ordering: implemented in
+  `execution-epoch-cleanup.md`, closed deployment assertion required;
+- controller parity, cancellation, 20/20 real built-app trials, and five
+  consecutive deployed canaries: pending.
+
 ## Historical iteration counter
 
 The evidence-backed lower bound is `P01 attempts >= 1`. The preserved attempt is

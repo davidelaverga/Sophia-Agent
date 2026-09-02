@@ -911,7 +911,9 @@ export class VoiceLabWorker {
     }
 
     let eventPage = await this.#allEvents(run.id);
-    const browserContextClosed = eventPage.events.some((event) => event.kind === "cleanup.browser_context_closed" && event.payload.close_resolved === true && event.payload.browser_registry_absent === true) && !this.driver.hasSession(run.id);
+    const executionEpochCleanup = deriveExecutionEpochCleanupProof(run, eventPage.events);
+    const legacyBrowserContextClosed = eventPage.events.some((event) => event.kind === "cleanup.browser_context_closed" && event.payload.close_resolved === true && event.payload.browser_registry_absent === true) && !this.driver.hasSession(run.id);
+    const browserContextClosed = executionEpochCleanup.required ? executionEpochCleanup.ready && !this.driver.hasSession(run.id) : legacyBrowserContextClosed;
     const browserLeaseReleased = await this.#releaseBrowserLeaseProof(run.id);
     eventPage = await this.#allEvents(run.id);
     const taskCleanup = deriveTaskCleanup(eventPage.events, run);
@@ -1769,9 +1771,11 @@ export class VoiceLabWorker {
     const acquiredBrowser = eventPage.events.find((event) => event.kind === "harness.browser_runtime_acquired" && event.source === "canonical");
     const productEvents = eventPage.events.filter((event) => isExactBoundProductEvent(run, event));
     const taskCleanup = deriveTaskCleanup(eventPage.events, run);
-    const browserContextClosed = !this.driver.hasSession(run.id) && eventPage.events.some((event) =>
+    const executionEpochCleanup = deriveExecutionEpochCleanupProof(run, eventPage.events);
+    const legacyBrowserContextClosed = !this.driver.hasSession(run.id) && eventPage.events.some((event) =>
       event.kind === "cleanup.browser_context_absent" && event.payload.browser_never_allocated === true
       || event.kind === "cleanup.browser_context_closed" && event.payload.close_resolved === true && event.payload.browser_registry_absent === true);
+    const browserContextClosed = executionEpochCleanup.required ? executionEpochCleanup.ready && !this.driver.hasSession(run.id) : legacyBrowserContextClosed;
     const browserLeaseReleased = eventPage.events.some((event) =>
       event.kind === "cleanup.browser_lease_released" && event.payload.cas_deleted === true
       || event.kind === "cleanup.browser_lease_absent" && event.payload.authoritative_ledger_read === true);
@@ -1886,6 +1890,7 @@ export class VoiceLabWorker {
       metrics: deriveEvidenceMetrics(eventPage.events, operations),
       cleanup_audit: {
         browser_context_closed: browserContextClosed,
+        execution_epoch_cleanup: executionEpochCleanup,
         browser_lease_released: browserLeaseReleased,
         provider_disconnect: input.intentionallyUnallocated ? intentionallyUnavailable : providerDisconnected,
         auth_session_revoked: input.intentionallyUnallocated ? intentionallyUnavailable : authSessionRevoked,
@@ -2423,9 +2428,39 @@ export class VoiceLabWorker {
     const active = this.#activeLeases.get(runId);
     let current = await this.ledger.getBrowserLease(runId);
     const epoch = active?.epoch ?? (current?.workerId === this.workerId ? current.leaseEpoch : null);
+    let executionProof: ExecutionEpochCleanupProof | null = null;
+    if (epoch !== null) {
+      const run = await this.#freshRun(runId);
+      const events = (await this.#allEvents(runId)).events;
+      executionProof = deriveExecutionEpochCleanupProof(run, events);
+      if (executionProof.required && (!executionProof.ready
+        || executionProof.browserLeaseEpoch !== epoch
+        || executionProof.workerIdSha256 !== sha256(this.workerId)
+        || this.driver.hasSession(runId))) {
+        await this.ledger.appendEvent(runId, "cleanup.execution_epoch_unconfirmed", "worker", {
+          schema: "sophia_voice_lab_execution_epoch_cleanup_gate_v1",
+          execution_epoch_sha256: executionProof.executionEpochSha256,
+          browser_lease_epoch: epoch,
+          proof_ready: executionProof.ready,
+          reason: executionProof.reason,
+          browser_session_absent: !this.driver.hasSession(runId),
+        }, `cleanup:${runId}:execution-epoch-unconfirmed:${epoch}`);
+        return false;
+      }
+    }
     if (epoch !== null) {
       const released = await this.ledger.releaseBrowserLease(runId, this.workerId, epoch);
-      if (released) await this.ledger.appendEvent(runId, "cleanup.browser_lease_released", "worker", { worker_id_hash: sha256(this.workerId), lease_epoch: epoch, cas_deleted: true }, `cleanup:${runId}:browser-lease`);
+      if (released) await this.ledger.appendEvent(runId, "cleanup.browser_lease_released", "worker", {
+        worker_id_hash: sha256(this.workerId),
+        lease_epoch: epoch,
+        cas_deleted: true,
+        ...(executionProof?.required ? {
+          schema: "sophia_voice_lab_execution_epoch_lease_release_v1",
+          execution_epoch_sha256: executionProof.executionEpochSha256,
+          cleanup_proof_sha256: executionProof.proofSha256,
+          cleanup_proof_ready: executionProof.ready,
+        } : {}),
+      }, `cleanup:${runId}:browser-lease`);
     }
     this.#activeLeases.delete(runId);
     current = await this.ledger.getBrowserLease(runId);
@@ -3084,7 +3119,8 @@ export function deriveCompletedVerdicts(run: RunRecord, events: import("./domain
     && dependencyVerified;
   const joinsComplete = run.canonicalSessionId !== null && run.threadId !== null && run.providerSessionId !== null && run.providerEpoch !== null && (nonSilenceOperations.length === 0 || run.turnId !== null);
   const captureProven = kinds.has("harness.initialized") && kinds.has("harness.media_stream_issued") && kinds.has("session.microphone_stream_acquired");
-  const cleanupProven = authoritativeLiveCleanupComplete(events) && (kinds.has("cleanup.browser_lease_released") || kinds.has("cleanup.browser_lease_absent")) && authClean && providerClosed && taskCleanup.unresolved_count === 0;
+  const executionEpochCleanup = deriveExecutionEpochCleanupProof(run, events);
+  const cleanupProven = authoritativeLiveCleanupComplete(events) && (kinds.has("cleanup.browser_lease_released") || kinds.has("cleanup.browser_lease_absent")) && authClean && providerClosed && taskCleanup.unresolved_count === 0 && (!executionEpochCleanup.required || executionEpochCleanup.ready);
   const scenarioEvaluation = evaluateScenarioAssertions(run, eligibleEvents, operations, authAudit);
   const scenarioHasFailure = scenarioEvaluation.harness.some((assertion) => assertion.status === "fail");
   const scenarioHasUnavailable = scenarioEvaluation.harness.length === 0 || scenarioEvaluation.harness.some((assertion) => assertion.status === "unavailable");
@@ -4330,6 +4366,115 @@ function authCleanupConfirmed(event: { kind: string; payload: Record<string, unk
   if (event.payload.session_revoked === true && event.payload.cookies_cleared === true) return true;
   const receipt = event.payload.receipt as Record<string, unknown> | undefined;
   return event.payload.confirmed === true && receipt?.session_revoked === true && receipt?.cookies_cleared === true;
+}
+
+export type ExecutionEpochCleanupProof = {
+  required: boolean;
+  ready: boolean;
+  reason: string;
+  executionEpochSha256: string | null;
+  workerIdSha256: string | null;
+  browserLeaseEpoch: number | null;
+  proofSha256: string | null;
+  eventSeqs: {
+    processAcquired: number | null;
+    runtimeAcquired: number | null;
+    providerCleanup: number | null;
+    authCleanup: number | null;
+    processClosed: number | null;
+    recovery: number | null;
+  };
+};
+
+/**
+ * Join the run-owned Chromium process, its worker lease, and the exact provider,
+ * auth-session, and process-death receipts before the lease can be released.
+ * A recovery receipt is an allowed cleanup source only when it follows proven
+ * process death and authoritatively reports both provider and auth components.
+ */
+export function deriveExecutionEpochCleanupProof(
+  run: RunRecord,
+  events: import("./domain.js").LabEvent[],
+): ExecutionEpochCleanupProof {
+  const emptySeqs = { processAcquired: null, runtimeAcquired: null, providerCleanup: null, authCleanup: null, processClosed: null, recovery: null };
+  const acquisitions = events.filter((event) => event.kind === "harness.browser_process_acquired" && event.source === "browser");
+  if (acquisitions.length === 0) return { required: false, ready: true, reason: "browser_process_not_allocated", executionEpochSha256: null, workerIdSha256: null, browserLeaseEpoch: null, proofSha256: null, eventSeqs: emptySeqs };
+  const fail = (reason: string, partial: Partial<ExecutionEpochCleanupProof> = {}): ExecutionEpochCleanupProof => ({
+    required: true,
+    ready: false,
+    reason,
+    executionEpochSha256: null,
+    workerIdSha256: null,
+    browserLeaseEpoch: null,
+    proofSha256: null,
+    eventSeqs: emptySeqs,
+    ...partial,
+  });
+  if (acquisitions.length !== 1) return fail("process_acquisition_count_invalid");
+  const acquired = acquisitions[0]!;
+  const ap = acquired.payload;
+  const runHash = sha256(run.id);
+  const cleanupHash = sha256(run.cleanupObligationId);
+  if (ap.schema !== "sophia_voice_lab_browser_process_ownership_v1"
+    || ap.voice_lab_run_id_sha256 !== runHash || ap.cleanup_obligation_id_sha256 !== cleanupHash
+    || !isSha256(ap.process_id_sha256) || !isSha256(ap.browser_boot_id_sha256) || !isSha256(ap.execution_epoch_sha256)
+    || ap.one_process_per_run !== true || ap.raw_process_id_excluded !== true) return fail("process_acquisition_binding_invalid");
+  const epoch = String(ap.execution_epoch_sha256);
+  const processId = String(ap.process_id_sha256);
+  const bootId = String(ap.browser_boot_id_sha256);
+  const runtimes = events.filter((event) => event.kind === "harness.browser_runtime_acquired" && event.source === "canonical" && event.seq > acquired.seq);
+  if (runtimes.length !== 1) return fail("runtime_acquisition_count_invalid", { executionEpochSha256: epoch, eventSeqs: { ...emptySeqs, processAcquired: acquired.seq } });
+  const runtime = runtimes[0]!;
+  const workerId = runtime.payload.worker_id_sha256;
+  const leaseEpoch = runtime.payload.browser_lease_epoch;
+  if (!isSha256(workerId) || !Number.isSafeInteger(leaseEpoch) || Number(leaseEpoch) < 1) return fail("runtime_lease_binding_invalid", { executionEpochSha256: epoch, eventSeqs: { ...emptySeqs, processAcquired: acquired.seq, runtimeAcquired: runtime.seq } });
+
+  const sameEpoch = (payload: Record<string, unknown>) => payload.voice_lab_run_id_sha256 === runHash
+    && payload.cleanup_obligation_id_sha256 === cleanupHash
+    && payload.process_id_sha256 === processId
+    && payload.browser_boot_id_sha256 === bootId
+    && payload.execution_epoch_sha256 === epoch;
+  const closes = events.filter((event) => event.kind === "cleanup.browser_context_closed" && event.source === "browser"
+    && event.seq > runtime.seq && event.payload.schema === "sophia_voice_lab_execution_epoch_browser_cleanup_v1"
+    && sameEpoch(event.payload) && event.payload.close_resolved === true && event.payload.browser_registry_absent === true
+    && event.payload.browser_process_close_resolved === true && event.payload.browser_process_disconnected === true
+    && event.payload.raw_process_id_excluded === true);
+  if (closes.length !== 1) return fail("process_death_proof_invalid", { executionEpochSha256: epoch, workerIdSha256: workerId, browserLeaseEpoch: Number(leaseEpoch), eventSeqs: { ...emptySeqs, processAcquired: acquired.seq, runtimeAcquired: runtime.seq } });
+  const closed = closes[0]!;
+  const providers = events.filter((event) => event.kind === "cleanup.provider_transport_closed" && event.source === "canonical"
+    && event.seq > runtime.seq && event.seq < closed.seq
+    && event.payload.schema === "sophia_voice_lab_execution_epoch_provider_cleanup_v1" && sameEpoch(event.payload)
+    && ["closed", "ended"].includes(String(event.payload.provider_stage))
+    && isSha256(event.payload.provider_event_sha256) && event.payload.exact_product_binding_validated === true
+    && event.payload.raw_process_and_provider_identifiers_excluded === true);
+  const auth = events.filter((event) => event.kind === "auth.session_cleanup" && event.source === "canonical"
+    && event.seq > runtime.seq && event.seq < closed.seq
+    && event.payload.cleanup_proof_schema === "sophia_voice_lab_execution_epoch_auth_cleanup_v1"
+    && sameEpoch(event.payload) && authCleanupConfirmed(event));
+  const direct = providers.length === 1 && auth.length === 1 && providers[0]!.seq < auth[0]!.seq;
+  const recoveries = events.filter((event) => {
+    if (event.kind !== "cleanup.recovery" || event.seq <= closed.seq) return false;
+    const receipt = event.payload.receipt as Record<string, unknown> | undefined;
+    return receipt?.test_run_id === run.testRunId && receipt.cleanup_obligation_id_sha256 === cleanupHash
+      && authoritativeLiveCleanupComplete([event]) && recoveryComponentComplete([event], "voice_provider") && recoveryComponentComplete([event], "auth_sessions");
+  });
+  const recovered = recoveries.length === 1;
+  if (!direct && !recovered) return fail("provider_or_auth_cleanup_unconfirmed", {
+    executionEpochSha256: epoch,
+    workerIdSha256: workerId,
+    browserLeaseEpoch: Number(leaseEpoch),
+    eventSeqs: { ...emptySeqs, processAcquired: acquired.seq, runtimeAcquired: runtime.seq, providerCleanup: providers[0]?.seq ?? null, authCleanup: auth[0]?.seq ?? null, processClosed: closed.seq, recovery: recoveries[0]?.seq ?? null },
+  });
+  const eventSeqs = {
+    processAcquired: acquired.seq,
+    runtimeAcquired: runtime.seq,
+    providerCleanup: providers[0]?.seq ?? null,
+    authCleanup: auth[0]?.seq ?? null,
+    processClosed: closed.seq,
+    recovery: recoveries[0]?.seq ?? null,
+  };
+  const proofCore = { run_id_sha256: runHash, cleanup_obligation_id_sha256: cleanupHash, process_id_sha256: processId, browser_boot_id_sha256: bootId, execution_epoch_sha256: epoch, worker_id_sha256: workerId, browser_lease_epoch: Number(leaseEpoch), cleanup_path: direct ? "direct" : "recovery", event_seqs: eventSeqs };
+  return { required: true, ready: true, reason: direct ? "direct_cleanup_before_process_death" : "authoritative_recovery_after_process_death", executionEpochSha256: epoch, workerIdSha256: workerId, browserLeaseEpoch: Number(leaseEpoch), proofSha256: canonicalRequestHash(proofCore), eventSeqs };
 }
 
 function exactString(value: unknown): string | null { return typeof value === "string" && value.length > 0 && value.length <= 512 ? value : null; }
