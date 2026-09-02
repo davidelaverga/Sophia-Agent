@@ -889,83 +889,16 @@ export async function activateDashboardMicButton(page: Page, button: Locator, vi
   await page.keyboard.press("Enter");
 }
 
-const ACTIVE_SESSION_VOICE_BUTTON_NAMES = [
-  "Listening...",
-  "Thinking...",
-  "Speaking...",
-  "Recording... release to send",
-] as const;
-
-export async function establishSessionVoiceStart(
-  page: Page,
-  readyButtonName: string,
+export async function waitForPageOwnedVoiceActivation(
+  hasScheduledReceipt: () => boolean,
   timeoutMs = SESSION_VOICE_START_VISIBILITY_TIMEOUT_MS,
-): Promise<"activated" | "already_active"> {
+): Promise<"scheduled"> {
   const deadline = Date.now() + timeoutMs;
-  const readyButton = page.getByRole("button", { name: readyButtonName, exact: true }).first();
-  const activeButtons = ACTIVE_SESSION_VOICE_BUTTON_NAMES.map((name) => (
-    page.getByRole("button", { name, exact: true }).first()
-  ));
-
   while (Date.now() < deadline) {
-    const remaining = Math.max(1, deadline - Date.now());
-    if (await readyButton.isVisible({ timeout: Math.min(remaining, 250) }).catch(() => false)) {
-      // Session hydration can replace the composer between visibility and
-      // focus. Keep every locator operation inside this helper's deadline and
-      // retry only before the native Enter activation has been issued.
-      const enabled = await readyButton
-        .isEnabled({ timeout: Math.min(remaining, 250) })
-        .catch(() => false);
-      if (enabled) {
-        // Schedule the exact button's native click for the renderer's next
-        // task, then acknowledge this evaluation before React enters the
-        // provider-media transition. Dispatching element.click() inside the
-        // evaluation still shares its completion boundary with a synchronous
-        // product handler; production media startup can then strand the same
-        // Playwright command lane needed to read authoritative receipts. This
-        // remains a one-shot activation of the visible, enabled ordinary
-        // control and never calls a product handler directly.
-        const activationAcknowledgement = readyButton.evaluate((element) => {
-          if (!(element instanceof HTMLButtonElement) || element.disabled) {
-            throw new Error("The ordinary session voice control was replaced before activation.");
-          }
-          setTimeout(() => {
-            if (element.isConnected && !element.disabled) element.click();
-          }, 0);
-        }, undefined, { timeout: Math.min(1_000, Math.max(1, deadline - Date.now())) });
-        // The renderer can execute the scheduling function, deliver the
-        // ordinary click, and still leave Playwright's locator evaluation
-        // acknowledgement unresolved while media startup owns the renderer
-        // task lane. Waiting for that acknowledgement poisoned the start
-        // operation for the complete 300-second deadline. Dispatch exactly
-        // once, yield one worker-owned turn so Chromium can receive and run
-        // the already-issued evaluation, consume any eventual rejection, and
-        // let the page-owned push receipts below provide the authoritative
-        // activation proof.
-        void activationAcknowledgement.catch(() => undefined);
-        await waitOnWorkerClock(Math.min(25, Math.max(1, deadline - Date.now())));
-        return "activated";
-      }
-    }
-    for (const activeButton of activeButtons) {
-      if (await activeButton.isVisible({ timeout: Math.min(remaining, 250) }).catch(() => false)) {
-        // The ordinary product control can advance from ready to connecting,
-        // listening, thinking, speaking, or press-to-talk before this worker
-        // observes the ready label. Those exact labels prove that the same
-        // product mic is already active. A second activation would cancel,
-        // mute, or barge into that live session, so continue without clicking.
-        return "already_active";
-      }
-    }
+    if (hasScheduledReceipt()) return "scheduled";
     await waitOnWorkerClock(Math.min(50, Math.max(1, deadline - Date.now())));
   }
-
-  // Preserve the TimeoutError-shaped recovery contract without dispatching a
-  // final renderer command. A locator.waitFor issued after this worker-owned
-  // deadline can remain queued behind an unresponsive renderer until the
-  // outer operation watchdog closes the page, preventing the exact-session
-  // recovery predicate from ever running.
-  const timeout = new Error("The ordinary session voice control did not become visible.");
+  const timeout = new Error("The page-owned harness did not schedule the ordinary session voice control.");
   timeout.name = "TimeoutError";
   throw timeout;
 }
@@ -1324,7 +1257,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       const authUser = authIdentity?.user as Record<string, unknown> | undefined;
       if (!authSession.ok() || authUser?.id !== run.principalId) throw new VoiceLabError(labError("AUTH_PRINCIPAL_MISMATCH", "The browser session is not bound to the exact dedicated Voice Lab principal.", "authorization", false, { observed_principal_sha256: typeof authUser?.id === "string" ? sha256(authUser.id) : null }));
       await enterStage("browser_init_script");
-      const initScriptContent = buildVoiceLabInitScript({ pageOrigin: frontendOrigin, websocketOrigins: [...this.config.websocketOrigins], maxAudioBytes: this.config.maxAudioBytes, testRunId: run.testRunId, cleanupObligationId: run.cleanupObligationId });
+      const initScriptContent = buildVoiceLabInitScript({ pageOrigin: frontendOrigin, websocketOrigins: [...this.config.websocketOrigins], maxAudioBytes: this.config.maxAudioBytes, testRunId: run.testRunId, cleanupObligationId: run.cleanupObligationId, startButtonName: this.config.startButtonName });
       await context.addInitScript({ content: initScriptContent });
       // Capture only the already-authenticated BrowserContext state before any
       // ordinary renderer command can become unhealthy. Recovery can then
@@ -1758,13 +1691,15 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
           recovering ? SESSION_VOICE_RECOVERY_TAB_TIMEOUT_MS : SESSION_VOICE_INITIAL_TAB_TIMEOUT_MS,
         );
         await enterStage("voice_start_button");
-        // The URL can commit before the session client tree finishes
-        // hydrating. Keep the exact ordinary button contract and at most one
-        // native activation. If the same product control has already advanced
-        // to a known active label, do not toggle it back off.
-        await establishSessionVoiceStart(
-          activePage,
-          this.config.startButtonName,
+        // The page-owned init harness observes and activates the exact visible,
+        // enabled native button once. Waiting only on its already-pushed receipt
+        // avoids issuing any renderer command after media startup begins.
+        await waitForPageOwnedVoiceActivation(
+          () => startupPush.queue.some((envelope) => {
+            if (envelope.page !== activePage || envelope.channel !== "harness"
+              || envelope.payload === null || typeof envelope.payload !== "object" || Array.isArray(envelope.payload)) return false;
+            return (envelope.payload as Record<string, unknown>).kind === "harness.voice_control_activation_scheduled";
+          }),
           recovering ? SESSION_VOICE_RECOVERY_START_TIMEOUT_MS : SESSION_VOICE_INITIAL_START_TIMEOUT_MS,
         );
       };
@@ -1783,13 +1718,10 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
         ),
         reload: () => reloadExactSessionRouteOnce("voice_start_recovery_reload"),
       });
-      // The native click is intentionally scheduled after its renderer
-      // evaluation acknowledges. Do not immediately enqueue a new Runtime
-      // evaluation behind that click: Chromium can dispatch the media-start
-      // task first and leave the newly queued command waiting on the same
-      // activation boundary indefinitely. A worker-owned grace lets the
-      // ordinary click, getUserMedia, and provider bootstrap task chain settle
-      // before startup evidence performs its first renderer read.
+      // No Playwright renderer command is issued at the activation boundary.
+      // A worker-owned grace lets the ordinary click, getUserMedia, and
+      // provider bootstrap task chain settle before startup evidence drains the
+      // exposed-binding queue.
       await waitOnWorkerClock(SESSION_VOICE_ACTIVATION_SETTLE_MS);
       await enterStage("voice_startup_readiness");
       const events = await this.#waitForStartupReadiness(session, 45_000);

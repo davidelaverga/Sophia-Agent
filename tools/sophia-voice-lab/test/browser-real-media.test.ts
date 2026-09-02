@@ -8,7 +8,7 @@ import { chromium, type Browser } from "playwright";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { buildVoiceLabInitScript } from "../src/browser-init.js";
-import { activateDashboardMicButton, classifySessionVoiceRoute, DIRECT_CDP_CLIENT_DIAGNOSTICS_ENABLED, establishSessionNavigation, establishSessionVoiceStart, establishSessionVoiceTab, PAUSING_CLIENT_DIAGNOSTICS_ENABLED, PlaywrightVoiceDriver, resolveDashboardMicButton, settleDiagnosticWithinBudget, settlePausedDiagnosticAndResume } from "../src/browser-driver.js";
+import { activateDashboardMicButton, classifySessionVoiceRoute, DIRECT_CDP_CLIENT_DIAGNOSTICS_ENABLED, establishSessionNavigation, establishSessionVoiceTab, PAUSING_CLIENT_DIAGNOSTICS_ENABLED, PlaywrightVoiceDriver, resolveDashboardMicButton, settleDiagnosticWithinBudget, settlePausedDiagnosticAndResume, waitForPageOwnedVoiceActivation } from "../src/browser-driver.js";
 
 function sineWav(durationMs = 600, sampleRate = 16_000): Buffer {
   const samples = Math.floor(sampleRate * durationMs / 1_000);
@@ -198,135 +198,54 @@ describe("real Chromium dynamic media contract", () => {
     await context.close();
   });
 
-  it("does not toggle an ordinary session voice control that already advanced to an active state", async () => {
-    const context = await browser.newContext();
-    const page = await context.newPage();
-    await page.goto(origin);
-    await page.setContent(`
-      <div id="session-controls"></div>
-      <script>
-        window.__voiceActivations = 0;
-        setTimeout(() => {
-          const button = document.createElement('button');
-          button.type = 'button';
-          button.setAttribute('aria-label', 'Listening...');
-          button.onclick = () => { window.__voiceActivations += 1; };
-          document.querySelector('#session-controls').append(button);
-        }, 150);
-      </script>
-    `);
-    await expect(establishSessionVoiceStart(page, "Tap to speak", 1_000)).resolves.toBe("already_active");
-    expect(await page.evaluate(() => (window as any).__voiceActivations)).toBe(0);
-    await context.close();
+  it("advances from a page-owned activation receipt without issuing a renderer command", async () => {
+    let scheduled = false;
+    setTimeout(() => { scheduled = true; }, 25);
+    await expect(waitForPageOwnedVoiceActivation(() => scheduled, 250)).resolves.toBe("scheduled");
   });
 
-  it("re-resolves a replaced ready mic before issuing one native activation", async () => {
-    const context = await browser.newContext();
-    const page = await context.newPage();
-    await page.goto(origin);
-    await page.setContent(`
-      <div id="session-controls">
-        <button type="button" aria-label="Tap to speak" disabled></button>
-      </div>
-      <script>
-        window.__voiceActivations = 0;
-        setTimeout(() => {
-          const button = document.createElement('button');
-          button.type = 'button';
-          button.setAttribute('aria-label', 'Tap to speak');
-          button.onclick = () => { window.__voiceActivations += 1; };
-          document.querySelector('#session-controls').replaceChildren(button);
-        }, 150);
-      </script>
-    `);
-    await expect(establishSessionVoiceStart(page, "Tap to speak", 1_000)).resolves.toBe("activated");
-    expect(await page.evaluate(() => (window as any).__voiceActivations)).toBe(1);
-    await context.close();
-  });
-
-  it("activates the exact voice control once without awaiting its async media handler", async () => {
-    const context = await browser.newContext();
-    const page = await context.newPage();
-    await page.goto(origin);
-    await page.setContent(`
-      <button type="button" aria-label="Tap to speak">microphone</button>
-      <script>
-        window.__voiceActivations = 0;
-        document.querySelector('button').onclick = () => {
-          window.__voiceActivations += 1;
-          return new Promise(() => undefined);
-        };
-      </script>
-    `);
+  it("ends an absent page-owned activation receipt on the worker deadline", async () => {
     const started = Date.now();
-    await expect(establishSessionVoiceStart(page, "Tap to speak", 1_500)).resolves.toBe("activated");
-    expect(await page.evaluate(() => (window as any).__voiceActivations)).toBe(1);
-    expect(Date.now() - started).toBeLessThan(1_400);
-    await context.close();
-  });
-
-  it("acknowledges activation before a synchronous media transition occupies the renderer", async () => {
-    const context = await browser.newContext();
-    const page = await context.newPage();
-    await page.goto(origin);
-    await page.setContent(`
-      <button type="button" aria-label="Tap to speak">microphone</button>
-      <script>
-        window.__voiceActivations = 0;
-        document.querySelector('button').onclick = () => {
-          window.__voiceActivations += 1;
-          const deadline = performance.now() + 600;
-          while (performance.now() < deadline) {}
-        };
-      </script>
-    `);
-    const started = Date.now();
-    await expect(establishSessionVoiceStart(page, "Tap to speak", 1_500)).resolves.toBe("activated");
-    expect(Date.now() - started).toBeLessThan(400);
-    await page.waitForFunction(() => (window as any).__voiceActivations === 1);
-    expect(await page.evaluate(() => (window as any).__voiceActivations)).toBe(1);
-    await context.close();
-  });
-
-  it("advances after one delivered activation when its protocol acknowledgement never resolves", async () => {
-    let activationDispatches = 0;
-    const readyButton = {
-      first: () => readyButton,
-      isVisible: async () => true,
-      isEnabled: async () => true,
-      evaluate: () => {
-        activationDispatches += 1;
-        return new Promise<void>(() => undefined);
-      },
-    };
-    const inactiveButton = {
-      first: () => inactiveButton,
-      isVisible: async () => false,
-    };
-    const page = {
-      getByRole: (_role: string, options: { name: string }) => options.name === "Tap to speak" ? readyButton : inactiveButton,
-    } as any;
-
-    const result = await Promise.race([
-      establishSessionVoiceStart(page, "Tap to speak", 1_000),
-      new Promise<"deadline">((resolve) => setTimeout(() => resolve("deadline"), 100)),
-    ]);
-
-    expect(result).toBe("activated");
-    expect(activationDispatches).toBe(1);
-  });
-
-  it("ends an absent voice-control wait on the worker deadline with a TimeoutError", async () => {
-    const context = await browser.newContext();
-    const page = await context.newPage();
-    await page.goto(origin);
-    await page.setContent('<main aria-label="empty session shell"></main>');
-    const started = Date.now();
-    await expect(establishSessionVoiceStart(page, "Tap to speak", 75)).rejects.toMatchObject({
+    await expect(waitForPageOwnedVoiceActivation(() => false, 75)).rejects.toMatchObject({
       name: "TimeoutError",
-      message: "The ordinary session voice control did not become visible.",
+      message: "The page-owned harness did not schedule the ordinary session voice control.",
     });
     expect(Date.now() - started).toBeLessThan(1_000);
+  });
+
+  it("uses the page-owned harness to activate the exact ordinary voice button once", async () => {
+    const pushed: Array<Record<string, any>> = [];
+    const context = await browser.newContext();
+    await context.exposeBinding("__sophiaVoiceLabPushV1", (_source, raw: Record<string, any>) => {
+      pushed.push(raw);
+    });
+    await context.addInitScript({ content: buildVoiceLabInitScript({
+      pageOrigin: origin,
+      websocketOrigins: [origin.replace("http://", "ws://")],
+      maxAudioBytes: 1_000_000,
+      testRunId: "00000000-0000-4000-8000-000000000001",
+      cleanupObligationId: "00000000-0000-4000-8000-000000000002",
+      startButtonName: "Tap to speak",
+    }) });
+    const page = await context.newPage();
+    await page.goto(`${origin}/session`);
+    await page.evaluate(() => {
+      document.body.innerHTML = '<button type="button" aria-label="Tap to speak">microphone</button>';
+      (window as any).__voiceActivations = 0;
+      const button = document.querySelector('button');
+      if (button) {
+        button.onclick = () => {
+          (window as any).__voiceActivations += 1;
+          return new Promise(() => undefined);
+        };
+      }
+    });
+
+    await expect.poll(() => pushed.some((entry) => entry?.payload?.kind === "harness.voice_control_activation_scheduled")).toBe(true);
+    await expect.poll(() => page.evaluate(() => (window as any).__voiceActivations)).toBe(1);
+    await page.evaluate(() => document.querySelector('button')?.setAttribute('class', 'settled'));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(await page.evaluate(() => (window as any).__voiceActivations)).toBe(1);
     await context.close();
   });
 
@@ -503,7 +422,7 @@ describe("real Chromium dynamic media contract", () => {
       const native = mediaDevices.getUserMedia.bind(mediaDevices);
       Object.defineProperty(mediaDevices, "getUserMedia", { configurable: true, writable: true, value: (...args: Parameters<typeof native>) => { (window as any).__nativeGumCalls += 1; return native(...args); } });
     });
-    await context.addInitScript({ content: buildVoiceLabInitScript({ pageOrigin: origin, websocketOrigins: [origin.replace("http://", "ws://")], maxAudioBytes: 1_000_000, testRunId: "00000000-0000-4000-8000-000000000001", cleanupObligationId: "00000000-0000-4000-8000-000000000002" }) });
+    await context.addInitScript({ content: buildVoiceLabInitScript({ pageOrigin: origin, websocketOrigins: [origin.replace("http://", "ws://")], maxAudioBytes: 1_000_000, testRunId: "00000000-0000-4000-8000-000000000001", cleanupObligationId: "00000000-0000-4000-8000-000000000002", startButtonName: "Tap to speak" }) });
     const page = await context.newPage();
     await page.goto(origin);
     await page.evaluate(() => {

@@ -39,7 +39,7 @@ function harness() {
   };
   sandbox.window = sandbox;
   sandbox.top = sandbox;
-  vm.runInNewContext(buildVoiceLabInitScript({ pageOrigin: "https://frontend.test", websocketOrigins: ["wss://provider.test"], maxAudioBytes: 1024, testRunId: "00000000-0000-4000-8000-000000000001", cleanupObligationId: "00000000-0000-4000-8000-000000000002" }), sandbox);
+  vm.runInNewContext(buildVoiceLabInitScript({ pageOrigin: "https://frontend.test", websocketOrigins: ["wss://provider.test"], maxAudioBytes: 1024, testRunId: "00000000-0000-4000-8000-000000000001", cleanupObligationId: "00000000-0000-4000-8000-000000000002", startButtonName: "Tap to speak" }), sandbox);
   return { sandbox, audio, sources, listeners, productEvents, pagePushes, storage };
 }
 
