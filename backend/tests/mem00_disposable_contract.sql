@@ -177,6 +177,53 @@ BEGIN
     IF NOT has_table_privilege('service_role', 'public.sophia_memories', 'SELECT') THEN
         RAISE EXCEPTION 'service role lacks canonical read privilege';
     END IF;
+    IF has_table_privilege('anon', 'public.sophia_memory_certification_cleanup_v', 'SELECT')
+       OR has_table_privilege('authenticated', 'public.sophia_memory_retrieval_authorization_v', 'SELECT') THEN
+        RAISE EXCEPTION 'browser role retained operational-view access';
+    END IF;
+    IF NOT has_table_privilege('service_role', 'public.sophia_memory_certification_cleanup_v', 'SELECT') THEN
+        RAISE EXCEPTION 'service role lacks certification cleanup view access';
+    END IF;
+    IF has_table_privilege('authenticated', 'public.sophia_memory_fault_settings', 'SELECT')
+       OR has_function_privilege('authenticated', 'public.sophia_memory_arm_fault(text,text,integer,text)', 'EXECUTE') THEN
+        RAISE EXCEPTION 'browser role retained fault-plane access';
+    END IF;
+    IF NOT has_function_privilege('service_role', 'public.sophia_memory_arm_fault(text,text,integer,text)', 'EXECUTE') THEN
+        RAISE EXCEPTION 'service role lacks fault-plane control';
+    END IF;
+END
+$test$;
+
+DO $test$
+DECLARE
+    receipt JSONB;
+    cleared INTEGER;
+BEGIN
+    receipt := public.sophia_memory_arm_fault(
+        'owner-authority', 'provider_timeout_before_effect', 60,
+        'hmac-sha256:fault-operation:synthetic'
+    );
+    IF receipt->>'remaining_uses' <> '1'
+       OR NOT public.sophia_memory_consume_fault(
+           'owner-authority', 'provider_timeout_before_effect'
+       )
+       OR public.sophia_memory_consume_fault(
+           'owner-authority', 'provider_timeout_before_effect'
+       ) THEN
+        RAISE EXCEPTION 'fault setting was not exactly one-shot';
+    END IF;
+    PERFORM public.sophia_memory_arm_fault(
+        'owner-authority', 'langsmith_unavailable', 60,
+        'hmac-sha256:fault-operation:cleanup'
+    );
+    cleared := public.sophia_memory_clear_faults('owner-authority');
+    IF cleared < 1 OR EXISTS (
+           SELECT 1 FROM public.sophia_memory_fault_settings
+            WHERE user_id = 'owner-authority'
+              AND remaining_uses > 0 AND cleared_at IS NULL AND expires_at > now()
+       ) THEN
+        RAISE EXCEPTION 'fault cleanup did not reach terminal zero';
+    END IF;
 END
 $test$;
 

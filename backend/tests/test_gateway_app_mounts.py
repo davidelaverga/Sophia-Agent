@@ -113,6 +113,8 @@ def test_gateway_version_exposes_safe_render_deployment_identity(monkeypatch):
         "deployment_id": "dep-voice-lab-test",
         "service_id": "srv-gateway-test",
         "artifact_upsert_auth_patch": "artifact_upsert_auth_v2",
+        "memory_contract_schema": "mem00.v1",
+        "memory_supported_contract_epoch": 1,
     }
 
 

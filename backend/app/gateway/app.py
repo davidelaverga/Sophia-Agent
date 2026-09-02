@@ -111,7 +111,7 @@ def _initial_deck_quality_readiness(*, enabled: bool | None) -> dict[str, object
     }
 
 
-def _gateway_version_metadata() -> dict[str, str | None]:
+def _gateway_version_metadata() -> dict[str, object]:
     commit_sha = os.getenv("RENDER_GIT_COMMIT") or os.getenv("RENDER_GIT_COMMIT_SHA") or os.getenv("GIT_COMMIT_SHA") or os.getenv("SOURCE_COMMIT")
     return {
         "commit_sha": commit_sha,
@@ -119,6 +119,8 @@ def _gateway_version_metadata() -> dict[str, str | None]:
         "deployment_id": os.getenv("RENDER_DEPLOY_ID"),
         "service_id": os.getenv("RENDER_SERVICE_ID"),
         "artifact_upsert_auth_patch": _ARTIFACT_UPSERT_AUTH_PATCH,
+        "memory_contract_schema": "mem00.v1",
+        "memory_supported_contract_epoch": 1,
     }
 
 

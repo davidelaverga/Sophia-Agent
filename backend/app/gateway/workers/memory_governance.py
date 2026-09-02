@@ -9,6 +9,7 @@ import time
 from typing import Any
 
 from deerflow.sophia.memory_governance.extraction_service import MemoryExtractionService
+from deerflow.sophia.memory_governance.faults import MemoryFaultController
 from deerflow.sophia.memory_governance.flags import (
     MemoryFeatureFlags,
     MemoryFlagConfigurationError,
@@ -118,6 +119,7 @@ def build_configured_memory_governance_worker(*, flags: MemoryFeatureFlags | Non
     deployment = os.getenv("RENDER_GIT_COMMIT") or os.getenv("SOPHIA_DEPLOYMENT_SHA") or "local"
     lease_owner = keyed_ref("worker", f"gateway:{deployment}:{os.getpid()}")
     store = configured_memory_store()
+    faults = MemoryFaultController(store=store) if resolved.memory_fault_injection else None
     extraction = None
     projection = None
     if resolved.candidate_ledger_write:
@@ -126,6 +128,7 @@ def build_configured_memory_governance_worker(*, flags: MemoryFeatureFlags | Non
             session_store=SessionStore(),
             lease_owner=lease_owner,
             service_name="sophia-gateway",
+            faults=faults,
         )
     if resolved.provider_projection:
         projection = MemoryProjectionReconciler(
@@ -133,6 +136,7 @@ def build_configured_memory_governance_worker(*, flags: MemoryFeatureFlags | Non
             adapter=Mem0ProjectionAdapter(),
             lease_owner=lease_owner,
             service_name="sophia-gateway",
+            faults=faults,
         )
     return MemoryGovernanceWorker(
         extraction=extraction,

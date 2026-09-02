@@ -18,6 +18,22 @@ export type PrivacyStatus = {
   delete_available: boolean
 }
 
+export type MemoryDeletionReceipt = {
+  status: "accepted_and_fenced" | "partial_failure" | "unsupported" | "failed"
+  canonical_memory_fence: string
+  provider_purge: string
+  source_transcript: "not_deleted"
+  derived_artifacts: string
+  cache_invalidation: string
+  other_account_data: "not_covered_by_mem00"
+  memory_count: number
+  fenced_count: number
+  failed_count: number
+  pending_candidate_count: number
+  rejected_candidate_count: number
+  details?: Array<{ memory_ref: string; status: string }>
+}
+
 type ConsentCheckResponse = {
   hasConsent?: boolean
   consentDate?: string
@@ -68,12 +84,12 @@ export const exportPrivacyData = async (): Promise<Blob> => {
   return apiRequestBlob("/api/privacy/export", { method: "GET" })
 }
 
-export const deleteAccountData = async (): Promise<void> => {
+export const deleteAccountData = async (): Promise<MemoryDeletionReceipt | undefined> => {
   if (usePrivacyMock) {
-    return
+    return undefined
   }
-  
-  await apiRequestVoid("/api/privacy/delete", { method: "DELETE" })
+
+  return apiRequest<MemoryDeletionReceipt>("/api/privacy/delete", { method: "DELETE" })
 }
 
 export const getPrivacyStatus = async (signal?: AbortSignal): Promise<PrivacyStatus> => {
@@ -86,6 +102,5 @@ export const getPrivacyStatus = async (signal?: AbortSignal): Promise<PrivacySta
     signal,
   })
 }
-
 
 

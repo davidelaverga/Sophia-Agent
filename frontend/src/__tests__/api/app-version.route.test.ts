@@ -18,6 +18,8 @@ describe('/api/app-version', () => {
     expect(payload).toEqual({
       build_id: 'build-1234567890',
       deployment_id: 'deployment-1',
+      memory_contract_schema: 'mem00.v1',
+      memory_supported_contract_epoch: 1,
     });
   });
 });

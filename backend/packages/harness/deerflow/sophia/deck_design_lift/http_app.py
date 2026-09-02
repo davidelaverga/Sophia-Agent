@@ -47,7 +47,12 @@ async def version(_request: Request) -> Response:
             headers={"Cache-Control": "no-store"},
         )
     return JSONResponse(
-        {"service": "sophia-langgraph", "commit_sha": commit_sha},
+        {
+            "service": "sophia-langgraph",
+            "commit_sha": commit_sha,
+            "memory_contract_schema": "mem00.v1",
+            "memory_supported_contract_epoch": 1,
+        },
         status_code=200,
         headers={"Cache-Control": "no-store"},
     )

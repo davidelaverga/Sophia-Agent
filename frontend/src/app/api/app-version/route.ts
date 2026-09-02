@@ -19,11 +19,15 @@ export async function GET() {
   console.log('[app-version] resolved', {
     build_id: buildId,
     deployment_id: deploymentId,
+    memory_contract_schema: 'mem00.v1',
+    memory_supported_contract_epoch: 1,
   });
   return NextResponse.json(
     {
       build_id: buildId,
       deployment_id: deploymentId,
+      memory_contract_schema: 'mem00.v1',
+      memory_supported_contract_epoch: 1,
     },
     {
       headers: {

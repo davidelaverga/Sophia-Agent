@@ -18,6 +18,8 @@ The canonical product database is the only approval authority. Mem0 is a desired
 | Opener | disabled under governed authority | no stale derivative memory |
 | Handoff | quarantined/disabled under governed authority | no ungoverned derivative handoff |
 | Identity | isolated identity store only | legacy memory identity loads remain zero |
+| Privacy export | canonical authority plus candidate ledger | fail closed unless active, forgotten, and pending memory scope is complete; never emit a fabricated empty success |
+| Privacy memory deletion | canonical authority plus candidate ledger | reject pending candidates; revision-fence active and forgotten canonical memories; report provider purge, transcript scope, derived invalidation, and other account data separately |
 
 ## Raw provider boundary
 

@@ -402,13 +402,15 @@ def capability_for_production_start(
     )
 
 
-def voice_service_identity() -> dict[str, str | None]:
+def voice_service_identity() -> dict[str, str | int | None]:
     build_id = (os.getenv("RENDER_GIT_COMMIT") or os.getenv("SOPHIA_DEPLOYMENT_SHA") or "unknown").strip()
     return {
         "service": "sophia-voice",
         "build_id": build_id,
         "deployment_id": (os.getenv("RENDER_DEPLOY_ID") or "").strip() or None,
         "service_id": (os.getenv("RENDER_SERVICE_ID") or "").strip() or None,
+        "memory_contract_schema": "mem00.v1",
+        "memory_supported_contract_epoch": 1,
     }
 
 

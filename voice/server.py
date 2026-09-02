@@ -1572,7 +1572,7 @@ def create_fastapi_app(
     app.state.options = resolved_options
 
     @app.get("/version", include_in_schema=False)
-    async def voice_version() -> dict[str, str | None]:
+    async def voice_version() -> dict[str, str | int | None]:
         return voice_service_identity()
 
     @app.get("/health", include_in_schema=False)

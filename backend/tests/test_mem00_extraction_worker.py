@@ -9,6 +9,7 @@ from deerflow.sophia.memory_governance.extraction_service import (
     MemoryExtractionService,
     _manifest_ref,
 )
+from deerflow.sophia.memory_governance.faults import InjectedExtractionClaimantCrash
 from deerflow.sophia.memory_governance.models import ExtractionRun, MemoryContract
 from deerflow.sophia.session_store import SessionMessageRecord, SessionRecord
 
@@ -253,6 +254,33 @@ def test_extractor_failure_returns_durable_run_to_retry_state() -> None:
     with pytest.raises(RuntimeError, match="synthetic extractor failure"):
         _service(store, sessions, fail).run_once()
     assert store.failed[1:] == ("memory_extraction_worker_failed", True)
+
+
+def test_injected_claimant_crash_leaves_the_durable_lease_for_expiry_recovery() -> None:
+    sessions = _Sessions()
+    store = _Governance(_run(sessions))
+
+    class Faults:
+        def consume(self, *, owner_id, mode):
+            assert owner_id == "owner-1"
+            assert mode == "extraction_claimant_crash"
+            return True
+
+    service = MemoryExtractionService(
+        governance_store=store,
+        session_store=sessions,
+        lease_owner="claimant-1",
+        service_name="test",
+        extractor=lambda *_: [],
+        faults=Faults(),
+    )
+    with pytest.raises(
+        InjectedExtractionClaimantCrash,
+        match="memory_extraction_claimant_crash_injected",
+    ):
+        service.run_once()
+    assert store.completed is None
+    assert store.failed is None
 
 
 def test_disabled_contract_refuses_extraction_before_claim_or_model() -> None:

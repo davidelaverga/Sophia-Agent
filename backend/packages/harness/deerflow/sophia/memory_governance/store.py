@@ -210,6 +210,57 @@ class SupabaseMemoryGovernanceStore:
             raise MemoryGovernanceUnavailable("candidate_expiry_result_invalid")
         return result
 
+    def arm_fault(
+        self,
+        *,
+        user_id: str,
+        mode: str,
+        ttl_seconds: int,
+        audit_ref: str,
+    ) -> dict[str, Any]:
+        result = self._rpc(
+            "sophia_memory_arm_fault",
+            {
+                "p_user_id": user_id,
+                "p_mode": mode,
+                "p_ttl_seconds": ttl_seconds,
+                "p_audit_ref": audit_ref,
+            },
+        )
+        if not isinstance(result, dict):
+            raise MemoryGovernanceUnavailable("memory_fault_arm_result_invalid")
+        return result
+
+    def consume_fault(self, *, user_id: str, mode: str) -> bool:
+        result = self._rpc(
+            "sophia_memory_consume_fault",
+            {"p_user_id": user_id, "p_mode": mode},
+        )
+        if not isinstance(result, bool):
+            raise MemoryGovernanceUnavailable("memory_fault_consume_result_invalid")
+        return result
+
+    def clear_faults(self, *, user_id: str) -> int:
+        result = self._rpc("sophia_memory_clear_faults", {"p_user_id": user_id})
+        if not isinstance(result, int):
+            raise MemoryGovernanceUnavailable("memory_fault_clear_result_invalid")
+        return result
+
+    def expire_projection_lease(self, lease: ProjectionLease) -> bool:
+        if lease.lease_token is None:
+            raise MemoryGovernanceConflict("memory_projection_lease_missing")
+        result = self._rpc(
+            "sophia_memory_expire_projection_lease",
+            {
+                "p_user_id": lease.user_id,
+                "p_projection_job_id": str(lease.projection_job_id),
+                "p_lease_token": str(lease.lease_token),
+            },
+        )
+        if not isinstance(result, bool):
+            raise MemoryGovernanceUnavailable("memory_projection_lease_expiry_result_invalid")
+        return result
+
     def invalidate_source(self, **payload: object) -> SourceInvalidationReceipt:
         return self._model(
             SourceInvalidationReceipt,

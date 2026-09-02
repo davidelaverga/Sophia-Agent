@@ -1001,6 +1001,8 @@ def test_version_identity_is_public_and_readiness_routes_remain_public(
     identity = voice_service_identity()
     assert identity["build_id"] == BUILD
     assert identity["deployment_id"] == "dep-test"
+    assert identity["memory_contract_schema"] == "mem00.v1"
+    assert identity["memory_supported_contract_epoch"] == 1
 
     app = voice_server.create_fastapi_app(SimpleNamespace())
     routes = {getattr(route, "path", None) for route in app.routes}
@@ -1010,3 +1012,5 @@ def test_version_identity_is_public_and_readiness_routes_remain_public(
     response = TestClient(app).get("/version")
     assert response.status_code == 200
     assert response.json()["build_id"] == BUILD
+    assert response.json()["memory_contract_schema"] == "mem00.v1"
+    assert response.json()["memory_supported_contract_epoch"] == 1

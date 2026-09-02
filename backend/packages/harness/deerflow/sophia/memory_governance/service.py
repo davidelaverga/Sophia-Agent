@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
+from .faults import MemoryFaultController
+from .flags import memory_feature_flags_for_owner
 from .identity import assert_not_voice_lab_principal
 from .models import GovernanceReceipt, PrivacyReceipt, SourceInvalidationReceipt
 from .refs import keyed_ref, request_digest
@@ -357,6 +359,13 @@ class CanonicalMemoryService:
         actor_kind: str = "user",
     ) -> PrivacyReceipt:
         self._assert_supported_contract()
+        retain_warm_cache = bool(
+            memory_feature_flags_for_owner(self.owner_id).memory_fault_injection
+            and MemoryFaultController(store=self.store).consume(
+                owner_id=self.owner_id,
+                mode="cache_retained_through_tombstone",
+            )
+        )
         digest_payload = {
             "memory_id": str(memory_id),
             "expected_governance_revision": expected_governance_revision,
@@ -375,6 +384,10 @@ class CanonicalMemoryService:
             provider_purge=receipt.provider_purge or "purge_pending",
             source_transcript="not_deleted",
             derived_artifacts="invalidation_required",
-            cache_invalidation="revocation_epoch_advanced",
+            cache_invalidation=(
+                "revocation_epoch_advanced_cache_retained_for_fault_recheck"
+                if retain_warm_cache
+                else "revocation_epoch_advanced"
+            ),
             receipt=receipt,
         )

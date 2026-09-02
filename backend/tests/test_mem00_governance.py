@@ -5,6 +5,10 @@ from uuid import uuid4
 
 import pytest
 
+from deerflow.sophia.memory_governance.faults import (
+    MemoryFaultControlError,
+    MemoryFaultController,
+)
 from deerflow.sophia.memory_governance.flags import (
     MemoryFeatureFlags,
     MemoryFlagConfigurationError,
@@ -97,6 +101,76 @@ def test_worker_requires_certification_principal_in_exact_cohort(
         match="memory_certification_principal_not_in_cohort",
     ):
         build_configured_memory_governance_worker(flags=MemoryFeatureFlags(candidate_ledger_write=True))
+
+
+def _enable_fault_plane(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in (
+        "CANDIDATE_LEDGER_WRITE",
+        "CANDIDATE_LEDGER_READ",
+        "CANONICAL_POOL_READ",
+        "PROVIDER_PROJECTION",
+        "GOVERNED_RUNTIME_READ",
+        "FAULT_INJECTION",
+    ):
+        monkeypatch.setenv(f"SOPHIA_MEMORY_{name}", "true")
+    monkeypatch.setenv("SOPHIA_MEMORY_CERTIFICATION_PRINCIPAL", "mem00-cert-owner")
+    monkeypatch.setenv("SOPHIA_MEMORY_COHORT_PRINCIPALS", "mem00-cert-owner")
+
+
+def test_fault_plane_is_exact_principal_one_shot_ttl_bounded_and_audited(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _enable_fault_plane(monkeypatch)
+
+    class Store:
+        consumed = False
+        armed = None
+
+        def arm_fault(self, **payload):
+            self.armed = payload
+            return {"mode": payload["mode"], "remaining_uses": 1}
+
+        def consume_fault(self, **payload):
+            if self.consumed:
+                return False
+            self.consumed = True
+            return True
+
+        def clear_faults(self, **payload):
+            return 1
+
+    store = Store()
+    controller = MemoryFaultController(store=store)
+    receipt = controller.arm(
+        owner_id="mem00-cert-owner",
+        mode="provider_commit_response_loss",
+        ttl_seconds=60,
+        operation_ref="synthetic-operation-1",
+    )
+    assert receipt == {"mode": "provider_commit_response_loss", "remaining_uses": 1}
+    assert store.armed["audit_ref"].startswith("hmac-sha256:fault-operation:")
+    assert controller.consume(
+        owner_id="mem00-cert-owner",
+        mode="provider_commit_response_loss",
+    )
+    assert not controller.consume(
+        owner_id="mem00-cert-owner",
+        mode="provider_commit_response_loss",
+    )
+    assert controller.clear(owner_id="mem00-cert-owner") == 1
+    with pytest.raises(MemoryFaultControlError, match="memory_fault_principal_denied"):
+        controller.arm(
+            owner_id="ordinary-owner",
+            mode="provider_timeout_before_effect",
+            operation_ref="denied-operation",
+        )
+    with pytest.raises(MemoryFaultControlError, match="memory_fault_setting_invalid"):
+        controller.arm(
+            owner_id="mem00-cert-owner",
+            mode="provider_timeout_before_effect",
+            ttl_seconds=301,
+            operation_ref="invalid-ttl",
+        )
 
 
 def test_generic_memory_containment_is_cohort_scoped(
@@ -399,6 +473,142 @@ def test_projection_completion_can_fence_late_success() -> None:
     assert store.payload["p_result_state"] == "active"
 
 
+def _projection_fault_fixture(mode: str, *, operation: str = "project_revision"):
+    from deerflow.sophia.memory_governance.projection import MemoryProjectionReconciler
+
+    lease = ProjectionLease(
+        projection_job_id=uuid4(),
+        user_id="mem00-cert-owner",
+        memory_id=uuid4(),
+        provider="mem0",
+        environment="production",
+        provider_project="existing-project",
+        provider_namespace="sophia-memory-v2-subject",
+        desired_content_revision=1,
+        desired_governance_revision=1,
+        operation=operation,
+        state="leased" if operation == "project_revision" else "purging",
+        lease_token=uuid4(),
+        projection_operation_id="synthetic-fault-operation",
+        canonical_content="CANONICAL TEXT" if operation == "project_revision" else None,
+    )
+
+    class Store:
+        payload = None
+        expired = False
+
+        def get_contract(self):
+            return MemoryContract(
+                contract_epoch=1,
+                schema_version="mem00.v1",
+                mode="shadow",
+                updated_at=datetime.now(UTC),
+            )
+
+        def claim_projection(self, **kwargs):
+            return lease
+
+        def complete_projection(self, payload):
+            self.payload = payload
+            if self.expired:
+                raise MemoryGovernanceUnavailable("memory_projection_lease_stale")
+            return {"state": payload["p_result_state"]}
+
+        def projection_binding_ids(self, lease):
+            return ("provider-existing",)
+
+        def expire_projection_lease(self, lease):
+            self.expired = True
+            return True
+
+    class Adapter:
+        projected = False
+        deleted = False
+
+        def find_by_operation_marker(self, **kwargs):
+            return ()
+
+        def project_revision(self, **kwargs):
+            self.projected = True
+            return ProviderMutationResult(
+                status="created",
+                provider_ids=("provider-created",),
+                metadata_verified=True,
+            )
+
+        def delete_ids(self, *args, **kwargs):
+            self.deleted = True
+
+    class Faults:
+        consumed = False
+
+        def consume(self, *, owner_id, mode: str):
+            if mode != selected_mode or self.consumed:
+                return False
+            self.consumed = True
+            return True
+
+    selected_mode = mode
+    store = Store()
+    adapter = Adapter()
+    reconciler = MemoryProjectionReconciler(
+        store=store,
+        adapter=adapter,
+        lease_owner="worker",
+        service_name="test",
+        faults=Faults(),
+    )
+    return reconciler, store, adapter
+
+
+@pytest.mark.parametrize("mode", ["provider_timeout_before_effect", "provider_429_5xx"])
+def test_projection_pre_effect_faults_do_not_call_provider(mode: str) -> None:
+    reconciler, store, adapter = _projection_fault_fixture(mode)
+    assert reconciler.run_once()
+    assert not adapter.projected
+    assert store.payload["p_result_state"] == "failed_retryable"
+    assert store.payload["p_provider_ids"] == []
+
+
+def test_projection_commit_response_loss_retains_every_returned_id_for_reconciliation() -> None:
+    reconciler, store, adapter = _projection_fault_fixture("provider_commit_response_loss")
+    assert reconciler.run_once()
+    assert adapter.projected
+    assert store.payload["p_result_state"] == "ambiguous"
+    assert store.payload["p_provider_ids"] == ["provider-created"]
+
+
+def test_projection_delete_block_fault_preserves_retryable_purge() -> None:
+    reconciler, store, adapter = _projection_fault_fixture(
+        "provider_delete_blocked",
+        operation="purge_binding",
+    )
+    assert reconciler.run_once()
+    assert not adapter.deleted
+    assert store.payload["p_result_state"] == "failed_retryable"
+
+
+def test_database_failure_after_provider_success_leaves_durable_job_for_reconciliation() -> None:
+    reconciler, store, adapter = _projection_fault_fixture(
+        "database_failure_after_provider_success"
+    )
+    with pytest.raises(
+        MemoryGovernanceUnavailable,
+        match="memory_database_failure_after_provider_success",
+    ):
+        reconciler.run_once()
+    assert adapter.projected
+    assert store.payload is None
+
+
+def test_projection_lease_expiry_rejects_stale_completion_after_provider_success() -> None:
+    reconciler, store, adapter = _projection_fault_fixture("projection_lease_expiry")
+    with pytest.raises(MemoryGovernanceUnavailable, match="memory_projection_lease_stale"):
+        reconciler.run_once()
+    assert adapter.projected
+    assert store.expired
+
+
 def test_disabled_contract_refuses_projection_before_provider_call() -> None:
     from deerflow.sophia.memory_governance.projection import MemoryProjectionReconciler
 
@@ -473,6 +683,32 @@ def test_langsmith_outbound_payload_contains_only_structural_references(monkeypa
     assert "canonical memory text" not in serialized
     assert '"inputs": {}' in serialized
     assert "hmac-sha256:query:safe" in serialized
+
+
+def test_langsmith_outage_fault_is_one_event_scoped_and_content_free(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import deerflow.sophia.memory_governance.observability as observability
+
+    monkeypatch.setenv("SOPHIA_MEMORY_LANGSMITH_EXPORT", "true")
+    monkeypatch.setattr(observability, "_consume_langsmith_fault", lambda owner_id: owner_id == "mem00-cert-owner")
+    monkeypatch.setattr(
+        observability,
+        "_export_langsmith",
+        lambda envelope, *, client=None, force_unavailable=False: (
+            "unavailable" if force_unavailable else "exported"
+        ),
+    )
+    assert (
+        observability.emit_memory_event(
+            "memory.synthetic.outage",
+            service="test",
+            outcome="safe",
+            fault_owner_id="mem00-cert-owner",
+            owner_ref="hmac-sha256:owner:synthetic",
+        )
+        == "unavailable"
+    )
 
 
 def test_observability_rejects_nested_content_bearing_fields() -> None:

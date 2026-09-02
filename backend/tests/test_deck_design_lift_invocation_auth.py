@@ -72,6 +72,8 @@ async def test_version_exposes_only_the_exact_render_commit(
     assert response.json() == {
         "service": "sophia-langgraph",
         "commit_sha": _COMMIT_SHA,
+        "memory_contract_schema": "mem00.v1",
+        "memory_supported_contract_epoch": 1,
     }
 
 

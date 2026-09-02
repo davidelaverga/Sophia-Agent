@@ -88,10 +88,19 @@ def build_memory_langsmith_run_payload(envelope: Mapping[str, object]) -> dict[s
     }
 
 
-def _export_langsmith(envelope: Mapping[str, object], *, client: object | None = None) -> str:
+def _export_langsmith(
+    envelope: Mapping[str, object],
+    *,
+    client: object | None = None,
+    force_unavailable: bool = False,
+) -> str:
     """Export one structural span without making product behavior depend on tracing."""
 
     global _LAST_EXPORT_STATUS
+    if force_unavailable:
+        _LAST_EXPORT_STATUS = "unavailable"
+        logger.warning("memory_langsmith_export status=unavailable contentExcluded=true", exc_info=False)
+        return _LAST_EXPORT_STATUS
     if not _truthy(os.getenv("SOPHIA_MEMORY_LANGSMITH_EXPORT")):
         _LAST_EXPORT_STATUS = "disabled"
         return _LAST_EXPORT_STATUS
@@ -125,7 +134,28 @@ def _deployment_sha() -> str:
     return "unknown"
 
 
-def emit_memory_event(event_name: str, *, service: str, outcome: str, **fields: object) -> str:
+def _consume_langsmith_fault(owner_id: str | None) -> bool:
+    if not owner_id:
+        return False
+    try:
+        from .faults import MemoryFaultController
+
+        return MemoryFaultController().consume(
+            owner_id=owner_id,
+            mode="langsmith_unavailable",
+        )
+    except Exception:  # noqa: BLE001 - tracing fault checks cannot affect product behavior.
+        return False
+
+
+def emit_memory_event(
+    event_name: str,
+    *,
+    service: str,
+    outcome: str,
+    fault_owner_id: str | None = None,
+    **fields: object,
+) -> str:
     try:
         _validate_structural_payload(fields)
     except ValueError:
@@ -143,7 +173,10 @@ def emit_memory_event(event_name: str, *, service: str, outcome: str, **fields: 
         **fields,
     }
     logger.info("memory_event %s", json.dumps(envelope, sort_keys=True, separators=(",", ":")))
-    return _export_langsmith(envelope)
+    return _export_langsmith(
+        envelope,
+        force_unavailable=_consume_langsmith_fault(fault_owner_id),
+    )
 
 
 def increment_counter(name: str, amount: int = 1) -> None:

@@ -392,6 +392,8 @@ services:
     region: oregon
     healthCheckPath: /ready
     envVars:
+      - key: SOPHIA_MEMORY_SUPPORTED_CONTRACT_EPOCH
+        value: "1"
       # Disable ONNX Runtime's native POSIX telemetry before smart-turn import;
       # this also prevents a native telemetry mutex race during shutdown.
       - key: ORT_DISABLE_TELEMETRY

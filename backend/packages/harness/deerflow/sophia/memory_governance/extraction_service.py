@@ -12,6 +12,7 @@ from deerflow.sophia.session_store import (
     canonical_visible_messages,
 )
 
+from .faults import InjectedExtractionClaimantCrash, MemoryFaultController
 from .identity import assert_not_voice_lab_principal
 from .models import CandidateSource, ExtractedCandidate, ExtractionRun
 from .observability import emit_memory_event
@@ -72,12 +73,14 @@ class MemoryExtractionService:
         lease_owner: str,
         service_name: str,
         extractor: Extractor | None = None,
+        faults: MemoryFaultController | None = None,
     ) -> None:
         self.governance_store = governance_store
         self.session_store = session_store
         self.lease_owner = lease_owner
         self.service_name = service_name
         self.extractor = extractor or self._extract
+        self.faults = faults
 
     def _assert_supported_contract(self) -> None:
         contract = self.governance_store.get_contract()
@@ -194,6 +197,11 @@ class MemoryExtractionService:
             return False
         replacement: ExtractionRun | None = None
         try:
+            if self.faults is not None and self.faults.consume(
+                owner_id=run.user_id,
+                mode="extraction_claimant_crash",
+            ):
+                raise InjectedExtractionClaimantCrash("memory_extraction_claimant_crash_injected")
             session = self.session_store.get(run.user_id, run.session_id)
             visible = canonical_visible_messages(self.session_store.list_messages(run.user_id, run.session_id))
             selected = [message for message in visible if run.sequence_start <= message.sequence <= run.sequence_end]
@@ -256,6 +264,10 @@ class MemoryExtractionService:
                 if isinstance(item, dict) and str(item.get("content") or "").strip()
             )
             completed = self.governance_store.complete_extraction(run, input_manifest_ref=current_ref, candidates=candidates)
+        except InjectedExtractionClaimantCrash:
+            # Leave the durable lease untouched so another claimant can resume
+            # only after its fence expires, exactly as with process death.
+            raise
         except Exception:
             self.governance_store.fail_extraction(run, error_code="memory_extraction_worker_failed", retryable=True)
             raise
@@ -263,6 +275,7 @@ class MemoryExtractionService:
             "memory.extraction.completed",
             service=self.service_name,
             outcome=completed.state,
+            fault_owner_id=run.user_id,
             extraction_run_ref=keyed_ref("extraction-run", str(run.extraction_run_id)),
             candidate_count=completed.terminal_candidate_count or 0,
         )
@@ -271,6 +284,7 @@ class MemoryExtractionService:
                 "memory.extraction.replacement_queued",
                 service=self.service_name,
                 outcome="queued",
+                fault_owner_id=run.user_id,
                 extraction_run_ref=keyed_ref("extraction-run", str(replacement.extraction_run_id)),
                 superseded_run_ref=keyed_ref("extraction-run", str(run.extraction_run_id)),
             )

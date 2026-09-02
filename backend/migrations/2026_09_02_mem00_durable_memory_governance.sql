@@ -335,6 +335,25 @@ CREATE TABLE IF NOT EXISTS public.sophia_memory_prompt_admissions (
     created_at                 TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+CREATE TABLE IF NOT EXISTS public.sophia_memory_fault_settings (
+    fault_setting_id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id                    TEXT NOT NULL,
+    mode                       TEXT NOT NULL CHECK (mode IN (
+        'extraction_claimant_crash', 'provider_timeout_before_effect',
+        'provider_commit_response_loss', 'provider_429_5xx',
+        'database_failure_after_provider_success', 'projection_lease_expiry',
+        'provider_delete_blocked', 'cache_retained_through_tombstone',
+        'langsmith_unavailable'
+    )),
+    remaining_uses             INTEGER NOT NULL DEFAULT 1 CHECK (remaining_uses IN (0, 1)),
+    expires_at                 TIMESTAMPTZ NOT NULL,
+    audit_ref                  TEXT NOT NULL CHECK (audit_ref LIKE 'hmac-sha256:%'),
+    created_at                 TIMESTAMPTZ NOT NULL DEFAULT now(),
+    consumed_at                TIMESTAMPTZ,
+    cleared_at                 TIMESTAMPTZ,
+    UNIQUE (user_id, mode)
+);
+
 CREATE INDEX IF NOT EXISTS sophia_memory_extraction_claim_idx
     ON public.sophia_memory_extraction_runs(state, next_attempt_at, lease_expires_at, created_at);
 CREATE INDEX IF NOT EXISTS sophia_memory_candidate_review_idx
@@ -350,6 +369,97 @@ CREATE INDEX IF NOT EXISTS sophia_memory_binding_lookup_idx
     );
 CREATE INDEX IF NOT EXISTS sophia_memory_tombstone_owner_idx
     ON public.sophia_memory_tombstones(user_id, committed_at DESC);
+
+-- Content-free operational views for the five MEM00 dashboard planes. They
+-- aggregate structural state only; no transcript, candidate, canonical, or
+-- provider text is selected. The cleanup view is owner-scoped internally so
+-- certification can query only its resolved synthetic principal.
+CREATE OR REPLACE VIEW public.sophia_memory_extraction_freshness_v
+WITH (security_invoker = true) AS
+SELECT state,
+       modality,
+       count(*) AS run_count,
+       min(created_at) AS oldest_created_at,
+       max(updated_at) AS latest_updated_at,
+       count(*) FILTER (WHERE state IN ('queued', 'leased', 'retry_wait')) AS nonterminal_count,
+       count(*) FILTER (WHERE state = 'failed_terminal') AS terminal_failure_count
+  FROM public.sophia_memory_extraction_runs
+ GROUP BY state, modality;
+
+CREATE OR REPLACE VIEW public.sophia_memory_lifecycle_transitions_v
+WITH (security_invoker = true) AS
+SELECT event_type,
+       previous_lifecycle,
+       resulting_lifecycle,
+       actor_kind,
+       safe_reason_code,
+       count(*) AS transition_count,
+       max(created_at) AS latest_transition_at
+  FROM public.sophia_memory_governance_events
+ GROUP BY event_type, previous_lifecycle, resulting_lifecycle, actor_kind, safe_reason_code;
+
+CREATE OR REPLACE VIEW public.sophia_memory_projection_health_v
+WITH (security_invoker = true) AS
+SELECT provider,
+       environment,
+       provider_project,
+       operation,
+       state,
+       provider_result_class,
+       provider_error_class,
+       safe_reason_code,
+       count(*) AS job_count,
+       min(created_at) AS oldest_created_at,
+       max(updated_at) AS latest_updated_at
+  FROM public.sophia_memory_projection_jobs
+ GROUP BY provider, environment, provider_project, operation, state,
+          provider_result_class, provider_error_class, safe_reason_code;
+
+CREATE OR REPLACE VIEW public.sophia_memory_retrieval_authorization_v
+WITH (security_invoker = true) AS
+SELECT caller,
+       provider_status,
+       outcome,
+       safe_reason_code,
+       count(*) AS request_count,
+       coalesce(sum(provider_hit_count), 0) AS provider_hit_count,
+       max(created_at) AS latest_request_at
+  FROM public.sophia_memory_prompt_admissions
+ GROUP BY caller, provider_status, outcome, safe_reason_code;
+
+CREATE OR REPLACE VIEW public.sophia_memory_certification_cleanup_v
+WITH (security_invoker = true) AS
+SELECT governance.user_id,
+       contract.contract_epoch,
+       contract.schema_version,
+       contract.mode,
+       governance.user_catalog_generation,
+       governance.user_revocation_epoch,
+       (SELECT count(*) FROM public.sophia_memory_candidate_versions version
+         WHERE version.user_id = governance.user_id AND version.scrubbed_at IS NULL) AS live_candidate_plaintext_count,
+       (SELECT count(*) FROM public.sophia_memory_versions version
+         WHERE version.user_id = governance.user_id AND version.scrubbed_at IS NULL) AS live_canonical_plaintext_count,
+       (SELECT count(*) FROM public.sophia_memory_candidates candidate
+         WHERE candidate.user_id = governance.user_id AND candidate.review_state = 'pending_review') AS active_candidate_count,
+       (SELECT count(*) FROM public.sophia_memories memory
+         WHERE memory.user_id = governance.user_id AND memory.lifecycle <> 'tombstoned') AS active_canonical_count,
+       (SELECT count(*) FROM public.sophia_memory_provider_bindings binding
+         WHERE binding.user_id = governance.user_id AND binding.binding_state <> 'purged') AS nonterminal_binding_count,
+       (SELECT count(*) FROM public.sophia_memory_projection_jobs job
+         WHERE job.user_id = governance.user_id
+           AND job.state NOT IN ('active', 'stale', 'purged', 'failed_terminal', 'orphaned')) AS nonterminal_job_count,
+       (SELECT count(*) FROM public.sophia_memory_fault_settings fault
+         WHERE fault.user_id = governance.user_id
+           AND fault.remaining_uses > 0
+           AND fault.cleared_at IS NULL
+           AND fault.expires_at > now()) AS active_fault_setting_count,
+       (SELECT count(*) FROM public.sophia_memory_governance_events event
+         WHERE event.user_id = governance.user_id) AS retained_event_receipt_count,
+       (SELECT count(*) FROM public.sophia_memory_tombstones tombstone
+         WHERE tombstone.user_id = governance.user_id) AS retained_tombstone_receipt_count
+  FROM public.sophia_memory_user_governance governance
+ CROSS JOIN public.sophia_memory_contract contract
+ WHERE contract.singleton = true;
 
 -- These tables are backend authorities. Browsers use authenticated Gateway
 -- service methods; they never mutate or select the tables directly.
@@ -370,7 +480,8 @@ BEGIN
         'sophia_memory_projection_jobs',
         'sophia_memory_provider_bindings',
         'sophia_memory_tombstones',
-        'sophia_memory_prompt_admissions'
+        'sophia_memory_prompt_admissions',
+        'sophia_memory_fault_settings'
     ]
     LOOP
         EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY', table_name);
@@ -379,6 +490,24 @@ BEGIN
     END LOOP;
 END
 $mem00_acl$;
+
+DO $mem00_view_acl$
+DECLARE
+    view_name TEXT;
+BEGIN
+    FOREACH view_name IN ARRAY ARRAY[
+        'sophia_memory_extraction_freshness_v',
+        'sophia_memory_lifecycle_transitions_v',
+        'sophia_memory_projection_health_v',
+        'sophia_memory_retrieval_authorization_v',
+        'sophia_memory_certification_cleanup_v'
+    ]
+    LOOP
+        EXECUTE format('REVOKE ALL ON TABLE public.%I FROM PUBLIC, anon, authenticated, service_role', view_name);
+        EXECUTE format('GRANT SELECT ON TABLE public.%I TO service_role', view_name);
+    END LOOP;
+END
+$mem00_view_acl$;
 
 CREATE OR REPLACE FUNCTION public.sophia_memory_ensure_governance(p_user_id TEXT)
 RETURNS public.sophia_memory_user_governance
@@ -2029,6 +2158,110 @@ BEGIN
 END
 $function$;
 
+CREATE OR REPLACE FUNCTION public.sophia_memory_arm_fault(
+    p_user_id TEXT,
+    p_mode TEXT,
+    p_ttl_seconds INTEGER,
+    p_audit_ref TEXT
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+DECLARE
+    setting public.sophia_memory_fault_settings;
+BEGIN
+    IF p_user_id IS NULL OR length(btrim(p_user_id)) = 0
+       OR p_ttl_seconds < 1 OR p_ttl_seconds > 300
+       OR p_audit_ref NOT LIKE 'hmac-sha256:%' THEN
+        RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'memory_fault_setting_invalid';
+    END IF;
+    INSERT INTO public.sophia_memory_fault_settings(
+        user_id, mode, remaining_uses, expires_at, audit_ref
+    ) VALUES (
+        p_user_id, p_mode, 1, now() + make_interval(secs => p_ttl_seconds), p_audit_ref
+    )
+    ON CONFLICT (user_id, mode) DO UPDATE
+       SET fault_setting_id = gen_random_uuid(), remaining_uses = 1,
+           expires_at = excluded.expires_at, audit_ref = excluded.audit_ref,
+           created_at = now(), consumed_at = NULL, cleared_at = NULL
+    RETURNING * INTO setting;
+    RETURN jsonb_build_object(
+        'fault_setting_id', setting.fault_setting_id,
+        'mode', setting.mode,
+        'remaining_uses', setting.remaining_uses,
+        'expires_at', setting.expires_at,
+        'audit_ref', setting.audit_ref
+    );
+END
+$function$;
+
+CREATE OR REPLACE FUNCTION public.sophia_memory_consume_fault(
+    p_user_id TEXT,
+    p_mode TEXT
+)
+RETURNS BOOLEAN
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+DECLARE
+    consumed BOOLEAN := false;
+BEGIN
+    UPDATE public.sophia_memory_fault_settings
+       SET remaining_uses = 0, consumed_at = now()
+     WHERE user_id = p_user_id
+       AND mode = p_mode
+       AND remaining_uses = 1
+       AND cleared_at IS NULL
+       AND expires_at > now();
+    consumed := FOUND;
+    RETURN consumed;
+END
+$function$;
+
+CREATE OR REPLACE FUNCTION public.sophia_memory_clear_faults(p_user_id TEXT)
+RETURNS INTEGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+DECLARE
+    affected INTEGER;
+BEGIN
+    UPDATE public.sophia_memory_fault_settings
+       SET remaining_uses = 0, cleared_at = coalesce(cleared_at, now())
+     WHERE user_id = p_user_id AND cleared_at IS NULL;
+    GET DIAGNOSTICS affected = ROW_COUNT;
+    RETURN affected;
+END
+$function$;
+
+CREATE OR REPLACE FUNCTION public.sophia_memory_expire_projection_lease(
+    p_user_id TEXT,
+    p_projection_job_id UUID,
+    p_lease_token UUID
+)
+RETURNS BOOLEAN
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+DECLARE
+    affected BOOLEAN := false;
+BEGIN
+    UPDATE public.sophia_memory_projection_jobs
+       SET lease_expires_at = now() - interval '1 second', updated_at = now()
+     WHERE user_id = p_user_id
+       AND projection_job_id = p_projection_job_id
+       AND lease_token = p_lease_token
+       AND state IN ('leased', 'purging');
+    affected := FOUND;
+    RETURN affected;
+END
+$function$;
+
 REVOKE ALL ON FUNCTION public.sophia_memory_ensure_governance(TEXT) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.sophia_memory_invalidate_source(TEXT,TEXT,BIGINT,BOOLEAN,TEXT,TEXT,TEXT,TEXT) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.sophia_memory_enqueue_extraction(TEXT,TEXT,TEXT,TEXT,TEXT,TEXT,BIGINT,BIGINT,BIGINT,TEXT,TEXT,TEXT,TEXT) FROM PUBLIC, anon, authenticated;
@@ -2047,6 +2280,10 @@ REVOKE ALL ON FUNCTION public.sophia_memory_complete_projection(TEXT,UUID,UUID,T
 REVOKE ALL ON FUNCTION public.sophia_memory_fail_extraction(TEXT,UUID,UUID,TEXT,BOOLEAN) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.sophia_memory_record_prompt_admission(UUID,TEXT,TEXT,TEXT,TEXT,TEXT,TEXT,TEXT,TEXT,TEXT,INTEGER,BIGINT,BIGINT,JSONB,JSONB,TEXT,TEXT,JSONB) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.sophia_memory_expire_candidates(INTEGER) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.sophia_memory_arm_fault(TEXT,TEXT,INTEGER,TEXT) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.sophia_memory_consume_fault(TEXT,TEXT) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.sophia_memory_clear_faults(TEXT) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.sophia_memory_expire_projection_lease(TEXT,UUID,UUID) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.sophia_memory_ensure_governance(TEXT) TO service_role;
 GRANT EXECUTE ON FUNCTION public.sophia_memory_invalidate_source(TEXT,TEXT,BIGINT,BOOLEAN,TEXT,TEXT,TEXT,TEXT) TO service_role;
 GRANT EXECUTE ON FUNCTION public.sophia_memory_enqueue_extraction(TEXT,TEXT,TEXT,TEXT,TEXT,TEXT,BIGINT,BIGINT,BIGINT,TEXT,TEXT,TEXT,TEXT) TO service_role;
@@ -2065,6 +2302,10 @@ GRANT EXECUTE ON FUNCTION public.sophia_memory_complete_projection(TEXT,UUID,UUI
 GRANT EXECUTE ON FUNCTION public.sophia_memory_fail_extraction(TEXT,UUID,UUID,TEXT,BOOLEAN) TO service_role;
 GRANT EXECUTE ON FUNCTION public.sophia_memory_record_prompt_admission(UUID,TEXT,TEXT,TEXT,TEXT,TEXT,TEXT,TEXT,TEXT,TEXT,INTEGER,BIGINT,BIGINT,JSONB,JSONB,TEXT,TEXT,JSONB) TO service_role;
 GRANT EXECUTE ON FUNCTION public.sophia_memory_expire_candidates(INTEGER) TO service_role;
+GRANT EXECUTE ON FUNCTION public.sophia_memory_arm_fault(TEXT,TEXT,INTEGER,TEXT) TO service_role;
+GRANT EXECUTE ON FUNCTION public.sophia_memory_consume_fault(TEXT,TEXT) TO service_role;
+GRANT EXECUTE ON FUNCTION public.sophia_memory_clear_faults(TEXT) TO service_role;
+GRANT EXECUTE ON FUNCTION public.sophia_memory_expire_projection_lease(TEXT,UUID,UUID) TO service_role;
 
 NOTIFY pgrst, 'reload schema';
 
