@@ -47,6 +47,7 @@ function isControlReceipt(value: unknown, action: VoiceLabControlAction): value 
 export function useVoiceLabControlAdapter(
   action: VoiceLabControlAction,
   invokeExistingAction: () => void | Promise<void>,
+  enabled = true,
 ): void {
   const invokedRef = useRef(false);
   const invokeExistingActionRef = useRef(invokeExistingAction);
@@ -56,7 +57,7 @@ export function useVoiceLabControlAdapter(
   }, [invokeExistingAction]);
 
   useEffect(() => {
-    if (invokedRef.current) return;
+    if (!enabled || invokedRef.current) return;
     const controller = new AbortController();
 
     void (async () => {
@@ -76,9 +77,31 @@ export function useVoiceLabControlAdapter(
         name: 'authorized-action',
         payload: receipt,
       });
-      await invokeExistingActionRef.current();
+      recordSophiaCaptureEvent({
+        category: 'voice-lab-control',
+        name: 'authorized-action-invoking',
+        payload: { action },
+      });
+      try {
+        await invokeExistingActionRef.current();
+        recordSophiaCaptureEvent({
+          category: 'voice-lab-control',
+          name: 'authorized-action-completed',
+          payload: { action },
+        });
+      } catch (error) {
+        recordSophiaCaptureEvent({
+          category: 'voice-lab-control',
+          name: 'authorized-action-failed',
+          payload: {
+            action,
+            error_class: error instanceof Error ? error.name : 'Error',
+          },
+        });
+        throw error;
+      }
     })().catch(() => undefined);
 
     return () => controller.abort();
-  }, [action]);
+  }, [action, enabled]);
 }

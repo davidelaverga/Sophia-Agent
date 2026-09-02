@@ -14,7 +14,7 @@ interface UseSessionUiInteractionsParams {
   setUserOpenedArtifacts: (opened: boolean) => void;
   setShowScaffold: (show: boolean) => void;
   triggerLightHaptic: () => void;
-  onBaseMicClick: () => void;
+  onBaseMicClick: () => void | Promise<void>;
   protectArtifactStageOpen?: boolean;
 }
 
@@ -125,10 +125,10 @@ export function useSessionUiInteractions({
     }
   }, [protectArtifactStageOpen, showArtifactsUi, showArtifacts, setShowArtifacts]);
 
-  const handleMicClick = useCallback(() => {
+  const handleMicClick = useCallback(async () => {
     if (isReadOnly) return;
     setShowScaffold(false);
-    onBaseMicClick();
+    await onBaseMicClick();
   }, [isReadOnly, setShowScaffold, onBaseMicClick]);
 
   const focusComposer = useCallback(() => {

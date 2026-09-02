@@ -68,6 +68,40 @@ describe('useVoiceLabControlAdapter', () => {
       category: 'voice-lab-control',
       name: 'authorized-action',
     }));
+    expect(recordCaptureMock).toHaveBeenCalledWith(expect.objectContaining({
+      category: 'voice-lab-control',
+      name: 'authorized-action-invoking',
+    }));
+    expect(recordCaptureMock).toHaveBeenCalledWith(expect.objectContaining({
+      category: 'voice-lab-control',
+      name: 'authorized-action-completed',
+    }));
+    expect(invoke).toHaveBeenCalledTimes(1);
+  });
+
+  it('waits to authorize until the ordinary product action is ready', async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      ...receipt,
+      action: 'voice-start',
+    }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }));
+    const invoke = vi.fn().mockResolvedValue(undefined);
+
+    const { rerender } = renderHook(
+      ({ enabled }) => useVoiceLabControlAdapter('voice-start', invoke, enabled),
+      { initialProps: { enabled: false } },
+    );
+    await settle();
+
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+    expect(invoke).not.toHaveBeenCalled();
+
+    rerender({ enabled: true });
+    await settle();
+
+    expect(globalThis.fetch).toHaveBeenCalledTimes(1);
     expect(invoke).toHaveBeenCalledTimes(1);
   });
 

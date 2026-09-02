@@ -2093,7 +2093,6 @@ function SessionPageContent() {
   // Keep the controller and the visible composer on the same exact product
   // callback. This preserves read-only and UI-state guards and prevents a
   // private synthetic-only voice-start path from drifting into the app.
-  useVoiceLabControlAdapter('voice-start', handleMicClick);
   const handleCloseArtifactsPanelAndCanvasState = useCallback(() => {
     canvasRestoreClosedByUserRef.current = true;
     clearSelectedBuilderCanvasState('canvas_close');
@@ -2280,7 +2279,7 @@ function SessionPageContent() {
       setFocusModeManualOverride(true);
     }
 
-    handleMicClick();
+    void handleMicClick();
   }, [focusMode, handleMicClick, handleOpenArtifactsPanel, setFocusMode, setFocusModeManualOverride]);
 
   const handlePendingBuilderArtifactReviewConsumed = useCallback(() => {
@@ -2295,6 +2294,15 @@ function SessionPageContent() {
       void router.push(href);
     },
   });
+
+  // The synthetic controller must not race session-store hydration. Its exact
+  // visible microphone callback is armed only once the ordinary session has a
+  // valid backend identity and is ready for normal user interaction.
+  useVoiceLabControlAdapter(
+    'voice-start',
+    handleMicClick,
+    !shouldShowLoading && hasValidBackendSessionId && !isReadOnly,
+  );
 
   const {
     handleSubmit,

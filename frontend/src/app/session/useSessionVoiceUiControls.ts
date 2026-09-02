@@ -28,22 +28,22 @@ interface UseSessionVoiceUiControlsParams {
 export function useSessionVoiceUiControls({
   voiceState,
 }: UseSessionVoiceUiControlsParams) {
-  const baseHandleMicClick = useCallback(() => {
+  const baseHandleMicClick = useCallback(async () => {
     // While actively listening: mute mic (keeps session alive) instead of
     // tearing everything down. Prevents progressive latency accumulation
     // when the user toggles the mic multiple times within a session.
     if (voiceState.stage === 'listening') {
       if (voiceState.muteMic) {
-        void voiceState.muteMic();
+        await voiceState.muteMic();
       } else {
-        void voiceState.stopTalking();
+        await voiceState.stopTalking();
       }
       return;
     }
 
     // Connecting: user wants to cancel — full stop (no live call to mute yet).
     if (voiceState.stage === 'connecting') {
-      void voiceState.stopTalking();
+      await voiceState.stopTalking();
       return;
     }
 
@@ -62,12 +62,12 @@ export function useSessionVoiceUiControls({
 
     // Idle with a live call + muted → just unmute (cheap toggle).
     if (voiceState.hasLiveCall && voiceState.isMuted && voiceState.unmuteMic) {
-      void voiceState.unmuteMic();
+      await voiceState.unmuteMic();
       return;
     }
 
     // No live call → full startTalking (initial connect).
-    void voiceState.startTalking();
+    await voiceState.startTalking();
   }, [voiceState]);
 
   const setVoiceStatusCompat = useCallback((status: VoiceStatus) => {

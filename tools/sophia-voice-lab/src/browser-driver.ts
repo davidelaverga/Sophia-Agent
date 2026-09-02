@@ -1284,7 +1284,24 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       if (hasControlAdapter && hasHarness && hasCredentials && hasMedia && hasProviderReceipt && hasStreaming) return drained;
       await waitOnWorkerClock(100);
     }
-    throw new VoiceLabError(labError("VOICE_START_TIMEOUT", "The ordinary voice UI did not prove the page-owned synthetic stream, credentials, and provider readiness before timeout.", "product", true, { harness_initialized: observed.has("harness.initialized"), replacement_stream_issued: issuedIdentity !== null, product_stream_acquired: productIdentity !== null, synthetic_stream_correlated: issuedIdentity !== null && productIdentity !== null && issuedIdentity.stream === productIdentity.stream && JSON.stringify(issuedIdentity.tracks) === JSON.stringify(productIdentity.tracks) }));
+    throw new VoiceLabError(labError("VOICE_START_TIMEOUT", "The ordinary voice UI did not prove the page-owned synthetic stream, credentials, and provider readiness before timeout.", "product", true, {
+      control_adapter_session_start_authorized: observed.has("control.adapter_authorized.session-start"),
+      control_adapter_voice_start_authorized: observed.has("control.adapter_authorized.voice-start"),
+      authorized_action_invoking: observed.has("product.voice-lab-control.authorized-action-invoking"),
+      authorized_action_completed: observed.has("product.voice-lab-control.authorized-action-completed"),
+      authorized_action_failed: observed.has("product.voice-lab-control.authorized-action-failed"),
+      start_talking_requested: observed.has("product.voice-session.start-talking-requested"),
+      start_talking_rejected: observed.has("product.voice-session.start-talking-rejected"),
+      start_talking_ignored: observed.has("product.voice-session.start-talking-ignored"),
+      start_talking_failed: observed.has("product.voice-session.start-talking-failed"),
+      credentials_received: observed.has("session.credentials_received"),
+      harness_initialized: observed.has("harness.initialized"),
+      replacement_stream_issued: issuedIdentity !== null,
+      product_stream_acquired: productIdentity !== null,
+      provider_connection_epoch: observed.has("provider.connection_epoch"),
+      provider_streaming_observed: observed.has("provider.connection_observability") || observed.has("provider.streaming_ready"),
+      synthetic_stream_correlated: issuedIdentity !== null && productIdentity !== null && issuedIdentity.stream === productIdentity.stream && JSON.stringify(issuedIdentity.tracks) === JSON.stringify(productIdentity.tracks),
+    }));
   }
 
   async #snapshotEvent(session: BrowserSession, stage: "startup" | "turn_schedule" | "finalization"): Promise<Omit<LabEvent, "runId" | "seq" | "at">> {
