@@ -143,10 +143,11 @@ Execution-unlock progress is monotonic:
   deployment green at `b973a2af742f36dbf148b7bd2f395d5b3bd32bb6`;
 - CDP/React diagnostic probe removal: closed deployment green at
   `66cebaa414b2a8b89f2881b34baaac22870652f5`;
-- controller parity: implemented in `controller-parity.md`, closed deployment
-  assertion required;
-- cancellation, 20/20 real built-app trials, and five consecutive deployed
-  canaries: pending.
+- controller parity: closed deployment green at
+  `ad611e382ecd96a2ab1b7a5041b187f7d9f39aed`;
+- page-owned control cancellation: implemented in `control-cancellation.md`,
+  closed deployment assertion required;
+- 20/20 real built-app trials and five consecutive deployed canaries: pending.
 
 ## Historical iteration counter
 

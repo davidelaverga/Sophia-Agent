@@ -1,6 +1,6 @@
 # Voice Lab controller parity
 
-Status: `IMPLEMENTED — CLOSED DEPLOYMENT ASSERTION REQUIRED`
+Status: `CLOSED DEPLOYMENT GREEN — ad611e382ecd96a2ab1b7a5041b187f7d9f39aed`
 
 Falsifiable hypothesis: after exact server authorization, each Voice Lab
 controller action invokes the same callback as the corresponding visible Sophia
@@ -14,5 +14,6 @@ only the callback boundary after authorization; it adds no route, DOM, provider,
 text, storage, or browser-control fallback. A source-level contract fails if
 either private wrapper returns or either adapter stops using the exact visible
 control callback. Existing route, hook, session, dashboard, and Voice Lab suites
-must remain green before publication, followed by a closed exact-candidate
-deployment assertion with one settled worker and zero active runs.
+remained green before publication. The exact candidate was deployed on all six
+components and the aggregate readiness attestation reported one settled worker,
+zero active runs, exact component identities, and every mutation gate closed.

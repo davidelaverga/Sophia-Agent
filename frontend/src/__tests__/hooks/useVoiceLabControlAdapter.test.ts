@@ -85,4 +85,49 @@ describe('useVoiceLabControlAdapter', () => {
     expect(invoke).not.toHaveBeenCalled();
     expect(recordCaptureMock).not.toHaveBeenCalled();
   });
+
+  it('aborts authorization on unmount and never invokes from a stale response', async () => {
+    let resolveFetch!: (response: Response) => void;
+    const pendingFetch = new Promise<Response>((resolve) => {
+      resolveFetch = resolve;
+    });
+    globalThis.fetch = vi.fn().mockReturnValue(pendingFetch);
+    const invoke = vi.fn();
+
+    const { unmount } = renderHook(() => useVoiceLabControlAdapter('session-start', invoke));
+    const signal = vi.mocked(globalThis.fetch).mock.calls[0]?.[1]?.signal;
+
+    unmount();
+    expect(signal?.aborted).toBe(true);
+
+    resolveFetch(new Response(JSON.stringify(receipt), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }));
+    await settle();
+
+    expect(invoke).not.toHaveBeenCalled();
+    expect(recordCaptureMock).not.toHaveBeenCalled();
+  });
+
+  it('does not publish or invoke when unmounted while receipt parsing is pending', async () => {
+    let resolveReceipt!: (value: unknown) => void;
+    const pendingReceipt = new Promise<unknown>((resolve) => {
+      resolveReceipt = resolve;
+    });
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => pendingReceipt,
+    } as Response);
+    const invoke = vi.fn();
+
+    const { unmount } = renderHook(() => useVoiceLabControlAdapter('session-start', invoke));
+    await settle();
+    unmount();
+    resolveReceipt(receipt);
+    await settle();
+
+    expect(invoke).not.toHaveBeenCalled();
+    expect(recordCaptureMock).not.toHaveBeenCalled();
+  });
 });
