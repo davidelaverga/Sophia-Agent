@@ -31,5 +31,6 @@ server-authorized product actions and contains no DOM fallback.
 Focused frontend authorization, negative-path, middleware, dashboard, and session
 tests plus Voice Lab browser/media contract tests must pass before publication.
 The next independent candidate owns disposable Chromium process identity and
-effect fencing; this adapter is not a browser, voice runtime, provider authority,
-or product mutation implementation.
+execution-epoch fencing as specified in `browser-process-ownership.md`; this
+adapter is not a browser, voice runtime, provider authority, or product mutation
+implementation.

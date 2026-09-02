@@ -8,7 +8,8 @@ import { chromium, type Browser } from "playwright";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { buildVoiceLabInitScript } from "../src/browser-init.js";
-import { activateDashboardMicButton, armPageOwnedVoiceActivation, classifySessionVoiceRoute, DIRECT_CDP_CLIENT_DIAGNOSTICS_ENABLED, establishSessionNavigation, establishSessionVoiceTab, PAUSING_CLIENT_DIAGNOSTICS_ENABLED, PlaywrightVoiceDriver, resolveDashboardMicButton, settleDiagnosticWithinBudget, settlePausedDiagnosticAndResume, waitForPageOwnedVoiceActivation } from "../src/browser-driver.js";
+import { activateDashboardMicButton, armPageOwnedVoiceActivation, classifySessionVoiceRoute, closeDisposableBrowserProcess, DIRECT_CDP_CLIENT_DIAGNOSTICS_ENABLED, establishSessionNavigation, establishSessionVoiceTab, launchDisposableBrowserProcess, PAUSING_CLIENT_DIAGNOSTICS_ENABLED, PlaywrightVoiceDriver, resolveDashboardMicButton, settleDiagnosticWithinBudget, settlePausedDiagnosticAndResume, waitForPageOwnedVoiceActivation } from "../src/browser-driver.js";
+import { testRun } from "./helpers.js";
 
 function sineWav(durationMs = 600, sampleRate = 16_000): Buffer {
   const samples = Math.floor(sampleRate * durationMs / 1_000);
@@ -521,5 +522,24 @@ describe("real Chromium dynamic media contract", () => {
     expect(second).toEqual(first);
     expect(launches).toBe(1);
     await driver.close();
+  }, 20_000);
+
+  it("allocates distinct disposable Chromium processes and proves both exited", async () => {
+    const run = testRun();
+    const launch = (options: Parameters<typeof chromium.launchServer>[0]) => chromium.launchServer({ ...options, executablePath });
+    const first = await launchDisposableBrowserProcess(run, launch);
+    const second = await launchDisposableBrowserProcess({ ...run, id: `${run.id}-second` }, launch);
+    expect(first.processId).not.toBe(second.processId);
+    expect(first.processIdSha256).not.toBe(second.processIdSha256);
+    expect(first.bootIdSha256).not.toBe(second.bootIdSha256);
+    expect(first.executionEpochSha256).not.toBe(second.executionEpochSha256);
+    expect(first.browser.isConnected()).toBe(true);
+    expect(second.browser.isConnected()).toBe(true);
+    await expect(closeDisposableBrowserProcess(first)).resolves.toEqual({ closed: true, errorClass: null });
+    await expect(closeDisposableBrowserProcess(second)).resolves.toEqual({ closed: true, errorClass: null });
+    expect(first.browser.isConnected()).toBe(false);
+    expect(second.browser.isConnected()).toBe(false);
+    expect(first.child.exitCode !== null || first.child.signalCode !== null).toBe(true);
+    expect(second.child.exitCode !== null || second.child.signalCode !== null).toBe(true);
   }, 20_000);
 });

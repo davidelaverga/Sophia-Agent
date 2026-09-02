@@ -1,9 +1,10 @@
 import { randomUUID } from "node:crypto";
+import type { ChildProcess } from "node:child_process";
 import { constants as fsConstants } from "node:fs";
 import { access } from "node:fs/promises";
 import { setTimeout as sleep } from "node:timers/promises";
 
-import { chromium, type APIRequestContext, type APIResponse, type Browser, type BrowserContext, type Locator, type Page, type Response as PlaywrightResponse } from "playwright";
+import { chromium, type APIRequestContext, type APIResponse, type Browser, type BrowserContext, type BrowserServer, type Locator, type Page, type Response as PlaywrightResponse } from "playwright";
 
 import type { ResolvedAudio } from "./audio.js";
 import { buildVoiceLabInitScript } from "./browser-init.js";
@@ -749,6 +750,7 @@ export interface VoiceBrowserDriver {
 }
 
 interface BrowserSession {
+  ownership: OwnedBrowserProcess;
   context: BrowserContext;
   page: Page;
   harnessCursor: number;
@@ -757,6 +759,89 @@ interface BrowserSession {
   contextExpiresAt: number;
   expectedBinding: { testRunId: string; cleanupObligationId: string; principalId: string; scenarioId: string | null; scenarioVersion: string | null; environment: string; retentionHours: number; providerExpiresAt: string; browserContextBinding?: D02BrowserContextBinding };
   startupPush: StartupPushState;
+}
+
+export type OwnedBrowserProcess = {
+  browser: Browser;
+  server: BrowserServer;
+  child: ChildProcess;
+  processId: number;
+  processIdSha256: string;
+  bootIdSha256: string;
+  executionEpochSha256: string;
+  startedAt: string;
+};
+
+const RUN_BROWSER_ARGS = ["--autoplay-policy=no-user-gesture-required", "--disable-dev-shm-usage"] as const;
+
+export function browserProcessOwnershipHashes(input: {
+  runId: string;
+  cleanupObligationId: string;
+  processId: number;
+  nonce: string;
+  startedAt: string;
+}): { processIdSha256: string; bootIdSha256: string; executionEpochSha256: string } {
+  if (!Number.isSafeInteger(input.processId) || input.processId < 1 || !UUID_V4.test(input.nonce)
+    || !Number.isFinite(new Date(input.startedAt).getTime()) || new Date(input.startedAt).toISOString() !== input.startedAt) {
+    throw new VoiceLabError(labError("BROWSER_PROCESS_OWNERSHIP_INVALID", "Browser process ownership inputs were malformed.", "harness", false));
+  }
+  const processIdSha256 = sha256(String(input.processId));
+  const bootIdSha256 = sha256(canonicalRequestHash({ process_id_sha256: processIdSha256, nonce: input.nonce, started_at: input.startedAt }));
+  const executionEpochSha256 = sha256(canonicalRequestHash({ run_id: input.runId, cleanup_obligation_id: input.cleanupObligationId, boot_id_sha256: bootIdSha256 }));
+  return { processIdSha256, bootIdSha256, executionEpochSha256 };
+}
+
+export async function launchDisposableBrowserProcess(
+  run: Pick<RunRecord, "id" | "cleanupObligationId">,
+  launchServer: (options: Parameters<typeof chromium.launchServer>[0]) => ReturnType<typeof chromium.launchServer> = (options) => chromium.launchServer(options),
+  connect: (endpoint: string) => ReturnType<typeof chromium.connect> = (endpoint) => chromium.connect(endpoint),
+): Promise<OwnedBrowserProcess> {
+  const server = await launchServer({ headless: true, args: [...RUN_BROWSER_ARGS] });
+  const child = server.process();
+  const processId = child.pid;
+  if (!Number.isSafeInteger(processId) || Number(processId) < 1) {
+    await server.close().catch(() => undefined);
+    throw new VoiceLabError(labError("BROWSER_PROCESS_OWNERSHIP_INVALID", "Chromium did not expose an owned process identity.", "harness", false));
+  }
+  const startedAt = new Date().toISOString();
+  const hashes = browserProcessOwnershipHashes({
+    runId: run.id,
+    cleanupObligationId: run.cleanupObligationId,
+    processId: Number(processId),
+    nonce: randomUUID(),
+    startedAt,
+  });
+  try {
+    const browser = await connect(server.wsEndpoint());
+    return { browser, server, child, processId: Number(processId), startedAt, ...hashes };
+  } catch (error) {
+    await server.close().catch(() => undefined);
+    throw error;
+  }
+}
+
+export async function closeDisposableBrowserProcess(ownership: OwnedBrowserProcess): Promise<{ closed: boolean; errorClass: string | null }> {
+  let errorClass: string | null = null;
+  await ownership.browser.close().catch((error: unknown) => { errorClass = error instanceof Error ? error.name : "BrowserCloseError"; });
+  await ownership.server.close().catch((error: unknown) => { errorClass ??= error instanceof Error ? error.name : "BrowserServerCloseError"; });
+  for (let attempt = 0; attempt < 20 && ownership.child.exitCode === null && ownership.child.signalCode === null; attempt += 1) {
+    await waitOnWorkerClock(50);
+  }
+  if (ownership.child.exitCode === null && ownership.child.signalCode === null) {
+    ownership.child.kill("SIGKILL");
+    for (let attempt = 0; attempt < 20 && ownership.child.exitCode === null && ownership.child.signalCode === null; attempt += 1) {
+      await waitOnWorkerClock(50);
+    }
+  }
+  const closed = !ownership.browser.isConnected()
+    && (ownership.child.exitCode !== null || ownership.child.signalCode !== null);
+  return { closed, errorClass: closed ? null : errorClass ?? "BrowserProcessStillAlive" };
+}
+
+export function disposableBrowserProcessIsActive(ownership: OwnedBrowserProcess): boolean {
+  return ownership.browser.isConnected()
+    && ownership.child.exitCode === null
+    && ownership.child.signalCode === null;
 }
 
 type StartupPushEnvelope = {
@@ -1204,6 +1289,8 @@ export async function establishDashboardMicRoute(input: {
 export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
   readonly #sessions = new Map<string, BrowserSession>();
   readonly #pendingContexts = new Map<string, BrowserContext>();
+  readonly #pendingProcesses = new Map<string, OwnedBrowserProcess>();
+  readonly #startingRuns = new Set<string>();
   #browser: Browser | null = null;
   #browserLaunch: Promise<Browser> | null = null;
   #readinessCache: { expiresAt: number; value: { ok: boolean; detail: string; engine?: string; version?: string } } | null = null;
@@ -1214,6 +1301,8 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
     readonly fetchImpl: typeof fetch = fetch,
     readonly launchBrowser: (options: Parameters<typeof chromium.launch>[0]) => ReturnType<typeof chromium.launch> = (options) => chromium.launch(options),
     readonly checkExecutable: (file: string, mode: number) => Promise<void> = access,
+    readonly launchBrowserServer: (options: Parameters<typeof chromium.launchServer>[0]) => ReturnType<typeof chromium.launchServer> = (options) => chromium.launchServer(options),
+    readonly connectBrowser: (endpoint: string) => ReturnType<typeof chromium.connect> = (endpoint) => chromium.connect(endpoint),
   ) {}
 
   hasSession(runId: string): boolean { return this.#sessions.has(runId); }
@@ -1236,18 +1325,27 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
   }
 
   async start(run: RunRecord, frontendCapability: string, browserContextBinding?: D02BrowserContextBinding, onStage?: (stage: BrowserStartStage) => Promise<void>): Promise<DriverStartResult> {
-    if (this.#sessions.has(run.id)) throw new VoiceLabError(labError("BROWSER_ALREADY_STARTED", "Run already owns a browser session.", "conflict"));
-    const exactBrowserContextBinding = validateD02BrowserContextBinding(run, browserContextBinding);
-    const deployment = await this.#verifyDeployment(run);
+    if (this.#sessions.has(run.id) || this.#pendingProcesses.has(run.id) || this.#startingRuns.has(run.id)) throw new VoiceLabError(labError("BROWSER_ALREADY_STARTED", "Run already owns or is acquiring a browser process.", "conflict"));
+    this.#startingRuns.add(run.id);
+    const prepared = await (async () => {
+      const exactBrowserContextBinding = validateD02BrowserContextBinding(run, browserContextBinding);
+      const deployment = await this.#verifyDeployment(run);
+      let storageState: { cookies: unknown[]; origins: unknown[] } | undefined;
+      if (this.config.storageStateCiphertext || this.config.storageStateKey) {
+        if (!this.config.storageStateCiphertext || !this.config.storageStateKey) throw new VoiceLabError(labError("STORAGE_STATE_INVALID", "Both encrypted storageState values must be configured together.", "authorization"));
+        storageState = decryptStorageState(this.config.storageStateCiphertext, this.config.storageStateKey) as { cookies: unknown[]; origins: unknown[] };
+        if (!Array.isArray(storageState.cookies) || !Array.isArray(storageState.origins)) throw new VoiceLabError(labError("STORAGE_STATE_INVALID", "Decrypted storageState has an invalid shape.", "authorization"));
+      }
+      const frontendOrigin = validateAllowedOrigin(run.target.frontendUrl, this.config.allowedOrigins).origin;
+      const ownership = await this.#launchOwnedBrowserProcess(run);
+      this.#pendingProcesses.set(run.id, ownership);
+      return { exactBrowserContextBinding, deployment, storageState, frontendOrigin, ownership };
+    })().finally(() => {
+      this.#startingRuns.delete(run.id);
+    });
+    const { exactBrowserContextBinding, deployment, storageState, frontendOrigin, ownership } = prepared;
     const observedDeployment = deployment.identity;
-    let storageState: { cookies: unknown[]; origins: unknown[] } | undefined;
-    if (this.config.storageStateCiphertext || this.config.storageStateKey) {
-      if (!this.config.storageStateCiphertext || !this.config.storageStateKey) throw new VoiceLabError(labError("STORAGE_STATE_INVALID", "Both encrypted storageState values must be configured together.", "authorization"));
-      storageState = decryptStorageState(this.config.storageStateCiphertext, this.config.storageStateKey) as { cookies: unknown[]; origins: unknown[] };
-      if (!Array.isArray(storageState.cookies) || !Array.isArray(storageState.origins)) throw new VoiceLabError(labError("STORAGE_STATE_INVALID", "Decrypted storageState has an invalid shape.", "authorization"));
-    }
-    const frontendOrigin = validateAllowedOrigin(run.target.frontendUrl, this.config.allowedOrigins).origin;
-    const browser = await this.#ensureBrowser();
+    const browser = ownership.browser;
     const bootstrapStorageState = storageState === undefined
       ? undefined
       : isolateBootstrapStorageState(storageState);
@@ -1266,8 +1364,15 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
         return undefined;
       });
     };
-    let context = await browser.newContext({ ...(bootstrapStorageState === undefined ? {} : { storageState: bootstrapStorageState as any }), serviceWorkers: "block" });
-    await installPushBinding(context);
+    let context: BrowserContext;
+    try {
+      context = await browser.newContext({ ...(bootstrapStorageState === undefined ? {} : { storageState: bootstrapStorageState as any }), serviceWorkers: "block" });
+      await installPushBinding(context);
+    } catch (error) {
+      await this.#closeOwnedBrowserProcess(ownership);
+      this.#pendingProcesses.delete(run.id);
+      throw error;
+    }
     this.#pendingContexts.set(run.id, context);
     let ordinaryRouteStage: BrowserStartStage = "frontend_auth_grant";
     const enterStage = async (stage: BrowserStartStage): Promise<void> => {
@@ -1689,9 +1794,10 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
           // Diagnostic enrichment is fail-open and must not alter product flow.
         }
       }
-      const session: BrowserSession = { context, page: activePage, harnessCursor: 0, productCursor: null, latestProviderReceipt: null, contextExpiresAt: Number(grantReceipt.expires_at), expectedBinding: { testRunId: run.testRunId, cleanupObligationId: run.cleanupObligationId, principalId: run.principalId, scenarioId: run.scenarioId, scenarioVersion: run.scenarioVersion, environment: run.environment, retentionHours: run.capturePolicy.retentionHours, providerExpiresAt: run.expiresAt.toISOString(), ...(exactBrowserContextBinding === undefined ? {} : { browserContextBinding: exactBrowserContextBinding }) }, startupPush };
+      const session: BrowserSession = { ownership, context, page: activePage, harnessCursor: 0, productCursor: null, latestProviderReceipt: null, contextExpiresAt: Number(grantReceipt.expires_at), expectedBinding: { testRunId: run.testRunId, cleanupObligationId: run.cleanupObligationId, principalId: run.principalId, scenarioId: run.scenarioId, scenarioVersion: run.scenarioVersion, environment: run.environment, retentionHours: run.capturePolicy.retentionHours, providerExpiresAt: run.expiresAt.toISOString(), ...(exactBrowserContextBinding === undefined ? {} : { browserContextBinding: exactBrowserContextBinding }) }, startupPush };
       this.#sessions.set(run.id, session);
       this.#pendingContexts.delete(run.id);
+      this.#pendingProcesses.delete(run.id);
       await page.goto(new URL("/", frontendOrigin).toString(), { waitUntil: "domcontentloaded", timeout: 30_000 });
       assertPageLocation(page.url(), frontendOrigin, (pathname) => pathname === "/", "ORDINARY_UI_ORIGIN_DRIFT");
       await enterStage("control_adapter_session_start");
@@ -1704,6 +1810,22 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       await enterStage("voice_startup_readiness");
       const events = await this.#waitForStartupReadiness(session, 45_000);
       events.push(...this.#drainStartupPush(session));
+      events.push({
+        kind: "harness.browser_process_acquired",
+        source: "browser",
+        payload: {
+          schema: "sophia_voice_lab_browser_process_ownership_v1",
+          voice_lab_run_id_sha256: sha256(run.id),
+          cleanup_obligation_id_sha256: sha256(run.cleanupObligationId),
+          process_id_sha256: ownership.processIdSha256,
+          browser_boot_id_sha256: ownership.bootIdSha256,
+          execution_epoch_sha256: ownership.executionEpochSha256,
+          started_at: ownership.startedAt,
+          one_process_per_run: true,
+          raw_process_id_excluded: true,
+        },
+        dedupeKey: `browser-process:${ownership.executionEpochSha256}`,
+      });
       events.push({ kind: "deployment.verified", source: "canonical", payload: deployment.components, dedupeKey: `deployment:${run.id}:startup` });
       // A renderer snapshot is intentionally deferred until after start has
       // released the worker operation lease. The push receipts above already
@@ -1722,9 +1844,10 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
         if (error instanceof VoiceLabError) throw error;
         throw new VoiceLabError(labError("ORDINARY_UI_ROUTE_FAILED", "The ordinary deployed Sophia voice route could not be established.", "harness", false, { stage: ordinaryRouteStage, cause: classifyBrowserStartCause(error), client_page_error: currentClientPageErrorDiagnostic(), route_state: shouldCaptureSessionVoiceRoute(ordinaryRouteStage) && page ? await classifySessionVoiceRoute(page, frontendOrigin, this.config.startButtonName) : null }));
       }
-      const closed = await closeContextWithProof(context, () => this.#browser?.contexts() ?? []);
-      if (closed.closed) { this.#sessions.delete(run.id); this.#pendingContexts.delete(run.id); }
-      else throw new VoiceLabError(labError("BROWSER_CONTEXT_CLOSE_FAILED", "Failed start left a browser context that could not be proven closed.", "harness", true, { original_error_class: error instanceof VoiceLabError ? error.detail.code : error instanceof Error ? error.name : "Error", close_error_class: closed.errorClass }));
+      const closed = await closeContextWithProof(context, () => ownership.browser.contexts());
+      const processClosed = closed.closed ? await this.#closeOwnedBrowserProcess(ownership) : { closed: false, errorClass: closed.errorClass };
+      if (closed.closed && processClosed.closed) { this.#sessions.delete(run.id); this.#pendingContexts.delete(run.id); this.#pendingProcesses.delete(run.id); }
+      else throw new VoiceLabError(labError("BROWSER_CONTEXT_CLOSE_FAILED", "Failed start left a browser context or process that could not be proven closed.", "harness", true, { original_error_class: error instanceof VoiceLabError ? error.detail.code : error instanceof Error ? error.name : "Error", close_error_class: closed.errorClass ?? processClosed.errorClass }));
       if (error instanceof VoiceLabError) throw error;
       throw new VoiceLabError(labError("ORDINARY_UI_ROUTE_FAILED", "The ordinary deployed Sophia voice route could not be established.", "harness", false, { stage: ordinaryRouteStage, cause: classifyBrowserStartCause(error), client_page_error: currentClientPageErrorDiagnostic(), route_state: shouldCaptureSessionVoiceRoute(ordinaryRouteStage) && page ? await classifySessionVoiceRoute(page, frontendOrigin, this.config.startButtonName) : null }));
     }
@@ -1748,7 +1871,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
     });
     const events = await this.drain(run.id);
     events.push(await this.#snapshotEvent(session, "turn_schedule"));
-    return { receipt: redact(receipt as Record<string, unknown>), events };
+    return { receipt: { product: redact(receipt as Record<string, unknown>), execution_epoch_sha256: session.ownership.executionEpochSha256 }, events };
   }
 
   async rotate(run: RunRecord, expectedEpoch: number, operationId: string, activeTarget?: ActiveProductTarget): Promise<DriverOperationResult> {
@@ -1772,7 +1895,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
     }
     if (!restoration) throw new VoiceLabError(labError("SOCKET_ROTATION_TIMEOUT", "No product restored/degraded provider epoch receipt arrived before timeout.", "product", true, { expected_epoch: expectedEpoch }));
     if (restoration.phase === "degraded") throw new VoiceLabError(labError("SOCKET_ROTATION_DEGRADED", "Product continuity degraded after socket rotation.", "product", false, { expected_epoch: expectedEpoch, receipt: redact(restoration) }));
-    return { receipt: { harness: redact(receipt as Record<string, unknown>), product: redact(restoration) }, events };
+    return { receipt: { harness: redact(receipt as Record<string, unknown>), product: redact(restoration), execution_epoch_sha256: session.ownership.executionEpochSha256 }, events };
   }
 
   async continueSession(run: RunRecord, frontendContinueCapability: string): Promise<Omit<LabEvent, "runId" | "seq" | "at">[]> {
@@ -1784,7 +1907,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
     const allowedOps = receipt?.allowed_ops;
     if (!response.ok() || receipt?.ok !== true || receipt?.test_run_id !== run.testRunId || receipt?.cleanup_obligation_id !== run.cleanupObligationId || receipt?.session_preserved !== true || !Array.isArray(allowedOps) || allowedOps.length !== 3 || !allowedOps.includes("session:create") || !allowedOps.includes("session:read") || !allowedOps.includes("session:finalize") || typeof receipt?.expires_at !== "number" || receipt.expires_at <= now || receipt.expires_at > now + 305 || !sameD02BrowserContextBinding(receipt, session.expectedBinding.browserContextBinding)) throw new VoiceLabError(labError("SESSION_CONTINUATION_FAILED", "Short-lived synthetic run context could not be refreshed without rotating the dedicated auth session.", "authorization", true, { status: response.status() }));
     session.contextExpiresAt = receipt.expires_at;
-    return [{ kind: "auth.session_continued", source: "canonical", payload: { test_run_id: run.testRunId, expires_at: receipt.expires_at, session_preserved: true, ...(session.expectedBinding.browserContextBinding ?? {}) }, dedupeKey: `auth-continue:${run.id}:${receipt.expires_at}` }];
+    return [{ kind: "auth.session_continued", source: "canonical", payload: { test_run_id: run.testRunId, expires_at: receipt.expires_at, session_preserved: true, execution_epoch_sha256: session.ownership.executionEpochSha256, ...(session.expectedBinding.browserContextBinding ?? {}) }, dedupeKey: `auth-continue:${run.id}:${receipt.expires_at}` }];
   }
 
   async quiesceD02Provider(run: RunRecord, request: D02ProductCleanupRequest): Promise<D02ProductCleanupAcknowledgement> {
@@ -2123,26 +2246,41 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
   async cancel(runId: string, _reason: string): Promise<void> {
     const session = this.#sessions.get(runId);
     const context = session?.context ?? this.#pendingContexts.get(runId);
-    if (!context) return;
-    const result = await closeContextWithProof(context, () => this.#browser?.contexts() ?? []);
-    if (!result.closed) throw new VoiceLabError(labError("BROWSER_CONTEXT_CLOSE_FAILED", "Cancelled operation left a browser context that could not be proven closed.", "harness", true, { error_class: result.errorClass }));
+    const ownership = session?.ownership ?? this.#pendingProcesses.get(runId);
+    if (!context && !ownership) return;
+    const result = context
+      ? await closeContextWithProof(context, () => ownership?.browser.contexts() ?? [])
+      : { closed: true, errorClass: null };
+    const processResult = result.closed && ownership
+      ? await this.#closeOwnedBrowserProcess(ownership)
+      : { closed: ownership === undefined, errorClass: result.errorClass };
+    if (!result.closed || !processResult.closed) throw new VoiceLabError(labError("BROWSER_PROCESS_CLOSE_FAILED", "Cancelled operation left a browser context or process that could not be proven closed.", "harness", true, { error_class: result.errorClass ?? processResult.errorClass }));
     this.#sessions.delete(runId);
     this.#pendingContexts.delete(runId);
+    this.#pendingProcesses.delete(runId);
   }
 
   async close(): Promise<void> {
-    const contexts = [...new Set([...this.#sessions.values()].map((session) => session.context).concat([...this.#pendingContexts.values()]))];
-    const results = await Promise.all(contexts.map((context) => closeContextWithProof(context, () => this.#browser?.contexts() ?? [])));
-    if (results.some((result) => !result.closed)) throw new VoiceLabError(labError("BROWSER_CONTEXT_CLOSE_FAILED", "Worker shutdown could not prove every owned browser context closed.", "harness", true, { unresolved_contexts: results.filter((result) => !result.closed).length }));
-    this.#sessions.clear(); this.#pendingContexts.clear();
+    const ownerships = [...new Set([...this.#sessions.values()].map((session) => session.ownership).concat([...this.#pendingProcesses.values()]))];
+    const results = await Promise.all(ownerships.map((ownership) => this.#closeOwnedBrowserProcess(ownership)));
+    if (results.some((result) => !result.closed)) throw new VoiceLabError(labError("BROWSER_PROCESS_CLOSE_FAILED", "Worker shutdown could not prove every owned browser process closed.", "harness", true, { unresolved_processes: results.filter((result) => !result.closed).length }));
+    this.#sessions.clear(); this.#pendingContexts.clear(); this.#pendingProcesses.clear();
     if (this.#browser) await this.#browser.close();
     this.#browser = null;
     this.#readinessCache = null;
   }
 
+  async #launchOwnedBrowserProcess(run: RunRecord): Promise<OwnedBrowserProcess> {
+    return launchDisposableBrowserProcess(run, this.launchBrowserServer, this.connectBrowser);
+  }
+
+  async #closeOwnedBrowserProcess(ownership: OwnedBrowserProcess): Promise<{ closed: boolean; errorClass: string | null }> {
+    return closeDisposableBrowserProcess(ownership);
+  }
+
   async #ensureBrowser(): Promise<Browser> {
     if (this.#browser?.isConnected()) return this.#browser;
-    this.#browserLaunch ??= this.launchBrowser({ headless: true, args: ["--autoplay-policy=no-user-gesture-required", "--disable-dev-shm-usage"] });
+    this.#browserLaunch ??= this.launchBrowser({ headless: true, args: [...RUN_BROWSER_ARGS] });
     try {
       this.#browser = await this.#browserLaunch;
       this.#browser.once("disconnected", () => {
@@ -2220,17 +2358,34 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
   #requireSession(runId: string): BrowserSession {
     const session = this.#sessions.get(runId);
     if (!session) throw new VoiceLabError(labError("BROWSER_SESSION_LOST", "The browser worker no longer owns this run; it cannot be reconstructed honestly.", "harness"));
+    if (!disposableBrowserProcessIsActive(session.ownership)) throw new VoiceLabError(labError("BROWSER_EXECUTION_EPOCH_LOST", "The run-owned browser process is no longer active; this execution epoch is fenced and cannot be reconstructed.", "harness", false, { execution_epoch_sha256: session.ownership.executionEpochSha256 }));
     return session;
   }
 
   async #closeContextEvent(runId: string, context: BrowserContext, reason: string): Promise<Omit<LabEvent, "runId" | "seq" | "at">> {
-    const result = await closeContextWithProof(context, () => this.#browser?.contexts() ?? []);
-    if (result.closed) {
+    const session = this.#sessions.get(runId);
+    const ownership = session?.ownership ?? this.#pendingProcesses.get(runId);
+    const result = await closeContextWithProof(context, () => ownership?.browser.contexts() ?? []);
+    const processResult = result.closed && ownership
+      ? await this.#closeOwnedBrowserProcess(ownership)
+      : { closed: ownership === undefined, errorClass: result.errorClass };
+    if (result.closed && processResult.closed) {
       if (this.#sessions.get(runId)?.context === context) this.#sessions.delete(runId);
       if (this.#pendingContexts.get(runId) === context) this.#pendingContexts.delete(runId);
-      return { kind: "cleanup.browser_context_closed", source: "browser", payload: { reason, close_resolved: true, browser_registry_absent: true }, dedupeKey: `cleanup:${runId}:browser` };
+      this.#pendingProcesses.delete(runId);
+      return { kind: "cleanup.browser_context_closed", source: "browser", payload: {
+        reason,
+        close_resolved: true,
+        browser_registry_absent: true,
+        browser_process_close_resolved: true,
+        browser_process_disconnected: true,
+        process_id_sha256: ownership?.processIdSha256 ?? null,
+        browser_boot_id_sha256: ownership?.bootIdSha256 ?? null,
+        execution_epoch_sha256: ownership?.executionEpochSha256 ?? null,
+        raw_process_id_excluded: true,
+      }, dedupeKey: `cleanup:${runId}:browser` };
     }
-    return { kind: "cleanup.browser_context_close_failed", source: "browser", payload: { reason, close_resolved: false, browser_registry_absent: false, error_class: result.errorClass }, dedupeKey: `cleanup:${runId}:browser-close-failed` };
+    return { kind: "cleanup.browser_context_close_failed", source: "browser", payload: { reason, close_resolved: result.closed, browser_registry_absent: result.closed && processResult.closed, browser_process_close_resolved: processResult.closed, execution_epoch_sha256: ownership?.executionEpochSha256 ?? null, error_class: result.errorClass ?? processResult.errorClass }, dedupeKey: `cleanup:${runId}:browser-close-failed` };
   }
 
   async #waitForStartupReadiness(session: BrowserSession, timeoutMs: number): Promise<Omit<LabEvent, "runId" | "seq" | "at">[]> {

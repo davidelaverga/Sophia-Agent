@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { activateVoiceStartWithClientErrorReload, assertPageLocation, captureSessionRecoveryStorageState, classifyBrowserStartCause, classifyClientCdpExceptionFrames, classifyClientCdpPausedFrames, classifyClientConsoleErrorLocation, classifyClientPageError, closeContextWithProof, DASHBOARD_ROUTE_TIMEOUT_MS, drainProductCapture, establishDashboardMicRoute, establishSessionNavigation, extractNextChunkScriptUrls, findPassiveEffectCreateBreakpoint, findPassiveEffectCreateCatchBreakpoint, findPassiveEffectDestroyBreakpoint, isolateBootstrapStorageState, isExactFinalizationResponse, isRecoverableEmptyDashboardVoiceRoute, isRecoverableEmptySessionVoiceRoute, openFreshExactDashboardContext, openFreshExactSessionContext, passiveEffectBreakpointCondition, PlaywrightVoiceDriver, RECOVERABLE_DASHBOARD_LOAD_ERROR, RECOVERABLE_DASHBOARD_RELOAD_BUTTON, requestBoundJson, requestBoundJsonWithOneTransientRetry, selectRecentClientEffectProbe, selectRecentClientPausedFrames, SESSION_NAVIGATION_ROUTE_TIMEOUT_MS, SESSION_NAVIGATION_SETTLE_TIMEOUT_MS, SESSION_RECOVERY_STORAGE_CAPTURE_TIMEOUT_MS, SESSION_ROUTE_RECOVERY_RELOAD_TIMEOUT_MS, SESSION_VOICE_ACTIVATION_SETTLE_MS, SESSION_VOICE_INITIAL_START_TIMEOUT_MS, SESSION_VOICE_INITIAL_TAB_TIMEOUT_MS, SESSION_VOICE_RECOVERY_START_TIMEOUT_MS, SESSION_VOICE_RECOVERY_TAB_TIMEOUT_MS, shouldCaptureSessionVoiceRoute, shouldReleasePassiveEffectBreakpoint, validateAppSyntheticBinding, validateD02BrowserContextBinding, validateD02ProductCleanupEcho, validateVoiceLabControlAdapterReceipt, waitForClientPageError, waitOnWorkerClock, withClientDiagnosticFrames, withClientEffectProbe } from "../src/browser-driver.js";
+import { activateVoiceStartWithClientErrorReload, assertPageLocation, browserProcessOwnershipHashes, captureSessionRecoveryStorageState, classifyBrowserStartCause, classifyClientCdpExceptionFrames, classifyClientCdpPausedFrames, classifyClientConsoleErrorLocation, classifyClientPageError, closeContextWithProof, DASHBOARD_ROUTE_TIMEOUT_MS, disposableBrowserProcessIsActive, drainProductCapture, establishDashboardMicRoute, establishSessionNavigation, extractNextChunkScriptUrls, findPassiveEffectCreateBreakpoint, findPassiveEffectCreateCatchBreakpoint, findPassiveEffectDestroyBreakpoint, isolateBootstrapStorageState, isExactFinalizationResponse, isRecoverableEmptyDashboardVoiceRoute, isRecoverableEmptySessionVoiceRoute, openFreshExactDashboardContext, openFreshExactSessionContext, passiveEffectBreakpointCondition, PlaywrightVoiceDriver, RECOVERABLE_DASHBOARD_LOAD_ERROR, RECOVERABLE_DASHBOARD_RELOAD_BUTTON, requestBoundJson, requestBoundJsonWithOneTransientRetry, selectRecentClientEffectProbe, selectRecentClientPausedFrames, SESSION_NAVIGATION_ROUTE_TIMEOUT_MS, SESSION_NAVIGATION_SETTLE_TIMEOUT_MS, SESSION_RECOVERY_STORAGE_CAPTURE_TIMEOUT_MS, SESSION_ROUTE_RECOVERY_RELOAD_TIMEOUT_MS, SESSION_VOICE_ACTIVATION_SETTLE_MS, SESSION_VOICE_INITIAL_START_TIMEOUT_MS, SESSION_VOICE_INITIAL_TAB_TIMEOUT_MS, SESSION_VOICE_RECOVERY_START_TIMEOUT_MS, SESSION_VOICE_RECOVERY_TAB_TIMEOUT_MS, shouldCaptureSessionVoiceRoute, shouldReleasePassiveEffectBreakpoint, validateAppSyntheticBinding, validateD02BrowserContextBinding, validateD02ProductCleanupEcho, validateVoiceLabControlAdapterReceipt, waitForClientPageError, waitOnWorkerClock, withClientDiagnosticFrames, withClientEffectProbe } from "../src/browser-driver.js";
 import { sha256 } from "../src/security.js";
 import { SHA, SHA_B, SHA_C, SHA_D, testConfig, testRun } from "./helpers.js";
 
@@ -31,6 +31,68 @@ describe("server-authorized Voice Lab control adapter", () => {
     expect(validateVoiceLabControlAdapterReceipt({ ...receipt, expected_deployment: { ...run.target.expectedDeployment, voice: SHA_D } }, "session-start", run, 1_800_000_000)).toBeNull();
     expect(validateVoiceLabControlAdapterReceipt({ ...receipt, expires_at: 1_800_000_000 }, "session-start", run, 1_800_000_000)).toBeNull();
     expect(validateVoiceLabControlAdapterReceipt({ ...receipt, unexpected: true }, "session-start", run, 1_800_000_000)).toBeNull();
+  });
+});
+
+describe("disposable browser process ownership", () => {
+  it("binds a redacted process identity and boot epoch to exactly one run", () => {
+    const input = {
+      runId: "run-browser-owner-001",
+      cleanupObligationId: "123e4567-e89b-42d3-a456-426614174000",
+      processId: 4172,
+      nonce: "123e4567-e89b-42d3-a456-426614174222",
+      startedAt: "2026-09-02T15:00:00.000Z",
+    };
+    const first = browserProcessOwnershipHashes(input);
+    expect(first.processIdSha256).toBe(sha256("4172"));
+    expect(first.bootIdSha256).toMatch(/^[a-f0-9]{64}$/);
+    expect(first.executionEpochSha256).toMatch(/^[a-f0-9]{64}$/);
+    expect(browserProcessOwnershipHashes(input)).toEqual(first);
+    expect(browserProcessOwnershipHashes({ ...input, runId: "run-browser-owner-002" }).executionEpochSha256).not.toBe(first.executionEpochSha256);
+    expect(browserProcessOwnershipHashes({ ...input, processId: 4173 }).bootIdSha256).not.toBe(first.bootIdSha256);
+    expect(() => browserProcessOwnershipHashes({ ...input, processId: 0 })).toThrowError(expect.objectContaining({ detail: expect.objectContaining({ code: "BROWSER_PROCESS_OWNERSHIP_INVALID" }) }));
+  });
+
+  it("treats either a disconnected browser or exited owned child as a fenced epoch", () => {
+    const ownership = {
+      browser: { isConnected: () => true },
+      child: { exitCode: null, signalCode: null },
+    } as any;
+    expect(disposableBrowserProcessIsActive(ownership)).toBe(true);
+    ownership.child.exitCode = 0;
+    expect(disposableBrowserProcessIsActive(ownership)).toBe(false);
+    ownership.child.exitCode = null;
+    ownership.browser.isConnected = () => false;
+    expect(disposableBrowserProcessIsActive(ownership)).toBe(false);
+  });
+
+  it("rejects a concurrent duplicate before it can launch a second process", async () => {
+    const run = testRun();
+    const builds: Record<string, string> = {
+      "frontend.test": run.target.expectedDeployment.frontend,
+      "gateway.test": run.target.expectedDeployment.backend,
+      "voice.test": run.target.expectedDeployment.voice,
+      "langgraph.test": run.target.expectedDependencies.langgraph,
+    };
+    let enterLaunch!: () => void;
+    let rejectLaunch!: (error: Error) => void;
+    const launchEntered = new Promise<void>((resolve) => { enterLaunch = resolve; });
+    const launchBlocked = new Promise<never>((_resolve, reject) => { rejectLaunch = reject; });
+    const driver = new PlaywrightVoiceDriver(
+      testConfig(),
+      async (input) => {
+        const url = new URL(String(input));
+        return new Response(JSON.stringify({ build_id: builds[url.hostname] }), { status: 200, headers: { "content-type": "application/json" } });
+      },
+      undefined,
+      undefined,
+      (() => { enterLaunch(); return launchBlocked; }) as any,
+    );
+    const first = driver.start(run, "capability").catch((error) => error);
+    await launchEntered;
+    await expect(driver.start(run, "capability")).rejects.toMatchObject({ detail: { code: "BROWSER_ALREADY_STARTED" } });
+    rejectLaunch(new Error("expected-launch-stop"));
+    await expect(first).resolves.toMatchObject({ message: "expected-launch-stop" });
   });
 });
 
