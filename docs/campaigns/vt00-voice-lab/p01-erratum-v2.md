@@ -139,8 +139,10 @@ Execution-unlock progress is monotonic:
   `81e3da1641f1e3ae2edc56a7dc693915184ebe62`;
 - MutationObserver and injected DOM-button activation removal: closed deployment
   green at `b9fafffe575fa39a5f29ff22d9811e449eb4e067`;
-- superseded direct UI activation and route-reload fallback removal: implemented
-  in `ui-fallback-isolation.md`, closed deployment assertion required;
+- superseded direct UI activation and route-reload fallback removal: closed
+  deployment green at `b973a2af742f36dbf148b7bd2f395d5b3bd32bb6`;
+- CDP/React diagnostic probe removal: implemented in
+  `cdp-diagnostic-isolation.md`, closed deployment assertion required;
 - controller parity, cancellation, 20/20 real built-app trials, and five
   consecutive deployed canaries: pending.
 

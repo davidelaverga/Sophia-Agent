@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 
-import { assertPageLocation, browserProcessOwnershipHashes, classifyBrowserStartCause, classifyClientCdpExceptionFrames, classifyClientCdpPausedFrames, classifyClientConsoleErrorLocation, classifyClientPageError, closeContextWithProof, disposableBrowserProcessIsActive, drainProductCapture, extractNextChunkScriptUrls, findPassiveEffectCreateBreakpoint, findPassiveEffectCreateCatchBreakpoint, findPassiveEffectDestroyBreakpoint, isExactFinalizationResponse, passiveEffectBreakpointCondition, PlaywrightVoiceDriver, requestBoundJson, requestBoundJsonWithOneTransientRetry, selectRecentClientEffectProbe, selectRecentClientPausedFrames, shouldCaptureSessionVoiceRoute, shouldReleasePassiveEffectBreakpoint, validateAppSyntheticBinding, validateD02BrowserContextBinding, validateD02ProductCleanupEcho, validateVoiceLabControlAdapterReceipt, waitOnWorkerClock, withClientDiagnosticFrames, withClientEffectProbe } from "../src/browser-driver.js";
+import { assertPageLocation, browserProcessOwnershipHashes, classifyBrowserStartCause, classifyClientConsoleErrorLocation, classifyClientPageError, closeContextWithProof, disposableBrowserProcessIsActive, drainProductCapture, isExactFinalizationResponse, PlaywrightVoiceDriver, requestBoundJson, requestBoundJsonWithOneTransientRetry, shouldCaptureSessionVoiceRoute, validateAppSyntheticBinding, validateD02BrowserContextBinding, validateD02ProductCleanupEcho, validateVoiceLabControlAdapterReceipt, waitOnWorkerClock } from "../src/browser-driver.js";
 import { sha256 } from "../src/security.js";
 import { SHA, SHA_B, SHA_C, SHA_D, testConfig, testRun } from "./helpers.js";
 
@@ -19,6 +19,13 @@ describe("server-authorized Voice Lab control adapter", () => {
       "RECOVERABLE_DASHBOARD_LOAD_ERROR",
       "isRecoverableEmptySessionVoiceRoute",
       "isRecoverableEmptyDashboardVoiceRoute",
+      "newCDPSession",
+      "Debugger.",
+      "Runtime.",
+      "DIRECT_CDP_CLIENT_DIAGNOSTICS_ENABLED",
+      "PAUSING_CLIENT_DIAGNOSTICS_ENABLED",
+      "findPassiveEffect",
+      "effect_probe",
     ]) expect(source).not.toContain(forbidden);
     expect(source).toContain('enterStage("control_adapter_session_start")');
     expect(source).toContain('enterStage("control_adapter_voice_start")');
@@ -293,198 +300,6 @@ describe("ordinary dashboard consent route", () => {
       columnNumber: 1,
     }, "https://www.sophia-ei.com")).toBeNull();
   });
-
-  it("projects up to five same-origin Next frames from Chromium exception details", () => {
-    const diagnostic = classifyClientCdpExceptionFrames({
-      text: "Uncaught secret detail",
-      url: "https://attacker.example/private.js?token=secret",
-      lineNumber: 8,
-      columnNumber: 9,
-      stackTrace: {
-        callFrames: [
-          { url: "https://attacker.example/private.js?token=secret", lineNumber: 1, columnNumber: 2 },
-          { url: "https://www.sophia-ei.com/_next/static/chunks/dashboard.abc123.js?token=secret", lineNumber: 11, columnNumber: 33 },
-          { url: "https://www.sophia-ei.com/_next/static/chunks/app.987xyz.js", lineNumber: 21, columnNumber: 43 },
-        ],
-      },
-    }, "https://www.sophia-ei.com");
-
-    expect(diagnostic).toEqual([
-      { chunk: "dashboard.abc123.js", line: 12, column: 34 },
-      { chunk: "app.987xyz.js", line: 22, column: 44 },
-    ]);
-    expect(JSON.stringify(diagnostic)).not.toContain("secret");
-    expect(classifyClientCdpExceptionFrames({
-      stackTrace: { callFrames: [{ url: "https://attacker.example/_next/static/chunks/evil.js", lineNumber: 0, columnNumber: 0 }] },
-    }, "https://www.sophia-ei.com")).toEqual([]);
-  });
-
-  it("projects only same-origin Next throw-site frames from Chromium debugger pauses", () => {
-    const diagnostic = classifyClientCdpPausedFrames({
-      reason: "exception",
-      data: { description: "secret exception text" },
-      callFrames: [
-        { url: "https://www.sophia-ei.com/_next/static/chunks/app-page.abc123.js?token=secret", location: { lineNumber: 4, columnNumber: 18 } },
-        { url: "https://attacker.example/_next/static/chunks/evil.js", location: { lineNumber: 8, columnNumber: 9 } },
-        { url: "https://www.sophia-ei.com/_next/static/chunks/react.987xyz.js", location: { lineNumber: 10, columnNumber: 20 } },
-      ],
-    }, "https://www.sophia-ei.com");
-
-    expect(diagnostic).toEqual([
-      { chunk: "app-page.abc123.js", line: 5, column: 19 },
-      { chunk: "react.987xyz.js", line: 11, column: 21 },
-    ]);
-    expect(JSON.stringify(diagnostic)).not.toContain("secret");
-    expect(JSON.stringify(diagnostic)).not.toContain("attacker");
-  });
-
-  it("keeps the application throw when a later React rethrow shares the pageerror window", () => {
-    expect(selectRecentClientPausedFrames([
-      { observedAt: 1_000, frames: [{ chunk: "stale.js", line: 1, column: 1 }] },
-      { observedAt: 9_100, frames: [
-        { chunk: "app-page.js", line: 1, column: 77 },
-        { chunk: "react.js", line: 1, column: 100 },
-      ] },
-      { observedAt: 9_200, frames: [
-        { chunk: "react.js", line: 1, column: 200 },
-        { chunk: "react.js", line: 1, column: 220 },
-      ] },
-    ], 9_250)).toEqual([
-      { chunk: "react.js", line: 1, column: 200 },
-      { chunk: "app-page.js", line: 1, column: 77 },
-      { chunk: "react.js", line: 1, column: 220 },
-      { chunk: "react.js", line: 1, column: 100 },
-    ]);
-  });
-
-  it("prefers correlated paused throw sites over an existing React-only pageerror stack", () => {
-    const diagnostic = classifyClientPageError(Object.assign(new TypeError("opaque product failure"), {
-      stack: "TypeError: opaque product failure\n    at react (https://www.sophia-ei.com/_next/static/chunks/react.js:1:100)",
-    }));
-    const enriched = withClientDiagnosticFrames(diagnostic, [
-      { chunk: "app-page.js", line: 1, column: 77 },
-      { chunk: "react.js", line: 1, column: 200 },
-    ], true);
-
-    expect(enriched).toMatchObject({
-      next_chunk: "app-page.js",
-      next_frames: [
-        { chunk: "app-page.js", line: 1, column: 77 },
-        { chunk: "react.js", line: 1, column: 200 },
-        { chunk: "react.js", line: 1, column: 100 },
-      ],
-    });
-    expect(JSON.stringify(enriched)).not.toContain("opaque product failure");
-  });
-
-  it("attaches only the bounded correlated React effect probe", () => {
-    const diagnostic = classifyClientPageError(new TypeError("opaque product failure"));
-    const probe = {
-      create_type: "object" as const,
-      effect_tag: 9,
-      owner_fiber_tag: 0,
-      owner_props: "on_ready" as const,
-      owner_frame: { chunk: "app-page.js", line: 1, column: 77 },
-    };
-    expect(selectRecentClientEffectProbe([
-      { observedAt: 1_000, frames: [], effectProbe: probe },
-      { observedAt: 9_100, frames: [{ chunk: "react.js", line: 1, column: 100 }] },
-      { observedAt: 9_200, frames: [{ chunk: "react.js", line: 1, column: 200 }], effectProbe: probe },
-    ], 9_250)).toEqual(probe);
-    expect(withClientEffectProbe(diagnostic, probe)).toMatchObject({ effect_probe: probe });
-    expect(JSON.stringify(withClientEffectProbe(diagnostic, probe))).not.toContain("opaque product failure");
-  });
-
-  it("selects by pause time when asynchronous probe evaluations complete out of order", () => {
-    const invalidProbe = {
-      create_type: "object" as const,
-      effect_tag: 9,
-      owner_fiber_tag: 0,
-      owner_props: "other" as const,
-      owner_frame: { chunk: "app-page.js", line: 1, column: 77 },
-    };
-    const callableProbe = { ...invalidProbe, create_type: "function" as const };
-    expect(selectRecentClientEffectProbe([
-      { observedAt: 9_240, frames: [], effectProbe: callableProbe },
-      { observedAt: 9_100, frames: [], effectProbe: invalidProbe },
-      { observedAt: 9_200, frames: [], effectProbe: callableProbe },
-    ], 9_250)).toEqual(callableProbe);
-  });
-
-  it("finds a minified React passive-effect create call without a build-specific offset", () => {
-    expect(findPassiveEffectCreateBreakpoint([
-      "function before(e){return e}",
-      "function iv(e,t){try{var n=t.updateQueue,r=null!==n?n.lastEffect:null;if(null!==r){var l=r.next;n=l;do{if((n.tag&e)===e){r=void 0;var a=n.create;n.inst.destroy=r=a()}n=n.next}while(n!==l)}}catch(e){throw e}}",
-    ].join("\n"))).toEqual({
-      probe_kind: "create",
-      line_number: 1,
-      column_number: 145,
-      create_variable: "a",
-      effect_variable: "n",
-      owner_variable: "t",
-    });
-    expect(findPassiveEffectCreateBreakpoint("function nope(e,t){return t.create}")).toBeNull();
-  });
-
-  it("finds a minified React passive-effect destroy call and conditions on invalid cleanup values", () => {
-    const source = "function iy(e,t,n){try{var r=t.updateQueue,l=null!==r?r.lastEffect:null;if(null!==l){var a=l.next;r=a;do{if((r.tag&e)===e){var o=r.inst,i=o.destroy;if(void 0!==i){o.destroy=void 0,l=t;try{i()}catch(e){sN(l,n,e)}}}r=r.next}while(r!==a)}}catch(e){sN(t,t.return,e)}}";
-    const breakpoint = findPassiveEffectDestroyBreakpoint(source);
-    expect(breakpoint).toMatchObject({
-      probe_kind: "destroy",
-      line_number: 0,
-      instance_variable: "o",
-      destroy_variable: "i",
-      effect_variable: "r",
-      owner_variable: "t",
-    });
-    expect(breakpoint?.column_number).toBe(source.indexOf("i()}"));
-    expect(breakpoint && passiveEffectBreakpointCondition(breakpoint)).toBe('typeof i !== "undefined" && typeof i !== "function"');
-  });
-
-  it("finds the passive-effect create catch without pausing successful effects", () => {
-    const source = "function iv(e,t){try{var n=t.updateQueue,r=null!==n?n.lastEffect:null;if(null!==r){var l=r.next;n=l;do{if((n.tag&e)===e){r=void 0;var a=n.create;n.inst.destroy=r=a()}n=n.next}while(n!==l)}}catch(e){sN(t,t.return,e)}}";
-    const breakpoint = findPassiveEffectCreateCatchBreakpoint(source);
-    expect(breakpoint).toEqual({
-      probe_kind: "create_catch",
-      line_number: 0,
-      column_number: source.indexOf("sN(t,t.return,e)"),
-      exception_variable: "e",
-      effect_variable: "n",
-      owner_variable: "t",
-    });
-    expect(breakpoint && passiveEffectBreakpointCondition(breakpoint)).toBe("true");
-  });
-
-  it("keeps the passive-effect breakpoint armed across callable effects", () => {
-    expect(shouldReleasePassiveEffectBreakpoint("function")).toBe(false);
-    expect(shouldReleasePassiveEffectBreakpoint("undefined")).toBe(true);
-    expect(shouldReleasePassiveEffectBreakpoint("object")).toBe(true);
-  });
-
-  it("pauses the passive-effect probe only for non-callable creates", () => {
-    expect(passiveEffectBreakpointCondition({
-      probe_kind: "create",
-      line_number: 1,
-      column_number: 145,
-      create_variable: "a",
-      effect_variable: "n",
-      owner_variable: "t",
-    })).toBe('typeof a !== "function"');
-  });
-
-  it("extracts only bounded same-origin Next chunk URLs for pre-navigation breakpoint arming", () => {
-    expect(extractNextChunkScriptUrls([
-      '<script src="/_next/static/chunks/react.js?dpl=abc"></script>',
-      '<script src="https://www.sophia-ei.com/_next/static/chunks/app-page.js"></script>',
-      '<script src="https://other.example/_next/static/chunks/foreign.js"></script>',
-      '<script src="/ordinary.js"></script>',
-      '<script src="/_next/static/chunks/react.js?dpl=abc"></script>',
-    ].join(""), "https://www.sophia-ei.com")).toEqual([
-      "https://www.sophia-ei.com/_next/static/chunks/react.js?dpl=abc",
-      "https://www.sophia-ei.com/_next/static/chunks/app-page.js",
-    ]);
-  });
-
   it("hashes browser start causes instead of projecting request headers", () => {
     const diagnostic = classifyBrowserStartCause(new Error("X-Sophia-Voice-Lab-Capability: signed-secret"));
     expect(diagnostic.error_class).toBe("Error");

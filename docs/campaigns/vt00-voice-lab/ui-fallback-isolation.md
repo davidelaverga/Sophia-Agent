@@ -1,6 +1,6 @@
 # Voice Lab UI fallback isolation
 
-Status: `IMPLEMENTED — CLOSED DEPLOYMENT ASSERTION REQUIRED`
+Status: `CLOSED DEPLOYMENT GREEN — b973a2af742f36dbf148b7bd2f395d5b3bd32bb6`
 
 Falsifiable hypothesis: production Voice Lab startup has exactly one activation
 path: the server-authorized, default-disabled control adapter. The worker must
