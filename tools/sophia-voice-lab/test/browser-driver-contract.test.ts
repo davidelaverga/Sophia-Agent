@@ -1,10 +1,29 @@
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
 
-import { activateVoiceStartWithClientErrorReload, assertPageLocation, browserProcessOwnershipHashes, classifyBrowserStartCause, classifyClientCdpExceptionFrames, classifyClientCdpPausedFrames, classifyClientConsoleErrorLocation, classifyClientPageError, closeContextWithProof, DASHBOARD_ROUTE_TIMEOUT_MS, disposableBrowserProcessIsActive, drainProductCapture, establishDashboardMicRoute, establishSessionNavigation, extractNextChunkScriptUrls, findPassiveEffectCreateBreakpoint, findPassiveEffectCreateCatchBreakpoint, findPassiveEffectDestroyBreakpoint, isExactFinalizationResponse, isRecoverableEmptyDashboardVoiceRoute, isRecoverableEmptySessionVoiceRoute, passiveEffectBreakpointCondition, PlaywrightVoiceDriver, RECOVERABLE_DASHBOARD_LOAD_ERROR, RECOVERABLE_DASHBOARD_RELOAD_BUTTON, requestBoundJson, requestBoundJsonWithOneTransientRetry, selectRecentClientEffectProbe, selectRecentClientPausedFrames, SESSION_NAVIGATION_ROUTE_TIMEOUT_MS, SESSION_NAVIGATION_SETTLE_TIMEOUT_MS, SESSION_ROUTE_RECOVERY_RELOAD_TIMEOUT_MS, SESSION_VOICE_ACTIVATION_SETTLE_MS, SESSION_VOICE_INITIAL_START_TIMEOUT_MS, SESSION_VOICE_INITIAL_TAB_TIMEOUT_MS, SESSION_VOICE_RECOVERY_START_TIMEOUT_MS, SESSION_VOICE_RECOVERY_TAB_TIMEOUT_MS, shouldCaptureSessionVoiceRoute, shouldReleasePassiveEffectBreakpoint, validateAppSyntheticBinding, validateD02BrowserContextBinding, validateD02ProductCleanupEcho, validateVoiceLabControlAdapterReceipt, waitForClientPageError, waitOnWorkerClock, withClientDiagnosticFrames, withClientEffectProbe } from "../src/browser-driver.js";
+import { assertPageLocation, browserProcessOwnershipHashes, classifyBrowserStartCause, classifyClientCdpExceptionFrames, classifyClientCdpPausedFrames, classifyClientConsoleErrorLocation, classifyClientPageError, closeContextWithProof, disposableBrowserProcessIsActive, drainProductCapture, extractNextChunkScriptUrls, findPassiveEffectCreateBreakpoint, findPassiveEffectCreateCatchBreakpoint, findPassiveEffectDestroyBreakpoint, isExactFinalizationResponse, passiveEffectBreakpointCondition, PlaywrightVoiceDriver, requestBoundJson, requestBoundJsonWithOneTransientRetry, selectRecentClientEffectProbe, selectRecentClientPausedFrames, shouldCaptureSessionVoiceRoute, shouldReleasePassiveEffectBreakpoint, validateAppSyntheticBinding, validateD02BrowserContextBinding, validateD02ProductCleanupEcho, validateVoiceLabControlAdapterReceipt, waitOnWorkerClock, withClientDiagnosticFrames, withClientEffectProbe } from "../src/browser-driver.js";
 import { sha256 } from "../src/security.js";
 import { SHA, SHA_B, SHA_C, SHA_D, testConfig, testRun } from "./helpers.js";
 
 describe("server-authorized Voice Lab control adapter", () => {
+  it("contains no superseded UI activation or route-reload fallback", () => {
+    const source = readFileSync(new URL("../src/browser-driver.ts", import.meta.url), "utf8");
+    for (const forbidden of [
+      "resolveDashboardMicButton",
+      "activateDashboardMicButton",
+      "establishSessionVoiceTab",
+      "establishSessionNavigation",
+      "establishDashboardMicRoute",
+      "activateVoiceStartWithClientErrorReload",
+      "waitForClientPageError",
+      "RECOVERABLE_DASHBOARD_LOAD_ERROR",
+      "isRecoverableEmptySessionVoiceRoute",
+      "isRecoverableEmptyDashboardVoiceRoute",
+    ]) expect(source).not.toContain(forbidden);
+    expect(source).toContain('enterStage("control_adapter_session_start")');
+    expect(source).toContain('enterStage("control_adapter_voice_start")');
+  });
+
   it("accepts only an exact, current run/scenario/deployment/cleanup/action epoch", () => {
     const run = testRun({
       testRunId: "run-control-001",
@@ -125,68 +144,6 @@ describe("ordinary session navigation settlement", () => {
     expect(shouldCaptureSessionVoiceRoute("session_navigation")).toBe(false);
   });
 
-  it("accepts an exact session route that commits at the polling deadline", async () => {
-    let currentUrl = "https://www.sophia-ei.com/";
-    const emptyButtons = {
-      count: async () => 0,
-      nth: () => { throw new Error("no button expected"); },
-    };
-    const page = {
-      url: () => currentUrl,
-      getByRole: () => emptyButtons,
-      waitForTimeout: async () => undefined,
-      waitForURL: async (predicate: (url: URL) => boolean, options: { timeout: number; waitUntil: string }) => {
-        expect(options.timeout).toBe(SESSION_NAVIGATION_SETTLE_TIMEOUT_MS);
-        expect(options.waitUntil).toBe("commit");
-        currentUrl = "https://www.sophia-ei.com/session";
-        expect(predicate(new URL(currentUrl))).toBe(true);
-        expect(predicate(new URL("https://evil.invalid/session"))).toBe(false);
-        expect(predicate(new URL("https://www.sophia-ei.com/session#stale"))).toBe(false);
-      },
-    };
-
-    await establishSessionNavigation(page as any, "https://www.sophia-ei.com", "Start fresh", 0);
-    expect(SESSION_NAVIGATION_ROUTE_TIMEOUT_MS).toBe(75_000);
-    expect(SESSION_NAVIGATION_SETTLE_TIMEOUT_MS).toBe(15_000);
-  });
-
-  it("returns immediately when the exact route is already committed at the deadline", async () => {
-    let waitForUrlCalled = false;
-    const page = {
-      url: () => "https://www.sophia-ei.com/session",
-      getByRole: () => ({ count: async () => 0 }),
-      waitForTimeout: async () => undefined,
-      waitForURL: async () => { waitForUrlCalled = true; },
-    };
-
-    await establishSessionNavigation(page as any, "https://www.sophia-ei.com", "Start fresh", 0);
-    expect(waitForUrlCalled).toBe(false);
-  });
-
-  it("can rehydrate an exact session route after a client-error navigation timeout", async () => {
-    let currentUrl = "https://www.sophia-ei.com/";
-    let attempts = 0;
-    let reloads = 0;
-    const emptyButtons = { count: async () => 0 };
-    const page = {
-      url: () => currentUrl,
-      getByRole: () => emptyButtons,
-      waitForTimeout: async () => undefined,
-      waitForURL: async () => {
-        attempts += 1;
-        currentUrl = "https://www.sophia-ei.com/session";
-        throw Object.assign(new Error("hidden browser detail"), { name: "TimeoutError" });
-      },
-    };
-
-    await expect(activateVoiceStartWithClientErrorReload({
-      activate: () => establishSessionNavigation(page as any, "https://www.sophia-ei.com", "Start fresh", 0),
-      hasClientPageError: async () => true,
-      reload: async () => { reloads += 1; },
-    })).resolves.toBe("reloaded_after_client_error");
-    expect(attempts).toBe(1);
-    expect(reloads).toBe(1);
-  });
 });
 
 describe("ordinary voice start recovery", () => {
@@ -199,157 +156,12 @@ describe("ordinary voice start recovery", () => {
     expect("storageStateKey" in config).toBe(false);
   });
 
-  it("reserves enough of the operation watchdog for one bounded reload and recovery attempt", () => {
-    expect(SESSION_VOICE_INITIAL_TAB_TIMEOUT_MS).toBe(5_000);
-    expect(SESSION_VOICE_INITIAL_START_TIMEOUT_MS).toBe(10_000);
-    expect(SESSION_ROUTE_RECOVERY_RELOAD_TIMEOUT_MS).toBe(15_000);
-    expect(SESSION_VOICE_RECOVERY_TAB_TIMEOUT_MS).toBe(10_000);
-    expect(SESSION_VOICE_RECOVERY_START_TIMEOUT_MS).toBe(15_000);
-    expect(SESSION_VOICE_ACTIVATION_SETTLE_MS).toBe(15_000);
-    expect(
-      SESSION_VOICE_INITIAL_TAB_TIMEOUT_MS
-      + SESSION_VOICE_INITIAL_START_TIMEOUT_MS
-      + SESSION_ROUTE_RECOVERY_RELOAD_TIMEOUT_MS
-      + SESSION_VOICE_RECOVERY_TAB_TIMEOUT_MS
-      + SESSION_VOICE_RECOVERY_START_TIMEOUT_MS
-      + SESSION_VOICE_ACTIVATION_SETTLE_MS,
-    ).toBe(70_000);
-  });
-
   it("uses a worker-owned clock that does not depend on a page", async () => {
     const started = Date.now();
     await expect(waitOnWorkerClock(10)).resolves.toBeUndefined();
     expect(Date.now() - started).toBeGreaterThanOrEqual(5);
   });
 
-  it("settles a causally preceding page error within one bounded diagnostic window", async () => {
-    let clock = 0;
-    let probes = 0;
-    await expect(waitForClientPageError({
-      probe: () => ++probes === 3,
-      wait: async () => { clock += 25; },
-      timeoutMs: 100,
-      now: () => clock,
-    })).resolves.toBe(true);
-    expect(probes).toBe(3);
-  });
-
-  it("returns false when the bounded diagnostic window expires", async () => {
-    let clock = 0;
-    await expect(waitForClientPageError({
-      probe: () => false,
-      wait: async () => { clock += 25; },
-      timeoutMs: 50,
-      now: () => clock,
-    })).resolves.toBe(false);
-    expect(clock).toBe(50);
-  });
-
-  it("reloads the exact session route once after a start-button timeout with a captured client error", async () => {
-    const calls: string[] = [];
-    const timeout = Object.assign(new Error("hidden browser detail"), { name: "TimeoutError" });
-    let activation = 0;
-
-    const result = await activateVoiceStartWithClientErrorReload({
-      activate: async () => {
-        calls.push("activate");
-        activation += 1;
-        if (activation === 1) throw timeout;
-      },
-      hasClientPageError: () => true,
-      reload: async () => { calls.push("reload"); },
-    });
-
-    expect(result).toBe("reloaded_after_client_error");
-    expect(calls).toEqual(["activate", "reload", "activate"]);
-  });
-
-  it("accepts Playwright timeout-shaped values without relying on a JavaScript realm", async () => {
-    const timeout = { name: "TimeoutError" };
-    let activation = 0;
-    let reloads = 0;
-    await expect(activateVoiceStartWithClientErrorReload({
-      activate: async () => {
-        activation += 1;
-        if (activation === 1) throw timeout;
-      },
-      hasClientPageError: async () => true,
-      reload: async () => { reloads += 1; },
-    })).resolves.toBe("reloaded_after_client_error");
-    expect(reloads).toBe(1);
-  });
-
-  it("does not reload a timeout without a captured client page error", async () => {
-    const timeout = Object.assign(new Error("hidden browser detail"), { name: "TimeoutError" });
-    let reloads = 0;
-
-    await expect(activateVoiceStartWithClientErrorReload({
-      activate: async () => { throw timeout; },
-      hasClientPageError: () => false,
-      reload: async () => { reloads += 1; },
-    })).rejects.toBe(timeout);
-    expect(reloads).toBe(0);
-  });
-
-  it("reloads once for the exact empty session shell after the bounded startup timeout", async () => {
-    const timeout = Object.assign(new Error("hidden browser detail"), { name: "TimeoutError" });
-    let activation = 0;
-    let reloads = 0;
-    const route = {
-      location: "expected_session",
-      voice_tab: "absent",
-      voice_button: "absent",
-      dashboard_mic_visible: false,
-      dashboard_mic_button: "absent",
-      consent_visible: false,
-      auth_gate_visible: false,
-      auth_checking_visible: false,
-      session_store_loading_visible: false,
-      voice_fallback_visible: false,
-    } as const;
-
-    expect(isRecoverableEmptySessionVoiceRoute(route)).toBe(true);
-    await expect(activateVoiceStartWithClientErrorReload({
-      activate: async () => {
-        activation += 1;
-        if (activation === 1) throw timeout;
-      },
-      hasClientPageError: () => false,
-      hasRecoverableExactSessionShell: () => isRecoverableEmptySessionVoiceRoute(route),
-      reload: async () => { reloads += 1; },
-    })).resolves.toBe("reloaded_after_exact_session_shell");
-    expect(reloads).toBe(1);
-  });
-
-  it("rejects lookalike session states that still expose a loading or auth gate", () => {
-    const base = {
-      location: "expected_session",
-      voice_tab: "absent",
-      voice_button: "absent",
-      dashboard_mic_visible: false,
-      dashboard_mic_button: "absent",
-      consent_visible: false,
-      auth_gate_visible: false,
-      auth_checking_visible: false,
-      session_store_loading_visible: false,
-      voice_fallback_visible: false,
-    } as const;
-    expect(isRecoverableEmptySessionVoiceRoute({ ...base, session_store_loading_visible: true })).toBe(false);
-    expect(isRecoverableEmptySessionVoiceRoute({ ...base, auth_gate_visible: true })).toBe(false);
-    expect(isRecoverableEmptySessionVoiceRoute({ ...base, location: "same_origin_other" })).toBe(false);
-  });
-
-  it("never loops when the reloaded route still cannot render the control", async () => {
-    const timeout = Object.assign(new Error("hidden browser detail"), { name: "TimeoutError" });
-    let reloads = 0;
-
-    await expect(activateVoiceStartWithClientErrorReload({
-      activate: async () => { throw timeout; },
-      hasClientPageError: () => true,
-      reload: async () => { reloads += 1; },
-    })).rejects.toBe(timeout);
-    expect(reloads).toBe(1);
-  });
 });
 
 describe("product-authored synthetic capture provenance", () => {
@@ -680,118 +492,6 @@ describe("ordinary dashboard consent route", () => {
     expect(JSON.stringify(diagnostic)).not.toContain("signed-secret");
   });
 
-  it("matches the exact production recoverable error heading", () => {
-    expect(RECOVERABLE_DASHBOARD_LOAD_ERROR.test("This page couldn't load.")).toBe(true);
-    expect(RECOVERABLE_DASHBOARD_LOAD_ERROR.test("This page couldn’t load.")).toBe(true);
-    expect(RECOVERABLE_DASHBOARD_LOAD_ERROR.test("This page couldn’t load")).toBe(true);
-    expect(RECOVERABLE_DASHBOARD_LOAD_ERROR.test("This page could not load.")).toBe(false);
-    expect(RECOVERABLE_DASHBOARD_LOAD_ERROR.test("Another page couldn’t load.")).toBe(false);
-    expect(RECOVERABLE_DASHBOARD_RELOAD_BUTTON).toBe("Reload");
-  });
-
-  it("accepts through the visible consent UI before requiring the microphone CTA", async () => {
-    let now = 0;
-    let consentAccepted = false;
-    let waits = 0;
-    const result = await establishDashboardMicRoute({
-      isMicVisible: async () => consentAccepted && waits > 0,
-      isConsentVisible: async () => !consentAccepted,
-      isConsentEnabled: async () => waits > 0,
-      acceptConsent: async () => { consentAccepted = true; },
-      wait: async () => { waits += 1; now += 100; },
-      timeoutMs: 1_000,
-      now: () => now,
-    });
-    expect(result).toBe("accepted");
-    expect(consentAccepted).toBe(true);
-  });
-
-  it("does not touch consent when the microphone CTA is already present", async () => {
-    let accepted = false;
-    const result = await establishDashboardMicRoute({
-      isMicVisible: async () => true,
-      isConsentVisible: async () => true,
-      isConsentEnabled: async () => true,
-      acceptConsent: async () => { accepted = true; },
-      wait: async () => undefined,
-      timeoutMs: 1_000,
-    });
-    expect(result).toBe("already_consented");
-    expect(accepted).toBe(false);
-  });
-
-  it("allows bounded cold auth hydration beyond the former 20-second limit", async () => {
-    let now = 0;
-    let accepted = false;
-    const result = await establishDashboardMicRoute({
-      isMicVisible: async () => accepted,
-      isConsentVisible: async () => now >= 25_000 && !accepted,
-      isConsentEnabled: async () => now >= 25_000,
-      acceptConsent: async () => { accepted = true; },
-      wait: async () => { now += 100; },
-      timeoutMs: DASHBOARD_ROUTE_TIMEOUT_MS,
-      now: () => now,
-    });
-    expect(DASHBOARD_ROUTE_TIMEOUT_MS).toBe(60_000);
-    expect(now).toBe(25_000);
-    expect(result).toBe("accepted");
-  });
-
-  it("reloads the exact recoverable Next.js error shell once before continuing", async () => {
-    let now = 0;
-    let reloads = 0;
-    const result = await establishDashboardMicRoute({
-      isMicVisible: async () => reloads === 1,
-      isConsentVisible: async () => false,
-      isConsentEnabled: async () => false,
-      acceptConsent: async () => undefined,
-      isRecoverableLoadErrorVisible: async () => reloads === 0,
-      reload: async () => { reloads += 1; },
-      wait: async () => { now += 100; },
-      timeoutMs: 1_000,
-      now: () => now,
-    });
-    expect(result).toBe("already_consented");
-    expect(reloads).toBe(1);
-  });
-
-  it("reloads one exact empty dashboard shell only after the hydration grace", async () => {
-    let now = 0;
-    let reloads = 0;
-    const result = await establishDashboardMicRoute({
-      isMicVisible: async () => reloads === 1,
-      isConsentVisible: async () => false,
-      isConsentEnabled: async () => false,
-      acceptConsent: async () => undefined,
-      isRecoverableEmptyRoute: async () => reloads === 0,
-      reloadEmptyRoute: async () => { reloads += 1; },
-      emptyRouteGraceMs: 300,
-      wait: async () => { now += 100; },
-      timeoutMs: 1_000,
-      now: () => now,
-    });
-    expect(result).toBe("already_consented");
-    expect(now).toBe(300);
-    expect(reloads).toBe(1);
-  });
-
-  it("classifies only a fixed empty dashboard route as reloadable", () => {
-    const empty = {
-      location: "dashboard",
-      voice_tab: "absent",
-      voice_button: "absent",
-      dashboard_mic_visible: false,
-      dashboard_mic_button: "absent",
-      consent_visible: false,
-      auth_gate_visible: false,
-      auth_checking_visible: false,
-      session_store_loading_visible: false,
-      voice_fallback_visible: false,
-    } as const;
-    expect(isRecoverableEmptyDashboardVoiceRoute(empty)).toBe(true);
-    expect(isRecoverableEmptyDashboardVoiceRoute({ ...empty, auth_gate_visible: true })).toBe(false);
-    expect(isRecoverableEmptyDashboardVoiceRoute({ ...empty, location: "same_origin_other" })).toBe(false);
-  });
 });
 
 describe("D02 product provider-cleanup acknowledgement", () => {

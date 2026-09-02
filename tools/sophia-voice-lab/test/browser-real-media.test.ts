@@ -8,7 +8,7 @@ import { chromium, type Browser } from "playwright";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { buildVoiceLabInitScript } from "../src/browser-init.js";
-import { activateDashboardMicButton, classifySessionVoiceRoute, closeDisposableBrowserProcess, DIRECT_CDP_CLIENT_DIAGNOSTICS_ENABLED, establishSessionNavigation, establishSessionVoiceTab, launchDisposableBrowserProcess, PAUSING_CLIENT_DIAGNOSTICS_ENABLED, PlaywrightVoiceDriver, resolveDashboardMicButton, settleDiagnosticWithinBudget, settlePausedDiagnosticAndResume } from "../src/browser-driver.js";
+import { classifySessionVoiceRoute, closeDisposableBrowserProcess, DIRECT_CDP_CLIENT_DIAGNOSTICS_ENABLED, launchDisposableBrowserProcess, PAUSING_CLIENT_DIAGNOSTICS_ENABLED, PlaywrightVoiceDriver, settleDiagnosticWithinBudget, settlePausedDiagnosticAndResume } from "../src/browser-driver.js";
 import { testRun } from "./helpers.js";
 
 function sineWav(durationMs = 600, sampleRate = 16_000): Buffer {
@@ -131,130 +131,6 @@ describe("real Chromium dynamic media contract", () => {
     await new Promise<void>((resolve) => server?.close(() => resolve()));
   }, 30_000);
 
-  it("resolves the dashboard mic button from the onboarding anchor's sibling structure", async () => {
-    const context = await browser.newContext();
-    const page = await context.newPage();
-    await page.goto(origin);
-    await page.setContent(`
-      <div>
-        <span data-onboarding="mic-cta" aria-hidden="true"></span>
-        <button type="button" aria-label="Connecting to Sophia">microphone</button>
-      </div>
-    `);
-    const button = await resolveDashboardMicButton(page, page.locator('[data-onboarding="mic-cta"]'));
-    expect(await button.getAttribute("aria-label")).toBe("Connecting to Sophia");
-    await context.close();
-  });
-
-  it("activates the ordinary dashboard mic button while animated visual layers cover its hit point", async () => {
-    const context = await browser.newContext();
-    const page = await context.newPage();
-    await page.goto(origin);
-    await page.setContent(`
-      <style>
-        @keyframes drift { from { transform: translateX(0); } to { transform: translateX(8px); } }
-        #stage { animation: drift 120ms infinite alternate; }
-        #visual-layer { position: fixed; inset: 0; z-index: 20; }
-      </style>
-      <div id="stage">
-        <span data-onboarding="mic-cta" aria-hidden="true"></span>
-        <button
-          type="button"
-          aria-label="Start open session"
-          onfocus="document.querySelector('[data-onboarding=mic-cta]').remove()"
-          onclick="window.__micActivations += 1"
-        >microphone</button>
-      </div>
-      <div id="visual-layer"></div>
-      <script>window.__micActivations = 0;</script>
-    `);
-    const button = await resolveDashboardMicButton(page, page.locator('[data-onboarding="mic-cta"]'));
-    await expect(button.click({ timeout: 500 })).rejects.toThrow(/Timeout/);
-    await activateDashboardMicButton(page, button);
-    expect(await page.locator('[data-onboarding="mic-cta"]').count()).toBe(0);
-    expect(await page.evaluate(() => (window as any).__micActivations)).toBe(1);
-    await context.close();
-  });
-
-  it("waits for a delayed ordinary session voice control within the caller's bound", async () => {
-    const context = await browser.newContext();
-    const page = await context.newPage();
-    await page.goto(origin);
-    await page.setContent(`
-      <div id="session-controls"></div>
-      <script>
-        window.__voiceActivations = 0;
-        setTimeout(() => {
-          const button = document.createElement('button');
-          button.type = 'button';
-          button.setAttribute('aria-label', 'Tap to speak');
-          button.onclick = () => { window.__voiceActivations += 1; };
-          document.querySelector('#session-controls').append(button);
-        }, 150);
-      </script>
-    `);
-    const button = page.getByRole("button", { name: "Tap to speak", exact: true }).first();
-    await activateDashboardMicButton(page, button, 1_000);
-    expect(await page.evaluate(() => (window as any).__voiceActivations)).toBe(1);
-    await context.close();
-  });
-
-  it("selects the ordinary voice tab once when a fresh session opens in text mode", async () => {
-    const context = await browser.newContext();
-    const page = await context.newPage();
-    await page.goto(origin);
-    await page.setContent(`
-      <button role="tab" aria-selected="false">voice</button>
-      <button role="tab" aria-selected="true">text</button>
-      <script>
-        window.__voiceTabActivations = 0;
-        document.querySelector('[role="tab"]')?.addEventListener('click', (event) => {
-          window.__voiceTabActivations += 1;
-          event.currentTarget.setAttribute('aria-selected', 'true');
-        });
-      </script>
-    `);
-    await expect(establishSessionVoiceTab(page, 1_000)).resolves.toBe("activated");
-    expect(await page.evaluate(() => (window as any).__voiceTabActivations)).toBe(1);
-    await context.close();
-  });
-
-  it("does not fail startup when the voice tab is transiently absent during session hydration", async () => {
-    const context = await browser.newContext();
-    const page = await context.newPage();
-    await page.goto(origin);
-    await page.setContent('<main aria-label="hydrating session"></main>');
-    await expect(establishSessionVoiceTab(page, 100)).resolves.toBe("unavailable");
-    await context.close();
-  });
-
-  it("waits through session hydration and selects a delayed ordinary voice tab once", async () => {
-    const context = await browser.newContext();
-    const page = await context.newPage();
-    await page.goto(origin);
-    await page.setContent(`
-      <main aria-label="hydrating session"></main>
-      <script>
-        window.__voiceTabActivations = 0;
-        setTimeout(() => {
-          const button = document.createElement('button');
-          button.type = 'button';
-          button.setAttribute('role', 'tab');
-          button.setAttribute('aria-selected', 'false');
-          button.textContent = 'voice';
-          button.onclick = () => {
-            window.__voiceTabActivations += 1;
-            button.setAttribute('aria-selected', 'true');
-          };
-          document.querySelector('main').append(button);
-        }, 150);
-      </script>
-    `);
-    await expect(establishSessionVoiceTab(page, 1_000)).resolves.toBe("activated");
-    expect(await page.evaluate(() => (window as any).__voiceTabActivations)).toBe(1);
-    await context.close();
-  });
-
   it("projects only fixed structural states when the session voice control is unavailable", async () => {
     const context = await browser.newContext();
     const page = await context.newPage();
@@ -314,53 +190,6 @@ describe("real Chromium dynamic media contract", () => {
     expect(diagnostic.voice_tab).toBe("selected");
     expect(diagnostic.voice_button).toBe("disabled");
     expect(JSON.stringify(diagnostic)).not.toContain("do-not-project");
-    await context.close();
-  });
-
-  it("follows delayed and nested fresh-session choices until ordinary session navigation completes", async () => {
-    const context = await browser.newContext();
-    const page = await context.newPage();
-    await page.goto(origin);
-    await page.setContent(`
-      <button type="button" hidden>Start fresh</button>
-      <div id="choices"></div>
-      <script>
-        setTimeout(() => {
-          const choices = document.querySelector('#choices');
-          const fresh = document.createElement('button');
-          fresh.type = 'button';
-          fresh.textContent = 'Start fresh';
-          fresh.onclick = () => {
-            fresh.remove();
-            const open = document.createElement('button');
-            open.type = 'button';
-            open.textContent = 'Start open';
-            open.onclick = () => history.pushState({}, '', '/session');
-            choices.append(open);
-          };
-          choices.append(fresh);
-        }, 1_400);
-      </script>
-    `);
-    await establishSessionNavigation(page, origin, "Start fresh", 5_000);
-    expect(new URL(page.url()).pathname).toBe("/session");
-    await context.close();
-  });
-
-  it("activates a persistent asynchronous fresh-session choice only once", async () => {
-    const context = await browser.newContext();
-    const page = await context.newPage();
-    await page.goto(origin);
-    await page.setContent(`
-      <button
-        type="button"
-        onclick="window.__freshActivations += 1; setTimeout(() => history.pushState({}, '', '/session'), 1_500)"
-      >Start fresh</button>
-      <script>window.__freshActivations = 0;</script>
-    `);
-    await establishSessionNavigation(page, origin, "Start fresh", 4_000);
-    expect(new URL(page.url()).pathname).toBe("/session");
-    expect(await page.evaluate(() => (window as any).__freshActivations)).toBe(1);
     await context.close();
   });
 

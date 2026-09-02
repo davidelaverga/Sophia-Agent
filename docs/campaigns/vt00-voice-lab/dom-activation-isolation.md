@@ -1,6 +1,6 @@
 # Voice Lab DOM activation isolation
 
-Status: `IMPLEMENTED — CLOSED DEPLOYMENT ASSERTION REQUIRED`
+Status: `CLOSED DEPLOYMENT GREEN — b9fafffe575fa39a5f29ff22d9811e449eb4e067`
 
 Falsifiable hypothesis: the production Voice Lab startup path can activate the
 ordinary Sophia session and voice callbacks only through the server-authorized,

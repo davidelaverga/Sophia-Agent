@@ -137,8 +137,10 @@ Execution-unlock progress is monotonic:
   green at `8f0cb46a1c9ca23a2e2b7950fb12e6d125e5f35b`;
 - storage transplant removal: closed deployment green at
   `81e3da1641f1e3ae2edc56a7dc693915184ebe62`;
-- MutationObserver and DOM-button activation removal: implemented in
-  `dom-activation-isolation.md`, closed deployment assertion required;
+- MutationObserver and injected DOM-button activation removal: closed deployment
+  green at `b9fafffe575fa39a5f29ff22d9811e449eb4e067`;
+- superseded direct UI activation and route-reload fallback removal: implemented
+  in `ui-fallback-isolation.md`, closed deployment assertion required;
 - controller parity, cancellation, 20/20 real built-app trials, and five
   consecutive deployed canaries: pending.
 
