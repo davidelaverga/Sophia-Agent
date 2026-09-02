@@ -1,6 +1,6 @@
 # Voice Lab browser storage isolation
 
-Status: `IMPLEMENTED — CLOSED DEPLOYMENT ASSERTION REQUIRED`
+Status: `CLOSED DEPLOYMENT GREEN — 81e3da1641f1e3ae2edc56a7dc693915184ebe62`
 
 Falsifiable hypothesis: a production Voice Lab run can establish the dedicated
 synthetic principal and the ordinary Sophia voice session without importing any
@@ -23,3 +23,8 @@ disposable-process, and execution-epoch suites must pass before publication.
 Production gates remain closed until the exact candidate is deployed and aggregate
 readiness again reports all exact component identities, one settled worker, zero
 active runs, and every mutation and execution gate closed.
+
+The exact candidate was deployed on every component and aggregate readiness
+returned HTTP 200 with all six identities exact, one settled worker, zero active
+runs, OAuth and test auth verified, and every product mutation and execution gate
+closed before the DOM-activation removal began.

@@ -900,37 +900,6 @@ export async function activateDashboardMicButton(page: Page, button: Locator, vi
   await page.keyboard.press("Enter");
 }
 
-export async function waitForPageOwnedVoiceActivation(
-  hasScheduledReceipt: () => boolean,
-  timeoutMs = SESSION_VOICE_START_VISIBILITY_TIMEOUT_MS,
-): Promise<"scheduled"> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (hasScheduledReceipt()) return "scheduled";
-    await waitOnWorkerClock(Math.min(50, Math.max(1, deadline - Date.now())));
-  }
-  const timeout = new Error("The page-owned harness did not schedule the ordinary session voice control.");
-  timeout.name = "TimeoutError";
-  throw timeout;
-}
-
-export async function armPageOwnedVoiceActivation(
-  page: Page,
-  voiceActivationToken: string,
-  timeoutMs = 1_000,
-): Promise<"armed"> {
-  const armed = await page.locator("html").evaluate((_element, token) => {
-    const harness = (window as typeof window & {
-      __sophiaVoiceLab?: { armVoiceActivation?: (candidate: string) => boolean };
-    }).__sophiaVoiceLab;
-    return harness?.armVoiceActivation?.(token) === true;
-  }, voiceActivationToken, { timeout: timeoutMs });
-  if (armed) return "armed";
-  const error = new Error("The page-owned harness rejected the bounded voice activation arm.");
-  error.name = "TimeoutError";
-  throw error;
-}
-
 export async function establishSessionVoiceTab(
   page: Page,
   timeoutMs = SESSION_VOICE_TAB_TIMEOUT_MS,
@@ -1300,8 +1269,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       const authUser = authIdentity?.user as Record<string, unknown> | undefined;
       if (!authSession.ok() || authUser?.id !== run.principalId) throw new VoiceLabError(labError("AUTH_PRINCIPAL_MISMATCH", "The browser session is not bound to the exact dedicated Voice Lab principal.", "authorization", false, { observed_principal_sha256: typeof authUser?.id === "string" ? sha256(authUser.id) : null }));
       await enterStage("browser_init_script");
-      const voiceActivationToken = randomUUID();
-      const initScriptContent = buildVoiceLabInitScript({ pageOrigin: frontendOrigin, websocketOrigins: [...this.config.websocketOrigins], maxAudioBytes: this.config.maxAudioBytes, testRunId: run.testRunId, cleanupObligationId: run.cleanupObligationId, startButtonName: this.config.startButtonName, voiceActivationToken });
+      const initScriptContent = buildVoiceLabInitScript({ pageOrigin: frontendOrigin, websocketOrigins: [...this.config.websocketOrigins], maxAudioBytes: this.config.maxAudioBytes, testRunId: run.testRunId, cleanupObligationId: run.cleanupObligationId });
       await context.addInitScript({ content: initScriptContent });
       const preloadedPassiveEffectBreakpoints = await settleDiagnosticWithinBudget(
         preloadPassiveEffectBreakpoints(context.request, frontendOrigin).catch(() => []),

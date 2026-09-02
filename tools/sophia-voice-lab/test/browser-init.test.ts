@@ -39,13 +39,22 @@ function harness() {
   };
   sandbox.window = sandbox;
   sandbox.top = sandbox;
-  vm.runInNewContext(buildVoiceLabInitScript({ pageOrigin: "https://frontend.test", websocketOrigins: ["wss://provider.test"], maxAudioBytes: 1024, testRunId: "00000000-0000-4000-8000-000000000001", cleanupObligationId: "00000000-0000-4000-8000-000000000002", startButtonName: "Tap to speak", voiceActivationToken: "activation-token" }), sandbox);
+  vm.runInNewContext(buildVoiceLabInitScript({ pageOrigin: "https://frontend.test", websocketOrigins: ["wss://provider.test"], maxAudioBytes: 1024, testRunId: "00000000-0000-4000-8000-000000000001", cleanupObligationId: "00000000-0000-4000-8000-000000000002" }), sandbox);
   return { sandbox, audio, sources, listeners, productEvents, pagePushes, storage };
 }
 
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 describe("page-owned dynamic WebAudio injection", () => {
+  it("contains no DOM observer or button-click activation fallback", () => {
+    const script = buildVoiceLabInitScript({ pageOrigin: "https://frontend.test", websocketOrigins: ["wss://provider.test"], maxAudioBytes: 1024, testRunId: "00000000-0000-4000-8000-000000000001", cleanupObligationId: "00000000-0000-4000-8000-000000000002" });
+    expect(script).not.toContain("MutationObserver");
+    expect(script).not.toContain("querySelectorAll('button')");
+    expect(script).not.toContain("button.click()");
+    expect(script).not.toContain("armVoiceActivation");
+    expect(script).not.toContain("voiceActivationToken");
+  });
+
   it("pushes harness and product startup receipts through the private binding lane", async () => {
     const { sandbox, listeners, pagePushes } = harness();
     await wait(0);

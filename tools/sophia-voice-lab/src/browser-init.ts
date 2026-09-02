@@ -4,8 +4,6 @@ export interface InitScriptOptions {
   maxAudioBytes: number;
   testRunId: string;
   cleanupObligationId: string;
-  startButtonName: string;
-  voiceActivationToken: string;
 }
 
 export function buildVoiceLabInitScript(options: InitScriptOptions): string {
@@ -231,12 +229,7 @@ export function buildVoiceLabInitScript(options: InitScriptOptions): string {
     }
     Object.defineProperties(LabWebSocket, { CONNECTING: { value: NativeWebSocket.CONNECTING }, OPEN: { value: NativeWebSocket.OPEN }, CLOSING: { value: NativeWebSocket.CLOSING }, CLOSED: { value: NativeWebSocket.CLOSED } });
     window.WebSocket = LabWebSocket;
-    let armOrdinaryVoiceControl = () => false;
     const bridge = Object.freeze({
-      armVoiceActivation: (token) => {
-        if (token !== options.voiceActivationToken) return false;
-        return armOrdinaryVoiceControl();
-      },
       schedule: async ({ operationId, utteranceId, audioBase64, sha256, delayMs = 0, expectedSilence = false, settlementWindowMs, activeTarget = null }) => {
         const replay = state.scheduleReceipts.get(operationId);
         if (replay) return replay;
@@ -332,69 +325,5 @@ export function buildVoiceLabInitScript(options: InitScriptOptions): string {
     }, { once: true });
     Object.defineProperty(window, '__sophiaVoiceLab', { configurable: false, enumerable: false, writable: false, value: bridge });
     emit('harness.initialized', { page_owned_audio_context: true, synthetic_audio_tracks: destination.stream.getAudioTracks().length });
-    // Discover the exact ordinary voice control from the page-owned harness,
-    // but do not activate it until the worker has finished every route/tab
-    // command and arms this exact document with the per-run nonce. The arm
-    // acknowledgement settles before the page schedules its native click, so
-    // no Playwright renderer command remains queued across product media
-    // startup.
-    if (typeof document !== 'undefined' && typeof MutationObserver === 'function') {
-      let voiceActivationIssued = false;
-      let voiceActivationPending = false;
-      let voiceActivationArmed = false;
-      let voiceControlObserver = null;
-      const normalizedControlName = (button) => (button.getAttribute('aria-label') || button.textContent || '').trim();
-      const visibleOrdinaryControl = (button) => {
-        if (!(button instanceof HTMLButtonElement) || button.disabled || !button.isConnected) return false;
-        if (normalizedControlName(button) !== options.startButtonName || button.getAttribute('aria-hidden') === 'true') return false;
-        const style = getComputedStyle(button);
-        return style.display !== 'none' && style.visibility !== 'hidden' && button.getClientRects().length > 0;
-      };
-      const activateOrdinaryVoiceControl = () => {
-        if (!voiceActivationArmed || voiceActivationIssued || voiceActivationPending || location.origin !== options.pageOrigin
-          || (location.pathname !== '/session' && !location.pathname.startsWith('/session/'))) return;
-        const button = Array.from(document.querySelectorAll('button')).find(visibleOrdinaryControl);
-        if (!button) return;
-        voiceActivationPending = true;
-        // The nonce-bound worker arm has already acknowledged before this
-        // later page task runs. No Playwright renderer command therefore
-        // remains pending across the ordinary product media startup.
-        setTimeout(() => {
-          if (!visibleOrdinaryControl(button)) {
-            voiceActivationPending = false;
-            emit('harness.voice_control_activation_aborted', { reason: 'ordinary_control_replaced_before_dispatch' });
-            activateOrdinaryVoiceControl();
-            return;
-          }
-          voiceActivationIssued = true;
-          voiceActivationPending = false;
-          emit('harness.voice_control_activation_scheduled', { ordinary_native_button: true, exact_name: true });
-          emit('harness.voice_control_activation_dispatch_started', { ordinary_native_button: true, exact_name: true });
-          button.click();
-        }, 0);
-      };
-      armOrdinaryVoiceControl = () => {
-        if (voiceActivationArmed || voiceActivationIssued) return false;
-        voiceActivationArmed = true;
-        queueMicrotask(activateOrdinaryVoiceControl);
-        return true;
-      };
-      const installVoiceControlObserver = () => {
-        if (voiceControlObserver || !document.documentElement) return;
-        voiceControlObserver = new MutationObserver(activateOrdinaryVoiceControl);
-        voiceControlObserver.observe(document.documentElement, {
-          subtree: true,
-          childList: true,
-          attributes: true,
-          attributeFilter: ['aria-label', 'aria-hidden', 'class', 'disabled', 'style'],
-        });
-        activateOrdinaryVoiceControl();
-      };
-      if (document.readyState === 'loading') {
-        addEventListener('DOMContentLoaded', installVoiceControlObserver, { once: true });
-      } else {
-        queueMicrotask(installVoiceControlObserver);
-      }
-    }
   })();`;
 }

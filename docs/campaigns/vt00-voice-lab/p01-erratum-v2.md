@@ -135,8 +135,10 @@ Execution-unlock progress is monotonic:
   deployment green at `0b505c40928fedf6a6ca7bdd5fe874ab64208c26`;
 - driver/process death plus provider/session cleanup ordering: closed deployment
   green at `8f0cb46a1c9ca23a2e2b7950fb12e6d125e5f35b`;
-- storage transplant removal: implemented in `storage-isolation.md`, closed
-  deployment assertion required;
+- storage transplant removal: closed deployment green at
+  `81e3da1641f1e3ae2edc56a7dc693915184ebe62`;
+- MutationObserver and DOM-button activation removal: implemented in
+  `dom-activation-isolation.md`, closed deployment assertion required;
 - controller parity, cancellation, 20/20 real built-app trials, and five
   consecutive deployed canaries: pending.
 
