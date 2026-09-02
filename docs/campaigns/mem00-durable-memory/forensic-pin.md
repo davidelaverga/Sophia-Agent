@@ -31,8 +31,8 @@ The participating product services are now converged on remote head `7d1e6b6a`; 
 
 - Supabase project reference: `vlxnwmyvhchwbousrdzc`.
 - Region/compute observed: `us-west-1`, micro, healthy.
-- Pre-MEM00 schema snapshot: 890 catalog entries, MD5 `2dba7958516953a2539fd71b3571f270`.
-- No MEM00 table existed at the pin and no production migration has been applied.
+- Latest pre-MEM00 schema snapshot: PostgreSQL `17.6`; 1,413 entries and MD5 `35ae9752dee02bca116c2aa3905195f9` using the recorded union of public columns, constraints, routine signatures/results, relations, and index definitions. The earlier 890-entry snapshot used a narrower catalog projection and remains historical rather than directly comparable.
+- Zero public relations matched `sophia_memory%`; `public.sophia_memory_contract` did not exist and no production MEM00 migration had been applied at the latest pin.
 - Additive migration staged at `backend/migrations/2026_09_02_mem00_durable_memory_governance.sql`.
 - Migration SHA-256: `96303ed50b1508b35287cb70acd26dd34e58aa44a50b0527090f17ac302f96b7`.
 - Contract default after migration: epoch `1`, schema `mem00.v1`, mode `disabled`, candidate plaintext retention exactly 30 days, content-free receipts at least 3,650 days.
@@ -68,7 +68,7 @@ The participating product services are now converged on remote head `7d1e6b6a`; 
 
 ## Default-closed feature snapshot
 
-All new flags are absent/false in production and default false in code:
+All new flags are absent in the latest signed-in Gateway environment read and default false in code. The existing environment still exposes only the eight expected legacy Mem0 key names (`MEM0_API_KEY`, `MEM0_ENABLED`, `MEM0_MAX_SEARCH_RESULTS`, `MEM0_ORG_ID`, `MEM0_PROJECT_ID`, `MEM0_REFERENCE_DATE_ENABLED`, `MEM0_REMOVE_CATEGORY_FILTER_ENABLED`, and `MEM0_USER_ID_PREFIX`); secret values are excluded.
 
 `candidate_ledger_write`, `candidate_ledger_read`, `canonical_pool_read`, `provider_projection`, `governed_runtime_read`, `legacy_inventory`, `legacy_import`, and `memory_fault_injection`.
 
