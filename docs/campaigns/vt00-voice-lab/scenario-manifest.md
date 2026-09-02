@@ -4,6 +4,10 @@ Status: `DRAFT — EXECUTION PENDING`
 
 Manifest version: `vt00.scenarios.v1`
 
+V-P01 composition is governed by `p01-erratum-v2.md`. Its v1 proof path is
+superseded and no official signed V-P01 is authorized until the erratum's
+implementation and execution unlocks are green on one exact closed deployment.
+
 Every scenario uses the dedicated synthetic principal, the ordinary deployed Sophia UI, exact deployment identities, and a unique run-scoped idempotency key. Harness and product expectations are evaluated independently.
 
 Scenarios run sequentially. The current Gateway active-session map is keyed by the single dedicated principal, so concurrent suite children are not authorized.
@@ -40,7 +44,7 @@ Scenarios run sequentially. The current Gateway active-session map is keyed by t
 | `V-D01` | Produce and incrementally drain more than 500 browser events | Monotonic, generation-aware, deduplicated persistence with zero sequence gap, or explicit `invalid_test` | Not applicable | `PENDING` |
 | `V-D02` | Restart the MCP API or browser worker at the declared boundary | API restart reattaches through the ledger without duplicate injection; browser-worker loss is truthfully terminal and fully reaped | Product state is unchanged by observer restart | `PENDING` |
 | `V-L01` | Disable or make LangSmith unavailable | Typed `trace_unavailable`; canonical evidence remains complete and exportable | Local Sophia behavior/state does not diverge because tracing failed | `PENDING` |
-| `V-P01` | Fresh-agent installed-plugin flow | Start → speak → wait → inspect → end → evidence completes without raw JS, credentials, manual takeover, or more than ten high-level calls | Not applicable | `PENDING` |
+| `V-P01` | Fresh-agent installed-plugin flow under `p01-erratum-v2.md` | Exact ten-call semantic spine plus bounded audited read-only polling; truthful submission/settlement, a service-minted run-bound adaptive receipt, and three ordinal domains; no raw JS, credentials, or manual takeover | Not applicable | `PENDING — V2 IMPLEMENTATION GATED` |
 
 `V-F02` is currently catalogued as `typed_unsupported` with reason
 `governed_product_clock_not_available`. This is an honest owning-product boundary,

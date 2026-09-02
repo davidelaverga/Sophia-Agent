@@ -60,7 +60,7 @@ State the outcome without combining harness and product failures. A product defe
 | `V-D01` | `PENDING` | `PENDING` | `PENDING` | `PENDING` | `PENDING` |
 | `V-D02` | `PENDING` | `PENDING` | `PENDING` | `PENDING` | `PENDING` |
 | `V-L01` | `PENDING` | `PENDING` | `PENDING` | `PENDING` | `PENDING` |
-| `V-P01` | `PENDING` | `PENDING` | `PENDING` | `PENDING` | `PENDING` |
+| `V-P01` | `PENDING — V2 IMPLEMENTATION GATED` | `PENDING` | `PENDING` | `PENDING` | `p01-erratum-v2.md`; historical attempt lower bound `>= 1` |
 
 For each non-pass, record the first failing receipt/cursor, expected behavior, observed behavior, reproducibility, owner, and whether rerun is authorized.
 
@@ -83,6 +83,8 @@ For each non-pass, record the first failing receipt/cursor, expected behavior, o
 | Capture cursor/generation/gap audit | `PENDING` | `PENDING` |
 | Registered `plugin_asdk_app` identity and private install | `PENDING` | `PENDING` |
 | Fresh Codex task identity, OAuth subject, and bounded MCP call audit | `PENDING` | `PENDING` |
+| P01 exact semantic spine, audited polls, and three ordinal domains | `PENDING` | `p01-erratum-v2.md` |
+| P01 service-minted run-bound adaptive observation receipt | `PENDING` | `p01-erratum-v2.md` |
 | Registered-app worst-case `end_voice_run` terminal latency / timeout | `PENDING` | `PENDING` |
 
 ## Gate checklist
