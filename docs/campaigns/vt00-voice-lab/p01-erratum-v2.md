@@ -145,9 +145,11 @@ Execution-unlock progress is monotonic:
   `66cebaa414b2a8b89f2881b34baaac22870652f5`;
 - controller parity: closed deployment green at
   `ad611e382ecd96a2ab1b7a5041b187f7d9f39aed`;
-- page-owned control cancellation: implemented in `control-cancellation.md`,
-  closed deployment assertion required;
-- 20/20 real built-app trials and five consecutive deployed canaries: pending.
+- page-owned control cancellation: closed deployment green at
+  `d8ad61b303b5df8df262dad46d51782353741761`;
+- 20/20 deterministic real-Chromium dynamic-injection trials: implemented in
+  `dynamic-injection-trials.md`, closed deployment assertion required;
+- five consecutive fresh deployed voice canaries: pending.
 
 ## Historical iteration counter
 

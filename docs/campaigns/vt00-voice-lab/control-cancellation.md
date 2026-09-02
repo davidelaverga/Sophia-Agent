@@ -1,6 +1,6 @@
 # Voice Lab control cancellation
 
-Status: `IMPLEMENTED — CLOSED DEPLOYMENT ASSERTION REQUIRED`
+Status: `CLOSED DEPLOYMENT GREEN — d8ad61b303b5df8df262dad46d51782353741761`
 
 Falsifiable hypothesis: a Voice Lab control authorization belongs only to the
 mounted page instance that requested it. Unmounting that page aborts the
@@ -18,4 +18,6 @@ Focused hook tests hold the fetch and receipt promises open across unmount, prov
 the request signal is aborted, release valid stale receipts, and require zero
 capture publication and zero callback invocation. The full frontend and Voice
 Lab suites must remain green before publication, followed by a closed exact-
-candidate deployment assertion with one settled worker and zero active runs.
+candidate deployment assertion with one settled worker and zero active runs. The
+exact candidate was deployed on all six components and that assertion passed
+with every mutation gate closed.

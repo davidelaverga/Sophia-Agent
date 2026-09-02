@@ -178,25 +178,39 @@ describe("real Chromium dynamic media contract", () => {
       };
     }, origin.replace("http://", "ws://"));
 
-    const wav = sineWav();
+    const wav = sineWav(120);
     const digest = createHash("sha256").update(wav).digest("hex");
-    const receipt = await page.evaluate(async ({ audioBase64, sha256 }) => (window as any).__sophiaVoiceLab.schedule({ operationId: "real-op-1", utteranceId: "real-utt-1", audioBase64, sha256, delayMs: 80 }), { audioBase64: wav.toString("base64"), sha256: digest });
-    expect(receipt.kind).toBe("audio.input.scheduled");
-    await page.waitForFunction(() => {
-      const events = (window as any).__sophiaVoiceLab.drain(0).events;
-      return events.some((event: any) => event.kind === "audio.input.completed") && events.some((event: any) => event.kind === "harness.input_frame_forwarded");
-    }, undefined, { timeout: 15_000 });
+    for (let trial = 1; trial <= 20; trial += 1) {
+      const operationId = `real-op-${trial}`;
+      const utteranceId = `real-utt-${trial}`;
+      const receipts = await page.evaluate(async ({ operationId, utteranceId, audioBase64, sha256 }) => {
+        const request = { operationId, utteranceId, audioBase64, sha256, delayMs: 10 };
+        return Promise.all([
+          (window as any).__sophiaVoiceLab.schedule(request),
+          (window as any).__sophiaVoiceLab.schedule(request),
+        ]);
+      }, { operationId, utteranceId, audioBase64: wav.toString("base64"), sha256: digest });
+      expect(receipts[0]).toEqual(receipts[1]);
+      expect(receipts[0].kind).toBe("audio.input.scheduled");
+      await page.waitForFunction((expectedOperationId) => {
+        const events = (window as any).__sophiaVoiceLab.drain(0).events;
+        return events.some((event: any) => event.kind === "audio.input.completed" && event.payload.operation_id === expectedOperationId)
+          && events.some((event: any) => event.kind === "harness.input_frame_forwarded" && event.payload.operation_id === expectedOperationId);
+      }, operationId, { timeout: 15_000 });
+    }
     const result = await page.evaluate(() => ({ nativeCalls: (window as any).__nativeGumCalls, productMediaObserverCalls: (window as any).__productMediaObserverCalls, nonzeroCallbacks: (window as any).__realMedia.nonzeroCallbacks, events: (window as any).__sophiaVoiceLab.drain(0).events }));
     expect(result.nativeCalls).toBe(0);
     expect(result.productMediaObserverCalls).toBe(1);
     expect(result.nonzeroCallbacks).toBeGreaterThan(0);
     expect(result.events.filter((event: any) => event.kind === "harness.media_stream_issued")).toHaveLength(1);
-    expect(result.events.filter((event: any) => event.kind === "audio.input.started")).toHaveLength(1);
-    expect(result.events.filter((event: any) => event.kind === "audio.input.completed")).toHaveLength(1);
+    expect(result.events.filter((event: any) => event.kind === "audio.input.scheduled")).toHaveLength(20);
+    expect(result.events.filter((event: any) => event.kind === "audio.input.started")).toHaveLength(20);
+    expect(result.events.filter((event: any) => event.kind === "audio.input.completed")).toHaveLength(20);
     expect(result.events.filter((event: any) => ["audio.input.interrupted", "audio.input.rejected"].includes(event.kind))).toHaveLength(0);
     const forwarded = result.events.filter((event: any) => event.kind === "harness.input_frame_forwarded");
     expect(forwarded.length).toBeGreaterThan(0);
-    expect(forwarded.every((event: any) => event.payload.operation_id === "real-op-1" && event.payload.utterance_id === "real-utt-1" && /^[a-f0-9]{64}$/.test(event.payload.sha256) && !Object.hasOwn(event.payload, "data"))).toBe(true);
+    expect(new Set(forwarded.map((event: any) => event.payload.operation_id))).toEqual(new Set(Array.from({ length: 20 }, (_, index) => `real-op-${index + 1}`)));
+    expect(forwarded.every((event: any) => /^real-op-\d+$/.test(event.payload.operation_id) && /^real-utt-\d+$/.test(event.payload.utterance_id) && /^[a-f0-9]{64}$/.test(event.payload.sha256) && !Object.hasOwn(event.payload, "data"))).toBe(true);
     const rotation = await page.evaluate(() => (window as any).__sophiaVoiceLab.rotate());
     expect(rotation.kind).toBe("harness.socket_rotation_requested");
     const cameraDenied = await page.evaluate(async () => {
@@ -217,7 +231,7 @@ describe("real Chromium dynamic media contract", () => {
     });
     expect(foreignProof).toEqual({ bridgeInstalled: false, nativeCalls: 1, rejected: true });
     await context.close();
-  }, 25_000);
+  }, 45_000);
 
   it("proves a cached worker Chromium launch/context/WebAudio readiness contract", async () => {
     let launches = 0;
