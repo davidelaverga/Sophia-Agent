@@ -344,11 +344,11 @@ export function useDashboardEntryState() {
     haptic('light');
   }, [micState, selectedRitual, handleStartSession]);
 
-  const handleVoiceLabSessionStart = useCallback(
-    () => handleStartSession(true),
-    [handleStartSession],
-  );
-  useVoiceLabControlAdapter('session-start', handleVoiceLabSessionStart);
+  // The synthetic controller receives no alternate product action. Once the
+  // server authorizes the request, it invokes the exact callback owned by the
+  // visible dashboard microphone control, including all of its current-state
+  // and ritual-selection behavior.
+  useVoiceLabControlAdapter('session-start', handleCallSophia);
 
   useEffect(() => {
     if (!showReplaceSessionConfirm) return;

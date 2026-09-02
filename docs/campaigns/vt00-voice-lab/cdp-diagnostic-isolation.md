@@ -1,6 +1,6 @@
 # Voice Lab CDP diagnostic isolation
 
-Status: `IMPLEMENTED — CLOSED DEPLOYMENT ASSERTION REQUIRED`
+Status: `CLOSED DEPLOYMENT GREEN — 66cebaa414b2a8b89f2881b34baaac22870652f5`
 
 Falsifiable hypothesis: the Voice Lab browser driver contains no Chrome DevTools
 Protocol or React-internal probe that can inspect, pause, resume, or otherwise

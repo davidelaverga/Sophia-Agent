@@ -509,11 +509,6 @@ function SessionPageContent() {
     memoryHighlightsCount: memoryHighlights?.length ?? 0,
     artifactReviewActive: showArtifacts && Boolean(selectedBuilderArtifactPath || storedBuilderArtifact),
   });
-  const handleVoiceLabVoiceStart = useCallback(() => {
-    baseHandleMicClick();
-  }, [baseHandleMicClick]);
-  useVoiceLabControlAdapter('voice-start', handleVoiceLabVoiceStart);
-
   const removeInternalDebriefTriggerBubble = useCallback((triggerText: string) => {
     setChatMessages((prev) => {
       const index = [...prev]
@@ -2095,6 +2090,10 @@ function SessionPageContent() {
     onBaseMicClick: baseHandleMicClick,
     protectArtifactStageOpen: artifactStageVisibilityProtected,
   });
+  // Keep the controller and the visible composer on the same exact product
+  // callback. This preserves read-only and UI-state guards and prevents a
+  // private synthetic-only voice-start path from drifting into the app.
+  useVoiceLabControlAdapter('voice-start', handleMicClick);
   const handleCloseArtifactsPanelAndCanvasState = useCallback(() => {
     canvasRestoreClosedByUserRef.current = true;
     clearSelectedBuilderCanvasState('canvas_close');
