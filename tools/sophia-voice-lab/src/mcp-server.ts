@@ -115,6 +115,7 @@ export function createVoiceLabMcpServer(
           client_request_id_hash: requestContext?.clientRequestIdHash ?? null,
           operation_id_sha256: operationId ? sha256(operationId) : null,
           run_id_sha256: responseRunId ? sha256(responseRunId) : null,
+          submission_outcome: typeof result.data.submission_outcome === "string" ? result.data.submission_outcome : null,
           operation_state: typeof result.data.operation_state === "string" ? result.data.operation_state : null,
           run_state: typeof result.data.run_state === "string" ? result.data.run_state : null,
           condition_satisfied: result.data.condition_satisfied === true,
@@ -135,7 +136,8 @@ export function createVoiceLabMcpServer(
       } catch (error) {
         const contextRun = auditRunId ? await ledger.getRun(auditRunId) : null;
         const result = errorEnvelope(error, contextRun?.callerId === caller.subject ? contextRun : undefined);
-        await ledger.recordAuthAudit({ runId: auditRunId, callerId: caller.subject, action: `tool:${definition.name}`, argumentHash, outcome: "denied", detail: { status: result.status, error_class: result.error_class, request_id_hash: requestContext?.requestIdHash ?? null, client_request_id_hash: requestContext?.clientRequestIdHash ?? null }, observedAt: new Date() });
+        if (!definition.annotations.readOnlyHint) result.data.submission_outcome = "rejected";
+        await ledger.recordAuthAudit({ runId: auditRunId, callerId: caller.subject, action: `tool:${definition.name}`, argumentHash, outcome: "denied", detail: { status: result.status, error_class: result.error_class, submission_outcome: definition.annotations.readOnlyHint ? null : "rejected", request_id_hash: requestContext?.requestIdHash ?? null, client_request_id_hash: requestContext?.clientRequestIdHash ?? null }, observedAt: new Date() });
         const challenge = oauthChallenge && result.error?.category === "authorization" ? oauthChallenge(definition.scopes, result.error.code === "SCOPE_REQUIRED" ? "insufficient_scope" : "invalid_token") : null;
         return { content: [{ type: "text" as const, text: `${result.error_class}: ${result.error?.message ?? "Voice Lab request failed."}` }], structuredContent: result as unknown as Record<string, unknown>, isError: true, ...(challenge ? { _meta: { "mcp/www_authenticate": [challenge] } } : {}) };
       }

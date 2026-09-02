@@ -30,7 +30,7 @@ afterEach(async () => {
   await Promise.all(temporaryDirectories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
 });
 
-type Drift = "none" | "missing_app_join" | "thread_replay";
+type Drift = "none" | "missing_app_join" | "missing_submission_outcome" | "thread_replay";
 
 interface Fixture {
   controllerInput: Record<string, unknown>;
@@ -107,6 +107,19 @@ describe("P01 official-source collector", () => {
       persistCapture: async () => { persisted = true; },
       dependencies: fixture.dependencies,
     })).rejects.toThrow(/thread\/read MCP replay drifted/i);
+    expect(persisted).toBe(false);
+  });
+
+  it("rejects a mutating receipt that conflates submission with operation state", async () => {
+    const fixture = await createFixture("missing_submission_outcome");
+    let persisted = false;
+    await expect(collectAndSignP01Claim({
+      controllerInput: fixture.controllerInput,
+      publicConfig: fixture.publicConfig,
+      platformPrivateKeyPath: fixture.platformKeyPath,
+      persistCapture: async () => { persisted = true; },
+      dependencies: fixture.dependencies,
+    })).rejects.toThrow(/distinguish one fresh durable submission/i);
     expect(persisted).toBe(false);
   });
 
@@ -228,16 +241,17 @@ async function createFixture(drift: Drift): Promise<Fixture> {
   const operations = new Map<number, string>([[1, randomUUID()], [3, randomUUID()], [5, randomUUID()], [8, randomUUID()]]);
   const data: Record<string, unknown>[] = [
     { deployment_discovered: true },
-    { operation_state: "accepted" },
+    { replay: false, submission_outcome: "durably_accepted", operation_state: "accepted" },
     { condition_satisfied: true },
-    { operation_state: "succeeded" },
+    { replay: false, submission_outcome: "durably_accepted", operation_state: "succeeded" },
     { condition_satisfied: true, matched: [{ seq: 55, turn_id: "turn-product-1" }] },
-    { operation_state: "succeeded" },
+    { replay: false, submission_outcome: "durably_accepted", operation_state: "succeeded" },
     { condition_satisfied: true },
     { run_state: "active" },
-    { operation_state: "succeeded", cleanup_complete: true, evidence_state: "available", manifest_id: manifestId, manifest_sha256: manifestSha256 },
+    { replay: false, submission_outcome: "durably_accepted", operation_state: "succeeded", cleanup_complete: true, evidence_state: "available", manifest_id: manifestId, manifest_sha256: manifestSha256 },
     { cleanup_complete: true, evidence_state: "available", manifest_id: manifestId, manifest_sha256: manifestSha256 },
   ];
+  if (drift === "missing_submission_outcome") delete data[1]!.submission_outcome;
   const completedItems = tools.map((tool, index) => {
     const appContext = {
       connectorId: drift === "missing_app_join" && index === 5 ? "plugin_asdk_app_wrong" : APP_ID,

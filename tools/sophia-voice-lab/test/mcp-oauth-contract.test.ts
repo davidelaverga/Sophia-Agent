@@ -368,11 +368,15 @@ describe("external MCP OAuth wire contract", () => {
     const request = { jsonrpc: "2.0", id: `s02-fixture-${randomUUID()}`, method: "tools/call", params: { name: "speak", arguments: { run_id: runId, fixture_id: "s02-governed-unknown-fixture", idempotency_key: "s02-http-fixture" } } };
     const response = await fetch(`http://127.0.0.1:${address.port}/mcp`, { method: "POST", redirect: "manual", headers: { authorization: `Bearer ${config.bearerToken}`, "content-type": "application/json", accept: "application/json, text/event-stream", "x-sophia-voice-lab-probe-id": probeId }, body: JSON.stringify(request) });
     expect(response.status).toBe(200);
-    expect(await response.text()).toContain("FIXTURE_NOT_FOUND");
+    const responseText = await response.text();
+    expect(responseText).toContain("FIXTURE_NOT_FOUND");
+    expect(responseText).toContain("submission_outcome");
+    expect(responseText).toContain("rejected");
     expect(await ledger.listOperations(runId)).toHaveLength(operationsBefore.length);
     expect((await ledger.getRun(runId))?.latestCursor).toBe(before?.latestCursor);
-    const audits = await ledger.listAuthAuditByArgumentHashes(config.bearerSubject, [canonicalRequestHash(request)], new Date(0));
+    const audits = await ledger.listAuthAuditByArgumentHashes(config.bearerSubject, [canonicalRequestHash(request), canonicalRequestHash(request.params.arguments)], new Date(0));
     expect(audits).toContainEqual(expect.objectContaining({ action: "mcp.authenticate", outcome: "allowed", argumentHash: canonicalRequestHash(request), detail: expect.objectContaining({ probe_id_sha256: sha256(probeId) }) }));
+    expect(audits).toContainEqual(expect.objectContaining({ action: "tool:speak", outcome: "denied", detail: expect.objectContaining({ submission_outcome: "rejected", error_class: "FIXTURE_NOT_FOUND" }) }));
   });
 
   it("requires voice_lab:read before resolving any artifact identifier", async () => {

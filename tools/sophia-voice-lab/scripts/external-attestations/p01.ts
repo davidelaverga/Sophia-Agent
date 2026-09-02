@@ -466,6 +466,7 @@ function validateAndDeriveCalls(items: readonly z.infer<typeof McpToolItemSchema
     if (operationExpected !== (envelope.operation_id !== null)) throw new Error(`P01 call ${index + 1} operation cardinality is invalid.`);
     if (envelope.operation_id) operationIds.push(envelope.operation_id);
     const data = envelope.data;
+    if ([1, 3, 5, 8].includes(index) && (data.submission_outcome !== "durably_accepted" || data.replay !== false)) throw new Error(`P01 mutating call ${index + 1} did not distinguish one fresh durable submission from its operation state.`);
     if ([2, 4, 6].includes(index) && data.condition_satisfied !== true) throw new Error(`P01 wait call ${index + 1} did not satisfy its exact condition.`);
     if (index === 1 && data.operation_state !== "accepted") throw new Error("P01 start operation was not accepted.");
     if ([3, 5, 8].includes(index) && data.operation_state !== "succeeded") throw new Error(`P01 mutating call ${index + 1} did not settle exactly once as succeeded.`);

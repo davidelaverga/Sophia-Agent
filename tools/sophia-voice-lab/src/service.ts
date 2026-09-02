@@ -1307,10 +1307,10 @@ export class VoiceLabService {
         if (!record || record.detail.status !== expectedStatuses[index]) return false;
         if (["get_capabilities", "wait_for_turn", "inspect_voice_run", "export_voice_evidence"].includes(call.tool_name) && record.detail.operation_id_sha256 !== null) return false;
         if (call.tool_name === "wait_for_turn" && record.detail.condition_satisfied !== true) return false;
-        if (call.tool_name === "start_voice_run") return record.detail.operation_state === "accepted";
-        if (call.tool_name === "speak") return record.detail.operation_state === "succeeded";
+        if (call.tool_name === "start_voice_run") return record.detail.submission_outcome === "durably_accepted" && record.detail.replay === false && record.detail.operation_state === "accepted";
+        if (call.tool_name === "speak") return record.detail.submission_outcome === "durably_accepted" && record.detail.replay === false && record.detail.operation_state === "succeeded";
         if (call.tool_name === "inspect_voice_run") return record.detail.run_state === run.state || record.detail.run_state === "active" || record.detail.run_state === "ready";
-        if (call.tool_name === "end_voice_run") return record.detail.operation_state === "succeeded" && record.detail.cleanup_complete === true && record.detail.evidence_state === "available"
+        if (call.tool_name === "end_voice_run") return record.detail.submission_outcome === "durably_accepted" && record.detail.replay === false && record.detail.operation_state === "succeeded" && record.detail.cleanup_complete === true && record.detail.evidence_state === "available"
           && record.detail.manifest_id_sha256 === sha256(currentEvidence.manifestId) && record.detail.manifest_sha256 === currentEvidence.manifestSha256;
         if (call.tool_name === "export_voice_evidence") return record.detail.evidence_state === "available"
           && record.detail.manifest_id_sha256 === sha256(currentEvidence.manifestId) && record.detail.manifest_sha256 === currentEvidence.manifestSha256;
@@ -1385,7 +1385,7 @@ export class VoiceLabService {
     const rollingAdmission = created.rollingAdmission!;
     if (!created.replay) await this.ledger.appendEvent(created.run.id, "run.accepted", "mcp", { operation_id: created.operation.id, scenario_id: created.run.scenarioId }, `operation:${created.operation.id}:accepted`);
     const fresh = await this.ledger.getRun(created.run.id) ?? created.run;
-    return envelope({ run: fresh, operationId: created.operation.id, status: created.operation.state === "succeeded" ? "completed" : "accepted", data: { replay: created.replay, run_state: fresh.state, operation_state: created.operation.state, rolling_admission: { replay: rollingAdmission.replay, reset_at: rollingAdmission.resetAt.toISOString(), remaining: rollingAdmission.remaining } } });
+    return envelope({ run: fresh, operationId: created.operation.id, status: created.operation.state === "succeeded" ? "completed" : "accepted", data: { replay: created.replay, submission_outcome: created.replay ? "idempotent_replay" : "durably_accepted", run_state: fresh.state, operation_state: created.operation.state, rolling_admission: { replay: rollingAdmission.replay, reset_at: rollingAdmission.resetAt.toISOString(), remaining: rollingAdmission.remaining } } });
   }
 
   async speak(caller: AuthenticatedCaller, raw: unknown): Promise<LabEnvelope> {
@@ -1698,7 +1698,7 @@ export class VoiceLabService {
     if (!created.replay) await this.ledger.appendEvent(runId, `operation.${type}.accepted`, "mcp", { operation_id: created.operation.id }, `operation:${created.operation.id}:accepted`);
     else await this.ledger.appendEvent(runId, `operation.${type}.idempotent_replay`, "mcp", { operation_id: created.operation.id, exact_request_hash_replay: true, no_new_operation: true }, `operation:${created.operation.id}:idempotent-replay`);
     const fresh = await this.ledger.getRun(runId) ?? run;
-    return envelope({ run: fresh, operationId: created.operation.id, status: created.operation.state === "succeeded" ? "completed" : "accepted", data: { replay: created.replay, operation_state: created.operation.state } });
+    return envelope({ run: fresh, operationId: created.operation.id, status: created.operation.state === "succeeded" ? "completed" : "accepted", data: { replay: created.replay, submission_outcome: created.replay ? "idempotent_replay" : "durably_accepted", operation_state: created.operation.state } });
   }
 
   async awaitSchedulingReceipt(caller: AuthenticatedCaller, accepted: LabEnvelope, timeoutMs: number): Promise<LabEnvelope> {
@@ -1708,12 +1708,13 @@ export class VoiceLabService {
       const operation = await this.ledger.getOperation(accepted.operation_id);
       const run = await this.ownedRun(caller, accepted.run_id);
       if (!operation) throw new VoiceLabError(labError("OPERATION_NOT_FOUND", "Scheduling operation was not found.", "internal"));
-      if (operation.state === "succeeded") return envelope({ run, operationId: operation.id, status: "completed", data: { replay: Boolean(accepted.data.replay), operation_state: operation.state, ...(operation.result ?? {}) } });
-      if (operation.state === "failed" || operation.state === "timed_out" || operation.state === "cancelled") return envelope({ run, operationId: operation.id, status: "failed", error: operation.error ?? labError("SCHEDULING_FAILED", "Page-side audio scheduling failed.", "harness"), data: { operation_state: operation.state } });
+      if (operation.state === "succeeded") return envelope({ run, operationId: operation.id, status: "completed", data: { replay: Boolean(accepted.data.replay), submission_outcome: accepted.data.submission_outcome, operation_state: operation.state, ...(operation.result ?? {}) } });
+      if (operation.state === "failed" || operation.state === "timed_out" || operation.state === "cancelled") return envelope({ run, operationId: operation.id, status: "failed", error: operation.error ?? labError("SCHEDULING_FAILED", "Page-side audio scheduling failed.", "harness"), data: { replay: Boolean(accepted.data.replay), submission_outcome: accepted.data.submission_outcome, operation_state: operation.state } });
       await delay(25);
     }
     const run = await this.ownedRun(caller, accepted.run_id);
-    return envelope({ run, operationId: accepted.operation_id, status: "timeout", warnings: [{ code: "SCHEDULING_PENDING", message: "Page-side scheduling is still pending; inspect the durable operation and retry with the same idempotency key." }], retryability: "retryable", data: { operation_state: "pending", receipt: null } });
+    const operation = await this.ledger.getOperation(accepted.operation_id);
+    return envelope({ run, operationId: accepted.operation_id, status: "timeout", warnings: [{ code: "SCHEDULING_PENDING", message: "Page-side scheduling is still pending; inspect the durable operation and retry with the same idempotency key." }], retryability: "retryable", data: { replay: Boolean(accepted.data.replay), submission_outcome: accepted.data.submission_outcome, operation_state: operation?.state ?? "unknown", receipt: null } });
   }
 
   async awaitEndSettlement(caller: AuthenticatedCaller, accepted: LabEnvelope, timeoutMs: number): Promise<LabEnvelope> {
@@ -1726,16 +1727,16 @@ export class VoiceLabService {
       if (!operation) throw new VoiceLabError(labError("OPERATION_NOT_FOUND", "End operation was not found.", "internal"));
       const evidence = await this.ledger.getEvidence(run.id);
       if (["failed", "timed_out", "cancelled"].includes(operation.state)) {
-        return envelope({ run, operationId: operation.id, status: "failed", error: operation.error ?? labError("END_FAILED", "Bounded canonical finalization failed.", "harness", false), evidence: evidence?.artifactRefs ?? [], data: { replay: Boolean(accepted.data.replay), operation_state: operation.state, run_state: run.state, cleanup_complete: run.cleanupComplete, evidence_state: evidence ? "available" : "pending" } });
+        return envelope({ run, operationId: operation.id, status: "failed", error: operation.error ?? labError("END_FAILED", "Bounded canonical finalization failed.", "harness", false), evidence: evidence?.artifactRefs ?? [], data: { replay: Boolean(accepted.data.replay), submission_outcome: accepted.data.submission_outcome, operation_state: operation.state, run_state: run.state, cleanup_complete: run.cleanupComplete, evidence_state: evidence ? "available" : "pending" } });
       }
       if (operation.state === "succeeded" && TERMINAL_RUN_STATES.has(run.state) && run.cleanupComplete && evidence) {
-        return envelope({ run, operationId: operation.id, status: "completed", evidence: evidence.artifactRefs, data: { replay: Boolean(accepted.data.replay), operation_state: operation.state, run_state: run.state, cleanup_complete: true, evidence_state: "available", manifest_id: evidence.manifestId, manifest_sha256: evidence.manifestSha256, schema_version: evidence.schemaVersion } });
+        return envelope({ run, operationId: operation.id, status: "completed", evidence: evidence.artifactRefs, data: { replay: Boolean(accepted.data.replay), submission_outcome: accepted.data.submission_outcome, operation_state: operation.state, run_state: run.state, cleanup_complete: true, evidence_state: "available", manifest_id: evidence.manifestId, manifest_sha256: evidence.manifestSha256, schema_version: evidence.schemaVersion } });
       }
       await delay(25);
     } while (Date.now() < deadline);
     const run = await this.ownedRun(caller, accepted.run_id);
     const operation = await this.ledger.getOperation(accepted.operation_id);
-    return envelope({ run, operationId: accepted.operation_id, status: "timeout", warnings: [{ code: "END_FINALIZATION_PENDING", message: "Canonical finalization, zero-orphan cleanup, or durable evidence did not settle before the bounded end wait." }], retryability: "retryable", data: { replay: Boolean(accepted.data.replay), operation_state: operation?.state ?? "unknown", run_state: run.state, cleanup_complete: run.cleanupComplete, evidence_state: (await this.ledger.getEvidence(run.id)) ? "available" : "pending", wait_timeout_ms: boundedMs } });
+    return envelope({ run, operationId: accepted.operation_id, status: "timeout", warnings: [{ code: "END_FINALIZATION_PENDING", message: "Canonical finalization, zero-orphan cleanup, or durable evidence did not settle before the bounded end wait." }], retryability: "retryable", data: { replay: Boolean(accepted.data.replay), submission_outcome: accepted.data.submission_outcome, operation_state: operation?.state ?? "unknown", run_state: run.state, cleanup_complete: run.cleanupComplete, evidence_state: (await this.ledger.getEvidence(run.id)) ? "available" : "pending", wait_timeout_ms: boundedMs } });
   }
 
   private async assertInputPreconditions(caller: AuthenticatedCaller, runId: string, input: { expected_cursor?: number | undefined; expected_provider_epoch?: number | undefined; expected_turn_id?: string | undefined }): Promise<void> {

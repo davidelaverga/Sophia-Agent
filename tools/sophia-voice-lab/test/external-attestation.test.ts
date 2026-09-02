@@ -133,6 +133,7 @@ type P01AdmissionMode = "valid" | "missing" | "shape_drift" | "durable_hash_drif
 async function p01Fixture(
   statusOverrides: Partial<Record<number, string>> = {},
   admissionMode: P01AdmissionMode = "valid",
+  submissionDriftOrdinal?: number,
 ) {
   const config = testConfig({
     SOPHIA_VOICE_LAB_OAUTH_ISSUER: "https://oauth.test",
@@ -243,6 +244,7 @@ async function p01Fixture(
     const detail: Record<string, unknown> = {
       tool: tools[index], status, response_sha256: responseSha256, result_request_id_sha256: resultRequestIdSha256, run_id_sha256: runIdSha256, operation_id_sha256: operationIdSha256,
       authorization_kind: "oauth", oauth_client_id_sha256: oauthClientHash, oauth_token_id_sha256: sha256("p01-oauth-token-family"), replay: false,
+      submission_outcome: [2, 4, 6, 9].includes(ordinal) ? (submissionDriftOrdinal === ordinal ? null : "durably_accepted") : null,
       operation_state: ordinal === 2 ? "accepted" : [4, 6, 9].includes(ordinal) ? "succeeded" : null,
       run_state: ordinal === 8 ? "active" : ordinal >= 9 ? terminal.state : "ready",
       condition_satisfied: [3, 5, 7].includes(ordinal), cleanup_complete: ordinal >= 9, evidence_state: ordinal >= 9 ? "available" : null,
@@ -267,6 +269,7 @@ describe("source-owned external attestation boundary", () => {
     await expect((await p01Fixture()).validate()).resolves.toBeUndefined();
     await expect((await p01Fixture({ 9: "timeout" })).validate()).rejects.toMatchObject({ detail: { code: "ATTESTATION_CROSS_JOIN_FAILED" } });
     await expect((await p01Fixture({ 10: "unavailable" })).validate()).rejects.toMatchObject({ detail: { code: "ATTESTATION_CROSS_JOIN_FAILED" } });
+    await expect((await p01Fixture({}, "valid", 4)).validate()).rejects.toMatchObject({ detail: { code: "ATTESTATION_CROSS_JOIN_FAILED" } });
   });
 
   it("joins public P01 speak arguments only through one exact augmented admission", async () => {

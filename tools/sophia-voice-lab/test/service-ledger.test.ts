@@ -479,6 +479,8 @@ describe("service and durable memory-ledger contracts", () => {
     expect(new Set(results.map((result) => result.run_id)).size).toBe(1);
     expect(new Set(results.map((result) => result.operation_id)).size).toBe(1);
     expect(results.filter((result) => result.data.replay === false)).toHaveLength(1);
+    expect(results.filter((result) => result.data.submission_outcome === "durably_accepted")).toHaveLength(1);
+    expect(results.filter((result) => result.data.submission_outcome === "idempotent_replay")).toHaveLength(19);
     await expect(service.startVoiceRun(caller, { ...request, scenario_id: "V-F01" })).rejects.toMatchObject({ detail: { code: "IDEMPOTENCY_CONFLICT" } });
   });
 
@@ -586,6 +588,8 @@ describe("service and durable memory-ledger contracts", () => {
     const accepted = await service.speak(caller, { run_id: run.id, text: "observation-bound follow-up", idempotency_key: "a01-exact-observation", expected_cursor: turn.seq, expected_turn_id: "turn-a01-1", adaptive_observation: { event_seq: turn.seq, turn_id: "turn-a01-1", observation_class: "assistant_turn_complete", followup_intent: "clarify" }, timing_policy: { schedule_timeout_ms: 100 } });
     expect(accepted.status).toBe("timeout");
     const followup = (await ledger.listOperations(run.id)).find((operation) => operation.id === accepted.operation_id)!;
+    expect(accepted.data).toMatchObject({ replay: false, submission_outcome: "durably_accepted", operation_state: followup.state });
+    expect(["accepted", "queued", "leased", "executing"]).toContain(accepted.data.operation_state);
     expect(followup.input.adaptive_observation).toMatchObject({ event_seq: turn.seq, turn_id: "turn-a01-1", followup_intent: "clarify" });
   });
 
@@ -607,7 +611,7 @@ describe("service and durable memory-ledger contracts", () => {
     const manifestId = randomUUID();
     await ledger.saveEvidence({ runId: run.id, manifestId, manifestSha256: sha256("bounded-end-manifest"), schemaVersion: "sophia.voice-lab.evidence.v1", revisionSeq: 1, artifactRefs: [], createdAt: new Date() });
     const ended = await endPromise;
-    expect(ended).toMatchObject({ status: "completed", operation_id: claimedEnd!.operation.id, data: { operation_state: "succeeded", cleanup_complete: true, evidence_state: "available", manifest_id: manifestId } });
+    expect(ended).toMatchObject({ status: "completed", operation_id: claimedEnd!.operation.id, data: { replay: false, submission_outcome: "durably_accepted", operation_state: "succeeded", cleanup_complete: true, evidence_state: "available", manifest_id: manifestId } });
     const exported = await service.exportVoiceEvidence(caller, { run_id: run.id });
     expect(exported).toMatchObject({ status: "completed", data: { manifest_id: manifestId } });
   });
