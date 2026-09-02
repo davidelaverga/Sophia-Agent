@@ -14,7 +14,7 @@ import {
   type SuiteRecord,
   type SuiteEvidenceRecord,
 } from "./domain.js";
-import type { AuthAuditRecord, BrowserLease, ClaimedOperation, EventClaimGuard, EventPage, LedgerHealth, NewOperation, OperationAdmission, PrincipalProvisionCapabilityRotation, PrincipalProvisionClaim, PrincipalProvisionControlRecord, PrincipalProvisionPreparation, PrincipalProvisionReadiness, RetentionTombstone, RollingAdmissionFence, RollingAdmissionLimits, RollingAdmissionReservation, RollingAdmissionResult, RunPatch, VoiceLabLedger, WorkerHeartbeat } from "./ledger.js";
+import type { AuthAuditRecord, BrowserLease, ClaimedOperation, EventAppendInput, EventClaimGuard, EventPage, LedgerHealth, NewOperation, OperationAdmission, PrincipalProvisionCapabilityRotation, PrincipalProvisionClaim, PrincipalProvisionControlRecord, PrincipalProvisionPreparation, PrincipalProvisionReadiness, RetentionTombstone, RollingAdmissionFence, RollingAdmissionLimits, RollingAdmissionReservation, RollingAdmissionResult, RunPatch, VoiceLabLedger, WorkerHeartbeat } from "./ledger.js";
 import { canonicalRequestHash, sha256 } from "./security.js";
 import { parseExactPrincipalProvisionReceipt } from './principal-provision-receipt.js';
 import { attestVoiceLabSchema } from "./schema-attestation.js";
@@ -409,6 +409,61 @@ export class PostgresVoiceLabLedger implements VoiceLabLedger {
       await client.query(`update ${SCHEMA}.runs set latest_cursor=$2,updated_at=now() where id=$1`, [runId, seq]);
       await client.query("commit");
       return mapEvent(inserted.rows[0]);
+    } catch (error) { await client.query("rollback"); throw translatePgError(error); }
+    finally { client.release(); }
+  }
+
+  async appendEvents(runId: string, inputs: EventAppendInput[]): Promise<LabEvent[]> {
+    if (inputs.length === 0) return [];
+    const client = await this.pool.connect();
+    try {
+      await client.query("begin");
+      const locked = await client.query<{ latest_cursor: number }>(`select latest_cursor from ${SCHEMA}.runs where id=$1 for update`, [runId]);
+      if (!locked.rows[0]) throw notFound("RUN_NOT_FOUND", "Run was not found.");
+
+      const dedupeKeys = inputs.flatMap((input) => input.dedupeKey ? [input.dedupeKey] : []);
+      const existingResult = dedupeKeys.length === 0
+        ? { rows: [] as any[] }
+        : await client.query(`select * from ${SCHEMA}.run_events where run_id=$1 and dedupe_key=any($2::text[])`, [runId, dedupeKeys]);
+      const existingByKey = new Map(existingResult.rows.map((row) => [String(row.dedupe_key), mapEvent(row)]));
+      const pending: EventAppendInput[] = [];
+      const replayed: LabEvent[] = [];
+      for (const input of inputs) {
+        const prior = input.dedupeKey ? existingByKey.get(input.dedupeKey) : undefined;
+        if (!prior) {
+          pending.push(input);
+          continue;
+        }
+        if (prior.kind !== input.kind || prior.source !== input.source || canonicalRequestHash(prior.payload) !== canonicalRequestHash(input.payload)) {
+          throw conflict("DEDUPE_CONFLICT", "Event dedupe key was reused with different canonical evidence.");
+        }
+        replayed.push(prior);
+      }
+
+      const baseCursor = Number(locked.rows[0].latest_cursor);
+      let inserted: LabEvent[] = [];
+      if (pending.length > 0) {
+        const insertedResult = await client.query(
+          `insert into ${SCHEMA}.run_events (run_id,seq,kind,source,payload,dedupe_key,observed_at)
+           select $1, $2 + ordinal::integer, kind, source, payload::jsonb, dedupe_key, observed_at
+           from unnest($3::text[],$4::text[],$5::text[],$6::text[],$7::timestamptz[])
+             with ordinality as batch(kind,source,payload,dedupe_key,observed_at,ordinal)
+           returning *`,
+          [
+            runId,
+            baseCursor,
+            pending.map((input) => input.kind),
+            pending.map((input) => input.source),
+            pending.map((input) => JSON.stringify(input.payload)),
+            pending.map((input) => input.dedupeKey ?? null),
+            pending.map((input) => input.observedAt ?? new Date()),
+          ],
+        );
+        inserted = insertedResult.rows.map(mapEvent);
+        await client.query(`update ${SCHEMA}.runs set latest_cursor=$2,updated_at=now() where id=$1`, [runId, baseCursor + pending.length]);
+      }
+      await client.query("commit");
+      return [...replayed, ...inserted].sort((left, right) => left.seq - right.seq);
     } catch (error) { await client.query("rollback"); throw translatePgError(error); }
     finally { client.release(); }
   }

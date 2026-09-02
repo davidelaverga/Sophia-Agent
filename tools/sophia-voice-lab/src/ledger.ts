@@ -75,6 +75,14 @@ export interface EventPage {
   latest: number;
 }
 
+export interface EventAppendInput {
+  kind: string;
+  source: LabEvent["source"];
+  payload: Record<string, unknown>;
+  dedupeKey?: string;
+  observedAt?: Date;
+}
+
 export interface LedgerHealth {
   ok: boolean;
   detail: string;
@@ -215,6 +223,7 @@ export interface VoiceLabLedger {
   cancelPendingRunOperations(runId: string, exceptOperationId: string | null, error: LabError): Promise<OperationRecord[]>;
   claimEvent(runId: string, kind: string, source: LabEvent["source"], payload: Record<string, unknown>, dedupeKey: string, observedAt?: Date, guard?: EventClaimGuard): Promise<{ event: LabEvent; replay: boolean }>;
   appendEvent(runId: string, kind: string, source: LabEvent["source"], payload: Record<string, unknown>, dedupeKey?: string, observedAt?: Date): Promise<LabEvent>;
+  appendEvents(runId: string, events: EventAppendInput[]): Promise<LabEvent[]>;
   listEvents(runId: string, after: number, limit: number): Promise<EventPage>;
   findLatestEvent(runId: string, kinds: string[]): Promise<LabEvent | null>;
   createSuite(suite: SuiteRecord, rolling?: RollingAdmissionFence): Promise<{ suite: SuiteRecord; replay: boolean; rollingAdmission?: RollingAdmissionResult }>;

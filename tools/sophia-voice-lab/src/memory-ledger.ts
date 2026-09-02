@@ -12,7 +12,7 @@ import {
   type SuiteRecord,
   type SuiteEvidenceRecord,
 } from "./domain.js";
-import type { AuthAuditRecord, BrowserLease, ClaimedOperation, EventClaimGuard, EventPage, LedgerHealth, NewOperation, OperationAdmission, PrincipalProvisionCapabilityRotation, PrincipalProvisionClaim, PrincipalProvisionControlRecord, PrincipalProvisionPreparation, PrincipalProvisionReadiness, RetentionTombstone, RollingAdmissionFence, RollingAdmissionLimits, RollingAdmissionReservation, RollingAdmissionResult, RunPatch, VoiceLabLedger, WorkerHeartbeat } from "./ledger.js";
+import type { AuthAuditRecord, BrowserLease, ClaimedOperation, EventAppendInput, EventClaimGuard, EventPage, LedgerHealth, NewOperation, OperationAdmission, PrincipalProvisionCapabilityRotation, PrincipalProvisionClaim, PrincipalProvisionControlRecord, PrincipalProvisionPreparation, PrincipalProvisionReadiness, RetentionTombstone, RollingAdmissionFence, RollingAdmissionLimits, RollingAdmissionReservation, RollingAdmissionResult, RunPatch, VoiceLabLedger, WorkerHeartbeat } from "./ledger.js";
 import { parseExactPrincipalProvisionReceipt } from './principal-provision-receipt.js';
 import { canonicalRequestHash, sha256 } from "./security.js";
 import { CallerPartitioner, type CallerPartitionKeyRing } from "./caller-partition.js";
@@ -281,6 +281,41 @@ export class MemoryVoiceLabLedger implements VoiceLabLedger {
     run.latestCursor = event.seq;
     run.updatedAt = event.at;
     return clone(event);
+  }
+
+  async appendEvents(runId: string, inputs: EventAppendInput[]): Promise<LabEvent[]> {
+    const run = this.#runs.get(runId);
+    if (!run) throw notFound("RUN_NOT_FOUND", "Run was not found.");
+    const events = this.#events.get(runId) ?? [];
+    const appended: LabEvent[] = [];
+    for (const input of inputs) {
+      const existing = input.dedupeKey
+        ? events.find((event) => event.dedupeKey === input.dedupeKey)
+        : undefined;
+      if (existing) {
+        assertEventReplay(existing, input.kind, input.source, input.payload);
+        appended.push(existing);
+        continue;
+      }
+      const event: LabEvent = {
+        runId,
+        seq: events.length + 1,
+        kind: input.kind,
+        source: input.source,
+        at: input.observedAt ?? new Date(),
+        payload: clone(input.payload),
+        dedupeKey: input.dedupeKey ?? null,
+      };
+      events.push(event);
+      appended.push(event);
+    }
+    this.#events.set(runId, events);
+    const latest = events.at(-1);
+    if (latest) {
+      run.latestCursor = latest.seq;
+      run.updatedAt = latest.at;
+    }
+    return clone(appended.sort((left, right) => left.seq - right.seq));
   }
 
   async listEvents(runId: string, after: number, limit: number): Promise<EventPage> {

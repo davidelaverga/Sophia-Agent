@@ -1239,18 +1239,18 @@ describe("service and durable memory-ledger contracts", () => {
   it("publishes the same complete append-only manifest shape for a harness failure and uses canonical saved artifact identities", async () => {
     const run = testRun({ scenarioId: "V-A01", state: "reserved" });
     await ledger.createRunWithOperation(run, startOperation(run), { global: 1, caller: 1 });
-    const originalAppendEvent = ledger.appendEvent.bind(ledger);
+    const originalAppendEvents = ledger.appendEvents.bind(ledger);
     let releaseFirstStageWrite = () => undefined;
     const firstStageWriteBlocked = new Promise<void>((resolve) => {
       releaseFirstStageWrite = resolve;
     });
     let firstStageCallbackReleasedBeforePersistence = false;
-    ledger.appendEvent = async (...args) => {
-      const [,, , payload] = args;
-      if (args[1] === "harness.startup_stage" && payload.stage_sequence === 1) {
+    ledger.appendEvents = async (...args) => {
+      const [, events] = args;
+      if (events.some((event) => event.kind === "harness.startup_stage" && event.payload.stage_sequence === 1)) {
         await firstStageWriteBlocked;
       }
-      return originalAppendEvent(...args);
+      return originalAppendEvents(...args);
     };
     const receiptBytes = Buffer.from('{"safe":"failure-receipt"}');
     const canonicalArtifactId = randomUUID();
