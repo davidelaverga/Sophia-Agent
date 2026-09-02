@@ -71,6 +71,38 @@ describe('useVoiceLabControlAdapter', () => {
     expect(invoke).toHaveBeenCalledTimes(1);
   });
 
+  it('keeps authorization alive across callback identity changes and invokes the latest exact action once', async () => {
+    let resolveFetch!: (response: Response) => void;
+    const pendingFetch = new Promise<Response>((resolve) => {
+      resolveFetch = resolve;
+    });
+    globalThis.fetch = vi.fn().mockReturnValue(pendingFetch);
+    const firstInvoke = vi.fn();
+    const latestInvoke = vi.fn().mockResolvedValue(undefined);
+
+    const { rerender } = renderHook(
+      ({ invoke }) => useVoiceLabControlAdapter('voice-start', invoke),
+      { initialProps: { invoke: firstInvoke } },
+    );
+    await settle();
+    const signal = vi.mocked(globalThis.fetch).mock.calls[0]?.[1]?.signal;
+
+    rerender({ invoke: latestInvoke });
+    await settle();
+
+    expect(signal?.aborted).toBe(false);
+    expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+
+    resolveFetch(new Response(JSON.stringify({ ...receipt, action: 'voice-start' }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }));
+    await settle();
+
+    expect(firstInvoke).not.toHaveBeenCalled();
+    expect(latestInvoke).toHaveBeenCalledTimes(1);
+  });
+
   it.each([
     ['ordinary/default-disabled response', new Response('{}', { status: 404 })],
     ['wrong action', new Response(JSON.stringify({ ...receipt, action: 'voice-start' }), { status: 200 })],

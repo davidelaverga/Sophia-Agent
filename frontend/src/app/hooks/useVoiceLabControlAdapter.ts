@@ -49,6 +49,11 @@ export function useVoiceLabControlAdapter(
   invokeExistingAction: () => void | Promise<void>,
 ): void {
   const invokedRef = useRef(false);
+  const invokeExistingActionRef = useRef(invokeExistingAction);
+
+  useEffect(() => {
+    invokeExistingActionRef.current = invokeExistingAction;
+  }, [invokeExistingAction]);
 
   useEffect(() => {
     if (invokedRef.current) return;
@@ -71,9 +76,9 @@ export function useVoiceLabControlAdapter(
         name: 'authorized-action',
         payload: receipt,
       });
-      await invokeExistingAction();
+      await invokeExistingActionRef.current();
     })().catch(() => undefined);
 
     return () => controller.abort();
-  }, [action, invokeExistingAction]);
+  }, [action]);
 }
