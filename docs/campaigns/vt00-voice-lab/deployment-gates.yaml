@@ -679,6 +679,12 @@ quantitative_gates:
     status: unpassed
   - id: fresh_session_smoke
     threshold: 5_consecutive_sessions_zero_harness_caused_failures
+    scenario: V-F01
+    maximum_run_starts: 5
+    execution: sequential_only
+    admission_between_runs: prior_run_terminal_evidence_exported_and_zero_owned_resources
+    first_stop_condition: harness_failure_or_cleanup_ambiguity
+    official_v_p01_forbidden_until_green: true
     status: unpassed
   - id: identity_evidence_joins
     threshold: 100_percent_present_or_typed_unavailable_zero_silent_inference

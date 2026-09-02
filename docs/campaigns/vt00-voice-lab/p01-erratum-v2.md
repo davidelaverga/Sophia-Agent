@@ -147,9 +147,11 @@ Execution-unlock progress is monotonic:
   `ad611e382ecd96a2ab1b7a5041b187f7d9f39aed`;
 - page-owned control cancellation: closed deployment green at
   `d8ad61b303b5df8df262dad46d51782353741761`;
-- 20/20 deterministic real-Chromium dynamic-injection trials: implemented in
-  `dynamic-injection-trials.md`, closed deployment assertion required;
-- five consecutive fresh deployed voice canaries: pending.
+- 20/20 deterministic real-Chromium dynamic-injection trials: closed deployment
+  green at `566bf2abbf851c12e3cf66b7103354a47ce04559`;
+- five consecutive fresh deployed voice canaries: bounded V-F01 collection
+  protocol implemented in `fresh-session-canaries.md`; closed deployment and live
+  collection pending.
 
 ## Historical iteration counter
 

@@ -7,10 +7,13 @@ This runbook operates the isolated Voice Lab test plane against the ordinary dep
 The machine-readable deployment order, environment ownership, rollback points, cleanup exceptions, and quantitative gate state live in `deployment-gates.yaml`. Update that checkpoint from `unpassed` only from attached execution evidence.
 
 V-P01 hard stop: `p01-erratum-v2.md` supersedes the contradictory v1 proof
-composition. Do not open any gate or launch an official signed V-P01 until all five
-erratum repairs, its real memory/PostgreSQL integration proof, and every separate
+composition. Do not launch an official signed V-P01 until all five erratum repairs,
+its real memory/PostgreSQL integration proof, and every separate
 adapter/process/controller/cancellation/trial/canary unlock are green on the same
-exact immutable deployment. The evidence-backed P01 attempt lower bound is
+exact immutable deployment. The only pre-P01 gate-opening exception is the bounded
+five-run V-F01 collection window in `fresh-session-canaries.md`; it may open only
+after every non-canary unlock is green, may execute no other scenario, and must
+close on its first stop condition. The evidence-backed P01 attempt lower bound is
 monotonic and currently `>= 1`.
 
 ## Roles and stop authority
@@ -149,11 +152,22 @@ The committed candidate pins `sophia-voice-lab-mcp.onrender.com` as one identity
 - Confirm the private plugin's `.app.json` points to the newly registered `plugin_asdk_app` technical ID, its remote app points to the newly verified MCP HTTPS endpoint, and neither bundle contains a secret. A `.mcp.json` preflight connection is not final installation evidence.
 - Exercise a worst-case bounded `end_voice_run` through the registered app and prove the platform keeps the call open through terminal finalization. The diagnostic `.mcp.json` timeout is 180 seconds; current OpenAI plugin documentation does not publish a registered-app tool timeout, so only an installed-surface execution can close this gate.
 
-Record every result as `PASS`, `FAIL`, or `PENDING`. Do not open mutations while any required item is `FAIL` or `PENDING`.
+Record every result as `PASS`, `FAIL`, or `PENDING`. Do not open mutations while
+any required item is `FAIL` or `PENDING`, except that `fresh_session_smoke` is
+necessarily `PENDING` during its one bounded collection window after every other
+required item is `PASS`.
 
 The current Gateway active-session ownership is keyed by the single dedicated principal. Keep global and per-caller concurrency at one and execute regression-suite children sequentially. Parallel runs are forbidden until the product-plane ownership model changes and gains its own evidence-backed gate.
 
 ## Opening and closing the campaign window
+
+Before official V-P01, this section may be used once for the bounded
+`fresh-session-canaries.md` collection window. In that window step 3 is fixed to
+five sequential V-F01 starts, step 4 may execute only V-F01, and the operator must
+complete the per-run terminal-zero and evidence checks before admitting the next
+run. The first harness-caused failure or cleanup ambiguity jumps directly to step
+5. Passing fewer than five consecutive sessions does not partially satisfy the
+canary unlock and never authorizes V-P01.
 
 1. While Voice Lab web admission remains closed, set the protected frontend test-plane enable flag only for the dedicated principal and open its product-plane kill switch, then manually redeploy/promote the frontend from exact candidate B. Record the new campaign-open Vercel deploy ID and require signed frontend readiness from that exact deployment to report the B build, `voice_lab_enabled:true`, `kill_switch_engaged:false`, and `provisioning_enabled:false`; neither the closed-final B deploy nor any unpromoted preview is admissible. Set and deploy the matching Gateway/Voice flags and product kill switches. Before touching the worker, require exact current-B Gateway and Voice deploy IDs plus `voice_lab_enabled:true`, `voice_lab_kill_switch_engaged:false`, and `voice_lab_mutation_ready:true` from both public readiness projections; Gateway must also retain `voice_lab_admission_ready:true`.
 2. Set the service-scoped Voice Lab worker execution kill switch to `false`, record the resulting Render worker deploy ID/start, and wait for exactly one live current-B heartbeat from a new boot. Require effective kill switch `false`, the open-state deployment-identity hash, fixture/browser readiness, and `observed_at` after both that deploy start and the current MCP boot. Only then set the separately stored Voice Lab MCP web-admission kill switch to `false`; require the redeployed web `/readyz` to report `execution_gate_settled:true`, both product mutation gates open, and `mutation_ready:true`. Keep destructive socket rotation protected by explicit `voice_lab:fault` scope and the distinct diagnostic fault bearer.
