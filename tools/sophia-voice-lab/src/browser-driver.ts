@@ -114,11 +114,44 @@ type ClientPageErrorDiagnostic = {
   digest: string | null;
 };
 type ClientChunkFrame = { chunk: string; line: number; column: number };
-type SessionNavigationResponseDiagnostic = {
+export type SessionNavigationResponseDiagnostic = {
   transport: "document" | "route_fetch";
   status: number;
   ok: boolean;
+  completion: "pending" | "finished" | "failed";
 };
+
+/** Observe only the fixed transport/status/completion state of a same-origin
+ * `/session` response. The response body, URL parameters, headers, and failure
+ * text are intentionally excluded from the diagnostic. */
+export function observeSessionNavigationResponse(
+  response: PlaywrightResponse,
+  frontendOrigin: string,
+  update: (diagnostic: SessionNavigationResponseDiagnostic) => void,
+  active: () => boolean = () => true,
+): void {
+  let target: URL;
+  try {
+    target = new URL(response.url());
+  } catch {
+    return;
+  }
+  if (target.origin !== frontendOrigin || !/^\/session(?:\/|$)/.test(target.pathname)) return;
+  const resourceType = response.request().resourceType();
+  if (resourceType !== "document" && resourceType !== "fetch" && resourceType !== "xhr") return;
+  const base = {
+    transport: resourceType === "document" ? "document" as const : "route_fetch" as const,
+    status: response.status(),
+    ok: response.ok(),
+  };
+  if (!active()) return;
+  update({ ...base, completion: "pending" });
+  void response.finished().then(() => {
+    if (active()) update({ ...base, completion: "finished" });
+  }).catch(() => {
+    if (active()) update({ ...base, completion: "failed" });
+  });
+}
 export function classifyBrowserStartCause(error: unknown): {
   error_class: string;
   safe_signature: string;
@@ -669,16 +702,12 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
           try {
             const target = new URL(response.url());
             if (target.origin !== frontendOrigin) return;
-            if (/^\/session(?:\/|$)/.test(target.pathname)) {
-              const resourceType = response.request().resourceType();
-              if (resourceType === "document" || resourceType === "fetch" || resourceType === "xhr") {
-                latestSessionNavigationResponse = {
-                  transport: resourceType === "document" ? "document" : "route_fetch",
-                  status: response.status(),
-                  ok: response.ok(),
-                };
-              }
-            }
+            observeSessionNavigationResponse(
+              response,
+              frontendOrigin,
+              (diagnostic) => { latestSessionNavigationResponse = diagnostic; },
+              () => startupPush.active,
+            );
             if (response.status() !== 200) return;
             if (target.pathname === "/api/voice-lab/control/session-start") action = "session-start";
             if (target.pathname === "/api/voice-lab/control/voice-start") action = "voice-start";

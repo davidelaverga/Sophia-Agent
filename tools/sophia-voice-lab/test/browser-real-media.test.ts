@@ -8,7 +8,7 @@ import { chromium, type Browser } from "playwright";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { buildVoiceLabInitScript } from "../src/browser-init.js";
-import { classifySessionVoiceRoute, closeDisposableBrowserProcess, launchDisposableBrowserProcess, PlaywrightVoiceDriver } from "../src/browser-driver.js";
+import { classifySessionVoiceRoute, closeDisposableBrowserProcess, launchDisposableBrowserProcess, observeSessionNavigationResponse, PlaywrightVoiceDriver, type SessionNavigationResponseDiagnostic } from "../src/browser-driver.js";
 import { testRun } from "./helpers.js";
 
 function sineWav(durationMs = 600, sampleRate = 16_000): Buffer {
@@ -153,6 +153,23 @@ describe("real Chromium dynamic media contract", () => {
     expect(diagnostic.location).toBe("expected_session");
     expect(diagnostic.voice_button).toBe("absent");
     expect(JSON.stringify(diagnostic)).not.toContain("private user content");
+    await context.close();
+  });
+
+  it("records only bounded session response lifecycle states", async () => {
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    const diagnostics: SessionNavigationResponseDiagnostic[] = [];
+    page.on("response", (response) => {
+      observeSessionNavigationResponse(response, origin, (diagnostic) => diagnostics.push(diagnostic));
+    });
+    await page.goto(`${origin}/session?private=must-not-be-projected`);
+    await expect.poll(() => diagnostics.at(-1)?.completion).toBe("finished");
+    expect(diagnostics).toEqual([
+      { transport: "document", status: 200, ok: true, completion: "pending" },
+      { transport: "document", status: 200, ok: true, completion: "finished" },
+    ]);
+    expect(JSON.stringify(diagnostics)).not.toContain("must-not-be-projected");
     await context.close();
   });
 
