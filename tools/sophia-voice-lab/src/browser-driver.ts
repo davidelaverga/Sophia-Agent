@@ -114,6 +114,11 @@ type ClientPageErrorDiagnostic = {
   digest: string | null;
 };
 type ClientChunkFrame = { chunk: string; line: number; column: number };
+type SessionNavigationResponseDiagnostic = {
+  transport: "document" | "route_fetch";
+  status: number;
+  ok: boolean;
+};
 export function classifyBrowserStartCause(error: unknown): {
   error_class: string;
   safe_signature: string;
@@ -130,6 +135,10 @@ export function classifyBrowserStartCause(error: unknown): {
 export type SessionVoiceRouteDiagnostic = {
   page_closed: boolean;
   location: "expected_session" | "dashboard" | "same_origin_other" | "cross_origin" | "invalid";
+  document_ready_state: "loading" | "interactive" | "complete" | "unavailable";
+  document_navigation_matches_session_route: boolean;
+  document_body_children: "zero" | "one" | "multiple" | "unavailable";
+  next_flight_payload_present: boolean;
   voice_tab: "absent" | "hidden" | "disabled" | "selected" | "available";
   voice_button: "absent" | "hidden" | "disabled" | "ready" | "active_listening" | "active_thinking" | "active_speaking" | "active_ptt";
   dashboard_mic_visible: boolean;
@@ -142,6 +151,7 @@ export type SessionVoiceRouteDiagnostic = {
   protected_consent_pending_present: boolean;
   protected_content_ready_present: boolean;
   session_content_mounted_present: boolean;
+  session_route_loading_present: boolean;
   session_store_loading_visible: boolean;
   voice_fallback_visible: boolean;
 };
@@ -173,6 +183,44 @@ export async function classifySessionVoiceRoute(
   } catch {
     location = "invalid";
   }
+
+  const documentState: {
+    readyState: "loading" | "interactive" | "complete" | "unavailable";
+    bodyChildren: "zero" | "one" | "multiple" | "unavailable";
+    navigationMatchesSession: boolean;
+    nextFlightPresent: boolean;
+  } = await observeOnWorkerClock(() => page.evaluate((expectedOrigin) => {
+    const readyState = document.readyState === "loading" || document.readyState === "interactive" || document.readyState === "complete"
+      ? document.readyState
+      : "unavailable";
+    const childCount = document.body?.childElementCount;
+    const bodyChildren = typeof childCount !== "number"
+      ? "unavailable"
+      : childCount === 0
+        ? "zero"
+        : childCount === 1
+          ? "one"
+          : "multiple";
+    const navigation = performance.getEntriesByType("navigation")[0] as PerformanceNavigationTiming | undefined;
+    let navigationMatchesSession = false;
+    try {
+      const target = new URL(navigation?.name ?? "");
+      navigationMatchesSession = target.origin === expectedOrigin && /^\/session(?:\/|$)/.test(target.pathname);
+    } catch {
+      navigationMatchesSession = false;
+    }
+    return {
+      readyState,
+      bodyChildren,
+      navigationMatchesSession,
+      nextFlightPresent: Array.from(document.scripts).some((script) => (script.textContent ?? "").includes("self.__next_f.push")),
+    };
+  }, frontendOrigin), {
+    readyState: "unavailable" as const,
+    bodyChildren: "unavailable" as const,
+    navigationMatchesSession: false,
+    nextFlightPresent: false,
+  });
 
   const voiceTab = page.getByRole("tab", { name: /^voice$/i }).first();
   const voiceTabCount = await observeOnWorkerClock(() => voiceTab.count(), 0);
@@ -225,6 +273,10 @@ export async function classifySessionVoiceRoute(
   return {
     page_closed: page.isClosed(),
     location,
+    document_ready_state: documentState.readyState,
+    document_navigation_matches_session_route: documentState.navigationMatchesSession,
+    document_body_children: documentState.bodyChildren,
+    next_flight_payload_present: documentState.nextFlightPresent,
     voice_tab,
     voice_button,
     dashboard_mic_visible: await observeOnWorkerClock(() => micAnchor.isVisible(), false),
@@ -237,6 +289,7 @@ export async function classifySessionVoiceRoute(
     protected_consent_pending_present: await observeOnWorkerClock(() => page.locator('[data-voice-lab-route-state="protected-consent-pending"]').count(), 0) > 0,
     protected_content_ready_present: await observeOnWorkerClock(() => page.locator('[data-voice-lab-route-state="protected-content-ready"]').count(), 0) > 0,
     session_content_mounted_present: await observeOnWorkerClock(() => page.locator('[data-voice-lab-route-state="session-content-mounted"]').count(), 0) > 0,
+    session_route_loading_present: await observeOnWorkerClock(() => page.locator('[data-voice-lab-route-state="session-route-loading"]').count(), 0) > 0,
     session_store_loading_visible: await observeOnWorkerClock(() => page.locator('[data-voice-lab-route-state="session-store-loading"]').first().isVisible(), false),
     voice_fallback_visible: await observeOnWorkerClock(() => page.getByText("Voice input unavailable", { exact: true }).first().isVisible(), false),
   };
@@ -569,6 +622,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
     let latestClientPageError: ClientPageErrorDiagnostic | null = null;
     let page: Page | null = null;
     let latestClientConsoleFrames: ClientChunkFrame[] = [];
+    let latestSessionNavigationResponse: SessionNavigationResponseDiagnostic | null = null;
     const currentClientPageErrorDiagnostic = (): ClientPageErrorDiagnostic | null =>
       withClientDiagnosticFrames(latestClientPageError, latestClientConsoleFrames);
     try {
@@ -610,11 +664,22 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
           if (frame) latestClientConsoleFrames = [frame];
         });
         targetPage.on("response", (response) => {
-          if (!startupPush.active || response.status() !== 200) return;
+          if (!startupPush.active) return;
           let action: "session-start" | "voice-start" | null = null;
           try {
             const target = new URL(response.url());
             if (target.origin !== frontendOrigin) return;
+            if (/^\/session(?:\/|$)/.test(target.pathname)) {
+              const resourceType = response.request().resourceType();
+              if (resourceType === "document" || resourceType === "fetch" || resourceType === "xhr") {
+                latestSessionNavigationResponse = {
+                  transport: resourceType === "document" ? "document" : "route_fetch",
+                  status: response.status(),
+                  ok: response.ok(),
+                };
+              }
+            }
+            if (response.status() !== 200) return;
             if (target.pathname === "/api/voice-lab/control/session-start") action = "session-start";
             if (target.pathname === "/api/voice-lab/control/voice-start") action = "voice-start";
           } catch {
@@ -661,6 +726,8 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
         45_000,
         frontendOrigin,
         currentClientPageErrorDiagnostic,
+        () => latestClientConsoleFrames.slice(0, 5),
+        () => latestSessionNavigationResponse,
       );
       events.push(...this.#drainStartupPush(session));
       events.push({
@@ -694,14 +761,14 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       // capability and must revoke the login before closing the browser.
       if (this.#sessions.get(run.id)?.context === context) {
         if (error instanceof VoiceLabError) throw error;
-        throw new VoiceLabError(labError("ORDINARY_UI_ROUTE_FAILED", "The ordinary deployed Sophia voice route could not be established.", "harness", false, { stage: ordinaryRouteStage, cause: classifyBrowserStartCause(error), client_page_error: currentClientPageErrorDiagnostic(), route_state: shouldCaptureSessionVoiceRoute(ordinaryRouteStage) && page ? await classifySessionVoiceRoute(page, frontendOrigin, this.config.startButtonName) : null }));
+        throw new VoiceLabError(labError("ORDINARY_UI_ROUTE_FAILED", "The ordinary deployed Sophia voice route could not be established.", "harness", false, { stage: ordinaryRouteStage, cause: classifyBrowserStartCause(error), client_page_error: currentClientPageErrorDiagnostic(), client_console_error_frames: latestClientConsoleFrames.slice(0, 5), session_navigation_response: latestSessionNavigationResponse, route_state: shouldCaptureSessionVoiceRoute(ordinaryRouteStage) && page ? await classifySessionVoiceRoute(page, frontendOrigin, this.config.startButtonName) : null }));
       }
       const closed = await closeContextWithProof(context, () => ownership.browser.contexts());
       const processClosed = closed.closed ? await this.#closeOwnedBrowserProcess(ownership) : { closed: false, errorClass: closed.errorClass };
       if (closed.closed && processClosed.closed) { this.#sessions.delete(run.id); this.#pendingContexts.delete(run.id); this.#pendingProcesses.delete(run.id); }
       else throw new VoiceLabError(labError("BROWSER_CONTEXT_CLOSE_FAILED", "Failed start left a browser context or process that could not be proven closed.", "harness", true, { original_error_class: error instanceof VoiceLabError ? error.detail.code : error instanceof Error ? error.name : "Error", close_error_class: closed.errorClass ?? processClosed.errorClass }));
       if (error instanceof VoiceLabError) throw error;
-      throw new VoiceLabError(labError("ORDINARY_UI_ROUTE_FAILED", "The ordinary deployed Sophia voice route could not be established.", "harness", false, { stage: ordinaryRouteStage, cause: classifyBrowserStartCause(error), client_page_error: currentClientPageErrorDiagnostic(), route_state: shouldCaptureSessionVoiceRoute(ordinaryRouteStage) && page ? await classifySessionVoiceRoute(page, frontendOrigin, this.config.startButtonName) : null }));
+      throw new VoiceLabError(labError("ORDINARY_UI_ROUTE_FAILED", "The ordinary deployed Sophia voice route could not be established.", "harness", false, { stage: ordinaryRouteStage, cause: classifyBrowserStartCause(error), client_page_error: currentClientPageErrorDiagnostic(), client_console_error_frames: latestClientConsoleFrames.slice(0, 5), session_navigation_response: latestSessionNavigationResponse, route_state: shouldCaptureSessionVoiceRoute(ordinaryRouteStage) && page ? await classifySessionVoiceRoute(page, frontendOrigin, this.config.startButtonName) : null }));
     }
   }
 
@@ -1295,6 +1362,8 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
     timeoutMs: number,
     frontendOrigin: string,
     clientPageErrorDiagnostic: () => ClientPageErrorDiagnostic | null,
+    clientConsoleErrorFrames: () => ClientChunkFrame[],
+    sessionNavigationResponse: () => SessionNavigationResponseDiagnostic | null,
   ): Promise<Omit<LabEvent, "runId" | "seq" | "at">[]> {
     const deadline = Date.now() + timeoutMs;
     const drained: Omit<LabEvent, "runId" | "seq" | "at">[] = [];
@@ -1344,6 +1413,8 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       synthetic_stream_correlated: issuedIdentity !== null && productIdentity !== null && issuedIdentity.stream === productIdentity.stream && JSON.stringify(issuedIdentity.tracks) === JSON.stringify(productIdentity.tracks),
       route_state: routeState,
       client_page_error: clientPageErrorDiagnostic(),
+      client_console_error_frames: clientConsoleErrorFrames(),
+      session_navigation_response: sessionNavigationResponse(),
     }));
   }
 

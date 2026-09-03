@@ -83,6 +83,10 @@ describe("real Chromium dynamic media contract", () => {
     await expect(classifySessionVoiceRoute(page, origin, "Tap to speak")).resolves.toEqual({
       page_closed: false,
       location: "expected_session",
+      document_ready_state: "complete",
+      document_navigation_matches_session_route: true,
+      document_body_children: "multiple",
+      next_flight_payload_present: false,
       voice_tab: "available",
       voice_button: "absent",
       dashboard_mic_visible: false,
@@ -95,6 +99,7 @@ describe("real Chromium dynamic media contract", () => {
       protected_consent_pending_present: false,
       protected_content_ready_present: false,
       session_content_mounted_present: false,
+      session_route_loading_present: false,
       session_store_loading_visible: false,
       voice_fallback_visible: false,
     });
