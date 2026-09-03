@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 import { recordSophiaCaptureEvent } from '../lib/session-capture';
 
@@ -51,13 +51,18 @@ export function useVoiceLabControlAdapter(
 ): void {
   const invokedRef = useRef(false);
   const invokeExistingActionRef = useRef(invokeExistingAction);
+  const readinessLatchedRef = useRef(enabled);
+  const [authorizedReceipt, setAuthorizedReceipt] = useState<VoiceLabControlReceipt | null>(null);
+
+  if (enabled) {
+    readinessLatchedRef.current = true;
+  }
 
   useEffect(() => {
     invokeExistingActionRef.current = invokeExistingAction;
   }, [invokeExistingAction]);
 
   useEffect(() => {
-    if (!enabled || invokedRef.current) return;
     const controller = new AbortController();
 
     void (async () => {
@@ -70,13 +75,23 @@ export function useVoiceLabControlAdapter(
       });
       if (!response.ok) return;
       const receipt: unknown = await response.json();
-      if (!isControlReceipt(receipt, action) || invokedRef.current || controller.signal.aborted) return;
-      invokedRef.current = true;
+      if (!isControlReceipt(receipt, action) || controller.signal.aborted) return;
       recordSophiaCaptureEvent({
         category: 'voice-lab-control',
         name: 'authorized-action',
         payload: receipt,
       });
+      setAuthorizedReceipt(receipt);
+    })().catch(() => undefined);
+
+    return () => controller.abort();
+  }, [action]);
+
+  useEffect(() => {
+    if (!authorizedReceipt || !readinessLatchedRef.current || invokedRef.current) return;
+    invokedRef.current = true;
+
+    void (async () => {
       recordSophiaCaptureEvent({
         category: 'voice-lab-control',
         name: 'authorized-action-invoking',
@@ -101,7 +116,5 @@ export function useVoiceLabControlAdapter(
         throw error;
       }
     })().catch(() => undefined);
-
-    return () => controller.abort();
-  }, [action, enabled]);
+  }, [action, authorizedReceipt, enabled]);
 }

@@ -79,7 +79,7 @@ describe('useVoiceLabControlAdapter', () => {
     expect(invoke).toHaveBeenCalledTimes(1);
   });
 
-  it('waits to authorize until the ordinary product action is ready', async () => {
+  it('keeps authorization alive while waiting for the ordinary product action to become ready', async () => {
     globalThis.fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({
       ...receipt,
       action: 'voice-start',
@@ -95,14 +95,46 @@ describe('useVoiceLabControlAdapter', () => {
     );
     await settle();
 
-    expect(globalThis.fetch).not.toHaveBeenCalled();
+    expect(globalThis.fetch).toHaveBeenCalledTimes(1);
     expect(invoke).not.toHaveBeenCalled();
 
     rerender({ enabled: true });
     await settle();
 
-    expect(globalThis.fetch).toHaveBeenCalledTimes(1);
     expect(invoke).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not discard a successful authorization when readiness briefly flaps', async () => {
+    let resolveFetch!: (response: Response) => void;
+    const pendingFetch = new Promise<Response>((resolve) => {
+      resolveFetch = resolve;
+    });
+    globalThis.fetch = vi.fn().mockReturnValue(pendingFetch);
+    const invoke = vi.fn().mockResolvedValue(undefined);
+
+    const { rerender } = renderHook(
+      ({ enabled }) => useVoiceLabControlAdapter('voice-start', invoke, enabled),
+      { initialProps: { enabled: true } },
+    );
+    await settle();
+    const signal = vi.mocked(globalThis.fetch).mock.calls[0]?.[1]?.signal;
+
+    rerender({ enabled: false });
+    await settle();
+
+    expect(signal?.aborted).toBe(false);
+
+    resolveFetch(new Response(JSON.stringify({ ...receipt, action: 'voice-start' }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }));
+    await settle();
+
+    expect(invoke).toHaveBeenCalledTimes(1);
+    expect(recordCaptureMock).toHaveBeenCalledWith(expect.objectContaining({
+      category: 'voice-lab-control',
+      name: 'authorized-action-completed',
+    }));
   });
 
   it('keeps authorization alive across callback identity changes and invokes the latest exact action once', async () => {
