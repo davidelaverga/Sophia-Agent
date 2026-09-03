@@ -7,11 +7,11 @@ This is a content-free R0 snapshot. Secret values, memory text, raw user/session
 ## Repository lineage
 
 - Reviewed reference: `1e11584050927bac2b4c851533614bc9d63e4eab`.
-- Newest remote head at the latest reconciliation: `7d1e6b6a58ea98a77c00e96be54c61f8fdf2b66e`.
-- Base tree: `734bb4dfa8a9c472ea9ee9ba5f49900e5c3ba079`.
+- Newest remote head at the latest reconciliation: `ce83d5a8f7b2abec031314488bc4eb66985095b3`.
+- Base tree: `2968d5fe58f515e1afe4f0418ada7b183f9b55f9`.
 - Isolated branch: `codex/mem00-durable-memory-governance`.
 - Active VT00 worktree remains separate on `codex/vt00-implementation`; MEM00 did not modify it.
-- Changes after the reviewed reference were explicitly reconciled through `7d1e6b6a`: `0b505c40` owns disposable Voice Lab browser epochs; `8f0cb46a` gates lease release on terminal cleanup; `81e3da16` removes browser-storage transplant; `b9fafffe` removes the DOM activation fallback; `b973a2af` removes superseded UI activation fallbacks; `66cebaa4` removes CDP React diagnostics; `ad611e38` enforces controller callback parity; `d8ad61b3` adds control-cancellation proof documentation plus two frontend adapter regressions; `566bf2ab` proves Voice Lab dynamic-injection trials; `80801eff` binds fresh-session canaries; and `7d1e6b6a` preserves an authorized voice-start request across callback identity changes while invoking the latest exact action once. They affect Voice Lab process ownership, cleanup, browser isolation, evidence, and tests—not memory authority. Their active-run safety boundary is preserved.
+- Changes after the reviewed reference were explicitly reconciled through `ce83d5a8`. In addition to the previously pinned lineage through `7d1e6b6a`, twelve later commits (`ad3db9e4` through `ce83d5a8`) harden hydrated/authorized Voice start, remount/navigation receipts, protected session loading, safe timeout diagnostics, and browser-driver route classification. Their diff is limited to frontend session/Voice Lab control and `tools/sophia-voice-lab`; backend and Voice have zero byte delta. They do not add or bypass a memory authority, and their active-run safety boundary is preserved.
 - The immutable MEM00 candidate commit/tree is populated in the post-freeze evidence manifest. Pre-freeze deterministic attempts use the exact base above plus their ledger identity; they are not represented as immutable candidates.
 
 ## Deployed component snapshot
@@ -25,7 +25,7 @@ This is a content-free R0 snapshot. Secret values, memory text, raw user/session
 | Voice Lab MCP | `srv-da6uiqfavr4c739mtbng` | read-only identity captured | internal MCP |
 | Frontend | Vercel project `sophia-agent-front` / deployment `AfZz3YaPCag7bAA6ksxv6pHF1AFU` | `7d1e6b6a58ea98a77c00e96be54c61f8fdf2b66e` | `https://www.sophia-ei.com` (`sophia-agent-front-ory3qko89-sophia-30911edf.vercel.app`) |
 
-The participating product services are now converged on remote head `7d1e6b6a`; none is on the isolated MEM00 candidate yet. The earlier failed LangGraph attempt for `d8ad61b3` remains evidence-bearing, but later same-branch deployments succeeded. Voice Lab's 2026-09-03 action-time read reported no active run or operation, an engaged kill switch, and closed backend/voice product-mutation gates. Its target contract still expected `80801eff`; during that read Gateway/frontend/LangGraph had already advanced to `7d1e6b6a` while Voice was still on `80801eff`. A subsequent signed-in Render read proved Voice deployment `dep-dac9q6vavr4c73flvku0` live on `7d1e6b6a`. R4 must still re-read Voice Lab immediately before any deploy.
+The table above is the prior converged snapshot and has been superseded by live deployment drift. At 2026-09-03T08:07:13Z, Voice Lab reported no active run or operation, an engaged kill switch, and closed product-mutation gates; it observed Gateway, LangGraph, and frontend on `ce83d5a8` and Voice on `6f8e5180`, while its own frozen server/candidate remained `6f8e5180`. Exact current deployment IDs are re-pinned immediately before dark deployment; none is on the isolated MEM00 candidate yet.
 
 ## Product database snapshot
 
@@ -44,15 +44,15 @@ The participating product services are now converged on remote head `7d1e6b6a`; 
 - Existing project ID: `proj_q1I90sXEFJXjVt3Mvghj2P7nKEfzPvT9h0t9Ft3Z` (`default-project` in `davide5-default-org`).
 - Existing plan shown by the dashboard: Growth Plan. Extra Usage was off.
 - Billing window observed: 2026-08-11 through 2026-09-11.
-- Usage at the latest read-only refresh: 30/200,000 add requests and 1,786/20,000 retrieval requests; the dashboard showed 518 requests, two entities, and zero memories stored in its selected seven-day metrics window.
+- Usage at the post-R3 refresh: 34/200,000 add requests and 1,875/20,000 retrieval requests. Growth Plan remains active and Extra Usage remains off.
 - SDK dependency: `mem0ai==1.0.9` in both backend package graphs.
 - Locked wheel SHA-256: `5153883da8f49296de763f4f92876ce3d4ee7daf7f596e3d4feb3a1709d3c4b0`.
 - Deployed module SHA-256 observed: `d4dea4af0e23d544a8a004dd385656ab49ea14180d1d854ef81483e94c1d045d`.
 - Existing API host: `https://api.mem0.ai`; no base-URL override was present.
 - SDK paths observed: direct add `POST /v1/memories/`, search `POST /v2/memories/search/`, enumerate `POST /v2/memories/`, get/delete `/v1/memories/{id}/`.
 - Direct add supports initial metadata in 1.0.9. The governed adapter uses `infer=false`, `async_mode=false`, verifies initial markers, paginates enumeration, treats provider text as untrusted, and verifies deletion.
-- R3 remeasurement proved direct non-inferred storage, two distinct rows without merge, initial metadata, stable returned IDs/search, exact operation-marker reconciliation, repeated convergence, page-size-one pagination, subject isolation, namespace metadata, and semantic search. A fresh action-time probe against the deployed `mem0ai==1.0.9` runtime again returned 403 for exact-ID deletion. The currently documented `DELETE /v1/batch` body (`memory_ids`) was then sent through the same SDK transport and returned 400; the exact single synthetic row remains fenced under its isolated certification subject. The user authorized one same-project replacement key, replacement of only the existing Gateway `MEM0_API_KEY`, retention of the old provider key for rollback, and a full terminal-zero R3 rerun. Browser policy still requires immediate confirmation before the prepared Create action and secret transfer to Render. Projection remains closed.
-- The signed-in project membership is `Admin`. The API-key inventory contains five hashed keys and exposes no per-key scope selector. No key was created, rotated, revealed, or revoked during inspection.
+- The approved same-project replacement key passed complete R3 on deployed `mem0ai==1.0.9`: it deleted the fenced preflight row, created three direct non-inferred rows across two subjects, preserved distinct stable IDs and initial metadata, passed search/repeated reconciliation/page-size-one pagination/subject isolation, deleted all exact IDs through the public SDK, and ended with terminal counts `[0,0,0]`. The replacement key was saved only to the existing Gateway `MEM0_API_KEY` using Render's save-only path. The old provider key remains unrevoked; no service restart occurred from the save.
+- The signed-in project membership is `Admin`. The API-key inventory contains six hashed keys and exposes no per-key scope selector. Exactly one replacement key was created; none was revoked.
 - Existing service flags: `MEM0_ENABLED=true`, max search results `3`, reference date enabled, category-filter removal enabled, user prefix `sophia_user_`. No MEM00 flag existed in production.
 - Dashboard configuration observed: multilingual extraction enabled, nonempty user custom instructions, blank agent custom instructions, nine existing categories (`fact`, `feeling`, `decision`, `lesson`, `commitment`, `relationship`, `pattern`, `ritual_context`, `personal_goal`), Memory Decay enabled, and no expiration date selected.
 - Dashboard 7-day counters at pin: stored `0`, recalled `0`, searches `465`.
@@ -76,4 +76,4 @@ Invalid partial combinations are rejected. No combination may activate a reader 
 
 ## No-change attestation
 
-This pin made no intentional SDK-major, API-version, endpoint, project, organization, configuration, algorithm-toggle, plan, billing, credential, or paid-service change. It created no second memory authority and wrote no provider memory.
+This pin made no intentional SDK-major, API-version, endpoint, project, organization, configuration, algorithm-toggle, plan, billing, or paid-service change. The only credential change was the approved same-project replacement stored under the existing Gateway variable after complete R3; the old provider key remains unrevoked. Synthetic provider rows were terminal-zero cleaned, and no second memory authority was created.
