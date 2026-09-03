@@ -386,11 +386,6 @@ export class VoiceLabWorker {
       }
     }
     await this.ledger.purgeExpiredRetention(maintenanceNow, 20);
-    for (const pending of await this.ledger.listRunsPendingEvidence(10)) {
-      if (pending.terminalError !== null || !["completed", "product_failed", "inconclusive_provider", "failed_harness", "authorization_failed"].includes(pending.state)) await this.#saveFailureEvidence(pending, pending.terminalError ?? labError("TERMINAL_CERTIFICATION_REVISION", "Terminal execution evidence was revised without mutating the execution decision.", "evidence"), []);
-      else if (pending.scenarioId === "V-S01" || pending.scenarioId === "V-S02") await this.#finalizePreResourceScenario(pending.id);
-      else await this.#finalizeEndRun(pending.id);
-    }
     for (const expired of await this.ledger.listExpiredRuns(new Date(), 20)) {
       await this.#terminalizeFailure(expired.id, labError("RUN_EXPIRED", "Run exceeded its bounded TTL and was cleaned up.", "harness"), "expired");
     }
@@ -401,6 +396,14 @@ export class VoiceLabWorker {
       const failedOperation = [...operations].reverse().find((operation) => (operation.state === "failed" || operation.state === "timed_out") && operation.error !== null);
       const recoveryError = pending.terminalError ?? failedOperation?.error ?? labError("RECOVERY_PENDING", "Terminal run still requires durable zero-orphan recovery.", "harness", true);
       await this.#terminalizeFailure(pending.id, recoveryError, TERMINAL_RUN_STATES.has(pending.state) ? pending.state : undefined);
+    }
+    // Zero-orphan recovery must run before terminal evidence publication.
+    // A bounded per-run artifact cap can make evidence revision unavailable,
+    // but it must never starve cleanup of already-closed external resources.
+    for (const pending of await this.ledger.listRunsPendingEvidence(10)) {
+      if (pending.terminalError !== null || !["completed", "product_failed", "inconclusive_provider", "failed_harness", "authorization_failed"].includes(pending.state)) await this.#saveFailureEvidence(pending, pending.terminalError ?? labError("TERMINAL_CERTIFICATION_REVISION", "Terminal execution evidence was revised without mutating the execution decision.", "evidence"), []);
+      else if (pending.scenarioId === "V-S01" || pending.scenarioId === "V-S02") await this.#finalizePreResourceScenario(pending.id);
+      else await this.#finalizeEndRun(pending.id);
     }
     if (this.#killSwitchEngaged()) {
       // Accepted suites are durable scheduling intent. Engaging the kill switch
