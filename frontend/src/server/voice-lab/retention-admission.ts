@@ -6,6 +6,8 @@ type GatewayReadiness = {
   voice_lab_retention_reaper?: { status?: unknown; running?: unknown };
 };
 
+export const VOICE_LAB_RETENTION_ADMISSION_TIMEOUT_MS = 15_000;
+
 /** Fail before Better Auth allocation when durable cleanup is not authoritative. */
 export async function assertVoiceLabRetentionAdmissionReady(): Promise<void> {
   try {
@@ -13,7 +15,11 @@ export async function assertVoiceLabRetentionAdmissionReady(): Promise<void> {
       method: 'GET',
       cache: 'no-store',
       headers: { Accept: 'application/json' },
-      signal: AbortSignal.timeout(3_000),
+      // Match the privileged frontend-operation ceiling. Cross-region cold
+      // starts can legitimately exceed three seconds even when the signed
+      // Gateway retention fence is healthy; the caller still fails closed
+      // after this bounded deadline.
+      signal: AbortSignal.timeout(VOICE_LAB_RETENTION_ADMISSION_TIMEOUT_MS),
     });
     const payload = await response.json() as GatewayReadiness;
     if (
