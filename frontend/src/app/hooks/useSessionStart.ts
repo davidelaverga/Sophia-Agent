@@ -12,11 +12,11 @@
 
 'use client';
 
-import { useRouter } from 'next/navigation';
 import { useState, useCallback, useRef } from 'react';
 
 import { startSession, getActiveSession, isSuccess, getErrorMessage } from '../lib/api/sessions-api';
 import { logger } from '../lib/error-logger';
+import { navigateToSessionDocument } from '../lib/session-navigation';
 import { SessionStartResponseSchema, validateResponse } from '../lib/schemas/session-schemas';
 import type { PresetType, ContextMode } from '../lib/session-types';
 import { useSessionStore } from '../stores/session-store';
@@ -238,7 +238,6 @@ function mapContextMode(mode: ContextMode): PresetContext {
 export function useSessionStart(options: UseSessionStartOptions = {}) {
   const { onSuccess, onError, navigateOnSuccess = true } = options;
   
-  const router = useRouter();
   const createSession = useSessionStore((state) => state.createSession);
   const restoreOpenSession = useSessionStore((state) => state.restoreOpenSession);
   const updateFromBackend = useSessionStore((state) => state.updateFromBackend);
@@ -397,7 +396,7 @@ export function useSessionStart(options: UseSessionStartOptions = {}) {
       
       if (navigateOnSuccess) {
         haptic('medium');
-        router.push('/session');
+        navigateToSessionDocument(window.location);
       }
       
       return successResult;
@@ -414,7 +413,6 @@ export function useSessionStart(options: UseSessionStartOptions = {}) {
     setInitializing, 
     clearSession,
     setError, 
-    router, 
     navigateOnSuccess, 
     onSuccess, 
     onError
@@ -505,11 +503,11 @@ export function useSessionStart(options: UseSessionStartOptions = {}) {
 
     if (navigateOnSuccess) {
       haptic('medium');
-      router.push('/session');
+      navigateToSessionDocument(window.location);
     }
 
     return successResult;
-  }, [navigateOnSuccess, onSuccess, restoreOpenSession, router]);
+  }, [navigateOnSuccess, onSuccess, restoreOpenSession]);
   
   return {
     start,
