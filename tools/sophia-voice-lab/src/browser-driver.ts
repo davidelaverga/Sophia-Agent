@@ -52,6 +52,14 @@ const CONTROL_ADAPTER_RECEIPT_KEYS = [
 ] as const;
 const CONTROL_ADAPTER_RECEIPT_HEADER = "x-sophia-voice-lab-control-receipt";
 
+/** The synthetic principal's committed onboarding state selects reduced motion.
+ * Mirror that ordinary accessibility preference at the browser media-query
+ * layer so canvas-heavy session visuals take their authored static path. */
+export const VOICE_LAB_BROWSER_CONTEXT_OPTIONS = {
+  serviceWorkers: "block",
+  reducedMotion: "reduce",
+} as const;
+
 export function decodeVoiceLabControlAdapterReceiptHeader(value: string | undefined): unknown {
   if (!value) return null;
   try {
@@ -639,7 +647,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       // session inside this new context. Importing cookies or Web Storage from
       // another browser is forbidden: every run begins with an empty origin
       // store and acquires all authority through the bound grant response.
-      context = await browser.newContext({ serviceWorkers: "block" });
+      context = await browser.newContext(VOICE_LAB_BROWSER_CONTEXT_OPTIONS);
       await installPushBinding(context);
     } catch (error) {
       await this.#closeOwnedBrowserProcess(ownership);
@@ -1268,7 +1276,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
     try {
       await this.checkExecutable(chromium.executablePath(), fsConstants.X_OK);
       const browser = await this.#ensureBrowser();
-      const context = await browser.newContext({ serviceWorkers: "block" });
+      const context = await browser.newContext(VOICE_LAB_BROWSER_CONTEXT_OPTIONS);
       try {
         const page = await context.newPage();
         const media = await page.evaluate(async () => {

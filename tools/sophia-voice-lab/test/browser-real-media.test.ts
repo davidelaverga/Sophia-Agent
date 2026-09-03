@@ -8,7 +8,7 @@ import { chromium, type Browser } from "playwright";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { buildVoiceLabInitScript } from "../src/browser-init.js";
-import { classifySessionVoiceRoute, closeDisposableBrowserProcess, launchDisposableBrowserProcess, observeSessionNavigationResponse, PlaywrightVoiceDriver, type SessionNavigationResponseDiagnostic } from "../src/browser-driver.js";
+import { classifySessionVoiceRoute, closeDisposableBrowserProcess, launchDisposableBrowserProcess, observeSessionNavigationResponse, PlaywrightVoiceDriver, type SessionNavigationResponseDiagnostic, VOICE_LAB_BROWSER_CONTEXT_OPTIONS } from "../src/browser-driver.js";
 import { testRun } from "./helpers.js";
 
 function sineWav(durationMs = 600, sampleRate = 16_000): Buffer {
@@ -170,6 +170,15 @@ describe("real Chromium dynamic media contract", () => {
       { transport: "document", status: 200, ok: true, completion: "finished" },
     ]);
     expect(JSON.stringify(diagnostics)).not.toContain("must-not-be-projected");
+    await context.close();
+  });
+
+  it("mirrors the synthetic principal's reduced-motion accessibility preference", async () => {
+    const context = await browser.newContext(VOICE_LAB_BROWSER_CONTEXT_OPTIONS);
+    const page = await context.newPage();
+    await page.goto(origin);
+    await expect(page.evaluate(() => window.matchMedia('(prefers-reduced-motion: reduce)').matches)).resolves.toBe(true);
+    await expect(page.evaluate(() => window.matchMedia('(prefers-reduced-motion: no-preference)').matches)).resolves.toBe(false);
     await context.close();
   });
 
