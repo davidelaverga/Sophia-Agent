@@ -137,6 +137,11 @@ export type SessionVoiceRouteDiagnostic = {
   consent_visible: boolean;
   auth_gate_visible: boolean;
   auth_checking_visible: boolean;
+  auth_authenticated_children_present: boolean;
+  auth_unauthenticated_present: boolean;
+  protected_consent_pending_present: boolean;
+  protected_content_ready_present: boolean;
+  session_content_mounted_present: boolean;
   session_store_loading_visible: boolean;
   voice_fallback_visible: boolean;
 };
@@ -227,6 +232,11 @@ export async function classifySessionVoiceRoute(
     consent_visible: await observeOnWorkerClock(() => page.locator(CONSENT_ACCEPT_SELECTOR).first().isVisible(), false),
     auth_gate_visible: await observeOnWorkerClock(() => page.getByRole("button", { name: "Continue with Google", exact: true }).first().isVisible(), false),
     auth_checking_visible: await observeOnWorkerClock(() => page.locator('[data-voice-lab-route-state="auth-checking"]').first().isVisible(), false),
+    auth_authenticated_children_present: await observeOnWorkerClock(() => page.locator('[data-voice-lab-route-state="auth-authenticated-children"]').count(), 0) > 0,
+    auth_unauthenticated_present: await observeOnWorkerClock(() => page.locator('[data-voice-lab-route-state="auth-unauthenticated"]').count(), 0) > 0,
+    protected_consent_pending_present: await observeOnWorkerClock(() => page.locator('[data-voice-lab-route-state="protected-consent-pending"]').count(), 0) > 0,
+    protected_content_ready_present: await observeOnWorkerClock(() => page.locator('[data-voice-lab-route-state="protected-content-ready"]').count(), 0) > 0,
+    session_content_mounted_present: await observeOnWorkerClock(() => page.locator('[data-voice-lab-route-state="session-content-mounted"]').count(), 0) > 0,
     session_store_loading_visible: await observeOnWorkerClock(() => page.locator('[data-voice-lab-route-state="session-store-loading"]').first().isVisible(), false),
     voice_fallback_visible: await observeOnWorkerClock(() => page.getByText("Voice input unavailable", { exact: true }).first().isVisible(), false),
   };

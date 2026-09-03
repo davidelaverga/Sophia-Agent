@@ -90,6 +90,11 @@ describe("real Chromium dynamic media contract", () => {
       consent_visible: false,
       auth_gate_visible: false,
       auth_checking_visible: false,
+      auth_authenticated_children_present: false,
+      auth_unauthenticated_present: false,
+      protected_consent_pending_present: false,
+      protected_content_ready_present: false,
+      session_content_mounted_present: false,
       session_store_loading_visible: false,
       voice_fallback_visible: false,
     });

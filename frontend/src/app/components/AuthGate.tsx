@@ -1016,11 +1016,20 @@ export function AuthGate({
   }
 
   if (authState === "authenticated") {
-    return <>{children}</>
+    return (
+      <>
+        <span hidden data-voice-lab-route-state="auth-authenticated-children" />
+        {children}
+      </>
+    )
   }
 
   return (
-    <div className="midnightAtelierGate" data-visual-tier={tier}>
+    <div
+      className="midnightAtelierGate"
+      data-visual-tier={tier}
+      data-voice-lab-route-state="auth-unauthenticated"
+    >
       <canvas ref={skyCanvasRef} className="skyCanvas" aria-hidden="true" />
       <canvas ref={starsCanvasRef} className="starsCanvas" aria-hidden="true" />
 

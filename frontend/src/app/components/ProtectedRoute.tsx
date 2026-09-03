@@ -62,6 +62,10 @@ export function ProtectedRoute({ children, skipConsent = false }: ProtectedRoute
 
   return (
     <AuthGate>
+      <span
+        hidden
+        data-voice-lab-route-state={isConsentReady ? 'protected-content-ready' : 'protected-consent-pending'}
+      />
       {showConsentGate && (
         <ConsentGate onReady={handleConsentReady} />
       )}

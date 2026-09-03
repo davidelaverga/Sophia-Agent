@@ -50,6 +50,7 @@ function SessionHeaderTooltip({
 
   return (
     <div
+      data-voice-lab-route-state="session-content-mounted"
       className={cn(
         'pointer-events-none absolute top-full mt-2 whitespace-nowrap rounded-lg px-2.5 py-1.5',
         'text-[11px] font-medium tracking-wide',
