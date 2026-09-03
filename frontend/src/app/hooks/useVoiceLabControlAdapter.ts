@@ -24,6 +24,14 @@ type VoiceLabControlReceipt = {
   ordinary_user_access: false;
 };
 
+type ControlRequestEntry = {
+  promise: Promise<VoiceLabControlReceipt | null>;
+  receipt: VoiceLabControlReceipt | null;
+};
+
+const controlRequests = new Map<VoiceLabControlAction, ControlRequestEntry>();
+const claimedControlEpochs = new Set<string>();
+
 function isControlReceipt(value: unknown, action: VoiceLabControlAction): value is VoiceLabControlReceipt {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const receipt = value as Partial<VoiceLabControlReceipt>;
@@ -42,6 +50,47 @@ function isControlReceipt(value: unknown, action: VoiceLabControlAction): value 
     && typeof deployment?.frontend === 'string'
     && typeof deployment?.backend === 'string'
     && typeof deployment?.voice === 'string';
+}
+
+function requestControlReceipt(action: VoiceLabControlAction): Promise<VoiceLabControlReceipt | null> {
+  const existing = controlRequests.get(action);
+  if (existing?.receipt && existing.receipt.expires_at > Math.floor(Date.now() / 1000)) {
+    return Promise.resolve(existing.receipt);
+  }
+  if (existing) return existing.promise;
+
+  const entry: ControlRequestEntry = { promise: Promise.resolve(null), receipt: null };
+  entry.promise = (async () => {
+    const response = await fetch(`/api/voice-lab/control/${action}`, {
+      method: 'POST',
+      credentials: 'same-origin',
+      cache: 'no-store',
+      redirect: 'error',
+    });
+    if (!response.ok) return null;
+    const receipt: unknown = await response.json();
+    if (!isControlReceipt(receipt, action)) return null;
+    entry.receipt = receipt;
+    return receipt;
+  })().catch(() => null).then((receipt) => {
+    if (!receipt) controlRequests.delete(action);
+    return receipt;
+  });
+  controlRequests.set(action, entry);
+  return entry.promise;
+}
+
+function claimControlReceipt(receipt: VoiceLabControlReceipt): boolean {
+  const claim = `${receipt.test_run_id}:${receipt.action}:${receipt.control_epoch_sha256}`;
+  if (claimedControlEpochs.has(claim)) return false;
+  claimedControlEpochs.add(claim);
+  controlRequests.delete(receipt.action);
+  return true;
+}
+
+export function resetVoiceLabControlAdapterForTests(): void {
+  controlRequests.clear();
+  claimedControlEpochs.clear();
 }
 
 export function useVoiceLabControlAdapter(
@@ -63,19 +112,11 @@ export function useVoiceLabControlAdapter(
   }, [invokeExistingAction]);
 
   useEffect(() => {
-    const controller = new AbortController();
+    let active = true;
 
     void (async () => {
-      const response = await fetch(`/api/voice-lab/control/${action}`, {
-        method: 'POST',
-        credentials: 'same-origin',
-        cache: 'no-store',
-        redirect: 'error',
-        signal: controller.signal,
-      });
-      if (!response.ok) return;
-      const receipt: unknown = await response.json();
-      if (!isControlReceipt(receipt, action) || controller.signal.aborted) return;
+      const receipt = await requestControlReceipt(action);
+      if (!receipt || !active) return;
       recordSophiaCaptureEvent({
         category: 'voice-lab-control',
         name: 'authorized-action',
@@ -84,11 +125,14 @@ export function useVoiceLabControlAdapter(
       setAuthorizedReceipt(receipt);
     })().catch(() => undefined);
 
-    return () => controller.abort();
+    return () => {
+      active = false;
+    };
   }, [action]);
 
   useEffect(() => {
     if (!authorizedReceipt || !readinessLatchedRef.current || invokedRef.current) return;
+    if (!claimControlReceipt(authorizedReceipt)) return;
     invokedRef.current = true;
 
     void (async () => {

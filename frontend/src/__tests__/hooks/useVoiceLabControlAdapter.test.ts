@@ -7,7 +7,10 @@ vi.mock('../../app/lib/session-capture', () => ({
   recordSophiaCaptureEvent: (...args: unknown[]) => recordCaptureMock(...args),
 }));
 
-import { useVoiceLabControlAdapter } from '../../app/hooks/useVoiceLabControlAdapter';
+import {
+  resetVoiceLabControlAdapterForTests,
+  useVoiceLabControlAdapter,
+} from '../../app/hooks/useVoiceLabControlAdapter';
 
 const receipt = {
   ok: true,
@@ -39,6 +42,7 @@ describe('useVoiceLabControlAdapter', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    resetVoiceLabControlAdapterForTests();
   });
 
   afterEach(() => {
@@ -117,12 +121,10 @@ describe('useVoiceLabControlAdapter', () => {
       { initialProps: { enabled: true } },
     );
     await settle();
-    const signal = vi.mocked(globalThis.fetch).mock.calls[0]?.[1]?.signal;
-
     rerender({ enabled: false });
     await settle();
 
-    expect(signal?.aborted).toBe(false);
+    expect(globalThis.fetch).toHaveBeenCalledTimes(1);
 
     resolveFetch(new Response(JSON.stringify({ ...receipt, action: 'voice-start' }), {
       status: 200,
@@ -151,12 +153,9 @@ describe('useVoiceLabControlAdapter', () => {
       { initialProps: { invoke: firstInvoke } },
     );
     await settle();
-    const signal = vi.mocked(globalThis.fetch).mock.calls[0]?.[1]?.signal;
-
     rerender({ invoke: latestInvoke });
     await settle();
 
-    expect(signal?.aborted).toBe(false);
     expect(globalThis.fetch).toHaveBeenCalledTimes(1);
 
     resolveFetch(new Response(JSON.stringify({ ...receipt, action: 'voice-start' }), {
@@ -184,19 +183,20 @@ describe('useVoiceLabControlAdapter', () => {
     expect(recordCaptureMock).not.toHaveBeenCalled();
   });
 
-  it('aborts authorization on unmount and never invokes from a stale response', async () => {
+  it('retains an in-flight authorization across remount and invokes only the current exact action', async () => {
     let resolveFetch!: (response: Response) => void;
     const pendingFetch = new Promise<Response>((resolve) => {
       resolveFetch = resolve;
     });
     globalThis.fetch = vi.fn().mockReturnValue(pendingFetch);
-    const invoke = vi.fn();
+    const staleInvoke = vi.fn();
+    const currentInvoke = vi.fn().mockResolvedValue(undefined);
 
-    const { unmount } = renderHook(() => useVoiceLabControlAdapter('session-start', invoke));
-    const signal = vi.mocked(globalThis.fetch).mock.calls[0]?.[1]?.signal;
+    const { unmount } = renderHook(() => useVoiceLabControlAdapter('session-start', staleInvoke));
 
     unmount();
-    expect(signal?.aborted).toBe(true);
+    renderHook(() => useVoiceLabControlAdapter('session-start', currentInvoke));
+    expect(globalThis.fetch).toHaveBeenCalledTimes(1);
 
     resolveFetch(new Response(JSON.stringify(receipt), {
       status: 200,
@@ -204,8 +204,12 @@ describe('useVoiceLabControlAdapter', () => {
     }));
     await settle();
 
-    expect(invoke).not.toHaveBeenCalled();
-    expect(recordCaptureMock).not.toHaveBeenCalled();
+    expect(staleInvoke).not.toHaveBeenCalled();
+    expect(currentInvoke).toHaveBeenCalledTimes(1);
+    expect(recordCaptureMock).toHaveBeenCalledWith(expect.objectContaining({
+      category: 'voice-lab-control',
+      name: 'authorized-action-completed',
+    }));
   });
 
   it('does not publish or invoke when unmounted while receipt parsing is pending', async () => {
