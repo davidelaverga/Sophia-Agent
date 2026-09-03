@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef } from 'react';
 
 import { recordSophiaCaptureEvent } from '../lib/session-capture';
 
@@ -120,12 +120,6 @@ export function useVoiceLabControlAdapter(
 ): void {
   const invokedRef = useRef(false);
   const invokeExistingActionRef = useRef(invokeExistingAction);
-  const readinessLatchedRef = useRef(enabled);
-  const [authorizedReceipt, setAuthorizedReceipt] = useState<VoiceLabControlReceipt | null>(null);
-
-  if (enabled) {
-    readinessLatchedRef.current = true;
-  }
 
   useEffect(() => {
     invokeExistingActionRef.current = invokeExistingAction;
@@ -144,20 +138,16 @@ export function useVoiceLabControlAdapter(
         name: 'authorized-action',
         payload: receipt,
       });
-      setAuthorizedReceipt(receipt);
-    })().catch(() => undefined);
 
-    return () => {
-      active = false;
-    };
-  }, [action, enabled]);
+      // Invoke in the same committed effect that accepted the receipt. A
+      // session route can briefly replace or suspend this client subtree as
+      // hydration settles; deferring the authorized action to a second state
+      // effect leaves a narrow window where authorization is observable but
+      // the ordinary microphone action is never called. The module-level
+      // receipt claim preserves exact-once behavior across remounts.
+      if (invokedRef.current || !claimControlReceipt(receipt)) return;
+      invokedRef.current = true;
 
-  useEffect(() => {
-    if (!authorizedReceipt || !readinessLatchedRef.current || invokedRef.current) return;
-    if (!claimControlReceipt(authorizedReceipt)) return;
-    invokedRef.current = true;
-
-    void (async () => {
       recordSophiaCaptureEvent({
         category: 'voice-lab-control',
         name: 'authorized-action-invoking',
@@ -182,5 +172,9 @@ export function useVoiceLabControlAdapter(
         throw error;
       }
     })().catch(() => undefined);
-  }, [action, authorizedReceipt, enabled]);
+
+    return () => {
+      active = false;
+    };
+  }, [action, enabled]);
 }
