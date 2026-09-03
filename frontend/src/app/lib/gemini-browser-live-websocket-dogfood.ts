@@ -7819,6 +7819,7 @@ function createGeminiSyntheticInteractionEvidenceTracker(options: {
 function readSyntheticInputOperationSignal(
   value: unknown,
   expectedTestRunId: string,
+  expectedCleanupObligationId: string,
 ): GeminiSyntheticInputOperationSignal {
   if (!isRecord(value)) {
     throw new GeminiSyntheticInputSignalError('input_operation_signal_malformed');
@@ -7827,6 +7828,7 @@ function readSyntheticInputOperationSignal(
     'schema',
     'phase',
     'test_run_id',
+    'cleanup_obligation_id',
     'operation_id',
     'utterance_id',
     'source_sha256',
@@ -7848,7 +7850,10 @@ function readSyntheticInputOperationSignal(
   const phase = value.phase;
   const expectedSilence = value.expected_silence;
   const settlementWindow = value.settlement_window_ms;
-  if (value.test_run_id !== expectedTestRunId) {
+  if (
+    value.test_run_id !== expectedTestRunId
+    || value.cleanup_obligation_id !== expectedCleanupObligationId
+  ) {
     throw new GeminiSyntheticInputSignalError('input_operation_signal_binding_mismatch');
   }
   if (
@@ -8068,6 +8073,7 @@ function createGeminiSyntheticInputEvidenceTracker(options: {
       signal = readSyntheticInputOperationSignal(
         (event as CustomEvent<unknown>).detail,
         options.syntheticTest.test_run_id,
+        options.syntheticTest.cleanup_obligation_id,
       );
     } catch (error) {
       fail(
