@@ -1533,13 +1533,13 @@ export class VoiceLabWorker {
         canonicalSessionId = stableJoin("canonical_session_id", canonicalSessionId, exactString(payload.sessionId));
         providerSessionId = stableJoin("provider_session_id", providerSessionId, exactString(payload.voiceAgentSessionId));
         traceId = stableJoin("trace_id", traceId, exactString(payload.langsmithTraceId));
-        providerEpoch = monotonicEpoch(providerEpoch, exactFiniteNumber(payload.providerConnectionEpoch));
+        providerEpoch = monotonicEpoch(providerEpoch, exactPositiveProviderEpoch(payload.providerConnectionEpoch));
       } else if (event.kind === "provider.connection_epoch") {
         const receipt = payload.receipt && typeof payload.receipt === "object" ? payload.receipt as Record<string, unknown> : {};
         canonicalSessionId = stableJoin("canonical_session_id", canonicalSessionId, exactString(payload.sessionId));
         providerSessionId = stableJoin("provider_session_id", providerSessionId, exactString(payload.voiceAgentSessionId));
         traceId = stableJoin("trace_id", traceId, exactString(receipt.langsmithTraceId));
-        providerEpoch = monotonicEpoch(providerEpoch, exactFiniteNumber(receipt.providerConnectionEpoch));
+        providerEpoch = monotonicEpoch(providerEpoch, exactPositiveProviderEpoch(receipt.providerConnectionEpoch));
       } else if (event.kind === "capture.snapshot") {
         const snapshot = payload.snapshot && typeof payload.snapshot === "object" ? payload.snapshot as Record<string, unknown> : {};
         const session = snapshot.session && typeof snapshot.session === "object" ? snapshot.session as Record<string, unknown> : {};
@@ -4523,7 +4523,9 @@ function strictProductRunBinding(source: string, payload: Record<string, unknown
     cleanup_obligation_id_sha256: record.cleanup_obligation_id_sha256,
   };
 }
-function exactFiniteNumber(value: unknown): number | null { return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null; }
+export function exactPositiveProviderEpoch(value: unknown): number | null {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : null;
+}
 function stableJoin(name: string, current: string | null, candidate: string | null): string | null {
   if (candidate === null) return current;
   if (current !== null && current !== candidate) throw new VoiceLabError(labError("JOIN_CORRELATION_CONFLICT", `Conflicting ${name} values were observed from strict owning receipts.`, "harness", false, { join: name, prior_hash: sha256(current), candidate_hash: sha256(candidate) }));
