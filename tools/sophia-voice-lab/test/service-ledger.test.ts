@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { AudioResolver } from "../src/audio.js";
 import { TERMINAL_RUN_STATES, VoiceLabError, initialVerdicts, labError } from "../src/domain.js";
@@ -1168,6 +1168,25 @@ describe("service and durable memory-ledger contracts", () => {
     const worker = new VoiceLabWorker("worker-kill-test", ledger, config, audio, inertDriver, new CapabilityCodec(config.capabilitySecret, config.capabilityIssuer, config.capabilityTtlSeconds));
     await worker.maintainSessions();
     expect(await ledger.getSuite(suiteId)).toMatchObject({ state: "cancelled", runIds: [], nextScenarioIndex: 0 });
+  });
+
+  it("runs zero-orphan recovery before terminal evidence publication", async () => {
+    const order: string[] = [];
+    vi.spyOn(ledger, "listRunsNeedingRecovery").mockImplementation(async () => {
+      order.push("recovery");
+      return [];
+    });
+    vi.spyOn(ledger, "listRunsPendingEvidence").mockImplementation(async () => {
+      order.push("evidence");
+      return [];
+    });
+    const config = testConfig({ SOPHIA_VOICE_LAB_KILL_SWITCH: "true" });
+    const inertDriver = { hasSession: () => false, readiness: async () => ({ ok: true, detail: "test" }), close: async () => undefined } as any;
+    const worker = new VoiceLabWorker("worker-maintenance-order", ledger, config, audio, inertDriver, new CapabilityCodec(config.capabilitySecret, config.capabilityIssuer, config.capabilityTtlSeconds));
+
+    await worker.maintainSessions();
+
+    expect(order).toEqual(["recovery", "evidence"]);
   });
 
   it("hard-purges retained content at the signed deadline and gives only the owner a keyed typed result", async () => {

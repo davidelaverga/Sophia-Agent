@@ -3771,6 +3771,7 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
       schema: 'sophia_voice_lab_input_operation_v1',
       phase,
       test_run_id: testRunId,
+      cleanup_obligation_id: syntheticTest.cleanup_obligation_id,
       operation_id: 'operation-input-1',
       utterance_id: 'utterance-input-1',
       source_sha256: sourceSha,
@@ -3819,6 +3820,24 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
     window.dispatchEvent(new CustomEvent('sophia:voice-lab-input-operation', {
       detail: signal('completed'),
     }));
+    fakeAudioContext.processor.onaudioprocess?.({
+      inputBuffer: { getChannelData: () => new Float32Array(4096) },
+      outputBuffer: { numberOfChannels: 1, getChannelData: () => new Float32Array(4096) },
+    } as unknown as AudioProcessingEvent);
+    expect(websocket?.sent.at(-1)).toBe(JSON.stringify({ realtimeInput: { audioStreamEnd: true } }));
+    expect(inputDiagnostics).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        eventType: 'input_audio_stream_end_sent',
+        trigger: 'synthetic_input_operation_completed',
+        audioStreamEndSent: true,
+      }),
+    ]));
+    const sentCountAfterSyntheticEnd = websocket?.sent.length ?? 0;
+    fakeAudioContext.processor.onaudioprocess?.({
+      inputBuffer: { getChannelData: () => new Float32Array(4096) },
+      outputBuffer: { numberOfChannels: 1, getChannelData: () => new Float32Array(4096) },
+    } as unknown as AudioProcessingEvent);
+    expect(websocket?.sent).toHaveLength(sentCountAfterSyntheticEnd);
     await vi.waitFor(() => expect(legReceipts).toHaveLength(1));
     expect(legReceipts[0]).toMatchObject({
       schema: 'sophia_gemini_input_leg_v1',
@@ -3977,6 +3996,7 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
       schema: 'sophia_voice_lab_input_operation_v1',
       phase,
       test_run_id: syntheticTest.test_run_id,
+      cleanup_obligation_id: syntheticTest.cleanup_obligation_id,
       operation_id: 'operation-builder-001',
       utterance_id: 'utterance-builder-001',
       source_sha256: 'd'.repeat(64),
@@ -4089,6 +4109,7 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
       schema: 'sophia_voice_lab_input_operation_v1',
       phase,
       test_run_id: syntheticTest.test_run_id,
+      cleanup_obligation_id: syntheticTest.cleanup_obligation_id,
       operation_id: 'operation-a01-001',
       utterance_id: 'utterance-a01-001',
       source_sha256: 'a'.repeat(64),
@@ -4165,8 +4186,9 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
     await connection.close();
   });
 
-  it('hard-fails an ambiguous synthetic assistant response without a stable response id', async () => {
+  it('binds an anonymous provider response to the active synthetic input by epoch and receive sequence', async () => {
     const interactionFaults: GeminiSyntheticInteractionFaultReceipt[] = [];
+    const interactionReceipts: GeminiSyntheticInteractionReceipt[] = [];
     const inputTurns: GeminiSyntheticInputTurnReceipt[] = [];
     let websocket: FakeWebSocket | null = null;
     const syntheticTest = {
@@ -4204,12 +4226,14 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
       getUserMedia: vi.fn(async () => ({ getTracks: () => [], getAudioTracks: () => [] } as unknown as MediaStream)),
       audioContextFactory: () => new FakeAudioContext() as unknown as AudioContext,
       onSyntheticInputTurnReceipt: (receipt) => inputTurns.push(receipt),
+      onSyntheticInteractionReceipt: (receipt) => interactionReceipts.push(receipt),
       onSyntheticInteractionFaultReceipt: (receipt) => interactionFaults.push(receipt),
     });
     const operation = (phase: string) => ({
       schema: 'sophia_voice_lab_input_operation_v1',
       phase,
       test_run_id: syntheticTest.test_run_id,
+      cleanup_obligation_id: syntheticTest.cleanup_obligation_id,
       operation_id: 'operation-a03-001',
       utterance_id: 'utterance-a03-001',
       source_sha256: 'b'.repeat(64),
@@ -4224,16 +4248,27 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
     ))).toBe(true));
     connection.acknowledgeSyntheticPublicUserTurn({ publicUtteranceId: 'public-a03-001', transcriptLength: 9 });
     websocket?.emitMessage({ serverContent: { outputTranscription: { text: 'Ambiguous.' } } });
+    websocket?.emitMessage({ serverContent: { turnComplete: true } });
 
-    await vi.waitFor(() => expect(interactionFaults).toEqual([
-      expect.objectContaining({ code: 'interaction_response_id_missing' }),
-    ]));
-    expect(websocket?.readyState).toBe(3);
+    await vi.waitFor(() => expect(interactionReceipts.some((receipt) => (
+      receipt.phase === 'assistant_response_completed'
+    ))).toBe(true));
+    const assigned = interactionReceipts.find((receipt) => receipt.phase === 'assistant_response_assigned');
+    expect(assigned).toMatchObject({
+      operation_id: 'operation-a03-001',
+      utterance_id: 'utterance-a03-001',
+      response_id: expect.stringMatching(/^synthetic-response:3:\d+$/),
+      assistant_turn_id: expect.stringMatching(/^synthetic-response:3:\d+$/),
+      provider_connection_epoch: 3,
+    });
+    expect(interactionFaults).toEqual([]);
+    expect(websocket?.readyState).toBe(1);
     await connection.close();
   });
 
   it.each([
     ['cross-run', 'input_operation_signal_binding_mismatch'],
+    ['cross-cleanup', 'input_operation_signal_binding_mismatch'],
     ['malformed', 'input_operation_signal_malformed'],
   ] as const)('hard-fails a %s Voice Lab input signal instead of silently dropping provenance', async (kind, expectedCode) => {
     const fakeAudioContext = new FakeAudioContext();
@@ -4279,6 +4314,9 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
         schema: 'sophia_voice_lab_input_operation_v1',
         phase: 'scheduled',
         test_run_id: kind === 'cross-run' ? 'run-input-fault-B' : syntheticTest.test_run_id,
+        cleanup_obligation_id: kind === 'cross-cleanup'
+          ? '123e4567-e89b-42d3-a456-426614174999'
+          : syntheticTest.cleanup_obligation_id,
         operation_id: 'operation-fault-1',
         utterance_id: 'utterance-fault-1',
         source_sha256: 'c'.repeat(64),
@@ -4339,6 +4377,7 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
       schema: 'sophia_voice_lab_input_operation_v1',
       phase,
       test_run_id: syntheticTest.test_run_id,
+      cleanup_obligation_id: syntheticTest.cleanup_obligation_id,
       operation_id: `operation-overlap-${ordinal}`,
       utterance_id: `utterance-overlap-${ordinal}`,
       source_sha256: String(ordinal).repeat(64),
@@ -4401,6 +4440,7 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
       schema: 'sophia_voice_lab_input_operation_v1',
       phase,
       test_run_id: syntheticTest.test_run_id,
+      cleanup_obligation_id: syntheticTest.cleanup_obligation_id,
       operation_id: 'operation-silence-1',
       utterance_id: 'utterance-silence-1',
       source_sha256: 'b'.repeat(64),

@@ -69,6 +69,20 @@ export function decodeVoiceLabControlAdapterReceiptHeader(value: string | undefi
   }
 }
 
+/** Follow the ordinary session UI through both authored exit confirmations.
+ * The second guard is conditional: it appears only while Sophia is still
+ * draining output after the public assistant turn has completed. */
+export async function clickEndSessionThroughExitGuards(page: Pick<Page, "getByRole">): Promise<void> {
+  const end = page.getByRole("button", { name: /^End session$/i }).first();
+  await end.waitFor({ state: "visible", timeout: 10_000 });
+  await end.click();
+  const confirm = page.getByRole("button", { name: /^end session$/i }).last();
+  await confirm.waitFor({ state: "visible", timeout: 5_000 });
+  await confirm.click();
+  const leaveAnyway = page.getByRole("button", { name: /^Leave anyway$/i }).last();
+  if (await leaveAnyway.isVisible({ timeout: 2_000 }).catch(() => false)) await leaveAnyway.click();
+}
+
 export function validateVoiceLabControlAdapterReceipt(
   receipt: unknown,
   action: "session-start" | "voice-start",
@@ -1054,12 +1068,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       if (!refreshed.ok()) throw new VoiceLabError(labError("FINALIZATION_GRANT_REJECTED", `Frontend finalization grant refresh was rejected with HTTP ${refreshed.status()}.`, "authorization"));
       const frontendOrigin = new URL(run.target.frontendUrl).origin;
       const finalizationResponse = session.page.waitForResponse((response) => isExactFinalizationResponse(response, frontendOrigin), { timeout: 20_000 }).catch(() => null);
-      const end = session.page.getByRole("button", { name: /^End session$/i }).first();
-      await end.waitFor({ state: "visible", timeout: 10_000 });
-      await end.click();
-      const confirm = session.page.getByRole("button", { name: /^end session$/i }).last();
-      await confirm.waitFor({ state: "visible", timeout: 5_000 });
-      await confirm.click();
+      await clickEndSessionThroughExitGuards(session.page);
       const response = await finalizationResponse;
       if (!response || response.status() !== 202 || !isJsonResponse(response)) throw new VoiceLabError(labError("PRODUCT_FINALIZATION_UNCONFIRMED", "The ordinary UI did not produce an exact-origin JSON 202 product finalization receipt.", "product", true, { status: response?.status() ?? null }));
       const responseBody = await response.json().catch(() => null) as Record<string, unknown> | null;
@@ -1121,11 +1130,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
           if (!refreshed.ok()) throw new Error(`finalize grant HTTP ${refreshed.status()}`);
           const frontendOrigin = new URL(run.target.frontendUrl).origin;
           const finalizationResponse = session.page.waitForResponse((response) => isExactFinalizationResponse(response, frontendOrigin), { timeout: 12_000 }).catch(() => null);
-          const endButton = session.page.getByRole("button", { name: /^End session$/i }).first();
-          await endButton.waitFor({ state: "visible", timeout: 5_000 });
-          await endButton.click();
-          const confirm = session.page.getByRole("button", { name: /^end session$/i }).last();
-          if (await confirm.isVisible({ timeout: 2_000 }).catch(() => false)) await confirm.click();
+          await clickEndSessionThroughExitGuards(session.page);
           const response = await finalizationResponse;
           const receipt = response && response.status() === 202 && isJsonResponse(response) ? await response.json().catch(() => null) as Record<string, unknown> | null : null;
           const confirmed = Boolean(response?.ok() && hasExactFinalizationEnvelope(run, receipt, true));

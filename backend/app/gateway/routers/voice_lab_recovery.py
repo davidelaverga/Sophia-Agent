@@ -2992,6 +2992,7 @@ async def _reconcile_overdue_cleanup_admissions(
         cleanup_admissions,
         complete_cleanup_admission,
         release_cleanup_admission,
+        verify_cleanup_provider_settlement_replay,
     )
 
     try:
@@ -3058,6 +3059,55 @@ async def _reconcile_overdue_cleanup_admissions(
                     )
                 if consumed:
                     continue
+            if (
+                admission.status in {"browser_closed", "activation_aborted"}
+                and claims.scenario_id != "V-D02"
+            ):
+                settlement_sha256 = (
+                    _provider_terminal_settlement_sha256(
+                        record,
+                        voice_module=voice,
+                    )
+                    if record is not None
+                    else None
+                )
+                try:
+                    settlement_verified = bool(settlement_sha256) and (
+                        await asyncio.to_thread(
+                            verify_cleanup_provider_settlement_replay,
+                            claims.cleanup_obligation_id,
+                            settlement_sha256,
+                        )
+                    )
+                except Exception as exc:  # noqa: BLE001 - retain on ambiguity.
+                    return _component(
+                        "pending",
+                        code="cleanup_admission_provider_settlement_unavailable",
+                        error_type=type(exc).__name__,
+                    )
+                if not settlement_verified:
+                    return _component(
+                        "pending",
+                        code="cleanup_admission_provider_settlement_unconfirmed",
+                    )
+                try:
+                    consumed = await asyncio.to_thread(
+                        complete_cleanup_admission,
+                        admission,
+                        basis="server_relay_zero",
+                    )
+                except Exception as exc:  # noqa: BLE001 - retain on ambiguity.
+                    return _component(
+                        "pending",
+                        code="cleanup_admission_provider_settlement_consume_unavailable",
+                        error_type=type(exc).__name__,
+                    )
+                if not consumed:
+                    return _component(
+                        "pending",
+                        code="cleanup_admission_provider_settlement_not_consumed",
+                    )
+                continue
             await voice._disconnect_gemini_production_session(
                 admission.resource_id,
                 capability=sign_retention_reaper_runtime_capability(

@@ -4,14 +4,19 @@ vi.mock('../../app/api/_lib/gateway-url', () => ({
   getPrimaryGatewayUrl: () => 'https://gateway.test',
 }));
 
-import { assertVoiceLabRetentionAdmissionReady } from '../../server/voice-lab/retention-admission';
+import {
+  assertVoiceLabRetentionAdmissionReady,
+  VOICE_LAB_RETENTION_ADMISSION_TIMEOUT_MS,
+} from '../../server/voice-lab/retention-admission';
 
 describe('Voice Lab retention admission', () => {
   afterEach(() => {
+    vi.restoreAllMocks();
     vi.unstubAllGlobals();
   });
 
   it('permits principal bootstrap while the retention plane is ready and product mutations remain closed', async () => {
+    const timeoutSpy = vi.spyOn(AbortSignal, 'timeout');
     const targetFetch = vi.fn(async () => new Response(JSON.stringify({
       voice_lab_admission_ready: true,
       voice_lab_mutation_ready: false,
@@ -26,6 +31,7 @@ describe('Voice Lab retention admission', () => {
       method: 'GET',
       cache: 'no-store',
     }));
+    expect(timeoutSpy).toHaveBeenCalledWith(VOICE_LAB_RETENTION_ADMISSION_TIMEOUT_MS);
   });
 
   it('fails closed when the protected retention admission fence is unavailable', async () => {
