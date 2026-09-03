@@ -1316,6 +1316,135 @@ async def test_recovery_aborts_and_consumes_due_unactivated_ordinary_provider(
     assert len(synthetic["voice_provider_activation_abort_receipts"]) == 1
 
 
+@pytest.mark.anyio
+async def test_recovery_consumes_durable_browser_close_after_voice_owner_loss(
+    monkeypatch: pytest.MonkeyPatch,
+    voice_lab_env: None,
+) -> None:
+    from app.gateway.routers import voice_lab_recovery as recovery_router
+    from deerflow.sophia import cleanup_fence
+
+    admission, record, _state = _seed_provider_settlement(
+        monkeypatch,
+        provider_state="active",
+        activated_epoch=1,
+        pending_epoch=None,
+    )
+    claims = _verify(_sign(_claims()))
+    assert claims is not None
+    voice_router._record_synthetic_browser_provider_close(
+        claims,
+        "provider-session-1",
+        [_provider_close_receipt()],
+        [],
+    )
+
+    class AfterProviderDeadline(datetime):
+        @classmethod
+        def now(cls, tz: object = None) -> datetime:
+            observed = datetime(2033, 5, 18, 4, 3, 21, tzinfo=UTC)
+            return observed if tz is not None else observed.replace(tzinfo=None)
+
+    monkeypatch.setattr(cleanup_fence, "datetime", AfterProviderDeadline)
+    disconnect = AsyncMock(
+        side_effect=AssertionError("durable browser close must not need its Voice owner")
+    )
+    monkeypatch.setattr(
+        voice_router,
+        "_disconnect_gemini_production_session",
+        disconnect,
+    )
+
+    result = await recovery_router._reconcile_overdue_cleanup_admissions(
+        claims,
+        record,
+    )
+
+    assert result == {
+        "status": "completed",
+        "cleanup_admissions_reconciled": 1,
+    }
+    assert cleanup_fence.cleanup_admissions(admission.cleanup_obligation_id) == ()
+    disconnect.assert_not_awaited()
+
+
+@pytest.mark.anyio
+async def test_recovery_never_shortcuts_d02_with_durable_browser_close(
+    monkeypatch: pytest.MonkeyPatch,
+    voice_lab_env: None,
+) -> None:
+    from app.gateway.routers import voice_lab_recovery as recovery_router
+    from deerflow.sophia import cleanup_fence
+
+    admission, record, _state = _seed_provider_settlement(
+        monkeypatch,
+        provider_state="active",
+        activated_epoch=1,
+        pending_epoch=None,
+        scenario_id="V-D02",
+        scenario_version="vt00.scenarios.v1",
+    )
+    claims = _verify(
+        _sign(
+            _claims(
+                scenario_id="V-D02",
+                scenario_version="vt00.scenarios.v1",
+                voice_lab_run_id_sha256="a" * 64,
+                browser_worker_id_sha256="b" * 64,
+                browser_lease_epoch=1,
+                browser_context_id_sha256="c" * 64,
+            )
+        )
+    )
+    assert claims is not None
+    synthetic = record.metadata["synthetic_voice_lab"]
+    synthetic.update(
+        {
+            "voice_lab_run_id_sha256": claims.voice_lab_run_id_sha256,
+            "browser_worker_id_sha256": claims.browser_worker_id_sha256,
+            "browser_lease_epoch": claims.browser_lease_epoch,
+            "browser_context_id_sha256": claims.browser_context_id_sha256,
+        }
+    )
+    voice_router._record_synthetic_browser_provider_close(
+        claims,
+        "provider-session-1",
+        [_provider_close_receipt()],
+        [],
+    )
+
+    class AfterProviderDeadline(datetime):
+        @classmethod
+        def now(cls, tz: object = None) -> datetime:
+            observed = datetime(2033, 5, 18, 4, 3, 21, tzinfo=UTC)
+            return observed if tz is not None else observed.replace(tzinfo=None)
+
+    monkeypatch.setattr(cleanup_fence, "datetime", AfterProviderDeadline)
+    disconnect = AsyncMock(return_value=voice_router.GeminiProductionDisconnectResult(disconnected=True))
+    monkeypatch.setattr(
+        voice_router,
+        "_disconnect_gemini_production_session",
+        disconnect,
+    )
+    monkeypatch.setattr(
+        recovery_router,
+        "sign_retention_reaper_runtime_capability",
+        lambda *_args, **_kwargs: "signed-retention-capability",
+    )
+
+    result = await recovery_router._reconcile_overdue_cleanup_admissions(
+        claims,
+        record,
+    )
+
+    assert result == {
+        "status": "pending",
+        "code": "cleanup_admission_provider_owner_ack_pending",
+    }
+    assert len(cleanup_fence.cleanup_admissions(admission.cleanup_obligation_id)) == 1
+    disconnect.assert_awaited_once()
+
+
 def test_provider_settlement_aborts_never_created_initial_candidate_and_replays(
     monkeypatch: pytest.MonkeyPatch,
     voice_lab_env: None,
