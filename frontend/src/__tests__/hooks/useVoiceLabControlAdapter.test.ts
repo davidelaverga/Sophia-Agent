@@ -102,7 +102,7 @@ describe('useVoiceLabControlAdapter', () => {
     }));
   });
 
-  it('keeps authorization alive while waiting for the ordinary product action to become ready', async () => {
+  it('requests authorization only after the ordinary product action becomes ready', async () => {
     globalThis.fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({
       ...receipt,
       action: 'voice-start',
@@ -118,12 +118,13 @@ describe('useVoiceLabControlAdapter', () => {
     );
     await settle();
 
-    expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+    expect(globalThis.fetch).not.toHaveBeenCalled();
     expect(invoke).not.toHaveBeenCalled();
 
     rerender({ enabled: true });
     await settle();
 
+    expect(globalThis.fetch).toHaveBeenCalledTimes(1);
     expect(invoke).toHaveBeenCalledTimes(1);
   });
 
@@ -149,6 +150,11 @@ describe('useVoiceLabControlAdapter', () => {
       status: 200,
       headers: { 'content-type': 'application/json' },
     }));
+    await settle();
+
+    expect(invoke).not.toHaveBeenCalled();
+
+    rerender({ enabled: true });
     await settle();
 
     expect(invoke).toHaveBeenCalledTimes(1);

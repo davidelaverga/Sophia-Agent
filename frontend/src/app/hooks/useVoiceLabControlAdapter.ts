@@ -132,6 +132,8 @@ export function useVoiceLabControlAdapter(
   }, [invokeExistingAction]);
 
   useEffect(() => {
+    if (!enabled) return;
+
     let active = true;
 
     void (async () => {
@@ -148,7 +150,7 @@ export function useVoiceLabControlAdapter(
     return () => {
       active = false;
     };
-  }, [action]);
+  }, [action, enabled]);
 
   useEffect(() => {
     if (!authorizedReceipt || !readinessLatchedRef.current || invokedRef.current) return;
