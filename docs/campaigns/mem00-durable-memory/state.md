@@ -2,7 +2,7 @@
 
 Updated: 2026-09-03
 
-Operational state: `AUTHORIZED_R3_R4_EXECUTION`; continue through the approved bounded hosted probe, additive migration, dark deployment, and synthetic certification cohort.
+Operational state: `R4_COORDINATION_HOLD`; safe implementation, migration, and provider proof are complete, but exact-candidate convergence is paused while the separate active observability/VT00 task owns the shared production deployment plane.
 
 ## Completed safe gates
 
@@ -29,7 +29,9 @@ Operational state: `AUTHORIZED_R3_R4_EXECUTION`; continue through the approved b
 - No Mem0 SDK/API version, endpoint, organization, project, configuration, algorithm toggle, plan, billing, or paid-service change was made. The API-key inventory now contains six hashed keys; exactly one is the approved replacement.
 - The refreshed billing window remains unchanged, Growth Plan remains active, Extra Usage remains off, and post-certification usage is 34/200,000 add requests plus 1,875/20,000 retrieval requests. Projection remains closed until the additive migration and dark exact-candidate deployment are complete.
 - The refreshed signed-in EU LangSmith Sophia project uses the pinned workspace/project, retains 14-day retention, and showed no runs in the selected one-day window. No trace, evaluator, automation, alert, or plan change was made.
+- The isolated branch is published at `2e2de0bf797da16383109ff083c34ff852067c86` with tree `9e830f7cf941fdabc0ef5a2e439db551ff1767bd`. Render deployments `dep-dackq2u1egvs73d0ul50`, `dep-dackq6vavr4c73fjf740`, and `dep-dackqb0n74is73dhemf0` each completed successfully on that exact commit. Vercel Preview first canceled on the existing ignored-build rule and then failed closed because Preview lacks the required database TLS CA; no project setting or TLS policy was weakened. Exact production deployment `9oVBUnsFBSN2q2G2UbEry62cSsno` then built successfully and served `www.sophia-ei.com`.
+- R4 is not certified because a separate active production campaign redeployed Gateway and Voice back to VT00/observability `fb8a6655` after MEM00's successful deploys, leaving a mixed four-service identity. Voice Lab reported no active run and an engaged kill switch, and MEM00 flags remained absent/default-false, so no memory behavior changed. MEM00 will not fight the shared deployment plane; it requires an idle coordinated window before exact reconvergence.
 
 ## Promotion status
 
-`PROMOTE MEM00` is not yet permitted. R3 and the additive disabled migration are complete. Required remaining work is remote publication and dark exact-candidate deployment, synthetic MEM-P01–MEM-P08 certification, any separately approved real-user legacy/cutover work, five consecutive clean exact-candidate canaries, terminal-zero cleanup, and the final independently reviewable evidence packet. Real-user enrollment/import, bulk or ambiguous purge, project/API/SDK/plan/billing changes, merge, and full promotion remain unauthorized.
+`PROMOTE MEM00` is not yet permitted. R3 and the additive disabled migration are complete, and each dark binary has built successfully, but shared production services are not currently converged on one MEM00 SHA. Required remaining work is an idle deployment window, exact-candidate reconvergence, a separately signed-in ordinary synthetic memory-certification account, synthetic-cohort-only configuration, MEM-P01–MEM-P08 certification, any separately approved real-user legacy/cutover work, five consecutive clean exact-candidate canaries, terminal-zero cleanup, and the final independently reviewable evidence packet. Real-user enrollment/import, bulk or ambiguous purge, project/API/SDK/plan/billing changes, merge, and full promotion remain unauthorized.
