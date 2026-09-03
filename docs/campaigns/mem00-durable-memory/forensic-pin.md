@@ -1,17 +1,17 @@
 # MEM00 forensic pin
 
-Captured: 2026-09-02 (Europe/Rome)
+Captured: 2026-09-04 (Europe/Rome; refreshed from the original 2026-09-02 pin)
 
 This is a content-free R0 snapshot. Secret values, memory text, raw user/session/provider identifiers, transcripts, authorization URLs, and provider error bodies are intentionally excluded.
 
 ## Repository lineage
 
 - Reviewed reference: `1e11584050927bac2b4c851533614bc9d63e4eab`.
-- Newest remote head at the latest reconciliation: `fb8a6655311decf433245b2fce9667c80018b965`.
-- Base tree: `8261f6d9417981a2ec2c0fc7d4237c3b6d276e60`.
+- Newest remote head at the latest reconciliation: `3add3336216e74324cd1ed4d3859caccc70c94fe`.
+- Reconciled upstream tree: `a867e9d378db33eeee4d292bb130995bc0bf9f12`.
 - Isolated branch: `codex/mem00-durable-memory-governance`.
 - Active VT00 worktree remains separate on `codex/vt00-implementation`; MEM00 did not modify it.
-- Changes after the reviewed reference were explicitly reconciled through `fb8a6655`. In addition to the lineage through `1a8acf53`, `d26bcd11` atomically invokes authorized Voice Lab actions and `fb8a6655` ignores pre-activation provider epochs. Their three-file delta is limited to the frontend Voice Lab control adapter and Voice Lab worker/provider-epoch test, does not add or bypass a memory authority, and preserves the active-run safety boundary. Focused frontend tests passed 12/12 with TypeScript green; focused Voice Lab tests passed 10/10 with TypeScript green.
+- Changes after the reviewed reference were explicitly reconciled through `3add3336`. The newest eight commits after `fb8a6655` repair Voice Lab cross-region readiness, rounded fixture accounting, synthetic cleanup and audio flushing, anonymous provider binding, finalization exit guards, durable provider cleanup, and orphan recovery. Their 12-file delta does not add or bypass a memory authority and preserves the active-run safety boundary. The merged pre-evidence candidate is `77424edab7a682d2acea1e328a0e27336b5470df` / tree `d2d19514b8c78c7c2d1a3f2965493ecda4c6fc53`; backend 111/111, complete frontend 1,952 passed/two skipped, complete Voice Lab 348 passed/six skipped, and both TypeScript checks are green.
 - The first isolated-branch publication was verified at commit/tree `fba9e10e18870021b97055582fefc3a192947c2e` / `e0d45a0843a3882fcd5dc4281efaf7b723fb82b4`. Its one-repository fine-grained credential was revoked immediately, and no pull request or merge was created. The newly reconciled local pre-evidence tip is `53e2fc7e7a993652c1f4976311f426cb50cdc9d8` / `192c8b54da2006b707b61d3feede241f17806a3a` and remains undeployed until refreshed publication.
 - The immutable MEM00 candidate commit/tree is populated in the post-freeze evidence manifest. Pre-freeze deterministic attempts use the exact base above plus their ledger identity; they are not represented as immutable candidates.
 
@@ -19,14 +19,14 @@ This is a content-free R0 snapshot. Secret values, memory text, raw user/session
 
 | Component | Service/deployment | Reported revision | Public identity |
 | --- | --- | --- | --- |
-| Gateway | `srv-d7be5s9r0fns7397l4g0` / `dep-dacijmqfngtc73dko69g` | `ce83d5a8f7b2abec031314488bc4eb66985095b3` | `https://sophia-gateway.onrender.com` |
-| LangGraph | `srv-d7be5s9r0fns7397l4fg` / `dep-dacikfuq1p3s738aih9g` | `ce83d5a8f7b2abec031314488bc4eb66985095b3` | `https://sophia-langgraph.onrender.com` |
-| Voice | `srv-d7be5s9r0fns7397l4f0` / `dep-dacil2qfngtc73dkslhg` | `ce83d5a8f7b2abec031314488bc4eb66985095b3` | `https://sophia-voice-2uzr.onrender.com` |
+| Gateway | `srv-d7be5s9r0fns7397l4g0` / `dep-dacufjijnfac738rfa1g` | `b17669ab7b5600d7fba53b0ff28840640de5e750` | `https://sophia-gateway.onrender.com` |
+| LangGraph | `srv-d7be5s9r0fns7397l4fg` / `dep-dacu4enavr4c73f144ag` | `163b54979ebb418ea144da9298490b33aa4105ce` | `https://sophia-langgraph.onrender.com` |
+| Voice | `srv-d7be5s9r0fns7397l4f0` / `dep-dactnjijnfac738rfopg` | `e3b40f1b21739479db239c383ce88285ce740152` | `https://sophia-voice-2uzr.onrender.com` |
 | Voice Lab worker | `srv-da6uiqfavr4c739mtbo0` / `dep-dac7hfdg1s2s738pdvn0` | `66cebaa414b2a8b89f2881b34baaac22870652f5` | internal worker |
 | Voice Lab MCP | `srv-da6uiqfavr4c739mtbng` | read-only identity captured | internal MCP |
-| Frontend | Vercel project `sophia-agent-front` / deployment `8xF4eNvCKA4THBGHDAbNFJ2sQgU2` | `ce83d5a8f7b2abec031314488bc4eb66985095b3` | `https://www.sophia-ei.com` (`sophia-agent-front-7rxw31f0n-sophia-30911edf.vercel.app`) |
+| Frontend | Vercel project `sophia-agent-front` / deployment `BWxKhVwCyKqFB32EzovabxXQNsP3` | `163b54979ebb418ea144da9298490b33aa4105ce` | `https://www.sophia-ei.com` (`sophia-agent-front-i0on7a1no-sophia-30911edf.vercel.app`) |
 
-The product table is the 2026-09-03T10:13+02:00 snapshot. A second Gateway deploy for the same `ce83d5a8` revision was in progress at that instant, so its live ID above remains authoritative until a later terminal re-pin. At 2026-09-03T08:07:13Z, Voice Lab reported no active run or operation, an engaged kill switch, and closed product-mutation gates. None of the product services is on the isolated MEM00 candidate yet.
+The product table is the resumed 2026-09-04T00:04+02:00 snapshot. At 2026-09-03T21:58:30Z, Voice Lab reported no active run or operation, an engaged kill switch, and closed product-mutation gates. The product is intentionally mixed after the idle observability campaign; none of these revisions contains the refreshed isolated MEM00 candidate.
 
 ## Product database snapshot
 
@@ -45,7 +45,7 @@ The product table is the 2026-09-03T10:13+02:00 snapshot. A second Gateway deplo
 - Existing project ID: `proj_q1I90sXEFJXjVt3Mvghj2P7nKEfzPvT9h0t9Ft3Z` (`default-project` in `davide5-default-org`).
 - Existing plan shown by the dashboard: Growth Plan. Extra Usage was off.
 - Billing window observed: 2026-08-11 through 2026-09-11.
-- Usage at the post-R3 refresh: 34/200,000 add requests and 1,875/20,000 retrieval requests. Growth Plan remains active and Extra Usage remains off.
+- Usage at the resumed refresh: 34/200,000 add requests and 1,933/20,000 retrieval requests. Growth Plan remains active and Extra Usage remains off.
 - SDK dependency: `mem0ai==1.0.9` in both backend package graphs.
 - Locked wheel SHA-256: `5153883da8f49296de763f4f92876ce3d4ee7daf7f596e3d4feb3a1709d3c4b0`.
 - Deployed module SHA-256 observed: `d4dea4af0e23d544a8a004dd385656ab49ea14180d1d854ef81483e94c1d045d`.
