@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 
 import { AudioResolver } from "../src/audio.js";
 import { BUNDLED_FIXTURE_MANIFEST_SHA256, loadConfig } from "../src/config.js";
+import { reserveAudioInput } from "../src/service.js";
 import { testConfig } from "./helpers.js";
 
 const fixtureRoot = path.resolve(import.meta.dirname, "../fixtures");
@@ -40,6 +41,23 @@ describe("governed deterministic V-A02 fixtures", () => {
     const manifest = JSON.parse(await readFile(path.join(fixtureRoot, "manifest.json"), "utf8"));
     expect(manifest.fixtures.map((fixture: any) => fixture.fixture_class).sort()).toEqual(["long_brief", "noisy_command", "short_command", "silence", "trailing_pause"]);
     expect(manifest.fixtures.find((fixture: any) => fixture.fixture_class === "silence").assertion_policy).toMatchObject({ expect_transcript: false, semantic_threshold: "no_fabricated_injected_or_product_turn" });
+  });
+
+  it("durably reserves every immutable fixture without whole-millisecond byte underflow", async () => {
+    const config = testConfig();
+    const resolver = new AudioResolver(config);
+    await resolver.initialize();
+    const summaries = resolver.summaries();
+    const manifest = JSON.parse(await readFile(path.join(fixtureRoot, "manifest.json"), "utf8"));
+
+    for (const summary of summaries) {
+      const fixture = manifest.fixtures.find((candidate: any) => candidate.id === summary.id);
+      const bytes = await readFile(path.join(fixtureRoot, "audio", fixture.file));
+      const reservation = await reserveAudioInput({ fixture_id: summary.id }, summaries, config);
+
+      expect(reservation.duration_ms, summary.id).toBe(summary.durationMs);
+      expect(reservation.bytes, summary.id).toBeGreaterThanOrEqual(bytes.byteLength);
+    }
   });
 
   it("records the observed adaptive TTS engine version and fails closed on mismatch", async () => {

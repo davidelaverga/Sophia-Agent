@@ -489,7 +489,10 @@ export async function reserveAudioInput(
     const fixture = fixtures.find((candidate) => candidate.id === input.fixture_id);
     if (!fixture) throw new VoiceLabError(labError("FIXTURE_NOT_FOUND", `Fixture ${input.fixture_id} is not allowlisted.`, "validation"));
     if (fixture.durationMs > config.maxAudioDurationMs) throw new VoiceLabError(labError("AUDIO_DURATION_LIMIT", "Fixture exceeds the per-utterance duration limit.", "validation"));
-    const bytes = Math.ceil(fixture.durationMs * fixture.sampleRate * fixture.channels * 2 / 1_000) + 44;
+    // Manifest durations are whole milliseconds while immutable WAV payloads may
+    // end within the following millisecond. Reserve that bounded rounding tail
+    // so the durable fence never under-reserves a startup-verified fixture.
+    const bytes = Math.ceil((fixture.durationMs + 1) * fixture.sampleRate * fixture.channels * 2 / 1_000) + 44;
     if (bytes > config.maxAudioBytes) throw new VoiceLabError(labError("AUDIO_TOO_LARGE", "Fixture reservation exceeds the per-utterance audio byte limit.", "validation"));
     return { duration_ms: fixture.durationMs, bytes };
   }
