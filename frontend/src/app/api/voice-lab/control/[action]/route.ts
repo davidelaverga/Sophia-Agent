@@ -24,6 +24,8 @@ const OPERATION_BY_ACTION = {
   'voice-start': 'voice:start',
 } as const;
 
+export const VOICE_LAB_CONTROL_RECEIPT_HEADER = 'X-Sophia-Voice-Lab-Control-Receipt';
+
 function failure(error: unknown): NextResponse {
   if (error instanceof VoiceLabCapabilityError) {
     return NextResponse.json({ ok: false, error: error.code }, { status: error.status });
@@ -81,7 +83,7 @@ export async function POST(
       .update(action, 'ascii')
       .digest('hex');
 
-    const response = NextResponse.json({
+    const receipt = {
       ok: true,
       schema: 'sophia_voice_lab_control_adapter_v1',
       action,
@@ -93,8 +95,17 @@ export async function POST(
       control_epoch_sha256: controlEpochSha256,
       expires_at: Math.min(capability.exp, binding.exp),
       ordinary_user_access: false,
-    });
+    } as const;
+    const response = NextResponse.json(receipt);
     response.headers.set('Cache-Control', 'no-store');
+    // The ordinary session route may remount while this response body is being
+    // consumed. Mirror the same exact, bounded receipt in a navigation-stable
+    // response header so both the page and the external observer can validate
+    // authorization without inventing a second control path.
+    response.headers.set(
+      VOICE_LAB_CONTROL_RECEIPT_HEADER,
+      encodeURIComponent(JSON.stringify(receipt)),
+    );
     return response;
   } catch (error) {
     return failure(error);

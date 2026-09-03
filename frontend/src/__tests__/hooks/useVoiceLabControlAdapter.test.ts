@@ -83,6 +83,25 @@ describe('useVoiceLabControlAdapter', () => {
     expect(invoke).toHaveBeenCalledTimes(1);
   });
 
+  it('uses the exact response-header receipt when route navigation makes the body unavailable', async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue(new Response('not-json', {
+      status: 200,
+      headers: {
+        'x-sophia-voice-lab-control-receipt': encodeURIComponent(JSON.stringify(receipt)),
+      },
+    }));
+    const invoke = vi.fn().mockResolvedValue(undefined);
+
+    renderHook(() => useVoiceLabControlAdapter('session-start', invoke));
+    await settle();
+
+    expect(invoke).toHaveBeenCalledTimes(1);
+    expect(recordCaptureMock).toHaveBeenCalledWith(expect.objectContaining({
+      category: 'voice-lab-control',
+      name: 'authorized-action-completed',
+    }));
+  });
+
   it('keeps authorization alive while waiting for the ordinary product action to become ready', async () => {
     globalThis.fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({
       ...receipt,

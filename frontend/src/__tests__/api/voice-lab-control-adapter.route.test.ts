@@ -112,7 +112,7 @@ describe('/api/voice-lab/control/[action] POST', () => {
     const response = await POST(request(), { params: Promise.resolve({ action: routeAction }) });
     expect(response.status).toBe(200);
     expect(response.headers.get('cache-control')).toBe('no-store');
-    await expect(response.json()).resolves.toMatchObject({
+    const expectedReceipt = {
       ok: true,
       schema: 'sophia_voice_lab_control_adapter_v1',
       action: expectedAction,
@@ -121,7 +121,11 @@ describe('/api/voice-lab/control/[action] POST', () => {
       cleanup_obligation_id: '123e4567-e89b-42d3-a456-426614174000',
       expected_deployment: { frontend: BUILD, backend: BUILD, voice: BUILD },
       ordinary_user_access: false,
-    });
+    };
+    await expect(response.clone().json()).resolves.toMatchObject(expectedReceipt);
+    expect(JSON.parse(decodeURIComponent(
+      response.headers.get('x-sophia-voice-lab-control-receipt') || '',
+    ))).toMatchObject(expectedReceipt);
   });
 
   it('is default-disabled even for a valid synthetic principal and capability', async () => {

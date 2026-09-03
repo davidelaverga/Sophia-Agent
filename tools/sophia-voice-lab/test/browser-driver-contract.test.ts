@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 
-import { assertPageLocation, browserProcessOwnershipHashes, classifyBrowserStartCause, classifyClientConsoleErrorLocation, classifyClientPageError, closeContextWithProof, disposableBrowserProcessIsActive, drainProductCapture, isExactFinalizationResponse, PlaywrightVoiceDriver, requestBoundJson, requestBoundJsonWithOneTransientRetry, shouldCaptureSessionVoiceRoute, validateAppSyntheticBinding, validateD02BrowserContextBinding, validateD02ProductCleanupEcho, validateVoiceLabControlAdapterReceipt, waitOnWorkerClock } from "../src/browser-driver.js";
+import { assertPageLocation, browserProcessOwnershipHashes, classifyBrowserStartCause, classifyClientConsoleErrorLocation, classifyClientPageError, closeContextWithProof, decodeVoiceLabControlAdapterReceiptHeader, disposableBrowserProcessIsActive, drainProductCapture, isExactFinalizationResponse, PlaywrightVoiceDriver, requestBoundJson, requestBoundJsonWithOneTransientRetry, shouldCaptureSessionVoiceRoute, validateAppSyntheticBinding, validateD02BrowserContextBinding, validateD02ProductCleanupEcho, validateVoiceLabControlAdapterReceipt, waitOnWorkerClock } from "../src/browser-driver.js";
 import { sha256 } from "../src/security.js";
 import { SHA, SHA_B, SHA_C, SHA_D, testConfig, testRun } from "./helpers.js";
 
@@ -57,6 +57,8 @@ describe("server-authorized Voice Lab control adapter", () => {
     expect(validateVoiceLabControlAdapterReceipt({ ...receipt, expected_deployment: { ...run.target.expectedDeployment, voice: SHA_D } }, "session-start", run, 1_800_000_000)).toBeNull();
     expect(validateVoiceLabControlAdapterReceipt({ ...receipt, expires_at: 1_800_000_000 }, "session-start", run, 1_800_000_000)).toBeNull();
     expect(validateVoiceLabControlAdapterReceipt({ ...receipt, unexpected: true }, "session-start", run, 1_800_000_000)).toBeNull();
+    expect(decodeVoiceLabControlAdapterReceiptHeader(encodeURIComponent(JSON.stringify(receipt)))).toEqual(receipt);
+    expect(decodeVoiceLabControlAdapterReceiptHeader("%not-json")).toBeNull();
   });
 });
 

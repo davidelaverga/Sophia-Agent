@@ -31,6 +31,7 @@ type ControlRequestEntry = {
 
 const controlRequests = new Map<VoiceLabControlAction, ControlRequestEntry>();
 const claimedControlEpochs = new Set<string>();
+const CONTROL_RECEIPT_HEADER = 'x-sophia-voice-lab-control-receipt';
 
 function isControlReceipt(value: unknown, action: VoiceLabControlAction): value is VoiceLabControlReceipt {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
@@ -52,6 +53,20 @@ function isControlReceipt(value: unknown, action: VoiceLabControlAction): value 
     && typeof deployment?.voice === 'string';
 }
 
+function receiptFromResponseHeader(
+  response: Response,
+  action: VoiceLabControlAction,
+): VoiceLabControlReceipt | null {
+  const encoded = response.headers.get(CONTROL_RECEIPT_HEADER);
+  if (!encoded) return null;
+  try {
+    const receipt: unknown = JSON.parse(decodeURIComponent(encoded));
+    return isControlReceipt(receipt, action) ? receipt : null;
+  } catch {
+    return null;
+  }
+}
+
 function requestControlReceipt(action: VoiceLabControlAction): Promise<VoiceLabControlReceipt | null> {
   const existing = controlRequests.get(action);
   if (existing?.receipt && existing.receipt.expires_at > Math.floor(Date.now() / 1000)) {
@@ -68,6 +83,11 @@ function requestControlReceipt(action: VoiceLabControlAction): Promise<VoiceLabC
       redirect: 'error',
     });
     if (!response.ok) return null;
+    const headerReceipt = receiptFromResponseHeader(response, action);
+    if (headerReceipt) {
+      entry.receipt = headerReceipt;
+      return headerReceipt;
+    }
     const receipt: unknown = await response.json();
     if (!isControlReceipt(receipt, action)) return null;
     entry.receipt = receipt;

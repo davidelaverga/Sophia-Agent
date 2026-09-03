@@ -50,6 +50,16 @@ const CONTROL_ADAPTER_RECEIPT_KEYS = [
   "cleanup_obligation_id", "expected_deployment", "control_epoch_sha256",
   "expires_at", "ordinary_user_access",
 ] as const;
+const CONTROL_ADAPTER_RECEIPT_HEADER = "x-sophia-voice-lab-control-receipt";
+
+export function decodeVoiceLabControlAdapterReceiptHeader(value: string | undefined): unknown {
+  if (!value) return null;
+  try {
+    return JSON.parse(decodeURIComponent(value));
+  } catch {
+    return null;
+  }
+}
 
 export function validateVoiceLabControlAdapterReceipt(
   receipt: unknown,
@@ -599,15 +609,23 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
             return;
           }
           if (action === null) return;
-          void response.json().then((receipt: unknown) => {
-            if (!startupPush.active) return;
+          const enqueueReceipt = (receipt: unknown): boolean => {
+            if (!startupPush.active) return false;
             const value = validateVoiceLabControlAdapterReceipt(receipt, action, run);
-            if (!value) return;
+            if (!value) return false;
             if (startupPush.queue.length >= MAX_STARTUP_PUSH_EVENTS) {
               startupPush.overflow = true;
-              return;
+              return true;
             }
             startupPush.queue.push({ page: targetPage, channel: "control", payload: value });
+            return true;
+          };
+          const headerReceipt = decodeVoiceLabControlAdapterReceiptHeader(
+            response.headers()[CONTROL_ADAPTER_RECEIPT_HEADER],
+          );
+          if (enqueueReceipt(headerReceipt)) return;
+          void response.json().then((receipt: unknown) => {
+            enqueueReceipt(receipt);
           }).catch(() => undefined);
         });
       };
