@@ -646,7 +646,12 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       assertPageLocation(page.url(), frontendOrigin, (pathname) => /^\/session(?:\/|$)/.test(pathname), "ORDINARY_UI_ORIGIN_DRIFT");
       await enterStage("control_adapter_voice_start");
       await enterStage("voice_startup_readiness");
-      const events = await this.#waitForStartupReadiness(session, 45_000, frontendOrigin);
+      const events = await this.#waitForStartupReadiness(
+        session,
+        45_000,
+        frontendOrigin,
+        currentClientPageErrorDiagnostic,
+      );
       events.push(...this.#drainStartupPush(session));
       events.push({
         kind: "harness.browser_process_acquired",
@@ -1275,7 +1280,12 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
     return { kind: "cleanup.browser_context_close_failed", source: "browser", payload: { reason, close_resolved: result.closed, browser_registry_absent: result.closed && processResult.closed, browser_process_close_resolved: processResult.closed, execution_epoch_sha256: ownership?.executionEpochSha256 ?? null, error_class: result.errorClass ?? processResult.errorClass }, dedupeKey: `cleanup:${runId}:browser-close-failed` };
   }
 
-  async #waitForStartupReadiness(session: BrowserSession, timeoutMs: number, frontendOrigin: string): Promise<Omit<LabEvent, "runId" | "seq" | "at">[]> {
+  async #waitForStartupReadiness(
+    session: BrowserSession,
+    timeoutMs: number,
+    frontendOrigin: string,
+    clientPageErrorDiagnostic: () => ClientPageErrorDiagnostic | null,
+  ): Promise<Omit<LabEvent, "runId" | "seq" | "at">[]> {
     const deadline = Date.now() + timeoutMs;
     const drained: Omit<LabEvent, "runId" | "seq" | "at">[] = [];
     const observed = new Set<string>();
@@ -1323,6 +1333,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       provider_streaming_observed: observed.has("provider.connection_observability") || observed.has("provider.streaming_ready"),
       synthetic_stream_correlated: issuedIdentity !== null && productIdentity !== null && issuedIdentity.stream === productIdentity.stream && JSON.stringify(issuedIdentity.tracks) === JSON.stringify(productIdentity.tracks),
       route_state: routeState,
+      client_page_error: clientPageErrorDiagnostic(),
     }));
   }
 
