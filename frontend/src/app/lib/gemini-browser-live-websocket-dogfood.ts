@@ -7572,9 +7572,10 @@ function createGeminiSyntheticInteractionEvidenceTracker(options: {
     }
     pendingToolsByInput.delete(key);
   };
-  const stateForResponse = (responseId: string | null) => (
-    responseId ? statesByResponse.get(responseId) ?? null : null
-  );
+  const stateForResponse = (responseId: string | null) => {
+    if (responseId) return statesByResponse.get(responseId) ?? null;
+    return activeResponseId ? statesByResponse.get(activeResponseId) ?? null : null;
+  };
 
   return {
     noteAcceptedPublicUserTurn: (binding, acceptedAt) => {
@@ -7617,11 +7618,26 @@ function createGeminiSyntheticInteractionEvidenceTracker(options: {
       if (stopped || faulted) return;
       const categories = categorizeGeminiProviderEvent(event);
       if (!isAssistantOutputCategories(categories)) return;
-      const responseId = readGeminiStableResponseId(event);
-      if (!responseId || !GEMINI_SYNTHETIC_SAFE_ID.test(responseId)) {
-        if (pendingInput !== null) {
-          fail('interaction_response_id_missing');
-        }
+      const providerEpoch = receiveMetadata.providerConnectionEpoch ?? options.getProviderConnectionEpoch();
+      if (!Number.isInteger(providerEpoch) || providerEpoch < 1) {
+        fail('interaction_provider_epoch_conflict');
+        return;
+      }
+      const providerResponseId = readGeminiStableResponseId(event);
+      if (providerResponseId && !GEMINI_SYNTHETIC_SAFE_ID.test(providerResponseId)) {
+        fail('interaction_response_id_missing', { responseId: providerResponseId });
+        return;
+      }
+      if (!providerResponseId && activeResponseId !== null && pendingInput !== null) {
+        fail('interaction_response_overlap', { responseId: activeResponseId });
+        return;
+      }
+      const responseId = providerResponseId
+        ?? activeResponseId
+        ?? (pendingInput === null
+          ? null
+          : `synthetic-response:${providerEpoch}:${receiveMetadata.providerReceiveSequence}`);
+      if (!responseId) {
         return;
       }
       const existing = statesByResponse.get(responseId);
@@ -7658,11 +7674,6 @@ function createGeminiSyntheticInteractionEvidenceTracker(options: {
           utteranceId: pendingInput.binding.utterance_id,
           responseId,
         });
-        return;
-      }
-      const providerEpoch = receiveMetadata.providerConnectionEpoch ?? options.getProviderConnectionEpoch();
-      if (!Number.isInteger(providerEpoch) || providerEpoch < 1) {
-        fail('interaction_provider_epoch_conflict', { responseId });
         return;
       }
       const state: GeminiSyntheticInteractionEvidenceState = {
@@ -7719,7 +7730,7 @@ function createGeminiSyntheticInteractionEvidenceTracker(options: {
     },
     finishProviderEvent: (event, receiveMetadata) => {
       if (stopped || faulted) return;
-      const responseId = readGeminiStableResponseId(event);
+      const responseId = readGeminiStableResponseId(event) ?? activeResponseId;
       const state = stateForResponse(responseId);
       if (!state || state.assistantEndedAt !== null) return;
       const interrupted = isGeminiServerInterruptedEvent(event);

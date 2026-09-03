@@ -4186,8 +4186,9 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
     await connection.close();
   });
 
-  it('hard-fails an ambiguous synthetic assistant response without a stable response id', async () => {
+  it('binds an anonymous provider response to the active synthetic input by epoch and receive sequence', async () => {
     const interactionFaults: GeminiSyntheticInteractionFaultReceipt[] = [];
+    const interactionReceipts: GeminiSyntheticInteractionReceipt[] = [];
     const inputTurns: GeminiSyntheticInputTurnReceipt[] = [];
     let websocket: FakeWebSocket | null = null;
     const syntheticTest = {
@@ -4225,6 +4226,7 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
       getUserMedia: vi.fn(async () => ({ getTracks: () => [], getAudioTracks: () => [] } as unknown as MediaStream)),
       audioContextFactory: () => new FakeAudioContext() as unknown as AudioContext,
       onSyntheticInputTurnReceipt: (receipt) => inputTurns.push(receipt),
+      onSyntheticInteractionReceipt: (receipt) => interactionReceipts.push(receipt),
       onSyntheticInteractionFaultReceipt: (receipt) => interactionFaults.push(receipt),
     });
     const operation = (phase: string) => ({
@@ -4246,11 +4248,21 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
     ))).toBe(true));
     connection.acknowledgeSyntheticPublicUserTurn({ publicUtteranceId: 'public-a03-001', transcriptLength: 9 });
     websocket?.emitMessage({ serverContent: { outputTranscription: { text: 'Ambiguous.' } } });
+    websocket?.emitMessage({ serverContent: { turnComplete: true } });
 
-    await vi.waitFor(() => expect(interactionFaults).toEqual([
-      expect.objectContaining({ code: 'interaction_response_id_missing' }),
-    ]));
-    expect(websocket?.readyState).toBe(3);
+    await vi.waitFor(() => expect(interactionReceipts.some((receipt) => (
+      receipt.phase === 'assistant_response_completed'
+    ))).toBe(true));
+    const assigned = interactionReceipts.find((receipt) => receipt.phase === 'assistant_response_assigned');
+    expect(assigned).toMatchObject({
+      operation_id: 'operation-a03-001',
+      utterance_id: 'utterance-a03-001',
+      response_id: expect.stringMatching(/^synthetic-response:3:\d+$/),
+      assistant_turn_id: expect.stringMatching(/^synthetic-response:3:\d+$/),
+      provider_connection_epoch: 3,
+    });
+    expect(interactionFaults).toEqual([]);
+    expect(websocket?.readyState).toBe(1);
     await connection.close();
   });
 
