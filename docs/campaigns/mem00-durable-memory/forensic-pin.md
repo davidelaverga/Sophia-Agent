@@ -7,11 +7,11 @@ This is a content-free R0 snapshot. Secret values, memory text, raw user/session
 ## Repository lineage
 
 - Reviewed reference: `1e11584050927bac2b4c851533614bc9d63e4eab`.
-- Newest remote head at the latest reconciliation: `ce83d5a8f7b2abec031314488bc4eb66985095b3`.
-- Base tree: `2968d5fe58f515e1afe4f0418ada7b183f9b55f9`.
+- Newest remote head at the latest reconciliation: `1a8acf53676da4a0b48c210ec340dfcd04a3c89e`.
+- Base tree: `f375be68ffb775bfadff082124b82f003ec6f88b`.
 - Isolated branch: `codex/mem00-durable-memory-governance`.
 - Active VT00 worktree remains separate on `codex/vt00-implementation`; MEM00 did not modify it.
-- Changes after the reviewed reference were explicitly reconciled through `ce83d5a8`. In addition to the previously pinned lineage through `7d1e6b6a`, twelve later commits (`ad3db9e4` through `ce83d5a8`) harden hydrated/authorized Voice start, remount/navigation receipts, protected session loading, safe timeout diagnostics, and browser-driver route classification. Their diff is limited to frontend session/Voice Lab control and `tools/sophia-voice-lab`; backend and Voice have zero byte delta. They do not add or bypass a memory authority, and their active-run safety boundary is preserved.
+- Changes after the reviewed reference were explicitly reconciled through `1a8acf53`. In addition to the previously pinned lineage through `ce83d5a8`, `61422226` attests session response completion and `1a8acf53` honors reduced-motion session rendering. Both touch only the Voice Lab browser driver/tests; backend, Voice, and frontend have zero byte delta. They do not add or bypass a memory authority, and their active-run safety boundary is preserved.
 - The immutable MEM00 candidate commit/tree is populated in the post-freeze evidence manifest. Pre-freeze deterministic attempts use the exact base above plus their ledger identity; they are not represented as immutable candidates.
 
 ## Deployed component snapshot
@@ -63,7 +63,7 @@ The product table is the 2026-09-03T10:13+02:00 snapshot. A second Gateway deplo
 - Workspace ID: `26b7385f-8e69-4a13-b4da-49873ae46191`.
 - Sophia project ID: `7dd40980-665a-4f4a-95c3-582e6270b707`.
 - Retention: 14 days.
-- No runs were visible in the selected one-day window at the pin.
+- The signed-in regional endpoint is `https://eu.smith.langchain.com`. No runs were visible in the selected one-day window at the latest pin.
 - MEM00 export is default-disabled and content-free. When enabled for the synthetic cohort it sends structural metadata and counters only.
 
 ## Default-closed feature snapshot
