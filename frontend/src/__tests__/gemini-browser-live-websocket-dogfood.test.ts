@@ -3820,6 +3820,24 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
     window.dispatchEvent(new CustomEvent('sophia:voice-lab-input-operation', {
       detail: signal('completed'),
     }));
+    fakeAudioContext.processor.onaudioprocess?.({
+      inputBuffer: { getChannelData: () => new Float32Array(4096) },
+      outputBuffer: { numberOfChannels: 1, getChannelData: () => new Float32Array(4096) },
+    } as unknown as AudioProcessingEvent);
+    expect(websocket?.sent.at(-1)).toBe(JSON.stringify({ realtimeInput: { audioStreamEnd: true } }));
+    expect(inputDiagnostics).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        eventType: 'input_audio_stream_end_sent',
+        trigger: 'synthetic_input_operation_completed',
+        audioStreamEndSent: true,
+      }),
+    ]));
+    const sentCountAfterSyntheticEnd = websocket?.sent.length ?? 0;
+    fakeAudioContext.processor.onaudioprocess?.({
+      inputBuffer: { getChannelData: () => new Float32Array(4096) },
+      outputBuffer: { numberOfChannels: 1, getChannelData: () => new Float32Array(4096) },
+    } as unknown as AudioProcessingEvent);
+    expect(websocket?.sent).toHaveLength(sentCountAfterSyntheticEnd);
     await vi.waitFor(() => expect(legReceipts).toHaveLength(1));
     expect(legReceipts[0]).toMatchObject({
       schema: 'sophia_gemini_input_leg_v1',

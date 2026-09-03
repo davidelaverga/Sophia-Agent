@@ -8368,6 +8368,17 @@ function startMicrophoneAudioPipeline(options: {
       sendAudioStreamEnd('muted_audio_process');
       return;
     }
+
+    const syntheticInputOperation = options.syntheticInputEvidence?.currentBinding() ?? null;
+    if (options.syntheticInputEvidence && syntheticInputOperation?.phase !== 'started') {
+      if (
+        syntheticInputOperation?.phase === 'completed'
+        || syntheticInputOperation?.phase === 'interrupted'
+      ) {
+        sendAudioStreamEnd(`synthetic_input_operation_${syntheticInputOperation.phase}`);
+      }
+      return;
+    }
     audioStreamEndSent = false;
 
     const input = event.inputBuffer.getChannelData(0);
