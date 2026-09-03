@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 
-import { assertPageLocation, browserProcessOwnershipHashes, classifyBrowserStartCause, classifyClientConsoleErrorLocation, classifyClientPageError, closeContextWithProof, decodeVoiceLabControlAdapterReceiptHeader, disposableBrowserProcessIsActive, drainProductCapture, isExactFinalizationResponse, PlaywrightVoiceDriver, requestBoundJson, requestBoundJsonWithOneTransientRetry, shouldCaptureSessionVoiceRoute, validateAppSyntheticBinding, validateD02BrowserContextBinding, validateD02ProductCleanupEcho, validateVoiceLabControlAdapterReceipt, waitOnWorkerClock } from "../src/browser-driver.js";
+import { assertPageLocation, browserProcessOwnershipHashes, classifyBrowserStartCause, classifyClientConsoleErrorLocation, classifyClientPageError, clickEndSessionThroughExitGuards, closeContextWithProof, decodeVoiceLabControlAdapterReceiptHeader, disposableBrowserProcessIsActive, drainProductCapture, isExactFinalizationResponse, PlaywrightVoiceDriver, requestBoundJson, requestBoundJsonWithOneTransientRetry, shouldCaptureSessionVoiceRoute, validateAppSyntheticBinding, validateD02BrowserContextBinding, validateD02ProductCleanupEcho, validateVoiceLabControlAdapterReceipt, waitOnWorkerClock } from "../src/browser-driver.js";
 import { sha256 } from "../src/security.js";
 import { SHA, SHA_B, SHA_C, SHA_D, testConfig, testRun } from "./helpers.js";
 
@@ -446,6 +446,27 @@ describe("privileged browser boundary", () => {
     expect(isExactFinalizationResponse(response("https://evil.invalid/api/sophia/end-session"), "https://www.sophia-ei.com")).toBe(false);
     expect(isExactFinalizationResponse(response("https://www.sophia-ei.com/api/sophia/end-session?redirect=1"), "https://www.sophia-ei.com")).toBe(false);
     expect(isExactFinalizationResponse(response("https://www.sophia-ei.com/api/sophia/end-session", "GET"), "https://www.sophia-ei.com")).toBe(false);
+  });
+
+  it("follows the optional responding-state exit guard before awaiting finalization", async () => {
+    const clicked: string[] = [];
+    const locator = (name: string, visible = true) => ({
+      first: () => locator(name, visible),
+      last: () => locator(name, visible),
+      waitFor: async () => undefined,
+      click: async () => { clicked.push(name); },
+      isVisible: async () => visible,
+    });
+    const page = {
+      getByRole: (_role: string, options: { name: RegExp }) => {
+        const source = options.name.source.toLowerCase();
+        return source.includes("leave anyway") ? locator("leave-anyway") : locator("end-session");
+      },
+    } as any;
+
+    await clickEndSessionThroughExitGuards(page);
+
+    expect(clicked).toEqual(["end-session", "end-session", "leave-anyway"]);
   });
 
   it("caches a bounded Chromium launch failure instead of probing every heartbeat", async () => {
