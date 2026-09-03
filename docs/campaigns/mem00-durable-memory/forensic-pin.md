@@ -7,11 +7,12 @@ This is a content-free R0 snapshot. Secret values, memory text, raw user/session
 ## Repository lineage
 
 - Reviewed reference: `1e11584050927bac2b4c851533614bc9d63e4eab`.
-- Newest remote head at the latest reconciliation: `1a8acf53676da4a0b48c210ec340dfcd04a3c89e`.
-- Base tree: `f375be68ffb775bfadff082124b82f003ec6f88b`.
+- Newest remote head at the latest reconciliation: `fb8a6655311decf433245b2fce9667c80018b965`.
+- Base tree: `8261f6d9417981a2ec2c0fc7d4237c3b6d276e60`.
 - Isolated branch: `codex/mem00-durable-memory-governance`.
 - Active VT00 worktree remains separate on `codex/vt00-implementation`; MEM00 did not modify it.
-- Changes after the reviewed reference were explicitly reconciled through `1a8acf53`. In addition to the previously pinned lineage through `ce83d5a8`, `61422226` attests session response completion and `1a8acf53` honors reduced-motion session rendering. Both touch only the Voice Lab browser driver/tests; backend, Voice, and frontend have zero byte delta. They do not add or bypass a memory authority, and their active-run safety boundary is preserved.
+- Changes after the reviewed reference were explicitly reconciled through `fb8a6655`. In addition to the lineage through `1a8acf53`, `d26bcd11` atomically invokes authorized Voice Lab actions and `fb8a6655` ignores pre-activation provider epochs. Their three-file delta is limited to the frontend Voice Lab control adapter and Voice Lab worker/provider-epoch test, does not add or bypass a memory authority, and preserves the active-run safety boundary. Focused frontend tests passed 12/12 with TypeScript green; focused Voice Lab tests passed 10/10 with TypeScript green.
+- The first isolated-branch publication was verified at commit/tree `fba9e10e18870021b97055582fefc3a192947c2e` / `e0d45a0843a3882fcd5dc4281efaf7b723fb82b4`. Its one-repository fine-grained credential was revoked immediately, and no pull request or merge was created. The newly reconciled local pre-evidence tip is `53e2fc7e7a993652c1f4976311f426cb50cdc9d8` / `192c8b54da2006b707b61d3feede241f17806a3a` and remains undeployed until refreshed publication.
 - The immutable MEM00 candidate commit/tree is populated in the post-freeze evidence manifest. Pre-freeze deterministic attempts use the exact base above plus their ledger identity; they are not represented as immutable candidates.
 
 ## Deployed component snapshot
