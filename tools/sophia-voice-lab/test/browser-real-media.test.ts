@@ -81,6 +81,7 @@ describe("real Chromium dynamic media contract", () => {
       <p>private user content that must not be projected</p>
     `);
     await expect(classifySessionVoiceRoute(page, origin, "Tap to speak")).resolves.toEqual({
+      page_closed: false,
       location: "expected_session",
       voice_tab: "available",
       voice_button: "absent",
@@ -128,6 +129,20 @@ describe("real Chromium dynamic media contract", () => {
     expect(diagnostic.voice_tab).toBe("selected");
     expect(diagnostic.voice_button).toBe("disabled");
     expect(JSON.stringify(diagnostic)).not.toContain("do-not-project");
+    await context.close();
+  });
+
+  it("records a closed page without leaking the last URL or page content", async () => {
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    await page.goto(`${origin}/session`);
+    await page.setContent("<p>private user content that must not be projected</p>");
+    await page.close();
+    const diagnostic = await classifySessionVoiceRoute(page, origin, "Tap to speak");
+    expect(diagnostic.page_closed).toBe(true);
+    expect(diagnostic.location).toBe("expected_session");
+    expect(diagnostic.voice_button).toBe("absent");
+    expect(JSON.stringify(diagnostic)).not.toContain("private user content");
     await context.close();
   });
 

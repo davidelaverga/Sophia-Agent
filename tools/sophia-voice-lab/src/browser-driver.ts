@@ -128,6 +128,7 @@ export function classifyBrowserStartCause(error: unknown): {
 }
 
 export type SessionVoiceRouteDiagnostic = {
+  page_closed: boolean;
   location: "expected_session" | "dashboard" | "same_origin_other" | "cross_origin" | "invalid";
   voice_tab: "absent" | "hidden" | "disabled" | "selected" | "available";
   voice_button: "absent" | "hidden" | "disabled" | "ready" | "active_listening" | "active_thinking" | "active_speaking" | "active_ptt";
@@ -217,6 +218,7 @@ export async function classifySessionVoiceRoute(
         : "available";
 
   return {
+    page_closed: page.isClosed(),
     location,
     voice_tab,
     voice_button,
@@ -644,7 +646,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       assertPageLocation(page.url(), frontendOrigin, (pathname) => /^\/session(?:\/|$)/.test(pathname), "ORDINARY_UI_ORIGIN_DRIFT");
       await enterStage("control_adapter_voice_start");
       await enterStage("voice_startup_readiness");
-      const events = await this.#waitForStartupReadiness(session, 45_000);
+      const events = await this.#waitForStartupReadiness(session, 45_000, frontendOrigin);
       events.push(...this.#drainStartupPush(session));
       events.push({
         kind: "harness.browser_process_acquired",
@@ -1273,7 +1275,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
     return { kind: "cleanup.browser_context_close_failed", source: "browser", payload: { reason, close_resolved: result.closed, browser_registry_absent: result.closed && processResult.closed, browser_process_close_resolved: processResult.closed, execution_epoch_sha256: ownership?.executionEpochSha256 ?? null, error_class: result.errorClass ?? processResult.errorClass }, dedupeKey: `cleanup:${runId}:browser-close-failed` };
   }
 
-  async #waitForStartupReadiness(session: BrowserSession, timeoutMs: number): Promise<Omit<LabEvent, "runId" | "seq" | "at">[]> {
+  async #waitForStartupReadiness(session: BrowserSession, timeoutMs: number, frontendOrigin: string): Promise<Omit<LabEvent, "runId" | "seq" | "at">[]> {
     const deadline = Date.now() + timeoutMs;
     const drained: Omit<LabEvent, "runId" | "seq" | "at">[] = [];
     const observed = new Set<string>();
@@ -1302,6 +1304,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       if (hasControlAdapter && hasHarness && hasCredentials && hasMedia && hasProviderReceipt && hasStreaming) return drained;
       await waitOnWorkerClock(100);
     }
+    const routeState = await classifySessionVoiceRoute(session.page, frontendOrigin, this.config.startButtonName);
     throw new VoiceLabError(labError("VOICE_START_TIMEOUT", "The ordinary voice UI did not prove the page-owned synthetic stream, credentials, and provider readiness before timeout.", "product", true, {
       control_adapter_session_start_authorized: observed.has("control.adapter_authorized.session-start"),
       control_adapter_voice_start_authorized: observed.has("control.adapter_authorized.voice-start"),
@@ -1319,6 +1322,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       provider_connection_epoch: observed.has("provider.connection_epoch"),
       provider_streaming_observed: observed.has("provider.connection_observability") || observed.has("provider.streaming_ready"),
       synthetic_stream_correlated: issuedIdentity !== null && productIdentity !== null && issuedIdentity.stream === productIdentity.stream && JSON.stringify(issuedIdentity.tracks) === JSON.stringify(productIdentity.tracks),
+      route_state: routeState,
     }));
   }
 
