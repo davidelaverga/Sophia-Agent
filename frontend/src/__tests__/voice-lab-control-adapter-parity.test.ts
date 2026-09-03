@@ -22,7 +22,7 @@ describe('Voice Lab controller parity', () => {
 
   it('routes session authorization through the exact visible composer callback', () => {
     expect(sessionSource).toMatch(
-      /useVoiceLabControlAdapter\(\s*'voice-start',\s*handleMicClick,\s*!shouldShowLoading && hasValidBackendSessionId && !isReadOnly,\s*\)/,
+      /useVoiceLabControlAdapter\(\s*'voice-start',\s*handleMicClick,\s*!shouldShowLoading && !isReadOnly,\s*\)/,
     );
     expect(sessionSource).not.toContain('handleVoiceLabVoiceStart');
   });

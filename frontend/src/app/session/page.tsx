@@ -2295,13 +2295,15 @@ function SessionPageContent() {
     },
   });
 
-  // The synthetic controller must not race session-store hydration. Its exact
-  // visible microphone callback is armed only once the ordinary session has a
-  // valid backend identity and is ready for normal user interaction.
+  // Match the exact visible microphone control: it is available once the
+  // ordinary session store has loaded and the session is writable. Backend-ID
+  // validation remains inside the existing voice runtime invoked by this same
+  // callback; adding it here would create a stricter synthetic-only gate than
+  // the control a user can actually press.
   useVoiceLabControlAdapter(
     'voice-start',
     handleMicClick,
-    !shouldShowLoading && hasValidBackendSessionId && !isReadOnly,
+    !shouldShowLoading && !isReadOnly,
   );
 
   const {
