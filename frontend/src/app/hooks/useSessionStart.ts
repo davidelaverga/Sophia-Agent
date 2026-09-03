@@ -13,7 +13,7 @@
 'use client';
 
 import { useRouter } from 'next/navigation';
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 
 import { startSession, getActiveSession, isSuccess, getErrorMessage } from '../lib/api/sessions-api';
 import { logger } from '../lib/error-logger';
@@ -250,6 +250,15 @@ export function useSessionStart(options: UseSessionStartOptions = {}) {
   const [isLoading, setIsLoading] = useState(false);
   const [lastResult, setLastResult] = useState<StartSessionResult | null>(null);
   const inFlightRef = useRef(false);
+  const pendingNavigationRef = useRef(false);
+
+  useEffect(() => {
+    if (isLoading || !pendingNavigationRef.current) return;
+
+    pendingNavigationRef.current = false;
+    haptic('medium');
+    router.push('/session');
+  }, [isLoading, router]);
   
   /**
    * Start a new session via backend API
@@ -396,8 +405,7 @@ export function useSessionStart(options: UseSessionStartOptions = {}) {
       onSuccess?.(successResult);
       
       if (navigateOnSuccess) {
-        haptic('medium');
-        router.push('/session');
+        pendingNavigationRef.current = true;
       }
       
       return successResult;
@@ -414,7 +422,6 @@ export function useSessionStart(options: UseSessionStartOptions = {}) {
     setInitializing, 
     clearSession,
     setError, 
-    router,
     navigateOnSuccess, 
     onSuccess, 
     onError
@@ -504,12 +511,11 @@ export function useSessionStart(options: UseSessionStartOptions = {}) {
     onSuccess?.(successResult);
 
     if (navigateOnSuccess) {
-      haptic('medium');
-      router.push('/session');
+      pendingNavigationRef.current = true;
     }
 
     return successResult;
-  }, [navigateOnSuccess, onSuccess, restoreOpenSession, router]);
+  }, [navigateOnSuccess, onSuccess, restoreOpenSession]);
   
   return {
     start,
