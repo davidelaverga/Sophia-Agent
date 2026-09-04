@@ -81,6 +81,8 @@ export const VOICE_LAB_AUTH_LEDGER_MIGRATION_SHA256 =
   '42e6f2b3bf083675bcdd7b2f29c66b400c6fca9771b76f866e6c55f8513b514c';
 export const VOICE_LAB_CLEANUP_INDEX_MIGRATION_SHA256 =
   '191ee955123259b821d5dd87b03579ce912f3467376b58316cbfac855ce83b44';
+export const VOICE_LAB_ORDINARY_WRITE_FENCE_REPAIR_SHA256 =
+  'abd7701f8effca6c1acb4034a5f2d41ee01915e923bae1e38ea0a8279cb60401';
 const EXPECTED_AUTH_LEDGER_TABLE_COMMENT =
   `sophia.voice-lab.auth-ledger.v1 migration_sha256=${VOICE_LAB_AUTH_LEDGER_MIGRATION_SHA256}`;
 const EXPECTED_AUTH_LEDGER_COLUMNS = new Map<string, readonly [string, 'YES' | 'NO']>([
@@ -478,7 +480,7 @@ const EXPECTED_CLEANUP_FUNCTIONS = new Map([
     gatewayExecute: false,
   }],
   ['sophia_voice_lab_cleanup_write_fence', {
-    sourceSha256: '4faacbb98b20ee4e955ae8343e55c163060f9963104c384dadb1263249d28fad',
+    sourceSha256: '0678607736ee21130257e2a87f79bc807d12a0f6d22295f55079ff6bbb4aa1b2',
     args: '', language: 'plpgsql', volatility: 'v', securityDefiner: true,
     result: 'trigger', kind: 'f', returnsSet: false, strict: false,
     leakproof: false, parallel: 'u',

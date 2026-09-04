@@ -7,6 +7,7 @@ import { describe, expect, it } from 'vitest';
 import {
   VOICE_LAB_AUTH_LEDGER_MIGRATION_SHA256,
   VOICE_LAB_CLEANUP_INDEX_MIGRATION_SHA256,
+  VOICE_LAB_ORDINARY_WRITE_FENCE_REPAIR_SHA256,
 } from '../../server/voice-lab/session-ledger';
 import { transactionBody } from '../../../scripts/voice-lab-migration-contract.mjs';
 
@@ -18,6 +19,10 @@ const runnerPath = resolve(process.cwd(), 'scripts/migrate-voice-lab-auth-ledger
 const cleanupMigrationPath = resolve(
   process.cwd(),
   '../backend/migrations/2026_08_23_voice_lab_cleanup_obligation_indexes.sql',
+);
+const ordinaryWriteFenceRepairPath = resolve(
+  process.cwd(),
+  '../backend/migrations/2026_09_04_voice_lab_ordinary_write_fence_repair.sql',
 );
 
 describe('Voice Lab auth-ledger operated migration contract', () => {
@@ -93,6 +98,31 @@ describe('Voice Lab auth-ledger operated migration contract', () => {
     expect(sql).toContain('grant select, update\n      on public.sophia_voice_lab_cleanup_scan_cursors');
     expect(sql).toContain('grant execute on function\n      public.sophia_voice_lab_d02_sources_zero(text)');
     expect(sql).toContain('operation=sources-zero exposure=gateway-runtime-readback');
+  });
+
+  it('pins the additive ordinary-row write-fence repair', () => {
+    const sql = readFileSync(ordinaryWriteFenceRepairPath, 'utf8');
+    const runner = readFileSync(runnerPath, 'utf8');
+    const digest = createHash('sha256').update(sql, 'utf8').digest('hex');
+
+    expect(digest).toBe(VOICE_LAB_ORDINARY_WRITE_FENCE_REPAIR_SHA256);
+    expect(runner).toContain(
+      `const EXPECTED_ORDINARY_WRITE_FENCE_REPAIR_SHA256 = '${VOICE_LAB_ORDINARY_WRITE_FENCE_REPAIR_SHA256}'`,
+    );
+    expect(sql.match(/__SOPHIA_VOICE_LAB_ORDINARY_WRITE_FENCE_REPAIR_SHA256__/g))
+      .toHaveLength(1);
+    expect(sql).toContain(
+      "new_synthetic := coalesce(new_payload ->> ''synthetic'' = ''true'', false);",
+    );
+    expect(sql).toContain(
+      "new_synthetic := coalesce(new_payload ->> ''synthetic_test'' = ''true'', false);",
+    );
+    expect(sql).toContain(
+      "'0678607736ee21130257e2a87f79bc807d12a0f6d22295f55079ff6bbb4aa1b2'",
+    );
+    expect(transactionBody(sql, 'ordinary-write-fence-repair')).toContain(
+      'Voice Lab cleanup write fence repair verification failed',
+    );
   });
 
   it('accepts both pinned line-comment prologues and rejects arbitrary wrapper drift', () => {

@@ -392,6 +392,38 @@ describeRealPostgres('Voice Lab auth-ledger and cleanup-index real Postgres cont
     expect(preflightOutput).toContain('mode=preflight');
     expect(preflightOutput).toContain('ready=true');
 
+    await expect(pool.query(
+      `INSERT INTO public.sophia_sessions (
+         id, user_id, thread_id, mode, metadata, status
+       ) VALUES (
+         'ordinary-session-probe', 'ordinary-user', 'ordinary-thread',
+         'voice', '{}'::jsonb, 'active'
+       )`,
+    )).resolves.toBeDefined();
+    await expect(pool.query(
+      `UPDATE public.sophia_sessions
+          SET metadata = '{"ordinary_probe":true}'::jsonb
+        WHERE id = 'ordinary-session-probe'`,
+    )).resolves.toBeDefined();
+    await expect(pool.query(
+      `DELETE FROM public.sophia_sessions
+        WHERE id = 'ordinary-session-probe'`,
+    )).resolves.toBeDefined();
+    await expect(pool.query(
+      `INSERT INTO public.artifact_registry_records (
+         artifact_id, record_payload
+       ) VALUES ('ordinary-artifact-probe', '{}'::jsonb)`,
+    )).resolves.toBeDefined();
+    await expect(pool.query(
+      `UPDATE public.artifact_registry_records
+          SET record_payload = '{"ordinary_probe":true}'::jsonb
+        WHERE artifact_id = 'ordinary-artifact-probe'`,
+    )).resolves.toBeDefined();
+    await expect(pool.query(
+      `DELETE FROM public.artifact_registry_records
+        WHERE artifact_id = 'ordinary-artifact-probe'`,
+    )).resolves.toBeDefined();
+
     const hmacVector = await pool.query<{ digest: string }>(`
       SELECT encode(public.sophia_voice_lab_d02_hmac_sha256(
         convert_to('key', 'UTF8'),

@@ -10,12 +10,15 @@ import { transactionBody } from './voice-lab-migration-contract.mjs';
 
 const EXPECTED_MIGRATION_SHA256 = '42e6f2b3bf083675bcdd7b2f29c66b400c6fca9771b76f866e6c55f8513b514c';
 const EXPECTED_CLEANUP_INDEX_MIGRATION_SHA256 = '191ee955123259b821d5dd87b03579ce912f3467376b58316cbfac855ce83b44';
+const EXPECTED_ORDINARY_WRITE_FENCE_REPAIR_SHA256 = 'abd7701f8effca6c1acb4034a5f2d41ee01915e923bae1e38ea0a8279cb60401';
 const RECOGNIZED_PRIOR_MIGRATION_SHA256 =
   '42e6f2b3bf083675bcdd7b2f29c66b400c6fca9771b76f866e6c55f8513b514c';
 const RECOGNIZED_PRIOR_CLEANUP_INDEX_MIGRATION_SHA256 =
   '45983a3244852f3d8edadcdff2201c691f1721d3943181de0626307c9e90cdd4';
 const AUTH_HASH_PLACEHOLDER = '__SOPHIA_VOICE_LAB_AUTH_LEDGER_MIGRATION_SHA256__';
 const CLEANUP_HASH_PLACEHOLDER = '__SOPHIA_VOICE_LAB_CLEANUP_INDEX_MIGRATION_SHA256__';
+const ORDINARY_WRITE_FENCE_REPAIR_HASH_PLACEHOLDER =
+  '__SOPHIA_VOICE_LAB_ORDINARY_WRITE_FENCE_REPAIR_SHA256__';
 const TABLE = 'sophia_voice_lab_auth_grants';
 const EXPECTED_DATABASE_OWNER_ROLE = 'postgres';
 const EXPECTED_RUNTIME_DATABASE_ROLE = 'better_auth_app';
@@ -85,6 +88,10 @@ const AUTH_MIGRATION_PATH = resolve(
 const CLEANUP_MIGRATION_PATH = resolve(
   scriptRoot,
   '../../backend/migrations/2026_08_23_voice_lab_cleanup_obligation_indexes.sql',
+);
+const ORDINARY_WRITE_FENCE_REPAIR_PATH = resolve(
+  scriptRoot,
+  '../../backend/migrations/2026_09_04_voice_lab_ordinary_write_fence_repair.sql',
 );
 const EXPECTED_TABLE_COMMENT =
   `sophia.voice-lab.auth-ledger.v1 migration_sha256=${EXPECTED_MIGRATION_SHA256}`;
@@ -466,7 +473,7 @@ const CLEANUP_FUNCTION_CONTRACTS = new Map([
     config: ['search_path=pg_catalog, public, pg_temp'], serviceExecute: true,
   }],
   ['sophia_voice_lab_cleanup_write_fence', {
-    sourceSha256: '4faacbb98b20ee4e955ae8343e55c163060f9963104c384dadb1263249d28fad',
+    sourceSha256: '0678607736ee21130257e2a87f79bc807d12a0f6d22295f55079ff6bbb4aa1b2',
     args: '', language: 'plpgsql', volatility: 'v', securityDefiner: true,
     result: 'trigger', kind: 'f', returnsSet: false, strict: false,
     leakproof: false, parallel: 'u',
@@ -3159,7 +3166,7 @@ if (
   && !args.has('--apply')
 ) throw new Error('D02 finalize-authority rotation requires --apply.');
 
-const [authSql, cleanupSql] = await Promise.all([
+const [authSql, cleanupSql, ordinaryWriteFenceRepairSql] = await Promise.all([
   loadPinnedMigration(
     AUTH_MIGRATION_PATH,
     EXPECTED_MIGRATION_SHA256,
@@ -3173,13 +3180,24 @@ const [authSql, cleanupSql] = await Promise.all([
     'Voice Lab cleanup-index',
     33,
   ),
+  loadPinnedMigration(
+    ORDINARY_WRITE_FENCE_REPAIR_PATH,
+    EXPECTED_ORDINARY_WRITE_FENCE_REPAIR_SHA256,
+    ORDINARY_WRITE_FENCE_REPAIR_HASH_PLACEHOLDER,
+    'Voice Lab ordinary write-fence repair',
+  ),
 ]);
 if (args.has('--verify-file-only')) {
   transactionBody(authSql, 'Voice Lab auth-ledger');
   transactionBody(cleanupSql, 'Voice Lab cleanup-index');
+  transactionBody(
+    ordinaryWriteFenceRepairSql,
+    'Voice Lab ordinary write-fence repair',
+  );
   console.log(
     `voice_lab_auth_ledger migration_sha256=${EXPECTED_MIGRATION_SHA256} `
       + `cleanup_index_migration_sha256=${EXPECTED_CLEANUP_INDEX_MIGRATION_SHA256} `
+      + `ordinary_write_fence_repair_sha256=${EXPECTED_ORDINARY_WRITE_FENCE_REPAIR_SHA256} `
       + 'files_verified=true wrappers_verified=true',
   );
   process.exit(0);
@@ -3243,6 +3261,10 @@ try {
       });
       await client.query(transactionBody(authSql, 'Voice Lab auth-ledger'));
       await client.query(transactionBody(cleanupSql, 'Voice Lab cleanup-index'));
+      await client.query(transactionBody(
+        ordinaryWriteFenceRepairSql,
+        'Voice Lab ordinary write-fence repair',
+      ));
       await preflight(client);
       await client.query('COMMIT');
     } catch (error) {
@@ -3257,6 +3279,7 @@ try {
     `voice_lab_auth_ledger mode=${args.has('--apply') ? 'apply' : 'preflight'} `
       + `migration_sha256=${EXPECTED_MIGRATION_SHA256} `
       + `cleanup_index_migration_sha256=${EXPECTED_CLEANUP_INDEX_MIGRATION_SHA256} ready=true`
+      + ` ordinary_write_fence_repair_sha256=${EXPECTED_ORDINARY_WRITE_FENCE_REPAIR_SHA256}`
       + (rotatedFinalizeAuthorityFrom
         ? ` finalize_authority_rotated_from=${rotatedFinalizeAuthorityFrom}`
           + ` finalize_authority_rotated_to=${expectedD02FinalizeAuthority.keyId}`
