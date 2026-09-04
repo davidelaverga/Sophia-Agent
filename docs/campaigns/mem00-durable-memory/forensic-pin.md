@@ -12,21 +12,21 @@ This is a content-free R0 snapshot. Secret values, memory text, raw user/session
 - Isolated branch: `codex/mem00-durable-memory-governance`.
 - Active VT00 worktree remains separate on `codex/vt00-implementation`; MEM00 did not modify it.
 - Changes after the reviewed reference were explicitly reconciled through `3add3336`. The newest eight commits after `fb8a6655` repair Voice Lab cross-region readiness, rounded fixture accounting, synthetic cleanup and audio flushing, anonymous provider binding, finalization exit guards, durable provider cleanup, and orphan recovery. Their 12-file delta does not add or bypass a memory authority and preserves the active-run safety boundary. The merged pre-evidence candidate is `77424edab7a682d2acea1e328a0e27336b5470df` / tree `d2d19514b8c78c7c2d1a3f2965493ecda4c6fc53`; backend 111/111, complete frontend 1,952 passed/two skipped, complete Voice Lab 348 passed/six skipped, and both TypeScript checks are green.
-- The first isolated-branch publication was verified at commit/tree `fba9e10e18870021b97055582fefc3a192947c2e` / `e0d45a0843a3882fcd5dc4281efaf7b723fb82b4`. Its one-repository fine-grained credential was revoked immediately, and no pull request or merge was created. The newly reconciled local pre-evidence tip is `53e2fc7e7a993652c1f4976311f426cb50cdc9d8` / `192c8b54da2006b707b61d3feede241f17806a3a` and remains undeployed until refreshed publication.
+- The refreshed isolated-branch publication is verified at immutable commit/tree `ba24bef4662868609b64bc9dfaa0ca6e159f163f` / `1b5766c179eea2d531421ea0a6307f2bcb528d1d`. Its three-day, one-repository fine-grained credential was revoked immediately after verification, and no pull request or merge was created. The upstream observability branch remains pinned at `3add3336216e74324cd1ed4d3859caccc70c94fe`.
 - The immutable MEM00 candidate commit/tree is populated in the post-freeze evidence manifest. Pre-freeze deterministic attempts use the exact base above plus their ledger identity; they are not represented as immutable candidates.
 
 ## Deployed component snapshot
 
 | Component | Service/deployment | Reported revision | Public identity |
 | --- | --- | --- | --- |
-| Gateway | `srv-d7be5s9r0fns7397l4g0` / `dep-dacufjijnfac738rfa1g` | `b17669ab7b5600d7fba53b0ff28840640de5e750` | `https://sophia-gateway.onrender.com` |
-| LangGraph | `srv-d7be5s9r0fns7397l4fg` / `dep-dacu4enavr4c73f144ag` | `163b54979ebb418ea144da9298490b33aa4105ce` | `https://sophia-langgraph.onrender.com` |
-| Voice | `srv-d7be5s9r0fns7397l4f0` / `dep-dactnjijnfac738rfopg` | `e3b40f1b21739479db239c383ce88285ce740152` | `https://sophia-voice-2uzr.onrender.com` |
+| Gateway | `srv-d7be5s9r0fns7397l4g0` / `dep-dad6him7bikc739st6m0` | `ba24bef4662868609b64bc9dfaa0ca6e159f163f` | `https://sophia-gateway.onrender.com` |
+| LangGraph | `srv-d7be5s9r0fns7397l4fg` / `dep-dad6hq710e5c73di51lg` | `ba24bef4662868609b64bc9dfaa0ca6e159f163f` | `https://sophia-langgraph.onrender.com` |
+| Voice | `srv-d7be5s9r0fns7397l4f0` / `dep-dad6hrqfngtc738222j0` | `ba24bef4662868609b64bc9dfaa0ca6e159f163f` | `https://sophia-voice-2uzr.onrender.com` |
 | Voice Lab worker | `srv-da6uiqfavr4c739mtbo0` / `dep-dac7hfdg1s2s738pdvn0` | `66cebaa414b2a8b89f2881b34baaac22870652f5` | internal worker |
 | Voice Lab MCP | `srv-da6uiqfavr4c739mtbng` | read-only identity captured | internal MCP |
-| Frontend | Vercel project `sophia-agent-front` / deployment `BWxKhVwCyKqFB32EzovabxXQNsP3` | `163b54979ebb418ea144da9298490b33aa4105ce` | `https://www.sophia-ei.com` (`sophia-agent-front-i0on7a1no-sophia-30911edf.vercel.app`) |
+| Frontend | Vercel project `sophia-agent-front` / deployment `6UvzkSkbVW5SDHYcS8Y3FB7xWcDg` | `ba24bef4662868609b64bc9dfaa0ca6e159f163f` | `https://www.sophia-ei.com` (`dpl_6UvzkSkbVW5SDHYcS8Y3FB7xWcDg`) |
 
-The product table is the resumed 2026-09-04T00:04+02:00 snapshot. At 2026-09-03T21:58:30Z, Voice Lab reported no active run or operation, an engaged kill switch, and closed product-mutation gates. The product is intentionally mixed after the idle observability campaign; none of these revisions contains the refreshed isolated MEM00 candidate.
+The product table is the post-deployment 2026-09-04T10:26+02:00 snapshot. Public version probes join all four product surfaces to the immutable candidate, `mem00.v1`, and supported epoch `1`. The Voice Lab reported no active run or operation, an engaged kill switch, and closed product-mutation gates. It remains intentionally pinned to expected VT00 identity `e3b40f1b21739479db239c383ce88285ce740152`, so its identity verdict is a truthful expected-candidate mismatch; no Voice Lab run was started.
 
 ## Product database snapshot
 
