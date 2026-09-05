@@ -112,7 +112,7 @@ class BuilderMem0RetrievalMiddleware(AgentMiddleware[BuilderMem0RetrievalState])
         lets the run proceed without memories — same behaviour as the
         async path on timeout / error.
         """
-        return None
+        return self._recall_shutdown_update(state, self._resolve_user_id(state, runtime))
 
     # --- async path ------------------------------------------------------
 
@@ -141,6 +141,10 @@ class BuilderMem0RetrievalMiddleware(AgentMiddleware[BuilderMem0RetrievalState])
             log_middleware("BuilderMem0Retrieval", "no user_id — skipping", _t0)
             return None
 
+        shutdown = self._recall_shutdown_update(state, user_id)
+        if shutdown is not None:
+            return shutdown
+
         query = self._resolve_query(state)
         if not query:
             log_middleware("BuilderMem0Retrieval", "no query — skipping", _t0)
@@ -167,6 +171,21 @@ class BuilderMem0RetrievalMiddleware(AgentMiddleware[BuilderMem0RetrievalState])
         return update
 
     # --- async-path helpers ---------------------------------------------
+
+    @staticmethod
+    def _recall_shutdown_update(state: BuilderMem0RetrievalState, user_id: str | None) -> dict | None:
+        from deerflow.sophia.memory_governance.flags import memory_feature_flags_for_owner
+
+        if not user_id:
+            return None
+        flags = memory_feature_flags_for_owner(user_id)
+        if not flags.canonical_pool_read or flags.governed_runtime_read:
+            return None
+        return {
+            "injected_memories": [],
+            "injected_memory_contents": [],
+            "system_prompt_blocks": [block for block in state.get("system_prompt_blocks", []) if not block.lstrip().startswith(("<memory>", "<memories>"))],
+        }
 
     async def _safe_search(self, user_id: str, query: str) -> list | None:
         """Run search_memories with timeout + error swallow.

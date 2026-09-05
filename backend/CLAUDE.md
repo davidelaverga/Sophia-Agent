@@ -677,6 +677,16 @@ Local sentrux: `mcp__sentrux__rescan` then `mcp__sentrux__health`. CI is authori
 
 ### Memory System (`packages/harness/deerflow/agents/memory/`)
 
+**MEM00 rollback boundary**: canonical ownership (`canonical_pool_read`), not
+recall availability (`governed_runtime_read`), owns legacy quarantine. With
+canonical review enabled and recall disabled, the Mem0 facade returns zero
+before cache/provider access; voice fastcache reads/writes and generic memory
+routes remain excluded. Companion and Builder rollback clear carried memory
+IDs/content and their `<memories>`/`<memory>` prompt blocks before early exits.
+Keep ledger/canonical
+flags and cohort binding intact, and close runtime/projection/fault flags
+together. Regression: `tests/test_mem00_recall_rollback.py`.
+
 **Components**:
 - `updater.py` - LLM-based memory updates with fact extraction, whitespace-normalized fact deduplication (trims leading/trailing whitespace before comparing), atomic file I/O, and timezone-aware UTC timestamp serialization (`...Z`) for memory metadata.
 - `queue.py` - Debounced update queue (per-thread deduplication, configurable wait time)

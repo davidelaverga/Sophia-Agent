@@ -183,7 +183,7 @@ class Mem0MemoryMiddleware(AgentMiddleware[Mem0MemoryState]):
             memory_feature_flags_for_owner,
         )
 
-        if memory_feature_flags_for_owner(self._user_id).governed_runtime_read:
+        if memory_feature_flags_for_owner(self._user_id).canonical_pool_read:
             return None
         if platform not in ("voice", "ios_voice") or not thread_id:
             return None
@@ -274,7 +274,7 @@ class Mem0MemoryMiddleware(AgentMiddleware[Mem0MemoryState]):
             memory_feature_flags_for_owner,
         )
 
-        if memory_feature_flags_for_owner(self._user_id).governed_runtime_read:
+        if memory_feature_flags_for_owner(self._user_id).canonical_pool_read:
             return
         if platform not in ("voice", "ios_voice") or not thread_id or not results:
             logger.info(
@@ -305,6 +305,17 @@ class Mem0MemoryMiddleware(AgentMiddleware[Mem0MemoryState]):
     @override
     def before_agent(self, state: Mem0MemoryState, runtime: Runtime) -> dict | None:
         _t0 = time.perf_counter()
+        from deerflow.sophia.memory_governance.flags import memory_feature_flags_for_owner
+
+        flags = memory_feature_flags_for_owner(self._user_id)
+        if flags.canonical_pool_read and not flags.governed_runtime_read:
+            # Clear carried memory fields even on crisis/empty-query exits;
+            # keeping canonical ownership must not preserve a warm prompt.
+            return {
+                "injected_memories": [],
+                "injected_memory_contents": [],
+                "system_prompt_blocks": [block for block in state.get("system_prompt_blocks", []) if not block.lstrip().startswith("<memories>")],
+            }
         if state.get("skip_expensive", False):
             log_middleware("Mem0Memory", "skipped (crisis)", _t0)
             return None

@@ -2,6 +2,26 @@
 
 MEM00_FIVE_ITERATIONS_REACHED — CONTINUE
 
+## 2026-09-05 continuation checkpoint — current
+
+Candidate under examination: `5f7f15164a708f7c6fec5a94f6ab20f707df4aa0`, isolated MEM00 branch; reviewed observability head remains `3add3336216e74324cd1ed4d3859caccc70c94fe`. Production Gateway `dep-dadva38n74is73bo42lg` and LangGraph `dep-dadvb1gn74is73bo7l30` are Live on that candidate with corrected exact-owner configuration. New local rollback tests are uncommitted; they are not a new immutable candidate. Clean full production canaries: **0**.
+
+| Iteration | Falsified hypothesis / cluster | Current result |
+| --- | --- | --- |
+| EI-078 | Configured UUID equals ordinary authenticated owner / identity | Corrected from request-log/database join; VT00 principal remains distinct. |
+| EI-079 | Immediate form fill/save persists owner fields / browser harness | Explicit select/type/blur, full reload readback, runtime fingerprint, and empty canonical Journal now agree. |
+| EI-080 | Default PATH contains uv / local harness | Existing isolated uv found; six cohort/principal/fault checks pass. |
+| DP-006 | Currently deployed credential satisfies exact SDK deletion / provider contract | One direct row passed metadata/search/enumeration but delete failed. Dashboard exact-fixture deletion plus paginated SDK enumeration proved zero. |
+| EI-081 | Disabling governed recall preserves legacy quarantine / implementation | Five initial red regressions plus two Builder sync/async cases are now green. Full repaired backend: 5904 passed, 161 skipped, 12 warnings. Unsaved production flag changes canceled; repair remains undeployed. |
+
+No provider text was admitted by this certification: no candidate or approved canonical memory was created. Seven owner-scoped database counts (candidate/canonical versions, candidates, memories, projection jobs, bindings, fault settings) are zero. Provider preflight subject `sha256:cdd0dfc568c3f2fe` is zero after permanent deletion of its single synthetic row. This is bounded cleanup evidence, not the complete mission-wide terminal-zero certificate. No live Voice Lab run was started; action-time checks remained no-run/no-operation with the kill switch engaged.
+
+The effective deployed provider key fingerprint `sha256:109d881133f29ed5` differs from the prior DP-005 key fingerprint. The dashboard still lists the prior replacement but exposes only a masked value and deletion control. Requested authority: one new same-project replacement key, Gateway key-only update, retain old keys, and repeat hosted certification; no approval response yet at this checkpoint. Do not create another provider fixture until deletion authority is repaired.
+
+Local repair validation is complete: baseline 5897 passed / 161 skipped, repaired suite 5904 passed / 161 skipped, and targeted lint passed. Next experiment: publish the isolated repair, resolve the requested credential authority, and re-pin/redeploy only with action-time Voice Lab checks. Preserve canonical review/tombstones when disabling recall/projection/fault injection on the repaired candidate. Then remeasure hosted behavior and resume MEM-P01–MEM-P08. No merge, real-user import, bulk purge, project/version/plan/billing change, or success claim is authorized by this checkpoint.
+
+## Historical first threshold (superseded operational snapshot)
+
 The threshold was reached during safe local/disposable work. No production certification attempt has run, no security hold exists, and production/provider state remains untouched.
 
 ## Counted attempts and exact available identities

@@ -19,7 +19,7 @@ def _reject_when_mem00_owns_sophia_memory(user_id: str) -> None:
         memory_feature_flags_for_owner,
     )
 
-    if memory_feature_flags_for_owner(user_id).governed_runtime_read:
+    if memory_feature_flags_for_owner(user_id).canonical_pool_read:
         raise HTTPException(
             status_code=410,
             detail="Generic DeerFlow memory is quarantined from Sophia under MEM00",

@@ -215,7 +215,7 @@ def warm_up() -> None:
 
     from deerflow.sophia.memory_governance.flags import memory_feature_flags
 
-    if memory_feature_flags().governed_runtime_read:
+    if memory_feature_flags().canonical_pool_read:
         # Governed retrieval has no content-bearing warmup query. Adapter and
         # database availability are exercised by readiness/canary probes.
         _warm_up_completed = True
@@ -301,7 +301,19 @@ def search_memories_with_diagnostics(
         memory_feature_flags_for_owner,
     )
 
-    if memory_feature_flags_for_owner(user_id).governed_runtime_read:
+    flags = memory_feature_flags_for_owner(user_id)
+    if flags.canonical_pool_read and not flags.governed_runtime_read:
+        # Recall shutdown never hands ownership back to the legacy provider
+        # or its plaintext cache. Canonical review remains independently live.
+        return {
+            "memories": [],
+            "provider_status": "unavailable",
+            "provider_reason": "governed_runtime_disabled",
+            "provider_transport": "none",
+            "cache_status": "disabled_governed",
+            "latency_ms": 0,
+        }
+    if flags.governed_runtime_read:
         from deerflow.sophia.memory_governance.mem0_projection_adapter import (
             Mem0ProjectionAdapter,
         )

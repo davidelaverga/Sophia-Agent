@@ -43,6 +43,15 @@ DeerFlow is a LangGraph-based AI super agent with sandbox execution, persistent 
 
 ## Core Components
 
+### Sophia canonical-memory recall shutdown
+
+For a MEM00-enrolled owner, keep candidate-ledger read/write and canonical-pool
+read enabled when pausing recall. Disable governed-runtime read, provider
+projection, and fault injection together. The canonical Journal and review
+remain available; memory search returns zero without consulting legacy Mem0
+or plaintext caches, and generic DeerFlow memory remains quarantined. Do not
+disable canonical ownership or remove the cohort as a rollback procedure.
+
 ### Lead Agent
 
 The single LangGraph agent (`lead_agent`) is the runtime entry point, created via `make_lead_agent(config)`. It combines:

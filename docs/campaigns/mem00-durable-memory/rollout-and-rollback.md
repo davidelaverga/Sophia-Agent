@@ -21,15 +21,51 @@
 
 ## Safe rollback
 
+**Deployment gate (2026-09-05): do not use the flag-only shutdown on deployed
+`5f7f151`.** EI-081 proved that version reopens legacy search/cache and generic
+memory when governed recall is disabled. A local repair, covered by
+`tests/test_mem00_recall_rollback.py`, preserves quarantine using canonical
+ownership and clears carried companion/Builder memory state. Verify and deploy
+that repair before applying the sequence below. The attempted flag edits were
+canceled without saving.
+
 1. Close governed runtime recall, producing zero memory.
-2. Stop projection claims while preserving durable desired-state jobs.
+2. Stop projection claims and fault injection while preserving durable desired-state jobs. Close `GOVERNED_RUNTIME_READ`, `PROVIDER_PROJECTION`, and `FAULT_INJECTION` together; the validated flag contract rejects faults without projection.
 3. Keep canonical UI and tombstone fencing active.
 4. Drain/cancel only resolved synthetic work and retain content-free receipts.
 5. Restore a prior binary only if it refuses every raw legacy memory path under the current epoch. Otherwise leave memory disabled.
 
 The additive schema is not dropped during rollback. Provider deletion is not canonical deletion; a canonical tombstone fences admission before purge. Unknown database/provider state always fails closed.
 
-## Grouped action proposed for the user's one explicit approval (not yet authorized)
+### Authenticated-owner deployment regression
+
+Before cohort activation, join a fresh ordinary signed-in product request to
+its timestamped Gateway route and exact Better Auth owner. Compare that owner
+with both `CERTIFICATION_PRINCIPAL` and the single-member `COHORT_PRINCIPALS`,
+using fingerprints in evidence; reject guessed UUID aliases. Verify separation
+from the preserved VT00 principal and zero candidate/canonical/binding/job/fault
+state. Enter controlled form values with select-all/type/blur, verify settled
+values, save, reload, and verify persisted values. After serialized exact-SHA
+deployment, verify effective runtime fingerprints and the ordinary canonical
+Journal before creating a candidate. EI-078/EI-079 show why a UI save click or
+an empty legacy response alone does not satisfy this regression.
+
+### Current provider credential hold
+
+DP-005 passed with key fingerprint `sha256:a489adc448f942ed`; DP-006 measured
+the currently deployed key `sha256:109d881133f29ed5` and exact SDK deletion
+failed. Its one isolated synthetic fixture was deleted in the dashboard and
+paginated SDK enumeration returned zero. The earlier R3 success is therefore
+not current authorization evidence. No more provider fixtures may be created
+until the credential binding is repaired under the requested same-project
+key-only approval, followed by a fresh complete hosted proof. Do not alter
+SDK/API/project/configuration/plan/billing to work around the failure.
+
+## Historical grouped action proposed for approval
+
+The first migration/deployment and initial replacement-key actions below were
+subsequently approved and executed. They are retained as historical scope, not
+as a fresh approval request; the current additional key request is above.
 
 - Diagnostic target: existing Mem0 organization/project only. Create one unmistakably synthetic row and test the current documented `DELETE /v1/batch/` `memory_ids` payload from the deployed Gateway shell. Delete only that row and prove pagination-complete zero. If the API still denies deletion, stop projection and do not create additional provider rows.
 - Conditional credential action: only if the documented-payload diagnostic fails and the user authorizes it, create one new API key in the same existing Mem0 organization/project, replace only the Gateway's `MEM0_API_KEY`, and rerun the full R3 contract. This changes no SDK/API version, endpoint, project, configuration, algorithm toggle, plan, or billing. Preserve the prior key for immediate rollback until the replacement is proven; do not revoke it in this action.
