@@ -2,7 +2,46 @@
 
 MEM00_FIVE_ITERATIONS_REACHED — CONTINUE
 
-## 2026-09-05 continuation checkpoint — current
+## 2026-09-05 12:22Z continuation checkpoint — current
+
+`MEM00_FIVE_ITERATIONS_REACHED — CONTINUE`
+
+Exact examined candidate: `58a748b1ee8b08ed97d27d1d40e69b1bbdaf6f65`.
+All five new failures are retained: EI-084 unsettled Render fields, EI-085
+clipboard transport, EI-086 unavailable browser crypto, EI-087 shell working
+directory, and SH-001 prefix-selected environment secret exposure. The first
+four are instrument failures, not provider-governance failures. SH-001 is a
+security hold: the agent printed a reference HMAC credential and must not
+reproduce it or treat this run as certifying.
+
+Falsified: immediate masked-field editing is settled, Copy value guarantees
+system clipboard transport, browser evaluation exposes crypto.subtle, new
+shells start in /app/backend, and a memory-prefixed environment dump is safe.
+Plausible and still untested: the newly installed Mem0 key supports the exact
+pinned deletion contract. DP-007 preparation is not a hosted proof.
+
+Containment: Gateway `dep-dae0fleq1p3s73fg3lh0` and LangGraph
+`dep-dae0h4id0e5s73elepm0` are Live on repaired 58a748b1 with recall,
+projection, and faults false; ledger/canonical flags stay true. Five global
+governance counts are zero. No provider fixture was created. No Voice Lab run
+was started; action-time no-run/closed-gate checks are recorded in state.md.
+Five new diagnostic regressions and seven rollback regressions pass; full
+backend validation is running. Clean production canaries remain zero.
+
+EI-088 subsequently caught a duplicated provider endpoint literal in the new
+diagnostic (1 failed / 5908 passed / 161 skipped full suite). Importing the
+adapter constant repairs the boundary without weakening the existing test;
+15 focused tests and lint pass. Full rerun passed **5909 tests, 161 skipped,
+12 warnings** in 292.28 seconds. This local repair does not reopen recall or
+resolve the security hold without the requested reference-key rotation.
+
+Next experiment: finish the allowlisted diagnostic repair, obtain the narrow
+reference-HMAC rotation approval, preserve content-free evidence across the
+rotation, redeploy/verify exact identity and zero-memory containment, then
+resume the unexecuted pinned provider deletion proof. No Mem0 project/API/SDK,
+plan/billing change, unrelated credential rotation, import, purge, or merge.
+
+## Earlier 2026-09-05 continuation checkpoint — historical
 
 Candidate under examination: `5f7f15164a708f7c6fec5a94f6ab20f707df4aa0`, isolated MEM00 branch; reviewed observability head remains `3add3336216e74324cd1ed4d3859caccc70c94fe`. Production Gateway `dep-dadva38n74is73bo42lg` and LangGraph `dep-dadvb1gn74is73bo7l30` are Live on that candidate with corrected exact-owner configuration. The validated rollback repair is now published as `ee61bfaf74bbfedf16c741c37a847caa26ea314c`, but not deployed; include later evidence commits in the next immutable pin. Clean full production canaries: **0**.
 

@@ -52,6 +52,18 @@ an empty legacy response alone does not satisfy this regression.
 
 ### Current provider credential hold
 
+**Superseded by SH-001 on 2026-09-05:** the user approved the new key and Gateway
+now runs fingerprint `sha256:8388812563a212e0`; LangGraph's key is unchanged.
+No new provider fixture/delete proof ran. The agent's prefix-selected runtime
+diagnostic exposed the separate reference HMAC secret. Both repaired services
+are now closed for runtime recall/projection/fault injection, with canonical
+review and tombstones preserved. HMAC rotation approval is pending. Use only
+the allowlisted `deerflow.sophia.memory_governance.runtime_pin` module once
+deployed; never dump `SOPHIA_MEMORY_*` values. Retain old content-free evidence
+and record the reference-key transition instead of rewriting historical refs.
+
+Historical provider-key failure:
+
 DP-005 passed with key fingerprint `sha256:a489adc448f942ed`; DP-006 measured
 the currently deployed key `sha256:109d881133f29ed5` and exact SDK deletion
 failed. Its one isolated synthetic fixture was deleted in the dashboard and

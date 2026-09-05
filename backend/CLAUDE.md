@@ -687,6 +687,13 @@ Keep ledger/canonical
 flags and cohort binding intact, and close runtime/projection/fault flags
 together. Regression: `tests/test_mem00_recall_rollback.py`.
 
+**MEM00 diagnostic secrecy**: use the explicit allowlist in
+`sophia/memory_governance/runtime_pin.py`, invoked from `/app/backend` with
+the workspace `uv run` environment. Do not enumerate prefix-matched
+environment values: the memory prefix includes a reference HMAC secret.
+Regression: `tests/test_mem00_runtime_pin.py`, including unknown future
+secret fields and malformed values in otherwise allowlisted flags.
+
 **Components**:
 - `updater.py` - LLM-based memory updates with fact extraction, whitespace-normalized fact deduplication (trims leading/trailing whitespace before comparing), atomic file I/O, and timezone-aware UTC timestamp serialization (`...Z`) for memory metadata.
 - `queue.py` - Debounced update queue (per-thread deduplication, configurable wait time)

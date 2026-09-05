@@ -52,6 +52,12 @@ remain available; memory search returns zero without consulting legacy Mem0
 or plaintext caches, and generic DeerFlow memory remains quarantined. Do not
 disable canonical ownership or remove the cohort as a rollback procedure.
 
+For content-free runtime pins, run `uv run python -m
+deerflow.sophia.memory_governance.runtime_pin` from `/app/backend`. It emits
+only allowlisted typed flags and fingerprints. Never print environment values
+by prefix: `SOPHIA_MEMORY_` includes the reference HMAC credential. Unknown
+fields and malformed flag values are not echoed.
+
 ### Lead Agent
 
 The single LangGraph agent (`lead_agent`) is the runtime entry point, created via `make_lead_agent(config)`. It combines:

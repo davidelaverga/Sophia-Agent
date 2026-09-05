@@ -1,0 +1,131 @@
+{
+  "schema": "sophia.memory-certification.security-hold.v1",
+  "campaign": "MEM00",
+  "hold_id": "MEM00-SH-001",
+  "status": "SECURITY_HOLD",
+  "recorded_at": "2026-09-05T12:29:07Z",
+  "cause": "Agent diagnostic prefix-enumerated memory environment values and exposed the reference HMAC secret in shell/tool output. Raw secret excluded.",
+  "authorization": {
+    "mem0_gateway_key_replacement": "user_approved_and_completed",
+    "reference_hmac_rotation": "requested_pending",
+    "merge": "not_authorized"
+  },
+  "deployed": {
+    "gateway": {
+      "commit": "58a748b1ee8b08ed97d27d1d40e69b1bbdaf6f65",
+      "deployment": "dep-dae0fleq1p3s73fg3lh0",
+      "live": true
+    },
+    "langgraph": {
+      "commit": "58a748b1ee8b08ed97d27d1d40e69b1bbdaf6f65",
+      "deployment": "dep-dae0h4id0e5s73elepm0",
+      "live": true
+    },
+    "frontend": {
+      "last_observed_commit": "5f7f15164a708f7c6fec5a94f6ab20f707df4aa0"
+    },
+    "voice": {
+      "last_observed_commit": "5f7f15164a708f7c6fec5a94f6ab20f707df4aa0"
+    }
+  },
+  "voice_lab": {
+    "action_time_checks": [
+      "2026-09-05T12:15:08.902Z",
+      "2026-09-05T12:18:12.102Z"
+    ],
+    "active_run": false,
+    "active_operation": false,
+    "kill_switch": "engaged",
+    "mutation_gates": "closed",
+    "vt00_expected_commit": "e3b40f1b21739479db239c383ce88285ce740152",
+    "identity_mismatch_retained": true
+  },
+  "shared_flags": {
+    "candidate_ledger_read": true,
+    "candidate_ledger_write": true,
+    "canonical_pool_read": true,
+    "governed_runtime_read": false,
+    "provider_projection": false,
+    "fault_injection": false,
+    "legacy_inventory": false,
+    "legacy_import": false
+  },
+  "runtime_containment": {
+    "gateway": {
+      "memory_count": 0,
+      "provider_status": "unavailable",
+      "provider_reason": "governed_runtime_disabled",
+      "provider_transport": "none",
+      "cache_status": "disabled_governed"
+    },
+    "langgraph": {
+      "memory_count": 0,
+      "provider_status": "unavailable",
+      "provider_reason": "governed_runtime_disabled",
+      "provider_transport": "none",
+      "cache_status": "disabled_governed"
+    }
+  },
+  "credential_fingerprints": {
+    "gateway_mem0": "sha256:8388812563a212e0",
+    "langgraph_mem0_unchanged": "sha256:109d881133f29ed5",
+    "shared_reference_hmac_before_rotation": "sha256:c2d1fd95aecf1930"
+  },
+  "provider": {
+    "sdk": "1.0.9",
+    "project": "unchanged existing default-project",
+    "old_keys_retained": 6,
+    "new_keys_created": 1,
+    "hosted_delete_proof_executed": false,
+    "fixtures_created": 0,
+    "plan": "Growth",
+    "extra_usage": false,
+    "adds": 35,
+    "retrievals": 1951,
+    "intentional_contract_or_billing_change": false
+  },
+  "database": {
+    "schema_version": "mem00.v1",
+    "epoch": 1,
+    "mode": "enforced",
+    "contract_updated_at": "2026-09-04T17:17:41.403939+00:00",
+    "counts": {
+      "candidates": 0,
+      "canonical_memories": 0,
+      "provider_bindings": 0,
+      "projection_jobs": 0,
+      "fault_settings": 0,
+      "user_governance": 0,
+      "extraction_runs": 0,
+      "candidate_versions": 0,
+      "candidate_sources": 0,
+      "canonical_versions": 0,
+      "governance_events": 0,
+      "tombstones": 0,
+      "prompt_admissions": 0
+    }
+  },
+  "joins": {
+    "ordinary_journal": "No saved memories yet",
+    "langsmith": "No runs found; no joined certification trace",
+    "product_metrics": "No full certification run; no promotion-level metric assertion",
+    "cleanup_scope": "No new provider/product fixture created; full mission-wide terminal-zero certificate not claimed"
+  },
+  "instrument_repair": {
+    "status": "local_not_deployed",
+    "module_sha256": "72c64d8674f067441fa023848198acbfbc704b927c3b7c3baf70f358955964f0",
+    "test_sha256": "3202b937c2207d1affab2bc9e95c4a17bb35e079f2b6f08c5aabc52d72ca059f",
+    "focused_tests_passed": 15,
+    "lint": "passed",
+    "full_suite": {
+      "passed": 5909,
+      "skipped": 161,
+      "warnings": 12,
+      "duration_seconds": 292.28,
+      "exit_code": 0,
+      "recorded_at": "2026-09-05T12:30:47Z"
+    }
+  },
+  "clean_production_canaries": 0,
+  "next_gate": "Explicit reference HMAC rotation approval, exact candidate deployment, safe fingerprint verification, then fresh hosted contract proof."
+}
