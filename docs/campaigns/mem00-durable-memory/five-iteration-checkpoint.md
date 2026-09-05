@@ -4,7 +4,7 @@ MEM00_FIVE_ITERATIONS_REACHED — CONTINUE
 
 ## 2026-09-05 continuation checkpoint — current
 
-Candidate under examination: `5f7f15164a708f7c6fec5a94f6ab20f707df4aa0`, isolated MEM00 branch; reviewed observability head remains `3add3336216e74324cd1ed4d3859caccc70c94fe`. Production Gateway `dep-dadva38n74is73bo42lg` and LangGraph `dep-dadvb1gn74is73bo7l30` are Live on that candidate with corrected exact-owner configuration. New local rollback tests are uncommitted; they are not a new immutable candidate. Clean full production canaries: **0**.
+Candidate under examination: `5f7f15164a708f7c6fec5a94f6ab20f707df4aa0`, isolated MEM00 branch; reviewed observability head remains `3add3336216e74324cd1ed4d3859caccc70c94fe`. Production Gateway `dep-dadva38n74is73bo42lg` and LangGraph `dep-dadvb1gn74is73bo7l30` are Live on that candidate with corrected exact-owner configuration. The validated rollback repair is now published as `ee61bfaf74bbfedf16c741c37a847caa26ea314c`, but not deployed; include later evidence commits in the next immutable pin. Clean full production canaries: **0**.
 
 | Iteration | Falsified hypothesis / cluster | Current result |
 | --- | --- | --- |
