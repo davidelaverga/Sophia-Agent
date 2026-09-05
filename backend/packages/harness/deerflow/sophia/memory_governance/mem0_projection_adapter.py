@@ -261,14 +261,29 @@ class Mem0ProjectionAdapter:
             for item in rows:
                 metadata = item.get("metadata")
                 if isinstance(metadata, dict) and metadata.get("projection_operation_id") == projection_operation_id:
-                    if expected_metadata is not None and any(metadata.get(key) != value for key, value in expected_metadata.items()):
+                    # Hosted list metadata stringifies booleans/integers. Use it
+                    # only for discovery; authorize reconciliation against the
+                    # pinned exact-ID readback, without coercing binding types.
+                    provider_id = item.get("id")
+                    if not isinstance(provider_id, str) or not provider_id:
+                        raise Mem0ContractError("mem0_operation_marker_metadata_conflict", ambiguous_effect=True)
+                    try:
+                        stored = self._get_client().get(provider_id)
+                    except Exception as exc:
+                        raise Mem0ContractError("mem0_operation_marker_verification_failed", retryable=True, ambiguous_effect=True) from exc
+                    stored_metadata = stored.get("metadata") if isinstance(stored, dict) else None
+                    required = {**(expected_metadata or {}), "projection_operation_id": projection_operation_id}
+                    if (
+                        not isinstance(stored, dict)
+                        or stored.get("id") != provider_id
+                        or not isinstance(stored_metadata, dict)
+                        or any(type(stored_metadata.get(key)) is not type(value) or stored_metadata.get(key) != value for key, value in required.items())
+                    ):
                         raise Mem0ContractError(
                             "mem0_operation_marker_metadata_conflict",
                             ambiguous_effect=True,
                         )
-                    provider_id = item.get("id")
-                    if isinstance(provider_id, str) and provider_id:
-                        found.append(provider_id)
+                    found.append(provider_id)
         return tuple(dict.fromkeys(found))
 
     def _all_pages(

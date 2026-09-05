@@ -1,0 +1,136 @@
+{
+  "schema": "sophia.memory-certification.worker-recovery.v1",
+  "recorded_at": "2026-09-05T21:02:48Z",
+  "authorization": "User approved recovery of the exact September 3 20:18 synthetic run and its existing worker; no plugin, new service, gate opening, or MEM00 deployment.",
+  "candidate": {
+    "mem00_commit": "3c3a6362804ef1eee6f7cbe615121836ce383ed9",
+    "mem00_tree": "b0944e469a35a510fd7bbd1214c5c5ed4e2dc39e",
+    "reviewed_remote_commit": "3add3336216e74324cd1ed4d3859caccc70c94fe",
+    "vt00_expected_commit": "e3b40f1b21739479db239c383ce88285ce740152",
+    "remote_reverified_at": "2026-09-05T21:02:48Z"
+  },
+  "worker_root_cause": {
+    "code": "CONFIG_INVALID",
+    "reason": "Effective repository candidate did not equal running worker service commit; saved dashboard configuration was not effective deployed configuration.",
+    "old_running_commit": "3add3336216e74324cd1ed4d3859caccc70c94fe",
+    "old_effective_repository_candidate": "e3b40f1b21739479db239c383ce88285ce740152"
+  },
+  "deployments": [
+    {
+      "service": "srv-da6uiqfavr4c739mtbo0",
+      "deployment": "dep-dae7uaqd0e5s73fgd37g",
+      "commit": "3add3336216e74324cd1ed4d3859caccc70c94fe",
+      "result": "Live; worker started with matching saved configuration, but controller still expected frozen e3b40f1."
+    },
+    {
+      "service": "srv-da6uiqfavr4c739mtbo0",
+      "deployment": "dep-dae81rn40ujc73e6ptig",
+      "commit": "e3b40f1b21739479db239c383ce88285ce740152",
+      "result": "Live; worker repository candidate saved and independently reloaded as exact e3b40f1; frozen controller/worker identities agree."
+    }
+  ],
+  "worker_after": {
+    "observed_at": "2026-09-05T20:56:03.216Z",
+    "ready": true,
+    "runtime_ready": true,
+    "live_workers": 1,
+    "active_runs": 0,
+    "kill_switch_engaged": true,
+    "product_mutation_gates_open": false,
+    "heartbeat_sequence": 70,
+    "service_version": "e3b40f1b21739479db239c383ce88285ce740152",
+    "repository_candidate_sha": "e3b40f1b21739479db239c383ce88285ce740152",
+    "public_readyz_http_status": 503
+  },
+  "retention_incident": {
+    "purged_at": "2026-09-05T20:45:09.552Z",
+    "control_expires_at": "2026-10-05T20:45:09.552Z",
+    "remote_purge_status": "unconfirmed",
+    "cause": "Restarted worker applied existing hard-retention policy to expired terminal lab records regardless of cleanup_complete.",
+    "deleted": "Expired lab run detail and dependent lab evidence/events. Not a manual DELETE or forced terminal-state update.",
+    "recoverability": "No longer available in the live lab database; no backup recovery has been established.",
+    "remaining": "Content-free keyed retention tombstone; independent product-side cleanup obligation and canonical session remain.",
+    "correction": "The first zero-run observation was incorrectly described as cleanup recovery. It only proved lab retention completion; remote terminal zero was not established."
+  },
+  "gateway_after": {
+    "http_status": 200,
+    "retention_status": "degraded",
+    "last_cycle_at": "2026-09-05T20:55:59.585Z",
+    "running": true,
+    "lease_acquired": true,
+    "discovered": 2,
+    "completed": 0,
+    "pending": 2,
+    "conflicts": 0,
+    "malformed": 0,
+    "discovery_failed": false,
+    "processing_failed": 0,
+    "voice_lab_protected_plane_ready": false,
+    "voice_lab_admission_ready": false,
+    "voice_lab_mutation_ready": false
+  },
+  "exact_approved_product_obligation": {
+    "created_at": "2026-09-03T20:18:19.486887Z",
+    "state": "closed",
+    "lifecycle_phase": "session_provisional",
+    "provider_expires_at": "2026-09-03T20:48:10.044Z",
+    "retention_expires_at": "2026-09-03T21:18:25.546Z",
+    "live_cleanup_completed_at": null,
+    "completed_at": null,
+    "canonical_session_status": "active",
+    "canonical_session_ended_at": null,
+    "admission_count": 1,
+    "admission_kind": "provider",
+    "admission_status": "browser_active",
+    "admission_lease_expires_at": "2026-09-03T20:22:20.250783Z",
+    "canonical_close_receipt_present": false,
+    "retry": "Existing service-owned overdue-admission reconciliation, scoped by a single exact timestamp-resolved obligation; no new session or credential minted.",
+    "retry_status": "pending",
+    "retry_code": "cleanup_admission_provider_owner_ack_pending",
+    "measured_endpoint": "DELETE /production/realtime/gemini/browser-sessions/{exact-bound-id}",
+    "measured_http_status": 404,
+    "interpretation": "A load-balanced 404 and expired deadline are not an authoritative browser/provider close receipt. No closure or terminal state was fabricated."
+  },
+  "separate_older_obligation_read_only": {
+    "created_at": "2026-09-03T19:24:02.073035Z",
+    "state": "closed",
+    "lifecycle_phase": "session_provisional",
+    "live_cleanup_completed_at": "2026-09-03T19:25:47.896022Z",
+    "completed_at": null,
+    "explicit_recovery_attempted": false
+  },
+  "validation": {
+    "worker_tests": {"passed": 55, "files": 3, "duration_seconds": 1.37, "runtime": "Node 22.22.0, official archive checksum verified"},
+    "provider_owner_loss_tests": {"passed": 5, "deselected": 74, "warnings": 8, "duration_seconds": 0.93, "runtime": "Python 3.12 uv workspace"},
+    "instrument_failures": ["Default pnpm/Node launcher stopped before tests; corrected to verified Node 22", "Unqualified local node absent; corrected to verified absolute runtime", "SessionStore imported from worker module failed before mutation; corrected to its owning session_store module"],
+    "new_code_regression_added": false,
+    "limitations": "Existing regression coverage validates fail-closed behavior, not resolution of the missing production receipt."
+  },
+  "memory_deployment_allowed": false,
+  "final_recheck": {
+    "observed_at": "2026-09-05T21:05:42.417Z",
+    "active_runs": 0,
+    "worker_ready": true,
+    "live_workers": 1,
+    "execution": "kill_switch_engaged",
+    "product_mutation_gates_open": false,
+    "gateway_retention_pending": 2,
+    "gateway_retention_status": "degraded",
+    "gateway_mutation_ready": false
+  },
+  "failure_checkpoint": {
+    "flag": "MEM00_FIVE_ITERATIONS_REACHED — CONTINUE",
+    "attempt_ids": ["MEM00-EI-090", "MEM00-EI-091", "MEM00-EI-092", "MEM00-EI-093", "MEM00-EI-094", "MEM00-EI-095"],
+    "candidate_identity": "All six use MEM00 commit/tree recorded above; EI-092 worker deployment identities are recorded separately above.",
+    "clusters": ["Authentication: superseded by authorized plugin-free diagnostics", "Evidence instrument: null run envelope and lab hard-retention zero are not product zero", "Worker deployed/saved identity mismatch: repaired", "Diagnostic runtime/import: repaired", "Voice/Gateway owner-loss contract: authoritative close acknowledgement missing"],
+    "falsified": ["Plugin reconnection is required to inspect the deployment gate", "Zero lab rows establish remote cleanup", "Worker restoration alone completes the product obligation", "Provider DELETE 404 establishes browser close"],
+    "still_plausible": "The original browser/Voice owner disappeared without durably persisting its close receipt; the remaining product contract intentionally refuses retrospective closure from absence alone.",
+    "next_experiment": "With expanded recovery scope, seek recoverable authoritative close evidence and diagnose both expired product obligations. Do not fabricate receipts, weaken gates, or repeat the same 404 retry as a repair.",
+    "safety": "Kill switch engaged, mutation gates closed, no memory deployment or new fixtures; lab detail retention loss recorded, product cleanup unconfirmed, SH-001 open, zero clean canaries."
+  },
+  "memory_deployment_attempted": false,
+  "synthetic_memory_fixtures_created": 0,
+  "clean_complete_canaries": 0,
+  "security_hold": "SH-001 remains open: saved reference-HMAC rotation is not yet deployed/effective.",
+  "next_decision": "Extend recovery scope to the Voice/Gateway owner-loss protocol and the separate older synthetic obligation. Do not convert absent evidence into successful cleanup or alter provider settings."
+}

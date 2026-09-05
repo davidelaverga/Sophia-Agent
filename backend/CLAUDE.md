@@ -694,6 +694,15 @@ environment values: the memory prefix includes a reference HMAC secret.
 Regression: `tests/test_mem00_runtime_pin.py`, including unknown future
 secret fields and malformed values in otherwise allowlisted flags.
 
+**MEM00 provider marker readback**: hosted SDK 1.0.9 list responses may stringify
+boolean/integer metadata while exact-ID reads preserve the initial types.
+`Mem0ProjectionAdapter.find_by_operation_marker` uses the list only to discover
+candidate IDs, then verifies the exact returned ID and strictly typed metadata.
+Never coerce provider revisions or accept `True == 1` as a binding match. An
+exact-read outage is retryable and ambiguous, not an empty successful lookup;
+conflicts expose no unverified cleanup IDs. Provider content remains excluded.
+Regression: `tests/test_mem00_provider_marker_readback.py` (DP-007).
+
 **Components**:
 - `updater.py` - LLM-based memory updates with fact extraction, whitespace-normalized fact deduplication (trims leading/trailing whitespace before comparing), atomic file I/O, and timezone-aware UTC timestamp serialization (`...Z`) for memory metadata.
 - `queue.py` - Debounced update queue (per-thread deduplication, configurable wait time)

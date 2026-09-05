@@ -58,6 +58,12 @@ only allowlisted typed flags and fingerprints. Never print environment values
 by prefix: `SOPHIA_MEMORY_` includes the reference HMAC credential. Unknown
 fields and malformed flag values are not echoed.
 
+Mem0 operation-marker reconciliation treats list metadata as discovery only:
+the hosted list endpoint can stringify booleans and revisions. Every matching
+ID must pass an exact-ID read with strictly typed expected metadata before
+reconciliation returns it. Read failures remain ambiguous; they never authorize
+a duplicate add or count as verified absence. Provider text is never returned.
+
 ### Lead Agent
 
 The single LangGraph agent (`lead_agent`) is the runtime entry point, created via `make_lead_agent(config)`. It combines:

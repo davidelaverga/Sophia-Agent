@@ -1,0 +1,50 @@
+{
+  "schema": "sophia.memory-certification.deployment-gate.v1",
+  "recorded_at": "2026-09-05T20:17:49Z",
+  "candidate_commit": "3c3a6362804ef1eee6f7cbe615121836ce383ed9",
+  "candidate_tree": "b0944e469a35a510fd7bbd1214c5c5ed4e2dc39e",
+  "reviewed_remote_commit": "3add3336216e74324cd1ed4d3859caccc70c94fe",
+  "user_instruction": "Do not use the plugin; continue MEM00. User reports no active Voice Lab runs.",
+  "inspection": "No plugin calls. Public read-only readiness endpoint joined to aggregate PostgreSQL SELECTs through the existing Render service shell, inside BEGIN READ ONLY with a five-second statement timeout and ROLLBACK.",
+  "readyz": {
+    "http_status": 503,
+    "target_observed_at": "2026-09-05T20:13:27.421Z",
+    "service_version": "e3b40f1b21739479db239c383ce88285ce740152",
+    "database_ready": true,
+    "active_runs": 1,
+    "live_workers": 0,
+    "worker_reason": "heartbeat_missing",
+    "execution": "kill_switch_engaged",
+    "product_mutation_gates_open": false,
+    "mutation_ready": false
+  },
+  "durable_run_aggregate": {
+    "count": 1,
+    "state": "product_failed",
+    "cleanup_complete": false,
+    "created_at": "2026-09-03T20:18:10.044Z",
+    "updated_at": "2026-09-03T21:54:40.838Z",
+    "expires_at": "2026-09-03T20:48:10.044Z",
+    "all_expired": true,
+    "latest_worker_heartbeat": "2026-09-03T21:54:40.931Z",
+    "browser_leases_total": 0,
+    "browser_leases_unexpired": 0,
+    "operations": {"start_succeeded": 1, "speak_succeeded": 1, "end_failed": 1},
+    "cleanup_recovery_events": 1258,
+    "latest_cleanup_recovery_at": "2026-09-03T21:36:22.787Z"
+  },
+  "interpretation": "No currently executing speech operation or browser lease was found. The terminal failed run remains active for admission/deployment accounting because cleanup is incomplete. Missing worker heartbeat is not cleanup proof. A null run_id in a capabilities envelope is not a global idle-run proof.",
+  "deployed_component_observations": {
+    "gateway": "58a748b1ee8b08ed97d27d1d40e69b1bbdaf6f65",
+    "langgraph": "58a748b1ee8b08ed97d27d1d40e69b1bbdaf6f65",
+    "frontend": "5f7f15164a708f7c6fec5a94f6ab20f707df4aa0",
+    "voice": "5f7f15164a708f7c6fec5a94f6ab20f707df4aa0"
+  },
+  "local_validation": {"tests": ["tests/test_mem00_runtime_pin.py", "tests/test_mem00_architecture.py"], "passed": 8, "duration_seconds": 0.75, "exit_code": 0},
+  "deployment_allowed": false,
+  "deployment_attempted": false,
+  "voice_records_mutated": false,
+  "synthetic_fixtures_created": 0,
+  "clean_complete_canaries": 0,
+  "next_required_authority": "Scope approval to repair/recover the unrelated September 3 Voice Lab synthetic run and its missing cleanup worker while preserving gates, evidence and candidate identities. Do not mark cleanup complete manually or delete its evidence."
+}

@@ -2,23 +2,24 @@
   "schema": "sophia.memory-certification.security-hold.v1",
   "campaign": "MEM00",
   "hold_id": "MEM00-SH-001",
-  "status": "SECURITY_HOLD",
+  "status": "RESOLVED",
+  "resolution": "Both running services on exact 3c3a636 independently reported replacement reference fingerprint sha256:70c4ec6052335991 through the repaired allowlisted diagnostic; governed recall/projection/fault remain false and both live shutdown proofs return zero memories without provider transport or legacy cache. Historical incident evidence retained.",
   "recorded_at": "2026-09-05T12:29:07Z",
   "cause": "Agent diagnostic prefix-enumerated memory environment values and exposed the reference HMAC secret in shell/tool output. Raw secret excluded.",
   "authorization": {
     "mem0_gateway_key_replacement": "user_approved_and_completed",
-    "reference_hmac_rotation": "requested_pending",
+    "reference_hmac_rotation": "user_approved_user_saved_both_verified_2026-09-05T19:16:07Z",
     "merge": "not_authorized"
   },
   "deployed": {
     "gateway": {
-      "commit": "58a748b1ee8b08ed97d27d1d40e69b1bbdaf6f65",
-      "deployment": "dep-dae0fleq1p3s73fg3lh0",
+      "commit": "3c3a6362804ef1eee6f7cbe615121836ce383ed9",
+      "deployment": "dep-dae8b59t0dsc7397hd70",
       "live": true
     },
     "langgraph": {
-      "commit": "58a748b1ee8b08ed97d27d1d40e69b1bbdaf6f65",
-      "deployment": "dep-dae0h4id0e5s73elepm0",
+      "commit": "3c3a6362804ef1eee6f7cbe615121836ce383ed9",
+      "deployment": "dep-dae8ciuq1p3s738bili0",
       "live": true
     },
     "frontend": {
@@ -69,7 +70,10 @@
   "credential_fingerprints": {
     "gateway_mem0": "sha256:8388812563a212e0",
     "langgraph_mem0_unchanged": "sha256:109d881133f29ed5",
-    "shared_reference_hmac_before_rotation": "sha256:c2d1fd95aecf1930"
+    "shared_reference_hmac_before_rotation": "sha256:c2d1fd95aecf1930",
+    "shared_reference_hmac_saved_after_rotation": "sha256:70c4ec6052335991",
+    "saved_values_match": true,
+    "running_values_after_rotation_verified": true
   },
   "provider": {
     "sdk": "1.0.9",
@@ -112,7 +116,7 @@
     "cleanup_scope": "No new provider/product fixture created; full mission-wide terminal-zero certificate not claimed"
   },
   "instrument_repair": {
-    "status": "local_not_deployed",
+    "status": "deployed_and_verified_3c3a6362804ef1eee6f7cbe615121836ce383ed9",
     "module_sha256": "72c64d8674f067441fa023848198acbfbc704b927c3b7c3baf70f358955964f0",
     "test_sha256": "3202b937c2207d1affab2bc9e95c4a17bb35e079f2b6f08c5aabc52d72ca059f",
     "focused_tests_passed": 15,
@@ -127,5 +131,14 @@
     }
   },
   "clean_production_canaries": 0,
-  "next_gate": "Explicit reference HMAC rotation approval, exact candidate deployment, safe fingerprint verification, then fresh hosted contract proof."
+  "superseded_deployment_gate_blocker": {
+    "recorded_at": "2026-09-05T21:02:48Z",
+    "classification": "product_cleanup_unconfirmed",
+    "service": "Existing Voice/Gateway cleanup protocol; plugin not required",
+    "error_code": "cleanup_admission_provider_owner_ack_pending",
+    "reason": "Worker healthy and lab zero after hard retention, but exact product provider admission remains browser_active, DELETE returns 404 and no canonical browser-close receipt exists. Separate older retention obligation also pending.",
+    "required_action": "Extend approved recovery scope to Voice/Gateway owner-loss protocol and the separate older obligation; preserve missing-proof state and require authoritative cleanup before memory deployment.",
+    "deployment_attempted": false
+  },
+  "next_gate": "User expressly waived historical pending voice-cleanup debt as a MEM00 deployment blocker. Leave those runs untouched and unconfirmed. Both memory services are verified; freshly measure the pinned hosted Mem0 contract before enabling projection/recall. This resolution is not a promotion or full canary."
 }

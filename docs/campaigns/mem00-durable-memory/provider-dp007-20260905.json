@@ -1,0 +1,103 @@
+{
+  "schema": "mem00.provider-preflight.v1",
+  "run_id": "mem00-dp007-20260905T212200Z",
+  "started_at": "2026-09-05T21:22:18.720698Z",
+  "probe_finished_at": "2026-09-05T21:22:20.956812Z",
+  "deployed_commit": "3c3a6362804ef1eee6f7cbe615121836ce383ed9",
+  "deployments": {
+    "gateway": "dep-dae8b59t0dsc7397hd70",
+    "langgraph": "dep-dae8ciuq1p3s738bili0"
+  },
+  "subject_refs": [
+    "c1e62efbf39912ae",
+    "9efaabde4159762c"
+  ],
+  "provider_row_ref": "b5513c32635298b1",
+  "sdk": "1.0.9",
+  "host": "https://api.mem0.ai",
+  "crud_path": "/v1/memories/",
+  "search_path": "/v2/memories/search/",
+  "credential_fingerprint": "sha256:8388812563a212e0",
+  "reference_fingerprint": "sha256:70c4ec6052335991",
+  "created": 1,
+  "status": "failed_reconciliation_fixture_cleanup_verified",
+  "failure": "mem0_operation_marker_metadata_conflict",
+  "hypothesis": "Hosted paginated metadata stringifies scalar booleans and integers while exact-ID GET preserves initial metadata types.",
+  "observed_types": {
+    "sophia_managed": {
+      "list": "str",
+      "get": "bool",
+      "expected": "bool"
+    },
+    "memory_contract_epoch": {
+      "list": "str",
+      "get": "int",
+      "expected": "int"
+    },
+    "canonical_revision": {
+      "list": "str",
+      "get": "int",
+      "expected": "int"
+    },
+    "memory_governance_revision": {
+      "list": "str",
+      "get": "int",
+      "expected": "int"
+    }
+  },
+  "string_metadata_bindings_match": true,
+  "initial_metadata_verified": true,
+  "exact_content_match": true,
+  "cleanup": {
+    "authorization": "Known isolated row only, exact-ID GET metadata matched every original expected field before deletion",
+    "http_statuses": [
+      200
+    ],
+    "terminal_counts": [
+      0,
+      0
+    ],
+    "verified_zero": true
+  },
+  "joins": {
+    "database": "mem00.v1 epoch1 enforced; fresh exact counts zero for candidates/memories/jobs/bindings/faults",
+    "app": "Journal empty",
+    "langsmith": "Pinned EU Sophia project accessible, no joined full product trace",
+    "metrics": "Provider dashboard usage 36 adds/1965 retrievals; no promotion-level counters claimed"
+  },
+  "provider_configuration": {
+    "project": "unchanged default-project",
+    "plan": "Growth",
+    "extra_usage": false,
+    "multilingual_extraction": true,
+    "custom_instructions": "unchanged"
+  },
+  "containment": {
+    "runtime_read": false,
+    "projection": false,
+    "fault_injection": false,
+    "canonical_review": true
+  },
+  "full_product_canary": false,
+  "clean_complete_canaries": 0,
+  "repair": "List rows discover candidates only; exact-ID readback verifies ID and strictly typed expected metadata. Read outage stays ambiguous; conflicts return no unverified cleanup IDs.",
+  "regression": {
+    "red": {
+      "failed": 9,
+      "passed": 1
+    },
+    "green": {
+      "passed": 10
+    },
+    "baseline": {
+      "passed": 5909,
+      "skipped": 161,
+      "warnings": 12,
+      "seconds": 297.29
+    },
+    "after_full_suite": {"passed": 5919, "skipped": 161, "warnings": 12, "seconds": 296.31, "exit_code": 0},
+    "offline_probe_safety_tests": 9,
+    "ruff": "passed"
+  },
+  "source_before_repair_sha256": "5ccce00be2396529a878f2acfa6838968867d9c965fdd8a5a93287be73b5902e"
+}

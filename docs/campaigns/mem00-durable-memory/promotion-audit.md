@@ -1,6 +1,6 @@
 # MEM00 Section 17 promotion audit
 
-Updated: 2026-09-03 (Europe/Rome)
+Updated: 2026-09-05 (Europe/Rome)
 
 Status values are deliberately strict: `local-proven` is not production proof, `production-pending` is incomplete, and only `production-proven` can satisfy promotion. The terminal declaration remains unavailable until every row is `production-proven` and the evidence packet independently reproduces each reference.
 
@@ -36,4 +36,4 @@ Status values are deliberately strict: `local-proven` is not production proof, `
 | No unapproved provider/plan/config change; every run revalidates hosted behavior | production-pending | per-run Mem0 config/usage/contract pins |
 | Evidence packet independently reviewable | production-pending | final redacted manifest, hashes, queries, logs, metrics, UI, LangSmith joins |
 
-Current hard gate: the deployed Mem0 key cannot delete its exact synthetic row. One same-project replacement-key form is prepared and awaits the browser-required action-time confirmation. No production migration or MEM00 deployment may begin before full R3 terminal zero and another Voice Lab inactivity read.
+Current hard gate: DP-007 measured list metadata stringification and failed reconciliation on deployed `3c3a636`; exact-ID metadata remained typed and the replacement key successfully deleted the sole synthetic fixture (HTTP 200, pagination-complete zero). Repair and a fresh complete R3 remain required before recall/projection activation. SH-001 is resolved on both running memory services. Historical voice cleanup debt is explicitly waived by the user as a deployment blocker, not classified as clean. Complete clean production canaries: zero. Migration is already applied; neither it nor a standalone provider probe constitutes promotion.

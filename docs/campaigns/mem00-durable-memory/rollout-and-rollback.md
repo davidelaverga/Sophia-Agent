@@ -14,8 +14,11 @@
 
 ## Action-time guards
 
+- **Explicit exception approved after EI-095 on 2026-09-05:** proceed with MEM00 despite the two already-recorded expired VT00 cleanup obligations, accepting potential loss of those pending voice runs as the user requested. Leave voice recovery and records untouched. This supersedes the cleanup-debt deployment block below only for those historical obligations. Continue checking no executing voice run, healthy expected worker and closed voice mutation gates; preserve truthful unconfirmed receipts. It does not waive any MEM00 isolation, provider contract, five-canary or terminal-zero requirement.
 - Re-read remote head, deploy IDs/revisions, schema digest/epoch, flags, Mem0 usage/configuration, and LangSmith target before every certification run.
 - Query Voice Lab run/lease state immediately before any deployment. If a run is active or cleanup is incomplete, do not deploy.
+- Join the lab count to Gateway retention readiness and exact product cleanup receipts. Worker hard retention can delete an expired terminal lab row with `cleanup_complete=false`, leaving only an **unconfirmed** keyed tombstone. Zero lab rows or a provider DELETE 404 cannot clear a still-pending product obligation. Before worker restart, preserve the allowed content-free identity join and establish its retention side effects; never promise evidence preservation based solely on restart being non-destructive at the UI level. See `worker-recovery-20260905.json`.
+- Plugin use is not required for this read-only guard. The public `/readyz` response and narrowly scoped, read-only ledger aggregates can supply evidence. A capability envelope with `run_id=null` is not a global count. An expired terminal run with `cleanup_complete=false` still blocks deployment; no live worker/browser lease is not terminal-zero proof. On 2026-09-05 this exact case was measured directly and recorded in `deployment-gate-20260905.json`.
 - Use only the synthetic principal and derived provider subject for R3/R5.
 - Refuse cross-owner or unresolved destructive targets and enter `SECURITY_HOLD` where the mission requires it.
 
@@ -50,7 +53,16 @@ deployment, verify effective runtime fingerprints and the ordinary canonical
 Journal before creating a candidate. EI-078/EI-079 show why a UI save click or
 an empty legacy response alone does not satisfy this regression.
 
-### Current provider credential hold
+### Current provider reconciliation gate
+
+SH-001 is resolved on running Gateway/LangGraph `3c3a636`: both report replacement
+reference fingerprint `sha256:70c4ec6052335991` through the allowlisted diagnostic.
+DP-007 proves the Gateway replacement Mem0 key deletes its exact synthetic row
+(HTTP 200, paginated zero). It also exposes list metadata stringification; fix
+the adapter using exact-ID typed readback and repeat full R3 before activation.
+Do not replace another key or alter provider settings to address this mismatch.
+
+Historical credential hold (superseded):
 
 **Superseded by SH-001 on 2026-09-05:** the user approved the new key and Gateway
 now runs fingerprint `sha256:8388812563a212e0`; LangGraph's key is unchanged.
