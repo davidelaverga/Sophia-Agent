@@ -85,6 +85,8 @@ transcript revision, processed watermark and lifecycle status in one database
 update. A conflict or unavailable database is not a successful end. No second
 extraction run or provider write is created; new ranges keep the atomic enqueue
 path. The browser retains an unconfirmed session for an ordinary retry.
+The lifecycle predicate uses the session store's database encoding (`open` →
+`active`, `paused` → `resumable`); all equality fences remain mandatory.
 
 ### Lead Agent
 

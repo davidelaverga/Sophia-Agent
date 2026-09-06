@@ -89,6 +89,7 @@ describe('useSessionExitFlow', () => {
     await act(async () => { await result.current.handleEndSession(); });
     expect(result.current.showEmergence).toBe(false);
     expect(result.current.showExitConfirm).toBe(true);
+    expect(result.current.exitConfirmReason).toBe('end_unconfirmed');
     expect(setEnding).toHaveBeenLastCalledWith(false);
     expect(addSessionMock).not.toHaveBeenCalled();
     expect(setRecapArtifactsMock).not.toHaveBeenCalled();

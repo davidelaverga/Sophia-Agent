@@ -13,6 +13,23 @@ from deerflow.sophia.memory_governance.store import MemoryGovernanceConflict, Su
 from deerflow.sophia.session_store import SessionMessageRecord, SessionRecord
 
 
+@pytest.mark.parametrize("database_status", ["active", "resumable", "ended"])
+def test_finalize_uses_database_status_after_real_session_mapping(database_status):
+    from deerflow.sophia.session_store import SupabaseSessionStoreConfig, SupabaseSessionTranscriptStore
+
+    row = {"id": "session-1", "thread_id": "thread-1", "user_id": "owner-1", "status": database_status, "message_revision": 7, "memory_processed_until_sequence": 2}
+    sessions = SupabaseSessionTranscriptStore(SupabaseSessionStoreConfig(url="https://example.invalid", service_role_key="test"))
+    record = sessions._record_from_session_row(row)
+
+    def respond(request):
+        # Reproduce PostgREST's exact equality, not a mock unconditional success.
+        matches = request.url.params["status"] == f"eq.{database_status}"
+        return httpx.Response(200, json=[{"id": "session-1", "status": "ended", "ended_at": "2026-09-06T16:32:00+00:00"}] if matches else [])
+
+    store = SupabaseMemoryGovernanceStore(url="https://example.invalid", service_role_key="test", client=httpx.Client(transport=httpx.MockTransport(respond)))
+    store.finalize_processed_session(session=record, ended_at="2026-09-06T16:32:00+00:00")
+
+
 def _setup(monkeypatch, *, processed=2, messages=2):
     monkeypatch.setenv("SOPHIA_MEMORY_REFERENCE_HMAC_SECRET", "m" * 32)
     record = SessionRecord(session_id="session-1", thread_id="thread-1", user_id="owner-1", status="resumable", message_revision=7, memory_processed_until_sequence=processed)

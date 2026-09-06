@@ -54,7 +54,8 @@ Backend auth: `getServerAuthToken()` reads `sophia-backend-token` cookie.
 
 - **Session finalization truth**: `useSessionExitFlow` only enters emergence,
   writes ended history/recap state, and emits success after a successful backend
-  receipt. HTTP/network failures retain the session and reopen End confirmation
+  receipt. HTTP/network failures retain the session and reopen an explicitly
+  unconfirmed End dialog with Retry End, distinct from the responding guard
   with an error toast. Never restore the local-success fallback: it hides failed
   durable extraction/finalization. Regression: `useSessionExitFlow.test.ts`.
 

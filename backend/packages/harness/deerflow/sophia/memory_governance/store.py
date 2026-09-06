@@ -164,6 +164,8 @@ class SupabaseMemoryGovernanceStore:
         and lifecycle changes are fenced independently. A miss is never success.
         New ranges still use the existing atomic finalization/enqueue RPC.
         """
+        from deerflow.sophia.session_store import _to_db_status
+
         if session.status not in {"active", "open", "paused", "resumable", "ended"}:
             raise MemoryGovernanceConflict("memory_session_state_conflict")
         terminal_at = session.ended_at or ended_at
@@ -176,7 +178,7 @@ class SupabaseMemoryGovernanceStore:
                 "thread_id": f"eq.{session.thread_id}",
                 "message_revision": f"eq.{session.message_revision}",
                 "memory_processed_until_sequence": f"eq.{session.memory_processed_until_sequence}",
-                "status": f"eq.{session.status}",
+                "status": f"eq.{_to_db_status(session.status)}",
                 "select": "id,status,ended_at",
             },
             json_body={"status": "ended", "ended_at": terminal_at, "updated_at": datetime.now(UTC).isoformat()},

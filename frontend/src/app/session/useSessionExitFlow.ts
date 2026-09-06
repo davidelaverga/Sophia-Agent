@@ -264,6 +264,7 @@ export function useSessionExitFlow({
   getSessionTranscriptRevision,
 }: UseSessionExitFlowParams) {
   const [showExitConfirm, setShowExitConfirm] = useState(false);
+  const [exitConfirmReason, setExitConfirmReason] = useState<'responding' | 'end_unconfirmed'>('responding');
   const [showDebriefOffer, setShowDebriefOffer] = useState(false);
   const [debriefData, setDebriefData] = useState<DebriefData | null>(null);
   const [isNavigatingToRecap, setIsNavigatingToRecap] = useState(false);
@@ -271,6 +272,7 @@ export function useSessionExitFlow({
   const [pendingRecapSessionId, setPendingRecapSessionId] = useState<string | null>(null);
 
   const openExitConfirm = useCallback(() => {
+    setExitConfirmReason('responding');
     setShowExitConfirm(true);
   }, []);
 
@@ -278,6 +280,7 @@ export function useSessionExitFlow({
     // A local recap is not a durable finalization receipt. Retain the session
     // and transcript so the ordinary End action can be retried idempotently.
     setEnding(false);
+    setExitConfirmReason('end_unconfirmed');
     setShowExitConfirm(true);
     useUiToastStore.getState().showToast({
       message: 'Session end could not be confirmed. Your session is still available; please try again.',
@@ -521,6 +524,7 @@ export function useSessionExitFlow({
     }
 
     if (isSophiaResponding && !showExitConfirm) {
+      setExitConfirmReason('responding');
       setShowExitConfirm(true);
       haptic('light');
       return;
@@ -629,6 +633,7 @@ export function useSessionExitFlow({
 
   return {
     showExitConfirm,
+    exitConfirmReason,
     showDebriefOffer,
     showEmergence,
     debriefData,

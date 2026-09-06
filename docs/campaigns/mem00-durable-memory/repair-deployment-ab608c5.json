@@ -1,0 +1,64 @@
+{
+  "schema": "mem00.iteration-evidence.v1",
+  "candidate": "ab608c5343a35257a3870229711ffbc1d3e616e6",
+  "tree": "cf7a618b658b9016ac8eb9dfd15f597a6a751526",
+  "reviewed_remote": "3add3336216e74324cd1ed4d3859caccc70c94fe",
+  "branch": "codex/mem00-durable-memory-governance",
+  "deployments": {
+    "gateway": {"id": "dep-daeplgou01pc73fh1jfg", "live_at": "2026-09-06T16:56:15Z", "instance_suffix": "75nth"},
+    "langgraph": {"id": "dep-daepmtgn74is73eukaj0", "live_at": "2026-09-06T17:00:54Z", "duration_seconds": 208, "public_version_matches": true, "runtime_pin_matches": true},
+    "voice_component": {"id": "dep-daeplvon74is73eug79g", "live_at": "2026-09-06T16:56:17Z"},
+    "frontend": {"id": "dpl_GFU5qGX4WCviKnQtEVUe9CiP1bBs", "status": "Ready", "environment": "Production", "source_preview": "9Jkwpf9RiahYjzZ1j8nnkjwarNzn"}
+  },
+  "all_four_public_versions_match": true,
+  "action_time_idle_guards": ["2026-09-06T16:53:50.215Z", "2026-09-06T16:55:14.221Z", "2026-09-06T16:57:14.722Z", "2026-09-06T16:59:10.213Z"],
+  "guard_observations": {"active_runs": 0, "workers": 1, "worker_ready": true, "kill_engaged": true, "product_mutation_gates": false},
+  "voice_lab_untouched": true,
+  "schema_version": "mem00.v1",
+  "contract_epoch": 1,
+  "contract_mode": "enforced",
+  "migration_sha256": "96303ed50b1508b35287cb70acd26dd34e58aa44a50b0527090f17ac302f96b7",
+  "contract_updated_at": "2026-09-04T17:17:41.403939Z",
+  "runtime_pin": {
+    "cohort_and_principal_fingerprint": "sha256:3207762acc978926",
+    "reference_key_fingerprint": "sha256:70c4ec6052335991",
+    "gateway_credential_fingerprint": "sha256:8388812563a212e0",
+    "langgraph_credential_fingerprint": "sha256:109d881133f29ed5",
+    "sdk": "1.0.9", "api_host": "https://api.mem0.ai", "crud": "/v1/memories/", "search": "/v2/memories/search/", "list": "/v2/memories/",
+    "project_fingerprint": "sha256:6ac656a6b1be5f93", "org_fingerprint": "sha256:268f794f90764fcb",
+    "enabled": ["CANDIDATE_LEDGER_READ", "CANDIDATE_LEDGER_WRITE", "CANONICAL_POOL_READ", "GOVERNED_RUNTIME_READ", "PROVIDER_PROJECTION", "FAULT_INJECTION", "LANGSMITH_EXPORT"],
+    "disabled": ["LEGACY_IMPORT", "LEGACY_INVENTORY"]
+  },
+  "hosted_probe": {
+    "run_id": "mem00-dp007-20260906T170243Z-full", "source_sha256": "b8e979c994db50090dabdec1ee53974d2b38b7c8c2520817671697dd709f7255",
+    "started_at": "2026-09-06T17:02:47.029138Z", "finished_at": "2026-09-06T17:03:03.429885Z", "status": "passed", "created": 3,
+    "all_three_fixtures_passed": ["direct_content_exact", "initial_metadata", "repeat_reconciliation", "search", "runtime_metadata_filter", "mismatched_metadata_excluded"],
+    "pagination_counts": [2, 1], "prior_fixtures_unchanged": true, "search_subject_isolation": true,
+    "cleanup": [{"subject_ref": "dfa233766670dc41", "terminal_count": 0, "verified_zero": true}, {"subject_ref": "c550345130e34384", "terminal_count": 0, "verified_zero": true}],
+    "full_product_canary": false
+  },
+  "usage": {"plan": "Growth", "extra_usage": false, "window": "2026-08-11/2026-09-11", "before": {"adds": 45, "retrievals": 2108}, "after": {"adds": 48, "retrievals": 2156}, "configuration_changed": false},
+  "processed_end_rerun": {
+    "session_ref": "hmac-sha256:session:0d15db3caacacd2afcd9632486b9c6019b4990bb87a142f6e507f0b012e194ac",
+    "request_times": ["2026-09-06T17:04:06.643Z", "2026-09-06T17:04:36.225Z"],
+    "request_id": "4l5r5-1788714276225-96f191db208e", "http_status": 500, "upstream_status": 500, "execution_seconds": 1.49,
+    "gateway_exception": "MemoryGovernanceConflict: memory_session_finalization_conflict", "log_times": ["2026-09-06T17:04:08Z", "2026-09-06T17:04:37Z"],
+    "database": {"status": "active", "ended_at": null, "revision": 2, "processed_until_sequence": 2, "extraction_status": "succeeded_zero"},
+    "mapped_record_status": "open",
+    "causal_evidence": "Actual deployed session mapper reads active as open; CAS compares eq.open against active and matches no row. New exact-equality transport regression reproduces active/open and resumable/paused failures.",
+    "frontend": {"no_false_ended_success": true, "retry_dialog_mislabels_failure_as_responding": true},
+    "langsmith_finalization_join": "not_claimed_no_successful_finalization",
+    "new_turns": 0, "new_candidate_approvals": 0
+  },
+  "cleanup": {"provider_probe_terminal_zero": true, "product_terminal_zero": false, "exact_p01_session_retained_for_repaired_rerun": true, "older_pending_candidates_untouched": 2},
+  "next_repair_verification": {
+    "backend_baseline_passed": 5940, "backend_focused_red": {"failed": 2, "passed": 12}, "backend_focused_green": 14,
+    "backend_full": {"passed": 5943, "skipped": 161, "warnings": 12, "seconds": 419.64},
+    "frontend_focused_red": {"failed": 2, "passed": 9}, "frontend_focused_green": 11,
+    "frontend_full": {"passed": 1955, "skipped": 2, "seconds": 169.68}, "frontend_typecheck": "passed",
+    "voice_component": {"passed": 616, "warnings": 12, "seconds": 11.37},
+    "ruff_diff_and_focused_eslint": "passed", "deployed_rerun": "required"
+  },
+  "complete_clean_canaries": 0,
+  "status": "CONTINUE"
+}

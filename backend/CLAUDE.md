@@ -728,6 +728,10 @@ zero/malformed readback raises a conflict. New ranges still use the atomic RPC.
 Both end routes must consume that receipt without a second unguarded upsert.
 The content-free `memory.session.finalized` point event joins the processed-range
 end. Regression: `tests/test_mem00_processed_session_end.py`.
+The CAS must serialize lifecycle status through the existing session-store
+database mapping. A real Supabase row maps `active` to `open` and `resumable`
+to `paused`; comparing those application aliases directly silently matches zero
+rows. Regression includes the actual row mapper plus exact PostgREST equality.
 
 **Components**:
 - `updater.py` - LLM-based memory updates with fact extraction, whitespace-normalized fact deduplication (trims leading/trailing whitespace before comparing), atomic file I/O, and timezone-aware UTC timestamp serialization (`...Z`) for memory metadata.

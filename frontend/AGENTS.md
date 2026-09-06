@@ -84,6 +84,8 @@ src/
 - `src/app/session/useSessionExitFlow.ts` owns truthful End outcomes: an HTTP or
   network failure retains the session for retry and cannot write ended history,
   enter recap emergence, or tear down the session as if finalization succeeded.
+  Its retry dialog carries `end_unconfirmed`, distinct from a responding guard,
+  and explicitly offers Retry End rather than falsely claiming active generation.
 
 ## Resources
 

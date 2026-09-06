@@ -87,6 +87,7 @@ export function useSessionExitOrchestration({
 }: UseSessionExitOrchestrationParams) {
   const {
     showExitConfirm,
+    exitConfirmReason,
     showDebriefOffer,
     showEmergence,
     debriefData,
@@ -139,6 +140,7 @@ export function useSessionExitOrchestration({
 
   return {
     showExitConfirm,
+    exitConfirmReason,
     showDebriefOffer,
     showEmergence,
     debriefData,
