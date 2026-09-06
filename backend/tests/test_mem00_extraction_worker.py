@@ -230,6 +230,34 @@ def test_successful_zero_candidate_run_is_terminal_and_range_bound() -> None:
     assert store.completed[2] == ()
 
 
+def test_real_extractor_parse_failure_retries_without_advancing_cursor(monkeypatch) -> None:
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from deerflow.sophia import extraction
+
+    sessions = _Sessions()
+    store = _Governance(_run(sessions))
+    client = Mock()
+    client.messages.create.return_value = SimpleNamespace(content=[SimpleNamespace(text="not JSON")], stop_reason="end_turn")
+    monkeypatch.setattr(extraction.anthropic, "Anthropic", lambda: client)
+    monkeypatch.setattr(extraction, "_load_template", lambda: "Extract {transcript}")
+    with pytest.raises(extraction.MemoryWriteError):
+        _service(store, sessions, None).run_once()
+    assert store.completed is None
+    assert store.failed[1:] == ("memory_extraction_worker_failed", True)
+    assert sessions.record.memory_processed_until_sequence == 1
+
+
+def test_queued_model_pin_matches_actual_extractor_model() -> None:
+    from deerflow.sophia.extraction import _PIPELINE_MODEL
+
+    sessions = _Sessions()
+    store = _Governance(_run(sessions))
+    _service(store, sessions, None).enqueue_finalized_session(user_id="owner-1", session_id="session-1")
+    assert store.enqueued["p_extractor_model"] == _PIPELINE_MODEL
+
+
 def test_restart_recovery_idempotently_enqueues_unprocessed_ended_session() -> None:
     sessions = _Sessions()
     store = _Governance(_run(sessions, state="queued"))

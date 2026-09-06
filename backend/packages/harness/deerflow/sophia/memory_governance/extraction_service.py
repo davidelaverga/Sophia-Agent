@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 
-from deerflow.sophia.extraction import extract_session_memories
+from deerflow.sophia.extraction import _PIPELINE_MODEL, extract_session_memories
 from deerflow.sophia.session_store import (
     SessionMessageRecord,
     SessionStore,
@@ -161,7 +161,7 @@ class MemoryExtractionService:
             "p_sequence_end": sequence_end,
             "p_input_manifest_ref": manifest_ref,
             "p_extractor_contract_version": "mem00.extract.v1",
-            "p_extractor_model": "claude-3-5-haiku-20241022",
+            "p_extractor_model": _PIPELINE_MODEL,
             "p_extractor_prompt_version": "mem0_extraction.md:v1",
         }
 

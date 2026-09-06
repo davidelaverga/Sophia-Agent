@@ -1,0 +1,15 @@
+{
+  "schema": "mem00.extractor-failure.v1",
+  "attempt_id": "MEM00-EI-115",
+  "candidate": "bb54d5f40b18bfb01e93267017cf49d561c214d7",
+  "unchanged_extractor_prompt_sha256": "4a192ef703a89baf70c5f4d6f15bdeb328e8ef945d6a936e4428ef0c8516c180",
+  "hypothesis": "candidate_only extraction inherits the legacy error-to-empty and deterministic-partial fallback, so malformed JSON, missing templates or model errors can incorrectly complete the durable range and advance its cursor.",
+  "production_evidence": "repair-deployment-bb54d5f.json",
+  "reproduction": {"log_at": "2026-09-06T21:00:58Z", "message": "Failed to parse extraction response; content_excluded", "durable_state": "succeeded_zero", "recap": "No new memories", "hypothesis_status": "confirmed by production join and deterministic default-extractor worker regression"},
+  "repair": ["Candidate-only extraction failures raise retryable safe errors, including when deterministic candidates exist", "Incomplete responses and any malformed entry reject the whole batch", "Valid complete empty arrays remain successful zero", "One complete leading JSON fence accepts a fully validated JSON batch while excluding trailing prose; incomplete or multiple fences remain retryable failures", "Candidate-only API exception logs exclude traceback/provider body", "Queued extractor model label matches the unchanged actual claude-haiku-4-5-20251001 model"],
+  "hosted_response_contract_probe": {"observed_at": "2026-09-06T21:14:58.517021+00:00", "model": "claude-haiku-4-5-20251001", "stop_reason": "end_turn", "block_types": ["text"], "text_length": 2131, "input_tokens": 2608, "output_tokens": 550, "legacy_parse_success": false, "legacy_error_position": 812, "standalone_closing_fence_count": 1, "trailing_nonempty_line_count": 8, "fenced_json_valid": true, "fenced_json_list": true, "fenced_entry_count": 2, "provider_writes": 0, "content_exported": false},
+  "verification": {"red_failed": 16, "red_passed": 14, "fence_contract_red_failed": 3, "fence_contract_red_passed": 20, "focused_passed": 64, "focused_seconds": 0.22, "ruff": "passed", "intermediate_full_backend": {"passed": 5995, "skipped": 161, "warnings": 12, "seconds": 354.56, "scope": "strict retry before fence parser amendment"}, "full_backend": {"passed": 6000, "skipped": 161, "warnings": 12, "seconds": 350.86, "exit_code": 0}},
+  "cleanup": "Exact failed fixture session/messages/source links and Gateway recap are zero; content-free superseded run retained. Provider probe subjects both zero. Broader derivatives and older candidate provenance remain outstanding.",
+  "complete_clean_canaries": 0,
+  "promotion_permitted": false
+}

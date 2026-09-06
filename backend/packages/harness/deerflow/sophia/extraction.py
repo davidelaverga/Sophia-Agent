@@ -7,6 +7,7 @@ via add_memories() with full metadata and status="pending_review".
 
 import json
 import logging
+import math
 import re
 from datetime import UTC, datetime
 from difflib import SequenceMatcher
@@ -81,7 +82,25 @@ _DUPLICATE_STOPWORDS = {
 
 
 class MemoryWriteError(RuntimeError):
-    """Raised when candidate extraction succeeded but the memory write did not."""
+    """A retryable extraction or persistence failure, never successful empty."""
+
+
+def _validate_candidate_batch(extracted: list) -> None:
+    """Validate the whole governed batch before policy filtering or merging.
+
+    A malformed entry cannot be silently dropped: doing so could publish a
+    partial batch and advance the durable transcript cursor past lost work.
+    """
+    for entry in extracted:
+        if not isinstance(entry, dict) or not isinstance(entry.get("content"), str) or not entry["content"].strip():
+            raise MemoryWriteError("extractor_invalid_response")
+        category = entry.get("category", "fact")
+        if not isinstance(category, str) or category not in {"fact", "feeling", "decision", "lesson", "commitment", "preference", "relationship", "pattern", "ritual_context"}:
+            raise MemoryWriteError("extractor_invalid_response")
+        for field in ("confidence", "importance"):
+            value = entry.get(field, 0.5)
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not 0 <= value <= 1:
+                raise MemoryWriteError("extractor_invalid_response")
 
 
 def _load_template() -> str:
@@ -116,6 +135,25 @@ def _strip_markdown_fences(text: str) -> str:
             lines = lines[:-1]
         stripped = "\n".join(lines)
     return stripped.strip()
+
+
+def _governed_json_payload(text: str) -> str:
+    """Accept bare JSON or one complete leading JSON fence, never a fragment.
+
+    The hosted extractor can add prose after the closing fence. That prose is
+    not candidate data. Multiple fences or an unclosed block are ambiguous and
+    must retry; JSON decoding and whole-batch validation still apply afterward.
+    """
+    stripped = text.strip()
+    if not stripped.startswith("```"):
+        return stripped
+    lines = stripped.splitlines()
+    if lines[0].strip().casefold() not in {"```", "```json"} or stripped.count("```") != 2:
+        raise MemoryWriteError("extractor_invalid_response")
+    closing = [index for index, line in enumerate(lines[1:], 1) if line.strip() == "```"]
+    if len(closing) != 1:
+        raise MemoryWriteError("extractor_invalid_response")
+    return "\n".join(lines[1:closing[0]])
 
 
 def analyze_explicit_remember_messages(messages: list[dict]) -> dict:
@@ -652,7 +690,8 @@ def extract_session_memories(
 
     Returns:
         List of memory dicts that were written to Mem0. Empty list on
-        error or if no memories were extracted.
+        legacy-path error or if no memories were extracted. Governed
+        candidate-only errors raise, so the durable worker can retry.
     """
     log_user_id = user_id
     log_session_id = session_id
@@ -705,12 +744,12 @@ def extract_session_memories(
         template = _load_template()
     except FileNotFoundError:
         logger.error("Extraction template not found at %s", _EXTRACTION_TEMPLATE_PATH)
+        if candidate_only:
+            raise MemoryWriteError("extraction_template_missing") from None
         if not deterministic_entries:
             if require_memory_write:
                 raise MemoryWriteError("extraction_template_missing")
             return []
-        if candidate_only:
-            return deterministic_entries
         return _write_extracted_memories(
             user_id=user_id,
             session_id=session_id,
@@ -746,13 +785,13 @@ def extract_session_memories(
         )
         response_text = response.content[0].text
     except Exception:
-        logger.error("Anthropic API call failed for session %s", log_session_id, exc_info=True)
+        logger.error("Anthropic API call failed for session %s", log_session_id, exc_info=not candidate_only)
+        if candidate_only:
+            raise MemoryWriteError("extractor_failed") from None
         if not deterministic_entries:
             if require_memory_write:
                 raise MemoryWriteError("extractor_failed")
             return []
-        if candidate_only:
-            return deterministic_entries
         return _write_extracted_memories(
             user_id=user_id,
             session_id=session_id,
@@ -761,9 +800,13 @@ def extract_session_memories(
             require_memory_write=require_memory_write,
         )
 
+    # A valid-looking prefix from an incomplete response is not a full batch.
+    if candidate_only and getattr(response, "stop_reason", None) != "end_turn":
+        raise MemoryWriteError("extractor_incomplete_response")
+
     # Parse JSON response
     try:
-        cleaned = _strip_markdown_fences(response_text)
+        cleaned = _governed_json_payload(response_text) if candidate_only else _strip_markdown_fences(response_text)
         extracted = json.loads(cleaned)
     except (json.JSONDecodeError, TypeError):
         logger.error(
@@ -771,6 +814,8 @@ def extract_session_memories(
             log_session_id,
             "content_excluded" if candidate_only else (response_text[:200] if response_text else "(empty)"),
         )
+        if candidate_only:
+            raise MemoryWriteError("extractor_invalid_response") from None
         if not deterministic_entries:
             if require_memory_write:
                 raise MemoryWriteError("extractor_invalid_response")
@@ -779,12 +824,16 @@ def extract_session_memories(
 
     if not isinstance(extracted, list):
         logger.error("Extraction response is not a list for session %s", log_session_id)
+        if candidate_only:
+            raise MemoryWriteError("extractor_invalid_response")
         if not deterministic_entries:
             if require_memory_write:
                 raise MemoryWriteError("extractor_invalid_response")
             return []
         extracted = deterministic_entries
 
+    if candidate_only:
+        _validate_candidate_batch(extracted)
     extracted = _filter_policy_rejected_entries(extracted)
     extracted = _merge_deterministic_entries(extracted, deterministic_entries)
 
