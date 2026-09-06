@@ -17,7 +17,7 @@ from .identity import assert_not_voice_lab_principal
 from .models import CandidateSource, ExtractedCandidate, ExtractionRun
 from .observability import emit_memory_event
 from .refs import keyed_ref, request_digest
-from .store import MemoryGovernanceUnavailable, SupabaseMemoryGovernanceStore
+from .store import MemoryGovernanceConflict, MemoryGovernanceUnavailable, SupabaseMemoryGovernanceStore
 
 Extractor = Callable[[str, str, list[dict], dict], list[dict]]
 
@@ -98,16 +98,33 @@ class MemoryExtractionService:
             candidate_only=True,
         )
 
-    def _finalized_extraction_payload(self, *, user_id: str, session_id: str) -> dict[str, object] | None:
+    def _finalized_extraction_payload(self, *, user_id: str, session_id: str, finalize_ended_at: str | None = None) -> dict[str, object] | None:
         assert_not_voice_lab_principal(user_id)
         self._assert_supported_contract()
         session = self.session_store.get(user_id, session_id)
         if session is None:
+            if finalize_ended_at is not None:
+                raise MemoryGovernanceConflict("memory_session_not_found")
             return None
+        if session.user_id != user_id or session.session_id != session_id:
+            raise MemoryGovernanceConflict("memory_session_scope_conflict")
         visible = canonical_visible_messages(self.session_store.list_messages(user_id, session_id))
         last_processed = max(0, int(session.memory_processed_until_sequence or 0))
         selected = [message for message in visible if message.sequence > last_processed]
         if not selected:
+            if finalize_ended_at is not None:
+                self.governance_store.finalize_processed_session(session=session, ended_at=finalize_ended_at)
+                emit_memory_event(
+                    "memory.session.finalized",
+                    service=self.service_name,
+                    outcome="ended_no_new_range",
+                    fault_owner_id=user_id,
+                    owner_ref=keyed_ref("owner", user_id),
+                    session_ref=keyed_ref("session", session_id),
+                    thread_ref=keyed_ref("thread", session.thread_id),
+                    transcript_revision=session.message_revision,
+                    processed_until_sequence=last_processed,
+                )
             return None
         sequence_start = selected[0].sequence
         sequence_end = selected[-1].sequence
@@ -161,9 +178,9 @@ class MemoryExtractionService:
         session_id: str,
         ended_at: str,
     ) -> ExtractionRun | None:
-        """Atomically mark the persisted session ended and enqueue its exact range."""
+        """Durably end and enqueue; None means a CAS-confirmed end with no new work."""
 
-        payload = self._finalized_extraction_payload(user_id=user_id, session_id=session_id)
+        payload = self._finalized_extraction_payload(user_id=user_id, session_id=session_id, finalize_ended_at=ended_at)
         if payload is None:
             return None
         return self.governance_store.finalize_and_enqueue_extraction(

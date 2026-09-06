@@ -81,6 +81,9 @@ src/
 - `src/app/workspace/chats/[thread_id]/page.tsx` owns composer busy-state wiring.
 - `src/core/threads/hooks.ts` owns pre-submit upload state and thread submission.
 - `src/hooks/usePoseStream.ts` is a passive store selector; global WebSocket lifecycle stays in `App.tsx`.
+- `src/app/session/useSessionExitFlow.ts` owns truthful End outcomes: an HTTP or
+  network failure retains the session for retry and cannot write ended history,
+  enter recap emergence, or tear down the session as if finalization succeeded.
 
 ## Resources
 

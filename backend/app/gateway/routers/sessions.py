@@ -1115,14 +1115,14 @@ async def end_session(
                 lease_owner=keyed_ref("worker", "gateway-session-end-enqueue-only"),
                 service_name="sophia-gateway",
             )
-            durable_run = extraction.finalize_and_enqueue_session(
+            extraction.finalize_and_enqueue_session(
                 user_id=owner_user_id,
                 session_id=body.session_id,
                 ended_at=datetime.now(UTC).isoformat(),
             )
             record = _store.get(owner_user_id, body.session_id)
-            if durable_run is None:
-                record = _store.end(owner_user_id, body.session_id)
+            if record is None or record.status != "ended" or not record.ended_at:
+                raise RuntimeError("memory_finalization_readback_unconfirmed")
         except Exception as exc:
             logger.error(
                 "MEM00 durable finalization failed for session end",

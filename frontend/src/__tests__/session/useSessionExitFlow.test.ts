@@ -59,6 +59,48 @@ describe('useSessionExitFlow', () => {
     clearRecentSessionEndHint();
   });
 
+  it.each(['http', 'network'])('keeps an unconfirmed %s end retryable without local success', async (failure) => {
+    if (failure === 'http') {
+      endSessionApiMock.mockResolvedValue({ success: false, error: 'server unavailable' });
+    } else {
+      endSessionApiMock.mockRejectedValue(new Error('network unavailable'));
+    }
+    isSuccessMock.mockImplementation((value: { success?: boolean }) => value.success === true);
+    const navigateTo = vi.fn();
+    const endSessionStore = vi.fn();
+    const clearSessionStore = vi.fn();
+    const setEnding = vi.fn();
+    const stopVoiceTransport = vi.fn();
+    const { result } = renderHook(() => useSessionExitFlow({
+      isReadOnly: false,
+      isSophiaResponding: false,
+      stopStreaming: vi.fn(),
+      stopVoiceTransport,
+      setEnding,
+      sessionId: 'session-unconfirmed',
+      messageCount: 2,
+      endSessionStore,
+      clearSessionStore,
+      clearBootstrap: vi.fn(),
+      navigateTo,
+      promoteToDebriefMode: vi.fn(),
+      startDebriefWithLLM: vi.fn(),
+    }));
+    await act(async () => { await result.current.handleEndSession(); });
+    expect(result.current.showEmergence).toBe(false);
+    expect(result.current.showExitConfirm).toBe(true);
+    expect(setEnding).toHaveBeenLastCalledWith(false);
+    expect(addSessionMock).not.toHaveBeenCalled();
+    expect(setRecapArtifactsMock).not.toHaveBeenCalled();
+    expect(endSessionStore).not.toHaveBeenCalled();
+    expect(clearSessionStore).not.toHaveBeenCalled();
+    expect(teardownSessionClientStateMock).not.toHaveBeenCalled();
+    expect(navigateTo).not.toHaveBeenCalled();
+    expect(stopVoiceTransport).not.toHaveBeenCalled();
+    expect(showToastMock).toHaveBeenCalledWith(expect.objectContaining({ variant: 'error' }));
+    expect(getRecentSessionEndHint()).toBeNull();
+  });
+
   it('keeps the end-session flow on emergence and recap instead of offering debrief', async () => {
     endSessionApiMock.mockResolvedValue({
       success: true,

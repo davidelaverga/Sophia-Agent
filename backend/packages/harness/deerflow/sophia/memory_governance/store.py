@@ -10,10 +10,14 @@ from __future__ import annotations
 import os
 import threading
 from collections.abc import Iterable
-from typing import Any
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 import httpx
+
+if TYPE_CHECKING:
+    from deerflow.sophia.session_store import SessionRecord
 
 from .models import (
     CandidateRecord,
@@ -151,6 +155,45 @@ class SupabaseMemoryGovernanceStore:
     def finalize_and_enqueue_extraction(self, **payload: object) -> ExtractionRun:
         row = self._rpc("sophia_memory_finalize_and_enqueue_extraction", payload)
         return self._model(ExtractionRun, row)
+
+    def finalize_processed_session(self, *, session: SessionRecord, ended_at: str) -> None:
+        """CAS-finalize a snapshot with no unprocessed visible messages.
+
+        The extraction service reads the record before its transcript. A
+        concurrent transcript replacement increments message_revision; progress
+        and lifecycle changes are fenced independently. A miss is never success.
+        New ranges still use the existing atomic finalization/enqueue RPC.
+        """
+        if session.status not in {"active", "open", "paused", "resumable", "ended"}:
+            raise MemoryGovernanceConflict("memory_session_state_conflict")
+        terminal_at = session.ended_at or ended_at
+        rows = self._request(
+            "PATCH",
+            "sophia_sessions",
+            params={
+                "id": f"eq.{session.session_id}",
+                "user_id": f"eq.{session.user_id}",
+                "thread_id": f"eq.{session.thread_id}",
+                "message_revision": f"eq.{session.message_revision}",
+                "memory_processed_until_sequence": f"eq.{session.memory_processed_until_sequence}",
+                "status": f"eq.{session.status}",
+                "select": "id,status,ended_at",
+            },
+            json_body={"status": "ended", "ended_at": terminal_at, "updated_at": datetime.now(UTC).isoformat()},
+            prefer="return=representation",
+        )
+        try:
+            valid = (
+                isinstance(rows, list)
+                and len(rows) == 1
+                and rows[0]["id"] == session.session_id
+                and rows[0]["status"] == "ended"
+                and datetime.fromisoformat(rows[0]["ended_at"]) == datetime.fromisoformat(terminal_at)
+            )
+        except (KeyError, TypeError, ValueError):
+            valid = False
+        if not valid:
+            raise MemoryGovernanceConflict("memory_session_finalization_conflict")
 
     def claim_extraction(self, *, lease_owner: str, lease_seconds: int = 120) -> ExtractionRun | None:
         rows = self._rpc(

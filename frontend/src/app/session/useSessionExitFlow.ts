@@ -274,6 +274,18 @@ export function useSessionExitFlow({
     setShowExitConfirm(true);
   }, []);
 
+  const keepUnconfirmedEndRetryable = useCallback(() => {
+    // A local recap is not a durable finalization receipt. Retain the session
+    // and transcript so the ordinary End action can be retried idempotently.
+    setEnding(false);
+    setShowExitConfirm(true);
+    useUiToastStore.getState().showToast({
+      message: 'Session end could not be confirmed. Your session is still available; please try again.',
+      variant: 'error',
+      durationMs: 6000,
+    });
+  }, [setEnding]);
+
   const finalizeExitToRecap = useCallback(
     (recapSessionId: string) => {
       flushSync(() => {
@@ -427,69 +439,20 @@ export function useSessionExitFlow({
           return;
         }
       } else {
-        logger.warn('API end failed, saving locally', {
+        logger.warn('API end unconfirmed; session retained for retry', {
           component: 'SessionPage',
           action: 'end_session',
-          metadata: { error: result.error },
         });
-
-        const localEndedAt = new Date().toISOString();
-        const mappedArtifactsFromLiveSession = mapLiveArtifactsToRecapV1({
-          sessionId: recapSessionId,
-          startedAt,
-          endedAt: localEndedAt,
-          presetType,
-          contextMode,
-          threadId: recapThreadId,
-          currentArtifacts,
-          currentBuilderArtifact,
-        });
-
-        useSessionHistoryStore.getState().addSession({
-          sessionId: recapSessionId,
-          presetType,
-          contextMode,
-          startedAt,
-          endedAt: localEndedAt,
-          messageCount,
-          takeawayPreview: mappedArtifactsFromLiveSession?.takeaway,
-        });
-
-        if (mappedArtifactsFromLiveSession) {
-          useRecapStore.getState().setArtifacts(recapSessionId, mappedArtifactsFromLiveSession);
-        }
+        keepUnconfirmedEndRetryable();
+        return;
       }
-    } catch (error) {
-      logger.logError(error, {
+    } catch {
+      logger.warn('Session end unavailable; session retained for retry', {
         component: 'SessionPage',
         action: 'end_session_network',
       });
-
-      const localEndedAt = new Date().toISOString();
-      const mappedArtifactsFromLiveSession = mapLiveArtifactsToRecapV1({
-        sessionId: recapSessionId,
-        startedAt,
-        endedAt: localEndedAt,
-        presetType,
-        contextMode,
-        threadId: recapThreadId,
-        currentArtifacts,
-        currentBuilderArtifact,
-      });
-
-      useSessionHistoryStore.getState().addSession({
-        sessionId: recapSessionId,
-        presetType,
-        contextMode,
-        startedAt,
-        endedAt: localEndedAt,
-        messageCount,
-        takeawayPreview: mappedArtifactsFromLiveSession?.takeaway,
-      });
-
-      if (mappedArtifactsFromLiveSession) {
-        useRecapStore.getState().setArtifacts(recapSessionId, mappedArtifactsFromLiveSession);
-      }
+      keepUnconfirmedEndRetryable();
+      return;
     }
 
     if (stopVoiceTransport) {
@@ -530,6 +493,7 @@ export function useSessionExitFlow({
     messages,
     flushSessionTranscript,
     getSessionTranscriptRevision,
+    keepUnconfirmedEndRetryable,
   ]);
 
   // ── Emergence → Recap flow ────────────────────────────────────────────────

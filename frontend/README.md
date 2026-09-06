@@ -4,6 +4,11 @@ Like the original DeerFlow 1.0, we would love to give the community a minimalist
 
 ## Tech Stack
 
+Sophia reports session completion only after the backend confirms End. If the
+request fails or its outcome is unknown, the session remains available and the
+End confirmation stays retryable; a local recap is not presented as proof of
+durable completion.
+
 - **Framework**: [Next.js 16](https://nextjs.org/) with [App Router](https://nextjs.org/docs/app)
 - **UI**: [React 19](https://react.dev/), [Tailwind CSS 4](https://tailwindcss.com/), [Shadcn UI](https://ui.shadcn.com/), [MagicUI](https://magicui.design/) and [React Bits](https://reactbits.dev/)
 - **AI Integration**: [LangGraph SDK](https://www.npmjs.com/package/@langchain/langgraph-sdk) and [Vercel AI Elements](https://vercel.com/ai-sdk/ai-elements)

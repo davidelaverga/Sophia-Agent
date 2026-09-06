@@ -720,6 +720,15 @@ Keep provider discovery separate from canonical authorization; do not weaken
 binding/revision checks or render returned provider text. Regression:
 `tests/test_mem00_search_filter_contract.py` (including metadata named user_id).
 
+**MEM00 processed-range End**: `finalize_and_enqueue_session` returning None now
+means an existing, correctly scoped session was durably ended with no new work,
+not an unavailable range. The no-work path uses a PostgREST compare-and-set over
+owner/session/thread, transcript revision, processed watermark and status;
+zero/malformed readback raises a conflict. New ranges still use the atomic RPC.
+Both end routes must consume that receipt without a second unguarded upsert.
+The content-free `memory.session.finalized` point event joins the processed-range
+end. Regression: `tests/test_mem00_processed_session_end.py`.
+
 **Components**:
 - `updater.py` - LLM-based memory updates with fact extraction, whitespace-normalized fact deduplication (trims leading/trailing whitespace before comparing), atomic file I/O, and timezone-aware UTC timestamp serialization (`...Z`) for memory metadata.
 - `queue.py` - Debounced update queue (per-thread deduplication, configurable wait time)

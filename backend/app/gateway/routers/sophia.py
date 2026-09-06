@@ -1644,7 +1644,7 @@ def _queue_offline_pipeline(
     thread_id: str,
     thread_state: dict | None,
     ended_at: str,
-) -> None:
+) -> bool:
     from deerflow.sophia.memory_governance.flags import (
         memory_feature_flags_for_owner,
     )
@@ -1670,7 +1670,10 @@ def _queue_offline_pipeline(
             ended_at=ended_at,
         )
         if durable_run is None:
-            raise RuntimeError("memory_extraction_range_unavailable")
+            # Inactivity may already have durably processed this exact range.
+            # The service has CAS-confirmed End; do not duplicate extraction or
+            # replay derivative writes merely because the user explicitly ends.
+            return False
         logger.info(
             "session.finalization durable_memory_enqueued extraction_run_ref=%s contentExcluded=true",
             keyed_ref("extraction-run", str(durable_run.extraction_run_id)),
@@ -1697,6 +1700,7 @@ def _queue_offline_pipeline(
     )
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
+    return True
 
 
 def _mark_session_record_ended(user_id: str, session_id: str, ended_at: str) -> bool:
@@ -3290,7 +3294,10 @@ async def end_session(
         if isinstance(recap_turn_count, int):
             has_new_messages = current_max_sequence > max(last_processed_sequence, recap_turn_count)
 
-    if isinstance(existing_recap, dict) and not has_new_messages:
+    from deerflow.sophia.memory_governance.flags import memory_feature_flags_for_owner
+
+    atomic_memory_finalization = memory_feature_flags_for_owner(user_id).candidate_ledger_write
+    if isinstance(existing_recap, dict) and not has_new_messages and not atomic_memory_finalization:
         existing_ended_at = existing_recap.get("ended_at") if isinstance(existing_recap.get("ended_at"), str) else ended_at
         _mark_session_record_ended(user_id, body.session_id, existing_ended_at)
         try:
@@ -3348,11 +3355,6 @@ async def end_session(
             current_max_sequence,
         )
 
-    from deerflow.sophia.memory_governance.flags import (
-        memory_feature_flags_for_owner,
-    )
-
-    atomic_memory_finalization = memory_feature_flags_for_owner(user_id).candidate_ledger_write
     if not atomic_memory_finalization:
         _mark_session_record_ended(user_id, body.session_id, ended_at)
 
@@ -3365,7 +3367,7 @@ async def end_session(
         pass
 
     try:
-        _queue_offline_pipeline(
+        pipeline_queued = _queue_offline_pipeline(
             user_id,
             body.session_id,
             authoritative_thread_id,
@@ -3377,10 +3379,10 @@ async def end_session(
             user_id,
             body.session_id,
             authoritative_thread_id,
-            True,
+            pipeline_queued is not False,
         )
         return SessionEndResponse(
-            status="pipeline_queued",
+            status="no_new_messages" if pipeline_queued is False else "pipeline_queued",
             session_id=body.session_id,
             ended_at=ended_at,
             duration_minutes=duration_minutes,

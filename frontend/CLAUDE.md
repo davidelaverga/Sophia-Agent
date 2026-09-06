@@ -52,6 +52,12 @@ Backend auth: `getServerAuthToken()` reads `sophia-backend-token` cookie.
 
 ### Key Patterns
 
+- **Session finalization truth**: `useSessionExitFlow` only enters emergence,
+  writes ended history/recap state, and emits success after a successful backend
+  receipt. HTTP/network failures retain the session and reopen End confirmation
+  with an error toast. Never restore the local-success fallback: it hides failed
+  durable extraction/finalization. Regression: `useSessionExitFlow.test.ts`.
+
 - **Dev bypass**: `NEXT_PUBLIC_DEV_BYPASS_AUTH=true` skips all auth
 - **Path alias**: `@/*` maps to `src/*`
 - **Environment validation**: `@t3-oss/env-nextjs` in `src/env.js`. Skip with `SKIP_ENV_VALIDATION=1`

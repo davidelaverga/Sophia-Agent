@@ -1,0 +1,47 @@
+{
+  "schema": "mem00.deployed-repair.v1",
+  "commit": "22f4126b1c797bdebf7507cf022f4b77ca81bf9b",
+  "tree": "d401a5e7f445c76fa9ee73c85a349d7252b1acf1",
+  "branch": "codex/mem00-durable-memory-governance",
+  "reviewed_remote_unchanged": "3add3336216e74324cd1ed4d3859caccc70c94fe",
+  "deployments": {
+    "gateway": {"id": "dep-daekkov40ujc73fkamcg", "live_at": "2026-09-06T11:13:23Z", "instance": "sw6th", "ready_http_status": 200},
+    "langgraph": {"id": "dep-daekmd6q1p3s739omj50", "live_at": "2026-09-06T11:17:26Z", "instance": "866qc"},
+    "voice": {"id": "dep-daeknqn40ujc73fklhj0", "live_at": "2026-09-06T11:18:43Z"},
+    "frontend": {"id": "dpl_E7No16CyZ9Q2UUzpPJYa7UDtEBjb", "status": "Ready", "environment": "Production", "domain": "www.sophia-ei.com"}
+  },
+  "all_four_public_identities": {"http_status": 200, "commit_matches": true, "schema": "mem00.v1", "epoch": 1},
+  "action_time_guards": ["2026-09-06T11:10:26.720Z", "2026-09-06T11:13:03.816Z", "2026-09-06T11:14:29.723Z", "2026-09-06T11:17:02.728Z"],
+  "each_guard": {"active_runs": 0, "live_workers": 1, "worker_ready": true, "kill_switch_engaged": true, "gates_open": false},
+  "voice_lab_worker_and_controller": "untouched; historical cleanup waiver remains explicit",
+  "independent_gateway_and_langgraph_pins": {
+    "sdk": "1.0.9", "endpoint_matches": true, "project_matches": true,
+    "project_fingerprint": "sha256:6ac656a6b1be5f93", "org_fingerprint": "sha256:268f794f90764fcb",
+    "principal_and_cohort_fingerprint": "sha256:3207762acc978926", "reference_key_fingerprint": "sha256:70c4ec6052335991",
+    "gateway_credential_fingerprint": "sha256:8388812563a212e0", "langgraph_credential_fingerprint": "sha256:109d881133f29ed5",
+    "ledger_read": true, "ledger_write": true, "canonical_pool_read": true, "runtime_read": true, "projection": true, "fault_injection": true, "langsmith_export": true, "legacy_inventory": false, "legacy_import": false
+  },
+  "provider_probe": {
+    "run_id": "mem00-dp007-20260906T111957Z-full",
+    "instrument_sha256": "b8e979c994db50090dabdec1ee53974d2b38b7c8c2520817671697dd709f7255",
+    "transport": "immutable committed source fetched and SHA256 verified before execution",
+    "started_at": "2026-09-06T11:20:01.602031Z", "finished_at": "2026-09-06T11:20:17.655337Z", "status": "passed", "created": 3,
+    "each_fixture": {"direct_content_exact": true, "initial_metadata": true, "repeat_reconciliation": true, "search": true, "runtime_metadata_filter": true, "mismatched_metadata_excluded": true},
+    "pagination_counts": [2, 1], "prior_fixtures_unchanged": true, "search_subject_isolation": true,
+    "cleanup": [{"subject_ref": "fad8b05c740e9b94", "terminal_count": 0, "verified_zero": true}, {"subject_ref": "a40d6d958c6e379b", "terminal_count": 0, "verified_zero": true}],
+    "full_product_canary": false
+  },
+  "langsmith_readback": {
+    "matched_count": 1, "event": "memory.certification.provider_contract", "caller": "certification_instrument",
+    "operation_ref": "hmac-sha256:certification:e62645352fa80528b98eb7f5afdd51800562cbff2cea410db69deef3f40ad176",
+    "run_ref": "hmac-sha256:run:66bedbdcccc40aec12f42d07979ac4a791dea19cbaa31b928a9b0ec5005b007b",
+    "trace_ref": "hmac-sha256:trace:96c4d8238a11c38cc1ff6fd3d0368eb610a7b44a7181878314b9f845ab2cce65",
+    "operation_ref_matches": true, "owner_ref_matches": true, "deployment_matches": true, "inputs_empty": true, "outcome": "passed",
+    "start_time": "2026-09-06T11:21:49.212763Z", "end_time": "2026-09-06T11:21:49.212763Z", "completed_point_event": true,
+    "not_a_product_prompt_admission_trace": true
+  },
+  "changes": {"schema": false, "feature_flags": false, "provider_sdk_api_project_config": false, "credentials": false, "plan_billing": false, "merge": false, "paid_service": false},
+  "fresh_mem0_dashboard_after_probe": {"adds": 45, "retrievals": 2108, "plan": "Growth", "extra_usage": false, "billing_window": "2026-08-11/2026-09-11", "cached_old_tab_values_not_used": true},
+  "complete_clean_canaries": 0,
+  "remaining": ["Renew ordinary Sophia login", "P01 product cleanup and client error reproduction", "Actual live metrics export and remaining Section17 evidence", "Five complete consecutive canaries on immutable candidate", "Mission-wide MEM00 terminal-zero cleanup"]
+}

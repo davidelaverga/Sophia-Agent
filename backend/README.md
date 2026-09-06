@@ -79,6 +79,13 @@ deployment. Metadata cannot override the entity selector. Provider filters
 only narrow discovery; canonical owner/revision governance still authorizes
 every returned ID, and only canonical text reaches consumers.
 
+Explicit session End also works after inactivity already processed its visible
+transcript. With no new range, finalization compares the current owner, thread,
+transcript revision, processed watermark and lifecycle status in one database
+update. A conflict or unavailable database is not a successful end. No second
+extraction run or provider write is created; new ranges keep the atomic enqueue
+path. The browser retains an unconfirmed session for an ordinary retry.
+
 ### Lead Agent
 
 The single LangGraph agent (`lead_agent`) is the runtime entry point, created via `make_lead_agent(config)`. It combines:

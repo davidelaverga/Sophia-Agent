@@ -1,0 +1,21 @@
+{
+  "schema": "mem00.iteration-evidence.v1",
+  "attempts": ["MEM00-EI-105", "MEM00-EI-106", "MEM00-EI-107"],
+  "deployed_candidate": "22f4126b1c797bdebf7507cf022f4b77ca81bf9b",
+  "tree": "d401a5e7f445c76fa9ee73c85a349d7252b1acf1",
+  "reviewed_remote": "3add3336216e74324cd1ed4d3859caccc70c94fe",
+  "all_four_public_identities_match": true,
+  "status": "local_repair_deployed_rerun_required",
+  "complete_clean_canaries": 0,
+  "session_ref": "hmac-sha256:session:0d15db3caacacd2afcd9632486b9c6019b4990bb87a142f6e507f0b012e194ac",
+  "app": {"ordinary_sign_in_renewed": true, "recovered_unique_existing_turn": true, "new_turns": 0, "end_confirmation_submitted": true, "toast": "Session ended", "recap": "No new memories from this session", "fresh_history_status": "Paused", "retry_message_clicked": false, "audio_started": false},
+  "database_after_end": {"status": "resumable", "ended_at": null, "updated_at": "2026-09-06T16:32:06.961211+00:00", "extraction_status": "succeeded_zero", "processed_until_sequence": 2},
+  "vercel": {"request_id": "dq2ts-1788712326147-af2e67cbe566", "started_at": "2026-09-06T16:32:06.147Z", "path": "/api/sophia/end-session", "status": 500, "gateway_upstream_status": 500, "execution_seconds": 1.88, "response_seconds": 2.0, "deployment_id": "dpl_E7No16CyZ9Q2UUzpPJYa7UDtEBjb"},
+  "gateway_logs": {"instance": "sw6th", "timestamp": "2026-09-06T16:32:07Z", "exception": "RuntimeError", "safe_reason": "memory_extraction_range_unavailable", "searched_only_safe_signature": true},
+  "causal_evidence": {"backend": "Actual owning queue rejects a None no-new-range result with memory_extraction_range_unavailable; focused regression reproduces exact signature.", "frontend": "Both HTTP-failure and thrown-network-error regressions incorrectly entered emergence before repair; production500 and still-resumable canonical record falsify local ended success."},
+  "provider": {"new_rows_created": 0, "sdk": "1.0.9", "project_ref": "sha256:6ac656a6b1be5f93", "configuration_change": false, "fresh_hosted_behavior_run": false},
+  "runtime_pin": {"owner_ref": "sha256:3207762acc978926", "cohort_ref": "sha256:3207762acc978926", "reference_key_ref": "sha256:70c4ec6052335991", "gateway_credential_ref": "sha256:8388812563a212e0", "supported_epoch": 1, "ledger_read_write": true, "canonical_pool": true, "runtime_projection_faults": true, "legacy_inventory_import": false, "langsmith_export": true},
+  "tests": {"backend_baseline": {"passed": 5929, "skipped": 161, "warnings": 12, "seconds": 308.31}, "backend_focused": {"passed": 162, "warnings": 8}, "frontend_red": {"failed": 2, "passed": 9}, "frontend_green": {"passed": 11}, "frontend_full": {"passed": 1955, "skipped": 2, "seconds": 83.78}, "frontend_typecheck": "passed", "voice_component": {"passed": 616, "warnings": 12, "seconds": 4.48}, "full_after": {"passed": 5940, "skipped": 161, "warnings": 12, "seconds": 312.95}},
+  "cleanup": {"exact_p01_fixture": "retained_for_rerun", "older_pending_candidates": "untouched", "voice_runs": "untouched", "terminal_zero": false},
+  "limitations": ["Original text-stream hiccup still unresolved", "No new complete canary", "Metrics production read surface still pending", "Hosted end receipt and trace join require repaired deployment"]
+}
