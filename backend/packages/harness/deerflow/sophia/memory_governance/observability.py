@@ -74,6 +74,15 @@ def build_memory_langsmith_run_payload(envelope: Mapping[str, object]) -> dict[s
     _validate_structural_payload(envelope)
     event_name = str(envelope.get("event_name") or "memory.unknown")
     safe_reason = envelope.get("safe_reason_code")
+    occurred_at = envelope.get("occurred_at")
+    try:
+        if not isinstance(occurred_at, str):
+            raise ValueError
+        timestamp = datetime.fromisoformat(occurred_at)
+        if timestamp.utcoffset() is None:
+            raise ValueError
+    except ValueError:
+        raise ValueError("memory_event_timestamp_invalid") from None
     return {
         "name": event_name,
         "run_type": "tool",
@@ -82,7 +91,12 @@ def build_memory_langsmith_run_payload(envelope: Mapping[str, object]) -> dict[s
             "outcome": str(envelope.get("outcome") or "unknown"),
             "safe_reason_code": str(safe_reason) if safe_reason is not None else None,
         },
-        "metadata": dict(envelope),
+        # Client.create_run persists governance metadata under extra.metadata.
+        # A top-level metadata argument is not a hosted searchable metadata join.
+        "extra": {"metadata": dict(envelope)},
+        # These are completed point events, not an invented operation duration.
+        "start_time": occurred_at,
+        "end_time": occurred_at,
         "tags": ["sophia", "memory-governance", EVENT_SCHEMA],
         "project_name": (os.getenv("LANGSMITH_PROJECT") or os.getenv("LANGCHAIN_PROJECT") or "Sophia"),
     }

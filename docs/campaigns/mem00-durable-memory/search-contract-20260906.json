@@ -1,0 +1,30 @@
+{
+  "schema": "mem00.provider-contract-diagnostic.v1",
+  "attempt_id": "MEM00-EI-102",
+  "diagnostic_checkpoint_at": "2026-09-06T10:53:03Z",
+  "candidate": "a017e58d5aad3b60c4be9fb3a434be2035417293",
+  "service": "sophia-langgraph", "instance": "zrqnr", "sdk": "1.0.9",
+  "endpoint": "https://api.mem0.ai/v2/memories/search/",
+  "credential_fingerprint": "sha256:109d881133f29ed5",
+  "principal_and_cohort_fingerprint": "sha256:3207762acc978926",
+  "project_fingerprint": "sha256:6ac656a6b1be5f93",
+  "hypothesis": "Current production metadata filters are accepted by the pinned hosted search contract.",
+  "results": [
+    {"shape": "subject_only", "status": "ok", "hit_count": 0},
+    {"shape": "flat_runtime_metadata", "status": "ValidationError"},
+    {"shape": "AND_subject_plus_one_multi_key_metadata_clause", "status": "ValidationError"},
+    {"shape": "AND_subject_plus_single_string_metadata_key", "status": "ok", "hit_count": 0},
+    {"shape": "AND_subject_plus_single_boolean_metadata_key", "status": "ok", "hit_count": 0},
+    {"shape": "AND_subject_plus_single_integer_metadata_key", "status": "ok", "hit_count": 0},
+    {"shape": "AND_subject_plus_separate_metadata_clause_for_each_runtime_key", "status": "ok", "hit_count": 0}
+  ],
+  "interpretation": "Credential outage falsified for these current reads. Flat and multi-key metadata shapes are invalid. Individually typed clauses succeed. Empty-subject acceptance is not a positive fixture/search-cardinality proof.",
+  "documentation": "https://docs.mem0.ai/platform/features/v2-memory-filters",
+  "repair": "Use AND with an immutable exact user_id entity clause plus one nested metadata key per clause. Canonical governance remains mandatory after discovery.",
+  "regression": "Search adapter tests red3fail then green; combined search/marker/governance/exporter52pass. Probe previously missed the runtime shape; ignored-metadata fault reproduced1fail10pass, then expanded probe11pass.",
+  "deployed_repair": false,
+  "next_required": "Publish/deploy exact repaired candidate, rerun positive and deliberately nonmatching runtime-filter provider fixtures, then ordinary product canaries.",
+  "mutation": "read_only_provider_searches; no provider rows, key, project, plan, algorithm, endpoint or version changes",
+  "raw_provider_error_bodies_excluded": true,
+  "complete_clean_canaries": 0
+}

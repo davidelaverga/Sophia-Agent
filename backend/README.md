@@ -64,6 +64,21 @@ ID must pass an exact-ID read with strictly typed expected metadata before
 reconciliation returns it. Read failures remain ambiguous; they never authorize
 a duplicate add or count as verified absence. Provider text is never returned.
 
+Memory event tracing uses the installed LangSmith SDK's `extra.metadata` field
+for structural governance references. Completed point events carry equal,
+timezone-aware start/end timestamps from `occurred_at`; this is not a measured
+operation duration. Outbound SDK serialization is regression-tested, not merely
+the arguments passed to a fake client. Missing/invalid timestamps or export
+failures produce observability-unavailable without weakening memory governance.
+Hosted readback is still required for certification.
+
+The unchanged hosted Mem0 v2 search accepts custom metadata as one key per
+`metadata` clause under `AND`, alongside a separate exact `user_id` clause.
+Flat metadata and multi-key metadata clauses fail validation on the pinned
+deployment. Metadata cannot override the entity selector. Provider filters
+only narrow discovery; canonical owner/revision governance still authorizes
+every returned ID, and only canonical text reaches consumers.
+
 ### Lead Agent
 
 The single LangGraph agent (`lead_agent`) is the runtime entry point, created via `make_lead_agent(config)`. It combines:

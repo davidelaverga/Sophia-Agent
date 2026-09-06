@@ -1,0 +1,26 @@
+{
+  "schema": "mem00.repair-verification.v1",
+  "base_commit": "a017e58d5aad3b60c4be9fb3a434be2035417293",
+  "repairs": ["LangSmith extra.metadata with completed structural point-event timestamps", "Hosted v2 single-key metadata AND clauses with immutable owner selector", "Provider probe covers runtime metadata acceptance and nonmatching exclusion"],
+  "tests": {
+    "backend_before": {"passed": 5919, "skipped": 161, "warnings": 12, "seconds": 413.00},
+    "exporter_red": {"failed": 2, "passed": 1},
+    "search_red": {"failed": 3},
+    "provider_probe_coverage_red": {"failed": 1, "passed": 10},
+    "focused_final": {"passed": 52, "warnings": 8},
+    "backend_after_exporter_only_intermediate": {"passed": 5926, "skipped": 161, "warnings": 12, "seconds": 413.50},
+    "backend_after_final_combined": {"passed": 5929, "skipped": 161, "warnings": 12, "seconds": 509.30},
+    "voice": {"passed": 616, "warnings": 12, "seconds": 9.48},
+    "provider_probe_offline": {"passed": 11},
+    "frontend_typecheck": "passed",
+    "frontend_first_run": {"passed": 1952, "failed": 1, "skipped": 2, "seconds": 140.04, "failure": "ArtifactPdfPreview zoomed page frame width empty instead of1080px; unchanged frontend source"},
+    "frontend_bounded_concurrency_rerun": {"passed": 1953, "skipped": 2, "files_passed": 220, "seconds": 160.29, "workers": "max2/min1", "assertions_and_timeouts_unchanged": true},
+    "ruff_changed_backend": "passed",
+    "git_diff_check": "passed"
+  },
+  "probe_sha256": "b8e979c994db50090dabdec1ee53974d2b38b7c8c2520817671697dd709f7255",
+  "migration_sha256_unchanged": "96303ed50b1508b35287cb70acd26dd34e58aa44a50b0527090f17ac302f96b7",
+  "deployed_repair": false,
+  "complete_clean_canaries": 0,
+  "open": ["Sophia ordinary sign-in expired; reauthentication requested once", "P01 cleanup and UI connection error unresolved", "Repaired hosted provider probe and LangSmith join not yet run", "Live process metric export incomplete", "Full Section17 and five consecutive canaries outstanding"]
+}

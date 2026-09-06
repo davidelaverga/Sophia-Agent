@@ -23,7 +23,7 @@ def subject_for(run_id, ordinal):
     return "sophia-memory-v2:mem00-cert:" + str(uuid5(NAMESPACE_URL, run_id + str(ordinal)))
 
 
-def probe(run_id, fixture_count=1, *, expected_commit):
+def probe(run_id, fixture_count=1, *, expected_commit, expected_activation="closed"):
     from deerflow.sophia.memory_governance.mem0_projection_adapter import Mem0ProjectionAdapter
     from deerflow.sophia.memory_governance.runtime_pin import runtime_pin
 
@@ -32,6 +32,8 @@ def probe(run_id, fixture_count=1, *, expected_commit):
         raise ValueError("invalid_fixture_count")
     if not re.fullmatch(r"[0-9a-f]{40}", expected_commit):
         raise ValueError("invalid_expected_commit")
+    if expected_activation not in ("closed", "open"):
+        raise ValueError("invalid_expected_activation")
     subjects = [subject_for(run_id, i) for i in range(2)]
     pin = runtime_pin()
     assert pin["commit"] == expected_commit
@@ -39,8 +41,8 @@ def probe(run_id, fixture_count=1, *, expected_commit):
     assert pin["credential_fingerprint"] == "sha256:8388812563a212e0"
     assert pin["sdk"] == "1.0.9" and pin["endpoint_matches_pin"]
     assert pin["provider_project_matches"]
-    assert pin["flags"]["PROVIDER_PROJECTION"] is False
-    assert pin["flags"]["GOVERNED_RUNTIME_READ"] is False
+    for flag in ("PROVIDER_PROJECTION", "GOVERNED_RUNTIME_READ", "FAULT_INJECTION"):
+        assert pin["flags"][flag] is (expected_activation == "open"), "activation_snapshot_mismatch"
     adapter = Mem0ProjectionAdapter()
     client = adapter._get_client()
     assert client.project_id == os.environ["MEM0_PROJECT_ID"]
@@ -94,9 +96,12 @@ def probe(run_id, fixture_count=1, *, expected_commit):
             for _ in range(2):
                 reconciled = adapter.find_by_operation_marker(provider_subject=subject, projection_operation_id=operation, expected_metadata=metadata, page_size=1)
                 assert reconciled == result.provider_ids, "operation_reconciliation_mismatch"
-            hits = adapter.search_ids(query=f"imaginary test badge cobalt-{index}", provider_subject=subject, metadata_filter={}, limit=10)
+            runtime_filter = {key: metadata[key] for key in ("sophia_managed", "memory_contract_epoch", "environment", "provider_namespace")}
+            hits = adapter.search_ids(query=f"imaginary test badge cobalt-{index}", provider_subject=subject, metadata_filter=runtime_filter, limit=10)
             assert result.provider_ids[0] in {h.provider_memory_id for h in hits}, "search_missing_fixture"
-            receipt["checks"].append({"fixture": index, "direct_content_exact": True, "initial_metadata": True, "repeat_reconciliation": True, "search": True})
+            mismatched_hits = adapter.search_ids(query=f"imaginary test badge cobalt-{index}", provider_subject=subject, metadata_filter={**runtime_filter, "environment": "mem00-nonmatching-contract-probe"}, limit=10)
+            assert not mismatched_hits, "runtime_metadata_filter_ignored"
+            receipt["checks"].append({"fixture": index, "direct_content_exact": True, "initial_metadata": True, "repeat_reconciliation": True, "search": True, "runtime_metadata_filter": True, "mismatched_metadata_excluded": True})
         expected_counts = [2, 1] if fixture_count == 3 else [1, 0]
         observed = [enumerate_ids(s) for s in subjects]
         assert [len(rows) for rows in observed] == expected_counts, "pagination_cardinality"
@@ -147,5 +152,6 @@ if __name__ == "__main__":
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--fixtures", type=int, choices=(1, 3), default=1)
     parser.add_argument("--expected-commit", required=True)
+    parser.add_argument("--expected-activation", choices=("closed", "open"), default="closed")
     arguments = parser.parse_args()
-    probe(arguments.run_id, arguments.fixtures, expected_commit=arguments.expected_commit)
+    probe(arguments.run_id, arguments.fixtures, expected_commit=arguments.expected_commit, expected_activation=arguments.expected_activation)

@@ -1,0 +1,30 @@
+{
+  "schema": "mem00.provider-contract.v1",
+  "run_id": "mem00-dp007-20260906T091841Z-full",
+  "status": "passed",
+  "started_at": "2026-09-06T09:19:00.377492Z",
+  "finished_at": "2026-09-06T09:19:15.519880Z",
+  "candidate": "a017e58d5aad3b60c4be9fb3a434be2035417293",
+  "instrument_sha256": "3b5dea9e073c7efac9ae33b4551e0924f4136253387abae7a13b89584a74ad35",
+  "sdk": "1.0.9", "host": "https://api.mem0.ai", "crud_path": "/v1/memories/", "search_path": "/v2/memories/search/",
+  "principal_and_cohort": "sha256:3207762acc978926", "project": "sha256:6ac656a6b1be5f93", "org": "sha256:268f794f90764fcb",
+  "runtime_read": true, "projection": true, "fault_injection": true, "legacy_inventory": false, "legacy_import": false,
+  "deployments": {
+    "gateway": {"id": "dep-dae980vqj5pc73ao158g", "live_at": "2026-09-05T22:14:37Z"},
+    "langgraph": {"id": "dep-daeitv8n74is73e2hefg", "live_at": "2026-09-06T09:15:54Z"},
+    "voice": {"id": "dep-dae92ipt0dsc739a0v00", "live_at": "2026-09-05T22:02:38Z"},
+    "frontend": {"id": "Gf7Fo9Fwroqde4xqi4K2yvqqQmkF", "status": "Ready", "environment": "Production"}
+  },
+  "created": 3,
+  "all_three_fixtures": {"direct_content_exact": true, "initial_metadata": true, "repeat_reconciliation": true, "search": true},
+  "pagination_counts": [2, 1], "prior_fixtures_unchanged": true, "search_subject_isolation": true,
+  "cleanup": [
+    {"subject_ref": "436b682a99e9f1fa", "terminal_count": 0, "verified_zero": true},
+    {"subject_ref": "2af22995c58d714c", "terminal_count": 0, "verified_zero": true}
+  ],
+  "provider_configuration": {"plan": "Growth", "extra_usage": false, "multilingual_extraction": true, "custom_instructions_match_prior_pin": true, "intentional_change": false},
+  "usage_before": {"adds": 39, "retrievals": 2010},
+  "usage_after_including_subsequent_diagnostics": {"adds": 42, "retrievals": 2060, "billing_window": "2026-08-11/2026-09-11", "extra_usage": false},
+  "coverage_limitation_discovered_later": "This historical run used subject-only search. It did not certify the runtime metadata shape. The expanded instrument now requires positive and nonmatching runtime metadata searches; its fresh deployed proof remains outstanding.",
+  "full_product_canary": false, "complete_clean_canaries": 0
+}

@@ -738,6 +738,7 @@ def test_langsmith_outbound_payload_contains_only_structural_references(monkeypa
     envelope = {
         "schema": "sophia.memory.event.v1",
         "event_name": "memory.prompt.admission",
+        "occurred_at": "2026-09-06T09:20:43.411927+00:00",
         "outcome": "authorized",
         "owner_ref": "hmac-sha256:owner:safe",
         "query_ref": "hmac-sha256:query:safe",

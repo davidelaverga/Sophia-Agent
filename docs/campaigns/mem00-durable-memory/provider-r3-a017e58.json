@@ -1,0 +1,124 @@
+{
+  "schema": "mem00.provider-contract.v1",
+  "run_id": "mem00-dp007-20260905T215355Z-full",
+  "status": "passed",
+  "started_at": "2026-09-05T21:54:14.072079+00:00",
+  "finished_at": "2026-09-05T21:54:29.096440+00:00",
+  "commit": "a017e58d5aad3b60c4be9fb3a434be2035417293",
+  "tree": "ad5bf9c757961a43af4b4d68ce0d9bc49331e391",
+  "deployments": {
+    "gateway": "dep-dae8rmid0e5s73fjctbg",
+    "gateway_live_at": "2026-09-05T21:48:57Z",
+    "langgraph": "dep-dae8t5ad0e5s73fjhngg",
+    "langgraph_live_at": "2026-09-05T21:52:51Z"
+  },
+  "deployed_pin": {
+    "sdk": "1.0.9",
+    "host": "https://api.mem0.ai",
+    "crud_path": "/v1/memories/",
+    "search_path": "/v2/memories/search/",
+    "reference_key_fingerprint": "sha256:70c4ec6052335991",
+    "gateway_credential_fingerprint": "sha256:8388812563a212e0",
+    "langgraph_credential_fingerprint_unchanged": "sha256:109d881133f29ed5",
+    "principal_and_cohort_fingerprint": "sha256:3207762acc978926",
+    "project_fingerprint": "sha256:6ac656a6b1be5f93",
+    "org_fingerprint": "sha256:268f794f90764fcb",
+    "epoch": 1,
+    "canonical_review": true,
+    "runtime_read": false,
+    "projection": false,
+    "fault_injection": false
+  },
+  "created": 3,
+  "checks": [
+    {
+      "fixture": 0,
+      "direct_content_exact": true,
+      "initial_metadata": true,
+      "repeat_reconciliation": true,
+      "search": true
+    },
+    {
+      "fixture": 1,
+      "direct_content_exact": true,
+      "initial_metadata": true,
+      "repeat_reconciliation": true,
+      "search": true
+    },
+    {
+      "fixture": 2,
+      "direct_content_exact": true,
+      "initial_metadata": true,
+      "repeat_reconciliation": true,
+      "search": true
+    }
+  ],
+  "pagination_counts": [
+    2,
+    1
+  ],
+  "prior_fixtures_unchanged": true,
+  "search_subject_isolation": true,
+  "cleanup": [
+    {
+      "subject_ref": "1d8b8dc48532faf9",
+      "terminal_count": 0,
+      "verified_zero": true
+    },
+    {
+      "subject_ref": "7099dc70db5f8ef2",
+      "terminal_count": 0,
+      "verified_zero": true
+    }
+  ],
+  "provider_config": {
+    "plan": "Growth",
+    "extra_usage": false,
+    "multilingual_extraction": true,
+    "custom_instructions_match_prior_pin": true,
+    "intentional_change": false
+  },
+  "usage": {
+    "before": {
+      "adds": 36,
+      "retrievals": 1965
+    },
+    "after_dashboard_read": {
+      "adds": 36,
+      "retrievals": 1965
+    },
+    "note": "Dashboard still shows pre-run counters; propagation is not treated as zero provider activity. Probe proves three writes and subsequent calls."
+  },
+  "joins": {
+    "schema": "mem00.v1/1/enforced, unchanged timestamp2026-09-04T17:17:41.403939+00:00",
+    "product_state": "Two owner-scoped pending_review candidates created2026-09-05T21:23:09.562871Z; canonical memories/jobs/bindings/faults zero. Existing candidates were not approved, altered or purged.",
+    "ordinary_app": "Journal reports no saved memories",
+    "langsmith": "Existing EU Sophia project accessible; other product traces visible, not joined full MEM00 canary traces",
+    "shutdown": "Both memory services return zero memory under disabled governed recall; no legacy/provider transport",
+    "guards": [
+      "2026-09-05T21:46:43.719Z",
+      "2026-09-05T21:49:41.225Z"
+    ]
+  },
+  "verification": {
+    "backend": {
+      "passed": 5919,
+      "skipped": 161,
+      "warnings": 12
+    },
+    "frontend": {
+      "passed": 1953,
+      "skipped": 2,
+      "typecheck": "passed"
+    },
+    "voice_component": {
+      "passed": 616,
+      "warnings": 12
+    },
+    "probe_safety_tests": 9,
+    "instrument_sha256": "4141f197cf95f80591a9e1074cf727704116db4c184ddf35137ca15fb5dcf0a8"
+  },
+  "full_product_canary": false,
+  "clean_complete_canaries": 0,
+  "promotion": "not_permitted"
+}

@@ -703,6 +703,23 @@ exact-read outage is retryable and ambiguous, not an empty successful lookup;
 conflicts expose no unverified cleanup IDs. Provider content remains excluded.
 Regression: `tests/test_mem00_provider_marker_readback.py` (DP-007).
 
+**MEM00 trace serialization**: structural events must use `extra.metadata` in
+`Client.create_run`, not a top-level `metadata` argument. Equal start/end times
+describe the completed event at its timezone-aware `occurred_at`, not the full
+operation's duration. Invalid timestamps fail tracing closed to unavailable;
+product governance never depends on successful export. Regression
+`tests/test_mem00_langsmith_serialization.py` captures the actual installed SDK's
+serialized HTTP body and checks searchable references, completion, and excluded
+plaintext. Hosted readback remains a separate certification requirement.
+
+**MEM00 hosted search filters**: v2 custom metadata requires one key in each
+`metadata` clause, combined under `AND` with the exact `user_id` entity clause.
+The deployed SDK1.0.9 accepts subject-only and individual typed metadata
+clauses but rejects flat custom fields and a multi-key metadata clause.
+Keep provider discovery separate from canonical authorization; do not weaken
+binding/revision checks or render returned provider text. Regression:
+`tests/test_mem00_search_filter_contract.py` (including metadata named user_id).
+
 **Components**:
 - `updater.py` - LLM-based memory updates with fact extraction, whitespace-normalized fact deduplication (trims leading/trailing whitespace before comparing), atomic file I/O, and timezone-aware UTC timestamp serialization (`...Z`) for memory metadata.
 - `queue.py` - Debounced update queue (per-thread deduplication, configurable wait time)

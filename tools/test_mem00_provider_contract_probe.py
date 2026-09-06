@@ -20,6 +20,7 @@ class Adapter:
         self.delete_error = False
         self.change_text = False
         self.stringify_list = False
+        self.ignore_metadata = False
 
     def _get_client(self):
         return self
@@ -42,8 +43,8 @@ class Adapter:
     def find_by_operation_marker(self, *, provider_subject, projection_operation_id, **kwargs):
         return tuple(i for i, r in self.rows.items() if r["subject"] == provider_subject and r["metadata"]["projection_operation_id"] == projection_operation_id)
 
-    def search_ids(self, *, provider_subject, **kwargs):
-        return tuple(types.SimpleNamespace(provider_memory_id=i) for i, r in self.rows.items() if r["subject"] == provider_subject)
+    def search_ids(self, *, provider_subject, metadata_filter, **kwargs):
+        return tuple(types.SimpleNamespace(provider_memory_id=i) for i, r in self.rows.items() if r["subject"] == provider_subject and (self.ignore_metadata or all(r["metadata"].get(k) == v for k, v in metadata_filter.items())))
 
     def delete_ids(self, identities, **kwargs):
         if self.delete_error:
@@ -55,16 +56,16 @@ class Adapter:
 class ProbeTests(unittest.TestCase):
     def setUp(self):
         self.adapter = Adapter()
-        self.pin = dict(commit="3c3a6362804ef1eee6f7cbe615121836ce383ed9", reference_key_fingerprint="sha256:70c4ec6052335991", credential_fingerprint="sha256:8388812563a212e0", sdk="1.0.9", endpoint_matches_pin=True, provider_project_matches=True, flags=dict(PROVIDER_PROJECTION=False, GOVERNED_RUNTIME_READ=False))
+        self.pin = dict(commit="3c3a6362804ef1eee6f7cbe615121836ce383ed9", reference_key_fingerprint="sha256:70c4ec6052335991", credential_fingerprint="sha256:8388812563a212e0", sdk="1.0.9", endpoint_matches_pin=True, provider_project_matches=True, flags=dict(PROVIDER_PROJECTION=False, GOVERNED_RUNTIME_READ=False, FAULT_INJECTION=False))
 
-    def run_probe(self, count=1):
+    def run_probe(self, count=1, activation="closed"):
         modules = {
             "deerflow.sophia.memory_governance.mem0_projection_adapter": types.SimpleNamespace(Mem0ProjectionAdapter=lambda: self.adapter),
             "deerflow.sophia.memory_governance.runtime_pin": types.SimpleNamespace(runtime_pin=lambda: self.pin),
         }
         output = io.StringIO()
         with patch.dict("sys.modules", modules), patch.dict(os.environ, MEM0_PROJECT_ID="project", MEM0_ORG_ID="org"), contextlib.redirect_stdout(output):
-            result = probe.probe("mem00-dp007-20260905T211800Z", count, expected_commit="3c3a6362804ef1eee6f7cbe615121836ce383ed9")
+            result = probe.probe("mem00-dp007-20260905T211800Z", count, expected_commit="3c3a6362804ef1eee6f7cbe615121836ce383ed9", expected_activation=activation)
         self.assertNotIn("SENSITIVE_PROVIDER_ERROR", output.getvalue())
         self.assertNotIn("imaginary test badge", output.getvalue())
         return result
@@ -109,10 +110,27 @@ class ProbeTests(unittest.TestCase):
         self.assertEqual(result["status"], "failed")
         self.assertEqual(self.adapter.rows, {})
 
+    def test_ignored_runtime_metadata_filter_fails_and_cleans(self):
+        self.adapter.ignore_metadata = True
+        result = self.run_probe(3)
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(self.adapter.rows, {})
+
     def test_wrong_runtime_stops_before_provider_write(self):
         self.pin["sdk"] = "3.0.0"
         with self.assertRaises(AssertionError):
             self.run_probe()
+        self.assertEqual(self.adapter.rows, {})
+
+    def test_open_activation_requires_explicit_exact_three_flag_snapshot(self):
+        self.pin["flags"] = {key: True for key in self.pin["flags"]}
+        with self.assertRaises(AssertionError):
+            self.run_probe()
+        self.assertEqual(self.adapter.rows, {})
+        self.assertEqual(self.run_probe(3, activation="open")["status"], "passed")
+        self.pin["flags"]["FAULT_INJECTION"] = False
+        with self.assertRaises(AssertionError):
+            self.run_probe(activation="open")
         self.assertEqual(self.adapter.rows, {})
 
     def test_reused_nonempty_subject_is_not_adopted_or_purged(self):

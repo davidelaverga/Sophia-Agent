@@ -1,0 +1,40 @@
+{
+  "schema": "mem00.iteration-evidence.v1",
+  "attempt_id": "MEM00-EI-100",
+  "scenario": "MEM-P01",
+  "candidate": "a017e58d5aad3b60c4be9fb3a434be2035417293",
+  "tree": "ad5bf9c757961a43af4b4d68ce0d9bc49331e391",
+  "status": "failed_investigation_open",
+  "complete_clean_canaries": 0,
+  "hypothesis": "The ordinary synthetic text turn completes end-to-end without a client stream error and produces a joined durable extraction receipt.",
+  "app": {"route": "/session", "mode": "text", "user_turns_submitted": 1, "reply_visible": true, "error": "Connection hiccup", "retry_clicked": false, "end_clicked_once_during_cleanup": true, "end_receipt": "unconfirmed", "audio_started": false, "fresh_settings_page": "sign_in_required"},
+  "session_ref": "hmac-sha256:session:0d15db3caacacd2afcd9632486b9c6019b4990bb87a142f6e507f0b012e194ac",
+  "database": {
+    "matched_user_messages": 1,
+    "messages": [
+      {"sequence": 1, "role": "user", "final": true, "created_at": "2026-09-06T09:20:38.563Z"},
+      {"sequence": 2, "role": "assistant", "final": true, "created_at": "2026-09-06T09:20:45.115Z"}
+    ],
+    "session_status": "resumable", "ended_at": null, "recap_status": null,
+    "extraction": {"state": "succeeded_zero", "range": [1, 2], "attempts": 1, "candidates": 0, "created_at": "2026-09-06T09:31:28.631654Z", "terminal_at": "2026-09-06T09:31:34.74928Z"},
+    "prompt_admission_rows_in_exact_owner_time_window": 0,
+    "interpretation": "Existing ten-minute inactivity watcher enqueues extraction then pauses the session. This matches resumable state; it is not evidence of an explicit End click. Zero candidates alone is not evidence of extraction failure."
+  },
+  "vercel": {"deployment": "dpl_Gf7Fo9Fwroqde4xqi4K2yvqqQmkF", "request_id": "7sj7s-1788686438663-f94a75f8ef39", "started_at": "2026-09-06T09:20:38.663Z", "path": "/api/chat", "status": 200, "execution_seconds": 11.33, "response_seconds": 11.4, "upstream": "sophia-langgraph.onrender.com", "paid_observability_not_enabled": true},
+  "langsmith": {
+    "exact_thread_metadata_query_count": 0,
+    "bounded_window": ["2026-09-06T09:20:00Z", "2026-09-06T09:21:00Z"],
+    "window_run_count": 1,
+    "event": "memory.retrieval.denied",
+    "trace_ref": "hmac-sha256:trace:4f7f8a0d337c227dbc1b30597834b03d8453fb58b212d6334b5814228317ae57",
+    "run_ref": "hmac-sha256:run:aa38524a248770e4bed94dcc6fb242b39b27ee0ce5801a6eeffee675a9c5d2dd",
+    "started_at": "2026-09-06T09:20:43.411927Z", "end_time": null,
+    "governance_metadata_present": false,
+    "outputs": {"outcome": "zero_memory", "safe_reason_code": "provider_unavailable"},
+    "join_status": "unconfirmed_time_window_only",
+    "finding": "Exporter sends metadata at top level instead of SDK extra.metadata and omits span completion timestamps. Hosted run lacks governance references. Repair and exact outbound serialization regression required."
+  },
+  "cleanup": {"current_session": "pending_authentication", "current_candidates": 0, "provider_probe_subject_counts": [0, 0], "older_two_pending_candidates": "untouched_not_adopted", "terminal_zero": false},
+  "owner_cleanup_view_at_followup": {"contract_epoch": 1, "schema_version": "mem00.v1", "mode": "enforced", "user_catalog_generation": 0, "user_revocation_epoch": 0, "live_candidate_plaintext_count": 2, "live_canonical_plaintext_count": 0, "active_candidate_count": 2, "active_canonical_count": 0, "nonterminal_binding_count": 0, "nonterminal_job_count": 0, "active_fault_setting_count": 0, "retained_event_receipt_count": 2, "retained_tombstone_receipt_count": 0},
+  "open": ["Determine client stream error cause", "Repair structural LangSmith serialization and verify hosted readback", "Expose actual live operational counters, not fresh-shell zeros", "Clean exact synthetic session through governed product paths"]
+}

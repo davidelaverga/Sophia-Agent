@@ -223,8 +223,11 @@ class Mem0ProjectionAdapter:
         limit: int,
     ) -> tuple[ProviderHit, ...]:
         bounded_limit = min(max(limit, 1), 100)
-        filters: dict[str, object] = {"user_id": provider_subject}
-        filters.update(metadata_filter)
+        # Hosted v2 requires custom metadata inside separate single-key clauses.
+        # Never let a metadata key replace the owner-scoped entity selector.
+        clauses: list[dict[str, object]] = [{"user_id": provider_subject}]
+        clauses.extend({"metadata": {key: value}} for key, value in metadata_filter.items())
+        filters: dict[str, object] = {"AND": clauses}
         try:
             response = self._get_client().search(query=query, filters=filters, limit=bounded_limit)
         except Exception as exc:
