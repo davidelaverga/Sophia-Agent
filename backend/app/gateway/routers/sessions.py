@@ -971,6 +971,39 @@ def _invalidate_memory_source_before_delete(
     )
 
 
+def _cleanup_memory_session_recap(owner_user_id: str, session_id: str) -> None:
+    """Keep the canonical parent retryable until its local recap is removed."""
+    from deerflow.sophia.memory_governance.flags import memory_feature_flags_for_owner
+
+    try:
+        if memory_feature_flags_for_owner(owner_user_id).candidate_ledger_write:
+            from app.gateway.routers.sophia import _delete_session_recap
+
+            _delete_session_recap(owner_user_id, session_id)
+    except Exception:
+        logger.warning("Session recap cleanup unavailable")
+        raise HTTPException(status_code=503, detail={"code": "session_recap_cleanup_unavailable"}) from None
+    else:
+        if not memory_feature_flags_for_owner(owner_user_id).candidate_ledger_write:
+            return
+        # This is deliberately a local-file receipt, not global erasure or
+        # successful parent deletion (which has not happened yet).
+        try:
+            from deerflow.sophia.memory_governance.observability import emit_memory_event
+            from deerflow.sophia.memory_governance.refs import keyed_ref
+
+            emit_memory_event(
+                "memory.session.recap_cleanup",
+                service="gateway",
+                outcome="local_recap_absent",
+                owner_ref=keyed_ref("owner", owner_user_id),
+                session_ref=keyed_ref("session", session_id),
+                privacy_complete=False,
+            )
+        except Exception:
+            logger.warning("Session recap cleanup trace unavailable")
+
+
 @router.delete("/bulk", response_model=SessionBulkDeleteResponse)
 async def delete_all_sessions(
     request: Request,
@@ -1011,6 +1044,9 @@ async def delete_all_sessions(
             detail={"code": "memory_source_invalidation_unavailable"},
         ) from exc
 
+    for record in records_to_delete:
+        _cleanup_memory_session_recap(owner_user_id, record.session_id)
+
     deleted_records = _store.delete_all(owner_user_id) if records_to_delete else []
 
     if deleted_records:
@@ -1045,6 +1081,8 @@ async def delete_session(
         required_operation="session:create",
     )
     owner_user_id, record = _resolve_session_record(normalized_user_id, session_id)
+    if record is None and claims is not None:
+        raise HTTPException(status_code=404, detail="Session not found.")
     if record is not None and assert_voice_lab_session_record(record, claims):
         raise HTTPException(
             status_code=409,
@@ -1059,6 +1097,9 @@ async def delete_session(
             status_code=503,
             detail={"code": "memory_source_invalidation_unavailable"},
         ) from exc
+    # Also permits an authenticated exact-owner retry to remove a pre-fix
+    # orphan, while preserving the existing 404 response for a missing parent.
+    _cleanup_memory_session_recap(owner_user_id, session_id)
     deleted = _store.delete(owner_user_id, session_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Session not found.")

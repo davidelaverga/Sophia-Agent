@@ -801,20 +801,75 @@ def _hydrate_memories_for_review(
 
 
 def _get_session_recap_path(user_id: str, session_id: str) -> Path:
-    return safe_user_path(USERS_DIR, user_id, "recaps", f"{session_id}.json")
+    from deerflow.sophia.session_recap import recap_path
+
+    return recap_path(USERS_DIR, user_id, session_id)
+
+
+def _delete_session_recap(user_id: str, session_id: str) -> None:
+    """Delete one exact local derivative; never recurse or follow links."""
+    _get_session_recap_path(user_id, session_id).unlink(missing_ok=True)
+
+
+def _recap_source_revision(user_id: str, session_id: str) -> tuple | None:
+    from deerflow.sophia.session_recap import source_revision
+
+    # No legacy-owner fallback: a local file is not proof of current ownership.
+    return source_revision(_session_store.get(user_id, session_id), user_id, session_id)
 
 
 def _read_session_recap(user_id: str, session_id: str) -> dict | None:
+    from deerflow.sophia.memory_governance.flags import memory_feature_flags_for_owner
+
+    try:
+        governed = memory_feature_flags_for_owner(user_id).candidate_ledger_write
+        before = _recap_source_revision(user_id, session_id) if governed else None
+        if governed and before is None:
+            return None
+    except Exception:
+        return None  # Configuration or canonical DB uncertainty exposes no recap.
     recap_path = _get_session_recap_path(user_id, session_id)
     if not recap_path.exists():
         return None
-    return json.loads(recap_path.read_text(encoding="utf-8"))
+    payload = json.loads(recap_path.read_text(encoding="utf-8"))
+    if governed:
+        try:
+            if _recap_source_revision(user_id, session_id) != before:
+                return None
+            if payload.get("session_id") != session_id or payload.get("thread_id") != before[1]:
+                return None
+            if payload.get("_memory_source_revision") != list(before):
+                return None
+        except Exception:
+            return None
+    return payload
 
 
 def _write_session_recap(user_id: str, session_id: str, payload: dict) -> None:
+    from deerflow.sophia.memory_governance.flags import memory_feature_flags_for_owner
+
+    try:
+        governed = memory_feature_flags_for_owner(user_id).candidate_ledger_write
+        before = _recap_source_revision(user_id, session_id) if governed else None
+        if governed and before is None:
+            raise OSError("recap_source_unavailable")
+    except Exception:
+        raise OSError("recap_source_unavailable") from None
     recap_path = _get_session_recap_path(user_id, session_id)
     recap_path.parent.mkdir(parents=True, exist_ok=True)
+    if governed:
+        payload = {**payload, "_memory_source_revision": list(before)}
     recap_path.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
+    if governed:
+        try:
+            if _recap_source_revision(user_id, session_id) == before:
+                return
+        except Exception:
+            pass
+        # A racing deletion or outage cannot leave this write authoritative.
+        # Reads independently revalidate even if this exact unlink fails.
+        _delete_session_recap(user_id, session_id)
+        raise OSError("recap_source_unavailable")
 
 
 _SYNTHETIC_FINALIZATION_EXCLUSIONS = {

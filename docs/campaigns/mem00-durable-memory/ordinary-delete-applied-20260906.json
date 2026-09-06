@@ -1,0 +1,42 @@
+{
+  "schema": "mem00.ordinary-delete-application.v1",
+  "observed_at": "2026-09-06T19:01:56Z",
+  "approval": "User approved the exact staged ordinary-session-delete-order production migration in the next turn.",
+  "remote_head": "d8e8e6ededecedbfbc3b1a0227d3de1a98e7be10",
+  "reviewed_remote": "3add3336216e74324cd1ed4d3859caccc70c94fe",
+  "deployed_candidate": "00af23d8d24f5a28c9ec5dfb954992883fe51aaa",
+  "all_four_public_components_match": true,
+  "migration_sha256": "aa0bfd23151602da02cd28af6deba013e5e0c586018cfd2fae65341006ea5211",
+  "editor_full_document_roundtrip": {"exact": true, "characters": 2373},
+  "execution": {"result": "Success. No rows returned", "verified_at": "2026-09-06T18:59:53Z", "existing_data_changed_by_installation": false},
+  "guard": {"observed_at": "2026-09-06T18:57:30.239Z", "active_runs": 0, "live_workers": 1, "worker_ready": true, "kill_switch_engaged": true, "mutation_gates_open": false, "http_status": 503, "reason": "Expected frozen Voice Lab identity mismatch; no voice action performed"},
+  "post_schema": {
+    "message_fence_sha256": "11adcf09844e96acbdc00e76bd9d6504a9a834540a3d30774e09a45b15a032f3",
+    "parent_fence_sha256": "0678607736ee21130257e2a87f79bc807d12a0f6d22295f55079ff6bbb4aa1b2",
+    "helper_sha256": "4087a488f957a0fb77d758de1db94f9938644411103ecfc77c62f5b9664716ce",
+    "trigger": "enabled BEFORE DELETE FOR EACH ROW on public.sophia_sessions, exact helper target",
+    "security_definer": true, "search_path": "pg_catalog, public", "anon_execute": false, "authenticated_execute": false,
+    "contract": {"contract_epoch": 1, "schema_version": "mem00.v1", "mode": "enforced", "updated_at": "2026-09-04T17:17:41.403939Z"}
+  },
+  "product_delete": {
+    "fixture": "MEM00-P01-20260906-A",
+    "session_ref": "hmac-sha256:session:0d15db3caacacd2afcd9632486b9c6019b4990bb87a142f6e507f0b012e194ac",
+    "request_at": "2026-09-06T19:01:05.183Z", "request_id": "lzsw2-1788721265183-658bf374e1f8", "status": 200,
+    "execution_seconds": 1.46, "response_seconds": 1.7, "deployment_id": "dpl_J1s2KveLm8zqxQEJUfd8EjUGc1ox",
+    "gateway_instance": "pnsw7", "ui_history_fixture_absent": true, "other_three_history_rows_unchanged": true,
+    "counts": {"sessions": 0, "messages": 0, "candidate_sources": 0},
+    "retained_extraction_run": "superseded", "safe_terminal_reason": "source_session_deleted", "gateway_recap_file_exists": true,
+    "terminal_zero": false
+  },
+  "fresh_provider": {
+    "run_id": "mem00-dp007-20260906T190248Z-full", "source_sha256": "b8e979c994db50090dabdec1ee53974d2b38b7c8c2520817671697dd709f7255",
+    "started_at": "2026-09-06T19:02:51.604132Z", "finished_at": "2026-09-06T19:03:08.754974Z", "status": "passed",
+    "fixtures": 3, "all_fixtures_pass": ["direct_content_exact", "initial_metadata", "mismatched_metadata_excluded", "repeat_reconciliation", "runtime_metadata_filter", "search"],
+    "pagination_counts": [2, 1], "prior_fixtures_unchanged": true, "search_subject_isolation": true,
+    "cleanup": [{"subject_ref": "a57b3434e2ee8e58", "terminal_count": 0, "verified_zero": true}, {"subject_ref": "b071f2db12cb444a", "terminal_count": 0, "verified_zero": true}],
+    "sdk": "1.0.9", "project_fingerprint": "sha256:6ac656a6b1be5f93", "configuration_changed": false
+  },
+  "failure": {"id": "MEM00-EI-113", "owning_layer": "Gateway recap derivative lifecycle", "hypothesis": "Ordinary deletion removes the canonical parent and messages but never invokes recap-file cleanup; the file-backed reader can retain the orphan.", "evidence": "UI DELETE200 plus scoped canonical zeros and gateway_recap_file_exists=true; delete_session only calls delegation-ledger cleanup.", "status": "repair in progress"},
+  "complete_clean_canaries": 0,
+  "promotion_permitted": false
+}

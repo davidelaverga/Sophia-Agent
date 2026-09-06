@@ -29,7 +29,7 @@ from typing import Any
 import httpx
 
 from deerflow.agents.sophia_agent.paths import USERS_DIR
-from deerflow.agents.sophia_agent.utils import safe_user_path, validate_user_id
+from deerflow.agents.sophia_agent.utils import validate_user_id
 from deerflow.sophia.extraction import analyze_explicit_remember_messages, extract_session_memories
 from deerflow.sophia.handoffs import generate_handoff
 from deerflow.sophia.identity import maybe_update_identity
@@ -634,7 +634,23 @@ def _write_offline_recap(
     disk (web flow writes a richer one and must always win).  Raises on
     filesystem errors so the caller's try/except can record them.
     """
-    recap_path = safe_user_path(USERS_DIR, user_id, "recaps", f"{session_id}.json")
+    from deerflow.sophia.memory_governance.flags import memory_feature_flags_for_owner
+    from deerflow.sophia.session_recap import recap_path as scoped_recap_path
+    from deerflow.sophia.session_recap import source_revision
+    from deerflow.sophia.session_store import SessionStore
+
+    governed = memory_feature_flags_for_owner(user_id).candidate_ledger_write
+    recap_path = scoped_recap_path(USERS_DIR, user_id, session_id)
+    record = None
+    before = None
+    if governed:
+        try:
+            record = SessionStore().get(user_id, session_id)
+            before = source_revision(record, user_id, session_id)
+            if before is None or before[1] != thread_id:
+                raise OSError("recap_source_unavailable")
+        except Exception:
+            raise OSError("recap_source_unavailable") from None
     if recap_path.exists():
         logger.info(
             "Recap already exists for %s/%s — skipping offline write",
@@ -673,8 +689,18 @@ def _write_offline_recap(
         # Mem0 candidates from ``/api/memory/recent`` never runs.
         "recap_artifacts": {},
     }
+    if governed:
+        payload["_memory_source_revision"] = list(before)
     recap_path.parent.mkdir(parents=True, exist_ok=True)
     recap_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    if governed:
+        try:
+            unchanged = source_revision(SessionStore().get(user_id, session_id), user_id, session_id) == before
+        except Exception:
+            unchanged = False
+        if not unchanged:
+            scoped_recap_path(USERS_DIR, user_id, session_id).unlink(missing_ok=True)
+            raise OSError("recap_source_unavailable")
     logger.info(
         "Recap written for user %s session %s at %s",
         user_id,

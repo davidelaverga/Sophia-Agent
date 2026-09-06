@@ -1,0 +1,107 @@
+{
+  "schema": "mem00.recap-repair.v1",
+  "observed_at": "2026-09-06T20:40:16Z",
+  "deployed_candidate": "00af23d8d24f5a28c9ec5dfb954992883fe51aaa",
+  "failure_id": "MEM00-EI-113",
+  "hypothesis": "Gateway local recap reads and deletion are not coupled to current canonical source existence, ownership and revision, allowing a deleted source's orphan recap to remain readable.",
+  "production_reproduction": {
+    "canonical_sessions": 0,
+    "canonical_messages": 0,
+    "candidate_sources": 0,
+    "gateway_recap_file_exists": true,
+    "gateway_recap_readable": true,
+    "langgraph_recap_file_exists": false,
+    "raw_text_exported": false
+  },
+  "repair": [
+    "Exact owner/session path validation with symlink refusal",
+    "Governed reads revalidate canonical source before and after file I/O and require a matching stored transcript revision",
+    "Gateway and offline writers stamp server-resolved canonical source revision and reject missing, mismatched or concurrently deleted sources",
+    "Governed single and bulk deletion removes local recap before parent deletion and returns503 on cleanup failure",
+    "Exact authenticated-owner retry can remove a pre-fix orphan while retaining404 for an absent parent",
+    "Content-free local_recap_absent trace explicitly sets privacy_complete=false"
+  ],
+  "regression_red": {
+    "initial": {
+      "failed": 15,
+      "passed": 2
+    },
+    "stale_revision_followup": {
+      "failed": 3,
+      "passed": 21
+    }
+  },
+  "verification": {
+    "focused_passed": 239,
+    "focused_warnings": 8,
+    "focused_seconds": 2.32,
+    "ruff": "passed after two import-only formatting corrections",
+    "initial_repair_full_passed": 5967,
+    "initial_repair_full_skipped": 161,
+    "initial_repair_full_seconds": 309.08,
+    "final_revision_full_suite": {
+      "passed": 5975,
+      "skipped": 161,
+      "warnings": 12,
+      "seconds": 309.1
+    },
+    "voice_passed": 616,
+    "voice_warnings": 12,
+    "voice_seconds": 4.18,
+    "frontend_typecheck": "passed",
+    "frontend_source_changed": false,
+    "frontend_full": {
+      "passed": 1955,
+      "skipped": 2,
+      "seconds": 90.78
+    }
+  },
+  "baseline_instrument_failure": {
+    "id": "MEM00-EI-114",
+    "failed": 18,
+    "passed": 5928,
+    "skipped": 161,
+    "seconds": 380.25,
+    "cluster": "test_deck_quality_shadow_persistence",
+    "hypothesis": "A paused run aged collection-time TEST_NOW-based deadlines; these tests pass when their temporal fixture remains current.",
+    "hypothesis_status": "not proven; original detailed traceback was truncated",
+    "isolated_rerun_passed": 31,
+    "unchanged_full_rerun_passed": 5946,
+    "unchanged_full_rerun_skipped": 161,
+    "unchanged_full_rerun_seconds": 308.36,
+    "unrelated_runtime_changed": false
+  },
+  "independent_langgraph_pin": {
+    "instance": "qql6p",
+    "sdk": "1.0.9",
+    "project_fingerprint": "sha256:6ac656a6b1be5f93",
+    "credential_fingerprint": "sha256:109d881133f29ed5",
+    "reference_key_fingerprint": "sha256:70c4ec6052335991",
+    "principal_fingerprint": "sha256:3207762acc978926",
+    "matches_prior_flags": true
+  },
+  "provider_dashboard": {
+    "project": "default-project",
+    "plan": "Growth",
+    "extra_usage": false,
+    "add_requests": 54,
+    "retrieval_requests": 2252,
+    "billing_window": "2026-08-11/2026-09-11",
+    "configuration_changed": false
+  },
+  "langsmith_dashboard": {
+    "project": "Sophia",
+    "retention_days": 14,
+    "accessible": true,
+    "new_recap_cleanup_event": "not deployed or emitted yet"
+  },
+  "deployment_status": "Validated isolated candidate pending publication and deployment",
+  "known_remaining_gaps": [
+    "Live metrics surface and windowed traffic evidence",
+    "Other derivatives and consumer convergence matrix",
+    "Complete product canaries and Section17",
+    "Exact deployed recap cleanup rerun; old orphan may disappear with ephemeral container replacement, which alone is not cleanup implementation proof"
+  ],
+  "complete_clean_canaries": 0,
+  "promotion_permitted": false
+}

@@ -1,6 +1,6 @@
 # Production approval request — ordinary session deletion ordering
 
-Status: **staged, not applied**. This is a new production schema change, not covered by the earlier ordinary-write-fence repair. No new approval has yet been received.
+Status: **approved and production-applied**, verified at 2026-09-06T18:59:53Z. The user's next-turn “approved” granted this exact staged action. Both original fence hashes remain unchanged; the new helper hash, enabled BEFORE DELETE trigger, fixed search path, SECURITY DEFINER and denied anon/authenticated execution match this proposal. The exact disposable P01 deletion now returns200 and leaves zero session/message/source rows, but a Gateway recap file remains. See `ordinary-delete-applied-20260906.json`; this is not terminal-zero certification.
 
 ## Exact target and action
 
@@ -40,4 +40,4 @@ Immediately before applying: recheck0active voice runs and readiness/kill/gates,
 
 Within a transaction, verify the installed helper body matches the fingerprint above, then drop only `sophia_mem00_ordinary_session_delete_order` on `public.sophia_sessions` and its same-named function. This restores the prior ordering/failure and was tested locally. It does not restore sessions a user subsequently deleted; those deletions are ordinary requested product operations. Do not use rollback to bypass canonical tombstones or privacy decisions.
 
-No schema mutation will be made until this specific production action is approved.
+The specific approval was received and consumed only for the transaction above. No other schema, configuration, credential, billing, import or merge action is authorized by it.
