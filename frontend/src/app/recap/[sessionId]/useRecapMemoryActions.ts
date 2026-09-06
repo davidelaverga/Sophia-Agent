@@ -149,16 +149,16 @@ export function useRecapMemoryActions({
 
     if (decision === 'approved') {
       showToast({
-        message: 'Memory saved.',
-        variant: 'success',
+        message: 'Selected to keep. Complete review to save.',
+        variant: 'info',
         durationMs: 1500,
       });
     }
 
     if (decision === 'edited') {
       showToast({
-        message: 'Refined memory saved.',
-        variant: 'success',
+        message: 'Refinement selected. Complete review to save.',
+        variant: 'info',
         durationMs: 1500,
       });
     }

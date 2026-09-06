@@ -1,0 +1,61 @@
+{
+  "schema": "mem00.repair-deployment.v1",
+  "candidate": "8b733c92a66eb2b392300cd9e4291b2b193ea19d",
+  "tree": "289ee75d294ca3dc69fdde1672df22f24d1c6d25",
+  "branch": "codex/mem00-durable-memory-governance",
+  "reviewed_remote_head": "3add3336216e74324cd1ed4d3859caccc70c94fe",
+  "deployments": {
+    "gateway": {"id": "dep-daetk4gu01pc738089lg", "instance": "mvj8c", "started_at": "2026-09-06T21:24:34Z", "duration_seconds": 121, "status": "Live"},
+    "langgraph": {"id": "dep-daetlh7qj5pc73at5brg", "instance": "kgxnx", "started_at": "2026-09-06T21:27:33Z", "live_at": "2026-09-06T21:30:05Z"},
+    "voice": {"id": "dep-daetkegn74is73fej1lg", "started_at": "2026-09-06T21:25:14Z", "duration_seconds": 41.7, "status": "Live"},
+    "frontend": {"id": "dpl_7dCcutAd4GkrKDE6jH6mFWZa4nrU", "ready_at": "2026-09-06T21:29:14Z", "duration_seconds": 69, "source_preview": "41t3fRym6j2fkEXf8jxh3JfxGz6E", "production_build_ignore_step_used": false, "project_settings_changed": false}
+  },
+  "public_identity_join": {"all_four_match_candidate": true, "schema": "mem00.v1", "epoch": 1},
+  "action_guards": {"observed_at": ["2026-09-06T21:24:03.315Z", "2026-09-06T21:25:03.622Z", "2026-09-06T21:27:16.313Z", "2026-09-06T21:27:53.513Z"], "active_runs": 0, "execution": "kill_switch_engaged", "product_mutation_gates_open": false, "worker_ready": true, "live_workers": 1},
+  "independent_runtime_pins": {
+    "gateway_and_langgraph_verified": true,
+    "principal_and_single_member_cohort": "sha256:3207762acc978926",
+    "reference_key": "sha256:70c4ec6052335991",
+    "gateway_credential": "sha256:8388812563a212e0",
+    "langgraph_credential": "sha256:109d881133f29ed5",
+    "sdk": "1.0.9",
+    "provider_org": "sha256:268f794f90764fcb",
+    "provider_project": "sha256:6ac656a6b1be5f93",
+    "endpoint_matches_pin": true,
+    "flags_enabled": ["CANDIDATE_LEDGER_READ", "CANDIDATE_LEDGER_WRITE", "CANONICAL_POOL_READ", "FAULT_INJECTION", "GOVERNED_RUNTIME_READ", "LANGSMITH_EXPORT", "PROVIDER_PROJECTION"],
+    "flags_disabled": ["LEGACY_IMPORT", "LEGACY_INVENTORY"],
+    "configuration_changed": false
+  },
+  "schema_change": false,
+  "approved_delete_order_migration_sha256": "aa0bfd23151602da02cd28af6deba013e5e0c586018cfd2fae65341006ea5211",
+  "provider_dashboard": {"project": "default-project", "plan": "Growth", "extra_usage": false, "add_requests": 60, "retrieval_requests": 2355, "billing_window": "2026-08-11/2026-09-11", "settings_changed": false},
+  "provider_instructions": {"characters": 8481, "sha256": "d6d5f46cc5b7873096622d745ce05735ce3bdc3dd941666eda0b98ce49bd4b59", "save_disabled": true, "custom_categories": ["fact", "feeling", "decision", "lesson", "commitment", "relationship", "pattern", "ritual_context", "personal_goal"]},
+  "provider_probe": {
+    "run_id": "mem00-dp007-20260906T213326Z-full",
+    "source_sha256": "b8e979c994db50090dabdec1ee53974d2b38b7c8c2520817671697dd709f7255",
+    "started_at": "2026-09-06T21:33:31.264181+00:00",
+    "finished_at": "2026-09-06T21:33:46.776935+00:00",
+    "status": "passed", "fixtures": 3,
+    "checks_passed_for_each": ["direct_content_exact", "initial_metadata", "mismatched_metadata_excluded", "repeat_reconciliation", "runtime_metadata_filter", "search"],
+    "pagination_counts": [2, 1], "prior_fixtures_unchanged": true, "search_subject_isolation": true,
+    "cleanup": [{"subject_ref": "632cb34350b3671e", "terminal_count": 0}, {"subject_ref": "24eb90636111d8a4", "terminal_count": 0}],
+    "full_product_canary": false
+  },
+  "synthetic_product_journey": {
+    "session_ref": "hmac-sha256:session:840737bc924ed1fda4c42bae24e4511dec73a8b9980e501d26b3e7cc8385f736",
+    "extraction_run_ref": "hmac-sha256:extraction-run:24534fe72a4a51b8215cfe066f5f41605d023c6cde69c333fb9b34da1390622a",
+    "candidate_refs": ["hmac-sha256:candidate:c47cf6a3943a4440be9f84c7affc05c50933ff5c78a5681311973b95040f60a5", "hmac-sha256:candidate:b402fc4f04223f54b0bd775d4a0afeaac29875ea6af00ecd104daf0ac1b70e52"],
+    "chat_http": {"status": 200, "started_at": "2026-09-06T21:34:19.561Z"},
+    "end_http": {"status": 202, "started_at": "2026-09-06T21:34:49.800Z"},
+    "ended_at": "2026-09-06T21:34:51.065438+00:00",
+    "extraction": {"state": "succeeded_nonzero", "candidate_count": 2, "attempt_count": 1, "transcript_revision": 2, "sequence_start": 1, "sequence_end": 2, "processed_through_sequence": 2, "model": "claude-haiku-4-5-20251001", "exact_recap_text_parity": true},
+    "pending_isolation": {"canonical_count": 0, "projection_job_count": 0, "provider_page_counts": [0], "pool_empty": true, "all_consumer_matrix_executed": false},
+    "review_failure": {"attempts": ["MEM00-EI-116", "MEM00-EI-117"], "request_id": "zkjx5-1788730667059-1e078d34a399", "started_at": "2026-09-06T21:37:47.059Z", "http_status": 200, "execution_seconds": 1.30, "ui_rejection_error": true, "canonical_count_after": 0, "candidates_still_pending": 2, "approval_was_local_selection_not_commit": true},
+    "langsmith_extraction": {"run_ref": "hmac-sha256:langsmith-run:3781493428006953ad0472407fd58bdf72b9964f6119c450feecdc4dec1ed49c", "trace_ref": "hmac-sha256:trace:984d889f60eb285dfafcdba650ccb67ebcfc957985b01408c165023f71e86721", "name": "memory.extraction.completed", "start_and_end": "2026-09-06T21:34:58.693536+00:00", "inputs_empty": true, "candidate_count": 2, "outcome": "succeeded_nonzero", "environment": "unknown"},
+    "cleanup": {"method": "ordinary exact session Delete", "sessions": 0, "messages": 0, "candidates_expired_scrubbed": 2, "live_candidate_plaintext": 0, "canonical_count": 0, "projection_jobs": 0, "provider_page_counts": [0], "recap_file_exists": false, "recap_readable": false, "retained_source_links": 4, "retained_extraction_state": "superseded", "retained_reason": "source_session_deleted", "other_history_rows_unchanged": 3, "full_derivative_terminal_zero": false},
+    "langsmith_cleanup": {"run_ref": "hmac-sha256:langsmith-run:0b385153f4be3b1d9d653b1c964f513336710375d9a6f23b1f8256b3c9ec91aa", "trace_ref": "hmac-sha256:trace:0038b239185d66945b7007dfa5d3d4e636a1e076e980a58a7ccbba8ab49cc514", "start_and_end": "2026-09-06T21:42:17.372683+00:00", "inputs_empty": true, "outcome": "local_recap_absent", "privacy_complete": false}
+  },
+  "complete_clean_canaries": 0,
+  "promotion_permitted": false,
+  "remaining": ["deployed review repair", "live metric surface", "complete P01-P08 consumer and fault matrix", "five consecutive complete canaries", "full terminal-zero derivative cleanup"]
+}

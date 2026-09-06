@@ -4,6 +4,26 @@ import { describe, expect, it, vi } from 'vitest';
 import { useRecapMemoryActions } from '../../app/recap/[sessionId]/useRecapMemoryActions';
 
 describe('useRecapMemoryActions', () => {
+  it.each(['approved', 'edited'] as const)('does not claim a %s draft is canonically saved', (decision) => {
+    const showToast = vi.fn();
+    const setDecision = vi.fn();
+    const commitMemories = vi.fn();
+    const { result } = renderHook(() => useRecapMemoryActions({
+      artifacts: {
+        sessionId: 's1', sessionType: 'open', contextMode: 'life', status: 'ready',
+        memoryCandidates: [{ id: 'c1', text: 'Synthetic fixture', candidateRevision: 1 }],
+      },
+      decisions: [], sessionId: 's1', setArtifacts: vi.fn(), setDecision,
+      commitMemories, showToast, navigateAfterSave: vi.fn(),
+    }));
+    act(() => result.current.handleDecisionChange('c1', decision, 'Synthetic refinement'));
+    expect(setDecision).toHaveBeenCalledWith('s1', 'c1', decision, 'Synthetic refinement');
+    expect(commitMemories).not.toHaveBeenCalled();
+    expect(showToast).toHaveBeenCalledWith(expect.objectContaining({ variant: 'info' }));
+    expect(showToast.mock.calls.map(([payload]) => payload.message).join(' ')).not.toMatch(/saved/i);
+    expect(result.current.saveSuccess).toBeNull();
+  });
+
   it('commits approved decisions before reporting success', async () => {
     vi.useFakeTimers();
 

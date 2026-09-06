@@ -40,6 +40,35 @@ async function flushEffects() {
 }
 
 describe('useRecapArtifactsLoader', () => {
+  it('preserves the complete canonical review contract when hydrating the recent ledger', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({
+      memories: [{
+        id: '05941898-bd0b-4d01-bcd1-9577ca94c6bc',
+        text: 'Synthetic review fixture',
+        category: 'fact',
+        candidate_revision: 7,
+        review_state: 'pending_review',
+        projection_state: 'absent',
+        authority: 'sophia_candidate_ledger',
+      }],
+      count: 1,
+      candidate_count: 1,
+      source: 'candidate_ledger',
+    }));
+    global.fetch = fetchMock as unknown as typeof fetch;
+    const hydrated = await hydrateStoredArtifactsWithRecentMemories({
+      sessionId: 'synthetic-review', sessionType: 'open', contextMode: 'life',
+      status: 'ready', memoryCandidates: [],
+    }, 'synthetic-review');
+    expect(hydrated?.memoryCandidates).toEqual([expect.objectContaining({
+      id: '05941898-bd0b-4d01-bcd1-9577ca94c6bc',
+      candidateRevision: 7,
+      reviewState: 'pending_review',
+      projectionState: 'absent',
+      authority: 'sophia_candidate_ledger',
+    })]);
+  });
+
   beforeEach(() => {
     localStorage.clear();
     clearRecentSessionEndHint();

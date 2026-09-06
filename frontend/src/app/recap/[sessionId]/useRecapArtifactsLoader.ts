@@ -53,6 +53,10 @@ interface RecentMemoriesResponse {
     created_at?: string;
     confidence?: number;
     reason?: string;
+    candidate_revision?: number;
+    review_state?: string;
+    projection_state?: string;
+    authority?: string;
   }>;
   count?: number;
   source?: string;
@@ -507,6 +511,10 @@ async function hydratePayloadWithRecentMemories(
         ...(memory.created_at ? { created_at: memory.created_at } : {}),
         ...(typeof memory.confidence === 'number' ? { confidence: memory.confidence } : {}),
         ...(memory.reason ? { reason: memory.reason } : {}),
+        candidate_revision: memory.candidate_revision,
+        review_state: memory.review_state,
+        projection_state: memory.projection_state,
+        authority: memory.authority,
       })),
     },
     memoryRecent,
