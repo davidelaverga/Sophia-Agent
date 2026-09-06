@@ -733,6 +733,16 @@ database mapping. A real Supabase row maps `active` to `open` and `resumable`
 to `paused`; comparing those application aliases directly silently matches zero
 rows. Regression includes the actual row mapper plus exact PostgREST equality.
 
+**MEM00 ordinary deletion order (staged, not production-applied)**: the existing
+Voice Lab child trigger requires its parent even during a foreign-key cascade.
+An ordinary parent DELETE therefore fails after the parent disappears. The
+additive ordinary-only BEFORE DELETE trigger deletes exact owner/session
+children first, while the parent is visible, with atomic rollback. It does not
+rewrite the shared fences or authorize synthetic deletion. Source hash drift
+aborts installation. See `tests/test_mem00_delete_order_migration.py` and the
+disposable `tools/mem00_session_delete_contract.mjs` proof. Production approval
+is required; a source-invalidation receipt alone is not successful deletion.
+
 **Components**:
 - `updater.py` - LLM-based memory updates with fact extraction, whitespace-normalized fact deduplication (trims leading/trailing whitespace before comparing), atomic file I/O, and timezone-aware UTC timestamp serialization (`...Z`) for memory metadata.
 - `queue.py` - Debounced update queue (per-thread deduplication, configurable wait time)

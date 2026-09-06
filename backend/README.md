@@ -88,6 +88,13 @@ path. The browser retains an unconfirmed session for an ordinary retry.
 The lifecycle predicate uses the session store's database encoding (`open` →
 `active`, `paused` → `resumable`); all equality fences remain mandatory.
 
+The staged `2026_09_06_mem00_ordinary_session_delete_order.sql` repairs ordinary
+session deletion when the existing transcript fence requires a still-visible
+parent. Its owner-scoped child deletion runs before the parent within the same
+transaction; synthetic parents retain the existing deletion restrictions.
+Applying it requires explicit production migration approval. The disposable
+contract is `tools/mem00_session_delete_contract.mjs`; no fence is disabled.
+
 ### Lead Agent
 
 The single LangGraph agent (`lead_agent`) is the runtime entry point, created via `make_lead_agent(config)`. It combines:

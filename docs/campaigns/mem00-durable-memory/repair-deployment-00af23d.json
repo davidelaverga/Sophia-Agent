@@ -1,0 +1,54 @@
+{
+  "schema": "mem00.iteration-evidence.v1",
+  "candidate": "00af23d8d24f5a28c9ec5dfb954992883fe51aaa",
+  "tree": "c80b10be9ca11f5a535ce9bc7833243bd369e35c",
+  "reviewed_remote": "3add3336216e74324cd1ed4d3859caccc70c94fe",
+  "branch": "codex/mem00-durable-memory-governance",
+  "deployments": {
+    "gateway": {"id": "dep-daeq3kad0e5s739i56pg", "live_at": "2026-09-06T17:26:21Z", "instance_suffix": "pnsw7", "ready_http": 200, "runtime_pin_matches": true},
+    "voice_component": {"id": "dep-daeq3ueq1p3s73aecggg", "live_at": "2026-09-06T17:26:05Z", "public_version_matches": true},
+    "langgraph": {"id": "dep-daeq5lv40ujc7389nir0", "status": "Live", "live_at": "2026-09-06T17:31:42Z", "runtime_pin_matches": true, "credential_fingerprint": "sha256:109d881133f29ed5"},
+    "frontend": {"id": "dpl_J1s2KveLm8zqxQEJUfd8EjUGc1ox", "environment": "Production", "status": "Ready", "domain": "www.sophia-ei.com"}
+  },
+  "action_time_idle_guards": ["2026-09-06T17:23:54.420Z", "2026-09-06T17:24:51.417Z", "2026-09-06T17:28:19.518Z", "2026-09-06T17:29:06.816Z"],
+  "guard_observations": {"active_runs": 0, "workers": 1, "worker_ready": true, "kill_engaged": true, "product_mutation_gates": false},
+  "voice_lab_untouched": true,
+  "runtime_pin": {"principal_and_cohort": "sha256:3207762acc978926", "gateway_credential": "sha256:8388812563a212e0", "reference_key": "sha256:70c4ec6052335991", "project": "sha256:6ac656a6b1be5f93", "org": "sha256:268f794f90764fcb", "sdk": "1.0.9", "endpoint_matches": true, "flags_unchanged": true},
+  "contract": {"schema_version": "mem00.v1", "epoch": 1, "mode": "enforced", "updated_at": "2026-09-04T17:17:41.403939Z", "migration_sha256": "96303ed50b1508b35287cb70acd26dd34e58aa44a50b0527090f17ac302f96b7"},
+  "cleanup_baseline": {"catalog_generation": 0, "revocation_epoch": 0, "live_candidate_plaintext": 2, "active_candidates": 2, "live_canonical_plaintext": 0, "active_canonical": 0, "nonterminal_bindings": 0, "nonterminal_jobs": 0, "active_faults": 0, "retained_content_free_events": 2, "retained_content_free_tombstones": 0},
+  "new_schema_flags_provider_contract_configuration_credentials_plan_changes": false,
+  "all_four_public_versions_match": true,
+  "hosted_probe": {
+    "run_id": "mem00-dp007-20260906T173311Z-full", "source_sha256": "b8e979c994db50090dabdec1ee53974d2b38b7c8c2520817671697dd709f7255",
+    "started_at": "2026-09-06T17:33:15.444155Z", "finished_at": "2026-09-06T17:33:31.237595Z", "status": "passed", "created": 3,
+    "all_three_fixtures_passed": ["direct_content_exact", "initial_metadata", "repeat_reconciliation", "search", "runtime_metadata_filter", "mismatched_metadata_excluded"],
+    "pagination_counts": [2, 1], "prior_fixtures_unchanged": true, "search_subject_isolation": true,
+    "cleanup": [{"subject_ref": "849eb40c09a942ad", "terminal_count": 0, "verified_zero": true}, {"subject_ref": "12a17d2aa7368727", "terminal_count": 0, "verified_zero": true}],
+    "full_product_canary": false
+  },
+  "provider_usage": {"plan": "Growth", "extra_usage": false, "window": "2026-08-11/2026-09-11", "before": {"adds": 48, "retrievals": 2156}, "after": {"adds": 51, "retrievals": 2204}, "configuration_changed": false},
+  "processed_end_rerun": {
+    "status": "repair_proven_not_complete_canary",
+    "session_ref": "hmac-sha256:session:0d15db3caacacd2afcd9632486b9c6019b4990bb87a142f6e507f0b012e194ac",
+    "request": {"timestamp": "2026-09-06T17:34:07.831Z", "id": "4bgc4-1788716047831-49ceb06bee61", "status": 202, "execution_seconds": 3.65},
+    "canonical_session": {"status": "ended", "ended_at": "2026-09-06T17:34:10.578371Z", "updated_at": "2026-09-06T17:34:11.073169Z", "processed_until_sequence": 2},
+    "extraction": {"count": 1, "run_ref": "hmac-sha256:extraction-run:8b32fdb340168cee4b33438e9fd9b3be663352615ecad51013896075c3fd8fbf", "state": "succeeded_zero", "revision": 2, "range": [1, 2], "candidate_count": 0, "created_at": "2026-09-06T09:31:28.631654Z", "terminal_at": "2026-09-06T09:31:34.749280Z"},
+    "langsmith": {"matched_count": 1, "run_ref": "hmac-sha256:run:511c31fb23d78e4ff4cd028efa599b8506507ef2e34ffc8528e58e1c9ac53483", "trace_ref": "hmac-sha256:trace:6a53636558a9a936d109818ead8d2fd19f1836fef2e7de1fb821f1a51add3c43", "event": "memory.session.finalized", "outcome": "ended_no_new_range", "timestamp": "2026-09-06T17:34:11.112766Z", "completed_point_event": true, "inputs_empty": true, "owner_session_deployment_match": true},
+    "ui": {"fresh_client": true, "existing_session_restored": true, "ordinary_use_this_tab_handoff": true, "new_turns": 0, "audio_started": false, "recap_terminal_empty": true, "fresh_history_archived": true}
+  },
+  "cleanup_attempt": {
+    "request": {"timestamp": "2026-09-06T17:37:21.255Z", "id": "rk5k2-1788716241255-07895c7ded7e", "status": 500, "execution_seconds": 1.17},
+    "gateway_log_time": "2026-09-06T17:37:22Z", "database_error_code": "P0001", "safe_failure_signature": "synthetic transcript parent session is unavailable",
+    "after": {"sessions": 1, "messages": 2, "candidate_sources": 0, "retained_run_state": "superseded", "retained_run_reason": "source_session_deleted", "gateway_recap_file_exists": true},
+    "scope": "exact_P01_only", "older_candidates_untouched": true,
+    "deployed_fence_pins": {"cleanup_write_fence": "0678607736ee21130257e2a87f79bc807d12a0f6d22295f55079ff6bbb4aa1b2", "message_write_fence": "11adcf09844e96acbdc00e76bd9d6504a9a834540a3d30774e09a45b15a032f3"},
+    "disposable_postgres": {"baseline": "exact_hosted_cascade_failure_reproduced", "repair_applies_twice": true, "ordinary_cascade": true, "wrong_owner_untouched": true, "rollback_restores_parent_and_child": true, "foreign_child_conflict_rolls_back": true, "synthetic_parent_and_child_delete_denied": true, "message_fence_unchanged": true, "browser_function_execution_denied": true, "external_mutations": 0},
+    "proposed_migration_sha256": "aa0bfd23151602da02cd28af6deba013e5e0c586018cfd2fae65341006ea5211",
+    "production_migration_applied": false,
+    "proposed_migration_verification": {"backend_passed": 5946, "backend_skipped": 161, "backend_warnings": 12, "backend_seconds": 337.17, "focused_passed": 17, "disposable_postgres_version": "17.5", "pglite_version": "0.3.10", "ddl_rollback_restores_prior_behavior": true, "ruff_diff_checks": "passed"},
+    "post_failure_governance": {"catalog_generation": 0, "revocation_epoch": 0, "active_candidates": 2, "live_candidate_plaintext": 2, "active_canonical": 0, "live_canonical_plaintext": 0, "nonterminal_jobs": 0, "nonterminal_bindings": 0, "active_faults": 0, "retained_content_free_events": 3, "retained_content_free_tombstones": 0}
+  },
+  "complete_clean_canaries": 0,
+  "product_terminal_zero": false,
+  "status": "CONTINUE"
+}
