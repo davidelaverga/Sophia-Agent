@@ -37,6 +37,7 @@ interface UseRecapArtifactsLoaderParams {
   sessionId: string;
   artifacts: RecapArtifactsV1 | null;
   setArtifacts: (sessionId: string, artifacts: RecapArtifactsV1) => void;
+  invalidateArtifacts?: (sessionId: string) => void;
 }
 
 interface UseRecapArtifactsLoaderResult {
@@ -532,34 +533,46 @@ async function sessionHasReviewedMemories(
 
 export function useRecapArtifactsLoader({
   sessionId,
-  artifacts,
-  setArtifacts,
+  setArtifacts: publishArtifacts,
+  invalidateArtifacts,
 }: UseRecapArtifactsLoaderParams): UseRecapArtifactsLoaderResult {
   const [status, setStatus] = useState<RecapPageStatus>('loading');
+  const [statusSessionId, setStatusSessionId] = useState(sessionId);
   const [retryCount, setRetryCount] = useState(0);
   const [telemetry, setTelemetry] = useState<RecapTelemetryState>(() =>
     createInitialRecapTelemetryState({ sessionId })
   );
 
-  const recordTelemetry = useCallback<RecapTelemetryRecorder>((observation) => {
+  const recordObservation = useCallback<RecapTelemetryRecorder>((observation) => {
     setTelemetry((current) => applyRecapRequestObservation(current, observation));
   }, []);
 
-  const recordMemoryRecentSkipped = useCallback<MemoryRecentSkipRecorder>((reason) => {
+  const recordSkippedObservation = useCallback<MemoryRecentSkipRecorder>((reason) => {
     setTelemetry((current) => applyMemoryRecentNotRequestedReason(current, reason));
   }, []);
 
-  const setObservedStatus = useCallback((nextStatus: RecapPageStatus) => {
+  const setPageStatus = useCallback((nextStatus: RecapPageStatus) => {
+    setStatusSessionId(sessionId);
     setStatus(nextStatus);
     setTelemetry((current) => applyRecapPageStatus(current, nextStatus));
-  }, []);
+  }, [sessionId]);
 
   useEffect(() => {
     setTelemetry(createInitialRecapTelemetryState({ sessionId }));
   }, [sessionId]);
 
   useEffect(() => {
+    let active = true;
     let retryTimer: ReturnType<typeof setTimeout> | null = null;
+    const setArtifacts = (id: string, value: RecapArtifactsV1) => { if (active) publishArtifacts(id, value); };
+    const markViewed = () => { if (active) useSessionHistoryStore.getState().markRecapViewed(sessionId); };
+    const clearCurrentEndHint = () => {
+      if (active && getRecentSessionEndHint()?.sessionId === sessionId) clearRecentSessionEndHint();
+    };
+
+    const recordTelemetry: RecapTelemetryRecorder = (observation) => { if (active) recordObservation(observation); };
+    const recordMemoryRecentSkipped: MemoryRecentSkipRecorder = (reason) => { if (active) recordSkippedObservation(reason); };
+    const setObservedStatus = (value: RecapPageStatus) => { if (active) setPageStatus(value); };
 
     const loadArtifacts = async () => {
       setObservedStatus('loading');
@@ -574,112 +587,37 @@ export function useRecapArtifactsLoader({
       };
 
       const scheduleMemoryRetry = (enabled: boolean) => {
-        if (!enabled || retryCount >= RECENT_END_MAX_RETRIES) {
+        if (!active || !enabled || retryCount >= RECENT_END_MAX_RETRIES) {
           return false;
         }
 
         setObservedStatus('processing');
         retryTimer = setTimeout(() => {
-          setRetryCount((current) => current + 1);
+          if (active) setRetryCount((current) => current + 1);
         }, RECENT_END_RETRY_DELAY_MS);
         return true;
       };
 
       const scheduleRecentRetry = () => {
-        if (!hasRecentEndHint) {
+        if (!active || !hasRecentEndHint) {
           return false;
         }
 
         if (retryCount >= RECENT_END_MAX_RETRIES) {
-          clearRecentSessionEndHint();
+          clearCurrentEndHint();
           setObservedStatus('unavailable');
           return true;
         }
 
         setObservedStatus('processing');
         retryTimer = setTimeout(() => {
-          setRetryCount((current) => current + 1);
+          if (active) setRetryCount((current) => current + 1);
         }, RECENT_END_RETRY_DELAY_MS);
         return true;
       };
 
-      if (artifacts) {
-        const endedSessionPayload = buildEndedSessionMemoryPayload({
-          artifacts,
-          historyEntry,
-          sessionId,
-          snapshot: sessionTelemetrySnapshot,
-        });
-        const shouldRetryStoredMemories = shouldRetryMemories(
-          artifacts.endedAt || historyEntry?.endedAt || sessionTelemetrySnapshot?.endedAt
-        );
-        const hasStoredMemories = Array.isArray(artifacts.memoryCandidates) && artifacts.memoryCandidates.length > 0;
-        const baseStoredPayload = buildArtifactsPayloadFromStore(artifacts, sessionId);
-        const storedPayload = {
-          ...baseStoredPayload,
-          ...endedSessionPayload,
-          takeaway: baseStoredPayload.takeaway,
-          reflection_candidate: baseStoredPayload.reflection_candidate,
-          memory_candidates: baseStoredPayload.memory_candidates,
-          builder_artifact: baseStoredPayload.builder_artifact,
-          started_at: artifacts.startedAt || historyEntry?.startedAt || endedSessionPayload?.started_at,
-          ended_at: artifacts.endedAt || historyEntry?.endedAt || sessionTelemetrySnapshot?.endedAt,
-        };
-
-        if (!hasStoredMemories) {
-          const hydratedStored = await hydratePayloadWithRecentMemories(
-            storedPayload,
-            sessionId,
-            recordTelemetry,
-            recordMemoryRecentSkipped,
-          );
-          const hydratedStoredArtifacts = mapBackendArtifactsToRecapV1(hydratedStored.payload, sessionId);
-
-          if ((hydratedStoredArtifacts?.memoryCandidates?.length ?? 0) > 0) {
-            if (hasRecentEndHint) {
-              clearRecentSessionEndHint();
-            }
-            setArtifacts(sessionId, hydratedStoredArtifacts);
-          } else if (hydratedStored.memoryRecent?.unavailable || (hydratedStored.memoryRecent && !hydratedStored.memoryRecent.ok)) {
-            if (hasRecentEndHint) {
-              clearRecentSessionEndHint();
-            }
-            // The store already contains this recap. Replacing it with an
-            // equivalent empty hydration changes the `artifacts` dependency
-            // and starts this effect again, producing an unbounded request
-            // loop while the page appears stuck in its loading state.
-            setObservedStatus('unavailable');
-            return;
-          } else if (isTerminalEmptyMemoryRecent(hydratedStored.memoryRecent)) {
-            if (hasRecentEndHint) {
-              clearRecentSessionEndHint();
-            }
-            // A terminal-empty response adds no data to the stored recap.
-            // Keep the existing object identity so this effect can settle in
-            // `ready` instead of continuously rehydrating the same payload.
-            useSessionHistoryStore.getState().markRecapViewed(sessionId);
-            setObservedStatus('ready');
-            return;
-          } else if (await sessionHasReviewedMemories(storedPayload, sessionId, recordTelemetry)) {
-            if (hasRecentEndHint) {
-              clearRecentSessionEndHint();
-            }
-            useSessionHistoryStore.getState().markRecapViewed(sessionId);
-            setObservedStatus('reviewed');
-            return;
-          } else if (scheduleMemoryRetry(shouldRetryStoredMemories)) {
-            return;
-          } else if (hasRecentEndHint) {
-            clearRecentSessionEndHint();
-          }
-        } else if (hasRecentEndHint) {
-          clearRecentSessionEndHint();
-        }
-
-        useSessionHistoryStore.getState().markRecapViewed(sessionId);
-        setObservedStatus('ready');
-        return;
-      }
+      // Persisted artifacts are display cache, never source authority. Every
+      // entry/retry revalidates the source before making any recap actionable.
 
       const recapFrontendPath = `/api/sophia/sessions/${sessionId}/recap`;
       const recapStartedAt = new Date().toISOString();
@@ -698,8 +636,14 @@ export function useRecapArtifactsLoader({
           signal,
         });
 
+        if (!active) return;
         if (response.ok) {
           const data = await response.json() as Record<string, unknown>;
+          if (!active) return;
+          if (typeof data.session_id === 'string' && data.session_id !== sessionId) {
+            setObservedStatus('unavailable');
+            return;
+          }
           recordTelemetry({
             kind: 'recap',
             frontendPath: recapFrontendPath,
@@ -768,6 +712,7 @@ export function useRecapArtifactsLoader({
             recordTelemetry,
             recordMemoryRecentSkipped,
           );
+          if (!active) return;
           const mapped = mapBackendArtifactsToRecapV1(hydratedArtifacts.payload, sessionId);
 
           if (mapped) {
@@ -781,7 +726,7 @@ export function useRecapArtifactsLoader({
 
             if (!hasMappedMemories && (hydratedArtifacts.memoryRecent?.unavailable || (hydratedArtifacts.memoryRecent && !hydratedArtifacts.memoryRecent.ok))) {
               if (hasRecentEndHint) {
-                clearRecentSessionEndHint();
+                clearCurrentEndHint();
               }
               setArtifacts(sessionId, mapped);
               setObservedStatus('unavailable');
@@ -790,10 +735,10 @@ export function useRecapArtifactsLoader({
 
             if (!hasMappedMemories && isTerminalEmptyMemoryRecent(hydratedArtifacts.memoryRecent)) {
               if (hasRecentEndHint) {
-                clearRecentSessionEndHint();
+                clearCurrentEndHint();
               }
               setArtifacts(sessionId, mapped);
-              useSessionHistoryStore.getState().markRecapViewed(sessionId);
+              markViewed();
               setObservedStatus('ready');
               return;
             }
@@ -810,19 +755,19 @@ export function useRecapArtifactsLoader({
               }
             } else if (!hasMappedMemories && await sessionHasReviewedMemories(artifactsPayload, sessionId, recordTelemetry)) {
               if (hasRecentEndHint) {
-                clearRecentSessionEndHint();
+                clearCurrentEndHint();
               }
               setArtifacts(sessionId, mapped);
-              useSessionHistoryStore.getState().markRecapViewed(sessionId);
+              markViewed();
               setObservedStatus('reviewed');
               return;
             }
 
             if (hasRecentEndHint) {
-              clearRecentSessionEndHint();
+              clearCurrentEndHint();
             }
             setArtifacts(sessionId, mapped);
-            useSessionHistoryStore.getState().markRecapViewed(sessionId);
+            markViewed();
             setObservedStatus('ready');
             return;
           }
@@ -839,13 +784,14 @@ export function useRecapArtifactsLoader({
               recordTelemetry,
               recordMemoryRecentSkipped,
             );
+            if (!active) return;
             const endedMapped = mapBackendArtifactsToRecapV1(hydratedEnded.payload, sessionId);
             if (endedMapped && (isTerminalEmptyMemoryRecent(hydratedEnded.memoryRecent) || (endedMapped.memoryCandidates?.length ?? 0) > 0)) {
               if (hasRecentEndHint) {
-                clearRecentSessionEndHint();
+                clearCurrentEndHint();
               }
               setArtifacts(sessionId, endedMapped);
-              useSessionHistoryStore.getState().markRecapViewed(sessionId);
+              markViewed();
               setObservedStatus('ready');
               return;
             }
@@ -880,34 +826,9 @@ export function useRecapArtifactsLoader({
         });
 
         if (response.status === 404) {
-          const endedSessionPayload = buildEndedSessionMemoryPayload({
-            historyEntry,
-            sessionId,
-            snapshot: sessionTelemetrySnapshot,
-          });
-          if (endedSessionPayload) {
-            const hydratedEnded = await hydratePayloadWithRecentMemories(
-              endedSessionPayload,
-              sessionId,
-              recordTelemetry,
-              recordMemoryRecentSkipped,
-            );
-            const endedMapped = mapBackendArtifactsToRecapV1(hydratedEnded.payload, sessionId);
-            if (endedMapped && (isTerminalEmptyMemoryRecent(hydratedEnded.memoryRecent) || (endedMapped.memoryCandidates?.length ?? 0) > 0)) {
-              if (hasRecentEndHint) {
-                clearRecentSessionEndHint();
-              }
-              setArtifacts(sessionId, endedMapped);
-              useSessionHistoryStore.getState().markRecapViewed(sessionId);
-              setObservedStatus('ready');
-              return;
-            }
-            if (hydratedEnded.memoryRecent?.unavailable || (hydratedEnded.memoryRecent && !hydratedEnded.memoryRecent.ok)) {
-              setObservedStatus('unavailable');
-              return;
-            }
-          }
-
+          // A local ended-session hint cannot restore a missing source or
+          // authorize its cached candidates. Keep only bounded empty retry.
+          invalidateArtifacts?.(sessionId);
           if (scheduleRecentRetry()) {
             return;
           }
@@ -945,7 +866,7 @@ export function useRecapArtifactsLoader({
 
         const mockWithSessionId = { ...mockRecapArtifacts, sessionId };
         setArtifacts(sessionId, mockWithSessionId);
-        useSessionHistoryStore.getState().markRecapViewed(sessionId);
+        markViewed();
         setObservedStatus('ready');
         return;
       }
@@ -956,11 +877,12 @@ export function useRecapArtifactsLoader({
     void loadArtifacts();
 
     return () => {
+      active = false;
       if (retryTimer !== null) {
         clearTimeout(retryTimer);
       }
     };
-  }, [sessionId, artifacts, setArtifacts, retryCount, recordTelemetry, recordMemoryRecentSkipped, setObservedStatus]);
+  }, [sessionId, publishArtifacts, invalidateArtifacts, retryCount, recordObservation, recordSkippedObservation, setPageStatus]);
 
   const reload = useCallback(() => {
     setStatus('loading');
@@ -968,7 +890,7 @@ export function useRecapArtifactsLoader({
   }, []);
 
   return {
-    status,
+    status: statusSessionId === sessionId ? status : 'loading',
     reload,
     telemetry,
   };

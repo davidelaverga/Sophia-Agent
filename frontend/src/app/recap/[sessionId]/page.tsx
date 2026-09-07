@@ -47,6 +47,7 @@ export default function RecapPage() {
   const { 
     getArtifacts, 
     setArtifacts, 
+    invalidateSession,
     getDecisions, 
     setDecision,
     allCandidatesReviewed,
@@ -77,6 +78,7 @@ export default function RecapPage() {
     sessionId,
     artifacts,
     setArtifacts,
+    invalidateArtifacts: invalidateSession,
   });
 
   const {

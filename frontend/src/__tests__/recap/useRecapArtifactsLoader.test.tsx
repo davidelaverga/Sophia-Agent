@@ -1,6 +1,7 @@
 import { act, renderHook } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import type { RecapArtifactsV1 } from '../../app/lib/recap-types';
 import {
   clearRecentSessionEndHint,
   getRecentSessionEndHint,
@@ -40,6 +41,78 @@ async function flushEffects() {
 }
 
 describe('useRecapArtifactsLoader', () => {
+  it.each([404, 503])('does not trust persisted recap candidates when authority returns %s', async (httpStatus) => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ detail: 'unavailable' }, httpStatus));
+    global.fetch = fetchMock as unknown as typeof fetch;
+    const setArtifacts = vi.fn();
+    const invalidateArtifacts = vi.fn();
+    const cached: RecapArtifactsV1 = { sessionId: 'mem00-deleted-source', sessionType: 'open', contextMode: 'life', status: 'ready', takeaway: 'MEM00 STALE', memoryCandidates: [{ id: 'old-candidate', text: 'MEM00 STALE', category: 'fact' }] };
+    const { result } = renderHook(() => useRecapArtifactsLoader({
+      sessionId: 'mem00-deleted-source',
+      artifacts: cached,
+      setArtifacts,
+      invalidateArtifacts,
+    }));
+    await flushEffects();
+    expect(fetchMock).toHaveBeenCalledWith('/api/sophia/sessions/mem00-deleted-source/recap', expect.any(Object));
+    expect(result.current.status).toBe(httpStatus === 404 ? 'not_found' : 'unavailable');
+    expect(setArtifacts).not.toHaveBeenCalled();
+    expect(markRecapViewedMock).not.toHaveBeenCalled();
+    expect(invalidateArtifacts.mock.calls).toEqual(httpStatus === 404 ? [['mem00-deleted-source']] : []);
+  });
+
+  it('denies a fresh response for a different session', async () => {
+    global.fetch = vi.fn().mockResolvedValue(jsonResponse({ session_id: 'wrong-session', memory_candidates: [{ id: 'wrong', text: 'synthetic', category: 'fact' }] })) as unknown as typeof fetch;
+    const setArtifacts = vi.fn();
+    const { result } = renderHook(() => useRecapArtifactsLoader({ sessionId: 'expected-session', artifacts: null, setArtifacts }));
+    await flushEffects();
+    expect(result.current.status).toBe('unavailable');
+    expect(setArtifacts).not.toHaveBeenCalled();
+    expect(markRecapViewedMock).not.toHaveBeenCalled();
+  });
+
+  it('does not publish an obsolete response or clear the current session end hint', async () => {
+    let resolveOld!: (response: Response) => void;
+    const oldResponse = new Promise<Response>((resolve) => { resolveOld = resolve; });
+    global.fetch = vi.fn().mockReturnValueOnce(oldResponse).mockResolvedValueOnce(jsonResponse({ session_id: 'new-session', memory_candidates: [{ id: 'new', text: 'synthetic', category: 'fact' }] })) as unknown as typeof fetch;
+    const setArtifacts = vi.fn();
+    const { result, rerender } = renderHook(({ sessionId }) => useRecapArtifactsLoader({ sessionId, artifacts: null, setArtifacts }), { initialProps: { sessionId: 'old-session' } });
+    rerender({ sessionId: 'new-session' });
+    await flushEffects();
+    markRecentSessionEnd('new-session');
+    await act(async () => { resolveOld(jsonResponse({ session_id: 'old-session', memory_candidates: [{ id: 'old', text: 'synthetic', category: 'fact' }] })); });
+    expect(setArtifacts).toHaveBeenCalledTimes(1);
+    expect(setArtifacts.mock.calls[0][0]).toBe('new-session');
+    expect(result.current.status).toBe('ready');
+    expect(getRecentSessionEndHint()?.sessionId).toBe('new-session');
+  });
+
+  it('does not repeat requests when the persisted cache object is replaced', async () => {
+    const fetchMock = vi.fn().mockImplementation(() => Promise.resolve(jsonResponse({ session_id: 'stable-session', memory_candidates: [{ id: 'current', text: 'synthetic', category: 'fact' }] })));
+    global.fetch = fetchMock as unknown as typeof fetch;
+    const setArtifacts = vi.fn();
+    const cached: RecapArtifactsV1 = { sessionId: 'stable-session', sessionType: 'open', contextMode: 'life', status: 'ready', memoryCandidates: [] };
+    const { rerender } = renderHook(({ artifacts }) => useRecapArtifactsLoader({ sessionId: 'stable-session', artifacts, setArtifacts }), { initialProps: { artifacts: cached } });
+    await flushEffects();
+    rerender({ artifacts: { ...cached } });
+    await flushEffects();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('replaces persisted recap candidates with the fresh authoritative response', async () => {
+    global.fetch = vi.fn().mockResolvedValue(jsonResponse({ session_id: 'mem00-current-source', takeaway: 'MEM00 CURRENT', memory_candidates: [{ id: 'new-candidate', text: 'MEM00 CURRENT', category: 'fact' }] })) as unknown as typeof fetch;
+    const setArtifacts = vi.fn();
+    const cached: RecapArtifactsV1 = { sessionId: 'mem00-current-source', sessionType: 'open', contextMode: 'life', status: 'ready', takeaway: 'MEM00 STALE', memoryCandidates: [{ id: 'old-candidate', text: 'MEM00 STALE', category: 'fact' }] };
+    const { result } = renderHook(() => useRecapArtifactsLoader({
+      sessionId: 'mem00-current-source',
+      artifacts: cached,
+      setArtifacts,
+    }));
+    await flushEffects();
+    expect(result.current.status).toBe('ready');
+    expect(setArtifacts).toHaveBeenLastCalledWith('mem00-current-source', expect.objectContaining({ takeaway: 'MEM00 CURRENT', memoryCandidates: [expect.objectContaining({ id: 'new-candidate' })] }));
+  });
+
   it('preserves the complete canonical review contract when hydrating the recent ledger', async () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse({
       memories: [{
@@ -297,7 +370,10 @@ describe('useRecapArtifactsLoader', () => {
       status: 'ready' as const,
       memoryCandidates: [],
     };
-    const fetchMock = vi.fn().mockResolvedValue(
+    const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse({
+      session_id: artifacts.sessionId, started_at: artifacts.startedAt, ended_at: artifacts.endedAt,
+      takeaway: artifacts.takeaway, memory_candidates: [],
+    })).mockResolvedValueOnce(
       jsonResponse({
         memories: [],
         count: 0,
@@ -323,16 +399,15 @@ describe('useRecapArtifactsLoader', () => {
 
     await flushEffects();
 
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(fetchMock).toHaveBeenCalledWith(
       '/api/memory/recent?status=pending_review&session_id=sess-terminal-empty&started_at=2026-03-03T19%3A46%3A00.000Z&ended_at=2026-03-03T20%3A00%3A00.000Z',
       expect.objectContaining({ method: 'GET' }),
     );
     expect(result.current.status).toBe('ready');
-    // The response adds no information. Replacing the stored object here
-    // retriggers the loader effect in the real page and causes an infinite
-    // `/memories/recent` request loop behind "Composing recap...".
-    expect(setArtifacts).not.toHaveBeenCalled();
+    // The fresh source replaces the persisted object once. The cache itself
+    // is no longer a loader-effect dependency and cannot create a fetch loop.
+    expect(setArtifacts).toHaveBeenCalledTimes(1);
     expect(result.current.telemetry.memoryRecent).toMatchObject({
       requested: true,
       terminal: true,
@@ -354,7 +429,10 @@ describe('useRecapArtifactsLoader', () => {
       status: 'ready' as const,
       memoryCandidates: [],
     };
-    const fetchMock = vi.fn().mockResolvedValue(
+    const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse({
+      session_id: artifacts.sessionId, ended_at: artifacts.endedAt,
+      takeaway: artifacts.takeaway, memory_candidates: [],
+    })).mockResolvedValueOnce(
       jsonResponse({
         memories: [],
         count: 0,

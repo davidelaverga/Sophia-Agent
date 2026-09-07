@@ -121,7 +121,7 @@ describe('Memory Candidates v2 smoke', () => {
     });
   });
 
-  it('accept does not fire network and persists reviewed state after refresh; empty state message renders', async () => {
+  it('accept is local and persists a version-matched decision after fresh authority revalidation', async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url.includes('/api/sophia/sessions/test-session/recap') && (!init?.method || init.method === 'GET')) {
@@ -131,7 +131,7 @@ describe('Memory Candidates v2 smoke', () => {
             takeaway: 'Session takeaway',
             reflection_candidate: { prompt: 'Reflect', tag: 'growth' },
             memory_candidates: [
-              { id: 'mem-1', text: 'I value calm focus', category: 'goals', created_at: '2026-02-20T14:30:00Z' },
+              { id: 'mem-1', text: 'I value calm focus', category: 'goals', candidate_revision: 1, created_at: '2026-02-20T14:30:00Z' },
             ],
           }),
           { status: 200, headers: { 'Content-Type': 'application/json' } }
@@ -164,7 +164,7 @@ describe('Memory Candidates v2 smoke', () => {
     await renderInto(secondRender.root, <RecapPage />);
 
     await waitForText(secondRender.container, 'All memories reviewed');
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
 
     await act(async () => {
       secondRender.root.unmount();

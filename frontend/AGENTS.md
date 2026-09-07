@@ -78,6 +78,8 @@ src/
 
 ### Interaction Ownership
 
+- Recap display cache is not source authority. `useRecapArtifactsLoader` revalidates the authenticated recap source on every entry/retry before rendering actionable data; HTTP/provider uncertainty cannot reuse persisted candidates. A source404 invalidates only that session's artifacts, decisions and commit status. Recent-End hints may schedule bounded empty retries but cannot restore a missing source. Async responses from an obsolete load must not publish state.
+
 - Recap debug export reads `/api/memory/observability` on demand. The proxy binds the ordinary authenticated owner; Gateway additionally restricts it to the memory-certification principal. `memory-observability.ts` validates and strips unknown fields before portable export. Unavailable metrics never block product memory actions or masquerade as a clean certification.
 
 - `src/app/workspace/chats/[thread_id]/page.tsx` owns composer busy-state wiring.

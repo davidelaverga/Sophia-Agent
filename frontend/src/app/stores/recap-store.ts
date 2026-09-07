@@ -36,6 +36,7 @@ interface RecapState {
   setArtifacts: (sessionId: string, artifacts: RecapArtifactsV1) => void;
   getArtifacts: (sessionId: string) => RecapArtifactsV1 | undefined;
   clearArtifacts: (sessionId: string) => void;
+  invalidateSession: (sessionId: string) => void;
   
   /** Memory decision actions */
   setDecision: (
@@ -91,6 +92,17 @@ export const useRecapStore = create<RecapState>()(
             ...state.artifacts,
             [sessionId]: artifacts,
           },
+          decisions: {
+            ...state.decisions,
+            [sessionId]: (state.decisions[sessionId] || []).filter((decision) =>
+              artifacts.memoryCandidates?.some((candidate) => candidate.id === decision.candidateId
+                && Number.isInteger(candidate.candidateRevision) && (candidate.candidateRevision ?? 0) > 0
+                && candidate.candidateRevision === decision.expectedCandidateRevision)
+            ),
+          },
+          // A prior batch receipt does not establish completion of this fresh
+          // candidate set. Version-matched individual decisions remain below.
+          commitStatus: { ...state.commitStatus, [sessionId]: 'idle' },
         }));
       },
       
@@ -103,6 +115,18 @@ export const useRecapStore = create<RecapState>()(
           const nextArtifacts = { ...state.artifacts };
           delete nextArtifacts[sessionId];
           return { artifacts: nextArtifacts };
+        });
+      },
+
+      invalidateSession: (sessionId) => {
+        set((state) => {
+          const artifacts = { ...state.artifacts };
+          const decisions = { ...state.decisions };
+          const commitStatus = { ...state.commitStatus };
+          delete artifacts[sessionId];
+          delete decisions[sessionId];
+          delete commitStatus[sessionId];
+          return { artifacts, decisions, commitStatus };
         });
       },
       

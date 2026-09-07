@@ -52,6 +52,8 @@ Backend auth: `getServerAuthToken()` reads `sophia-backend-token` cookie.
 
 ### Key Patterns
 
+- **Recap authority**: persisted recap artifacts are display cache only. Every entry/retry must re-read the owner-authenticated source before showing review content. Source404 clears the exact session's cached artifacts, decisions and commit status; local ended/history hints cannot resurrect its candidates. Unavailable authority renders no cached review content. Replacing the fresh artifact snapshot must not trigger a cache-effect request loop, and obsolete async loads cannot publish into the current page.
+
 - **Session finalization truth**: `useSessionExitFlow` only enters emergence,
   writes ended history/recap state, and emits success after a successful backend
   receipt. HTTP/network failures retain the session and reopen an explicitly
