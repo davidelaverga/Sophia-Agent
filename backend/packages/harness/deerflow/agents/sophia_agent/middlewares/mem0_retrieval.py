@@ -18,8 +18,8 @@ Why this lives in the Builder chain:
 The retrieval is best-effort:
 
 - **Timeout**: 2.0s default. Mem0 hangs do NOT block the run.
-- **Failure**: any exception is swallowed and logged; state is returned
-  unchanged. The Builder run continues without injected memory.
+- **Failure**: any exception is swallowed and logged. Governed owners clear
+  prior explicit memory state; legacy owners retain the existing behavior.
 - **No user_id**: skipped silently (early-bound user_id is the EI/companion
   path, late-bound is the work_bot path — both populate state by the time
   this middleware runs).
@@ -108,11 +108,11 @@ class BuilderMem0RetrievalMiddleware(AgentMiddleware[BuilderMem0RetrievalState])
 
         The sync path exists so a sync agent invocation doesn't crash, but
         Builder runs are async in production (``runs.wait`` / ``astream``)
-        so this hook is rarely hit. Returning None preserves state and
-        lets the run proceed without memories — same behaviour as the
-        async path on timeout / error.
+        so this hook is rarely hit. Governed owners return an explicit clearing
+        update because no fresh lookup can authorize retained memory. Legacy
+        owners retain the previous no-op behavior.
         """
-        return self._recall_shutdown_update(state, self._resolve_user_id(state, runtime))
+        return self._governed_entry_update(state, self._resolve_user_id(state, runtime))
 
     # --- async path ------------------------------------------------------
 
@@ -141,26 +141,31 @@ class BuilderMem0RetrievalMiddleware(AgentMiddleware[BuilderMem0RetrievalState])
             log_middleware("BuilderMem0Retrieval", "no user_id — skipping", _t0)
             return None
 
-        shutdown = self._recall_shutdown_update(state, user_id)
-        if shutdown is not None:
-            return shutdown
+        empty_update = self._governed_entry_update(state, user_id)
+        if empty_update is not None:
+            from deerflow.sophia.memory_governance.flags import memory_feature_flags_for_owner
+
+            if not memory_feature_flags_for_owner(user_id).governed_runtime_read:
+                return empty_update
+            # Never merge an old admission with a fresh owner-scoped result.
+            state = {**state, **empty_update}
 
         query = self._resolve_query(state)
         if not query:
             log_middleware("BuilderMem0Retrieval", "no query — skipping", _t0)
-            return None
+            return empty_update
 
         results = await self._safe_search(user_id, query)
         if not results:
             # _safe_search logs the specific reason (timeout/error/empty)
             log_middleware("BuilderMem0Retrieval", "no results", _t0)
-            return None
+            return empty_update
 
         task_type = self._resolve_task_type(state)
         memory_ids, memory_contents = self._collect_snippets(results, query, task_type=task_type)
         if not memory_contents:
             log_middleware("BuilderMem0Retrieval", "no usable contents", _t0)
-            return None
+            return empty_update
 
         update = self._build_state_update(state, memory_ids, memory_contents)
         log_middleware(
@@ -173,19 +178,16 @@ class BuilderMem0RetrievalMiddleware(AgentMiddleware[BuilderMem0RetrievalState])
     # --- async-path helpers ---------------------------------------------
 
     @staticmethod
-    def _recall_shutdown_update(state: BuilderMem0RetrievalState, user_id: str | None) -> dict | None:
+    def _governed_entry_update(state: BuilderMem0RetrievalState, user_id: str | None) -> dict | None:
+        from deerflow.sophia.memory_governance.context_state import cleared_memory_state
         from deerflow.sophia.memory_governance.flags import memory_feature_flags_for_owner
 
         if not user_id:
             return None
         flags = memory_feature_flags_for_owner(user_id)
-        if not flags.canonical_pool_read or flags.governed_runtime_read:
+        if not flags.canonical_pool_read:
             return None
-        return {
-            "injected_memories": [],
-            "injected_memory_contents": [],
-            "system_prompt_blocks": [block for block in state.get("system_prompt_blocks", []) if not block.lstrip().startswith(("<memory>", "<memories>"))],
-        }
+        return cleared_memory_state(state)
 
     async def _safe_search(self, user_id: str, query: str) -> list | None:
         """Run search_memories with timeout + error swallow.

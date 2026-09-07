@@ -1,0 +1,62 @@
+{
+  "schema": "mem00.repair-deployment.v1",
+  "status": "CONTINUE",
+  "commit": "2e8536b78ac901b517fe1e9fdc3e9010f153ca67",
+  "tree": "e8e2a430d04ed096bb7af5779f7dfc030ad744ef",
+  "parent": "f809d43daa26a20aa7e32e4b510f3f558918b17e",
+  "local_exact_tree_commit": "d4d2ab8187a6454c6da28ce16015521010291569",
+  "reviewed_branch_head": "3add3336216e74324cd1ed4d3859caccc70c94fe",
+  "publication": "isolated branch, fast-forward only, verified exact tree; no merge",
+  "deployment_guards": {
+    "observed_at": ["2026-09-07T18:30:35.214Z", "2026-09-07T18:32:25.623Z", "2026-09-07T18:33:39.119Z", "2026-09-07T18:35:36.413Z", "2026-09-07T18:37:42.115Z"],
+    "all_zero_active_runs": true,
+    "all_kill_switch_engaged": true,
+    "all_product_mutation_gates_closed": true,
+    "all_worker_ready": true,
+    "live_workers": 1,
+    "preserved_controller_worker_commit": "e3b40f1b21739479db239c383ce88285ce740152",
+    "voice_run_created": false
+  },
+  "components": {
+    "gateway": {"service": "srv-d7be5s9r0fns7397l4g0", "deployment": "dep-dafg6k6q1p3s73bk9ca0", "instance": "t6wcf", "status": "Live", "live_at": "2026-09-07T18:34:35Z"},
+    "langgraph": {"service": "srv-d7be5s9r0fns7397l4fg", "deployment": "dep-dafg76e7bikc738g8fdg", "instance": "t8qcg", "status": "Live", "live_at": "2026-09-07T18:36:55Z"},
+    "voice": {"service": "srv-d7be5s9r0fns7397l4f0", "deployment": "dep-dafg76e1egvs73a0pf2g", "instance": "t7lpw", "status": "Live", "live_at": "2026-09-07T18:35:02Z"},
+    "frontend": {"deployment": "dpl_7iH7ai2fNHdDpAcGtpGtEjT28ENu", "status": "Ready/Production/Current", "build_finished_at": "2026-09-07T18:39:22Z", "duration_seconds": 84, "domain": "www.sophia-ei.com", "preview": "HTHa77K4Fw5NA7nTsBjhEkgKraJm", "preview_result": "Canceled by existing Ignore Build Step", "production_build_cache": false, "per_build_ignore_step": false, "saved_configuration_changed": false}
+  },
+  "public_identity_check": {"observed_at": "2026-09-07T19:23:52Z", "all_four_commit_match": true, "schema": "mem00.v1", "epoch": 1},
+  "canonical_contract_readback": {"contract_epoch": 1, "schema_version": "mem00.v1", "mode": "enforced", "updated_at": "2026-09-04T17:17:41.403939+00:00", "full_ddl_digest_refreshed": false},
+  "provider_pin": {
+    "sdk": "mem0ai==1.0.9", "host": "https://api.mem0.ai", "crud": "/v1/memories/", "search": "/v2/memories/search/", "get_all": "POST /v2/memories/",
+    "gateway_credential": "sha256:8388812563a212e0", "langgraph_credential": "sha256:109d881133f29ed5", "independent_runtime_readbacks_match": true,
+    "principal_and_cohort": "sha256:3207762acc978926", "project": "sha256:6ac656a6b1be5f93", "organization": "sha256:268f794f90764fcb", "reference_key": "sha256:70c4ec6052335991",
+    "enabled_flags": ["CANDIDATE_LEDGER_READ", "CANDIDATE_LEDGER_WRITE", "CANONICAL_POOL_READ", "FAULT_INJECTION", "GOVERNED_RUNTIME_READ", "LANGSMITH_EXPORT", "PROVIDER_PROJECTION"],
+    "disabled_flags": ["LEGACY_IMPORT", "LEGACY_INVENTORY"],
+    "instruction_chars": 8481, "instruction_sha256": "d6d5f46cc5b7873096622d745ce05735ce3bdc3dd941666eda0b98ce49bd4b59", "multilingual_extraction": true,
+    "plan": "Growth", "extra_usage": false, "billing_window": "2026-08-11/2026-09-11", "usage_before": {"adds": 71, "retrievals": 2530}, "usage_after": {"adds": 74, "retrievals": 2578}, "configuration_changed": false
+  },
+  "fresh_hosted_probe": {
+    "run_id": "mem00-dp007-20260907T192445Z-full", "source_sha256": "b8e979c994db50090dabdec1ee53974d2b38b7c8c2520817671697dd709f7255", "started_at": "2026-09-07T19:24:49.912131+00:00", "finished_at": "2026-09-07T19:25:07.520742+00:00", "status": "passed", "created": 3,
+    "all_three_fixtures_pass": ["direct_content_exact", "initial_metadata", "mismatched_metadata_excluded", "repeat_reconciliation", "runtime_metadata_filter", "search"], "pagination_counts": [2, 1], "prior_fixtures_unchanged": true, "search_subject_isolation": true,
+    "cleanup": [{"subject_ref": "3441730063727132", "terminal_count": 0, "verified_zero": true}, {"subject_ref": "e4ae8cd454c8c9d4", "terminal_count": 0, "verified_zero": true}], "full_product_canary": false
+  },
+  "deployed_voice_memory_boundary": {
+    "observed_at": "2026-09-07T19:27:33.088732+00:00", "execution_scope": "actual deployed Gateway diagnostic process, no mocks; not serving HTTP or audio session",
+    "four_facade_callers": ["voice_setup", "voice_dynamic_retrieval", "voice_direct_fallback", "voice_retrieval_tool"], "all_memory_counts": 0, "all_status": "unavailable", "all_reason": "long_lived_memory_context_disabled", "all_cache_status": "disabled_governed",
+    "gateway_setup": {"memory_count": 0, "identity_available": false, "handoff_available": false, "preferred_name_available": false, "status": "unavailable"},
+    "gateway_dynamic": {"memory_count": 0, "status": "unavailable"},
+    "carried_state_cleared": {"voice_normal": true, "voice_crisis": true, "ios_voice_normal": true, "ios_voice_crisis": true},
+    "provider_calls": "denial event reports not_called; code and regression assert return before adapter/reader construction",
+    "diagnostic_transport_field": "script inspected transport instead of provider_transport and got null; null is not transport proof",
+    "next_input_revocation_protocol_implemented": false,
+    "actual_serving_http": false,
+    "voice_run_created": false
+  },
+  "verification": {"backend_passed": 6034, "backend_skipped": 161, "backend_seconds": 394.15, "frontend_passed": 1972, "frontend_skipped": 2, "frontend_seconds": 155.98, "voice_passed": 616, "voice_seconds": 9.92, "typescript": "passed", "ruff": "passed", "diff": "passed"},
+  "limitations": ["Voice memory is explicitly disabled for the governed cohort, not a working retained-context revocation protocol", "Text/Builder carried-state and per-model/history admission gaps remain; next local repair is not part of this deployed commit", "Serving-process metrics coverage remains partial", "Full mixed-state and fault matrix incomplete", "Old unrelated pending candidates/history preserved", "Probe cleanup does not certify all Section9.8 surfaces"],
+  "langsmith_voice_denials": {"count":6,"all_completed":true,"all_inputs_empty":true,"all_environment_production":true,"all_provider_not_called":true,"scope":"actual deployed diagnostic process, not serving HTTP","callers":{"voice_direct_fallback":1,"voice_dynamic_retrieval":2,"voice_retrieval_tool":1,"voice_setup":2},"references":[{"run_ref":"hmac-sha256:langsmith-run:3bf6b5d2f4b28b03d8ad887be8ee5da3ea55c39a4798964ec5f6328055a68462","trace_ref":"hmac-sha256:trace:33d91b4293e1c63cc11c08c6d6da69d8781e10b03df87617be1a5a7b7c42e767","caller":"voice_dynamic_retrieval"},{"run_ref":"hmac-sha256:langsmith-run:fc63ab52ee958c042745f3ee48a35bf6196514f0f451c00f066e3b32500e0c36","trace_ref":"hmac-sha256:trace:35b189ae26a0e015772fe4caf205daba51d1ea33b651b17e5411b266701f03c6","caller":"voice_setup"},{"run_ref":"hmac-sha256:langsmith-run:587a2550baa77b4ad41a986321fc620c8621bf659b5d2c4ac3a2b2dd222af5f7","trace_ref":"hmac-sha256:trace:c685b9b575233779ae1d978733ba87a2a0a87c8ee1b487c6fac84068168e4459","caller":"voice_retrieval_tool"},{"run_ref":"hmac-sha256:langsmith-run:425a8b93139324cd75238d073fbcd120a9168f582ad7b2afbd7374e3474c8469","trace_ref":"hmac-sha256:trace:a292a364e6048bf25533a43684e65fcfcc99a28cf3b5bd95efc199f645efa011","caller":"voice_direct_fallback"},{"run_ref":"hmac-sha256:langsmith-run:1eb0aa75824b68dd23cf56561935d801d263f4f0e61981836facd3c6542367bc","trace_ref":"hmac-sha256:trace:a0396add6dfa7099f00751f4cfeb1b747a18e77518d98b1d2fe83bdc06793b08","caller":"voice_dynamic_retrieval"},{"run_ref":"hmac-sha256:langsmith-run:e56b20b75820f945ae681066e6e802eab137ade47555c7651fa87b2f83b6b9d1","trace_ref":"hmac-sha256:trace:04863d8f94bf38bd98029dbe19630c85941ec4a7f9bb9c584a44f9938fd62b59","caller":"voice_setup"}]},
+  "carried_entry_failure": {"attempt":"MEM00-EI-125","observed_at":"2026-09-07T19:34:27.183001+00:00","consumers":["text","builder"],"both_update_returned":false,"both_old_id_content_block_retained":true,"scope":"deployed LangGraph entry functions; actual provider/canonical read; no model or serving HTTP","synthetic_state_persisted":false,"local_repair_deployed":false},
+  "provider_marker_inventory": {"started_at":"2026-09-07T19:34:33.907260+00:00","finished_at":"2026-09-07T19:34:36.262509+00:00","source_sha256":"1c15e6e9b034c97306047310d7c2044448ec3d44035e3e3c7dfe3702b1662dc0","scope":"current_project_supported_entity_domain","page_counts":[100,100,100,100,100,100,100,83,0],"provider_reported_count":783,"distinct_records":783,"pagination_complete":true,"transactionally_consistent":false,"marker_rows":0,"unknown_marker_rows":0,"content_inspected":false,"mutations":0,"terminal_zero_certified":false},
+  "clean_complete_canaries": 0,
+  "terminal_zero_certified": false,
+  "promote_mem00": false
+}

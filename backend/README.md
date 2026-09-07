@@ -8,6 +8,8 @@ DeerFlow is a LangGraph-based AI super agent with sandbox execution, persistent 
 
 ### MEM00 certification diagnostics
 
+Governed text and Builder automatic retrieval replace their previous explicit memory state on each agent entry. Empty, failed, skipped and synchronous-no-retrieval paths clear prior injected snippets and memory prompt blocks. Fresh results do not merge with old admissions. This entry cleanup does not yet certify per-model revocation, retained tool results, summaries or enriched Builder briefs.
+
 For the governed MEM00 cohort, personal-memory voice setup, dynamic retrieval, direct fallback and retrieval-tool results are explicitly unavailable until the voice transport has a next-input revocation fence. Current conversation remains usable. Retrieval-time approval is not permission to retain memory across later turns. Canonical review/Pool and governed text retrieval are unaffected.
 
 The authenticated certification owner can read `GET /api/sophia/{user_id}/memory-observability` (proxied by `/api/memory/observability` in the web app). Recap debug exports include a redacted subset. The endpoint requires the existing canonical-read flag and excludes the Voice Lab principal. It makes no provider calls or memory mutations.

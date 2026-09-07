@@ -308,24 +308,28 @@ class Mem0MemoryMiddleware(AgentMiddleware[Mem0MemoryState]):
         from deerflow.sophia.memory_governance.flags import memory_feature_flags_for_owner
 
         flags = memory_feature_flags_for_owner(self._user_id)
+        empty_update = None
+        if flags.canonical_pool_read:
+            from deerflow.sophia.memory_governance.context_state import cleared_memory_state
+
+            empty_update = cleared_memory_state(state)
+            # Work on a copy. An empty/failed fresh lookup must replace the
+            # previous admission, never implicitly renew its prompt blocks.
+            state = {**state, **empty_update}
         retained_voice_context = (state.get("platform") or (getattr(runtime, "context", None) or {}).get("platform")) in ("voice", "ios_voice")
         if flags.canonical_pool_read and (not flags.governed_runtime_read or retained_voice_context):
             # Clear carried memory fields even on crisis/empty-query exits;
             # keeping canonical ownership must not preserve a warm prompt.
             # Voice has no next-input revocation barrier, so its memory remains
             # empty even while fresh text retrieval is enabled for the cohort.
-            return {
-                "injected_memories": [],
-                "injected_memory_contents": [],
-                "system_prompt_blocks": [block for block in state.get("system_prompt_blocks", []) if not block.lstrip().startswith("<memories>")],
-            }
+            return empty_update
         if state.get("skip_expensive", False):
             log_middleware("Mem0Memory", "skipped (crisis)", _t0)
-            return None
+            return empty_update
 
         if self._user_id == _VOICE_WARMUP_USER_ID:
             log_middleware("Mem0Memory", "skipped (voice warmup)", _t0)
-            return None
+            return empty_update
 
         ritual = state.get("active_ritual")
         active_skill = state.get("active_skill")
@@ -351,7 +355,7 @@ class Mem0MemoryMiddleware(AgentMiddleware[Mem0MemoryState]):
 
         if not query:
             log_middleware("Mem0Memory", "skipped (empty query)", _t0)
-            return None
+            return empty_update
 
         if platform in ("voice", "ios_voice") and self._is_low_signal_voice_query(query):
             cached_results = self._maybe_reuse_voice_results(
@@ -367,7 +371,7 @@ class Mem0MemoryMiddleware(AgentMiddleware[Mem0MemoryState]):
                 search_ms = 0.0
             else:
                 log_middleware("Mem0Memory", "skipped (low-signal voice turn)", _t0)
-                return None
+                return empty_update
         else:
             results = self._maybe_reuse_voice_results(
                 thread_id=thread_id,
@@ -412,7 +416,7 @@ class Mem0MemoryMiddleware(AgentMiddleware[Mem0MemoryState]):
                     exc_info=True,
                 )
                 log_middleware("Mem0Memory", "retrieval failed", _t0)
-                return None
+                return empty_update
             search_ms = (time.perf_counter() - _t_search) * 1000
             self._store_voice_results(
                 thread_id=thread_id,
@@ -426,7 +430,7 @@ class Mem0MemoryMiddleware(AgentMiddleware[Mem0MemoryState]):
 
         if not results:
             log_middleware("Mem0Memory", f"no memories found (search: {search_ms:.0f}ms)", _t0)
-            return None
+            return empty_update
 
         # Log per-category breakdown
         category_counts: dict[str, int] = {}
