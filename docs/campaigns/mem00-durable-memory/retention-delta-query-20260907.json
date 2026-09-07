@@ -1,0 +1,18 @@
+{
+  "campaign_id": "MEM00",
+  "observed_at": "2026-09-07T20:12:35.903443+00:00",
+  "candidate": "c41bbb102022c82a50c8afe4080068e54ea0c409",
+  "scope": "Read-only structural production query shape; staged planner not executed or integrated",
+  "owner_filtered": true,
+  "select": ["event_id", "user_id", "memory_id", "event_type", "user_revocation_epoch"],
+  "epoch_window": {"after_exclusive": 0, "through_inclusive": 3},
+  "pagination": {"order": "event_id.asc", "page_size": 100, "max_pages": 20, "rows_per_page": [3, 0], "explicit_empty_terminal": true},
+  "stable_epoch": 3,
+  "events": [
+    {"event_ref": "hmac-sha256:governance-event:fa2468b709d19c8fdb6ea793d0191081fdbb36eddaec17a2b441fbdb6a627e71", "memory_ref": "hmac-sha256:memory:e972c8007f4ccc3c0cd6f642792acf5b7f34ba8953b5b8790c316fffb0c28b64", "event_type": "memory_edited", "epoch": 1},
+    {"event_ref": "hmac-sha256:governance-event:cdd49385fae95b8d333b07d6fe65f0537e2b78d24be2d7e19fbff60fa13da297", "memory_ref": "hmac-sha256:memory:e972c8007f4ccc3c0cd6f642792acf5b7f34ba8953b5b8790c316fffb0c28b64", "event_type": "memory_forgotten", "epoch": 2},
+    {"event_ref": "hmac-sha256:governance-event:82cebf95105189086914afe1e7c9fbf7bad6c6a4b9176395c715ee5f7bb6c23d", "memory_ref": "hmac-sha256:memory:e972c8007f4ccc3c0cd6f642792acf5b7f34ba8953b5b8790c316fffb0c28b64", "event_type": "memory_tombstoned", "epoch": 3}
+  ],
+  "mutations": 0,
+  "runtime_fence_certified": false
+}

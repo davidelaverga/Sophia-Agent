@@ -1071,13 +1071,17 @@ def _resolve_thread_id(runtime: ToolRuntime[Any, Any] | None) -> str | None:
         return None
 
 
-def _resolve_memory_snippets(state: SophiaState) -> list[str]:
+def _resolve_memory_snippets(state: SophiaState, *, owner_id: str | None = None) -> list[str]:
     """Return human-readable memory snippets for the builder context.
 
     Preference order:
       1. ``injected_memory_contents`` (explicit human-readable snippets)
       2. ``injected_memories`` values that do not look like opaque IDs
     """
+    from deerflow.sophia.memory_governance.context_state import allows_unversioned_builder_handoff
+
+    if not allows_unversioned_builder_handoff(owner_id):
+        return []
     snippets_raw = state.get("injected_memory_contents") or []
     snippets = [str(item).strip() for item in snippets_raw if str(item).strip()]
     if snippets:
@@ -2581,7 +2585,7 @@ async def _start_builder_task_impl(
 
     active_ritual = state.get("active_ritual") if synthetic_context is None else None
     ritual_phase = state.get("ritual_phase") if synthetic_context is None else None
-    memory_snippets = _resolve_memory_snippets(state) if synthetic_context is None else []
+    memory_snippets = _resolve_memory_snippets(state, owner_id=user_id) if synthetic_context is None else []
 
     # Resolve the literal current turn before demo normalization.  Stale
     # companion state must never replace a concrete deliverable brief, and an

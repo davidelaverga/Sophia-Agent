@@ -1,0 +1,228 @@
+{
+  "schema": "mem00.repair-deployment.v1",
+  "status": "CONTINUE",
+  "commit": "c41bbb102022c82a50c8afe4080068e54ea0c409",
+  "tree": "000f36250b922aca089fbfada2dac865e2d7477c",
+  "parent": "2e8536b78ac901b517fe1e9fdc3e9010f153ca67",
+  "local_exact_tree_commit": "93e01fea75210a2c4ad8fc8cab7a9bc482cc19b5",
+  "reviewed_branch_head": "3add3336216e74324cd1ed4d3859caccc70c94fe",
+  "publication": "isolated branch, fast-forward only, verified exact tree; no merge",
+  "deployment_guards": {
+    "observed_at": [
+      "2026-09-07T19:40:47.223Z",
+      "2026-09-07T19:42:14.221Z",
+      "2026-09-07T19:43:37.320Z",
+      "2026-09-07T19:44:49.819Z",
+      "2026-09-07T19:46:53.518Z"
+    ],
+    "all_zero_active_runs": true,
+    "all_kill_switch_engaged": true,
+    "all_product_mutation_gates_closed": true,
+    "all_worker_ready": true,
+    "live_workers": 1,
+    "preserved_controller_worker_commit": "e3b40f1b21739479db239c383ce88285ce740152",
+    "voice_run_created": false
+  },
+  "components": {
+    "gateway": {
+      "service": "srv-d7be5s9r0fns7397l4g0",
+      "deployment": "dep-dafh79dbedkc73980o50",
+      "instance": "jhrjz",
+      "status": "Live",
+      "live_at": "2026-09-07T19:44:20Z"
+    },
+    "langgraph": {
+      "service": "srv-d7be5s9r0fns7397l4fg",
+      "deployment": "dep-dafh8eqd0e5s73cdgaig",
+      "instance": "7sz2t",
+      "status": "Live",
+      "live_at": "2026-09-07T19:47:35Z"
+    },
+    "voice": {
+      "service": "srv-d7be5s9r0fns7397l4f0",
+      "deployment": "dep-dafh8eon74is73a0qagg",
+      "instance": "z6wgl",
+      "status": "Live",
+      "live_at": "2026-09-07T19:46:22Z"
+    },
+    "frontend": {
+      "deployment": "dpl_5UUzzSEYqTYv9xaoyeLs7P3GGyKE",
+      "status": "Ready/Production/Current",
+      "build_finished_at": "2026-09-07T19:48:15Z",
+      "domain": "www.sophia-ei.com",
+      "preview": "9M5V7wU3TJGnvJqH5oNVKLbg3FSr",
+      "preview_result": "Canceled by existing Ignore Build Step",
+      "production_build_cache": false,
+      "per_build_ignore_step": false,
+      "saved_configuration_changed": false
+    }
+  },
+  "public_identity_check": {
+    "observed_at": "2026-09-07T19:51:01Z",
+    "all_four_commit_match": true,
+    "schema": "mem00.v1",
+    "epoch": 1
+  },
+  "canonical_contract_readback": {
+    "contract_epoch": 1,
+    "schema_version": "mem00.v1",
+    "mode": "enforced",
+    "updated_at": "2026-09-04T17:17:41.403939+00:00",
+    "full_ddl_digest_refreshed": false
+  },
+  "provider_pin": {
+    "sdk": "mem0ai==1.0.9",
+    "host": "https://api.mem0.ai",
+    "crud": "/v1/memories/",
+    "search": "/v2/memories/search/",
+    "get_all": "POST /v2/memories/",
+    "gateway_credential": "sha256:8388812563a212e0",
+    "langgraph_credential": "sha256:109d881133f29ed5",
+    "independent_runtime_readbacks_match": true,
+    "principal_and_cohort": "sha256:3207762acc978926",
+    "project": "sha256:6ac656a6b1be5f93",
+    "organization": "sha256:268f794f90764fcb",
+    "reference_key": "sha256:70c4ec6052335991",
+    "enabled_flags": [
+      "CANDIDATE_LEDGER_READ",
+      "CANDIDATE_LEDGER_WRITE",
+      "CANONICAL_POOL_READ",
+      "FAULT_INJECTION",
+      "GOVERNED_RUNTIME_READ",
+      "LANGSMITH_EXPORT",
+      "PROVIDER_PROJECTION"
+    ],
+    "disabled_flags": [
+      "LEGACY_IMPORT",
+      "LEGACY_INVENTORY"
+    ],
+    "instruction_chars": 8481,
+    "instruction_sha256": "d6d5f46cc5b7873096622d745ce05735ce3bdc3dd941666eda0b98ce49bd4b59",
+    "multilingual_extraction": true,
+    "plan": "Growth",
+    "extra_usage": false,
+    "billing_window": "2026-08-11/2026-09-11",
+    "usage_before": {
+      "adds": 74,
+      "retrievals": 2590
+    },
+    "usage_after": {
+      "adds": 77,
+      "retrievals": 2640
+    },
+    "configuration_changed": false
+  },
+  "fresh_hosted_probe": {
+    "run_id": "mem00-dp007-20260907T194827Z-full",
+    "source_sha256": "b8e979c994db50090dabdec1ee53974d2b38b7c8c2520817671697dd709f7255",
+    "started_at": "2026-09-07T19:48:32.072187+00:00",
+    "finished_at": "2026-09-07T19:48:47.100897+00:00",
+    "status": "passed",
+    "created": 3,
+    "all_three_fixtures_pass": [
+      "direct_content_exact",
+      "initial_metadata",
+      "mismatched_metadata_excluded",
+      "repeat_reconciliation",
+      "runtime_metadata_filter",
+      "search"
+    ],
+    "pagination_counts": [
+      2,
+      1
+    ],
+    "prior_fixtures_unchanged": true,
+    "search_subject_isolation": true,
+    "cleanup": [
+      {
+        "subject_ref": "f42cd8e3bf96b483",
+        "terminal_count": 0,
+        "verified_zero": true
+      },
+      {
+        "subject_ref": "98ea3912c5a84bd1",
+        "terminal_count": 0,
+        "verified_zero": true
+      }
+    ],
+    "full_product_canary": false
+  },
+  "verification": {
+    "backend_passed": 6045,
+    "backend_skipped": 161,
+    "backend_seconds": 440.69,
+    "frontend_passed": 1972,
+    "frontend_skipped": 2,
+    "frontend_seconds": 168.08,
+    "voice_passed": 616,
+    "voice_seconds": 9.65,
+    "focused_passed": 48,
+    "typescript": "passed",
+    "ruff": "passed",
+    "diff": "passed"
+  },
+  "limitations": [
+    "Automatic retrieval-owned fields are cleared on entry; per-model revocation and retained history/tool/summary/enriched-description fencing remain unproven",
+    "Voice memory is explicitly disabled for the governed cohort, not a working retained-context revocation protocol",
+    "Serving-process metrics coverage remains partial",
+    "Full mixed-state and fault matrix incomplete",
+    "Old unrelated pending candidates/history preserved",
+    "Probe cleanup does not certify all Section9.8 surfaces"
+  ],
+  "clean_complete_canaries": 0,
+  "terminal_zero_certified": false,
+  "promote_mem00": false,
+  "prior_voice_boundary_evidence": {
+    "file": "repair-deployment-2e8536b.json",
+    "same_guard_code": true,
+    "not_a_fresh_full_consumer_canary": true
+  },
+  "carried_entry_repair": {
+    "attempt": "MEM00-EI-125",
+    "observed_at": "2026-09-07T19:49:03.317718+00:00",
+    "scope": "deployed LangGraph entry functions; no model or actual serving HTTP invocation",
+    "consumers": [
+      "text",
+      "builder"
+    ],
+    "both_update_returned": true,
+    "both_old_id_content_block_retained": false,
+    "synthetic_state_persisted": false,
+    "full_product_canary": false
+  },
+  "canonical_trace_join": {
+    "environment": "production",
+    "actual_model_invocation": false,
+    "full_product_canary": false,
+    "joined": [
+      {
+        "retrieval_ref": "hmac-sha256:retrieval:dbe0e032a5730c7dac402724aa3e21ecdcc9c1165c6b08052eba0393a63204f7",
+        "caller": "text_automatic_context",
+        "provider_status": "ok",
+        "provider_hit_count": 0,
+        "catalog_generation": 4,
+        "revocation_epoch": 3,
+        "authorized_count": 0,
+        "created_at": "2026-09-07T19:49:02.076487+00:00",
+        "run_ref": "hmac-sha256:langsmith-run:66d0b8997fa8e6342eb9106b0cdbdc23add897bffc1873e833ef411d7600d31d",
+        "trace_ref": "hmac-sha256:trace:793facb106907da492391a4de6d05b0192d4755c63e8228544050c2930bca774",
+        "trace_completed": true,
+        "trace_inputs_empty": true
+      },
+      {
+        "retrieval_ref": "hmac-sha256:retrieval:bcdfad2046b0ed3ac7d8bb959350aab56e9af032ce673267b44835c9a240b32c",
+        "caller": "builder_context",
+        "provider_status": "ok",
+        "provider_hit_count": 0,
+        "catalog_generation": 4,
+        "revocation_epoch": 3,
+        "authorized_count": 0,
+        "created_at": "2026-09-07T19:49:02.995422+00:00",
+        "run_ref": "hmac-sha256:langsmith-run:dbc0c6323a1f904a1fe9cb6b0f1137a2907d0e2f71bcba600eb1071c60775406",
+        "trace_ref": "hmac-sha256:trace:e7fb0ee234fd779100ec471c3eaba0d7fc012a0f80029a92860167bb8d52c8bf",
+        "trace_completed": true,
+        "trace_inputs_empty": true
+      }
+    ]
+  }
+}

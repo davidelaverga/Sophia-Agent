@@ -152,7 +152,7 @@ def build_builder_middleware_chain(
         # nothing. The middleware renders a different prompt block in that
         # case (acknowledges the uploads, instructs the model NOT to try
         # ``view_image``).
-        BuilderTaskMiddleware(vision_enabled=vision_enabled),
+        BuilderTaskMiddleware(vision_enabled=vision_enabled, user_id=user_id),
         BuilderResearchPolicyMiddleware(),
         # Phase 4G — emits ``custom``-mode phase events
         # (``starting`` / ``researching`` / ``drafting`` /

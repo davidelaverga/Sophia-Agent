@@ -8,6 +8,10 @@ DeerFlow is a LangGraph-based AI super agent with sandbox execution, persistent 
 
 ### MEM00 certification diagnostics
 
+The staged retained-context transition planner is decision-only: unrelated revocations can refresh an epoch without reconnecting, while intersecting or unprovable deltas require rotation. Its bounded owner-filtered event reader requires an explicit terminal page and stable clocks; strict manifests contain no text. It is not wired into model execution yet and does not certify long-lived-context safety.
+
+MEM00 Builder handoffs exclude unversioned inherited memory snippets from the outbound enriched brief and delegation. The receiver binds the policy to its server-selected owner, clears inherited snippets and rebuilds its own old briefing. Configuration uncertainty fails closed. This containment does not scrub earlier enriched HumanMessages, tool results or summaries, and is not a complete retained-context protocol.
+
 Governed text and Builder automatic retrieval replace their previous explicit memory state on each agent entry. Empty, failed, skipped and synchronous-no-retrieval paths clear prior injected snippets and memory prompt blocks. Fresh results do not merge with old admissions. This entry cleanup does not yet certify per-model revocation, retained tool results, summaries or enriched Builder briefs.
 
 For the governed MEM00 cohort, personal-memory voice setup, dynamic retrieval, direct fallback and retrieval-tool results are explicitly unavailable until the voice transport has a next-input revocation fence. Current conversation remains usable. Retrieval-time approval is not permission to retain memory across later turns. Canonical review/Pool and governed text retrieval are unaffected.

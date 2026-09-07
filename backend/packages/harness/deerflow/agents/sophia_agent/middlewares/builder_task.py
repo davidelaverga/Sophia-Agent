@@ -1118,15 +1118,30 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
 
     state_schema = BuilderTaskState
 
-    def __init__(self, *, vision_enabled: bool = False) -> None:
+    def __init__(self, *, vision_enabled: bool = False, user_id: str | None = None) -> None:
         super().__init__()
         self._vision_enabled = vision_enabled
+        self._memory_owner_id = user_id
 
     @override
     def before_agent(self, state: BuilderTaskState, runtime: Runtime) -> dict | None:
         _t0 = time.perf_counter()
 
         delegation_context: dict[str, Any] = state.get("delegation_context") or {}
+        from deerflow.sophia.memory_governance.context_state import allows_unversioned_builder_handoff
+
+        exclude_inherited_memory = not allows_unversioned_builder_handoff(self._memory_owner_id)
+        handoff_updates: dict[str, Any] = {}
+        if exclude_inherited_memory:
+            # Rebuild the briefing owned by this middleware. It can contain
+            # embedded memory blocks, so standalone retrieval cleanup alone
+            # cannot make a carried briefing safe. This does not scrub model
+            # history, descriptions or summaries derived on earlier turns.
+            handoff_updates["system_prompt_blocks"] = [block for block in (state.get("system_prompt_blocks") or []) if not str(block).lstrip().startswith("<builder_briefing>")]
+            if delegation_context:
+                delegation_context = {**delegation_context, "relevant_memories": []}
+                handoff_updates["delegation_context"] = delegation_context
+            state = {**state, **handoff_updates}
         runtime_config = getattr(runtime, "config", None)
         synthetic_context = normalize_synthetic_builder_context(
             state,
@@ -1138,22 +1153,19 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             log_middleware("BuilderTask", "no delegation_context", _t0)
             return (
                 {
+                    **handoff_updates,
                     "synthetic_test": synthetic_context,
                     "injected_memories": [],
                     "injected_memory_contents": [],
                 }
                 if synthetic_context is not None
-                else None
+                else handoff_updates or None
             )
 
         # ``or {}`` handles the Builder-as-Main synthesised path where
         # ``companion_artifact`` is explicitly None (no companion to source it
         # from). Spec Appendix B shows the canonical synthesised shape.
-        companion_artifact: dict[str, Any] = (
-            {}
-            if synthetic_context is not None
-            else delegation_context.get("companion_artifact") or {}
-        )
+        companion_artifact: dict[str, Any] = {} if synthetic_context is not None else delegation_context.get("companion_artifact") or {}
         task_type: str = delegation_context.get("task_type", "unknown")
         task_brief = str(delegation_context.get("task") or delegation_context.get("task_brief") or "")
         relevant_memories: list[str] = (
@@ -1166,16 +1178,8 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
                 limit=5,
             )
         )
-        active_ritual: str | None = (
-            None
-            if synthetic_context is not None
-            else delegation_context.get("active_ritual")
-        )
-        ritual_phase: str | None = (
-            None
-            if synthetic_context is not None
-            else delegation_context.get("ritual_phase")
-        )
+        active_ritual: str | None = None if synthetic_context is not None else delegation_context.get("active_ritual")
+        ritual_phase: str | None = None if synthetic_context is not None else delegation_context.get("ritual_phase")
         state_research_policy = state.get("allow_web_research")
         delegated_research_policy = delegation_context.get("allow_web_research")
         if isinstance(state_research_policy, bool):
@@ -1414,9 +1418,7 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             sections.append("<builder_target_workflows>\n" + "\n\n".join(workflow_sections) + "\n</builder_target_workflows>")
 
         pptx_library_guidance = (
-            "For PPTX, submit creative_plan, deck_stylesheet, slide html_body, and exactly two repair_anchor_ids per "
-            "slide through prepare_deck_build; NEVER write custom python-pptx/pptxgenjs scripts or lower-level "
-            "compiler files yourself."
+            "For PPTX, submit creative_plan, deck_stylesheet, slide html_body, and exactly two repair_anchor_ids per slide through prepare_deck_build; NEVER write custom python-pptx/pptxgenjs scripts or lower-level compiler files yourself."
             if deck_service_enabled
             else "For PPTX, this is an explicit non-production legacy/debug route; use the exposed ppt-generation workflow tools prepare_pptx_image_manifest and build_deck_from_slides; NEVER write custom python-pptx/pptxgenjs scripts."
         )
@@ -1633,11 +1635,7 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             # ordinary invocation. Synthetic execution strips only the two
             # explicitly memory-authored block shapes and leaves all product
             # task guidance unchanged.
-            blocks = [
-                block
-                for block in blocks
-                if not str(block).lstrip().startswith(("<memory>", "<memories>"))
-            ]
+            blocks = [block for block in blocks if not str(block).lstrip().startswith(("<memory>", "<memories>"))]
         blocks.append(briefing)
 
         log_middleware(
@@ -1646,6 +1644,7 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             _t0,
         )
         return {
+            **handoff_updates,
             "system_prompt_blocks": blocks,
             **({"builder_run_id": builder_run_id} if (builder_run_id := _runtime_builder_run_id(runtime)) else {}),
             **(

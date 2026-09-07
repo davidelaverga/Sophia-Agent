@@ -88,6 +88,21 @@ class _FakeThreadPaths:
 # ---------- dispatch shape ---------------------------------------------------
 
 
+def test_mem00_handoff_does_not_embed_unversioned_memory(monkeypatch):
+    from deerflow.sophia.memory_governance import flags
+
+    monkeypatch.setattr(flags, "memory_feature_flags_for_owner", lambda owner: SimpleNamespace(canonical_pool_read=owner == "alice"))
+    module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
+    fake_client, captured = _make_fake_sdk_client()
+    monkeypatch.setattr("langgraph_sdk.get_client", lambda url=None: fake_client)
+    runtime = _make_runtime({"user_id": "spoofed", "injected_memory_contents": ["Prefers concise slide headlines MEM00 STALE"]}, user_id="alice")
+    response = asyncio.run(module.start_builder_task.coroutine(description="Create a concise slide deck", task_type="presentation", runtime=runtime))
+    assert isinstance(response, Command)
+    dispatched = captured["run_kwargs"]["input"]
+    assert dispatched["delegation_context"]["relevant_memories"] == []
+    assert "MEM00 STALE" not in repr(dispatched)
+
+
 def test_start_builder_task_dispatches_via_asgi(monkeypatch):
     module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
     fake_client, captured = _make_fake_sdk_client(thread_id="asgi-1", run_id="run-1")
