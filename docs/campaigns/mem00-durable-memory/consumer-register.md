@@ -7,11 +7,11 @@ The canonical product database is the only approval authority. Mem0 is a desired
 | Text automatic context | `text_automatic_context` | canonical active records only; zero on provider/database uncertainty |
 | Explicit text retrieval tool | `text_retrieval_tool` | provider IDs/scores only, then canonical authorization/text |
 | Builder context | `builder_context` | same governed facade; no preview/raw-provider bypass |
-| Voice setup context | `voice_setup` | generation-bound admission; zero on stale/unknown governance |
-| Voice direct fallback | `voice_direct_fallback` | governed facade only; no legacy fallback |
-| Voice dynamic retrieval | `voice_dynamic_retrieval` | governed facade only; caller-attributed receipt |
+| Voice setup context | `voice_setup` | staged EI122 zero-memory containment until next-input revocation barrier; deployed proof pending |
+| Voice direct fallback | `voice_direct_fallback` | staged EI122 zero-memory containment; no legacy fallback; deployed proof pending |
+| Voice dynamic retrieval | `voice_dynamic_retrieval` | staged EI122 typed unavailable with caller-attributed denial; deployed proof pending |
 | Voice preferred name | `voice_preferred_name` | identity-derived memory disabled under MEM00; no identity claim from memory |
-| Voice retrieval tool | `voice_retrieval_tool` | canonical authorization/text only |
+| Voice retrieval tool | `voice_retrieval_tool` | staged EI122 typed unavailable until retained context can be fenced; deployed proof pending |
 | Reflections | `reflection` | governed facade and current generation |
 | Journal/Pool | canonical API | active canonical database records; provider health is secondary |
 | Recap/review inbox | durable candidate ledger | the same candidate IDs and terminal extraction state |
@@ -23,7 +23,7 @@ The canonical product database is the only approval authority. Mem0 is a desired
 
 ## Raw provider boundary
 
-`deerflow.sophia.memory_governance.adapter` is the sole production SDK/network boundary. `deerflow.sophia.mem0_client` is a compatibility facade that delegates to the governed reader/adapter. The architecture test rejects any new direct `MemoryClient`, `api.mem0.ai`, or raw memory endpoint use outside the boundary.
+`deerflow.sophia.memory_governance.mem0_projection_adapter` is the sole production SDK/network boundary. `deerflow.sophia.mem0_client` is a compatibility facade that delegates to the governed reader/adapter or explicitly denies unfenced voice retention. The architecture test rejects any new direct `MemoryClient`, `api.mem0.ai`, or raw memory endpoint use outside the boundary.
 
 ## Denial matrix
 

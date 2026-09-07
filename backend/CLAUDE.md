@@ -995,6 +995,10 @@ PYTHONPATH=. uv run pytest \
 
 ## Code Style
 
+Voice component verification uses its independent Python3.12 environment, not backend uv: from repository root, run `PYTHONPATH=.:backend/packages/harness voice/.venv/bin/python -m pytest voice/tests/ -q`. First assert that interpreter is3.12 and `vision_agents`/`pytest` are importable. Backend tests continue to use the backend uv workspace. Do not install voice dependencies into the backend to repair a test-command mismatch.
+
+MEM00 voice retention containment: the shared memory facade denies the four voice caller labels for canonical-governed owners before constructing a provider/reader or touching the legacy cache. This reduced-personalization barrier is not a long-lived-context invalidation protocol. Gateway setup and the shared retrieval contract preserve unavailable receipts even when transport succeeds. Keep other owners and text/Builder callers unchanged; prove next-input revocation safety before removing the barrier.
+
 MEM00 observability resolves environment from the pinned `SOPHIA_MEMORY_PROVIDER_ENVIRONMENT` before generic environment aliases. The certification-only Gateway metrics route runs synchronous database reads in FastAPI's worker pool, never in the async event loop. `memory_governance/metrics.py` selects only fixed structural columns and uses owner-bound, bounded keyset scans; short pages do not imply exhaustion. Its unavailable/partial coverage states must survive the frontend proxy and recap export. A fresh shell's process counters are not serving-process evidence, and no metrics snapshot independently certifies promotion or cleanup.
 
 - Uses `ruff` for linting and formatting

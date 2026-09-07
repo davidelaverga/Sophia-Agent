@@ -302,6 +302,38 @@ def search_memories_with_diagnostics(
     )
 
     flags = memory_feature_flags_for_owner(user_id)
+    if flags.canonical_pool_read and caller in {
+        "voice_setup",
+        "voice_dynamic_retrieval",
+        "voice_direct_fallback",
+        "voice_retrieval_tool",
+    }:
+        # A retrieval-time authorization cannot fence later turns in a retained
+        # provider context. Until that transport has a next-input revocation
+        # barrier, keep this cohort's voice memory explicitly unavailable.
+        # Do not enter the provider, governed reader, or legacy plaintext cache.
+        from deerflow.sophia.memory_governance.observability import emit_memory_event
+        from deerflow.sophia.memory_governance.refs import keyed_ref
+
+        emit_memory_event(
+            "memory.retrieval.denied",
+            service=os.getenv("RENDER_SERVICE_NAME") or "sophia-langgraph",
+            outcome="zero_memory",
+            fault_owner_id=user_id,
+            owner_ref=keyed_ref("owner", user_id),
+            query_ref=keyed_ref("query", query),
+            caller=caller,
+            provider_status="not_called",
+            safe_reason_code="long_lived_memory_context_disabled",
+        )
+        return {
+            "memories": [],
+            "provider_status": "unavailable",
+            "provider_reason": "long_lived_memory_context_disabled",
+            "provider_transport": "none",
+            "cache_status": "disabled_governed",
+            "latency_ms": 0,
+        }
     if flags.canonical_pool_read and not flags.governed_runtime_read:
         # Recall shutdown never hands ownership back to the legacy provider
         # or its plaintext cache. Canonical review remains independently live.

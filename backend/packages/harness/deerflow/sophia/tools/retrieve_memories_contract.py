@@ -293,6 +293,25 @@ def _retrieve_memories_core(
             include_guidance=include_guidance,
         )
 
+    if search_diagnostics.get("provider_status") in {"unavailable", "disabled", "not_called", "error"}:
+        # A successful transport with a fail-closed recall receipt is not an
+        # authoritative empty search. Drop even malformed accompanying rows.
+        return _status_response(
+            ok=False,
+            status="unavailable",
+            query=sanitized_query,
+            limit=safe_limit,
+            message=_UNAVAILABLE_MESSAGE,
+            latency_ms=_elapsed_ms(started_at),
+            query_was_truncated=query_was_truncated,
+            provider_status="unavailable",
+            provider_reason=str(search_diagnostics.get("provider_reason") or "governed_recall_unavailable"),
+            cache_status=str(search_diagnostics.get("cache_status") or "unknown"),
+            provider_transport=_optional_string(search_diagnostics.get("provider_transport")),
+            categories=internal_categories,
+            include_guidance=include_guidance,
+        )
+
     memories = _normalize_memory_results(
         raw_results,
         limit=safe_limit,

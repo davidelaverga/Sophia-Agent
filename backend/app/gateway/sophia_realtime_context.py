@@ -452,6 +452,8 @@ def _search_realtime_memories(
         logger.warning("realtime.context mem0 search failed", exc_info=True)
         return [], "error", "provider_exception"
 
+    if isinstance(search_result, Mapping) and search_result.get("provider_status") in {"unavailable", "disabled", "not_called", "error"}:
+        return [], "unavailable", _safe_reason(search_result.get("provider_reason")) or "governed_recall_unavailable"
     raw_memories = search_result.get("memories", []) if isinstance(search_result, Mapping) else []
     if not isinstance(raw_memories, list):
         raw_memories = []

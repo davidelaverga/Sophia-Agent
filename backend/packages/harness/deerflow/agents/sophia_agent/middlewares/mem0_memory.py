@@ -308,9 +308,12 @@ class Mem0MemoryMiddleware(AgentMiddleware[Mem0MemoryState]):
         from deerflow.sophia.memory_governance.flags import memory_feature_flags_for_owner
 
         flags = memory_feature_flags_for_owner(self._user_id)
-        if flags.canonical_pool_read and not flags.governed_runtime_read:
+        retained_voice_context = (state.get("platform") or (getattr(runtime, "context", None) or {}).get("platform")) in ("voice", "ios_voice")
+        if flags.canonical_pool_read and (not flags.governed_runtime_read or retained_voice_context):
             # Clear carried memory fields even on crisis/empty-query exits;
             # keeping canonical ownership must not preserve a warm prompt.
+            # Voice has no next-input revocation barrier, so its memory remains
+            # empty even while fresh text retrieval is enabled for the cohort.
             return {
                 "injected_memories": [],
                 "injected_memory_contents": [],

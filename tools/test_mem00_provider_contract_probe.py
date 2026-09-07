@@ -104,6 +104,14 @@ class ProbeTests(unittest.TestCase):
             self.run_probe()
         self.assertEqual(self.adapter.rows, {})
 
+    def test_langgraph_credential_cannot_run_gateway_pinned_probe(self):
+        self.pin["credential_fingerprint"] = "sha256:109d881133f29ed5"
+        with patch.object(self.adapter, "_get_client", side_effect=AssertionError("provider_client_must_not_be_created")) as get_client:
+            with self.assertRaises(AssertionError):
+                self.run_probe()
+            get_client.assert_not_called()
+        self.assertEqual(self.adapter.rows, {})
+
     def test_direct_content_change_fails_and_cleans(self):
         self.adapter.change_text = True
         result = self.run_probe()
