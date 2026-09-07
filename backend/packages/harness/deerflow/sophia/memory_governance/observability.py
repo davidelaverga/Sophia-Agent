@@ -10,6 +10,7 @@ from collections import Counter
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any
+from uuid import uuid4
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +29,16 @@ ZERO_TOLERANCE_COUNTERS = frozenset(
 _COUNTERS: Counter[str] = Counter()
 _LOCK = threading.Lock()
 _LAST_EXPORT_STATUS = "not_attempted"
+_PROCESS_REF = "process:" + str(uuid4())
+_PROCESS_STARTED_AT = datetime.now(UTC).isoformat()
+_EVENT_COUNTS: Counter[str] = Counter()
+_EXPORT_COUNTS: Counter[str] = Counter()
+_METRIC_EVENT_NAMES = frozenset({
+    "memory.session.finalized", "memory.session.recap_cleanup",
+    "memory.extraction.completed", "memory.extraction.replacement_queued",
+    "memory.projection.job", "memory.projection.database_completion_unavailable",
+    "memory.retrieval.denied", "memory.prompt.admission",
+})
 _DENIED_KEYS = frozenset(
     {
         "content",
@@ -148,6 +159,14 @@ def _deployment_sha() -> str:
     return "unknown"
 
 
+def _environment() -> str:
+    for name in ("SOPHIA_MEMORY_PROVIDER_ENVIRONMENT", "SOPHIA_ENV", "ENVIRONMENT"):
+        value = (os.getenv(name) or "").strip()
+        if value:
+            return value
+    return "unknown"
+
+
 def _consume_langsmith_fault(owner_id: str | None) -> bool:
     if not owner_id:
         return False
@@ -170,6 +189,7 @@ def emit_memory_event(
     fault_owner_id: str | None = None,
     **fields: object,
 ) -> str:
+    global _LAST_EXPORT_STATUS
     try:
         _validate_structural_payload(fields)
     except ValueError:
@@ -179,7 +199,7 @@ def emit_memory_event(
         "schema": EVENT_SCHEMA,
         "event_name": event_name,
         "occurred_at": datetime.now(UTC).isoformat(),
-        "environment": (os.getenv("SOPHIA_ENV") or os.getenv("ENVIRONMENT") or "unknown"),
+        "environment": _environment(),
         "service": service,
         "deployment_sha": _deployment_sha(),
         "memory_contract_epoch": int(os.getenv("SOPHIA_MEMORY_SUPPORTED_CONTRACT_EPOCH", "1")),
@@ -187,10 +207,17 @@ def emit_memory_event(
         **fields,
     }
     logger.info("memory_event %s", json.dumps(envelope, sort_keys=True, separators=(",", ":")))
-    return _export_langsmith(
+    export_status = _export_langsmith(
         envelope,
         force_unavailable=_consume_langsmith_fault(fault_owner_id),
     )
+    # Fixed dimensions only: never retain owner/query refs or arbitrary payload
+    # strings in metrics. This measures this serving process, not a new shell.
+    with _LOCK:
+        _LAST_EXPORT_STATUS = export_status if export_status in {"exported", "unavailable", "disabled"} else "unknown"
+        _EVENT_COUNTS[event_name if event_name in _METRIC_EVENT_NAMES else "other"] += 1
+        _EXPORT_COUNTS[_LAST_EXPORT_STATUS] += 1
+    return export_status
 
 
 def increment_counter(name: str, amount: int = 1) -> None:
@@ -208,10 +235,43 @@ def counter_snapshot() -> Mapping[str, int]:
     return result
 
 
+def runtime_metric_snapshot() -> dict[str, object]:
+    """Live process diagnostics, explicitly not an aggregate release certificate.
+
+    Durable lifecycle gauges and cross-service coverage must be joined separately.
+    A process restart creates a new observation window and process reference.
+    """
+    with _LOCK:
+        events = dict(_EVENT_COUNTS)
+        exports = dict(_EXPORT_COUNTS)
+        zeros = {name: _COUNTERS.get(name, 0) for name in sorted(ZERO_TOLERANCE_COUNTERS)}
+    return {
+        "schema": "mem00.runtime-metrics.v1",
+        "scope": "serving_process_since_start",
+        "process_ref": _PROCESS_REF,
+        "started_at": _PROCESS_STARTED_AT,
+        "observed_at": datetime.now(UTC).isoformat(),
+        "deployment_sha": _deployment_sha(),
+        "environment": _environment(),
+        "memory_contract_epoch": int(os.getenv("SOPHIA_MEMORY_SUPPORTED_CONTRACT_EPOCH", "1")),
+        "event_count": sum(events.values()),
+        "events_by_name": events,
+        "exports_by_status": exports,
+        "last_export_status": langsmith_export_status(),
+        "zero_tolerance_counters": zeros,
+        "security_status": "SECURITY_HOLD" if any(zeros.values()) else "no_violation_observed",
+        "coverage": "partial",
+        "release_certified": False,
+        "missing_coverage": ["durable_lifecycle_gauges", "latency_histograms", "cross_service_observation_windows", "complete_consumer_fault_matrix"],
+    }
+
+
 def reset_counters_for_test() -> None:
     global _LAST_EXPORT_STATUS
     with _LOCK:
         _COUNTERS.clear()
+        _EVENT_COUNTS.clear()
+        _EXPORT_COUNTS.clear()
     _LAST_EXPORT_STATUS = "not_attempted"
 
 

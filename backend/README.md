@@ -6,6 +6,12 @@ DeerFlow is a LangGraph-based AI super agent with sandbox execution, persistent 
 
 ## Architecture
 
+### MEM00 certification diagnostics
+
+The authenticated certification owner can read `GET /api/sophia/{user_id}/memory-observability` (proxied by `/api/memory/observability` in the web app). Recap debug exports include a redacted subset. The endpoint requires the existing canonical-read flag and excludes the Voice Lab principal. It makes no provider calls or memory mutations.
+
+Process counters identify the serving process and its observation window. Durable gauges scan owner-filtered structural rows with bounded keyset pagination. A failed or incomplete scan returns unavailable, never fabricated zeroes. These non-transactional observations are partial evidence, not release or terminal-cleanup certificates.
+
 ```
                         ┌──────────────────────────────────────┐
                         │          Nginx (Port 2026)           │

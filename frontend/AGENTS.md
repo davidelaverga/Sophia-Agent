@@ -78,6 +78,8 @@ src/
 
 ### Interaction Ownership
 
+- Recap debug export reads `/api/memory/observability` on demand. The proxy binds the ordinary authenticated owner; Gateway additionally restricts it to the memory-certification principal. `memory-observability.ts` validates and strips unknown fields before portable export. Unavailable metrics never block product memory actions or masquerade as a clean certification.
+
 - `src/app/workspace/chats/[thread_id]/page.tsx` owns composer busy-state wiring.
 - `src/core/threads/hooks.ts` owns pre-submit upload state and thread submission.
 - `src/hooks/usePoseStream.ts` is a passive store selector; global WebSocket lifecycle stays in `App.tsx`.

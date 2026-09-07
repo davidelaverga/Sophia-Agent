@@ -1,5 +1,6 @@
 import type { SessionHistoryEntry } from '../stores/session-history-store';
 
+import { sanitizeMemoryObservation, type MemoryObservation } from './memory-observability';
 import type { MemoryDecisionState, RecapArtifactsV1 } from './recap-types';
 import type { SophiaCaptureSnapshot } from './session-capture';
 import type {
@@ -186,6 +187,7 @@ export type LastSessionTelemetrySnapshot = {
 };
 
 export type RecapTelemetryReport = {
+  memoryGovernance: MemoryObservation;
   reportType: 'recap-telemetry-report';
   version: 1;
   source: 'recap-ui';
@@ -262,6 +264,7 @@ export type RecapTelemetryReport = {
 };
 
 type BuildRecapTelemetryReportParams = {
+  memoryObservation?: MemoryObservation;
   sessionId: string;
   route: string;
   pageStatus: string;
@@ -468,6 +471,7 @@ export function applyRecapRequestObservation(
 }
 
 export function buildRecapTelemetryReport({
+  memoryObservation,
   artifacts,
   decisions,
   exportedAt = new Date().toISOString(),
@@ -500,6 +504,7 @@ export function buildRecapTelemetryReport({
   ));
 
   return {
+    memoryGovernance: sanitizeMemoryObservation(memoryObservation?.available ? memoryObservation.snapshot : null),
     reportType: 'recap-telemetry-report',
     version: RECAP_TELEMETRY_REPORT_VERSION,
     source: 'recap-ui',

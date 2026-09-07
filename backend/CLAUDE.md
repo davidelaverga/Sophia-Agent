@@ -995,6 +995,8 @@ PYTHONPATH=. uv run pytest \
 
 ## Code Style
 
+MEM00 observability resolves environment from the pinned `SOPHIA_MEMORY_PROVIDER_ENVIRONMENT` before generic environment aliases. The certification-only Gateway metrics route runs synchronous database reads in FastAPI's worker pool, never in the async event loop. `memory_governance/metrics.py` selects only fixed structural columns and uses owner-bound, bounded keyset scans; short pages do not imply exhaustion. Its unavailable/partial coverage states must survive the frontend proxy and recap export. A fresh shell's process counters are not serving-process evidence, and no metrics snapshot independently certifies promotion or cleanup.
+
 - Uses `ruff` for linting and formatting
 - Line length: 240 characters
 - Python 3.12+ with type hints

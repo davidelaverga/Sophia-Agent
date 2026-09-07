@@ -23,6 +23,7 @@ import {
 } from '../../components/recap';
 import { BuilderDeliverableCard } from '../../components/session/ArtifactsPanel';
 import { haptic } from '../../hooks/useHaptics';
+import { readMemoryObservation } from '../../lib/memory-observability';
 import { buildRecapTelemetryReport } from '../../lib/recap-telemetry-report';
 import type { MemoryDecision } from '../../lib/recap-types';
 import { useRecapStore } from '../../stores/recap-store';
@@ -111,10 +112,12 @@ export default function RecapPage() {
     reload();
   }, [reload]);
 
-  const handleExportDebug = useCallback(() => {
+  const handleExportDebug = useCallback(async () => {
     try {
+      const memoryObservation = await readMemoryObservation();
       const exportedAt = new Date().toISOString();
       const report = buildRecapTelemetryReport({
+        memoryObservation,
         sessionId,
         route: typeof window === 'undefined' ? `/recap/${sessionId}` : window.location.pathname,
         pageStatus: status,

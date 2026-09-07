@@ -13,6 +13,7 @@ from typing import Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from app.gateway.auth import require_authorized_user_scope
@@ -2469,6 +2470,32 @@ async def reflect(user_id: str, body: ReflectRequest) -> ReflectResponse:
 # ---------------------------------------------------------------------------
 # 4. Journal
 # ---------------------------------------------------------------------------
+
+
+@router.get("/{user_id}/memory-observability", summary="Read the serving process MEM00 observation window")
+def memory_observability(user_id: str) -> JSONResponse:
+    from deerflow.sophia.memory_governance.identity import MemoryIdentityConfigurationError, assert_not_voice_lab_principal, memory_certification_principal
+    from deerflow.sophia.memory_governance.metrics import durable_metric_snapshot
+    from deerflow.sophia.memory_governance.observability import runtime_metric_snapshot
+    from deerflow.sophia.memory_governance.store import configured_memory_store
+
+    _validate_user(user_id)
+    # The router's ordinary authenticated-owner dependency runs first. This
+    # additionally limits process-wide structural diagnostics to certification.
+    try:
+        assert_not_voice_lab_principal(user_id)
+        if user_id != memory_certification_principal():
+            raise HTTPException(status_code=403, detail="Memory diagnostics scope denied")
+    except MemoryIdentityConfigurationError:
+        raise HTTPException(status_code=403, detail="Memory diagnostics scope denied") from None
+    if not _memory_flags(user_id).canonical_pool_read:
+        raise HTTPException(status_code=404, detail="Memory diagnostics unavailable")
+    snapshot = runtime_metric_snapshot()
+    try:
+        snapshot["durable"] = durable_metric_snapshot(configured_memory_store(), user_id)
+    except Exception:  # noqa: BLE001 - absent diagnostics are not a zero measurement.
+        snapshot["durable"] = {"available": False, "safe_reason_code": "durable_metrics_unavailable"}
+    return JSONResponse(snapshot, headers={"Cache-Control": "no-store"})
 
 
 @router.get(
