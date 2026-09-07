@@ -1974,7 +1974,7 @@ function CompletedState({
               <p className="mt-1.5 text-[11px] tracking-[0.06em]" style={{ color: 'var(--cosmic-text-whisper)' }}>
                 {approvedCount === 0
                   ? 'Nothing carried forward this time'
-                  : `${approvedCount} ${approvedCount === 1 ? 'memory' : 'memories'} in the pool`}
+                  : `${approvedCount} ${approvedCount === 1 ? 'memory' : 'memories'} selected — complete review to save`}
               </p>
             </div>
           </div>

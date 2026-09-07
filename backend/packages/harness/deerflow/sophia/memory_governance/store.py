@@ -434,10 +434,15 @@ class SupabaseMemoryGovernanceStore:
         result: list[CanonicalMemory] = []
         for row in base_rows:
             key = (str(row.get("memory_id")), int(row.get("current_content_revision") or 0))
-            version = version_map.get(key, {})
+            version = version_map.get(key)
+            if version is None:
+                raise MemoryGovernanceUnavailable("canonical_version_unavailable")
+            # Database join keys are not canonical model fields. Only the exact
+            # current version can supply content; never fall back to an older edit.
+            content = {field: version.get(field) for field in ("canonical_content", "content_ref", "category", "scope")}
             states = binding_states.get(key[0], set())
             projection_state = "active" if "eligible" in states else ("stale" if states else "absent")
-            result.append(CanonicalMemory.model_validate({**row, **version, "projection_state": projection_state}))
+            result.append(CanonicalMemory.model_validate({**row, **content, "projection_state": projection_state}))
         return tuple(result)
 
     def authorize_provider_hits(

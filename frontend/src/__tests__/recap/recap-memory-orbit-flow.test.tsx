@@ -82,7 +82,8 @@ describe('RecapMemoryOrbit demo flow', () => {
     });
 
     expect(screen.getByText('All memories reviewed')).toBeInTheDocument();
-    expect(screen.getByText('1 memory in the pool')).toBeInTheDocument();
+    expect(screen.getByText('1 memory selected — complete review to save')).toBeInTheDocument();
+    expect(screen.queryByText(/in the pool/)).not.toBeInTheDocument();
   });
 
   it('summarizes only approved and edited memories after review', () => {
@@ -103,7 +104,8 @@ describe('RecapMemoryOrbit demo flow', () => {
     );
 
     expect(screen.getByText('All memories reviewed')).toBeInTheDocument();
-    expect(screen.getByText('2 memories in the pool')).toBeInTheDocument();
+    expect(screen.getByText('2 memories selected — complete review to save')).toBeInTheDocument();
+    expect(screen.queryByText(/in the pool/)).not.toBeInTheDocument();
     expect(screen.queryByText('I prefer short resets between games.')).not.toBeInTheDocument();
     expect(screen.queryByText('I recover faster when I slow down and breathe.')).not.toBeInTheDocument();
     expect(screen.queryByText('Temporary draft memory to remove.')).not.toBeInTheDocument();
