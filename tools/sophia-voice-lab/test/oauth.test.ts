@@ -439,7 +439,9 @@ describe("OAuth 2.1 authorization server", () => {
   it("uses a CSRF-safe POST consent form and never returns the operator secret", async () => {
     const page = await server.handleAuthorizationRequest(authorizationParams());
     expect(page.status).toBe(200);
-    expect(page.headers["content-security-policy"]).toContain("form-action 'self'");
+    // Browsers can apply form-action to the 303 callback as well as the POST.
+    // Permit only the already-pinned callback, never an arbitrary client URL.
+    expect(page.headers["content-security-policy"]).toBe(`default-src 'none'; form-action 'self' ${CHATGPT_STABLE_REDIRECT_URI}; base-uri 'none'; frame-ancestors 'none'`);
     expect(page.headers["set-cookie"]).toContain("Secure; HttpOnly; SameSite=Lax");
     expect(page.body).toContain('method="post"');
     expect(page.body).not.toContain(CONSENT_SECRET);

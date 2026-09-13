@@ -625,7 +625,9 @@ export class OAuthAuthorizationServer implements RequestAuthenticator, OAuthToke
         "cache-control": "no-store",
         pragma: "no-cache",
         "referrer-policy": "no-referrer",
-        "content-security-policy": "default-src 'none'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+        // form-action can also constrain the successful 303 redirect. Keep
+        // the same-origin POST and the one pinned OAuth callback, no wildcard.
+        "content-security-policy": `default-src 'none'; form-action 'self' ${CHATGPT_STABLE_REDIRECT_URI}; base-uri 'none'; frame-ancestors 'none'`,
         "set-cookie": `${csrfCookie}=${csrfToken}; Path=/; Max-Age=${this.#config.authorizationRequestTtlSeconds}; Secure; HttpOnly; SameSite=Lax`,
       },
       body: renderConsentPage(requestToken, csrfToken, scopes),
