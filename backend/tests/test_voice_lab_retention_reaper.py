@@ -9,7 +9,7 @@ import uuid
 from contextlib import asynccontextmanager, nullcontext
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -719,6 +719,85 @@ async def test_database_scan_and_complete_purge_survive_builder_discovery_outage
     assert purge_calls == [5]
     assert cycle.discovery_failed is True
     assert cycle.processing_failed == 0
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("overdue", [0, 1])
+@pytest.mark.parametrize(
+    ("scenario", "fence_patch", "revokes"),
+    [
+        ("V-F01", {}, True),
+        ("V-D02", {}, False),
+        ("V-F01", {"admission_closed": False}, False),
+        ("V-F01", {"admission_closed": "true"}, False),
+        ("V-F01", {"admission_closed": None}, False),
+        ("V-F01", {"status": "unavailable"}, False),
+        ("V-F01", {"code": "owner_evidence_missing"}, False),
+    ],
+)
+async def test_pending_reaper_revokes_only_exact_closed_non_d02_auth(
+    monkeypatch: pytest.MonkeyPatch,
+    overdue: int,
+    scenario: str,
+    fence_patch: dict[str, object],
+    revokes: bool,
+) -> None:
+    now = datetime(2026, 8, 23, 12, 0, tzinfo=UTC)
+    record = _session(now, run_id="pending-auth-reaper")
+    record.metadata["synthetic_voice_lab"]["scenario_id"] = scenario
+    if scenario == "V-D02":
+        record.metadata["synthetic_voice_lab"].update(
+            {
+                "voice_lab_run_id_sha256": "a" * 64,
+                "browser_worker_id_sha256": "b" * 64,
+                "browser_context_id_sha256": "c" * 64,
+                "browser_lease_epoch": 1,
+            }
+        )
+    sessions = _SessionStore(record)
+    fence = {
+        "status": "pending", "admission_closed": True,
+        "code": "cleanup_admission_in_flight",
+        "cleanup_admissions_overdue": overdue, **fence_patch,
+    }
+    monkeypatch.setattr(
+        voice_lab_recovery, "_close_live_cleanup_admission", lambda *_args: fence,
+    )
+    reconcile = AsyncMock(return_value={"status": "pending"})
+    monkeypatch.setattr(
+        voice_lab_recovery, "_reconcile_overdue_cleanup_admissions", reconcile,
+    )
+    auth = Mock(return_value={"status": "completed"})
+    provider = AsyncMock(side_effect=AssertionError("provider cleanup remains fenced"))
+    builder = AsyncMock(side_effect=AssertionError("Builder cleanup remains fenced"))
+    purge = Mock(side_effect=AssertionError("canonical discovery must survive"))
+    monkeypatch.setattr(voice_lab_recovery, "_recover_auth_sessions_sync", auth)
+    monkeypatch.setattr(voice_lab_recovery, "_recover_voice_provider", provider)
+    monkeypatch.setattr(voice_lab_recovery, "_recover_builder", builder)
+    monkeypatch.setattr(retention_worker, "_purge_expired_provisional_session", purge)
+    reaper = VoiceLabRetentionReaper(
+        session_store=sessions,  # type: ignore[arg-type]
+        artifact_registry=_ArtifactRegistry(),  # type: ignore[arg-type]
+        interval_seconds=5, batch_size=5,
+        finalization_scanner=lambda **_kwargs: ([], 0),
+        lease_factory=_lease, clock=lambda: now,
+    )
+
+    completed = await reaper._process(
+        retention_worker._obligation_from_session(record), now=now,
+    )
+    assert completed is False
+    assert auth.call_count == int(revokes)
+    assert reconcile.await_count == int(overdue > 0 and fence["status"] == "pending")
+    if revokes:
+        claims = auth.call_args.args[0]
+        binding = record.metadata["synthetic_voice_lab"]
+        assert claims.cleanup_obligation_id == binding["cleanup_obligation_id"]
+        assert claims.test_run_id == binding["test_run_id"]
+    provider.assert_not_awaited()
+    builder.assert_not_awaited()
+    purge.assert_not_called()
+    assert sessions.record is record
 
 
 @pytest.mark.anyio

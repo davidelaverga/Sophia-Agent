@@ -1608,6 +1608,21 @@ class VoiceLabRetentionReaper:
                     timeout=_STORE_IO_TIMEOUT_SECONDS,
                 )
         if admission_fence.get("status") not in _TERMINAL:
+            # Expired authentication can be revoked under the exact CLOSED
+            # obligation even while a browser admission awaits owner evidence.
+            # Keep the obligation pending: revocation proves neither provider
+            # settlement nor permission to purge its canonical discovery record.
+            if (
+                claims.scenario_id != "V-D02"
+                and admission_fence.get("status") == "pending"
+                and admission_fence.get("admission_closed") is True
+                and admission_fence.get("code") == "cleanup_admission_in_flight"
+            ):
+                await _lease_fenced_to_thread(
+                    recovery._recover_auth_sessions_sync,
+                    claims,
+                    timeout=_STORE_IO_TIMEOUT_SECONDS,
+                )
             return False
         if record is not None:
             # Admission reconciliation can synchronously receive the owning
