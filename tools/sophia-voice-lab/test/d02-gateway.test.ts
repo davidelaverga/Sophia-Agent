@@ -7,6 +7,7 @@ import {
   D02GatewayContinuityObservationRequestSchema,
   D02GatewayFreezeRequestSchema,
   D02GatewaySettlementRequestSchema,
+  D02GatewaySettlementReadbackRequestSchema,
   type D02GatewayContinuityObservationRequest,
 } from "../src/d02-gateway.js";
 import { canonicalRequestHash, sha256 } from "../src/security.js";
@@ -277,6 +278,34 @@ describe("product-owned D02 Gateway client", () => {
     const receipt = { ...unsigned, signature: sign(null, Buffer.from(canonicalRequestHash(unsigned), "hex"), privateKey).toString("base64url") };
     const client = new D02GatewayClient(config, async () => new Response(JSON.stringify(receipt), { status: 202 }), () => now);
     await expect(client.settle("http://gateway.test", request)).resolves.toEqual(receipt);
+    const { schema: _schema, termination_request_id, provider_session_id, test_run_id, ...lookupBinding } = request;
+    const lookup = D02GatewaySettlementReadbackRequestSchema.parse({ ...lookupBinding,
+      schema: "sophia_voice_lab_gateway_browser_worker_termination_receipt_lookup_v1",
+      termination_request_id_sha256: sha256(termination_request_id), provider_session_id_sha256: sha256(provider_session_id), test_run_id_sha256: sha256(test_run_id),
+    });
+    const lookupFetch = vi.fn<typeof fetch>(async (url, init) => {
+      expect(String(url)).toBe("http://gateway.test/internal/voice-lab/d02/browser-worker-termination-receipts");
+      expect(init?.redirect).toBe("error");
+      expect(JSON.parse(String(init?.body))).toEqual(lookup);
+      expect(String(init?.body)).not.toContain(provider_session_id);
+      const token = new Headers(init?.headers).get("X-Sophia-Voice-Lab-D02-Gateway-Capability")!;
+      const claims = JSON.parse(Buffer.from(token.split(".")[0]!, "base64url").toString());
+      expect(claims).toMatchObject({ op: "settle", request_sha256: canonicalRequestHash(lookup), termination_request_id_sha256: sha256(termination_request_id) });
+      return new Response(JSON.stringify(receipt), { status: 200 });
+    });
+    const readbackClient = new D02GatewayClient(config, lookupFetch, () => new Date(now.getTime() + 3_600_000));
+    await expect(readbackClient.readSettlement("http://gateway.test", lookup)).resolves.toEqual(receipt);
+    await expect(readbackClient.readSettlement("http://gateway.test", { ...lookup, provider_session_id } as never)).rejects.toThrow();
+    await expect(readbackClient.readSettlement("https://foreign.invalid", lookup)).rejects.toThrow();
+    expect(lookupFetch).toHaveBeenCalledTimes(1);
+    for (const key of ["provider_session_id_sha256", "browser_worker_id_sha256", "render_action_accepted_response_sha256"] as const) {
+      const different = { ...unsigned, [key]: sha256(`wrong-${key}`) };
+      const signed = { ...different, signature: sign(null, Buffer.from(canonicalRequestHash(different), "hex"), privateKey).toString("base64url") };
+      await expect(new D02GatewayClient(config, async () => new Response(JSON.stringify(signed)), () => now).readSettlement("http://gateway.test", lookup)).rejects.toMatchObject({ detail: { code: "D02_GATEWAY_RECEIPT_BINDING_MISMATCH" } });
+    }
+    const unavailable = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({ detail: { code: "voice_lab_d02_settlement_receipt_unavailable" } }), { status: 409 }));
+    await expect(new D02GatewayClient(config, unavailable, () => now).readSettlement("http://gateway.test", lookup)).rejects.toMatchObject({ detail: { code: "D02_GATEWAY_SETTLEMENT_PENDING", retryable: true } });
+    expect(unavailable).toHaveBeenCalledTimes(1);
     const delayedExactReplay = new D02GatewayClient(config, async () => new Response(JSON.stringify(receipt), { status: 202 }), () => new Date(now.getTime() + 3_600_000));
     await expect(delayedExactReplay.settle("http://gateway.test", request)).resolves.toEqual(receipt);
     const retainedUnsigned = { ...unsigned, authority_key_id: retainedKeyId };

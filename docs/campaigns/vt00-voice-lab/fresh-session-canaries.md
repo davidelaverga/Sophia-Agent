@@ -8,6 +8,10 @@ session requires the governed product, worker, and MCP gates to be open. The
 runbook therefore permits one bounded pre-P01 collection window only after every
 other execution unlock is green on the same exact immutable candidate.
 
+Under C4, this includes the twenty complete built-Sophia journeys defined in
+`complete-built-journeys.md`. Their separate collection window must close first;
+these five canaries use fresh additional runs and cannot reuse those journeys.
+
 The collection consists of exactly five sequential V-F01 runs. Each run starts
 fresh through the installed Sophia Voice Lab tools, injects one deterministic
 synthetic speech turn, waits for the canonical user and assistant observations,

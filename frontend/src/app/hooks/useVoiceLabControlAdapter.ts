@@ -69,10 +69,14 @@ function receiptFromResponseHeader(
 
 function requestControlReceipt(action: VoiceLabControlAction): Promise<VoiceLabControlReceipt | null> {
   const existing = controlRequests.get(action);
-  if (existing?.receipt && existing.receipt.expires_at > Math.floor(Date.now() / 1000)) {
-    return Promise.resolve(existing.receipt);
+  if (existing?.receipt) {
+    if (isControlReceipt(existing.receipt, action)) return Promise.resolve(existing.receipt);
+    // A resolved promise is not a renewable authorization. Expired retained
+    // receipts must go back through the server before another page can claim.
+    controlRequests.delete(action);
+  } else if (existing) {
+    return existing.promise;
   }
-  if (existing) return existing.promise;
 
   const entry: ControlRequestEntry = { promise: Promise.resolve(null), receipt: null };
   entry.promise = (async () => {
@@ -93,7 +97,7 @@ function requestControlReceipt(action: VoiceLabControlAction): Promise<VoiceLabC
     entry.receipt = receipt;
     return receipt;
   })().catch(() => null).then((receipt) => {
-    if (!receipt) controlRequests.delete(action);
+    if (!receipt && controlRequests.get(action) === entry) controlRequests.delete(action);
     return receipt;
   });
   controlRequests.set(action, entry);
@@ -101,6 +105,7 @@ function requestControlReceipt(action: VoiceLabControlAction): Promise<VoiceLabC
 }
 
 function claimControlReceipt(receipt: VoiceLabControlReceipt): boolean {
+  if (!isControlReceipt(receipt, receipt.action)) return false;
   const claim = `${receipt.test_run_id}:${receipt.action}:${receipt.control_epoch_sha256}`;
   if (claimedControlEpochs.has(claim)) return false;
   claimedControlEpochs.add(claim);
@@ -120,6 +125,13 @@ export function useVoiceLabControlAdapter(
 ): void {
   const invokedRef = useRef(false);
   const invokeExistingActionRef = useRef(invokeExistingAction);
+  const actionOwnerRef = useRef<{ active: boolean } | null>(null);
+
+  useEffect(() => {
+    const owner = { active: true };
+    actionOwnerRef.current = owner;
+    return () => { owner.active = false; };
+  }, [action]);
 
   useEffect(() => {
     invokeExistingActionRef.current = invokeExistingAction;
@@ -129,10 +141,11 @@ export function useVoiceLabControlAdapter(
     if (!enabled) return;
 
     let active = true;
+    const actionOwner = actionOwnerRef.current;
 
     void (async () => {
       const receipt = await requestControlReceipt(action);
-      if (!receipt || !active) return;
+      if (!receipt || !active || !isControlReceipt(receipt, action)) return;
       recordSophiaCaptureEvent({
         category: 'voice-lab-control',
         name: 'authorized-action',
@@ -155,12 +168,17 @@ export function useVoiceLabControlAdapter(
       });
       try {
         await invokeExistingActionRef.current();
+        // Readiness may change because the authorized action started. That is
+        // not ownership loss, but unmount/action replacement is: an obsolete
+        // callback must not publish into the replacement page's capture.
+        if (!actionOwner?.active) return;
         recordSophiaCaptureEvent({
           category: 'voice-lab-control',
           name: 'authorized-action-completed',
           payload: { action },
         });
       } catch (error) {
+        if (!actionOwner?.active) return;
         recordSophiaCaptureEvent({
           category: 'voice-lab-control',
           name: 'authorized-action-failed',

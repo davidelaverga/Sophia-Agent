@@ -6,12 +6,12 @@ import path from "node:path";
 import { canonicalRequestHash } from "./security.js";
 
 export const VOICE_LAB_SCHEMA = "sophia_voice_lab";
-export const VOICE_LAB_SCHEMA_VERSION = 3;
+export const VOICE_LAB_SCHEMA_VERSION = 4;
 // Updated only after the migration bytes are finalized. migrate.ts verifies
 // the exact bytes before it connects to Postgres, and persists this value in
 // schema_metadata for both web and worker startup attestation.
-export const VOICE_LAB_MIGRATION_SHA256 = "9396354e67e47fc304cd9af1ff2d782f3fc6ba9c953e37475efe4965b57873a6";
-export const VOICE_LAB_SCHEMA_SEAL_PATH = path.join(tmpdir(), "sophia-voice-lab-schema-v3.attestation.json");
+export const VOICE_LAB_MIGRATION_SHA256 = "9407b1e0e881e9e497bb97e711067f304b3c323a50bf2b2302293b25561d5932";
+export const VOICE_LAB_SCHEMA_SEAL_PATH = path.join(tmpdir(), "sophia-voice-lab-schema-v4.attestation.json");
 
 export const VOICE_LAB_TABLES = [
   "admission_reservations",
@@ -20,6 +20,8 @@ export const VOICE_LAB_TABLES = [
   "browser_leases",
   "evidence_manifest_revisions",
   "evidence_manifests",
+  "historical_quarantine",
+  "historical_admission_exceptions",
   "oauth_access_tokens",
   "oauth_authorization_codes",
   "oauth_authorization_requests",
@@ -28,6 +30,7 @@ export const VOICE_LAB_TABLES = [
   "oauth_refresh_tokens",
   "operations",
   "principal_provisions",
+  "recovery_controls",
   "run_events",
   "runs",
   "retention_tombstones",

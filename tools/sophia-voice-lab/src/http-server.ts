@@ -236,6 +236,29 @@ export function createHttpApp(config: VoiceLabConfig, service: VoiceLabService, 
       return res.set({ 'Cache-Control': 'no-store', Pragma: 'no-cache' }).status(status).json({ ok: false, error: status === 401 ? 'UNAUTHORIZED' : detail?.code ?? 'PRINCIPAL_PROVISION_FAILED' });
     }
   });
+  app.post("/internal/voice-lab/recovery/owner-dispatch", async (req, res) => {
+    const requestIdHash = sha256(randomUUID());
+    let callerId = "unauthenticated";
+    let argumentHash = sha256("bounded-unparsed-request");
+    try {
+      const caller = await authenticator.authenticate(req.header("authorization"));
+      callerId = caller.subject;
+      argumentHash = canonicalRequestHash(req.body ?? null);
+      const result = await service.genericOwnerDispatch(caller, req.body);
+      await ledger.recordAuthAudit({ runId: null, callerId, action: "external_attestation.generic_owner_dispatch", argumentHash, outcome: "allowed", detail: {
+        request_id_hash: requestIdHash, run_id_sha256: sha256(result.control.binding.runId), control_version: result.control.version,
+        dispatch_allowed: result.dispatchAllowed, journal_sha256: result.control.genericOwnerDispatch?.proofSha256 ?? null,
+        owner_loss_proof_sha256: result.control.genericOwnerLoss?.proofSha256 ?? null,
+      }, observedAt: new Date() });
+      return res.set({ "Cache-Control": "no-store", Pragma: "no-cache" }).status(200).json(result);
+    } catch (error) {
+      const detail = error instanceof VoiceLabError ? error.detail : null;
+      await ledger.recordAuthAudit({ runId: null, callerId, action: "external_attestation.generic_owner_dispatch", argumentHash, outcome: "denied", detail: { request_id_hash: requestIdHash, error_class: detail?.code ?? "GENERIC_OWNER_DISPATCH_REJECTED" }, observedAt: new Date() }).catch(() => undefined);
+      const status = callerId === "unauthenticated" ? 401 : detail?.category === "authorization" ? 403 : 409;
+      if (status === 401) res.set("WWW-Authenticate", 'Bearer realm="sophia-voice-lab-attestation"');
+      return res.set({ "Cache-Control": "no-store", Pragma: "no-cache" }).status(status).json({ error: { code: "GENERIC_OWNER_DISPATCH_REJECTED", message: "Generic owner dispatch request was rejected." } });
+    }
+  });
   app.post("/internal/voice-lab/d02/browser-continuity", async (req, res) => {
     const requestIdHash = sha256(randomUUID());
     let callerId = "unauthenticated";
@@ -356,7 +379,7 @@ export function createHttpApp(config: VoiceLabConfig, service: VoiceLabService, 
   // rejection to an authenticated caller, audit only a content-free fallback
   // hash, and return a bounded JSON-RPC error before any tool/provider work.
   app.use(((error, req, res, next) => {
-    const attestationPath = req.path === "/internal/voice-lab/attestations" || req.path === "/internal/voice-lab/d02/browser-continuity" || req.path === "/internal/voice-lab/d02/browser-worker-loss-observation" || req.path === "/internal/voice-lab/d02/render-worker-dispatch-claims";
+    const attestationPath = req.path === "/internal/voice-lab/attestations" || req.path === "/internal/voice-lab/recovery/owner-dispatch" || req.path === "/internal/voice-lab/d02/browser-continuity" || req.path === "/internal/voice-lab/d02/browser-worker-loss-observation" || req.path === "/internal/voice-lab/d02/render-worker-dispatch-claims";
     const principalProvisionPath = req.path === PRINCIPAL_PROVISION_PATH;
     if (req.path !== "/mcp" && !attestationPath && !principalProvisionPath || (error as { type?: string }).type !== "entity.parse.failed" && (error as { type?: string }).type !== "entity.too.large") return next(error);
     void (async () => {

@@ -28,6 +28,8 @@ import { initializeAuthorityFiles, verifyD02LocalReceipt, verifyD02WorkerTermina
 import { VerifiedAttestationReceiptSchema, executeA03LostResponse, postAttestationAndVerifyReplay } from "./http.js";
 import { verifyManifestRevision } from "./manifest.js";
 import { executeD02RenderRestart } from "./render-controller.js";
+import { executeGenericWorkerTermination } from "./generic-worker-controller.js";
+import { openGenericWorkerJournal } from "./generic-worker-journal.js";
 import { D02WorkerTerminationCheckpointSchema, executeD02RenderWorkerTermination, type D02WorkerTerminationCheckpoint } from "./render-worker-controller.js";
 import { redactControllerValue, safeError } from "./redaction.js";
 import { assertUnusedAbsolutePaths, readPublicFile, readPublicJson, readSecureFile, readSecureJson, writeNewSecureJson } from "./secure-files.js";
@@ -35,6 +37,7 @@ import { assertUnusedAbsolutePaths, readPublicFile, readPublicJson, readSecureFi
 type Flags = ReadonlyMap<string, string>;
 
 export interface CliRuntimeOverrides {
+  genericWorkerTermination?: Pick<Parameters<typeof executeGenericWorkerTermination>[0], "fetchImpl" | "sleep" | "now" | "allowHttpForTest">;
   workerTermination?: {
     fetchImpl?: typeof fetch;
     sleep?: (milliseconds: number) => Promise<void>;
@@ -137,6 +140,32 @@ export async function runCli(argv: readonly string[], write: (line: string) => v
         signature_printed: false,
       });
       return 0;
+    }
+
+    if (command === "generic-render-worker-loss") {
+      assertOnly(flags, ["input", "public-config", "transport-tokens", "deployment-key", "render-token", "bundle-dir", "resume"]);
+      if (flags.has("resume") && flags.get("resume") !== "true") throw new Error("--resume accepts only the literal value true.");
+      const controller = z.object({
+        runId: z.string().uuid(), requestId: z.string().uuid(), workerServiceId: z.string().regex(/^srv-[0-9a-z]{20}$/),
+        voiceLabOrigin: z.string().url(), expectedLabSha: z.string().regex(/^[a-f0-9]{40}$/), expectedLangGraphSha: z.string().regex(/^[a-f0-9]{40}$/),
+      }).strict().parse(await readSecureJson(requiredFlag(flags, "input")));
+      const publicConfig = await loadPublicConfig(requiredFlag(flags, "public-config"));
+      const tokens = TransportTokensSchema.parse(await readSecureJson(requiredFlag(flags, "transport-tokens")));
+      const render = BearerSecretFileSchema.parse(await readSecureJson(requiredFlag(flags, "render-token")));
+      const privateKeyPath = requiredFlag(flags, "deployment-key");
+      const macKey = await readSecureFile(privateKeyPath);
+      try {
+        const journal = await openGenericWorkerJournal({ directory: requiredFlag(flags, "bundle-dir"),
+          inputSha256: hashCanonical({ controller, authority: publicConfig.deployment_control }), macKey, resume: flags.has("resume") });
+        const result = await executeGenericWorkerTermination({ ...controller, ...runtime.genericWorkerTermination,
+          publicConfig, privateKeyPath, deploymentBearer: tokens.deployment_control, renderBearer: render.bearer_token,
+          ...(journal.resume ? { resume: journal.resume } : {}), checkpoint: journal.checkpoint });
+        writeSafe(write, { ok: result.status === "owner_loss_verified", command, status: result.status,
+          run_id: controller.runId, replacement_observed: result.replacementObserved,
+          receipt_sha256: result.receipt ? hashCanonical(result.receipt) : null,
+          provider_cleanup_proven: false, live_resources_zero_proven: false, credentials_printed: false });
+        return result.status === "owner_loss_verified" ? 0 : 2;
+      } finally { macKey.fill(0); }
     }
 
     if (command === "d02-render-restart") {
@@ -421,11 +450,13 @@ async function loadD02WorkerJournal(paths: readonly string[], controllerInputSha
       previous_entry_sha256: entry.previous_entry_sha256,
       payload: entry.payload,
     };
-    if (entry.index !== index || entry.phase !== D02_WORKER_PHASES[index] || entry.controller_input_sha256 !== controllerInputSha256
+    if (entry.index !== index || entry.controller_input_sha256 !== controllerInputSha256
       || entry.previous_entry_sha256 !== (index === 0 ? null : entries[index - 1]!.entry_sha256)
       || entry.entry_sha256 !== hashCanonical(core)
       || !constantTimeHexEqual(entry.entry_hmac_sha256, d02WorkerJournalHmac(core, journalMacKey))) throw new Error(`D02 resume journal phase ${index} is tampered, reordered, or bound to a different controller input or deployment key.`);
     assertD02WorkerJournalPosition(index, entry.phase, entry.payload);
+    if (entry.phase === "final_retained_recovery" && index !== count - 1)
+      throw new Error("D02 retained recovery checkpoint cannot be followed by certification phases.");
     entries.push(entry);
   }
   return entries;
@@ -445,6 +476,11 @@ function assertD02WorkerJournalCheckpointPosition(index: number, checkpoint: D02
 }
 
 function assertD02WorkerJournalPosition(index: number, phase: string, payload: unknown): void {
+  if (phase === "final_retained_recovery" && (index === 10 || index === 11)) {
+    const checkpoint = D02WorkerTerminationCheckpointSchema.parse(payload);
+    if (checkpoint.phase !== phase) throw new Error("D02 retained outcome journal phase mismatch.");
+    return;
+  }
   if (!Number.isSafeInteger(index) || index < 0 || index >= D02_WORKER_PHASES.length || D02_WORKER_PHASES[index] !== phase) throw new Error(`D02 journal attempted a gapped or reordered phase at position ${index}.`);
   if (index === 0) {
     const intent = z.object({
@@ -585,6 +621,7 @@ function usage(): Record<string, string> {
     "p01-collect-claim": "Run signed Codex CLI plugin/app-server sources, persist their raw receipt bundle, and sign only the derived exact ten-call P01 claim.",
     "d02-render-restart": "Submit exactly one Render restart after a signed command, settle deploy/instance/boot, replay MCP, and attach the final proof.",
     "d02-render-worker-loss": "Persist a signed command, restart exactly one Render background-worker service once, and use --resume true with the same hash-chained bundle after interruption; ambiguous Render dispatch is GET-only/manual-required.",
+    "generic-render-worker-loss": "Observe closed exact releases, consume one durable generic owner claim, and persist signed owner-loss evidence; --resume true is observation-only after consumption. Does not prove resource cleanup.",
     "verify-d02-local-receipt": "Verify the separate signed Render-controller request/accepted/settled receipt without printing its signature.",
     "verify-d02-worker-receipt": "Verify the source-specific signed Render browser-worker termination receipt; Gateway settlement remains a separate mandatory proof.",
     "verify-manifest": "Verify an immutable attestation receipt appears in a later append-only evidence-manifest revision.",

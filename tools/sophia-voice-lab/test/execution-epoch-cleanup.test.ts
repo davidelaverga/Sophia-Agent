@@ -5,107 +5,48 @@ import { sha256 } from "../src/security.js";
 import { deriveExecutionEpochCleanupProof } from "../src/worker.js";
 import { testRun } from "./helpers.js";
 
-const PROCESS = "1".repeat(64);
-const BOOT = "2".repeat(64);
-const EPOCH = "3".repeat(64);
-const WORKER = "4".repeat(64);
-const PROVIDER_EVENT = "5".repeat(64);
-
-function event(run: RunRecord, seq: number, kind: string, source: LabEvent["source"], payload: Record<string, unknown>): LabEvent {
-  return { runId: run.id, seq, kind, source, payload, at: new Date(seq * 1_000), dedupeKey: `${kind}:${seq}` };
-}
-
-function ownership(run: RunRecord): LabEvent[] {
-  return [
-    event(run, 1, "harness.browser_process_acquired", "browser", {
-      schema: "sophia_voice_lab_browser_process_ownership_v1",
-      voice_lab_run_id_sha256: sha256(run.id),
-      cleanup_obligation_id_sha256: sha256(run.cleanupObligationId),
-      process_id_sha256: PROCESS,
-      browser_boot_id_sha256: BOOT,
-      execution_epoch_sha256: EPOCH,
-      started_at: new Date(0).toISOString(),
-      one_process_per_run: true,
-      raw_process_id_excluded: true,
-    }),
-    event(run, 2, "harness.browser_runtime_acquired", "canonical", {
-      worker_id_sha256: WORKER,
-      browser_lease_epoch: 7,
-      operation_id: "operation-1",
-      engine: "chromium",
-      version: "151",
-      service_version: "a".repeat(40),
-      acquired_at: new Date(2_000).toISOString(),
-    }),
-  ];
-}
-
-function provider(run: RunRecord, seq = 3): LabEvent {
-  return event(run, seq, "cleanup.provider_transport_closed", "canonical", {
-    schema: "sophia_voice_lab_execution_epoch_provider_cleanup_v1",
-    voice_lab_run_id_sha256: sha256(run.id),
-    cleanup_obligation_id_sha256: sha256(run.cleanupObligationId),
-    process_id_sha256: PROCESS,
-    browser_boot_id_sha256: BOOT,
-    execution_epoch_sha256: EPOCH,
-    provider_stage: "closed",
-    provider_event_sha256: PROVIDER_EVENT,
-    exact_product_binding_validated: true,
-    raw_process_and_provider_identifiers_excluded: true,
-  });
-}
-
-function auth(run: RunRecord, seq = 4): LabEvent {
-  return event(run, seq, "auth.session_cleanup", "canonical", {
-    cleanup_proof_schema: "sophia_voice_lab_execution_epoch_auth_cleanup_v1",
-    voice_lab_run_id_sha256: sha256(run.id),
-    cleanup_obligation_id_sha256: sha256(run.cleanupObligationId),
-    process_id_sha256: PROCESS,
-    browser_boot_id_sha256: BOOT,
-    execution_epoch_sha256: EPOCH,
-    session_revoked: true,
-    cookies_cleared: true,
-  });
-}
-
-function closed(run: RunRecord, seq = 5): LabEvent {
-  return event(run, seq, "cleanup.browser_context_closed", "browser", {
-    schema: "sophia_voice_lab_execution_epoch_browser_cleanup_v1",
-    voice_lab_run_id_sha256: sha256(run.id),
-    cleanup_obligation_id_sha256: sha256(run.cleanupObligationId),
-    reason: "normal_end",
-    close_resolved: true,
-    browser_registry_absent: true,
-    browser_process_close_resolved: true,
-    browser_process_disconnected: true,
-    process_id_sha256: PROCESS,
-    browser_boot_id_sha256: BOOT,
-    execution_epoch_sha256: EPOCH,
-    raw_process_id_excluded: true,
-  });
-}
-
-function recovery(run: RunRecord, seq = 4): LabEvent {
-  const builder = { status: "completed", cleanup_complete: true, discovery_complete: true, authoritative_zero_tasks: true, discovered_task_count: 0 };
-  return event(run, seq, "cleanup.recovery", "canonical", {
-    complete: true,
-    receipt: {
-      complete: true,
-      live_cleanup_complete: true,
-      live_resources_zero: true,
-      test_run_id: run.testRunId,
-      cleanup_obligation_id_sha256: sha256(run.cleanupObligationId),
-      components: {
-        canonical_session: { status: "completed" },
-        voice_provider: { status: "completed" },
-        builder,
-        auth_sessions: { status: "completed" },
-      },
-    },
-  });
-}
+import { ownership, provider, auth, closed, recovery, EPOCH, WORKER } from "./execution-cleanup-fixture.js";
 
 describe("execution epoch terminal cleanup", () => {
+  it("rejects a second runtime acquisition even before the selected process receipt", () => {
+    const run = testRun();
+    const events = [...ownership(run), provider(run), auth(run), closed(run)].map(event => ({ ...event, seq: event.seq + 2 }));
+    expect(deriveExecutionEpochCleanupProof(run, events).ready).toBe(true);
+    const earlierRuntime = { ...events[1]!, seq: 1 };
+    expect(deriveExecutionEpochCleanupProof(run, [earlierRuntime, ...events])).toMatchObject({ ready: false, reason: "runtime_acquisition_count_invalid", proofSha256: null });
+  });
+
+  it.each([0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY])("rejects invalid event sequence %s", seq => {
+    const run = testRun();
+    const events = [...ownership(run), provider(run), auth(run), closed(run)];
+    expect(deriveExecutionEpochCleanupProof(run, events).ready).toBe(true);
+    events[0] = { ...events[0]!, seq };
+    expect(deriveExecutionEpochCleanupProof(run, events)).toMatchObject({ ready: false, proofSha256: null });
+  });
+
+  it("rejects a colliding sequence even when the competing event is not selected", () => {
+    const run = testRun();
+    const events = [...ownership(run), provider(run), auth(run), closed(run)];
+    const collision = { ...events[0]!, kind: "harness.startup_stage", source: "worker" as const };
+    expect(deriveExecutionEpochCleanupProof(run, [...events, collision])).toMatchObject({ ready: false, reason: "execution_event_sequence_invalid", proofSha256: null });
+  });
+
+  it.each([0, 1, 2, 3, 4])("rejects a foreign event envelope at direct cleanup index %i", index => {
+    const run = testRun();
+    const events = [...ownership(run), provider(run), auth(run), closed(run)];
+    expect(deriveExecutionEpochCleanupProof(run, events).ready).toBe(true);
+    const transplanted = events.map((event, i) => i === index ? { ...event, runId: testRun().id } : event);
+    expect(deriveExecutionEpochCleanupProof(run, transplanted)).toMatchObject({ ready: false, reason: "execution_event_run_binding_invalid", proofSha256: null });
+  });
+
+  it("rejects a foreign canonical recovery envelope despite matching receipt payload", () => {
+    const run = testRun();
+    const events = [...ownership(run), closed(run, 3), recovery(run, 4)];
+    expect(deriveExecutionEpochCleanupProof(run, events).ready).toBe(true);
+    events[3] = { ...events[3]!, runId: testRun().id };
+    expect(deriveExecutionEpochCleanupProof(run, events)).toMatchObject({ ready: false, reason: "execution_event_run_binding_invalid", proofSha256: null });
+  });
+
   it("proves provider and auth cleanup before exact owned process death", () => {
     const run = testRun();
     const proof = deriveExecutionEpochCleanupProof(run, [...ownership(run), provider(run), auth(run), closed(run)]);
@@ -138,8 +79,8 @@ describe("execution epoch terminal cleanup", () => {
     expect(deriveExecutionEpochCleanupProof(run, drifted)).toMatchObject({ ready: false, reason: "process_death_proof_invalid" });
   });
 
-  it("does not impose an execution-epoch proof on a pre-allocation rejection", () => {
+  it("does not infer pre-allocation rejection from missing process evidence", () => {
     const proof = deriveExecutionEpochCleanupProof(testRun(), []);
-    expect(proof).toEqual(expect.objectContaining({ required: false, ready: true, reason: "browser_process_not_allocated" }));
+    expect(proof).toEqual(expect.objectContaining({ required: true, ready: false, reason: "process_acquisition_evidence_missing" }));
   });
 });

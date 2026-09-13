@@ -46,7 +46,66 @@ describe('useVoiceLabControlAdapter', () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     globalThis.fetch = originalFetch;
+  });
+
+  it.each(['unmount', 'action-change', 'readiness-pause'] as const)('fences delayed callback results after %s without reinvoking', async (boundary) => {
+    for (const fails of [false, true]) {
+      resetVoiceLabControlAdapterForTests();
+      recordCaptureMock.mockClear();
+      globalThis.fetch = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify(receipt), { status: 200 }))
+        .mockResolvedValue(new Response('{}', { status: 404 }));
+      let finish!: () => void;
+      const invoke = vi.fn(() => new Promise<void>((resolve, reject) => {
+        finish = () => fails ? reject(new Error('delayed callback failure')) : resolve();
+      }));
+      const hook = renderHook(({ action, enabled }: { action: 'session-start' | 'voice-start'; enabled: boolean }) =>
+        useVoiceLabControlAdapter(action, invoke, enabled),
+      { initialProps: { action: 'session-start' as 'session-start' | 'voice-start', enabled: true } });
+      await settle();
+      expect(invoke).toHaveBeenCalledTimes(1);
+      if (boundary === 'unmount') hook.unmount();
+      else hook.rerender({ action: boundary === 'action-change' ? 'voice-start' : 'session-start', enabled: false });
+      recordCaptureMock.mockClear();
+      finish();
+      await settle();
+      if (boundary === 'readiness-pause') {
+        expect(recordCaptureMock).toHaveBeenCalledWith(expect.objectContaining({ name: fails ? 'authorized-action-failed' : 'authorized-action-completed' }));
+      } else expect(recordCaptureMock).not.toHaveBeenCalled();
+      expect(invoke).toHaveBeenCalledTimes(1);
+      hook.unmount();
+    }
+  });
+
+  it.each([false, true])('revalidates expired unclaimed receipts and follows the fresh server decision (allow=%s)', async (allow) => {
+    const now = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(now);
+    const expiringReceipt = { ...receipt, expires_at: Math.floor(now / 1000) + 1 };
+    const renewedReceipt = { ...receipt, expires_at: Math.floor(now / 1000) + 60, control_epoch_sha256: 'c'.repeat(64) };
+    let resolveFetch!: (response: Response) => void;
+    globalThis.fetch = vi.fn()
+      .mockImplementationOnce(() => new Promise<Response>((resolve) => { resolveFetch = resolve; }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(allow ? renewedReceipt : {}), { status: allow ? 200 : 404 }));
+    const invoke = vi.fn();
+    const { rerender } = renderHook(
+      ({ enabled }) => useVoiceLabControlAdapter('session-start', invoke, enabled),
+      { initialProps: { enabled: true } },
+    );
+    rerender({ enabled: false });
+    resolveFetch(new Response(JSON.stringify(expiringReceipt), { status: 200 }));
+    await settle();
+    clock.mockReturnValue(now + 2000);
+    rerender({ enabled: true });
+    await settle();
+    expect(globalThis.fetch).toHaveBeenCalledTimes(2);
+    expect(invoke).toHaveBeenCalledTimes(allow ? 1 : 0);
+    if (allow) {
+      expect(recordCaptureMock).toHaveBeenCalledWith(expect.objectContaining({ name: 'authorized-action', payload: renewedReceipt }));
+      expect(recordCaptureMock).not.toHaveBeenCalledWith(expect.objectContaining({ name: 'authorized-action', payload: expiringReceipt }));
+    } else {
+      expect(recordCaptureMock).not.toHaveBeenCalled();
+    }
   });
 
   it('invokes the existing action exactly once after an exact server authorization', async () => {

@@ -389,7 +389,7 @@ def _capability(body: Any, operation: str, *, jti: str) -> str:
         "op": operation,
         "request_sha256": request_sha,
         "cleanup_obligation_id": CLEANUP_ID,
-        "termination_request_id_sha256": hashlib.sha256(
+        "termination_request_id_sha256": body.get("termination_request_id_sha256") or hashlib.sha256(
             str(action_request_id).encode()
         ).hexdigest(),
         "iat": now,
@@ -407,6 +407,126 @@ def _capability(body: Any, operation: str, *, jti: str) -> str:
         + "."
         + base64.urlsafe_b64encode(signature).rstrip(b"=").decode()
     )
+
+
+def _retained_lookup_body() -> dict[str, Any]:
+    body = _settlement_body().model_dump(mode="json")
+    for key in ("termination_request_id", "provider_session_id", "test_run_id"):
+        body[f"{key}_sha256"] = hashlib.sha256(body.pop(key).encode()).hexdigest()
+    body["schema"] = "sophia_voice_lab_gateway_browser_worker_termination_receipt_lookup_v1"
+    return body
+
+
+def _retained_lookup_receipt(local: tuple[_LocalStore, Ed25519PrivateKey]) -> dict[str, Any]:
+    store, voice_key = local
+    return d02._build_receipt(
+        body=_settlement_body(), metadata=store.record.metadata,
+        synthetic=store.record.metadata["synthetic_voice_lab"], obligation_state="closed",
+        provider_settlement_sha256="a" * 64, voice_terminal_receipt=_voice_receipt(voice_key),
+        database_now=datetime.now(UTC) - timedelta(hours=1),
+    )
+
+
+def test_retained_receipt_lookup_does_not_need_session_content(d02_local, monkeypatch):
+    receipt = _retained_lookup_receipt(d02_local)
+    body = _retained_lookup_body()
+    key = (CLEANUP_ID, body["termination_request_id_sha256"])
+    d02._LOCAL_FREEZES[key] = {"receipt": receipt}
+    monkeypatch.setattr(d02_local[0], "find_session_by_cleanup_obligation_id", lambda *_: pytest.fail("raw session lookup forbidden"))
+    app = FastAPI()
+    app.include_router(d02.router)
+    with TestClient(app) as client:
+        response = client.post("/internal/voice-lab/d02/browser-worker-termination-receipts", json=body,
+            headers={d02.D02_CAPABILITY_HEADER: _capability(body, "settle", jti="retained-read-1")})
+    assert response.status_code == 200
+    assert response.json() == receipt
+    assert PROVIDER_SESSION_ID not in response.text
+    assert d02._LOCAL_FREEZES[key] == {"receipt": receipt}
+
+
+def test_retained_receipt_lookup_requires_exact_capability_and_source(d02_local):
+    receipt = _retained_lookup_receipt(d02_local)
+    body = _retained_lookup_body()
+    key = (CLEANUP_ID, body["termination_request_id_sha256"])
+    d02._LOCAL_FREEZES[key] = {"receipt": receipt}
+    app = FastAPI()
+    app.include_router(d02.router)
+    with TestClient(app) as client:
+        path = "/internal/voice-lab/d02/browser-worker-termination-receipts"
+        assert client.post(path, json=body).status_code == 401
+        wrong = {**body, "provider_session_id_sha256": "f" * 64}
+        assert client.post(path, json=wrong, headers={d02.D02_CAPABILITY_HEADER: _capability(body, "settle", jti="retained-wrong-body")}).status_code == 403
+        assert client.post(path, json=wrong, headers={d02.D02_CAPABILITY_HEADER: _capability(wrong, "settle", jti="retained-wrong-source")}).status_code == 409
+        assert client.post(path, json={**body, "provider_session_id": PROVIDER_SESSION_ID}).status_code == 422
+        d02._LOCAL_FREEZES[key] = {}
+        missing = client.post(path, json=body, headers={d02.D02_CAPABILITY_HEADER: _capability(body, "settle", jti="retained-missing")})
+        assert missing.status_code == 409
+        assert missing.json()["detail"]["code"] == "voice_lab_d02_settlement_receipt_unavailable"
+        assert d02._LOCAL_FREEZES[key] == {}
+
+
+def test_retained_receipt_lookup_database_uses_existing_scoped_rpc(d02_local, monkeypatch):
+    receipt = _retained_lookup_receipt(d02_local)
+    body = _retained_lookup_body()
+    connection = _RpcConnection([{"status": "existing", "receipt": receipt, "settlement_request_sha256": "b" * 64}])
+    _install_rpc_connections(monkeypatch, [connection])
+    app = FastAPI()
+    app.include_router(d02.router)
+    with TestClient(app) as client:
+        response = client.post("/internal/voice-lab/d02/browser-worker-termination-receipts", json=body,
+            headers={d02.D02_CAPABILITY_HEADER: _capability(body, "settle", jti="retained-db-1")})
+    assert response.status_code == 200
+    assert response.json() == receipt
+    assert len(connection.rpc_cursor.calls) == 1
+    sql, parameters = connection.rpc_cursor.calls[0]
+    assert "sophia_voice_lab_d02_settlement_authorize" in sql
+    assert parameters[:3] == (CLEANUP_ID, body["termination_request_id_sha256"], _canonical_hash(body))
+
+
+@pytest.mark.parametrize("mutation", [
+    {"provider_connection_epoch": True}, {"browser_lease_epoch": "1"},
+    {"frozen_provider_connection_epochs": [2, 1]},
+    {"frozen_provider_connection_epochs": [1, 1]},
+    {"loss_observed_at": "2026-09-13T00:00:00Z"},
+])
+def test_retained_receipt_lookup_rejects_noncanonical_body(d02_local, mutation):
+    app = FastAPI()
+    app.include_router(d02.router)
+    with TestClient(app) as client:
+        assert client.post("/internal/voice-lab/d02/browser-worker-termination-receipts",
+            json={**_retained_lookup_body(), **mutation}).status_code == 422
+    assert not d02._LOCAL_FREEZES
+
+
+@pytest.mark.parametrize("status", ["candidate", "freeze_required", "session_unavailable", "binding_cardinality_invalid", "capability_replay_conflict"])
+def test_retained_receipt_lookup_never_finalizes_candidate(d02_local, monkeypatch, status):
+    body = _retained_lookup_body()
+    connection = _RpcConnection([{"status": status}])
+    _install_rpc_connections(monkeypatch, [connection])
+    app = FastAPI()
+    app.include_router(d02.router)
+    with TestClient(app) as client:
+        response = client.post("/internal/voice-lab/d02/browser-worker-termination-receipts", json=body,
+            headers={d02.D02_CAPABILITY_HEADER: _capability(body, "settle", jti="retained-no-finalize")})
+    assert response.status_code == 409
+    assert len(connection.rpc_cursor.calls) == 1
+    assert connection.exit_exception_type is HTTPException
+
+
+def test_retained_receipt_lookup_invalid_signature_rolls_back(d02_local, monkeypatch):
+    receipt = {**_retained_lookup_receipt(d02_local), "signature": "A" * 86}
+    body = _retained_lookup_body()
+    connection = _RpcConnection([{"status": "existing", "receipt": receipt}])
+    _install_rpc_connections(monkeypatch, [connection])
+    app = FastAPI()
+    app.include_router(d02.router)
+    with TestClient(app) as client:
+        response = client.post("/internal/voice-lab/d02/browser-worker-termination-receipts", json=body,
+            headers={d02.D02_CAPABILITY_HEADER: _capability(body, "settle", jti="retained-invalid-signature")})
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "voice_lab_d02_stored_receipt_invalid"
+    assert len(connection.rpc_cursor.calls) == 1
+    assert connection.exit_exception_type is HTTPException
 
 
 @pytest.mark.parametrize("unsafe_setting_index", range(4))

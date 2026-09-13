@@ -10,6 +10,8 @@ import {
 } from "node:crypto";
 
 import { canonicalRequestHash, sha256 } from "../../src/security.js";
+import { verifyD02WorkerTerminationSignature } from "../../src/d02-worker-receipt.js";
+import { GenericOwnerLossReceiptSchema, type GenericOwnerLossReceipt } from "../../src/generic-owner-loss.js";
 import {
   AUTHORITY_NAMES,
   AUTHORITY_DEFAULTS,
@@ -167,13 +169,21 @@ export async function signD02WorkerTerminationReceipt(
 }
 
 export function verifyD02WorkerTerminationReceipt(input: D02WorkerTerminationControllerReceipt, publicConfig: PublicAuthorityConfig): void {
-  const parsed = D02WorkerTerminationControllerReceiptSchema.parse(input);
+  verifyD02WorkerTerminationSignature(input, publicConfig.deployment_control);
+}
+
+export async function validateGenericOwnerSigningCustody(publicConfig: PublicAuthorityConfig, privateKeyPath: string): Promise<void> {
+  const key = await readPrivateKey(privateKeyPath);
+  assertPrivateKeyMatchesAuthority(key, publicConfig.deployment_control);
+}
+
+export async function signGenericOwnerLossReceipt(raw: Omit<GenericOwnerLossReceipt, "signature">, publicConfig: PublicAuthorityConfig, privateKeyPath: string): Promise<GenericOwnerLossReceipt> {
   const authority = publicConfig.deployment_control;
-  if (parsed.issuer !== authority.issuer || parsed.subject !== authority.subject || parsed.authority_key_id !== authority.key_id) throw new Error("D02 worker-termination receipt does not match the deployment-control public configuration.");
-  const unsigned = { ...parsed } as Record<string, unknown>;
-  delete unsigned.signature;
-  const publicKey = createPublicKey({ key: Buffer.from(authority.public_key_spki_base64, "base64"), format: "der", type: "spki" });
-  if (!ed25519Verify(null, Buffer.from(canonicalRequestHash(unsigned), "hex"), publicKey, Buffer.from(parsed.signature, "base64url"))) throw new Error("D02 worker-termination controller receipt signature verification failed.");
+  if (raw.issuer !== authority.issuer || raw.subject !== authority.subject || raw.authorityKeyId !== authority.key_id) throw new Error("Generic owner-loss authority mismatch.");
+  const key = await readPrivateKey(privateKeyPath);
+  assertPrivateKeyMatchesAuthority(key, authority);
+  const signature = ed25519Sign(null, Buffer.from(canonicalRequestHash(raw), "hex"), key).toString("base64url");
+  return GenericOwnerLossReceiptSchema.parse({ ...raw, signature });
 }
 
 export function newUnsignedClaim(input: {

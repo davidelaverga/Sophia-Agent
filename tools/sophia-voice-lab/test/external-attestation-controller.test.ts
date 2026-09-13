@@ -107,7 +107,7 @@ function deterministicNow() {
   return () => new Date(base + ++tick * 1_000);
 }
 
-function d02FetchHarness(controller: ReturnType<typeof d02ControllerInput>, options: { providerStatus?: number; continuityPendingCount?: number } = {}) {
+function d02FetchHarness(controller: ReturnType<typeof d02ControllerInput>, options: { providerStatus?: number; continuityPendingCount?: number; malformedInstanceStage?: "before" | "after"; duplicateInstance?: boolean } = {}) {
   const calls: Array<{ method: string; origin: string; pathname: string; search: string }> = [];
   const attestationInvocations = new Map<string, number>();
   let providerAccepted = false;
@@ -141,7 +141,11 @@ function d02FetchHarness(controller: ReturnType<typeof d02ControllerInput>, opti
       }
       const after = providerAccepted;
       if (url.pathname.endsWith("/deploys")) return json([{ deploy: { id: after ? "dep-abcdefghij0123456789" : "dep-0123456789abcdefghij", status: "live", createdAt: after ? at(2_000) : at(-3_600_000), startedAt: after ? at(2_500) : at(-3_600_000), updatedAt: after ? at(3_500) : at(-1_800_000), finishedAt: after ? at(3_500) : at(-1_800_000) } }]);
-      if (url.pathname.endsWith("/instances")) return json([{ instance: { id: after ? "instance-after" : "instance-before", createdAt: after ? at(3_200) : at(-3_600_000) } }]);
+      if (url.pathname.endsWith("/instances")) {
+        const records = [{ instance: { id: after ? "instance-after" : "instance-before", createdAt: after ? at(3_200) : at(-3_600_000) } }];
+        if (options.malformedInstanceStage === (after ? "after" : "before")) records.push(options.duplicateInstance ? structuredClone(records[0]!) : { instance: { id: "invalid owner!", createdAt: at(-3_600_000) } });
+        return json(records);
+      }
       return json({ service: { id: controller.render_service_id } });
     }
     if (url.origin === "http://voice-lab.test" && url.pathname === "/mcp") {
@@ -288,6 +292,28 @@ describe("offline external-attestation controllers", () => {
       authorization: { service_id_sha256: HASH_A, one_shot: true, provider_mutation_authorized: true, confirmation: "RESTART_EXACT_VOICE_LAB_MCP_SERVICE_ONCE" }, poll: { timeout_ms: 30_000, interval_ms: 1_000 },
     };
     expect(D02RenderControllerInputSchema.safeParse(candidate).success).toBe(false);
+  });
+
+  it.each([["before", false], ["after", false], ["before", true], ["after", true]] as const)("refuses invalid instance inventory %s dispatch (duplicate=%s)", async (stage, duplicateInstance) => {
+    const fixture = await initialized();
+    const controller = d02ControllerInput();
+    const harness = d02FetchHarness(controller, { malformedInstanceStage: stage, duplicateInstance });
+    const phases: string[] = [];
+    await expect(executeD02RenderRestart({
+      controller,
+      renderBearer: "render-controller-bearer-material-00000000000001",
+      mcpBearer: "mcp-controller-bearer-material-00000000000000001",
+      publicConfig: fixture.output.publicConfig,
+      transportTokens: TransportTokensSchema.parse(await readSecureJson(fixture.paths.tokens)),
+      deploymentPrivateKeyPath: fixture.paths.deployment,
+      fetchImpl: harness.fetchImpl,
+      sleep: async () => undefined,
+      now: deterministicNow(),
+      allowHttpForTest: true,
+      checkpoint: async (checkpoint) => { phases.push(checkpoint.phase); },
+    })).rejects.toThrow(duplicateInstance ? /instance.*duplicated/i : /instance.*malformed/i);
+    expect(harness.calls.filter((call) => call.origin === "https://api.render.com" && call.method === "POST")).toHaveLength(stage === "before" ? 0 : 1);
+    expect(phases).not.toContain("final_attached");
   });
 
   it("executes D02 with one provider POST only after the durable command and binds the server continuity/local receipts", async () => {

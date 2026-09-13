@@ -56,7 +56,10 @@ type CompletedItem = {
  * real MCP/service boundary. The App Server fixture only replays those exact
  * bytes; it never invents a service response or authorization audit row.
  */
-export async function proveP01LiveBoundary(ledger: VoiceLabLedger): Promise<{ runId: string; pollingCallCount: number }> {
+export async function proveP01LiveBoundary(ledger: VoiceLabLedger, options: { delayedStart?: boolean; startTimeoutCount?: number; delayedAssistant?: boolean; assistantTimeoutCount?: number; secondAssistantTimeoutCount?: number; assistantCursorDrift?: boolean; assistantBeforeSettlement?: boolean; delayedEvidence?: boolean } = {}): Promise<{ runId: string; pollingCallCount: number }> {
+  const startTimeoutCount = options.startTimeoutCount ?? (options.delayedStart ? 1 : 0);
+  const assistantTimeoutCount = options.assistantTimeoutCount ?? (options.delayedAssistant ? 1 : 0);
+  const secondAssistantTimeoutCount = options.secondAssistantTimeoutCount ?? assistantTimeoutCount;
   const directory = await realpath(await mkdtemp(path.join(os.tmpdir(), "voice-lab-p01-live-")));
   const mcpServers: Array<{ close: () => Promise<void> }> = [];
   const mcpClients: Array<{ close: () => Promise<void> }> = [];
@@ -191,6 +194,11 @@ export async function proveP01LiveBoundary(ledger: VoiceLabLedger): Promise<{ ru
     }, false);
     assert.equal(start.status, "accepted");
     assert.ok(start.run_id && start.operation_id);
+    for (let index = 0; index < startTimeoutCount; index += 1) {
+      const pendingStart = await invoke("wait_for_turn", { run_id: start.run_id, after_cursor: 0, condition: "operation_terminal", operation_id: start.operation_id, timeout_ms: 100 }, true);
+      assert.equal(pendingStart.status, "timeout");
+      assert.notEqual(pendingStart.data.condition_satisfied, true);
+    }
     await settle(start.operation_id);
     let run = await ledger.getRun(start.run_id);
     assert.ok(run);
@@ -202,7 +210,7 @@ export async function proveP01LiveBoundary(ledger: VoiceLabLedger): Promise<{ ru
       providerSessionId: `provider-${run.id}`,
       providerEpoch: 1,
     });
-    await ledger.upsertBrowserLease(run.id, "p01-live-worker", 60);
+    const browserLease = await ledger.upsertBrowserLease(run.id, "p01-live-worker", 60);
     const startWait = await invoke("wait_for_turn", { run_id: run.id, after_cursor: 0, condition: "operation_terminal", operation_id: start.operation_id, timeout_ms: 100 }, true);
     assert.equal(startWait.status, "ok");
 
@@ -211,9 +219,17 @@ export async function proveP01LiveBoundary(ledger: VoiceLabLedger): Promise<{ ru
     assert.ok(speakOne.operation_id);
     const firstTimeoutPoll = await invoke("wait_for_turn", { run_id: run.id, after_cursor: run.latestCursor, condition: "operation_terminal", operation_id: speakOne.operation_id, timeout_ms: 100 }, true);
     assert.equal(firstTimeoutPoll.status, "timeout");
+    if (options.assistantBeforeSettlement) {
+      const pending = await invoke("wait_for_turn", { run_id: run.id, after_cursor: 0, condition: "assistant_turn_complete", timeout_ms: 100 }, true);
+      assert.equal(pending.status, "timeout");
+    }
     await settle(speakOne.operation_id);
     const firstTerminalPoll = await invoke("wait_for_turn", { run_id: run.id, after_cursor: 0, condition: "operation_terminal", operation_id: speakOne.operation_id, timeout_ms: 100 }, true);
     assert.equal(firstTerminalPoll.status, "ok");
+    for (let index = 0; index < assistantTimeoutCount; index += 1) {
+      const pending = await invoke("wait_for_turn", { run_id: run.id, after_cursor: options.assistantCursorDrift ? 1 : 0, condition: "assistant_turn_complete", timeout_ms: 100 }, true);
+      assert.equal(pending.status, "timeout");
+    }
     const firstTurnSeq = await appendAssistantTurn(run.id, `turn-one-${randomUUID()}`);
     const firstAssistant = await invoke("wait_for_turn", { run_id: run.id, after_cursor: 0, condition: "assistant_turn_complete", timeout_ms: 100 }, true);
     assert.equal(firstAssistant.status, "ok");
@@ -236,17 +252,39 @@ export async function proveP01LiveBoundary(ledger: VoiceLabLedger): Promise<{ ru
     await settle(speakTwo.operation_id);
     const secondTerminalPoll = await invoke("wait_for_turn", { run_id: run.id, after_cursor: firstTurnSeq, condition: "operation_terminal", operation_id: speakTwo.operation_id, timeout_ms: 100 }, true);
     assert.equal(secondTerminalPoll.status, "ok");
+    for (let index = 0; index < secondAssistantTimeoutCount; index += 1) {
+      const pending = await invoke("wait_for_turn", { run_id: run.id, after_cursor: firstTurnSeq, condition: "assistant_turn_complete", timeout_ms: 100 }, true);
+      assert.equal(pending.status, "timeout");
+    }
     await appendAssistantTurn(run.id, `turn-two-${randomUUID()}`);
     const secondAssistant = await invoke("wait_for_turn", { run_id: run.id, after_cursor: firstTurnSeq, condition: "assistant_turn_complete", timeout_ms: 100 }, true);
     assert.equal(secondAssistant.status, "ok");
     await invoke("inspect_voice_run", { run_id: run.id, after_cursor: 0, limit: 100 }, true);
 
-    const end = await invoke("end_voice_run", { run_id: run.id, idempotency_key: `p01-live-end-${randomUUID()}`, wait_timeout_ms: 100 }, false);
+    const endPromise = invoke("end_voice_run", { run_id: run.id, idempotency_key: `p01-live-end-${randomUUID()}`, wait_timeout_ms: 100 }, false);
+    if (options.delayedEvidence) {
+      const deadline = Date.now() + 1000;
+      let endOperation = (await ledger.listOperations(run.id)).find((operation) => operation.type === "end");
+      while (!endOperation && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 1));
+        endOperation = (await ledger.listOperations(run.id)).find((operation) => operation.type === "end");
+      }
+      assert.ok(endOperation);
+      await settle(endOperation.id);
+    }
+    const end = await endPromise;
     assert.equal(end.status, "timeout");
     assert.ok(end.operation_id);
-    await settle(end.operation_id);
+    if (options.delayedEvidence) assert.equal(end.data.operation_state, "succeeded");
+    else await settle(end.operation_id);
+    assert.equal(await ledger.releaseBrowserLease(run.id, "p01-live-worker", browserLease.leaseEpoch), true);
     run = (await ledger.getRun(run.id))!;
     run = await ledger.updateRun(run.id, run.version, { state: "pending_external_evidence", cleanupComplete: true, terminalError: null });
+    if (options.delayedEvidence) {
+      const pending = await invoke("wait_for_turn", { run_id: run.id, after_cursor: 0, condition: "finalization_complete", operation_id: end.operation_id, timeout_ms: 100 }, true);
+      assert.equal(pending.status, "timeout");
+      assert.equal(pending.data.evidence_state, "pending");
+    }
     const manifestId = randomUUID();
     const manifest = {
       contract_version: "sophia.voice-lab.evidence.v1",
@@ -266,7 +304,7 @@ export async function proveP01LiveBoundary(ledger: VoiceLabLedger): Promise<{ ru
     await ledger.saveArtifact({ id: manifestId, runId: run.id, kind: "manifest_attachment", contentType: "application/json", sha256: manifestSha256, bytes: manifestBytes, createdAt: run.updatedAt });
     const manifestRef = { kind: "manifest", resource_id: `voice-lab://evidence/${manifestId}`, sha256: manifestSha256, content_type: "application/json", byte_length: manifestBytes.byteLength };
     await ledger.saveEvidence({ runId: run.id, manifestId, manifestSha256, schemaVersion: "sophia.voice-lab.evidence.v1", revisionSeq: run.latestCursor, artifactRefs: [manifestRef], createdAt: run.updatedAt });
-    const endTerminalPoll = await invoke("wait_for_turn", { run_id: run.id, after_cursor: 0, condition: "operation_terminal", operation_id: end.operation_id, timeout_ms: 100 }, true);
+    const endTerminalPoll = await invoke("wait_for_turn", { run_id: run.id, after_cursor: 0, condition: "finalization_complete", operation_id: end.operation_id, timeout_ms: 100 }, true);
     assert.equal(endTerminalPoll.status, "completed");
     const exported = await invoke("export_voice_evidence", { run_id: run.id }, true);
     assert.equal(exported.status, "completed");
@@ -325,7 +363,7 @@ export async function proveP01LiveBoundary(ledger: VoiceLabLedger): Promise<{ ru
     verifyExternalClaimSignature(collection.claim, initialized.publicConfig);
     assert.equal(collection.claim.run_id, run.id);
     assert.equal(collection.claim.evidence.kind, "p01_platform_plugin_task");
-    assert.equal(collection.claim.evidence.polling_call_count, 4);
+    assert.equal(collection.claim.evidence.polling_call_count, 4 + startTimeoutCount + assistantTimeoutCount + secondAssistantTimeoutCount + (options.delayedEvidence ? 1 : 0));
 
     const authority = config.attestationAuthorities.platform_plugin;
     const attestationCaller: AuthenticatedCaller = { subject: authority.subject, scopes: new Set(["voice_lab:attest", "voice_lab:attest:platform_plugin"]), authorizationKind: "attestation" };

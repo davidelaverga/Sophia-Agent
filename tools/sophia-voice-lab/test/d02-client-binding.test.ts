@@ -97,5 +97,6 @@ describe("V-D02 browser ownership propagation", () => {
       browser_context_id_sha256: expected.browser_context_id_sha256,
     });
     expect(await ledger.getRun(run.id)).toMatchObject({ state: "ready" });
+    expect((await ledger.getRecoveryControl(run.id))?.browserContextBinding).toEqual(expected);
   });
 });

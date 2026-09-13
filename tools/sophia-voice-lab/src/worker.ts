@@ -12,8 +12,13 @@ import { TERMINAL_RUN_STATES, VoiceLabError, initialVerdicts, labError, type Evi
 import type { ClaimedOperation, EventAppendInput, RollingAdmissionLimits, VoiceLabLedger } from "./ledger.js";
 import { PostgresVoiceLabLedger } from "./postgres-ledger.js";
 import { pkceS256 } from "./oauth.js";
+import { deriveRecoveryBrowserBinding, RecoveryControlBindingSchema, recoveryTransportBinding, validateRecoveryBrowserBinding, type RecoveryControlRecord } from "./recovery-control.js";
+import { authCleanupConfirmed, authoritativeLiveCleanupComplete, deriveExecutionEpochCleanupProof, recoveryComponentComplete, type ExecutionEpochCleanupProof } from "./execution-cleanup.js";
+export { deriveExecutionEpochCleanupProof, type ExecutionEpochCleanupProof } from "./execution-cleanup.js";
 import { CapabilityCodec, StaticBearerAuthenticator, assertNoSecret, canonicalRequestHash, redact, requireScope, sha256 } from "./security.js";
 import { validateAllowedOrigin } from "./security.js";
+import { assertRecoveryAttemptReceipt, recoveryAttemptIdentity } from "./recovery-attempt.js";
+import { recoveryAttemptAuditHash } from "./retained-d02-recovery.js";
 import { D02BrowserContinuityProofSchema, assertFreshProductAdmissionProof, reserveAudioInput, toolInputSchemas, validateAudioInputLimit, type FixtureSummary } from "./service.js";
 import { transitionRun } from "./state-machine.js";
 import { createWorkerBootIdentity, createWorkerHeartbeatAttestation, type WorkerBootIdentity } from "./worker-heartbeat.js";
@@ -138,6 +143,8 @@ export class VoiceLabWorker {
   #loopPromise: Promise<void> | null = null;
   #currentOperationAbort: AbortController | null = null;
   #currentOperationRunId: string | null = null;
+  #terminalRecoveryCursor: string | undefined;
+  #expiredLeaseCursor: string | undefined;
   readonly #d02ShutdownArms = new Map<string, D02WorkerShutdownArm>();
   readonly #d02ShutdownsInFlight = new Map<string, Promise<void>>();
   readonly #d02PreDispatchPauses = new Set<string>();
@@ -355,20 +362,32 @@ export class VoiceLabWorker {
 
   async maintainSessions(): Promise<void> {
     const maintenanceNow = new Date();
-    for (const pending of await this.ledger.listRunsCertificationDue(maintenanceNow, 20)) {
-      const error = labError("EXTERNAL_EVIDENCE_DEADLINE_EXPIRED", "The bounded external-evidence window expired before every mandatory supported assertion became machine-verifiable.", "harness", false, { deadline_at: pending.expiresAt.toISOString() });
-      const verdicts: Verdicts = { ...pending.verdicts, harness: "fail", evidence: "fail" };
-      let failed = await transitionRun(this.ledger, pending, "failed_harness", { verdicts, terminalError: error });
-      const terminal = await this.ledger.appendEvent(failed.id, "run.failed_harness", "worker", { terminal_state: "failed_harness", terminal_reason: error.code, certification_deadline_at: pending.expiresAt.toISOString(), execution_cleanup_complete: failed.cleanupComplete }, `run:${failed.id}:failed_harness`);
-      failed = await this.#freshRun(failed.id);
-      await this.#saveFailureEvidence(failed, error, []);
-      this.logger.warn({ run_id: failed.id, terminal_event_seq: terminal.seq }, "external evidence deadline expired");
+    let certificationDue: RunRecord[] = [];
+    try { certificationDue = await this.ledger.listRunsCertificationDue(maintenanceNow, 20); }
+    catch (error) { this.logger.error({ error: safeError(error) }, "certification deadline listing unavailable; resource maintenance continues"); }
+    for (const pending of certificationDue) {
+      try {
+        const error = labError("EXTERNAL_EVIDENCE_DEADLINE_EXPIRED", "The bounded external-evidence window expired before every mandatory supported assertion became machine-verifiable.", "harness", false, { deadline_at: pending.expiresAt.toISOString() });
+        const verdicts: Verdicts = { ...pending.verdicts, harness: "fail", evidence: "fail" };
+        let failed = await transitionRun(this.ledger, pending, "failed_harness", { verdicts, terminalError: error });
+        const terminal = await this.ledger.appendEvent(failed.id, "run.failed_harness", "worker", { terminal_state: "failed_harness", terminal_reason: error.code, certification_deadline_at: pending.expiresAt.toISOString(), execution_cleanup_complete: failed.cleanupComplete }, `run:${failed.id}:failed_harness`);
+        failed = await this.#freshRun(failed.id);
+        await this.#saveFailureEvidence(failed, error, []);
+        this.logger.warn({ run_id: failed.id, terminal_event_seq: terminal.seq }, "external evidence deadline expired");
+      } catch (error) {
+        // Certification publication is not authority to defer unrelated hard
+        // retention deadlines or leave provider/browser obligations unchecked.
+        this.logger.error({ run_id_sha256: sha256(pending.id), error: safeError(error) }, "certification deadline update unconfirmed; resource maintenance continues");
+      }
     }
     // Retention is a second, restart-safe lifecycle. A live run can finish and
     // export once execution resources are authoritatively zero, while the
     // exact binding remains durable until the Gateway later proves deletion of
     // retained product evidence. Only then may the lab delete its own copies.
-    for (const retained of await this.ledger.listRunsRetentionDue(maintenanceNow, 20)) {
+    let retentionDue: RunRecord[] = [];
+    try { retentionDue = await this.ledger.listRunsRetentionDue(maintenanceNow, 20); }
+    catch (error) { this.logger.error({ error: safeError(error) }, "remote retention listing unavailable; local hard-deadline purge still required"); }
+    for (const retained of retentionDue) {
       try {
         const recovery = await this.#recoverRun(retained);
         await this.#persistEvents(retained.id, recovery.events);
@@ -385,101 +404,176 @@ export class VoiceLabWorker {
         this.logger.error({ run_id: retained.id, error: safeError(error) }, "remote retention purge could not be confirmed before local hard deadline");
       }
     }
-    await this.ledger.purgeExpiredRetention(maintenanceNow, 20);
-    for (const expired of await this.ledger.listExpiredRuns(new Date(), 20)) {
-      await this.#terminalizeFailure(expired.id, labError("RUN_EXPIRED", "Run exceeded its bounded TTL and was cleaned up.", "harness"), "expired");
+    try { await this.ledger.purgeExpiredRetention(maintenanceNow, 20); }
+    catch (error) { this.logger.error({ error: safeError(error) }, "local retention purge unconfirmed; independent resource recovery continues"); }
+    const retainedControls = await this.ledger.scheduleRetainedRecovery(10).catch(error => {
+      this.logger.error({ error: safeError(error) }, "retained recovery scheduling unavailable; other resource maintenance continues");
+      return [];
+    });
+    for (const control of retainedControls) {
+      if (control.contentPurgedAt === null) continue;
+      try { await this.#recoverRetainedControl(control); }
+      catch (error) { this.logger.error({ run_id_sha256: sha256(control.binding.runId), error: safeError(error) }, "retained recovery remains unconfirmed"); }
     }
-    for (const pending of await this.ledger.listRunsNeedingRecovery(10)) {
-      const replacement = await this.#observeD02GracefulWorkerReplacement(pending);
-      if (replacement === "awaiting_replacement") continue;
-      const operations = await this.ledger.listOperations(pending.id);
-      const failedOperation = [...operations].reverse().find((operation) => (operation.state === "failed" || operation.state === "timed_out") && operation.error !== null);
-      const recoveryError = pending.terminalError ?? failedOperation?.error ?? labError("RECOVERY_PENDING", "Terminal run still requires durable zero-orphan recovery.", "harness", true);
-      await this.#terminalizeFailure(pending.id, recoveryError, TERMINAL_RUN_STATES.has(pending.state) ? pending.state : undefined);
+    const expiredRuns = await this.ledger.listExpiredRuns(new Date(), 20).catch(error => {
+      this.logger.error({ error: safeError(error) }, "expired run listing unavailable; other resource maintenance continues");
+      return [];
+    });
+    for (const expired of expiredRuns) {
+      try { await this.#terminalizeFailure(expired.id, labError("RUN_EXPIRED", "Run exceeded its bounded TTL and was cleaned up.", "harness"), "expired"); }
+      catch (error) { this.logger.error({ run_id_sha256: sha256(expired.id), error: safeError(error) }, "expired run recovery remains unconfirmed"); }
+    }
+    let recoveryPage: RunRecord[] = [];
+    try {
+      recoveryPage = await this.ledger.listRunsNeedingRecovery(10, this.#terminalRecoveryCursor);
+      if (recoveryPage.length === 0 && this.#terminalRecoveryCursor !== undefined) {
+        recoveryPage = await this.ledger.listRunsNeedingRecovery(10);
+      }
+      this.#terminalRecoveryCursor = recoveryPage.length === 0 ? undefined : recoveryPage.at(-1)!.id;
+    } catch (error) {
+      // A failed read is not an empty queue or authority to advance its cursor.
+      this.logger.error({ error: safeError(error) }, "terminal recovery listing unavailable; other resource maintenance continues");
+    }
+    for (const pending of recoveryPage) {
+      try {
+        const replacement = await this.#observeD02GracefulWorkerReplacement(pending);
+        if (replacement === "awaiting_replacement") continue;
+        const operations = await this.ledger.listOperations(pending.id);
+        const failedOperation = [...operations].reverse().find((operation) => (operation.state === "failed" || operation.state === "timed_out") && operation.error !== null);
+        const recoveryError = pending.terminalError ?? failedOperation?.error ?? labError("RECOVERY_PENDING", "Terminal run still requires durable zero-orphan recovery.", "harness", true);
+        await this.#terminalizeFailure(pending.id, recoveryError, TERMINAL_RUN_STATES.has(pending.state) ? pending.state : undefined);
+      } catch (error) {
+        this.logger.error({ run_id_sha256: sha256(pending.id), error: safeError(error) }, "terminal run recovery remains unconfirmed");
+      }
     }
     // Zero-orphan recovery must run before terminal evidence publication.
     // A bounded per-run artifact cap can make evidence revision unavailable,
     // but it must never starve cleanup of already-closed external resources.
-    for (const pending of await this.ledger.listRunsPendingEvidence(10)) {
-      if (pending.terminalError !== null || !["completed", "product_failed", "inconclusive_provider", "failed_harness", "authorization_failed"].includes(pending.state)) await this.#saveFailureEvidence(pending, pending.terminalError ?? labError("TERMINAL_CERTIFICATION_REVISION", "Terminal execution evidence was revised without mutating the execution decision.", "evidence"), []);
-      else if (pending.scenarioId === "V-S01" || pending.scenarioId === "V-S02") await this.#finalizePreResourceScenario(pending.id);
-      else await this.#finalizeEndRun(pending.id);
-    }
-    if (this.#killSwitchEngaged()) {
-      // Accepted suites are durable scheduling intent. Engaging the kill switch
-      // must quiesce that intent as well as live runs; otherwise maintenance
-      // would keep allocating children that immediately fail authorization.
-      for (const suite of await this.ledger.listRunnableSuites(100)) {
-        await this.ledger.updateSuite(suite.id, "cancelled", suite.runIds, suite.nextScenarioIndex);
+    const evidencePending = await this.ledger.listRunsPendingEvidence(10).catch(error => {
+      this.logger.error({ error: safeError(error) }, "pending evidence listing unavailable; live resource maintenance continues");
+      return [];
+    });
+    for (const pending of evidencePending) {
+      try {
+        if (pending.terminalError !== null || !["completed", "product_failed", "inconclusive_provider", "failed_harness", "authorization_failed"].includes(pending.state)) await this.#saveFailureEvidence(pending, pending.terminalError ?? labError("TERMINAL_CERTIFICATION_REVISION", "Terminal execution evidence was revised without mutating the execution decision.", "evidence"), []);
+        else if (pending.scenarioId === "V-S01" || pending.scenarioId === "V-S02") await this.#finalizePreResourceScenario(pending.id);
+        else await this.#finalizeEndRun(pending.id);
+      } catch (error) {
+        this.logger.error({ run_id_sha256: sha256(pending.id), error: safeError(error) }, "terminal evidence publication unconfirmed; live resource maintenance continues");
       }
-    } else {
-      await this.#advanceSuites();
     }
-    await this.#finalizeTerminalSuites();
-    for (const [runId, lease] of this.#activeLeases) {
-      const current = await this.ledger.getRun(runId);
-      const d02Arm = await this.#resolveD02WorkerShutdownArm(runId);
-      if (d02Arm) {
-        this.#d02ShutdownArms.set(runId, d02Arm);
-        await this.#quiesceD02Worker(runId, d02Arm);
-        continue;
-      }
-      if (this.#d02PreDispatchPauses.has(runId)) {
-        // Gateway is already frozen, but global Render dispatch authority has
-        // not committed. Preserve ownership without touching the frozen app;
-        // the next maintenance pass either observes the unique dispatch claim
-        // and quiesces or remains paused.
-        const owned = await this.ledger.heartbeatBrowserLease(runId, this.workerId, lease.epoch, this.config.browserLeaseSeconds);
-        if (!owned) {
-          this.#activeLeases.delete(runId);
-          const lostLease = await this.ledger.getBrowserLease(runId);
-          await this.#markDriverRestart(runId, lostLease?.workerId === this.workerId && lostLease.leaseEpoch === lease.epoch ? lostLease : undefined);
+    try {
+      if (this.#killSwitchEngaged()) {
+        // Accepted suites are durable scheduling intent. Engaging the kill switch
+        // must quiesce that intent as well as live runs; otherwise maintenance
+        // would keep allocating children that immediately fail authorization.
+        for (const suite of await this.ledger.listRunnableSuites(100)) {
+          await this.ledger.updateSuite(suite.id, "cancelled", suite.runIds, suite.nextScenarioIndex);
         }
-        continue;
+      } else {
+        await this.#advanceSuites();
       }
-      if (this.#killSwitchEngaged() && current && !TERMINAL_RUN_STATES.has(current.state)) {
-        await this.#terminalizeFailure(runId, labError("KILL_SWITCH_ENGAGED", "Kill switch actively terminated and recovered the live synthetic run.", "authorization", false), "cancelled");
-        continue;
+      await this.#finalizeTerminalSuites();
+    } catch (error) {
+      this.logger.error({ error: safeError(error) }, "suite maintenance unconfirmed; live resource maintenance continues");
+    }
+    let activeMaintenanceFailure: unknown = null;
+    for (const [runId, lease] of this.#activeLeases) {
+      try { await this.#maintainActiveLease(runId, lease); }
+      catch (error) {
+        // An unavailable ownership read or failed recovery write proves neither
+        // lease loss nor cleanup. Keep its durable obligation and continue with
+        // other leases, including the independent expired-receipt scan below.
+        activeMaintenanceFailure ??= error;
+        this.logger.error({ run_id_sha256: sha256(runId), error: safeError(error) }, "active browser maintenance unconfirmed; remaining lease recovery continues");
       }
-      if (current && current.expiresAt <= new Date() && !TERMINAL_RUN_STATES.has(current.state)) {
-        await this.#terminalizeFailure(runId, labError("RUN_EXPIRED", "Run exceeded its bounded TTL and was cleaned up.", "harness"), "expired");
-        continue;
+    }
+    let expiredPage = await this.ledger.reapExpiredBrowserLeases(undefined, 10, this.#expiredLeaseCursor);
+    if (expiredPage.length === 0 && this.#expiredLeaseCursor !== undefined) {
+      expiredPage = await this.ledger.reapExpiredBrowserLeases(undefined, 10);
+    }
+    // Advance only after successful listing; failed loss writes retain their
+    // receipts and are revisited on wrap. No deletion or ownership extension.
+    this.#expiredLeaseCursor = expiredPage.at(-1)?.runId;
+    for (const lostLease of expiredPage) {
+      try { await this.#markDriverRestart(lostLease.runId, lostLease); }
+      catch (error) {
+        this.logger.error({ run_id_sha256: sha256(lostLease.runId), error: safeError(error) }, "expired browser loss observation unconfirmed; remaining lease recovery continues");
       }
+    }
+    // Preserve the failure signal (including invalid D02 shutdown authority),
+    // but only after independent resource obligations have been visited.
+    if (activeMaintenanceFailure !== null) throw activeMaintenanceFailure;
+  }
+
+  async #maintainActiveLease(runId: string, lease: ActiveLease): Promise<void> {
+    const current = await this.ledger.getRun(runId);
+    const d02Arm = await this.#resolveD02WorkerShutdownArm(runId);
+    if (d02Arm) {
+      this.#d02ShutdownArms.set(runId, d02Arm);
+      await this.#quiesceD02Worker(runId, d02Arm);
+      return;
+    }
+    if (this.#d02PreDispatchPauses.has(runId)) {
+      // Gateway is already frozen, but global Render dispatch authority has
+      // not committed. Preserve ownership without touching the frozen app;
+      // the next maintenance pass either observes the unique dispatch claim
+      // and quiesces or remains paused.
       const owned = await this.ledger.heartbeatBrowserLease(runId, this.workerId, lease.epoch, this.config.browserLeaseSeconds);
-      if (!owned || !this.driver.hasSession(runId)) {
+      if (!owned) {
         this.#activeLeases.delete(runId);
-        // Preserve the exact owned lease even when the in-process browser
-        // registry disappears before the database lease expires. Without this
-        // receipt a live browser crash would be indistinguishable from an
-        // unowned policy assertion during late D02 certification.
         const lostLease = await this.ledger.getBrowserLease(runId);
         await this.#markDriverRestart(runId, lostLease?.workerId === this.workerId && lostLease.leaseEpoch === lease.epoch ? lostLease : undefined);
-        continue;
       }
-      try {
-        if (!this.#killSwitchEngaged() && current) {
-          const continueGrant = await this.#mintAndVerify(current, "sophia-voice-lab-frontend", ["session:continue", "session:create", "session:read", "session:finalize"], "session:continue");
-          await this.#persistEvents(runId, await this.driver.continueSession(current, continueGrant.token));
-        }
-        await this.#persistEvents(runId, await this.driver.drain(runId));
+      return;
+    }
+    if (this.#killSwitchEngaged() && current && !TERMINAL_RUN_STATES.has(current.state)) {
+      await this.#terminalizeFailure(runId, labError("KILL_SWITCH_ENGAGED", "Kill switch actively terminated and recovered the live synthetic run.", "authorization", false), "cancelled");
+      return;
+    }
+    if (current && current.expiresAt <= new Date() && !TERMINAL_RUN_STATES.has(current.state)) {
+      await this.#terminalizeFailure(runId, labError("RUN_EXPIRED", "Run exceeded its bounded TTL and was cleaned up.", "harness"), "expired");
+      return;
+    }
+    const owned = await this.ledger.heartbeatBrowserLease(runId, this.workerId, lease.epoch, this.config.browserLeaseSeconds);
+    if (!owned || !this.driver.hasSession(runId)) {
+      this.#activeLeases.delete(runId);
+      // Preserve the exact owned lease even when the in-process browser
+      // registry disappears before the database lease expires. Without this
+      // receipt a live browser crash would be indistinguishable from an
+      // unowned policy assertion during late D02 certification.
+      const lostLease = await this.ledger.getBrowserLease(runId);
+      await this.#markDriverRestart(runId, lostLease?.workerId === this.workerId && lostLease.leaseEpoch === lease.epoch ? lostLease : undefined);
+      return;
+    }
+    try {
+      if (!this.#killSwitchEngaged() && current) {
+        const continueGrant = await this.#mintAndVerify(current, "sophia-voice-lab-frontend", ["session:continue", "session:create", "session:read", "session:finalize"], "session:continue");
+        await this.#persistEvents(runId, await this.driver.continueSession(current, continueGrant.token));
       }
-      catch (error) {
-        const armedAfterFailure = await this.#resolveD02WorkerShutdownArm(runId);
-        if (armedAfterFailure) {
-          this.#d02ShutdownArms.set(runId, armedAfterFailure);
-          await this.#quiesceD02Worker(runId, armedAfterFailure);
-        } else {
-          this.#activeLeases.delete(runId);
-          await this.#terminalizeFailure(runId, errorDetail(error));
-        }
+      await this.#persistEvents(runId, await this.driver.drain(runId));
+    }
+    catch (error) {
+      const armedAfterFailure = await this.#resolveD02WorkerShutdownArm(runId);
+      if (armedAfterFailure) {
+        this.#d02ShutdownArms.set(runId, armedAfterFailure);
+        await this.#quiesceD02Worker(runId, armedAfterFailure);
+      } else {
+        this.#activeLeases.delete(runId);
+        await this.#terminalizeFailure(runId, errorDetail(error));
       }
     }
-    for (const lostLease of await this.ledger.reapExpiredBrowserLeases()) await this.#markDriverRestart(lostLease.runId, lostLease);
   }
 
   async #advanceSuites(): Promise<void> {
     for (const suite of await this.ledger.listRunnableSuites(10)) {
       const children = (await Promise.all(suite.runIds.map((runId) => this.ledger.getRun(runId)))).filter((run): run is RunRecord => run !== null);
+      // A missing retained/purged child is unknown history, not a completed
+      // prerequisite. Do not admit later work using only the surviving subset.
+      if (!suiteChildrenMatchDefinition(suite, children, this.config.principalId)) {
+        this.logger.warn({ suite_id_sha256: sha256(suite.id), expected_children: suite.runIds.length, observed_children: children.length }, "suite child history incomplete or mismatched; admission remains closed");
+        continue;
+      }
       if (children.some((run) => !TERMINAL_RUN_STATES.has(run.state) || !run.cleanupComplete)) continue;
       if (suite.nextScenarioIndex >= suite.definition.scenarios.length) {
         const state = suiteCertificationState(children);
@@ -527,12 +621,13 @@ export class VoiceLabWorker {
     for (const suite of await this.ledger.listSuitesPendingEvidence(20)) {
       if (suite.state !== "completed" && suite.state !== "failed" && suite.state !== "cancelled") continue;
       const children = (await Promise.all(suite.runIds.map((runId) => this.ledger.getRun(runId)))).filter((run): run is RunRecord => run !== null);
-      if (children.length !== suite.runIds.length || children.some((run) => !TERMINAL_RUN_STATES.has(run.state) || !run.cleanupComplete)) continue;
+      if (!suiteChildrenMatchDefinition(suite, children, this.config.principalId) || children.some((run) => !TERMINAL_RUN_STATES.has(run.state) || !run.cleanupComplete)) continue;
       await this.#saveSuiteEvidence(suite, children, suite.state);
     }
   }
 
   async #saveSuiteEvidence(suite: SuiteRecord, children: RunRecord[], terminalState: Extract<SuiteRecord["state"], "completed" | "failed" | "cancelled">): Promise<boolean> {
+    if (!suiteChildrenMatchDefinition(suite, children, this.config.principalId)) return false;
     const childRows: Array<Record<string, unknown>> = [];
     const childRefs: EvidenceRef[] = [];
     for (const scenario of suite.definition.scenarios) {
@@ -710,8 +805,24 @@ export class VoiceLabWorker {
         });
       };
       let started: DriverStartResult;
+      let runtimeAcquisitionPersisted = false;
+      const runtimeAcquisition = (runtime: { engine?: string; version?: string }): EventAppendInput => {
+        if (!runtime.engine || !runtime.version) throw new VoiceLabError(labError("BROWSER_RUNTIME_PROVENANCE_UNAVAILABLE", "The acquired browser runtime did not expose an exact engine/version identity.", "harness", false));
+        return { kind: "harness.browser_runtime_acquired", source: "canonical", payload: {
+          worker_id_sha256: sha256(this.workerId), browser_lease_epoch: browserLease.leaseEpoch,
+          ...(browserContextBinding ? { browser_context_id_sha256: browserContextBinding.browser_context_id_sha256 } : {}),
+          operation_id: operation.id, engine: runtime.engine, version: runtime.version,
+          service_version: this.config.serviceVersion, acquired_at: new Date().toISOString(), raw_worker_identifier_excluded: true,
+        }, dedupeKey: `browser-runtime:${run.id}:${browserLease.leaseEpoch}` };
+      };
       try {
-        started = await this.driver.start(run, grant.token, browserContextBinding, recordStartupStage);
+        started = await this.driver.start(run, grant.token, browserContextBinding, recordStartupStage, async (acquisition, runtime) => {
+          await this.#fenceMutation(claimed, signal);
+          const { dedupeKey, ...event } = acquisition;
+          await this.ledger.appendEvents(run.id, [{ ...event, ...(dedupeKey === null ? {} : { dedupeKey }) }, runtimeAcquisition(runtime)]);
+          await this.ledger.preserveRecoveryExecutionOwnership(run.id);
+          runtimeAcquisitionPersisted = true;
+        });
       } catch (error) {
         await this.ledger.appendEvents(run.id, startupStages);
         throw error;
@@ -719,6 +830,7 @@ export class VoiceLabWorker {
       await this.ledger.appendEvents(run.id, startupStages);
       if (!sameD02BrowserContextBinding(started.browserContextBinding, browserContextBinding)) throw new VoiceLabError(labError("BROWSER_CONTEXT_BINDING_MISMATCH", "The browser driver did not attest the exact V-D02 run, worker, lease, and context allocation.", "harness", false));
       if (browserContextBinding) {
+        await this.ledger.bindRecoveryBrowserContext(run.id, this.workerId, browserContextBinding.browser_lease_epoch, started.browserContextBinding);
         await this.ledger.appendEvent(run.id, "harness.browser_context_bound", "canonical", {
           schema: "sophia_voice_lab_browser_context_binding_v1",
           test_run_id_sha256: sha256(run.testRunId),
@@ -731,19 +843,11 @@ export class VoiceLabWorker {
       }
       run = await transitionRun(this.ledger, run, "opening_app", { observedDeployment: started.observedDeployment, verdicts: { ...run.verdicts, auth: "pass" } });
       await this.#persistEvents(run.id, started.events);
-      const browserRuntime = await this.driver.readiness();
-      if (!browserRuntime.ok || typeof browserRuntime.engine !== "string" || browserRuntime.engine.length === 0 || typeof browserRuntime.version !== "string" || browserRuntime.version.length === 0) throw new VoiceLabError(labError("BROWSER_RUNTIME_PROVENANCE_UNAVAILABLE", "The acquired browser runtime did not expose an exact engine/version identity.", "harness", false));
-      await this.ledger.appendEvent(run.id, "harness.browser_runtime_acquired", "canonical", {
-        worker_id_sha256: sha256(this.workerId),
-        browser_lease_epoch: browserLease.leaseEpoch,
-        ...(browserContextBinding ? { browser_context_id_sha256: browserContextBinding.browser_context_id_sha256 } : {}),
-        operation_id: operation.id,
-        engine: browserRuntime.engine,
-        version: browserRuntime.version,
-        service_version: this.config.serviceVersion,
-        acquired_at: new Date().toISOString(),
-        raw_worker_identifier_excluded: true,
-      }, `browser-runtime:${run.id}:${browserLease.leaseEpoch}`);
+      if (!runtimeAcquisitionPersisted) {
+        const browserRuntime = await this.driver.readiness();
+        if (!browserRuntime.ok) throw new VoiceLabError(labError("BROWSER_RUNTIME_PROVENANCE_UNAVAILABLE", "The acquired browser runtime did not expose an exact engine/version identity.", "harness", false));
+        await this.ledger.appendEvents(run.id, [runtimeAcquisition(browserRuntime)]);
+      }
       run = await this.#freshRun(run.id);
       run = await transitionRun(this.ledger, run, "ready", { verdicts: { ...run.verdicts, harness: "pass", auth: "pass" } });
       await this.ledger.appendEvent(run.id, "run.ready", "worker", { operation_id: operation.id }, `run:${run.id}:ready`);
@@ -923,7 +1027,7 @@ export class VoiceLabWorker {
     const providerDisconnected = eventPage.events.some((event) => isExactBoundProductEvent(run, event) && event.kind === "provider.stage" && ["closed", "ended"].includes(String(event.payload.stage))) || recoveryComponentComplete(eventPage.events, "voice_provider");
     const authSessionRevoked = eventPage.events.some(authCleanupConfirmed) || recoveryComponentComplete(eventPage.events, "auth_sessions");
     const canonicalFinalized = eventPage.events.some((event) => isCanonicalFinalizationReceipt(run, event));
-    const liveCleanupComplete = authoritativeLiveCleanupComplete(eventPage.events);
+    const liveCleanupComplete = authoritativeLiveCleanupComplete(eventPage.events, run);
     const cleanupComplete = canonicalFinalized && browserContextClosed && browserLeaseReleased && providerDisconnected && authSessionRevoked && taskCleanup.unresolved_count === 0 && liveCleanupComplete;
     if (!cleanupComplete) {
       throw new VoiceLabError(labError("ZERO_ORPHAN_CLEANUP_UNCONFIRMED", "Run cannot produce final evidence until canonical finalization plus browser, provider, auth, and owned-task cleanup are proven.", "harness", true, {
@@ -1369,7 +1473,7 @@ export class VoiceLabWorker {
     const events = await this.#allEvents(run.id);
     const operations = await this.ledger.listOperations(run.id);
     const assertions = evaluateScenarioAssertions(run, events.events, operations);
-    if (!assertions.harness.every((assertion) => assertion.status === "pass") || !authoritativeLiveCleanupComplete(events.events)) throw new VoiceLabError(labError("PRE_RESOURCE_CERTIFICATION_INCOMPLETE", "Pre-resource certification cannot pass without every governed rejection and authoritative zero-orphan recovery.", "harness", true, { scenario_id: run.scenarioId }));
+    if (!assertions.harness.every((assertion) => assertion.status === "pass") || !authoritativeLiveCleanupComplete(events.events, run)) throw new VoiceLabError(labError("PRE_RESOURCE_CERTIFICATION_INCOMPLETE", "Pre-resource certification cannot pass without every governed rejection and authoritative zero-orphan recovery.", "harness", true, { scenario_id: run.scenarioId }));
     const verdicts: Verdicts = { harness: "pass", product: "unavailable", provider: "unavailable", auth: run.scenarioId === "V-S01" ? "pass" : "unavailable", evidence: "pass" };
     run = await this.#freshRun(run.id);
     run = await transitionRun(this.ledger, run, "completed", { verdicts, cleanupComplete: true, ...retentionPatchFromEvents(events.events) });
@@ -1483,6 +1587,15 @@ export class VoiceLabWorker {
     if (run.scenarioId !== "V-D02") return undefined;
     const active = this.#activeLeases.get(run.id);
     const activeBinding = active ? deriveD02BrowserContextBinding(run, this.workerId, active.epoch) : undefined;
+    const control = await this.ledger.getRecoveryControl(run.id);
+    const controlBinding = control?.browserContextBinding ?? control?.browserAllocationBinding;
+    if (controlBinding) {
+      // Allocation intent permits only exact-bound capability recovery; it is
+      // never promoted to a driver-attested readiness or cleanup receipt.
+      const binding = validateRecoveryBrowserBinding({ runId: run.id, scenarioId: run.scenarioId }, controlBinding);
+      if (activeBinding && !sameD02BrowserContextBinding(binding, activeBinding)) throw new VoiceLabError(labError("BROWSER_CONTEXT_BINDING_MISMATCH", "Durable recovery ownership conflicts with the active lease.", "harness", false));
+      return binding;
+    }
     const durable = await this.ledger.findLatestEvent(run.id, ["harness.browser_context_bound"]);
     if (!durable) {
       if (activeBinding) return activeBinding;
@@ -1568,15 +1681,22 @@ export class VoiceLabWorker {
     const cancelled = await this.ledger.cancelPendingRunOperations(run.id, null, labError("RUN_TERMINATED", "Operation was cancelled because its owning run became terminal.", "harness", false, { terminal_reason: error.code }));
     for (const operation of cancelled) await this.ledger.appendEvent(run.id, "operation.cancelled", "worker", { operation_id: operation.id, operation_type: operation.type, reason_code: operation.error?.code ?? "RUN_TERMINATED" }, `operation:${operation.id}:cancelled`);
     if (TERMINAL_RUN_STATES.has(run.state)) {
-      if (run.state !== "completed") {
+      const control = await this.ledger.getRecoveryControl(run.id);
+      const outstandingLease = await this.ledger.getBrowserLease(run.id);
+      if (run.state !== "completed" || !run.cleanupComplete || control?.liveCleanupComplete !== true || outstandingLease !== null || this.driver.hasSession(run.id)) {
         const recovered = await this.#recoverRun(run);
         await this.#persistEvents(run.id, recovered.events);
       }
       run = await this.#freshRun(run.id);
       const recoveryPage = await this.#allEvents(run.id);
       const browserLeaseReleased = await this.#releaseBrowserLeaseProof(run.id);
-      const liveCleanupComplete = authoritativeLiveCleanupComplete(recoveryPage.events) && !this.driver.hasSession(run.id) && browserLeaseReleased;
-      if (liveCleanupComplete && !run.cleanupComplete) run = await this.ledger.updateRun(run.id, run.version, { cleanupComplete: true, ...retentionPatchFromEvents(recoveryPage.events) });
+      const liveCleanupComplete = authoritativeLiveCleanupComplete(recoveryPage.events, run) && !this.driver.hasSession(run.id) && browserLeaseReleased;
+      // Raw terminal state is not settlement authority. Correct stale success
+      // downward as well as promoting newly proven cleanup, and reconcile an
+      // independent backfilled control even when the raw flag already agrees.
+      if (run.cleanupComplete !== liveCleanupComplete || control?.liveCleanupComplete !== liveCleanupComplete) {
+        run = await this.ledger.updateRun(run.id, run.version, { cleanupComplete: liveCleanupComplete, ...retentionPatchFromEvents(recoveryPage.events) });
+      }
       // Rebuild the deterministic failure manifest after every recovery
       // attempt so a pending receipt can become a durable complete receipt.
       await this.#saveFailureEvidence(run, run.terminalError ?? error, []);
@@ -1597,22 +1717,57 @@ export class VoiceLabWorker {
     const state: RunState = forcedState ?? (error.code === "CAPTURE_CURSOR_GAP" || error.code === "CAPTURE_DRAIN_UNSUPPORTED" || error.code === "PRODUCT_INPUT_EVIDENCE_FAULT" ? "invalid_test" : error.code === "DEPLOYMENT_MISMATCH" ? "deployment_mismatch" : error.category === "authorization" ? "authorization_failed" : error.category === "product" ? "product_failed" : error.category === "provider" ? "inconclusive_provider" : "failed_harness");
     const verdicts = deriveFailureVerdicts(run, state, ended.events);
     const browserLeaseReleased = await this.#releaseBrowserLeaseProof(run.id);
-    const liveCleanupComplete = authoritativeLiveCleanupComplete(ended.events) && !this.driver.hasSession(run.id) && browserLeaseReleased;
+    const liveCleanupComplete = authoritativeLiveCleanupComplete(ended.events, run) && !this.driver.hasSession(run.id) && browserLeaseReleased;
     run = await this.ledger.updateRun(run.id, run.version, { state, verdicts, terminalError: error, cleanupComplete: liveCleanupComplete, ...retentionPatchFromEvents(ended.events) });
     await this.ledger.appendEvent(run.id, `run.${state}`, "worker", { error }, `run:${run.id}:${state}`);
     await this.#saveFailureEvidence(run, error, ended.artifacts);
   }
 
+  async #recoverRetainedControl(control: RecoveryControlRecord): Promise<void> {
+    const binding = RecoveryControlBindingSchema.parse(control.binding);
+    const d02 = binding.scenarioId === "V-D02"
+      ? validateRecoveryBrowserBinding(binding, control.browserContextBinding ?? control.browserAllocationBinding)
+      : undefined;
+    const grant = this.capabilities.mint({ aud: "sophia-voice-lab-recovery", sub: binding.principalId, principal_id: binding.principalId,
+      test_run_id: binding.testRunId, cleanup_obligation_id: binding.cleanupObligationId,
+      ...(binding.scenarioId === null ? {} : { scenario_id: binding.scenarioId }), ...(binding.scenarioVersion === null ? {} : { scenario_version: binding.scenarioVersion }),
+      ...(d02 ?? {}), synthetic: true, environment: binding.environment, retention_hours: binding.retentionHours,
+      provider_expires_at: binding.providerExpiresAt, allowed_ops: ["session:recover"], expected_deployment: binding.expectedDeployment });
+    this.capabilities.verify(grant.token, { audience: "sophia-voice-lab-recovery", operation: "session:recover", principalId: binding.principalId,
+      testRunId: binding.testRunId, cleanupObligationId: binding.cleanupObligationId, environment: binding.environment,
+      retentionHours: binding.retentionHours, providerExpiresAt: binding.providerExpiresAt, expectedDeployment: binding.expectedDeployment,
+      scenarioId: binding.scenarioId, scenarioVersion: binding.scenarioVersion,
+      ...(d02 ? { voiceLabRunIdSha256: d02.voice_lab_run_id_sha256, browserWorkerIdSha256: d02.browser_worker_id_sha256, browserLeaseEpoch: d02.browser_lease_epoch, browserContextIdSha256: d02.browser_context_id_sha256 } : {}) });
+    const attempt = recoveryAttemptIdentity(grant.claims);
+    await this.ledger.recordRecoveryCapabilityAudit(binding.runId, control.version, sha256(grant.claims.jti), recoveryAttemptAuditHash(control, attempt));
+    // Cleanup only: never allocate a browser, extend the original provider TTL,
+    // rebuild a raw RunRecord, or persist returned content past its deadline.
+    const result = await this.driver.recover(recoveryTransportBinding(binding), grant.token);
+    const completed = result.events.find(event => event.kind === "cleanup.recovery" && event.source === "canonical" && event.payload.complete === true);
+    if (!completed || this.driver.hasSession(binding.runId)) return;
+    assertRecoveryAttemptReceipt(completed, attempt, new Date());
+    await this.ledger.settleRecoveryControl(binding.runId, control.version, completed, attempt);
+  }
+
   async #recoverRun(run: RunRecord): Promise<Awaited<ReturnType<VoiceBrowserDriver["recover"]>>> {
     const combined: Awaited<ReturnType<VoiceBrowserDriver["recover"]>> = { events: [], artifacts: [] };
     const browserLease = await this.ledger.getBrowserLease(run.id);
-    const allocationFree = run.canonicalSessionId === null && run.threadId === null && run.providerSessionId === null && run.traceId === null && run.providerEpoch === null && run.turnId === null && browserLease === null && !this.driver.hasSession(run.id);
+    const control = await this.ledger.getRecoveryControl(run.id);
+    // Session publication and worker lease lifetime are not allocation history.
+    // A crash before publication must retain the original release identity;
+    // missing legacy control data must also fail closed for runtime rebinding.
+    const allocationFree = control?.browserAllocationEver === false
+      && run.canonicalSessionId === null && run.threadId === null && run.providerSessionId === null && run.traceId === null && run.providerEpoch === null && run.turnId === null && browserLease === null && !this.driver.hasSession(run.id);
     const recoveryExpectedDeployment = allocationFree && this.config.readinessTarget !== null
       ? this.config.readinessTarget.expectedDeployment
       : run.target.expectedDeployment;
     for (let attempt = 0; attempt < 3; attempt += 1) {
       const recoveryGrant = await this.#mintAndVerify(run, "sophia-voice-lab-recovery", ["session:recover"], "session:recover", undefined, recoveryExpectedDeployment);
-      const result = await this.driver.recover(run, recoveryGrant.token);
+      const result = await this.driver.recover(recoveryTransportBinding({
+        runId: run.id, testRunId: run.testRunId,
+        cleanupObligationId: run.cleanupObligationId,
+        gatewayOrigin: run.target.gatewayUrl,
+      }), recoveryGrant.token);
       combined.events.push(...result.events);
       combined.artifacts.push(...result.artifacts);
       if (result.events.some((event) => event.kind === "cleanup.recovery" && event.payload.complete === true)) break;
@@ -1784,7 +1939,7 @@ export class VoiceLabWorker {
       || event.kind === "cleanup.browser_lease_absent" && event.payload.authoritative_ledger_read === true);
     const providerDisconnected = productEvents.some((event) => event.kind === "provider.stage" && ["closed", "ended"].includes(String(event.payload.stage))) || recoveryComponentComplete(eventPage.events, "voice_provider");
     const authSessionRevoked = eventPage.events.some(authCleanupConfirmed) || recoveryComponentComplete(eventPage.events, "auth_sessions");
-    const liveCleanupComplete = authoritativeLiveCleanupComplete(eventPage.events);
+    const liveCleanupComplete = authoritativeLiveCleanupComplete(eventPage.events, run);
     const assertions = evaluateScenarioAssertions(run, eventPage.events, operations, authAudit);
     const platformAttestation = eventPage.events.find((event) => event.source === "canonical" && event.kind === "external.attestation.p01_platform_plugin_task" && event.payload.binding_validated === true && typeof event.payload.content_sha256 === "string");
     const platformProof = platformAttestation?.payload.evidence as Record<string, unknown> | undefined;
@@ -1898,7 +2053,8 @@ export class VoiceLabWorker {
         provider_disconnect: input.intentionallyUnallocated ? intentionallyUnavailable : providerDisconnected,
         auth_session_revoked: input.intentionallyUnallocated ? intentionallyUnavailable : authSessionRevoked,
         synthetic_tasks: taskCleanup,
-        live_execution_resources_zero: liveCleanupComplete,
+        gateway_live_resources_zero: liveCleanupComplete,
+        live_execution_resources_zero: liveCleanupComplete && browserContextClosed && browserLeaseReleased && taskCleanup.unresolved_count === 0,
         cleanup_complete: run.cleanupComplete && liveCleanupComplete && browserContextClosed && browserLeaseReleased,
         recovery_receipts: projectEvidence("cleanup_audit/recovery_receipts", eventPage.events.filter((event) => event.kind === "cleanup.recovery").map((event) => ({ observed_at: event.at.toISOString(), ...event.payload }))),
         retention_purge_due_at: run.retentionPurgeDueAt?.toISOString() ?? null,
@@ -2452,6 +2608,7 @@ export class VoiceLabWorker {
       }
     }
     if (epoch !== null) {
+      if (executionProof?.ready) await this.ledger.preserveRecoveryExecutionCleanup(runId);
       const released = await this.ledger.releaseBrowserLease(runId, this.workerId, epoch);
       if (released) await this.ledger.appendEvent(runId, "cleanup.browser_lease_released", "worker", {
         worker_id_hash: sha256(this.workerId),
@@ -2468,6 +2625,14 @@ export class VoiceLabWorker {
     this.#activeLeases.delete(runId);
     current = await this.ledger.getBrowserLease(runId);
     if (current === null) {
+      const control = await this.ledger.getRecoveryControl(runId);
+      if (!control) return false;
+      if (control.browserAllocationEver !== false) {
+        const run = await this.#freshRun(runId);
+        const proof = deriveExecutionEpochCleanupProof(run, (await this.#allEvents(runId)).events);
+        if (!proof.ready || this.driver.hasSession(runId)) return false;
+        await this.ledger.preserveRecoveryExecutionCleanup(runId);
+      }
       const prior = await this.ledger.findLatestEvent(runId, ["cleanup.browser_lease_released", "cleanup.browser_lease_absent"]);
       if (!prior) await this.ledger.appendEvent(runId, "cleanup.browser_lease_absent", "worker", { authoritative_ledger_read: true }, `cleanup:${runId}:browser-lease-absent`);
       return true;
@@ -2940,15 +3105,6 @@ function sameDeployment(value: unknown, expected: RunRecord["target"]["expectedD
   return Object.keys(deployment).length === 3 && deployment.frontend === expected.frontend && deployment.backend === expected.backend && deployment.voice === expected.voice;
 }
 
-function recoveryComponentComplete(events: import("./domain.js").LabEvent[], component: "canonical_session" | "voice_provider" | "builder" | "auth_sessions"): boolean {
-  return events.some((event) => {
-    if (event.kind !== "cleanup.recovery" || event.payload.complete !== true) return false;
-    const receipt = event.payload.receipt as Record<string, unknown> | undefined;
-    const components = receipt?.components as Record<string, Record<string, unknown>> | undefined;
-    const status = components?.[component]?.status;
-    return receipt?.complete === true && typeof status === "string" && !["pending", "failed", "unavailable"].includes(status);
-  });
-}
 
 function manifestJoins(run: RunRecord): Record<string, unknown> {
   const available = <T>(value: T | null, absent: string) => value === null ? { value: null, status: "unavailable", reason: absent } : { value, status: "available", reason: null };
@@ -3049,6 +3205,22 @@ export function runCertificationProjection(verdicts: Verdicts): { status: "certi
   return { status: "not_certified", outcome: "harness_or_evidence_not_certified", reason: decision.reason };
 }
 
+/** The durable suite list is not permission to count foreign or reused runs. */
+export function suiteChildrenMatchDefinition(suite: SuiteRecord, children: RunRecord[], expectedPrincipalId: string): boolean {
+  if (!Number.isInteger(suite.nextScenarioIndex) || suite.nextScenarioIndex < 0 || suite.nextScenarioIndex > suite.definition.scenarios.length) return false;
+  const expected = suite.definition.scenarios.slice(0, suite.nextScenarioIndex).filter(scenario => scenario.support !== "typed_unsupported");
+  if (children.length !== suite.runIds.length || children.length !== expected.length
+    || new Set(suite.runIds).size !== suite.runIds.length
+    || new Set(children.map(run => run.testRunId)).size !== children.length
+    || new Set(children.map(run => run.cleanupObligationId)).size !== children.length
+    || new Set(children.map(run => run.principalId)).size > 1) return false;
+  return children.every((run, index) => run.id === suite.runIds[index]
+    && run.callerId === suite.callerId && run.principalId === expectedPrincipalId && run.environment === suite.definition.environment
+    && run.scenarioId === expected[index]!.id && run.scenarioVersion === expected[index]!.version
+    && canonicalRequestHash(run.target) === canonicalRequestHash(suite.definition.target)
+    && canonicalRequestHash(run.capturePolicy) === canonicalRequestHash(suite.definition.capturePolicy));
+}
+
 export function suiteCertificationProjection(children: RunRecord[]): {
   status: "certified" | "pending" | "not_certified";
   outcome_label: string;
@@ -3057,18 +3229,20 @@ export function suiteCertificationProjection(children: RunRecord[]): {
   product_counts: Record<"pass" | "unavailable" | "fail" | "inconclusive" | "pending", number>;
   outcome_counts: Record<string, number>;
 } {
-  const projections = children.map((run) => runCertificationProjection(run.verdicts));
+  const projections = children.map((run) => !TERMINAL_RUN_STATES.has(run.state) || run.state === "pending_external_evidence" || !run.cleanupComplete
+    ? { status: "pending_lifecycle" as const, outcome: "lifecycle_or_cleanup_unconfirmed" }
+    : runCertificationProjection(run.verdicts));
   const productCounts = { pass: 0, unavailable: 0, fail: 0, inconclusive: 0, pending: 0 };
   for (const run of children) productCounts[run.verdicts.product] += 1;
   const outcomeCounts: Record<string, number> = {};
   for (const projection of projections) outcomeCounts[projection.outcome] = (outcomeCounts[projection.outcome] ?? 0) + 1;
   const certifiedCount = projections.filter((projection) => projection.status === "certified").length;
-  const status = projections.some((projection) => projection.status === "pending_external_evidence") ? "pending" : certifiedCount === children.length ? "certified" : "not_certified";
+  const status = projections.some((projection) => projection.status === "pending_external_evidence" || projection.status === "pending_lifecycle") ? "pending"
+    : children.length > 0 && certifiedCount === children.length ? "certified" : "not_certified";
   const observedProductOutcomes = (Object.keys(productCounts) as Array<keyof typeof productCounts>).filter((outcome) => productCounts[outcome] > 0);
-  const outcomeLabel = status !== "certified"
-    ? status === "pending" ? "supported_children_pending_external_evidence" : "supported_children_not_harness_evidence_certified"
-    : children.length === 0 ? "no_supported_children"
-      : observedProductOutcomes.length === 1 ? `harness_evidence_certified_all_product_${observedProductOutcomes[0]}`
+  const outcomeLabel = children.length === 0 ? "no_supported_children" : status !== "certified"
+    ? status === "pending" ? "supported_children_pending_lifecycle_or_evidence" : "supported_children_not_harness_evidence_certified"
+    : observedProductOutcomes.length === 1 ? `harness_evidence_certified_all_product_${observedProductOutcomes[0]}`
         : "harness_evidence_certified_mixed_product_outcomes";
   return { status, outcome_label: outcomeLabel, harness_evidence_certified_count: certifiedCount, supported_child_count: children.length, product_counts: productCounts, outcome_counts: outcomeCounts };
 }
@@ -3092,8 +3266,11 @@ export function certificationTerminalDecision(verdicts: Verdicts): { state: RunS
  * truthfully finish as aborted_driver_restart and still certify its expected
  * loss/recovery behavior after owning evidence arrives. */
 export function suiteCertificationState(children: RunRecord[]): "pending" | "completed" | "failed" {
-  if (children.some((run) => run.state === "pending_external_evidence")) return "pending";
-  return children.every((run) => run.verdicts.harness === "pass" && run.verdicts.evidence === "pass" && run.cleanupComplete) ? "completed" : "failed";
+  // An unsupported-only suite can finish scheduling, but its projection is
+  // explicitly not certified. Nonempty suites use one lifecycle-aware verdict.
+  if (children.length === 0) return "completed";
+  const status = suiteCertificationProjection(children).status;
+  return status === "pending" ? "pending" : status === "certified" ? "completed" : "failed";
 }
 
 export function deriveCompletedVerdicts(run: RunRecord, events: import("./domain.js").LabEvent[], operations: import("./domain.js").OperationRecord[], authAudit: import("./ledger.js").AuthAuditRecord[] = []): Verdicts {
@@ -3123,13 +3300,13 @@ export function deriveCompletedVerdicts(run: RunRecord, events: import("./domain
   const joinsComplete = run.canonicalSessionId !== null && run.threadId !== null && run.providerSessionId !== null && run.providerEpoch !== null && (nonSilenceOperations.length === 0 || run.turnId !== null);
   const captureProven = kinds.has("harness.initialized") && kinds.has("harness.media_stream_issued") && kinds.has("session.microphone_stream_acquired");
   const executionEpochCleanup = deriveExecutionEpochCleanupProof(run, events);
-  const cleanupProven = authoritativeLiveCleanupComplete(events) && (kinds.has("cleanup.browser_lease_released") || kinds.has("cleanup.browser_lease_absent")) && authClean && providerClosed && taskCleanup.unresolved_count === 0 && (!executionEpochCleanup.required || executionEpochCleanup.ready);
+  const cleanupProven = authoritativeLiveCleanupComplete(events, run) && (kinds.has("cleanup.browser_lease_released") || kinds.has("cleanup.browser_lease_absent")) && authClean && providerClosed && taskCleanup.unresolved_count === 0 && (!executionEpochCleanup.required || executionEpochCleanup.ready);
   const scenarioEvaluation = evaluateScenarioAssertions(run, eligibleEvents, operations, authAudit);
   const scenarioHasFailure = scenarioEvaluation.harness.some((assertion) => assertion.status === "fail");
   const scenarioHasUnavailable = scenarioEvaluation.harness.length === 0 || scenarioEvaluation.harness.some((assertion) => assertion.status === "unavailable");
   if (run.scenarioId === "V-F02") return { harness: "unavailable", product: "unavailable", provider: "unavailable", auth: "unavailable", evidence: "unavailable" };
   const preResource = run.scenarioId === "V-S01" || run.scenarioId === "V-S02";
-  const preResourceCleanup = authoritativeLiveCleanupComplete(events)
+  const preResourceCleanup = authoritativeLiveCleanupComplete(events, run)
     && kinds.has("cleanup.browser_context_absent")
     && eligibleEvents.some((event) => event.kind === "cleanup.browser_lease_absent" && event.payload.authoritative_ledger_read === true);
   const baseHarnessPass = preResource
@@ -3955,7 +4132,7 @@ export function evaluateScenarioAssertions(run: RunRecord, events: import("./dom
       const zero = eligible.filter((event) => event.kind === "cleanup.recovery" || event.kind === "cleanup.browser_context_absent" || event.kind === "cleanup.browser_lease_absent" || event.kind === "security.pre_resource_allocation_fence");
       const fence = byKind("security.pre_resource_allocation_fence");
       const noAllocation = fence.length === 1 && fence[0]!.payload.active_run_count_unchanged === true && fence[0]!.payload.browser_context_absent === true && fence[0]!.payload.browser_lease_absent === true && fence[0]!.payload.canonical_session_absent === true && fence[0]!.payload.provider_session_absent === true && fence[0]!.payload.tts_process_invocations === 0;
-      harness.push(check("s01.rejected_before_resource_allocation", "harness", noAllocation && authoritativeLiveCleanupComplete(eligible) && byKind("cleanup.browser_context_absent").length === 1 && byKind("cleanup.browser_lease_absent").some((event) => event.payload.authoritative_ledger_read === true), zero, "authoritative_zero_resource_recovery_unavailable"));
+      harness.push(check("s01.rejected_before_resource_allocation", "harness", noAllocation && authoritativeLiveCleanupComplete(eligible, run) && byKind("cleanup.browser_context_absent").length === 1 && byKind("cleanup.browser_lease_absent").some((event) => event.payload.authoritative_ledger_read === true), zero, "authoritative_zero_resource_recovery_unavailable"));
       product.push(unavailable("s01.no_ordinary_product_impact", "product", "not_applicable_pre_resource_rejection"));
       break;
     }
@@ -3996,7 +4173,7 @@ export function evaluateScenarioAssertions(run: RunRecord, events: import("./dom
       const zero = eligible.filter((event) => event.kind.startsWith("cleanup.") || event.kind === "security.pre_resource_allocation_fence");
       const fence = byKind("security.pre_resource_allocation_fence");
       const noAllocation = fence.length === 1 && fence[0]!.payload.active_run_count_unchanged === true && fence[0]!.payload.browser_context_absent === true && fence[0]!.payload.browser_lease_absent === true && fence[0]!.payload.provider_session_absent === true && fence[0]!.payload.tts_process_invocations === 0;
-      harness.push(check("s02.no_resource_or_orphan", "harness", noAllocation && authoritativeLiveCleanupComplete(eligible) && byKind("cleanup.browser_context_absent").length === 1, zero, "authoritative_zero_resource_recovery_unavailable"));
+      harness.push(check("s02.no_resource_or_orphan", "harness", noAllocation && authoritativeLiveCleanupComplete(eligible, run) && byKind("cleanup.browser_context_absent").length === 1, zero, "authoritative_zero_resource_recovery_unavailable"));
       product.push(unavailable("s02.no_user_facing_impact", "product", "not_applicable_pre_resource_rejection"));
       break;
     }
@@ -4307,7 +4484,7 @@ export function evaluateScenarioAssertions(run: RunRecord, events: import("./dom
 }
 
 export function deriveTaskCleanup(events: import("./domain.js").LabEvent[], run?: RunRecord): { observed_count: number; unresolved_count: number; proof: string; tasks: Array<{ task_id_hash: string; terminal: boolean; state: string | null }> } {
-  const authoritativeZero = authoritativeLiveCleanupComplete(events);
+  const authoritativeZero = authoritativeLiveCleanupComplete(events, run);
   const latest = new Map<string, string | null>();
   for (const event of events) {
     if (event.source === "product" && (!run || !isExactBoundProductEvent(run, event))) continue;
@@ -4323,16 +4500,6 @@ export function deriveTaskCleanup(events: import("./domain.js").LabEvent[], run?
   return { observed_count: tasks.length, unresolved_count: authoritativeZero ? 0 : Math.max(1, unresolved), proof: authoritativeZero ? "gateway_authoritative_post_delete_zero" : "authoritative_task_discovery_or_zero_unconfirmed", tasks };
 }
 
-function authoritativeLiveCleanupComplete(events: Array<{ kind: string; payload: Record<string, unknown> }>): boolean {
-  return events.some((event) => {
-    if (event.kind !== "cleanup.recovery" || event.payload.complete !== true) return false;
-    const receipt = event.payload.receipt as Record<string, unknown> | undefined;
-    const components = receipt?.components as Record<string, unknown> | undefined;
-    const builder = components?.builder as Record<string, unknown> | undefined;
-    const builderReceipt = builder?.receipt && typeof builder.receipt === "object" ? builder.receipt as Record<string, unknown> : {};
-    return receipt?.complete === true && receipt?.live_cleanup_complete === true && receipt?.live_resources_zero === true && builder?.status === "completed" && (builder?.cleanup_complete ?? builderReceipt.cleanup_complete) === true && (builder?.discovery_complete ?? builderReceipt.discovery_complete) === true && (builder?.authoritative_zero_tasks ?? builderReceipt.authoritative_zero_tasks) === true && Number.isInteger(builder?.discovered_task_count ?? builderReceipt.discovered_task_count) && Number(builder?.discovered_task_count ?? builderReceipt.discovered_task_count) >= 0;
-  });
-}
 
 function authoritativeRetentionPurged(events: Array<{ kind: string; payload: Record<string, unknown> }>): boolean {
   return events.some((event) => {
@@ -4364,121 +4531,6 @@ export function deriveFailureVerdicts(run: RunRecord, state: RunState, cleanupEv
   };
 }
 
-function authCleanupConfirmed(event: { kind: string; payload: Record<string, unknown> }): boolean {
-  if (event.kind !== "auth.session_cleanup") return false;
-  if (event.payload.session_revoked === true && event.payload.cookies_cleared === true) return true;
-  const receipt = event.payload.receipt as Record<string, unknown> | undefined;
-  return event.payload.confirmed === true && receipt?.session_revoked === true && receipt?.cookies_cleared === true;
-}
-
-export type ExecutionEpochCleanupProof = {
-  required: boolean;
-  ready: boolean;
-  reason: string;
-  executionEpochSha256: string | null;
-  workerIdSha256: string | null;
-  browserLeaseEpoch: number | null;
-  proofSha256: string | null;
-  eventSeqs: {
-    processAcquired: number | null;
-    runtimeAcquired: number | null;
-    providerCleanup: number | null;
-    authCleanup: number | null;
-    processClosed: number | null;
-    recovery: number | null;
-  };
-};
-
-/**
- * Join the run-owned Chromium process, its worker lease, and the exact provider,
- * auth-session, and process-death receipts before the lease can be released.
- * A recovery receipt is an allowed cleanup source only when it follows proven
- * process death and authoritatively reports both provider and auth components.
- */
-export function deriveExecutionEpochCleanupProof(
-  run: RunRecord,
-  events: import("./domain.js").LabEvent[],
-): ExecutionEpochCleanupProof {
-  const emptySeqs = { processAcquired: null, runtimeAcquired: null, providerCleanup: null, authCleanup: null, processClosed: null, recovery: null };
-  const acquisitions = events.filter((event) => event.kind === "harness.browser_process_acquired" && event.source === "browser");
-  if (acquisitions.length === 0) return { required: false, ready: true, reason: "browser_process_not_allocated", executionEpochSha256: null, workerIdSha256: null, browserLeaseEpoch: null, proofSha256: null, eventSeqs: emptySeqs };
-  const fail = (reason: string, partial: Partial<ExecutionEpochCleanupProof> = {}): ExecutionEpochCleanupProof => ({
-    required: true,
-    ready: false,
-    reason,
-    executionEpochSha256: null,
-    workerIdSha256: null,
-    browserLeaseEpoch: null,
-    proofSha256: null,
-    eventSeqs: emptySeqs,
-    ...partial,
-  });
-  if (acquisitions.length !== 1) return fail("process_acquisition_count_invalid");
-  const acquired = acquisitions[0]!;
-  const ap = acquired.payload;
-  const runHash = sha256(run.id);
-  const cleanupHash = sha256(run.cleanupObligationId);
-  if (ap.schema !== "sophia_voice_lab_browser_process_ownership_v1"
-    || ap.voice_lab_run_id_sha256 !== runHash || ap.cleanup_obligation_id_sha256 !== cleanupHash
-    || !isSha256(ap.process_id_sha256) || !isSha256(ap.browser_boot_id_sha256) || !isSha256(ap.execution_epoch_sha256)
-    || ap.one_process_per_run !== true || ap.raw_process_id_excluded !== true) return fail("process_acquisition_binding_invalid");
-  const epoch = String(ap.execution_epoch_sha256);
-  const processId = String(ap.process_id_sha256);
-  const bootId = String(ap.browser_boot_id_sha256);
-  const runtimes = events.filter((event) => event.kind === "harness.browser_runtime_acquired" && event.source === "canonical" && event.seq > acquired.seq);
-  if (runtimes.length !== 1) return fail("runtime_acquisition_count_invalid", { executionEpochSha256: epoch, eventSeqs: { ...emptySeqs, processAcquired: acquired.seq } });
-  const runtime = runtimes[0]!;
-  const workerId = runtime.payload.worker_id_sha256;
-  const leaseEpoch = runtime.payload.browser_lease_epoch;
-  if (!isSha256(workerId) || !Number.isSafeInteger(leaseEpoch) || Number(leaseEpoch) < 1) return fail("runtime_lease_binding_invalid", { executionEpochSha256: epoch, eventSeqs: { ...emptySeqs, processAcquired: acquired.seq, runtimeAcquired: runtime.seq } });
-
-  const sameEpoch = (payload: Record<string, unknown>) => payload.voice_lab_run_id_sha256 === runHash
-    && payload.cleanup_obligation_id_sha256 === cleanupHash
-    && payload.process_id_sha256 === processId
-    && payload.browser_boot_id_sha256 === bootId
-    && payload.execution_epoch_sha256 === epoch;
-  const closes = events.filter((event) => event.kind === "cleanup.browser_context_closed" && event.source === "browser"
-    && event.seq > runtime.seq && event.payload.schema === "sophia_voice_lab_execution_epoch_browser_cleanup_v1"
-    && sameEpoch(event.payload) && event.payload.close_resolved === true && event.payload.browser_registry_absent === true
-    && event.payload.browser_process_close_resolved === true && event.payload.browser_process_disconnected === true
-    && event.payload.raw_process_id_excluded === true);
-  if (closes.length !== 1) return fail("process_death_proof_invalid", { executionEpochSha256: epoch, workerIdSha256: workerId, browserLeaseEpoch: Number(leaseEpoch), eventSeqs: { ...emptySeqs, processAcquired: acquired.seq, runtimeAcquired: runtime.seq } });
-  const closed = closes[0]!;
-  const providers = events.filter((event) => event.kind === "cleanup.provider_transport_closed" && event.source === "canonical"
-    && event.seq > runtime.seq && event.seq < closed.seq
-    && event.payload.schema === "sophia_voice_lab_execution_epoch_provider_cleanup_v1" && sameEpoch(event.payload)
-    && ["closed", "ended"].includes(String(event.payload.provider_stage))
-    && isSha256(event.payload.provider_event_sha256) && event.payload.exact_product_binding_validated === true
-    && event.payload.raw_process_and_provider_identifiers_excluded === true);
-  const auth = events.filter((event) => event.kind === "auth.session_cleanup" && event.source === "canonical"
-    && event.seq > runtime.seq && event.seq < closed.seq
-    && event.payload.cleanup_proof_schema === "sophia_voice_lab_execution_epoch_auth_cleanup_v1"
-    && sameEpoch(event.payload) && authCleanupConfirmed(event));
-  const direct = providers.length === 1 && auth.length === 1 && providers[0]!.seq < auth[0]!.seq;
-  const recoveries = events.filter((event) => {
-    if (event.kind !== "cleanup.recovery" || event.seq <= closed.seq) return false;
-    const receipt = event.payload.receipt as Record<string, unknown> | undefined;
-    return receipt?.test_run_id === run.testRunId && receipt.cleanup_obligation_id_sha256 === cleanupHash
-      && authoritativeLiveCleanupComplete([event]) && recoveryComponentComplete([event], "voice_provider") && recoveryComponentComplete([event], "auth_sessions");
-  });
-  const recovered = recoveries.length === 1;
-  if (!direct && !recovered) return fail("provider_or_auth_cleanup_unconfirmed", {
-    executionEpochSha256: epoch,
-    workerIdSha256: workerId,
-    browserLeaseEpoch: Number(leaseEpoch),
-    eventSeqs: { ...emptySeqs, processAcquired: acquired.seq, runtimeAcquired: runtime.seq, providerCleanup: providers[0]?.seq ?? null, authCleanup: auth[0]?.seq ?? null, processClosed: closed.seq, recovery: recoveries[0]?.seq ?? null },
-  });
-  const eventSeqs = {
-    processAcquired: acquired.seq,
-    runtimeAcquired: runtime.seq,
-    providerCleanup: providers[0]?.seq ?? null,
-    authCleanup: auth[0]?.seq ?? null,
-    processClosed: closed.seq,
-    recovery: recoveries[0]?.seq ?? null,
-  };
-  const proofCore = { run_id_sha256: runHash, cleanup_obligation_id_sha256: cleanupHash, process_id_sha256: processId, browser_boot_id_sha256: bootId, execution_epoch_sha256: epoch, worker_id_sha256: workerId, browser_lease_epoch: Number(leaseEpoch), cleanup_path: direct ? "direct" : "recovery", event_seqs: eventSeqs };
-  return { required: true, ready: true, reason: direct ? "direct_cleanup_before_process_death" : "authoritative_recovery_after_process_death", executionEpochSha256: epoch, workerIdSha256: workerId, browserLeaseEpoch: Number(leaseEpoch), proofSha256: canonicalRequestHash(proofCore), eventSeqs };
-}
 
 function exactString(value: unknown): string | null { return typeof value === "string" && value.length > 0 && value.length <= 512 ? value : null; }
 export function isExactBoundProductEvent(run: RunRecord, event: Pick<import("./domain.js").LabEvent, "source" | "payload">): boolean {
@@ -4661,24 +4713,12 @@ export function deriveD02BrowserContextBinding(run: RunRecord, workerId: string,
   if (run.scenarioId !== "V-D02" || typeof workerId !== "string" || workerId.length === 0 || !Number.isSafeInteger(leaseEpoch) || leaseEpoch < 1) {
     throw new VoiceLabError(labError("BROWSER_CONTEXT_BINDING_MISMATCH", "A deterministic browser context binding requires one exact V-D02 run, worker, and positive lease epoch.", "harness", false));
   }
-  const workerHash = sha256(workerId);
-  const allocationId = deterministicUuid(run.id, `browser-context-allocation:${workerHash}:${leaseEpoch}`);
-  return {
-    voice_lab_run_id_sha256: sha256(run.id),
-    browser_worker_id_sha256: workerHash,
-    browser_lease_epoch: leaseEpoch,
-    browser_context_id_sha256: sha256(allocationId),
-  };
+  return deriveRecoveryBrowserBinding(run.id, workerId, leaseEpoch);
 }
 
 function isExactD02BrowserContextBinding(run: RunRecord, binding: D02BrowserContextBinding): boolean {
-  return run.scenarioId === "V-D02"
-    && /^[a-f0-9]{64}$/.test(binding.voice_lab_run_id_sha256)
-    && binding.voice_lab_run_id_sha256 === sha256(run.id)
-    && /^[a-f0-9]{64}$/.test(binding.browser_worker_id_sha256)
-    && Number.isSafeInteger(binding.browser_lease_epoch)
-    && binding.browser_lease_epoch > 0
-    && /^[a-f0-9]{64}$/.test(binding.browser_context_id_sha256);
+  try { validateRecoveryBrowserBinding({ runId: run.id, scenarioId: run.scenarioId }, binding); return true; }
+  catch { return false; }
 }
 
 function sameD02BrowserContextBinding(left: D02BrowserContextBinding | undefined, right: D02BrowserContextBinding | undefined): boolean {

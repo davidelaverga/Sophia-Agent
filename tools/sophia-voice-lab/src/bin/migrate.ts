@@ -3,6 +3,7 @@ import { readFile, realpath } from "node:fs/promises";
 import path from "node:path";
 
 import pg from "pg";
+import { composeVoiceLabMigration } from "../migration-bundle.js";
 
 import { acquireMigrationLock, closeMigrationClient, configureMigrationSession, createMigrationClient, logMigrationStage } from "../migration-runtime.js";
 import { canonicalRequestHash } from "../security.js";
@@ -15,7 +16,7 @@ const defaultPath = path.resolve(process.cwd(), "../../backend/migrations/2026_0
 const configuredPath = process.env.SOPHIA_VOICE_LAB_MIGRATION_PATH?.trim();
 if (configuredPath && process.env.NODE_ENV === "production" && await realpath(configuredPath) !== await realpath(defaultPath)) throw new Error("Production migration path must be the immutable bundled Voice Lab migration.");
 const migrationPath = configuredPath || defaultPath;
-const sqlBytes = await readFile(migrationPath);
+const sqlBytes = composeVoiceLabMigration(await readFile(migrationPath), await readFile(path.resolve(process.cwd(), "migrations/004_recovery_controls.sql")));
 const migrationSha256 = createHash("sha256").update(sqlBytes).digest("hex");
 if (migrationSha256 !== VOICE_LAB_MIGRATION_SHA256) throw new Error("Voice Lab migration bytes do not match the compiled release checksum.");
 const client = createMigrationClient(databaseUrl);
@@ -34,9 +35,11 @@ try {
   // target schema, so IF NOT EXISTS can never bless pre-existing drift.
   const expectedCatalogSha256 = await buildReferenceCatalog(client, sqlBytes.toString("utf8"));
   logMigrationStage("reference_catalog_built");
-  await inspectMigrationPreflight(client, expectedCatalogSha256);
+  const migrationMode = await inspectMigrationPreflight(client, expectedCatalogSha256);
   logMigrationStage("target_preflight_passed");
-  await client.query(sqlBytes.toString("utf8"));
+  // An exact rerun needs no DDL. In particular, do not rerun the additive
+  // CREATE TABLE extension or permit IF NOT EXISTS to hide target drift.
+  if (migrationMode === "fresh") await client.query(sqlBytes.toString("utf8"));
   logMigrationStage("migration_applied");
   const catalogSha256 = canonicalRequestHash(await readVoiceLabCatalog(client));
   if (catalogSha256 !== expectedCatalogSha256) throw new Error("Voice Lab migration postflight differs from the release reference catalog.");

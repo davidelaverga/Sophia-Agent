@@ -1,3 +1,14 @@
+import { deriveExecutionOwnership } from "./execution-ownership.js";
+import { ingestGenericOwnerLoss } from "./generic-owner-loss.js";
+import { deriveRetainedGenericRecovery } from "./retained-generic-recovery.js";
+import { z } from "zod";
+import { verifyRetainedD02OwnerDeath } from "./retained-owner-verifier.js";
+import { parseRetainedOwnerDeath } from "./retained-owner-death.js";
+import { verifyRetainedD02ProviderSettlement } from "./retained-d02-provider.js";
+import type { RetainedOwnerIngestion, RetainedProviderIngestion } from "./retained-ingestion.js";
+import { deriveRetainedD02Recovery, recoveryAttemptAuditHash } from "./retained-d02-recovery.js";
+import type { RecoveryAttemptIdentity } from "./recovery-attempt.js";
+import { D02_DISPATCH_EVENT, deriveD02RecoveryJournal } from "./d02-recovery-journal.js";
 import {
   TERMINAL_RUN_STATES,
   VoiceLabError,
@@ -14,8 +25,12 @@ import {
 } from "./domain.js";
 import type { AuthAuditRecord, BrowserLease, ClaimedOperation, EventAppendInput, EventClaimGuard, EventPage, LedgerHealth, NewOperation, OperationAdmission, PrincipalProvisionCapabilityRotation, PrincipalProvisionClaim, PrincipalProvisionControlRecord, PrincipalProvisionPreparation, PrincipalProvisionReadiness, RetentionTombstone, RollingAdmissionFence, RollingAdmissionLimits, RollingAdmissionReservation, RollingAdmissionResult, RunPatch, VoiceLabLedger, WorkerHeartbeat } from "./ledger.js";
 import { parseExactPrincipalProvisionReceipt } from './principal-provision-receipt.js';
+import { deriveExecutionEpochCleanupProof } from "./execution-cleanup.js";
 import { canonicalRequestHash, sha256 } from "./security.js";
 import { CallerPartitioner, type CallerPartitionKeyRing } from "./caller-partition.js";
+import { RETAINED_RECOVERY_RETRY_MS, executionMatchesRecoveryAllocation } from "./recovery-control.js";
+import { prepareGenericOwnerDispatch, consumeGenericOwnerDispatch, type PrepareGenericOwnerDispatch, type ConsumeGenericOwnerDispatch, type GenericOwnerDispatchResult } from "./generic-owner-dispatch.js";
+import { deriveRecoveryBrowserBinding, projectRecoveryControlBinding, recoveryCapabilityAudit, recoveryInventoryCursor, recoverySettlementProof, validateRecoveryBrowserBinding, type RecoveryControlRecord } from "./recovery-control.js";
 
 function clone<T>(value: T): T {
   return structuredClone(value);
@@ -23,6 +38,8 @@ function clone<T>(value: T): T {
 
 export class MemoryVoiceLabLedger implements VoiceLabLedger {
   readonly #runs = new Map<string, RunRecord>();
+  readonly #recoveryControls = new Map<string, RecoveryControlRecord>();
+  readonly #recoveryScheduled = new Map<string, number>();
   readonly #operations = new Map<string, OperationRecord>();
   readonly #operationKeys = new Map<string, string>();
   readonly #events = new Map<string, LabEvent[]>();
@@ -52,19 +69,211 @@ export class MemoryVoiceLabLedger implements VoiceLabLedger {
   async close(): Promise<void> {}
   async health(): Promise<LedgerHealth> { return { ok: true, detail: "memory-test-only" }; }
 
+  #runRequiresAdmission(run: RunRecord): boolean {
+    return !TERMINAL_RUN_STATES.has(run.state) || !run.cleanupComplete
+      || this.#recoveryControls.get(run.id)?.liveCleanupComplete === false || this.#browserLeases.has(run.id);
+  }
   async countActiveRuns(callerId?: string): Promise<number> {
-    return [...this.#runs.values()].filter((run) => (!TERMINAL_RUN_STATES.has(run.state) || !run.cleanupComplete) && (callerId === undefined || run.callerId === callerId)).length;
+    const partitions = callerId === undefined ? null : new Set(this.#callerPartitions.callerIds(callerId));
+    const retained = [...this.#recoveryControls.values()].filter((control) => !this.#runs.has(control.binding.runId) && (!control.liveCleanupComplete || this.#browserLeases.has(control.binding.runId)) && (partitions === null || partitions.has(control.binding.callerPartitionId))).length;
+    return retained + [...this.#runs.values()].filter((run) => this.#runRequiresAdmission(run) && (callerId === undefined || run.callerId === callerId)).length;
+  }
+
+  async listRecoveryControls(limit: number, afterRunId?: string): Promise<RecoveryControlRecord[]> {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1000) throw conflict("RECOVERY_LIMIT_INVALID", "Recovery listing limit is invalid.");
+    const cursor = recoveryInventoryCursor(afterRunId);
+    return clone([...this.#recoveryControls.values()]
+      .filter((control) => (cursor === null || control.binding.runId > cursor)
+        && (!control.liveCleanupComplete || !control.remotePurgeComplete || this.#browserLeases.has(control.binding.runId)))
+      .sort((a, b) => a.binding.runId < b.binding.runId ? -1 : a.binding.runId > b.binding.runId ? 1 : 0)
+      .slice(0, limit));
+  }
+  async recordRecoveryCapabilityAudit(runId: string, expectedVersion: number, jtiHash: string, argumentHash: string): Promise<void> {
+    const control = this.#recoveryControls.get(runId);
+    if (!control || control.contentPurgedAt === null || control.version !== expectedVersion) throw conflict("RECOVERY_VERSION_CONFLICT", "Retained recovery authorization requires the exact durable revision.");
+    this.#authAudit.push(clone({ ...recoveryCapabilityAudit(control, jtiHash, argumentHash), id: ++this.#nextAuthAuditId }));
+  }
+  async scheduleRetainedRecovery(limit: number): Promise<RecoveryControlRecord[]> {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1000) throw conflict("RECOVERY_LIMIT_INVALID", "Recovery scheduling limit is invalid.");
+    const now = Date.now();
+    const selected = [...this.#recoveryControls.values()]
+      .filter(c => c.contentPurgedAt !== null && (!c.liveCleanupComplete || !c.remotePurgeComplete || this.#browserLeases.has(c.binding.runId)))
+      .filter(c => !this.#recoveryScheduled.has(c.binding.runId) || this.#recoveryScheduled.get(c.binding.runId)! <= now - RETAINED_RECOVERY_RETRY_MS)
+      .sort((a, b) => (this.#recoveryScheduled.get(a.binding.runId) ?? 0) - (this.#recoveryScheduled.get(b.binding.runId) ?? 0)
+        || a.binding.runId.localeCompare(b.binding.runId)).slice(0, limit);
+    for (const control of selected) this.#recoveryScheduled.set(control.binding.runId, now);
+    return clone(selected);
+  }
+  async preserveRecoveryExecutionOwnership(runId: string): Promise<RecoveryControlRecord> {
+    const run = this.#runs.get(runId);
+    const current = this.#recoveryControls.get(runId);
+    const lease = this.#browserLeases.get(runId);
+    if (!run || !current || current.contentPurgedAt !== null || !current.browserAllocationEver) throw conflict("RECOVERY_OWNERSHIP_UNAVAILABLE", "Ownership must be preserved before content deletion.");
+    const ownership = deriveExecutionOwnership(run, this.#events.get(runId) ?? []);
+    if (!executionMatchesRecoveryAllocation(current, ownership)) throw conflict("RECOVERY_LEASE_MISMATCH", "Ownership must match the durable allocation.");
+    if (!lease || lease.expiresAt <= new Date() || sha256(lease.workerId) !== ownership.workerIdSha256 || lease.leaseEpoch !== ownership.browserLeaseEpoch) throw conflict("RECOVERY_LEASE_MISMATCH", "Ownership requires its exact live allocation lease.");
+    if (current.executionOwnership) {
+      if (canonicalRequestHash(current.executionOwnership) !== canonicalRequestHash(ownership)) throw conflict("RECOVERY_OWNERSHIP_CONFLICT", "Execution ownership is immutable.");
+      return clone(current);
+    }
+    const updated = { ...current, version: current.version + 1, executionOwnership: ownership };
+    this.#recoveryControls.set(runId, updated);
+    return clone(updated);
+  }
+  async preserveRecoveryExecutionCleanup(runId: string): Promise<RecoveryControlRecord> {
+    const run = this.#runs.get(runId);
+    const current = this.#recoveryControls.get(runId);
+    if (!run || !current || !current.browserAllocationEver || current.contentPurgedAt !== null) throw conflict("RECOVERY_EXECUTION_PROOF_UNAVAILABLE", "Execution proof must be preserved from its owning evidence before content deletion.");
+    const proof = deriveExecutionEpochCleanupProof(run, this.#events.get(runId) ?? []);
+    const lease = this.#browserLeases.get(runId);
+    if (!proof.ready || !executionMatchesRecoveryAllocation(current, proof) || (lease && (proof.workerIdSha256 !== sha256(lease.workerId) || proof.browserLeaseEpoch !== lease.leaseEpoch))) throw conflict("RECOVERY_EXECUTION_PROOF_UNCONFIRMED", "Exact execution ownership and cleanup are not proven.");
+    if (current.executionCleanupProof) {
+      if (canonicalRequestHash(current.executionCleanupProof) !== canonicalRequestHash(proof)) throw conflict("RECOVERY_EXECUTION_PROOF_CONFLICT", "Preserved execution cleanup is immutable.");
+      return clone(current);
+    }
+    const updated = { ...current, version: current.version + 1, executionCleanupProof: proof };
+    this.#recoveryControls.set(runId, updated);
+    return clone(updated);
+  }
+  async bindRecoveryBrowserContext(runId: string, workerId: string, leaseEpoch: number, driverBinding: unknown): Promise<RecoveryControlRecord> {
+    const current = this.#recoveryControls.get(runId);
+    const lease = this.#browserLeases.get(runId);
+    if (!current || !this.#runs.has(runId) || current.contentPurgedAt !== null) throw conflict("RECOVERY_BINDING_UNAVAILABLE", "Recovery binding cannot be created after content deletion.");
+    const binding = validateRecoveryBrowserBinding(current.binding, driverBinding);
+    if (!current.browserAllocationBinding || canonicalRequestHash(current.browserAllocationBinding) !== canonicalRequestHash(binding)) throw conflict("RECOVERY_BINDING_CONFLICT", "Driver attestation must match the prior allocation intent.");
+    if (!lease || lease.workerId !== workerId || lease.leaseEpoch !== leaseEpoch || lease.expiresAt <= new Date()
+      || binding.browser_worker_id_sha256 !== sha256(workerId) || binding.browser_lease_epoch !== leaseEpoch) throw conflict("RECOVERY_LEASE_MISMATCH", "Recovery binding requires the exact live browser lease.");
+    if (current.browserContextBinding) {
+      if (canonicalRequestHash(current.browserContextBinding) !== canonicalRequestHash(binding)) throw conflict("RECOVERY_BINDING_CONFLICT", "Recovery browser binding is immutable.");
+      return clone(current);
+    }
+    const updated = { ...current, version: current.version + 1, browserContextBinding: binding };
+    this.#recoveryControls.set(runId, updated);
+    return clone(updated);
+  }
+  async getRecoveryControl(runId: string): Promise<RecoveryControlRecord | null> {
+    return clone(this.#recoveryControls.get(runId) ?? null);
+  }
+  async persistGenericOwnerLoss(input: import("./generic-owner-loss.js").GenericOwnerLossIngestion) {
+    const control = this.#recoveryControls.get(input.runId);
+    if (!control) throw new Error("GENERIC_OWNER_CONTROL_MISSING");
+    const result = ingestGenericOwnerLoss(control, input, new Date());
+    if (!result.replay) this.#recoveryControls.set(input.runId, clone({ ...control, version: result.version, genericOwnerLoss: result.proof }));
+    return clone(result);
+  }
+  async prepareGenericOwnerDispatch(input: PrepareGenericOwnerDispatch): Promise<RecoveryControlRecord> {
+    const current = this.#recoveryControls.get(input.runId);
+    if (!current) throw new Error("GENERIC_DISPATCH_CONTROL_MISSING");
+    const journal = prepareGenericOwnerDispatch(current, input, new Date());
+    if (current.genericOwnerDispatch) return clone(current);
+    for (const other of this.#recoveryControls.values()) {
+      if (other.genericOwnerDispatch?.workerServiceIdSha256 === journal.workerServiceIdSha256
+        && other.genericOwnerDispatch.workerIdSha256 === journal.workerIdSha256) throw new Error("GENERIC_DISPATCH_OWNER_ALREADY_CLAIMED");
+    }
+    const updated = { ...current, genericOwnerDispatch: journal, version: current.version + 1 };
+    this.#recoveryControls.set(input.runId, updated);
+    return clone(updated);
+  }
+  async consumeGenericOwnerDispatch(input: ConsumeGenericOwnerDispatch): Promise<GenericOwnerDispatchResult> {
+    const current = this.#recoveryControls.get(input.runId);
+    if (!current) throw new Error("GENERIC_DISPATCH_CONTROL_MISSING");
+    const journal = consumeGenericOwnerDispatch(current, input, new Date());
+    if (current.genericOwnerDispatch?.consumedAt !== null) return { dispatchAllowed: false, control: clone(current) };
+    const updated = { ...current, genericOwnerDispatch: journal, version: current.version + 1 };
+    this.#recoveryControls.set(input.runId, updated);
+    return { dispatchAllowed: true, control: clone(updated) };
+  }
+  async persistRetainedD02OwnerDeath(input: RetainedOwnerIngestion) {
+    z.string().uuid().parse(input.runId);
+    z.number().int().positive().max(Number.MAX_SAFE_INTEGER).parse(input.expectedVersion);
+    const control = this.#recoveryControls.get(input.runId);
+    if (!control) throw new Error("OWNER_CONTROL_UNAVAILABLE");
+    const lease = this.#browserLeases.get(input.runId);
+    if (lease && (sha256(lease.workerId) !== control.executionOwnership?.workerIdSha256
+      || lease.leaseEpoch !== control.executionOwnership?.browserLeaseEpoch)) throw new Error("OWNER_LEASE_MISMATCH");
+    const previous = control.d02OwnerDeath;
+    if (previous && previous.signedReceiptSha256 !== canonicalRequestHash(input.receipt)) throw new Error("OWNER_DEATH_IMMUTABLE");
+    const proof = parseRetainedOwnerDeath(verifyRetainedD02OwnerDeath({ ...input, control,
+      acceptedAt: previous ? new Date(previous.acceptedAt) : new Date() }));
+    if (previous) {
+      if (canonicalRequestHash(previous) !== canonicalRequestHash(proof)) throw new Error("OWNER_DEATH_IMMUTABLE");
+      return clone({ replay: true, version: control.version, proof });
+    }
+    if (control.version !== input.expectedVersion) throw new Error("OWNER_CONTROL_VERSION_CONFLICT");
+    const updated = { ...control, d02OwnerDeath: proof, version: control.version + 1 };
+    this.#recoveryControls.set(input.runId, clone(updated));
+    return clone({ replay: false, version: updated.version, proof });
+  }
+  async persistRetainedD02ProviderSettlement(input: RetainedProviderIngestion) {
+    z.string().uuid().parse(input.runId);
+    z.number().int().positive().max(Number.MAX_SAFE_INTEGER).parse(input.expectedVersion);
+    const control = this.#recoveryControls.get(input.runId);
+    if (!control) throw new Error("PROVIDER_CONTROL_UNAVAILABLE");
+    const lease = this.#browserLeases.get(input.runId);
+    if (lease && (sha256(lease.workerId) !== control.executionOwnership?.workerIdSha256
+      || lease.leaseEpoch !== control.executionOwnership?.browserLeaseEpoch)) throw new Error("PROVIDER_LEASE_MISMATCH");
+    const previous = control.d02ProviderSettlement;
+    if (previous && previous.gatewayReceiptSha256 !== canonicalRequestHash(input.receipt)) throw new Error("PROVIDER_SETTLEMENT_IMMUTABLE");
+    const proof = verifyRetainedD02ProviderSettlement(control, input.receipt, input.authority, new Date());
+    if (previous) {
+      if (canonicalRequestHash(previous) !== canonicalRequestHash(proof)) throw new Error("PROVIDER_SETTLEMENT_IMMUTABLE");
+      return clone({ replay: true, version: control.version, proof });
+    }
+    if (control.version !== input.expectedVersion) throw new Error("PROVIDER_CONTROL_VERSION_CONFLICT");
+    const updated = { ...control, d02ProviderSettlement: proof, version: control.version + 1 };
+    this.#recoveryControls.set(input.runId, clone(updated));
+    return clone({ replay: false, version: updated.version, proof });
+  }
+  async settleRecoveryControl(runId: string, expectedVersion: number, canonicalEvent: unknown, attempt?: RecoveryAttemptIdentity): Promise<RecoveryControlRecord> {
+    const current = this.#recoveryControls.get(runId);
+    if (!current) throw notFound("RECOVERY_CONTROL_NOT_FOUND", "Recovery control was not found.");
+    if (current.contentPurgedAt === null) throw conflict("RECOVERY_CONTENT_NOT_PURGED", "Live-run settlement belongs to the existing execution path.");
+    const proof = recoverySettlementProof(current.binding, canonicalEvent);
+    const lease = this.#browserLeases.get(runId);
+    let externalProof;
+    if (current.browserAllocationEver && !current.executionCleanupProof?.ready && !current.d02RecoverySettlement && attempt && current.d02OwnerDeath && current.d02ProviderSettlement) {
+      externalProof = deriveRetainedD02Recovery(current, canonicalEvent, attempt, new Date());
+      if (!this.#authAudit.some(a => a.callerId === current.binding.callerPartitionId && a.action === "capability:session:recover" && a.outcome === "allowed" && a.argumentHash === recoveryAttemptAuditHash(current, attempt))) throw conflict("RECOVERY_ATTEMPT_AUDIT_MISSING", "Exact retained recovery attempt was not durably authorized.");
+      if (lease && (sha256(lease.workerId) !== externalProof.workerIdSha256 || lease.leaseEpoch !== externalProof.browserLeaseEpoch)) throw conflict("RECOVERY_LEASE_MISMATCH", "Recovery must close only the original allocation.");
+    }
+    let genericProof;
+    if (current.genericOwnerLoss && !current.genericRecoverySettlement && attempt) {
+      genericProof = deriveRetainedGenericRecovery(current, canonicalEvent, attempt, new Date());
+      if (!this.#authAudit.some(a => a.callerId === current.binding.callerPartitionId && a.action === "capability:session:recover" && a.outcome === "allowed" && a.argumentHash === recoveryAttemptAuditHash(current, attempt))) throw conflict("RECOVERY_ATTEMPT_AUDIT_MISSING", "Exact retained recovery attempt was not durably authorized.");
+      if (lease && (sha256(lease.workerId) !== genericProof.workerIdSha256 || lease.leaseEpoch !== genericProof.browserLeaseEpoch)) throw conflict("RECOVERY_LEASE_MISMATCH", "Recovery must close only the original allocation.");
+    }
+    if (lease && !externalProof && !genericProof) throw conflict("RECOVERY_BROWSER_UNSETTLED", "Recovery cannot settle while a browser lease remains.");
+    if (current.browserAllocationEver !== false && !current.executionCleanupProof?.ready && !current.d02RecoverySettlement && !current.genericRecoverySettlement && !externalProof && !genericProof) throw conflict("RECOVERY_EXECUTION_UNCONFIRMED", "Allocated browser execution must have an independently preserved cleanup proof.");
+    if (current.lastSettlement?.fromVersion === expectedVersion && current.lastSettlement.eventSha256 === proof.eventSha256) return clone(current);
+    if (current.version !== expectedVersion) throw conflict("RECOVERY_VERSION_CONFLICT", "Recovery control changed concurrently.");
+    const settled: RecoveryControlRecord = {
+      ...current, version: current.version + 1, liveCleanupComplete: true,
+      remotePurgeComplete: current.remotePurgeComplete || proof.remotePurgeComplete,
+      lastSettlement: { fromVersion: expectedVersion, eventSha256: proof.eventSha256, receiptSha256: proof.receiptSha256 },
+      ...(externalProof ? { d02RecoverySettlement: externalProof } : {}),
+      ...(genericProof ? { genericRecoverySettlement: genericProof } : {}),
+    };
+    if ((externalProof || genericProof) && lease) this.#browserLeases.delete(runId);
+    this.#recoveryControls.set(runId, settled);
+    if (settled.remotePurgeComplete && settled.retentionLookupHmac) {
+      const tombstone = this.#retentionTombstones.get(settled.retentionLookupHmac);
+      if (tombstone) this.#retentionTombstones.set(settled.retentionLookupHmac, { ...tombstone, remotePurgeStatus: "confirmed" });
+    }
+    return clone(settled);
   }
   async listExpiredRuns(now: Date, limit: number): Promise<RunRecord[]> { return clone([...this.#runs.values()].filter((run) => !TERMINAL_RUN_STATES.has(run.state) && run.expiresAt <= now).slice(0, limit)); }
-  async listRunsNeedingRecovery(limit: number): Promise<RunRecord[]> {
+  async listRunsNeedingRecovery(limit: number, afterRunId?: string): Promise<RunRecord[]> {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1000) throw conflict("RECOVERY_LIMIT_INVALID", "Recovery listing limit is invalid.");
+    const cursor = recoveryInventoryCursor(afterRunId);
     return clone([...this.#runs.values()].filter((run) => {
-      if (run.cleanupComplete) return false;
+      if (cursor !== null && run.id <= cursor) return false;
+      if (run.cleanupComplete && this.#recoveryControls.get(run.id)?.liveCleanupComplete === true && !this.#browserLeases.has(run.id)) return false;
       if (TERMINAL_RUN_STATES.has(run.state)) return true;
       const operations = [...this.#operations.values()].filter((operation) => operation.runId === run.id);
       const terminalFailure = operations.some((operation) => operation.state === "failed" || operation.state === "timed_out");
       const liveOperation = operations.some((operation) => ["accepted", "queued", "leased", "executing"].includes(operation.state));
       return terminalFailure && !liveOperation;
-    }).slice(0, limit));
+    }).sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0).slice(0, limit));
   }
   async listRunsPendingEvidence(limit: number): Promise<RunRecord[]> {
     return clone([...this.#runs.values()].filter((run) => {
@@ -127,15 +336,21 @@ export class MemoryVoiceLabLedger implements VoiceLabLedger {
       const rollingAdmission = rolling ? this.#reserveRollingAdmission(rolling.reservation, rolling.limits) : undefined;
       return { run: clone(this.#runs.get(existing.runId)!), operation: clone(existing), replay: true, ...(rollingAdmission ? { rollingAdmission } : {}) };
     }
-    const active = [...this.#runs.values()].filter((candidate) => !TERMINAL_RUN_STATES.has(candidate.state) || !candidate.cleanupComplete);
-    if (active.length >= limits.global || active.filter((candidate) => candidate.callerId === operation.callerId).length >= limits.caller) throw conflict("CONCURRENCY_LIMIT", "Voice Lab concurrency limit is reached.");
+    // Do not await between admission and insertion: the memory transaction must
+    // remain atomic even when multiple callers submit starts in one tick.
+    const active = [...this.#runs.values()].filter((candidate) => this.#runRequiresAdmission(candidate));
+    const retained = [...this.#recoveryControls.values()].filter((control) => !this.#runs.has(control.binding.runId) && (!control.liveCleanupComplete || this.#browserLeases.has(control.binding.runId)));
+    const partitions = new Set(this.#callerPartitions.callerIds(operation.callerId));
+    if (active.length + retained.length >= limits.global || active.filter((candidate) => candidate.callerId === operation.callerId).length + retained.filter((control) => partitions.has(control.binding.callerPartitionId)).length >= limits.caller) throw conflict("CONCURRENCY_LIMIT", "Voice Lab concurrency limit is reached.");
+    const binding = projectRecoveryControlBinding(run, this.#callerPartitions.activeCallerId(run.callerId));
     const rollingAdmission = rolling ? this.#reserveRollingAdmission(rolling.reservation, rolling.limits) : undefined;
     // A durable rolling reservation outlives the governed run/evidence bytes.
     // If its canonical operation has already been retention-purged, it is a
     // content-free replay tombstone, never authority to allocate a new run for
     // the same natural key without charging admission again.
     if (rollingAdmission?.replay) throw conflict("IDEMPOTENCY_RETENTION_EXPIRED", "The idempotent start receipt was retention-purged and cannot be replayed or reallocated.");
-    if ([...this.#runs.values()].some((candidate) => candidate.cleanupObligationId === run.cleanupObligationId)) throw conflict("CLEANUP_OBLIGATION_CONFLICT", "Cleanup obligation is already bound to a different run.");
+    if ([...this.#recoveryControls.values()].some((candidate) => candidate.binding.cleanupObligationId === run.cleanupObligationId || candidate.binding.runId === run.id || candidate.binding.testRunId === run.testRunId)) throw conflict("CLEANUP_OBLIGATION_CONFLICT", "Cleanup obligation is already bound to a run.");
+    this.#recoveryControls.set(run.id, clone({ binding, browserAllocationEver: false, version: 1, liveCleanupComplete: run.cleanupComplete, retentionPurgeDueAt: run.retentionPurgeDueAt, remotePurgeComplete: run.retentionPurgeVerifiedAt !== null && !run.retentionPurgePending, contentPurgedAt: null }));
     this.#runs.set(run.id, clone(run));
     const record = newOperationRecord(operation);
     this.#operations.set(record.id, record);
@@ -160,6 +375,14 @@ export class MemoryVoiceLabLedger implements VoiceLabLedger {
       updatedAt: new Date(),
     };
     this.#runs.set(runId, updated);
+    const control = this.#recoveryControls.get(runId)!;
+    this.#recoveryControls.set(runId, clone({
+      ...control, version: control.version + 1,
+      ...(patch.cleanupComplete !== undefined ? { liveCleanupComplete: patch.cleanupComplete } : {}),
+      ...(patch.retentionPurgeDueAt !== undefined ? { retentionPurgeDueAt: patch.retentionPurgeDueAt } : {}),
+      ...(patch.retentionPurgeVerifiedAt !== undefined || patch.retentionPurgePending !== undefined
+        ? { remotePurgeComplete: updated.retentionPurgeVerifiedAt !== null && !updated.retentionPurgePending } : {}),
+    }));
     return clone(updated);
   }
 
@@ -253,6 +476,7 @@ export class MemoryVoiceLabLedger implements VoiceLabLedger {
     const existing = events.find((event) => event.dedupeKey === dedupeKey);
     if (existing) {
       assertEventReplay(existing, kind, source, payload);
+      if (kind === D02_DISPATCH_EVENT && guard && this.#recoveryControls.get(runId)?.d02Journal?.dispatchClaimSha256 !== payload.dispatch_claim_sha256) throw conflict("D02_JOURNAL_CONFLICT", "D02 dispatch replay lost retained authority.");
       return { event: clone(existing), replay: true };
     }
     guard?.({
@@ -263,6 +487,12 @@ export class MemoryVoiceLabLedger implements VoiceLabLedger {
       databaseNow: new Date(),
     });
     const event: LabEvent = { runId, seq: events.length + 1, kind, source, at: observedAt, payload: clone(payload), dedupeKey };
+    if (kind === D02_DISPATCH_EVENT && guard) {
+      const journal = deriveD02RecoveryJournal(run, events, event);
+      const control = this.#recoveryControls.get(runId);
+      if (!control || control.d02Journal) throw conflict("D02_JOURNAL_CONFLICT", "D02 dispatch journal cannot be replaced.");
+      this.#recoveryControls.set(runId, clone({ ...control, version: control.version + 1, d02Journal: journal }));
+    }
     events.push(event);
     this.#events.set(runId, events);
     run.latestCursor = event.seq;
@@ -419,10 +649,16 @@ export class MemoryVoiceLabLedger implements VoiceLabLedger {
   }
 
   async upsertBrowserLease(runId: string, workerId: string, leaseSeconds: number): Promise<BrowserLease> {
+    if (!this.#runs.has(runId)) throw notFound("RUN_NOT_FOUND", "A retained recovery control cannot authorize a new browser allocation.");
     const prior = this.#browserLeases.get(runId);
     const now = new Date();
     if (prior && prior.workerId !== workerId && prior.expiresAt > now) throw conflict("BROWSER_ALREADY_LEASED", "Browser is owned by another live worker.");
     const lease = { runId, workerId, leaseEpoch: (prior?.leaseEpoch ?? 0) + 1, expiresAt: new Date(now.getTime() + leaseSeconds * 1_000), updatedAt: now };
+    const control = this.#recoveryControls.get(runId)!;
+    if (control.browserAllocationEver !== false) throw conflict("BROWSER_ALLOCATION_ALREADY_RESERVED", "An allocated execution cannot be replaced or reconstructed after lease loss.");
+    if (control.browserAllocationBinding) throw conflict("BROWSER_ALLOCATION_ALREADY_RESERVED", "A browser allocation cannot be replaced or reconstructed.");
+    const binding = deriveRecoveryBrowserBinding(runId, workerId, lease.leaseEpoch);
+    this.#recoveryControls.set(runId, { ...control, version: control.version + 1, browserAllocationEver: true, browserAllocationBinding: binding });
     this.#browserLeases.set(runId, lease);
     return clone(lease);
   }
@@ -430,8 +666,8 @@ export class MemoryVoiceLabLedger implements VoiceLabLedger {
 
   async heartbeatBrowserLease(runId: string, workerId: string, leaseEpoch: number, leaseSeconds: number): Promise<boolean> {
     const lease = this.#browserLeases.get(runId);
-    if (!lease || lease.workerId !== workerId || lease.leaseEpoch !== leaseEpoch) return false;
     const now = new Date();
+    if (!lease || lease.workerId !== workerId || lease.leaseEpoch !== leaseEpoch || lease.expiresAt <= now) return false;
     lease.expiresAt = new Date(now.getTime() + leaseSeconds * 1_000);
     lease.updatedAt = now;
     return true;
@@ -444,9 +680,14 @@ export class MemoryVoiceLabLedger implements VoiceLabLedger {
     return true;
   }
 
-  async reapExpiredBrowserLeases(now = new Date()): Promise<BrowserLease[]> {
-    const expired = [...this.#browserLeases.values()].filter((lease) => lease.expiresAt <= now);
-    for (const lease of expired) this.#browserLeases.delete(lease.runId);
+  async reapExpiredBrowserLeases(now = new Date(), limit = 100, afterRunId?: string): Promise<BrowserLease[]> {
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new RangeError("expired lease page limit must be between 1 and 100");
+    const expired = [...this.#browserLeases.values()]
+      .filter((lease) => lease.expiresAt <= now && (afterRunId === undefined || lease.runId > afterRunId))
+      .sort((a, b) => a.runId < b.runId ? -1 : a.runId > b.runId ? 1 : 0)
+      .slice(0, limit);
+    // Expiry revokes renewal, not the durable cleanup obligation. Keep the
+    // exact receipt until proof-gated release/settlement explicitly removes it.
     return clone(expired);
   }
   async heartbeatWorker(heartbeat: WorkerHeartbeat): Promise<void> { this.#workerHeartbeats.set(heartbeat.workerId, clone(heartbeat)); }
@@ -606,7 +847,9 @@ export class MemoryVoiceLabLedger implements VoiceLabLedger {
       for (const [id, artifact] of this.#artifacts) if (artifact.runId === run.id) this.#artifacts.delete(id);
       for (const [id, operation] of this.#operations) if (operation.runId === run.id) { this.#operations.delete(id); this.#operationKeys.delete(operationKey(operation)); }
       for (let index = this.#authAudit.length - 1; index >= 0; index -= 1) if (this.#authAudit[index]?.runId === run.id) this.#authAudit.splice(index, 1);
-      this.#browserLeases.delete(run.id);
+      // Expiry removes content, not allocation authority or a live lease.
+      const control = this.#recoveryControls.get(run.id)!;
+      this.#recoveryControls.set(run.id, clone({ ...control, version: control.version + 1, contentPurgedAt: now, retentionLookupHmac: retentionHmac(this.#retentionKey, "lookup", `${run.id}\u0000${run.callerId}`) }));
       this.#retentionTombstones.set(retentionHmac(this.#retentionKey, "lookup", `${run.id}\u0000${run.callerId}`), { purgedAt: now, remotePurgeStatus: run.retentionPurgeVerifiedAt !== null && !run.retentionPurgePending ? "confirmed" : "unconfirmed", expiresAt: new Date(now.getTime() + 30 * 86_400_000) });
       this.#runs.delete(run.id);
       for (const suite of this.#suites.values()) suite.runIds = suite.runIds.filter((runId) => runId !== run.id);
@@ -619,7 +862,6 @@ export class MemoryVoiceLabLedger implements VoiceLabLedger {
     return candidates.map((run) => run.id);
   }
 }
-function retentionHmac(key: string, domain: string, value: string): string { return createHmac("sha256", key).update(`sophia-voice-lab-retention-v1\n${domain}\n${value}`).digest("hex"); }
 
 function hasD02OperationFence(events: readonly LabEvent[]): boolean {
   return events.some((event) => event.source === "canonical" && (
@@ -675,15 +917,16 @@ function assertSameRollingReservation(prior: RollingAdmissionReservation, candid
     throw conflict("IDEMPOTENCY_CONFLICT", "Rolling admission key was reused with different arguments.");
   }
 }
-function rollingUsage(rows: RollingAdmissionReservation[], callerIds?: ReadonlySet<string>): RollingAdmissionLimits["global"] {
+function rollingUsage(rows: RollingAdmissionReservation[], callerIds?: ReadonlySet<string>): Record<typeof ROLLING_FIELDS[number], number> {
   const selected = callerIds === undefined ? rows : rows.filter((row) => callerIds.has(row.callerId));
-  return Object.fromEntries(ROLLING_FIELDS.map((field) => [field, selected.reduce((sum, row) => sum + row[field], 0)])) as unknown as RollingAdmissionLimits["global"];
+  return Object.fromEntries(ROLLING_FIELDS.map((field) => [field, selected.reduce((sum, row) => sum + row[field], 0)])) as Record<typeof ROLLING_FIELDS[number], number>;
 }
 function assertRollingCapacity(rows: RollingAdmissionReservation[], candidate: RollingAdmissionReservation, limits: RollingAdmissionLimits, callerPartitions: ReadonlySet<string>): void {
   const global = rollingUsage([...rows, candidate]);
   const caller = rollingUsage([...rows, candidate], callerPartitions);
   for (const field of ROLLING_FIELDS) {
-    if (global[field] > limits.global[field] || caller[field] > limits.caller[field]) throw conflict(`ROLLING_${field.replace(/[A-Z]/g, (letter) => `_${letter}`).toUpperCase()}_LIMIT`, `Rolling ${field} admission budget would be exceeded.`);
+    const globalCap = limits.global[field], callerCap = limits.caller[field];
+    if ((globalCap !== null && global[field] > globalCap) || (callerCap !== null && caller[field] > callerCap)) throw conflict(`ROLLING_${field.replace(/[A-Z]/g, (letter) => `_${letter}`).toUpperCase()}_LIMIT`, `Rolling ${field} admission budget would be exceeded.`);
   }
 }
 function rollingAdmissionResult(rows: RollingAdmissionReservation[], candidate: RollingAdmissionReservation, limits: RollingAdmissionLimits, replay: boolean, callerPartitions: ReadonlySet<string>): RollingAdmissionResult {
@@ -691,8 +934,8 @@ function rollingAdmissionResult(rows: RollingAdmissionReservation[], candidate: 
   const active = rows.filter((row) => row.environment === candidate.environment && row.observedAt.getTime() > cutoff);
   const global = rollingUsage(active);
   const caller = rollingUsage(active, callerPartitions);
-  const remaining = (cap: RollingAdmissionLimits["global"], used: RollingAdmissionLimits["global"]) => Object.fromEntries(ROLLING_FIELDS.map((field) => [field, Math.max(0, cap[field] - used[field])])) as unknown as RollingAdmissionLimits["global"];
+  const remaining = (cap: RollingAdmissionLimits["global"], used: ReturnType<typeof rollingUsage>) => Object.fromEntries(ROLLING_FIELDS.map((field) => { const limit = cap[field]; return [field, limit === null ? null : Math.max(0, limit - used[field])]; })) as unknown as RollingAdmissionLimits["global"];
   const oldest = active.reduce((value, row) => Math.min(value, row.observedAt.getTime()), candidate.observedAt.getTime());
   return { replay, resetAt: new Date(oldest + limits.windowSeconds * 1_000), remaining: { global: remaining(limits.global, global), caller: remaining(limits.caller, caller) } };
 }
-import { createHmac } from "node:crypto";
+import { retentionHmac } from "./retention-identity.js";

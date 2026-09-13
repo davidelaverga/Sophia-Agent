@@ -64,6 +64,19 @@ deer-flow/
 
 ## Important Development Guidelines
 
+### Voice Lab D02 retained receipt lookup
+
+`POST /internal/voice-lab/d02/browser-worker-termination-receipts` uses the
+strict digest-only lookup schema and existing `settle` capability operation.
+Bind the capability to the exact lookup body, cleanup obligation and termination
+hash. Reuse `sophia_voice_lab_d02_settlement_authorize`; do not add database
+grants or call settlement-finalize from this path. An existing receipt must pass
+signature verification and every retained binding before return. The original
+mutating request hash is not the lookup request hash. Missing/candidate rows
+remain unavailable; they do not authorize raw-session reconstruction or provider
+calls. A stored signed fact can outlive its signing envelope's expiry, but its
+current lookup capability must remain valid. This is not terminal cleanup proof.
+
 ### Documentation Update Policy
 **CRITICAL: Always update README.md and CLAUDE.md after every code change**
 

@@ -2,18 +2,56 @@
 
 Status: `DRAFT — DEPLOYMENT AND CERTIFICATION PENDING`
 
+### Historical closure exception — operator authorized 2026-09-14
+
+The operator explicitly requested: “Continue the goal without requiring verified
+closure.” For the already identified unresolved historical VT00 inventory,
+verified closure is therefore no longer a prerequisite to continuing the
+campaign. Record the exact inventory and per-row authorization references as
+`operator_accepted_unverified_history`; preserve the original obligations and
+report cleanup as unverified, never completed or zero-orphan. Authorization text
+SHA256: `7c5407cd71b622c8dc70208f7b5881b4d768ac5f01dc4c03dd7350b135a01529`.
+This hash is an audit reference, not a cryptographic source attestation.
+
+This narrow exception supersedes historical-closure blocking instructions below.
+It does not waive exact releases, authentication, D02 role isolation, per-run
+limits, or settlement/evidence requirements for new qualification runs. Final
+campaign reporting must disclose the accepted historical exception; it must not
+claim unconditional historical or global resource-zero certification. Applying
+the exception still follows reviewed exact-release deployment and migration
+ordering. Until its runtime integration is verified, do not simply open gates.
+
+Gateway integration uses `SOPHIA_VOICE_LAB_HISTORICAL_ACCEPTANCE_JSON`, scoped to
+the exact source-read historical cleanup/run hashes and a fixed past cutoff;
+see the backend README for its strict schema. Validate its pending-versus-accepted
+readiness projection and preservation of unrelated/new authentication before
+deployment. The Lab database exception and Gateway configuration must reference
+the same operator authorization. Neither setting is a closure receipt, and
+neither removes the accepted obligations from the final report.
+
 This runbook operates the isolated Voice Lab test plane against the ordinary deployed Sophia browser voice path. It does not authorize a general production test mode, direct provider substitution, text injection in place of audio, or use of a person's voice as fallback.
 
 The machine-readable deployment order, environment ownership, rollback points, cleanup exceptions, and quantitative gate state live in `deployment-gates.yaml`. Update that checkpoint from `unpassed` only from attached execution evidence.
 
+VT00-C4 also requires the separate `c4_complete_built_sophia_journeys` gate:
+twenty complete fresh-process built-Sophia journeys with exact identities,
+ordinary authenticated controller behavior, input/output evidence, finalization,
+resource settlement and durable export. Historical twenty-operation injection
+trials and hook tests do not satisfy it. Neither do the five deployed canaries
+or fresh installed-root P01; those remain additional requirements. The checkpoint
+is an evidence inventory, not a runtime admission grant or an executable journey
+collector. Its tests verify contract shape only, never campaign completion.
+
 V-P01 hard stop: `p01-erratum-v2.md` supersedes the contradictory v1 proof
 composition. Do not launch an official signed V-P01 until all five erratum repairs,
 its real memory/PostgreSQL integration proof, and every separate
-adapter/process/controller/cancellation/trial/canary unlock are green on the same
-exact immutable deployment. The only pre-P01 gate-opening exception is the bounded
-five-run V-F01 collection window in `fresh-session-canaries.md`; it may open only
-after every non-canary unlock is green, may execute no other scenario, and must
-close on its first stop condition. The evidence-backed P01 attempt lower bound is
+adapter/process/controller/cancellation/trial/journey/canary unlock are green on
+the same exact immutable deployment. Pre-P01 live collection has two ordered,
+separate windows: the twenty-journey phase in `complete-built-journeys.md`, then
+the five-canary phase in `fresh-session-canaries.md`. The first requires all
+non-live prerequisites; the second additionally requires twenty qualified
+journeys. Both execute only V-F01, have explicit start-count bounds and close
+on their first stop condition. The evidence-backed P01 attempt lower bound is
 monotonic and currently `>= 1`.
 
 ## Roles and stop authority
@@ -153,16 +191,19 @@ The committed candidate pins `sophia-voice-lab-mcp.onrender.com` as one identity
 - Exercise a worst-case bounded `end_voice_run` through the registered app and prove the platform keeps the call open through terminal finalization. The diagnostic `.mcp.json` timeout is 180 seconds; current OpenAI plugin documentation does not publish a registered-app tool timeout, so only an installed-surface execution can close this gate.
 
 Record every result as `PASS`, `FAIL`, or `PENDING`. Do not open mutations while
-any required item is `FAIL` or `PENDING`, except that `fresh_session_smoke` is
-necessarily `PENDING` during its one bounded collection window after every other
-required item is `PASS`.
+any required item is `FAIL` or `PENDING`, except for the exact live-collection
+dependencies: journeys and canaries may be pending in the twenty-journey window;
+only canaries may be pending in the five-canary window. Every non-live prerequisite
+must already pass, and neither collection window authorizes official P01.
 
 The current Gateway active-session ownership is keyed by the single dedicated principal. Keep global and per-caller concurrency at one and execute regression-suite children sequentially. Parallel runs are forbidden until the product-plane ownership model changes and gains its own evidence-backed gate.
 
 ## Opening and closing the campaign window
 
-Before official V-P01, this section may be used once for the bounded
-`fresh-session-canaries.md` collection window. In that window step 3 is fixed to
+Before official V-P01, first use this procedure for the bounded
+`complete-built-journeys.md` phase (at most twenty sequential V-F01 starts per
+window). Close it and attest twenty complete same-candidate journeys before
+the separate `fresh-session-canaries.md` window. In the latter step 3 is fixed to
 five sequential V-F01 starts, step 4 may execute only V-F01, and the operator must
 complete the per-run terminal-zero and evidence checks before admitting the next
 run. The first harness-caused failure or cleanup ambiguity jumps directly to step

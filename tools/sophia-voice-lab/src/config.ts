@@ -35,6 +35,16 @@ function integer(env: NodeJS.ProcessEnv, name: string, fallback: number, min: nu
   return parsed;
 }
 
+// Only the aggregate provider-spend cap supports an explicit unlimited policy.
+// Per-run deadlines, concurrency, input bounds, and usage accounting stay intact.
+function providerSpendLimit(env: NodeJS.ProcessEnv, name: string): number | null {
+  if (env[name] === "unlimited") return null;
+  if (env[name] !== undefined && !/^\d+$/.test(env[name]!)) {
+    throw new VoiceLabError(labError("CONFIG_INVALID", `${name} must be an integer or unlimited.`, "internal"));
+  }
+  return integer(env, name, 144_000, 60, 604_800);
+}
+
 export const ATTESTATION_AUTHORITIES = ["external_mcp_client", "deployment_control", "platform_plugin"] as const;
 export type AttestationAuthority = typeof ATTESTATION_AUTHORITIES[number];
 
@@ -103,7 +113,7 @@ function boolean(env: NodeJS.ProcessEnv, name: string, fallback: boolean): boole
   throw new VoiceLabError(labError("CONFIG_INVALID", `${name} must be true/false.`, "internal"));
 }
 
-function parseCallerPartitionKeys(raw: string | undefined, nodeEnv: string): CallerPartitionKeyRing {
+export function parseCallerPartitionKeys(raw: string | undefined, nodeEnv: string): CallerPartitionKeyRing {
   const fallback = { active_key_id: "test-v1", keys: { "test-v1": "caller-partition-test-secret-00000000000001" } };
   let value: unknown;
   try { value = JSON.parse(raw?.trim() || (nodeEnv === "test" ? JSON.stringify(fallback) : required({ SOPHIA_VOICE_LAB_CALLER_PARTITION_KEYS_JSON: raw }, "SOPHIA_VOICE_LAB_CALLER_PARTITION_KEYS_JSON"))); }
@@ -196,8 +206,8 @@ export interface VoiceLabConfig {
   admissionWindowSeconds: number;
   maxRollingRunStarts: number;
   maxRollingRunStartsPerCaller: number;
-  maxRollingProviderSeconds: number;
-  maxRollingProviderSecondsPerCaller: number;
+  maxRollingProviderSeconds: number | null;
+  maxRollingProviderSecondsPerCaller: number | null;
   maxRollingSuites: number;
   maxRollingSuitesPerCaller: number;
   maxRollingSuiteChildren: number;
@@ -219,6 +229,7 @@ export interface VoiceLabConfig {
   browserLeaseSeconds: number;
   workerPollMs: number;
   killSwitch: boolean;
+  genericRecoveryWorkerServiceId: string | null;
   provisioningEnabled: boolean;
   allowRawAudio: boolean;
   logLevel: string;
@@ -456,8 +467,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, processRole: "w
     admissionWindowSeconds: integer(env, "SOPHIA_VOICE_LAB_ADMISSION_WINDOW_SECONDS", 86_400, 60, 604_800),
     maxRollingRunStarts: integer(env, "SOPHIA_VOICE_LAB_MAX_ROLLING_RUN_STARTS", 25, 1, 1_000),
     maxRollingRunStartsPerCaller: integer(env, "SOPHIA_VOICE_LAB_MAX_ROLLING_RUN_STARTS_PER_CALLER", 25, 1, 1_000),
-    maxRollingProviderSeconds: integer(env, "SOPHIA_VOICE_LAB_MAX_ROLLING_PROVIDER_SECONDS", 144_000, 60, 604_800),
-    maxRollingProviderSecondsPerCaller: integer(env, "SOPHIA_VOICE_LAB_MAX_ROLLING_PROVIDER_SECONDS_PER_CALLER", 144_000, 60, 604_800),
+    maxRollingProviderSeconds: providerSpendLimit(env, "SOPHIA_VOICE_LAB_MAX_ROLLING_PROVIDER_SECONDS"),
+    maxRollingProviderSecondsPerCaller: providerSpendLimit(env, "SOPHIA_VOICE_LAB_MAX_ROLLING_PROVIDER_SECONDS_PER_CALLER"),
     maxRollingSuites: integer(env, "SOPHIA_VOICE_LAB_MAX_ROLLING_SUITES", 1, 1, 100),
     maxRollingSuitesPerCaller: integer(env, "SOPHIA_VOICE_LAB_MAX_ROLLING_SUITES_PER_CALLER", 1, 1, 100),
     maxRollingSuiteChildren: integer(env, "SOPHIA_VOICE_LAB_MAX_ROLLING_SUITE_CHILDREN", 20, 1, 2_100),
@@ -479,6 +490,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, processRole: "w
     browserLeaseSeconds: integer(env, "SOPHIA_VOICE_LAB_BROWSER_LEASE_SECONDS", 30, 10, 120),
     workerPollMs: integer(env, "SOPHIA_VOICE_LAB_WORKER_POLL_MS", 250, 50, 5_000),
     killSwitch: boolean(env, "SOPHIA_VOICE_LAB_KILL_SWITCH", nodeEnv !== "test"),
+    genericRecoveryWorkerServiceId: genericRecoveryWorkerServiceId(env),
     provisioningEnabled: boolean(env, 'SOPHIA_VOICE_LAB_PROVISIONING_ENABLED', false),
     allowRawAudio: boolean(env, "SOPHIA_VOICE_LAB_ALLOW_RAW_AUDIO", false),
     logLevel: env.LOG_LEVEL?.trim() || "info",
@@ -493,6 +505,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, processRole: "w
     } : null,
     oauth,
   };
+}
+
+function genericRecoveryWorkerServiceId(env: NodeJS.ProcessEnv): string | null {
+  const value = env.SOPHIA_VOICE_LAB_GENERIC_RECOVERY_WORKER_SERVICE_ID?.trim();
+  if (!value) return null;
+  if (!/^srv-[0-9a-z]{20}$/.test(value)) throw new VoiceLabError(labError("CONFIG_INVALID", "Generic recovery requires an exact Render worker service ID.", "internal"));
+  return value;
 }
 
 function campaignValue(env: NodeJS.ProcessEnv, nodeEnv: string, name: string, testFallback: string): string {

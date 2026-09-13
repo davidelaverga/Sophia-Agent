@@ -387,7 +387,10 @@ describe("V-D02 source-specific worker shutdown", () => {
     const command = await attachCommand(harness);
     await claimDispatch(harness, command);
     expect(await harness.ledger.releaseBrowserLease(harness.run.id, harness.workerId, harness.leaseEpoch)).toBe(true);
-    await harness.ledger.upsertBrowserLease(harness.run.id, "foreign-current-owner", 60);
+    await expect(harness.ledger.upsertBrowserLease(harness.run.id, "foreign-current-owner", 60)).rejects.toMatchObject({ detail: { code: "BROWSER_ALLOCATION_ALREADY_RESERVED" } });
+    // Fault-inject an inconsistent read to retain the downstream stale-command
+    // defense test even though legitimate allocation now rejects replacement.
+    vi.spyOn(harness.ledger, "getBrowserLease").mockResolvedValue({ runId: harness.run.id, workerId: "foreign-current-owner", leaseEpoch: harness.leaseEpoch + 1, expiresAt: new Date(Date.now() + 60_000), updatedAt: new Date() });
     harness.worker.stop();
     await harness.worker.close();
     const events = (await harness.ledger.listEvents(harness.run.id, 0, 500)).events;

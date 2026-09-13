@@ -4,6 +4,31 @@ Status: `REVIEWED — IMPLEMENTATION GATED`
 
 Effective: 2026-09-02
 
+### C4 local asynchronous-observation correction (2026-09-13; not deployed)
+
+Startup may require bounded observation after durable acceptance. The collector
+and verifier now share `src/p01-contract.ts`: timeout-only exact-start waits are
+audited polls between calls two and three; the first conclusive exact-start wait
+occupies semantic call three. The ten-poll per-operation, twenty-poll total and
+ten-second per-poll limits are unchanged. A timeout neither proves readiness nor
+permits speech. Polls after a conclusive result remain forbidden. This correction
+also retains timeout-only `assistant_turn_complete` waits before calls five and
+seven. These start only after the corresponding speech operation settles and
+reuse the semantic wait's observation cursor; the first conclusive observation
+occupies the semantic wait. Operation and assistant polls share the owning speech
+operation's ten-poll bound, not separate budgets. Their durable audit includes
+the observation cursor, and a null polled-operation hash denotes the
+assistant-observation phase (not a caller-supplied operation claim).
+
+After end, `finalization_complete` observes the exact owned end operation and
+requires its success, terminal run state, cleanup completion and durable evidence
+metadata together. It remains pending even after operation success when any
+other prerequisite is absent. End polls use this condition rather than a
+historical `operation_terminal` receipt, and consume the existing end-operation
+budget. The signed verifier joins the finalization-ready manifest hash to export.
+This local contract is not deployed and does not waive any execution unlock.
+See `c4-reconciliation.md` for current evidence and limitations.
+
 This erratum is the controlling V-P01 composition contract when read with the
 parent VT00 mission, VT00-C1, VT00-C2, and `runbook.md`. It supersedes only the
 contradictory V-P01 v1 proof composition. It does not waive or relax any parent
@@ -51,8 +76,11 @@ truthful harness/product result, not a submission failure and not a pass.
 
 ## Bounded audited polling
 
-Read-only polling is allowed only when a spine response truthfully reports a
-nonterminal operation state. The collector must use the smallest sufficient
+Read-only polling is allowed when a spine response truthfully reports a
+nonterminal operation state, an exact pending assistant observation times out
+after its speech operation has settled, or the exact end operation has not yet
+reached `finalization_complete`. Operation success alone does not settle the last
+condition. The collector must use the smallest sufficient
 condition and stop at the first conclusive receipt. The fixed upper bound is 20
 polls total and 10 polls for any one operation; every poll uses an explicit timeout
 no greater than 10 seconds. Polls are limited to `wait_for_turn` and

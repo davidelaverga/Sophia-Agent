@@ -61,6 +61,24 @@ export const D02GatewayFreezeResponseSchema = z.object({
   freeze_request_sha256: SHA256,
 }).strict();
 
+/** Existing-fact lookup: never carries a raw provider/session/termination ID. */
+export const D02GatewaySettlementReadbackRequestSchema = z.object({
+  schema: z.literal("sophia_voice_lab_gateway_browser_worker_termination_receipt_lookup_v1"),
+  cleanup_obligation_id: UUID_V4,
+  termination_request_id_sha256: SHA256, voice_lab_run_id_sha256: SHA256, test_run_id_sha256: SHA256,
+  provider_session_id_sha256: SHA256, provider_admission_id_sha256: SHA256,
+  provider_connection_epoch: z.number().int().positive(), frozen_provider_connection_epochs: POSITIVE_EPOCHS,
+  browser_worker_id_sha256: SHA256, browser_lease_epoch: z.number().int().positive(), browser_context_id_sha256: SHA256,
+  render_action_request_sha256: SHA256, render_action_accepted_response_sha256: SHA256, render_action_settled_snapshot_sha256: SHA256,
+  loss_event_seq: z.number().int().positive(), loss_observed_at: CANONICAL_UTC_MILLIS,
+}).strict().superRefine((value, context) => {
+  const epochs = value.frozen_provider_connection_epochs;
+  if (!epochs.includes(value.provider_connection_epoch) || epochs.some((epoch, i) => i > 0 && epoch <= epochs[i - 1]!)) {
+    context.addIssue({ code: "custom", path: ["frozen_provider_connection_epochs"], message: "Exact canonical frozen epoch union required." });
+  }
+});
+export type D02GatewaySettlementReadbackRequest = z.infer<typeof D02GatewaySettlementReadbackRequestSchema>;
+
 export const D02GatewayContinuityObservationRequestSchema = z.object({
   schema: z.literal("sophia_voice_lab_d02_product_continuity_observation_request_v1"),
   restart_request_id: UUID_V4,
@@ -193,6 +211,25 @@ export type D02GatewaySettlementRequest = z.infer<typeof D02GatewaySettlementReq
 export type D02GatewayContinuityObservationRequest = z.infer<typeof D02GatewayContinuityObservationRequestSchema>;
 export type D02GatewayFreezeResponse = z.infer<typeof D02GatewayFreezeResponseSchema>;
 export type D02GatewaySettlementReceipt = z.infer<typeof D02GatewaySettlementReceiptSchema>;
+
+/** Signature authority for an immutable Gateway fact. Binding to a request or
+ * retained obligation is a separate mandatory check by the caller. */
+export function verifyD02GatewaySettlementSignature(raw: unknown, authority: VoiceLabConfig["d02GatewayReceiptAuthority"], observedAt: Date): D02GatewaySettlementReceipt {
+  const receipt = D02GatewaySettlementReceiptSchema.parse(raw);
+  const encodedKey = authority?.publicKeysById[receipt.authority_key_id];
+  if (!encodedKey) throw new VoiceLabError(labError("D02_GATEWAY_RECEIPT_INVALID", "The D02 Gateway settlement authority is unavailable.", "authorization"));
+  const unsigned = { ...receipt } as Record<string, unknown>;
+  delete unsigned.signature;
+  let valid = false;
+  try {
+    const key = createPublicKey({ key: Buffer.from(encodedKey, "base64"), format: "der", type: "spki" });
+    valid = verifySignature(null, Buffer.from(canonicalRequestHash(unsigned), "hex"), key, Buffer.from(receipt.signature, "base64url"));
+  } catch { valid = false; }
+  // Exact readback of an already committed fact can outlive its issuance TTL.
+  const now = observedAt.getTime();
+  if (!valid || !Number.isFinite(now) || Date.parse(receipt.issued_at) > now + 30_000) throw new VoiceLabError(labError("D02_GATEWAY_RECEIPT_INVALID", "The D02 Gateway settlement signature or issuance time is invalid.", "authorization"));
+  return receipt;
+}
 export type D02GatewayContinuityObservationReceipt = z.infer<typeof D02GatewayContinuityObservationReceiptSchema>;
 
 const CAPABILITY_ISSUER = "sophia-voice-lab";
@@ -205,7 +242,7 @@ function capabilityToken(input: {
   operation: "freeze" | "settle" | "observe_continuity";
   requestSha256: string;
   cleanupObligationId: string;
-  terminationRequestId: string;
+  terminationRequestIdSha256: string;
   now: Date;
 }): string {
   const seconds = Math.floor(input.now.getTime() / 1_000);
@@ -216,7 +253,7 @@ function capabilityToken(input: {
     op: input.operation,
     request_sha256: input.requestSha256,
     cleanup_obligation_id: input.cleanupObligationId,
-    termination_request_id_sha256: sha256(input.terminationRequestId),
+    termination_request_id_sha256: input.terminationRequestIdSha256,
     iat: seconds,
     nbf: seconds - 2,
     exp: seconds + 120,
@@ -256,22 +293,7 @@ export class D02GatewayClient {
     const response = await this.post(gatewayOrigin, "/internal/voice-lab/d02/browser-worker-termination-settlements", "settle", body);
     const parsed = D02GatewaySettlementReceiptSchema.safeParse(response);
     if (!parsed.success) throw new VoiceLabError(labError("D02_GATEWAY_SETTLEMENT_PENDING", "The D02 Gateway settlement response shape was ambiguous and must be read back by exact replay.", "evidence", true));
-    const authority = this.config.d02GatewayReceiptAuthority;
-    const receiptPublicKey = authority?.publicKeysById[parsed.data.authority_key_id];
-    if (authority === null || receiptPublicKey === undefined) throw new VoiceLabError(labError("D02_GATEWAY_RECEIPT_INVALID", "The D02 Gateway settlement receipt authority is unavailable or not retained.", "authorization"));
-    const unsigned: Record<string, unknown> = { ...parsed.data };
-    delete unsigned.signature;
-    let valid = false;
-    try {
-      const key = createPublicKey({ key: Buffer.from(receiptPublicKey, "base64"), format: "der", type: "spki" });
-      valid = verifySignature(null, Buffer.from(canonicalRequestHash(unsigned), "hex"), key, Buffer.from(parsed.data.signature, "base64url"));
-    } catch { valid = false; }
-    const now = this.now().getTime();
-    const issued = new Date(parsed.data.issued_at).getTime();
-    // The Gateway returns the immutable, signed settlement receipt on exact
-    // response-loss replay. Its short expiry bounds first issuance, not the
-    // retention-period readback of an already-committed product fact.
-    if (!valid || issued > now + 30_000) throw new VoiceLabError(labError("D02_GATEWAY_RECEIPT_INVALID", "The D02 Gateway settlement receipt signature or issuance time is invalid.", "authorization"));
+    verifyD02GatewaySettlementSignature(parsed.data, this.config.d02GatewayReceiptAuthority, this.now());
     if (parsed.data.termination_request_id_sha256 !== sha256(body.termination_request_id)
       || parsed.data.voice_lab_run_id_sha256 !== body.voice_lab_run_id_sha256
       || parsed.data.test_run_id_sha256 !== sha256(body.test_run_id)
@@ -291,6 +313,18 @@ export class D02GatewayClient {
       throw new VoiceLabError(labError("D02_GATEWAY_RECEIPT_BINDING_MISMATCH", "The authentic D02 Gateway receipt did not bind the exact settlement request.", "evidence"));
     }
     return parsed.data;
+  }
+
+  async readSettlement(gatewayOrigin: string, raw: D02GatewaySettlementReadbackRequest): Promise<D02GatewaySettlementReceipt> {
+    const body = D02GatewaySettlementReadbackRequestSchema.parse(raw);
+    const response = await this.post(gatewayOrigin, "/internal/voice-lab/d02/browser-worker-termination-receipts", "settle", body);
+    const receipt = verifyD02GatewaySettlementSignature(response, this.config.d02GatewayReceiptAuthority, this.now());
+    if (!Object.entries(body).every(([key, value]) => key === "schema" || (key === "cleanup_obligation_id"
+      ? receipt.cleanup_obligation_id_sha256 === sha256(String(value))
+      : canonicalRequestHash((receipt as Record<string, unknown>)[key]) === canonicalRequestHash(value)))) {
+      throw new VoiceLabError(labError("D02_GATEWAY_RECEIPT_BINDING_MISMATCH", "The stored Gateway receipt did not bind the exact retained lookup.", "evidence"));
+    }
+    return receipt;
   }
 
   async observeContinuity(gatewayOrigin: string, raw: D02GatewayContinuityObservationRequest): Promise<D02GatewayContinuityObservationReceipt> {
@@ -327,12 +361,13 @@ export class D02GatewayClient {
     return parsed.data;
   }
 
-  private async post(gatewayOrigin: string, pathname: string, operation: "freeze" | "settle" | "observe_continuity", body: D02GatewayFreezeRequest | D02GatewaySettlementRequest | D02GatewayContinuityObservationRequest): Promise<unknown> {
+  private async post(gatewayOrigin: string, pathname: string, operation: "freeze" | "settle" | "observe_continuity", body: D02GatewayFreezeRequest | D02GatewaySettlementRequest | D02GatewayContinuityObservationRequest | D02GatewaySettlementReadbackRequest): Promise<unknown> {
     const origin = validateAllowedOrigin(gatewayOrigin, this.config.allowedOrigins).origin;
     const secret = this.config.d02GatewayCapabilitySecret;
     if (secret === null) throw new VoiceLabError(labError("D02_GATEWAY_AUTHORITY_UNAVAILABLE", "The product-owned D02 Gateway authority is unavailable.", "internal"));
     const requestSha256 = canonicalRequestHash(body);
-    const actionRequestId = "termination_request_id" in body ? body.termination_request_id : body.restart_request_id;
+    const actionRequestHash = "termination_request_id_sha256" in body ? body.termination_request_id_sha256
+      : sha256("termination_request_id" in body ? body.termination_request_id : body.restart_request_id);
     let response: Response;
     try {
       response = await this.fetchImpl(new URL(pathname, origin), {
@@ -342,7 +377,7 @@ export class D02GatewayClient {
         headers: {
           accept: "application/json",
           "content-type": "application/json",
-          [CAPABILITY_HEADER]: capabilityToken({ secret, operation, requestSha256, cleanupObligationId: body.cleanup_obligation_id, terminationRequestId: actionRequestId, now: this.now() }),
+          [CAPABILITY_HEADER]: capabilityToken({ secret, operation, requestSha256, cleanupObligationId: body.cleanup_obligation_id, terminationRequestIdSha256: actionRequestHash, now: this.now() }),
         },
         body: JSON.stringify(body),
       });

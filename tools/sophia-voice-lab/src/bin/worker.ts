@@ -1,21 +1,21 @@
-import { randomUUID } from "node:crypto";
-
 import { PlaywrightVoiceDriver } from "../browser-driver.js";
 import { loadConfig } from "../config.js";
 import { probeTarget } from "../http-server.js";
 import { createAudioResolver, createLedger } from "../runtime.js";
 import { CapabilityCodec } from "../security.js";
 import { VoiceLabWorker } from "../worker.js";
+import { resolveWorkerIdentity } from "../worker-identity.js";
 
 // The evaluator worker is deliberately incapable of authenticating to the
 // external-attestation ingestion route. It loads verification keys only and
 // rejects any accidental transport-secret mount at startup.
 const config = loadConfig(process.env, "worker");
+const workerId = resolveWorkerIdentity(config.nodeEnv, process.env);
 const ledger = createLedger(config);
 await ledger.initialize();
 const audio = await createAudioResolver(config);
 const worker = new VoiceLabWorker(
-  process.env.RENDER_INSTANCE_ID?.trim() || `worker-${randomUUID()}`,
+  workerId,
   ledger,
   config,
   audio,

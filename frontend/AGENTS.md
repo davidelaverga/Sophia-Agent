@@ -78,6 +78,26 @@ src/
 
 ### Interaction Ownership
 
+- `useVoiceLabControlAdapter` retains only unexpired server authorization across
+  readiness pauses. An expired resolved request is not reusable authority; the
+  next eligible mount must obtain a fresh server decision before claiming or
+  publishing an authorized action. Valid in-flight remount sharing and exact-once
+  control-epoch claims remain document-scoped.
+  Already-invoked asynchronous callbacks may publish completion/failure only
+  while their mounted action owner is current. Unmount or action replacement
+  revokes that publication authority; ordinary readiness changes do not cancel
+  the callback or erase its legitimate result. This is an evidence fence, not
+  independent resource cancellation or a new activation path.
+
+- `useStreamVoiceSession` fences startup publication by its existing request
+  generation. A superseded bootstrap may close only its own returned connection;
+  it cannot overwrite the replacement controller's telemetry. Gemini setup
+  readiness is current state: reconnect/closing/loss invalidates it, and only a
+  current-owner setup transition may restore it. Historical ready events are not
+  current readiness proof. All transport callbacks use that same owner predicate
+  before interpreting payloads or publishing telemetry, capture or tool ledgers;
+  replacement, terminal loss and unmount invalidate publication authority.
+
 - Recap display cache is not source authority. `useRecapArtifactsLoader` revalidates the authenticated recap source on every entry/retry before rendering actionable data; HTTP/provider uncertainty cannot reuse persisted candidates. A source404 invalidates only that session's artifacts, decisions and commit status. Recent-End hints may schedule bounded empty retries but cannot restore a missing source. Async responses from an obsolete load must not publish state.
 
 - Recap debug export reads `/api/memory/observability` on demand. The proxy binds the ordinary authenticated owner; Gateway additionally restricts it to the memory-certification principal. `memory-observability.ts` validates and strips unknown fields before portable export. Unavailable metrics never block product memory actions or masquerade as a clean certification.

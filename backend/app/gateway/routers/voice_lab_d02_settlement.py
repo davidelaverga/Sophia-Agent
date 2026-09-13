@@ -25,7 +25,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
@@ -553,6 +553,37 @@ class D02SettlementRequest(_StrictModel):
             or any(epoch <= 0 for epoch in epochs)
         ):
             raise ValueError("frozen epochs must be positive, unique, and ascending")
+        return self
+
+
+class D02SettlementReceiptLookupRequest(_StrictModel):
+    """Read an existing signed fact without reconstructing deleted identifiers."""
+
+    schema: Literal["sophia_voice_lab_gateway_browser_worker_termination_receipt_lookup_v1"]
+    cleanup_obligation_id: str = Field(pattern=r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
+    termination_request_id_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    voice_lab_run_id_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    test_run_id_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    provider_session_id_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    provider_admission_id_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    provider_connection_epoch: int = Field(gt=0, strict=True)
+    frozen_provider_connection_epochs: tuple[Annotated[int, Field(gt=0, strict=True)], ...] = Field(min_length=1, max_length=64)
+    browser_worker_id_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    browser_lease_epoch: int = Field(gt=0, strict=True)
+    browser_context_id_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    render_action_request_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    render_action_accepted_response_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    render_action_settled_snapshot_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    loss_event_seq: int = Field(gt=0, strict=True)
+    loss_observed_at: str
+
+    @model_validator(mode="after")
+    def _validate_binding(self) -> D02SettlementReceiptLookupRequest:
+        epochs = self.frozen_provider_connection_epochs
+        if tuple(sorted(set(epochs))) != epochs or self.provider_connection_epoch not in epochs:
+            raise ValueError("exact canonical frozen epoch union required")
+        if _parse_canonical_utc_millis(self.loss_observed_at) is None:
+            raise ValueError("loss_observed_at must be canonical UTC milliseconds")
         return self
 
 
@@ -3916,3 +3947,54 @@ def settle_browser_worker_termination(
         request_sha256=request_sha,
         capability_jti_sha256=jti_sha,
     )
+
+
+def _validate_lookup_receipt(body: D02SettlementReceiptLookupRequest, raw: object) -> dict[str, Any]:
+    receipt = _verify_stored_receipt(raw)
+    expected = _request_dict(body)
+    expected.pop("schema")
+    expected["cleanup_obligation_id_sha256"] = hashlib.sha256(expected.pop("cleanup_obligation_id").encode()).hexdigest()
+    if receipt.get("schema") != D02_SETTLEMENT_SCHEMA or any(
+        _canonical_hash(receipt.get(key)) != _canonical_hash(value) for key, value in expected.items()
+    ):
+        raise _failure("voice_lab_d02_settlement_receipt_binding_mismatch", 409)
+    return receipt
+
+
+def _lookup_settlement_receipt(body: D02SettlementReceiptLookupRequest, request_sha256: str, jti_sha256: str) -> dict[str, Any]:
+    dsn = _database_url()
+    if dsn is None:
+        with _LOCAL_LOCK:
+            _register_capability_use(None, capability_jti_sha256=jti_sha256, operation="settle", request_sha256=request_sha256,
+                cleanup_obligation_id=body.cleanup_obligation_id, termination_request_id_sha256=body.termination_request_id_sha256)
+            frozen = _LOCAL_FREEZES.get((body.cleanup_obligation_id, body.termination_request_id_sha256))
+            if not frozen or frozen.get("receipt") is None:
+                raise _failure("voice_lab_d02_settlement_receipt_unavailable", 409)
+            return _validate_lookup_receipt(body, frozen["receipt"])
+    import psycopg
+
+    # Existing narrow RPC and cleanup advisory lock; no new SQL grant, session
+    # reconstruction, provider call, or settlement-finalize authority. The lookup
+    # schema's exact hash is distinct from the original mutating request hash.
+    with psycopg.connect(dsn, connect_timeout=5) as connection:
+        with connection.cursor() as cursor:
+            authorized = _d02_rpc_json(cursor, """
+                SELECT public.sophia_voice_lab_d02_settlement_authorize(
+                  %s::text, %s::text, %s::text, %s::text
+                )
+                """, (body.cleanup_obligation_id, body.termination_request_id_sha256, request_sha256, jti_sha256))
+            if authorized["status"] == "capability_replay_conflict":
+                raise _failure("voice_lab_d02_capability_replay_conflict", 409)
+            if authorized["status"] in {"freeze_required", "candidate", "session_unavailable", "binding_cardinality_invalid"}:
+                raise _failure("voice_lab_d02_settlement_receipt_unavailable", 409)
+            if authorized["status"] != "existing":
+                raise _failure("voice_lab_d02_gateway_database_response_invalid", 503)
+            return _validate_lookup_receipt(body, authorized.get("receipt"))
+
+
+@router.post("/browser-worker-termination-receipts", status_code=200)
+def read_browser_worker_termination_receipt(body: D02SettlementReceiptLookupRequest, request: Request) -> dict[str, Any]:
+    request_sha = _canonical_hash(_request_dict(body))
+    jti_sha = _verify_capability(request, operation="settle", request_sha256=request_sha,
+        cleanup_obligation_id=body.cleanup_obligation_id, termination_request_id_sha256=body.termination_request_id_sha256)
+    return _lookup_settlement_receipt(body, request_sha, jti_sha)

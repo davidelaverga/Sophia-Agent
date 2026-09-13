@@ -8,16 +8,17 @@ description: Run governed autonomous Sophia production voice dogfood through the
 Use only the Sophia Voice Lab MCP tools for live test control. Do not use raw browser JavaScript, repository-local runner commands, direct Gemini/backend calls, a human microphone, or text-message substitution.
 
 Before acting, read `references/tool-contracts.md` and the relevant scenario in `references/scenario-catalog.md`. Read `references/evidence-interpretation.md` before assigning a verdict. Use `references/recovery.md` when any operation is not successful.
+For V-P01, also read `references/p01-asynchronous-flow.md` before the first call; it defines the bounded asynchronous observation contract.
 
 ## Default bounded flow
 
 1. Call `get_capabilities`. Confirm the requested environment, scenario version, deployment policy, capture policy, and fault scopes are supported.
 2. Resolve the exact deployed frontend, Gateway, and Voice identities from the capability result or a prior trusted deployment record. Never guess a SHA.
-3. Call `start_voice_run` with the exact expected identities and a fresh stable idempotency key. Stop this run if the observed target differs. Use one bounded `wait_for_turn` call to require the product-ready receipt before speaking.
+3. Call `start_voice_run` with the exact expected identities and a fresh stable idempotency key. Stop this run if the observed target differs. Require the exact start operation's successful product-ready receipt before speaking; V-P01 uses the bounded observation rules in its reference.
 4. Call `speak` with one bounded utterance. Its success proves only page-side audio scheduling; it does not prove PCM emission, provider transcription, product acceptance, or playback.
 5. Call `wait_for_turn` from the returned event cursor for the declared observation. Inspect the structured channels rather than relying on prose.
 6. Select each follow-up only after reading the preceding Sophia observation. For V-P01, call six must pass the one `sophia_voice_lab_observation_receipt_v1` returned by call five unchanged under `adaptive_observation.receipt`, add only a separate `followup_intent`, and cite the returned current cursor, provider epoch, and turn as strict preconditions. Never construct, edit, or reuse the receipt. Perform one receipt-bound follow-up and one bounded wait for its result (two speech turns total). Run the separate V-A01 recipe when the full six-turn adaptive scenario is requested.
-7. For V-P01, preserve the exact ten-call semantic spine. If a `speak` or `end_voice_run` receipt is durable but its operation is not yet `succeeded`, insert only an explicit `wait_for_turn` with `condition: operation_terminal` for that exact operation, `timeout_ms` no greater than 10000, at most ten polls for one operation and twenty total. Keep each poll between its mutation and the next semantic call, stop at the first terminal receipt, and never poll an already-succeeded operation.
+7. For V-P01, preserve the ten-call semantic spine and use only the bounded startup, speech, assistant-observation and finalization waits defined in `references/p01-asynchronous-flow.md`. A timeout or durable acceptance is not completion.
 8. Call `inspect_voice_run` before any conclusion. Join input scheduling/PCM/transcription, provider output, playback realization, product state, exact deployment, and trace status. Treat LangSmith as supplemental and fail-open.
 9. If requested and authorized, use `barge_in` only relative to an observed playback receipt, and `force_socket_rotation` only with the current provider epoch returned by the run.
 10. Always call `end_voice_run`, even after a product failure. Wait for bounded finalization and cleanup evidence.

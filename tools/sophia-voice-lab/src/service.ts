@@ -28,6 +28,9 @@ import type { EventClaimSnapshot, RollingAdmissionFence, RollingAdmissionLimits,
 import { canonicalRequestHash, projectPublicData, requireScope, sha256, validateAllowedOrigin, type AuthenticatedCaller } from "./security.js";
 import { assertRunAcceptsOperation } from "./state-machine.js";
 import { SCENARIO_CATALOG, SCENARIO_IDS } from "./scenarios.js";
+import { P01_ASSISTANT_OBSERVATIONS, P01_OPERATION_OBSERVATIONS, P01_LIMITS, P01_MAX_CHRONOLOGICAL_CALLS, p01EndNeedsFinalization } from "./p01-contract.js";
+import { verifyRetainedD02OwnerDeath } from "./retained-owner-verifier.js";
+import { deriveRetainedD02SettlementLookup } from "./retained-d02-provider.js";
 
 const StartSchema = z.object({
   environment: z.enum(["production", "staging"]),
@@ -109,12 +112,13 @@ const BargeSchema = SpeakSchema.safeExtend({
 const WaitSchema = z.object({
   run_id: RunIdSchema,
   after_cursor: z.number().int().nonnegative(),
-  condition: z.enum(["any_event", "input_transcription", "assistant_first_audio", "assistant_turn_complete", "tool_call", "tool_settlement", "task_state", "ui_projection", "session_lifecycle_state", "operation_terminal"]),
+  condition: z.enum(["any_event", "input_transcription", "assistant_first_audio", "assistant_turn_complete", "tool_call", "tool_settlement", "task_state", "ui_projection", "session_lifecycle_state", "operation_terminal", "finalization_complete"]),
   operation_id: z.string().uuid().optional(),
   timeout_ms: z.number().int().min(100).max(60_000).default(10_000),
 }).strict().superRefine((value, context) => {
-  if (value.condition === "operation_terminal" && !value.operation_id) context.addIssue({ code: "custom", path: ["operation_id"], message: "operation_id is required for operation_terminal." });
-  if (value.condition !== "operation_terminal" && value.operation_id) context.addIssue({ code: "custom", path: ["operation_id"], message: "operation_id is only valid for operation_terminal." });
+  const observesOperation = value.condition === "operation_terminal" || value.condition === "finalization_complete";
+  if (observesOperation && !value.operation_id) context.addIssue({ code: "custom", path: ["operation_id"], message: "operation_id is required for operation/finalization observations." });
+  if (!observesOperation && value.operation_id) context.addIssue({ code: "custom", path: ["operation_id"], message: "operation_id is only valid for operation/finalization observations." });
 });
 
 const InspectSchema = z.object({ run_id: RunIdSchema, after_cursor: z.number().int().nonnegative().default(0), limit: z.number().int().min(1).max(500).default(100) }).strict();
@@ -310,42 +314,9 @@ const D02WorkerReplacementEventSchema = z.object({
   source: z.literal("replacement_worker_startup_after_graceful_d02_restart"),
   raw_worker_identifiers_excluded: z.literal(true),
 }).strict();
-const D02BrowserWorkerLossObservationCoreSchema = z.object({
-  schema: z.literal("sophia_voice_lab_d02_browser_worker_loss_observation_v1"),
-  run_id_sha256: ExternalShaSchema,
-  test_run_id_sha256: ExternalShaSchema,
-  cleanup_obligation_id_sha256: ExternalShaSchema,
-  termination_request_id_sha256: ExternalShaSchema,
-  provider_session_id_sha256: ExternalShaSchema,
-  provider_admission_id_sha256: ExternalShaSchema,
-  provider_connection_epoch: z.number().int().positive(),
-  frozen_provider_connection_epochs: z.array(z.number().int().positive()).min(1).max(64),
-  product_provider_cleanup_settlement_sha256: ExternalShaSchema,
-  browser_context_id_sha256: ExternalShaSchema,
-  lost_browser_worker_id_sha256: ExternalShaSchema,
-  replacement_browser_worker_id_sha256: ExternalShaSchema,
-  lost_browser_lease_epoch: z.number().int().positive(),
-  loss_event_seq: z.number().int().positive(),
-  loss_observed_at: ExternalTimestampSchema,
-  observed_at: ExternalTimestampSchema,
-  terminal_state: z.literal("aborted_driver_restart"),
-  terminal_error_code: z.literal("BROWSER_SESSION_LOST"),
-  browser_lease_absent: z.literal(true),
-  owning_gateway_settlement_included: z.literal(false),
-}).strict().superRefine((value, context) => {
-  if (value.lost_browser_worker_id_sha256 === value.replacement_browser_worker_id_sha256) context.addIssue({ code: "custom", path: ["replacement_browser_worker_id_sha256"], message: "Replacement worker identity must differ from the lost worker." });
-  if (new Set(value.frozen_provider_connection_epochs).size !== value.frozen_provider_connection_epochs.length
-    || value.frozen_provider_connection_epochs.some((epoch, index) => index > 0 && epoch <= value.frozen_provider_connection_epochs[index - 1]!)) {
-    context.addIssue({ code: "custom", path: ["frozen_provider_connection_epochs"], message: "Frozen provider epochs must be unique and strictly ascending." });
-  }
-  if (!value.frozen_provider_connection_epochs.includes(value.provider_connection_epoch)) context.addIssue({ code: "custom", path: ["provider_connection_epoch"], message: "Current provider epoch must be present in the frozen epoch set." });
-  if (!orderedTimestamps(value.loss_observed_at, value.observed_at)) context.addIssue({ code: "custom", path: ["observed_at"], message: "Worker-loss observation predates the durable loss event." });
-});
-export const D02BrowserWorkerLossObservationSchema = D02BrowserWorkerLossObservationCoreSchema.extend({ proof_sha256: ExternalShaSchema }).strict().superRefine((value, context) => {
-  const { proof_sha256, ...core } = value;
-  if (proof_sha256 !== canonicalRequestHash(core)) context.addIssue({ code: "custom", path: ["proof_sha256"], message: "D02 browser-worker loss observation hash is invalid." });
-});
-export type D02BrowserWorkerLossObservation = z.infer<typeof D02BrowserWorkerLossObservationSchema>;
+export { D02BrowserWorkerLossObservationSchema } from "./d02-worker-receipt.js";
+import { D02BrowserWorkerLossObservationCoreSchema, D02BrowserWorkerLossObservationSchema, D02WorkerTerminationControllerReceiptSchema, verifyD02WorkerTerminationSignature, type D02BrowserWorkerLossObservation } from "./d02-worker-receipt.js";
+export type { D02BrowserWorkerLossObservation } from "./d02-worker-receipt.js";
 const PlatformToolNameSchema = z.enum(["get_capabilities", "start_voice_run", "wait_for_turn", "speak", "inspect_voice_run", "end_voice_run", "export_voice_evidence"]);
 const PlatformCallFields = {
   tool_name: PlatformToolNameSchema,
@@ -358,16 +329,16 @@ const PlatformCallFields = {
 } as const;
 const PlatformCallSchema = z.object({
   ...PlatformCallFields,
-  spine_ordinal: z.number().int().min(1).max(10),
-  chronological_ordinal: z.number().int().min(1).max(30),
+  spine_ordinal: z.number().int().min(1).max(P01_LIMITS.semanticCalls),
+  chronological_ordinal: z.number().int().min(1).max(P01_MAX_CHRONOLOGICAL_CALLS),
 }).strict();
 const PlatformPollingCallSchema = z.object({
   ...PlatformCallFields,
   tool_name: z.literal("wait_for_turn"),
   operation_id_sha256: z.null(),
-  poll_ordinal: z.number().int().min(1).max(20),
-  chronological_ordinal: z.number().int().min(1).max(30),
-  polled_operation_id_sha256: ExternalShaSchema,
+  poll_ordinal: z.number().int().min(1).max(P01_LIMITS.pollsTotal),
+  chronological_ordinal: z.number().int().min(1).max(P01_MAX_CHRONOLOGICAL_CALLS),
+  polled_operation_id_sha256: ExternalShaSchema.nullable(),
 }).strict();
 export const ExternalAttestationEvidenceSchema = z.discriminatedUnion("kind", [
   z.object({
@@ -409,6 +380,9 @@ export const ExternalAttestationEvidenceSchema = z.discriminatedUnion("kind", [
   }).strict(),
   z.object({
     kind: z.literal("d02_browser_worker_loss"), authority: z.literal("deployment_control"), termination_request_id_sha256: ExternalShaSchema,
+    // Optional for decoding historical signed claims. New C4 controllers send
+    // the exact source; its signature and digest are independently checked.
+    local_controller_receipt: D02WorkerTerminationControllerReceiptSchema.optional(),
     local_controller_receipt_sha256: ExternalShaSchema, run_id_sha256: ExternalShaSchema, cleanup_obligation_id_sha256: ExternalShaSchema,
     worker_service_id_sha256: ExternalShaSchema, provider_session_id_sha256: ExternalShaSchema, provider_admission_id_sha256: ExternalShaSchema,
     provider_connection_epoch: z.number().int().positive(), frozen_provider_connection_epochs: z.array(z.number().int().positive()).min(1).max(64),
@@ -428,8 +402,8 @@ export const ExternalAttestationEvidenceSchema = z.discriminatedUnion("kind", [
   z.object({
     kind: z.literal("p01_platform_plugin_task"), authority: z.literal("platform_plugin"), registered_app_id: z.string().regex(/^plugin_asdk_app[0-9A-Za-z_-]{4,112}$/), plugin_version: z.string().regex(FINAL_CODEX_PLUGIN_VERSION_PATTERN),
     platform_task_id_sha256: ExternalShaSchema, platform_thread_id_sha256: ExternalShaSchema, install_receipt_sha256: ExternalShaSchema,
-    plugin_package_sha256: ExternalShaSchema, installed_at: ExternalTimestampSchema, fresh_task_started_at: ExternalTimestampSchema, fresh_task_completed_at: ExternalTimestampSchema, high_level_call_count: z.number().int().min(1).max(10),
-    calls: z.array(PlatformCallSchema).length(10), polling_call_count: z.number().int().min(0).max(20), polling_calls: z.array(PlatformPollingCallSchema).max(20), operation_ids: z.array(z.string().uuid()).min(4).max(10),
+    plugin_package_sha256: ExternalShaSchema, installed_at: ExternalTimestampSchema, fresh_task_started_at: ExternalTimestampSchema, fresh_task_completed_at: ExternalTimestampSchema, high_level_call_count: z.number().int().min(1).max(P01_LIMITS.semanticCalls),
+    calls: z.array(PlatformCallSchema).length(P01_LIMITS.semanticCalls), polling_call_count: z.number().int().min(0).max(P01_LIMITS.pollsTotal), polling_calls: z.array(PlatformPollingCallSchema).max(P01_LIMITS.pollsTotal), operation_ids: z.array(z.string().uuid()).min(4).max(P01_LIMITS.semanticCalls),
     adaptive_observation_call_ordinal: z.literal(5), adaptive_followup_call_ordinal: z.literal(6),
     prohibited_tool_audit_passed: z.literal(true), raw_javascript_used: z.literal(false), local_runner_used: z.literal(false), manual_takeover_used: z.literal(false), exact_deployment_discovered: z.literal(true), adaptive_followup_completed: z.literal(true),
   }).strict(),
@@ -595,6 +569,45 @@ export class VoiceLabService {
     } });
   }
 
+  /** Deployment-control journal access only; never performs a provider action. */
+  async genericOwnerDispatch(caller: AuthenticatedCaller, raw: unknown) {
+    requireScope(caller, "voice_lab:attest");
+    requireScope(caller, "voice_lab:attest:deployment_control");
+    if (caller.authorizationKind !== "attestation" || caller.subject !== this.config.attestationAuthorities.deployment_control.subject)
+      throw new VoiceLabError(labError("ATTESTATION_AUTHORITY_MISMATCH", "Generic owner recovery requires deployment-control transport authority.", "authorization"));
+    if (!this.config.killSwitch || !this.config.genericRecoveryWorkerServiceId)
+      throw new VoiceLabError(labError("GENERIC_RECOVERY_CLOSED_WINDOW_REQUIRED", "Generic recovery requires closed admission and a configured exact worker service.", "conflict"));
+    const runId = z.string().uuid();
+    const version = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
+    const input = z.discriminatedUnion("action", [
+      z.object({ action: z.literal("inspect"), runId }).strict(),
+      z.object({ action: z.literal("prepare"), runId, expectedVersion: version, requestId: z.string().uuid() }).strict(),
+      z.object({ action: z.literal("consume"), runId, expectedVersion: version, preparedProofSha256: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
+      z.object({ action: z.literal("ingest_owner_loss"), runId, expectedVersion: version, receipt: z.unknown() }).strict(),
+    ]).parse(raw);
+    const control = await this.ledger.getRecoveryControl(input.runId);
+    if (!control || control.binding.scenarioId === "V-D02" || control.binding.principalId !== this.config.principalId
+      || control.binding.environment !== this.config.environment) throw new VoiceLabError(labError("GENERIC_RECOVERY_SCOPE_INVALID", "Generic recovery control is outside the configured principal/environment.", "authorization"));
+    if (control.genericOwnerDispatch && control.genericOwnerDispatch.workerServiceIdSha256 !== sha256(this.config.genericRecoveryWorkerServiceId))
+      throw new VoiceLabError(labError("GENERIC_RECOVERY_SERVICE_MISMATCH", "Stored recovery service differs from current configuration.", "conflict"));
+    if (input.action === "inspect") return { dispatchAllowed: false, control, workerServiceId: this.config.genericRecoveryWorkerServiceId };
+    if (input.action === "ingest_owner_loss") {
+      const target = this.config.readinessTarget;
+      if (!target || canonicalRequestHash(target.expectedDeployment) !== canonicalRequestHash(control.binding.expectedDeployment))
+        throw new VoiceLabError(labError("GENERIC_RECOVERY_RELEASE_MISMATCH", "Generic receipt ingestion requires the configured exact product release.", "conflict"));
+      const authority = this.config.attestationAuthorities.deployment_control;
+      await this.ledger.persistGenericOwnerLoss({ runId: input.runId, expectedVersion: input.expectedVersion, receipt: input.receipt,
+        authority: { issuer: authority.issuer, subject: authority.subject, key_id: authority.keyId, public_key_spki_base64: authority.publicKeySpkiBase64 },
+        expectedWorkerServiceIdSha256: sha256(this.config.genericRecoveryWorkerServiceId),
+        expectedLabSha: this.config.serviceVersion, expectedLangGraphSha: target.expectedDependencies.langgraph });
+      const persisted = await this.ledger.getRecoveryControl(input.runId);
+      if (!persisted?.genericOwnerLoss) throw new Error("GENERIC_OWNER_PERSISTENCE_UNCONFIRMED");
+      return { dispatchAllowed: false, control: persisted, workerServiceId: this.config.genericRecoveryWorkerServiceId };
+    }
+    if (input.action === "prepare") return { dispatchAllowed: false, control: await this.ledger.prepareGenericOwnerDispatch({ runId: input.runId, expectedVersion: input.expectedVersion, requestId: input.requestId, workerServiceId: this.config.genericRecoveryWorkerServiceId }), workerServiceId: this.config.genericRecoveryWorkerServiceId };
+    return { ...await this.ledger.consumeGenericOwnerDispatch(input), workerServiceId: this.config.genericRecoveryWorkerServiceId };
+  }
+
   /** Read-only owning proof used by the independent D02 controller after the
    * web restart and idempotent replay. The caller supplies only immutable
    * identifiers; browser continuity is derived from the current durable lease. */
@@ -672,15 +685,9 @@ export class VoiceLabService {
     const input = ExternalAttestationSchema.parse(raw);
     if (!requestContext || requestContext.argumentHash !== canonicalRequestHash(input) || !/^[a-f0-9]{64}$/.test(requestContext.requestIdHash)) throw new VoiceLabError(labError("ATTESTATION_AUDIT_CONTEXT_MISSING", "External attestation requires an exact authenticated HTTP audit context.", "authorization"));
     const run = await this.ledger.getRun(input.run_id);
-    if (!run || run.evidencePurgedAt !== null) throw new VoiceLabError(labError("RUN_NOT_FOUND", "Run was not found.", "validation"));
-    if (input.test_run_id_sha256 !== sha256(run.testRunId) || input.cleanup_obligation_id_sha256 !== sha256(run.cleanupObligationId) || input.scenario_id !== run.scenarioId || input.scenario_version !== run.scenarioVersion || input.environment !== run.environment
-      || canonicalRequestHash(input.expected_deployment) !== canonicalRequestHash(run.target.expectedDeployment)) {
-      throw new VoiceLabError(labError("ATTESTATION_BINDING_MISMATCH", "External attestation did not exactly bind the governed run and deployment.", "evidence"));
-    }
     const issuedAt = new Date(input.issued_at);
     const expiresAt = new Date(input.expires_at);
     const now = new Date();
-    const retentionDeadline = run.retentionPurgeDueAt ?? new Date(run.createdAt.getTime() + run.capturePolicy.retentionHours * 3_600_000);
     const authority = input.evidence.authority;
     const authorityConfig = this.config.attestationAuthorities[authority];
     requireScope(caller, `voice_lab:attest:${authority}`);
@@ -695,6 +702,12 @@ export class VoiceLabService {
       signatureValid = verifySignature(null, digest, publicKey, Buffer.from(input.signature, "base64url"));
     } catch { signatureValid = false; }
     if (!signatureValid) throw new VoiceLabError(labError("ATTESTATION_SIGNATURE_INVALID", "External attestation signature was invalid.", "authorization"));
+    if (!run || run.evidencePurgedAt !== null) return this.recoverRetainedD02AttestationFacts(input, caller, requestContext);
+    if (input.test_run_id_sha256 !== sha256(run.testRunId) || input.cleanup_obligation_id_sha256 !== sha256(run.cleanupObligationId) || input.scenario_id !== run.scenarioId || input.scenario_version !== run.scenarioVersion || input.environment !== run.environment
+      || canonicalRequestHash(input.expected_deployment) !== canonicalRequestHash(run.target.expectedDeployment)) {
+      throw new VoiceLabError(labError("ATTESTATION_BINDING_MISMATCH", "External attestation did not exactly bind the governed run and deployment.", "evidence"));
+    }
+    const retentionDeadline = run.retentionPurgeDueAt ?? new Date(run.createdAt.getTime() + run.capturePolicy.retentionHours * 3_600_000);
     const existing = (await readCompleteEventLedger(this.ledger, run.id)).filter((event) => event.kind === `external.attestation.${input.evidence.kind}`);
     const signedContentHash = canonicalRequestHash(signed);
     const replay = existing.find((event) => event.payload.attestation_id === input.attestation_id && event.payload.signature_material_sha256 === signedContentHash);
@@ -756,6 +769,86 @@ export class VoiceLabService {
     }
     const fresh = await this.ledger.getRun(run.id) ?? run;
     return envelope({ run: fresh, status: "completed", data: { attestation_id: input.attestation_id, attestation_kind: input.evidence.kind, content_sha256: payload.content_sha256, event_seq: event.seq, immutable: true, ...(recoveredGatewayFreeze ? { gateway_freeze_idempotent_replay: true } : {}), ...(recoveredGatewayContinuity ? { gateway_continuity_idempotent_replay: true } : {}), proof_status: "pending_evaluator_cross_join" } });
+  }
+
+  /** Authenticated recovery facts after raw retention. A still-valid independent
+   * owner receipt may be ingested against the retained journal; no new scenario
+   * attestation, raw content or provider identity is reconstructed. */
+  private async recoverRetainedD02AttestationFacts(input: z.infer<typeof ExternalAttestationSchema>, caller: AuthenticatedCaller,
+    requestContext: { argumentHash: string; requestIdHash: string }): Promise<LabEnvelope> {
+    const missing = () => new VoiceLabError(labError("RUN_NOT_FOUND", "Run evidence is unavailable; retained recovery facts are not complete.", "validation"));
+    const evidence = input.evidence;
+    if (evidence.kind !== "d02_browser_worker_loss" || !evidence.local_controller_receipt) throw missing();
+    let control = await this.ledger.getRecoveryControl(input.run_id);
+    if (!control || control.contentPurgedAt === null || !control.d02Journal) throw missing();
+    const binding = control.binding;
+    if (input.test_run_id_sha256 !== sha256(binding.testRunId) || input.cleanup_obligation_id_sha256 !== sha256(binding.cleanupObligationId)
+      || input.scenario_id !== binding.scenarioId || input.scenario_version !== binding.scenarioVersion || input.environment !== binding.environment
+      || canonicalRequestHash(input.expected_deployment) !== canonicalRequestHash(binding.expectedDeployment)
+      || evidence.local_controller_receipt_sha256 !== canonicalRequestHash(evidence.local_controller_receipt)
+      || (control.d02OwnerDeath && evidence.local_controller_receipt_sha256 !== control.d02OwnerDeath.signedReceiptSha256)
+      || (control.d02ProviderSettlement && evidence.product_provider_cleanup_settlement_sha256 !== control.d02ProviderSettlement.providerSettlementSha256)) throw attestationMismatch("Retained recovery readback did not match its immutable sources.");
+    const authority = this.config.attestationAuthorities.deployment_control;
+    const ownerInput = { runId: input.run_id, expectedVersion: control.version, receipt: evidence.local_controller_receipt,
+      expectedWorkerServiceIdSha256: control.d02Journal.workerServiceIdSha256,
+      publicConfig: { deployment_control: { issuer: authority.issuer, subject: authority.subject,
+        key_id: authority.keyId, public_key_spki_base64: authority.publicKeySpkiBase64 } } };
+    let proof = verifyRetainedD02OwnerDeath({ ...ownerInput, control,
+      acceptedAt: control.d02OwnerDeath ? new Date(control.d02OwnerDeath.acceptedAt) : new Date() });
+    if (!control.d02OwnerDeath) {
+      await this.ledger.recordAuthAudit({ runId: null, callerId: caller.subject, action: "external_attestation.retained_owner_ingestion",
+        argumentHash: requestContext.argumentHash, outcome: "allowed", detail: { request_id_hash: requestContext.requestIdHash,
+          control_binding_sha256: proof.controlBindingSha256, signed_source_sha256: proof.signedReceiptSha256 }, observedAt: new Date() });
+      // PostgreSQL re-verifies under its locks using the database acceptance
+      // clock. The pre-check above is not a substitute for that transaction.
+      const stored = await this.ledger.persistRetainedD02OwnerDeath(ownerInput);
+      proof = stored.proof;
+      control = await this.ledger.getRecoveryControl(input.run_id);
+      if (!control?.d02OwnerDeath) throw missing();
+    }
+    if (!control.d02ProviderSettlement) {
+      const lookup = deriveRetainedD02SettlementLookup(control);
+      await this.ledger.recordAuthAudit({ runId: null, callerId: caller.subject,
+        action: "external_attestation.retained_provider_lookup", argumentHash: requestContext.argumentHash,
+        outcome: "allowed", detail: { request_id_hash: requestContext.requestIdHash,
+          lookup_sha256: canonicalRequestHash(lookup), owner_death_proof_sha256: proof.proofSha256 }, observedAt: new Date() });
+      let receipt: Awaited<ReturnType<D02GatewayClient["readSettlement"]>> | undefined;
+      try {
+        receipt = await this.d02Gateway.readSettlement(binding.gatewayOrigin, lookup);
+      } catch (error) {
+        // A missing committed receipt is not permission to recreate content or
+        // invoke mutating settlement. Authentication/signature failures escape.
+        if (!(error instanceof VoiceLabError) || error.detail.code !== "D02_GATEWAY_SETTLEMENT_PENDING"
+          || error.detail.category !== "evidence" || !error.detail.retryable) throw error;
+      }
+      if (receipt) {
+        if (receipt.provider_settlement_sha256 !== evidence.product_provider_cleanup_settlement_sha256)
+          throw attestationMismatch("Retained Gateway receipt did not match the independent controller settlement.");
+        // The ledger independently verifies signature and all retained joins
+        // under its CAS/transaction before storing any provider proof.
+        await this.ledger.persistRetainedD02ProviderSettlement({ runId: input.run_id, expectedVersion: control.version,
+          receipt, authority: this.config.d02GatewayReceiptAuthority });
+        control = await this.ledger.getRecoveryControl(input.run_id);
+        if (!control?.d02OwnerDeath || !control.d02ProviderSettlement) throw missing();
+      }
+    }
+    if (!control.d02ProviderSettlement) return envelope({ status: "unavailable",
+      error: labError("RETAINED_D02_PROVIDER_SETTLEMENT_UNAVAILABLE", "Owner death is preserved; independent provider settlement is still required.", "evidence", true),
+      data: { proof_status: "retained_owner_only", raw_evidence_purged: true, certification_available: false,
+        owner_death_proof_sha256: proof.proofSha256, provider_settlement_proof_sha256: null,
+        live_cleanup_complete: control.liveCleanupComplete, remote_purge_complete: control.remotePurgeComplete } });
+    if (canonicalRequestHash(proof) !== canonicalRequestHash(control.d02OwnerDeath)
+      || control.d02ProviderSettlement.ownerDeathProofSha256 !== proof.proofSha256) throw attestationMismatch("Retained recovery authority changed.");
+    await this.ledger.recordAuthAudit({ runId: null, callerId: caller.subject, action: "external_attestation.retained_recovery_readback",
+      argumentHash: requestContext.argumentHash, outcome: "allowed", detail: { request_id_hash: requestContext.requestIdHash,
+        control_binding_sha256: proof.controlBindingSha256, owner_death_proof_sha256: proof.proofSha256,
+        provider_settlement_proof_sha256: control.d02ProviderSettlement.proofSha256 }, observedAt: new Date() });
+    return envelope({ status: "ok", warnings: [{ code: "RAW_EVIDENCE_PURGED", message: "Only durable recovery facts remain; scenario certification is unavailable." }],
+      data: { proof_status: "retained_recovery_facts_only", raw_evidence_purged: true, certification_available: false,
+        signed_claim_sha256: canonicalRequestHash(input),
+        control_binding_sha256: proof.controlBindingSha256, owner_death_proof_sha256: proof.proofSha256,
+        provider_settlement_proof_sha256: control.d02ProviderSettlement.proofSha256,
+        live_cleanup_complete: control.liveCleanupComplete, remote_purge_complete: control.remotePurgeComplete } });
   }
 
   private async deriveD02BrowserContinuity(run: RunRecord, rawQuery: z.infer<typeof D02BrowserContinuityQuerySchema>, observedAt: Date): Promise<D02BrowserContinuityProof> {
@@ -1225,6 +1318,48 @@ export class VoiceLabService {
       return options.requireD02ContinuityReceiptIssuedBy ? { gatewayContinuityIdempotentReplay: true } : undefined;
     }
     if (evidence.kind === "d02_browser_worker_loss") {
+      if (evidence.local_controller_receipt) {
+        const authority = this.config.attestationAuthorities.deployment_control;
+        const source = (() => {
+          try {
+            return verifyD02WorkerTerminationSignature(evidence.local_controller_receipt, {
+              issuer: authority.issuer, subject: authority.subject, key_id: authority.keyId, public_key_spki_base64: authority.publicKeySpkiBase64,
+            });
+          } catch {
+            throw new VoiceLabError(labError("ATTESTATION_SIGNATURE_INVALID", "Controller source signature was invalid.", "authorization"));
+          }
+        })();
+        if (canonicalRequestHash(source) !== evidence.local_controller_receipt_sha256
+          || source.run_id !== run.id || source.test_run_id_sha256 !== sha256(run.testRunId)
+          || source.cleanup_obligation_id_sha256 !== sha256(run.cleanupObligationId)
+          || source.environment !== run.environment || canonicalRequestHash(source.expected_deployment) !== canonicalRequestHash(run.target.expectedDeployment)
+          || sha256(source.termination_request_id) !== evidence.termination_request_id_sha256
+          || source.binding.worker_service_id_sha256 !== evidence.worker_service_id_sha256
+          || source.binding.provider_session_id_sha256 !== evidence.provider_session_id_sha256
+          || source.binding.provider_admission_id_sha256 !== evidence.provider_admission_id_sha256
+          || source.binding.provider_connection_epoch !== evidence.provider_connection_epoch
+          || canonicalRequestHash(source.binding.frozen_provider_connection_epochs) !== canonicalRequestHash(evidence.frozen_provider_connection_epochs)
+          || source.binding.browser_worker_id_sha256 !== evidence.lost_worker_id_sha256
+          || source.binding.browser_lease_epoch !== evidence.lost_browser_lease_epoch
+          || source.binding.browser_context_id_sha256 !== evidence.browser_context_id_sha256
+          || source.render.dispatch_claim_sha256 !== evidence.render_dispatch_claim_sha256
+          || source.render.action_request_sha256 !== evidence.render_action_request_sha256
+          || source.render.action_accepted_response_sha256 !== evidence.render_action_accepted_response_sha256
+          || source.render.action_settled_snapshot_sha256 !== evidence.render_action_settled_snapshot_sha256
+          || source.render.before_service_response_sha256 !== evidence.before_service_response_sha256
+          || source.render.after_service_response_sha256 !== evidence.after_service_response_sha256
+          || source.render.before_deploy_id_sha256 !== evidence.before_deploy_id_sha256
+          || source.render.after_deploy_id_sha256 !== evidence.after_deploy_id_sha256
+          || source.render.before_instance_set_sha256 !== evidence.before_instance_set_sha256
+          || source.render.after_instance_set_sha256 !== evidence.after_instance_set_sha256
+          || source.render.before_worker_owner_instance_id_sha256 !== evidence.lost_worker_owner_instance_id_sha256
+          || source.render.replacement_worker_owner_instance_id_sha256 !== evidence.replacement_worker_owner_instance_id_sha256
+          || source.render.action_requested_at !== evidence.action_requested_at
+          || source.render.action_accepted_at !== evidence.action_accepted_at || source.render.action_settled_at !== evidence.action_settled_at
+          || source.voice_lab.worker_loss_observation.loss_event_seq !== evidence.loss_event_seq
+          || source.voice_lab.worker_loss_observation.loss_observed_at !== evidence.loss_observed_at
+          || source.voice_lab.worker_loss_observation.product_provider_cleanup_settlement_sha256 !== evidence.product_provider_cleanup_settlement_sha256) throw attestationMismatch("The signed controller source did not match the worker-loss attestation.");
+      }
       const currentLease = await this.ledger.getBrowserLease(run.id);
       const now = new Date();
       const sourceLossObservation = await this.deriveD02BrowserWorkerLossObservation(run, {
@@ -1288,6 +1423,20 @@ export class VoiceLabService {
         throw attestationMismatch("D02 worker-loss action proof did not join the durable one-shot command, Render replacement receipt, exact lost lease, and terminal Voice Lab abort.");
       }
       if (run.providerSessionId === null || typeof command.termination_request_id !== "string") throw attestationMismatch("D02 settlement lost its raw owning provider or termination lookup authority.");
+      // Legacy claims remain decodable, but cannot acknowledge a new C4
+      // settlement without the independently signed, durably retained source.
+      if (!evidence.local_controller_receipt) throw attestationMismatch("D02 settlement requires the signed controller source receipt.");
+      const ownerControl = await this.ledger.getRecoveryControl(run.id);
+      if (!ownerControl) throw attestationMismatch("D02 settlement requires its durable recovery control.");
+      const deploymentAuthority = this.config.attestationAuthorities.deployment_control;
+      await this.ledger.persistRetainedD02OwnerDeath({ runId: run.id, expectedVersion: ownerControl.version,
+        receipt: evidence.local_controller_receipt,
+        expectedWorkerServiceIdSha256: evidence.worker_service_id_sha256,
+        publicConfig: { deployment_control: {
+          issuer: deploymentAuthority.issuer, subject: deploymentAuthority.subject,
+          key_id: deploymentAuthority.keyId, public_key_spki_base64: deploymentAuthority.publicKeySpkiBase64,
+        } },
+      });
       const settlementRequest = {
         schema: "sophia_voice_lab_gateway_browser_worker_termination_settlement_request_v1" as const,
         termination_request_id: command.termination_request_id,
@@ -1315,6 +1464,10 @@ export class VoiceLabService {
         throw attestationMismatch("The Gateway settlement receipt did not bind the governed scenario, environment, deployment, and exact browser-authored provider settlement.");
       }
       const receiptSha256 = canonicalRequestHash(receipt);
+      const providerControl = await this.ledger.getRecoveryControl(run.id);
+      if (!providerControl) throw attestationMismatch("D02 provider settlement requires its durable recovery control.");
+      await this.ledger.persistRetainedD02ProviderSettlement({ runId: run.id,
+        expectedVersion: providerControl.version, receipt, authority: this.config.d02GatewayReceiptAuthority });
       await this.ledger.appendEvent(run.id, "product.d02_gateway_browser_worker_termination_settled", "canonical", {
         schema: "sophia_voice_lab_d02_gateway_settlement_event_v1",
         termination_request_id_sha256: evidence.termination_request_id_sha256,
@@ -1349,36 +1502,59 @@ export class VoiceLabService {
           && record.detail.authorization_kind === "oauth" && record.detail.oauth_client_id_sha256 === oauthClientHash && typeof record.detail.oauth_token_id_sha256 === "string";
       });
       const pollCounts = new Map<string, number>();
+      const totalPollCounts = new Map<string, number>();
       const conclusivelySettled = new Set<string>();
-      const mutationPolicyByOperation = new Map<string, { mutationCall: (typeof evidence.calls)[number]; boundaryCall: (typeof evidence.calls)[number]; requiresPoll: boolean }>();
-      for (const [mutationIndex, boundaryIndex] of [[3, 4], [5, 6], [8, 9]] as const) {
+      const mutationPolicyByOperation = new Map<string, { mutationCall: (typeof evidence.calls)[number]; boundaryCall: (typeof evidence.calls)[number]; requiresPoll: boolean; settlementAtBoundary: boolean; waitCondition: string }>();
+      for (const { mutationIndex, boundaryIndex, settlementAtBoundary, waitCondition } of P01_OPERATION_OBSERVATIONS) {
         const mutationCall = evidence.calls[mutationIndex]!;
         const boundaryCall = evidence.calls[boundaryIndex]!;
         const mutationRecord = auditedCalls[mutationCall.chronological_ordinal - 1];
         if (mutationCall.operation_id_sha256) mutationPolicyByOperation.set(mutationCall.operation_id_sha256, {
           mutationCall,
           boundaryCall,
-          requiresPoll: mutationRecord?.detail.operation_state !== "succeeded",
+          requiresPoll: waitCondition === "finalization_complete" ? p01EndNeedsFinalization(mutationRecord?.detail ?? {}) : mutationRecord?.detail.operation_state !== "succeeded",
+          settlementAtBoundary,
+          waitCondition,
         });
       }
       const exactPollSemantics = [...evidence.polling_calls].sort((left, right) => left.chronological_ordinal - right.chronological_ordinal).every((call) => {
         const record = auditedCalls[call.chronological_ordinal - 1];
+        if (call.polled_operation_id_sha256 === null) {
+          const phase = P01_ASSISTANT_OBSERVATIONS.find(({ mutationIndex, boundaryIndex }) => call.chronological_ordinal > evidence.calls[mutationIndex]!.chronological_ordinal && call.chronological_ordinal < evidence.calls[boundaryIndex]!.chronological_ordinal);
+          if (!phase) return false;
+          const mutation = evidence.calls[phase.mutationIndex]!;
+          const operationHash = mutation.operation_id_sha256;
+          if (!operationHash) return false;
+          const mutationRecord = auditedCalls[mutation.chronological_ordinal - 1];
+          const boundaryRecord = auditedCalls[evidence.calls[phase.boundaryIndex]!.chronological_ordinal - 1];
+          const count = (totalPollCounts.get(operationHash) ?? 0) + 1;
+          totalPollCounts.set(operationHash, count);
+          return count <= P01_LIMITS.pollsPerOperation && record?.detail.wait_condition === "assistant_turn_complete" && record.detail.status === "timeout"
+            && record.detail.condition_satisfied === false && typeof record.detail.wait_timeout_ms === "number" && record.detail.wait_timeout_ms <= P01_LIMITS.pollTimeoutMs
+            && typeof record.detail.wait_after_cursor === "number" && record.detail.wait_after_cursor === boundaryRecord?.detail.wait_after_cursor
+            && (mutationRecord?.detail.operation_state === "succeeded" || conclusivelySettled.has(operationHash));
+        }
         const policy = mutationPolicyByOperation.get(call.polled_operation_id_sha256);
         const count = (pollCounts.get(call.polled_operation_id_sha256) ?? 0) + 1;
         pollCounts.set(call.polled_operation_id_sha256, count);
-        if (count > 10 || conclusivelySettled.has(call.polled_operation_id_sha256) || !policy || !policy.requiresPoll
+        const totalCount = (totalPollCounts.get(call.polled_operation_id_sha256) ?? 0) + 1;
+        totalPollCounts.set(call.polled_operation_id_sha256, totalCount);
+        if (totalCount > P01_LIMITS.pollsPerOperation || conclusivelySettled.has(call.polled_operation_id_sha256) || !policy || !policy.requiresPoll
           || call.chronological_ordinal <= policy.mutationCall.chronological_ordinal || call.chronological_ordinal >= policy.boundaryCall.chronological_ordinal
-          || record?.detail.polled_operation_id_sha256 !== call.polled_operation_id_sha256 || record.detail.wait_condition !== "operation_terminal"
-          || typeof record.detail.wait_timeout_ms !== "number" || record.detail.wait_timeout_ms > 10_000
+          || record?.detail.polled_operation_id_sha256 !== call.polled_operation_id_sha256 || record.detail.wait_condition !== policy.waitCondition
+          || typeof record.detail.wait_timeout_ms !== "number" || record.detail.wait_timeout_ms > P01_LIMITS.pollTimeoutMs
           || !["timeout", "ok", "completed"].includes(String(record.detail.status))) return false;
         if (record.detail.condition_satisfied === true) {
+          if (policy.settlementAtBoundary) return false;
           if (record.detail.observed_operation_state !== "succeeded") return false;
+          if (policy.waitCondition === "finalization_complete" && (record.detail.finalization_ready !== true || record.detail.terminal !== true || record.detail.cleanup_complete !== true || record.detail.evidence_state !== "available"
+            || !currentEvidence || record.detail.manifest_id_sha256 !== sha256(currentEvidence.manifestId) || record.detail.manifest_sha256 !== currentEvidence.manifestSha256)) return false;
           conclusivelySettled.add(call.polled_operation_id_sha256);
         } else if (record.detail.status !== "timeout") return false;
         return true;
       });
       const exactPollCoverage = [...mutationPolicyByOperation].every(([operationHash, policy]) => policy.requiresPoll
-        ? conclusivelySettled.has(operationHash)
+        ? policy.settlementAtBoundary || conclusivelySettled.has(operationHash)
         : !pollCounts.has(operationHash));
       const referencedOperationCalls = referencedOperations.every((operation) => {
         const tool = operation.type === "start" ? "start_voice_run" : operation.type === "end" ? "end_voice_run" : operation.type;
@@ -1391,7 +1567,7 @@ export class VoiceLabService {
         if (["get_capabilities", "wait_for_turn", "inspect_voice_run", "export_voice_evidence"].includes(call.tool_name) && record.detail.operation_id_sha256 !== null) return false;
         if (index === 0) return record.detail.status === "ok" && call.polled_operation_id_sha256 === null;
         if (index === 2) return record.detail.status === "ok" && record.detail.condition_satisfied === true && record.detail.observed_operation_state === "succeeded"
-          && record.detail.wait_condition === "operation_terminal" && typeof record.detail.wait_timeout_ms === "number" && record.detail.wait_timeout_ms <= 10_000
+          && record.detail.wait_condition === "operation_terminal" && typeof record.detail.wait_timeout_ms === "number" && record.detail.wait_timeout_ms <= P01_LIMITS.pollTimeoutMs
           && call.polled_operation_id_sha256 === evidence.calls[1]!.operation_id_sha256;
         if (index === 4 || index === 6) return record.detail.status === "ok" && record.detail.condition_satisfied === true && call.polled_operation_id_sha256 === null;
         if (call.tool_name === "start_voice_run" || call.tool_name === "speak") return record.detail.submission_outcome === "durably_accepted" && record.detail.replay === false
@@ -1399,7 +1575,7 @@ export class VoiceLabService {
           && (call.tool_name === "start_voice_run" || record.detail.operation_state === "succeeded" || call.operation_id_sha256 !== null && conclusivelySettled.has(call.operation_id_sha256));
         if (call.tool_name === "inspect_voice_run") return record.detail.run_state === run.state || record.detail.run_state === "active" || record.detail.run_state === "ready";
         if (call.tool_name === "end_voice_run") return record.detail.submission_outcome === "durably_accepted" && record.detail.replay === false
-          && (["accepted", "queued", "leased", "executing"].includes(String(record.detail.operation_state)) ? call.operation_id_sha256 !== null && conclusivelySettled.has(call.operation_id_sha256)
+          && (mutationPolicyByOperation.get(call.operation_id_sha256 ?? "")?.requiresPoll ? call.operation_id_sha256 !== null && conclusivelySettled.has(call.operation_id_sha256)
             : record.detail.operation_state === "succeeded" && record.detail.cleanup_complete === true && record.detail.evidence_state === "available"
               && record.detail.manifest_id_sha256 === sha256(currentEvidence.manifestId) && record.detail.manifest_sha256 === currentEvidence.manifestSha256);
         if (call.tool_name === "export_voice_evidence") return record.detail.status === "completed" && record.detail.evidence_state === "available"
@@ -1407,7 +1583,7 @@ export class VoiceLabService {
         return true;
       });
       if (run.scenarioId !== "V-P01" || this.config.registeredAppId === null || evidence.registered_app_id !== this.config.registeredAppId || evidence.plugin_version !== this.config.pluginVersion || evidence.plugin_package_sha256 !== this.config.pluginPackageSha256
-        || evidence.high_level_call_count !== 10 || evidence.calls.length !== 10 || auditedCalls.length !== 10 + evidence.polling_call_count || !exactCalls || !exactPollingCalls || !exactTimeline || !exactPollSemantics || !exactPollCoverage
+        || evidence.high_level_call_count !== P01_LIMITS.semanticCalls || evidence.calls.length !== P01_LIMITS.semanticCalls || auditedCalls.length !== P01_LIMITS.semanticCalls + evidence.polling_call_count || !exactCalls || !exactPollingCalls || !exactTimeline || !exactPollSemantics || !exactPollCoverage
         || new Set(evidence.operation_ids).size !== evidence.operation_ids.length || evidence.operation_ids.length !== 4 || referencedOperations.length !== evidence.operation_ids.length || operations.length !== 4
         || !referencedTypes.has("start") || referencedOperations.filter((operation) => operation.type === "speak").length !== 2 || !referencedTypes.has("end") || !referencedOperationCalls
         || referencedOperations.some((operation) => operation.state !== "succeeded") || !TERMINAL_RUN_STATES.has(run.state) || run.terminalError !== null || run.cleanupComplete !== true || currentEvidence === null || !exactSuccessfulCanonicalCalls
@@ -1682,6 +1858,7 @@ export class VoiceLabService {
     requireScope(caller, "voice_lab:read");
     const input = WaitSchema.parse(raw);
     let run = await this.ownedRun(caller, input.run_id);
+    if (input.condition === "finalization_complete") return this.waitForFinalization(caller, input.run_id, input.operation_id!, input.after_cursor, input.timeout_ms);
     const timeoutMs = Math.min(input.timeout_ms, this.config.maxWaitMs);
     const deadline = Date.now() + timeoutMs;
     let scanCursor = input.after_cursor;
@@ -1717,6 +1894,26 @@ export class VoiceLabService {
     const run = await this.ownedRun(caller, input.run_id);
     const page = await this.ledger.listEvents(run.id, input.after_cursor, input.limit);
     return envelope({ run, after: input.after_cursor, status: TERMINAL_RUN_STATES.has(run.state) ? "completed" : "running", data: { run_state: run.state, events: page.events.map((event) => publicEvent(event, run.id, run.testRunId)), expires_at: run.expiresAt.toISOString(), terminal_error: run.terminalError } });
+  }
+
+  private async waitForFinalization(caller: AuthenticatedCaller, runId: string, operationId: string, afterCursor: number, timeoutMs: number): Promise<LabEnvelope> {
+    const deadline = Date.now() + Math.min(timeoutMs, this.config.maxWaitMs);
+    do {
+      const run = await this.ownedRun(caller, runId);
+      const operation = await this.ledger.getOperation(operationId);
+      if (!operation || operation.runId !== run.id || operation.type !== "end") throw new VoiceLabError(labError("FINALIZATION_OPERATION_MISMATCH", "Finalization requires the exact owned end operation.", "authorization"));
+      const evidence = await this.ledger.getEvidence(run.id);
+      const ready = operation.state === "succeeded" && TERMINAL_RUN_STATES.has(run.state) && run.cleanupComplete && evidence !== null;
+      const failed = ["failed", "timed_out", "cancelled"].includes(operation.state);
+      const expired = Date.now() >= deadline;
+      if (ready || failed || expired) return envelope({ run, after: afterCursor, status: ready ? "completed" : failed ? "unavailable" : "timeout", evidence: evidence?.artifactRefs ?? [],
+        retryability: ready || failed ? "not_retryable" : "retryable",
+        data: { condition: "finalization_complete", condition_satisfied: ready, finalization_ready: ready,
+          observed_operation_state: operation.state, run_state: run.state, terminal: TERMINAL_RUN_STATES.has(run.state), cleanup_complete: run.cleanupComplete,
+          evidence_state: evidence ? "available" : "pending", manifest_id: evidence?.manifestId ?? null, manifest_sha256: evidence?.manifestSha256 ?? null,
+          matched: [], timeout_ms: Math.min(timeoutMs, this.config.maxWaitMs) } });
+      await delay(25);
+    } while (true);
   }
 
   async exportVoiceEvidence(caller: AuthenticatedCaller, raw: unknown): Promise<LabEnvelope> {
@@ -2003,7 +2200,7 @@ export class VoiceLabService {
     }, limits: this.rollingAdmissionLimits() };
   }
 
-  private publicLimits(): Record<string, number> {
+  private publicLimits(): Record<string, number | null> {
     return { max_concurrent_runs: this.config.maxConcurrentRuns, max_runs_per_caller: this.config.maxRunsPerCaller, max_text_characters: this.config.maxTextCharacters, max_audio_bytes: this.config.maxAudioBytes, max_audio_duration_ms: this.config.maxAudioDurationMs, max_utterances_per_run: this.config.maxUtterancesPerRun, max_injected_duration_ms: this.config.maxInjectedDurationMs, max_injected_bytes: this.config.maxInjectedBytes, min_utterance_interval_ms: this.config.minUtteranceIntervalMs, max_run_seconds: this.config.maxRunSeconds, max_operation_seconds: this.config.maxOperationSeconds, start_operation_seconds: this.config.startOperationSeconds, end_operation_seconds: this.config.endOperationSeconds, fault_operation_seconds: this.config.faultOperationSeconds, max_wait_ms: this.config.maxWaitMs, effective_min_retention_hours: Math.ceil((this.config.maxRunSeconds + this.config.endOperationSeconds) / 3_600), rolling_window_seconds: this.config.admissionWindowSeconds, max_rolling_run_starts: this.config.maxRollingRunStarts, max_rolling_run_starts_per_caller: this.config.maxRollingRunStartsPerCaller, max_rolling_provider_seconds: this.config.maxRollingProviderSeconds, max_rolling_provider_seconds_per_caller: this.config.maxRollingProviderSecondsPerCaller, max_rolling_suites: this.config.maxRollingSuites, max_rolling_suites_per_caller: this.config.maxRollingSuitesPerCaller, max_rolling_suite_children: this.config.maxRollingSuiteChildren, max_rolling_suite_children_per_caller: this.config.maxRollingSuiteChildrenPerCaller, max_rolling_injected_duration_ms: this.config.maxRollingInjectedDurationMs, max_rolling_injected_duration_ms_per_caller: this.config.maxRollingInjectedDurationMsPerCaller, max_rolling_injected_bytes: this.config.maxRollingInjectedBytes, max_rolling_injected_bytes_per_caller: this.config.maxRollingInjectedBytesPerCaller };
   }
 }
@@ -2298,6 +2495,7 @@ function publicEvent(event: { seq: number; kind: string; source: string; at: Dat
 }
 
 export function eventMatches(event: { kind: string; payload: Record<string, unknown> }, condition: z.infer<typeof WaitSchema>["condition"], operationId?: string): boolean {
+  if (condition === "finalization_complete") return false; // A historical event cannot prove current cleanup/evidence readiness.
   const { kind, payload } = event;
   const phase = nestedValue(payload, ["phase"]);
   const turnComplete = nestedValue(payload, ["turnComplete", "turn_complete"]);

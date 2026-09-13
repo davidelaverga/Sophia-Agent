@@ -7,6 +7,7 @@ import { initialVerdicts, type LabEvent, type OperationRecord } from "../src/dom
 import { canonicalRequestHash, sha256 } from "../src/security.js";
 import { S01_FRONTEND_GRANT_VARIANTS, S01_OAUTH_VARIANTS, S02_HTTP_VARIANTS, S02_MCP_BOUNDARY_PROBE_SCHEMA, S02_VALIDATION_VARIANTS, deriveCompletedVerdicts, isCanonicalFinalizationReceipt, isExactS02McpBoundaryProbe, reconcileProductInputLeg, s02HttpProbeExpectation } from "../src/worker.js";
 import { testRun } from "./helpers.js";
+import { recovery } from "./execution-cleanup-fixture.js";
 
 function operation(fixtureId = "a02_short_command"): OperationRecord {
   const now = new Date();
@@ -104,7 +105,6 @@ describe("exact input-leg evidence", () => {
 });
 
 describe("scenario-aware terminal verdict prerequisites", () => {
-  const recovery = (runId: string, seq: number): LabEvent => ({ runId, seq, kind: "cleanup.recovery", source: "canonical", at: new Date(), payload: { complete: true, receipt: { complete: true, live_cleanup_complete: true, live_resources_zero: true, components: { builder: { status: "completed", cleanup_complete: true, discovery_complete: true, authoritative_zero_tasks: true, discovered_task_count: 0 } } } }, dedupeKey: null });
   const absent = (runId: string, seq: number, kind: string, payload: Record<string, unknown> = {}): LabEvent => ({ runId, seq, kind, source: "worker", at: new Date(), payload, dedupeKey: null });
 
   it("allows exact pre-resource S01/S02 assertions without inventing browser/provider joins, while ordinary runs cannot pass vacuously", () => {
@@ -139,7 +139,7 @@ describe("scenario-aware terminal verdict prerequisites", () => {
       const tail = next + scenarioEvents.length;
       const events = [...probes, ...scenarioEvents,
         absent(run.id, tail, "security.pre_resource_allocation_fence", { active_run_count_unchanged: true, browser_context_absent: true, browser_lease_absent: true, canonical_session_absent: true, provider_session_absent: true, tts_process_invocations: 0 }),
-        absent(run.id, tail + 1, "cleanup.browser_context_absent"), absent(run.id, tail + 2, "cleanup.browser_lease_absent", { authoritative_ledger_read: true }), recovery(run.id, tail + 3)];
+        absent(run.id, tail + 1, "cleanup.browser_context_absent"), absent(run.id, tail + 2, "cleanup.browser_lease_absent", { authoritative_ledger_read: true }), recovery(run, tail + 3)];
       expect(deriveCompletedVerdicts(run, events, [])).toMatchObject({ harness: "pass", provider: "unavailable", product: "unavailable", evidence: "pass" });
       const nearMiss = events.filter((event) => event.payload.variant !== (scenarioId === "V-S01" ? "wrong_run" : "malformed_sha"));
       expect(deriveCompletedVerdicts(run, nearMiss, []).harness).toBe("fail");

@@ -1,7 +1,8 @@
 import pg from "pg";
-import { createHmac } from "node:crypto";
+import { retentionHmac } from "./retention-identity.js";
 
 import {
+  TERMINAL_RUN_STATES,
   VoiceLabError,
   labError,
   type EvidenceRecord,
@@ -19,9 +20,18 @@ import { canonicalRequestHash, sha256 } from "./security.js";
 import { parseExactPrincipalProvisionReceipt } from './principal-provision-receipt.js';
 import { attestVoiceLabSchema } from "./schema-attestation.js";
 import { CallerPartitioner, type CallerPartitionKeyRing } from "./caller-partition.js";
+import { deriveRecoveryBrowserBinding, projectRecoveryControlBinding, RecoveryControlBindingSchema, recoveryInventoryCursor } from "./recovery-control.js";
+import { PostgresRecoveryControls } from "./postgres-recovery-control.js";
+import { persistRetainedD02OwnerDeath } from "./postgres-retained-owner-ingestion.js";
+import { persistRetainedD02ProviderSettlement } from "./postgres-retained-provider-ingestion.js";
+import type { RetainedOwnerIngestion, RetainedProviderIngestion } from "./retained-ingestion.js";
+import { D02_DISPATCH_EVENT, deriveD02RecoveryJournal, parseD02RecoveryJournal } from "./d02-recovery-journal.js";
 
 const { Pool } = pg;
 const SCHEMA = "sophia_voice_lab";
+export const LEDGER_CONNECT_TIMEOUT_MS = 5_000;
+export const LEDGER_STATEMENT_TIMEOUT_MS = 5_000;
+export const LEDGER_LOCK_TIMEOUT_MS = 2_000;
 
 export class PostgresVoiceLabLedger implements VoiceLabLedger {
   readonly pool: pg.Pool;
@@ -30,7 +40,11 @@ export class PostgresVoiceLabLedger implements VoiceLabLedger {
   #healthCache: { expiresAt: number; value: LedgerHealth } | null = null;
 
   constructor(databaseUrl: string, max = 10, retentionKey: string | null = null, callerPartitionKeys: CallerPartitionKeyRing | null = null) {
-    this.pool = new Pool({ connectionString: databaseUrl, max, application_name: "sophia-voice-lab" });
+    this.pool = new Pool({ connectionString: databaseUrl, max, application_name: "sophia-voice-lab",
+      connectionTimeoutMillis: LEDGER_CONNECT_TIMEOUT_MS,
+      statement_timeout: LEDGER_STATEMENT_TIMEOUT_MS,
+      lock_timeout: LEDGER_LOCK_TIMEOUT_MS,
+    });
     this.#retentionKey = retentionKey;
     const keys = callerPartitionKeys ?? (process.env.NODE_ENV === "test" ? { activeKeyId: "test-v1", keys: { "test-v1": "caller-partition-postgres-test-secret-000001" } } : null);
     if (!keys) throw new VoiceLabError(labError("CALLER_PARTITION_KEY_MISSING", "A caller-partition HMAC key ring is required by the durable ledger.", "internal"));
@@ -55,6 +69,14 @@ export class PostgresVoiceLabLedger implements VoiceLabLedger {
     if (attestation.ok) {
       try { await this.#assertCallerPartitionKeyCoverage(this.pool); }
       catch { value = { ok: false, detail: "caller-partition-key-ring-mismatch" }; }
+      if (value.ok) {
+        try {
+          const quarantine = await this.pool.query(`select exists(select 1 from ${SCHEMA}.historical_quarantine q
+            where not exists(select 1 from ${SCHEMA}.historical_admission_exceptions e
+              where e.lookup_id_hmac=q.lookup_id_hmac and e.inventory_sha256=q.inventory_sha256)) as blocked`);
+          if (quarantine.rows[0]?.blocked !== false) value = { ok: false, detail: "historical-recovery-quarantined" };
+        } catch { value = { ok: false, detail: "historical-quarantine-unavailable" }; }
+      }
     }
     this.#healthCache = { expiresAt: Date.now() + 5_000, value };
     return value;
@@ -68,36 +90,52 @@ export class PostgresVoiceLabLedger implements VoiceLabLedger {
          select caller_partition_id from ${SCHEMA}.auth_audit where run_id is null and observed_at >= now()-interval '7 days'
          union all
          select caller_partition_id from ${SCHEMA}.principal_provisions
+         union all
+         select binding->>'callerPartitionId' from ${SCHEMA}.recovery_controls
        ) live_partitions order by caller_partition_id`,
     );
     this.#callerPartitions.assertLivePartitionIds(result.rows.map((row) => row.caller_partition_id));
   }
 
   async countActiveRuns(callerId?: string): Promise<number> {
-    const terminal = ["pending_external_evidence", "completed", "product_failed", "invalid_test", "inconclusive_provider", "failed_harness", "authorization_failed", "deployment_mismatch", "aborted_driver_restart", "expired", "cancelled"];
-    const result = callerId === undefined
-      ? await this.pool.query<{ count: string }>(`select count(*)::text as count from ${SCHEMA}.runs where cleanup_complete=false or not (state = any($1::text[]))`, [terminal])
-      : await this.pool.query<{ count: string }>(`select count(*)::text as count from ${SCHEMA}.runs where caller_id=$1 and (cleanup_complete=false or not (state = any($2::text[])))`, [callerId, terminal]);
-    return Number(result.rows[0]?.count ?? 0);
+    const counts = await activeRunCounts(this.pool, callerId ?? null, callerId === undefined ? [] : this.#callerPartitions.callerIds(callerId));
+    return callerId === undefined ? counts.global : counts.caller;
   }
+  recordRecoveryCapabilityAudit(runId: string, expectedVersion: number, jtiHash: string, argumentHash: string) { return new PostgresRecoveryControls(this.pool).recordCapabilityAudit(runId, expectedVersion, jtiHash, argumentHash); }
+  preserveRecoveryExecutionCleanup(runId: string) { return new PostgresRecoveryControls(this.pool).preserveExecutionCleanup(runId); }
+  preserveRecoveryExecutionOwnership(runId: string) { return new PostgresRecoveryControls(this.pool).preserveExecutionOwnership(runId); }
+  bindRecoveryBrowserContext(runId: string, workerId: string, leaseEpoch: number, driverBinding: unknown) { return new PostgresRecoveryControls(this.pool).bindBrowserContext(runId, workerId, leaseEpoch, driverBinding); }
+  getRecoveryControl(runId: string) { return new PostgresRecoveryControls(this.pool).get(runId); }
+  prepareGenericOwnerDispatch(input: import("./generic-owner-dispatch.js").PrepareGenericOwnerDispatch) { return new PostgresRecoveryControls(this.pool).prepareGenericOwnerDispatch(input); }
+  consumeGenericOwnerDispatch(input: import("./generic-owner-dispatch.js").ConsumeGenericOwnerDispatch) { return new PostgresRecoveryControls(this.pool).consumeGenericOwnerDispatch(input); }
+  persistGenericOwnerLoss(input: import("./generic-owner-loss.js").GenericOwnerLossIngestion) { return new PostgresRecoveryControls(this.pool).persistGenericOwnerLoss(input); }
+  persistRetainedD02OwnerDeath(input: RetainedOwnerIngestion) { return persistRetainedD02OwnerDeath({ ...input, pool: this.pool }); }
+  persistRetainedD02ProviderSettlement(input: RetainedProviderIngestion) { return persistRetainedD02ProviderSettlement({ ...input, pool: this.pool }); }
+  listRecoveryControls(limit: number, afterRunId?: string) { return new PostgresRecoveryControls(this.pool).list(limit, afterRunId); }
+  scheduleRetainedRecovery(limit: number) { return new PostgresRecoveryControls(this.pool).schedule(limit); }
+  settleRecoveryControl(runId: string, expectedVersion: number, canonicalEvent: unknown, attempt?: import("./recovery-attempt.js").RecoveryAttemptIdentity) { return new PostgresRecoveryControls(this.pool).settle(runId, expectedVersion, canonicalEvent, attempt); }
   async listExpiredRuns(now: Date, limit: number): Promise<RunRecord[]> {
     const terminal = ["pending_external_evidence", "completed", "product_failed", "invalid_test", "inconclusive_provider", "failed_harness", "authorization_failed", "deployment_mismatch", "aborted_driver_restart", "expired", "cancelled"];
     const result = await this.pool.query(`select * from ${SCHEMA}.runs where expires_at <= $1 and not (state = any($2::text[])) order by expires_at asc limit $3`, [now, terminal, limit]);
     return result.rows.map(mapRun);
   }
-  async listRunsNeedingRecovery(limit: number): Promise<RunRecord[]> {
+  async listRunsNeedingRecovery(limit: number, afterRunId?: string): Promise<RunRecord[]> {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1000) throw conflict("RECOVERY_LIMIT_INVALID", "Recovery listing limit is invalid.");
+    const cursor = recoveryInventoryCursor(afterRunId);
     const terminal = ["pending_external_evidence", "completed", "product_failed", "invalid_test", "inconclusive_provider", "failed_harness", "authorization_failed", "deployment_mismatch", "aborted_driver_restart", "expired", "cancelled"];
     const result = await this.pool.query(
       `select r.* from ${SCHEMA}.runs r
-        where r.cleanup_complete=false and (
+        where (r.cleanup_complete=false
+          or exists (select 1 from ${SCHEMA}.recovery_controls c where c.run_id=r.id and not c.live_cleanup_complete)
+          or exists (select 1 from ${SCHEMA}.browser_leases b where b.run_id=r.id)) and (
           r.state=any($1::text[])
           or (
             not (r.state=any($1::text[]))
             and exists (select 1 from ${SCHEMA}.operations o where o.run_id=r.id and o.state in ('failed','timed_out'))
             and not exists (select 1 from ${SCHEMA}.operations o where o.run_id=r.id and o.state in ('accepted','queued','leased','executing'))
           )
-        ) order by r.updated_at asc limit $2`,
-      [terminal, limit],
+        ) and ($3::uuid is null or r.id > $3::uuid) order by r.id asc limit $2`,
+      [terminal, limit, cursor],
     );
     return result.rows.map(mapRun);
   }
@@ -168,12 +206,12 @@ export class PostgresVoiceLabLedger implements VoiceLabLedger {
         return { run: mapRun(priorRun.rows[0]), operation: prior, replay: true, ...(rollingAdmission ? { rollingAdmission } : {}) };
       }
       if (rollingAdmission?.replay) throw conflict("IDEMPOTENCY_RETENTION_EXPIRED", "The idempotent start receipt was retention-purged and cannot be replayed or reallocated.");
-      const terminal = ["pending_external_evidence", "completed", "product_failed", "invalid_test", "inconclusive_provider", "failed_harness", "authorization_failed", "deployment_mismatch", "aborted_driver_restart", "expired", "cancelled"];
-      const quota = await client.query<{ global_count: string; caller_count: string }>(
-        `select count(*)::text as global_count, count(*) filter (where caller_id=$1)::text as caller_count from ${SCHEMA}.runs where cleanup_complete=false or not (state = any($2::text[]))`,
-        [operation.callerId, terminal],
-      );
-      if (Number(quota.rows[0]?.global_count ?? 0) >= limits.global || Number(quota.rows[0]?.caller_count ?? 0) >= limits.caller) throw conflict("CONCURRENCY_LIMIT", "Voice Lab concurrency limit is reached.");
+      const quota = await activeRunCounts(client, operation.callerId, this.#callerPartitions.callerIds(operation.callerId));
+      if (quota.global >= limits.global || quota.caller >= limits.caller) throw conflict("CONCURRENCY_LIMIT", "Voice Lab concurrency limit is reached.");
+      const binding = projectRecoveryControlBinding(run, this.#callerPartitions.activeCallerId(run.callerId));
+      await client.query(`insert into ${SCHEMA}.recovery_controls
+        (run_id,test_run_id,cleanup_obligation_id,binding,version,live_cleanup_complete,remote_purge_complete,retention_purge_due_at)
+        values ($1,$2,$3,$4,1,$5,$6,$7)`, [run.id, run.testRunId, run.cleanupObligationId, binding, run.cleanupComplete, run.retentionPurgeVerifiedAt !== null && !run.retentionPurgePending, run.retentionPurgeDueAt]);
       await client.query(
         `insert into ${SCHEMA}.runs (id,caller_id,principal_id,test_run_id,cleanup_obligation_id,environment,scenario_id,scenario_version,state,version,target,observed_deployment,capture_policy,verdicts,canonical_session_id,thread_id,provider_session_id,trace_id,provider_epoch,turn_id,latest_cursor,expires_at,created_at,updated_at,cleanup_complete,retention_purge_due_at,retention_purge_pending,retention_purge_verified_at,evidence_purged_at,terminal_error)
          values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30)`,
@@ -208,9 +246,15 @@ export class PostgresVoiceLabLedger implements VoiceLabLedger {
     if (!current) throw notFound("RUN_NOT_FOUND", "Run was not found.");
     const next: RunRecord = { ...current, ...patch, version: current.version + 1, updatedAt: new Date() };
     const result = await this.pool.query(
-      `update ${SCHEMA}.runs set state=$3,version=version+1,observed_deployment=$4,verdicts=$5,canonical_session_id=$6,thread_id=$7,provider_session_id=$8,trace_id=$9,provider_epoch=$10,turn_id=$11,terminal_error=$12,cleanup_complete=$13,retention_purge_due_at=$14,retention_purge_pending=$15,retention_purge_verified_at=$16,updated_at=now()
-       where id=$1 and version=$2 returning *`,
-      [runId, expectedVersion, next.state, next.observedDeployment, next.verdicts, next.canonicalSessionId, next.threadId, next.providerSessionId, next.traceId, next.providerEpoch, next.turnId, next.terminalError, next.cleanupComplete, next.retentionPurgeDueAt, next.retentionPurgePending, next.retentionPurgeVerifiedAt],
+      `with updated as (update ${SCHEMA}.runs set state=$3,version=version+1,observed_deployment=$4,verdicts=$5,canonical_session_id=$6,thread_id=$7,provider_session_id=$8,trace_id=$9,provider_epoch=$10,turn_id=$11,terminal_error=$12,cleanup_complete=$13,retention_purge_due_at=$14,retention_purge_pending=$15,retention_purge_verified_at=$16,updated_at=now()
+       where id=$1 and version=$2 and exists (select 1 from ${SCHEMA}.recovery_controls c where c.run_id=$1) returning *),
+       mirrored as (update ${SCHEMA}.recovery_controls c set version=c.version+1,
+         live_cleanup_complete=case when $17 then u.cleanup_complete else c.live_cleanup_complete end,
+         retention_purge_due_at=case when $18 then u.retention_purge_due_at else c.retention_purge_due_at end,
+         remote_purge_complete=case when $19 then u.retention_purge_verified_at is not null and not u.retention_purge_pending else c.remote_purge_complete end
+         from updated u where c.run_id=u.id returning c.run_id)
+       select u.* from updated u join mirrored m on m.run_id=u.id`,
+      [runId, expectedVersion, next.state, next.observedDeployment, next.verdicts, next.canonicalSessionId, next.threadId, next.providerSessionId, next.traceId, next.providerEpoch, next.turnId, next.terminalError, next.cleanupComplete, next.retentionPurgeDueAt, next.retentionPurgePending, next.retentionPurgeVerifiedAt, patch.cleanupComplete !== undefined, patch.retentionPurgeDueAt !== undefined, patch.retentionPurgeVerifiedAt !== undefined || patch.retentionPurgePending !== undefined],
     );
     if (!result.rows[0]) throw conflict("RUN_VERSION_CONFLICT", "Run changed concurrently.");
     return mapRun(result.rows[0]);
@@ -360,13 +404,18 @@ export class PostgresVoiceLabLedger implements VoiceLabLedger {
       await client.query("begin");
       const locked = await client.query(`select * from ${SCHEMA}.runs where id=$1 for update`, [runId]);
       if (!locked.rows[0]) throw notFound("RUN_NOT_FOUND", "Run was not found.");
+      const retainD02 = kind === D02_DISPATCH_EVENT && guard !== undefined;
+      const control = retainD02 ? await client.query(`select d02_journal from ${SCHEMA}.recovery_controls where run_id=$1 for update`, [runId]) : null;
+      if (retainD02 && !control?.rows[0]) throw conflict("D02_JOURNAL_CONFLICT", "D02 dispatch requires retained authority.");
       const existing = await client.query(`select * from ${SCHEMA}.run_events where run_id=$1 and dedupe_key=$2`, [runId, dedupeKey]);
       if (existing.rows[0]) {
         const prior = mapEvent(existing.rows[0]);
         if (prior.kind !== kind || prior.source !== source || canonicalRequestHash(prior.payload) !== canonicalRequestHash(payload)) throw conflict("DEDUPE_CONFLICT", "Event dedupe key was reused with different canonical evidence.");
+        if (retainD02 && parseD02RecoveryJournal(control!.rows[0].d02_journal).dispatchClaimSha256 !== payload.dispatch_claim_sha256) throw conflict("D02_JOURNAL_CONFLICT", "D02 dispatch replay lost retained authority.");
         await client.query("commit");
         return { event: prior, replay: true };
       }
+      let guardedEvents: LabEvent[] = [];
       if (guard) {
         const [eventRows, operationRows, leaseRows, clock] = await Promise.all([
           client.query(`select * from ${SCHEMA}.run_events where run_id=$1 order by seq asc`, [runId]),
@@ -374,15 +423,21 @@ export class PostgresVoiceLabLedger implements VoiceLabLedger {
           client.query(`select * from ${SCHEMA}.browser_leases where run_id=$1 for update`, [runId]),
           client.query<{ database_now: Date }>("select clock_timestamp() as database_now"),
         ]);
+        guardedEvents = eventRows.rows.map(mapEvent);
         guard({
           run: mapRun(locked.rows[0]),
-          events: eventRows.rows.map(mapEvent),
+          events: guardedEvents,
           operations: operationRows.rows.map(mapOperation),
           browserLease: leaseRows.rows[0] ? mapLease(leaseRows.rows[0]) : null,
           databaseNow: new Date(clock.rows[0]!.database_now),
         });
       }
       const seq = Number(locked.rows[0].latest_cursor) + 1;
+      if (retainD02) {
+        if (control!.rows[0].d02_journal !== null) throw conflict("D02_JOURNAL_CONFLICT", "D02 dispatch journal cannot be replaced.");
+        const journal = deriveD02RecoveryJournal(mapRun(locked.rows[0]), guardedEvents, { runId, seq, kind, source, payload, dedupeKey, at: observedAt });
+        await client.query(`update ${SCHEMA}.recovery_controls set d02_journal=$2,version=version+1 where run_id=$1`, [runId, journal]);
+      }
       const inserted = await client.query(
         `insert into ${SCHEMA}.run_events (run_id,seq,kind,source,payload,dedupe_key,observed_at) values ($1,$2,$3,$4,$5,$6,$7) returning *`,
         [runId, seq, kind, source, payload, dedupeKey ?? null, observedAt],
@@ -650,13 +705,22 @@ export class PostgresVoiceLabLedger implements VoiceLabLedger {
     const client = await this.pool.connect();
     try {
       await client.query("begin");
+      const owner = await client.query(`select id from ${SCHEMA}.runs where id=$1 for update`, [runId]);
+      if (!owner.rows[0]) throw notFound("RUN_NOT_FOUND", "Retained recovery control cannot allocate a new browser.");
+      const controls = await client.query(`select binding,browser_allocation_binding,browser_allocation_ever from ${SCHEMA}.recovery_controls where run_id=$1 for update`, [runId]);
+      if (!controls.rows[0]) throw conflict("RECOVERY_CONTROL_NOT_FOUND", "Browser allocation requires a durable recovery control.");
+      RecoveryControlBindingSchema.parse(controls.rows[0].binding);
+      if (controls.rows[0].browser_allocation_binding !== null) throw conflict("BROWSER_ALLOCATION_ALREADY_RESERVED", "A browser allocation cannot be replaced or reconstructed.");
       const prior = await client.query(`select * from ${SCHEMA}.browser_leases where run_id=$1 for update`, [runId]);
       if (prior.rows[0] && prior.rows[0].worker_id !== workerId && new Date(prior.rows[0].expires_at) > new Date()) throw conflict("BROWSER_ALREADY_LEASED", "Browser is owned by another live worker.");
+      if (controls.rows[0].browser_allocation_ever !== false) throw conflict("BROWSER_ALLOCATION_ALREADY_RESERVED", "An allocated execution cannot be replaced or reconstructed after lease loss.");
       const result = await client.query(
         `insert into ${SCHEMA}.browser_leases (run_id,worker_id,lease_epoch,expires_at,updated_at) values ($1,$2,1,now()+make_interval(secs=>$3),now())
          on conflict (run_id) do update set worker_id=excluded.worker_id,lease_epoch=${SCHEMA}.browser_leases.lease_epoch+1,expires_at=excluded.expires_at,updated_at=now() returning *`,
         [runId, workerId, leaseSeconds],
       );
+      const binding = deriveRecoveryBrowserBinding(runId, workerId, Number(result.rows[0].lease_epoch));
+      await client.query(`update ${SCHEMA}.recovery_controls set browser_allocation_binding=$2,browser_allocation_ever=true,version=version+1 where run_id=$1`, [runId, binding]);
       await client.query("commit");
       return mapLease(result.rows[0]);
     } catch (error) { await client.query("rollback"); throw translatePgError(error); }
@@ -669,7 +733,7 @@ export class PostgresVoiceLabLedger implements VoiceLabLedger {
   }
 
   async heartbeatBrowserLease(runId: string, workerId: string, leaseEpoch: number, leaseSeconds: number): Promise<boolean> {
-    const result = await this.pool.query(`update ${SCHEMA}.browser_leases set expires_at=now()+make_interval(secs=>$4),updated_at=now() where run_id=$1 and worker_id=$2 and lease_epoch=$3`, [runId, workerId, leaseEpoch, leaseSeconds]);
+    const result = await this.pool.query(`update ${SCHEMA}.browser_leases set expires_at=clock_timestamp()+make_interval(secs=>$4),updated_at=clock_timestamp() where run_id=$1 and worker_id=$2 and lease_epoch=$3 and expires_at>clock_timestamp()`, [runId, workerId, leaseEpoch, leaseSeconds]);
     return (result.rowCount ?? 0) === 1;
   }
 
@@ -678,8 +742,13 @@ export class PostgresVoiceLabLedger implements VoiceLabLedger {
     return (result.rowCount ?? 0) === 1;
   }
 
-  async reapExpiredBrowserLeases(now = new Date()): Promise<BrowserLease[]> {
-    const result = await this.pool.query(`delete from ${SCHEMA}.browser_leases where expires_at <= $1 returning *`, [now]);
+  async reapExpiredBrowserLeases(now?: Date, limit = 100, afterRunId?: string): Promise<BrowserLease[]> {
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new RangeError("expired lease page limit must be between 1 and 100");
+    // Production callers omit the test clock: allocation, renewal and reaping
+    // must share the database clock, not a potentially skewed worker clock.
+    // Non-destructive observation survives a crash before the worker's loss
+    // journal write. Only proof-gated release/settlement removes the receipt.
+    const result = await this.pool.query(`select * from ${SCHEMA}.browser_leases where expires_at <= coalesce($1::timestamptz,clock_timestamp()) and ($3::uuid is null or run_id > $3::uuid) order by run_id limit $2`, [now ?? null, limit, afterRunId ?? null]);
     return result.rows.map(mapLease);
   }
 
@@ -945,6 +1014,10 @@ export class PostgresVoiceLabLedger implements VoiceLabLedger {
       );
       const ids = selected.rows.map((row) => row.id);
       for (const row of selected.rows) {
+        const preserved = await client.query(`update ${SCHEMA}.recovery_controls
+          set version=version+1,content_purged_at=$2,retention_lookup_hmac=$3
+          where run_id=$1 returning run_id`, [row.id, now, retentionHmac(this.#retentionKey, "lookup", `${row.id}\u0000${row.caller_id}`)]);
+        if (preserved.rowCount !== 1) throw conflict("RECOVERY_CONTROL_MISSING", "Retention cannot erase a run whose recovery control is missing.");
         const remoteStatus = row.retention_purge_verified_at !== null && row.retention_purge_pending === false ? "confirmed" : "unconfirmed";
         await client.query(
           `insert into ${SCHEMA}.retention_tombstones (lookup_id_hmac,recovery_id_hmac,remote_purge_status,purged_at,control_expires_at)
@@ -973,7 +1046,22 @@ export class PostgresVoiceLabLedger implements VoiceLabLedger {
   }
 }
 
-function retentionHmac(key: string, domain: string, value: string): string { return createHmac("sha256", key).update(`sophia-voice-lab-retention-v1\n${domain}\n${value}`).digest("hex"); }
+
+async function activeRunCounts(database: pg.Pool | pg.PoolClient, callerId: string | null, partitions: string[]): Promise<{ global: number; caller: number }> {
+  const result = await database.query<{ global_count: string; caller_count: string }>(`with active as (
+    select r.id,r.caller_id,null::text as caller_partition from ${SCHEMA}.runs r
+      where not r.cleanup_complete or not (r.state=any($1::text[]))
+        or exists (select 1 from ${SCHEMA}.recovery_controls c where c.run_id=r.id and not c.live_cleanup_complete)
+        or exists (select 1 from ${SCHEMA}.browser_leases b where b.run_id=r.id)
+    union all
+    select c.run_id,null::text,c.binding->>'callerPartitionId' from ${SCHEMA}.recovery_controls c
+      where not exists (select 1 from ${SCHEMA}.runs r where r.id=c.run_id)
+        and (not c.live_cleanup_complete or exists (select 1 from ${SCHEMA}.browser_leases b where b.run_id=c.run_id))
+  ) select count(*)::text as global_count,
+      count(*) filter (where caller_id=$2 or caller_partition=any($3::text[]))::text as caller_count from active`,
+  [[...TERMINAL_RUN_STATES], callerId, partitions]);
+  return { global: Number(result.rows[0]?.global_count ?? 0), caller: Number(result.rows[0]?.caller_count ?? 0) };
+}
 
 function runValues(run: RunRecord): unknown[] {
   return [run.id,run.callerId,run.principalId,run.testRunId,run.cleanupObligationId,run.environment,run.scenarioId,run.scenarioVersion,run.state,run.version,run.target,run.observedDeployment,run.capturePolicy,run.verdicts,run.canonicalSessionId,run.threadId,run.providerSessionId,run.traceId,run.providerEpoch,run.turnId,run.latestCursor,run.expiresAt,run.createdAt,run.updatedAt,run.cleanupComplete,run.retentionPurgeDueAt,run.retentionPurgePending,run.retentionPurgeVerifiedAt,run.evidencePurgedAt,run.terminalError];
@@ -985,6 +1073,7 @@ function mapSuite(row: any): SuiteRecord { return { id:row.id,callerId:row.calle
 function mapSuiteEvidence(row: any): SuiteEvidenceRecord { return { suiteId:row.suite_id,manifestId:row.manifest_id,manifestSha256:row.manifest_sha256,schemaVersion:row.schema_version,bytes:Buffer.from(row.bytes),artifactRefs:row.artifact_refs ?? [],createdAt:new Date(row.created_at) }; }
 function mapEvidence(row: any): EvidenceRecord { return { runId:row.run_id,manifestId:row.manifest_id,manifestSha256:row.manifest_sha256,schemaVersion:row.schema_version,revisionSeq:Number(row.revision_seq ?? 0),artifactRefs:row.artifact_refs ?? [],createdAt:new Date(row.created_at) }; }
 function mapArtifact(row: any): DurableArtifact { return { id:row.id,runId:row.run_id,kind:row.kind,contentType:row.content_type,sha256:row.sha256,bytes:Buffer.from(row.bytes),createdAt:new Date(row.created_at) }; }
+export { mapRun as decodeStoredVoiceLabRun };
 function mapLease(row: any): BrowserLease { return { runId:row.run_id,workerId:row.worker_id,leaseEpoch:Number(row.lease_epoch),expiresAt:new Date(row.expires_at),updatedAt:new Date(row.updated_at) }; }
 function mapAuthAudit(row: any): AuthAuditRecord { return { id:Number(row.id),runId:row.run_id,callerId:row.caller_id ?? row.caller_partition_id,action:row.action,capabilityJtiHash:row.capability_jti_hash ?? null,argumentHash:row.argument_hash,outcome:row.outcome,detail:row.detail ?? {},observedAt:new Date(row.observed_at) }; }
 function mapPrincipalProvision(row: any): PrincipalProvisionControlRecord {
@@ -1022,13 +1111,13 @@ function translatePgError(error: unknown): Error {
   if (error instanceof VoiceLabError) return error;
   const code = typeof error === "object" && error !== null && "code" in error ? String((error as { code: unknown }).code) : "";
   const constraint = typeof error === "object" && error !== null && "constraint" in error ? String((error as { constraint: unknown }).constraint) : "";
-  if (code === "23505" && (constraint === "runs_cleanup_obligation_id_key" || constraint === "voice_lab_runs_cleanup_obligation_idx")) return conflict("CLEANUP_OBLIGATION_CONFLICT", "Cleanup obligation is already bound to a different run.");
+  if (code === "23505" && (constraint === "runs_cleanup_obligation_id_key" || constraint === "voice_lab_runs_cleanup_obligation_idx" || constraint === "recovery_controls_cleanup_obligation_id_key")) return conflict("CLEANUP_OBLIGATION_CONFLICT", "Cleanup obligation is already bound to a different run.");
   if (code === "23505") return conflict("IDEMPOTENCY_CONFLICT", "A unique durable operation already exists.");
   return error instanceof Error ? error : new Error(String(error));
 }
 
 const ROLLING_FIELDS = ["runStarts", "providerSeconds", "suites", "suiteChildren", "audioDurationMs", "audioBytes"] as const;
-type RollingUsage = RollingAdmissionLimits["global"];
+type RollingUsage = Record<typeof ROLLING_FIELDS[number], number>;
 function validateRollingReservation(reservation: RollingAdmissionReservation): void {
   if (!/^[a-f0-9]{64}$/.test(reservation.reservationKey) || !/^[a-f0-9]{64}$/.test(reservation.requestHash) || Number.isNaN(reservation.observedAt.getTime())
     || ROLLING_FIELDS.some((field) => !Number.isSafeInteger(reservation[field]) || reservation[field] < 0)) throw conflict("ROLLING_ADMISSION_INVALID", "Rolling admission reservation is malformed.");
@@ -1101,9 +1190,10 @@ async function rollingUsagePg(client: pg.PoolClient, reservation: RollingAdmissi
 }
 function assertRollingCapacity(global: RollingUsage, caller: RollingUsage, reservation: RollingAdmissionReservation, limits: RollingAdmissionLimits): void {
   for (const field of ROLLING_FIELDS) {
-    if (global[field] + reservation[field] > limits.global[field] || caller[field] + reservation[field] > limits.caller[field]) throw conflict(`ROLLING_${field.replace(/[A-Z]/g, (letter) => `_${letter}`).toUpperCase()}_LIMIT`, `Rolling ${field} admission budget would be exceeded.`);
+    const globalCap = limits.global[field], callerCap = limits.caller[field];
+    if ((globalCap !== null && global[field] + reservation[field] > globalCap) || (callerCap !== null && caller[field] + reservation[field] > callerCap)) throw conflict(`ROLLING_${field.replace(/[A-Z]/g, (letter) => `_${letter}`).toUpperCase()}_LIMIT`, `Rolling ${field} admission budget would be exceeded.`);
   }
 }
-function rollingRemaining(cap: RollingUsage, used: RollingUsage): RollingUsage {
-  return Object.fromEntries(ROLLING_FIELDS.map((field) => [field, Math.max(0, cap[field] - used[field])])) as unknown as RollingUsage;
+function rollingRemaining(cap: RollingAdmissionLimits["global"], used: RollingUsage): RollingAdmissionLimits["global"] {
+  return Object.fromEntries(ROLLING_FIELDS.map((field) => { const limit = cap[field]; return [field, limit === null ? null : Math.max(0, limit - used[field])]; })) as unknown as RollingAdmissionLimits["global"];
 }

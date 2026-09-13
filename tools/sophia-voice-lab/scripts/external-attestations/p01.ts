@@ -7,6 +7,7 @@ import { z } from "zod";
 
 import { canonicalRequestHash, sha256 } from "../../src/security.js";
 import { toolInputSchemas } from "../../src/service.js";
+import { P01_ASSISTANT_OBSERVATIONS, P01_OPERATION_OBSERVATIONS, P01_LIMITS, P01_MAX_CHRONOLOGICAL_CALLS, p01EndNeedsFinalization } from "../../src/p01-contract.js";
 import {
   P01CollectorInputSchema,
   type P01CollectorInput,
@@ -409,7 +410,7 @@ async function collectAppServerFacts(controller: P01CollectorInput, installedAt:
       kind: "p01_platform_plugin_task", authority: "platform_plugin", registered_app_id: controller.app.registered_app_id,
       plugin_version: controller.plugin.version, platform_task_id_sha256: sha256(turnId), platform_thread_id_sha256: sha256(threadId),
       plugin_package_sha256: controller.plugin.package_sha256, installed_at: installedAt, fresh_task_started_at: taskStartedAt,
-      fresh_task_completed_at: taskCompletedAt, high_level_call_count: 10, calls: derivedCalls.calls,
+      fresh_task_completed_at: taskCompletedAt, high_level_call_count: P01_LIMITS.semanticCalls, calls: derivedCalls.calls,
       polling_call_count: derivedCalls.pollingCalls.length, polling_calls: derivedCalls.pollingCalls, operation_ids: derivedCalls.operationIds,
       adaptive_observation_call_ordinal: 5, adaptive_followup_call_ordinal: 6,
       prohibited_tool_audit_passed: true, raw_javascript_used: false, local_runner_used: false, manual_takeover_used: false,
@@ -448,6 +449,10 @@ function classifyP01Items(items: readonly z.infer<typeof McpToolItemSchema>[]): 
       const condition = isRecord(item.arguments) ? item.arguments.condition : null;
       const expectedCondition = expectedIndex === 2 ? "operation_terminal" : "assistant_turn_complete";
       semanticMatch = condition === expectedCondition;
+      // Observation timeouts are retained as audited polls; only a conclusive
+      // receipt occupies the semantic wait. Never advance on submission alone.
+      const structured = item.result?.structuredContent;
+      if (semanticMatch && isRecord(structured) && structured.status === "timeout") semanticMatch = false;
     }
     if (semanticMatch) {
       spine.push({ item, chronologicalOrdinal: index + 1 });
@@ -455,13 +460,13 @@ function classifyP01Items(items: readonly z.infer<typeof McpToolItemSchema>[]): 
     }
     if (item.tool !== "wait_for_turn") throw new Error(`P01 inserted prohibited ${item.tool} outside the semantic spine.`);
     const parsed = toolInputSchemas.wait_for_turn.parse(item.arguments);
-    if (!isRecord(item.arguments) || !Object.hasOwn(item.arguments, "timeout_ms") || parsed.condition !== "operation_terminal" || parsed.timeout_ms > 10_000 || !parsed.operation_id) {
-      throw new Error("P01 polling must be one explicit operation_terminal wait of at most ten seconds.");
+    if (!isRecord(item.arguments) || !Object.hasOwn(item.arguments, "timeout_ms") || !["operation_terminal", "assistant_turn_complete", "finalization_complete"].includes(parsed.condition) || parsed.timeout_ms > P01_LIMITS.pollTimeoutMs) {
+      throw new Error("P01 polling must be one explicit operation or assistant wait of at most ten seconds.");
     }
     polls.push({ item, chronologicalOrdinal: index + 1, pollOrdinal: polls.length + 1 });
-    if (polls.length > 20) throw new Error("P01 exceeded the fixed twenty-poll total bound.");
+    if (polls.length > P01_LIMITS.pollsTotal) throw new Error("P01 exceeded the fixed twenty-poll total bound.");
   }
-  if (spine.length !== 10) throw new Error("P01 did not complete the exact ten-call semantic spine.");
+  if (spine.length !== P01_LIMITS.semanticCalls) throw new Error("P01 did not complete the exact ten-call semantic spine.");
   return { spine, polls };
 }
 
@@ -527,7 +532,7 @@ function validateAndDeriveCalls(items: readonly z.infer<typeof McpToolItemSchema
   const startWaitMatched = Array.isArray(envelopes[2]!.data.matched) ? envelopes[2]!.data.matched : [];
   const startSucceeded = startWaitMatched.some((entry) => isRecord(entry) && entry.kind === "operation.succeeded" && isRecord(entry.payload) && entry.payload.operation_id === operationIds[0]);
   if (!isRecord(spineItems[2]!.arguments) || !Object.hasOwn(spineItems[2]!.arguments, "timeout_ms") || startWait.condition !== "operation_terminal"
-    || startWait.operation_id !== operationIds[0] || startWait.timeout_ms > 10_000 || !startSucceeded) throw new Error("P01 call three did not prove the exact start operation terminal state.");
+    || startWait.operation_id !== operationIds[0] || startWait.timeout_ms > P01_LIMITS.pollTimeoutMs || !startSucceeded) throw new Error("P01 call three did not prove the exact start operation terminal state.");
   const firstSpeak = toolInputSchemas.speak.parse(spineItems[3]!.arguments);
   const adaptiveSpeak = toolInputSchemas.speak.parse(spineItems[5]!.arguments);
   if (firstSpeak.adaptive_observation !== undefined || adaptiveSpeak.adaptive_observation === undefined || !("receipt" in adaptiveSpeak.adaptive_observation)) throw new Error("P01 adaptive follow-up was not derived from one typed service receipt after the first observation.");
@@ -547,26 +552,51 @@ function validateAndDeriveCalls(items: readonly z.infer<typeof McpToolItemSchema
 
   const pollingCalls: P01Evidence["polling_calls"] = [];
   const pollCounts = new Map<string, number>();
+  const totalPollCounts = new Map<string, number>();
   const settled = new Set<string>();
-  const pollPolicy = new Map<string, { mutationChronologicalOrdinal: number; boundaryChronologicalOrdinal: number; requiresPoll: boolean }>([
-    [operationIds[1]!, { mutationChronologicalOrdinal: classified.spine[3]!.chronologicalOrdinal, boundaryChronologicalOrdinal: classified.spine[4]!.chronologicalOrdinal, requiresPoll: envelopes[3]!.data.operation_state !== "succeeded" }],
-    [operationIds[2]!, { mutationChronologicalOrdinal: classified.spine[5]!.chronologicalOrdinal, boundaryChronologicalOrdinal: classified.spine[6]!.chronologicalOrdinal, requiresPoll: envelopes[5]!.data.operation_state !== "succeeded" }],
-    [operationIds[3]!, { mutationChronologicalOrdinal: classified.spine[8]!.chronologicalOrdinal, boundaryChronologicalOrdinal: classified.spine[9]!.chronologicalOrdinal, requiresPoll: envelopes[8]!.data.operation_state !== "succeeded" }],
-  ]);
+  const pollPolicy = new Map(P01_OPERATION_OBSERVATIONS.map(({ mutationIndex, boundaryIndex, settlementAtBoundary, waitCondition }, operationIndex) => [operationIds[operationIndex]!, {
+    mutationChronologicalOrdinal: classified.spine[mutationIndex]!.chronologicalOrdinal,
+    boundaryChronologicalOrdinal: classified.spine[boundaryIndex]!.chronologicalOrdinal,
+    requiresPoll: waitCondition === "finalization_complete" ? p01EndNeedsFinalization(envelopes[mutationIndex]!.data) : envelopes[mutationIndex]!.data.operation_state !== "succeeded",
+    settlementAtBoundary,
+    waitCondition,
+  }]));
   for (const { item, chronologicalOrdinal, pollOrdinal } of classified.polls) {
     const parsed = toolInputSchemas.wait_for_turn.parse(item.arguments);
     const envelope = VoiceLabEnvelopeSchema.parse(item.result?.structuredContent);
+    if (parsed.condition === "assistant_turn_complete") {
+      const phase = P01_ASSISTANT_OBSERVATIONS.find(({ mutationIndex, boundaryIndex }) => chronologicalOrdinal > classified.spine[mutationIndex]!.chronologicalOrdinal && chronologicalOrdinal < classified.spine[boundaryIndex]!.chronologicalOrdinal);
+      if (!phase) throw new Error("P01 assistant poll crossed its semantic boundary.");
+      const operationId = envelopes[phase.mutationIndex]!.operation_id!;
+      const boundary = toolInputSchemas.wait_for_turn.parse(classified.spine[phase.boundaryIndex]!.item.arguments);
+      const count = (totalPollCounts.get(operationId) ?? 0) + 1;
+      totalPollCounts.set(operationId, count);
+      if (count > P01_LIMITS.pollsPerOperation) throw new Error("P01 polling exceeded a per-operation bound.");
+      if (envelope.run_id !== runId || envelope.test_run_id !== testRunId || envelope.operation_id !== null || parsed.run_id !== runId
+        || parsed.after_cursor !== boundary.after_cursor || envelope.status !== "timeout" || envelope.data.condition_satisfied === true
+        || (envelopes[phase.mutationIndex]!.data.operation_state !== "succeeded" && !settled.has(operationId))) throw new Error("P01 assistant poll lacked settled speech or drifted from the exact pending observation.");
+      pollingCalls.push({ poll_ordinal: pollOrdinal, chronological_ordinal: chronologicalOrdinal, tool_name: "wait_for_turn",
+        argument_sha256: canonicalRequestHash(item.arguments), response_sha256: canonicalRequestHash(envelope), result_request_id_sha256: sha256(envelope.request_id),
+        run_id_sha256: sha256(runId), operation_id_sha256: null, polled_operation_id_sha256: null });
+      continue;
+    }
     const policy = parsed.operation_id ? pollPolicy.get(parsed.operation_id) : undefined;
     if (envelope.run_id !== runId || envelope.test_run_id !== testRunId || envelope.operation_id !== null || !parsed.operation_id || !policy
-      || !policy.requiresPoll || chronologicalOrdinal <= policy.mutationChronologicalOrdinal || chronologicalOrdinal >= policy.boundaryChronologicalOrdinal) throw new Error("P01 poll crossed its fresh run, operation, or semantic boundary.");
+      || !policy.requiresPoll || parsed.condition !== policy.waitCondition || chronologicalOrdinal <= policy.mutationChronologicalOrdinal || chronologicalOrdinal >= policy.boundaryChronologicalOrdinal) throw new Error("P01 poll crossed its fresh run, operation, or semantic boundary.");
     const count = (pollCounts.get(parsed.operation_id) ?? 0) + 1;
     pollCounts.set(parsed.operation_id, count);
-    if (count > 10 || settled.has(parsed.operation_id)) throw new Error("P01 polling exceeded a per-operation bound or continued after a conclusive receipt.");
+    const totalCount = (totalPollCounts.get(parsed.operation_id) ?? 0) + 1;
+    totalPollCounts.set(parsed.operation_id, totalCount);
+    if (totalCount > P01_LIMITS.pollsPerOperation || settled.has(parsed.operation_id)) throw new Error("P01 polling exceeded a per-operation bound or continued after a conclusive receipt.");
     const matched = Array.isArray(envelope.data.matched) ? envelope.data.matched : [];
     const terminalMatch = matched.find((entry) => isRecord(entry) && ["operation.succeeded", "operation.failed"].includes(String(entry.kind))
       && isRecord(entry.payload) && entry.payload.operation_id === parsed.operation_id);
     if (isRecord(terminalMatch) && terminalMatch.kind === "operation.failed") throw new Error("P01 observed a failed operation while polling.");
-    const conclusive = envelope.data.condition_satisfied === true && isRecord(terminalMatch) && terminalMatch.kind === "operation.succeeded";
+    const conclusive = envelope.data.condition_satisfied === true && (policy.waitCondition === "finalization_complete"
+      ? envelope.data.finalization_ready === true && envelope.data.observed_operation_state === "succeeded" && envelope.data.terminal === true && envelope.data.cleanup_complete === true && envelope.data.evidence_state === "available"
+        && canonicalRequestHash(exactManifestReference(envelope)) === canonicalRequestHash(exportManifest)
+      : isRecord(terminalMatch) && terminalMatch.kind === "operation.succeeded");
+    if (conclusive && policy.settlementAtBoundary) throw new Error("P01 startup settlement must occupy semantic call three.");
     if (conclusive) settled.add(parsed.operation_id);
     else if (envelope.status !== "timeout" || envelope.data.condition_satisfied === true) throw new Error("P01 poll was neither a bounded timeout nor the first conclusive terminal receipt.");
     pollingCalls.push({
@@ -576,7 +606,7 @@ function validateAndDeriveCalls(items: readonly z.infer<typeof McpToolItemSchema
     });
   }
   for (const [operationId, policy] of pollPolicy) {
-    if (policy.requiresPoll && !settled.has(operationId)) throw new Error("P01 mutating call lacked a conclusive bounded operation poll.");
+    if (policy.requiresPoll && !policy.settlementAtBoundary && !settled.has(operationId)) throw new Error("P01 mutating call lacked a conclusive bounded operation poll.");
     if (!policy.requiresPoll && pollCounts.has(operationId)) throw new Error("P01 polled an operation whose mutating response was already conclusive.");
   }
   return { calls, pollingCalls, envelopes, operationIds };
@@ -629,7 +659,7 @@ function collectCompletedMcpItems(messages: readonly CapturedMessage[], threadId
     if (!ALLOWED_ITEM_TYPES.has(type)) throw new Error(`P01 used prohibited App Server item type ${type || "unknown"}.`);
     if (type === "mcpToolCall") completed.push(McpToolItemSchema.parse(params.item));
   }
-  if (completed.length < 10 || completed.length > 30) throw new Error("P01 fresh task must contain the ten-call semantic spine plus at most twenty bounded polls.");
+  if (completed.length < P01_LIMITS.semanticCalls || completed.length > P01_MAX_CHRONOLOGICAL_CALLS) throw new Error("P01 fresh task must contain the ten-call semantic spine plus at most twenty bounded polls.");
   return completed;
 }
 
@@ -647,7 +677,7 @@ function collectStartedMcpItems(messages: readonly CapturedMessage[], threadId: 
 }
 
 function validateMcpItemLifecycles(started: readonly z.infer<typeof McpToolItemSchema>[], completed: readonly z.infer<typeof McpToolItemSchema>[], controller: P01CollectorInput): void {
-  if (started.length !== completed.length || started.length < 10 || started.length > 30
+  if (started.length !== completed.length || started.length < P01_LIMITS.semanticCalls || started.length > P01_MAX_CHRONOLOGICAL_CALLS
     || new Set(started.map((item) => item.id)).size !== started.length || new Set(completed.map((item) => item.id)).size !== completed.length) throw new Error("P01 MCP item lifecycle cardinality is invalid.");
   let linkId: string | null = null;
   let server: string | null = null;
@@ -690,8 +720,10 @@ function buildFixedP01Prompt(controller: P01CollectorInput): string {
     `$${controller.plugin.skill_name} Use only $sophia-voice-lab through the attached registered app to execute one fresh governed V-P01 smoke in ${controller.campaign.environment}.`,
     `Discover and require this exact deployment: frontend=${deployment.frontend}, backend=${deployment.backend}, voice=${deployment.voice}.`,
     "Complete this exact ten-call semantic spine in order: get_capabilities; start_voice_run; wait_for_turn for the exact start operation to succeed; speak; wait_for_turn for the first assistant turn; speak; wait_for_turn for the second assistant turn; inspect_voice_run; end_voice_run; export_voice_evidence.",
-    "If a speak or end mutating response is durable but not yet succeeded, use only explicit operation_terminal wait_for_turn polls for that exact operation: timeout_ms at most 10000, at most ten polls per operation and twenty total, stopping immediately at the first terminal event and never polling an already-succeeded operation. Place every such poll after its mutation and before the next semantic-spine call.",
+    "If startup has not settled, retain bounded operation_terminal wait_for_turn timeouts as audited polls; the first conclusive exact-start wait occupies semantic call three. If a speak mutating response is durable but not yet succeeded, use explicit operation_terminal wait_for_turn polls for that exact operation. Every poll has timeout_ms at most 10000, at most ten polls per operation and twenty total. Stop each observation at its first conclusive receipt; never repeat operation_terminal for an already-succeeded operation. Place every poll after its mutation and before the next semantic-spine call.",
     "The second speak must be an adaptive follow-up explicitly bound to the authenticated observation receipt, event sequence, turn ID, cursor, and provider epoch returned by the first assistant-turn wait. Every semantic wait and the last poll for each pending operation must return condition_satisfied=true.",
+    "After a speech operation is proven settled, retain assistant_turn_complete timeouts as audited polls before semantic call five or seven. Retry the exact observation cursor until its first conclusive receipt, which occupies the semantic wait. These assistant polls and the operation polls share the same ten-poll owning-speech bound and twenty-poll total; no new budget is created.",
+    "After end_voice_run, if operation success, terminal run state, cleanup_complete and evidence_state=available are not all proven, use finalization_complete wait_for_turn for that exact end operation, even if the operation already succeeded. Do not substitute operation_terminal. Preserve bounded pending observations until the first finalization-ready receipt, then export the same manifest. These waits consume the end operation's existing ten-poll and shared twenty-poll limits.",
     "Use scenario V-P01 at vt00.scenarios.v1, explicit arguments (including defaults), fresh stable idempotency keys, and the exact deployment. End and export even if product evidence is unavailable; do not call any other tool or take over manually.",
   ].join("\n");
 }

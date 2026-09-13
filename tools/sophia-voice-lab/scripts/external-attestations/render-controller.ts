@@ -1,4 +1,5 @@
 import { randomBytes, randomUUID } from "node:crypto";
+import { RenderInventoryError, parseRenderInventory, retryableRenderObservation } from "./render-inventory.js";
 
 import { canonicalRequestHash, sha256 } from "../../src/security.js";
 import {
@@ -142,7 +143,7 @@ export async function executeD02RenderRestart(input: {
   while (Date.now() < deadline) {
     const [candidateVersion, candidateSnapshot] = await Promise.all([
       readVersion(controller.voice_lab_url, fetchImpl, input.allowHttpForTest === true).catch(() => null),
-      readRenderSnapshot(controller, input.renderBearer, fetchImpl, restartRequestedAt).catch(() => null),
+      readRenderSnapshot(controller, input.renderBearer, fetchImpl, restartRequestedAt).catch(retryableRenderObservation),
     ]);
     if (candidateVersion && candidateSnapshot) {
       assertCandidateVersion(candidateVersion, controller.run.expected_deployment.backend);
@@ -383,9 +384,14 @@ async function readRenderSnapshot(controller: D02RenderControllerInput, bearer: 
   const threshold = requestedAfter?.getTime() ?? Number.NEGATIVE_INFINITY;
   const deploy = deployRecords.find((item) => item.createdAt.getTime() >= threshold && item.status === "live") ?? deployRecords.find((item) => item.status === "live") ?? null;
   if (!deploy) throw new Error("Render deploy list has no exact live deploy record.");
-  const instanceRecords = unwrapList(instances.parsed, "instance").map((item) => normalizeInstance(item)).filter((item) => item !== null) as Array<ReturnType<typeof normalizeInstance> & {}>;
+  const instanceRecords = parseRenderInventory(() => unwrapList(instances.parsed, "instance").map(record => {
+    const instance = normalizeInstance(record);
+    if (instance === null) throw new RenderInventoryError("Render instance inventory contains a malformed record; owner absence cannot be proven.");
+    return instance;
+  }));
   const instanceIds = instanceRecords.map((item) => item.id).sort();
-  if (instanceIds.length < 1 || new Set(instanceIds).size !== instanceIds.length) throw new Error("Render instance list is empty or duplicated.");
+  if (new Set(instanceIds).size !== instanceIds.length) throw new RenderInventoryError("Render instance list is duplicated.");
+  if (instanceIds.length < 1) throw new Error("Render instance list is empty.");
   const newest = [...instanceRecords].sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime())[0]!;
   return {
     serviceResponseSha256: service.responseSha256,
@@ -451,7 +457,8 @@ function normalizeDeploy(record: Record<string, unknown>): { id: string; status:
 }
 
 function normalizeInstance(record: Record<string, unknown>): { id: string; createdAt: Date } | null {
-  const id = String(record.id ?? record.instanceId ?? record.instance_id ?? "");
+  const id = record.id ?? record.instanceId ?? record.instance_id;
+  if (typeof id !== "string") return null;
   if (!/^[A-Za-z0-9_-]{8,128}$/.test(id)) return null;
   return { id, createdAt: exactDate(record.createdAt ?? record.created_at ?? record.startedAt ?? record.started_at) };
 }

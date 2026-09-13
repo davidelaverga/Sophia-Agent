@@ -337,84 +337,8 @@ export const D02RenderWorkerTerminationInputSchema = z.object({
   if (!value.provider.frozen_connection_epochs.includes(value.provider.connection_epoch)) context.addIssue({ code: "custom", path: ["provider", "connection_epoch"], message: "Current provider epoch must be present in the frozen epoch set." });
 });
 
-export const D02WorkerTerminationControllerReceiptSchema = z.object({
-  schema: z.literal("sophia_voice_lab_d02_render_worker_termination_receipt_v1"),
-  receipt_id: UuidV4Schema,
-  termination_request_id: UuidV4Schema,
-  run_id: UuidV4Schema,
-  test_run_id_sha256: Sha256Schema,
-  cleanup_obligation_id_sha256: Sha256Schema,
-  environment: z.enum(["production", "staging"]),
-  expected_deployment: DeploymentSchema,
-  authority: z.literal("deployment_control"),
-  issuer: IdentifierSchema,
-  subject: IdentifierSchema,
-  authority_key_id: IdentifierSchema,
-  audience: z.literal("sophia-voice-lab-browser-worker-termination-receipt"),
-  binding: z.object({
-    worker_service_id_sha256: Sha256Schema,
-    provider_session_id_sha256: Sha256Schema,
-    provider_admission_id_sha256: Sha256Schema,
-    provider_connection_epoch: z.number().int().positive(),
-    frozen_provider_connection_epochs: z.array(z.number().int().positive()).min(1).max(64),
-    browser_worker_id_sha256: Sha256Schema,
-    browser_lease_epoch: z.number().int().positive(),
-    browser_context_id_sha256: Sha256Schema,
-  }).strict(),
-  render: z.object({
-    before_service_response_sha256: Sha256Schema,
-    after_service_response_sha256: Sha256Schema,
-    before_deploy_id_sha256: Sha256Schema,
-    after_deploy_id_sha256: Sha256Schema,
-    before_deploy_response_sha256: Sha256Schema,
-    after_deploy_response_sha256: Sha256Schema,
-    before_instance_response_sha256: Sha256Schema,
-    after_instance_response_sha256: Sha256Schema,
-    before_instance_set_sha256: Sha256Schema,
-    after_instance_set_sha256: Sha256Schema,
-    before_worker_owner_instance_id_sha256: Sha256Schema,
-    before_worker_owner_membership_count: z.literal(1),
-    replacement_worker_owner_instance_id_sha256: Sha256Schema,
-    replacement_worker_owner_membership_count: z.literal(1),
-    lost_worker_present_before_restart: z.literal(true),
-    lost_worker_absent_after_restart: z.literal(true),
-    dispatch_attempt_id_sha256: Sha256Schema,
-    dispatch_claim_sha256: Sha256Schema,
-    dispatch_claim_event_seq: z.number().int().positive(),
-    action_request_sha256: Sha256Schema,
-    action_accepted_response_sha256: Sha256Schema,
-    action_settled_snapshot_sha256: Sha256Schema,
-    action_http_status: z.literal(200),
-    action_requested_at: TimestampSchema,
-    action_accepted_at: TimestampSchema,
-    action_settled_at: TimestampSchema,
-    old_worker_instances_absent: z.literal(true),
-    replacement_worker_instances_observed: z.literal(true),
-    action_state: z.literal("settled_live_replacement"),
-  }).strict(),
-  voice_lab: z.object({ worker_loss_observation: D02BrowserWorkerLossObservationSchema }).strict(),
-  gateway: z.object({ settlement_schema_status: z.literal("not_yet_included"), settlement_receipt_included: z.literal(false) }).strict(),
-  nonce: z.string().min(32).max(128).regex(/^[A-Za-z0-9_-]+$/),
-  issued_at: TimestampSchema,
-  expires_at: TimestampSchema,
-  signature_algorithm: z.literal("ed25519-sha256-canonical-request-v1"),
-  signature: z.string().min(80).max(96).regex(/^[A-Za-z0-9_-]+$/),
-}).strict().superRefine((value, context) => {
-  if (value.receipt_id !== value.termination_request_id) context.addIssue({ code: "custom", path: ["receipt_id"], message: "Receipt ID must equal the one-shot termination request ID." });
-  if (value.render.before_instance_set_sha256 === value.render.after_instance_set_sha256) context.addIssue({ code: "custom", path: ["render"], message: "Worker termination receipt must prove a disjoint replacement instance set." });
-  if (value.render.before_worker_owner_instance_id_sha256 !== value.binding.browser_worker_id_sha256) context.addIssue({ code: "custom", path: ["render", "before_worker_owner_instance_id_sha256"], message: "Worker termination receipt must bind the exact Render owner to the governed browser worker." });
-  const epochs = value.binding.frozen_provider_connection_epochs;
-  if (new Set(epochs).size !== epochs.length || epochs.some((epoch, index) => index > 0 && epoch <= epochs[index - 1]!) || !epochs.includes(value.binding.provider_connection_epoch)) context.addIssue({ code: "custom", path: ["binding", "frozen_provider_connection_epochs"], message: "Receipt provider epoch set is not canonical." });
-  if (!orderedReceiptTimes(value.render.action_requested_at, value.render.action_accepted_at, value.render.action_settled_at, value.issued_at, value.expires_at)) context.addIssue({ code: "custom", path: ["render"], message: "Worker termination receipt timestamps are not ordered." });
-  const observation = value.voice_lab.worker_loss_observation;
-  if (observation.run_id_sha256 !== sha256(value.run_id) || observation.test_run_id_sha256 !== value.test_run_id_sha256 || observation.cleanup_obligation_id_sha256 !== value.cleanup_obligation_id_sha256
-    || observation.termination_request_id_sha256 !== sha256(value.termination_request_id) || observation.provider_session_id_sha256 !== value.binding.provider_session_id_sha256
-    || observation.provider_admission_id_sha256 !== value.binding.provider_admission_id_sha256 || observation.provider_connection_epoch !== value.binding.provider_connection_epoch
-    || canonicalRequestHash(observation.frozen_provider_connection_epochs) !== canonicalRequestHash(value.binding.frozen_provider_connection_epochs)
-    || observation.browser_context_id_sha256 !== value.binding.browser_context_id_sha256 || observation.lost_browser_worker_id_sha256 !== value.binding.browser_worker_id_sha256
-    || observation.lost_browser_lease_epoch !== value.binding.browser_lease_epoch
-    || observation.replacement_browser_worker_id_sha256 !== value.render.replacement_worker_owner_instance_id_sha256) context.addIssue({ code: "custom", path: ["voice_lab"], message: "Voice Lab loss observation does not bind the exact controller identities and Render replacement owner." });
-});
+export { D02WorkerTerminationControllerReceiptSchema } from "../../src/d02-worker-receipt.js";
+import { D02WorkerTerminationControllerReceiptSchema } from "../../src/d02-worker-receipt.js";
 
 function orderedReceiptTimes(...values: string[]): boolean {
   const times = values.map((value) => new Date(value).getTime());

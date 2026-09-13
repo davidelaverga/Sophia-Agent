@@ -14,6 +14,10 @@ import type {
   Verdicts,
 } from "./domain.js";
 import type { WorkerHeartbeatAttestation } from "./worker-heartbeat.js";
+import type { RecoveryControlRecord } from "./recovery-control.js";
+import type { PrepareGenericOwnerDispatch, ConsumeGenericOwnerDispatch, GenericOwnerDispatchResult } from "./generic-owner-dispatch.js";
+import type { RecoveryAttemptIdentity } from "./recovery-attempt.js";
+import type { RetainedOwnerIngestion, RetainedProviderIngestion, RetainedOwnerIngestionResult, RetainedProviderIngestionResult } from "./retained-ingestion.js";
 
 export interface NewOperation {
   id: string;
@@ -49,8 +53,8 @@ export interface RollingAdmissionReservation {
 
 export interface RollingAdmissionLimits {
   windowSeconds: number;
-  global: { runStarts: number; providerSeconds: number; suites: number; suiteChildren: number; audioDurationMs: number; audioBytes: number };
-  caller: { runStarts: number; providerSeconds: number; suites: number; suiteChildren: number; audioDurationMs: number; audioBytes: number };
+  global: { runStarts: number; providerSeconds: number | null; suites: number; suiteChildren: number; audioDurationMs: number; audioBytes: number };
+  caller: { runStarts: number; providerSeconds: number | null; suites: number; suiteChildren: number; audioDurationMs: number; audioBytes: number };
 }
 
 export interface RollingAdmissionResult {
@@ -199,12 +203,25 @@ export interface PrincipalProvisionReadiness {
 }
 
 export interface VoiceLabLedger {
+  recordRecoveryCapabilityAudit(runId: string, expectedVersion: number, jtiHash: string, argumentHash: string): Promise<void>;
+  preserveRecoveryExecutionCleanup(runId: string): Promise<RecoveryControlRecord>;
+  preserveRecoveryExecutionOwnership(runId: string): Promise<RecoveryControlRecord>;
+  bindRecoveryBrowserContext(runId: string, workerId: string, leaseEpoch: number, driverBinding: unknown): Promise<RecoveryControlRecord>;
+  getRecoveryControl(runId: string): Promise<RecoveryControlRecord | null>;
+  persistGenericOwnerLoss(input: import("./generic-owner-loss.js").GenericOwnerLossIngestion): Promise<{ replay: boolean; version: number; proof: import("./generic-owner-loss.js").VerifiedGenericOwnerLoss }>;
+  prepareGenericOwnerDispatch(input: PrepareGenericOwnerDispatch): Promise<RecoveryControlRecord>;
+  consumeGenericOwnerDispatch(input: ConsumeGenericOwnerDispatch): Promise<GenericOwnerDispatchResult>;
+  persistRetainedD02OwnerDeath(input: RetainedOwnerIngestion): Promise<RetainedOwnerIngestionResult>;
+  persistRetainedD02ProviderSettlement(input: RetainedProviderIngestion): Promise<RetainedProviderIngestionResult>;
+  listRecoveryControls(limit: number, afterRunId?: string): Promise<RecoveryControlRecord[]>;
+  scheduleRetainedRecovery(limit: number): Promise<RecoveryControlRecord[]>;
+  settleRecoveryControl(runId: string, expectedVersion: number, canonicalEvent: unknown, attempt?: RecoveryAttemptIdentity): Promise<RecoveryControlRecord>;
   initialize(): Promise<void>;
   close(): Promise<void>;
   health(): Promise<LedgerHealth>;
   countActiveRuns(callerId?: string): Promise<number>;
   listExpiredRuns(now: Date, limit: number): Promise<RunRecord[]>;
-  listRunsNeedingRecovery(limit: number): Promise<RunRecord[]>;
+  listRunsNeedingRecovery(limit: number, afterRunId?: string): Promise<RunRecord[]>;
   listRunsPendingEvidence(limit: number): Promise<RunRecord[]>;
   listRunsCertificationDue(now: Date, limit: number): Promise<RunRecord[]>;
   listRunsRetentionDue(now: Date, limit: number): Promise<RunRecord[]>;
@@ -244,7 +261,8 @@ export interface VoiceLabLedger {
   getBrowserLease(runId: string): Promise<BrowserLease | null>;
   heartbeatBrowserLease(runId: string, workerId: string, leaseEpoch: number, leaseSeconds: number): Promise<boolean>;
   releaseBrowserLease(runId: string, workerId: string, leaseEpoch: number): Promise<boolean>;
-  reapExpiredBrowserLeases(now?: Date): Promise<BrowserLease[]>;
+  /** Observe expired leases without deleting their durable recovery receipts. */
+  reapExpiredBrowserLeases(now?: Date, limit?: number, afterRunId?: string): Promise<BrowserLease[]>;
   heartbeatWorker(heartbeat: WorkerHeartbeat): Promise<void>;
   listLiveWorkers(since: Date): Promise<WorkerHeartbeat[]>;
   recordAuthAudit(record: AuthAuditRecord): Promise<void>;

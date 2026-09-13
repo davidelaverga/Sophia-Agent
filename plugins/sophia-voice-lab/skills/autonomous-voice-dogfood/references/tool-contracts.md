@@ -11,7 +11,7 @@ All tools return a versioned common envelope containing `contract_version`, `req
 - `inspect_voice_run`: safe bounded snapshot without mutation.
 - `barge_in`: schedule speech relative to an observed output realization. It returns utterance plus interruption/flush handles.
 - `force_socket_rotation`: restricted fault operation tied to an expected epoch. It never exposes or accepts a provider resumption handle.
-- `end_voice_run`: idempotently end through the product path, observe bounded finalization, close the browser, and audit cleanup.
+- `end_voice_run`: idempotently request ending through the product path. Durable acceptance or operation success alone does not prove cleanup/evidence completion. For V-P01 use the exact-end `finalization_complete` observation in `p01-asynchronous-flow.md` before export when any finalization prerequisite is missing.
 - `export_voice_evidence`: return the durable machine-readable verdict and governed artifact references after browser shutdown or MCP API restart.
 - `run_regression_suite`: start a durable asynchronous suite whose child runs remain separately inspectable.
 - `get_suite_run`: inspect suite and child states without hiding individual failures.

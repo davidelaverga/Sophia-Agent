@@ -155,6 +155,7 @@ Use a harmless, synthetic-only HTML deliverable. Do not reference or edit an ord
 
 ### V-P01 — fresh installed-plugin flow
 
+- Read `p01-asynchronous-flow.md` for startup/assistant timeout classification, shared polling budgets and exact-end finalization. Its C4 asynchronous end contract applies to V-P01 rather than the historical accepted-only prohibition in V-F01.
 - From a fresh authorized Codex task, use only installed plugin tools for this ten-call path: `get_capabilities` → `start_voice_run` → wait for product readiness → `speak` → wait for its observation → choose and `speak` one observation-derived follow-up → wait for that observation → `inspect_voice_run` → `end_voice_run` → `export_voice_evidence`.
 - The first observation wait must return exactly one service-authenticated `sophia_voice_lab_observation_receipt_v1`. The follow-up must pass that receipt unchanged, declare its intent separately, and bind the current cursor, provider epoch, and turn ID; caller-authored observation facts are invalid.
 - Do not use repository-local commands, raw browser JavaScript, credentials in arguments, direct product/provider calls, or manual takeover.

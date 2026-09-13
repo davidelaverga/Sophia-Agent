@@ -2076,6 +2076,93 @@ describe("useStreamVoiceSession", () => {
     expect(result.current.stage).toBe("speaking")
   })
 
+  it("a superseded startup closes only its own connection without overwriting the replacement runtime", async () => {
+    let resolveOld!: (value: typeof mockGeminiConnection) => void
+    const oldConnection = { ...mockGeminiConnection, sessionId: "gemini-old-owner", close: vi.fn().mockResolvedValue(undefined) }
+    const newConnection = { ...mockGeminiConnection, sessionId: "gemini-new-owner", close: vi.fn().mockResolvedValue(undefined) }
+    mockConnectGeminiBrowserLiveFromBootstrap
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveOld = resolve }))
+      .mockResolvedValueOnce(newConnection)
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => makeGeminiBootstrap("gemini-old-owner"), text: async () => "" })
+    const { result } = renderHook(() => useStreamVoiceSession("user-1", { preconnectEnabled: false }))
+    let oldStart!: Promise<void>
+    await act(async () => { oldStart = result.current.startTalking(); await Promise.resolve() })
+    await waitFor(() => expect(mockConnectGeminiBrowserLiveFromBootstrap).toHaveBeenCalledTimes(1))
+    await act(async () => { await result.current.stopTalking() })
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => makeGeminiBootstrap("gemini-new-owner"), text: async () => "" })
+    await act(async () => { await result.current.startTalking() })
+    expect(result.current.runtimeTelemetry).toMatchObject({ runtime: "gemini_live", sessionId: "gemini-new-owner" })
+    await act(async () => { resolveOld(oldConnection); await oldStart })
+    expect(oldConnection.close).toHaveBeenCalledTimes(1)
+    expect(newConnection.close).not.toHaveBeenCalled()
+    expect(result.current.runtimeTelemetry).toMatchObject({ runtime: "gemini_live", sessionId: "gemini-new-owner", setupComplete: true })
+    expect(result.current.hasLiveCall).toBe(true)
+  })
+
+  it.each(["replacement", "terminal", "unmount"])("fences obsolete audio and relay callbacks after %s", async (boundary) => {
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => makeGeminiBootstrap("gemini-old-callback-owner"), text: async () => "" })
+    mockConnectGeminiBrowserLiveFromBootstrap.mockResolvedValueOnce({ ...mockGeminiConnection, sessionId: "gemini-old-callback-owner" })
+    const { result, unmount } = renderHook(() => useStreamVoiceSession("user-1", { preconnectEnabled: false }))
+    await act(async () => { await result.current.startTalking() })
+    const old = mockConnectGeminiBrowserLiveFromBootstrap.mock.calls[0]?.[0] as {
+      onStage: (stage: string) => void
+      onOutputAudioReceived: (diagnostic: Record<string, unknown>) => void
+      onRelayError: (error: Error) => void
+    }
+    const audio = { timestamp: 12345, providerConnectionEpoch: 99 }
+    // Prove these callbacks are live before invalidating their owner.
+    act(() => old.onOutputAudioReceived(audio))
+    expect(result.current.runtimeTelemetry).toMatchObject({ runtime: "gemini_live", outputAudioReceivedCount: 1 })
+    if (boundary === "replacement") {
+      await act(async () => { await result.current.stopTalking() })
+      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => makeGeminiBootstrap("gemini-new-callback-owner"), text: async () => "" })
+      mockConnectGeminiBrowserLiveFromBootstrap.mockResolvedValueOnce({ ...mockGeminiConnection, sessionId: "gemini-new-callback-owner" })
+      await act(async () => { await result.current.startTalking() })
+    } else if (boundary === "terminal") {
+      await act(async () => { old.onStage("connection_lost"); await Promise.resolve() })
+    } else {
+      unmount()
+    }
+    const before = { ...result.current.runtimeTelemetry }
+    const captures = mockRecordSophiaCaptureEvent.mock.calls.length
+    act(() => {
+      old.onOutputAudioReceived(audio)
+      old.onRelayError(new Error("obsolete relay failure"))
+    })
+    expect(result.current.runtimeTelemetry).toEqual(before)
+    expect(mockRecordSophiaCaptureEvent).toHaveBeenCalledTimes(captures)
+    // Every supplied transport callback must reject obsolete ownership before
+    // interpreting its payload. This includes synthetic receipts and tool ledgers.
+    const callbacks = Object.entries(mockConnectGeminiBrowserLiveFromBootstrap.mock.calls[0]?.[0] as Record<string, unknown>)
+      .filter(([name, value]) => name.startsWith("on") && typeof value === "function")
+    expect(callbacks).toHaveLength(27)
+    for (const [name, callback] of callbacks) {
+      act(() => { (callback as (payload: unknown) => void)(undefined) })
+      expect(result.current.runtimeTelemetry, name).toEqual(before)
+      expect(mockRecordSophiaCaptureEvent, name).toHaveBeenCalledTimes(captures)
+    }
+  })
+
+  it("invalidates current setup readiness during reconnect and terminal connection loss", async () => {
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => makeGeminiBootstrap("gemini-ready-owner"), text: async () => "" })
+    mockConnectGeminiBrowserLiveFromBootstrap.mockResolvedValueOnce({ ...mockGeminiConnection, sessionId: "gemini-ready-owner" })
+    const { result } = renderHook(() => useStreamVoiceSession("user-1", { preconnectEnabled: false }))
+    await act(async () => { await result.current.startTalking() })
+    const options = mockConnectGeminiBrowserLiveFromBootstrap.mock.calls[0]?.[0] as { onStage: (stage: string) => void }
+    expect(result.current.runtimeTelemetry).toMatchObject({ setupComplete: true })
+    act(() => options.onStage("reconnecting"))
+    expect(result.current.runtimeTelemetry).toMatchObject({ setupComplete: false, connectionState: "connecting" })
+    act(() => options.onStage("connected"))
+    expect(result.current.runtimeTelemetry).toMatchObject({ setupComplete: true, connectionState: "connected" })
+    await act(async () => { options.onStage("connection_lost"); await Promise.resolve() })
+    expect(result.current.runtimeTelemetry).toMatchObject({ setupComplete: false, connectionState: "error" })
+    act(() => options.onStage("connected"))
+    expect(result.current.runtimeTelemetry).toMatchObject({ setupComplete: false, connectionState: "error" })
+    const readiness = mockRecordSophiaCaptureEvent.mock.calls.map(([event]) => event).filter((event) => event.name === "sophia-ready")
+    expect(readiness).toHaveLength(2) // Initial setup and current-owner reconnect only.
+    expect(result.current.hasLiveCall).toBe(false)
+  })
+
   it("terminal Gemini connection loss closes SSE, tears down once, and never reconnects", async () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,

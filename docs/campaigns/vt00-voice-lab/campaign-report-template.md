@@ -36,7 +36,22 @@ Reconcile this report with `deployment-gates.yaml`. Every quantitative entry in 
 
 State the outcome without combining harness and product failures. A product defect may be handed to its owning mission only when the harness and evidence verdicts are independently complete.
 
-## Scenario results
+## C4 built-product journey qualification
+
+Status: `UNPASSED`. Attach twenty independently identifiable complete
+fresh-process built-Sophia journeys on the same exact candidate, each with
+authenticated ordinary-controller startup, current readiness, input/output
+evidence, finalization, authoritative resource settlement and durable export.
+Use the dedicated `c4_complete_built_sophia_journeys` checkpoint; the historical
+twenty audio-operation trial and hook tests cannot fill these rows. Five deployed
+canaries and fresh installed-root P01 remain separate requirements. No journey
+is counted merely because its test runner exited successfully.
+
+| Journey | Exact build/process/run identity | Lifecycle evidence | Settlement/export | Verdict |
+|---|---|---|---|---|
+| `1–20` | `PENDING — supply one separate row per actual journey` | `PENDING` | `PENDING` | `UNPASSED` |
+
+## Canonical scenario results
 
 | Scenario ID | Run ID | Harness verdict | Product verdict | Evidence manifest | Defect/reference |
 |---|---|---|---|---|---|

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 
-import { assertPageLocation, browserProcessOwnershipHashes, classifyBrowserStartCause, classifyClientConsoleErrorLocation, classifyClientPageError, clickEndSessionThroughExitGuards, closeContextWithProof, decodeVoiceLabControlAdapterReceiptHeader, disposableBrowserProcessIsActive, drainProductCapture, isExactFinalizationResponse, PlaywrightVoiceDriver, requestBoundJson, requestBoundJsonWithOneTransientRetry, shouldCaptureSessionVoiceRoute, validateAppSyntheticBinding, validateD02BrowserContextBinding, validateD02ProductCleanupEcho, validateVoiceLabControlAdapterReceipt, waitOnWorkerClock } from "../src/browser-driver.js";
+import { assertPageLocation, browserProcessOwnershipHashes, classifyBrowserStartCause, classifyClientConsoleErrorLocation, classifyClientPageError, clickEndSessionThroughExitGuards, closeContextWithProof, closeDisposableBrowserProcess, decodeVoiceLabControlAdapterReceiptHeader, disposableBrowserProcessIsActive, drainProductCapture, isExactFinalizationResponse, PlaywrightVoiceDriver, requestBoundJson, requestBoundJsonWithOneTransientRetry, shouldCaptureSessionVoiceRoute, validateAppSyntheticBinding, validateD02BrowserContextBinding, validateD02ProductCleanupEcho, validateVoiceLabControlAdapterReceipt, waitOnWorkerClock } from "../src/browser-driver.js";
 import { sha256 } from "../src/security.js";
 import { SHA, SHA_B, SHA_C, SHA_D, testConfig, testRun } from "./helpers.js";
 
@@ -63,6 +63,58 @@ describe("server-authorized Voice Lab control adapter", () => {
 });
 
 describe("disposable browser process ownership", () => {
+  it.each([
+    { connected: false, exitCode: null, signalCode: null, closed: false },
+    { connected: true, exitCode: 0, signalCode: null, closed: false },
+    { connected: true, exitCode: null, signalCode: "SIGKILL", closed: false },
+    { connected: false, exitCode: 0, signalCode: null, closed: true },
+    { connected: false, exitCode: null, signalCode: "SIGKILL", closed: true },
+  ])("requires disconnection AND observed process death: %j", async state => {
+    let killAttempts = 0;
+    const ownership = {
+      browser: { isConnected: () => state.connected, close: async () => undefined },
+      server: { close: async () => undefined },
+      child: { exitCode: state.exitCode, signalCode: state.signalCode, kill: (signal: string) => {
+        expect(signal).toBe("SIGKILL");
+        killAttempts++;
+        return true; // Dispatch acknowledgement is deliberately NOT a death receipt.
+      } },
+    } as any;
+    expect(await closeDisposableBrowserProcess(ownership)).toEqual({
+      closed: state.closed, errorClass: state.closed ? null : "BrowserProcessStillAlive",
+    });
+    expect(killAttempts).toBe(state.exitCode === null && state.signalCode === null ? 1 : 0);
+  });
+
+  it.each([false, true])("awaits ownership persistence before context/auth allocation, write fails=%s", async failWrite => {
+    const run = testRun();
+    const builds: Record<string, string> = { "frontend.test": run.target.expectedDeployment.frontend, "gateway.test": run.target.expectedDeployment.backend,
+      "voice.test": run.target.expectedDeployment.voice, "langgraph.test": run.target.expectedDependencies.langgraph };
+    const child = { pid: 4172, exitCode: null as number | null, signalCode: null };
+    let connected = true;
+    let contexts = 0;
+    let observed = false;
+    const browser = { version: () => "test-owned-chromium", isConnected: () => connected, close: async () => { connected = false; },
+      newContext: async () => { contexts++; expect(observed).toBe(true); throw new Error("stop-before-auth"); } };
+    const server = { process: () => child, wsEndpoint: () => "ws://synthetic.invalid", close: async () => { connected = false; child.exitCode = 0; } };
+    const driver = new PlaywrightVoiceDriver(testConfig(), async input => new Response(JSON.stringify({ build_id: builds[new URL(String(input)).hostname] }), { status: 200 }),
+      undefined, undefined, (async () => server) as any, (async () => browser) as any);
+    await expect(driver.start(run, "unused-capability", undefined, undefined, async (event, runtime) => {
+      expect(contexts).toBe(0);
+      expect(event).toMatchObject({ kind: "harness.browser_process_acquired", source: "browser", payload: {
+        voice_lab_run_id_sha256: sha256(run.id), cleanup_obligation_id_sha256: sha256(run.cleanupObligationId), one_process_per_run: true } });
+      expect(runtime).toEqual({ engine: "chromium", version: "test-owned-chromium" });
+      await Promise.resolve();
+      observed = true;
+      if (failWrite) throw new Error("ownership-write-failed");
+    })).rejects.toThrow(failWrite ? "ownership-write-failed" : "stop-before-auth");
+    expect(observed).toBe(true);
+    expect(contexts).toBe(failWrite ? 0 : 1);
+    expect(child.exitCode).toBe(0);
+    expect(connected).toBe(false);
+    expect(driver.hasSession(run.id)).toBe(false);
+  });
+
   it("binds a redacted process identity and boot epoch to exactly one run", () => {
     const input = {
       runId: "run-browser-owner-001",
@@ -495,6 +547,17 @@ describe("out-of-band recovery retention contract", () => {
     receipt: { storage: "postgres", object_path: "voice-lab/recovery.json", sha256: "a".repeat(64) },
   };
 
+  it.each(["canonical_session", "voice_provider", "auth_sessions"] as const)("rejects unrecognized terminal status for %s", async component => {
+    const run = testRun();
+    for (const status of ["", "unknown", "running", "queued", "success", "deleted", "COMPLETED"]) {
+      const payload = { ...base, test_run_id: run.testRunId, cleanup_obligation_id: run.cleanupObligationId, retention_purged: true, retention_purge_pending: false, retention_maintenance_complete: true, components: { ...base.components, [component]: { status } } };
+      const driver = new PlaywrightVoiceDriver(testConfig(), async () => new Response(JSON.stringify(payload), { status: 200 }));
+      const result = await driver.recover(run, "signed-recovery-capability");
+      expect(result.events[0]?.payload.complete, `${component}:${status}`).toBe(false);
+      expect(result.events[0]?.payload.retention_purged, `${component}:${status}`).toBe(false);
+    }
+  });
+
   it("accepts live cleanup while retaining a separately scheduled purge obligation", async () => {
     const run = testRun();
     const payload = { ...base, test_run_id: run.testRunId, cleanup_obligation_id: run.cleanupObligationId, status: "live_cleanup_completed_retention_pending", retention_maintenance_complete: false, retention_purge_pending: true, retention_purged: false, retention_purge_due_at: "2026-08-24T17:00:00.000Z", components: { ...base.components, canonical_evidence: { status: "retention_pending", retention_expires_at: "2026-08-24T17:00:00.000Z" } } };
@@ -503,6 +566,25 @@ describe("out-of-band recovery retention contract", () => {
     expect(result.events[0]?.payload).toMatchObject({ complete: true, live_cleanup_complete: true, retention_purge_pending: true, retention_purged: false, retention_purge_due_at: "2026-08-24T17:00:00.000Z" });
     expect(JSON.stringify(result.events[0]?.payload)).not.toContain(run.cleanupObligationId);
     expect(result.events[0]?.payload).toMatchObject({ receipt: { cleanup_obligation_id_sha256: sha256(run.cleanupObligationId) } });
+  });
+
+  it.each([true, false])("recovers from a content-free binding and requires the exact cleanup identity (%s)", async (exact) => {
+    const run = testRun();
+    const binding = { id: run.id, testRunId: run.testRunId, cleanupObligationId: run.cleanupObligationId, target: { gatewayUrl: run.target.gatewayUrl } };
+    let requestedUrl = "";
+    let launches = 0;
+    const payload = { ...base, test_run_id: binding.testRunId, cleanup_obligation_id: exact ? binding.cleanupObligationId : "foreign-obligation" };
+    const driver = new PlaywrightVoiceDriver(testConfig(), async (url) => {
+      requestedUrl = String(url);
+      return new Response(JSON.stringify(payload), { status: 200, headers: { "content-type": "application/json" } });
+    }, async () => { launches += 1; throw new Error("recovery must not allocate a browser"); });
+
+    const result = await driver.recover(binding, "signed-recovery-capability");
+
+    expect(requestedUrl).toContain(`/runs/${binding.testRunId}/recover`);
+    expect(result.events[0]?.payload.complete).toBe(exact);
+    expect(result.artifacts).toEqual([]);
+    expect(launches).toBe(0);
   });
 
   it("accepts allocation-free live cleanup before a retention deadline exists", async () => {
@@ -584,7 +666,7 @@ describe("out-of-band recovery retention contract", () => {
       const payload = { ...base, test_run_id: run.testRunId, ...(cleanupObligationId === undefined ? {} : { cleanup_obligation_id: cleanupObligationId }), status: "completed", retention_maintenance_complete: true, retention_purge_pending: false, retention_purged: true, retention_purge_due_at: "2026-08-24T17:00:00.000Z", components: { ...base.components, canonical_evidence: { status: "completed" } } };
       const driver = new PlaywrightVoiceDriver(testConfig(), async () => new Response(JSON.stringify(payload), { status: 200, headers: { "content-type": "application/json" } }));
       const result = await driver.recover(run, "signed-recovery-capability");
-      expect(result.events[0]?.payload).toMatchObject({ complete: false, pending: false });
+      expect(result.events[0]?.payload).toMatchObject({ complete: false, pending: false, retention_purged: false });
     }
   });
 });

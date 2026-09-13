@@ -1,6 +1,6 @@
 schema_version: vt00.deployment-gates.v1
 status: unpassed
-updated_at: "2026-08-24"
+updated_at: "2026-09-13"
 
 source:
   target_branch: codex/sophia-observability-v1
@@ -671,6 +671,37 @@ evidence_policy:
   redaction_verification_status: unpassed
 
 quantitative_gates:
+  - id: c4_complete_built_sophia_journeys
+    protocol: complete-built-journeys.md
+    collection_scenario: V-F01
+    maximum_run_starts_per_window: 20
+    required_completed_voice_turns_per_journey: 2
+    precedes: fresh_session_smoke
+    threshold: 20_complete_fresh_process_built_sophia_journeys
+    required_count: 20
+    same_exact_candidate_required: true
+    distinct_process_identity_per_journey: true
+    control_plane: installed_sophia_voice_lab_tools
+    required_evidence:
+      - immutable_built_product_and_harness_identity
+      - fresh_process_and_run_binding
+      - ordinary_authenticated_product_controller
+      - current_owner_startup_and_provider_readiness
+      - input_pcm_transcription_and_product_acceptance
+      - output_and_realized_playback
+      - complete_session_finalization
+      - authoritative_owned_resource_settlement
+      - durable_export_and_evidence_integrity
+    forbidden_substitutes:
+      - twenty_audio_operations_in_one_process
+      - hook_unit_tests
+      - development_server_smoke
+      - authentication_bypass_or_browser_state_seeding
+      - dom_microphone_activation_or_local_runner_takeover
+    satisfies_five_deployed_canaries: false
+    satisfies_fresh_installed_root_p01: false
+    completed_journey_evidence: []
+    status: unpassed
   - id: dynamic_scheduling_idempotency
     threshold: 20_of_20_deterministic_trials_zero_duplicate_injections
     status: unpassed
@@ -678,6 +709,7 @@ quantitative_gates:
     threshold: 100_percent_before_provider_bearing_resource_creation
     status: unpassed
   - id: fresh_session_smoke
+    requires: c4_complete_built_sophia_journeys
     threshold: 5_consecutive_sessions_zero_harness_caused_failures
     scenario: V-F01
     maximum_run_starts: 5
@@ -696,7 +728,13 @@ quantitative_gates:
     threshold: 0_live_owned_browser_synthetic_session_provider_or_task_resources
     status: unpassed
   - id: plugin_cold_flow
-    threshold: 1_fresh_agent_no_more_than_10_high_level_mcp_calls_excluding_deliberately_long_read_only_polling
+    threshold: 1_fresh_installed_plugin_root_with_10_semantic_spine_calls_and_bounded_audited_polls
+    contract: p01-erratum-v2.md
+    semantic_spine_calls: 10
+    max_polls_per_operation: 10
+    max_polls_total: 20
+    max_poll_timeout_ms: 10000
+    finalization_requires: operation_success_terminal_run_cleanup_complete_and_durable_evidence
     status: unpassed
   - id: evidence_availability
     threshold: within_30_seconds_of_terminal_browser_cleanup_or_explicit_pending_finalizer
@@ -711,3 +749,4 @@ promotion:
   final_candidate_b_deployed_to_all_six_components: false
   final_registered_plugin_identity_verified: false
   documentation_alone_can_promote: false
+  c4_complete_built_sophia_journeys_required: true

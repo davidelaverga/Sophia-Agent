@@ -773,6 +773,7 @@ function annotationSuccessCount(
 }
 
 function geminiStageTelemetry(stage: string): {
+  setupComplete?: boolean
   connectionState?: GeminiRuntimeConnectionState
   websocketState?: GeminiRuntimeWebSocketState
   microphoneState?: GeminiRuntimeMicrophoneState
@@ -780,26 +781,26 @@ function geminiStageTelemetry(stage: string): {
 } {
   switch (stage) {
     case "starting_backend_session":
-      return { connectionState: "connecting", websocketState: "idle", microphoneState: "idle", remoteAudioState: "idle" }
+      return { setupComplete: false, connectionState: "connecting", websocketState: "idle", microphoneState: "idle", remoteAudioState: "idle" }
     case "requesting_microphone":
-      return { connectionState: "connecting", microphoneState: "waiting" }
+      return { setupComplete: false, connectionState: "connecting", microphoneState: "waiting" }
     case "opening_websocket":
-      return { connectionState: "connecting", websocketState: "connecting", microphoneState: "granted" }
+      return { setupComplete: false, connectionState: "connecting", websocketState: "connecting", microphoneState: "granted" }
     case "sending_setup":
     case "waiting_setup_complete":
-      return { connectionState: "connecting", websocketState: "setup_pending", microphoneState: "granted" }
+      return { setupComplete: false, connectionState: "connecting", websocketState: "setup_pending", microphoneState: "granted" }
     case "connected":
-      return { connectionState: "connected", websocketState: "connected", microphoneState: "connected", remoteAudioState: "expected" }
+      return { setupComplete: true, connectionState: "connected", websocketState: "connected", microphoneState: "connected", remoteAudioState: "expected" }
     case "streaming_audio":
-      return { connectionState: "connected", websocketState: "connected", microphoneState: "connected", remoteAudioState: "expected" }
+      return { setupComplete: true, connectionState: "connected", websocketState: "connected", microphoneState: "connected", remoteAudioState: "expected" }
     case "reconnecting":
-      return { connectionState: "connecting", websocketState: "connecting", microphoneState: "connected", remoteAudioState: "idle" }
+      return { setupComplete: false, connectionState: "connecting", websocketState: "connecting", microphoneState: "connected", remoteAudioState: "idle" }
     case "connection_lost":
-      return { connectionState: "error", websocketState: "error", microphoneState: "idle", remoteAudioState: "idle" }
+      return { setupComplete: false, connectionState: "error", websocketState: "error", microphoneState: "idle", remoteAudioState: "idle" }
     case "closing":
-      return { connectionState: "closing" }
+      return { setupComplete: false, connectionState: "closing" }
     case "closed":
-      return { connectionState: "closed", websocketState: "closed", microphoneState: "idle", remoteAudioState: "idle" }
+      return { setupComplete: false, connectionState: "closed", websocketState: "closed", microphoneState: "idle", remoteAudioState: "idle" }
     default:
       return {}
   }
@@ -2481,6 +2482,8 @@ export function useStreamVoiceSession(
       return
     }
     terminalVoiceSessionIdsRef.current.add(voiceSessionId)
+    isSophiaReadyRef.current = false
+    setIsSophiaReady(false)
 
     closeEventSource()
     void releasePreparedVoiceConnect({ keepalive: true })
@@ -3339,20 +3342,23 @@ export function useStreamVoiceSession(
             backendStillFrameFlagParsed: typeof creds.backendStillFrameFlagParsed === "boolean" ? creds.backendStillFrameFlagParsed : null,
           },
         })
+        // Transport callbacks can outlive close or a superseded bootstrap.
+        // Only the existing request owner may publish controller state/capture.
+        const ownsController = () => !destroyedRef.current
+          && startRequestVersionRef.current === requestVersion
+          && !terminalVoiceSessionIdsRef.current.has(creds.session_id)
         const connection = await connectGeminiBrowserLiveFromBootstrap({
           userId,
           sessionId: creds.session_id,
           threadId: threadId ?? null,
           bootstrap: creds,
           onStage: (geminiStage) => {
-            if (
-              destroyedRef.current
-              || startRequestVersionRef.current !== requestVersion
-              || terminalVoiceSessionIdsRef.current.has(creds.session_id)
-            ) {
-              return
-            }
+            if (!ownsController()) return
             const stageTelemetry = geminiStageTelemetry(geminiStage)
+            if (stageTelemetry.setupComplete === false) {
+              isSophiaReadyRef.current = false
+              setIsSophiaReady(false)
+            }
             setRuntimeTelemetry((current) => current.runtime === "gemini_live"
               ? { ...current, stage: geminiStage, ...stageTelemetry }
               : current)
@@ -3378,6 +3384,15 @@ export function useStreamVoiceSession(
               setMetaPresence("connecting")
             }
             if (geminiStage === "connected" || geminiStage === "streaming_audio") {
+              // The initial connection is admitted after the bootstrap promise
+              // resolves. Reconnect readiness belongs to that same current owner.
+              if (geminiConnectionRef.current?.sessionId === creds.session_id) {
+                markSophiaReady("gemini-live-setup-complete", {
+                  runtime: "gemini_live",
+                  voiceAgentSessionId: creds.session_id,
+                  providerConnectionEpoch: geminiConnectionRef.current.getProviderConnectionEpoch(),
+                })
+              }
               setError(undefined)
               setStage(userMicMutedRef.current ? "idle" : "listening")
               setSpeakingPresence(false)
@@ -3396,6 +3411,7 @@ export function useStreamVoiceSession(
             }
           },
           onOutputAudioReceived: (diagnostic) => {
+            if (!ownsController()) return
             setRuntimeTelemetry((current) => current.runtime === "gemini_live"
               ? {
                   ...current,
@@ -3417,6 +3433,7 @@ export function useStreamVoiceSession(
             })
           },
           onOutputAudioPlaybackReceipt: (receipt) => {
+            if (!ownsController()) return
             setRuntimeTelemetry((current) => {
               if (current.runtime !== "gemini_live") return current
               return {
@@ -3452,6 +3469,7 @@ export function useStreamVoiceSession(
             }
           },
           onOutputLegMonitorReceipt: (receipt) => {
+            if (!ownsController()) return
             if (!syntheticTest) return
             recordSophiaCaptureEvent({
               category: "voice-session",
@@ -3465,6 +3483,7 @@ export function useStreamVoiceSession(
             })
           },
           onProviderConnectionEpoch: (receipt) => {
+            if (!ownsController()) return
             setRuntimeTelemetry((current) => current.runtime === "gemini_live"
               ? {
                   ...current,
@@ -3486,6 +3505,7 @@ export function useStreamVoiceSession(
             })
           },
           onOutputAudioChunk: (diagnostic) => {
+            if (!ownsController()) return
             recordSophiaCaptureEvent({
               category: "voice-session",
               name: "gemini-output-audio-chunk",
@@ -3498,6 +3518,7 @@ export function useStreamVoiceSession(
             })
           },
           onAudioContextDiagnostics: (diagnostic: GeminiAudioContextDiagnostic) => {
+            if (!ownsController()) return
             setRuntimeTelemetry((current) => current.runtime === "gemini_live"
               ? {
                   ...current,
@@ -3519,6 +3540,7 @@ export function useStreamVoiceSession(
             })
           },
           onInputAudioActivity: (diagnostic) => {
+            if (!ownsController()) return
             if (diagnostic.eventType === "input_audio_frame_sent" && diagnostic.bargeInConfirmed === true) {
               const interruptedKeys = markAssistantTranscriptUserInputStarted(assistantTranscriptStaleGuardRef.current)
               if (interruptedKeys.length > 0) {
@@ -3558,6 +3580,7 @@ export function useStreamVoiceSession(
             })
           },
           onSyntheticInputLegReceipt: (receipt) => {
+            if (!ownsController()) return
             if (!syntheticTest) return
             recordSophiaCaptureEvent({
               category: "voice-session",
@@ -3571,6 +3594,7 @@ export function useStreamVoiceSession(
             })
           },
           onSyntheticInputTurnReceipt: (receipt) => {
+            if (!ownsController()) return
             if (!syntheticTest) return
             recordSyntheticAcceptedBuilderTurn(receipt)
             recordSophiaCaptureEvent({
@@ -3585,6 +3609,7 @@ export function useStreamVoiceSession(
             })
           },
           onSyntheticInputFaultReceipt: (receipt) => {
+            if (!ownsController()) return
             if (!syntheticTest) return
             recordSophiaCaptureEvent({
               category: "voice-session",
@@ -3598,6 +3623,7 @@ export function useStreamVoiceSession(
             })
           },
           onSyntheticInteractionReceipt: (receipt) => {
+            if (!ownsController()) return
             if (!syntheticTest) return
             const binding: GeminiSyntheticInteractionBinding = {
               schema: "sophia_gemini_interaction_binding_v1",
@@ -3653,6 +3679,7 @@ export function useStreamVoiceSession(
             })
           },
           onSyntheticInteractionFaultReceipt: (receipt) => {
+            if (!ownsController()) return
             if (!syntheticTest) return
             recordSophiaCaptureEvent({
               category: "voice-session",
@@ -3666,6 +3693,7 @@ export function useStreamVoiceSession(
             })
           },
           onSyntheticTraceFaultReceipt: (receipt) => {
+            if (!ownsController()) return
             if (!syntheticTest) return
             recordSophiaCaptureEvent({
               category: "voice-session",
@@ -3679,6 +3707,7 @@ export function useStreamVoiceSession(
             })
           },
           onBargeInTranscriptHandoff: (diagnostic) => {
+            if (!ownsController()) return
             setRuntimeTelemetry((current) => current.runtime === "gemini_live"
               ? {
                   ...current,
@@ -3733,6 +3762,7 @@ export function useStreamVoiceSession(
             })
           },
           onInterruption: (diagnostic) => {
+            if (!ownsController()) return
             resetAssistantTranscriptPacingState(assistantTranscriptPacingRef.current)
             markActiveAssistantTranscriptInterrupted(assistantTranscriptStaleGuardRef.current, { atMs: Date.parse(diagnostic.timestamp) })
             setPartialReply("")
@@ -3772,6 +3802,7 @@ export function useStreamVoiceSession(
             })
           },
           onStaleOutputSuppression: (diagnostic) => {
+            if (!ownsController()) return
             setRuntimeTelemetry((current) => current.runtime === "gemini_live"
               ? {
                   ...current,
@@ -3814,6 +3845,7 @@ export function useStreamVoiceSession(
             })
           },
           onRelayStatus: (relayStatus) => {
+            if (!ownsController()) return
             setRuntimeTelemetry((current) => current.runtime === "gemini_live"
               ? { ...current, relayStatus: relayStatus as GeminiRuntimeRelayStatus }
               : current)
@@ -3829,6 +3861,7 @@ export function useStreamVoiceSession(
             })
           },
           onProviderEvent: (event) => {
+            if (!ownsController()) return
             const timestamp = new Date().toISOString()
             const eventType = describeProviderEventType(event)
             const setupComplete = eventType === "setupComplete" || eventType === "setup_complete"
@@ -3856,6 +3889,7 @@ export function useStreamVoiceSession(
             })
           },
           onProviderEventTelemetry: (telemetry) => {
+            if (!ownsController()) return
             setRuntimeTelemetry((current) => current.runtime === "gemini_live"
               ? applyGeminiTranscriptReadiness(current, {
                   providerConnectionEpoch: telemetry.providerConnectionEpoch ?? current.providerConnectionEpoch,
@@ -3882,6 +3916,7 @@ export function useStreamVoiceSession(
             })
           },
           onRelayTrace: (trace) => {
+            if (!ownsController()) return
             setRuntimeTelemetry((current) => current.runtime === "gemini_live"
               ? (() => {
                   const isTranscription = trace.categories.includes("inputTranscription") || trace.categories.includes("outputTranscription")
@@ -3929,6 +3964,7 @@ export function useStreamVoiceSession(
             })
           },
           onRelayCoalescingDiagnostic: (diagnostic) => {
+            if (!ownsController()) return
             setRuntimeTelemetry((current) => current.runtime === "gemini_live"
               ? {
                   ...current,
@@ -3952,6 +3988,7 @@ export function useStreamVoiceSession(
             })
           },
           onToolCallLedgerUpdate: (entry) => {
+            if (!ownsController()) return
             recordSyntheticBuilderToolLedger(entry)
             setRuntimeTelemetry((current) => {
               if (current.runtime !== "gemini_live") {
@@ -3975,6 +4012,7 @@ export function useStreamVoiceSession(
             })
           },
           onRelayDiagnostic: (diagnostic) => {
+            if (!ownsController()) return
             setRuntimeTelemetry((current) => current.runtime === "gemini_live"
               ? {
                   ...current,
@@ -3997,6 +4035,7 @@ export function useStreamVoiceSession(
             })
           },
           onWebSocketDiagnostic: (diagnostic) => {
+            if (!ownsController()) return
             const websocketState = diagnostic.kind === "error" ? "error" : "closed"
             setRuntimeTelemetry((current) => current.runtime === "gemini_live"
               ? {
@@ -4022,6 +4061,7 @@ export function useStreamVoiceSession(
             })
           },
           onToolLoopDiagnostic: (diagnostic) => {
+            if (!ownsController()) return
             const diagnosticToolName = diagnostic.toolCall.name
             const diagnosticBackendNumber = (key: string) => (
               typeof diagnostic.backendResponse?.[key] === "number" && Number.isFinite(diagnostic.backendResponse[key])
@@ -4326,6 +4366,7 @@ export function useStreamVoiceSession(
             })
           },
           onRelayError: (relayError) => {
+            if (!ownsController()) return
             const errorText = relayError instanceof Error ? relayError.message : String(relayError)
             setRuntimeTelemetry((current) => current.runtime === "gemini_live"
               ? { ...current, relayStatus: "degraded", lastRelayErrorText: errorText }
@@ -4347,12 +4388,8 @@ export function useStreamVoiceSession(
           || terminalVoiceSessionIdsRef.current.has(creds.session_id)
         ) {
           await connection.close()
-          setRuntimeTelemetry(
-            createLegacyRuntimeTelemetry({
-              sessionId: sessionIdRef.current ?? null,
-              threadId: threadId ?? null,
-            }),
-          )
+          // Superseded work may release its own allocation, never publish state
+          // over the replacement owner (or into an unmounted controller).
           return
         }
 

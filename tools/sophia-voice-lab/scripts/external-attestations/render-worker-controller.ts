@@ -1,6 +1,8 @@
 import { randomBytes, randomUUID } from "node:crypto";
+import { RenderInventoryError, parseRenderInventory, retryableRenderObservation } from "./render-inventory.js";
 
 import { z } from "zod";
+import { RetainedRecoveryCheckpointSchema, RetainedRecoveryOnlyError } from "../../src/retained-recovery-response.js";
 
 import { canonicalRequestHash, sha256 } from "../../src/security.js";
 import { D02RenderWorkerDispatchClaimResponseSchema, ExternalAttestationSchema } from "../../src/service.js";
@@ -27,7 +29,7 @@ import {
 
 const MAX_PROVIDER_RESPONSE_BYTES = 2_000_000;
 
-interface RenderWorkerSnapshot {
+export interface RenderWorkerSnapshot {
   serviceId: string;
   serviceName: "sophia-voice-lab-worker";
   serviceType: "background_worker";
@@ -89,6 +91,7 @@ export const D02WorkerTerminationCheckpointSchema = z.discriminatedUnion("phase"
   z.object({ phase: z.literal("final_prepared"), claim: ExternalAttestationSchema }).strict(),
   z.object({ phase: z.literal("final_attestation_response"), response: AttestationResponseCheckpointSchema }).strict(),
   z.object({ phase: z.literal("final_attached"), receipt: VerifiedAttestationReceiptSchema }).strict(),
+  z.object({ phase: z.literal("final_retained_recovery"), receipt: RetainedRecoveryCheckpointSchema }).strict(),
 ]);
 
 export type D02WorkerTerminationCheckpoint = z.infer<typeof D02WorkerTerminationCheckpointSchema>;
@@ -105,6 +108,7 @@ interface ResumeState {
   finalClaim?: SignedExternalAttestation;
   finalResponses: AttestationResponseCheckpoint[];
   finalReceipt?: VerifiedAttestationReceipt;
+  retainedRecovery?: z.infer<typeof RetainedRecoveryCheckpointSchema>;
 }
 
 export interface D02RenderWorkerTerminationResult {
@@ -152,6 +156,11 @@ export async function executeD02RenderWorkerTermination(input: {
   const now = input.now ?? (() => new Date());
   const resume = parseResumeCheckpoints(input.resumeCheckpoints ?? []);
   assertStaticResumeBindings(resume, controller, input.publicConfig);
+  if (resume.retainedRecovery) {
+    if (!resume.finalClaim || resume.retainedRecovery.facts.signed_claim_sha256 !== canonicalRequestHash(resume.finalClaim))
+      throw new Error("Retained outcome checkpoint is detached from the exact signed final claim.");
+    throw new RetainedRecoveryOnlyError(resume.retainedRecovery.response_sha256, resume.retainedRecovery.facts);
+  }
 
   let preflight = resume.preflight;
   if (!preflight) {
@@ -249,7 +258,7 @@ export async function executeD02RenderWorkerTermination(input: {
     const deadline = Date.now() + controller.poll.timeout_ms;
     let after: RenderWorkerSnapshot | null = null;
     while (Date.now() < deadline) {
-      const candidate = await readRenderWorkerSnapshot(controller, input.renderBearer, fetchImpl, actionRequestedAt).catch(() => null);
+      const candidate = await readRenderWorkerSnapshot(controller, input.renderBearer, fetchImpl, actionRequestedAt).catch(retryableRenderObservation);
       if (candidate && isSettledReplacement(before, candidate, actionRequestedAt, controller)) { after = candidate; break; }
       await sleep(controller.poll.interval_ms);
     }
@@ -352,6 +361,7 @@ export async function executeD02RenderWorkerTermination(input: {
   let finalResponses = [...resume.finalResponses];
   let finalReceipt = resume.finalReceipt;
   if (!finalReceipt) {
+    try {
     finalReceipt = await postAttestationAndVerifyReplay({
       baseUrl: controller.voice_lab_url,
       claim: finalClaim,
@@ -366,6 +376,11 @@ export async function executeD02RenderWorkerTermination(input: {
         finalResponses = [...finalResponses, response];
       },
     });
+    } catch (error) {
+      if (error instanceof RetainedRecoveryOnlyError) await input.checkpoint({ phase: "final_retained_recovery",
+        receipt: { response_sha256: error.responseSha256, facts: error.facts } });
+      throw error;
+    }
     await input.checkpoint({ phase: "final_attached", receipt: finalReceipt });
   }
   return {
@@ -405,6 +420,11 @@ function parseResumeCheckpoints(raw: readonly unknown[]): ResumeState {
   ];
   if (parsed.length > expected.length) throw new Error("D02 resume journal contains phases beyond the terminal checkpoint.");
   parsed.forEach((checkpoint, index) => {
+    if (checkpoint.phase === "final_retained_recovery") {
+      if ((index !== 9 && index !== 10) || index !== parsed.length - 1)
+        throw new Error("Retained recovery must terminate a prepared final-claim prefix before certification.");
+      return;
+    }
     const wanted = expected[index]!;
     const ordinal = "response" in checkpoint ? checkpoint.response.ordinal : undefined;
     if (checkpoint.phase !== wanted.phase || (wanted.ordinal !== undefined && ordinal !== wanted.ordinal)) throw new Error(`D02 resume journal is gapped, reordered, or contains a non-canonical phase at position ${index + 1}.`);
@@ -420,6 +440,7 @@ function parseResumeCheckpoints(raw: readonly unknown[]): ResumeState {
     else if (checkpoint.phase === "render_worker_replacement_settled") { state.localReceipt = checkpoint.receipt; state.localReceiptSha256 = checkpoint.receipt_sha256; }
     else if (checkpoint.phase === "final_prepared") state.finalClaim = checkpoint.claim;
     else if (checkpoint.phase === "final_attestation_response") state.finalResponses.push(checkpoint.response);
+    else if (checkpoint.phase === "final_retained_recovery") state.retainedRecovery = checkpoint.receipt;
     else state.finalReceipt = checkpoint.receipt;
   }
   return state;
@@ -569,6 +590,7 @@ function finalEvidenceFor(
     authority: "deployment_control" as const,
     termination_request_id_sha256: sha256(preflight.termination_request_id),
     local_controller_receipt_sha256: localReceiptSha256,
+    local_controller_receipt: localReceipt,
     run_id_sha256: sha256(controller.run.run_id),
     cleanup_obligation_id_sha256: controller.run.cleanup_obligation_id_sha256,
     worker_service_id_sha256: sha256(controller.render_worker_service_id),
@@ -761,7 +783,7 @@ async function reconcileAmbiguousRenderDispatch(
   bearer: string,
   fetchImpl: typeof fetch,
 ): Promise<"replacement_observed_but_acceptance_receipt_unavailable" | "inconclusive"> {
-  const candidate = await readRenderWorkerSnapshot(controller, bearer, fetchImpl, actionRequestedAt).catch(() => null);
+  const candidate = await readRenderWorkerSnapshot(controller, bearer, fetchImpl, actionRequestedAt).catch(retryableRenderObservation);
   return candidate && isSettledReplacement(before, candidate, actionRequestedAt, controller) ? "replacement_observed_but_acceptance_receipt_unavailable" : "inconclusive";
 }
 
@@ -801,7 +823,7 @@ async function readWorkerLossObservation(input: { baseUrl: string; bearer: strin
   return D02BrowserWorkerLossObservationSchema.parse(body.parsed);
 }
 
-async function readRenderWorkerSnapshot(controller: D02RenderWorkerTerminationInput, bearer: string, fetchImpl: typeof fetch, requestedAfter: Date | null): Promise<RenderWorkerSnapshot> {
+export async function readRenderWorkerSnapshot(controller: Pick<D02RenderWorkerTerminationInput, "render_api_origin" | "render_worker_service_id">, bearer: string, fetchImpl: typeof fetch, requestedAfter: Date | null): Promise<RenderWorkerSnapshot> {
   const base = `${controller.render_api_origin}/v1/services/${encodeURIComponent(controller.render_worker_service_id)}`;
   const [service, deploys, instances] = await Promise.all([
     renderRequest({ url: new URL(base), method: "GET", bearer, fetchImpl }),
@@ -818,9 +840,17 @@ async function readRenderWorkerSnapshot(controller: D02RenderWorkerTerminationIn
   const threshold = requestedAfter?.getTime() ?? Number.NEGATIVE_INFINITY;
   const deploy = deployRecords.find((value) => value.createdAt.getTime() >= threshold && value.status === "live") ?? deployRecords.find((value) => value.status === "live") ?? null;
   if (!deploy) throw new Error("Render worker deploy list has no exact live deploy record.");
-  const instanceRecords = unwrapList(instances.parsed, "instance").map(normalizeInstance).filter((value): value is NonNullable<typeof value> => value !== null);
-  const instanceIds = instanceRecords.map((value) => value.id).sort();
-  if (instanceIds.length < 1 || new Set(instanceIds).size !== instanceIds.length) throw new Error("Render worker instance set is empty or duplicated.");
+  const instanceRecords = parseRenderInventory(() => unwrapList(instances.parsed, "instance").map(record => {
+    const instance = normalizeInstance(record);
+    if (instance === null) throw new RenderInventoryError("Render worker instance inventory contains a malformed record; owner absence cannot be proven.");
+    return instance;
+  }));
+  // Keep creation evidence attached to its owner while canonicalizing order.
+  // Sorting just the IDs silently attributes another instance's age to an owner.
+  instanceRecords.sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+  const instanceIds = instanceRecords.map((value) => value.id);
+  if (new Set(instanceIds).size !== instanceIds.length) throw new RenderInventoryError("Render worker instance set contains duplicate owners.");
+  if (instanceIds.length < 1) throw new Error("Render worker instance set is empty.");
   return {
     serviceId,
     serviceName: "sophia-voice-lab-worker",
@@ -889,7 +919,8 @@ function normalizeDeploy(record: Record<string, unknown>): { id: string; status:
 }
 
 function normalizeInstance(record: Record<string, unknown>): { id: string; createdAt: Date } | null {
-  const id = String(record.id ?? record.instanceId ?? record.instance_id ?? "");
+  const id = record.id ?? record.instanceId ?? record.instance_id;
+  if (typeof id !== "string") return null;
   if (!/^[A-Za-z0-9_-]{8,128}$/.test(id)) return null;
   return { id, createdAt: exactDate(record.createdAt ?? record.created_at) };
 }

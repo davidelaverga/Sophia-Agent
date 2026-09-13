@@ -15,6 +15,15 @@ import { runCli } from "../scripts/external-attestations/cli.js";
 import { initializeAuthorityFiles, verifyD02WorkerTerminationReceipt } from "../scripts/external-attestations/crypto.js";
 import { executeD02RenderWorkerTermination } from "../scripts/external-attestations/render-worker-controller.js";
 import { readSecureJson, writeNewSecureJson } from "../scripts/external-attestations/secure-files.js";
+import { verifyRetainedD02OwnerDeath } from "../scripts/external-attestations/retained-owner-proof.js";
+import { persistRetainedD02OwnerDeath } from "../scripts/external-attestations/retained-owner-ingestion.js";
+import { parseRetainedOwnerDeath } from "../src/retained-owner-death.js";
+import { deriveRecoveryBrowserBinding, projectRecoveryControlBinding, type RecoveryControlRecord } from "../src/recovery-control.js";
+import { deriveExecutionOwnership } from "../src/execution-ownership.js";
+import { completeExecutionCleanupFixture } from "./execution-cleanup-fixture.js";
+import { testRun } from "./helpers.js";
+import { verifyOwnerIngestionPostgres } from "./owner-ingestion-postgres-helper.js";
+import { verifyRetainedProviderFixture } from "./retained-d02-provider-helper.js";
 
 const SHA_A = "a".repeat(40);
 const SHA_B = "b".repeat(40);
@@ -100,9 +109,11 @@ function fetchHarness(controller: ReturnType<typeof controllerInput>, options: {
   serviceType?: string;
   serviceName?: string;
   beforeInstanceIds?: string[];
+  malformedInstanceStage?: "before" | "after";
   lossDrift?: "admission";
   loseAttestationResponseOnce?: "command" | "final";
   pendingAttestationOnce?: "command" | "final";
+  retainedFinal?: boolean | "replay";
   expiredCommandGatewayReplay?: boolean;
   loseRenderResponseOnce?: boolean;
   loseDispatchClaimResponseOnce?: boolean;
@@ -126,6 +137,13 @@ function fetchHarness(controller: ReturnType<typeof controllerInput>, options: {
       const count = (attestationCounts.get(claim.attestation_id) ?? 0) + 1;
       attestationCounts.set(claim.attestation_id, count);
       const target = claim.evidence.kind === "d02_browser_worker_termination_command" ? "command" : "final";
+      if (target === "final" && options.retainedFinal && (options.retainedFinal !== "replay" || count >= 2)) return json({
+        contract_version: "sophia.voice-lab.v1", request_id: randomUUID(), run_id: null, test_run_id: null, event_cursor: null, status: "ok",
+        data: { proof_status: "retained_recovery_facts_only", signed_claim_sha256: canonicalRequestHash(claim),
+          raw_evidence_purged: true, certification_available: false, control_binding_sha256: HASH_A,
+          owner_death_proof_sha256: HASH_B, provider_settlement_proof_sha256: HASH_C,
+          live_cleanup_complete: false, remote_purge_complete: false },
+      });
       if (options.pendingAttestationOnce === target && count === 1) return json({ error: { code: target === "command" ? "D02_GATEWAY_FREEZE_PENDING" : "D02_GATEWAY_SETTLEMENT_PENDING" } }, 409);
       if (options.loseAttestationResponseOnce === target && count === 1) throw new TypeError(`simulated ${target} attestation response loss after commit`);
       return json({
@@ -190,7 +208,9 @@ function fetchHarness(controller: ReturnType<typeof controllerInput>, options: {
       if (url.pathname.endsWith("/deploys")) return json([{ deploy: { id: "dep-0123456789abcdefghij", status: "live", createdAt: at(-3_600_000), startedAt: at(-3_600_000), updatedAt: accepted ? at(3_500) : at(-1_800_000), finishedAt: accepted ? at(3_500) : at(-1_800_000) } }]);
       if (url.pathname.endsWith("/instances")) {
         const instanceIds = accepted ? ["worker-instance-after"] : options.beforeInstanceIds ?? ["worker-instance-before"];
-        return json(instanceIds.map((id) => ({ instance: { id, createdAt: accepted ? at(3_000) : at(-3_600_000) } })));
+        const records: unknown[] = instanceIds.map((id) => ({ instance: { id, createdAt: accepted ? at(3_000) : at(-3_600_000) } }));
+        if (options.malformedInstanceStage === (accepted ? "after" : "before")) records.push({ instance: { id: "invalid owner!", createdAt: at(-3_600_000) } });
+        return json(records);
       }
       return json({ service: { id: controller.render_worker_service_id, type: options.serviceType ?? "background_worker", name: options.serviceName ?? "sophia-voice-lab-worker" } });
     }
@@ -239,9 +259,33 @@ describe("source-specific D02 Render browser-worker termination controller", () 
     expect(JSON.parse(rejected[0]!).error).toMatch(/unknown command/i);
   });
 
+  it.each(["before", "after"] as const)("refuses incomplete instance inventory %s dispatch", async malformedInstanceStage => {
+    const authority = await authorityFixture();
+    const controller = controllerInput();
+    const harness = fetchHarness(controller, { malformedInstanceStage });
+    const tokens = TransportTokensSchema.parse(await readSecureJson(authority.paths.tokens));
+    const phases: string[] = [];
+    await expect(executeD02RenderWorkerTermination({
+      controller, renderBearer: "render-worker-controller-bearer-000000000001",
+      publicConfig: authority.initialized.publicConfig, transportTokens: tokens,
+      deploymentPrivateKeyPath: authority.paths.deployment,
+      fetchImpl: harness.fetchImpl, sleep: async () => undefined,
+      now: deterministicNow(Date.now() - 60_000), allowHttpForTest: true,
+      checkpoint: async checkpoint => { phases.push(checkpoint.phase); },
+    })).rejects.toThrow(/instance.*malformed/i);
+    expect(harness.calls.filter(call => call.origin === "https://api.render.com" && call.method === "POST")).toHaveLength(malformedInstanceStage === "before" ? 0 : 1);
+  });
+
   it("persists the command before one restart, proves disjoint replacement instances, and never self-certifies Gateway settlement", async () => {
     const authority = await authorityFixture();
     const controller = controllerInput();
+    const run = testRun({ id: controller.run.run_id, scenarioId: "V-D02" });
+    run.createdAt = new Date(Date.now() - 120_000);
+    run.target.expectedDeployment = controller.run.expected_deployment;
+    controller.run.test_run_id_sha256 = sha256(run.testRunId);
+    controller.run.cleanup_obligation_id_sha256 = sha256(run.cleanupObligationId);
+    const browserBinding = deriveRecoveryBrowserBinding(run.id, "worker-instance-before", controller.browser.lease_epoch);
+    controller.browser.context_id_sha256 = browserBinding.browser_context_id_sha256;
     const harness = fetchHarness(controller);
     const tokens = TransportTokensSchema.parse(await readSecureJson(authority.paths.tokens));
     const phases: string[] = [];
@@ -253,7 +297,7 @@ describe("source-specific D02 Render browser-worker termination controller", () 
       deploymentPrivateKeyPath: authority.paths.deployment,
       fetchImpl: harness.fetchImpl,
       sleep: async () => undefined,
-      now: deterministicNow(Date.now()),
+      now: deterministicNow(Date.now() - 60_000),
       allowHttpForTest: true,
       checkpoint: async (checkpoint) => { phases.push(checkpoint.phase); },
     });
@@ -283,9 +327,127 @@ describe("source-specific D02 Render browser-worker termination controller", () 
     expect(final.render_action_request_sha256).toBe(command.render_action_request_sha256);
     expect(final.after_deploy_id_sha256).toBe(final.before_deploy_id_sha256);
     expect(final.local_controller_receipt_sha256).toBe(result.local_controller_receipt_sha256);
+    // C4: the runtime must receive the independently signed source, not just a
+    // hash it cannot verify or ingest. This remains a release gate until the
+    // shared runtime receipt schema and attestation ingestion are integrated.
+    expect.soft((final as Record<string, unknown>).local_controller_receipt).toEqual(result.local_controller_receipt);
     expect(final.gateway_settlement_receipt_included).toBe(false);
     expect(JSON.stringify(final)).not.toMatch(/provider_session_absent|browser_context_absent|builder_tasks_zero|all_operations_terminal/);
-  });
+    const signed = result.local_controller_receipt;
+    // Synthetic retained journal paired with the signed controller fixture;
+    // the adapter/service suites separately prove its production derivation.
+    const journalCore = {
+      schema: "sophia.voice-lab.d02-recovery-journal.v1" as const,
+      runIdSha256: sha256(run.id), cleanupObligationIdSha256: sha256(run.cleanupObligationId),
+      terminationRequestIdSha256: sha256(signed.termination_request_id),
+      commandContentSha256: HASH_A, commandEventSeq: signed.render.dispatch_claim_event_seq - 1,
+      gatewayFreezeRequestSha256: HASH_B, gatewayFreezeEventSeq: signed.render.dispatch_claim_event_seq - 1,
+      dispatchClaimSha256: signed.render.dispatch_claim_sha256, dispatchClaimEventSeq: signed.render.dispatch_claim_event_seq,
+      providerSessionIdSha256: signed.binding.provider_session_id_sha256,
+      providerAdmissionIdSha256: signed.binding.provider_admission_id_sha256,
+      providerConnectionEpoch: signed.binding.provider_connection_epoch,
+      frozenProviderConnectionEpochs: signed.binding.frozen_provider_connection_epochs,
+      workerIdSha256: signed.binding.browser_worker_id_sha256, browserLeaseEpoch: signed.binding.browser_lease_epoch,
+      browserContextIdSha256: signed.binding.browser_context_id_sha256, workerServiceIdSha256: signed.binding.worker_service_id_sha256,
+      actionRequestSha256: signed.render.action_request_sha256, dispatchAttemptIdSha256: signed.render.dispatch_attempt_id_sha256,
+    };
+    const control: RecoveryControlRecord = {
+      binding: projectRecoveryControlBinding(run, `cp1:test:${HASH_A}`),
+      browserAllocationEver: true,
+      d02Journal: { ...journalCore, proofSha256: canonicalRequestHash(journalCore) },
+      executionOwnership: deriveExecutionOwnership(run, completeExecutionCleanupFixture(run, "worker-instance-before", controller.browser.lease_epoch)),
+      browserContextBinding: browserBinding, version: 1, liveCleanupComplete: false,
+      retentionPurgeDueAt: null, remotePurgeComplete: false, contentPurgedAt: new Date(),
+    };
+    const input = { control, receipt: result.local_controller_receipt, publicConfig: authority.initialized.publicConfig,
+      expectedWorkerServiceIdSha256: sha256(controller.render_worker_service_id),
+      acceptedAt: new Date(result.local_controller_receipt.issued_at) };
+    const proof = verifyRetainedD02OwnerDeath(input);
+    expect(proof).toMatchObject({ ownershipProofSha256: control.executionOwnership!.proofSha256, providerCleanupProven: false, liveResourcesZeroProven: false });
+    expect(JSON.stringify(proof)).not.toContain(run.id);
+    expect(proof.dispatchJournalProofSha256).toBe(control.d02Journal!.proofSha256);
+    expect(proof).toMatchObject({
+      actionAcceptedResponseSha256: signed.render.action_accepted_response_sha256,
+      actionSettledSnapshotSha256: signed.render.action_settled_snapshot_sha256,
+      lossEventSeq: signed.voice_lab.worker_loss_observation.loss_event_seq,
+      lossObservedAt: signed.voice_lab.worker_loss_observation.loss_observed_at,
+    });
+    expect(() => verifyRetainedD02OwnerDeath({ ...input, control: { ...control, d02Journal: undefined } as unknown as RecoveryControlRecord })).toThrow("OWNER_DISPATCH_UNPROVEN");
+    for (const patch of [
+      { terminationRequestIdSha256: HASH_D }, { dispatchClaimSha256: HASH_D },
+      { dispatchAttemptIdSha256: HASH_D }, { actionRequestSha256: HASH_D },
+      { providerSessionIdSha256: HASH_D }, { providerAdmissionIdSha256: HASH_D },
+      { workerIdSha256: HASH_D }, { browserContextIdSha256: HASH_D },
+      { workerServiceIdSha256: HASH_D }, { runIdSha256: HASH_D },
+      { cleanupObligationIdSha256: HASH_D }, { browserLeaseEpoch: journalCore.browserLeaseEpoch + 1 },
+      { dispatchClaimEventSeq: journalCore.dispatchClaimEventSeq + 1 },
+      { frozenProviderConnectionEpochs: [...journalCore.frozenProviderConnectionEpochs, Math.max(...journalCore.frozenProviderConnectionEpochs) + 1] },
+    ]) {
+      // A fixture may already use HASH_D; ensure each negative changes value.
+      const drift = Object.fromEntries(Object.entries(patch).map(([key, value]) =>
+        [key, typeof value === "string" ? sha256(`different-journal-${key}`) : value]));
+      const changed = { ...journalCore, ...drift };
+      expect(() => verifyRetainedD02OwnerDeath({ ...input, control: { ...control,
+        d02Journal: { ...changed, proofSha256: canonicalRequestHash(changed) } } })).toThrow("OWNER_DISPATCH_BINDING_MISMATCH");
+    }
+    expect(() => verifyRetainedD02OwnerDeath({ ...input, expectedWorkerServiceIdSha256: HASH_D })).toThrow();
+    expect(() => verifyRetainedD02OwnerDeath({ ...input, acceptedAt: new Date(result.local_controller_receipt.expires_at) })).toThrow();
+    expect(() => verifyRetainedD02OwnerDeath({ ...input, control: { ...control, executionOwnership: undefined } as unknown as RecoveryControlRecord })).toThrow();
+    expect(() => verifyRetainedD02OwnerDeath({ ...input, control: { ...control, binding: { ...control.binding, testRunId: randomUUID() } } })).toThrow();
+    for (const changed of [
+      { ...control.binding, cleanupObligationId: randomUUID() },
+      { ...control.binding, environment: "staging" as const },
+      { ...control.binding, scenarioId: "V-A01" },
+      { ...control.binding, expectedDeployment: { ...control.binding.expectedDeployment, frontend: SHA_C } },
+    ]) expect(() => verifyRetainedD02OwnerDeath({ ...input, control: { ...control, binding: changed } })).toThrow();
+    expect(() => verifyRetainedD02OwnerDeath({ ...input, acceptedAt: new Date(Date.parse(input.receipt.issued_at) - 1) })).toThrow();
+    expect(() => verifyRetainedD02OwnerDeath({ ...input, control: { ...control, browserContextBinding: undefined, browserAllocationBinding: browserBinding } as unknown as RecoveryControlRecord })).toThrow();
+    expect(() => verifyRetainedD02OwnerDeath({ ...input, receipt: { ...input.receipt, signature: "a".repeat(86) } })).toThrow();
+    expect(() => verifyRetainedD02OwnerDeath({ ...input, receipt: { ...input.receipt, expected_deployment: { frontend: SHA_C, backend: SHA_B, voice: SHA_C } } })).toThrow();
+    expect(control.liveCleanupComplete).toBe(false);
+    expect(parseRetainedOwnerDeath(proof)).toEqual(proof);
+    verifyRetainedProviderFixture({ ...control, d02OwnerDeath: proof });
+    expect(() => parseRetainedOwnerDeath({ ...proof, providerCleanupProven: true })).toThrow();
+    expect(() => parseRetainedOwnerDeath({ ...proof, signedReceiptSha256: HASH_D })).toThrow();
+    // Controller transaction contract only; real-PG atomicity is a separate gate.
+    const row = { run_id: run.id, test_run_id: run.testRunId, cleanup_obligation_id: run.cleanupObligationId,
+      binding: control.binding, version: control.version, browser_allocation_ever: true,
+      execution_ownership: control.executionOwnership, d02_journal: control.d02Journal,
+      browser_context_binding: control.browserContextBinding, browser_allocation_binding: null,
+      execution_cleanup_proof: null, d02_owner_death: null as unknown,
+      live_cleanup_complete: false, remote_purge_complete: false, retention_purge_due_at: null,
+      content_purged_at: control.contentPurgedAt, retention_lookup_hmac: null,
+      last_settlement_from_version: null, last_settlement_event_sha256: null, last_settlement_receipt_sha256: null };
+    const queries: string[] = [];
+    let releases = 0;
+    const client = {
+      async query(sql: string, values?: unknown[]) {
+        queries.push(sql);
+        if (sql.startsWith("select * from sophia_voice_lab.recovery_controls")) return { rows: [{ ...row }] };
+        if (sql.startsWith("select worker_id")) return { rows: [{ worker_id: "worker-instance-before", lease_epoch: control.executionOwnership!.browserLeaseEpoch }] };
+        if (sql.startsWith("select clock_timestamp")) return { rows: [{ now: input.acceptedAt }] };
+        if (sql.startsWith("update sophia_voice_lab.recovery_controls")) { row.d02_owner_death = values![1]; row.version++; return { rows: [{ version: row.version }] }; }
+        return { rows: [] };
+      }, release() { releases++; },
+    };
+    const pool = { connect: async () => client } as unknown as import("pg").Pool;
+    const ingestion = { pool, runId: run.id, expectedVersion: control.version, receipt: input.receipt,
+      publicConfig: input.publicConfig, expectedWorkerServiceIdSha256: input.expectedWorkerServiceIdSha256 };
+    await expect(persistRetainedD02OwnerDeath({ ...ingestion, expectedVersion: control.version + 1 })).rejects.toThrow("OWNER_CONTROL_VERSION_CONFLICT");
+    expect(row.d02_owner_death).toBeNull();
+    expect(queries.at(-1)).toBe("rollback");
+    expect(await persistRetainedD02OwnerDeath(ingestion)).toMatchObject({ replay: false, version: control.version + 1, proof });
+    expect(await persistRetainedD02OwnerDeath(ingestion)).toMatchObject({ replay: true, version: control.version + 1, proof });
+    await expect(persistRetainedD02OwnerDeath({ ...ingestion, receipt: { ...input.receipt, signature: "a".repeat(86) } })).rejects.toThrow("OWNER_DEATH_IMMUTABLE");
+    expect(queries.filter(q => q.startsWith("update "))).toHaveLength(1);
+    expect(queries.some(q => /delete|set live_cleanup_complete|set execution_cleanup_proof/.test(q))).toBe(false);
+    expect(row.live_cleanup_complete).toBe(false);
+    expect(row.execution_cleanup_proof).toBeNull();
+    expect(releases).toBe(4);
+    const ownerDatabaseUrl = process.env.SOPHIA_VOICE_LAB_OWNER_TEST_DATABASE_URL;
+    if (ownerDatabaseUrl) await verifyOwnerIngestionPostgres(ownerDatabaseUrl, run, control, signed,
+      authority.initialized.publicConfig, authority.paths.deployment);
+  }, 60_000);
 
   it("rejects a non-worker service before command attachment or provider mutation", async () => {
     const authority = await authorityFixture();
@@ -337,7 +499,7 @@ describe("source-specific D02 Render browser-worker termination controller", () 
         fetchImpl: harness.fetchImpl,
         allowHttpForTest: true,
         checkpoint: async () => undefined,
-      })).rejects.toThrow(/singleton instance owned|instance set is empty or duplicated/i);
+      })).rejects.toThrow(/singleton instance owned|instance set contains duplicate owners/i);
       expect(harness.calls.some((call) => call.method === "POST")).toBe(false);
     }
   });
@@ -484,6 +646,55 @@ describe("source-specific D02 Render browser-worker termination controller", () 
       expect(harness.calls.filter((call) => call.origin === "https://api.render.com" && call.method === "POST")).toHaveLength(1);
       expect([...harness.attestationCounts.values()].sort((left, right) => left - right)).toEqual([2, 3]);
     }
+  });
+  it("classifies retained facts without certifying or retrying them as a malformed success", async () => {
+    const authority = await authorityFixture();
+    const controller = controllerInput();
+    const harness = fetchHarness(controller, { retainedFinal: true });
+    const checkpoints: any[] = [];
+    const input = { controller, renderBearer: "render-worker-controller-bearer-000000000001",
+      publicConfig: authority.initialized.publicConfig,
+      transportTokens: TransportTokensSchema.parse(await readSecureJson(authority.paths.tokens)),
+      deploymentPrivateKeyPath: authority.paths.deployment, fetchImpl: harness.fetchImpl,
+      sleep: async () => undefined, now: deterministicNow(Date.now()), allowHttpForTest: true,
+      checkpoint: async (checkpoint: any) => { checkpoints.push(checkpoint); } };
+    await expect(executeD02RenderWorkerTermination(input)).rejects.toMatchObject({
+      code: "RETAINED_RECOVERY_ONLY_NOT_CERTIFIED", facts: { certification_available: false } });
+    expect(checkpoints.at(-1).phase).toBe("final_retained_recovery");
+    expect(checkpoints.some(item => item.phase === "final_attached")).toBe(false);
+    const claim = checkpoints.find(item => item.phase === "final_prepared").claim;
+    expect(harness.attestationCounts.get(claim.attestation_id)).toBe(1);
+    const before = harness.calls.length;
+    await expect(executeD02RenderWorkerTermination({ ...input, resumeCheckpoints: checkpoints })).rejects.toMatchObject({ code: "RETAINED_RECOVERY_ONLY_NOT_CERTIFIED" });
+    expect(harness.calls).toHaveLength(before);
+    expect(harness.attestationCounts.get(claim.attestation_id)).toBe(1);
+    expect(checkpoints.at(-1).receipt.facts.signed_claim_sha256).toBe(canonicalRequestHash(claim));
+    const foreign = structuredClone(checkpoints);
+    foreign.at(-1).receipt.facts.signed_claim_sha256 = sha256("foreign-claim");
+    await expect(executeD02RenderWorkerTermination({ ...input, resumeCheckpoints: foreign })).rejects.toThrow(/detached/);
+    await expect(executeD02RenderWorkerTermination({ ...input, resumeCheckpoints: [...checkpoints, checkpoints.at(-1)] })).rejects.toThrow(/terminate/);
+    expect(harness.calls).toHaveLength(before);
+  });
+  it.each([true, "replay"] as const)("persists the non-certification outcome at %s in the MAC-bound CLI journal and resumes without network", async (retainedFinal) => {
+    const controller = controllerInput();
+    const fixture = await cliFixture(controller);
+    const harness = fetchHarness(controller, { retainedFinal });
+    const output: string[] = [];
+    expect(await runCli(fixture.args, line => output.push(line), { workerTermination: {
+      fetchImpl: harness.fetchImpl, sleep: async () => undefined, now: deterministicNow(Date.now()), allowHttpForTest: true,
+    } })).toBe(1);
+    const retainedPath = path.join(fixture.bundleDir, retainedFinal === true ? "10-worker-loss-response.json" : "11-worker-loss-replay-response.json");
+    const bytes = await readFile(retainedPath);
+    const checkpoint = JSON.parse(bytes.toString());
+    expect(checkpoint.phase).toBe("final_retained_recovery");
+    expect(checkpoint.payload.receipt.facts.certification_available).toBe(false);
+    const network = vi.fn<typeof fetch>(async () => { throw new Error("retained resume must not use network"); });
+    expect(await runCli([...fixture.args, "--resume", "true"], line => output.push(line), {
+      workerTermination: { fetchImpl: network, allowHttpForTest: true },
+    })).toBe(1);
+    expect(network).not.toHaveBeenCalled();
+    expect(await readFile(retainedPath)).toEqual(bytes);
+    expect(JSON.parse(output.at(-1)!).error).toMatch(/certification remains unavailable/i);
   });
 
   it("accepts an expired first command insertion only with exact Gateway-freeze replay evidence", async () => {

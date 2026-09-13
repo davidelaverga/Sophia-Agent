@@ -19,6 +19,7 @@ COPY --from=build --chown=node:node /app/tools/sophia-voice-lab/package.json /ap
 COPY --from=build --chown=node:node /app/tools/sophia-voice-lab/node_modules ./node_modules
 COPY --from=build --chown=node:node /app/tools/sophia-voice-lab/dist ./dist
 COPY --from=build --chown=node:node /app/tools/sophia-voice-lab/fixtures ./fixtures
+COPY --from=build --chown=node:node /app/tools/sophia-voice-lab/migrations ./migrations
 COPY --chown=node:node backend/migrations/2026_08_23_sophia_voice_lab.sql /app/backend/migrations/2026_08_23_sophia_voice_lab.sql
 
 # Install the Chromium revision pinned by package.json together with its Debian

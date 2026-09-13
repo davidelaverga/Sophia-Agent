@@ -181,6 +181,30 @@ describe("Voice Lab deployment health contract", () => {
     expect(parsed.startOperationSeconds).toBe(300);
   });
 
+  it.each(["true", "false"])("keeps quarantined diagnostics live without claiming admission or zero runs (kill=%s)", async kill => {
+    const config = testConfig({ SOPHIA_VOICE_LAB_KILL_SWITCH: kill,
+      SOPHIA_VOICE_LAB_ALLOWED_HOSTS: "127.0.0.1,localhost" });
+    const ledger = new MemoryVoiceLabLedger("test");
+    vi.spyOn(ledger, "health").mockResolvedValue({ ok: false, detail: "historical-recovery-quarantined" });
+    const count = vi.spyOn(ledger, "countActiveRuns");
+    const workers = vi.spyOn(ledger, "listLiveWorkers");
+    const service = new VoiceLabService(ledger, config, async () => []);
+    const server = await listen(createHttpApp(config, service, ledger, {
+      authenticate: vi.fn(async () => ({ subject: "quarantine-health-test", scopes: new Set(["voice_lab:read"]) })),
+    }), 0);
+    servers.push(server);
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("Missing quarantine-test server address");
+    const origin = `http://127.0.0.1:${address.port}`;
+    expect((await fetch(`${origin}/healthz`)).status).toBe(200);
+    const response = await fetch(`${origin}/readyz`);
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({ status: "not_ready", active_runs: null, mutation_ready: false,
+      components: { api: { ready: true }, database: { ready: false, detail: "historical-recovery-quarantined" } } });
+    expect(count).not.toHaveBeenCalled();
+    expect(workers).not.toHaveBeenCalled();
+  });
+
   it("accepts the container-local health host while retaining explicit host validation", async () => {
     const { blueprint } = await deploymentContract();
     const allowedHosts = requiredRuntimeValue(blueprint, "SOPHIA_VOICE_LAB_ALLOWED_HOSTS");

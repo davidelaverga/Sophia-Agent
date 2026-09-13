@@ -30,7 +30,7 @@ afterEach(async () => {
   await Promise.all(temporaryDirectories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
 });
 
-type Drift = "none" | "missing_app_join" | "missing_submission_outcome" | "thread_replay" | "poll_timeout_inflation" | "poll_after_conclusive";
+type Drift = "none" | "missing_app_join" | "missing_submission_outcome" | "missing_end_lifecycle" | "thread_replay" | "poll_timeout_inflation" | "poll_after_conclusive";
 
 interface Fixture {
   controllerInput: Record<string, unknown>;
@@ -45,6 +45,14 @@ interface Fixture {
 }
 
 describe("P01 official-source collector", () => {
+  it("does not infer terminal finalization from operation success and a manifest alone", async () => {
+    const fixture = await createFixture("missing_end_lifecycle");
+    let persisted = false;
+    await expect(collectAndSignP01Claim({ controllerInput: fixture.controllerInput, publicConfig: fixture.publicConfig,
+      platformPrivateKeyPath: fixture.platformKeyPath, persistCapture: async () => { persisted = true; }, dependencies: fixture.dependencies }))
+      .rejects.toThrow(/lacked a conclusive bounded operation poll/);
+    expect(persisted).toBe(false);
+  });
   it("derives and signs only the exact CLI/App Server install and fresh-task transcript", async () => {
     const fixture = await createFixture("none");
     let persisted: P01CaptureBundle | null = null;
@@ -283,10 +291,11 @@ async function createFixture(drift: Drift): Promise<Fixture> {
     { replay: false, submission_outcome: "durably_accepted", operation_state: "succeeded" },
     { condition_satisfied: true },
     { run_state: "active" },
-    { replay: false, submission_outcome: "durably_accepted", operation_state: "succeeded", cleanup_complete: true, evidence_state: "available", manifest_id: manifestId, manifest_sha256: manifestSha256 },
+    { replay: false, submission_outcome: "durably_accepted", operation_state: "succeeded", run_state: "pending_external_evidence", cleanup_complete: true, evidence_state: "available", manifest_id: manifestId, manifest_sha256: manifestSha256 },
     { cleanup_complete: true, evidence_state: "available", manifest_id: manifestId, manifest_sha256: manifestSha256 },
   ];
   if (drift === "missing_submission_outcome") delete data[1]!.submission_outcome;
+  if (drift === "missing_end_lifecycle") delete data[8]!.run_state;
   const completedSpineItems = tools.map((tool, index) => {
     const appContext = {
       connectorId: drift === "missing_app_join" && index === 5 ? "plugin_asdk_app_wrong" : APP_ID,

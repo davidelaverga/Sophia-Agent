@@ -4,6 +4,7 @@ import { z } from "zod";
 
 import { canonicalRequestHash, sha256 } from "../../src/security.js";
 import { ExternalAttestationSchema } from "../../src/service.js";
+import { classifyRetainedRecoveryResponse } from "../../src/retained-recovery-response.js";
 import {
   A03ExecutionRecordSchema,
   PublicAuthorityConfigSchema,
@@ -199,6 +200,8 @@ async function requestAttestationWithExactRetry(input: {
       let parsed: unknown;
       try { parsed = JSON.parse(bytes.toString("utf8")); }
       catch (error) { throw new RetryableAttestationError("Attestation endpoint returned an ambiguous invalid-JSON success response.", error); }
+      const retained = classifyRetainedRecoveryResponse(parsed, input.claim, sha256(bytes));
+      if (retained) throw retained;
       const envelope = AttestationReceiptSchema.parse(parsed);
       assertExpiredD02GatewayRecovery(envelope, input.claim);
       assertReceiptBinding(envelope, input.claim, input.ordinal === 2);

@@ -6,6 +6,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { canonicalRequestHash } from "../src/security.js";
+import { composeVoiceLabMigration } from "../src/migration-bundle.js";
 import { attestVoiceLabSchema, inspectMigrationPreflight, readReleaseSchemaSeal, readVoiceLabCatalog, VOICE_LAB_MIGRATION_SHA256, VOICE_LAB_SCHEMA_VERSION, VOICE_LAB_TABLES, writeReleaseSchemaSeal } from "../src/schema-attestation.js";
 
 class CatalogDatabase {
@@ -200,9 +201,15 @@ describe("pinned PostgreSQL schema attestation", () => {
   });
 
   it("pins the immutable centralized migration bytes and rejects a one-byte mutation", async () => {
-    const migration = await readFile(path.resolve(process.cwd(), "../../backend/migrations/2026_08_23_sophia_voice_lab.sql"));
+    const base = await readFile(path.resolve(process.cwd(), "../../backend/migrations/2026_08_23_sophia_voice_lab.sql"));
+    const recovery = await readFile(path.resolve(process.cwd(), "migrations/004_recovery_controls.sql"));
+    const migration = composeVoiceLabMigration(base, recovery);
     expect(createHash("sha256").update(migration).digest("hex")).toBe(VOICE_LAB_MIGRATION_SHA256);
     expect(createHash("sha256").update(Buffer.concat([migration, Buffer.from("\n-- tampered")])).digest("hex")).not.toBe(VOICE_LAB_MIGRATION_SHA256);
+    expect(() => composeVoiceLabMigration(Buffer.concat([base, Buffer.from(" ")]), recovery)).toThrow(/checksum/);
+    expect(() => composeVoiceLabMigration(base, Buffer.concat([recovery, Buffer.from(" ")]))).toThrow(/checksum/);
+    expect((migration.toString().match(/^begin;$/gm) ?? [])).toHaveLength(1);
+    expect((migration.toString().match(/^commit;$/gm) ?? [])).toHaveLength(1);
   });
 
   it("writes and strictly reads the release catalog seal used by web and worker startup", async () => {

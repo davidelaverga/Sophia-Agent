@@ -11,12 +11,14 @@ import { buildVoiceLabInitScript } from "./browser-init.js";
 import type { VoiceLabConfig } from "./config.js";
 import { VoiceLabError, labError, type DeploymentDependencies, type DeploymentIdentity, type LabEvent, type RunRecord } from "./domain.js";
 import { canonicalRequestHash, redact, sha256, validateAllowedOrigin } from "./security.js";
+import { isTerminalRecoveryComponentStatus } from "./recovery-control.js";
 
 export interface DriverStartResult {
   observedDeployment: DeploymentIdentity;
   events: Omit<LabEvent, "runId" | "seq" | "at">[];
   browserContextBinding?: D02BrowserContextBinding;
 }
+export type BrowserAcquisitionObserver = (event: DriverStartResult["events"][number], runtime: { engine: string; version: string }) => Promise<void>;
 export type D02BrowserContextBinding = {
   voice_lab_run_id_sha256: string;
   browser_worker_id_sha256: string;
@@ -456,9 +458,19 @@ export type BrowserStartStage =
   | "voice_start_recovery_reload"
   | "voice_startup_readiness";
 
+/** Recovery transport must not depend on retained transcripts, operations,
+ * provider handles or the original evidence-bearing run record. Authorization
+ * is still a separately verified, exact-bound recovery capability. */
+export interface RecoveryTransportBinding {
+  id: string;
+  testRunId: string;
+  cleanupObligationId: string;
+  target: { gatewayUrl: string };
+}
+
 export interface VoiceBrowserDriver {
   verifyTarget(run: RunRecord): Promise<DriverStartResult>;
-  start(run: RunRecord, frontendCapability: string, browserContextBinding?: D02BrowserContextBinding, onStage?: (stage: BrowserStartStage) => Promise<void>): Promise<DriverStartResult>;
+  start(run: RunRecord, frontendCapability: string, browserContextBinding?: D02BrowserContextBinding, onStage?: (stage: BrowserStartStage) => Promise<void>, onAcquired?: BrowserAcquisitionObserver): Promise<DriverStartResult>;
   schedule(run: RunRecord, operationId: string, utteranceId: string, audio: ResolvedAudio, delayMs?: number, activeTarget?: ActiveProductTarget): Promise<DriverOperationResult>;
   rotate(run: RunRecord, expectedEpoch: number, operationId: string, activeTarget?: ActiveProductTarget): Promise<DriverOperationResult>;
   continueSession(run: RunRecord, frontendContinueCapability: string): Promise<Omit<LabEvent, "runId" | "seq" | "at">[]>;
@@ -466,7 +478,7 @@ export interface VoiceBrowserDriver {
   drain(runId: string): Promise<Omit<LabEvent, "runId" | "seq" | "at">[]>;
   end(run: RunRecord, frontendFinalizeCapability: string, frontendCleanupCapability: string): Promise<DriverEndResult>;
   abort(run: RunRecord, reason: string, frontendFinalizeCapability?: string, frontendCleanupCapability?: string): Promise<DriverEndResult>;
-  recover(run: RunRecord, recoveryCapability: string): Promise<DriverEndResult>;
+  recover(run: RecoveryTransportBinding, recoveryCapability: string): Promise<DriverEndResult>;
   cancel(runId: string, reason: string): Promise<void>;
   hasSession(runId: string): boolean;
   readiness(): Promise<{ ok: boolean; detail: string; engine?: string; version?: string }>;
@@ -624,7 +636,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
     }
   }
 
-  async start(run: RunRecord, frontendCapability: string, browserContextBinding?: D02BrowserContextBinding, onStage?: (stage: BrowserStartStage) => Promise<void>): Promise<DriverStartResult> {
+  async start(run: RunRecord, frontendCapability: string, browserContextBinding?: D02BrowserContextBinding, onStage?: (stage: BrowserStartStage) => Promise<void>, onAcquired?: BrowserAcquisitionObserver): Promise<DriverStartResult> {
     if (this.#sessions.has(run.id) || this.#pendingProcesses.has(run.id) || this.#startingRuns.has(run.id)) throw new VoiceLabError(labError("BROWSER_ALREADY_STARTED", "Run already owns or is acquiring a browser process.", "conflict"));
     this.#startingRuns.add(run.id);
     const prepared = await (async () => {
@@ -640,6 +652,23 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
     const { exactBrowserContextBinding, deployment, frontendOrigin, ownership } = prepared;
     const observedDeployment = deployment.identity;
     const browser = ownership.browser;
+    const acquisition: DriverStartResult["events"][number] = {
+      kind: "harness.browser_process_acquired", source: "browser",
+      payload: { schema: "sophia_voice_lab_browser_process_ownership_v1",
+        voice_lab_run_id_sha256: sha256(run.id), cleanup_obligation_id_sha256: sha256(run.cleanupObligationId),
+        process_id_sha256: ownership.processIdSha256, browser_boot_id_sha256: ownership.bootIdSha256,
+        execution_epoch_sha256: ownership.executionEpochSha256, started_at: ownership.startedAt,
+        one_process_per_run: true, raw_process_id_excluded: true },
+      dedupeKey: `browser-process:${ownership.executionEpochSha256}`,
+    };
+    try {
+      // Await durable ownership before creating auth sessions or provider work.
+      await onAcquired?.(acquisition, { engine: "chromium", version: browser.version() });
+    } catch (error) {
+      const closed = await this.#closeOwnedBrowserProcess(ownership);
+      if (closed.closed) this.#pendingProcesses.delete(run.id);
+      throw error;
+    }
     const startupPush: StartupPushState = { active: true, overflow: false, queue: [] };
     const installPushBinding = async (targetContext: BrowserContext): Promise<void> => {
       await targetContext.exposeBinding(PAGE_PUSH_BINDING_NAME, (source, raw: unknown) => {
@@ -781,22 +810,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
         () => latestSessionNavigationResponse,
       );
       events.push(...this.#drainStartupPush(session));
-      events.push({
-        kind: "harness.browser_process_acquired",
-        source: "browser",
-        payload: {
-          schema: "sophia_voice_lab_browser_process_ownership_v1",
-          voice_lab_run_id_sha256: sha256(run.id),
-          cleanup_obligation_id_sha256: sha256(run.cleanupObligationId),
-          process_id_sha256: ownership.processIdSha256,
-          browser_boot_id_sha256: ownership.bootIdSha256,
-          execution_epoch_sha256: ownership.executionEpochSha256,
-          started_at: ownership.startedAt,
-          one_process_per_run: true,
-          raw_process_id_excluded: true,
-        },
-        dedupeKey: `browser-process:${ownership.executionEpochSha256}`,
-      });
+      events.push(acquisition);
       events.push({ kind: "deployment.verified", source: "canonical", payload: deployment.components, dedupeKey: `deployment:${run.id}:startup` });
       // A renderer snapshot is intentionally deferred until after start has
       // released the worker operation lease. The push receipts above already
@@ -1176,7 +1190,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
     }
   }
 
-  async recover(run: RunRecord, recoveryCapability: string): Promise<DriverEndResult> {
+  async recover(run: RecoveryTransportBinding, recoveryCapability: string): Promise<DriverEndResult> {
     const origin = validateAllowedOrigin(run.target.gatewayUrl, this.config.allowedOrigins).origin;
     const pathname = `${this.config.recoveryPathPrefix.replace(/\/$/, "")}/${encodeURIComponent(run.testRunId)}/recover`;
     try {
@@ -1187,7 +1201,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       const receipt = await response.json().catch(() => null) as Record<string, unknown> | null;
       const components = receipt?.components as Record<string, { status?: unknown }> | undefined;
       const durableReceipt = receipt?.receipt as Record<string, unknown> | undefined;
-      const liveComponentComplete = components !== undefined && ["canonical_session", "voice_provider", "builder", "auth_sessions"].every((key) => typeof components[key]?.status === "string" && !["pending", "failed", "unavailable", "retention_pending"].includes(String(components[key]!.status)));
+      const liveComponentComplete = components !== undefined && ["canonical_session", "voice_provider", "auth_sessions"].every((key) => isTerminalRecoveryComponentStatus(components[key]?.status));
       const builder = components?.builder as Record<string, unknown> | undefined;
       const builderReceipt = builder?.receipt && typeof builder.receipt === "object" ? builder.receipt as Record<string, unknown> : {};
       const authoritativeBuilderZero = builder?.status === "completed" && (builder?.cleanup_complete ?? builderReceipt.cleanup_complete) === true && (builder?.discovery_complete ?? builderReceipt.discovery_complete) === true && (builder?.authoritative_zero_tasks ?? builderReceipt.authoritative_zero_tasks) === true && Number.isInteger(builder?.discovered_task_count ?? builderReceipt.discovered_task_count) && Number(builder?.discovered_task_count ?? builderReceipt.discovered_task_count) >= 0;
@@ -1197,7 +1211,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       const purgeDue = typeof purgeDueRaw === "string" ? new Date(purgeDueRaw) : null;
       const purgeDueValid = purgeDue !== null && !Number.isNaN(purgeDue.getTime()) && purgeDue.toISOString() === purgeDueRaw;
       const retentionPending = receipt?.retention_purge_pending === true && receipt?.retention_purged === false && receipt?.retention_maintenance_complete === false && purgeDueValid && canonicalEvidence?.status === "retention_pending";
-      const retentionPurged = receipt?.retention_purge_pending === false && receipt?.retention_purged === true && receipt?.retention_maintenance_complete === true;
+      const retentionPurgedClaim = receipt?.retention_purge_pending === false && receipt?.retention_purged === true && receipt?.retention_maintenance_complete === true;
       const cleanupBound = receipt?.cleanup_obligation_id === run.cleanupObligationId;
       // Live resource cleanup is an independent terminal boundary. For an
       // allocation-free failure, product evidence may not exist yet, so the
@@ -1205,6 +1219,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       // is materialized. Evidence publication and retention remain separately
       // governed below and must never hold browser/provider cleanup open.
       const liveComplete = response.status === 200 && receipt?.ok === true && receipt?.complete === true && receipt?.live_cleanup_complete === true && receipt?.live_resources_zero === true && receipt?.test_run_id === run.testRunId && cleanupBound && liveComponentComplete && authoritativeBuilderZero && durable;
+      const retentionPurged = liveComplete && retentionPurgedClaim;
       const pending = response.status === 202 && receipt?.ok === true && receipt?.complete === false && receipt?.live_resources_zero !== true && receipt?.test_run_id === run.testRunId && cleanupBound && typeof receipt?.recovery_id === "string";
       const recoveryState = retentionPurged
         ? "retention-purged"

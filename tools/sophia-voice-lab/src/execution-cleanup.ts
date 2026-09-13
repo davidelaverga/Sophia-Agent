@@ -1,0 +1,165 @@
+import type { RunRecord } from "./domain.js";
+import { z } from "zod";
+import { canonicalRequestHash, sha256 } from "./security.js";
+import { isTerminalRecoveryComponentStatus } from "./recovery-control.js";
+import { executionEventSequencesValid } from "./execution-ownership.js";
+
+function isSha256(value: unknown): value is string { return typeof value === "string" && /^[a-f0-9]{64}$/.test(value); }
+
+export function parsePreservedExecutionCleanupProof(input: unknown): ExecutionEpochCleanupProof {
+  const hash = z.string().regex(/^[a-f0-9]{64}$/);
+  const seq = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
+  return z.object({ required: z.literal(true), ready: z.literal(true),
+    reason: z.enum(["direct_cleanup_before_process_death", "authoritative_recovery_after_process_death"]),
+    executionEpochSha256: hash, workerIdSha256: hash, browserLeaseEpoch: seq, proofSha256: hash,
+    eventSeqs: z.object({ processAcquired: seq, runtimeAcquired: seq, providerCleanup: seq.nullable(), authCleanup: seq.nullable(), processClosed: seq, recovery: seq.nullable() }).strict(),
+  }).strict().parse(input);
+}
+
+export function recoveryComponentComplete(events: import("./domain.js").LabEvent[], component: "canonical_session" | "voice_provider" | "builder" | "auth_sessions"): boolean {
+  return events.some((event) => {
+    if (event.kind !== "cleanup.recovery" || event.source !== "canonical" || event.payload.complete !== true) return false;
+    const receipt = event.payload.receipt as Record<string, unknown> | undefined;
+    const components = receipt?.components as Record<string, Record<string, unknown>> | undefined;
+    const status = components?.[component]?.status;
+    return receipt?.complete === true && (component === "builder" ? status === "completed" : isTerminalRecoveryComponentStatus(status));
+  });
+}
+
+export function authoritativeLiveCleanupComplete(events: Array<{ kind: string; source?: string; payload: Record<string, unknown> }>, run?: Pick<RunRecord, "testRunId" | "cleanupObligationId">): boolean {
+  if (!run) return false;
+  return events.some((event) => {
+    if (event.kind !== "cleanup.recovery" || event.source !== "canonical" || event.payload.complete !== true || event.payload.http_status !== 200) return false;
+    const receipt = event.payload.receipt as Record<string, unknown> | undefined;
+    if (receipt?.test_run_id !== run.testRunId || receipt.cleanup_obligation_id_sha256 !== sha256(run.cleanupObligationId)) return false;
+    const components = receipt?.components as Record<string, unknown> | undefined;
+    if (!["canonical_session", "voice_provider", "auth_sessions"].every(component => isTerminalRecoveryComponentStatus((components?.[component] as Record<string, unknown> | undefined)?.status))) return false;
+    const builder = components?.builder as Record<string, unknown> | undefined;
+    const builderReceipt = builder?.receipt && typeof builder.receipt === "object" ? builder.receipt as Record<string, unknown> : {};
+    return receipt?.complete === true && receipt?.live_cleanup_complete === true && receipt?.live_resources_zero === true && builder?.status === "completed" && (builder?.cleanup_complete ?? builderReceipt.cleanup_complete) === true && (builder?.discovery_complete ?? builderReceipt.discovery_complete) === true && (builder?.authoritative_zero_tasks ?? builderReceipt.authoritative_zero_tasks) === true && Number.isInteger(builder?.discovered_task_count ?? builderReceipt.discovered_task_count) && Number(builder?.discovered_task_count ?? builderReceipt.discovered_task_count) >= 0;
+  });
+}
+
+export function authCleanupConfirmed(event: { kind: string; payload: Record<string, unknown> }): boolean {
+  if (event.kind !== "auth.session_cleanup") return false;
+  if (event.payload.session_revoked === true && event.payload.cookies_cleared === true) return true;
+  const receipt = event.payload.receipt as Record<string, unknown> | undefined;
+  return event.payload.confirmed === true && receipt?.session_revoked === true && receipt?.cookies_cleared === true;
+}
+
+export type ExecutionEpochCleanupProof = {
+  required: boolean;
+  ready: boolean;
+  reason: string;
+  executionEpochSha256: string | null;
+  workerIdSha256: string | null;
+  browserLeaseEpoch: number | null;
+  proofSha256: string | null;
+  eventSeqs: {
+    processAcquired: number | null;
+    runtimeAcquired: number | null;
+    providerCleanup: number | null;
+    authCleanup: number | null;
+    processClosed: number | null;
+    recovery: number | null;
+  };
+};
+
+/**
+ * Join the run-owned Chromium process, its worker lease, and the exact provider,
+ * auth-session, and process-death receipts before the lease can be released.
+ * A recovery receipt is an allowed cleanup source only when it follows proven
+ * process death and authoritatively reports both provider and auth components.
+ */
+export function deriveExecutionEpochCleanupProof(
+  run: Pick<RunRecord, "id" | "testRunId" | "cleanupObligationId">,
+  events: import("./domain.js").LabEvent[],
+): ExecutionEpochCleanupProof {
+  const emptySeqs = { processAcquired: null, runtimeAcquired: null, providerCleanup: null, authCleanup: null, processClosed: null, recovery: null };
+  const acquisitions = events.filter((event) => event.kind === "harness.browser_process_acquired" && event.source === "browser");
+  const fail = (reason: string, partial: Partial<ExecutionEpochCleanupProof> = {}): ExecutionEpochCleanupProof => ({
+    required: true,
+    ready: false,
+    reason,
+    executionEpochSha256: null,
+    workerIdSha256: null,
+    browserLeaseEpoch: null,
+    proofSha256: null,
+    eventSeqs: emptySeqs,
+    ...partial,
+  });
+  // Missing retained evidence is not an allocation-free receipt. Pre-resource
+  // scenarios have their separate admission/zero-allocation certification path.
+  if (events.some(event => event.runId !== run.id)) return fail("execution_event_run_binding_invalid");
+  // Every selected receipt is addressed by sequence in the durable proof. A
+  // duplicate or non-ledger ordinal makes that address ambiguous, even when
+  // the competing event would otherwise be filtered out of this projection.
+  if (!executionEventSequencesValid(events)) return fail("execution_event_sequence_invalid");
+  if (acquisitions.length === 0) return fail("process_acquisition_evidence_missing");
+  if (acquisitions.length !== 1) return fail("process_acquisition_count_invalid");
+  const acquired = acquisitions[0]!;
+  const ap = acquired.payload;
+  const runHash = sha256(run.id);
+  const cleanupHash = sha256(run.cleanupObligationId);
+  if (ap.schema !== "sophia_voice_lab_browser_process_ownership_v1"
+    || ap.voice_lab_run_id_sha256 !== runHash || ap.cleanup_obligation_id_sha256 !== cleanupHash
+    || !isSha256(ap.process_id_sha256) || !isSha256(ap.browser_boot_id_sha256) || !isSha256(ap.execution_epoch_sha256)
+    || ap.one_process_per_run !== true || ap.raw_process_id_excluded !== true) return fail("process_acquisition_binding_invalid");
+  const epoch = String(ap.execution_epoch_sha256);
+  const processId = String(ap.process_id_sha256);
+  const bootId = String(ap.browser_boot_id_sha256);
+  const runtimes = events.filter((event) => event.kind === "harness.browser_runtime_acquired" && event.source === "canonical");
+  if (runtimes.length !== 1) return fail("runtime_acquisition_count_invalid", { executionEpochSha256: epoch, eventSeqs: { ...emptySeqs, processAcquired: acquired.seq } });
+  const runtime = runtimes[0]!;
+  if (runtime.seq <= acquired.seq) return fail("runtime_acquisition_order_invalid", { executionEpochSha256: epoch, eventSeqs: { ...emptySeqs, processAcquired: acquired.seq, runtimeAcquired: runtime.seq } });
+  const workerId = runtime.payload.worker_id_sha256;
+  const leaseEpoch = runtime.payload.browser_lease_epoch;
+  if (!isSha256(workerId) || !Number.isSafeInteger(leaseEpoch) || Number(leaseEpoch) < 1) return fail("runtime_lease_binding_invalid", { executionEpochSha256: epoch, eventSeqs: { ...emptySeqs, processAcquired: acquired.seq, runtimeAcquired: runtime.seq } });
+
+  const sameEpoch = (payload: Record<string, unknown>) => payload.voice_lab_run_id_sha256 === runHash
+    && payload.cleanup_obligation_id_sha256 === cleanupHash
+    && payload.process_id_sha256 === processId
+    && payload.browser_boot_id_sha256 === bootId
+    && payload.execution_epoch_sha256 === epoch;
+  const closes = events.filter((event) => event.kind === "cleanup.browser_context_closed" && event.source === "browser"
+    && event.seq > runtime.seq && event.payload.schema === "sophia_voice_lab_execution_epoch_browser_cleanup_v1"
+    && sameEpoch(event.payload) && event.payload.close_resolved === true && event.payload.browser_registry_absent === true
+    && event.payload.browser_process_close_resolved === true && event.payload.browser_process_disconnected === true
+    && event.payload.raw_process_id_excluded === true);
+  if (closes.length !== 1) return fail("process_death_proof_invalid", { executionEpochSha256: epoch, workerIdSha256: workerId, browserLeaseEpoch: Number(leaseEpoch), eventSeqs: { ...emptySeqs, processAcquired: acquired.seq, runtimeAcquired: runtime.seq } });
+  const closed = closes[0]!;
+  const providers = events.filter((event) => event.kind === "cleanup.provider_transport_closed" && event.source === "canonical"
+    && event.seq > runtime.seq && event.seq < closed.seq
+    && event.payload.schema === "sophia_voice_lab_execution_epoch_provider_cleanup_v1" && sameEpoch(event.payload)
+    && ["closed", "ended"].includes(String(event.payload.provider_stage))
+    && isSha256(event.payload.provider_event_sha256) && event.payload.exact_product_binding_validated === true
+    && event.payload.raw_process_and_provider_identifiers_excluded === true);
+  const auth = events.filter((event) => event.kind === "auth.session_cleanup" && event.source === "canonical"
+    && event.seq > runtime.seq && event.seq < closed.seq
+    && event.payload.cleanup_proof_schema === "sophia_voice_lab_execution_epoch_auth_cleanup_v1"
+    && sameEpoch(event.payload) && authCleanupConfirmed(event));
+  const direct = providers.length === 1 && auth.length === 1 && providers[0]!.seq < auth[0]!.seq;
+  const recoveries = events.filter((event) => {
+    if (event.kind !== "cleanup.recovery" || event.seq <= closed.seq) return false;
+    const receipt = event.payload.receipt as Record<string, unknown> | undefined;
+    return receipt?.test_run_id === run.testRunId && receipt.cleanup_obligation_id_sha256 === cleanupHash
+      && authoritativeLiveCleanupComplete([event], run) && recoveryComponentComplete([event], "voice_provider") && recoveryComponentComplete([event], "auth_sessions");
+  });
+  const recovered = recoveries.length === 1;
+  if (!direct && !recovered) return fail("provider_or_auth_cleanup_unconfirmed", {
+    executionEpochSha256: epoch,
+    workerIdSha256: workerId,
+    browserLeaseEpoch: Number(leaseEpoch),
+    eventSeqs: { ...emptySeqs, processAcquired: acquired.seq, runtimeAcquired: runtime.seq, providerCleanup: providers[0]?.seq ?? null, authCleanup: auth[0]?.seq ?? null, processClosed: closed.seq, recovery: recoveries[0]?.seq ?? null },
+  });
+  const eventSeqs = {
+    processAcquired: acquired.seq,
+    runtimeAcquired: runtime.seq,
+    providerCleanup: providers[0]?.seq ?? null,
+    authCleanup: auth[0]?.seq ?? null,
+    processClosed: closed.seq,
+    recovery: recoveries[0]?.seq ?? null,
+  };
+  const proofCore = { run_id_sha256: runHash, cleanup_obligation_id_sha256: cleanupHash, process_id_sha256: processId, browser_boot_id_sha256: bootId, execution_epoch_sha256: epoch, worker_id_sha256: workerId, browser_lease_epoch: Number(leaseEpoch), cleanup_path: direct ? "direct" : "recovery", event_seqs: eventSeqs };
+  return { required: true, ready: true, reason: direct ? "direct_cleanup_before_process_death" : "authoritative_recovery_after_process_death", executionEpochSha256: epoch, workerIdSha256: workerId, browserLeaseEpoch: Number(leaseEpoch), proofSha256: canonicalRequestHash(proofCore), eventSeqs };
+}

@@ -68,9 +68,9 @@ envVarGroups:
       - key: SOPHIA_VOICE_LAB_MAX_ROLLING_RUN_STARTS_PER_CALLER
         value: "40"
       - key: SOPHIA_VOICE_LAB_MAX_ROLLING_PROVIDER_SECONDS
-        value: "45000"
+        value: "unlimited"
       - key: SOPHIA_VOICE_LAB_MAX_ROLLING_PROVIDER_SECONDS_PER_CALLER
-        value: "45000"
+        value: "unlimited"
       - key: SOPHIA_VOICE_LAB_MAX_ROLLING_SUITES
         value: "1"
       - key: SOPHIA_VOICE_LAB_MAX_ROLLING_SUITES_PER_CALLER

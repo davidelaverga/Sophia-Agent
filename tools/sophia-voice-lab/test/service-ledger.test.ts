@@ -11,6 +11,7 @@ import { VoiceLabService, assertFreshProductAdmissionProof, targetAdmissionBindi
 import { assertTransition } from "../src/state-machine.js";
 import { VoiceLabWorker, assertResolvedAudioWithinAdmission, augmentOperationTimeoutWithInterruptedDriverError, certificationTerminalDecision, deriveCompletedVerdicts, evaluateScenarioAssertions, exactOutputLifecyclesAtEpoch, leaseHeartbeatIntervalMs, settleInterruptedExecution, suiteCertificationProjection, suiteCertificationState } from "../src/worker.js";
 import { caller, SHA, SHA_B, SHA_C, SHA_D, testConfig, testRun } from "./helpers.js";
+import { recovery as boundRecoveryFixture } from "./execution-cleanup-fixture.js";
 
 const target = {
   frontend_url: "http://frontend.test",
@@ -163,7 +164,7 @@ describe("service and durable memory-ledger contracts", () => {
     expect(JSON.stringify(error)).not.toContain("\\u0000");
   });
 
-  it("rebinds recovery to the current deployment only for a proven allocation-free terminal run", async () => {
+  it.each([false, true, null])("rebinds recovery only with durable zero-allocation history, previously allocated=%s", async (previouslyAllocated) => {
     const current = { frontend: "e".repeat(40), backend: "f".repeat(40), voice: "1".repeat(40) };
     const config = testConfig({
       SOPHIA_VOICE_LAB_TARGET_FRONTEND_URL: "http://frontend.test",
@@ -179,6 +180,15 @@ describe("service and durable memory-ledger contracts", () => {
     const run = testRun({ state: "failed_harness", cleanupComplete: false, terminalError, verdicts: { ...initialVerdicts(), harness: "fail", evidence: "fail" } });
     await ledger.createRunWithOperation(run, startOperation(run), { global: 1, caller: 1 });
     await ledger.cancelPendingRunOperations(run.id, null, terminalError);
+    if (previouslyAllocated) {
+      // A worker can die before publishing session/provider identifiers. Lease
+      // loss cannot erase the allocation intent or change its exact release.
+      const lease = await ledger.upsertBrowserLease(run.id, "lost-owner", 60);
+      await ledger.reapExpiredBrowserLeases(new Date(lease.expiresAt.getTime() + 1));
+      expect(await ledger.getBrowserLease(run.id)).toEqual(lease);
+      expect((await ledger.getRecoveryControl(run.id))?.browserAllocationEver).toBe(true);
+    }
+    if (previouslyAllocated === null) vi.spyOn(ledger, "getRecoveryControl").mockResolvedValue(null);
     let observedExpectedDeployment: unknown = null;
     const driver = {
       hasSession: () => false,
@@ -193,8 +203,8 @@ describe("service and durable memory-ledger contracts", () => {
 
     await worker.maintainSessions();
 
-    expect(observedExpectedDeployment).toEqual(current);
-    expect((await ledger.listAuthAudit(run.id)).some((entry) => entry.action === "capability:session:recover" && entry.detail.recovery_runtime_rebound === true)).toBe(true);
+    expect(observedExpectedDeployment).toEqual(previouslyAllocated === false ? current : run.target.expectedDeployment);
+    expect((await ledger.listAuthAudit(run.id)).some((entry) => entry.action === "capability:session:recover" && entry.detail.recovery_runtime_rebound === true)).toBe(previouslyAllocated === false);
   });
 
   it("terminalizes a nonterminal run whose durable failed operation survived a worker restart", async () => {
@@ -267,7 +277,9 @@ describe("service and durable memory-ledger contracts", () => {
       new CapabilityCodec(config.capabilitySecret, config.capabilityIssuer, config.capabilityTtlSeconds),
     );
 
-    await expect(worker.maintainSessions()).rejects.toThrow("simulated crash");
+    const reap = vi.spyOn(ledger, "reapExpiredBrowserLeases");
+    await expect(worker.maintainSessions()).resolves.toBeUndefined();
+    expect(reap).toHaveBeenCalledTimes(1);
     expect(await ledger.getEvidence(run.id)).toBeNull();
     expect((await ledger.listArtifacts(run.id)).filter((artifact) => artifact.kind === "manifest_attachment")).toHaveLength(1);
 
@@ -411,7 +423,7 @@ describe("service and durable memory-ledger contracts", () => {
       start: async () => { browserStarts += 1; throw new Error("must not allocate"); },
       recover: async () => ({ events: [
         { kind: "cleanup.browser_context_absent", source: "worker", payload: { browser_never_allocated: true }, dedupeKey: `cleanup:${accepted.run_id}:context-absent` },
-        { kind: "cleanup.recovery", source: "canonical", payload: { complete: true, receipt: { complete: true, live_cleanup_complete: true, live_resources_zero: true, components: { builder: { status: "completed", cleanup_complete: true, discovery_complete: true, authoritative_zero_tasks: true, discovered_task_count: 0 } } } }, dedupeKey: `cleanup:${accepted.run_id}:recovery` },
+        { ...boundRecoveryFixture((await fencedLedger.getRun(accepted.run_id!))!), dedupeKey: `cleanup:${accepted.run_id}:recovery` },
       ], artifacts: [] }),
       cancel: async () => undefined,
       readiness: async () => ({ ok: true, detail: "test", engine: "chromium", version: "test" }),
@@ -440,7 +452,7 @@ describe("service and durable memory-ledger contracts", () => {
     expect(() => assertTransition("pending_external_evidence", "completed")).not.toThrow();
     const abortedButCertified = testRun({ state: "aborted_driver_restart", cleanupComplete: true, verdicts: { harness: "pass", product: "unavailable", provider: "pass", auth: "pass", evidence: "pass" } });
     expect(suiteCertificationState([abortedButCertified])).toBe("completed");
-    const pending = testRun({ state: "pending_external_evidence", cleanupComplete: true, expiresAt: new Date(Date.now() - 1), verdicts: { harness: "unavailable", product: "unavailable", provider: "pass", auth: "pass", evidence: "unavailable" } });
+    const pending = testRun({ state: "pending_external_evidence", cleanupComplete: true, createdAt: new Date(Date.now() - 60_000), expiresAt: new Date(Date.now() - 1), verdicts: { harness: "unavailable", product: "unavailable", provider: "pass", auth: "pass", evidence: "unavailable" } });
     await ledger.createRunWithOperation(pending, startOperation(pending), { global: 1, caller: 1 });
     expect(suiteCertificationState([pending])).toBe("pending");
     expect((await ledger.listRunsCertificationDue(new Date(), 10)).map((run) => run.id)).toEqual([pending.id]);
@@ -625,6 +637,39 @@ describe("service and durable memory-ledger contracts", () => {
     await expect(service.speak(caller, { ...followupInput, idempotency_key: "p01-receipt-reuse", expected_cursor: postAccepted!.latestCursor })).rejects.toMatchObject({ detail: { code: "P01_UTTERANCE_LIMIT" } });
     const replay = await service.speak(caller, followupInput);
     expect(replay).toMatchObject({ operation_id: accepted.operation_id, status: "timeout", data: { replay: true, submission_outcome: "idempotent_replay" } });
+  });
+
+  it.each(["operation", "lifecycle", "cleanup", "evidence", "none"] as const)("finalization requires every durable prerequisite (missing %s)", async (missing) => {
+    const run = testRun({ state: "active" });
+    const end = { ...startOperation(run), type: "end" as const };
+    await ledger.createRunWithOperation(run, end, { global: 1, caller: 1 });
+    await ledger.upsertBrowserLease(run.id, "finalization-worker", 60);
+    if (missing !== "operation") {
+      const claimed = await ledger.claimNextOperation("finalization-worker", 30);
+      await ledger.markOperationExecuting(end.id, "finalization-worker", claimed!.operation.leaseEpoch);
+      await ledger.finishOperation(end.id, "finalization-worker", claimed!.operation.leaseEpoch, "succeeded", {}, null);
+    }
+    const current = (await ledger.getRun(run.id))!;
+    await ledger.updateRun(run.id, current.version, { state: missing === "lifecycle" ? "active" : "completed", cleanupComplete: missing !== "cleanup" });
+    if (missing !== "evidence") await ledger.saveEvidence({ runId: run.id, manifestId: randomUUID(), manifestSha256: sha256("finalization-manifest"), schemaVersion: "sophia.voice-lab.evidence.v1", revisionSeq: 1, artifactRefs: [], createdAt: new Date() });
+    const before = await ledger.listEvents(run.id, 0, 500);
+    const observed = await service.waitForTurn(caller, { run_id: run.id, operation_id: end.id, condition: "finalization_complete", after_cursor: 0, timeout_ms: 100 });
+    expect(observed).toMatchObject({ operation_id: null, status: missing === "none" ? "completed" : "timeout", data: { condition_satisfied: missing === "none", finalization_ready: missing === "none" } });
+    expect(await ledger.listEvents(run.id, 0, 500)).toEqual(before);
+    expect(await ledger.listOperations(run.id)).toHaveLength(1);
+  });
+
+  it("refuses finalization observation for missing, foreign, or non-end operations", async () => {
+    const first = testRun({ state: "active" });
+    const second = testRun({ state: "active" });
+    const start = startOperation(first);
+    const foreignEnd = { ...startOperation(second), type: "end" as const };
+    await ledger.createRunWithOperation(first, start, { global: 2, caller: 2 });
+    await ledger.createRunWithOperation(second, foreignEnd, { global: 2, caller: 2 });
+    for (const operationId of [randomUUID(), start.id, foreignEnd.id]) {
+      await expect(service.waitForTurn(caller, { run_id: first.id, operation_id: operationId, condition: "finalization_complete", after_cursor: 0, timeout_ms: 100 }))
+        .rejects.toMatchObject({ detail: { code: "FINALIZATION_OPERATION_MISMATCH" } });
+    }
   });
 
   it("bounded-waits in end so the next and final export call deterministically returns evidence", async () => {
@@ -1191,7 +1236,7 @@ describe("service and durable memory-ledger contracts", () => {
 
   it("hard-purges retained content at the signed deadline and gives only the owner a keyed typed result", async () => {
     const old = new Date(Date.now() - 3_600_000);
-    const run = testRun({ state: "completed", cleanupComplete: true, capturePolicy: { rawAudio: false, screenshot: true, video: false, retentionHours: 1 }, createdAt: old, updatedAt: old });
+    const run = testRun({ state: "completed", cleanupComplete: true, capturePolicy: { rawAudio: false, screenshot: true, video: false, retentionHours: 1 }, createdAt: old, updatedAt: old, expiresAt: new Date(old.getTime() + 60_000) });
     await ledger.createRunWithOperation(run, startOperation(run), { global: 1, caller: 1 });
     await ledger.appendEvent(run.id, "transcript.input.final", "product", { text: "purge me" });
     await ledger.recordAuthAudit({ runId: run.id, callerId: caller.subject, action: "test", capabilityJtiHash: sha256("jti"), argumentHash: sha256("args"), outcome: "allowed", detail: { principal: "voice-lab-user-1" }, observedAt: old });
@@ -1226,14 +1271,19 @@ describe("service and durable memory-ledger contracts", () => {
     const run = testRun({ state: "completed", cleanupComplete: true, retentionPurgeDueAt: due, retentionPurgePending: true });
     await ledger.createRunWithOperation(run, startOperation(run), { global: 1, caller: 1 });
     await ledger.appendEvent(run.id, "transcript.input.final", "product", { text: "must not survive outage" });
+    const recover = vi.fn(async () => { throw new Error("gateway unavailable"); });
     const outageDriver = {
-      recover: async () => { throw new Error("gateway unavailable"); },
+      recover,
       hasSession: () => false,
       readiness: async () => ({ ok: true, detail: "test" }),
       close: async () => undefined,
     } as any;
     const worker = new VoiceLabWorker("worker-retention-outage", ledger, config, audio, outageDriver, new CapabilityCodec(config.capabilitySecret, config.capabilityIssuer, config.capabilityTtlSeconds));
     await worker.maintainSessions();
+    expect(recover).toHaveBeenCalledWith({
+      id: run.id, testRunId: run.testRunId, cleanupObligationId: run.cleanupObligationId,
+      target: { gatewayUrl: run.target.gatewayUrl },
+    }, expect.any(String));
     expect(await ledger.getRun(run.id)).toBeNull();
     expect(await ledger.getRetentionTombstone(run.id, run.callerId)).toMatchObject({ remotePurgeStatus: "unconfirmed" });
   });
@@ -1293,7 +1343,7 @@ describe("service and durable memory-ledger contracts", () => {
     expect((await ledger.getEvidence(run.id))?.revisionSeq).toBe(20);
   });
 
-  it("publishes the same complete append-only manifest shape for a harness failure and uses canonical saved artifact identities", async () => {
+  it("publishes an append-only failure manifest with unproven browser cleanup and canonical saved artifact identities", async () => {
     const run = testRun({ scenarioId: "V-A01", state: "reserved" });
     await ledger.createRunWithOperation(run, startOperation(run), { global: 1, caller: 1 });
     const originalAppendEvents = ledger.appendEvents.bind(ledger);
@@ -1314,6 +1364,8 @@ describe("service and durable memory-ledger contracts", () => {
     const proposedArtifactId = randomUUID();
     await ledger.saveArtifact({ id: canonicalArtifactId, runId: run.id, kind: "canonical_receipt", contentType: "application/json", sha256: sha256(receiptBytes), bytes: receiptBytes, createdAt: run.createdAt });
     const recoveryReceipt = {
+      test_run_id: run.testRunId,
+      cleanup_obligation_id_sha256: sha256(run.cleanupObligationId),
       complete: true,
       live_cleanup_complete: true,
       live_resources_zero: true,
@@ -1336,7 +1388,7 @@ describe("service and durable memory-ledger contracts", () => {
       recover: async () => ({
         events: [
           { kind: "cleanup.browser_context_absent", source: "worker", payload: { browser_never_allocated: true }, dedupeKey: `cleanup:${run.id}:context-absent` },
-          { kind: "cleanup.recovery", source: "canonical", payload: { complete: true, receipt: recoveryReceipt }, dedupeKey: `cleanup:${run.id}:recovery` },
+          { kind: "cleanup.recovery", source: "canonical", payload: { complete: true, http_status: 200, receipt: recoveryReceipt }, dedupeKey: `cleanup:${run.id}:recovery` },
         ],
         artifacts: [{ id: proposedArtifactId, kind: "canonical_receipt", contentType: "application/json", bytes: receiptBytes }],
       }),
@@ -1356,7 +1408,8 @@ describe("service and durable memory-ledger contracts", () => {
     expect(startupStages[0]?.dedupeKey).toMatch(/^startup-stage:[0-9a-f-]+:1$/);
     expect(startupStages[1]?.dedupeKey).toMatch(/^startup-stage:[0-9a-f-]+:2$/);
     const failed = await ledger.getRun(run.id);
-    expect(failed).toMatchObject({ state: "failed_harness", cleanupComplete: true });
+    expect(failed).toMatchObject({ state: "failed_harness", cleanupComplete: false });
+    expect(await ledger.getBrowserLease(run.id)).not.toBeNull();
     const evidence = await ledger.getEvidence(run.id);
     expect(evidence).not.toBeNull();
     const manifestArtifact = await ledger.getArtifact(evidence!.manifestId);
@@ -1377,7 +1430,7 @@ describe("service and durable memory-ledger contracts", () => {
       failure: { owner: "harness", classification: "START_HARNESS_FAILURE" },
       raw_audio: { status: "not_captured" },
       video: { status: "unavailable" },
-      cleanup_audit: { browser_context_closed: true, browser_lease_released: true, live_execution_resources_zero: true, cleanup_complete: true },
+      cleanup_audit: { browser_context_closed: false, browser_lease_released: false, gateway_live_resources_zero: true, live_execution_resources_zero: false, cleanup_complete: false },
       cleanup_obligation: { cleanup_obligation_id_sha256: sha256(run.cleanupObligationId), raw_identifier_excluded: true },
     });
     for (const key of ["repository_commits", "run_lifecycle", "deployment_identity", "deployment_dependencies", "browser", "joins", "message_revisions", "utterances", "transcripts_and_turns", "media_receipts", "tool_receipts", "builder_receipts", "durable_projections", "ui_assertions", "metrics", "operations", "authorization_audit", "event_stream", "assertions", "human_summary"]) expect(manifest).toHaveProperty(key);
@@ -1385,6 +1438,14 @@ describe("service and durable memory-ledger contracts", () => {
     expect(JSON.stringify(manifest)).not.toContain(proposedArtifactId);
     expect(JSON.stringify(manifest)).not.toContain(run.cleanupObligationId);
     expect((manifest.operations as Array<{ state: string }>).every((operation) => !["accepted", "queued", "leased", "executing"].includes(operation.state))).toBe(true);
+    // A replacement worker cannot treat a reaped lease as process-death proof.
+    const lostLease = (await ledger.getBrowserLease(run.id))!;
+    await ledger.reapExpiredBrowserLeases(new Date(lostLease.expiresAt.getTime() + 1));
+    const replacement = new VoiceLabWorker("replacement-failure-evidence", ledger, config, audio, driver, new CapabilityCodec(config.capabilitySecret, config.capabilityIssuer, config.capabilityTtlSeconds));
+    await replacement.maintainSessions();
+    expect(await ledger.getRun(run.id)).toMatchObject({ cleanupComplete: false });
+    expect((await ledger.getRecoveryControl(run.id))?.browserAllocationEver).toBe(true);
+    expect((await ledger.listEvents(run.id, 0, 500)).events.some(event => event.kind === "cleanup.browser_lease_absent")).toBe(false);
   });
 
   it("never counts unbound product kinds toward readiness, cleanup, or verdicts", () => {

@@ -6,25 +6,33 @@ DeerFlow is a LangGraph-based AI super agent with sandbox execution, persistent 
 
 ## Architecture
 
-### Voice Lab historical risk acceptance
+### Voice Lab retained settlement receipts
 
-`SOPHIA_VOICE_LAB_HISTORICAL_ACCEPTANCE_JSON` optionally records explicit
-operator acceptance of exact historical cleanup gaps. Its version-one object
-contains `schema=sophia.voice-lab.historical-acceptance.v1`, a lowercase
-SHA-256 `authorization_sha256`, canonical UTC-millisecond `accepted_before`,
-and `obligations` pairing `cleanup_obligation_id_sha256` with
-`test_run_id_sha256`. These hashes are audit bindings, not credentials or
-signatures. Missing configuration retains the default blocking policy;
-malformed configuration refuses startup without logging its contents.
+For explicitly accepted ordinary historical provider-closure gaps, the Gateway
+supports `SOPHIA_VOICE_LAB_HISTORICAL_ACCEPTANCE_JSON`. Its strict v1 object has
+`schema: "sophia.voice-lab.historical-acceptance.v1"`, an
+`authorization_sha256` audit reference, canonical UTC-millisecond
+`accepted_before`, and 1–10,000 unique `obligations` containing exact
+`cleanup_obligation_id_sha256` / `test_run_id_sha256` pairs. Configure only
+operator-approved, source-read historical bindings; an absent setting preserves
+the default blocking behavior and malformed configuration rejects startup.
 
-Only listed, expired, closed, non-D02 obligations with successful exact auth
-cleanup and a provider-owner/settlement acknowledgment gap can stop blocking
-reaper readiness. They remain pending and unverified: no cleanup receipt,
-provider settlement, or deletion is manufactured. Readiness separately reports
-`accepted_historical_pending`, `blocking_pending`, and
-`historical_cleanup_verified=false`. New runs, unlisted obligations, auth
-failures, discovery errors, and D02 keep their existing checks. Deploy the code
-with voice gates closed before setting the reviewed configuration.
+This changes readiness, not cleanup facts. The reaper still attempts recovery,
+keeps `pending` unchanged, and reports `accepted_historical_pending`,
+`blocking_pending`, the authorization reference, and
+`historical_cleanup_verified: false`. Only closed, overdue, allowlisted non-D02
+obligations with successful exact auth cleanup and a typed missing-owner or
+missing-provider-settlement result qualify. Other errors and new obligations
+still degrade readiness. Exact historical auth cleanup preserves distinct new
+Lab runs as well as ordinary sessions; partial identity conflicts still fail.
+The D02 ownership/settlement path is not changed. No row, content, or settlement
+is fabricated or purged by accepting a historical exception.
+
+The internal D02 receipt lookup accepts a scoped, exact-request capability and
+retained identifier hashes. It returns only an already committed, independently
+verified Gateway settlement receipt, including after session content expires.
+It does not create a settlement, contact a provider, recreate session content,
+or certify complete resource cleanup. Missing receipts remain unavailable.
 
 ### MEM00 certification diagnostics
 
