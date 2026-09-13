@@ -763,8 +763,8 @@ describeRealPostgres('Voice Lab auth-ledger and cleanup-index real Postgres cont
         `INSERT INTO public.sophia_voice_lab_cleanup_obligations (
            cleanup_obligation_id, retention_expires_at, provider_expires_at
          ) VALUES (
-           $1, clock_timestamp() + interval '2 hours',
-           clock_timestamp() + interval '2 hours'
+           $1, statement_timestamp() + interval '2 hours',
+           statement_timestamp() + interval '2 hours'
          )`,
         [runtimeCleanupId],
       );
@@ -1568,5 +1568,23 @@ describeRealPostgres('Voice Lab auth-ledger and cleanup-index real Postgres cont
     await expect(runOperatorMigration('preflight')).rejects.toThrow(
       'Voice Lab product table sophia_session_messages required columns drifted',
     );
+  }, 90_000);
+  it('runs backend exact auth recovery with real product guards and a pending provider', async () => {
+    await resetProductObjects(pool);
+    await createProductPrerequisites(pool);
+    await runOperatorMigration('--apply');
+    const { stdout } = await execFileAsync('uv', [
+      'run', 'pytest', 'tests/test_voice_lab_auth_recovery_postgres.py', '-q',
+    ], {
+      cwd: resolve(process.cwd(), '../backend'),
+      env: {
+        ...process.env,
+        PYTHONPATH: '.',
+        SOPHIA_VOICE_LAB_PRODUCT_AUTH_FIXTURE_READY: 'YES',
+      },
+      timeout: 60_000,
+      maxBuffer: 1_000_000,
+    });
+    expect(stdout).toContain('1 passed');
   }, 90_000);
 });

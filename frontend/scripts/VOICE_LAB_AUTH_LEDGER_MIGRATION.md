@@ -141,3 +141,11 @@ inside that isolated `voice_lab_test` database, executes the same pinned
 operator `--apply` and preflight path, proves both cleanup expressions are
 selected by PostgreSQL `EXPLAIN`, and exercises the signed-binding update fences
 before removing its test objects.
+
+Use a loopback PostgreSQL 17 instance for this contract, with `uv` on `PATH`
+and the Python 3.12 backend environment synchronized using `uv sync --group dev`.
+The suite also invokes the actual backend auth-recovery function as
+`better_auth_app`: an exact expired grant and Lab session are removed while a
+pending provider admission, ordinary session, and unrelated revoked grant remain
+unchanged. Repeating recovery must be idempotent. This is a product-database
+cleanup regression, not provider settlement or authorization to open live gates.

@@ -3946,11 +3946,14 @@ def _recover_auth_sessions_sync(claims: VoiceLabClaims) -> dict[str, object]:
                         (claims.principal_id, token),
                     )
                     sessions_revoked += max(0, cursor.rowcount)
-                # Tombstones outlive the signed grant. Expired revoked rows are
-                # the only history eligible for bounded retention cleanup.
+                # Prune only the exact grants validated and locked above.
+                # This run's cleanup must not purge another run's history or
+                # acquire unrelated cleanup locks through a global sweep.
                 cursor.execute(
                     'DELETE FROM public."sophia_voice_lab_auth_grants" '
-                    "WHERE status = 'revoked' AND expires_at <= NOW()",
+                    "WHERE status = 'revoked' AND expires_at <= NOW() "
+                    "AND grant_fingerprint = ANY(%s)",
+                    ([row[0] for row in exact_grants],),
                 )
         return _component(
             "completed" if grants_revoked or sessions_revoked else "already_terminal",
@@ -4152,6 +4155,17 @@ async def recover_voice_lab_run(test_run_id: str, request: Request) -> JSONRespo
         voice_provider = _component("pending", code="cleanup_admission_in_flight")
         builder = _component("pending", code="cleanup_admission_in_flight")
         auth_sessions = _component("pending", code="cleanup_admission_in_flight")
+        if (
+            claims.scenario_id != "V-D02"
+            and cleanup_admission_fence.get("status") == "pending"
+            and cleanup_admission_fence.get("admission_closed") is True
+            and cleanup_admission_fence.get("code") == "cleanup_admission_in_flight"
+        ):
+            # Exact auth revocation reduces authority independently of provider
+            # settlement once admission is durably CLOSED. Keep all other
+            # components pending; this must never consume a provider admission
+            # or assert global zero. D02 retains its separate coupled protocol.
+            auth_sessions = await asyncio.to_thread(_recover_auth_sessions_sync, claims)
     canonical_evidence = await asyncio.to_thread(
         _recover_canonical_evidence_retention,
         claims,

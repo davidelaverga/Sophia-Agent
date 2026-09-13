@@ -499,6 +499,46 @@ def test_recovery_is_kill_safe_and_separates_accepted_from_complete(
     assert retained.json()["retention_purge_due_at"] == "2026-08-24T00:00:00+00:00"
 
 
+@pytest.mark.parametrize(
+    ("scenario", "closed", "code", "auth_expected"),
+    [
+        ("V-F01", True, "cleanup_admission_in_flight", True),
+        ("V-D02", True, "cleanup_admission_in_flight", False),
+        ("V-F01", False, "cleanup_admission_in_flight", False),
+        ("V-F01", "true", "cleanup_admission_in_flight", False),
+        ("V-F01", True, "cleanup_admission_fence_unavailable", False),
+    ],
+)
+def test_closed_generic_recovery_revokes_auth_without_certifying_pending_provider(
+    monkeypatch: pytest.MonkeyPatch, recovery_env: None,
+    scenario: str, closed: object, code: str, auth_expected: bool,
+) -> None:
+    client, components = _client(monkeypatch, retention_pending=True)
+    # Exercise component ordering after capability validation; the existing
+    # route-auth tests independently cover the signed admission boundary.
+    monkeypatch.setattr(voice_lab_recovery, "capability_for_voice_lab_recovery",
+        lambda request, test_run_id: _claims(scenario_id=scenario))
+    monkeypatch.setattr(voice_lab_recovery, "_close_live_cleanup_admission", Mock(return_value={
+        "status": "pending", "code": code, "admission_closed": closed,
+        "cleanup_admissions_pending": 1, "cleanup_admissions_overdue": 0,
+    }))
+    response = client.post("/internal/voice-lab/runs/run-001/recover",
+        headers=_headers(_payload(scenario_id=scenario)))
+    assert response.status_code == 202
+    result = response.json()
+    assert result["complete"] is False
+    assert result["live_resources_zero"] is False
+    assert result["live_cleanup_complete"] is False
+    for name in ("canonical", "provider", "builder"):
+        components[name].assert_not_called()
+    if auth_expected:
+        components["auth"].assert_called_once()
+        assert result["components"]["auth_sessions"]["status"] == "completed"
+    else:
+        components["auth"].assert_not_called()
+        assert result["components"]["auth_sessions"]["status"] == "pending"
+
+
 def test_recovery_identity_is_stable_per_run_and_attempt_is_capability_bound() -> None:
     first = _claims(jti="attempt-one", nonce="nonce-one")
     same_attempt = _claims(jti="attempt-one", nonce="nonce-one")
@@ -2138,6 +2178,7 @@ class _FakeCursor:
         self._rows: list[tuple[object, ...]] = []
         self.rowcount = 0
         self.mutations = 0
+        self.queries: list[tuple[str, tuple[object, ...]]] = []
 
     def __enter__(self):
         return self
@@ -2146,6 +2187,7 @@ class _FakeCursor:
         return None
 
     def execute(self, sql: str, params: tuple[object, ...] = ()) -> None:
+        self.queries.append((sql, params))
         self.rowcount = 0
         if 'SELECT "token", "userAgent"' in sql:
             self._rows = list(self.sessions)
@@ -2445,6 +2487,11 @@ def test_exact_frontend_marker_binds_and_recovers_auth_session(
         "ordinary_sessions_preserved": 0,
     }
     assert cursor.mutations == 3
+    grant_deletes = [(sql, params) for sql, params in cursor.queries
+        if sql.startswith('DELETE FROM public."sophia_voice_lab_auth_grants"')]
+    assert len(grant_deletes) == 1
+    assert "grant_fingerprint = ANY(%s)" in grant_deletes[0][0]
+    assert grant_deletes[0][1] == ([ledger[0]],)
 
 
 def test_allocation_free_recovery_preserves_ordinary_auth_session(
@@ -2475,4 +2522,7 @@ def test_allocation_free_recovery_preserves_ordinary_auth_session(
     }
     assert cursor.sessions == [ordinary_session]
     assert cursor.grants == []
-    assert cursor.mutations == 1  # bounded deletion of expired revoked Lab grants
+    assert cursor.mutations == 1  # empty exact-grant deletion cannot touch other runs
+    grant_deletes = [(sql, params) for sql, params in cursor.queries
+        if sql.startswith('DELETE FROM public."sophia_voice_lab_auth_grants"')]
+    assert grant_deletes[0][1] == ([],)
