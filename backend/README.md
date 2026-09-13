@@ -6,6 +6,26 @@ DeerFlow is a LangGraph-based AI super agent with sandbox execution, persistent 
 
 ## Architecture
 
+### Voice Lab historical risk acceptance
+
+`SOPHIA_VOICE_LAB_HISTORICAL_ACCEPTANCE_JSON` optionally records explicit
+operator acceptance of exact historical cleanup gaps. Its version-one object
+contains `schema=sophia.voice-lab.historical-acceptance.v1`, a lowercase
+SHA-256 `authorization_sha256`, canonical UTC-millisecond `accepted_before`,
+and `obligations` pairing `cleanup_obligation_id_sha256` with
+`test_run_id_sha256`. These hashes are audit bindings, not credentials or
+signatures. Missing configuration retains the default blocking policy;
+malformed configuration refuses startup without logging its contents.
+
+Only listed, expired, closed, non-D02 obligations with successful exact auth
+cleanup and a provider-owner/settlement acknowledgment gap can stop blocking
+reaper readiness. They remain pending and unverified: no cleanup receipt,
+provider settlement, or deletion is manufactured. Readiness separately reports
+`accepted_historical_pending`, `blocking_pending`, and
+`historical_cleanup_verified=false`. New runs, unlisted obligations, auth
+failures, discovery errors, and D02 keep their existing checks. Deploy the code
+with voice gates closed before setting the reviewed configuration.
+
 ### MEM00 certification diagnostics
 
 The staged retained-context transition planner is decision-only: unrelated revocations can refresh an epoch without reconnecting, while intersecting or unprovable deltas require rotation. Its bounded owner-filtered event reader requires an explicit terminal page and stable clocks; strict manifests contain no text. It is not wired into model execution yet and does not certify long-lived-context safety.

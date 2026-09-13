@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import inspect
+import json
 import threading
 import time
 import uuid
@@ -798,6 +799,83 @@ async def test_pending_reaper_revokes_only_exact_closed_non_d02_auth(
     builder.assert_not_awaited()
     purge.assert_not_called()
     assert sessions.record is record
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("case", [
+    "accepted", "auth_already_terminal", "settlement_missing", "not_listed", "future_cutoff", "no_policy",
+    "auth_pending", "auth_not_found", "reconcile_outage", "not_overdue", "open",
+])
+async def test_historical_acceptance_changes_readiness_not_cleanup(
+    monkeypatch: pytest.MonkeyPatch, case: str,
+) -> None:
+    from dataclasses import replace
+
+    from app.gateway.voice_lab_historical_acceptance import ENV_KEY
+
+    now = datetime(2026, 8, 23, 12, 0, tzinfo=UTC)
+    record = _session(now, run_id="accepted-history")
+    obligation = retention_worker._obligation_from_session(record)
+    acceptance = {
+        "schema": "sophia.voice-lab.historical-acceptance.v1",
+        "authorization_sha256": "e" * 64,
+        "accepted_before": _millis(now + timedelta(days=1) if case == "future_cutoff" else now),
+        "obligations": [{
+            "cleanup_obligation_id_sha256": hashlib.sha256(
+                ("other" if case == "not_listed" else obligation.cleanup_obligation_id).encode()
+            ).hexdigest(),
+            "test_run_id_sha256": hashlib.sha256(obligation.test_run_id.encode()).hexdigest(),
+        }],
+    }
+    if case == "no_policy":
+        monkeypatch.delenv(ENV_KEY, raising=False)
+    else:
+        monkeypatch.setenv(ENV_KEY, json.dumps(acceptance))
+    fence = {"status": "pending", "admission_closed": case != "open",
+             "code": "cleanup_admission_in_flight", "cleanup_admissions_overdue": 0 if case == "not_overdue" else 1}
+    reason = ("cleanup_admission_provider_settlement_unconfirmed" if case == "settlement_missing"
+              else "cleanup_admission_query_unavailable" if case == "reconcile_outage"
+              else "cleanup_admission_provider_owner_ack_pending")
+    monkeypatch.setattr(voice_lab_recovery, "_close_live_cleanup_admission", lambda *_args: fence)
+    reconcile = AsyncMock(return_value={"status": "pending", "code": reason})
+    monkeypatch.setattr(voice_lab_recovery, "_reconcile_overdue_cleanup_admissions", reconcile)
+    auth = Mock(return_value={"status": "pending" if case == "auth_pending" else "not_found" if case == "auth_not_found" else "already_terminal" if case == "auth_already_terminal" else "completed"})
+    monkeypatch.setattr(voice_lab_recovery, "_recover_auth_sessions_sync", auth)
+    provider = AsyncMock(side_effect=AssertionError("provider settlement must not be manufactured"))
+    monkeypatch.setattr(voice_lab_recovery, "_recover_voice_provider", provider)
+    purge = Mock(side_effect=AssertionError("accepted history must not be purged"))
+    monkeypatch.setattr(retention_worker, "_purge_expired_provisional_session", purge)
+    sessions = _SessionStore(record)
+    reaper = VoiceLabRetentionReaper(
+        session_store=sessions, artifact_registry=_ArtifactRegistry(),
+        interval_seconds=5, batch_size=5, lease_factory=_lease, clock=lambda: now,
+    )
+    monkeypatch.setattr(reaper, "_discover_cleanup_control", lambda *_args: ([], 0))
+    monkeypatch.setattr(reaper, "_discover", lambda *_args, **_kwargs: ([obligation], 0, 0))
+    monkeypatch.setattr(reaper, "_purge_completed_fences", lambda **_kwargs: 0)
+    # Only the unit readiness status needs a live task; no worker loop is started.
+    reaper._task = asyncio.current_task()
+    cycle = await reaper.run_once()
+    accepted = case in {"accepted", "auth_already_terminal", "settlement_missing"}
+    assert cycle.pending == 1
+    assert cycle.completed == 0
+    assert cycle.accepted_historical_pending == int(accepted)
+    if accepted:
+        assert auth.call_args.kwargs == {"preserve_other_runs": True}
+    assert reaper.readiness()["status"] == ("ready" if accepted else "degraded")
+    assert reaper.readiness()["last_cycle"]["blocking_pending"] == int(not accepted)
+    if accepted:
+        assert reaper.readiness()["historical_cleanup_verified"] is False
+        for extra in [{"pending": 2}, {"processing_failed": 1}, {"discovery_failed": True},
+                      {"conflicts": 1}, {"malformed": 1}, {"accepted_historical_pending": 2}]:
+            reaper._last_cycle = replace(cycle, **extra)
+            assert reaper.readiness()["status"] == "degraded"
+    provider.assert_not_awaited()
+    purge.assert_not_called()
+    assert sessions.record is record
+    monkeypatch.setattr(reaper, "_discover", lambda *_args, **_kwargs: ([], 0, 0))
+    assert (await reaper.run_once()).accepted_historical_pending == 0
+    reaper._task = None
 
 
 @pytest.mark.anyio

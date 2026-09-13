@@ -231,6 +231,17 @@ Configuration priority:
 
 ### Gateway API (`app/gateway/`)
 
+Voice Lab historical acceptance is parsed by
+`voice_lab_historical_acceptance.py` from the exact operator-reviewed
+`SOPHIA_VOICE_LAB_HISTORICAL_ACCEPTANCE_JSON`. The reaper keeps accepted
+provider-owner/settlement gaps pending while excluding only that exact subset
+from readiness blocking. It never certifies cleanup. For accepted historical
+scope only, exact auth recovery preserves distinct newer Lab runs; partial
+identity matches still fail. No runtime endpoint grants an exception, and D02
+is excluded. Regression coverage:
+`test_voice_lab_historical_acceptance.py`,
+`test_voice_lab_retention_reaper.py`, and `test_voice_lab_recovery.py`.
+
 FastAPI application on port 8001 with health check at `GET /health`.
 
 **Routers**:

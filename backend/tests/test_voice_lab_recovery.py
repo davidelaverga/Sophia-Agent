@@ -2461,6 +2461,43 @@ def test_delayed_run_a_recovery_cannot_revoke_active_run_b(
     assert cursor.mutations == 0
 
 
+@pytest.mark.parametrize("case", ["mixed", "other_only", "partial_binding", "default"])
+def test_accepted_history_auth_cleanup_preserves_distinct_new_runs(
+    monkeypatch: pytest.MonkeyPatch, case: str,
+) -> None:
+    marker_a, ledger_a = _session_marker(run_id="run-001", token="token-A")
+    marker_b, ledger_b = _session_marker(
+        run_id="run-C" if case == "partial_binding" else "run-B", token="token-B",
+    )
+    sessions = [("token-B", marker_b)]
+    grants = [ledger_b]
+    if case == "mixed":
+        sessions.insert(0, ("token-A", marker_a))
+        grants.insert(0, ledger_a)
+    cursor = _FakeCursor(sessions, grants)
+    monkeypatch.setenv("SOPHIA_VOICE_LAB_AUTH_DATABASE_URL", "postgres://safe-test")
+    monkeypatch.setenv("SOPHIA_VOICE_LAB_AUTH_TOMBSTONE_ACTIVE_KID", "v1")
+    monkeypatch.setenv("SOPHIA_VOICE_LAB_AUTH_TOMBSTONE_KEYS", json.dumps({"v1": AUTH_TOMBSTONE_SECRET}))
+    monkeypatch.setitem(sys.modules, "psycopg", SimpleNamespace(
+        connect=lambda *_args, **_kwargs: _FakeConnection(cursor)))
+    result = voice_lab_recovery._recover_auth_sessions_sync(
+        _claims(), preserve_other_runs=case != "default",
+    )
+    if case in {"partial_binding", "default"}:
+        assert result == {"status": "failed", "code": "auth_active_run_conflict"}
+        assert cursor.mutations == 0
+    else:
+        assert result["status"] == ("completed" if case == "mixed" else "already_terminal")
+        writes = [(sql, params) for sql, params in cursor.queries if sql.startswith(("UPDATE", "DELETE"))]
+        for _sql, params in writes:
+            assert "token-B" not in repr(params)
+            assert ledger_b[0] not in repr(params)
+        if case == "mixed":
+            assert any(params == (_claims().principal_id, "token-A") for _sql, params in writes)
+        assert result["sessions_revoked"] == int(case == "mixed")
+        assert result["grants_tombstoned"] == int(case == "mixed")
+
+
 def test_exact_frontend_marker_binds_and_recovers_auth_session(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

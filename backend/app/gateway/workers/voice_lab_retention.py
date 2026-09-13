@@ -38,6 +38,12 @@ from app.gateway.voice_lab_capability import (
     VoiceLabClaims,
     voice_lab_session_record_matches,
 )
+from app.gateway.voice_lab_historical_acceptance import (
+    ENV_KEY as HISTORICAL_ACCEPTANCE_ENV_KEY,
+)
+from app.gateway.voice_lab_historical_acceptance import (
+    parse_historical_acceptance,
+)
 from deerflow.agents.sophia_agent.paths import USERS_DIR
 from deerflow.sophia.session_store import SessionRecord, SessionTranscriptStore
 
@@ -926,6 +932,7 @@ class RetentionCycleResult:
     discovered: int = 0
     completed: int = 0
     pending: int = 0
+    accepted_historical_pending: int = 0
     conflicts: int = 0
     malformed: int = 0
     discovery_failed: bool = False
@@ -970,6 +977,10 @@ class VoiceLabRetentionReaper:
         self._last_cycle: RetentionCycleResult | None = None
         self._last_cycle_at: str | None = None
         self._last_error_type: str | None = None
+        self._historical_acceptance = parse_historical_acceptance(
+            os.getenv(HISTORICAL_ACCEPTANCE_ENV_KEY)
+        )
+        self._accepted_historical_pending: set[tuple[str, str]] = set()
 
     def start(self) -> None:
         if self._task is not None and not self._task.done():
@@ -999,7 +1010,8 @@ class VoiceLabRetentionReaper:
             cycle and (
                 cycle.discovery_failed
                 or cycle.processing_failed
-                or cycle.pending
+                or not 0 <= cycle.accepted_historical_pending <= cycle.pending
+                or cycle.pending > cycle.accepted_historical_pending
                 or cycle.conflicts
                 or cycle.malformed
             )
@@ -1015,6 +1027,8 @@ class VoiceLabRetentionReaper:
                     "discovered": cycle.discovered,
                     "completed": cycle.completed,
                     "pending": cycle.pending,
+                    "accepted_historical_pending": cycle.accepted_historical_pending,
+                    "blocking_pending": max(0, cycle.pending - cycle.accepted_historical_pending),
                     "conflicts": cycle.conflicts,
                     "malformed": cycle.malformed,
                     "discovery_failed": cycle.discovery_failed,
@@ -1024,6 +1038,11 @@ class VoiceLabRetentionReaper:
                 else None
             ),
             "raw_identity_excluded": True,
+            "historical_cleanup_verified": False if cycle and cycle.accepted_historical_pending else None,
+            "historical_acceptance_authorization_sha256": (
+                self._historical_acceptance.authorization_sha256
+                if self._historical_acceptance else None
+            ),
         }
 
     async def _run_loop(self) -> None:
@@ -1324,6 +1343,7 @@ class VoiceLabRetentionReaper:
 
     async def run_once(self) -> RetentionCycleResult:
         now = self._clock().astimezone(UTC)
+        self._accepted_historical_pending.clear()
         try:
             async with self._lease_factory() as acquired:
                 if not acquired:
@@ -1401,6 +1421,7 @@ class VoiceLabRetentionReaper:
                     discovered=len(obligations),
                     completed=completed,
                     pending=pending,
+                    accepted_historical_pending=len(self._accepted_historical_pending),
                     conflicts=conflicts,
                     malformed=malformed,
                     discovery_failed=discovery_failed,
@@ -1586,6 +1607,7 @@ class VoiceLabRetentionReaper:
         if due_fence is None:
             return False
 
+        reconciliation: dict[str, object] = {}
         admission_fence = await _lease_fenced_to_thread(
             recovery._close_live_cleanup_admission,
             claims,
@@ -1618,11 +1640,32 @@ class VoiceLabRetentionReaper:
                 and admission_fence.get("admission_closed") is True
                 and admission_fence.get("code") == "cleanup_admission_in_flight"
             ):
-                await _lease_fenced_to_thread(
+                accepted_scope = bool(
+                    self._historical_acceptance is not None
+                    and self._historical_acceptance.accepts(
+                        cleanup_id=obligation.cleanup_obligation_id,
+                        test_run_id=obligation.test_run_id,
+                        deadline=obligation.deadline,
+                        scenario_id=obligation.scenario_id,
+                        now=now,
+                    )
+                )
+                auth = await _lease_fenced_to_thread(
                     recovery._recover_auth_sessions_sync,
                     claims,
                     timeout=_STORE_IO_TIMEOUT_SECONDS,
+                    **({"preserve_other_runs": True} if accepted_scope else {}),
                 )
+                if (
+                    accepted_scope
+                    and auth.get("status") in {"completed", "already_terminal"}
+                    and reconciliation.get("status") == "pending"
+                    and reconciliation.get("code") in {
+                        "cleanup_admission_provider_owner_ack_pending",
+                        "cleanup_admission_provider_settlement_unconfirmed",
+                    }
+                ):
+                    self._accepted_historical_pending.add(obligation.identity)
             return False
         if record is not None:
             # Admission reconciliation can synchronously receive the owning

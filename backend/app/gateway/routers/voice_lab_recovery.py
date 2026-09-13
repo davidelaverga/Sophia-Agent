@@ -3775,7 +3775,9 @@ def _recover_canonical_evidence_retention(
     )
 
 
-def _recover_auth_sessions_sync(claims: VoiceLabClaims) -> dict[str, object]:
+def _recover_auth_sessions_sync(
+    claims: VoiceLabClaims, *, preserve_other_runs: bool = False,
+) -> dict[str, object]:
     dsn = (
         os.getenv("SOPHIA_VOICE_LAB_AUTH_DATABASE_URL")
         or os.getenv("BETTER_AUTH_DATABASE_URL")
@@ -3839,7 +3841,14 @@ def _recover_auth_sessions_sync(claims: VoiceLabClaims) -> dict[str, object]:
                     and marker.get("cleanup_obligation_id")
                     == claims.cleanup_obligation_id
                 ]
-                if len(exact_sessions) != len(lab_sessions):
+                if any(
+                    marker.get("test_run_id") != claims.test_run_id
+                    or marker.get("cleanup_obligation_id") != claims.cleanup_obligation_id
+                    for _, marker in lab_sessions
+                    if not (preserve_other_runs
+                            and marker.get("test_run_id") != claims.test_run_id
+                            and marker.get("cleanup_obligation_id") != claims.cleanup_obligation_id)
+                ):
                     return _component("failed", code="auth_active_run_conflict")
 
                 cursor.execute(
@@ -3875,6 +3884,9 @@ def _recover_auth_sessions_sync(claims: VoiceLabClaims) -> dict[str, object]:
                         row[1] != claims.test_run_id
                         or row[3] != claims.cleanup_obligation_id
                     )
+                    and not (preserve_other_runs
+                             and row[1] not in run_candidates
+                             and row[3] not in cleanup_candidates)
                     for row in grant_rows
                 ):
                     return _component("failed", code="auth_active_run_conflict")
