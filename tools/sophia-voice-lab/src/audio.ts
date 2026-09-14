@@ -201,6 +201,27 @@ export function assertAudioByteLimit(byteLength: number, maxBytes: number): void
   if (!Number.isSafeInteger(byteLength) || byteLength < 0 || byteLength > maxBytes) throw new VoiceLabError(labError("AUDIO_TOO_LARGE", "Audio exceeds the configured immutable byte limit.", "validation"));
 }
 
+// espeak-ng 1.51 emits placeholder lengths on non-seekable stdout and never
+// patches them in CloseWavFile. Finalize only its exact PCM16 mono header after
+// a successful, bounded child exit; never relax the general WAV parser.
+export function finalizeEspeakStdout(bytes: Buffer): Buffer {
+  if (bytes.length > 44 && (bytes.length - 44) % 2 === 0
+    && bytes.toString("ascii", 0, 4) === "RIFF" && bytes.readUInt32LE(4) === 0x7ffff024
+    && bytes.toString("ascii", 8, 16) === "WAVEfmt " && bytes.readUInt32LE(16) === 16
+    && bytes.readUInt16LE(20) === 1 && bytes.readUInt16LE(22) === 1
+    && bytes.readUInt32LE(28) === bytes.readUInt32LE(24) * 2
+    && bytes.readUInt16LE(32) === 2 && bytes.readUInt16LE(34) === 16
+    && bytes.toString("ascii", 36, 40) === "data" && bytes.readUInt32LE(40) === 0x7ffff000) {
+    const finalized = Buffer.from(bytes);
+    finalized.writeUInt32LE(finalized.length - 8, 4);
+    finalized.writeUInt32LE(finalized.length - 44, 40);
+    parseWav(finalized);
+    return finalized;
+  }
+  parseWav(bytes);
+  return bytes;
+}
+
 export function synthesizeEspeak(text: string, timeoutMs = 10_000, maxBytes = 8_000_000, signal?: AbortSignal): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const child = spawn("espeak-ng", ["--stdout", "--stdin", "-v", "en-us", "-s", "155"], { stdio: ["pipe", "pipe", "pipe"] });
@@ -250,8 +271,8 @@ export function synthesizeEspeak(text: string, timeoutMs = 10_000, maxBytes = 8_
       if (killTimer) clearTimeout(killTimer);
       if (settled) return;
       if (code !== 0) { finish(new VoiceLabError(labError("TTS_FAILED", `Local espeak-ng failed with exit code ${code}.`, "harness", true))); return; }
-      const bytes = Buffer.concat(stdout);
-      try { parseWav(bytes); }
+      let bytes: Buffer;
+      try { bytes = finalizeEspeakStdout(Buffer.concat(stdout)); }
       catch { finish(new VoiceLabError(labError("TTS_OUTPUT_INVALID", "Local espeak-ng returned empty or invalid WAV output.", "harness", true))); return; }
       finish(null, bytes);
     });
