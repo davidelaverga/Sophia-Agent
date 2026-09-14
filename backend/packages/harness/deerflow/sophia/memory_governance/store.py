@@ -26,6 +26,7 @@ from .models import (
     ExtractionRun,
     GovernanceReceipt,
     MemoryContract,
+    OwnerMemoryAuthority,
     ProjectionLease,
     ProviderHit,
     SourceInvalidationReceipt,
@@ -133,6 +134,19 @@ class SupabaseMemoryGovernanceStore:
         if not isinstance(rows, list) or len(rows) != 1:
             raise MemoryGovernanceUnavailable("memory_contract_unavailable")
         return MemoryContract.model_validate(rows[0])
+
+    def get_owner_authority(self, user_id: str) -> OwnerMemoryAuthority:
+        # Missing rows/columns and old schemas are unavailable, never legacy.
+        rows = self._request("GET", "sophia_memory_user_governance", params={
+            "select": "user_id,authority_state,authority_epoch,authority_declared_at",
+            "user_id": f"eq.{user_id}", "limit": "2",
+        })
+        if not isinstance(rows, list) or len(rows) != 1:
+            raise MemoryGovernanceUnavailable("memory_owner_authority_unavailable")
+        result = OwnerMemoryAuthority.model_validate(rows[0])
+        if result.user_id != user_id:
+            raise MemoryGovernanceUnavailable("memory_owner_authority_unavailable")
+        return result
 
     def get_user_governance(self, user_id: str) -> UserGovernance:
         rows = self._request(

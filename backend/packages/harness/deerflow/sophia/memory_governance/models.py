@@ -55,6 +55,13 @@ class UserGovernance(StrictModel):
     provider_subject: str
 
 
+class OwnerMemoryAuthority(StrictModel):
+    user_id: str
+    authority_state: Literal["unknown", "legacy", "governed"]
+    authority_epoch: int | None = Field(default=None, gt=0)
+    authority_declared_at: datetime | None = None
+
+
 class CandidateSource(StrictModel):
     session_id: str
     message_id: str
