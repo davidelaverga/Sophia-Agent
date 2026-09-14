@@ -2476,6 +2476,32 @@ def _build_async_task_record(
     return async_task
 
 
+async def _start_independent_builder_task(*, guard, runtime, state, tool_name, edit_context, configured_user_id):
+    """C2 source-only launch; no model-authored description or parent copy."""
+    from deerflow.sophia.memory_governance.builder_provenance import dispatch_independent_builder
+    if (edit_context is not None or tool_name != "start_builder_task"
+            or configured_user_id not in (None, guard.owner)
+            or _resolve_thread_id(runtime) != guard.context_id):
+        return "Builder request unavailable: an independent current task source is required."
+    guard.check()
+    if existing := _has_active_builder_task(state):
+        return f"A Builder task is already tracked: {existing}. Check its status before requesting another launch."
+    try:
+        outcome = await dispatch_independent_builder(guard=guard, owner_id=guard.owner,
+            parent_thread_id=guard.context_id, source_messages=state.get("messages", []), tool_call_id=runtime.tool_call_id)
+    except Exception:
+        return "Builder launch could not be confirmed. Do not assume no background work exists or automatically launch a replacement."
+    child = outcome["thread_id"]
+    now = _utcnow_iso()
+    record = {"task_id": child, "agent_name": _ASYNC_BUILDER_AGENT_NAME, "thread_id": child,
+        "run_id": outcome["run_id"], "status": outcome["status"], "created_at": now,
+        "last_checked_at": now, "last_updated_at": now}
+    message = (f"Builder run confirmed. task_id: {child}. Status: {outcome['status']}."
+        if outcome["confirmed"] else f"Builder launch unconfirmed. task_id: {child}. Preserve this identity; do not launch a replacement.")
+    return Command(update={"async_tasks": {child: record}, "messages": [ToolMessage(
+        content=message, tool_call_id=runtime.tool_call_id, name=tool_name)]})
+
+
 async def _start_builder_task_impl(
     description: str,
     task_type: str,
@@ -2519,6 +2545,21 @@ async def _start_builder_task_impl(
     if raw_state is None:
         raw_state = {}
     state = cast(SophiaState, raw_state)
+
+    from deerflow.agents.sophia_agent.middlewares.memory_context import active_governed_tool_guard
+    if memory_guard := active_governed_tool_guard():
+        return await _start_independent_builder_task(guard=memory_guard, runtime=runtime, state=state,
+            tool_name=tool_name, edit_context=edit_context, configured_user_id=configured_user_id)
+
+    # Missing middleware is not evidence that this owner is legacy. Resolve
+    # before reading enrichment or copying files; uncertainty starts no work.
+    from deerflow.sophia.memory_governance.owner_authority import require_legacy_memory_lane
+    try:
+        dispatch_owner, _, _ = _resolve_user_id(runtime, state, configured_user_id=configured_user_id,
+            explicit_tool_arg=user_id_arg)
+        require_legacy_memory_lane(dispatch_owner)
+    except Exception:
+        return "Builder unavailable: current owner authority and an admitted run are required. No launch was attempted."
 
     try:
         synthetic_context = normalize_synthetic_builder_context(

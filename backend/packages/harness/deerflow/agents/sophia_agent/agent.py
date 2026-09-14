@@ -17,7 +17,7 @@ from deepagents.middleware.async_subagents import (
     AsyncSubAgentMiddleware,
 )
 from langchain.agents import create_agent
-from langchain_anthropic import ChatAnthropic
+from deerflow.sophia.memory_governance.model_clients import GovernedChatAnthropic as ChatAnthropic
 from langchain_core.runnables import RunnableConfig
 
 from deerflow.agents.middlewares.anthropic_content_block_sanitizer import AnthropicContentBlockSanitizerMiddleware
@@ -306,8 +306,7 @@ def make_sophia_agent(config: RunnableConfig):
     # native ``async_tasks`` channel.
 
     logger.info(
-        "Creating Sophia companion agent: user_id=%s, platform=%s, ritual=%s, context_mode=%s",
-        user_id,
+        "Creating Sophia companion agent: platform=%s, ritual=%s, context_mode=%s",
         platform,
         ritual,
         context_mode,
@@ -316,11 +315,14 @@ def make_sophia_agent(config: RunnableConfig):
     # Voice needs short responses (1-3 sentences) — lower max_tokens reduces generation time.
     # Text mode gets more room for longer responses.
     voice_mode = platform in ("voice", "ios_voice")
+    from deerflow.agents.sophia_agent.middlewares.memory_context import MemoryContextEntryMiddleware, MemoryContextModelProducer, MemoryRunGuard
+    memory_guard = MemoryRunGuard(owner_id=user_id, config=cfg, scope=context_mode)
     model = ChatAnthropic(
         model="claude-haiku-4-5-20251001",
         api_key=os.environ.get("ANTHROPIC_API_KEY", ""),
         max_tokens=512 if voice_mode else 4096,
         timeout=60.0,
+        memory_authority_factory=memory_guard.final_dispatch_authority,
     )
     model = disable_langsmith_tracing_for_runnable(model)
 
@@ -334,6 +336,7 @@ def make_sophia_agent(config: RunnableConfig):
 
     # Middleware chain — order is load-bearing.
     middlewares = [
+        MemoryContextEntryMiddleware(memory_guard),
         # -1. Generic LLM error handling — OUTERMOST wrap_model_call, i.e.
         #    the LAST chance to handle a model exception. It converts any
         #    error the provider-fallback middleware below re-raises
@@ -396,7 +399,7 @@ def make_sophia_agent(config: RunnableConfig):
         # original task brief. Sits between Mem0 and Artifact so the prompt
         # block is in the assembled system message but doesn't interfere
         # with skill routing or memory retrieval.
-        BuildAwarenessMiddleware(),
+        BuildAwarenessMiddleware(memory_guard=memory_guard),
         # 13c. Lifecycle-tool observability — emits one structured log line per
         # tool_call for any lifecycle tool so we can measure
         # tool-selection health post-deploy. Positioned after BuildAwareness
@@ -404,7 +407,7 @@ def make_sophia_agent(config: RunnableConfig):
         # ArtifactMiddleware. Purely observational; never mutates state.
         LifecycleToolObserverMiddleware(),
         # 14. Artifact system
-        ArtifactMiddleware(SKILLS_PATH / "artifact_instructions.md"),
+        ArtifactMiddleware(SKILLS_PATH / "artifact_instructions.md", memory_guard=memory_guard),
         # 14a. Delegation ledger (Spec D D-1) — appends one entry per turn
         # to the append-only per-session JSONL the delegation digest /
         # brief extraction / read_session_context all read. Positioned
@@ -456,6 +459,7 @@ def make_sophia_agent(config: RunnableConfig):
     # 17. Summarization (config-driven trigger/keep policy)
     summarization_middleware = _create_summarization_middleware()
     if summarization_middleware is not None:
+        summarization_middleware.memory_guard = memory_guard
         middlewares.append(summarization_middleware)
 
     # Post-chain: prompt assembly, dangling-tool-call patching, caching, then title.
@@ -476,9 +480,10 @@ def make_sophia_agent(config: RunnableConfig):
     from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
     middlewares.extend(
         [
-            PromptAssemblyMiddleware(),
-            DanglingToolCallMiddleware(),
             LoopDetectionMiddleware(),
+            MemoryContextModelProducer(memory_guard),
+            PromptAssemblyMiddleware(user_id, context_id=cfg.get("thread_id"), memory_scope=context_mode),
+            DanglingToolCallMiddleware(),
             SafetyFinishReasonMiddleware(),
             AnthropicContentBlockSanitizerMiddleware(),
             # Prompt caching AFTER assembly + dangling-tool patching — adds
@@ -525,4 +530,4 @@ def make_sophia_agent(config: RunnableConfig):
     # Sophia typically needs 2 model calls per turn (response + tool + end_turn).
     # Set higher than default 25 to handle multi-tool turns gracefully.
     agent.recursion_limit = 50
-    return agent
+    return disable_langsmith_tracing_for_runnable(agent) if memory_guard.enabled else agent

@@ -15,11 +15,12 @@ from __future__ import annotations
 import json
 import logging
 import time
+from collections import Counter
 from typing import Any, NotRequired, override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import SummarizationMiddleware
-from langchain_core.messages import AnyMessage, HumanMessage, RemoveMessage, ToolMessage
+from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, RemoveMessage, ToolMessage
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 
 from deerflow.agents.sophia_agent.utils import log_middleware
@@ -62,6 +63,9 @@ class SophiaSummarizationMiddleware(SummarizationMiddleware):
     """
 
     state_schema = SophiaSummarizationState
+    # Set by the Sophia factory to the same guard used by entry and final
+    # model admission. Legacy standalone use retains its former behavior.
+    memory_guard = None
 
     @override
     def before_model(self, state: SophiaSummarizationState, *args: Any, **kwargs: Any) -> dict[str, Any] | None:
@@ -74,14 +78,27 @@ class SophiaSummarizationMiddleware(SummarizationMiddleware):
     def _sophia_summarize(self, state: SophiaSummarizationState, *, sync: bool) -> dict[str, Any] | None:
         """Core summarization logic that injects into system_prompt_blocks."""
         _t0 = time.perf_counter()
+        if self.memory_guard is not None:
+            self.memory_guard.check()
+        governed = self.memory_guard is not None and self.memory_guard.enabled
         messages = state["messages"]
+        if governed and self.memory_guard.is_rebuilt_source_view(state):
+            # Exact sources were independently checked at entry. Dropping them
+            # immediately would turn recovery into context loss. This is a
+            # per-run guard-owned predicate, not a caller-supplied receipt flag;
+            # normal final admission and payload limits still apply.
+            logger.info("[SophiaSummarization] preserve exact rebuilt source view")
+            return None
         self._ensure_message_ids(messages)
 
         # --- Legacy cleanup ---
         # If previous runs left summary HumanMessages in the checkpointer
         # (created by the default LangChain SummarizationMiddleware), remove
         # them now so the model doesn't echo them.
-        legacy_removals = [m for m in messages if _is_legacy_summary_message(m)]
+        # Governed entry has authenticated the full checkpoint/current source.
+        # A user's wording is never provenance for generated-summary cleanup.
+        # Unknown old state is refused by entry, not reclassified by a prefix.
+        legacy_removals = [] if governed else [m for m in messages if _is_legacy_summary_message(m)]
         if legacy_removals:
             logger.warning(
                 "[SophiaSummarization] cleaning up %d legacy summary HumanMessage(s) from state",
@@ -126,11 +143,11 @@ class SophiaSummarizationMiddleware(SummarizationMiddleware):
         # because Haiku echoes narrative text from the system prompt regardless
         # of XML tags or guard instructions.  The arc is structured key=value
         # data that the model treats as state, not speakable content.
-        emotional_arc = _extract_emotional_arc(messages_to_summarize)
+        emotional_arc = _extract_emotional_arc(messages_to_summarize, governed=governed)
         if emotional_arc:
             logger.info(
-                "[SophiaSummarization] emotional_arc extracted: %s",
-                emotional_arc.replace("\n", " | "),
+                "[SophiaSummarization] emotional_arc extracted chars=%d",
+                len(emotional_arc),
             )
         else:
             logger.info("[SophiaSummarization] no emit_artifact tool results found for arc")
@@ -175,14 +192,41 @@ class SophiaSummarizationMiddleware(SummarizationMiddleware):
 # ---------------------------------------------------------------------------
 
 
-def _extract_emotional_arc(messages: list[AnyMessage]) -> str:
+def _confirmed_artifacts(messages: list[AnyMessage]) -> list[dict]:
+    """Read the current producer contract inside an already admitted history.
+
+    An unacknowledged/malformed/ambiguous tool call is not a recorded artifact.
+    This structural join is not independent source or memory authorization.
+    """
+    from deerflow.sophia.tools.emit_artifact_contract import EMIT_ARTIFACT_RESULT, validate_emit_artifact_args
+
+    calls = [(index, call) for index, message in enumerate(messages) if isinstance(message, AIMessage)
+        for call in message.tool_calls if isinstance(call, dict) and isinstance(call.get("id"), str) and call["id"]]
+    acknowledgements = [(index, message) for index, message in enumerate(messages) if isinstance(message, ToolMessage)]
+    call_counts = Counter(call["id"] for _, call in calls)
+    ack_counts = Counter(message.tool_call_id for _, message in acknowledgements)
+    accepted = {message.tool_call_id: index for index, message in acknowledgements
+        if message.name == "emit_artifact" and message.status == "success"
+        and message.content == EMIT_ARTIFACT_RESULT and ack_counts[message.tool_call_id] == 1}
+    artifacts = []
+    for index, call in calls:
+        if call.get("name") != "emit_artifact" or call_counts[call["id"]] != 1 or accepted.get(call["id"], -1) <= index:
+            continue
+        try:
+            artifacts.append(validate_emit_artifact_args(call["args"]))
+        except Exception:
+            continue  # Never log an unvalidated model/tool argument body.
+    return artifacts
+
+
+def _extract_emotional_arc(messages: list[AnyMessage], *, governed: bool = False) -> str:
     """Extract emotional arc from emit_artifact tool results in compressed messages.
 
     Per spec: Before compressing old messages, extract emotional arc from
     their emit_artifact tool call results.
     """
-    artifacts: list[dict] = []
-    for msg in messages:
+    artifacts: list[dict] = _confirmed_artifacts(messages) if governed else []
+    for msg in ([] if governed else messages):
         if not isinstance(msg, ToolMessage):
             continue
         if getattr(msg, "name", None) != "emit_artifact":

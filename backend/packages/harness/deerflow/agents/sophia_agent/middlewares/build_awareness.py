@@ -79,8 +79,9 @@ class BuildAwarenessMiddleware(AgentMiddleware[BuildAwarenessState]):
 
     state_schema = BuildAwarenessState
 
-    def __init__(self) -> None:
+    def __init__(self, memory_guard=None) -> None:
         super().__init__()
+        self.memory_guard = memory_guard
         # Per-task last-refresh timestamps, keyed by task_id. Process-local;
         # rebuilt on graph restart. Bounded by the natural turnover in
         # async_tasks (terminal tasks aren't refreshed).
@@ -92,6 +93,10 @@ class BuildAwarenessMiddleware(AgentMiddleware[BuildAwarenessState]):
     def before_agent(
         self, state: BuildAwarenessState, runtime: Runtime
     ) -> dict | None:
+        if self.memory_guard is not None:
+            self.memory_guard.check()
+            if self.memory_guard.enabled:
+                return self._pilot_status_notice(state)
         return self._render_from_state(state)
 
     # --- async path: refresh from SDK then render ---------------------------
@@ -100,6 +105,11 @@ class BuildAwarenessMiddleware(AgentMiddleware[BuildAwarenessState]):
     async def abefore_agent(
         self, state: BuildAwarenessState, runtime: Runtime
     ) -> dict | None:
+        if self.memory_guard is not None:
+            import asyncio
+            await asyncio.to_thread(self.memory_guard.check)
+            if self.memory_guard.enabled:
+                return self._pilot_status_notice(state)
         _t0 = time.perf_counter()
         async_tasks = state.get("async_tasks") or {}
         if not async_tasks:
@@ -172,6 +182,17 @@ class BuildAwarenessMiddleware(AgentMiddleware[BuildAwarenessState]):
             return None
         blocks = list(state.get("system_prompt_blocks", []) or [])
         blocks.append(block)
+        return {"system_prompt_blocks": blocks}
+
+    @staticmethod
+    def _pilot_status_notice(state):
+        # Preserve durable tasks and unrelated state, but never turn retained
+        # descriptions/results into unlabelled input to the text pilot.
+        blocks = [block for block in (state.get("system_prompt_blocks") or [])
+                  if not block.lstrip().startswith("<build_status>")]
+        if state.get("async_tasks"):
+            blocks.append("<build_status>Builder task details are not currently verified for this text context. "
+                          "No task was cancelled or restarted. Do not infer status, result or delivery from retained task text.</build_status>")
         return {"system_prompt_blocks": blocks}
 
     async def _refresh_task_status(self, task: dict) -> dict | None:

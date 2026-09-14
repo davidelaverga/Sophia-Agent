@@ -226,6 +226,36 @@ class SupabaseMemoryGovernanceStore:
     def authorize_extraction_dispatch(self, **payload: object):
         return self._rpc("sophia_memory_authorize_extraction_dispatch", payload)
 
+    def register_builder_handoff(self, **payload: object):
+        return self._rpc("sophia_memory_register_builder_handoff", payload)
+
+    def get_builder_handoff(self, **payload: object):
+        return self._rpc("sophia_memory_get_builder_handoff", payload)
+
+    def bind_builder_source_run(self, **payload: object):
+        return self._rpc("sophia_memory_bind_builder_source_run", payload)
+
+    def get_builder_source_run(self, **payload: object):
+        return self._rpc("sophia_memory_get_builder_source_run", payload)
+
+    def get_builder_source_run_for_handoff(self, **payload: object):
+        return self._rpc("sophia_memory_get_builder_source_run_for_handoff", payload)
+
+    def authorize_model_dispatch(self, **payload: object):
+        return self._rpc("sophia_memory_authorize_model_dispatch", payload)
+
+    def check_model_source_use(self, **payload: object):
+        return self._rpc("sophia_memory_check_source_use", payload)
+
+    def authorize_legacy_model_dispatch(self, **payload: object):
+        return self._rpc("sophia_memory_authorize_legacy_model_dispatch", payload)
+
+    def get_model_result(self, **payload: object):
+        return self._rpc("sophia_memory_get_model_result", payload)
+
+    def record_model_result(self, **payload: object):
+        return self._rpc("sophia_memory_record_model_result", payload)
+
     def claim_source_recovery(self, *, user_id: str, lease_owner: str) -> SourceRecoveryClaim | None:
         raw = self._rpc("sophia_memory_claim_source_recovery", {"p_user_id": user_id, "p_lease_owner": lease_owner})
         if raw is None:

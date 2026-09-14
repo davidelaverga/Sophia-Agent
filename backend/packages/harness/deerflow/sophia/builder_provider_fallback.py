@@ -411,7 +411,7 @@ def build_fallback_chat_model():
     streaming keeps the connection alive during long generations (same
     read-timeout rationale documented in ``builder_agent.py``).
     """
-    from langchain_openai import ChatOpenAI
+    from deerflow.sophia.memory_governance.model_clients import fallback_openai_model as ChatOpenAI
 
     model_name = fallback_model_name()
     if not model_name:

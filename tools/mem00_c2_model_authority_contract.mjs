@@ -53,6 +53,13 @@ try {
     'c2-command-1',ref('request'),ref('source-action-content')]);
   const witness = Object.fromEntries(['owner_id','session_id','thread_id','command_key','event_id','message_id','source_row_id','source_version','sequence','memory_clear_epoch','content_ref'].map(k=>[k,source[k]]));
   witness.schema='mem00.recorded-input-source.v1';
+  const sourceUse = await rpc('sophia_memory_check_source_use', ['c2-synthetic', JSON.stringify(witness), JSON.stringify([witness])]);
+  assert.deepEqual(sourceUse, {schema:'mem00.source-use-check.v1', owner_id:'c2-synthetic', thread_id:thread,
+    current_source_event_id:witness.event_id, memory_clear_epoch:0, source_dependencies:[witness],
+    source_use_status:'current', memory_approval:'not_granted', extraction_eligibility:'unchanged', final_dispatch_permission:false}); checks++;
+  await denied(()=>rpc('sophia_memory_check_source_use', ['c2-synthetic', JSON.stringify(witness), '[]']), /memory_source_use_invalid/);
+  await denied(()=>rpc('sophia_memory_check_source_use', ['c2-synthetic', JSON.stringify({...witness, content_ref:ref('changed')}),
+    JSON.stringify([{...witness, content_ref:ref('changed')}])]), /memory_/);
   const admission = async (scope='life', manifest=[]) => rpc('sophia_memory_record_prompt_admission',[
     randomUUID(),'c2-synthetic','synthetic',scope,ref('query'),'mem0','synthetic','existing-project',before.provider_subject,
     'ok',0,0,0,JSON.stringify(manifest),'{}',manifest.length?'authorized':'zero_memory',null,'{}']);
