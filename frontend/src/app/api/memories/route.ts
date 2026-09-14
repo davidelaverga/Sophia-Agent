@@ -1,6 +1,7 @@
 import { type NextRequest, NextResponse } from 'next/server';
 
 import { logger } from '../../lib/error-logger';
+import { canonicalCommandResponse } from '../_lib/memory-command-response';
 import { fetchSophiaApi, resolveSophiaUserId } from '../_lib/sophia';
 
 export async function POST(req: NextRequest) {
@@ -19,15 +20,19 @@ export async function POST(req: NextRequest) {
       `/api/sophia/${encodeURIComponent(userId)}/memories`,
       { method: 'POST', body: JSON.stringify(body) },
     );
+    if (typeof body.idempotency_key === 'string') {
+      return canonicalCommandResponse(backendResponse, userId, body.idempotency_key, 'memory_manual_created');
+    }
     const responseText = await backendResponse.text();
     return new NextResponse(responseText, {
       status: backendResponse.status,
       headers: {
         'Content-Type': backendResponse.headers.get('content-type') || 'application/json',
+        'Cache-Control': 'no-store',
       },
     });
-  } catch (error) {
-    logger.logError(error, { component: 'api/memories', action: 'create_memory', request: req });
-    return NextResponse.json({ error: 'Failed to create memory' }, { status: 500 });
+  } catch {
+    logger.logError(new Error('Memory command unavailable'), { component: 'api/memories', action: 'create_memory' });
+    return NextResponse.json({ error: 'Failed to create memory' }, { status: 503, headers: { 'Cache-Control': 'no-store' } });
   }
 }

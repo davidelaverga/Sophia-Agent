@@ -472,6 +472,32 @@ class SupabaseMemoryGovernanceStore:
             )
         return tuple(result)
 
+    def current_memory(self, *, user_id: str, memory_id: UUID):
+        import json
+
+        from .command_result import CurrentMemoryView
+
+        raw = self._rpc("sophia_memory_current_view", {"p_user_id": user_id, "p_memory_id": str(memory_id)})
+        try:
+            if (not isinstance(raw, dict) or raw.get("provider_state_queried") is not False or raw.get("current_view_only") is not True
+                    or len(json.dumps(raw).encode()) > 2 * 1024 * 1024):
+                raise ValueError
+            view = CurrentMemoryView.model_validate(raw)
+            if view.owner_id != user_id or view.memory_id != memory_id:
+                raise ValueError
+            return view
+        except Exception:
+            raise MemoryGovernanceUnavailable("memory_current_view_unavailable") from None
+
+    def source_boundary(self, *, user_id: str, session_id: str, thread_id: str):
+        return self._rpc("sophia_memory_source_boundary", {"p_user_id": user_id, "p_session_id": session_id, "p_thread_id": thread_id})
+
+    def accept_source_action(self, **payload):
+        return self._rpc("sophia_memory_accept_source_action", payload)
+
+    def source_action_status(self, *, user_id: str, command_key: str):
+        return self._rpc("sophia_memory_lookup_source_action", {"p_user_id": user_id, "p_idempotency_key": command_key})
+
     def source_snapshot(self, *, user_id: str, session_id: str, thread_id: str):
         return self._rpc("sophia_memory_source_snapshot", {"p_user_id": user_id, "p_session_id": session_id, "p_thread_id": thread_id})
 

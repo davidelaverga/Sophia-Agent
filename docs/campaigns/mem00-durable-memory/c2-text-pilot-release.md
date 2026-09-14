@@ -1,6 +1,6 @@
 # MEM00-C2 text pilot — current release record
 
-Successful target: MEMORY_TEXT_PILOT_READY. Current status: IMPLEMENTING, not activated or deployed. C2 replaces the prior PROMOTE-only/five-core-run prerequisites for this owner-restricted pilot. Historical C1 records and failures remain valid history, not additional first-use gates. Latest failed iteration868; checkpoint863–867 reported; next five-failure checkpoint872.
+Successful target: MEMORY_TEXT_PILOT_READY. Current status: IMPLEMENTING, not activated or deployed. C2 replaces the prior PROMOTE-only/five-core-run prerequisites for this owner-restricted pilot. Historical C1 records and failures remain valid history, not additional first-use gates. Latest failed iteration869; checkpoint863–867 reported; next five-failure checkpoint872.
 
 ## Candidate and scope
 
@@ -48,6 +48,8 @@ Receipt-recovery integration selected next: existing2026_09_08_mem00_c1_command_
 
 ### Selected extraction worker and SDK boundary
 
+Published extraction commit c464e8ebd889970cd863833822bdf315a5abf7e8 has tree a71ab0ca71e02a144204c0d13b1fb4921b2bfe3a, verified by remote fetch bb38b2; the current intake/lifecycle slice follows this exact parent.
+
 Post-extraction joined review rerun7073da again passes41 checks/22 Gateway reads/two executed frontend cases with1,005 candidates; reporter SHA2560ae162a2f59aa34d09d752ed63f5fba00f080460fa4126ee3d73c8aabfd88711. Disposable SQL and transient synthetic transport files closed/removed, zero production mutations.
 
 Reused the existing frozen prompt renderer, exact input fingerprint, one-use extraction dispatch authority, source-target finalization, complete source-run enumeration and durable recovery receipts. No model, prompt template, Mem0 SDK/project, configuration or billing setting changed. SDK-internal retries are disabled only for governed extraction because each send requires its own current SQL admission; this is request execution fencing, not a Mem0 configuration change. Existing legacy extraction also checks current durable owner authority before template/model use.
@@ -64,6 +66,20 @@ Extraction input/dispatch/source-target/epoch checks759f98 pass117 tests. After 
 | One complete authenticated browser-to-hosted-model lifecycle | Not run on this candidate |
 | Davide account activation and practical handover | Pending trusted owner resolution and authorized rollout |
 
+### Source-intake serving and current lifecycle responses
+
+Final frontend rerun d47097 passes142 checks, including the explicit upload-intake refusal with zero upstream effects. Whitespace4bb7c2 passes; remote parent still c464e8e before publication.
+
+Selected existing authenticated source profile/boundary/action/status Gateway routes and fixed store RPCs, mounted in Gateway, plus the dedicated Next interceptor before the generic session proxy. It binds trusted owner/session/thread, preserves exact command key/content/epoch, refuses malformed paths and returns bounded content-free failures with no-store. C2 explicitly refuses memory-source upload intake without upstream calls; no upload service or paid dependency was selected. This is text-source transport, not memory approval. Ordinary composer and model input/provenance wiring remains pending. The selected intake SQL still revokes service_role execution; a reviewed forward pilot grant/profile activation is required before production use. Do not mistake owner-level disposable fixtures for a production least-privilege pass.
+
+Intake backend cd34ac passes63 tests including actual app mounting and HTTP transport; initial frontend eb32c6 passes72 tests. Complete command-result integration distinguishes immutable historical decisions from an exact current canonical read: current read outage/tombstone/wrong owner denies text without erasing a committed receipt or resubmitting the original input. Create/edit/forget/restore/delete response adapters are updated; restore remains an existing canonical operation, not permission to restore source or bulk memory. The deletion disposition does not claim provider purge, browser erasure or account deletion. Current-view SQL is already in the selected snapshot_inventory migration; no additional migration was added here.
+
+Command backend23e878 passes67 checks. Combined intake/worker/review/command suite6a5b71 passes310 tests with9 existing warnings. TypeScript4d9c62 exits0. Frontend93883e passes141 checks, including44 lifecycle cases with positive current canonical create/edit results, six command lookup checks,72 source cases and obsolete-contract rejection/legacy compatibility checks. A subsequent C2 upload-refusal regression is recorded separately after execution. None is a hosted model or actual browser lifecycle certificate.
+
+EI869: adjacent frontend suite51914c had6 failures/16 passes. Hypothesis: old fixture contracts expected shortened lifecycle receipts to succeed and omitted newly required no-store request options. Evidence: failures were four503-vs200 response expectations and two exact request-option assertions. Reused existing obsolete-response rejection tests, retained legacy-path coverage, added two positive full-envelope create/edit cases and three canonical recent-response denial checks;93883e passes141. This is fixture-contract integration, not a production failure. No repeated provider operations or production state; next checkpoint remains872.
+
+Next required joins: ordinary session composer/source acceptance and transcript synchronization, full Pool management, candidate decision UI/lost successful response recovery, final assembled text-model admission and retained context, C2 disabled consumer inheritance, exact provider cleanup, selected schema/serving grants and rollback qualification, then coordinated shared deployment/owned hosted journey/account activation. Preserve the two unresolved provider obligations and no new production authority assumptions.
+
 Provider uncertainty is tracked debt, not an automatic pilot-wide blocker. Keep exact ownership, last/next reconciliation observations, bounded retries and visible pending status. Never erase the two historically uncertain synthetic obligations to make a report pass.
 
 ## Shared deployment coordination
@@ -71,6 +87,8 @@ Provider uncertainty is tracked debt, not an automatic pilot-wide blocker. Keep 
 Fresh public reads10:47–10:48UTC on2026-09-14 pin Gateway, Graph, Voice and frontend to35c6467c. Frontend deployment dpl_HDssPdmDg3DCMMztw4kWzwBMKfkj. Schema advertises mem00.v1/epoch1 but earlier actual column reads showed the owner-authority/clear additions absent; advertisement is not migration proof.
 
 VT00 reports no C5 run started or gates opened; it released the provisional freeze for local/planning work. An explicit exclusive shared deployment window is still required before product mutation. MEM00 owns pilot memory cohort/profile; VT00 owns Lab admission/controls. Neither changes the other's settings. No production mutation was performed.
+
+Latest VT00 message: Lab-only inventory correlation repair bb123f0e004c4b15a40b23ab4a3529cdd0b6bfc5; only Lab MCP/worker deployment and guarded worker restart planned. Voice admission remains closed, no shared product changes reported (35c6467c). MEM00 acknowledged local-only integration and the need for an exclusive shared deployment window. This message is coordination evidence, not a fresh direct runtime pin or an idle-run assertion.
 
 Render's documented rollback restores the target health-check path as well as artifact/environment, so a new health path alone is not durable old-binary exclusion. Keep that deployment issue explicit; do not invent a paid service or rotate credentials without authority.
 

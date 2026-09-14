@@ -120,6 +120,11 @@ class CanonicalMemoryService:
         self._assert_supported_contract()
         return self.store.list_pool(user_id=self.owner_id, include_forgotten=include_forgotten, limit=limit)
 
+    def command_result(self, *, receipt: GovernanceReceipt, idempotency_key: str):
+        from .command_result import command_result
+
+        return command_result(owner_id=self.owner_id, command_key=idempotency_key, receipt=receipt, store=self.store)
+
     def command_receipt(self, *, idempotency_key: str):
         self._assert_supported_contract()
         if not 8 <= len(idempotency_key) <= 200:

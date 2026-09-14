@@ -18,6 +18,7 @@ from app.gateway.routers import (
     channels,
     mcp,
     memory,
+    memory_source,
     models,
     sessions,
     skills,
@@ -899,6 +900,7 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
 
     # Sessions API is mounted at /api/v1/sessions
     app.include_router(sessions.router)
+    app.include_router(memory_source.router)
 
     # Voice API is mounted at /api/sophia/{user_id}/voice/*
     app.include_router(voice.router)

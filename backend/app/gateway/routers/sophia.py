@@ -35,7 +35,8 @@ from app.gateway.voice_lab_capability import (
 from deerflow.agents.sophia_agent.paths import USERS_DIR
 from deerflow.agents.sophia_agent.utils import safe_user_path
 from deerflow.sophia.memory_governance.store import MemoryGovernanceConflict
-from deerflow.sophia.memory_governance.models import CommandReceipt
+from deerflow.sophia.memory_governance.models import CommandReceipt, GovernanceReceipt
+from deerflow.sophia.memory_governance.command_result import CanonicalCommandResult
 from deerflow.sophia.review_metadata_store import (
     apply_review_metadata_overlays,
     remove_review_metadata,
@@ -165,6 +166,11 @@ def _canonical_to_memory_item(memory) -> MemoryItem:
         created_at=str(memory.created_at) if memory.created_at else None,
         updated_at=str(memory.updated_at) if memory.updated_at else None,
     )
+
+
+def _canonical_command_response(service, receipt: GovernanceReceipt, key: str) -> JSONResponse:
+    result = service.command_result(receipt=receipt, idempotency_key=key)
+    return JSONResponse(result.model_dump(mode="json", by_alias=True), headers={"Cache-Control": "no-store"})
 
 
 def _resolve_session_record_owner(user_id: str, session_id: str) -> tuple[str, SessionRecord | None]:
@@ -2005,7 +2011,7 @@ async def list_memories(
 
 @router.post(
     "/{user_id}/memories",
-    response_model=MemoryItem,
+    response_model=MemoryItem | CanonicalCommandResult,
     summary="Create a memory",
 )
 async def create_memory(user_id: str, body: MemoryCreateRequest) -> MemoryItem:
@@ -2022,10 +2028,7 @@ async def create_memory(user_id: str, body: MemoryCreateRequest) -> MemoryItem:
                 user_tier=body.tier,
                 idempotency_key=body.idempotency_key,
             )
-            memory = next(item for item in service.list_pool() if item.memory_id == receipt.memory_id)
-            return _canonical_to_memory_item(memory)
-        except StopIteration:
-            raise HTTPException(status_code=503, detail="Canonical memory receipt unavailable")
+            return _canonical_command_response(service, receipt, body.idempotency_key)
         except (ValueError, MemoryGovernanceConflict):
             raise HTTPException(status_code=409, detail="Canonical memory operation conflict")
         except Exception as exc:
@@ -2103,7 +2106,7 @@ async def create_memory(user_id: str, body: MemoryCreateRequest) -> MemoryItem:
 
 @router.post(
     "/{user_id}/memories/legacy-import",
-    response_model=MemoryItem,
+    response_model=MemoryItem | CanonicalCommandResult,
     summary="Import one exact evidence-approved legacy memory",
 )
 async def import_legacy_memory(user_id: str, body: LegacyMemoryImportRequest) -> MemoryItem:
@@ -2122,9 +2125,8 @@ async def import_legacy_memory(user_id: str, body: LegacyMemoryImportRequest) ->
             user_tier=body.tier,
             idempotency_key=body.idempotency_key,
         )
-        memory = next(item for item in service.list_pool() if item.memory_id == receipt.memory_id)
-        return _canonical_to_memory_item(memory)
-    except (ValueError, StopIteration, MemoryGovernanceConflict):
+        return _canonical_command_response(service, receipt, body.idempotency_key)
+    except (ValueError, MemoryGovernanceConflict):
         raise HTTPException(status_code=409, detail="Legacy approval evidence conflict")
     except Exception as exc:
         logger.warning(
@@ -2136,7 +2138,7 @@ async def import_legacy_memory(user_id: str, body: LegacyMemoryImportRequest) ->
 
 @router.put(
     "/{user_id}/memories/{memory_id}",
-    response_model=MemoryItem,
+    response_model=MemoryItem | CanonicalCommandResult,
     summary="Update a memory",
 )
 async def update_memory(user_id: str, memory_id: str, body: MemoryUpdateRequest) -> MemoryItem:
@@ -2157,9 +2159,8 @@ async def update_memory(user_id: str, memory_id: str, body: MemoryUpdateRequest)
                 user_tier=str(metadata.get("tier") or "none"),
                 idempotency_key=body.idempotency_key,
             )
-            memory = next(item for item in service.list_pool() if item.memory_id == receipt.memory_id)
-            return _canonical_to_memory_item(memory)
-        except (ValueError, StopIteration, MemoryGovernanceConflict):
+            return _canonical_command_response(service, receipt, body.idempotency_key)
+        except (ValueError, MemoryGovernanceConflict):
             raise HTTPException(status_code=409, detail="Canonical memory revision conflict")
         except Exception as exc:
             logger.warning(
@@ -2251,82 +2252,70 @@ async def delete_memory(user_id: str, memory_id: str):
 
 @router.post(
     "/{user_id}/memories/{memory_id}/forget",
-    response_model=MemoryGovernanceReceiptResponse,
+    response_model=CanonicalCommandResult,
     summary="Forget a canonical memory",
 )
-async def forget_memory(user_id: str, memory_id: str, body: MemoryLifecycleRequest) -> MemoryGovernanceReceiptResponse:
+async def forget_memory(user_id: str, memory_id: str, body: MemoryLifecycleRequest) -> JSONResponse:
     _validate_user(user_id)
     if not _memory_flags(user_id).canonical_pool_read:
-        raise HTTPException(status_code=404, detail="Canonical memory is not enabled")
+        raise HTTPException(status_code=404, detail="Canonical memory is not enabled", headers={"Cache-Control": "no-store"})
     try:
-        receipt = _canonical_memory_service(user_id).forget(
+        service = _canonical_memory_service(user_id)
+        receipt = service.forget(
             memory_id=UUID(memory_id),
             expected_governance_revision=body.expected_governance_revision,
             idempotency_key=body.idempotency_key,
         )
-        return MemoryGovernanceReceiptResponse(
-            status="forgotten",
-            memory_id=str(receipt.memory_id),
-            content_revision=receipt.content_revision,
-            memory_governance_revision=receipt.memory_governance_revision,
-            user_catalog_generation=receipt.user_catalog_generation,
-            user_revocation_epoch=receipt.user_revocation_epoch,
-            provider_purge=receipt.provider_purge,
-        )
+        return _canonical_command_response(service, receipt, body.idempotency_key)
     except (ValueError, MemoryGovernanceConflict):
-        raise HTTPException(status_code=409, detail="Canonical memory revision conflict")
+        raise HTTPException(status_code=409, detail="Canonical memory revision conflict", headers={"Cache-Control": "no-store"})
     except Exception as exc:
         logger.warning(
             "MEM00 forget failed error_type=%s contentExcluded=true",
             exc.__class__.__name__,
         )
-        raise HTTPException(status_code=503, detail="Memory governance unavailable")
+        raise HTTPException(status_code=503, detail="Memory governance unavailable", headers={"Cache-Control": "no-store"})
 
 
 @router.post(
     "/{user_id}/memories/{memory_id}/restore",
-    response_model=MemoryGovernanceReceiptResponse,
+    response_model=CanonicalCommandResult,
     summary="Restore a forgotten canonical memory",
 )
-async def restore_memory(user_id: str, memory_id: str, body: MemoryLifecycleRequest) -> MemoryGovernanceReceiptResponse:
+async def restore_memory(user_id: str, memory_id: str, body: MemoryLifecycleRequest) -> JSONResponse:
     _validate_user(user_id)
     if not _memory_flags(user_id).canonical_pool_read:
-        raise HTTPException(status_code=404, detail="Canonical memory is not enabled")
+        raise HTTPException(status_code=404, detail="Canonical memory is not enabled", headers={"Cache-Control": "no-store"})
     try:
-        receipt = _canonical_memory_service(user_id).restore(
+        service = _canonical_memory_service(user_id)
+        receipt = service.restore(
             memory_id=UUID(memory_id),
             expected_governance_revision=body.expected_governance_revision,
             idempotency_key=body.idempotency_key,
         )
-        return MemoryGovernanceReceiptResponse(
-            status="active_projection_pending",
-            memory_id=str(receipt.memory_id),
-            content_revision=receipt.content_revision,
-            memory_governance_revision=receipt.memory_governance_revision,
-            user_catalog_generation=receipt.user_catalog_generation,
-            user_revocation_epoch=receipt.user_revocation_epoch,
-        )
+        return _canonical_command_response(service, receipt, body.idempotency_key)
     except (ValueError, MemoryGovernanceConflict):
-        raise HTTPException(status_code=409, detail="Canonical memory revision conflict")
+        raise HTTPException(status_code=409, detail="Canonical memory revision conflict", headers={"Cache-Control": "no-store"})
     except Exception as exc:
         logger.warning(
             "MEM00 restore failed error_type=%s contentExcluded=true",
             exc.__class__.__name__,
         )
-        raise HTTPException(status_code=503, detail="Memory governance unavailable")
+        raise HTTPException(status_code=503, detail="Memory governance unavailable", headers={"Cache-Control": "no-store"})
 
 
 @router.post(
     "/{user_id}/memories/{memory_id}/permanent-delete",
-    response_model=MemoryGovernanceReceiptResponse,
+    response_model=CanonicalCommandResult,
     summary="Fence and permanently delete canonical memory content",
 )
-async def permanently_delete_memory(user_id: str, memory_id: str, body: MemoryLifecycleRequest) -> MemoryGovernanceReceiptResponse:
+async def permanently_delete_memory(user_id: str, memory_id: str, body: MemoryLifecycleRequest) -> JSONResponse:
     _validate_user(user_id)
     if not _memory_flags(user_id).canonical_pool_read:
-        raise HTTPException(status_code=404, detail="Canonical memory is not enabled")
+        raise HTTPException(status_code=404, detail="Canonical memory is not enabled", headers={"Cache-Control": "no-store"})
     try:
-        privacy = _canonical_memory_service(user_id).permanently_delete(
+        service = _canonical_memory_service(user_id)
+        privacy = service.permanently_delete(
             memory_id=UUID(memory_id),
             expected_governance_revision=body.expected_governance_revision,
             idempotency_key=body.idempotency_key,
@@ -2334,27 +2323,15 @@ async def permanently_delete_memory(user_id: str, memory_id: str, body: MemoryLi
         receipt = privacy.receipt
         if receipt is None:
             raise RuntimeError("memory_privacy_receipt_missing")
-        return MemoryGovernanceReceiptResponse(
-            status=privacy.status,
-            memory_id=str(receipt.memory_id),
-            content_revision=receipt.content_revision,
-            memory_governance_revision=receipt.memory_governance_revision,
-            user_catalog_generation=receipt.user_catalog_generation,
-            user_revocation_epoch=receipt.user_revocation_epoch,
-            provider_purge=privacy.provider_purge,
-            canonical_memory_fence=privacy.canonical_memory_fence,
-            source_transcript=privacy.source_transcript,
-            derived_artifacts=privacy.derived_artifacts,
-            cache_invalidation=privacy.cache_invalidation,
-        )
+        return _canonical_command_response(service, receipt, body.idempotency_key)
     except (ValueError, MemoryGovernanceConflict):
-        raise HTTPException(status_code=409, detail="Canonical memory revision conflict")
+        raise HTTPException(status_code=409, detail="Canonical memory revision conflict", headers={"Cache-Control": "no-store"})
     except Exception as exc:
         logger.warning(
             "MEM00 permanent delete failed error_type=%s contentExcluded=true",
             exc.__class__.__name__,
         )
-        raise HTTPException(status_code=503, detail="Memory governance unavailable")
+        raise HTTPException(status_code=503, detail="Memory governance unavailable", headers={"Cache-Control": "no-store"})
 
 
 @router.get("/{user_id}/memories/commands/{idempotency_key}", response_model=MemoryCommandStatusResponse)
