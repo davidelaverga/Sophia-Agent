@@ -6,7 +6,8 @@ import { decodeStoredVoiceLabRun } from "./postgres-ledger.js";
 import { assessHistoricalRecovery } from "./recovery-backfill.js";
 import { canonicalRequestHash, sha256 } from "./security.js";
 import { historicalInventoryCommitment } from "./historical-inventory-commitment.js";
-import { readVoiceLabCatalog, VOICE_LAB_TABLES, VOICE_LAB_SCHEMA_VERSION, VOICE_LAB_MIGRATION_SHA256 } from "./schema-attestation.js";
+import { readVoiceLabCatalog, VOICE_LAB_TABLES } from "./schema-attestation.js";
+import { SERVICE_FENCE_SOURCE_BUNDLE_SHA256 } from "./service-fence-migration.js";
 
 /** Staged upgrade primitive, deliberately NOT called by normal service startup.
  * The deployment controller must first close gates/quiesce old services and
@@ -95,7 +96,7 @@ export async function upgradeHistoricalRecovery(pool: pg.Pool, partitions: Calle
     await client.query(parts[1]!);
     if (canonicalRequestHash(await readVoiceLabCatalog(client)) !== expectedV4CatalogSha256) throw new Error("UPGRADE_POSTFLIGHT_DRIFT");
     await client.query("update sophia_voice_lab.schema_metadata set schema_version=$1,migration_sha256=$2,catalog_sha256=$3,updated_at=now() where singleton=true",
-      [VOICE_LAB_SCHEMA_VERSION, VOICE_LAB_MIGRATION_SHA256, expectedV4CatalogSha256]);
+      [4, SERVICE_FENCE_SOURCE_BUNDLE_SHA256, expectedV4CatalogSha256]);
     await client.query("commit");
     return { schema: "sophia.voice-lab.v3-upgrade.v1", controlsBackfilled: controls.length,
       quarantinedIdentities: erased.length,

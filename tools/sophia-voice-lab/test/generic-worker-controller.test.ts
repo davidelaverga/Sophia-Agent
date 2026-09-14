@@ -25,6 +25,7 @@ async function fixture(mode: "ok" | "lost-response" | "open-after" | "lost-inges
   const ledger = new MemoryVoiceLabLedger("test");
   const service = new VoiceLabService(ledger, config, async () => []);
   const run = testRun({ state: "failed_harness" });
+  const liveDeployment = { ...run.target.expectedDeployment };
   config.readinessTarget = run.target;
   const deploymentAuthority = initialized.publicConfig.deployment_control;
   config.attestationAuthorities.deployment_control = { issuer: deploymentAuthority.issuer, subject: deploymentAuthority.subject,
@@ -59,8 +60,8 @@ async function fixture(mode: "ok" | "lost-response" | "open-after" | "lost-inges
         components: { database: { ready: true }, browser_worker: { runtime_ready: true, live_workers: 1, execution_gate_settled: true, observed_kill_switch_engaged: true,
           heartbeat_attestation: { service_version: config.serviceVersion, repository_candidate_sha: config.serviceVersion, worker_instance_id_sha256: sha256(owner), observed_at: new Date().toISOString() } },
           test_auth: { ok: true, frontend_kill_switch_engaged: !(replacementAt && mode === "open-after"), mutation_gate_order_safe: true },
-          target_environment: { builds: { frontend: { observed: run.target.expectedDeployment.frontend }, backend: { observed: run.target.expectedDeployment.backend, product_mutation_gate: gate },
-            voice: { observed: run.target.expectedDeployment.voice, product_mutation_gate: gate }, langgraph: { observed: "d".repeat(40) } } } } }, 503);
+          target_environment: { builds: { frontend: { observed: liveDeployment.frontend }, backend: { observed: liveDeployment.backend, product_mutation_gate: gate },
+            voice: { observed: liveDeployment.voice, product_mutation_gate: gate }, langgraph: { observed: "d".repeat(40) } } } } }, 503);
     }
     if (url.origin !== "https://api.render.com") throw new Error("Unexpected source origin");
     expect((init?.headers as Record<string, string>).authorization).toBe("Bearer source-render-credential");
@@ -81,8 +82,21 @@ async function fixture(mode: "ok" | "lost-response" | "open-after" | "lost-inges
     publicConfig: initialized.publicConfig, privateKeyPath: keys.deployment_control, checkpoint: async (entry: GenericWorkerControllerCheckpoint) => { entries.push(structuredClone(entry)); },
     fetchImpl: fetchImpl as typeof fetch, timeoutMs: 1000, intervalMs: 100, sleep: async () => undefined };
   const resume = () => Object.fromEntries(entries.map(entry => [entry.phase, entry.value]));
-  return { input, entries, resume, ledger, directory, renderPosts: () => renderPosts };
+  return { input, entries, resume, ledger, directory, liveDeployment, renderPosts: () => renderPosts };
 }
+
+it("rejects repair pins unsupported by legacy ingestion before any restart or journal mutation", async () => {
+  const f = await fixture();
+  const controlBefore = await f.ledger.getRecoveryControl(f.input.runId);
+  const expectedRecoveryDeployment = { frontend: "1".repeat(40), backend: "2".repeat(40), voice: "3".repeat(40) };
+  Object.assign(f.liveDeployment, expectedRecoveryDeployment);
+  await expect(executeGenericWorkerTermination(f.input)).rejects.toThrow(/deployment mismatch/);
+  expect(f.renderPosts()).toBe(0);
+  await expect(executeGenericWorkerTermination({ ...f.input, expectedRecoveryDeployment })).rejects.toThrow(/requires the historical deployment/);
+  expect(await f.ledger.getRecoveryControl(f.input.runId)).toEqual(controlBefore);
+  expect(f.entries).toEqual([]);
+  expect(f.renderPosts()).toBe(0);
+});
 
 it("consumes the durable claim, restarts once, checks replacement gates and signs owner-loss only", async () => {
   const f = await fixture();

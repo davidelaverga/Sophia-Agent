@@ -33,6 +33,11 @@ This runbook operates the isolated Voice Lab test plane against the ordinary dep
 
 The machine-readable deployment order, environment ownership, rollback points, cleanup exceptions, and quantitative gate state live in `deployment-gates.yaml`. Update that checkpoint from `unpassed` only from attached execution evidence.
 
+For the C4 already-retired non-D02 owner repair, follow
+`c4-service-owner-fence.md` before restarting the v5 Lab services. It adds an
+explicit quiesced v4-to-v5 database upgrade and separates receipt collection,
+publication and canonical settlement; none is a qualification pass by itself.
+
 VT00-C4 also requires the separate `c4_complete_built_sophia_journeys` gate:
 twenty complete fresh-process built-Sophia journeys with exact identities,
 ordinary authenticated controller behavior, input/output evidence, finalization,

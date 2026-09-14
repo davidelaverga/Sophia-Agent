@@ -3,7 +3,7 @@ import { canonicalRequestHash, sha256 } from "../../src/security.js";
 import { RecoveryControlBindingSchema, validateRecoveryAllocationBinding, type RecoveryControlRecord } from "../../src/recovery-control.js";
 import { parseGenericOwnerDispatch, genericOwnerLossDispatchFromControl } from "../../src/generic-owner-dispatch.js";
 import { GenericOwnerLossReceiptSchema, verifyGenericOwnerLoss, parseVerifiedGenericOwnerLoss, type GenericOwnerLossReceipt } from "../../src/generic-owner-loss.js";
-import { readGenericWorkerPreflight, readGenericWorkerReplacementPreflight, genericRecoveryOrigin } from "./generic-worker-preflight.js";
+import { readGenericWorkerPreflight, readGenericWorkerReplacementPreflight, genericRecoveryOrigin, RecoveryProductDeploymentSchema } from "./generic-worker-preflight.js";
 import { readRenderWorkerSnapshot } from "./render-worker-controller.js";
 import { retryableRenderObservation } from "./render-inventory.js";
 import { signGenericOwnerLossReceipt, validateGenericOwnerSigningCustody } from "./crypto.js";
@@ -15,6 +15,7 @@ const time = z.string().datetime();
 const preparedSchema = z.object({
   requestId: z.string().uuid(), controlBindingSha256: hash, allocationBindingSha256: hash, workerServiceIdSha256: hash,
   expectedLabSha: z.string().regex(/^[a-f0-9]{40}$/), expectedLangGraphSha: z.string().regex(/^[a-f0-9]{40}$/),
+  expectedRecoveryDeployment: RecoveryProductDeploymentSchema.optional(),
   preparedProofSha256: hash, readinessResponseSha256: hash, before: GenericOwnerLossReceiptSchema.shape.before,
 }).strict();
 const consumedSchema = z.object({ dispatchClaimSha256: hash, actionRequestSha256: hash, actionRequestedAt: time }).strict();
@@ -32,6 +33,7 @@ export type GenericWorkerControllerCheckpoint =
 export async function executeGenericWorkerTermination(input: {
   runId: string; requestId: string; workerServiceId: string; voiceLabOrigin: string;
   expectedLabSha: string; expectedLangGraphSha: string; renderBearer: string; deploymentBearer: string;
+  expectedRecoveryDeployment?: z.infer<typeof RecoveryProductDeploymentSchema>;
   publicConfig: PublicAuthorityConfig; privateKeyPath: string;
   checkpoint: (entry: GenericWorkerControllerCheckpoint) => Promise<void>;
   resume?: unknown; fetchImpl?: typeof fetch; now?: () => Date; sleep?: (ms: number) => Promise<void>;
@@ -66,6 +68,15 @@ export async function executeGenericWorkerTermination(input: {
     return { control, dispatchAllowed: envelope.dispatchAllowed };
   };
   let { control } = await request({ action: "inspect", runId: input.runId });
+  const recoveryDeployment = RecoveryProductDeploymentSchema.parse(input.expectedRecoveryDeployment ?? control.binding.expectedDeployment);
+  // The legacy ingestion contract binds the historical product deployment.
+  // Refuse an incompatible repair target before consuming a restart permit.
+  if (canonicalRequestHash(recoveryDeployment) !== canonicalRequestHash(control.binding.expectedDeployment)) {
+    throw new Error("Generic legacy recovery requires the historical deployment; use the service-fence repair contract.");
+  }
+  if (resume && canonicalRequestHash(resume.prepared.expectedRecoveryDeployment ?? control.binding.expectedDeployment) !== canonicalRequestHash(recoveryDeployment)) {
+    throw new Error("Generic source checkpoint recovery deployment mismatch.");
+  }
   const publish = async (receipt: GenericOwnerLossReceipt) => {
     const persisted = await request({ action: "ingest_owner_loss", runId: input.runId, expectedVersion: control.version, receipt });
     if (persisted.dispatchAllowed || !persisted.control.genericOwnerLoss) throw new Error("Generic owner receipt persistence is unconfirmed.");
@@ -84,6 +95,7 @@ export async function executeGenericWorkerTermination(input: {
     return { status: "owner_loss_verified" as const, receipt: resume.receipt, proof, replacementObserved: true, replay: true };
   }
   const preflightInput = () => ({ control, workerServiceId: input.workerServiceId, voiceLabOrigin: origin, expectedLabSha: input.expectedLabSha,
+    expectedRecoveryDeployment: recoveryDeployment,
     expectedLangGraphSha: input.expectedLangGraphSha, renderBearer: input.renderBearer, fetchImpl, now, allowHttpForTest: input.allowHttpForTest === true });
   let prepared = resume?.prepared;
   let accepted = resume?.accepted;
@@ -100,6 +112,7 @@ export async function executeGenericWorkerTermination(input: {
     if (!control.genericOwnerDispatch) ({ control } = await request({ action: "prepare", runId: input.runId, expectedVersion: control.version, requestId: input.requestId }));
     prepared = preparedSchema.parse({ requestId: input.requestId, controlBindingSha256: before.controlBindingSha256, allocationBindingSha256: before.allocationBindingSha256,
       workerServiceIdSha256: before.workerServiceIdSha256, expectedLabSha: input.expectedLabSha, expectedLangGraphSha: input.expectedLangGraphSha,
+      expectedRecoveryDeployment: recoveryDeployment,
       readinessResponseSha256: before.readinessResponseSha256, before: before.before, preparedProofSha256: control.genericOwnerDispatch!.proofSha256 });
     await input.checkpoint({ phase: "prepared", value: prepared });
     const consumed = await request({ action: "consume", runId: input.runId, expectedVersion: control.version, preparedProofSha256: prepared.preparedProofSha256 });

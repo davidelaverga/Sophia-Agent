@@ -5,6 +5,7 @@ import { readRenderWorkerSnapshot } from "./render-worker-controller.js";
 
 export const GENERIC_RECOVERY_ORIGIN = "https://sophia-voice-lab-mcp.onrender.com";
 const sha = z.string().regex(/^[a-f0-9]{40}$/);
+export const RecoveryProductDeploymentSchema = z.object({ frontend: sha, backend: sha, voice: sha }).strict();
 const closedProductGate = z.object({ valid: z.literal(true), open: z.literal(false), voice_lab_enabled: z.literal(false), voice_lab_kill_switch_engaged: z.literal(true), voice_lab_mutation_ready: z.literal(false) }).passthrough();
 const build = z.object({ observed: sha }).passthrough();
 const readinessSchema = z.object({
@@ -33,6 +34,7 @@ export function genericRecoveryOrigin(raw: string, allowHttpForTest = false): st
 export type GenericWorkerPreflightInput = {
   control: RecoveryControlRecord; workerServiceId: string; voiceLabOrigin: string;
   expectedLabSha: string; expectedLangGraphSha: string; renderBearer: string;
+  expectedRecoveryDeployment?: z.infer<typeof RecoveryProductDeploymentSchema>;
   fetchImpl?: typeof fetch; allowHttpForTest?: boolean; now?: () => Date;
 };
 export async function readGenericWorkerPreflight(input: GenericWorkerPreflightInput) { return readPreflight(input); }
@@ -41,13 +43,27 @@ export async function readGenericWorkerReplacementPreflight(input: GenericWorker
   if (replacementHash === input.control.browserAllocationBinding?.browser_worker_id_sha256) throw new Error("Replacement owner did not change.");
   return readPreflight(input, replacementHash);
 }
-async function readPreflight(input: GenericWorkerPreflightInput, replacementHash?: string) {
+/** Read-only preflight for a separate service-wide fence. The durable original
+ * owner is already retired, so current closed readiness must join the exact
+ * provider inventory, not be relabeled as the original owner. */
+export async function readServiceOwnerFencePreflight(input: GenericWorkerPreflightInput & { allocatedWorkerId: string }) {
+  const allocation = validateRecoveryAllocationBinding(input.control.binding, input.control.browserAllocationBinding);
+  if (!/^srv-[0-9a-z]{20}-[A-Za-z0-9_-]{5,96}$/.test(input.allocatedWorkerId)
+    || input.allocatedWorkerId.slice(0, 24) !== input.workerServiceId
+    || sha256(input.allocatedWorkerId) !== allocation.browser_worker_id_sha256) throw new Error("Service fence original owner does not match the exact service allocation.");
+  if (!input.expectedRecoveryDeployment) throw new Error("Service fence requires explicit current recovery deployment pins.");
+  const result = await readPreflight(input, undefined, true);
+  return { ...result, schema: "sophia.voice-lab.service-owner-fence-preflight.v1" as const };
+}
+async function readPreflight(input: GenericWorkerPreflightInput, replacementHash?: string, retiredServiceOwner = false) {
   const origin = genericRecoveryOrigin(input.voiceLabOrigin, input.allowHttpForTest);
   const fetchImpl = input.fetchImpl ?? fetch;
   const binding = RecoveryControlBindingSchema.parse(input.control.binding);
+  // Recovery can run on a repaired release. Never rewrite the original run's
+  // immutable target to make its historical evidence appear current.
+  const recoveryDeployment = RecoveryProductDeploymentSchema.parse(input.expectedRecoveryDeployment ?? binding.expectedDeployment);
   if (binding.scenarioId === "V-D02" || !input.control.browserAllocationEver || input.control.liveCleanupComplete) throw new Error("Generic recovery scope is not outstanding.");
   const allocation = validateRecoveryAllocationBinding(binding, input.control.browserAllocationBinding);
-  const expectedOwnerHash = replacementHash ?? allocation.browser_worker_id_sha256;
   z.string().regex(/^srv-[0-9a-z]{20}$/).parse(input.workerServiceId);
   sha.parse(input.expectedLabSha); sha.parse(input.expectedLangGraphSha);
   const response = await fetchImpl(new URL("/readyz", origin), { redirect: "error", signal: AbortSignal.timeout(10_000), headers: { accept: "application/json" } });
@@ -57,13 +73,15 @@ async function readPreflight(input: GenericWorkerPreflightInput, replacementHash
   const ready = readinessSchema.parse(JSON.parse(bytes.toString("utf8")));
   const observedAt = (input.now ?? (() => new Date()))();
   const heartbeat = ready.components.browser_worker.heartbeat_attestation;
+  const expectedOwnerHash = retiredServiceOwner ? heartbeat.worker_instance_id_sha256 : replacementHash ?? allocation.browser_worker_id_sha256;
+  if (retiredServiceOwner && expectedOwnerHash === allocation.browser_worker_id_sha256) throw new Error("Service fence original owner is still current; use the original-owner contract.");
   const age = observedAt.getTime() - Date.parse(heartbeat.observed_at);
   if (!Number.isFinite(age) || age < 0 || age > 15_000 || ready.version !== input.expectedLabSha
     || heartbeat.service_version !== input.expectedLabSha || heartbeat.repository_candidate_sha !== input.expectedLabSha
     || heartbeat.worker_instance_id_sha256 !== expectedOwnerHash) throw new Error("Generic recovery live worker identity is stale or mismatched.");
   const builds = ready.components.target_environment.builds;
-  if (builds.frontend.observed !== binding.expectedDeployment.frontend || builds.backend.observed !== binding.expectedDeployment.backend
-    || builds.voice.observed !== binding.expectedDeployment.voice || builds.langgraph.observed !== input.expectedLangGraphSha) throw new Error("Generic recovery product deployment mismatch.");
+  if (builds.frontend.observed !== recoveryDeployment.frontend || builds.backend.observed !== recoveryDeployment.backend
+    || builds.voice.observed !== recoveryDeployment.voice || builds.langgraph.observed !== input.expectedLangGraphSha) throw new Error("Generic recovery product deployment mismatch.");
   const worker = await readRenderWorkerSnapshot({ render_api_origin: "https://api.render.com", render_worker_service_id: input.workerServiceId }, input.renderBearer, fetchImpl, null);
   if (worker.deployStatus !== "live" || worker.deploySettledAt === null || worker.instanceIds.length !== 1
     || sha256(worker.instanceIds[0]!) !== expectedOwnerHash) throw new Error("Generic recovery Render owner is not the exact singleton.");
@@ -74,6 +92,7 @@ async function readPreflight(input: GenericWorkerPreflightInput, replacementHash
     schema: "sophia.voice-lab.generic-worker-preflight.v1" as const,
     controlBindingSha256: canonicalRequestHash(binding), allocationBindingSha256: canonicalRequestHash(allocation),
     expectedLabSha: input.expectedLabSha, expectedLangGraphSha: input.expectedLangGraphSha,
+    expectedRecoveryDeployment: recoveryDeployment,
     readinessResponseSha256: sha256(bytes), workerServiceIdSha256: sha256(input.workerServiceId),
     before: { serviceResponseSha256: worker.serviceResponseSha256, deployResponseSha256: worker.deployResponseSha256, instanceResponseSha256: worker.instanceResponseSha256,
       instanceIdsSha256: worker.instanceIds.map(sha256), deployIdSha256: sha256(worker.deployId), deployStatus: "live" as const,

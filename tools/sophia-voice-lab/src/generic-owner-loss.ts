@@ -4,6 +4,7 @@ import { canonicalRequestHash, sha256 } from "./security.js";
 import { RecoveryControlBindingSchema, validateRecoveryAllocationBinding, type RecoveryControlRecord } from "./recovery-control.js";
 import type { WorkerReceiptAuthority } from "./d02-worker-receipt.js";
 import { genericOwnerLossDispatchFromControl } from "./generic-owner-dispatch.js";
+import { parseVerifiedServiceOwnerFence, verifyServiceOwnerFence, type VerifiedServiceOwnerFence } from "./service-owner-fence.js";
 
 const hash = z.string().regex(/^[a-f0-9]{64}$/);
 const time = z.string().datetime().refine(value => new Date(value).toISOString() === value);
@@ -59,9 +60,10 @@ const verifiedSchema = z.object({
   workerServiceIdSha256: hash, acceptedAt: time,
   providerCleanupProven: z.literal(false), liveResourcesZeroProven: z.literal(false), proofSha256: hash,
 }).strict();
-export type VerifiedGenericOwnerLoss = z.infer<typeof verifiedSchema>;
+export type VerifiedGenericOwnerLoss = z.infer<typeof verifiedSchema> | VerifiedServiceOwnerFence;
 
 export function parseVerifiedGenericOwnerLoss(raw: unknown, control?: RecoveryControlRecord): VerifiedGenericOwnerLoss {
+  if (raw && typeof raw === "object" && "schema" in raw && raw.schema === "sophia.voice-lab.verified-service-owner-fence.v1") return parseVerifiedServiceOwnerFence(raw, control);
   const value = verifiedSchema.parse(raw);
   const { proofSha256, ...core } = value;
   if (canonicalRequestHash(core) !== proofSha256) throw new Error("GENERIC_OWNER_PROOF_INVALID");
@@ -90,6 +92,7 @@ export function ingestGenericOwnerLoss(control: RecoveryControlRecord, input: Ge
   z.number().int().positive().max(Number.MAX_SAFE_INTEGER).parse(input.expectedVersion);
   if (control.binding.runId !== input.runId) throw new Error("GENERIC_OWNER_CONTROL_MISMATCH");
   const previous = control.genericOwnerLoss ? parseVerifiedGenericOwnerLoss(control.genericOwnerLoss, control) : undefined;
+  if (!previous && control.liveCleanupComplete) throw new Error("GENERIC_OWNER_ALREADY_SETTLED");
   if (previous && previous.signedReceiptSha256 !== canonicalRequestHash(input.receipt)) throw new Error("GENERIC_OWNER_RECEIPT_IMMUTABLE");
   const proof = parseVerifiedGenericOwnerLoss(verifyGenericOwnerLoss({ ...input, control,
     acceptedAt: previous ? new Date(previous.acceptedAt) : now }), control);
@@ -105,7 +108,13 @@ export function verifyGenericOwnerLoss(input: {
   control: RecoveryControlRecord; receipt: unknown;
   authority: WorkerReceiptAuthority; expectedWorkerServiceIdSha256: string; acceptedAt: Date;
   expectedLabSha: string; expectedLangGraphSha: string;
+  expectedRecoveryDeployment?: { frontend: string; backend: string; voice: string };
 }) {
+  if (input.receipt && typeof input.receipt === "object" && "schema" in input.receipt
+    && input.receipt.schema === "sophia.voice-lab.service-owner-fence-receipt.v1") {
+    if (!input.expectedRecoveryDeployment) throw new Error("SERVICE_FENCE_RECOVERY_RELEASE_REQUIRED");
+    return verifyServiceOwnerFence({ ...input, expectedRecoveryDeployment: input.expectedRecoveryDeployment });
+  }
   if (Buffer.byteLength(JSON.stringify(input.receipt) ?? "") > 16384) throw new Error("GENERIC_OWNER_RECEIPT_SIZE_INVALID");
   const receipt = GenericOwnerLossReceiptSchema.parse(input.receipt);
   if (receipt.expectedLabSha !== input.expectedLabSha || receipt.expectedLangGraphSha !== input.expectedLangGraphSha) throw new Error("GENERIC_OWNER_RELEASE_MISMATCH");

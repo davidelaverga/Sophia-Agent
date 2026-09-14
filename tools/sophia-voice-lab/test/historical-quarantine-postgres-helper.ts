@@ -12,6 +12,8 @@ import { readVoiceLabCatalog } from "../src/schema-attestation.js";
 import { PostgresVoiceLabLedger } from "../src/postgres-ledger.js";
 import { canonicalRequestHash, sha256 } from "../src/security.js";
 import { testRun } from "./helpers.js";
+import { serviceFenceInventory, upgradeServiceFenceSchema } from "../src/service-fence-upgrade.js";
+import { SERVICE_FENCE_SOURCE_BUNDLE_SHA256 } from "../src/service-fence-migration.js";
 
 /** Called only by the dedicated disposable-database suite, never a live runner. */
 export async function proveHistoricalQuarantine(admin: pg.Client, databaseUrl: string, runMigration: (url: string) => Promise<void>) {
@@ -65,7 +67,16 @@ async function proveQuarantineVariant(admin: pg.Client, databaseUrl: string, run
     });
     expect(canonicalRequestHash(await readVoiceLabCatalog(admin))).toBe(targetCatalog);
     expect((await admin.query("select count(*)::int as n from pg_namespace where nspname like 'sophia_voice_lab_ref_%'")).rows[0].n).toBe(0);
-    // Actual normal startup migration can attest without discarding quarantine.
+    expect((await admin.query("select schema_version,migration_sha256 from sophia_voice_lab.schema_metadata")).rows[0])
+      .toEqual({ schema_version: 4, migration_sha256: SERVICE_FENCE_SOURCE_BUNDLE_SHA256 });
+    await expect(runMigration(databaseUrl)).rejects.toThrow(/pre-existing schema drift/);
+    const inventoryClient = await pool.connect();
+    let fenceInventory: string;
+    try { fenceInventory = await serviceFenceInventory(inventoryClient); } finally { inventoryClient.release(); }
+    await upgradeServiceFenceSchema(pool, { commit: "a".repeat(40), inventorySha256: fenceInventory },
+      base, extension, await readFile("migrations/005_service_owner_fence.sql"));
+    // Current startup can attest only after the explicit additive upgrade,
+    // which must preserve both quarantine and per-identity exceptions.
     await runMigration(databaseUrl);
     const quarantinedLedger = new PostgresVoiceLabLedger(databaseUrl);
     try {

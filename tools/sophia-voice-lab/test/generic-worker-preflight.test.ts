@@ -1,7 +1,7 @@
 import { expect, it, vi } from "vitest";
-import { readGenericWorkerPreflight, GENERIC_RECOVERY_ORIGIN } from "../scripts/external-attestations/generic-worker-preflight.js";
+import { readGenericWorkerPreflight, readServiceOwnerFencePreflight, GENERIC_RECOVERY_ORIGIN } from "../scripts/external-attestations/generic-worker-preflight.js";
 import { deriveRecoveryBrowserBinding, projectRecoveryControlBinding, type RecoveryControlRecord } from "../src/recovery-control.js";
-import { sha256 } from "../src/security.js";
+import { canonicalRequestHash, sha256 } from "../src/security.js";
 import { testRun } from "./helpers.js";
 
 function fixture() {
@@ -74,4 +74,59 @@ it("rejects foreign credential destinations before fetching", async () => {
   const { input, fetchImpl } = fixture();
   await expect(readGenericWorkerPreflight({ ...input, voiceLabOrigin: "https://foreign.invalid" })).rejects.toThrow();
   expect(fetchImpl).not.toHaveBeenCalled();
+});
+
+it("uses explicit repaired-release pins without rewriting the original run binding", async () => {
+  const { input, ready } = fixture();
+  const original = canonicalRequestHash(input.control.binding);
+  const expectedRecoveryDeployment = { frontend: "1".repeat(40), backend: "2".repeat(40), voice: "3".repeat(40) };
+  for (const key of ["frontend", "backend", "voice"] as const) ready.components.target_environment.builds[key].observed = expectedRecoveryDeployment[key];
+  await expect(readGenericWorkerPreflight(input)).rejects.toThrow(/deployment mismatch/);
+  const result = await readGenericWorkerPreflight({ ...input, expectedRecoveryDeployment });
+  expect(result.expectedRecoveryDeployment).toEqual(expectedRecoveryDeployment);
+  expect(result.controlBindingSha256).toBe(original);
+  expect(canonicalRequestHash(input.control.binding)).toBe(original);
+});
+
+it.each(["frontend", "backend", "voice"] as const)("does not infer changed %s pins from live readiness", async key => {
+  const { input, ready } = fixture();
+  const expectedRecoveryDeployment = { ...input.control.binding.expectedDeployment };
+  ready.components.target_environment.builds[key].observed = "f".repeat(40);
+  await expect(readGenericWorkerPreflight({ ...input, expectedRecoveryDeployment })).rejects.toThrow(/deployment mismatch/);
+});
+
+function retiredFixture() {
+  const f = fixture();
+  const allocatedWorkerId = `${f.input.workerServiceId}-retired-pod`;
+  f.input.control.browserAllocationBinding = deriveRecoveryBrowserBinding(f.input.control.binding.runId, allocatedWorkerId, 1);
+  return { ...f, input: { ...f.input, allocatedWorkerId, expectedRecoveryDeployment: { ...f.input.control.binding.expectedDeployment } } };
+}
+
+it("observes the current exact singleton separately from a service-bound retired owner", async () => {
+  const f = retiredFixture(); const before = JSON.stringify(f.input.control);
+  const result = await readServiceOwnerFencePreflight(f.input);
+  expect(result.schema).toBe("sophia.voice-lab.service-owner-fence-preflight.v1");
+  expect(result.before.instanceIdsSha256).toEqual([sha256("render-original-owner")]);
+  expect(result.before.instanceIdsSha256[0]).not.toBe(f.input.control.browserAllocationBinding.browser_worker_id_sha256);
+  expect(JSON.stringify(f.input.control)).toBe(before);
+  expect(f.fetchImpl).toHaveBeenCalledTimes(4);
+  expect(JSON.stringify(result)).not.toContain(f.input.allocatedWorkerId);
+  await expect(readGenericWorkerPreflight(f.input)).rejects.toThrow(/identity/);
+});
+
+it.each(["wrong-service", "wrong-allocation", "original-current", "foreign-inventory", "multiple", "open-gate", "missing-pins"])("refuses retired-owner preflight: %s", async kind => {
+  const f = retiredFixture();
+  if (kind === "wrong-service") f.input.allocatedWorkerId = "srv-abcdefghij0123456789-retired-pod";
+  if (kind === "wrong-allocation") f.input.allocatedWorkerId += "-different";
+  if (kind === "original-current") f.ready.components.browser_worker.heartbeat_attestation.worker_instance_id_sha256 = sha256(f.input.allocatedWorkerId);
+  if (kind === "foreign-inventory") f.instances[0] = { instance: { id: "foreign-instance", createdAt: new Date(0).toISOString() } };
+  if (kind === "multiple") f.instances.push({ instance: { id: "extra-instance", createdAt: new Date(0).toISOString() } });
+  if (kind === "open-gate") f.ready.components.browser_worker.observed_kill_switch_engaged = false;
+  if (kind === "missing-pins") {
+    const { expectedRecoveryDeployment: _pins, ...missing } = f.input;
+    await expect(readServiceOwnerFencePreflight(missing)).rejects.toThrow(/explicit/);
+    expect(f.fetchImpl).not.toHaveBeenCalled();
+    return;
+  }
+  await expect(readServiceOwnerFencePreflight(f.input)).rejects.toThrow();
 });

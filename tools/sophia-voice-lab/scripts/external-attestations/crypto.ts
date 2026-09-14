@@ -177,6 +177,18 @@ export async function validateGenericOwnerSigningCustody(publicConfig: PublicAut
   assertPrivateKeyMatchesAuthority(key, publicConfig.deployment_control);
 }
 
+export async function signServiceOwnerFenceReceipt(raw: Omit<import("../../src/service-owner-fence.js").ServiceOwnerFenceReceipt, "signature">, publicConfig: PublicAuthorityConfig, privateKeyPath: string) {
+  const { ServiceOwnerFenceReceiptSchema } = await import("../../src/service-owner-fence.js");
+  const authority = publicConfig.deployment_control;
+  if (raw.issuer !== authority.issuer || raw.subject !== authority.subject || raw.authorityKeyId !== authority.key_id) throw new Error("Service fence authority mismatch.");
+  // Validate source contract before accessing the signing key.
+  ServiceOwnerFenceReceiptSchema.parse({ ...raw, signature: Buffer.alloc(64).toString("base64url") });
+  const key = await readPrivateKey(privateKeyPath);
+  assertPrivateKeyMatchesAuthority(key, authority);
+  const signature = ed25519Sign(null, Buffer.from(canonicalRequestHash(raw), "hex"), key).toString("base64url");
+  return ServiceOwnerFenceReceiptSchema.parse({ ...raw, signature });
+}
+
 export async function signGenericOwnerLossReceipt(raw: Omit<GenericOwnerLossReceipt, "signature">, publicConfig: PublicAuthorityConfig, privateKeyPath: string): Promise<GenericOwnerLossReceipt> {
   const authority = publicConfig.deployment_control;
   if (raw.issuer !== authority.issuer || raw.subject !== authority.subject || raw.authorityKeyId !== authority.key_id) throw new Error("Generic owner-loss authority mismatch.");

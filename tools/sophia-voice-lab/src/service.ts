@@ -1,6 +1,7 @@
 import { createHmac, createPublicKey, randomUUID, timingSafeEqual, verify as verifySignature } from "node:crypto";
 
 import { z } from "zod";
+import { ServiceOwnerFenceReceiptSchema } from "./service-owner-fence.js";
 
 import { FINAL_CODEX_PLUGIN_VERSION_PATTERN, type VoiceLabConfig } from "./config.js";
 import { D02GatewayClient, D02GatewayContinuityObservationReceiptSchema } from "./d02-gateway.js";
@@ -584,6 +585,7 @@ export class VoiceLabService {
       z.object({ action: z.literal("prepare"), runId, expectedVersion: version, requestId: z.string().uuid() }).strict(),
       z.object({ action: z.literal("consume"), runId, expectedVersion: version, preparedProofSha256: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
       z.object({ action: z.literal("ingest_owner_loss"), runId, expectedVersion: version, receipt: z.unknown() }).strict(),
+      z.object({ action: z.literal("ingest_service_fence"), runId, expectedVersion: version, receipt: ServiceOwnerFenceReceiptSchema }).strict(),
     ]).parse(raw);
     const control = await this.ledger.getRecoveryControl(input.runId);
     if (!control || control.binding.scenarioId === "V-D02" || control.binding.principalId !== this.config.principalId
@@ -591,14 +593,15 @@ export class VoiceLabService {
     if (control.genericOwnerDispatch && control.genericOwnerDispatch.workerServiceIdSha256 !== sha256(this.config.genericRecoveryWorkerServiceId))
       throw new VoiceLabError(labError("GENERIC_RECOVERY_SERVICE_MISMATCH", "Stored recovery service differs from current configuration.", "conflict"));
     if (input.action === "inspect") return { dispatchAllowed: false, control, workerServiceId: this.config.genericRecoveryWorkerServiceId };
-    if (input.action === "ingest_owner_loss") {
+    if (input.action === "ingest_owner_loss" || input.action === "ingest_service_fence") {
       const target = this.config.readinessTarget;
-      if (!target || canonicalRequestHash(target.expectedDeployment) !== canonicalRequestHash(control.binding.expectedDeployment))
+      if (!target || (input.action === "ingest_owner_loss" && canonicalRequestHash(target.expectedDeployment) !== canonicalRequestHash(control.binding.expectedDeployment)))
         throw new VoiceLabError(labError("GENERIC_RECOVERY_RELEASE_MISMATCH", "Generic receipt ingestion requires the configured exact product release.", "conflict"));
       const authority = this.config.attestationAuthorities.deployment_control;
       await this.ledger.persistGenericOwnerLoss({ runId: input.runId, expectedVersion: input.expectedVersion, receipt: input.receipt,
         authority: { issuer: authority.issuer, subject: authority.subject, key_id: authority.keyId, public_key_spki_base64: authority.publicKeySpkiBase64 },
         expectedWorkerServiceIdSha256: sha256(this.config.genericRecoveryWorkerServiceId),
+        ...(input.action === "ingest_service_fence" ? { expectedRecoveryDeployment: target.expectedDeployment } : {}),
         expectedLabSha: this.config.serviceVersion, expectedLangGraphSha: target.expectedDependencies.langgraph });
       const persisted = await this.ledger.getRecoveryControl(input.runId);
       if (!persisted?.genericOwnerLoss) throw new Error("GENERIC_OWNER_PERSISTENCE_UNCONFIRMED");

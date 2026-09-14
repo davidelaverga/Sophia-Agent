@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { PostgresVoiceLabLedger } from "../src/postgres-ledger.js";
-import { composeVoiceLabMigration } from "../src/migration-bundle.js";
+import { composeServiceFenceMigration } from "../src/service-fence-migration.js";
 import { verifyD02ServiceIngestion } from "./d02-service-ingestion-helper.js";
 import { verifyRestartRecoverySchedule } from "./recovery-schedule-helper.js";
 import { RETAINED_RECOVERY_RETRY_MS } from "../src/recovery-control.js";
@@ -24,9 +24,10 @@ selected("real PostgreSQL authenticated D02 service", () => {
     ledger = new PostgresVoiceLabLedger(url, 4, "synthetic-service-retention-key-000000000001");
     expect((await ledger.pool.query("select current_database() as name")).rows[0].name).toBe(parsed.pathname.slice(1));
     await ledger.pool.query("drop schema if exists sophia_voice_lab cascade");
-    await ledger.pool.query(composeVoiceLabMigration(
+    await ledger.pool.query(composeServiceFenceMigration(
       await readFile("../../backend/migrations/2026_08_23_sophia_voice_lab.sql"),
       await readFile("migrations/004_recovery_controls.sql"),
+      await readFile("migrations/005_service_owner_fence.sql"),
     ).toString("utf8"));
   });
   afterEach(async () => {

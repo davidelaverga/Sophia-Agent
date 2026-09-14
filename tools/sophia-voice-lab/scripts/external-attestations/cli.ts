@@ -30,6 +30,10 @@ import { verifyManifestRevision } from "./manifest.js";
 import { executeD02RenderRestart } from "./render-controller.js";
 import { executeGenericWorkerTermination } from "./generic-worker-controller.js";
 import { openGenericWorkerJournal } from "./generic-worker-journal.js";
+import { collectServiceOwnerFence } from "./service-owner-fence-controller.js";
+import { publishServiceOwnerFence } from "./service-owner-fence-publisher.js";
+import { openServiceOwnerFenceJournal } from "./service-owner-fence-journal.js";
+import { RecoveryProductDeploymentSchema } from "./generic-worker-preflight.js";
 import { D02WorkerTerminationCheckpointSchema, executeD02RenderWorkerTermination, type D02WorkerTerminationCheckpoint } from "./render-worker-controller.js";
 import { redactControllerValue, safeError } from "./redaction.js";
 import { assertUnusedAbsolutePaths, readPublicFile, readPublicJson, readSecureFile, readSecureJson, writeNewSecureJson } from "./secure-files.js";
@@ -37,6 +41,7 @@ import { assertUnusedAbsolutePaths, readPublicFile, readPublicJson, readSecureFi
 type Flags = ReadonlyMap<string, string>;
 
 export interface CliRuntimeOverrides {
+  serviceOwnerFence?: Pick<Parameters<typeof collectServiceOwnerFence>[0], "fetchImpl" | "sleep" | "now" | "allowHttpForTest">;
   genericWorkerTermination?: Pick<Parameters<typeof executeGenericWorkerTermination>[0], "fetchImpl" | "sleep" | "now" | "allowHttpForTest">;
   workerTermination?: {
     fetchImpl?: typeof fetch;
@@ -142,12 +147,46 @@ export async function runCli(argv: readonly string[], write: (line: string) => v
       return 0;
     }
 
+    if (command === "collect-service-owner-fence" || command === "publish-service-owner-fence") {
+      const publishing = command === "publish-service-owner-fence";
+      assertOnly(flags, ["input", "public-config", "transport-tokens", "deployment-key", "bundle-dir", ...(publishing ? [] : ["render-token", "resume"])]);
+      if (flags.has("resume") && flags.get("resume") !== "true") throw new Error("--resume accepts only true.");
+      const controller = z.object({ runId: z.string().uuid(), requestId: z.string().uuid(), workerServiceId: z.string().regex(/^srv-[0-9a-z]{20}$/),
+        allocatedWorkerId: z.string().regex(/^srv-[0-9a-z]{20}-[A-Za-z0-9_-]{5,96}$/), voiceLabOrigin: z.string().url(),
+        expectedLabSha: z.string().regex(/^[a-f0-9]{40}$/), expectedLangGraphSha: z.string().regex(/^[a-f0-9]{40}$/), expectedRecoveryDeployment: RecoveryProductDeploymentSchema,
+      }).strict().parse(await readSecureJson(requiredFlag(flags, "input")));
+      const publicConfig = await loadPublicConfig(requiredFlag(flags, "public-config"));
+      const tokens = TransportTokensSchema.parse(await readSecureJson(requiredFlag(flags, "transport-tokens")));
+      const privateKeyPath = requiredFlag(flags, "deployment-key");
+      const macKey = await readSecureFile(privateKeyPath);
+      try {
+        const journal = await openServiceOwnerFenceJournal({ directory: requiredFlag(flags, "bundle-dir"),
+          inputSha256: hashCanonical({ controller, authority: publicConfig.deployment_control }), macKey, resume: publishing || flags.has("resume") });
+        if (publishing) {
+          if (!journal.resume?.receipt) throw new Error("Publication requires a completed authenticated source journal.");
+          const result = await publishServiceOwnerFence({ ...controller, ...runtime.serviceOwnerFence,
+            publicConfig, deploymentBearer: tokens.deployment_control, receipt: journal.resume.receipt });
+          writeSafe(write, { ok: result.status === "ingested", command, status: result.status,
+            proof_sha256: result.proofSha256, durable_recovery_ingested: result.status === "ingested", cleanup_proven: false });
+          return result.status === "ingested" ? 0 : 2;
+        }
+        const render = BearerSecretFileSchema.parse(await readSecureJson(requiredFlag(flags, "render-token")));
+        const result = await collectServiceOwnerFence({ ...controller, ...runtime.serviceOwnerFence, publicConfig, privateKeyPath,
+          deploymentBearer: tokens.deployment_control, renderBearer: render.bearer_token,
+          ...(journal.resume ? { resume: journal.resume } : {}), checkpoint: journal.checkpoint });
+        writeSafe(write, { ok: result.status === "receipt_collected", command, status: result.status,
+          receipt_sha256: result.receipt ? hashCanonical(result.receipt) : null, durable_recovery_ingested: false, cleanup_proven: false });
+        return result.status === "receipt_collected" ? 0 : 2;
+      } finally { macKey.fill(0); }
+    }
+
     if (command === "generic-render-worker-loss") {
       assertOnly(flags, ["input", "public-config", "transport-tokens", "deployment-key", "render-token", "bundle-dir", "resume"]);
       if (flags.has("resume") && flags.get("resume") !== "true") throw new Error("--resume accepts only the literal value true.");
       const controller = z.object({
         runId: z.string().uuid(), requestId: z.string().uuid(), workerServiceId: z.string().regex(/^srv-[0-9a-z]{20}$/),
         voiceLabOrigin: z.string().url(), expectedLabSha: z.string().regex(/^[a-f0-9]{40}$/), expectedLangGraphSha: z.string().regex(/^[a-f0-9]{40}$/),
+        expectedRecoveryDeployment: z.object({ frontend: z.string().regex(/^[a-f0-9]{40}$/), backend: z.string().regex(/^[a-f0-9]{40}$/), voice: z.string().regex(/^[a-f0-9]{40}$/) }).strict().optional(),
       }).strict().parse(await readSecureJson(requiredFlag(flags, "input")));
       const publicConfig = await loadPublicConfig(requiredFlag(flags, "public-config"));
       const tokens = TransportTokensSchema.parse(await readSecureJson(requiredFlag(flags, "transport-tokens")));
@@ -157,7 +196,9 @@ export async function runCli(argv: readonly string[], write: (line: string) => v
       try {
         const journal = await openGenericWorkerJournal({ directory: requiredFlag(flags, "bundle-dir"),
           inputSha256: hashCanonical({ controller, authority: publicConfig.deployment_control }), macKey, resume: flags.has("resume") });
-        const result = await executeGenericWorkerTermination({ ...controller, ...runtime.genericWorkerTermination,
+        const { expectedRecoveryDeployment, ...controllerIdentity } = controller;
+        const result = await executeGenericWorkerTermination({ ...controllerIdentity, ...runtime.genericWorkerTermination,
+          ...(expectedRecoveryDeployment ? { expectedRecoveryDeployment } : {}),
           publicConfig, privateKeyPath, deploymentBearer: tokens.deployment_control, renderBearer: render.bearer_token,
           ...(journal.resume ? { resume: journal.resume } : {}), checkpoint: journal.checkpoint });
         writeSafe(write, { ok: result.status === "owner_loss_verified", command, status: result.status,
@@ -622,6 +663,8 @@ function usage(): Record<string, string> {
     "d02-render-restart": "Submit exactly one Render restart after a signed command, settle deploy/instance/boot, replay MCP, and attach the final proof.",
     "d02-render-worker-loss": "Persist a signed command, restart exactly one Render background-worker service once, and use --resume true with the same hash-chained bundle after interruption; ambiguous Render dispatch is GET-only/manual-required.",
     "generic-render-worker-loss": "Observe closed exact releases, consume one durable generic owner claim, and persist signed owner-loss evidence; --resume true is observation-only after consumption. Does not prove resource cleanup.",
+    "collect-service-owner-fence": "Collect a signed service-wide restart receipt for an already-retired allocation using a private authenticated disk journal. Does not ingest recovery or prove cleanup; resume never repeats a consumed restart.",
+    "publish-service-owner-fence": "Publish the exact receipt from a completed authenticated service-fence journal. No Render action or credential; lost acknowledgement uses inspection and never repeats a restart. Ingestion is not cleanup proof.",
     "verify-d02-local-receipt": "Verify the separate signed Render-controller request/accepted/settled receipt without printing its signature.",
     "verify-d02-worker-receipt": "Verify the source-specific signed Render browser-worker termination receipt; Gateway settlement remains a separate mandatory proof.",
     "verify-manifest": "Verify an immutable attestation receipt appears in a later append-only evidence-manifest revision.",
