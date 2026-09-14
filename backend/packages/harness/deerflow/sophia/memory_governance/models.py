@@ -134,6 +134,9 @@ class CanonicalMemory(StrictModel):
 
 class GovernanceReceipt(StrictModel):
     event_id: UUID
+    operation_id: str | None = None
+    event_type: str | None = None
+    resulting_lifecycle: MemoryLifecycle | None = None
     memory_id: UUID | None = None
     candidate_id: UUID | None = None
     content_revision: int | None = None
@@ -144,6 +147,12 @@ class GovernanceReceipt(StrictModel):
     status: str | None = None
     tombstone_id: UUID | None = None
     provider_purge: str | None = None
+
+
+class CommandReceipt(GovernanceReceipt):
+    operation_id: str = Field(min_length=1)
+    event_type: str = Field(min_length=1)
+    resulting_lifecycle: MemoryLifecycle | None = None
 
 
 class ProviderHit(StrictModel):

@@ -120,6 +120,13 @@ class CanonicalMemoryService:
         self._assert_supported_contract()
         return self.store.list_pool(user_id=self.owner_id, include_forgotten=include_forgotten, limit=limit)
 
+    def command_receipt(self, *, idempotency_key: str):
+        self._assert_supported_contract()
+        if not 8 <= len(idempotency_key) <= 200:
+            raise ValueError("memory_command_key_invalid")
+        # Historical logical result only; current lifecycle is a separate view.
+        return self.store.command_receipt(user_id=self.owner_id, idempotency_key=idempotency_key)
+
     def approve_candidate(
         self,
         *,

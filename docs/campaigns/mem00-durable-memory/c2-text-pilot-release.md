@@ -30,6 +30,8 @@ Next: extract the dependent canonical review/command/projection and actual text-
 
 ## Finite C2 acceptance
 
+Receipt-recovery integration selected next: existing2026_09_08_mem00_c1_command_receipts.sql (the second selected migration, not the entire C1 set), typed original command receipts, strict owner/key-bound store lookup, canonical service and authenticated Gateway status route, plus existing Next proxy/schema. SQL93c4c8 passes24 actual RPC receipt/replay/tombstone and lock-order checks including repeated migration application; disposable database closed. Backendfff312 passes38 focused tests, including committed/tombstoned/absent/wrong-owner/wrong-key/outage/duplicate/extra-plaintext status responses. Frontend9f62f7 passes6 proxy tests; TypeScript376b15 terminal0. Frozen offline dependency install reused844 packages/downloaded0; existing pnpm policy skipped native build scripts and was not changed. This proves recovery plumbing, not complete review UI or actual hosted lifecycle. Remaining ordinary decision response/UI integration is still required.
+
 | Gate | Current disposition |
 | --- | --- |
 | Isolation and durable rollback | Foundation tests pass; actual callsites and rollback-safe deployment boundary pending |

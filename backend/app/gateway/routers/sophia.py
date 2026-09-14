@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
@@ -35,6 +35,7 @@ from app.gateway.voice_lab_capability import (
 from deerflow.agents.sophia_agent.paths import USERS_DIR
 from deerflow.agents.sophia_agent.utils import safe_user_path
 from deerflow.sophia.memory_governance.store import MemoryGovernanceConflict
+from deerflow.sophia.memory_governance.models import CommandReceipt
 from deerflow.sophia.review_metadata_store import (
     apply_review_metadata_overlays,
     remove_review_metadata,
@@ -132,11 +133,13 @@ def _get_mem0_client():
 
 
 def _memory_flags(user_id: str):
-    from deerflow.sophia.memory_governance.flags import (
-        memory_feature_flags_for_owner,
-    )
+    from deerflow.sophia.memory_governance.owner_authority import resolved_memory_flags_for_owner
+    from deerflow.sophia.memory_governance.store import MemoryGovernanceUnavailable
 
-    return memory_feature_flags_for_owner(user_id)
+    try:
+        return resolved_memory_flags_for_owner(user_id)
+    except MemoryGovernanceUnavailable as exc:
+        raise HTTPException(status_code=503, detail=exc.reason) from None
 
 
 def _canonical_memory_service(user_id: str):
@@ -270,6 +273,12 @@ class BulkReviewResult(BaseModel):
 
 class BulkReviewResponse(BaseModel):
     results: list[BulkReviewResult] = Field(default_factory=list)
+
+
+class MemoryCommandStatusResponse(BaseModel):
+    status: Literal["committed", "not_found"]
+    historical_result_only: bool = True
+    receipt: CommandReceipt | None = None
 
 
 class MemoryLifecycleRequest(BaseModel):
@@ -2344,6 +2353,23 @@ async def permanently_delete_memory(user_id: str, memory_id: str, body: MemoryLi
             exc.__class__.__name__,
         )
         raise HTTPException(status_code=503, detail="Memory governance unavailable")
+
+
+@router.get("/{user_id}/memories/commands/{idempotency_key}", response_model=MemoryCommandStatusResponse)
+async def memory_command_status(user_id: str, idempotency_key: str, response: Response) -> MemoryCommandStatusResponse:
+    _validate_user(user_id)
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        if not _memory_flags(user_id).canonical_pool_read:
+            raise HTTPException(status_code=404, detail="Canonical memory is not enabled")
+        receipt = _canonical_memory_service(user_id).command_receipt(idempotency_key=idempotency_key)
+        return MemoryCommandStatusResponse(status="committed" if receipt is not None else "not_found", receipt=receipt)
+    except HTTPException as exc:
+        raise HTTPException(status_code=exc.status_code, detail="Memory command status unavailable", headers={"Cache-Control": "no-store"}) from None
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid command key", headers={"Cache-Control": "no-store"}) from None
+    except Exception:
+        raise HTTPException(status_code=503, detail="Memory command status unavailable", headers={"Cache-Control": "no-store"}) from None
 
 
 @router.post(

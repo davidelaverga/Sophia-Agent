@@ -22,6 +22,7 @@ if TYPE_CHECKING:
 from .models import (
     CandidateRecord,
     CanonicalMemory,
+    CommandReceipt,
     ExtractedCandidate,
     ExtractionRun,
     GovernanceReceipt,
@@ -380,6 +381,25 @@ class SupabaseMemoryGovernanceStore:
                 )
             )
         return tuple(result)
+
+    def command_receipt(self, *, user_id: str, idempotency_key: str) -> CommandReceipt | None:
+        raw = self._rpc("sophia_memory_lookup_command_receipt", {
+            "p_user_id": user_id, "p_idempotency_key": idempotency_key})
+        try:
+            import json
+
+            if (not isinstance(raw, dict) or set(raw) != {"schema", "owner_id", "command_key", "status", "historical_result_only", "receipt"}
+                    or raw["schema"] != "mem00.command-status.v1" or raw["owner_id"] != user_id
+                    or raw["command_key"] != idempotency_key or raw["historical_result_only"] is not True
+                    or len(json.dumps(raw).encode()) > 65536):
+                raise ValueError
+            if raw["status"] == "not_found" and raw["receipt"] is None:
+                return None
+            if raw["status"] != "committed" or not isinstance(raw["receipt"], dict) or raw["receipt"].get("idempotent_replay") is not True:
+                raise ValueError
+            return CommandReceipt.model_validate(raw["receipt"])
+        except Exception:
+            raise MemoryGovernanceUnavailable("memory_command_receipt_unavailable") from None
 
     def approve_candidate(self, **payload: object) -> GovernanceReceipt:
         return self._model(GovernanceReceipt, self._rpc("sophia_memory_approve_candidate", payload))
