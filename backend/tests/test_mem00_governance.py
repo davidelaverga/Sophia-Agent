@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from uuid import uuid4
 
 import pytest
+from mem00_owner_fixture import declare_memory_owners
 
 from deerflow.sophia.memory_governance.faults import (
     MemoryFaultControlError,
@@ -59,14 +60,15 @@ def test_flags_are_default_closed_and_invalid_combinations_fail() -> None:
         MemoryFeatureFlags.from_environ({"SOPHIA_MEMORY_GOVERNED_RUNTIME_READ": "true"})
 
 
-def test_enabled_flags_require_exact_owner_cohort() -> None:
+def test_enabled_flags_require_exact_owner_cohort(declare_memory_owners) -> None:
+    declare_memory_owners({'mem00-cert-owner': 'governed', 'near-match-mem00-cert-owner': 'legacy'})
     enabled = {
         "SOPHIA_MEMORY_CANDIDATE_LEDGER_WRITE": "true",
         "SOPHIA_MEMORY_COHORT_PRINCIPALS": "mem00-cert-owner,approved-owner",
     }
     assert memory_feature_flags_for_owner("mem00-cert-owner", enabled).candidate_ledger_write
     assert not memory_feature_flags_for_owner("near-match-mem00-cert-owner", enabled).candidate_ledger_write
-    with pytest.raises(MemoryFlagConfigurationError, match="memory_features_without_cohort"):
+    with pytest.raises(MemoryGovernanceUnavailable, match="memory_configuration_unavailable"):
         memory_feature_flags_for_owner(
             "mem00-cert-owner",
             {"SOPHIA_MEMORY_CANDIDATE_LEDGER_WRITE": "true"},
@@ -119,7 +121,9 @@ def _enable_fault_plane(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_fault_plane_is_exact_principal_one_shot_ttl_bounded_and_audited(
     monkeypatch: pytest.MonkeyPatch,
+    declare_memory_owners,
 ) -> None:
+    declare_memory_owners({'mem00-cert-owner': 'governed', 'ordinary-owner': 'legacy'})
     _enable_fault_plane(monkeypatch)
 
     class Store:
@@ -175,7 +179,9 @@ def test_fault_plane_is_exact_principal_one_shot_ttl_bounded_and_audited(
 
 def test_generic_memory_containment_is_cohort_scoped(
     monkeypatch: pytest.MonkeyPatch,
+    declare_memory_owners,
 ) -> None:
+    declare_memory_owners({'mem00-cert-owner': 'governed', 'ordinary-owner': 'legacy'})
     from fastapi import HTTPException
 
     from app.gateway.routers.memory import _reject_when_mem00_owns_sophia_memory
@@ -254,7 +260,9 @@ def test_mem0_adapter_initial_write_preserves_metadata(monkeypatch: pytest.Monke
 def test_legacy_mem0_facade_never_logs_query_memory_owner_or_provider_id(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
+    declare_memory_owners,
 ) -> None:
+    declare_memory_owners({'SENSITIVE-OWNER-REF': 'legacy'})
     import deerflow.sophia.mem0_client as mem0_client
 
     sensitive = {

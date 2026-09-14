@@ -6,24 +6,42 @@ from unittest.mock import Mock
 import pytest
 
 from deerflow.sophia import extraction
+from mem00_owner_fixture import declare_memory_owners
+from mem00_dispatch_fixture import dispatch_authority
 
 
 @pytest.fixture(autouse=True)
-def extraction_boundary(monkeypatch):
+def extraction_boundary(monkeypatch, declare_memory_owners):
+    declare_memory_owners({'synthetic-owner': 'governed'})
+    monkeypatch.setenv('SOPHIA_MEMORY_CANDIDATE_LEDGER_WRITE', 'true')
+    monkeypatch.setenv('SOPHIA_MEMORY_COHORT_PRINCIPALS', 'synthetic-owner')
     monkeypatch.setenv("SOPHIA_MEMORY_REFERENCE_HMAC_SECRET", "r" * 32)
     client = Mock()
-    monkeypatch.setattr(extraction.anthropic, "Anthropic", lambda: client)
+    monkeypatch.setattr(extraction.anthropic, "Anthropic", lambda **kwargs: client)
     monkeypatch.setattr(extraction, "_load_template", lambda: "Extract JSON: {transcript}")
+    import sys
+    # Capture the complete original work items before execution-time faults.
+    prepared = {explicit: _prepare_input(explicit) for explicit in (False, True)}
+    monkeypatch.setattr(sys.modules[__name__], '_prepare_input', lambda explicit: prepared[explicit])
     writes = Mock(side_effect=AssertionError("candidate extraction cannot write Mem0"))
     monkeypatch.setattr(extraction, "add_memories", writes)
     return client, writes
 
 
+def _prepare_input(explicit):
+    from deerflow.sophia.memory_governance.extraction_input import capture_context, extraction_input_ref
+    messages = [{"role": "user", "content": "Please remember that my favorite tea is chamomile." if explicit else "I prefer quiet puzzle games."}]
+    context = capture_context(context_mode='life', session_date='2026-09-14')
+    input_ref = extraction_input_ref(owner_id='synthetic-owner', session_id='synthetic-session', messages=messages,
+        context=context, model=extraction._PIPELINE_MODEL)
+    return messages, {'session_date': context.session_date, 'context_mode': context.context_mode, 'extractor_input_ref': input_ref}, dispatch_authority('synthetic-owner', 'synthetic-session', input_ref)
+
+
 def _extract(*, explicit=False):
+    messages, metadata, authority = _prepare_input(explicit)
     return extraction.extract_session_memories(
         "synthetic-owner", "synthetic-session",
-        [{"role": "user", "content": "Please remember that my favorite tea is chamomile." if explicit else "I prefer quiet puzzle games."}],
-        candidate_only=True,
+        messages, metadata, candidate_only=True, dispatch_authority=authority,
     )
 
 
