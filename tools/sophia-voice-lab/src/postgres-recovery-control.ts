@@ -9,7 +9,7 @@ import { parseRetainedOwnerDeath } from "./retained-owner-death.js";
 import { parseRetainedD02ProviderSettlement } from "./retained-d02-provider.js";
 import { deriveRetainedD02Recovery, parseRetainedD02Recovery, recoveryAttemptAuditHash } from "./retained-d02-recovery.js";
 import type { RecoveryAttemptIdentity } from "./recovery-attempt.js";
-import { VoiceLabError, labError } from "./domain.js";
+import { TERMINAL_RUN_STATES, VoiceLabError, labError } from "./domain.js";
 import { RecoveryControlBindingSchema, recoveryCapabilityAudit, recoveryInventoryCursor, recoverySettlementProof, validateRecoveryBrowserBinding, type RecoveryControlRecord } from "./recovery-control.js";
 import { canonicalRequestHash, sha256 } from "./security.js";
 import { deriveExecutionEpochCleanupProof, parsePreservedExecutionCleanupProof } from "./execution-cleanup.js";
@@ -211,6 +211,34 @@ export class PostgresRecoveryControls {
       const updated = await client.query<Row>(`update ${TABLE} set execution_cleanup_proof=$2,version=version+1 where run_id=$1 returning *`, [runId, parsePreservedExecutionCleanupProof(proof)]);
       await client.query("commit");
       return record(updated.rows[0]!);
+    } catch (error) { await client.query("rollback"); throw error; }
+    finally { client.release(); }
+  }
+
+  async releaseRecoveredBrowserLease(runId: string): Promise<boolean> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("begin");
+      const runs = await client.query("select id,test_run_id,cleanup_obligation_id,state,scenario_id from sophia_voice_lab.runs where id=$1 for update", [runId]);
+      const selected = await client.query<Row>(`select * from ${TABLE} where run_id=$1 for update`, [runId]);
+      const leases = await client.query("select worker_id,lease_epoch,expires_at<=clock_timestamp() as expired from sophia_voice_lab.browser_leases where run_id=$1 for update", [runId]);
+      const run = runs.rows[0], lease = leases.rows[0];
+      if (!run || !selected.rows[0] || !lease || lease.expired !== true || run.scenario_id === "V-D02"
+        || !TERMINAL_RUN_STATES.has(run.state)) {
+        await client.query("rollback"); return false;
+      }
+      const current = record(selected.rows[0]);
+      const events = await client.query("select * from sophia_voice_lab.run_events where run_id=$1 order by seq", [runId]);
+      const proof = deriveExecutionEpochCleanupProof({ id: run.id, testRunId: run.test_run_id, cleanupObligationId: run.cleanup_obligation_id }, events.rows.map(row => ({ runId, seq: Number(row.seq), kind: row.kind, source: row.source, payload: row.payload, at: row.observed_at, dedupeKey: row.dedupe_key })));
+      if (current.contentPurgedAt !== null || !proof.ready || !current.executionCleanupProof
+        || canonicalRequestHash(current.executionCleanupProof) !== canonicalRequestHash(proof)
+        || !executionMatchesRecoveryAllocation(current, proof)
+        || proof.workerIdSha256 !== sha256(lease.worker_id) || proof.browserLeaseEpoch !== Number(lease.lease_epoch)) {
+        await client.query("rollback"); return false;
+      }
+      // Release the exact dead execution, never acquire or impersonate its owner.
+      const deleted = await client.query("delete from sophia_voice_lab.browser_leases where run_id=$1 and worker_id=$2 and lease_epoch=$3 and expires_at<=clock_timestamp()", [runId, lease.worker_id, lease.lease_epoch]);
+      await client.query("commit"); return deleted.rowCount === 1;
     } catch (error) { await client.query("rollback"); throw error; }
     finally { client.release(); }
   }

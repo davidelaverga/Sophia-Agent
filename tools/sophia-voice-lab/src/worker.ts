@@ -2616,6 +2616,22 @@ export class VoiceLabWorker {
   async #releaseBrowserLeaseProof(runId: string): Promise<boolean> {
     const active = this.#activeLeases.get(runId);
     let current = await this.ledger.getBrowserLease(runId);
+    if (current && current.workerId !== this.workerId && !this.driver.hasSession(runId)) {
+      const run = await this.#freshRun(runId);
+      const proof = deriveExecutionEpochCleanupProof(run, (await this.#allEvents(runId)).events);
+      if (run.scenarioId !== "V-D02" && TERMINAL_RUN_STATES.has(run.state) && proof.ready) {
+        await this.ledger.preserveRecoveryExecutionCleanup(runId);
+        if (await this.ledger.releaseRecoveredBrowserLease(runId)) {
+          await this.ledger.appendEvent(runId, "cleanup.browser_lease_released", "worker", {
+            schema: "sophia_voice_lab_execution_epoch_lease_release_v1",
+            worker_id_hash: proof.workerIdSha256, lease_epoch: proof.browserLeaseEpoch,
+            execution_epoch_sha256: proof.executionEpochSha256, cleanup_proof_sha256: proof.proofSha256,
+            cleanup_proof_ready: true, cas_deleted: true, recovery_release: true,
+          }, `cleanup:${runId}:browser-lease`);
+          current = null;
+        }
+      }
+    }
     const epoch = active?.epoch ?? (current?.workerId === this.workerId ? current.leaseEpoch : null);
     let executionProof: ExecutionEpochCleanupProof | null = null;
     if (epoch !== null) {

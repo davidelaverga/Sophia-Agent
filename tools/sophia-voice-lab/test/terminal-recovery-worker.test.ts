@@ -9,6 +9,32 @@ import { VoiceLabWorker } from "../src/worker.js";
 import { testConfig, testRun } from "./helpers.js";
 import { ownership, recovery, closed } from "./execution-cleanup-fixture.js";
 
+it("settles a dead foreign execution without impersonation even when failure export is capped", async () => {
+  const ledger = new MemoryVoiceLabLedger("test");
+  const config = testConfig({ SOPHIA_VOICE_LAB_KILL_SWITCH: "true" });
+  const run = testRun({ state: "failed_harness", expiresAt: new Date(Date.now() + 600_000), retentionPurgeDueAt: new Date(Date.now() + 3_600_000) });
+  await ledger.createRunWithOperation(run, { id: randomUUID(), runId: run.id, callerId: run.callerId, type: "start", idempotencyKey: randomUUID(), requestHash: sha256(run.id), input: {} }, { global: 1, caller: 1 });
+  const lease = await ledger.upsertBrowserLease(run.id, "retired-owner", 0);
+  const acquired = ownership(run);
+  acquired[1]!.payload.worker_id_sha256 = sha256(lease.workerId);
+  acquired[1]!.payload.browser_lease_epoch = lease.leaseEpoch;
+  for (const event of [...acquired, closed(run, 3), recovery(run, 4)]) await ledger.appendEvent(run.id, event.kind, event.source, event.payload, event.dedupeKey);
+  const recover = vi.fn(async () => ({ events: [], artifacts: [] }));
+  const driver = { recover, hasSession: () => false } as unknown as VoiceBrowserDriver;
+  const ordinaryRelease = vi.spyOn(ledger, "releaseBrowserLease");
+  vi.spyOn(ledger, "saveArtifact").mockRejectedValue(new Error("voice lab artifact run cap exceeded"));
+  const worker = new VoiceLabWorker("replacement-owner", ledger, config, {} as AudioResolver, driver,
+    new CapabilityCodec(config.capabilitySecret, config.capabilityIssuer, config.capabilityTtlSeconds), pino({ level: "silent" }));
+  await worker.maintainSessions();
+  expect(ordinaryRelease).not.toHaveBeenCalled();
+  expect(recover).not.toHaveBeenCalled();
+  expect(await ledger.getBrowserLease(run.id)).toBeNull();
+  expect(await ledger.getRun(run.id)).toMatchObject({ cleanupComplete: true });
+  expect(await ledger.getRecoveryControl(run.id)).toMatchObject({ liveCleanupComplete: true, executionCleanupProof: { ready: true } });
+  expect(await ledger.countActiveRuns()).toBe(0);
+  expect(await ledger.getEvidence(run.id)).toBeNull();
+});
+
 it("reuses settled product recovery while browser proof is missing and recovers again after new closure evidence", async () => {
   const ledger = new MemoryVoiceLabLedger("test");
   const config = testConfig({ SOPHIA_VOICE_LAB_KILL_SWITCH: "true" });

@@ -261,6 +261,7 @@ export interface VoiceLabLedger {
   getBrowserLease(runId: string): Promise<BrowserLease | null>;
   heartbeatBrowserLease(runId: string, workerId: string, leaseEpoch: number, leaseSeconds: number): Promise<boolean>;
   releaseBrowserLease(runId: string, workerId: string, leaseEpoch: number): Promise<boolean>;
+  releaseRecoveredBrowserLease(runId: string): Promise<boolean>;
   /** Observe expired leases without deleting their durable recovery receipts. */
   reapExpiredBrowserLeases(now?: Date, limit?: number, afterRunId?: string): Promise<BrowserLease[]>;
   heartbeatWorker(heartbeat: WorkerHeartbeat): Promise<void>;

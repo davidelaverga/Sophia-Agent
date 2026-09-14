@@ -22,6 +22,7 @@ import { retentionHmac } from "../src/retention-identity.js";
 import { joinHistoricalObligations } from "../src/historical-obligation-join.js";
 import { deriveRecoveryBrowserBinding } from "../src/recovery-control.js";
 import { verifyPreservedExecutionCleanup } from "./recovery-execution-persistence-helper.js";
+import { verifyRecoveredLeaseRelease } from "./recovered-lease-helper.js";
 import { completeExecutionCleanupFixture } from "./execution-cleanup-fixture.js";
 import { deriveD02BrowserContextBinding } from "../src/worker.js";
 import { proveP01LiveBoundary } from "./p01-live-boundary-helper.js";
@@ -278,6 +279,10 @@ describePostgres("real PostgreSQL Voice Lab adapter", () => {
 
   it("preserves exact execution cleanup independently of content retention", async () => {
     await verifyPreservedExecutionCleanup(ledger!);
+  });
+
+  it("atomically releases only an expired exact dead execution with preserved cleanup", async () => {
+    await verifyRecoveredLeaseRelease(ledger!);
   });
 
   it("persists one-shot generic owner dispatch across concurrent consumption and purge", async () => {

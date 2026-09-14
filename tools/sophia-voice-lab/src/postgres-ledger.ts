@@ -742,6 +742,10 @@ export class PostgresVoiceLabLedger implements VoiceLabLedger {
     return (result.rowCount ?? 0) === 1;
   }
 
+  releaseRecoveredBrowserLease(runId: string): Promise<boolean> {
+    return new PostgresRecoveryControls(this.pool).releaseRecoveredBrowserLease(runId);
+  }
+
   async reapExpiredBrowserLeases(now?: Date, limit = 100, afterRunId?: string): Promise<BrowserLease[]> {
     if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new RangeError("expired lease page limit must be between 1 and 100");
     // Production callers omit the test clock: allocation, renewal and reaping
