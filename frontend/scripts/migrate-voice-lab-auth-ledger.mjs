@@ -7,6 +7,7 @@ import { Pool } from 'pg';
 
 import { resolveDatabaseTls } from '../src/server/better-auth/database-tls.mjs';
 import { transactionBody } from './voice-lab-migration-contract.mjs';
+import { MEM00_FUNCTION_AUTHORITY_SQL, withoutAttestedMem00Trigger } from '../src/server/voice-lab/mem00-trigger-contract.mjs';
 
 const EXPECTED_MIGRATION_SHA256 = '42e6f2b3bf083675bcdd7b2f29c66b400c6fca9771b76f866e6c55f8513b514c';
 const EXPECTED_CLEANUP_INDEX_MIGRATION_SHA256 = '191ee955123259b821d5dd87b03579ce912f3467376b58316cbfac855ce83b44';
@@ -1497,6 +1498,7 @@ async function preflight(
     ),
     client.query(
       `SELECT t.tgname, c.relname AS tablename, t.tgenabled,
+              ${MEM00_FUNCTION_AUTHORITY_SQL} AS mem00_function_authority_valid,
               pg_get_triggerdef(t.oid, true) AS trigger_definition,
               p.proname, p.prosecdef, p.provolatile, p.proconfig,
               l.lanname, pn.nspname AS function_schema,
@@ -2310,10 +2312,11 @@ async function preflight(
       throw new Error(`Voice Lab product cleanup index ${name} drifted.`);
     }
   }
-  if (cleanupTriggers.rows.length !== CLEANUP_TRIGGER_CONTRACTS.size) {
+  const governedTriggerRows = withoutAttestedMem00Trigger(cleanupTriggers.rows);
+  if (governedTriggerRows.length !== CLEANUP_TRIGGER_CONTRACTS.size) {
     throw new Error('Voice Lab cleanup write-fence trigger set drifted.');
   }
-  const triggerRows = new Map(cleanupTriggers.rows.map((row) => [row.tgname, row]));
+  const triggerRows = new Map(governedTriggerRows.map((row) => [row.tgname, row]));
   for (const [name, expected] of CLEANUP_TRIGGER_CONTRACTS) {
     const row = triggerRows.get(name);
     const expectedComment = `sophia.voice-lab.${expected.commentKind}.v1 migration_sha256=${EXPECTED_CLEANUP_INDEX_MIGRATION_SHA256}`;

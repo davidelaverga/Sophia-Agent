@@ -5021,3 +5021,64 @@ f799c321aee48f59833918d07e4cb19d0ff2cc12ac521ea1be619affdf8b4f0b
 (12 files, 46777 bytes). Registered app identity and permissions unchanged.
 Reinstallation remains sequenced after matching closed production protocol
 rollout. No new live run, migration, production gate change, or closure claim.
+
+## 2026-09-14 — closed C4 rollout and MEM00 compatibility repair
+
+Published C4 e3be7691b1c64c19e7d9f65e3bc2fda0f3b1871f reached all six services.
+The Lab v3-to-v4 operator preserved 136 historical identities with the existing
+operator_accepted_unverified_history authorization; no historical cleanup claim.
+Detailed rollout and upgrade receipts remain in sibling vt00-c4-evidence files.
+All admission/execution/product gates stayed closed. Main Blueprint was not
+blanket-synced because it would overwrite existing memory settings; code-only
+exact-commit deployments preserved those settings. Initial overlapping product
+deploys failed; Gateway-ready then LangGraph-ready then Voice-ready retries passed.
+
+Both Lab services now run C4 normally. Worker dep-dajjkt5g1s2s73b0qtp0 and web
+dep-dajjkqvqj5pc73dssbqg report one settled closed worker and zero active runs.
+Resume service initiated the exact-C4 web rebuild immediately; builds overlapped,
+but acceptance required a fresh exact worker heartbeat after web startup.
+Initial masked Render field edits did not persist; loaded nonsecret fields were
+corrected and verified through capabilities. The authorized aggregate provider
+seconds caps now report unlimited; per-run/concurrency bounds are unchanged.
+
+Frontend signed readiness still returned 503 voice_lab_auth_ledger_not_ready.
+Read-only Supabase catalog evidence identifies a sufficient cause: its exact
+four-trigger check includes the independently deployed fifth MEM00 ordinary
+session-delete-order trigger. That function's source hash is exactly
+4087a488f957a0fb77d758de1db94f9938644411103ecfc77c62f5b9664716ce;
+its search_path is pg_catalog, public and ACL is owner plus non-grantable
+owner-issued service_role EXECUTE. No production schema/ACL/credential changed.
+
+Added one shared optional-companion validator to frontend runtime and owner
+preflight. It pins source, signature, trigger definition, enabled state, table,
+owner, search path, language and execute authority. All four governed fences
+remain mandatory; unknown/duplicate/drifted companion triggers still reject.
+The memory function and migration bytes are unchanged.
+
+Verification: 25 focused tests passed; full frontend 1992 passed, 3 DB-dependent
+skipped (c4-mem00-compat-frontend-full.json SHA256
+b41ccfdb119ebf4e8c12b2063283ba7011a8c3598820a7d6df1972173d86ed0c).
+Typecheck passed; ESLint had zero errors, existing warnings plus import-order
+warnings subsequently tidied. Local production build compiled and generated
+62 pages using process-only synthetic auth material and a loopback port-1 DB
+placeholder with verify-full TLS; this is not deployable configuration.
+
+Real PG17.11 integration: all 3 tests passed, including real runtime/preflight
+acceptance and rejection of PUBLIC/runtime-role grants, service_role grant
+option, disabled trigger, invoker mode and source drift, plus existing backend
+recovery integration. Report c4-mem00-compat-pg17.json SHA256
+01c6043bb17a148b53f2a2770e5b54ca5fc410b619d6312b06c24fc13b8bfd67.
+Earlier fresh-cluster setup lacked test roles; PG18 then failed preexisting
+constraint-count checks before the new cases. Neither was reported as a pass.
+Built PG17.11 from the official PostgreSQL source archive after checksum
+verification to match production's major version, without changing unrelated
+PG18 catalog assertions.
+
+Disposable guest cluster /tmp/sophia-c4-pg17.nhAgS5t1/data, exact voice_lab_test,
+loopback guest16433/host16432: zero remaining fixture tables and other connections
+after tests. Both temporary PG18 and PG17 clusters stopped; forward cancelled;
+mem00-qualification VM stopped. Files retained; unrelated qualification24 untouched.
+
+Repair publication/deployment and signed readiness remain next. Installed plugin
+replacement, twenty journeys, five canaries, fresh-root P01, canonical suite and
+promotion are still pending. Historical waiver is not global zero certification.

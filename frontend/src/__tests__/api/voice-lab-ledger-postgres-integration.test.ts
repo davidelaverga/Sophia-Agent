@@ -1,7 +1,8 @@
 import { execFile } from 'node:child_process';
 import { createHash, createHmac } from 'node:crypto';
-import { promisify } from 'node:util';
+import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { promisify } from 'node:util';
 
 import { Pool, type PoolClient } from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -391,6 +392,38 @@ describeRealPostgres('Voice Lab auth-ledger and cleanup-index real Postgres cont
     const preflightOutput = await runOperatorMigration('preflight');
     expect(preflightOutput).toContain('mode=preflight');
     expect(preflightOutput).toContain('ready=true');
+
+    // The independently deployed MEM00 migration must coexist with the exact
+    // synthetic fences. Exercise real catalog/source/ACL checks, not mock rows.
+    const memoryMigration = readFileSync(resolve(process.cwd(), '../backend/migrations/2026_09_06_mem00_ordinary_session_delete_order.sql'), 'utf8');
+    const memoryFunction = memoryMigration.slice(
+      memoryMigration.indexOf('create or replace function'),
+      memoryMigration.indexOf('revoke all on function'),
+    );
+    await pool.query(memoryMigration);
+    try {
+      await expect(runOperatorMigration('preflight')).resolves.toContain('ready=true');
+      await expect(runtimeReadinessAsBetterAuthApp()).resolves.toMatchObject({ ready: true });
+      await pool.query('GRANT EXECUTE ON FUNCTION public.sophia_mem00_ordinary_session_delete_order() TO service_role');
+      await expect(runOperatorMigration('preflight')).resolves.toContain('ready=true');
+      for (const [drift, restore] of [
+        ['GRANT EXECUTE ON FUNCTION public.sophia_mem00_ordinary_session_delete_order() TO PUBLIC', 'REVOKE EXECUTE ON FUNCTION public.sophia_mem00_ordinary_session_delete_order() FROM PUBLIC'],
+        ['GRANT EXECUTE ON FUNCTION public.sophia_mem00_ordinary_session_delete_order() TO better_auth_app', 'REVOKE EXECUTE ON FUNCTION public.sophia_mem00_ordinary_session_delete_order() FROM better_auth_app'],
+        ['GRANT EXECUTE ON FUNCTION public.sophia_mem00_ordinary_session_delete_order() TO service_role WITH GRANT OPTION', 'REVOKE GRANT OPTION FOR EXECUTE ON FUNCTION public.sophia_mem00_ordinary_session_delete_order() FROM service_role'],
+        ['ALTER TABLE public.sophia_sessions DISABLE TRIGGER sophia_mem00_ordinary_session_delete_order', 'ALTER TABLE public.sophia_sessions ENABLE TRIGGER sophia_mem00_ordinary_session_delete_order'],
+        ['ALTER FUNCTION public.sophia_mem00_ordinary_session_delete_order() SECURITY INVOKER', 'ALTER FUNCTION public.sophia_mem00_ordinary_session_delete_order() SECURITY DEFINER'],
+        [memoryFunction.replace('return old;', 'return old; -- source drift'), memoryFunction],
+      ]) {
+        await pool.query(drift);
+        await expect(runOperatorMigration('preflight')).rejects.toThrow('MEM00 delete-order trigger contract drifted');
+        await expect(runtimeReadinessAsBetterAuthApp()).rejects.toMatchObject({ code: 'voice_lab_auth_ledger_not_ready' });
+        await pool.query(restore);
+        await expect(runOperatorMigration('preflight')).resolves.toContain('ready=true');
+        await expect(runtimeReadinessAsBetterAuthApp()).resolves.toMatchObject({ ready: true });
+      }
+    } finally {
+      await pool.query('DROP TRIGGER IF EXISTS sophia_mem00_ordinary_session_delete_order ON public.sophia_sessions; DROP FUNCTION IF EXISTS public.sophia_mem00_ordinary_session_delete_order();');
+    }
 
     await expect(pool.query(
       `INSERT INTO public.sophia_sessions (

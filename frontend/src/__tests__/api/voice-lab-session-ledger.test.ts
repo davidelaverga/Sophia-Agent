@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { VoiceLabCapabilityClaims } from '../../server/voice-lab/capability';
@@ -1393,6 +1395,49 @@ describe('dedicated Voice Lab Better Auth session ledger', () => {
     forbidden!.permitted = false;
 
     await expect(assertVoiceLabAuthLedgerReady()).resolves.toMatchObject({ ready: true });
+  });
+
+  it('accepts the exact deployed MEM00 companion without dropping Voice Lab fences', async () => {
+    const migration = readFileSync('../backend/migrations/2026_09_06_mem00_ordinary_session_delete_order.sql', 'utf8');
+    const companion = {
+      ...database.preflight.cleanupTriggers[0],
+      tgname: 'sophia_mem00_ordinary_session_delete_order',
+      tablename: 'sophia_sessions',
+      proname: 'sophia_mem00_ordinary_session_delete_order',
+      trigger_definition: 'CREATE TRIGGER sophia_mem00_ordinary_session_delete_order BEFORE DELETE ON sophia_sessions FOR EACH ROW EXECUTE FUNCTION sophia_mem00_ordinary_session_delete_order()',
+      proconfig: ['search_path=pg_catalog, public'],
+      prosrc: migration.split('as $function$')[1].split('$function$;')[0],
+      mem00_function_authority_valid: true,
+    };
+    database.preflight.cleanupTriggers.push(companion);
+    try {
+      await expect(assertVoiceLabAuthLedgerReady()).resolves.toMatchObject({ ready: true });
+      for (const patch of [
+        { tgenabled: 'D' }, { tablename: 'session' }, { prosecdef: false },
+        { owner_is_expected: false }, { owner_matches_control: false },
+        { function_schema: 'other' }, { function_is_public_identity: false },
+        { mem00_function_authority_valid: false },
+        { proconfig: ['search_path=public'] },
+        { prosrc: companion.prosrc + '\n' },
+        { trigger_definition: companion.trigger_definition.replace('FOR EACH ROW', 'FOR EACH ROW WHEN (false)') },
+      ]) {
+        const original = { ...companion };
+        Object.assign(companion, patch);
+        await expect(assertVoiceLabAuthLedgerReady()).rejects.toMatchObject({ code: 'voice_lab_auth_ledger_not_ready' });
+        Object.assign(companion, original);
+      }
+      database.preflight.cleanupTriggers.push({ ...companion });
+      await expect(assertVoiceLabAuthLedgerReady()).rejects.toMatchObject({ code: 'voice_lab_auth_ledger_not_ready' });
+      database.preflight.cleanupTriggers.pop();
+      const fence = database.preflight.cleanupTriggers[0];
+      const definition = fence.trigger_definition;
+      fence.trigger_definition += ' WHEN (false)';
+      await expect(assertVoiceLabAuthLedgerReady()).rejects.toMatchObject({ code: 'voice_lab_auth_ledger_not_ready' });
+      fence.trigger_definition = definition;
+      await expect(assertVoiceLabAuthLedgerReady()).resolves.toMatchObject({ ready: true });
+    } finally {
+      database.preflight.cleanupTriggers.splice(4);
+    }
   });
 
   it('rejects disabled trigger predicates, function-body drift, and extra overloads', async () => {

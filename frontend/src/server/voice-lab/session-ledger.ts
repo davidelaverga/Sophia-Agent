@@ -13,6 +13,8 @@ import {
   VoiceLabCapabilityError,
 } from '@/server/voice-lab/capability';
 
+import { MEM00_FUNCTION_AUTHORITY_SQL, withoutAttestedMem00Trigger } from './mem00-trigger-contract.mjs';
+
 const MARKER_PREFIX = 'sophia-voice-lab-session-v1.';
 const AUTH_LEDGER_TABLE = 'sophia_voice_lab_auth_grants';
 const AUTH_TOMBSTONE_DOMAIN = 'sophia-voice-lab-auth-tombstone-v1';
@@ -652,6 +654,7 @@ type ProductCleanupIndexRow = {
 };
 type LiveTombstoneKidRow = { tombstone_kid: string };
 type ProductCleanupTriggerRow = {
+  mem00_function_authority_valid: boolean;
   tgname: string;
   tablename: string;
   tgenabled: string;
@@ -1082,6 +1085,7 @@ async function assertVoiceLabAuthLedgerReadyOnClient(
       ),
       pool.query<ProductCleanupTriggerRow>(
         `SELECT t.tgname, c.relname AS tablename, t.tgenabled,
+                ${MEM00_FUNCTION_AUTHORITY_SQL} AS mem00_function_authority_valid,
                 pg_get_triggerdef(t.oid, true) AS trigger_definition,
                 p.proname, p.prosecdef, p.provolatile, p.proconfig,
                 l.lanname, pn.nspname AS function_schema,
@@ -2163,11 +2167,12 @@ async function assertVoiceLabAuthLedgerReadyOnClient(
         || normalizeIndexExpression(actual.predicate) !== expected.predicate
       ) throw ledgerNotReady();
     }
-    if (productCleanupTriggers.rows.length !== EXPECTED_PRODUCT_CLEANUP_TRIGGERS.size) {
+    const governedTriggerRows = withoutAttestedMem00Trigger(productCleanupTriggers.rows);
+    if (governedTriggerRows.length !== EXPECTED_PRODUCT_CLEANUP_TRIGGERS.size) {
       throw ledgerNotReady();
     }
     const cleanupTriggers = new Map(
-      productCleanupTriggers.rows.map((row) => [row.tgname, row]),
+      governedTriggerRows.map((row) => [row.tgname, row]),
     );
     for (const [name, expected] of EXPECTED_PRODUCT_CLEANUP_TRIGGERS) {
       const row = cleanupTriggers.get(name);
