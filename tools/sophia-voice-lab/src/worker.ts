@@ -819,7 +819,10 @@ export class VoiceLabWorker {
         started = await this.driver.start(run, grant.token, browserContextBinding, recordStartupStage, async (acquisition, runtime) => {
           await this.#fenceMutation(claimed, signal);
           const { dedupeKey, ...event } = acquisition;
-          await this.ledger.appendEvents(run.id, [{ ...event, ...(dedupeKey === null ? {} : { dedupeKey }) }, runtimeAcquisition(runtime)]);
+          // The driver returns this acquisition again with its startup batch.
+          // Both writes must have identical canonical bytes under its dedupe
+          // key, while ownership still commits before auth/provider allocation.
+          await this.ledger.appendEvents(run.id, [{ ...event, payload: governedDriverEventPayload(run, event), ...(dedupeKey === null ? {} : { dedupeKey }) }, runtimeAcquisition(runtime)]);
           await this.ledger.preserveRecoveryExecutionOwnership(run.id);
           runtimeAcquisitionPersisted = true;
         });
@@ -1626,8 +1629,7 @@ export class VoiceLabWorker {
       const rawObservedAt = provenance?.recorded_at ?? provenance?.observed_at;
       const parsed = typeof rawObservedAt === "string" ? new Date(rawObservedAt) : new Date();
       const appBinding = strictProductRunBinding(event.source, event.payload, boundRun);
-      const governedPayload = event.payload;
-      await this.ledger.appendEvent(runId, event.kind, event.source, redact({ ...governedPayload, _runner_binding: { run_id: runId, test_run_id_sha256: sha256(boundRun.testRunId) }, ...(appBinding === null ? {} : { _product_run_binding: appBinding }) }), event.dedupeKey ?? undefined, Number.isNaN(parsed.getTime()) ? new Date() : parsed);
+      await this.ledger.appendEvent(runId, event.kind, event.source, governedDriverEventPayload(boundRun, event), event.dedupeKey ?? undefined, Number.isNaN(parsed.getTime()) ? new Date() : parsed);
       if (event.source === "product" && event.kind === "audio.input.product_fault" && appBinding !== null) {
         const receipt = event.payload.receipt as Record<string, unknown> | undefined;
         throw new VoiceLabError(labError("PRODUCT_INPUT_EVIDENCE_FAULT", "The product rejected or could not unambiguously correlate the governed synthetic input operation.", "harness", false, { fault_code: typeof receipt?.code === "string" ? receipt.code : "unknown" }));
@@ -1682,8 +1684,15 @@ export class VoiceLabWorker {
     for (const operation of cancelled) await this.ledger.appendEvent(run.id, "operation.cancelled", "worker", { operation_id: operation.id, operation_type: operation.type, reason_code: operation.error?.code ?? "RUN_TERMINATED" }, `operation:${operation.id}:cancelled`);
     if (TERMINAL_RUN_STATES.has(run.state)) {
       const control = await this.ledger.getRecoveryControl(run.id);
-      const outstandingLease = await this.ledger.getBrowserLease(run.id);
-      if (run.state !== "completed" || !run.cleanupComplete || control?.liveCleanupComplete !== true || outstandingLease !== null || this.driver.hasSession(run.id)) {
+      const priorEvents = await this.#allEvents(run.id);
+      const latestBrowserClose = priorEvents.events.reduce((seq, event) => event.kind === "cleanup.browser_context_closed" ? Math.max(seq, event.seq) : seq, 0);
+      // Product settlement and browser settlement are independent obligations.
+      // Reissuing an already complete product receipt while browser proof is
+      // missing creates fresh audits/manifests on every maintenance tick. A new
+      // browser-close receipt still requires recovery after that event so the
+      // execution-epoch proof can establish ordering without guessing closure.
+      const productRecoveryCurrent = priorEvents.events.some(event => event.seq > latestBrowserClose && authoritativeLiveCleanupComplete([event], run));
+      if (!productRecoveryCurrent || this.driver.hasSession(run.id)) {
         const recovered = await this.#recoverRun(run);
         await this.#persistEvents(run.id, recovered.events);
       }
@@ -4549,6 +4558,14 @@ export function isExactBoundProductEvent(run: RunRecord, event: Pick<import("./d
     && record.provider_expires_at === run.expiresAt.toISOString()
     && record.cleanup_obligation_id_sha256 === sha256(run.cleanupObligationId);
 }
+function governedDriverEventPayload(run: RunRecord, event: { source: string; payload: Record<string, unknown> }): Record<string, unknown> {
+  const appBinding = strictProductRunBinding(event.source, event.payload, run);
+  return redact({ ...event.payload,
+    _runner_binding: { run_id: run.id, test_run_id_sha256: sha256(run.testRunId) },
+    ...(appBinding === null ? {} : { _product_run_binding: appBinding }),
+  });
+}
+
 function strictProductRunBinding(source: string, payload: Record<string, unknown>, expected: RunRecord): Record<string, unknown> | null {
   if (source !== "product") return null;
   const binding = payload._app_synthetic_binding;

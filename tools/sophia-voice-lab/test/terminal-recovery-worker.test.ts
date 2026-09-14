@@ -7,6 +7,51 @@ import { MemoryVoiceLabLedger } from "../src/memory-ledger.js";
 import { CapabilityCodec, sha256 } from "../src/security.js";
 import { VoiceLabWorker } from "../src/worker.js";
 import { testConfig, testRun } from "./helpers.js";
+import { ownership, recovery, closed } from "./execution-cleanup-fixture.js";
+
+it("reuses settled product recovery while browser proof is missing and recovers again after new closure evidence", async () => {
+  const ledger = new MemoryVoiceLabLedger("test");
+  const config = testConfig({ SOPHIA_VOICE_LAB_KILL_SWITCH: "true" });
+  const run = testRun({ state: "failed_harness", cleanupComplete: false, expiresAt: new Date(Date.now() + 600_000), retentionPurgeDueAt: new Date(Date.now() + 3_600_000) });
+  await ledger.createRunWithOperation(run, { id: randomUUID(), runId: run.id, callerId: run.callerId, type: "start", idempotencyKey: randomUUID(), requestHash: sha256(run.id), input: {} }, { global: 1, caller: 1 });
+  await ledger.upsertBrowserLease(run.id, "lost-browser-owner", 600);
+  for (const event of [...ownership(run), recovery(run)]) await ledger.appendEvent(run.id, event.kind, event.source, event.payload, event.dedupeKey);
+  const recover = vi.fn(async () => ({ events: [{ ...recovery(run), dedupeKey: `recovery:${randomUUID()}` }], artifacts: [] }));
+  const driver = { recover, hasSession: () => false } as unknown as VoiceBrowserDriver;
+  const makeWorker = () => new VoiceLabWorker(randomUUID(), ledger, config, {} as AudioResolver, driver,
+    new CapabilityCodec(config.capabilitySecret, config.capabilityIssuer, config.capabilityTtlSeconds), pino({ level: "silent" }));
+  await makeWorker().maintainSessions();
+  const first = await ledger.listEvents(run.id, 0, 1000);
+  const firstEvidence = await ledger.getEvidence(run.id);
+  expect(firstEvidence).not.toBeNull();
+  await makeWorker().maintainSessions();
+  expect(recover).not.toHaveBeenCalled();
+  expect(await ledger.getRun(run.id)).toMatchObject({ cleanupComplete: false });
+  expect((await ledger.listEvents(run.id, 0, 1000)).events).toEqual(first.events);
+  expect(await ledger.getEvidence(run.id)).toEqual(firstEvidence);
+  const close = closed(run);
+  await ledger.appendEvent(run.id, close.kind, close.source, close.payload, close.dedupeKey);
+  await makeWorker().maintainSessions();
+  expect(recover).toHaveBeenCalledTimes(1);
+  await makeWorker().maintainSessions();
+  expect(recover).toHaveBeenCalledTimes(1);
+});
+
+it.each(["unconfirmed", "wrong-binding"])("does not suppress product recovery for a %s receipt", async mode => {
+  const ledger = new MemoryVoiceLabLedger("test");
+  const config = testConfig({ SOPHIA_VOICE_LAB_KILL_SWITCH: "true" });
+  const run = testRun({ state: "failed_harness", cleanupComplete: false, expiresAt: new Date(Date.now() + 600_000) });
+  await ledger.createRunWithOperation(run, { id: randomUUID(), runId: run.id, callerId: run.callerId, type: "start", idempotencyKey: randomUUID(), requestHash: sha256(run.id), input: {} }, { global: 1, caller: 1 });
+  const prior = recovery(mode === "wrong-binding" ? testRun() : run);
+  if (mode === "unconfirmed") prior.payload.complete = false;
+  await ledger.appendEvent(run.id, prior.kind, prior.source, prior.payload, prior.dedupeKey);
+  const recover = vi.fn(async () => ({ events: [{ ...recovery(run), dedupeKey: "fresh-recovery" }], artifacts: [] }));
+  const driver = { recover, hasSession: () => false } as unknown as VoiceBrowserDriver;
+  const worker = new VoiceLabWorker("replacement", ledger, config, {} as AudioResolver, driver,
+    new CapabilityCodec(config.capabilitySecret, config.capabilityIssuer, config.capabilityTtlSeconds), pino({ level: "silent" }));
+  await worker.maintainSessions();
+  expect(recover).toHaveBeenCalledTimes(1);
+});
 
 it("does not consider new suite admission when an expected prior child is missing", async () => {
   const ledger = new MemoryVoiceLabLedger("test");

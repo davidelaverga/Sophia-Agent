@@ -5082,3 +5082,38 @@ mem00-qualification VM stopped. Files retained; unrelated qualification24 untouc
 Repair publication/deployment and signed readiness remain next. Installed plugin
 replacement, twenty journeys, five canaries, fresh-root P01, canonical suite and
 promotion are still pending. Historical waiver is not global zero certification.
+
+## J01 startup and recovery repair — 2026-09-14
+
+Exact 094f7d85a8e01867bf911042e8cca3fb68336bf3 reached product ready in the
+first fresh journey, then failed persistence with DEDUPE_CONFLICT before any
+speech. Run 10f1c17a-56aa-4fe7-be1e-426c52650855 is preserved as a failed
+attempt, not a qualified journey. Its abort encountered another same-key payload
+conflict. Product recovery reported settlement, but browser closure proof was
+not durably available. All gates were subsequently attested closed; that is
+containment, not proof of resource closure. This new obligation is not covered
+by the operator-accepted historical exception.
+
+Repairs preserve early atomic ownership before authentication, using the same
+canonical event payload for early acquisition and startup replay. Abort keeps
+an observed finalization receipt distinct from a later capture-drain failure,
+allowing subsequent auth/browser receipts to persist. Terminal maintenance
+reuses exact bound product recovery while browser proof is missing, preventing
+repeated recovery audits and immutable-manifest churn. Later browser closure
+still triggers recovery to preserve execution-epoch ordering. Missing browser
+proof remains missing; no cap, gate or cleanup assertion has been relaxed.
+
+Local validation: 685 Lab tests passed, 29 opt-in database tests skipped,
+typecheck passed; strengthened stable-evidence regression and both negative
+receipt cases passed separately. Real PostgreSQL 18 dedicated disposable
+databases: 17 adapter tests plus 12 service/control tests passed, zero failed or
+skipped. Reports c4-j01-recovery-dedupe-full.json,
+c4-j01-repair-postgres.json and c4-j01-repair-postgres-control.json are retained
+in the local vt00-c4-evidence directory. No frontend/backend or memory code
+changed. Disposable cluster stopped after zero other test connections; no
+production migration or credential change occurred.
+
+These are repair qualification results, not production voice passes. Deployment,
+new fresh-process journeys, five canaries, fresh-root P01, canonical suite and
+operational closeout remain outstanding. J01's original evidence and unresolved
+obligation remain preserved; promotion is not authorized by this checkpoint.

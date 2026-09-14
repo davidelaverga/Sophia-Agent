@@ -11,7 +11,7 @@ import { VoiceLabService, assertFreshProductAdmissionProof, targetAdmissionBindi
 import { assertTransition } from "../src/state-machine.js";
 import { VoiceLabWorker, assertResolvedAudioWithinAdmission, augmentOperationTimeoutWithInterruptedDriverError, certificationTerminalDecision, deriveCompletedVerdicts, evaluateScenarioAssertions, exactOutputLifecyclesAtEpoch, leaseHeartbeatIntervalMs, settleInterruptedExecution, suiteCertificationProjection, suiteCertificationState } from "../src/worker.js";
 import { caller, SHA, SHA_B, SHA_C, SHA_D, testConfig, testRun } from "./helpers.js";
-import { recovery as boundRecoveryFixture } from "./execution-cleanup-fixture.js";
+import { ownership, recovery as boundRecoveryFixture } from "./execution-cleanup-fixture.js";
 
 const target = {
   frontend_url: "http://frontend.test",
@@ -32,6 +32,43 @@ describe("service and durable memory-ledger contracts", () => {
     audio = new AudioResolver(testConfig());
     await audio.initialize();
     service = new VoiceLabService(ledger, testConfig(), async () => audio.summaries());
+  });
+
+  it("replays early durable browser acquisition through the normal event pipeline without changing its evidence", async () => {
+    const config = testConfig();
+    const run = testRun({ scenarioId: "V-F01" });
+    const operation = startOperation(run);
+    await ledger.createRunWithOperation(run, operation, { global: 1, caller: 1 });
+    const { runId: _runId, seq: _seq, at: _at, ...acquisition } = ownership(run)[0]!;
+    let allocated = false;
+    let earlyPayload: Record<string, unknown> | undefined;
+    const driver = {
+      hasSession: () => allocated,
+      start: async (_run: unknown, _grant: unknown, _binding: unknown, _stage: unknown, acquired: any) => {
+        await acquired(acquisition, { engine: "chromium", version: "test" });
+        const early = await ledger.findLatestEvent(run.id, ["harness.browser_process_acquired"]);
+        earlyPayload = early?.payload;
+        expect(earlyPayload).toMatchObject(acquisition.payload);
+        expect((await ledger.getRecoveryControl(run.id))?.browserAllocationEver).toBe(true);
+        allocated = true;
+        return { observedDeployment: run.target.expectedDeployment, events: [acquisition] };
+      },
+      readiness: async () => ({ ok: true, engine: "chromium", version: "test" }),
+      recover: async () => ({ events: [], artifacts: [] }),
+      cancel: async () => undefined,
+      close: async () => undefined,
+    } as any;
+    const worker = new VoiceLabWorker("acquisition-replay-worker", ledger, config, audio, driver,
+      new CapabilityCodec(config.capabilitySecret, config.capabilityIssuer, config.capabilityTtlSeconds));
+    await worker.runOnce();
+    expect(await ledger.getOperation(operation.id)).toMatchObject({ state: "succeeded", error: null });
+    expect(earlyPayload).toMatchObject({ _runner_binding: { run_id: run.id, test_run_id_sha256: sha256(run.testRunId) } });
+    expect(await ledger.getRun(run.id)).toMatchObject({ state: "ready" });
+    const page = await ledger.listEvents(run.id, 0, 100);
+    expect(page.events.filter(event => event.kind === acquisition.kind)).toHaveLength(1);
+    await expect(ledger.appendEvent(run.id, acquisition.kind, acquisition.source,
+      { ...page.events.find(event => event.kind === acquisition.kind)!.payload, one_process_per_run: false },
+      acquisition.dedupeKey!)).rejects.toMatchObject({ detail: { code: "DEDUPE_CONFLICT" } });
   });
 
   it("bounds settlement when an interrupted browser driver never resolves", async () => {

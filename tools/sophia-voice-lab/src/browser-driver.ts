@@ -1138,7 +1138,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
         if (bytes) artifacts.push({ id: randomUUID(), kind: "final_screenshot", contentType: "image/jpeg", bytes });
       }
       if (frontendFinalizeCapability) {
-        try {
+        await collectAbortFinalizationEvents(run.id, events, async () => {
           const refreshUrl = new URL(this.config.authRefreshPath, new URL(run.target.frontendUrl).origin).toString();
           const { response: refreshed } = await requestBoundJson(session.context.request, "POST", refreshUrl, 10_000, frontendFinalizeCapability);
           if (!refreshed.ok()) throw new Error(`finalize grant HTTP ${refreshed.status()}`);
@@ -1162,9 +1162,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
             }
             if (providerClosedEvent) events.push(this.#providerTransportClosedEvent(run, session, providerClosedEvent));
           }
-        } catch (error) {
-          events.push({ kind: "cleanup.product_finalization", source: "canonical", payload: { confirmed: false, unavailable_reason: error instanceof Error ? error.message.slice(0, 200) : "unknown" }, dedupeKey: `cleanup:${run.id}:product-finalization` });
-        }
+        });
       } else {
         events.push({ kind: "cleanup.product_finalization", source: "canonical", payload: { confirmed: false, unavailable_reason: "finalization_capability_unavailable" }, dedupeKey: `cleanup:${run.id}:product-finalization` });
       }
@@ -1565,6 +1563,28 @@ export function isExactFinalizationResponse(response: Pick<PlaywrightResponse, "
 function isJsonResponse(response: Pick<APIResponse, "headers">): boolean {
   const contentType = response.headers()["content-type"]?.split(";", 1)[0]?.trim().toLowerCase();
   return contentType === "application/json" || contentType?.endsWith("+json") === true;
+}
+
+export async function collectAbortFinalizationEvents(
+  runId: string,
+  events: Array<Omit<LabEvent, "runId" | "seq" | "at">>,
+  finalizeAndDrain: () => Promise<void>,
+): Promise<void> {
+  try {
+    await finalizeAndDrain();
+  } catch (error) {
+    // A later capture/transport drain failure cannot revoke an already observed
+    // finalization receipt or reuse its key with contradictory evidence. Keep
+    // the failure separate so auth/process closure receipts can still persist.
+    const recorded = events.some(event => event.kind === "cleanup.product_finalization"
+      && event.dedupeKey === `cleanup:${runId}:product-finalization`);
+    events.push({
+      kind: recorded ? "cleanup.post_finalization_observation_unavailable" : "cleanup.product_finalization",
+      source: "canonical",
+      payload: { ...(recorded ? {} : { confirmed: false }), unavailable_reason: error instanceof Error ? error.message.slice(0, 200) : "unknown" },
+      dedupeKey: `cleanup:${runId}:${recorded ? "post-finalization-observation" : "product-finalization"}`,
+    });
+  }
 }
 
 export function assertPageLocation(pageUrl: string, expectedOrigin: string, allowedPath: (pathname: string) => boolean, code: string): void {
