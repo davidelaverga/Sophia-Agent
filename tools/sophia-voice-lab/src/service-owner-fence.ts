@@ -55,7 +55,9 @@ export const ServiceOwnerFenceReceiptSchema = z.object({
   if (r.before.instanceIdsSha256[0] === r.workerIdSha256
     || r.after.instanceIdsSha256[0] === r.workerIdSha256
     || r.before.instanceIdsSha256[0] === r.after.instanceIdsSha256[0]
-    || r.before.deployIdSha256 === r.after.deployIdSha256
+    // A Render restart replaces instances within the same deployment. The
+    // deployment ID is provenance, not a process identity; require distinct
+    // instance ownership and post-action creation instead.
     || Date.parse(r.before.instanceCreatedAt) > Date.parse(r.before.observedAt)
     || Date.parse(r.after.instanceCreatedAt) < Date.parse(r.actionRequestedAt)
     || Date.parse(r.after.instanceCreatedAt) > Date.parse(r.after.observedAt)) {
@@ -63,6 +65,18 @@ export const ServiceOwnerFenceReceiptSchema = z.object({
   }
 });
 export type ServiceOwnerFenceReceipt = z.infer<typeof ServiceOwnerFenceReceiptSchema>;
+
+/** A verifier repair may be deployed after collection. Permit exactly one
+ * deployment-configured immutable receipt to retain its observed Lab version.
+ * This selects a pin only: signature, expiry, consumed dispatch, allocation,
+ * product pins and independent canonical settlement are still verified. */
+export function serviceFenceSourceLabSha(receipt: unknown, currentLabSha: string, approvedReceiptSha256?: string | null): string {
+  sha.parse(currentLabSha);
+  if (!approvedReceiptSha256) return currentLabSha;
+  hash.parse(approvedReceiptSha256);
+  if (canonicalRequestHash(receipt) !== approvedReceiptSha256) return currentLabSha;
+  return ServiceOwnerFenceReceiptSchema.parse(receipt).expectedLabSha;
+}
 
 const retainedSchema = z.object({
   schema: z.literal("sophia.voice-lab.verified-service-owner-fence.v1"),

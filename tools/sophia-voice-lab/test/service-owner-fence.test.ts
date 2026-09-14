@@ -1,10 +1,21 @@
 import { expect, it } from "vitest";
-import { ServiceOwnerFenceReceiptSchema, verifyServiceOwnerFence, type ServiceOwnerFenceReceipt } from "../src/service-owner-fence.js";
+import { ServiceOwnerFenceReceiptSchema, verifyServiceOwnerFence, serviceFenceSourceLabSha, type ServiceOwnerFenceReceipt } from "../src/service-owner-fence.js";
 import { canonicalRequestHash, sha256 } from "../src/security.js";
 import { ingestGenericOwnerLoss, parseVerifiedGenericOwnerLoss } from "../src/generic-owner-loss.js";
 import { serviceOwnerFenceFixture } from "./service-owner-fence-fixture.js";
 
 const fixture = serviceOwnerFenceFixture;
+
+it("requires an exact configured immutable receipt for cross-verifier source-version compatibility", () => {
+  const f = fixture(), current = 'a'.repeat(40), digest = canonicalRequestHash(f.input.receipt);
+  expect(serviceFenceSourceLabSha(f.input.receipt, current)).toBe(current);
+  expect(serviceFenceSourceLabSha(f.input.receipt, current, 'b'.repeat(64))).toBe(current);
+  expect(serviceFenceSourceLabSha(f.input.receipt, current, digest)).toBe(f.unsigned.expectedLabSha);
+  expect(verifyServiceOwnerFence({ ...f.input, expectedLabSha: serviceFenceSourceLabSha(f.input.receipt, current, digest) })).toBeDefined();
+  const tampered = { ...f.input.receipt, signature: 'a'.repeat(86) };
+  expect(() => verifyServiceOwnerFence({ ...f.input, receipt: tampered, expectedLabSha: serviceFenceSourceLabSha(tampered, current, canonicalRequestHash(tampered)) })).toThrow();
+  expect(() => verifyServiceOwnerFence({ ...f.input, expectedLabSha: serviceFenceSourceLabSha(f.input.receipt, current, digest), acceptedAt: new Date(f.unsigned.expiresAt) })).toThrow();
+});
 
 it("verifies a distinct recorded service restart without rewriting or settling the old allocation", () => {
   const f = fixture(); const original = JSON.stringify(f.input.control);
@@ -17,12 +28,18 @@ it.each(["controlBindingSha256", "allocationBindingSha256", "workerServiceIdSha2
   const f = fixture();
   expect(() => verifyServiceOwnerFence({ ...f.input, receipt: f.signed({ ...f.unsigned, [field]: sha256("foreign") }) })).toThrow();
 });
-it.each(["original-before", "original-after", "unchanged-owner", "unchanged-deploy", "overlap", "stale-before", "old-after", "multiple", "failed-action"])("rejects %s source claims", kind => {
+it("accepts a real restart replacement within the same deployment", () => {
+  const f = fixture(); const r = structuredClone(f.unsigned);
+  r.after.deployIdSha256 = r.before.deployIdSha256;
+  expect(verifyServiceOwnerFence({ ...f.input, receipt: f.signed(r) }).liveResourcesZeroProven).toBe(false);
+  r.after.instanceIdsSha256 = r.before.instanceIdsSha256;
+  expect(() => verifyServiceOwnerFence({ ...f.input, receipt: f.signed(r) })).toThrow();
+});
+it.each(["original-before", "original-after", "unchanged-owner", "overlap", "stale-before", "old-after", "multiple", "failed-action"])("rejects %s source claims", kind => {
   const f = fixture(); const r = structuredClone(f.unsigned);
   if (kind === "original-before") r.before.instanceIdsSha256 = [r.workerIdSha256];
   if (kind === "original-after") r.after.instanceIdsSha256 = [r.workerIdSha256];
   if (kind === "unchanged-owner") r.after.instanceIdsSha256 = r.before.instanceIdsSha256;
-  if (kind === "unchanged-deploy") r.after.deployIdSha256 = r.before.deployIdSha256;
   if (kind === "overlap") r.after.observedAt = f.at(362999).toISOString();
   if (kind === "stale-before") r.before.observedAt = f.at(-14000).toISOString();
   if (kind === "old-after") r.after.instanceCreatedAt = f.at(1000).toISOString();

@@ -1,7 +1,7 @@
 import { createHmac, createPublicKey, randomUUID, timingSafeEqual, verify as verifySignature } from "node:crypto";
 
 import { z } from "zod";
-import { ServiceOwnerFenceReceiptSchema } from "./service-owner-fence.js";
+import { ServiceOwnerFenceReceiptSchema, serviceFenceSourceLabSha } from "./service-owner-fence.js";
 
 import { FINAL_CODEX_PLUGIN_VERSION_PATTERN, type VoiceLabConfig } from "./config.js";
 import { D02GatewayClient, D02GatewayContinuityObservationReceiptSchema } from "./d02-gateway.js";
@@ -602,7 +602,9 @@ export class VoiceLabService {
         authority: { issuer: authority.issuer, subject: authority.subject, key_id: authority.keyId, public_key_spki_base64: authority.publicKeySpkiBase64 },
         expectedWorkerServiceIdSha256: sha256(this.config.genericRecoveryWorkerServiceId),
         ...(input.action === "ingest_service_fence" ? { expectedRecoveryDeployment: target.expectedDeployment } : {}),
-        expectedLabSha: this.config.serviceVersion, expectedLangGraphSha: target.expectedDependencies.langgraph });
+        expectedLabSha: input.action === "ingest_service_fence"
+          ? serviceFenceSourceLabSha(input.receipt, this.config.serviceVersion, this.config.genericRecoveryReceiptSha256)
+          : this.config.serviceVersion, expectedLangGraphSha: target.expectedDependencies.langgraph });
       const persisted = await this.ledger.getRecoveryControl(input.runId);
       if (!persisted?.genericOwnerLoss) throw new Error("GENERIC_OWNER_PERSISTENCE_UNCONFIRMED");
       return { dispatchAllowed: false, control: persisted, workerServiceId: this.config.genericRecoveryWorkerServiceId };

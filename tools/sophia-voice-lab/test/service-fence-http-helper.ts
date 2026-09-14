@@ -46,6 +46,17 @@ export async function verifyServiceFenceHttp(ledger: VoiceLabLedger, f: ReturnTy
     expect((await post({ ...body, expectedVersion: body.expectedVersion + 1 })).status).toBe(409);
     expect((await post({ ...body, receipt: { ...body.receipt, signature: "a".repeat(86) } })).status).toBe(409);
     expect((await ledger.getRecoveryControl(body.runId))!.genericOwnerLoss).toBeUndefined();
+    config.serviceVersion = "e".repeat(40);
+    expect((await post(body)).status).toBe(409);
+    config.genericRecoveryReceiptSha256 = "f".repeat(64);
+    expect((await post(body)).status).toBe(409);
+    const tampered = { ...body.receipt, signature: "a".repeat(86) };
+    config.genericRecoveryReceiptSha256 = canonicalRequestHash(tampered);
+    expect((await post({ ...body, receipt: tampered })).status).toBe(409);
+    config.genericRecoveryReceiptSha256 = canonicalRequestHash(body.receipt);
+    config.killSwitch = false;
+    expect((await post(body)).status).toBe(409);
+    config.killSwitch = true;
     const accepted = await post(body);
     expect(accepted.status).toBe(200);
     expect(accepted.headers.get("cache-control")).toBe("no-store");
@@ -56,7 +67,7 @@ export async function verifyServiceFenceHttp(ledger: VoiceLabLedger, f: ReturnTy
     expect(await (await post(body)).json()).toEqual(result);
     expect(await publishServiceOwnerFence({ runId: body.runId, workerServiceId: config.genericRecoveryWorkerServiceId!,
       voiceLabOrigin: `http://127.0.0.1:${address.port}`, receipt: body.receipt,
-      expectedLabSha: config.serviceVersion, expectedLangGraphSha: f.unsigned.expectedLangGraphSha,
+      expectedLabSha: f.unsigned.expectedLabSha, expectedLangGraphSha: f.unsigned.expectedLangGraphSha,
       expectedRecoveryDeployment: f.unsigned.expectedRecoveryDeployment,
       publicConfig: { deployment_control: authority }, deploymentBearer: token, allowHttpForTest: true }))
       .toEqual({ status: "ingested", proofSha256: result.control.genericOwnerLoss.proofSha256, replay: true, cleanupProven: false });

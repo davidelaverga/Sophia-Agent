@@ -120,5 +120,8 @@ it("restricts retained owner dispatch HTTP access to the closed, exact deploymen
 
 it("defaults generic worker recovery off and rejects malformed service configuration", () => {
   expect(testConfig().genericRecoveryWorkerServiceId).toBeNull();
+  expect(testConfig().genericRecoveryReceiptSha256).toBeNull();
+  expect(testConfig({ SOPHIA_VOICE_LAB_GENERIC_RECOVERY_RECEIPT_SHA256: "a".repeat(64) }).genericRecoveryReceiptSha256).toBe("a".repeat(64));
+  expect(() => testConfig({ SOPHIA_VOICE_LAB_GENERIC_RECOVERY_RECEIPT_SHA256: "not-a-digest" })).toThrow();
   expect(() => testConfig({ SOPHIA_VOICE_LAB_GENERIC_RECOVERY_WORKER_SERVICE_ID: "https://untrusted.invalid/" })).toThrow();
 });

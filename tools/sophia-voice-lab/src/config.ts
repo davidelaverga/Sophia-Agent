@@ -230,6 +230,7 @@ export interface VoiceLabConfig {
   workerPollMs: number;
   killSwitch: boolean;
   genericRecoveryWorkerServiceId: string | null;
+  genericRecoveryReceiptSha256?: string | null;
   provisioningEnabled: boolean;
   allowRawAudio: boolean;
   logLevel: string;
@@ -491,6 +492,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, processRole: "w
     workerPollMs: integer(env, "SOPHIA_VOICE_LAB_WORKER_POLL_MS", 250, 50, 5_000),
     killSwitch: boolean(env, "SOPHIA_VOICE_LAB_KILL_SWITCH", nodeEnv !== "test"),
     genericRecoveryWorkerServiceId: genericRecoveryWorkerServiceId(env),
+    genericRecoveryReceiptSha256: genericRecoveryReceiptSha256(env),
     provisioningEnabled: boolean(env, 'SOPHIA_VOICE_LAB_PROVISIONING_ENABLED', false),
     allowRawAudio: boolean(env, "SOPHIA_VOICE_LAB_ALLOW_RAW_AUDIO", false),
     logLevel: env.LOG_LEVEL?.trim() || "info",
@@ -511,6 +513,13 @@ function genericRecoveryWorkerServiceId(env: NodeJS.ProcessEnv): string | null {
   const value = env.SOPHIA_VOICE_LAB_GENERIC_RECOVERY_WORKER_SERVICE_ID?.trim();
   if (!value) return null;
   if (!/^srv-[0-9a-z]{20}$/.test(value)) throw new VoiceLabError(labError("CONFIG_INVALID", "Generic recovery requires an exact Render worker service ID.", "internal"));
+  return value;
+}
+
+function genericRecoveryReceiptSha256(env: NodeJS.ProcessEnv): string | null {
+  const value = env.SOPHIA_VOICE_LAB_GENERIC_RECOVERY_RECEIPT_SHA256?.trim();
+  if (!value) return null;
+  if (!/^[a-f0-9]{64}$/.test(value)) throw new VoiceLabError(labError("CONFIG_INVALID", "Recovery receipt compatibility requires one exact SHA-256 digest.", "internal"));
   return value;
 }
 
