@@ -15,6 +15,21 @@ const fixture = (sessionId: string, candidateRevision = 1): RecapArtifactsV1 => 
 });
 
 describe('Recap Store', () => {
+  it('does not publish a delayed commit result after its action lifetime ends', async () => {
+    let finish!: (value: Response) => void;
+    vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>(resolve => { finish = resolve; })));
+    const store = useRecapStore.getState();
+    store.setArtifacts('s', fixture('s'));
+    store.setDecision('s', 'candidate', 'approved');
+    let current = true;
+    const pending = store.commitMemories('s', undefined, () => current);
+    current = false;
+    store.invalidateSession('s');
+    finish(new Response(JSON.stringify({ committed: ['candidate'], discarded: [], errors: [] })));
+    await expect(pending).rejects.toThrow('recap_action_context_changed');
+    expect(useRecapStore.getState().commitStatus).toEqual({});
+    expect(useRecapStore.getState().decisions).toEqual({});
+  });
   beforeEach(() => {
     localStorage.clear();
     vi.restoreAllMocks();
@@ -23,6 +38,30 @@ describe('Recap Store', () => {
       decisions: {},
       commitStatus: {},
     });
+  });
+
+  it('never persists memory text, decisions or commit state', () => {
+    const store = useRecapStore.getState();
+    store.setArtifacts('private-session', fixture('private-session'));
+    store.setDecision('private-session', 'candidate', 'edited', 'SYNTHETIC PRIVATE EDIT');
+    useRecapStore.setState({ commitStatus: { 'private-session': 'committed' } });
+    const saved = JSON.parse(localStorage.getItem('sophia-recap')!);
+    expect(saved.state).toEqual({});
+    expect(store.getArtifacts('private-session')).toBeDefined();
+  });
+
+  it('discards old persisted recap data without touching unrelated drafts', async () => {
+    localStorage.setItem('unrelated-draft', 'preserve this draft');
+    localStorage.setItem('sophia-recap', JSON.stringify({ version: 0, state: {
+      artifacts: { old: fixture('old') }, decisions: { old: [{ candidateId: 'candidate', decision: 'approved' }] },
+      commitStatus: { old: 'committed' },
+    } }));
+    await useRecapStore.persist.rehydrate();
+    expect(useRecapStore.getState().artifacts).toEqual({});
+    expect(useRecapStore.getState().decisions).toEqual({});
+    expect(useRecapStore.getState().commitStatus).toEqual({});
+    expect(JSON.parse(localStorage.getItem('sophia-recap')!).state).toEqual({});
+    expect(localStorage.getItem('unrelated-draft')).toBe('preserve this draft');
   });
 
   it('invalidates only the missing source and its decisions and receipt', () => {

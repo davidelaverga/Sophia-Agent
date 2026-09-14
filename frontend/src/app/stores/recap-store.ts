@@ -3,7 +3,7 @@
  * Phase 3 - Week 3
  * 
  * Manages recap artifacts and memory decisions.
- * Persists to localStorage for refresh resilience.
+ * Memory-bearing state is transient and must be revalidated after refresh.
  */
 
 import { create } from 'zustand';
@@ -68,7 +68,8 @@ interface RecapState {
   /** Commit memories to backend */
   commitMemories: (
     sessionId: string,
-    threadId?: string
+    threadId?: string,
+    isCurrent?: () => boolean
   ) => Promise<CommitMemoriesResponse>;
   
   /** Get commit status for session */
@@ -231,7 +232,9 @@ export const useRecapStore = create<RecapState>()(
         });
       },
       
-      commitMemories: async (sessionId, threadId) => {
+      commitMemories: async (sessionId, threadId, isCurrent = () => true) => {
+        const assertCurrent = () => { if (!isCurrent()) throw new Error('recap_action_context_changed'); };
+        assertCurrent();
         const artifacts = get().artifacts[sessionId];
         const decisions = get().decisions[sessionId] || [];
         const approvedCandidates = decisions.filter(
@@ -284,6 +287,7 @@ export const useRecapStore = create<RecapState>()(
           }
 
           const result = await response.json() as CommitMemoriesResponse;
+          assertCurrent();
           result.discarded = [
             ...new Set([...result.discarded, ...discardedCandidates.map(d => d.candidateId)]),
           ];
@@ -308,6 +312,7 @@ export const useRecapStore = create<RecapState>()(
           return result;
           
         } catch (error) {
+          assertCurrent();
           logger.logError(error, { component: 'RecapStore', action: 'commit_memories' });
           
           // Mark all as error
@@ -335,12 +340,12 @@ export const useRecapStore = create<RecapState>()(
     {
       name: 'sophia-recap',
       storage: createJSONStorage(() => localStorage),
-      // Only persist what we need
-      partialize: (state) => ({
-        artifacts: state.artifacts,
-        decisions: state.decisions,
-        commitStatus: state.commitStatus,
-      }),
+      // Retain only the existing key's migration plumbing. Never serialize
+      // memory text, edited decisions or historical success as fresh authority.
+      version: 1,
+      partialize: () => ({}),
+      migrate: () => ({}),
+      merge: (_persisted, current) => current,
     }
   )
 );

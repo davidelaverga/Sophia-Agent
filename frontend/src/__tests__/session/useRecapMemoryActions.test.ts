@@ -4,6 +4,46 @@ import { describe, expect, it, vi } from 'vitest';
 import { useRecapMemoryActions } from '../../app/recap/[sessionId]/useRecapMemoryActions';
 
 describe('useRecapMemoryActions', () => {
+  it.each([200, 503])('ignores an old-owner discard response with status %s', async (status) => {
+    let finish!: (response: Response) => void;
+    vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>(resolve => { finish = resolve; })));
+    const setArtifacts = vi.fn(), setDecision = vi.fn(), showToast = vi.fn();
+    const { result, rerender } = renderHook(({ ownerId }) => useRecapMemoryActions({
+      ownerId, artifacts: { sessionId: 's', sessionType: 'open', contextMode: 'life', status: 'ready',
+        memoryCandidates: [{ id: 'c1', text: 'SYNTHETIC', candidateRevision: 1 }] },
+      decisions: [], sessionId: 's', setArtifacts, setDecision, showToast,
+      commitMemories: vi.fn(), navigateAfterSave: vi.fn(),
+    }), { initialProps: { ownerId: 'a' } });
+    act(() => result.current.handleDecisionChange('c1', 'discarded'));
+    rerender({ ownerId: 'b' });
+    await act(async () => {
+      finish(new Response(JSON.stringify({ discarded: ['c1'], errors: [] }), { status }));
+      await Promise.resolve(); await Promise.resolve();
+    });
+    expect(setArtifacts).not.toHaveBeenCalled();
+    expect(setDecision).not.toHaveBeenCalled();
+    expect(showToast).not.toHaveBeenCalled();
+    expect(result.current.actionError).toBeNull();
+    expect(result.current.actionRetry).toBeNull();
+  });
+  it.each(['owner-cycle', 'unmount', 'signed-out'])('cannot apply a pending save after %s', async (change) => {
+    let finish!: (value: { committed: string[]; discarded: string[]; errors: [] }) => void;
+    const commitMemories = vi.fn(() => new Promise<{ committed: string[]; discarded: string[]; errors: [] }>(resolve => { finish = resolve; }));
+    const showToast = vi.fn(), navigateAfterSave = vi.fn();
+    const { result, rerender, unmount } = renderHook(({ ownerId }: { ownerId: string | null }) => useRecapMemoryActions({
+      ownerId, artifacts: null, decisions: [{ candidateId: 'c1', decision: 'approved' }], sessionId: 'same-session',
+      setArtifacts: vi.fn(), setDecision: vi.fn(), commitMemories, showToast, navigateAfterSave,
+    }), { initialProps: { ownerId: 'a' } });
+    let pending!: Promise<void>;
+    act(() => { pending = result.current.handleSaveApproved(); });
+    if (change === 'unmount') unmount();
+    else if (change === 'signed-out') rerender({ ownerId: null });
+    else { rerender({ ownerId: 'b' }); rerender({ ownerId: 'a' }); }
+    await act(async () => { finish({ committed: ['c1'], discarded: [], errors: [] }); await pending; });
+    expect(showToast).not.toHaveBeenCalled();
+    expect(navigateAfterSave).not.toHaveBeenCalled();
+    expect(result.current.saveSuccess).toBeNull();
+  });
   it.each(['approved', 'edited'] as const)('does not claim a %s draft is canonically saved', (decision) => {
     const showToast = vi.fn();
     const setDecision = vi.fn();

@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 
 import { mockRecapArtifacts } from '../../components/recap/mockData';
 import { mapBackendArtifactsToRecapV1 } from '../../lib/artifacts-adapter';
@@ -36,6 +36,7 @@ export type RecapPageStatus = 'loading' | 'ready' | 'processing' | 'reviewed' | 
 
 interface UseRecapArtifactsLoaderParams {
   sessionId: string;
+  ownerId?: string | null;
   artifacts: RecapArtifactsV1 | null;
   setArtifacts: (sessionId: string, artifacts: RecapArtifactsV1) => void;
   invalidateArtifacts?: (sessionId: string) => void;
@@ -538,11 +539,15 @@ async function sessionHasReviewedMemories(
 
 export function useRecapArtifactsLoader({
   sessionId,
+  ownerId,
   setArtifacts: publishArtifacts,
   invalidateArtifacts,
 }: UseRecapArtifactsLoaderParams): UseRecapArtifactsLoaderResult {
+  const scope = JSON.stringify([ownerId, sessionId]);
+  const currentScope = useRef(scope);
+  currentScope.current = scope;
   const [status, setStatus] = useState<RecapPageStatus>('loading');
-  const [statusSessionId, setStatusSessionId] = useState(sessionId);
+  const [statusSessionId, setStatusSessionId] = useState(scope);
   const [retryCount, setRetryCount] = useState(0);
   const [telemetry, setTelemetry] = useState<RecapTelemetryState>(() =>
     createInitialRecapTelemetryState({ sessionId })
@@ -557,28 +562,29 @@ export function useRecapArtifactsLoader({
   }, []);
 
   const setPageStatus = useCallback((nextStatus: RecapPageStatus) => {
-    setStatusSessionId(sessionId);
+    setStatusSessionId(scope);
     setStatus(nextStatus);
     setTelemetry((current) => applyRecapPageStatus(current, nextStatus));
-  }, [sessionId]);
+  }, [scope]);
 
   useEffect(() => {
     setTelemetry(createInitialRecapTelemetryState({ sessionId }));
-  }, [sessionId]);
+  }, [sessionId, scope]);
 
   useEffect(() => {
-    if (!sessionId) return;
-    let active = true;
+    if (!sessionId || ownerId === null) return;
+    let disposed = false;
+    const active = () => !disposed && currentScope.current === scope;
     let retryTimer: ReturnType<typeof setTimeout> | null = null;
-    const setArtifacts = (id: string, value: RecapArtifactsV1) => { if (active) publishArtifacts(id, value); };
-    const markViewed = () => { if (active) useSessionHistoryStore.getState().markRecapViewed(sessionId); };
+    const setArtifacts = (id: string, value: RecapArtifactsV1) => { if (active()) publishArtifacts(id, value); };
+    const markViewed = () => { if (active()) useSessionHistoryStore.getState().markRecapViewed(sessionId); };
     const clearCurrentEndHint = () => {
-      if (active && getRecentSessionEndHint()?.sessionId === sessionId) clearRecentSessionEndHint();
+      if (active() && getRecentSessionEndHint()?.sessionId === sessionId) clearRecentSessionEndHint();
     };
 
-    const recordTelemetry: RecapTelemetryRecorder = (observation) => { if (active) recordObservation(observation); };
-    const recordMemoryRecentSkipped: MemoryRecentSkipRecorder = (reason) => { if (active) recordSkippedObservation(reason); };
-    const setObservedStatus = (value: RecapPageStatus) => { if (active) setPageStatus(value); };
+    const recordTelemetry: RecapTelemetryRecorder = (observation) => { if (active()) recordObservation(observation); };
+    const recordMemoryRecentSkipped: MemoryRecentSkipRecorder = (reason) => { if (active()) recordSkippedObservation(reason); };
+    const setObservedStatus = (value: RecapPageStatus) => { if (active()) setPageStatus(value); };
 
     const loadArtifacts = async () => {
       setObservedStatus('loading');
@@ -593,19 +599,19 @@ export function useRecapArtifactsLoader({
       };
 
       const scheduleMemoryRetry = (enabled: boolean) => {
-        if (!active || !enabled || retryCount >= RECENT_END_MAX_RETRIES) {
+        if (!active() || !enabled || retryCount >= RECENT_END_MAX_RETRIES) {
           return false;
         }
 
         setObservedStatus('processing');
         retryTimer = setTimeout(() => {
-          if (active) setRetryCount((current) => current + 1);
+          if (active()) setRetryCount((current) => current + 1);
         }, RECENT_END_RETRY_DELAY_MS);
         return true;
       };
 
       const scheduleRecentRetry = () => {
-        if (!active || !hasRecentEndHint) {
+        if (!active() || !hasRecentEndHint) {
           return false;
         }
 
@@ -617,7 +623,7 @@ export function useRecapArtifactsLoader({
 
         setObservedStatus('processing');
         retryTimer = setTimeout(() => {
-          if (active) setRetryCount((current) => current + 1);
+          if (active()) setRetryCount((current) => current + 1);
         }, RECENT_END_RETRY_DELAY_MS);
         return true;
       };
@@ -643,10 +649,10 @@ export function useRecapArtifactsLoader({
           signal,
         });
 
-        if (!active) return;
+        if (!active()) return;
         if (response.ok) {
           const data = await response.json() as Record<string, unknown>;
-          if (!active) return;
+          if (!active()) return;
           if (typeof data.session_id === 'string' && data.session_id !== sessionId) {
             setObservedStatus('unavailable');
             return;
@@ -671,7 +677,7 @@ export function useRecapArtifactsLoader({
               setObservedStatus('unavailable'); return;
             }
             const review = await readRemainingReviewPages(first, sessionId, signal);
-            if (!active) return;
+            if (!active()) return;
             const complete = review.extraction_state === 'complete';
             const excluded = review.extraction_state === 'source_excluded';
             const failed = ['failed_retryable', 'failed_terminal'].includes(review.extraction_state);
@@ -750,7 +756,7 @@ export function useRecapArtifactsLoader({
             recordTelemetry,
             recordMemoryRecentSkipped,
           );
-          if (!active) return;
+          if (!active()) return;
           const mapped = mapBackendArtifactsToRecapV1(hydratedArtifacts.payload, sessionId);
 
           if (mapped) {
@@ -822,7 +828,7 @@ export function useRecapArtifactsLoader({
               recordTelemetry,
               recordMemoryRecentSkipped,
             );
-            if (!active) return;
+            if (!active()) return;
             const endedMapped = mapBackendArtifactsToRecapV1(hydratedEnded.payload, sessionId);
             if (endedMapped && (isTerminalEmptyMemoryRecent(hydratedEnded.memoryRecent) || (endedMapped.memoryCandidates?.length ?? 0) > 0)) {
               if (hasRecentEndHint) {
@@ -915,12 +921,12 @@ export function useRecapArtifactsLoader({
     void loadArtifacts();
 
     return () => {
-      active = false;
+      disposed = true;
       if (retryTimer !== null) {
         clearTimeout(retryTimer);
       }
     };
-  }, [sessionId, publishArtifacts, invalidateArtifacts, retryCount, recordObservation, recordSkippedObservation, setPageStatus]);
+  }, [sessionId, ownerId, scope, publishArtifacts, invalidateArtifacts, retryCount, recordObservation, recordSkippedObservation, setPageStatus]);
 
   const reload = useCallback(() => {
     setStatus('loading');
@@ -928,7 +934,7 @@ export function useRecapArtifactsLoader({
   }, []);
 
   return {
-    status: statusSessionId === sessionId ? status : 'loading',
+    status: ownerId !== null && statusSessionId === scope ? status : 'loading',
     reload,
     telemetry,
   };

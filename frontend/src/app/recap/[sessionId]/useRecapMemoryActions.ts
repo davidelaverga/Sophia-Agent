@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useState, useRef, useLayoutEffect } from 'react';
 
 import { haptic } from '../../hooks/useHaptics';
 import { errorCopy } from '../../lib/error-copy';
@@ -15,12 +15,13 @@ type ShowToast = (payload: {
 }) => void;
 
 interface UseRecapMemoryActionsParams {
+  ownerId?: string | null;
   artifacts: RecapArtifactsV1 | null;
   decisions: DecisionMap;
   sessionId: string;
   setArtifacts: (sessionId: string, artifacts: RecapArtifactsV1) => void;
   setDecision: (sessionId: string, candidateId: string, decision: MemoryDecision, editedText?: string) => void;
-  commitMemories: (sessionId: string, threadId?: string) => Promise<{ committed: string[]; discarded: string[]; errors: Array<{ candidate_id: string; message: string }> }>;
+  commitMemories: (sessionId: string, threadId?: string, isCurrent?: () => boolean) => Promise<{ committed: string[]; discarded: string[]; errors: Array<{ candidate_id: string; message: string }> }>;
   showToast: ShowToast;
   navigateAfterSave: (result: { committed: string[]; discarded: string[]; errors: Array<{ candidate_id: string; message: string }> }) => void;
 }
@@ -40,6 +41,7 @@ function isLegacyCandidateId(candidateId: string): boolean {
 }
 
 export function useRecapMemoryActions({
+  ownerId,
   artifacts,
   decisions,
   sessionId,
@@ -49,11 +51,26 @@ export function useRecapMemoryActions({
   showToast,
   navigateAfterSave,
 }: UseRecapMemoryActionsParams): UseRecapMemoryActionsResult {
+  const lifetime = useRef({ ownerId, sessionId });
+  if (lifetime.current.ownerId !== ownerId || lifetime.current.sessionId !== sessionId) {
+    lifetime.current = { ownerId, sessionId };
+  }
+  const captured = lifetime.current;
+  const mounted = useRef(true);
+  const isCurrent = useCallback(() => mounted.current && ownerId !== null && lifetime.current === captured, [captured, ownerId]);
+  useLayoutEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
   const [isSaving, setIsSaving] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [actionRetry, setActionRetry] = useState<(() => void) | null>(null);
   const [deletingIds, setDeletingIds] = useState<Record<string, boolean>>({});
   const [saveSuccess, setSaveSuccess] = useState<{ count: number } | null>(null);
+  useLayoutEffect(() => {
+    setIsSaving(false); setActionError(null); setActionRetry(null);
+    setDeletingIds({}); setSaveSuccess(null);
+  }, [captured]);
 
   const removeCandidateFromArtifacts = useCallback((candidateId: string) => {
     if (!artifacts) return;
@@ -65,6 +82,7 @@ export function useRecapMemoryActions({
   }, [artifacts, sessionId, setArtifacts]);
 
   const handleDiscardCandidate = useCallback(async (candidateId: string) => {
+    if (!isCurrent()) return;
     if (deletingIds[candidateId]) {
       return;
     }
@@ -106,6 +124,7 @@ export function useRecapMemoryActions({
       const result = response.ok
         ? await response.json() as { discarded?: string[]; errors?: unknown[] }
         : null;
+      if (!isCurrent()) return;
       if (!response.ok || !result?.discarded?.includes(candidateId) || (result.errors?.length ?? 0) > 0) {
         throw new Error(`Discard failed: ${response.status}`);
       }
@@ -117,6 +136,7 @@ export function useRecapMemoryActions({
         durationMs: 1800,
       });
     } catch (error) {
+      if (!isCurrent()) return;
       logger.logError(error, {
         component: 'Recap',
         action: 'discard_memory',
@@ -128,15 +148,16 @@ export function useRecapMemoryActions({
       setActionRetry(() => retry);
       setDecision(sessionId, candidateId, 'idle');
     } finally {
-      setDeletingIds((prev) => {
+      if (isCurrent()) setDeletingIds((prev) => {
         const next = { ...prev };
         delete next[candidateId];
         return next;
       });
     }
-  }, [artifacts?.memoryCandidates, deletingIds, removeCandidateFromArtifacts, sessionId, setDecision, showToast]);
+  }, [isCurrent, artifacts?.memoryCandidates, deletingIds, removeCandidateFromArtifacts, sessionId, setDecision, showToast]);
 
   const handleDecisionChange = useCallback((candidateId: string, decision: MemoryDecision, editedText?: string) => {
+    if (!isCurrent()) return;
     if (decision === 'discarded') {
       void handleDiscardCandidate(candidateId);
       return;
@@ -162,9 +183,10 @@ export function useRecapMemoryActions({
         durationMs: 1500,
       });
     }
-  }, [handleDiscardCandidate, sessionId, setDecision, showToast]);
+  }, [isCurrent, handleDiscardCandidate, sessionId, setDecision, showToast]);
 
   const handleSaveApproved = useCallback(async () => {
+    if (!isCurrent()) return;
     setIsSaving(true);
     setActionError(null);
     setActionRetry(null);
@@ -178,7 +200,8 @@ export function useRecapMemoryActions({
       let commitResult = { committed: [], discarded: [], errors: [] as Array<{ candidate_id: string; message: string }> };
 
       if (approvedCount > 0) {
-        commitResult = await commitMemories(sessionId);
+        commitResult = ownerId === undefined ? await commitMemories(sessionId) : await commitMemories(sessionId, undefined, isCurrent);
+        if (!isCurrent()) return;
         if (commitResult.errors.length > 0 || commitResult.committed.length < approvedCount) {
           throw new Error(errorCopy.couldntSaveMemories);
         }
@@ -195,9 +218,10 @@ export function useRecapMemoryActions({
       });
 
       setTimeout(() => {
-        navigateAfterSave(commitResult);
+        if (isCurrent()) navigateAfterSave(commitResult);
       }, 1500);
     } catch (error) {
+      if (!isCurrent()) return;
       logger.logError(error, {
         component: 'Recap',
         action: 'save_memories',
@@ -208,9 +232,9 @@ export function useRecapMemoryActions({
       });
       haptic('error');
     } finally {
-      setIsSaving(false);
+      if (isCurrent()) setIsSaving(false);
     }
-  }, [commitMemories, decisions, navigateAfterSave, sessionId, showToast]);
+  }, [isCurrent, ownerId, commitMemories, decisions, navigateAfterSave, sessionId, showToast]);
 
   const dismissActionError = useCallback(() => {
     setActionError(null);

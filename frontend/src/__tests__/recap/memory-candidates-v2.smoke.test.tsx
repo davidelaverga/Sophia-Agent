@@ -3,6 +3,11 @@ import React from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+const identity = vi.hoisted(() => ({ owner: 'synthetic-recap-owner' }));
+vi.mock('../../app/providers', () => ({
+  useAuth: () => ({ user: { id: identity.owner }, loading: false }),
+}));
+
 vi.mock('next/navigation', () => ({
   useRouter: () => ({
     push: vi.fn(),
@@ -79,6 +84,7 @@ function findButtonByText(container: HTMLElement, text: string): HTMLButtonEleme
 
 describe('Memory Candidates v2 smoke', () => {
   beforeEach(() => {
+    identity.owner = 'synthetic-recap-owner';
     useRecapStore.setState({
       artifacts: {},
       decisions: {},
@@ -86,6 +92,33 @@ describe('Memory Candidates v2 smoke', () => {
     });
     vi.useFakeTimers();
     vi.clearAllMocks();
+  });
+
+  it('hides old owner text immediately and clears draft decisions before loading the new owner', async () => {
+    const response = (text: string) => new Response(JSON.stringify({ session_id: 'test-session',
+      memory_candidates: [{ id: 'same-fixture-id', text, category: 'fact', candidate_revision: 1 }],
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    let finish!: (value: Response) => void;
+    global.fetch = vi.fn().mockResolvedValueOnce(response('SYNTHETIC OWNER A'))
+      .mockImplementationOnce(() => new Promise<Response>(resolve => { finish = resolve; }));
+    const target = createRenderTarget();
+    try {
+      await renderInto(target.root, <RecapPage />);
+      await waitForText(target.container, 'SYNTHETIC OWNER A');
+      await act(async () => {
+        useRecapStore.getState().setDecision('test-session', 'same-fixture-id', 'edited', 'SYNTHETIC A DRAFT');
+      });
+      identity.owner = 'synthetic-owner-b';
+      await renderInto(target.root, <RecapPage />);
+      expect(target.container.textContent).not.toContain('SYNTHETIC OWNER A');
+      expect(target.container.textContent).not.toContain('SYNTHETIC A DRAFT');
+      expect(useRecapStore.getState().getDecisions('test-session')).toEqual([]);
+      await act(async () => { finish(response('SYNTHETIC OWNER B')); await flush(); });
+      await waitForText(target.container, 'SYNTHETIC OWNER B');
+      expect(useRecapStore.getState().getDecisions('test-session')).toEqual([]);
+    } finally {
+      await act(async () => { target.root.unmount(); target.container.remove(); });
+    }
   });
 
   it('normalizes adapter payload with backward compatibility (text ?? memory, category default general)', () => {
@@ -121,7 +154,7 @@ describe('Memory Candidates v2 smoke', () => {
     });
   });
 
-  it('accept is local and persists a version-matched decision after fresh authority revalidation', async () => {
+  it('accept is local and remount recovers canonical state without restoring an unsaved decision', async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url.includes('/api/sophia/sessions/test-session/recap') && (!init?.method || init.method === 'GET')) {
@@ -163,7 +196,9 @@ describe('Memory Candidates v2 smoke', () => {
     const secondRender = createRenderTarget();
     await renderInto(secondRender.root, <RecapPage />);
 
-    await waitForText(secondRender.container, 'All memories reviewed');
+    await waitForText(secondRender.container, 'I value calm focus');
+    expect(secondRender.container.textContent).not.toContain('All memories reviewed');
+    expect(useRecapStore.getState().getDecisions('test-session')).toEqual([]);
     expect(fetchMock).toHaveBeenCalledTimes(2);
 
     await act(async () => {

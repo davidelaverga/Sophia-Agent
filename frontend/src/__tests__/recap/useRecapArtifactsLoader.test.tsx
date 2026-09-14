@@ -41,6 +41,28 @@ async function flushEffects() {
 }
 
 describe('useRecapArtifactsLoader', () => {
+  it('ignores a previous owner response and refuses loading while signed out', async () => {
+    let finishOld!: (response: Response) => void;
+    const fetchMock = vi.fn().mockImplementationOnce(() => new Promise<Response>(resolve => { finishOld = resolve; }))
+      .mockResolvedValue(jsonResponse({ detail: 'unavailable' }, 503));
+    global.fetch = fetchMock;
+    const publish = vi.fn(), invalidate = vi.fn();
+    const { result, rerender } = renderHook(({ ownerId }: { ownerId: string | null }) => useRecapArtifactsLoader({
+      sessionId: 'same-session', ownerId, artifacts: null, setArtifacts: publish, invalidateArtifacts: invalidate,
+    }), { initialProps: { ownerId: 'owner-a' as string | null } });
+    await flushEffects();
+    rerender({ ownerId: 'owner-b' });
+    await flushEffects();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    await act(async () => { finishOld(jsonResponse({ detail: 'not found' }, 404)); });
+    expect(invalidate).not.toHaveBeenCalled();
+    expect(publish).not.toHaveBeenCalled();
+    expect(result.current.status).toBe('unavailable');
+    rerender({ ownerId: null });
+    await flushEffects();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result.current.status).not.toBe('ready');
+  });
   it.each([404, 503])('does not trust persisted recap candidates when authority returns %s', async (httpStatus) => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ detail: 'unavailable' }, httpStatus));
     global.fetch = fetchMock as unknown as typeof fetch;
