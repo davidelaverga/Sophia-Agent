@@ -125,3 +125,48 @@ def test_pilot_builder_denies_personal_memory(fixture, monkeypatch, declare_memo
     assert "messages" not in update
     assert update["system_prompt_blocks"] == ["Independent task instructions"]
     assert middleware.before_agent(state, runtime) == update
+
+
+@pytest.mark.parametrize("mutation", [None, "text", "owner", "missing_proof"])
+def test_automatic_text_injection_requires_exact_proof(fixture, monkeypatch, declare_memory_owners, mutation):
+    from langchain_core.messages import HumanMessage
+    from deerflow.agents.sophia_agent.middlewares import mem0_memory
+
+    declare_memory_owners({"owner": "governed"})
+    monkeypatch.setattr(mem0_memory, "warm_up", lambda: None)
+    monkeypatch.setattr("deerflow.sophia.memory_governance.flags.memory_feature_flags_for_owner", lambda owner: SimpleNamespace(canonical_pool_read=True, governed_runtime_read=True))
+    item, _, proof = fixture
+    row = {"id": str(item.memory_id), "content": item.canonical_content, RETRIEVAL_PROOF_KEY: proof}
+    if mutation == "text":
+        row["content"] += " unbound addition"
+    if mutation == "owner":
+        row[RETRIEVAL_PROOF_KEY] = {**proof, "owner_ref": "other"}
+    if mutation == "missing_proof":
+        row.pop(RETRIEVAL_PROOF_KEY)
+    monkeypatch.setattr(mem0_memory, "search_memories", lambda **kwargs: [row])
+    state = {"messages": [HumanMessage(content="Synthetic recall query")], "platform": "web",
+             "injected_memory_contents": ["old"], "memory_retrieval_proof": {"stale": True},
+             "system_prompt_blocks": ["<memories>old</memories>", "Independent rule"]}
+    result = mem0_memory.Mem0MemoryMiddleware("owner").before_agent(state, SimpleNamespace(context={"thread_id": "thread"}))
+    if mutation is None:
+        assert result["injected_memory_contents"] == ["- " + item.canonical_content]
+        assert result[RETRIEVAL_PROOF_KEY] == proof
+        assert result["system_prompt_blocks"] == ["Independent rule", "<memories>\n- " + item.canonical_content + "\n</memories>"]
+    else:
+        assert result["injected_memory_contents"] == []
+        assert result[RETRIEVAL_PROOF_KEY] is None
+        assert result["system_prompt_blocks"] == ["Independent rule"]
+
+
+@pytest.mark.parametrize("platform", ["voice", "ios_voice", "web"])
+def test_unknown_authority_clears_warm_automatic_injection(fixture, monkeypatch, declare_memory_owners, platform):
+    from deerflow.agents.sophia_agent.middlewares import mem0_memory
+    declare_memory_owners({})
+    monkeypatch.setattr(mem0_memory, "warm_up", lambda: None)
+    monkeypatch.setattr(mem0_memory, "search_memories", lambda **kwargs: pytest.fail("unknown owner search"))
+    result = mem0_memory.Mem0MemoryMiddleware("unknown").before_agent(
+        {"platform": platform, "injected_memory_contents": ["old"], "memory_retrieval_proof": {"old": True},
+         "system_prompt_blocks": ["<memory>old</memory>", "Independent rule"]}, SimpleNamespace(context={}))
+    assert result["injected_memory_contents"] == []
+    assert result[RETRIEVAL_PROOF_KEY] is None
+    assert result["system_prompt_blocks"] == ["Independent rule"]

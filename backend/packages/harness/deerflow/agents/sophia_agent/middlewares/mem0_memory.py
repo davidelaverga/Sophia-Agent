@@ -8,10 +8,11 @@ import logging
 import re
 import threading
 import time
-from typing import NotRequired, override
+from typing import Annotated, NotRequired, override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
+from langchain.agents.middleware.types import PrivateStateAttr
 from langgraph.runtime import Runtime
 
 from deerflow.agents.sophia_agent.utils import extract_last_message_text, log_middleware
@@ -33,6 +34,8 @@ class Mem0MemoryState(AgentState):
     active_skill: NotRequired[str]
     context_mode: NotRequired[str]
     injected_memories: NotRequired[list[str]]
+    injected_memory_contents: NotRequired[list[str]]
+    memory_retrieval_proof: NotRequired[Annotated[dict | None, PrivateStateAttr]]
     platform: NotRequired[str]
     turn_count: NotRequired[int]
     system_prompt_blocks: NotRequired[list[str]]
@@ -179,11 +182,9 @@ class Mem0MemoryMiddleware(AgentMiddleware[Mem0MemoryState]):
         query: str,
         turn_count: int | None,
     ) -> list[dict] | None:
-        from deerflow.sophia.memory_governance.flags import (
-            memory_feature_flags_for_owner,
-        )
+        from deerflow.sophia.memory_governance.owner_authority import legacy_memory_lane_allowed
 
-        if memory_feature_flags_for_owner(self._user_id).canonical_pool_read:
+        if not legacy_memory_lane_allowed(self._user_id):
             return None
         if platform not in ("voice", "ios_voice") or not thread_id:
             return None
@@ -270,11 +271,9 @@ class Mem0MemoryMiddleware(AgentMiddleware[Mem0MemoryState]):
         results: list[dict],
         turn_count: int | None,
     ) -> None:
-        from deerflow.sophia.memory_governance.flags import (
-            memory_feature_flags_for_owner,
-        )
+        from deerflow.sophia.memory_governance.owner_authority import legacy_memory_lane_allowed
 
-        if memory_feature_flags_for_owner(self._user_id).canonical_pool_read:
+        if not legacy_memory_lane_allowed(self._user_id):
             return
         if platform not in ("voice", "ios_voice") or not thread_id or not results:
             logger.info(
@@ -306,8 +305,13 @@ class Mem0MemoryMiddleware(AgentMiddleware[Mem0MemoryState]):
     def before_agent(self, state: Mem0MemoryState, runtime: Runtime) -> dict | None:
         _t0 = time.perf_counter()
         from deerflow.sophia.memory_governance.flags import memory_feature_flags_for_owner
+        from deerflow.sophia.memory_governance.store import MemoryGovernanceUnavailable
 
-        flags = memory_feature_flags_for_owner(self._user_id)
+        try:
+            flags = memory_feature_flags_for_owner(self._user_id)
+        except MemoryGovernanceUnavailable:
+            from deerflow.sophia.memory_governance.context_state import cleared_memory_state
+            return cleared_memory_state(state)
         empty_update = None
         if flags.canonical_pool_read:
             from deerflow.sophia.memory_governance.context_state import cleared_memory_state
@@ -383,11 +387,7 @@ class Mem0MemoryMiddleware(AgentMiddleware[Mem0MemoryState]):
             )
             search_ms = 0.0
 
-        from deerflow.sophia.memory_governance.flags import (
-            memory_feature_flags_for_owner,
-        )
-
-        governed_runtime = memory_feature_flags_for_owner(self._user_id).governed_runtime_read
+        governed_runtime = flags.governed_runtime_read
         if not governed_runtime:
             logger.info(
                 "[Mem0Memory] query_len=%d | categories=%s | context_mode=%s | ritual=%s | skill=%s | contentExcluded=true",
@@ -456,10 +456,21 @@ class Mem0MemoryMiddleware(AgentMiddleware[Mem0MemoryState]):
 
         block = "<memories>\n" + "\n".join(memory_lines) + "\n</memories>"
 
+        proof = None
+        if governed_runtime:
+            from deerflow.sophia.memory_governance.retrieval_provenance import select_retrieval_proof, verify_retrieval_proof
+            try:
+                proof = select_retrieval_proof(owner_id=self._user_id, rows=results, selected_ids=memory_ids)
+                if verify_retrieval_proof(owner_id=self._user_id, proof=proof, rendered_text="\n".join(memory_lines)) is None:
+                    return empty_update
+            except Exception:
+                return empty_update
+
         log_middleware("Mem0Memory", f"{len(results)} memories injected (search: {search_ms:.0f}ms)", _t0)
         return {
             "injected_memories": memory_ids,
             "injected_memory_contents": memory_lines,
+            "memory_retrieval_proof": proof,
             "system_prompt_blocks": list(state.get("system_prompt_blocks", [])) + [block],
         }
 

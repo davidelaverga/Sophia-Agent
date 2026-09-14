@@ -98,6 +98,14 @@ Provider uncertainty is tracked debt, not an automatic pilot-wide blocker. Keep 
 
 ## Shared deployment coordination
 
+### Automatic text proof and retained re-admission
+
+Prior provenance slice d603f0ddcd4f01dd6aae1fcc8d80aa5dcaf82ca4/tree01ebc54b2ac30b2c841bc358a31832b15c9fb98b was published and fetched exactly21c76e; local worktree matched446a17. This slice connects automatic text injection to validated exact canonical proof, preserves its private state channel, clears stale proof with owned injection, and denies voice cache reads/writes unless durable legacy ownership is positively established. Unknown ownership clears warm injection without provider access. The generic retained re-admission service and exact ID/revision hydration are selected from preserved C1; they still require trusted context and final transport integration.
+
+EI873: f69bba failed2/passed49. Hypothesis: selected hydrate_inclusions omitted its AuthorizedMemory import. Added the exact runtime import;7db213 passes51 retained/hydration tests, including known revocation, unrelated changes, provider/DB failure and atomic receipt conflict. EI874: c0e3d6 failed2/passed88. Hypothesis: carried-state fixtures supplied unproven positive text and still expected C1 positive Builder memory. Replaced the text fixture with an actual synthetic signed canonical receipt and required Builder zero-search clearing; no proof checks were bypassed. Combined eaeafd passes226 with9 warnings. Added automatic wrong-text/wrong-owner/missing-proof cases and unknown-authority clearing across web/voice/iOS. No production/provider state changed; checkpoint remains877.
+
+These local tests do not prove real assembled outgoing requests, hosted recall or production activation. Final companion guard/transport and authenticated source lineage remain mandatory. Existing optional attachment/delegation dependencies must be selected or explicitly contained as integration proceeds, not silently enabled.
+
 ### Text provenance and Builder exclusion slice
 
 Selected retained-context, authenticated-input/source witness and retrieval-proof modules from preserved C1 work. Governed facade seals only atomically admitted canonical results; explicit recall verifies the owner/rendered-text proof and carries it as a private ToolMessage artifact, not model-visible text. This proof is not final outgoing-model admission; transport and companion integration remain required.

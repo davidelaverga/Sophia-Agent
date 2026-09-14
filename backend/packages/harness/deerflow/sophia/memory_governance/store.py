@@ -635,6 +635,69 @@ class SupabaseMemoryGovernanceStore:
         except Exception:
             raise MemoryGovernanceUnavailable("memory_hit_resolution_unavailable") from None
 
+    def hydrate_inclusions(self, *, user_id: str, inclusions: tuple, scope: str) -> tuple[AuthorizedMemory, ...]:
+        """Hydrate exact current revisions, never a truncated owner-wide Pool.
+
+        This read is NOT prompt admission. The caller must subsequently use
+        record_prompt_admission to fence races, tombstones and provider bindings.
+        Missing/duplicate/extra rows invalidate the whole retained context.
+        """
+        from .retained_context import RetainedMemoryContext, encode_context_manifest
+        from .models import AuthorizedMemory
+
+        # Reuse the strict structural validator before constructing any filter.
+        encode_context_manifest(RetainedMemoryContext("validation-only", 0, inclusions))
+        if not isinstance(user_id, str) or not user_id.strip() or not isinstance(scope, str) or not scope:
+            raise MemoryGovernanceUnavailable("retained_context_selector_invalid")
+        if not inclusions:
+            return ()
+        expected = {str(item.memory_id): item for item in inclusions}
+        rows = self._request("GET", "sophia_memories", params={
+            "select": "memory_id,user_id,lifecycle,current_content_revision,memory_governance_revision",
+            "user_id": f"eq.{user_id}", "memory_id": "in.(" + ",".join(expected) + ")",
+            "limit": str(len(expected) + 1),
+        })
+        fields = {"memory_id", "user_id", "lifecycle", "current_content_revision", "memory_governance_revision"}
+        if not isinstance(rows, list) or len(rows) != len(expected):
+            raise MemoryGovernanceUnavailable("retained_context_incomplete")
+        seen = set()
+        for row in rows:
+            if not isinstance(row, dict) or set(row) != fields:
+                raise MemoryGovernanceUnavailable("retained_context_row_invalid")
+            item = expected.get(row["memory_id"])
+            if item is None or row["memory_id"] in seen or row["user_id"] != user_id or row["lifecycle"] != "active":
+                raise MemoryGovernanceUnavailable("retained_context_ineligible")
+            if (type(row["current_content_revision"]) is not int or type(row["memory_governance_revision"]) is not int
+                    or row["current_content_revision"] != item.content_revision or row["memory_governance_revision"] != item.governance_revision):
+                raise MemoryGovernanceUnavailable("retained_context_revision_changed")
+            seen.add(row["memory_id"])
+        versions = self._request("GET", "sophia_memory_versions", params={
+            "select": "memory_id,user_id,content_revision,canonical_content,content_ref,category,scope",
+            "user_id": f"eq.{user_id}",
+            "or": "(" + ",".join(f"and(memory_id.eq.{item.memory_id},content_revision.eq.{item.content_revision})" for item in inclusions) + ")",
+            "limit": str(len(expected) + 1),
+        })
+        fields = {"memory_id", "user_id", "content_revision", "canonical_content", "content_ref", "category", "scope"}
+        if not isinstance(versions, list) or len(versions) != len(expected):
+            raise MemoryGovernanceUnavailable("retained_context_versions_incomplete")
+        hydrated = {}
+        for row in versions:
+            if not isinstance(row, dict) or set(row) != fields:
+                raise MemoryGovernanceUnavailable("retained_context_version_invalid")
+            item = expected.get(row["memory_id"])
+            if (item is None or row["memory_id"] in hydrated or row["user_id"] != user_id
+                    or type(row["content_revision"]) is not int or row["content_revision"] != item.content_revision
+                    or row["scope"] not in {scope, "global"}
+                    or not isinstance(row["canonical_content"], str) or not row["canonical_content"]
+                    or not isinstance(row["content_ref"], str) or not row["content_ref"]):
+                raise MemoryGovernanceUnavailable("retained_context_version_ineligible")
+            hydrated[row["memory_id"]] = AuthorizedMemory(
+                memory_id=item.memory_id, content_revision=item.content_revision,
+                memory_governance_revision=item.governance_revision,
+                canonical_content=row["canonical_content"], category=row["category"], scope=row["scope"], score=None,
+            )
+        return tuple(hydrated[str(item.memory_id)] for item in inclusions)
+
     def record_prompt_admission(self, payload: dict[str, object]) -> UUID:
         result = self._rpc(
             "sophia_memory_record_prompt_admission",
