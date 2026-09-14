@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest';
+import { DefaultChatTransport, readUIMessageStream } from 'ai';
+import { describe, expect, it, vi } from 'vitest';
 
 import {
   createSSEToUIMessageStream,
@@ -82,6 +83,104 @@ function parseDataEventsFromDump(rawDump: string): Array<Record<string, unknown>
       }
     });
 }
+
+describe('memory-context refusal remains an error', () => {
+  it.each(['false', 'throws'] as const)('does not treat clean EOF as success without the exact run witness: %s', async mode => {
+    const confirm = vi.fn(async () => { if (mode === 'throws') throw new Error('SYNTHETIC PRIVATE LOOKUP'); return false; });
+    const dump = await readStreamAsString(createSSEToUIMessageStream(buildSseStream([
+      'event: token\ndata: {"token":"SYNTHETIC PARTIAL OUTPUT"}\n\n',
+    ]), undefined, confirm));
+    expect(confirm).toHaveBeenCalledOnce();
+    expect(dump).not.toContain('"type":"finish"');
+    expect(dump).toContain('memory_source_send_unconfirmed');
+    expect(dump).not.toContain('SYNTHETIC PRIVATE');
+  });
+  it('waits for the exact run witness after EOF before emitting success', async () => {
+    let resolve!: (value: boolean) => void;
+    const confirm = vi.fn(() => new Promise<boolean>(done => { resolve = done; }));
+    let settled = false;
+    const result = readStreamAsString(createSSEToUIMessageStream(buildSseStream([]), undefined, confirm))
+      .then(dump => { settled = true; return dump; });
+    await vi.waitFor(() => expect(confirm).toHaveBeenCalledOnce());
+    expect(settled).toBe(false);
+    resolve(true);
+    expect(await result).toContain('"type":"finish"');
+  });
+  it('does not manufacture a successful finish after an upstream read failure', async () => {
+    let source!: ReadableStreamDefaultController<Uint8Array>;
+    const upstream = new ReadableStream<Uint8Array>({ start(controller) { source = controller; } });
+    const result = readStreamAsString(createSSEToUIMessageStream(upstream));
+    source.error(new Error('SYNTHETIC PRIVATE NETWORK FAILURE'));
+    const dump = await result;
+    expect(dump).not.toContain('"type":"finish"');
+    expect(dump).toContain('memory_source_send_unconfirmed');
+    expect(dump).not.toContain('SYNTHETIC');
+    expect(upstream.locked).toBe(false);
+  });
+  it.each(['{"error":"SYNTHETIC PRIVATE PROVIDER ERROR"}', 'SYNTHETIC PRIVATE MALFORMED ERROR'])(
+    'keeps ordinary backend stream errors unconfirmed and stops late artifacts: %s', async payload => {
+      const dump = await readStreamAsString(createSSEToUIMessageStream(buildSseStream([
+        `event: error\ndata: ${payload}\n\n`,
+        'event: token\ndata: {"token":"SYNTHETIC LATE ANSWER"}\n\n',
+        'event: artifacts_complete\ndata: {"artifacts":{"takeaway":"SYNTHETIC LATE ARTIFACT"}}\n\n',
+      ])));
+      expect(parseDataEventsFromDump(dump)).toEqual([
+        { type: 'error', errorText: 'memory_source_send_unconfirmed' }, '[DONE]',
+      ]);
+      expect(dump).not.toContain('SYNTHETIC');
+    });
+  it('reaches the installed AI SDK as an error, not a completed assistant message', async () => {
+    const fetch = vi.fn(async () => new Response(createSSEToUIMessageStream(buildSseStream([
+      'event: error\ndata: {"error":"MemoryContextUnavailable","message":"memory_context_rotation_required"}\n\n',
+    ])), { headers: { 'content-type': 'text/event-stream', 'x-vercel-ai-ui-message-stream': 'v1' } }));
+    const transport = new DefaultChatTransport({ api: 'https://synthetic.invalid/api/chat', fetch });
+    const stream = await transport.sendMessages({ trigger: 'submit-message', chatId: 'synthetic-chat', messageId: undefined,
+      messages: [{ id: 'synthetic-user', role: 'user', parts: [{ type: 'text', text: 'SYNTHETIC SOURCE' }] }], abortSignal: undefined });
+    const received: unknown[] = []; const errors: unknown[] = [];
+    await expect((async () => {
+      for await (const message of readUIMessageStream({ stream, terminateOnError: true, onError: error => errors.push(error) })) received.push(message);
+    })()).rejects.toThrow('memory_context_rotation_required');
+    expect(received).toEqual([]); expect(errors).toHaveLength(1); expect(fetch).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    JSON.stringify({ error: 'MemoryContextUnavailable', message: 'memory_context_rotation_required', detail: 'SYNTHETIC PRIVATE DIAGNOSTIC' }),
+    JSON.stringify({ error: 'ModelDispatchDenied', message: 'memory_context_rotation_required' }),
+    JSON.stringify({ error: 'memory_context_rotation_required' }),
+    JSON.stringify('memory_context_rotation_required'),
+    'memory_context_rotation_required',
+  ])('stops the stream without a fabricated answer or task transition: %s', async (payload) => {
+    const upstream = buildSseStream([
+      `event: error\ndata: ${payload}\n\n`,
+      'event: token\ndata: {"token":"SYNTHETIC LATE TEXT"}\n\n',
+      'event: response_complete\ndata: {"response":"SYNTHETIC LATE ANSWER"}\n\n',
+      'event: task_cancelled\ndata: {"task_id":"retained-task"}\n\n',
+    ]);
+    const dump = await readStreamAsString(createSSEToUIMessageStream(upstream));
+    expect(parseDataEventsFromDump(dump)).toEqual([
+      { type: 'error', errorText: 'memory_context_rotation_required' }, '[DONE]',
+    ]);
+    expect(dump).not.toContain('SYNTHETIC');
+  });
+
+  it.each([false, true])('keeps prior display separate and cancels only its reader; cancellation throws=%s', async (throws) => {
+    let cancelled = false;
+    const upstream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(
+          'event: token\ndata: {"token":"SYNTHETIC ALREADY DISPLAYED"}\n\n'
+          + 'event: error\ndata: {"error":"MemoryContextUnavailable","message":"memory_context_rotation_required"}\n\n',
+        ));
+      },
+      cancel() { cancelled = true; if (throws) throw new Error('SYNTHETIC CANCEL DIAGNOSTIC'); },
+    });
+    const events = parseDataEventsFromDump(await readStreamAsString(createSSEToUIMessageStream(upstream)));
+    expect(events.filter(event => typeof event !== 'string').map(event => event.type))
+      .toEqual(['start', 'text-start', 'text-delta', 'text-end', 'error']);
+    expect(cancelled).toBe(true);
+    expect(upstream.locked).toBe(false);
+  });
+});
 
 describe('stream-transformers token sanitization', () => {
   it('removes leaked USER_MESSAGE in ui-message stream protocol', async () => {

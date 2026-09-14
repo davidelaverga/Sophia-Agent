@@ -13,6 +13,8 @@
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
 
+import { sourceSendIntentSchema, type SourceSendIntent } from '../lib/memory-source-client';
+
 // ============================================================================
 // TYPES
 // ============================================================================
@@ -25,6 +27,8 @@ interface QueuedMessage {
   sessionId: string;
   timestamp: string;
   retryCount: number;
+  sourceIntent?: SourceSendIntent;
+  delivery?: 'queued' | 'manual';
 }
 
 interface QueuedMemoryApproval {
@@ -56,7 +60,9 @@ interface ConnectivityState {
   setDegraded: () => void;
   
   // Queue management
-  queueMessage: (content: string, sessionId: string) => string;
+  queueMessage: (content: string, sessionId: string, sourceIntent?: SourceSendIntent) => string;
+  rememberSourceIntent: (intent: SourceSendIntent) => void;
+  findSourceIntent: (owner: string, session: string, thread: string, messageId: string, content: string) => SourceSendIntent;
   removeFromQueue: (messageId: string) => void;
   clearQueue: () => void;
   getQueuedMessages: (sessionId: string) => QueuedMessage[];
@@ -98,7 +104,6 @@ export const useConnectivityStore = create<ConnectivityState>()(
       messageQueue: [],
       memoryApprovalQueue: [],
       failedAttempts: 0,
-      
       // Status setters
       setOnline: () => set({
         status: 'online',
@@ -122,7 +127,37 @@ export const useConnectivityStore = create<ConnectivityState>()(
       }),
       
       // Queue management
-      queueMessage: (content, sessionId) => {
+      rememberSourceIntent: (value) => {
+        const intent = sourceSendIntentSchema.parse(value);
+        const existing = get().messageQueue.find(item => item.sourceIntent?.action.message_id === intent.action.message_id);
+        if (existing) {
+          if (JSON.stringify(existing.sourceIntent) !== JSON.stringify(intent)) throw new Error('memory_source_retry_conflict');
+          return;
+        }
+        // Never evict the original identity of an uncertain governed action.
+        if (get().messageQueue.length >= MAX_QUEUE_SIZE) throw new Error('memory_source_outbox_full');
+        set(state => ({ messageQueue: [...state.messageQueue, { id: intent.action.message_id, content: intent.action.content,
+          sessionId: intent.session_id, timestamp: new Date().toISOString(), retryCount: 0, sourceIntent: intent, delivery: 'manual' }] }));
+      },
+      findSourceIntent: (owner, session, thread, messageId, content) => {
+        const matches = get().messageQueue.filter(item => item.sourceIntent?.action.message_id === messageId);
+        if (matches.length !== 1) throw new Error('memory_source_retry_unavailable');
+        const intent = sourceSendIntentSchema.parse(matches[0].sourceIntent);
+        if (intent.owner_id !== owner || intent.session_id !== session || intent.action.thread_id !== thread || intent.action.content !== content) {
+          throw new Error('memory_source_retry_unavailable');
+        }
+        return intent;
+      },
+      queueMessage: (content, sessionId, sourceIntent) => {
+        const intent = sourceIntent ? sourceSendIntentSchema.parse(sourceIntent) : undefined;
+        if (intent && (intent.session_id !== sessionId || intent.action.content !== content)) throw new Error('memory_source_queue_scope_invalid');
+        if (intent) {
+          get().rememberSourceIntent(intent);
+          set(state => ({ messageQueue: state.messageQueue.map(item => item.sourceIntent?.action.message_id === intent.action.message_id
+            ? { ...item, delivery: 'queued' } : item) }));
+          return intent.action.message_id;
+        }
+        if (get().messageQueue.length >= MAX_QUEUE_SIZE && get().messageQueue.some(item => item.sourceIntent)) throw new Error('memory_source_outbox_full');
         const id = `queued_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
         const message: QueuedMessage = {
           id,
@@ -130,6 +165,7 @@ export const useConnectivityStore = create<ConnectivityState>()(
           sessionId,
           timestamp: new Date().toISOString(),
           retryCount: 0,
+          ...(intent ? { sourceIntent: intent } : {}),
         };
         
         set(state => ({
@@ -140,21 +176,23 @@ export const useConnectivityStore = create<ConnectivityState>()(
       },
       
       removeFromQueue: (messageId) => set(state => ({
-        messageQueue: state.messageQueue.filter(m => m.id !== messageId),
+        // Leaving automatic delivery is not proof that a model run completed.
+        // Keep exact original identity for explicit retry; clearQueue owns erase.
+        messageQueue: state.messageQueue.flatMap(m => m.id !== messageId ? [m] : m.sourceIntent ? [{ ...m, delivery: 'manual' as const }] : []),
       })),
       
       clearQueue: () => set({ messageQueue: [] }),
       
       getQueuedMessages: (sessionId) => {
-        return get().messageQueue.filter(m => m.sessionId === sessionId);
+        return get().messageQueue.filter(m => m.sessionId === sessionId && m.delivery !== 'manual');
       },
       
       incrementRetry: (messageId) => set(state => ({
         messageQueue: state.messageQueue.map(m => 
           m.id === messageId 
-            ? { ...m, retryCount: m.retryCount + 1 }
+            ? { ...m, retryCount: m.retryCount + 1, ...(m.sourceIntent && m.retryCount >= MAX_RETRIES ? { delivery: 'manual' as const } : {}) }
             : m
-        ).filter(m => m.retryCount <= MAX_RETRIES),
+        ).filter(m => m.sourceIntent || m.retryCount <= MAX_RETRIES),
       })),
 
       queueMemoryApproval: (memoryText, sessionId, category) => {
@@ -210,7 +248,7 @@ export const useConnectivityStore = create<ConnectivityState>()(
       
       // Selectors
       isOnline: () => get().status === 'online',
-      hasQueuedMessages: () => get().messageQueue.length > 0,
+      hasQueuedMessages: () => get().messageQueue.some(m => m.delivery !== 'manual'),
     }),
     {
       name: 'sophia-connectivity',
@@ -230,5 +268,5 @@ export const useConnectivityStore = create<ConnectivityState>()(
 
 export const selectIsOnline = (state: ConnectivityState) => state.status === 'online';
 export const selectStatus = (state: ConnectivityState) => state.status;
-export const selectQueueCount = (state: ConnectivityState) => state.messageQueue.length;
-export const selectHasQueue = (state: ConnectivityState) => state.messageQueue.length > 0;
+export const selectQueueCount = (state: ConnectivityState) => state.messageQueue.filter(m => m.delivery !== 'manual').length;
+export const selectHasQueue = (state: ConnectivityState) => state.messageQueue.some(m => m.delivery !== 'manual');

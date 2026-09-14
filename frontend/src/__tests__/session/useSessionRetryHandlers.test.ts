@@ -1,7 +1,9 @@
 import { act, renderHook } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { createSourceSendIntent } from '../../app/lib/memory-source-client';
 import { useSessionRetryHandlers } from '../../app/session/useSessionRetryHandlers';
+import { useConnectivityStore } from '../../app/stores/connectivity-store';
 
 const recoverFromDisconnectMock = vi.fn();
 
@@ -12,6 +14,31 @@ vi.mock('../../app/lib/stream-recovery', () => ({
 describe('useSessionRetryHandlers', () => {
   beforeEach(() => {
     recoverFromDisconnectMock.mockReset();
+    useConnectivityStore.setState({ messageQueue: [] });
+  });
+
+  it.each([false, true])('governed retry uses exact retained source, not text recovery; missing=%s', async missing => {
+    const session = '20000000-0000-4000-8000-000000000001', thread = '30000000-0000-4000-8000-000000000001';
+    const intent = createSourceSendIntent({ schema: 'mem00.source-profile.v1', owner_id: 'owner', session_id: session, thread_id: thread,
+      authority: 'governed', observation_only: true, boundary: { schema: 'mem00.source-boundary.v1', owner_id: 'owner', session_id: session,
+        thread_id: thread, memory_clear_epoch: 2, transcript_revision: 3 } }, 'SYNTHETIC RETRY');
+    if (!missing) useConnectivityStore.getState().rememberSourceIntent(intent);
+    const sendMessage = vi.fn(async () => undefined), setChatMessages = vi.fn();
+    const { result } = renderHook(() => useSessionRetryHandlers({
+      lastUserMessageContent: intent.action.content, isInterruptedByRefresh: true, hasValidBackendSessionId: true,
+      backendSessionId: session, refreshInterruptedAt: 100, cancelledMessageId: 'assistant', lastUserMessageId: intent.action.message_id,
+      chatMessages: [], setChatMessages, sendMessage,
+      retrySourceInput: (text, messageId) => ({ text, sourceIntent: useConnectivityStore.getState().findSourceIntent('owner', session, thread, messageId, text) }),
+      showToast: vi.fn(), messageCountBeforeSendRef: { current: 0 }, setCancelledMessageId: vi.fn(), setLastUserMessageContent: vi.fn(),
+      setLastUserMessageId: vi.fn(), setIsInterruptedByRefresh: vi.fn(), setInterruptedResponseMode: vi.fn(), setRefreshInterruptedAt: vi.fn(),
+      setMessageTimestamp: vi.fn(),
+    }));
+    await act(async () => expect(await result.current.handleRetry()).toEqual({ kind: missing ? 'none' : 'resent' }));
+    expect(recoverFromDisconnectMock).not.toHaveBeenCalled();
+    if (missing) {
+      expect(sendMessage).not.toHaveBeenCalled();
+      expect(setChatMessages).not.toHaveBeenCalled();
+    } else expect(sendMessage).toHaveBeenCalledWith({ text: intent.action.content, sourceIntent: intent });
   });
 
   it('returns recovered result and replaces cancelled assistant message', async () => {
@@ -36,6 +63,7 @@ describe('useSessionRetryHandlers', () => {
 
     const { result } = renderHook(() =>
       useSessionRetryHandlers({
+        retrySourceInput: (text: string) => ({ text }), // Explicit legacy fixture.
         lastUserMessageContent: 'hello',
         isInterruptedByRefresh: true,
         hasValidBackendSessionId: true,
@@ -88,6 +116,7 @@ describe('useSessionRetryHandlers', () => {
 
     const { result } = renderHook(() =>
       useSessionRetryHandlers({
+        retrySourceInput: (text: string) => ({ text }), // Explicit legacy fixture.
         lastUserMessageContent: 'hello',
         isInterruptedByRefresh: true,
         hasValidBackendSessionId: true,

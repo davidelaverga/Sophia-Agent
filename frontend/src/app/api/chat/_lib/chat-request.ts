@@ -1,4 +1,5 @@
 import { MAX_ATTACHED_FILES_PER_TURN } from '../../../lib/chat-constants';
+import { sourceActionSchema, type SourceAction } from '../../../lib/memory-source-contract';
 
 import { secureLog } from './config';
 import {
@@ -25,6 +26,7 @@ export interface ValidatedChatRequest {
    * Filtered to safe bare filenames (no slashes, no traversal).
    */
   attachedFiles: string[];
+  sourceAction?: SourceAction;
 }
 
 /**
@@ -144,6 +146,27 @@ export function parseAndValidateChatPayload(payload: unknown): ParseChatRequestR
   });
 
   const attachedFiles = extractAttachedFiles(record);
+  let sourceAction: SourceAction | undefined;
+  if (Object.prototype.hasOwnProperty.call(record, 'memory_source_action')) {
+    const result = sourceActionSchema.safeParse(record.memory_source_action);
+    if (!result.success || result.data.thread_id !== threadId || result.data.content !== userMessage) {
+      return { kind: 'invalid', response: new Response(JSON.stringify({ error: 'Invalid source action' }),
+        { status: 400, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } }) };
+    }
+    sourceAction = result.data;
+  }
+  if (Object.prototype.hasOwnProperty.call(record, 'memory_source_attachment_keys')) {
+    return { kind: 'invalid', response: new Response(JSON.stringify({ error: 'Source uploads unavailable in text pilot' }),
+      { status: 400, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } }) };
+  }
+  // Check both raw aliases, before the legacy sanitizer can silently discard
+  // an invalid filename. Governed sends cannot acquire legacy file authority.
+  if (sourceAction && ['attached_files', 'attachedFiles'].some(key =>
+    Object.prototype.hasOwnProperty.call(record, key)
+      && (!Array.isArray(record[key]) || (record[key] as unknown[]).length > 0))) {
+    return { kind: 'invalid', response: new Response(JSON.stringify({ error: 'Legacy attachments unavailable for source actions' }),
+      { status: 400, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } }) };
+  }
 
   return {
     kind: 'valid',
@@ -156,6 +179,7 @@ export function parseAndValidateChatPayload(payload: unknown): ParseChatRequestR
       platform,
       rawMessageLength: rawMessage.length,
       attachedFiles,
+      ...(sourceAction ? { sourceAction } : {}),
     },
   };
 }

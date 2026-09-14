@@ -466,6 +466,9 @@ function SessionPageContent() {
     setMessageTimestamp,
     setStreamInterruptHandler,
     sendMessage,
+    captureSourceInput,
+    retrySourceInput,
+    sourceProfileReady,
     voiceState,
     voiceStatus,
     isReflectionTtsActive,
@@ -2330,6 +2333,8 @@ function SessionPageContent() {
     isTyping,
     isReadOnly,
     sendMessage,
+    captureSourceInput,
+    retrySourceInput,
     connectivityStatus,
     queueMessage,
     sessionId,
@@ -2984,7 +2989,7 @@ function SessionPageContent() {
               onSubmit={handleSubmit}
               onMicClick={handleMicClick}
               placeholder={isReadOnly ? 'Read-only session' : inputPlaceholder}
-              disabled={isTyping || isReadOnly || hasUploadsInFlight}
+              disabled={isTyping || isReadOnly || hasUploadsInFlight || !sourceProfileReady}
               inputRef={inputRef}
               justSent={justSent}
               voiceStatus={voiceStatus}

@@ -34,6 +34,100 @@ describe('fetchBackendStreamWithBootstrap', () => {
     getServerAuthTokenMock.mockResolvedValue('');
   });
 
+  const recorded = { thread_id: '30000000-0000-4000-8000-000000000001', command_key: 'original-action-key',
+    message_id: 'original-source-id', content: basePayload.message, expected_clear_epoch: 2 };
+  it('forwards cancellation to the recorded run without a fallback dispatch', async () => {
+    const abort = new AbortController();
+    let entered!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const transport = vi.fn((_url: string, options: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      options.signal?.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), { once: true });
+      entered();
+    }));
+    global.fetch = transport as typeof fetch;
+    const pending = fetchBackendStreamWithBootstrap('http://localhost:2026/api/langgraph/threads', {
+      ...basePayload, thread_id: recorded.thread_id, memory_source_action: recorded }, abort.signal);
+    const outcome = pending.catch(error => error);
+    await started;
+    expect(transport.mock.calls[0][1].signal).toBe(abort.signal);
+    abort.abort();
+    expect(await outcome).toMatchObject({ name: 'AbortError' });
+    expect(transport).toHaveBeenCalledOnce();
+  });
+  it('does not dispatch when the original request is cancelled during authentication', async () => {
+    const abort = new AbortController();
+    let release!: (token: string) => void;
+    getServerAuthTokenMock.mockReturnValue(new Promise<string>(resolve => { release = resolve; }));
+    const transport = vi.fn().mockResolvedValue(new Response('unexpected send'));
+    global.fetch = transport as typeof fetch;
+    const pending = fetchBackendStreamWithBootstrap('http://localhost:2026/api/langgraph/threads', {
+      ...basePayload, thread_id: recorded.thread_id, memory_source_action: recorded }, abort.signal);
+    const outcome = pending.catch(error => error);
+    abort.abort(); release('synthetic-token');
+    expect(await outcome).toMatchObject({ name: 'AbortError' });
+    expect(transport).not.toHaveBeenCalled();
+  });
+  it('carries exact source action and canonical message identity to authenticated run creation', async () => {
+    const transport = vi.fn().mockResolvedValue(new Response('synthetic stream'));
+    global.fetch = transport as unknown as typeof fetch;
+    await fetchBackendStreamWithBootstrap('http://localhost:2026/api/langgraph/threads', {
+      ...basePayload, thread_id: recorded.thread_id, memory_source_action: recorded });
+    const payload = JSON.parse(transport.mock.calls[0][1].body);
+    expect(payload.input.messages).toEqual([{ role: 'user', content: basePayload.message, id: recorded.message_id }]);
+    expect(payload.config.configurable.memory_source_action).toEqual(recorded);
+    expect(payload.config.configurable.memory_source_session_id).toBe(basePayload.session_id);
+  });
+  it('does not rebind a recorded action to a new thread or reseed after a stale-thread response', async () => {
+    const transport = vi.fn().mockResolvedValue(new Response('Thread not found', { status: 404 }));
+    global.fetch = transport as unknown as typeof fetch;
+    const result = await fetchBackendStreamWithBootstrap('http://localhost:2026/api/langgraph/threads', {
+      ...basePayload, thread_id: recorded.thread_id, memory_source_action: recorded });
+    expect(result.upstream.status).toBe(404);
+    expect(result.newThreadId).toBeUndefined();
+    expect(transport).toHaveBeenCalledTimes(1);
+  });
+  it('captures canonical selection before auth awaits and never writes it into message state', async () => {
+    let release!: (token: string) => void;
+    getServerAuthTokenMock.mockReturnValue(new Promise<string>(resolve => { release = resolve; }));
+    const transport = vi.fn().mockResolvedValue(new Response('synthetic stream'));
+    global.fetch = transport as unknown as typeof fetch;
+    const action = { ...recorded };
+    const pending = fetchBackendStreamWithBootstrap('http://localhost:2026/api/langgraph/threads', {
+      ...basePayload, thread_id: action.thread_id, memory_source_action: action });
+    action.content = 'changed during auth'; release('synthetic-token');
+    await pending;
+    const payload = JSON.parse(transport.mock.calls[0][1].body);
+    expect(payload.input).toEqual({ messages: [{ role: 'user', content: recorded.content, id: recorded.message_id }] });
+    expect(payload.config.configurable.memory_source_attachment_keys).toBeUndefined();
+    expect(payload.config.configurable.current_turn_attached_files).toEqual([]);
+    expect(payload.config.configurable.memory_source_action).toEqual(recorded);
+  });
+  it.each([
+    { memory_source_action: null },
+    { message: 'prefixed text' },
+    { raw_message: 'substituted text' },
+    { attached_files: ['legacy.txt'] },
+    { memory_source_attachment_keys: [] },
+    { memory_source_attachment_keys: ['association-one', 'association-one'] },
+    { memory_source_attachment_keys: null },
+    { memory_source_attachment_keys: ['../association-one'] },
+    { memory_source_action: undefined, memory_source_attachment_keys: ['association-one'] },
+  ])('denies malformed source transport before any auth/fetch %j', async override => {
+    const transport = vi.fn(); global.fetch = transport as unknown as typeof fetch;
+    await expect(fetchBackendStreamWithBootstrap('http://localhost:2026/api/langgraph/threads', {
+      ...basePayload, thread_id: recorded.thread_id, memory_source_action: recorded,
+      ...override } as BackendStreamPayload)).rejects.toThrow(/memory_source_/);
+    expect(transport).not.toHaveBeenCalled();
+    expect(getServerAuthTokenMock).not.toHaveBeenCalled();
+  });
+  it('does not retry an uncertain recorded run across a fallback endpoint', async () => {
+    const transport = vi.fn().mockRejectedValue(new TypeError('fetch failed'));
+    global.fetch = transport as unknown as typeof fetch;
+    await expect(fetchBackendStreamWithBootstrap('http://localhost:2026/api/langgraph/threads', {
+      ...basePayload, thread_id: recorded.thread_id, memory_source_action: recorded })).rejects.toThrow('fetch failed');
+    expect(transport).toHaveBeenCalledTimes(1);
+  });
+
   it('falls back to direct LangGraph when the local proxy bootstrap request fails', async () => {
     const fetchMock = vi.fn()
       .mockRejectedValueOnce(new TypeError('fetch failed'))
