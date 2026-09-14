@@ -233,7 +233,7 @@ async def test_internal_post_persists_terminal_builder_state(
     fake_threads.update_state = AsyncMock(side_effect=_update_state)
     fake_client = MagicMock()
     fake_client.threads = fake_threads
-    monkeypatch.setattr("langgraph_sdk.get_client", lambda url=None: fake_client)
+    monkeypatch.setattr("langgraph_sdk.get_client", lambda url=None, api_key=None: fake_client)
 
     async with client:
         response = await client.post(
@@ -289,7 +289,7 @@ async def test_terminal_state_repairs_graphless_legacy_parent(monkeypatch):
     fake_threads.update = AsyncMock()
     fake_client = MagicMock()
     fake_client.threads = fake_threads
-    monkeypatch.setattr("langgraph_sdk.get_client", lambda url=None: fake_client)
+    monkeypatch.setattr("langgraph_sdk.get_client", lambda url=None, api_key=None: fake_client)
 
     await routes._persist_builder_terminal_state(payload)
 
@@ -316,7 +316,7 @@ async def test_internal_post_preserves_image_startup_diagnostics(
     fake_threads.update_state = AsyncMock(side_effect=_update_state)
     fake_client = MagicMock()
     fake_client.threads = fake_threads
-    monkeypatch.setattr("langgraph_sdk.get_client", lambda url=None: fake_client)
+    monkeypatch.setattr("langgraph_sdk.get_client", lambda url=None, api_key=None: fake_client)
 
     diagnostic_fields = {
         "image_generation_startup_error_class": "image_script_not_found",
@@ -365,7 +365,7 @@ async def test_internal_post_preserves_zero_native_deck_diagnostics(
     fake_threads.update_state = AsyncMock(side_effect=_update_state)
     fake_client = MagicMock()
     fake_client.threads = fake_threads
-    monkeypatch.setattr("langgraph_sdk.get_client", lambda url=None: fake_client)
+    monkeypatch.setattr("langgraph_sdk.get_client", lambda url=None, api_key=None: fake_client)
 
     diagnostic_fields = {
         "deck_route": "deck_ir_html_raster",
@@ -428,7 +428,7 @@ async def test_internal_post_persists_terminal_deck_diagnostics(
     fake_threads.update_state = AsyncMock(side_effect=_update_state)
     fake_client = MagicMock()
     fake_client.threads = fake_threads
-    monkeypatch.setattr("langgraph_sdk.get_client", lambda url=None: fake_client)
+    monkeypatch.setattr("langgraph_sdk.get_client", lambda url=None, api_key=None: fake_client)
 
     terminal_fields = {
         "terminal_status": "completed",
@@ -504,7 +504,7 @@ async def test_internal_post_persists_report_contract_diagnostics(
     fake_threads.update_state = AsyncMock(side_effect=_update_state)
     fake_client = MagicMock()
     fake_client.threads = fake_threads
-    monkeypatch.setattr("langgraph_sdk.get_client", lambda url=None: fake_client)
+    monkeypatch.setattr("langgraph_sdk.get_client", lambda url=None, api_key=None: fake_client)
 
     report_fields = {
         "report_contract_status": "rejected",
@@ -580,7 +580,7 @@ async def test_internal_post_hydrates_missing_run_id_from_parent_task(
     fake_threads.update_state = AsyncMock(side_effect=_update_state)
     fake_client = MagicMock()
     fake_client.threads = fake_threads
-    monkeypatch.setattr("langgraph_sdk.get_client", lambda url=None: fake_client)
+    monkeypatch.setattr("langgraph_sdk.get_client", lambda url=None, api_key=None: fake_client)
 
     async with client:
         response = await client.post(
