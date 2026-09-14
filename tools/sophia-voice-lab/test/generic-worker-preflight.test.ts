@@ -102,6 +102,21 @@ function retiredFixture() {
   return { ...f, input: { ...f.input, allocatedWorkerId, expectedRecoveryDeployment: { ...f.input.control.binding.expectedDeployment } } };
 }
 
+it("joins distinct full ownership and Render inventory identities for a retired-owner fence", async () => {
+  const f = retiredFixture();
+  const apiId = `${f.input.workerServiceId}-dkgqg`;
+  const heartbeat = f.ready.components.browser_worker.heartbeat_attestation;
+  heartbeat.worker_instance_id_sha256 = sha256(`${f.input.workerServiceId}-54b9b6c74d-dkgqg`);
+  Object.assign(heartbeat, { render_inventory_instance_id_sha256: sha256(apiId) });
+  f.instances[0] = { instance: { id: apiId, createdAt: new Date(Date.now() - 60000).toISOString() } };
+  expect((await readServiceOwnerFencePreflight(f.input)).before.instanceIdsSha256).toEqual([sha256(apiId)]);
+  Object.assign(heartbeat, { render_inventory_instance_id_sha256: sha256('wrong-instance') });
+  await expect(readServiceOwnerFencePreflight(f.input)).rejects.toThrow(/exact singleton/);
+  Object.assign(heartbeat, { render_inventory_instance_id_sha256: sha256(apiId) });
+  heartbeat.worker_instance_id_sha256 = sha256(f.input.allocatedWorkerId);
+  await expect(readServiceOwnerFencePreflight(f.input)).rejects.toThrow(/original owner is still current/);
+});
+
 it("observes the current exact singleton separately from a service-bound retired owner", async () => {
   const f = retiredFixture(); const before = JSON.stringify(f.input.control);
   const result = await readServiceOwnerFencePreflight(f.input);

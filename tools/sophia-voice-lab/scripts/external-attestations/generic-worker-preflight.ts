@@ -83,8 +83,12 @@ async function readPreflight(input: GenericWorkerPreflightInput, replacementHash
   if (builds.frontend.observed !== recoveryDeployment.frontend || builds.backend.observed !== recoveryDeployment.backend
     || builds.voice.observed !== recoveryDeployment.voice || builds.langgraph.observed !== input.expectedLangGraphSha) throw new Error("Generic recovery product deployment mismatch.");
   const worker = await readRenderWorkerSnapshot({ render_api_origin: "https://api.render.com", render_worker_service_id: input.workerServiceId }, input.renderBearer, fetchImpl, null);
+  // Only the retired-service fence uses the distinct inventory projection.
+  // Original-owner contracts retain their exact historical owner comparison.
+  const inventoryHash = retiredServiceOwner && heartbeat.render_inventory_instance_id_sha256 != null
+    ? z.string().regex(/^[a-f0-9]{64}$/).parse(heartbeat.render_inventory_instance_id_sha256) : expectedOwnerHash;
   if (worker.deployStatus !== "live" || worker.deploySettledAt === null || worker.instanceIds.length !== 1
-    || sha256(worker.instanceIds[0]!) !== expectedOwnerHash) throw new Error("Generic recovery Render owner is not the exact singleton.");
+    || sha256(worker.instanceIds[0]!) !== inventoryHash) throw new Error("Generic recovery Render owner is not the exact singleton.");
   const completedAt = (input.now ?? (() => new Date()))();
   if (completedAt.getTime() < observedAt.getTime() || completedAt.getTime() - Date.parse(heartbeat.observed_at) > 15_000
     || worker.instanceCreatedAt[0]!.getTime() > completedAt.getTime()) throw new Error("Generic recovery preflight expired or has future instance evidence.");

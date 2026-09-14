@@ -14,6 +14,16 @@ function webBoot(config: ReturnType<typeof testConfig>) {
 }
 
 describe("worker heartbeat deployment and kill-switch attestation", () => {
+  it("derives the inventory projection only after validating the exact durable owner", () => {
+    const config = testConfig({ SOPHIA_VOICE_LAB_KILL_SWITCH: "true" });
+    const owner = "srv-da6uiqfavr4c739mtbo0-54b9b6c74d-dkgqg";
+    const heartbeat = testWorkerHeartbeat(config, { workerId: owner, bootedAt: WORKER_BOOTED_AT, observedAt: OBSERVED_AT, effectiveKillSwitchEngaged: true });
+    expect(assessWorkerReadiness(config, [heartbeat], webBoot(config)).component).toMatchObject({
+      heartbeat_attestation: { worker_instance_id_sha256: sha256(owner), render_inventory_instance_id_sha256: sha256("srv-da6uiqfavr4c739mtbo0-dkgqg") },
+    });
+    expect(assessWorkerReadiness(config, [{ ...heartbeat, workerId: "srv-da6uiqfavr4c739mtbo0-54b9b6c74d-other" }], webBoot(config)).component)
+      .toMatchObject({ ready: false, heartbeat_attestation: null, detail: { reason: "heartbeat_boot_identity_invalid" } });
+  });
   it("accepts one post-web-boot worker with the exact same-SHA open deployment identity", () => {
     const config = testConfig({ SOPHIA_VOICE_LAB_KILL_SWITCH: "false" });
     const heartbeat = testWorkerHeartbeat(config, {

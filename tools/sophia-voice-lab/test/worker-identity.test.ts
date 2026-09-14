@@ -1,5 +1,15 @@
 import { expect, it } from "vitest";
-import { resolveWorkerIdentity } from "../src/worker-identity.js";
+import { resolveWorkerIdentity, renderInventoryInstanceId } from "../src/worker-identity.js";
+
+it("projects the observed Render inventory ID without rewriting ownership", () => {
+  const full = "srv-da6uiqfavr4c739mtbo0-54b9b6c74d-dkgqg";
+  expect(resolveWorkerIdentity("production", { RENDER_INSTANCE_ID: full })).toBe(full);
+  expect(renderInventoryInstanceId(full)).toBe("srv-da6uiqfavr4c739mtbo0-dkgqg");
+  expect(renderInventoryInstanceId("srv-da6uiqfavr4c739mtbo0-dkgqg")).toBe("srv-da6uiqfavr4c739mtbo0-dkgqg");
+});
+it.each(["worker-local", "srv-da6uiqfavr4c739mtbo0-nothex-dkgqg", "srv-da6uiqfavr4c739mtbo0-54b9b6c74d-dkgqg-extra", " srv-da6uiqfavr4c739mtbo0-dkgqg"])("rejects ambiguous Render inventory projection: %s", value => {
+  expect(renderInventoryInstanceId(value)).toBeNull();
+});
 
 it("preserves the exact platform owner for controller inventory correlation", () => {
   expect(resolveWorkerIdentity("production", { RENDER_INSTANCE_ID: "srv-example-worker-0123" })).toBe("srv-example-worker-0123");

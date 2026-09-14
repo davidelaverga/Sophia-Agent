@@ -24,6 +24,7 @@ import { targetAdmissionBinding, type VoiceLabService } from "./service.js";
 import type { OAuthAuthorizationServer } from "./oauth.js";
 import type { OAuthMaintenanceLoop } from "./oauth-maintenance.js";
 import { validateWorkerHeartbeat, workerDeploymentIdentitySha256 } from "./worker-heartbeat.js";
+import { renderInventoryInstanceId } from "./worker-identity.js";
 
 export interface WebBootIdentity {
   bootIdSha256: string;
@@ -114,6 +115,8 @@ export function assessWorkerReadiness(config: VoiceLabConfig, workers: readonly 
       expected_deployment_identity_sha256: expectedDeploymentIdentitySha256,
       heartbeat_attestation: {
         ...attestation,
+        render_inventory_instance_id_sha256: renderInventoryInstanceId(heartbeat.workerId) === null
+          ? null : sha256(renderInventoryInstanceId(heartbeat.workerId)!),
         observed_at: heartbeat.observedAt.toISOString(),
       },
       detail: runtimeReady ? heartbeat.detail : { ...heartbeat.detail, reason: "browser_or_fixtures_unready" },
