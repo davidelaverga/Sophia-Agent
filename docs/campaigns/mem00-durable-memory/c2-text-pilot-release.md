@@ -98,6 +98,16 @@ Provider uncertainty is tracked debt, not an automatic pilot-wide blocker. Keep 
 
 ## Shared deployment coordination
 
+### Text provenance and Builder exclusion slice
+
+Selected retained-context, authenticated-input/source witness and retrieval-proof modules from preserved C1 work. Governed facade seals only atomically admitted canonical results; explicit recall verifies the owner/rendered-text proof and carries it as a private ToolMessage artifact, not model-visible text. This proof is not final outgoing-model admission; transport and companion integration remain required.
+
+EI871: provenance run81c38b failed3/passed101. Hypothesis: current explicit recall omitted the proof artifact and accepted unbound text, while one copied C1 test incorrectly required positive Builder personalization. Reused the governed tool implementation and changed Builder to clear its owned memory injection for governed/unproven owners regardless of text recall flags. Replaced the positive Builder test with C2 denial coverage. Focused a4b1d2 passes104.
+
+EI872: adjacent run4dc558 failed11/passed143. Hypothesis: legacy Builder fixtures assumed undeclared ownership still enabled search. Added explicit durable legacy declarations for the two named fixture owners; did not restore an absent-row fallback. Extended C2 denial tests through the actual authority resolver for governed/unknown owners and both recall flag values, with zero search, retained injection removal and independently sourced prompt/message preservation. Rerun2349d1 passes157 with9 warnings; whitespace56480a has no diff errors (subsequent path discovery failed independently).
+
+MEM00_FIVE_ITERATIONS_REACHED — CONTINUE reported for868–872. Cluster: stale loader/response fixture contracts868/869, missing unavailable projection literal870, explicit-tool proof and C2 Builder-policy selection871, undeclared legacy Builder fixtures872. These are local integration failures, not hosted provider observations. Repairs are locally verified; no production deployment or synthetic provider operation occurred. Next checkpoint877. Next experiment is actual companion/final transport integration; do not claim hosted admission from these helper/tool tests.
+
 Fresh public reads10:47–10:48UTC on2026-09-14 pin Gateway, Graph, Voice and frontend to35c6467c. Frontend deployment dpl_HDssPdmDg3DCMMztw4kWzwBMKfkj. Schema advertises mem00.v1/epoch1 but earlier actual column reads showed the owner-authority/clear additions absent; advertisement is not migration proof.
 
 VT00 reports no C5 run started or gates opened; it released the provisional freeze for local/planning work. An explicit exclusive shared deployment window is still required before product mutation. MEM00 owns pilot memory cohort/profile; VT00 owns Lab admission/controls. Neither changes the other's settings. No production mutation was performed.

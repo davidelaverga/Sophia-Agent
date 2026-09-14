@@ -351,6 +351,12 @@ def search_memories_with_diagnostics(
         ]
         if categories:
             memories = [item for item in memories if item["category"] in categories]
+        if memories and getattr(governed.receipt, "prompt_admission_id", None) is not None:
+            from deerflow.sophia.memory_governance.retrieval_provenance import RETRIEVAL_PROOF_KEY, issue_retrieval_proof
+            selected_ids = {item["id"] for item in memories}
+            proof = issue_retrieval_proof(owner_id=user_id,
+                memories=tuple(item for item in governed.memories if str(item.memory_id) in selected_ids), receipt=governed.receipt)
+            memories = [{**item, RETRIEVAL_PROOF_KEY: proof} for item in memories]
         return {
             "memories": memories,
             "provider_status": governed.receipt.provider_status,

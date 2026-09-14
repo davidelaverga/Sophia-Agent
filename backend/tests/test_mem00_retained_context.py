@@ -127,6 +127,25 @@ def test_short_delta_pages_require_empty_page_and_owner_keyset():
     assert store.requests[2]["event_id"] == f"gt.{UUID(int=2)}"
 
 
+@pytest.mark.parametrize("kind", ["memory_source_action_accepted", "model_dispatch_authorized", "model_result_observed",
+    "builder_source_handoff_recorded", "builder_source_run_bound"])
+def test_source_and_model_observations_preserve_exact_revocation_delta(kind):
+    rows = [[event(memory_id=str(B), event_type="memory_tombstoned"), event(2, event_type=kind, memory_id=None)], []]
+    deltas = read(DeltaStore(rows))
+    assert deltas == (RevocationDelta(OWN, 4, B),)
+    assert decide(current_epoch=4, deltas=deltas, delta_complete=True).action == "continue"
+    assert decide(context=RetainedMemoryContext(OWN, 3, ()), current_epoch=4, deltas=deltas, delta_complete=True).action == "continue"
+
+
+@pytest.mark.parametrize("kind", ["memory_source_action_accepted", "model_dispatch_authorized", "model_result_observed",
+    "builder_source_handoff_recorded", "builder_source_run_bound"])
+def test_nonrevoking_observations_cannot_fill_missing_revocation_epoch(kind):
+    deltas = read(DeltaStore([[event(event_type=kind, memory_id=None)], []]))
+    assert deltas == ()
+    assert decide(current_epoch=4, deltas=deltas, delta_complete=True).action == "rotate"
+    assert decide(context=RetainedMemoryContext(OWN, 3, ()), current_epoch=4, deltas=deltas, delta_complete=True).action == "rotate"
+
+
 @pytest.mark.parametrize(
     "pages,reason",
     [

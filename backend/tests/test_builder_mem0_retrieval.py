@@ -9,6 +9,12 @@ timeout / error / no-user-id.
 from __future__ import annotations
 
 import pytest
+from mem00_owner_fixture import declare_memory_owners
+
+
+@pytest.fixture
+def legacy_builder_owners(declare_memory_owners):
+    declare_memory_owners({"u": "legacy", "user-abc": "legacy"})
 
 from deerflow.agents.sophia_agent.middlewares.mem0_retrieval import (
     _MAX_SNIPPET_CHARS,
@@ -128,6 +134,7 @@ class TestUserIdResolution:
         assert BuilderMem0RetrievalMiddleware._resolve_user_id({}, _R()) is None
 
 
+@pytest.mark.usefixtures("legacy_builder_owners")
 class TestRetrievalAsync:
     @pytest.mark.anyio
     async def test_happy_path_injects_contents_and_block(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -357,6 +364,7 @@ class TestRetrievalAsync:
         assert snippet.endswith("…")
 
 
+@pytest.mark.usefixtures("legacy_builder_owners")
 class TestSyncPath:
     def test_before_agent_returns_none(self) -> None:
         # Sync path is intentionally a no-op — Builder runs async in prod.
