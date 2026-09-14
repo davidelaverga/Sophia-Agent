@@ -2370,16 +2370,18 @@ def test_gateway_middleware_does_not_bypass_near_match_recovery_routes(
     }
 
 
+@pytest.mark.parametrize("action", ["recover", "browser-process-closed"])
 def test_gateway_middleware_delegates_exact_private_recovery_to_dual_auth_handler(
     voice_lab_env: None,
     monkeypatch: pytest.MonkeyPatch,
+    action: str,
 ) -> None:
     from app.gateway.app import create_app
 
     recovery_secret = "recovery-secret-that-is-at-least-thirty-two-bytes"
     monkeypatch.setenv("SOPHIA_VOICE_LAB_RECOVERY_INTERNAL_SECRET", recovery_secret)
     response = TestClient(create_app()).post(
-        "/internal/voice-lab/runs/run-001/recover",
+        f"/internal/voice-lab/runs/run-001/{action}",
         headers={
             VOICE_LAB_CAPABILITY_HEADER: "opaque-authority",
             VOICE_LAB_RECOVERY_INTERNAL_AUTH_HEADER: recovery_secret,

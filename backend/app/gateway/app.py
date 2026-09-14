@@ -76,7 +76,7 @@ _ARTIFACT_UPSERT_AUTH_PATCH = "artifact_upsert_auth_v2"
 _DECK_QUALITY_READINESS_ATTR = "_deck_quality_readiness"
 _DEPLOYMENT_SHA_PATTERN = re.compile(r"^[a-f0-9]{40}$")
 _SAFE_STARTUP_FAILURE_CODE = re.compile(r"^[a-z0-9_]{1,96}$")
-_VOICE_LAB_RECOVERY_PATH = re.compile(r"^/internal/voice-lab/runs/[^/]+/recover$")
+_VOICE_LAB_RECOVERY_PATH = re.compile(r"^/internal/voice-lab/runs/[^/]+/(?:recover|browser-process-closed)$")
 
 
 def _deck_quality_component(

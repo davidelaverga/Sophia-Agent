@@ -255,3 +255,17 @@ def test_private_route_rejects_d02_before_body_or_lookup(monkeypatch):
     response = TestClient(app).post("/internal/voice-lab/runs/run-001/browser-process-closed", content="bad")
     assert response.status_code == 403
     lookup.assert_not_called()
+
+
+def test_complete_gateway_stack_reaches_dual_authenticated_process_handler(monkeypatch, recovery_env):
+    from fastapi.testclient import TestClient
+    from app.gateway.app import create_app
+    lookup = Mock(return_value=({"status": "found"}, object()))
+    commit = Mock(return_value="c" * 64)
+    monkeypatch.setattr(voice_lab_recovery, "_lookup_canonical_session", lookup)
+    monkeypatch.setattr(process, "accept_browser_process_termination", commit)
+    response = TestClient(create_app()).post("/internal/voice-lab/runs/run-001/browser-process-closed",
+        json=receipt_for(_claims()), headers=_headers())
+    assert response.status_code == 202, response.text
+    assert response.json()["provider_cleanup_proven"] is False
+    commit.assert_called_once()
