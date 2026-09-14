@@ -603,7 +603,7 @@ describe('useRecapArtifactsLoader', () => {
     expect(result.current.status).toBe('not_found');
     expect(result.current.telemetry.memoryRecent).toMatchObject({
       requested: false,
-      memoryRecentNotRequestedReason: 'session_not_ended',
+      memoryRecentNotRequestedReason: 'source_not_found',
     });
 
     expect(fetchMock).toHaveBeenCalledTimes(1);

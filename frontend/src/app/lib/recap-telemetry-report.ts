@@ -19,6 +19,9 @@ export type RecapDebugStatus =
   | 'unknown';
 
 export type MemoryRecentSource =
+  | 'sophia_candidate_ledger'
+  | 'sophia_canonical'
+  | 'sophia_governance_denied'
   | 'local_review_overlay'
   | 'global_hydration'
   | 'mem0'
@@ -27,6 +30,7 @@ export type MemoryRecentSource =
   | 'error';
 
 export type MemoryRecentEmptyReason =
+  | 'review_coverage_unproven'
   | 'no_session_candidates'
   | 'no_results'
   | 'filtered_out'
@@ -37,6 +41,7 @@ export type RecapAbortReason = 'timeout' | 'navigation' | 'manual' | 'unknown' |
 export type MemoryRecentNotRequestedReason =
   | 'missing_session_id'
   | 'session_not_ended'
+  | 'source_not_found'
   | 'disabled_by_status'
   | 'waiting_for_required_recap_status'
   | 'already_resolved'
@@ -756,7 +761,7 @@ function mapPageStatusToRecapDebugStatus(pageStatus: string, memoryCandidateCoun
   if (pageStatus === 'ready') {
     return memoryCandidateCount === 0 ? 'no_results' : 'ready';
   }
-  if (pageStatus === 'reviewed') {
+  if (pageStatus === 'reviewed' || pageStatus === 'no_pending') {
     return 'no_results';
   }
   if (pageStatus === 'loading' || pageStatus === 'processing') {

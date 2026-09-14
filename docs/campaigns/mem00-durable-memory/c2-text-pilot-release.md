@@ -1,6 +1,6 @@
 # MEM00-C2 text pilot — current release record
 
-Successful target: MEMORY_TEXT_PILOT_READY. Current status: IMPLEMENTING, not activated or deployed. C2 replaces the prior PROMOTE-only/five-core-run prerequisites for this owner-restricted pilot. Historical C1 records and failures remain valid history, not additional first-use gates. Latest failed iteration865; next five-failure checkpoint867.
+Successful target: MEMORY_TEXT_PILOT_READY. Current status: IMPLEMENTING, not activated or deployed. C2 replaces the prior PROMOTE-only/five-core-run prerequisites for this owner-restricted pilot. Historical C1 records and failures remain valid history, not additional first-use gates. Latest failed iteration868; checkpoint863–867 reported; next five-failure checkpoint872.
 
 ## Candidate and scope
 
@@ -30,15 +30,27 @@ Next: extract the dependent canonical review/command/projection and actual text-
 
 ## Finite C2 acceptance
 
+### Canonical source/review slice, 2026-09-14
+
+This slice follows published receipt commit23072300a03b5a7a53fb8fc0a71ab3c27d5e99b0 (tree91f88c42e1a4b79d41b9dc7234a46077ba86ebc9), which follows legacy-boundary commit e6ff75d475a26b4a67289aac4b59e49dff243034. All are isolated from the shared deployment branch.
+
+The current v2 review contract requires source eligibility and clear-epoch checks; it was not downgraded to an older contract to reduce the migration count. Nine existing dependency migrations are now selected in addition to owner authority and command receipts: dependency_authority, review_snapshot, snapshot_inventory, source_decision_fence, transactional_clear, source_intake, extraction_dispatch, epoch_source_target, and epoch_review (all2026_09_09_mem00_c1). None has been applied in production. Selecting SQL dependencies does not enable optional clear/restore/source mutation endpoints. The source-intake/target helpers are dependency code, not a claim that all write callsites are integrated.
+
+Evidence: Gateway recovery rerun56e5cf passes29 tests after the lost process handle was safely rerun. Disposable SQL-only b16578 passed39 checks,1,005 candidates/six pages. Joined proof0cffad passes41 checks with22 actual Gateway/HTTP-store requests, actual Next recap/recent proxies and the recap loader, exact1,005 candidate/revision preservation, zero provider calls, and two executed—not skipped—frontend cases. Reporter SHA2561aa7652aafc2010e666895d9041031bdf9688a2d370617666b7beb328230e26f. Disposable database and private synthetic transport/report files were removed. This proves the read chain, not an actual hosted browser lifecycle or lost decision-response UI recovery.
+
+Frontend79d9c6 passes50 unique tests: schema19, authenticated recap proxy8, existing session routes4, loader15, truthful empty views4. An earlier50-test result122487 included19 repeated registrations from importing a test module; it is superseded by a standalone fixture and the unique50-test run. TypeScript9f7142 exits0. Whitespace809d98 exits0. Current review rendering cannot consult competing derivative copies when a canonical envelope is present. Full owner-switch/transient browser-state integration remains pending; the historical owner-unaware session-history interface is not represented as complete isolation.
+
+Failure accounting: EI866, local Python collection826f26, hypothesis: selected Gateway inventory function ended before its exception handler body. Repaired the exact handler with content-free503/no-store; regression56e5cf29 passed. EI867, local TypeScript69c6f6, hypothesis: wrapper still restricts the old recap status union. Updated RecapComponents to accept no_pending/source_excluded, verified9f7142 and rendered-state tests79d9c6. MEM00_FIVE_ITERATIONS_REACHED — CONTINUE was reported for863–867: prior legacy-privacy fixture mismatch, two publication setup errors864/865, and two incomplete patch selections866/867. Pattern: composition/dependency selection, not hosted provider failure; next experiment was typed/rendered read-chain verification, now passing. EI868, stale loader expectation0c3cb5: hypothesis:404 now correctly reports source_not_found but the test still expects session_not_ended. Updated only that diagnostic expectation; all15 loader tests pass79d9c6. These failures had no production effect or provider state. Next: finish the selected write lifecycle and actual text admission, then requalify their integrated paths.
+
 Receipt-recovery integration selected next: existing2026_09_08_mem00_c1_command_receipts.sql (the second selected migration, not the entire C1 set), typed original command receipts, strict owner/key-bound store lookup, canonical service and authenticated Gateway status route, plus existing Next proxy/schema. SQL93c4c8 passes24 actual RPC receipt/replay/tombstone and lock-order checks including repeated migration application; disposable database closed. Backendfff312 passes38 focused tests, including committed/tombstoned/absent/wrong-owner/wrong-key/outage/duplicate/extra-plaintext status responses. Frontend9f62f7 passes6 proxy tests; TypeScript376b15 terminal0. Frozen offline dependency install reused844 packages/downloaded0; existing pnpm policy skipped native build scripts and was not changed. This proves recovery plumbing, not complete review UI or actual hosted lifecycle. Remaining ordinary decision response/UI integration is still required.
 
 | Gate | Current disposition |
 | --- | --- |
 | Isolation and durable rollback | Foundation tests pass; actual callsites and rollback-safe deployment boundary pending |
-| SQL → Gateway → Next → UI review and lost response | Existing WIP evidence available; candidate integration pending |
+| SQL → Gateway → Next → UI review and lost response | Joined current review read chain passes; ordinary decision/lost-response UI integration pending |
 | Actual text model admission/retained revocation/disabled inheritance | Existing WIP evidence available; pilot-specific integration pending |
 | Exact delayed-effect/edit/delete and truthful pending | Existing WIP evidence available; candidate integration pending |
-| Selected migration compatibility/least privilege/restart | One foundation migration locally tested; remaining dependency selection and production approval pending |
+| Selected migration compatibility/least privilege/restart | Eleven selected; foundation/receipt/review disposable checks pass; complete selected upgrade/restart and production approval pending |
 | One complete authenticated browser-to-hosted-model lifecycle | Not run on this candidate |
 | Davide account activation and practical handover | Pending trusted owner resolution and authorized rollout |
 

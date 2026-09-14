@@ -382,6 +382,21 @@ class SupabaseMemoryGovernanceStore:
             )
         return tuple(result)
 
+    def source_snapshot(self, *, user_id: str, session_id: str, thread_id: str):
+        return self._rpc("sophia_memory_source_snapshot", {"p_user_id": user_id, "p_session_id": session_id, "p_thread_id": thread_id})
+
+    def review_snapshot(self, payload: dict[str, object]) -> dict:
+        result = self._rpc("sophia_memory_review_snapshot", payload)
+        if not isinstance(result, dict):
+            raise MemoryGovernanceUnavailable("memory_review_snapshot_invalid")
+        return result
+
+    def inventory_snapshot(self, payload: dict[str, object]) -> dict:
+        result = self._rpc("sophia_memory_inventory_snapshot", payload)
+        if not isinstance(result, dict):
+            raise MemoryGovernanceUnavailable("memory_inventory_unavailable")
+        return result
+
     def command_receipt(self, *, user_id: str, idempotency_key: str) -> CommandReceipt | None:
         raw = self._rpc("sophia_memory_lookup_command_receipt", {
             "p_user_id": user_id, "p_idempotency_key": idempotency_key})

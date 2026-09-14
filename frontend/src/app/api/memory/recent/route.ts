@@ -1,6 +1,8 @@
 import { type NextRequest, NextResponse } from 'next/server';
 
 import { logger } from '../../../lib/error-logger';
+import { memoryInventorySchema } from '../../../lib/memory-inventory-envelope';
+import { memoryReviewEnvelopeSchema } from '../../../lib/memory-review-envelope';
 import { fetchSophiaApi, resolveSophiaUserId } from '../../_lib/sophia';
 
 type GatewayMemory = {
@@ -31,6 +33,9 @@ type NormalizedMemory = {
 };
 
 type GatewayMemoryListPayload = {
+  memory_inventory?: unknown;
+  memory_review?: unknown;
+  unavailable?: boolean;
   memories?: GatewayMemory[];
   count?: number;
   source?: string;
@@ -157,7 +162,7 @@ function normalizeGatewayMemory(memory: GatewayMemory): NormalizedMemory | null 
   };
 }
 
-async function fetchMemoryList(userId: string, status?: string | null, sessionId?: string | null): Promise<Response> {
+async function fetchMemoryList(userId: string, status?: string | null, sessionId?: string | null, paging?: URLSearchParams): Promise<Response> {
   const params = new URLSearchParams();
   if (status) {
     params.set('status', status);
@@ -165,13 +170,17 @@ async function fetchMemoryList(userId: string, status?: string | null, sessionId
   if (sessionId) {
     params.set('session_id', sessionId);
   }
+  for (const name of ['cursor', 'page_size']) {
+    const value = paging?.get(name);
+    if (value != null) params.set(name, value);
+  }
 
   const query = params.toString();
   const suffix = query ? `?${query}` : '';
 
   return fetchSophiaApi(
     `/api/sophia/${encodeURIComponent(userId)}/memories/recent${suffix}`,
-    { method: 'GET' },
+    { method: 'GET', cache: 'no-store' },
   );
 }
 
@@ -314,7 +323,7 @@ function selectFallbackMemories(
   });
 }
 
-export async function GET(request: NextRequest) {
+async function readRecentMemories(request: NextRequest) {
   try {
     const status = request.nextUrl.searchParams.get('status');
     const userId = await resolveSophiaUserId();
@@ -334,7 +343,7 @@ export async function GET(request: NextRequest) {
     const endedAt = request.nextUrl.searchParams.get('ended_at');
     const shouldApplyScopedFilter = Boolean(status && (sessionId || startedAt || endedAt));
 
-    const filteredResponse = await fetchMemoryList(userId, status, sessionId);
+    const filteredResponse = await fetchMemoryList(userId, status, sessionId, request.nextUrl.searchParams);
     const filteredText = await filteredResponse.text();
 
     if (!filteredResponse.ok) {
@@ -354,9 +363,67 @@ export async function GET(request: NextRequest) {
       ? JSON.parse(filteredText) as GatewayMemoryListPayload
       : { memories: [], count: 0 };
 
+    if (filteredPayload.memory_inventory != null) {
+      const parsed = memoryInventorySchema.safeParse(filteredPayload.memory_inventory);
+      const view = !status || status === 'pending_review' ? 'pending_review'
+        : status === 'approved' || status === 'active' ? 'active' : status === 'forgotten' ? 'forgotten' : null;
+      if (!parsed.success || sessionId || parsed.data.owner_id !== userId || parsed.data.view !== view || filteredPayload.unavailable === true) {
+        return NextResponse.json({ memories: [], count: 0, unavailable: true, fallbackApplied: false,
+          error: 'Canonical inventory unavailable' }, { status: 503 });
+      }
+      const inventory = parsed.data;
+      const memories = inventory.records.map((item) => ({ id: item.id, sessionId: item.session_id,
+        text: item.content, category: item.category, review_state: item.kind === 'candidate' ? item.state : undefined,
+        candidate_revision: item.kind === 'candidate' ? item.revision : undefined,
+        content_revision: item.kind === 'memory' ? item.revision : undefined,
+        memory_governance_revision: item.memory_governance_revision, lifecycle: item.kind === 'memory' ? item.state : undefined,
+        projection_state: 'unavailable', authority: item.kind === 'candidate' ? 'sophia_candidate_ledger' : 'sophia_canonical' }));
+      return NextResponse.json({ memories, count: memories.length, candidate_count: view === 'pending_review' ? memories.length : 0,
+        source: view === 'pending_review' ? 'sophia_candidate_ledger' : 'sophia_canonical',
+        fallbackApplied: false, unavailable: false, extraction_complete: false, extraction_state: 'unavailable', memory_inventory: inventory });
+    }
+
+    if (filteredPayload.memory_review != null) {
+      const parsed = memoryReviewEnvelopeSchema.safeParse(filteredPayload.memory_review);
+      if (!parsed.success || filteredPayload.unavailable === true || !sessionId
+        || parsed.data.owner_id !== userId || parsed.data.session_id !== sessionId
+        || (status !== null && status !== 'pending_review')
+        || ['unavailable', 'not_found', 'source_changed', 'snapshot_changed'].includes(parsed.data.extraction_state)) {
+        return NextResponse.json({ memories: [], count: 0, unavailable: true, fallbackApplied: false,
+          error: 'Canonical review unavailable' }, { status: 503 });
+      }
+      const envelope = parsed.data;
+      const memories = envelope.candidates.map((item) => ({ id: item.candidate_id, sessionId, text: item.content,
+        category: item.category, candidate_revision: item.candidate_revision, review_state: item.review_state,
+        authority: 'sophia_candidate_ledger' }));
+      return NextResponse.json({ memories, count: memories.length, candidate_count: memories.length,
+        source: 'sophia_candidate_ledger', fallbackApplied: false, unavailable: false,
+        session_id_received: true, next_proxy_forwarded_session_id: true, gateway_received_session_id: true,
+        extraction_state: envelope.extraction_state, extraction_complete: envelope.extraction_state === 'complete',
+        memory_review: envelope });
+    }
+
     const filteredMemories = Array.isArray(filteredPayload.memories)
       ? filteredPayload.memories.map(normalizeGatewayMemory).filter((memory): memory is NormalizedMemory => memory !== null)
       : [];
+
+    // Canonical session membership/revisions come from the ledger query. Never
+    // pass this lane through legacy timestamp windows, provider labels or a
+    // second unfiltered request. Empty pages cannot prove extraction coverage.
+    if (filteredPayload.source?.startsWith('sophia_')) {
+      // Both governed lanes require a validated canonical envelope above.
+      return NextResponse.json({
+        memories: [], count: 0, candidate_count: 0,
+        source: filteredPayload.source,
+        fallbackApplied: false, unavailable: true,
+        session_id_received: Boolean(sessionId), next_proxy_forwarded_session_id: Boolean(sessionId),
+        gateway_received_session_id: filteredPayload.session_id_received === true,
+        empty_reason: 'review_coverage_unproven',
+        extraction_state: 'unavailable',
+        // Candidate visibility is not proof that the whole target completed.
+        extraction_complete: false,
+      });
+    }
 
     if (!shouldApplyScopedFilter) {
       return NextResponse.json({
@@ -443,11 +510,17 @@ export async function GET(request: NextRequest) {
         sessionId,
       }),
     });
-  } catch (error) {
-    logger.logError(error, { component: 'api/memory/recent', action: 'list_recent_memories', request });
+  } catch {
+    logger.logError(new Error('Memory review unavailable'), { component: 'api/memory/recent', action: 'list_recent_memories' });
     return NextResponse.json(
       { error: 'Failed to fetch recent memories' },
       { status: 500 },
     );
   }
+}
+
+export async function GET(request: NextRequest) {
+  const response = await readRecentMemories(request);
+  response.headers.set('Cache-Control', 'no-store');
+  return response;
 }

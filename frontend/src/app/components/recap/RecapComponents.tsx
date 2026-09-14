@@ -106,7 +106,7 @@ export function MemoryCandidatesPanel({
 // =============================================================================
 
 interface RecapEmptyStateProps {
-  status: 'processing' | 'reviewed' | 'unavailable' | 'not_found';
+  status: 'processing' | 'reviewed' | 'no_pending' | 'source_excluded' | 'unavailable' | 'not_found';
   onRetry?: () => void;
   onDismiss?: () => void;
   className?: string;

@@ -3,6 +3,7 @@ import { useEffect, useState, useCallback } from 'react';
 import { mockRecapArtifacts } from '../../components/recap/mockData';
 import { mapBackendArtifactsToRecapV1 } from '../../lib/artifacts-adapter';
 import { logger } from '../../lib/error-logger';
+import { memoryReviewEnvelopeSchema, readRemainingReviewPages } from '../../lib/memory-review-envelope';
 import {
   applyRecapPageStatus,
   applyMemoryRecentNotRequestedReason,
@@ -31,7 +32,7 @@ const RECENT_MEMORIES_FETCH_TIMEOUT_MS = 15000;
 
 type RecentMemoryStatus = 'pending_review' | 'approved';
 
-export type RecapPageStatus = 'loading' | 'ready' | 'processing' | 'reviewed' | 'unavailable' | 'not_found';
+export type RecapPageStatus = 'loading' | 'ready' | 'processing' | 'reviewed' | 'no_pending' | 'source_excluded' | 'unavailable' | 'not_found';
 
 interface UseRecapArtifactsLoaderParams {
   sessionId: string;
@@ -124,6 +125,9 @@ function readNumber(record: Record<string, unknown> | null, key: string): number
 
 function normalizeMemoryRecentSource(value: string | null): MemoryRecentSource {
   switch (value) {
+    case 'sophia_candidate_ledger':
+    case 'sophia_canonical':
+    case 'sophia_governance_denied':
     case 'local_review_overlay':
     case 'global_hydration':
     case 'mem0':
@@ -137,6 +141,7 @@ function normalizeMemoryRecentSource(value: string | null): MemoryRecentSource {
 
 function normalizeEmptyReason(value: string | null): MemoryRecentEmptyReason {
   switch (value) {
+    case 'review_coverage_unproven':
     case 'no_session_candidates':
     case 'no_results':
     case 'filtered_out':
@@ -562,6 +567,7 @@ export function useRecapArtifactsLoader({
   }, [sessionId]);
 
   useEffect(() => {
+    if (!sessionId) return;
     let active = true;
     let retryTimer: ReturnType<typeof setTimeout> | null = null;
     const setArtifacts = (id: string, value: RecapArtifactsV1) => { if (active) publishArtifacts(id, value); };
@@ -630,6 +636,7 @@ export function useRecapArtifactsLoader({
         recapSignal = signal;
         const response = await fetch(recapFrontendPath, {
           method: 'GET',
+          cache: 'no-store',
           headers: {
             'Content-Type': 'application/json',
           },
@@ -657,6 +664,37 @@ export function useRecapArtifactsLoader({
             timeoutMs: recapTimeoutMs,
             responseShapeKeys: getResponseShapeKeys(data),
           });
+
+          if (data.memory_review != null) {
+            const first = memoryReviewEnvelopeSchema.parse(data.memory_review);
+            if (first.session_id !== sessionId || ['unavailable', 'not_found', 'source_changed', 'snapshot_changed'].includes(first.extraction_state)) {
+              setObservedStatus('unavailable'); return;
+            }
+            const review = await readRemainingReviewPages(first, sessionId, signal);
+            if (!active) return;
+            const complete = review.extraction_state === 'complete';
+            const excluded = review.extraction_state === 'source_excluded';
+            const failed = ['failed_retryable', 'failed_terminal'].includes(review.extraction_state);
+            setArtifacts(sessionId, {
+              sessionId, threadId: review.thread_id || undefined, sessionType: 'open', contextMode: 'life',
+              endedAt: review.finalization.ended_at || undefined,
+              status: complete || excluded ? 'ready' : failed ? 'unavailable' : 'processing',
+              memoryCandidates: review.candidates.map((item) => ({ id: item.candidate_id, text: item.content, category: item.category,
+                candidateRevision: item.candidate_revision, reviewState: item.review_state, authority: 'sophia_candidate_ledger' })),
+              memoryReview: { snapshotId: review.snapshot_id, extractionState: review.extraction_state,
+                sourceEligibility: review.source_eligibility,
+                produced: review.summary.produced, pending: review.summary.pending, approved: review.summary.approved,
+                rejected: review.summary.rejected, invalidated: review.summary.invalidated, enumerationComplete: review.enumeration_complete },
+            });
+            if (review.candidates.length > 0) setObservedStatus('ready'); // published review page, not target completion
+            else if (complete) setObservedStatus(review.summary.produced === 0 ? 'ready'
+              : review.summary.approved + review.summary.rejected === review.summary.produced ? 'reviewed' : 'no_pending');
+            else if (excluded) setObservedStatus('source_excluded');
+            else if (failed) setObservedStatus('unavailable');
+            else setObservedStatus('processing');
+            if (complete) { clearCurrentEndHint(); markViewed(); }
+            return; // No derivative, recent/provider hydration or approved fallback.
+          }
 
           const nestedArtifacts = (data?.recap_artifacts || data?.artifacts) as Record<string, unknown> | undefined;
 
@@ -829,11 +867,11 @@ export function useRecapArtifactsLoader({
           // A local ended-session hint cannot restore a missing source or
           // authorize its cached candidates. Keep only bounded empty retry.
           invalidateArtifacts?.(sessionId);
+          recordMemoryRecentSkipped('source_not_found');
           if (scheduleRecentRetry()) {
             return;
           }
 
-          recordMemoryRecentSkipped('session_not_ended');
           setObservedStatus('not_found');
           return;
         }

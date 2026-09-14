@@ -104,6 +104,8 @@ class SessionMessageRecord(BaseModel):
     sequence: int = 0
     redaction_level: str = "none"
     metadata: dict[str, Any] = Field(default_factory=dict)
+    # Database-issued dependency witness, never accepted from browser snapshots.
+    memory_source_version: str | None = Field(default=None, exclude=True)
 
 
 @dataclass(frozen=True)
@@ -205,6 +207,8 @@ class SessionTranscriptStore(Protocol):
     ) -> SyntheticSessionFinalizationResult: ...
 
     def list_messages(self, user_id: str, session_id: str) -> list[SessionMessageRecord]: ...
+
+    def read_memory_source_messages(self, user_id: str, session_id: str, *, expected_revision: int) -> list[SessionMessageRecord]: ...
 
     def read_exact_session_messages(
         self,
@@ -1056,6 +1060,16 @@ class FilesystemSessionTranscriptStore:
     def list_messages(self, user_id: str, session_id: str) -> list[SessionMessageRecord]:
         return self._read_messages(user_id, session_id)
 
+    def read_memory_source_messages(self, user_id: str, session_id: str, *, expected_revision: int) -> list[SessionMessageRecord]:
+        before = self.get(user_id, session_id)
+        messages = self.read_exact_session_messages(user_id, session_id)
+        after = self.get(user_id, session_id)
+        if (before is None or after is None or before.message_revision != expected_revision
+            or after.message_revision != expected_revision or len(messages) > 10000
+            or sum(len(item.content.encode('utf-8')) for item in messages) > 8 * 1024 * 1024):
+            raise SessionEvidenceIntegrityError("memory_source_changed_or_unavailable")
+        return messages
+
     def read_exact_session_messages(
         self,
         user_id: str,
@@ -1677,6 +1691,7 @@ class SupabaseSessionTranscriptStore:
             sequence=int(row.get("sequence") or 0),
             redaction_level=str(metadata.get("redaction_level") or "none"),
             metadata=dict(metadata),
+            memory_source_version=row.get("memory_source_version") if isinstance(row.get("memory_source_version"), str) else None,
         )
 
     # -- required abstraction API -------------------------------------------
@@ -2182,6 +2197,57 @@ class SupabaseSessionTranscriptStore:
         messages = [message for message in (self._message_from_row(row) for row in rows) if message]
         messages.sort(key=_message_sort_key)
         return messages
+
+    def read_memory_source_messages(self, user_id: str, session_id: str, *, expected_revision: int) -> list[SessionMessageRecord]:
+        """Bounded owner/session keyset scan, checked against the parent revision.
+
+        A short server page is never exhaustion. Any malformed, over-budget,
+        non-advancing or changed source fails the entire read. No partial source
+        can become a successful extraction/review target. The subsequent review
+        RPC checks this revision and exact target again in its own MVCC view.
+        """
+        before = self.get(user_id, session_id)
+        if (before is None or before.user_id != user_id or before.session_id != session_id
+            or before.message_revision != expected_revision):
+            raise SessionEvidenceIntegrityError("memory_source_changed_or_unavailable")
+        messages: list[SessionMessageRecord] = []
+        after_id = ""
+        total_bytes = 0
+        for _ in range(128):
+            params = {"select": "*", "session_id": f"eq.{session_id}", "user_id": f"eq.{user_id}",
+                "order": "id.asc", "limit": "200"}
+            if after_id:
+                params["id"] = f"gt.{after_id}"
+            rows = self._request("GET", self._config.messages_table, params=params)
+            if not isinstance(rows, list) or len(rows) > 200:
+                raise SessionEvidenceIntegrityError("memory_source_page_invalid")
+            if not rows:
+                after = self.get(user_id, session_id)
+                if (after is None or after.user_id != user_id or after.session_id != session_id
+                    or after.message_revision != expected_revision or after.thread_id != before.thread_id):
+                    raise SessionEvidenceIntegrityError("memory_source_changed_or_unavailable")
+                return sorted(messages, key=_message_sort_key)
+            for row in rows:
+                if not isinstance(row, dict):
+                    raise SessionEvidenceIntegrityError("memory_source_row_invalid")
+                try:
+                    row_id = str(uuid.UUID(row["id"]))
+                except (KeyError, ValueError, TypeError, AttributeError):
+                    raise SessionEvidenceIntegrityError("memory_source_row_invalid") from None
+                if (row_id <= after_id or row.get("user_id") != user_id or row.get("session_id") != session_id
+                    or row.get("thread_id") != before.thread_id or type(row.get("sequence")) is not int
+                    or type(row.get("final")) is not bool or not isinstance(row.get("message_id"), str)
+                    or not row["message_id"] or not isinstance(row.get("created_at"), str)):
+                    raise SessionEvidenceIntegrityError("memory_source_row_invalid")
+                message = self._message_from_row(row)
+                if message is None:
+                    raise SessionEvidenceIntegrityError("memory_source_row_invalid")
+                messages.append(message)
+                total_bytes += len(message.content.encode("utf-8"))
+                if len(messages) > 10000 or total_bytes > 8 * 1024 * 1024:
+                    raise SessionEvidenceIntegrityError("memory_source_budget_exhausted")
+                after_id = row_id
+        raise SessionEvidenceIntegrityError("memory_source_budget_exhausted")
 
     def read_exact_session_messages(
         self,

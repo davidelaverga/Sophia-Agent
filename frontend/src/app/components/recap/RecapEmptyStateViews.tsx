@@ -6,7 +6,7 @@ import { errorCopy } from '../../lib/error-copy';
 import { cn } from '../../lib/utils';
 import { RetryAction } from '../ui/RetryAction';
 
-type RecapEmptyStatus = 'processing' | 'reviewed' | 'unavailable' | 'not_found';
+type RecapEmptyStatus = 'processing' | 'reviewed' | 'no_pending' | 'source_excluded' | 'unavailable' | 'not_found';
 
 interface RecapEmptyStateViewsProps {
   status: RecapEmptyStatus;
@@ -58,13 +58,25 @@ export function RecapEmptyStateViews({
           Recap unavailable
         </h3>
         <p className="text-sophia-text2 mb-4">
-          This session didn&apos;t generate artifacts. That&apos;s okay — not every session needs a recap.
+          We couldn&apos;t verify this recap. No memory candidates are shown. Please try again.
         </p>
       </div>
     );
   }
 
-  if (status === 'reviewed') {
+  if (status === 'source_excluded') {
+    return (
+      <div role="status" className={cn('bg-sophia-surface rounded-2xl p-8 text-center border border-sophia-surface-border', className)}>
+        <h3 className="text-lg font-medium text-sophia-text mb-2">Session source is excluded from memory extraction</h3>
+        <p className="text-sophia-text2 mb-4">
+          This transcript is preserved, but its source is from before a memory clear or no longer has valid acceptance.
+          This is not a completed extraction with zero candidates. Nothing has been approved automatically.
+        </p>
+      </div>
+    );
+  }
+
+  if (status === 'reviewed' || status === 'no_pending') {
     return (
       <div className={cn(
         'bg-sophia-surface rounded-2xl p-8 text-center border border-sophia-surface-border',
@@ -74,10 +86,12 @@ export function RecapEmptyStateViews({
           <Sparkles className="w-6 h-6 text-sophia-purple" />
         </div>
         <h3 className="text-lg font-medium text-sophia-text mb-2">
-          Memories already reviewed
+          {status === 'reviewed' ? 'Memories already reviewed' : 'No candidates currently eligible for review'}
         </h3>
         <p className="text-sophia-text2 mb-4">
-          This session did surface memories, but they were already reviewed and moved into your journal.
+          {status === 'reviewed'
+            ? 'The candidates from this session have already been approved or discarded. This does not confirm their current saved status.'
+            : 'This session produced candidates, but some have expired or are no longer eligible. Nothing has been approved automatically.'}
         </p>
       </div>
     );

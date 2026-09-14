@@ -208,6 +208,10 @@ class MemoryItem(BaseModel):
 
 
 class MemoryListResponse(BaseModel):
+    unavailable: bool = False
+    extraction_state: Literal["awaiting_finalization", "processing", "complete", "source_excluded", "failed_retryable", "failed_terminal", "unavailable"] | None = None
+    memory_review: dict | None = None
+    memory_inventory: dict | None = None
     memories: list[MemoryItem] = Field(default_factory=list)
     count: int = Field(default=0, description="Total memory count")
     source: str = Field(default="unknown", description="Safe diagnostic source classification")
@@ -413,6 +417,7 @@ class SessionRecapArtifactsPayload(BaseModel):
 
 
 class SessionRecapResponse(BaseModel):
+    memory_review: dict | None = Field(default=None)
     session_id: str = Field(..., description="Session identifier")
     thread_id: str | None = Field(default=None, description="LangGraph thread ID")
     session_type: str | None = Field(default=None)
@@ -1878,6 +1883,24 @@ async def retrieve_realtime_memories_internal(
 # ---------------------------------------------------------------------------
 
 
+@router.get("/{user_id}/memories/inventory", summary="Page current canonical and candidate state")
+async def get_memory_inventory(user_id: str, response: Response,
+    view: Literal["all", "saved", "active", "forgotten", "pending_review"] = Query(default="all"),
+    cursor: str | None = Query(default=None, max_length=512), page_size: int = Query(default=100, ge=1, le=200)):
+    _validate_user(user_id)
+    response.headers["Cache-Control"] = "no-store"
+    from deerflow.sophia.memory_governance.inventory import read_inventory
+
+    try:
+        envelope = read_inventory(owner_id=user_id, governance_store=_canonical_memory_service(user_id).store,
+            view=view, cursor=cursor, page_size=page_size)
+        return envelope.model_dump(mode="json", by_alias=True)
+    except MemoryGovernanceConflict as exc:
+        raise HTTPException(status_code=409, detail=exc.reason, headers={"Cache-Control": "no-store"}) from None
+    except Exception:
+        raise HTTPException(status_code=503, detail="Canonical inventory unavailable", headers={"Cache-Control": "no-store"}) from None
+
+
 @router.get(
     "/{user_id}/memories/recent",
     response_model=MemoryListResponse,
@@ -1886,70 +1909,49 @@ async def retrieve_realtime_memories_internal(
 )
 async def list_memories(
     user_id: str,
+    response: Response,
     status: str | None = Query(default=None, description="Filter by status (e.g. pending_review)"),
     session_id: str | None = Query(default=None, description="Optional diagnostic source session identifier"),
+    cursor: str | None = Query(default=None, max_length=512),
+    page_size: int = Query(default=100, ge=1, le=200),
 ) -> MemoryListResponse:
     _validate_user(user_id)
+    response.headers["Cache-Control"] = "no-store"
     flags = _memory_flags(user_id)
     if flags.candidate_ledger_read:
-        try:
-            store = _canonical_memory_service(user_id).store
-            if status in {None, "pending_review"}:
-                candidates = store.list_candidates(
-                    user_id=user_id,
-                    session_id=session_id,
-                    state=status or "pending_review",
-                )
-                items = [
-                    MemoryItem(
-                        id=str(candidate.candidate_id),
-                        content=candidate.content or "",
-                        category=candidate.category,
-                        metadata={
-                            "authority": "sophia_candidate_ledger",
-                            "review_state": candidate.review_state,
-                            "candidate_revision": candidate.current_candidate_revision,
-                            "projection_state": "absent",
-                        },
-                        created_at=str(candidate.created_at) if candidate.created_at else None,
-                    )
-                    for candidate in candidates
-                ]
-                return MemoryListResponse(
-                    memories=items,
-                    count=len(items),
-                    source="sophia_candidate_ledger",
-                    candidate_count=len(items),
-                    session_id_received=bool(session_id),
-                    empty_reason=None if items else "terminal_zero_candidates",
-                )
-            if flags.canonical_pool_read and status in {"approved", "active", "forgotten"}:
-                memories = _canonical_memory_service(user_id).list_pool(include_forgotten=status == "forgotten")
-                if status == "forgotten":
-                    memories = tuple(item for item in memories if item.lifecycle == "forgotten")
-                items = [_canonical_to_memory_item(memory) for memory in memories]
-                return MemoryListResponse(
-                    memories=items,
-                    count=len(items),
-                    source="sophia_canonical",
-                    candidate_count=0,
-                    session_id_received=bool(session_id),
-                    empty_reason=None if items else "terminal_zero_canonical",
-                )
-            return MemoryListResponse(
-                memories=[],
-                count=0,
-                source="sophia_governance_denied",
-                candidate_count=0,
-                session_id_received=bool(session_id),
-                empty_reason="review_state_not_exposed",
-            )
-        except Exception as exc:
-            logger.warning(
-                "MEM00 list unavailable error_type=%s contentExcluded=true",
-                exc.__class__.__name__,
-            )
-            raise HTTPException(status_code=503, detail="Memory governance unavailable")
+        if session_id and status in {None, "pending_review"}:
+            # One governed session-review authority and identical cursor scope.
+            # Do not issue the old independent candidate/version list at all.
+            recap = await get_session_recap(user_id, session_id, response, cursor=cursor, page_size=page_size)
+            from deerflow.sophia.memory_governance.review import ReviewEnvelope
+
+            envelope = ReviewEnvelope.model_validate(recap.memory_review)
+            items = [MemoryItem(id=str(item.candidate_id), content=item.content, category=item.category,
+                session_id=session_id, metadata={"authority": "sophia_candidate_ledger", "review_state": item.review_state,
+                    "candidate_revision": item.candidate_revision, "projection_state": "absent"}) for item in envelope.candidates]
+            return MemoryListResponse(memories=items, count=len(items), candidate_count=len(items),
+                source="sophia_candidate_ledger", session_id_received=True,
+                extraction_state=envelope.extraction_state, memory_review=envelope.model_dump(mode="json", by_alias=True))
+        if session_id is not None:
+            raise HTTPException(status_code=400, detail="Saved inventory is not session filtered", headers={"Cache-Control": "no-store"})
+        view = "pending_review" if status in {None, "pending_review"} else "active" if status in {"approved", "active"} else "forgotten" if status == "forgotten" else None
+        if view is None or (view != "pending_review" and not flags.canonical_pool_read):
+            raise HTTPException(status_code=400, detail="Unsupported inventory view", headers={"Cache-Control": "no-store"})
+        raw = await get_memory_inventory(user_id, response, view=view, cursor=cursor, page_size=page_size)
+        from deerflow.sophia.memory_governance.inventory import InventoryEnvelope
+
+        inventory = InventoryEnvelope.model_validate(raw)
+        pending = view == "pending_review"
+        items = [MemoryItem(id=str(item.id), content=item.content or "", category=item.category,
+            session_id=item.session_id, created_at=item.created_at, updated_at=item.updated_at,
+            metadata={"authority": "sophia_candidate_ledger", "review_state": item.state, "candidate_revision": item.revision,
+                "projection_state": "absent"} if pending else {"authority": "sophia_canonical", "lifecycle": item.state,
+                "content_revision": item.revision, "memory_governance_revision": item.memory_governance_revision,
+                "user_tier": item.user_tier}) for item in inventory.records]
+        return MemoryListResponse(memories=items, count=len(items), candidate_count=len(items) if pending else 0,
+            source="sophia_candidate_ledger" if pending else "sophia_canonical", session_id_received=False,
+            extraction_state="unavailable", memory_inventory=inventory.model_dump(mode="json", by_alias=True),
+            empty_reason="no_current_matches_in_snapshot" if not items else None)
     client = _get_mem0_client()
     trace_id = f"memrecent-{datetime.now(UTC).strftime('%Y%m%d%H%M%S%f')}"
     try:
@@ -2649,8 +2651,30 @@ async def journal(
     response_model=SessionRecapResponse,
     summary="Get persisted recap for a completed Sophia session",
 )
-async def get_session_recap(user_id: str, session_id: str) -> SessionRecapResponse:
+async def get_session_recap(user_id: str, session_id: str, response: Response,
+    cursor: str | None = Query(default=None, max_length=512), page_size: int = Query(default=100, ge=1, le=200)) -> SessionRecapResponse:
     _validate_user(user_id)
+    response.headers["Cache-Control"] = "no-store"
+    if _memory_flags(user_id).candidate_ledger_read:
+        from deerflow.sophia.memory_governance.review import read_review_envelope
+
+        try:
+            envelope = read_review_envelope(owner_id=user_id, session_id=session_id, session_store=_session_store,
+                governance_store=_canonical_memory_service(user_id).store, cursor=cursor, page_size=page_size)
+            # The ledger suffices without a local recap JSON. Never render its
+            # embedded candidate copies on the governed lane.
+            return SessionRecapResponse(session_id=session_id, thread_id=envelope.thread_id,
+                ended_at=envelope.finalization.ended_at,
+                status="ready" if envelope.extraction_state == "complete" else envelope.extraction_state,
+                memory_review=envelope.model_dump(mode="json", by_alias=True),
+                recap_artifacts={"memory_candidates": [{"id": str(item.candidate_id), "content": item.content,
+                    "category": item.category, "candidate_revision": item.candidate_revision,
+                    "review_state": item.review_state, "authority": "sophia_candidate_ledger"} for item in envelope.candidates]})
+        except MemoryGovernanceConflict as exc:
+            status_code = 404 if exc.reason in {"memory_review_source_not_found", "memory_review_not_found"} else 409
+            raise HTTPException(status_code=status_code, detail=exc.reason, headers={"Cache-Control": "no-store"}) from None
+        except Exception:
+            raise HTTPException(status_code=503, detail="Canonical review unavailable", headers={"Cache-Control": "no-store"}) from None
     try:
         recap = _read_session_recap(user_id, session_id)
     except json.JSONDecodeError as e:

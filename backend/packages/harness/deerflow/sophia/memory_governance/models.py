@@ -81,6 +81,19 @@ class ExtractedCandidate(StrictModel):
     sources: tuple[CandidateSource, ...] = ()
 
 
+class SourceDependency(StrictModel):
+    message_id: str = Field(min_length=1)
+    sequence: int = Field(gt=0, strict=True)
+    source_version: UUID
+
+
+class ExtractionInputContext(StrictModel):
+    schema_name: Literal["mem00.extract-input.v1"] = Field(alias="schema")
+    session_date: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
+    context_mode: str = Field(min_length=1, max_length=512)
+    template_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
 class ExtractionRun(StrictModel):
     extraction_run_id: UUID
     user_id: str
@@ -98,6 +111,13 @@ class ExtractionRun(StrictModel):
     processed_through_sequence: int | None = Field(default=None, ge=0)
     safe_terminal_reason: str | None = None
     error_code: str | None = None
+    extractor_model: str | None = None
+    extractor_prompt_version: str | None = None
+    source_dependencies: tuple[SourceDependency, ...] | None = None
+    validated_transcript_revision: int | None = Field(default=None, ge=0)
+    extractor_input_context: ExtractionInputContext | None = None
+    extractor_input_ref: str | None = None
+    memory_clear_epoch: int | None = Field(default=None, ge=0, strict=True)
 
 
 class CandidateRecord(StrictModel):
