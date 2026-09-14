@@ -69,6 +69,27 @@ class CandidateSource(StrictModel):
     transcript_revision: int = Field(ge=0)
 
 
+class SourceRecoveryClaim(StrictModel):
+    user_id: str = Field(min_length=1)
+    session_id: str = Field(min_length=1)
+    sweep_id: UUID
+    lease_token: UUID
+    lease_owner: str = Field(min_length=1)
+    lease_expires_at: datetime
+
+
+class SourceRecoveryReceipt(StrictModel):
+    schema_name: Literal["mem00.source-recovery.v1"] = Field(alias="schema")
+    user_id: str
+    session_id: str
+    sweep_id: UUID
+    lease_token: UUID
+    outcome: Literal["target_checked", "source_ineligible", "retryable_failure"]
+    checked_at: datetime
+    extraction_complete: bool = Field(strict=True)
+    idempotent_replay: bool = Field(strict=True)
+
+
 class ExtractedCandidate(StrictModel):
     content: str = Field(min_length=1)
     content_ref: str = Field(min_length=1)

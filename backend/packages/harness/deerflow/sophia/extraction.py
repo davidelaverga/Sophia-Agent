@@ -123,6 +123,24 @@ def _format_transcript(messages: list[dict]) -> str:
     return "\n\n".join(lines)
 
 
+def _render_extraction_prompt(template: str, *, session_id: str, messages: list[dict], metadata: dict) -> str:
+    """One formatter shared by durable input capture and the actual SDK call."""
+    replacements = {
+        "{transcript}": _format_transcript(messages),
+        "{artifacts}": str(metadata.get("artifacts", "None")),
+        "{session_date}": metadata.get("session_date", datetime.now(UTC).strftime("%Y-%m-%d")),
+        "{context_mode}": metadata.get("context_mode", "life"),
+        "{ritual_type}": str(metadata.get("ritual_type", "None")),
+        "{tone_start}": str(metadata.get("tone_start", "unknown")),
+        "{tone_end}": str(metadata.get("tone_end", "unknown")),
+        "{session_id}": session_id,
+        "{existing_memories}": str(metadata.get("existing_memories", "None")),
+    }
+    for placeholder, value in replacements.items():
+        template = template.replace(placeholder, value)
+    return template
+
+
 def _strip_markdown_fences(text: str) -> str:
     """Strip markdown code block fences (```json ... ```) if present."""
     stripped = text.strip()
@@ -672,6 +690,7 @@ def extract_session_memories(
     *,
     require_memory_write: bool = False,
     candidate_only: bool = False,
+    dispatch_authority=None,
 ) -> list[dict]:
     """Extract memories from a completed session transcript.
 
@@ -693,6 +712,17 @@ def extract_session_memories(
         legacy-path error or if no memories were extracted. Governed
         candidate-only errors raise, so the durable worker can retry.
     """
+    from deerflow.sophia.memory_governance.owner_authority import require_candidate_extraction, require_legacy_memory_lane
+
+    # Neither direct callers nor a globally enabled worker may infer ownership
+    # from flags. Check before formatting source text or touching model/template.
+    require_lane = require_candidate_extraction if candidate_only else require_legacy_memory_lane
+    require_lane(user_id)
+    if candidate_only:
+        from deerflow.sophia.memory_governance.extraction_dispatch import ExtractionDispatchAuthority
+
+        if not isinstance(dispatch_authority, ExtractionDispatchAuthority):
+            raise MemoryWriteError("extractor_dispatch_authority_required")
     log_user_id = user_id
     log_session_id = session_id
     if candidate_only:
@@ -712,7 +742,6 @@ def extract_session_memories(
         return []
 
     metadata = session_metadata or {}
-    session_date = metadata.get("session_date", datetime.now(UTC).strftime("%Y-%m-%d"))
 
     # Format the transcript
     transcript = _format_transcript(messages)
@@ -760,24 +789,46 @@ def extract_session_memories(
 
     # Use manual replacement instead of str.format() because the template
     # contains literal JSON curly braces that would conflict with format().
-    replacements = {
-        "{transcript}": transcript,
-        "{artifacts}": str(metadata.get("artifacts", "None")),
-        "{session_date}": session_date,
-        "{context_mode}": metadata.get("context_mode", "life"),
-        "{ritual_type}": str(metadata.get("ritual_type", "None")),
-        "{tone_start}": str(metadata.get("tone_start", "unknown")),
-        "{tone_end}": str(metadata.get("tone_end", "unknown")),
-        "{session_id}": session_id,
-        "{existing_memories}": str(metadata.get("existing_memories", "None")),
-    }
-    prompt = template
-    for placeholder, value in replacements.items():
-        prompt = prompt.replace(placeholder, value)
+    prompt = _render_extraction_prompt(template, session_id=session_id, messages=messages, metadata=metadata)
+    if candidate_only:
+        import hmac
+
+        from deerflow.sophia.memory_governance.extraction_input import prompt_input_ref
+
+        expected_ref = metadata.get("extractor_input_ref")
+        if not isinstance(expected_ref, str) or not hmac.compare_digest(expected_ref, prompt_input_ref(
+            owner_id=user_id, session_id=session_id, prompt=prompt, model=_PIPELINE_MODEL,
+        )):
+            raise MemoryWriteError("extractor_input_unproven")
 
     # Call Claude Haiku via Anthropic SDK
+    # Recheck after template work; a legacy owner may have cut over meanwhile.
+    # Keep this outside the provider-error fallback, which must not mask denial.
+    require_lane(user_id)
+    client = None
+    def close_governed_client():
+        if candidate_only and client is not None:
+            try:
+                client.close()
+            except Exception:
+                logger.warning("Extractor client cleanup unverified for session %s", log_session_id)
+
+    if candidate_only:
+        # A governed retry needs its own current SQL admission. SDK-internal
+        # retries would reuse an already consumed authorization invisibly.
+        try:
+            client = anthropic.Anthropic(max_retries=0)
+        except Exception:
+            raise MemoryWriteError("extractor_client_unavailable") from None
+        try:
+            dispatch_authority.admit(owner_id=user_id, session_id=session_id, extractor_input_ref=expected_ref)
+        except Exception:
+            close_governed_client()
+            logger.warning("Extractor dispatch authority unavailable for session %s", log_session_id)
+            raise
     try:
-        client = anthropic.Anthropic()
+        if not candidate_only:
+            client = anthropic.Anthropic()
         response = client.messages.create(
             model=_PIPELINE_MODEL,
             max_tokens=4096,
@@ -799,6 +850,9 @@ def extract_session_memories(
             metadata=metadata,
             require_memory_write=require_memory_write,
         )
+
+    finally:
+        close_governed_client()
 
     # A valid-looking prefix from an incomplete response is not a full batch.
     if candidate_only and getattr(response, "stop_reason", None) != "end_turn":

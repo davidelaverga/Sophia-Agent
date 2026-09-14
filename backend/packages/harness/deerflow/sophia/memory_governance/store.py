@@ -31,6 +31,8 @@ from .models import (
     ProjectionLease,
     ProviderHit,
     SourceInvalidationReceipt,
+    SourceRecoveryClaim,
+    SourceRecoveryReceipt,
     UserGovernance,
 )
 
@@ -162,6 +164,94 @@ class SupabaseMemoryGovernanceStore:
         if not isinstance(rows, list) or len(rows) != 1:
             raise MemoryGovernanceUnavailable("memory_user_governance_unavailable")
         return UserGovernance.model_validate(rows[0])
+
+    def source_extraction_runs(self, *, user_id: str, session_id: str) -> tuple[ExtractionRun, ...]:
+        """Complete bounded keyset scan; apply_source_target CAS-checks this set."""
+        result=[]
+        after=""
+        for _ in range(128):
+            params={"select":",".join(ExtractionRun.model_fields),"user_id":f"eq.{user_id}","session_id":f"eq.{session_id}",
+                "state":"neq.superseded","order":"extraction_run_id.asc","limit":"200"}
+            if after:
+                params["extraction_run_id"]=f"gt.{after}"
+            rows=self._request("GET","sophia_memory_extraction_runs",params=params)
+            if not isinstance(rows,list) or len(rows)>200:
+                raise MemoryGovernanceUnavailable("memory_source_runs_unavailable")
+            if not rows:
+                return tuple(result)
+            for row in rows:
+                run=self._model(ExtractionRun,row)
+                if run.user_id!=user_id or run.session_id!=session_id or run.state=="superseded" or str(run.extraction_run_id)<=after:
+                    raise MemoryGovernanceUnavailable("memory_source_runs_unavailable")
+                result.append(run)
+                after=str(run.extraction_run_id)
+                if len(result)>10000:
+                    raise MemoryGovernanceUnavailable("memory_source_runs_budget_exhausted")
+        raise MemoryGovernanceUnavailable("memory_source_runs_budget_exhausted")
+
+    def apply_source_target(self, **payload: object) -> ExtractionRun | None:
+        row=self._rpc("sophia_memory_apply_source_target",payload)
+        if (not isinstance(row,dict) or not row.get("event_id") or row.get("source_manifest_ref")!=payload.get("p_target_manifest_ref")):
+            raise MemoryGovernanceUnavailable("memory_source_target_receipt_invalid")
+        if row.get("run") is None:
+            return None
+        run=self._model(ExtractionRun,row["run"])
+        if (run.user_id,run.session_id,run.thread_id)!=(payload["p_user_id"],payload["p_session_id"],payload["p_thread_id"]):
+            raise MemoryGovernanceUnavailable("memory_source_target_receipt_invalid")
+        return run
+
+    def source_extraction_run(self, *, user_id: str, extraction_run_id: UUID) -> ExtractionRun:
+        rows=self._request("GET","sophia_memory_extraction_runs",params={"select":",".join(ExtractionRun.model_fields),
+            "user_id":f"eq.{user_id}","extraction_run_id":f"eq.{extraction_run_id}","limit":"2"})
+        run=self._model(ExtractionRun,rows)
+        if run.user_id!=user_id or run.extraction_run_id!=extraction_run_id:
+            raise MemoryGovernanceUnavailable("memory_source_run_scope_invalid")
+        return run
+
+    def apply_source_target_at_epoch(self, **payload: object):
+        from .source_snapshot import EpochSourceTargetReceipt
+
+        try:
+            result = EpochSourceTargetReceipt.model_validate(self._rpc("sophia_memory_apply_source_target_at_epoch", payload))
+            if (result.source_snapshot.model_dump(mode="json", by_alias=True) != payload["p_source_snapshot"]
+                or result.source_manifest_ref != payload["p_target_manifest_ref"]
+                or result.memory_clear_epoch != payload["p_expected_clear_epoch"]
+                or (result.source_snapshot.owner_id, result.source_snapshot.session_id, result.source_snapshot.thread_id,
+                    result.source_snapshot.transcript_revision) != (payload["p_user_id"], payload["p_session_id"], payload["p_thread_id"], payload["p_transcript_revision"])):
+                raise ValueError("scope")
+            return result
+        except Exception:
+            raise MemoryGovernanceUnavailable("memory_epoch_source_target_unavailable") from None
+
+    def authorize_extraction_dispatch(self, **payload: object):
+        return self._rpc("sophia_memory_authorize_extraction_dispatch", payload)
+
+    def claim_source_recovery(self, *, user_id: str, lease_owner: str) -> SourceRecoveryClaim | None:
+        raw = self._rpc("sophia_memory_claim_source_recovery", {"p_user_id": user_id, "p_lease_owner": lease_owner})
+        if raw is None:
+            return None
+        try:
+            claim = SourceRecoveryClaim.model_validate(raw)
+            if (claim.user_id, claim.lease_owner) != (user_id, lease_owner) or claim.lease_expires_at <= datetime.now(UTC):
+                raise ValueError
+            return claim
+        except Exception:
+            raise MemoryGovernanceUnavailable("memory_recovery_claim_invalid") from None
+
+    def complete_source_recovery(self, claim: SourceRecoveryClaim, *, outcome: str) -> SourceRecoveryReceipt:
+        raw = self._rpc("sophia_memory_complete_source_recovery", {
+            "p_user_id": claim.user_id, "p_session_id": claim.session_id, "p_sweep_id": str(claim.sweep_id),
+            "p_lease_token": str(claim.lease_token), "p_lease_owner": claim.lease_owner, "p_outcome": outcome,
+        })
+        try:
+            receipt = SourceRecoveryReceipt.model_validate(raw)
+            if receipt.extraction_complete or (receipt.user_id, receipt.session_id, receipt.sweep_id, receipt.lease_token, receipt.outcome) != (
+                claim.user_id, claim.session_id, claim.sweep_id, claim.lease_token, outcome,
+            ):
+                raise ValueError
+            return receipt
+        except Exception:
+            raise MemoryGovernanceUnavailable("memory_recovery_receipt_invalid") from None
 
     def enqueue_extraction(self, **payload: object) -> ExtractionRun:
         row = self._rpc("sophia_memory_enqueue_extraction", payload)
