@@ -1263,6 +1263,18 @@ def activate_cleanup_provider_session(
                 and (current_epoch if isinstance(current_epoch, int) else 0)
                 == desired_epoch - 1
             )
+            # Continuation staging deliberately preserves the active admission
+            # and current epoch while adding exactly one pending candidate.
+            # Require that staged successor, not first-credential state.
+            continuation_activation_matches = (
+                row[1] == "browser_active"
+                and current_synthetic.get("voice_provider_resource_state") == "active"
+                and isinstance(current_epoch, int)
+                and not isinstance(current_epoch, bool)
+                and current_epoch > 0
+                and current_pending_epoch == desired_epoch
+                and desired_epoch == current_epoch + 1
+            )
             idempotent_activation_matches = (
                 row[1] == "browser_active"
                 and current_synthetic.get("voice_provider_resource_state") == "active"
@@ -1272,7 +1284,9 @@ def activate_cleanup_provider_session(
                 == desired_synthetic.get("voice_provider_activation_receipt")
             )
             if not common_binding_matches or not (
-                pending_activation_matches or idempotent_activation_matches
+                pending_activation_matches
+                or continuation_activation_matches
+                or idempotent_activation_matches
             ):
                 raise CleanupFenceError(
                     "provider browser activation session binding conflicts"
