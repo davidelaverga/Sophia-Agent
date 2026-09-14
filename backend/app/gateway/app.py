@@ -16,6 +16,7 @@ from app.gateway.routers import (
     builder_canvas,
     builder_events,
     channels,
+    langgraph_auth,
     mcp,
     memory,
     memory_source,
@@ -850,7 +851,11 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
                 await resolve_bearer_user_id(request)
             except HTTPException as exc:
                 return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
-        return await call_next(request)
+        from app.gateway.auth import is_auth_bypass_enabled
+        from deerflow.sophia.langgraph_client_auth import langgraph_owner_scope
+        owner = None if is_auth_bypass_enabled() else getattr(request.state, "authenticated_user_id", None)
+        with langgraph_owner_scope(owner):
+            return await call_next(request)
 
     @app.middleware("http")
     async def migration_maintenance_mode(request, call_next):
@@ -901,6 +906,7 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
     # Sessions API is mounted at /api/v1/sessions
     app.include_router(sessions.router)
     app.include_router(memory_source.router)
+    app.include_router(langgraph_auth.router)
 
     # Voice API is mounted at /api/sophia/{user_id}/voice/*
     app.include_router(voice.router)
