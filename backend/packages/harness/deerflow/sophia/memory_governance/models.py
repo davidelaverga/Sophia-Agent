@@ -22,6 +22,7 @@ ExtractionState = Literal[
     "superseded",
 ]
 ProjectionState = Literal[
+    "unavailable",
     "absent",
     "queued",
     "leased",

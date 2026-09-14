@@ -1,6 +1,6 @@
 # MEM00-C2 text pilot — current release record
 
-Successful target: MEMORY_TEXT_PILOT_READY. Current status: IMPLEMENTING, not activated or deployed. C2 replaces the prior PROMOTE-only/five-core-run prerequisites for this owner-restricted pilot. Historical C1 records and failures remain valid history, not additional first-use gates. Latest failed iteration869; checkpoint863–867 reported; next five-failure checkpoint872.
+Successful target: MEMORY_TEXT_PILOT_READY. Current status: IMPLEMENTING, not activated or deployed. C2 replaces the prior PROMOTE-only/five-core-run prerequisites for this owner-restricted pilot. Historical C1 records and failures remain valid history, not additional first-use gates. Latest failed iteration870; checkpoint863–867 reported; next five-failure checkpoint872.
 
 ## Candidate and scope
 
@@ -68,6 +68,8 @@ Extraction input/dispatch/source-target/epoch checks759f98 pass117 tests. After 
 
 ### Source-intake serving and current lifecycle responses
 
+Published source/lifecycle slice edcc3050d1e1afabb6f25e4ea180f27557481c44 has tree d2fcb84586642914276673981fb35da472ae26f2. Remote fetch66df0c matched; current Pool slice follows this parent.
+
 Final frontend rerun d47097 passes142 checks, including the explicit upload-intake refusal with zero upstream effects. Whitespace4bb7c2 passes; remote parent still c464e8e before publication.
 
 Selected existing authenticated source profile/boundary/action/status Gateway routes and fixed store RPCs, mounted in Gateway, plus the dedicated Next interceptor before the generic session proxy. It binds trusted owner/session/thread, preserves exact command key/content/epoch, refuses malformed paths and returns bounded content-free failures with no-store. C2 explicitly refuses memory-source upload intake without upstream calls; no upload service or paid dependency was selected. This is text-source transport, not memory approval. Ordinary composer and model input/provenance wiring remains pending. The selected intake SQL still revokes service_role execution; a reviewed forward pilot grant/profile activation is required before production use. Do not mistake owner-level disposable fixtures for a production least-privilege pass.
@@ -80,6 +82,18 @@ EI869: adjacent frontend suite51914c had6 failures/16 passes. Hypothesis: old fi
 
 Next required joins: ordinary session composer/source acceptance and transcript synchronization, full Pool management, candidate decision UI/lost successful response recovery, final assembled text-model admission and retained context, C2 disabled consumer inheritance, exact provider cleanup, selected schema/serving grants and rollback qualification, then coordinated shared deployment/owned hosted journey/account activation. Preserve the two unresolved provider obligations and no new production authority assumptions.
 
+### Complete current Pool and current hit resolution
+
+Replaced capped owner-wide Pool/version/binding joins with complete bounded single-snapshot canonical inventory. Ordinary Gateway Journal and Next Journal preserve owner, shelf, snapshot, filters and completeness; explicit legacy responses retain a separately labelled legacy envelope, never a canonical fallback. Provider indexing is unavailable unless independently measured; a saved canonical record is not indexing evidence. Selected exact provider-hit resolver uses the existing selected SQL snapshot_inventory migration, accepts IDs/ranks, and renders only the current canonical record. It explicitly is not final model admission.
+
+JournalPageClient now revalidates authenticated owner/shelf/lifetime, drops stale in-flight results, removes managed memory text on page suspension/offline events, and recovers content-free command references through original receipts. Cross-tab messages only trigger revalidation. Provider auth context gains an opaque nonpersisted local lifetime token; the original WIP's Recap-store owner binding was not copied without that store's dependency integration. Thus Journal proof is not a claim that every browser memory cache/Recap path is finished.
+
+EI870: Pool suite9ac109 had1 failure/17 passes. Hypothesis: selected CanonicalMemory type omitted the existing explicit unavailable projection state used by management snapshots. Added that literal without inventing a successful provider state;73247f passes18 cases. Extended exact-hit/Pool suite6e6ae9 passes58; after updating the existing row-mapping fixture to the current inventory contract, combined Pool/hit/lifecycle/source/review run5df22b passes204 tests with9 existing warnings. No production/customer/provider state changed. Next checkpoint872.
+
+Frontend78ff5f passes96 tests, including63 actual Journal component cases,19 command-recovery cases,11 Pool proxy cases and3 envelope cases. TypeScript bae508 exits0. Joined disposable proof be0051 passes53 assertions across2010 canonical/candidate inventory rows and11 pages. It traverses actual SQL→HTTP store→Gateway→Next→Journal UI, rendering804 active and201 forgotten current memories, with zero provider calls. Exactly one Pool UI case executed, no skipped cases; reporter SHA256 f7ad8d54e9c02a2a69516915361114691d043542b717d06a0d3370f982b4ca22. Disposable DB and synthetic transport removed. The reused inventory driver now has explicit --pool-only scope so optional account/bulk export is not silently enabled or certified; its broader default remains separate. This is not hosted model recall, independent-concurrency certification, or production activation.
+
+Remaining core work is ordinary composer/accepted-source synchronization, candidate approval/rejection and Recap recovery/owner lifetime, final actual-model admission/retained revocation/disabled inheritance, projection obligations and runtime pins, rollout-safe selected SQL grants/profile, and the real production journey. Pool's local read/UI gate is now integrated, not the whole pilot.
+
 Provider uncertainty is tracked debt, not an automatic pilot-wide blocker. Keep exact ownership, last/next reconciliation observations, bounded retries and visible pending status. Never erase the two historically uncertain synthetic obligations to make a report pass.
 
 ## Shared deployment coordination
@@ -89,6 +103,8 @@ Fresh public reads10:47–10:48UTC on2026-09-14 pin Gateway, Graph, Voice and fr
 VT00 reports no C5 run started or gates opened; it released the provisional freeze for local/planning work. An explicit exclusive shared deployment window is still required before product mutation. MEM00 owns pilot memory cohort/profile; VT00 owns Lab admission/controls. Neither changes the other's settings. No production mutation was performed.
 
 Latest VT00 message: Lab-only inventory correlation repair bb123f0e004c4b15a40b23ab4a3529cdd0b6bfc5; only Lab MCP/worker deployment and guarded worker restart planned. Voice admission remains closed, no shared product changes reported (35c6467c). MEM00 acknowledged local-only integration and the need for an exclusive shared deployment window. This message is coordination evidence, not a fresh direct runtime pin or an idle-run assertion.
+
+Subsequent VT00 coordination: Lab bb123f0 reported deployed closed and an exact guarded worker restart accepted. VT00 is collecting settlement evidence and requested a short exclusive product flag window afterward for its C5 demonstration. MEM00 agreed Voice owns that window, preserves memory flags/schema, and reports final pins/closure; MEM00 will not mutate shared products until both sides agree it is closed. This is not permission to bypass active-run containment or evidence that settlement already completed.
 
 Render's documented rollback restores the target health-check path as well as artifact/environment, so a new health path alone is not durable old-binary exclusion. Keep that deployment issue explicit; do not invent a paid service or rotate credentials without authority.
 

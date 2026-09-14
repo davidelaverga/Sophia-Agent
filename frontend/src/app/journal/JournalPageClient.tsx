@@ -21,6 +21,7 @@ import {
   useRef,
   useState,
 } from 'react'
+import { flushSync } from 'react-dom'
 
 import { haptic } from '../hooks/useHaptics'
 import { useVisualTier } from '../hooks/useVisualTier'
@@ -43,9 +44,13 @@ import {
   type JournalCategory,
   type JournalEntry,
   type JournalPeriod,
-  type JournalResponse,
   type JournalViewMode,
 } from '../lib/journal'
+import { acknowledgeJournalCommand, journalCommandEvents, recoverJournalCommands, rememberJournalCommand, type JournalCommandAction, type RecoveredJournalCommand } from '../lib/journal-command-recovery'
+import { canonicalCommandResultSchema, currentCommandJournalEntry } from '../lib/memory-command-result'
+import { parseJournalEnvelope } from '../lib/memory-pool-envelope'
+import { notifyMemoryViews, observeMemoryViews } from '../lib/memory-view-notification'
+import { useAuth } from '../providers'
 
 import {
   JOURNAL_POOL_FRAGMENT_SHADER,
@@ -394,9 +399,18 @@ type JournalShelf = 'active' | 'forgotten'
 export function JournalPageClient() {
   const router = useRouter()
   const searchParams = useSearchParams()
+  const { user, loading: authLoading, authScope } = useAuth()
+  const owner = authLoading ? null : user?.id ?? null
   const highlightSet = useMemo(() => buildHighlightSet(searchParams.get('highlight')), [searchParams])
 
   const [entries, setEntries] = useState<JournalEntry[]>([])
+  const [entriesOwner, setEntriesOwner] = useState<string | null>(null)
+  const [entriesScope, setEntriesScope] = useState<string | null>(null)
+  const [entriesAuthority, setEntriesAuthority] = useState<'sophia_canonical' | 'legacy_provider' | null>(null)
+  const [surfaceEpoch, setSurfaceEpoch] = useState(0)
+  const [surfaceReady, setSurfaceReady] = useState(true)
+  const [discardedMemoryDraft, setDiscardedMemoryDraft] = useState(false)
+  const [recoveredCommands, setRecoveredCommands] = useState<RecoveredJournalCommand[]>([])
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [activeFilter, setActiveFilter] = useState<'all' | JournalCategory>('all')
@@ -414,6 +428,74 @@ export function JournalPageClient() {
   const [draftText, setDraftText] = useState('')
   const [entryActionError, setEntryActionError] = useState<string | null>(null)
   const [pendingEntryAction, setPendingEntryAction] = useState<PendingEntryAction | null>(null)
+  const [lifecycleRetry, setLifecycleRetry] = useState<{ entry: Pick<SceneEntry, 'id' | 'metadata'>; action: Exclude<JournalCommandAction, 'edit'> } | null>(null)
+  const ownerShelf = JSON.stringify([owner, shelf, surfaceEpoch, surfaceReady])
+  const scopeGeneration = useRef({ identity: ownerShelf, authScope, generation: 0 })
+  if (scopeGeneration.current.identity !== ownerShelf || scopeGeneration.current.authScope !== authScope) {
+    scopeGeneration.current = { identity: ownerShelf, authScope, generation: scopeGeneration.current.generation + 1 }
+  }
+  // An A -> B -> A transition cannot revive a request from the first A view.
+  const scopeIdentity = JSON.stringify([owner, shelf, scopeGeneration.current.generation])
+  const scopeRef = useRef(scopeIdentity)
+  scopeRef.current = scopeIdentity
+  const hasMemoryDraft = useRef(false)
+  hasMemoryDraft.current = Boolean(editingId && draftText)
+  const clearReferencePending = useCallback(() => {
+    if (!owner) return false
+    try { return localStorage.getItem('sophia.memory.clear-reference.v1:' + encodeURIComponent(owner)) !== null }
+    catch { return true }
+  }, [owner])
+  useEffect(() => {
+    const canRead = () => navigator.onLine !== false && document.visibilityState !== 'hidden' && !clearReferencePending()
+    const invalidate = (ready: boolean) => {
+      // Synchronously remove managed plaintext before a page-hide/cache snapshot,
+      // and fence old responses before scheduling any fresh authority read.
+      scopeRef.current = 'suspended-view'
+      flushSync(() => {
+        setDiscardedMemoryDraft(previous => previous || hasMemoryDraft.current)
+        setEntries([])
+        setEntriesOwner(null)
+        setEntriesAuthority(null)
+        setEditingId(null)
+        setDraftText('')
+        setSelectedId(null)
+        setSurfaceReady(ready)
+        setSurfaceEpoch(previous => previous + 1)
+      })
+    }
+    const suspend = () => invalidate(false)
+    const resume = () => invalidate(canRead())
+    const stopObserving = observeMemoryViews(owner, resume)
+    const onStorage = (event: StorageEvent) => {
+      // Notifications accelerate revalidation, never authorize a payload.
+      if (owner && (event.key === null || event.key === 'sophia.memory.clear-reference.v1:' + encodeURIComponent(owner)
+        || event.key.startsWith('sophia.memory.journal-command.v1:' + encodeURIComponent(owner) + ':'))) resume()
+    }
+    const onClearReference = (event: Event) => {
+      if ((event as CustomEvent).detail === owner) resume()
+    }
+    window.addEventListener('pagehide', suspend)
+    window.addEventListener('offline', suspend)
+    window.addEventListener('pageshow', resume)
+    window.addEventListener('online', resume)
+    window.addEventListener('focus', resume)
+    window.addEventListener('storage', onStorage)
+    window.addEventListener('sophia-memory-clear-reference', onClearReference)
+    document.addEventListener('visibilitychange', resume)
+    return () => {
+      stopObserving()
+      window.removeEventListener('pagehide', suspend)
+      window.removeEventListener('offline', suspend)
+      window.removeEventListener('pageshow', resume)
+      window.removeEventListener('online', resume)
+      window.removeEventListener('focus', resume)
+      window.removeEventListener('storage', onStorage)
+      window.removeEventListener('sophia-memory-clear-reference', onClearReference)
+      document.removeEventListener('visibilitychange', resume)
+    }
+  }, [owner, clearReferencePending])
+  // Text/signatures are transient only; durable reference-only recovery is separate.
+  const editAttempts = useRef<Record<string, { key: string; signature: string }>>({})
 
   const searchInputRef = useRef<HTMLInputElement>(null)
   const periodButtonRef = useRef<HTMLButtonElement>(null)
@@ -438,8 +520,8 @@ export function JournalPageClient() {
   const highlightIdsRef = useRef<Set<string>>(new Set())
   const autoRevealRef = useRef(false)
 
-  const { sceneEntries, maxTimelineDays } = useMemo(() => decorateEntries(entries), [entries])
-  const showInteractiveScene = !isLoading && !error && entries.length > 0
+  const { sceneEntries, maxTimelineDays } = useMemo(() => decorateEntries(owner && entriesOwner === owner && entriesScope === scopeIdentity ? entries : []), [entries, entriesOwner, owner, entriesScope, scopeIdentity])
+  const showInteractiveScene = Boolean(owner && entriesOwner === owner && entriesScope === scopeIdentity && !isLoading && !error && entries.length > 0)
 
   useEffect(() => {
     sceneEntriesRef.current = sceneEntries
@@ -472,12 +554,37 @@ export function JournalPageClient() {
 
   useEffect(() => {
     const controller = new AbortController()
+    editAttempts.current = {}
+    setLifecycleRetry(null)
+    setEntries([])
+    setEntriesOwner(null)
+    setEntriesScope(null)
+    setEntriesAuthority(null)
+    setRecoveredCommands([])
+    setSelectedId(null)
+    setEditingId(null)
+    setDraftText('')
+    setPendingEntryAction(null)
+    if (!owner) {
+      setIsLoading(authLoading)
+      setError(authLoading ? null : 'Sign in to view your journal.')
+      return () => controller.abort()
+    }
+    if (!surfaceReady || navigator.onLine === false || document.visibilityState === 'hidden' || clearReferencePending()) {
+      setIsLoading(false)
+      setError(clearReferencePending()
+        ? 'Memory-clear recovery is pending or unavailable. Recover and acknowledge the original receipt before loading current memories.'
+        : 'Journal hidden or offline. Current memory must be verified again before display.')
+      return () => controller.abort()
+    }
 
     async function loadJournal() {
       setIsLoading(true)
       setError(null)
 
       try {
+        const recovered = await recoverJournalCommands(owner, controller.signal)
+        if (controller.signal.aborted || scopeRef.current !== scopeIdentity) return
         const response = await fetch(
           shelf === 'forgotten' ? '/api/journal?status=forgotten&savedOnly=false' : '/api/journal',
           {
@@ -491,14 +598,42 @@ export function JournalPageClient() {
           throw new Error(`Journal request failed: ${response.status}`)
         }
 
-        const payload = (await response.json()) as JournalResponse
-        setEntries(Array.isArray(payload.entries) ? payload.entries : [])
+        const payload = parseJournalEnvelope(await response.json(), owner, shelf)
+        if (payload.schema === 'mem00.pool.v1' && (payload.filters.category !== null || payload.filters.search !== null)) {
+          throw new Error('Journal list is not the complete requested shelf')
+        }
+        if (controller.signal.aborted || scopeRef.current !== scopeIdentity) return
+        if (!Array.isArray(payload.entries)) throw new Error('Current Journal unavailable')
+        for (const item of recovered) {
+          if (!item.receipt) continue
+          for (const entry of payload.entries.filter(value => value.id === item.reference.memory_id)) {
+            const revision = entry.metadata?.memory_governance_revision
+            const contentRevision = entry.metadata?.content_revision
+            if (item.receipt.event_type === 'memory_tombstoned' || entry.metadata?.authority !== 'sophia_canonical'
+              || typeof revision !== 'number' || !Number.isSafeInteger(revision)
+              || typeof contentRevision !== 'number' || !Number.isSafeInteger(contentRevision)
+              || revision < (item.receipt.memory_governance_revision ?? 1)
+              || contentRevision < (item.receipt.content_revision ?? 1)) {
+              throw new Error('Current Journal contradicts recovered command')
+            }
+          }
+        }
+        // Only acknowledge content-free references after a fresh display read.
+        // Unknown lookup outcomes retain their keys and never submit a command.
+        for (const item of recovered) acknowledgeJournalCommand(item.reference)
+        setRecoveredCommands(recovered)
+        setEntries(payload.entries)
+        setEntriesAuthority(payload.authority)
+        setEntriesOwner(owner)
+        setEntriesScope(scopeIdentity)
       } catch {
         if (controller.signal.aborted) {
           return
         }
 
-        setError('Could not load your journal right now.')
+        setEntries([])
+        setEntriesOwner(null)
+        setError('Could not verify your journal or an earlier memory action. No new edit was sent. Try again when connected.')
       } finally {
         if (!controller.signal.aborted) {
           setIsLoading(false)
@@ -509,7 +644,7 @@ export function JournalPageClient() {
     void loadJournal()
 
     return () => controller.abort()
-  }, [shelf])
+  }, [shelf, owner, authLoading, scopeIdentity, surfaceReady, clearReferencePending])
 
   useEffect(() => {
     if (sceneEntries.length === 0 || highlightSet.size === 0) {
@@ -690,6 +825,8 @@ export function JournalPageClient() {
   }, [])
 
   const persistEntryEdit = useCallback(async (entry: SceneEntry) => {
+    const actionScope = scopeIdentity
+    if (!owner || entriesOwner !== owner || entriesScope !== scopeIdentity) return
     const nextText = draftText.trim()
     if (!nextText) {
       setEntryActionError('Memory text cannot be empty.')
@@ -711,9 +848,18 @@ export function JournalPageClient() {
             },
             expected_content_revision: Number(entry.metadata?.content_revision),
             expected_governance_revision: Number(entry.metadata?.memory_governance_revision),
-            idempotency_key: `journal-edit-${crypto.randomUUID()}`,
+            idempotency_key: '',
           }
         : { text: nextText }
+      if (isCanonicalMemory) {
+        const signature = JSON.stringify(requestBody)
+        const existing = editAttempts.current[entry.id]
+        if (existing && existing.signature !== signature) throw new Error('Previous edit outcome unresolved')
+        const attempt = existing ?? { key: `journal-edit-${crypto.randomUUID()}`, signature }
+        editAttempts.current[entry.id] = attempt
+        requestBody.idempotency_key = attempt.key
+        rememberJournalCommand(owner, entry.id, attempt.key)
+      }
       const response = await fetch(`/api/memories/${encodeURIComponent(entry.id)}`, {
         method: 'PUT',
         headers: {
@@ -721,12 +867,51 @@ export function JournalPageClient() {
         },
         body: JSON.stringify(requestBody),
       })
+      notifyMemoryViews(owner)
 
       if (!response.ok) {
+        if (scopeRef.current !== actionScope) return
+        if (isCanonicalMemory && response.status === 409) {
+          acknowledgeJournalCommand({ schema: 'mem00.journal-command-reference.v1', owner_id: owner,
+            memory_id: entry.id, command_key: requestBody.idempotency_key, action: 'edit' })
+          delete editAttempts.current[entry.id]
+          setEntries([])
+          setEditingId(null)
+          setDraftText('')
+        }
         throw new Error(`Journal memory update failed: ${response.status}`)
       }
 
-      const payload = (await response.json()) as Partial<JournalEntry>
+      const raw = await response.json()
+      if (scopeRef.current !== actionScope) return
+      if (isCanonicalMemory) {
+        const parsed = canonicalCommandResultSchema.safeParse(raw)
+        if (!parsed.success || parsed.data.owner_id !== owner || parsed.data.command_key !== requestBody.idempotency_key
+          || parsed.data.receipt.memory_id !== entry.id || parsed.data.receipt.event_type !== 'memory_edited') {
+          setEntries([])
+          setError('Current memory state could not be verified. Refresh to check it.')
+          throw new Error('Current canonical command view unavailable')
+        }
+        delete editAttempts.current[entry.id]
+        acknowledgeJournalCommand({ schema: 'mem00.journal-command-reference.v1', owner_id: owner,
+          memory_id: entry.id, command_key: requestBody.idempotency_key, action: 'edit' })
+        const currentEntry = currentCommandJournalEntry(parsed.data, shelf)
+        setEntries((current) => parsed.data.current_view.status === 'unavailable' ? [] : current.flatMap((existing) => {
+          if (existing.id !== entry.id) return [existing]
+          if (parsed.data.current_view.status !== 'available') return []
+          if (Number(existing.metadata?.memory_governance_revision ?? 0) > Number(parsed.data.current_view.memory_governance_revision ?? 0)) return [existing]
+          return currentEntry ? [currentEntry] : []
+        }))
+        setEditingId(null)
+        setDraftText('')
+        if (parsed.data.current_view.status !== 'available') {
+          setEntryActionError('The operation is confirmed, but the current memory is unavailable. Refresh to check its state.')
+          if (parsed.data.current_view.status === 'unavailable') setError('The operation is confirmed, but current memory state is unavailable. Refresh to check it.')
+        }
+        haptic('success')
+        return
+      }
+      const payload = raw as Partial<JournalEntry>
       setEntries((current) => current.map((existing) => {
         if (existing.id !== entry.id) {
           return existing
@@ -744,121 +929,117 @@ export function JournalPageClient() {
       setDraftText('')
       haptic('success')
     } catch (error) {
+      notifyMemoryViews(owner)
+      if (scopeRef.current !== actionScope) return
       logger.logError(error, { component: 'Journal', action: 'update_memory' })
       setEntryActionError("Couldn't update this memory right now.")
       haptic('error')
     } finally {
-      setPendingEntryAction((current) => (
+      if (scopeRef.current === actionScope) setPendingEntryAction((current) => (
         current?.id === entry.id && current.kind === 'save' ? null : current
       ))
     }
-  }, [draftText])
+  }, [draftText, owner, entriesOwner, entriesScope, shelf, scopeIdentity])
 
-  const deleteEntry = useCallback(async (entry: SceneEntry) => {
-    setPendingEntryAction({ id: entry.id, kind: 'delete' })
+  const runLifecycle = useCallback(async (entry: Pick<SceneEntry, 'id' | 'metadata'>, action: Exclude<JournalCommandAction, 'edit'>) => {
+    const actionScope = scopeIdentity
+    if (!owner || entriesOwner !== owner || entriesScope !== scopeIdentity) return
+    const canonical = entry.metadata?.authority === 'sophia_canonical'
+    if (!canonical && action !== 'delete') return
+    setPendingEntryAction({ id: entry.id, kind: action })
     setEntryActionError(null)
-
+    const attemptId = action + ':' + entry.id
+    let canRetry = canonical
     try {
-      const isCanonicalMemory = entry.metadata?.authority === 'sophia_canonical'
-      const response = await fetch(`/api/memories/${encodeURIComponent(entry.id)}`, {
-        method: 'DELETE',
-        ...(isCanonicalMemory
-          ? {
-              headers: {
-                'Content-Type': 'application/json',
-              },
-              body: JSON.stringify({
-                expected_governance_revision: Number(entry.metadata?.memory_governance_revision),
-                idempotency_key: `journal-delete-${crypto.randomUUID()}`,
-              }),
-            }
-          : {}),
+      const body = { expected_governance_revision: Number(entry.metadata?.memory_governance_revision), idempotency_key: '' }
+      let reference = null
+      if (canonical) {
+        const signature = JSON.stringify(body)
+        const existing = editAttempts.current[attemptId]
+        if (existing && existing.signature !== signature) throw new Error('Previous memory outcome unresolved')
+        const attempt = existing ?? { key: 'journal-' + action + '-' + crypto.randomUUID(), signature }
+        editAttempts.current[attemptId] = attempt
+        body.idempotency_key = attempt.key
+        reference = rememberJournalCommand(owner, entry.id, attempt.key, action)
+      }
+      const response = await fetch('/api/memories/' + encodeURIComponent(entry.id) + (action === 'delete' ? '' : '/' + action), {
+        method: action === 'delete' ? 'DELETE' : 'POST', cache: 'no-store',
+        ...(canonical ? { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) } : {}),
       })
-
+      notifyMemoryViews(owner)
+      if (scopeRef.current !== actionScope) return
       if (!response.ok) {
-        throw new Error(`Journal memory delete failed: ${response.status}`)
+        if (reference && response.status === 409) {
+          canRetry = false
+          acknowledgeJournalCommand(reference)
+          delete editAttempts.current[attemptId]
+          setEntries([])
+          setEditingId(null)
+          setDraftText('')
+          setError('Memory changed. Refresh current state before making a new decision.')
+        }
+        throw new Error('Memory command outcome unavailable')
       }
-
-      setEntries((current) => current.filter((existing) => existing.id !== entry.id))
-      if (selectedId === entry.id) {
-        setSelectedId(null)
+      if (canonical && reference) {
+        const raw = await response.json()
+        if (scopeRef.current !== actionScope) return
+        const parsed = canonicalCommandResultSchema.safeParse(raw)
+        if (!parsed.success || parsed.data.owner_id !== owner || parsed.data.command_key !== body.idempotency_key
+          || parsed.data.receipt.memory_id !== entry.id || parsed.data.receipt.event_type !== journalCommandEvents[action]) {
+          setEntries([])
+          setError('Current memory state could not be verified. Refresh to check it.')
+          throw new Error('Current canonical command view unavailable')
+        }
+        acknowledgeJournalCommand(reference)
+        canRetry = false
+        delete editAttempts.current[attemptId]
+        const result = parsed.data
+        setError(null)
+        setLifecycleRetry(null)
+        const currentEntry = currentCommandJournalEntry(result, shelf)
+        setEntries(current => result.current_view.status === 'unavailable' ? [] : current.flatMap(existing => {
+          if (existing.id !== entry.id) return [existing]
+          if (result.current_view.status !== 'available') return []
+          if (Number(existing.metadata?.memory_governance_revision ?? 0) > Number(result.current_view.memory_governance_revision ?? 0)) return [existing]
+          return currentEntry ? [currentEntry] : []
+        }))
+        const confirmedReference = reference
+        setRecoveredCommands(current => [...current.filter(item => item.reference.command_key !== confirmedReference.command_key),
+          { reference: confirmedReference, status: 'committed', receipt: result.receipt }])
+        if (result.current_view.status === 'unavailable') setError('The operation is confirmed, but current memory state is unavailable. Refresh to check it.')
+      } else {
+        setEntries(current => current.filter(existing => existing.id !== entry.id))
       }
-      if (editingId === entry.id) {
+      setSelectedId(current => current === entry.id ? null : current)
+      setEditingId(null)
+      setDraftText('')
+      setDeleteConfirmId(current => current === entry.id ? null : current)
+      haptic('success')
+    } catch {
+      notifyMemoryViews(owner)
+      if (scopeRef.current !== actionScope) return
+      const message = "Couldn't " + action + " this memory right now."
+      setEntryActionError(message)
+      if (canonical) {
+        setEntries([])
         setEditingId(null)
         setDraftText('')
+        setError(message)
+        setLifecycleRetry(canRetry ? { action, entry: { id: entry.id, metadata: {
+          authority: 'sophia_canonical', memory_governance_revision: entry.metadata?.memory_governance_revision,
+        } } } : null)
       }
-      setDeleteConfirmId((current) => (current === entry.id ? null : current))
-      haptic('success')
-    } catch (error) {
-      logger.logError(error, { component: 'Journal', action: 'delete_memory' })
-      setEntryActionError("Couldn't delete this memory right now.")
       haptic('error')
     } finally {
-      setPendingEntryAction((current) => (
-        current?.id === entry.id && current.kind === 'delete' ? null : current
+      if (scopeRef.current === actionScope) setPendingEntryAction(current => (
+        current?.id === entry.id && current.kind === action ? null : current
       ))
     }
-  }, [editingId, selectedId])
+  }, [owner, entriesOwner, entriesScope, scopeIdentity, shelf])
 
-  const forgetEntry = useCallback(async (entry: SceneEntry) => {
-    setPendingEntryAction({ id: entry.id, kind: 'forget' })
-    setEntryActionError(null)
-
-    try {
-      const response = await fetch(`/api/memories/${encodeURIComponent(entry.id)}/forget`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          expected_governance_revision: Number(entry.metadata?.memory_governance_revision),
-          idempotency_key: `journal-forget-${crypto.randomUUID()}`,
-        }),
-      })
-      if (!response.ok) {
-        throw new Error(`Journal memory forget failed: ${response.status}`)
-      }
-      setEntries((current) => current.filter((existing) => existing.id !== entry.id))
-      setSelectedId((current) => (current === entry.id ? null : current))
-      haptic('success')
-    } catch (error) {
-      logger.logError(error, { component: 'Journal', action: 'forget_memory' })
-      setEntryActionError("Couldn't forget this memory right now.")
-      haptic('error')
-    } finally {
-      setPendingEntryAction((current) => (
-        current?.id === entry.id && current.kind === 'forget' ? null : current
-      ))
-    }
-  }, [])
-
-  const restoreEntry = useCallback(async (entry: SceneEntry) => {
-    setPendingEntryAction({ id: entry.id, kind: 'restore' })
-    setEntryActionError(null)
-
-    try {
-      const response = await fetch(`/api/memories/${encodeURIComponent(entry.id)}/restore`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          expected_governance_revision: Number(entry.metadata?.memory_governance_revision),
-          idempotency_key: `journal-restore-${crypto.randomUUID()}`,
-        }),
-      })
-      if (!response.ok) {
-        throw new Error(`Journal memory restore failed: ${response.status}`)
-      }
-      setEntries((current) => current.filter((existing) => existing.id !== entry.id))
-      setSelectedId((current) => (current === entry.id ? null : current))
-      haptic('success')
-    } catch (error) {
-      logger.logError(error, { component: 'Journal', action: 'restore_memory' })
-      setEntryActionError("Couldn't restore this memory right now.")
-      haptic('error')
-    } finally {
-      setPendingEntryAction((current) => (
-        current?.id === entry.id && current.kind === 'restore' ? null : current
-      ))
-    }
-  }, [])
+  const deleteEntry = useCallback((entry: SceneEntry) => runLifecycle(entry, 'delete'), [runLifecycle])
+  const forgetEntry = useCallback((entry: SceneEntry) => runLifecycle(entry, 'forget'), [runLifecycle])
+  const restoreEntry = useCallback((entry: SceneEntry) => runLifecycle(entry, 'restore'), [runLifecycle])
 
   const renderDeleteConfirm = useCallback((entry: SceneEntry) => {
     if (deleteConfirmId !== entry.id) {
@@ -880,7 +1061,9 @@ export function JournalPageClient() {
           <div>
             <p id={`journal-delete-title-${entry.id}`} className={styles.deleteConfirmTitle}>Delete this memory?</p>
             <p id={`journal-delete-copy-${entry.id}`} className={styles.deleteConfirmText}>
-              This removes it from your Journal scene and can&apos;t be undone.
+              {entry.metadata?.authority === 'sophia_canonical'
+                ? 'This permanently fences this canonical memory. Provider cleanup and derived/cache erasure require separate verification. Source transcripts and other account data are not deleted by this command.'
+                : "This removes it from your Journal scene and can't be undone."}
             </p>
           </div>
         </div>
@@ -1734,8 +1917,29 @@ export function JournalPageClient() {
   const visibleCount = visibleEntries.length
   const totalCount = sceneEntries.length
   const showOrbHint = !selectedId && !hoveredId && visibleEntries.length > 0
+  const recoveryPanel = owner && entriesOwner === owner && entriesScope === scopeIdentity && (recoveredCommands.length > 0 || discardedMemoryDraft) ? (
+    <aside className={styles.recoveryNotice} aria-label="Recovered memory actions">
+      {discardedMemoryDraft && <p role="status">Unsaved memory edit cleared from this view. Review current state before editing again.</p>}
+      <p role="status">Memory action receipts. Displayed memories come only from a separately verified current view; no draft was recovered.</p>
+      <details>
+        <summary>View historical results</summary>
+        <ul>
+          {recoveredCommands.map((item) => (
+            <li key={item.reference.command_key}>
+              {item.receipt
+                ? `${item.reference.action} confirmed: ${item.receipt.operation_id}; original content revision ${item.receipt.content_revision}, governance revision ${item.receipt.memory_governance_revision}. This does not establish current eligibility.`
+                : `No admitted ${item.reference.action} was found. Review the current memory and make a fresh decision; no draft was restored.`}
+              {item.reference.action === 'delete' && item.receipt && (
+                <p>Original canonical fence confirmed. Canonical plaintext erasure, provider cleanup, derived invalidation and managed browser erasure are not verified here. Source transcripts are not deleted by this command; other account data is outside its scope.</p>
+              )}
+            </li>
+          ))}
+        </ul>
+      </details>
+    </aside>
+  ) : null
 
-  if (isLoading) {
+  if (isLoading || authLoading || (owner && (entriesOwner !== owner || entriesScope !== scopeIdentity) && !error)) {
     return (
       <div className={styles.page}>
         <div className={styles.overlayState}>
@@ -1750,11 +1954,18 @@ export function JournalPageClient() {
   if (error) {
     return (
       <div className={styles.page}>
+        {recoveryPanel}
         <div className={styles.overlayState}>
           <div className={styles.stateIcon}><Home className={styles.stateGlyph} /></div>
           <h1 className={styles.stateTitle}>Journal unavailable</h1>
           <p className={styles.stateText}>{error}</p>
           <div className={styles.overlayActions}>
+            {lifecycleRetry && owner && entriesOwner === owner && entriesScope === scopeIdentity && (
+              <button className={styles.primaryAction} disabled={Boolean(pendingEntryAction)}
+                onClick={() => void runLifecycle(lifecycleRetry.entry, lifecycleRetry.action)}>
+                Retry original memory action
+              </button>
+            )}
             <button className={styles.primaryAction} onClick={() => window.location.reload()}>
               Try again
             </button>
@@ -1770,6 +1981,7 @@ export function JournalPageClient() {
   if (totalCount === 0) {
     return (
       <div className={styles.page}>
+        {recoveryPanel}
         <div className={styles.overlayState}>
           <div className={styles.stateIcon}><LayoutGrid className={styles.stateGlyph} /></div>
           <h1 className={styles.stateTitle}>{shelf === 'forgotten' ? 'Forgotten shelf is empty' : 'No saved memories yet'}</h1>
@@ -1801,6 +2013,7 @@ export function JournalPageClient() {
 
   return (
     <div className={styles.page}>
+      {recoveryPanel}
       <canvas ref={poolCanvasRef} className={classNames(styles.canvasLayer, styles.poolCanvas)} />
       <canvas ref={overlayCanvasRef} className={classNames(styles.canvasLayer, styles.overlayCanvas)} />
       <canvas ref={hitCanvasRef} className={classNames(styles.canvasLayer, styles.hitCanvas)} />
@@ -1809,7 +2022,9 @@ export function JournalPageClient() {
         <div className={styles.topLeft}>
           <button type="button" className={styles.topLeftButton} onClick={() => router.push('/')}>
             <h1 className={styles.topLeftTitle}>Journal</h1>
-            <p className={styles.topLeftSub}><span className={styles.topLeftDot} /> Your memories with Sophia</p>
+            <p className={styles.topLeftSub}><span className={styles.topLeftDot} /> {entriesAuthority === 'sophia_canonical'
+              ? 'Canonical memories · Search indexing status unavailable'
+              : 'Legacy memory view · Completeness unverified'}</p>
           </button>
         </div>
 

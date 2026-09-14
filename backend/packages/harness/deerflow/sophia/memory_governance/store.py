@@ -553,123 +553,87 @@ class SupabaseMemoryGovernanceStore:
     def tombstone(self, **payload: object) -> GovernanceReceipt:
         return self._model(GovernanceReceipt, self._rpc("sophia_memory_tombstone", payload))
 
-    def list_pool(
-        self,
-        *,
-        user_id: str,
-        include_forgotten: bool = False,
-        limit: int = 500,
-    ) -> tuple[CanonicalMemory, ...]:
-        lifecycles = "in.(active,forgotten)" if include_forgotten else "eq.active"
-        rows = self._request(
-            "GET",
-            "sophia_memories",
-            params={
-                "select": "memory_id,user_id,lifecycle,user_tier,current_content_revision,memory_governance_revision,created_at,updated_at",
-                "user_id": f"eq.{user_id}",
-                "lifecycle": lifecycles,
-                "order": "updated_at.desc",
-                "limit": str(min(max(limit, 1), 500)),
-            },
-        )
-        base_rows = rows if isinstance(rows, list) else []
-        versions = (
-            self._request(
-                "GET",
-                "sophia_memory_versions",
-                params={"select": "memory_id,content_revision,canonical_content,content_ref,category,scope", "user_id": f"eq.{user_id}", "limit": "1000"},
-            )
-            if base_rows
-            else []
-        )
-        version_map = {(str(item.get("memory_id")), int(item.get("content_revision") or 0)): item for item in (versions if isinstance(versions, list) else []) if isinstance(item, dict)}
-        bindings = (
-            self._request(
-                "GET",
-                "sophia_memory_provider_bindings",
-                params={"select": "memory_id,binding_state", "user_id": f"eq.{user_id}", "limit": "1000"},
-            )
-            if base_rows
-            else []
-        )
-        binding_states: dict[str, set[str]] = {}
-        for item in bindings if isinstance(bindings, list) else []:
-            if isinstance(item, dict):
-                binding_states.setdefault(str(item.get("memory_id")), set()).add(str(item.get("binding_state")))
-        result: list[CanonicalMemory] = []
-        for row in base_rows:
-            key = (str(row.get("memory_id")), int(row.get("current_content_revision") or 0))
-            version = version_map.get(key)
-            if version is None:
-                raise MemoryGovernanceUnavailable("canonical_version_unavailable")
-            # Database join keys are not canonical model fields. Only the exact
-            # current version can supply content; never fall back to an older edit.
-            content = {field: version.get(field) for field in ("canonical_content", "content_ref", "category", "scope")}
-            states = binding_states.get(key[0], set())
-            projection_state = "active" if "eligible" in states else ("stale" if states else "absent")
-            result.append(CanonicalMemory.model_validate({**row, **content, "projection_state": projection_state}))
-        return tuple(result)
+    def pool_snapshot(self, *, user_id: str, include_forgotten: bool = False):
+        from .inventory import read_complete_inventory
+
+        try:
+            return read_complete_inventory(owner_id=user_id, governance_store=self,
+                view="saved" if include_forgotten else "active")
+        except MemoryGovernanceConflict:
+            raise MemoryGovernanceUnavailable("memory_inventory_snapshot_changed") from None
+
+    def list_pool(self, *, user_id: str, include_forgotten: bool = False) -> tuple[CanonicalMemory, ...]:
+        # Management snapshot only, not provider-hit authorization or model admission.
+        snapshot = self.pool_snapshot(user_id=user_id, include_forgotten=include_forgotten)
+        return tuple(CanonicalMemory(memory_id=item.id, user_id=user_id, lifecycle=item.state,
+            user_tier=item.user_tier, current_content_revision=item.revision,
+            memory_governance_revision=item.memory_governance_revision, canonical_content=item.content,
+            category=item.category, scope=item.scope, projection_state="unavailable",
+            created_at=item.created_at, updated_at=item.updated_at) for item in snapshot.records)
 
     def authorize_provider_hits(
-        self,
-        *,
-        user_id: str,
-        provider: str,
-        environment: str,
-        provider_project: str,
-        provider_namespace: str,
-        hits: Iterable[ProviderHit],
+        self, *, user_id: str, provider: str, environment: str, provider_project: str,
+        provider_namespace: str, hits: Iterable[ProviderHit],
     ) -> tuple[tuple[CanonicalMemory, float | None], dict[str, int]]:
-        hit_map = {hit.provider_memory_id: hit.score for hit in hits}
-        denials: dict[str, int] = {}
+        """Exact one-snapshot resolution; final atomic prompt admission is still required."""
+        import json
+        import math
+
+        hit_map = {}
+        for hit in hits:
+            if (not isinstance(hit.provider_memory_id, str) or not 1 <= len(hit.provider_memory_id) <= 512
+                    or hit.provider_memory_id != hit.provider_memory_id.strip()
+                    or (hit.score is not None and not math.isfinite(hit.score))):
+                raise MemoryGovernanceUnavailable("memory_hit_selector_invalid")
+            hit_map.setdefault(hit.provider_memory_id, hit.score)
+            if len(hit_map) > 100:
+                raise MemoryGovernanceUnavailable("memory_hit_selector_invalid")
         if not hit_map:
-            return (), denials
-        rows = self._request(
-            "GET",
-            "sophia_memory_provider_bindings",
-            params={
-                "select": "provider_memory_id,memory_id,canonical_content_revision,memory_governance_revision,binding_state,metadata_verification_state",
-                "user_id": f"eq.{user_id}",
-                "provider": f"eq.{provider}",
-                "environment": f"eq.{environment}",
-                "provider_project": f"eq.{provider_project}",
-                "provider_namespace": f"eq.{provider_namespace}",
-                "limit": "1000",
-            },
-        )
-        candidates = [row for row in (rows if isinstance(rows, list) else []) if isinstance(row, dict) and str(row.get("provider_memory_id")) in hit_map]
-        by_provider: dict[str, list[dict[str, Any]]] = {}
-        for row in candidates:
-            by_provider.setdefault(str(row["provider_memory_id"]), []).append(row)
-        eligible_bindings: list[dict[str, Any]] = []
-        for provider_id in hit_map:
-            matched = by_provider.get(provider_id, [])
-            if not matched:
-                denials["unmapped_provider_id"] = denials.get("unmapped_provider_id", 0) + 1
-            elif len(matched) != 1:
-                denials["inactive_projection"] = denials.get("inactive_projection", 0) + 1
-            elif matched[0].get("binding_state") != "eligible" or matched[0].get("metadata_verification_state") != "verified":
-                denials["inactive_projection"] = denials.get("inactive_projection", 0) + 1
-            else:
-                eligible_bindings.append(matched[0])
-        memories = {memory.memory_id: memory for memory in self.list_pool(user_id=user_id)}
-        authorized: list[tuple[CanonicalMemory, float | None]] = []
-        for binding in eligible_bindings:
-            memory = memories.get(UUID(str(binding["memory_id"])))
-            if memory is None or memory.lifecycle != "active":
-                denials["inactive_projection"] = denials.get("inactive_projection", 0) + 1
-                continue
-            if memory.current_content_revision != int(binding["canonical_content_revision"]):
-                denials["stale_content_revision"] = denials.get("stale_content_revision", 0) + 1
-                continue
-            if memory.memory_governance_revision != int(binding["memory_governance_revision"]):
-                denials["stale_memory_governance_revision"] = denials.get("stale_memory_governance_revision", 0) + 1
-                continue
-            if not memory.canonical_content:
-                denials["unknown_status"] = denials.get("unknown_status", 0) + 1
-                continue
-            authorized.append((memory, hit_map[str(binding["provider_memory_id"])]))
-        return tuple(authorized), denials
+            return (), {}
+        raw = self._rpc("sophia_memory_resolve_provider_hits", {
+            "p_user_id": user_id, "p_provider": provider, "p_environment": environment,
+            "p_provider_project": provider_project, "p_provider_namespace": provider_namespace,
+            "p_provider_memory_ids": list(hit_map)})
+        try:
+            expected = {"schema": "mem00.hit-resolution.v1", "memory_contract_epoch": 1, "owner_id": user_id,
+                "provider": provider, "environment": environment, "provider_project": provider_project,
+                "provider_namespace": provider_namespace, "status": "available", "final_admission": False}
+            if (len(json.dumps(raw).encode()) > 2 * 1024 * 1024
+                    or not isinstance(raw, dict) or set(raw) != set(expected) | {"results"}
+                    or any(raw.get(key) != value for key, value in expected.items())
+                    or type(raw["memory_contract_epoch"]) is not int or raw["final_admission"] is not False
+                    or not isinstance(raw["results"], list) or len(raw["results"]) != len(hit_map)):
+                raise ValueError
+            authorized, denials, seen_memories = [], {}, {}
+            reasons = {"unmapped_provider_id", "inactive_projection", "stale_content_revision",
+                "stale_memory_governance_revision", "unknown_status"}
+            for provider_id, row in zip(hit_map, raw["results"], strict=True):
+                if not isinstance(row, dict) or set(row) != {"provider_memory_id", "denial_reason", "memory"} or row["provider_memory_id"] != provider_id:
+                    raise ValueError
+                reason = row["denial_reason"]
+                if reason is not None:
+                    if reason not in reasons or row["memory"] is not None:
+                        raise ValueError
+                    denials[reason] = denials.get(reason, 0) + 1
+                    continue
+                item = row["memory"]
+                if (not isinstance(item, dict) or item.get("user_id") != user_id or item.get("lifecycle") != "active"
+                        or type(item.get("current_content_revision")) is not int or type(item.get("memory_governance_revision")) is not int
+                        or item.get("projection_state") != "active" or not item.get("canonical_content") or not item.get("content_ref")
+                        or not item.get("category") or not item.get("scope")):
+                    raise ValueError
+                memory = CanonicalMemory.model_validate(item)
+                if memory.memory_id in seen_memories:
+                    if seen_memories[memory.memory_id] != memory:
+                        raise ValueError
+                    # Input order is provider rank. Keep its first/best-ranked
+                    # hit, not a second memory or a fabricated combined score.
+                    continue
+                seen_memories[memory.memory_id] = memory
+                authorized.append((memory, hit_map[provider_id]))
+            return tuple(authorized), denials
+        except Exception:
+            raise MemoryGovernanceUnavailable("memory_hit_resolution_unavailable") from None
 
     def record_prompt_admission(self, payload: dict[str, object]) -> UUID:
         result = self._rpc(

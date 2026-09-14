@@ -37,6 +37,7 @@ from deerflow.agents.sophia_agent.utils import safe_user_path
 from deerflow.sophia.memory_governance.store import MemoryGovernanceConflict
 from deerflow.sophia.memory_governance.models import CommandReceipt, GovernanceReceipt
 from deerflow.sophia.memory_governance.command_result import CanonicalCommandResult
+from deerflow.sophia.memory_governance.pool import PoolEnvelope
 from deerflow.sophia.review_metadata_store import (
     apply_review_metadata_overlays,
     remove_review_metadata,
@@ -330,6 +331,10 @@ class JournalEntry(BaseModel):
 
 
 class JournalResponse(BaseModel):
+    schema_name: Literal["sophia.journal-legacy.v1"] = Field(default="sophia.journal-legacy.v1", alias="schema")
+    owner_id: str
+    authority: Literal["legacy_provider"] = "legacy_provider"
+    enumeration_complete: Literal[False] = False
     entries: list[JournalEntry] = Field(default_factory=list)
     count: int = Field(default=0)
 
@@ -2505,53 +2510,31 @@ def memory_observability(user_id: str) -> JSONResponse:
 
 @router.get(
     "/{user_id}/journal",
-    response_model=JournalResponse,
+    response_model=PoolEnvelope | JournalResponse,
     summary="Browse user journal (all memories)",
 )
 async def journal(
     user_id: str,
+    response: Response,
     category: str | None = Query(default=None, description="Filter by category"),
     memory_type: str | None = Query(default=None, alias="type", description="Alias for category filter"),
     search: str | None = Query(default=None, description="Case-insensitive text search"),
     status: str | None = Query(default=None, description="Filter by metadata.status"),
-) -> JournalResponse:
+) -> PoolEnvelope | JournalResponse:
     _validate_user(user_id)
+    response.headers["Cache-Control"] = "no-store"
     if _memory_flags(user_id).canonical_pool_read:
         try:
-            include_forgotten = status == "forgotten"
-            memories = _canonical_memory_service(user_id).list_pool(include_forgotten=include_forgotten)
-            if include_forgotten:
-                memories = tuple(memory for memory in memories if memory.lifecycle == "forgotten")
-            else:
-                memories = tuple(memory for memory in memories if memory.lifecycle == "active")
-            selected_category = category or memory_type
-            normalized_search = search.strip().lower() if search and search.strip() else None
-            entries = [
-                JournalEntry(
-                    id=str(memory.memory_id),
-                    content=memory.canonical_content or "",
-                    category=memory.category,
-                    metadata={
-                        "authority": "sophia_canonical",
-                        "lifecycle": memory.lifecycle,
-                        "tier": memory.user_tier,
-                        "scope": memory.scope,
-                        "projection_state": memory.projection_state,
-                        "content_revision": memory.current_content_revision,
-                        "memory_governance_revision": memory.memory_governance_revision,
-                    },
-                    created_at=str(memory.created_at) if memory.created_at else None,
-                )
-                for memory in memories
-                if (not selected_category or memory.category == selected_category) and (not normalized_search or normalized_search in (memory.canonical_content or "").lower())
-            ]
-            return JournalResponse(entries=entries, count=len(entries))
+            if status not in {None, "active", "approved", "forgotten"}:
+                raise ValueError("pool_status_invalid")
+            return _canonical_memory_service(user_id).pool_view(
+                view="forgotten" if status == "forgotten" else "active", category=category or memory_type, search=search)
         except Exception as exc:
             logger.warning(
                 "MEM00 journal failed error_type=%s contentExcluded=true",
                 exc.__class__.__name__,
             )
-            raise HTTPException(status_code=503, detail="Memory governance unavailable")
+            raise HTTPException(status_code=503, detail="Memory governance unavailable", headers={"Cache-Control": "no-store"})
     client = _get_mem0_client()
     try:
         selected_category = category or memory_type
@@ -2609,13 +2592,13 @@ async def journal(
             )
             for m in memories_raw
         ]
-        return JournalResponse(entries=entries, count=len(entries))
+        return JournalResponse(owner_id=user_id, entries=entries, count=len(entries))
     except Exception as exc:
         logger.warning(
             "Journal failed error_type=%s ownerExcluded=true contentExcluded=true",
             exc.__class__.__name__,
         )
-        raise HTTPException(status_code=503, detail="Memory service unavailable")
+        raise HTTPException(status_code=503, detail="Memory service unavailable", headers={"Cache-Control": "no-store"})
 
 
 # ---------------------------------------------------------------------------
