@@ -176,7 +176,7 @@ export async function proveP01LiveBoundary(ledger: VoiceLabLedger, options: { de
           receipt: { providerConnectionEpoch: 1, phase: "bootstrap" },
         }, `p01-live-provider-epoch:${run.id}:1`);
       }
-      const event = await ledger.appendEvent(run.id, "product.voice-sse.sophia.turn", "product", { _product_run_binding: binding, data: { phase: "agent_ended", turnId } }, `p01-live-turn:${turnId}`);
+      const event = await ledger.appendEvent(run.id, "product.voice-sse.sophia.turn", "product", { _product_run_binding: binding, data: { phase: "agent_ended", turn_id: turnId } }, `p01-live-turn:${turnId}`);
       const fresh = await ledger.getRun(run.id);
       assert.ok(fresh);
       await ledger.updateRun(run.id, fresh.version, { turnId, providerEpoch: 1 });

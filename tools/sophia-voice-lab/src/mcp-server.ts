@@ -5,7 +5,7 @@ import { z } from "zod";
 import type { VoiceLabLedger } from "./ledger.js";
 import { VoiceLabError, labError } from "./domain.js";
 import type { AuthenticatedCaller } from "./security.js";
-import { canonicalRequestHash, requireScope, sha256 } from "./security.js";
+import { canonicalRequestHash, canonicalResponseHash, requireScope, sha256 } from "./security.js";
 import { errorEnvelope, toolInputSchemas, type VoiceLabService } from "./service.js";
 
 const EnvelopeSchema = z.object({
@@ -96,7 +96,7 @@ export function createVoiceLabMcpServer(
       const auditRunId = await ownedAuditRunId(ledger, input, caller);
       try {
         const result = await invoke(caller, input);
-        const responseSha256 = canonicalRequestHash(result);
+        const responseSha256 = canonicalResponseHash(result);
         const responseRunId = typeof result.run_id === "string" && /^[0-9a-f-]{36}$/i.test(result.run_id) ? result.run_id : auditRunId;
         const operationId = typeof result.operation_id === "string" && /^[0-9a-f-]{36}$/i.test(result.operation_id) ? result.operation_id : null;
         const authDetail = {

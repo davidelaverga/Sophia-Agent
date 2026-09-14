@@ -1484,6 +1484,12 @@ def close_cleanup_provider_session(
     retention_deadline = _parsed_deadline(retention_expires_at)
     provider_deadline = _parsed_deadline(provider_expires_at)
     desired_synthetic = metadata.get("synthetic_voice_lab")
+    process_termination = (
+        isinstance(desired_synthetic, dict)
+        and isinstance(desired_synthetic.get("voice_provider_browser_close_receipts"), list)
+        and any(isinstance(item, dict) and item.get("schema") == "sophia_voice_lab_browser_process_termination_v1"
+            for item in desired_synthetic["voice_provider_browser_close_receipts"])
+    )
     provider_updates = {
         key: desired_synthetic.get(key)
         for key in _PROVIDER_TERMINAL_METADATA_KEYS
@@ -1511,6 +1517,8 @@ def close_cleanup_provider_session(
         with _LOCAL_LOCK:
             obligation_before = dict(_LOCAL_OBLIGATIONS.get(cleanup_id) or {})
             admission_before = _LOCAL_ADMISSIONS.get(admission.admission_id)
+            if process_termination and obligation_before.get("state") != "closed":
+                raise CleanupFenceError("process termination requires prior closed admission")
             existing_settlement = obligation_before.get("provider_settlement_sha256")
             if existing_settlement not in {None, settlement_sha256}:
                 raise CleanupFenceError("provider browser settlement conflicts")
@@ -1583,6 +1591,7 @@ def close_cleanup_provider_session(
             if (
                 row is None
                 or row[0] not in {"open", "closed"}
+                or (process_termination and row[0] != "closed")
                 or row[1] != retention_deadline
                 or row[2] != provider_deadline
                 or row[3] not in {None, settlement_sha256}

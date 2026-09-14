@@ -1,6 +1,7 @@
 import { createHmac, createPublicKey, randomUUID, timingSafeEqual, verify as verifySignature } from "node:crypto";
 
 import { z } from "zod";
+import { productTurnId } from "./product-turn.js";
 import { ServiceOwnerFenceReceiptSchema, serviceFenceSourceLabSha } from "./service-owner-fence.js";
 
 import { FINAL_CODEX_PLUGIN_VERSION_PATTERN, type VoiceLabConfig } from "./config.js";
@@ -2049,7 +2050,7 @@ export class VoiceLabService {
     if (input.expected_turn_id !== undefined) {
       const source = await this.ledger.findLatestEvent(run.id, ["product.voice-sse.sophia.turn", "product.stream-custom.sophia.turn"]);
       const data = source?.payload.data as Record<string, unknown> | undefined;
-      if (run.turnId !== input.expected_turn_id || data?.turnId !== input.expected_turn_id) throw new VoiceLabError(labError("TURN_PRECONDITION_FAILED", "Expected turn ID does not match the durable strict join and its latest owning receipt.", "conflict", true));
+      if (run.turnId !== input.expected_turn_id || productTurnId(data) !== input.expected_turn_id) throw new VoiceLabError(labError("TURN_PRECONDITION_FAILED", "Expected turn ID does not match the durable strict join and its latest owning receipt.", "conflict", true));
     }
   }
 
@@ -2092,7 +2093,7 @@ export class VoiceLabService {
     const page = await this.ledger.listEvents(run.id, observation.event_seq - 1, 1);
     const cited = page.events.find((event) => event.seq === observation.event_seq);
     const data = cited?.payload.data as Record<string, unknown> | undefined;
-    if (!cited || !isExactBoundProductEventForService(run, cited) || !cited.kind.endsWith(".sophia.turn") || data?.phase !== "agent_ended" || data.turnId !== observation.turn_id) {
+    if (!cited || !isExactBoundProductEventForService(run, cited) || !cited.kind.endsWith(".sophia.turn") || data?.phase !== "agent_ended" || productTurnId(data) !== observation.turn_id) {
       throw new VoiceLabError(labError("ADAPTIVE_OBSERVATION_MISMATCH", "V-A01 follow-up did not cite an exact app-authored completed assistant turn.", "conflict", false));
     }
     const allEvents: typeof page.events = [];
@@ -2106,7 +2107,7 @@ export class VoiceLabService {
     }
     const completedTurns = allEvents.filter((event) => {
       const eventData = event.payload.data as Record<string, unknown> | undefined;
-      return isExactBoundProductEventForService(run, event) && event.kind.endsWith(".sophia.turn") && eventData?.phase === "agent_ended" && typeof eventData.turnId === "string";
+      return isExactBoundProductEventForService(run, event) && event.kind.endsWith(".sophia.turn") && eventData?.phase === "agent_ended" && productTurnId(eventData) !== null;
     });
     if (completedTurns.at(-1)?.seq !== cited.seq) throw new VoiceLabError(labError("ADAPTIVE_OBSERVATION_STALE", "V-A01 follow-up must cite the immediately preceding completed assistant turn.", "conflict", true));
     const used = new Set(priorInputs.map((operation) => (operation.input.adaptive_observation as Record<string, unknown> | undefined)?.event_seq).filter((value): value is number => Number.isSafeInteger(value)));
@@ -2115,7 +2116,9 @@ export class VoiceLabService {
 
   private mintP01ObservationReceipt(run: RunRecord, event: { seq: number; kind: string; source: string; at: Date; payload: Record<string, unknown> }): z.infer<typeof ObservationReceiptSchema> | null {
     const data = event.payload.data as Record<string, unknown> | undefined;
-    if (!isExactBoundProductEventForService(run, event) || !event.kind.endsWith(".sophia.turn") || data?.phase !== "agent_ended" || typeof data.turnId !== "string" || !/^[A-Za-z0-9._:-]{1,128}$/.test(data.turnId)) return null;
+    if (!isExactBoundProductEventForService(run, event) || !event.kind.endsWith(".sophia.turn") || data?.phase !== "agent_ended") return null;
+    const turnId = productTurnId(data);
+    if (turnId === null) return null;
     const core = {
       schema: "sophia_voice_lab_observation_receipt_v1" as const,
       run_id: run.id,
@@ -2124,7 +2127,7 @@ export class VoiceLabService {
       scenario_version: SCENARIO_CATALOG_VERSION,
       deployment_identity_sha256: canonicalRequestHash({ expected: run.target.expectedDeployment, observed: run.observedDeployment }),
       event_seq: event.seq,
-      turn_id: data.turnId,
+      turn_id: turnId,
       observation_class: "assistant_turn_complete" as const,
       issued_at: event.at.toISOString(),
     };

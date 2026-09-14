@@ -2777,6 +2777,9 @@ def _provider_terminal_settlement_sha256(
     synthetic = metadata.get("synthetic_voice_lab") if isinstance(metadata, dict) else None
     if not isinstance(synthetic, dict):
         return None
+    from app.gateway.voice_lab_process_termination import browser_process_receipt, stored_browser_process_settlement
+    if browser_process_receipt(synthetic) is not None:
+        return stored_browser_process_settlement(synthetic)
     provider_session_id = _provider_session_id(record)
     close_receipts = synthetic.get("voice_provider_browser_close_receipts")
     abort_receipts = synthetic.get("voice_provider_activation_abort_receipts")
@@ -3062,6 +3065,17 @@ async def _reconcile_overdue_cleanup_admissions(
             if (
                 admission.status in {"browser_closed", "activation_aborted"}
                 and claims.scenario_id != "V-D02"
+                # Process death alone must not synthesize the independent
+                # Voice owner's zero callback. Fall through to the scoped
+                # disconnect/owner-ack path for this distinct receipt basis.
+                and not (
+                    isinstance(getattr(record, "metadata", None), dict)
+                    and isinstance(record.metadata.get("synthetic_voice_lab"), dict)
+                    and any(
+                        isinstance(item, dict) and item.get("schema") == "sophia_voice_lab_browser_process_termination_v1"
+                        for item in (record.metadata["synthetic_voice_lab"].get("voice_provider_browser_close_receipts") or [])
+                    )
+                )
             ):
                 settlement_sha256 = (
                     _provider_terminal_settlement_sha256(
@@ -4096,6 +4110,37 @@ def _persist_recovery_receipt(
             status_code=503,
             detail={"code": "voice_lab_recovery_receipt_fence_unavailable"},
         ) from exc
+
+
+@router.post("/runs/{test_run_id}/browser-process-closed")
+async def accept_voice_lab_browser_process_closed(test_run_id: str, request: Request) -> JSONResponse:
+    # The source is the private recovery worker, not caller-authored app/tool
+    # input. Preserve the ordinary recover endpoint's body-free contract.
+    claims = capability_for_voice_lab_recovery(request, test_run_id)
+    if claims.scenario_id == "V-D02":
+        raise HTTPException(status_code=403, detail={"code": "voice_lab_process_termination_d02_forbidden"})
+    chunks = bytearray()
+    async for chunk in request.stream():
+        chunks.extend(chunk)
+        if len(chunks) > 8192:
+            raise HTTPException(status_code=413, detail={"code": "voice_lab_process_termination_too_large"})
+    from app.gateway.voice_lab_process_termination import accept_browser_process_termination, parse_browser_process_termination
+    try:
+        receipt = parse_browser_process_termination(json.loads(chunks))
+    except (ValueError, TypeError, UnicodeDecodeError):
+        raise HTTPException(status_code=400, detail={"code": "voice_lab_process_termination_invalid"}) from None
+    _lookup, record = await asyncio.to_thread(_lookup_canonical_session, claims)
+    try:
+        digest = await asyncio.to_thread(accept_browser_process_termination, claims, record, receipt)
+    except (ValueError, KeyError):
+        raise HTTPException(status_code=409, detail={"code": "voice_lab_process_termination_binding_conflict"}) from None
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=503, detail={"code": "voice_lab_process_termination_commit_unconfirmed"}) from None
+    return JSONResponse({"accepted": True, "receipt_sha256": receipt["receipt_sha256"],
+        "provider_settlement_sha256": digest, "provider_cleanup_proven": False}, status_code=202,
+        headers={"Cache-Control": "no-store"})
 
 
 @router.post("/runs/{test_run_id}/recover")

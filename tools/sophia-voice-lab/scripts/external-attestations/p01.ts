@@ -5,7 +5,8 @@ import path from "node:path";
 
 import { z } from "zod";
 
-import { canonicalRequestHash, sha256 } from "../../src/security.js";
+import { canonicalRequestHash, canonicalResponseHash, sha256 } from "../../src/security.js";
+import { productTurnId } from "../../src/product-turn.js";
 import { toolInputSchemas } from "../../src/service.js";
 import { P01_ASSISTANT_OBSERVATIONS, P01_OPERATION_OBSERVATIONS, P01_LIMITS, P01_MAX_CHRONOLOGICAL_CALLS, p01EndNeedsFinalization } from "../../src/p01-contract.js";
 import {
@@ -513,7 +514,7 @@ function validateAndDeriveCalls(items: readonly z.infer<typeof McpToolItemSchema
     const polledOperationId = tool === "wait_for_turn" && isRecord(item.arguments) && item.arguments.condition === "operation_terminal" && typeof item.arguments.operation_id === "string" ? item.arguments.operation_id : null;
     calls.push({
       spine_ordinal: index + 1, chronological_ordinal: chronologicalOrdinal, tool_name: tool,
-      argument_sha256: canonicalRequestHash(item.arguments), response_sha256: canonicalRequestHash(envelope),
+      argument_sha256: canonicalRequestHash(item.arguments), response_sha256: canonicalResponseHash(envelope),
       result_request_id_sha256: sha256(envelope.request_id), run_id_sha256: envelope.run_id ? sha256(envelope.run_id) : null,
       operation_id_sha256: envelope.operation_id ? sha256(envelope.operation_id) : null,
       polled_operation_id_sha256: polledOperationId ? sha256(polledOperationId) : null,
@@ -541,7 +542,7 @@ function validateAndDeriveCalls(items: readonly z.infer<typeof McpToolItemSchema
   const returnedReceipts = Array.isArray(observationEnvelope.data.observation_receipts) ? observationEnvelope.data.observation_receipts : [];
   const receipt = adaptiveSpeak.adaptive_observation.receipt;
   const exactObservation = matchedEvents.some((entry) => isRecord(entry) && entry.seq === receipt.event_seq
-    && (entry.turn_id === receipt.turn_id || isRecord(entry.payload) && (entry.payload.turn_id === receipt.turn_id || isRecord(entry.payload.data) && entry.payload.data.turnId === receipt.turn_id)));
+    && (entry.turn_id === receipt.turn_id || isRecord(entry.payload) && (entry.payload.turn_id === receipt.turn_id || isRecord(entry.payload.data) && productTurnId(entry.payload.data) === receipt.turn_id)));
   if (returnedReceipts.length !== 1 || canonicalRequestHash(returnedReceipts[0]) !== canonicalRequestHash(receipt) || !exactObservation
     || receipt.run_id !== runId || receipt.test_run_id !== testRunId || receipt.scenario_id !== "V-P01" || receipt.scenario_version !== "vt00.scenarios.v1"
     || adaptiveSpeak.expected_cursor === undefined || adaptiveSpeak.expected_cursor < receipt.event_seq
@@ -576,7 +577,7 @@ function validateAndDeriveCalls(items: readonly z.infer<typeof McpToolItemSchema
         || parsed.after_cursor !== boundary.after_cursor || envelope.status !== "timeout" || envelope.data.condition_satisfied === true
         || (envelopes[phase.mutationIndex]!.data.operation_state !== "succeeded" && !settled.has(operationId))) throw new Error("P01 assistant poll lacked settled speech or drifted from the exact pending observation.");
       pollingCalls.push({ poll_ordinal: pollOrdinal, chronological_ordinal: chronologicalOrdinal, tool_name: "wait_for_turn",
-        argument_sha256: canonicalRequestHash(item.arguments), response_sha256: canonicalRequestHash(envelope), result_request_id_sha256: sha256(envelope.request_id),
+        argument_sha256: canonicalRequestHash(item.arguments), response_sha256: canonicalResponseHash(envelope), result_request_id_sha256: sha256(envelope.request_id),
         run_id_sha256: sha256(runId), operation_id_sha256: null, polled_operation_id_sha256: null });
       continue;
     }
@@ -601,7 +602,7 @@ function validateAndDeriveCalls(items: readonly z.infer<typeof McpToolItemSchema
     else if (envelope.status !== "timeout" || envelope.data.condition_satisfied === true) throw new Error("P01 poll was neither a bounded timeout nor the first conclusive terminal receipt.");
     pollingCalls.push({
       poll_ordinal: pollOrdinal, chronological_ordinal: chronologicalOrdinal, tool_name: "wait_for_turn",
-      argument_sha256: canonicalRequestHash(item.arguments), response_sha256: canonicalRequestHash(envelope), result_request_id_sha256: sha256(envelope.request_id),
+      argument_sha256: canonicalRequestHash(item.arguments), response_sha256: canonicalResponseHash(envelope), result_request_id_sha256: sha256(envelope.request_id),
       run_id_sha256: sha256(runId), operation_id_sha256: null, polled_operation_id_sha256: sha256(parsed.operation_id),
     });
   }

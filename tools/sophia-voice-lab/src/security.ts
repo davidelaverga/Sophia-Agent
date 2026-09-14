@@ -236,18 +236,33 @@ export function sha256(value: string | Buffer): string {
 }
 
 export function canonicalRequestHash(input: unknown): string {
-  const state = { nodes: 0, characters: 0, seen: new WeakSet<object>() };
+  const state = { nodes: 0, characters: 0, seen: new WeakSet<object>(), maxBytes: 1_000_000, maxNodes: 50_000 };
   const canonical = stableJson(input, 0, state);
   if (Buffer.byteLength(canonical) > 1_000_000) throw new VoiceLabError(labError("ARGUMENT_BOUNDS", "Canonical request exceeded the bounded one-megabyte hashing contract.", "validation"));
   return sha256(canonical);
 }
 
-function stableJson(input: unknown, depth: number, state: { nodes: number; characters: number; seen: WeakSet<object> }): string {
+/** Trusted, already-redacted observation pages may contain up to 500 events.
+ * Keep their audit hashing separate from the unchanged inbound request limits.
+ * Canonical bytes remain identical to canonicalRequestHash for smaller values.
+ */
+export function canonicalResponseHash(input: unknown): string {
+  try {
+    const state = { nodes: 0, characters: 0, seen: new WeakSet<object>(), maxBytes: 8_000_000, maxNodes: 400_000 };
+    const canonical = stableJson(input, 0, state);
+    if (Buffer.byteLength(canonical) > state.maxBytes) throw new Error("response bytes");
+    return sha256(canonical);
+  } catch {
+    throw new VoiceLabError(labError("RESPONSE_BOUNDS", "Observation response exceeded the bounded audit contract; inspect a smaller event page.", "harness", true));
+  }
+}
+
+function stableJson(input: unknown, depth: number, state: { nodes: number; characters: number; seen: WeakSet<object>; maxBytes: number; maxNodes: number }): string {
   state.nodes += 1;
-  if (depth > 64 || state.nodes > 50_000) throw new VoiceLabError(labError("ARGUMENT_BOUNDS", "Canonical request exceeded the bounded depth or node contract.", "validation"));
+  if (depth > 64 || state.nodes > state.maxNodes) throw new VoiceLabError(labError("ARGUMENT_BOUNDS", "Canonical request exceeded the bounded depth or node contract.", "validation"));
   if (typeof input === "string") {
     state.characters += input.length;
-    if (state.characters > 1_000_000) throw new VoiceLabError(labError("ARGUMENT_BOUNDS", "Canonical request exceeded the bounded text contract.", "validation"));
+    if (state.characters > state.maxBytes) throw new VoiceLabError(labError("ARGUMENT_BOUNDS", "Canonical request exceeded the bounded text contract.", "validation"));
     return JSON.stringify(input);
   }
   if (Array.isArray(input)) {

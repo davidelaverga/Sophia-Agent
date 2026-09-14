@@ -11,6 +11,8 @@ import { D02GatewayContinuityObservationReceiptSchema, D02GatewaySettlementRecei
 import { TERMINAL_RUN_STATES, VoiceLabError, initialVerdicts, labError, type EvidenceRef, type LabError, type RunRecord, type RunState, type SuiteRecord, type Verdicts } from "./domain.js";
 import type { ClaimedOperation, EventAppendInput, RollingAdmissionLimits, VoiceLabLedger } from "./ledger.js";
 import { PostgresVoiceLabLedger } from "./postgres-ledger.js";
+import { productTurnId } from "./product-turn.js";
+import { deriveBrowserProcessTermination } from "./browser-process-termination.js";
 import { pkceS256 } from "./oauth.js";
 import { deriveRecoveryBrowserBinding, RecoveryControlBindingSchema, recoveryTransportBinding, validateRecoveryBrowserBinding, type RecoveryControlRecord } from "./recovery-control.js";
 import { authCleanupConfirmed, authoritativeLiveCleanupComplete, deriveExecutionEpochCleanupProof, recoveryComponentComplete, type ExecutionEpochCleanupProof } from "./execution-cleanup.js";
@@ -285,18 +287,30 @@ export class VoiceLabWorker {
     const controller = new AbortController();
     this.#currentOperationAbort = controller;
     this.#currentOperationRunId = claimed.run.id;
+    let operationExecutionComplete = false;
     let heartbeatInFlight = false;
     const heartbeat = setInterval(() => {
       if (heartbeatInFlight || controller.signal.aborted) return;
       heartbeatInFlight = true;
-      void this.ledger.heartbeatOperation(claimed.operation.id, this.workerId, claimed.operation.leaseEpoch, this.config.operationLeaseSeconds)
-        .then(async (owned) => {
-          if (!owned) { controller.abort(new VoiceLabError(labError("LEASE_LOST", "Operation lease was lost before the next irreversible action.", "conflict", true))); return; }
+      void (async () => {
+          // Once execution settles, finishOperation intentionally makes its
+          // lease non-renewable. Keep the independent browser lease alive for
+          // finalization/abort, without mistaking that terminal operation for
+          // ownership loss and cancelling the browser during cleanup.
+          if (!operationExecutionComplete) {
+            try {
+              const owned = await this.ledger.heartbeatOperation(claimed.operation.id, this.workerId, claimed.operation.leaseEpoch, this.config.operationLeaseSeconds);
+              if (!owned && !operationExecutionComplete) { controller.abort(new VoiceLabError(labError("LEASE_LOST", "Operation lease was lost before the next irreversible action.", "conflict", true))); return; }
+            } catch (error) {
+              if (!operationExecutionComplete) throw error;
+            }
+          }
+          if (controller.signal.aborted) return;
           const browserLease = this.#activeLeases.get(claimed.run.id);
           if (!browserLease) return;
           const browserOwned = await this.ledger.heartbeatBrowserLease(claimed.run.id, this.workerId, browserLease.epoch, this.config.browserLeaseSeconds);
           if (!browserOwned) controller.abort(new VoiceLabError(labError("BROWSER_LEASE_LOST", "Browser lease was lost while the operation was in flight.", "conflict", true)));
-        })
+        })()
         .catch(() => controller.abort(new VoiceLabError(labError("LEASE_HEARTBEAT_FAILED", "Operation lease could not be renewed safely.", "harness", true))))
         .finally(() => { heartbeatInFlight = false; });
     }, leaseHeartbeatIntervalMs(this.config.operationLeaseSeconds, this.config.browserLeaseSeconds));
@@ -328,6 +342,8 @@ export class VoiceLabWorker {
         }
         throw error;
       }
+      operationExecutionComplete = true;
+      clearTimeout(deadline);
       const finalizePreResource = result._finalize_pre_resource === true;
       const finalizeEnd = result._finalize_end === true;
       if (finalizePreResource) delete result._finalize_pre_resource;
@@ -339,6 +355,8 @@ export class VoiceLabWorker {
       if (finalizePreResource) await this.#finalizePreResourceScenario(claimed.run.id);
       if (finalizeEnd) await this.#finalizeEndRun(claimed.run.id);
     } catch (error) {
+      operationExecutionComplete = true;
+      clearTimeout(deadline);
       const detail = errorDetail(error);
       if (!operationSettled) {
         await this.ledger.finishOperation(claimed.operation.id, this.workerId, claimed.operation.leaseEpoch, detail.code === "OPERATION_TIMEOUT" ? "timed_out" : "failed", null, detail).catch(() => undefined);
@@ -1670,7 +1688,7 @@ export class VoiceLabWorker {
         threadId = stableJoin("thread_id", threadId, exactString(transcript.thread_id));
       } else if (event.kind.endsWith(".sophia.turn")) {
         const data = payload.data && typeof payload.data === "object" ? payload.data as Record<string, unknown> : {};
-        turnId = exactString(data.turnId) ?? turnId;
+        turnId = productTurnId(data) ?? turnId;
       }
     }
     if (canonicalSessionId !== run.canonicalSessionId || threadId !== run.threadId || providerSessionId !== run.providerSessionId || traceId !== run.traceId || providerEpoch !== run.providerEpoch || turnId !== run.turnId) {
@@ -1770,13 +1788,16 @@ export class VoiceLabWorker {
     const recoveryExpectedDeployment = allocationFree && this.config.readinessTarget !== null
       ? this.config.readinessTarget.expectedDeployment
       : run.target.expectedDeployment;
+    const processTermination = control
+      ? deriveBrowserProcessTermination(run, control, (await this.#allEvents(run.id)).events, this.driver.hasSession(run.id))
+      : null;
     for (let attempt = 0; attempt < 3; attempt += 1) {
       const recoveryGrant = await this.#mintAndVerify(run, "sophia-voice-lab-recovery", ["session:recover"], "session:recover", undefined, recoveryExpectedDeployment);
       const result = await this.driver.recover(recoveryTransportBinding({
         runId: run.id, testRunId: run.testRunId,
         cleanupObligationId: run.cleanupObligationId,
         gatewayOrigin: run.target.gatewayUrl,
-      }), recoveryGrant.token);
+      }), recoveryGrant.token, processTermination ?? undefined);
       combined.events.push(...result.events);
       combined.artifacts.push(...result.artifacts);
       if (result.events.some((event) => event.kind === "cleanup.recovery" && event.payload.complete === true)) break;
@@ -3511,7 +3532,7 @@ export function evaluateScenarioAssertions(run: RunRecord, events: import("./dom
         const currentStart = currentChain.started[0];
         const precedingEnded = currentStart ? ended.filter((event) => event.seq < currentStart.seq).at(-1) : undefined;
         if (target) observationEvents.push(target);
-        const exact = target !== undefined && precedingEnded?.seq === target.seq && targetData?.phase === "agent_ended" && targetData.turnId === turnId
+        const exact = target !== undefined && precedingEnded?.seq === target.seq && targetData?.phase === "agent_ended" && productTurnId(targetData) === turnId
           && expectedTurnId === turnId && Number.isSafeInteger(expectedCursor) && expectedCursor >= eventSeq
           && previousChain.completed.length === 1 && currentChain.started.length === 1 && previousChain.completed[0]!.seq < eventSeq && eventSeq < currentChain.started[0]!.seq
           && operation.createdAt.getTime() >= target.at.getTime()

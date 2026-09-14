@@ -1620,4 +1620,18 @@ describeRealPostgres('Voice Lab auth-ledger and cleanup-index real Postgres cont
     });
     expect(stdout).toContain('1 passed');
   }, 90_000);
+  it('preserves atomic process-death settlement and independent owner acknowledgement', async () => {
+    await resetProductObjects(pool);
+    await createProductPrerequisites(pool);
+    await runOperatorMigration('--apply');
+    const { stdout } = await execFileAsync('uv', [
+      'run', 'pytest', 'tests/test_voice_lab_process_termination_postgres.py', '-q',
+    ], {
+      cwd: resolve(process.cwd(), '../backend'),
+      env: { ...process.env, PYTHONPATH: '.', SOPHIA_VOICE_LAB_PRODUCT_AUTH_FIXTURE_READY: 'YES' },
+      timeout: 60_000,
+      maxBuffer: 1_000_000,
+    }).catch(error => { throw new Error(String(error.stdout ?? error.message).slice(-16000)); });
+    expect(stdout).toContain('1 passed');
+  }, 90_000);
 });

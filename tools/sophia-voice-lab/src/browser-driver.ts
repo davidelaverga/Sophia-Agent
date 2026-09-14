@@ -8,6 +8,7 @@ import { chromium, type APIRequestContext, type APIResponse, type Browser, type 
 
 import type { ResolvedAudio } from "./audio.js";
 import { buildVoiceLabInitScript } from "./browser-init.js";
+import { BrowserProcessTerminationSchema, type BrowserProcessTermination } from "./browser-process-termination.js";
 import type { VoiceLabConfig } from "./config.js";
 import { VoiceLabError, labError, type DeploymentDependencies, type DeploymentIdentity, type LabEvent, type RunRecord } from "./domain.js";
 import { canonicalRequestHash, redact, sha256, validateAllowedOrigin } from "./security.js";
@@ -478,7 +479,7 @@ export interface VoiceBrowserDriver {
   drain(runId: string): Promise<Omit<LabEvent, "runId" | "seq" | "at">[]>;
   end(run: RunRecord, frontendFinalizeCapability: string, frontendCleanupCapability: string): Promise<DriverEndResult>;
   abort(run: RunRecord, reason: string, frontendFinalizeCapability?: string, frontendCleanupCapability?: string): Promise<DriverEndResult>;
-  recover(run: RecoveryTransportBinding, recoveryCapability: string): Promise<DriverEndResult>;
+  recover(run: RecoveryTransportBinding, recoveryCapability: string, processTermination?: BrowserProcessTermination): Promise<DriverEndResult>;
   cancel(runId: string, reason: string): Promise<void>;
   hasSession(runId: string): boolean;
   readiness(): Promise<{ ok: boolean; detail: string; engine?: string; version?: string }>;
@@ -1188,9 +1189,35 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
     }
   }
 
-  async recover(run: RecoveryTransportBinding, recoveryCapability: string): Promise<DriverEndResult> {
+  async recover(run: RecoveryTransportBinding, recoveryCapability: string, processTermination?: BrowserProcessTermination): Promise<DriverEndResult> {
     const origin = validateAllowedOrigin(run.target.gatewayUrl, this.config.allowedOrigins).origin;
     const pathname = `${this.config.recoveryPathPrefix.replace(/\/$/, "")}/${encodeURIComponent(run.testRunId)}/recover`;
+    const processEvents: DriverEndResult["events"] = [];
+    if (processTermination !== undefined) {
+      const receipt = BrowserProcessTerminationSchema.parse(processTermination);
+      if (this.hasSession(run.id) || receipt.run_id_sha256 !== sha256(run.id)
+        || receipt.test_run_id_sha256 !== sha256(run.testRunId)
+        || receipt.cleanup_obligation_id_sha256 !== sha256(run.cleanupObligationId)) {
+        throw new VoiceLabError(labError("PROCESS_TERMINATION_BINDING_INVALID", "Recovery process termination does not match the absent exact browser.", "evidence", false));
+      }
+      let accepted = false;
+      let status: number | null = null;
+      const settlementSha = canonicalRequestHash({ basis: "browser_process_terminated", receipt });
+      try {
+        const response = await this.fetchImpl(new URL(pathname.replace(/\/recover$/, "/browser-process-closed"), origin), {
+          method: "POST", redirect: "error", signal: AbortSignal.timeout(15_000),
+          headers: { accept: "application/json", "content-type": "application/json", "X-Sophia-Voice-Lab-Recovery-Auth": this.config.recoveryInternalSecret, "X-Sophia-Voice-Lab-Capability": recoveryCapability },
+          body: JSON.stringify(receipt),
+        });
+        status = response.status;
+        const body = await response.json().catch(() => null) as Record<string, unknown> | null;
+        accepted = status === 202 && body?.accepted === true && body.receipt_sha256 === receipt.receipt_sha256
+          && body.provider_settlement_sha256 === settlementSha && body.provider_cleanup_proven === false;
+      } catch { /* Normal authenticated recovery remains available below. */ }
+      processEvents.push({ kind: "cleanup.browser_process_termination", source: accepted ? "canonical" : "worker",
+        payload: { accepted, http_status: status, receipt, provider_settlement_sha256: accepted ? settlementSha : null, provider_cleanup_proven: false },
+        dedupeKey: `process-termination:${run.id}:${receipt.receipt_sha256}:${accepted}:${status}` });
+    }
     try {
       const response = await this.fetchImpl(new URL(pathname, origin), {
         method: "POST", redirect: "error", signal: AbortSignal.timeout(15_000),
@@ -1234,9 +1261,9 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       // would collide even though the canonical payload changed. Hash the
       // already-redacted payload so exact transport replays dedupe while later
       // attempts remain append-only evidence.
-      return { events: [{ kind: "cleanup.recovery", source: "canonical", payload: recoveryPayload, dedupeKey: `recovery:${run.id}:${recoveryState}:${canonicalRequestHash(recoveryPayload)}` }], artifacts: [] };
+      return { events: [...processEvents, { kind: "cleanup.recovery", source: "canonical", payload: recoveryPayload, dedupeKey: `recovery:${run.id}:${recoveryState}:${canonicalRequestHash(recoveryPayload)}` }], artifacts: [] };
     } catch (error) {
-      return { events: [{ kind: "cleanup.recovery", source: "canonical", payload: { complete: false, pending: false, unavailable_reason: error instanceof Error ? error.name : "recovery_failed" }, dedupeKey: `recovery:${run.id}:unavailable` }], artifacts: [] };
+      return { events: [...processEvents, { kind: "cleanup.recovery", source: "canonical", payload: { complete: false, pending: false, unavailable_reason: error instanceof Error ? error.name : "recovery_failed" }, dedupeKey: `recovery:${run.id}:unavailable` }], artifacts: [] };
     }
   }
 
