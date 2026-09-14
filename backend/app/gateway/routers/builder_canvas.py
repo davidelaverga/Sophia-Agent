@@ -12,7 +12,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from langgraph_sdk import get_client
+from deerflow.sophia.langgraph_client_auth import get_client
 from langgraph_sdk.errors import NotFoundError
 from pydantic import BaseModel, Field
 
