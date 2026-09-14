@@ -848,7 +848,7 @@ def _read_session_recap(user_id: str, session_id: str) -> dict | None:
     from deerflow.sophia.memory_governance.flags import memory_feature_flags_for_owner
 
     try:
-        governed = memory_feature_flags_for_owner(user_id).candidate_ledger_write
+        governed = memory_feature_flags_for_owner(user_id).canonical_pool_read
         before = _recap_source_revision(user_id, session_id) if governed else None
         if governed and before is None:
             return None
@@ -875,7 +875,7 @@ def _write_session_recap(user_id: str, session_id: str, payload: dict) -> None:
     from deerflow.sophia.memory_governance.flags import memory_feature_flags_for_owner
 
     try:
-        governed = memory_feature_flags_for_owner(user_id).candidate_ledger_write
+        governed = memory_feature_flags_for_owner(user_id).canonical_pool_read
         before = _recap_source_revision(user_id, session_id) if governed else None
         if governed and before is None:
             raise OSError("recap_source_unavailable")

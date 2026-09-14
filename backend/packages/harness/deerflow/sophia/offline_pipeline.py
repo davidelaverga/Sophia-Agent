@@ -639,7 +639,7 @@ def _write_offline_recap(
     from deerflow.sophia.session_recap import source_revision
     from deerflow.sophia.session_store import SessionStore
 
-    governed = memory_feature_flags_for_owner(user_id).candidate_ledger_write
+    governed = memory_feature_flags_for_owner(user_id).canonical_pool_read
     recap_path = scoped_recap_path(USERS_DIR, user_id, session_id)
     record = None
     before = None

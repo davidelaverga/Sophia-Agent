@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
+from mem00_owner_fixture import declare_memory_owners
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
@@ -138,7 +139,8 @@ def _synthetic_session_record(
 
 
 @pytest.fixture(autouse=True)
-def isolated_session_store(tmp_path, monkeypatch):
+def isolated_session_store(tmp_path, monkeypatch, declare_memory_owners):
+    declare_memory_owners({'dev-user': 'legacy', 'real-user-123': 'legacy'})
     store = SessionStore(tmp_path / "users")
     monkeypatch.setattr(sessions_router, "_store", store)
     return store

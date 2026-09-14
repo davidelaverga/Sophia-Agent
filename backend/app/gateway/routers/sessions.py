@@ -953,7 +953,7 @@ def _invalidate_memory_source_before_delete(
         memory_feature_flags_for_owner,
     )
 
-    if not memory_feature_flags_for_owner(owner_user_id).candidate_ledger_write:
+    if not memory_feature_flags_for_owner(owner_user_id).canonical_pool_read:
         return
     from deerflow.sophia.memory_governance.refs import keyed_ref
     from deerflow.sophia.memory_governance.service import CanonicalMemoryService
@@ -976,7 +976,7 @@ def _cleanup_memory_session_recap(owner_user_id: str, session_id: str) -> None:
     from deerflow.sophia.memory_governance.flags import memory_feature_flags_for_owner
 
     try:
-        if memory_feature_flags_for_owner(owner_user_id).candidate_ledger_write:
+        if memory_feature_flags_for_owner(owner_user_id).canonical_pool_read:
             from app.gateway.routers.sophia import _delete_session_recap
 
             _delete_session_recap(owner_user_id, session_id)
@@ -984,7 +984,7 @@ def _cleanup_memory_session_recap(owner_user_id: str, session_id: str) -> None:
         logger.warning("Session recap cleanup unavailable")
         raise HTTPException(status_code=503, detail={"code": "session_recap_cleanup_unavailable"}) from None
     else:
-        if not memory_feature_flags_for_owner(owner_user_id).candidate_ledger_write:
+        if not memory_feature_flags_for_owner(owner_user_id).canonical_pool_read:
             return
         # This is deliberately a local-file receipt, not global erasure or
         # successful parent deletion (which has not happened yet).
