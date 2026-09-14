@@ -15,11 +15,14 @@ router = APIRouter(
 
 
 def _reject_when_mem00_owns_sophia_memory(user_id: str) -> None:
-    from deerflow.sophia.memory_governance.flags import (
-        memory_feature_flags_for_owner,
-    )
+    from deerflow.sophia.memory_governance.owner_authority import resolve_owner_authority
+    from deerflow.sophia.memory_governance.store import MemoryGovernanceUnavailable
 
-    if memory_feature_flags_for_owner(user_id).canonical_pool_read:
+    try:
+        authority = resolve_owner_authority(user_id)
+    except MemoryGovernanceUnavailable:
+        raise HTTPException(status_code=503, detail="memory_owner_authority_unavailable") from None
+    if authority.authority_state == "governed":
         raise HTTPException(
             status_code=410,
             detail="Generic DeerFlow memory is quarantined from Sophia under MEM00",

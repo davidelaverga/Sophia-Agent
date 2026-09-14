@@ -44,11 +44,15 @@ class UserIdentityMiddleware(AgentMiddleware[UserIdentityState]):
         if state.get("user_id") != self._user_id:
             updates["user_id"] = self._user_id
 
-        from deerflow.sophia.memory_governance.flags import (
-            memory_feature_flags_for_owner,
-        )
+        from deerflow.sophia.memory_governance.owner_authority import resolve_owner_authority
+        from deerflow.sophia.memory_governance.store import MemoryGovernanceUnavailable
 
-        if memory_feature_flags_for_owner(self._user_id).candidate_ledger_write:
+        try:
+            authority = resolve_owner_authority(self._user_id)
+        except MemoryGovernanceUnavailable:
+            log_middleware("UserIdentity", "neutral (authority unavailable)", _t0)
+            return updates or None
+        if authority.authority_state == "governed":
             log_middleware("UserIdentity", "disabled (MEM00 unversioned identity)", _t0)
             return updates or None
 
@@ -72,6 +76,16 @@ class UserIdentityMiddleware(AgentMiddleware[UserIdentityState]):
         try:
             content = identity_path.read_text(encoding="utf-8")
             if content.strip():
+                # A pre-read legacy decision cannot authorize publication after
+                # durable cutover or a governance outage during filesystem I/O.
+                try:
+                    current = resolve_owner_authority(self._user_id)
+                except MemoryGovernanceUnavailable:
+                    log_middleware("UserIdentity", "neutral (authority unavailable after read)", _t0)
+                    return updates or None
+                if current.authority_state != "legacy" or current.authority_epoch != authority.authority_epoch:
+                    log_middleware("UserIdentity", "neutral (authority changed during read)", _t0)
+                    return updates or None
                 blocks = list(state.get("system_prompt_blocks", []))
                 blocks.append(f"<user_identity>\n{content}\n</user_identity>")
                 updates["system_prompt_blocks"] = blocks

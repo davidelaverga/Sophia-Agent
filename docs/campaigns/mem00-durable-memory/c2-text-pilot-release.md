@@ -1,6 +1,6 @@
 # MEM00-C2 text pilot — current release record
 
-Successful target: MEMORY_TEXT_PILOT_READY. Current status: IMPLEMENTING, not activated or deployed. C2 replaces the prior PROMOTE-only/five-core-run prerequisites for this owner-restricted pilot. Historical C1 records and failures remain valid history, not additional first-use gates. Latest failed iteration863; next five-failure checkpoint867.
+Successful target: MEMORY_TEXT_PILOT_READY. Current status: IMPLEMENTING, not activated or deployed. C2 replaces the prior PROMOTE-only/five-core-run prerequisites for this owner-restricted pilot. Historical C1 records and failures remain valid history, not additional first-use gates. Latest failed iteration865; next five-failure checkpoint867.
 
 ## Candidate and scope
 
@@ -13,6 +13,14 @@ Successful target: MEMORY_TEXT_PILOT_READY. Current status: IMPLEMENTING, not ac
 - Provider: preserve deployed mem0ai1.0.9, V1 CRUD/V2 search, existing project/configuration. Truthful bounded pending cleanup is permitted; no false terminal-zero claim.
 
 ## Selected foundation, not a deployable release
+
+Published foundation d2944ebfa3319ff2b864311981a776b476b2ca1a has tree6018d1c4f587443fcc785847b4299fb79c158705, identical to locally tested35170741. The local authoring commit is retained on codex/mem00-c2-foundation-local; the pilot branch follows the verified published commit. GitHub publication used the existing authenticated connector, not a new token. Original memory/shared branches were not moved.
+
+Next selected callsites: existing direct memory facade denial before cache/provider access, generic memory HTTP refusal and neutral identity with post-file-read authority recheck. The facade's new retrieval-provenance extension and raw-write metric extension are deliberately not imported yet; their dependencies belong with actual text admission and serving evidence. This intermediate code must not be deployed before those remaining boundaries are integrated. Focused foundation+actual-entrypoint tests7a21f8:25 passed with9 pre-existing Pydantic warnings; no external calls. The identity read-race test is reused with its fixture import pointed at the selected foundation module.
+
+Publication failure accounting: EI864 (84c82a) expected HTTPS push, got missing username/credential. Hypothesis: CLI credential unavailable although an authenticated connector may exist. Verified connector profile davidelaverga and published the exact tree without new credentials. EI865: update-ref's documented create/update wording did not create the absent branch (422); follow-up fetch consequently found no ref. Owning fix: use create_branch for a new ref, then read-only fetch26ba53 and exact local/remote tree comparison3f9b84. No production/customer state affected, no temporary provider fixtures, no force push. These are publication/setup failures, not product-canary failures. Latest865,next867.
+
+Selected identity race regression is terminal: b3108b30 passed,9 existing Pydantic warnings, across foundation, actual facade/generic HTTP/identity entrypoints, and post-read cutover/outage/wrong-owner races. Whitespace check8fb56e passed. This does not claim complete consumer containment or a production journey.
 
 First extraction reuses the existing owner-authority resolver, typed model, exact store read and availability/authority separation. It includes only one proposed forward migration:2026_09_08_mem00_c1_owner_authority.sql, SHA2561044fd8e89438488e3cd349a759c8afa345dd8c68fa6da4a06a62676ca682b0d. That migration depends on the existing base memory schema; it does not enroll anyone. Production application and declarations remain pending exact approval review. No other private migration has been selected by default.
 

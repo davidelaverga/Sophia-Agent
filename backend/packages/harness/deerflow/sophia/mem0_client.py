@@ -205,47 +205,14 @@ def _memory_provider_status_from_client() -> dict[str, Any]:
 
 
 def warm_up() -> None:
-    """Eagerly initialize the Mem0 client and verify connectivity.
+    """Do not issue userless searches; startup is not memory authorization.
 
-    Call at startup (e.g., in make_sophia_agent) so the first user
-    request doesn't pay the cold-start latency (~1-2s for client init + ping).
-    Safe to call multiple times — the client is a singleton.
+    Actual connectivity/hosted behavior is measured by scoped readiness and
+    certification probes. This compatibility hook makes no provider call and
+    does not claim that connectivity has been verified.
     """
     global _warm_up_completed
-
-    from deerflow.sophia.memory_governance.flags import memory_feature_flags
-
-    if memory_feature_flags().canonical_pool_read:
-        # Governed retrieval has no content-bearing warmup query. Adapter and
-        # database availability are exercised by readiness/canary probes.
-        _warm_up_completed = True
-        return
-
-    if _warm_up_completed:
-        return
-
-    with _warm_up_lock:
-        if _warm_up_completed:
-            return
-
-        _t0 = time.perf_counter()
-        client = _get_client()
-        if client is None:
-            logger.warning("[Mem0] warm_up: client unavailable")
-            _warm_up_completed = True
-            return
-
-        try:
-            # The Mem0 SDK pings the server on first API call.
-            # Do a lightweight search to trigger that ping now.
-            client.search(query="warm_up", filters={"user_id": "__warmup__"}, limit=1)
-            elapsed = (time.perf_counter() - _t0) * 1000
-            logger.info("[Mem0] warm_up completed (%.0fms)", elapsed)
-        except Exception:
-            elapsed = (time.perf_counter() - _t0) * 1000
-            logger.warning("[Mem0] warm_up ping failed (%.0fms)", elapsed, exc_info=True)
-        finally:
-            _warm_up_completed = True
+    _warm_up_completed = True
 
 
 def search_memories(
@@ -297,11 +264,14 @@ def search_memories_with_diagnostics(
     caller: str = "legacy_facade",
 ) -> dict[str, Any]:
     """Search Mem0 and return privacy-safe provider diagnostics with results."""
-    from deerflow.sophia.memory_governance.flags import (
-        memory_feature_flags_for_owner,
-    )
+    from deerflow.sophia.memory_governance.owner_authority import resolved_memory_flags_for_owner
+    from deerflow.sophia.memory_governance.store import MemoryGovernanceUnavailable
 
-    flags = memory_feature_flags_for_owner(user_id)
+    try:
+        flags = resolved_memory_flags_for_owner(user_id)
+    except MemoryGovernanceUnavailable as exc:
+        return {"memories": [], "provider_status": "unavailable", "provider_reason": exc.reason,
+            "provider_transport": "none", "cache_status": "disabled_authority_unavailable", "latency_ms": 0}
     if flags.canonical_pool_read and caller in {
         "voice_setup",
         "voice_dynamic_retrieval",
@@ -589,11 +559,14 @@ def add_memories(
     Returns the result from the SDK (typically a list of memory dicts),
     or an empty list if Mem0 is unavailable or the call fails.
     """
-    from deerflow.sophia.memory_governance.flags import (
-        memory_feature_flags_for_owner,
-    )
+    from deerflow.sophia.memory_governance.owner_authority import resolve_owner_authority
+    from deerflow.sophia.memory_governance.store import MemoryGovernanceUnavailable
 
-    if memory_feature_flags_for_owner(user_id).candidate_ledger_write:
+    try:
+        authority = resolve_owner_authority(user_id)
+    except MemoryGovernanceUnavailable:
+        raise MemoryProviderUnavailableError("memory_owner_authority_unavailable") from None
+    if authority.authority_state == "governed":
         raise MemoryProviderUnavailableError("raw_memory_write_disabled_by_mem00")
     client = _get_client()
     if client is None:
@@ -824,11 +797,15 @@ def _update_memory_metadata_via_rest(*, client, memory_id: str, metadata: dict) 
 
 
 def reconcile_review_metadata_with_mem0(user_id: str) -> int:
-    from deerflow.sophia.memory_governance.flags import (
-        memory_feature_flags_for_owner,
-    )
+    from deerflow.sophia.memory_governance.owner_authority import resolve_owner_authority
+    from deerflow.sophia.memory_governance.store import MemoryGovernanceUnavailable
 
-    if memory_feature_flags_for_owner(user_id).candidate_ledger_write:
+    try:
+        authority = resolve_owner_authority(user_id)
+    except MemoryGovernanceUnavailable:
+        logger.info("Legacy metadata reconciliation unavailable: owner authority unproven")
+        return 0
+    if authority.authority_state == "governed":
         return 0
     client = _get_client()
     if client is None:
