@@ -87,6 +87,35 @@ def _make_wakeup_with_fake_client(
 
 
 @pytest.mark.anyio
+async def test_shared_wakeup_client_keeps_concurrent_event_owners_separate():
+    from deerflow.sophia.langgraph_client_auth import _owner, langgraph_owner_scope
+    seen = []
+    class Runs:
+        async def create(self, thread_id, assistant_id, **kwargs):
+            await asyncio.sleep(0)
+            seen.append((_owner.get(), kwargs["context"]["user_id"]))
+    worker = CompanionWakeup(langgraph_url="http://test-langgraph")
+    worker._client = _FakeClient(Runs())
+    with langgraph_owner_scope("outer"):
+        outcomes = await asyncio.gather(*(worker.wake({"thread_id": f"thread-{owner}",
+            "task_id": f"task-{owner}", "status": "success", "user_id": owner}) for owner in ["owner-a", "owner-b"]))
+        assert _owner.get() == "outer"
+    assert _owner.get() is None
+    assert outcomes == [True, True]
+    assert sorted(seen) == [("owner-a", "owner-a"), ("owner-b", "owner-b")]
+
+
+@pytest.mark.anyio
+async def test_wakeup_owner_scope_is_reset_after_dispatch_exception():
+    from deerflow.sophia.langgraph_client_auth import _owner, langgraph_owner_scope
+    worker, _ = _make_wakeup_with_fake_client(raises=RuntimeError("synthetic"))
+    with langgraph_owner_scope("outer"):
+        assert not await worker.wake({"thread_id": "thread-a", "task_id": "task-a", "status": "success", "user_id": "owner-a"})
+        assert _owner.get() == "outer"
+    assert _owner.get() is None
+
+
+@pytest.mark.anyio
 async def test_wake_queues_run_on_success_event():
     wakeup, runs = _make_wakeup_with_fake_client()
 
