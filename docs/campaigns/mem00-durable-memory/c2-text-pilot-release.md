@@ -211,6 +211,145 @@ even that: the hosted journey has not run.
 
 
 
+### Deployment-readiness addendum (2026-09-15, second session — authenticated)
+
+Recorded after authenticated browser access to Render, Vercel, Mem0, Supabase and
+the real app at `sophia-ei.com`. Everything below is live-observed or
+locally-tested unless marked otherwise.
+
+**Live component pins (corrected and extended).**
+
+- `sophia-gateway.onrender.com/ready` → 200, `commit_sha`
+  `0c215c1ba0a2218ef224f65601092d5845bb07cf`, `service_id`
+  `srv-d7be5s9r0fns7397l4g0`; `/health` → 200 with deck-quality ready. The Gateway
+  is live, one commit behind the shared head `2deb762a`.
+- `sophia-langgraph.onrender.com` → live, LangGraph `0.8.1`, `langgraph_py`
+  `1.2.0`, self-hosted, `langsmith: false`.
+- `sophia-voice-2uzr.onrender.com/ready` → live at build `35c6467c`,
+  `voice_lab_enabled: false`, kill switch engaged.
+- `sophia-ei.com` → live, Vercel deployment `dpl_4TxUxd6Ee27JF8T42jre5f7Xz2W8`.
+- `sophia-backend-g8fe.onrender.com` → 503 suspended by owner. Reconciled: this
+  is the *legacy* auth backend (`SOPHIA_AUTH_BACKEND_URL`), not the Gateway.
+  The ordinary app authenticates through Better Auth + Google in the frontend.
+- LangSmith is the **EU** region: `render.yaml` sets
+  `LANGSMITH_ENDPOINT=https://eu.api.smith.langchain.com`, project `Sophia`.
+
+**Production schema — the exact unapplied set is now known (was unknown).**
+
+A read-only Supabase query against the live production database returned:
+
+| object | function | relation | trigger |
+| --- | --- | --- | --- |
+| `sophia_memory_contract` | false | **true** | false |
+| `sophia_memory_dispatch_receipt_immutable` | false | false | false |
+| `sophia_memory_expire_governed_candidates` | false | false | false |
+| `sophia_memory_lookup_command_receipt` | false | false | false |
+| `sophia_memory_prompt_owner_authority_fence` | false | false | false |
+| `sophia_memory_register_builder_handoff` | false | false | false |
+| `sophia_memory_resolve_provider_hits` | false | false | false |
+| `sophia_memory_review_snapshot` | false | false | false |
+| `sophia_memory_source_decision_overlaps` | false | false | false |
+| `sophia_memory_source_decision_trigger` | false | false | false |
+| `sophia_memory_source_intake_version_trigger` | false | false | false |
+| `sophia_memory_source_snapshot` | false | false | false |
+
+`sophia_memory_contract` exists, so the **2026-09-02 base migration is applied**
+(it also creates `sophia_memory_tombstone`, `sophia_memory_user_governance` and
+`sophia_memory_expire_candidates` — verified in the migration source). **None of
+the twelve new C1/C2 migration objects exist.** Therefore all twelve new
+migrations are unapplied, and the pilot candidate is **not deployable** until
+that exact set is authorized and applied. This is the concrete restricted action
+that needs approval; it is not deferred test work.
+
+
+**Integration candidate constructed and verified (not deployed).**
+
+Both published branches left untouched; no reset, rebase or force push.
+
+- Pilot branch is now at `f3378574bf73ee1823dd03199e243b628ffa75a0`, tree
+  `2c24c9648adcddc6e964648a4ec47377c3aac8ef`: `9cb84acf` (WP1 identity-bound
+  review join + governed expiry RPC) and `f3378574` (excluded-witness fix).
+- Integration branch `codex/mem00-c2-integration-r1` at
+  `7632e7a2e630b9e2d3f77b5627037e2e23178a8a`, tree
+  `e040971cde1991ee1dedd216c2f8beab33a21360`, merging the shared Voice Lab
+  repairs at `2deb762a` with the pilot branch. The merge is conflict-free.
+- Gateway hotspot reconciled explicitly: the shared side's Voice Lab recovery
+  path regex (which gained `browser-process-closed`) is byte-preserved, and the
+  pilot side's `langgraph_auth`/`memory_source` routers plus
+  `langgraph_owner_scope` middleware are preserved. `voice_lab_recovery.py` is
+  identical to the shared branch; Voice Lab markers (voice_lab 81, cleanup 9,
+  lease 2) and pilot markers (owner scope 2, memory_governance 9) both survive.
+- `backend/langgraph.json` has **zero** diff vs the shared branch: the
+  receiving auth policy remains staged, as required.
+- Verification on the merged tree: `test_voice_lab_recovery.py` +
+  `test_session_store.py` **67 passed**; frontend affected selection **75
+  passed, 2 skipped**; broader backend selection
+  `mem00 or voice_lab or session or gateway_app_mounts or render_config`
+  **41 failed, 1721 passed, 6 skipped**.
+
+**Pre-existing failures, classified honestly (not product failures).**
+
+The 41 remaining failures are concentrated in `test_extraction.py` (22),
+`test_gateway_sophia.py` (10), `test_sophia_middlewares.py` (8) and
+`test_voice_lab_route_isolation.py` (1), and all raise
+`MemoryGovernanceUnavailable: memory_owner_authority_unavailable` from
+`resolve_owner_authority`. These tests contain **no** durable-owner fixture
+setup, so the resolver correctly fails closed. This is a **fixture gap in
+obsolete legacy tests**, not a product defect — the fail-closed behaviour is the
+intended safety contract. Confirmed pre-existing: the published pilot head
+`c5e64774` already scored **44 failed / 1639 passed** on this selection, before
+any of this session's commits; the session's commits add **zero** failures and
+the excluded-witness fix removes exactly three. The published "1,454 isolated
+runtime tests" headline clearly did not include this selection, which is why the
+defects below went unreported.
+
+**EI929 — a real product defect found by the preserved WIP test.** The published
+pilot candidate added `memory_source_version` to `SessionMessageRecord` with
+`exclude=True`, so the field was present in `model_fields` but absent from every
+persisted row, while `read_exact_session_messages` compared the raw row key set
+against `model_fields`. It therefore failed closed on *every* legitimate
+synthetic finalization transcript. Downstream this surfaced as
+`canonical_evidence_raw_message_set_invalid` and broke three Voice Lab
+guarantees that pass on the shared branch. Fixed by deriving the expected
+raw-row key set from the model's own serialization contract. Impact in
+production today is nil only because Voice Lab is disabled
+(`voice_lab_enabled: false`); it would have broken expiry purge and canonical
+evidence retention as soon as Voice Lab were re-enabled.
+
+**Browser/authentication note.** Google blocks OAuth sign-in inside
+agent-browser's bundled "Chrome for Testing" (`navigator.webdriver` true and a
+mock keychain that cannot decrypt real Chrome cookies); it returned
+"Couldn't sign you in — This browser or app may not be secure" and later a
+`google.com/sorry` block. Attaching agent-browser to a *real* Chrome launched
+with `--remote-debugging-port=9222` works (`navigator.webdriver` false) and is
+how the authenticated observations above were obtained. Also: the failed
+LangSmith callback exposed a live access token, Google provider token and
+refresh token in the callback URL fragment — treated as a credential exposure
+and not reproduced here.
+**LangSmith trace coverage — read, and honestly degraded.**
+
+LangSmith EU is reachable and authenticated (`davide.laverga@gmail.com`), org
+`26b7385f-8e69-4a13-b4da-49873ae46191`. Three projects exist: `Sophia`
+(`7dd40980-665a-4f4a-95c3-582e6270b707`, retention 14d),
+`Sophia-Gemini-Live-Voice`, and a legacy `"Sophia"` (literal quotes, 3 months
+old). The projects list reports **0 traces in 7 days** for all three.
+
+Reading the `Sophia` project directly shows the newest traces are from
+**2026-09-07**: trace name `memory.prompt.admission`, input `zero_memory`,
+tags `sophia` / `memory-governance` / `sophia.memory.event.v1`, metadata
+confirming `LANGSMITH_ENDPOINT: https://eu.api.smith.langchain.com` and
+`LANGSMITH_PROJECT_UUID: 7dd40980-...`. They are content-free governance events,
+consistent with the rule that no personal memory plaintext is logged.
+
+Consequences: (a) the memory-governance telemetry shape is confirmed and usable
+as an evidence join; (b) there is **no trace evidence for the C2 text-pilot
+work**, because `langsmith: false` on the deployed LangGraph and
+`LANGSMITH_TRACING=false` mean tracing was off. Degraded trace coverage is
+recorded here rather than treated as a new global release block, but it also
+means tracing cannot substitute for the required authoritative
+lifecycle/admission evidence. LangSmith retention is now capped at 180 days
+(notice effective 2026-09-14) and this project is set to 14d, so older traces
+aged out.
 ## Candidate and scope
 
 - Isolated worktree: Sophia-Agent-mem00-c2, branch codex/mem00-text-pilot.
