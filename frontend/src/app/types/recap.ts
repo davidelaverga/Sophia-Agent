@@ -200,6 +200,17 @@ export interface CommitMemoriesResponse {
     candidate_id: string;
     message: string;
   }>;
+  /**
+   * Committed state could not be joined exactly. Recover through the original
+   * command receipt; never re-submit the decision.
+   */
+  ambiguous?: string[];
+  /** Content-free references bound to the original command key. */
+  commands?: Array<{
+    candidate_id: string;
+    idempotency_key: string;
+    expected_candidate_revision: number;
+  }>;
 }
 
 // =============================================================================

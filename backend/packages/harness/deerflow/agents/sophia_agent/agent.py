@@ -81,9 +81,12 @@ _ASYNC_BUILDER_SYSTEM_PROMPT = (
     '`task_type` ("document" / "research" / "presentation" / "frontend" / '
     '"visual_report") and a complete, self-contained `description`. (Do NOT '
     "call the lower-level `start_async_task` tool directly — "
-    "`start_builder_task` enriches the description with relevant memories, "
-    "your current emotional read, ritual context, and explicit URLs the user "
-    "provided.)\n"
+    "`start_builder_task` binds the build to independently authorized sources "
+    "and adds duplicate-launch protection plus the explicit URLs the user "
+    "provided. For an owner under durable memory governance it does NOT add "
+    "personal memories, your emotional read or ritual context to the builder "
+    "brief, so the `description` you write must be complete and "
+    "self-contained on its own.)\n"
     "  Ack like: \"Starting the build now — I'll have it back to you shortly.\"\n"
     "\n"
     "- `update_async_task(task_id, message)` — user course-corrects mid-build "
@@ -183,8 +186,10 @@ def _build_async_subagent_middleware() -> AsyncSubAgentMiddleware:
         "description": (
             "Sophia's builder graph. Delegate file-creation, research, "
             "presentation, visual_report, frontend, and document tasks via "
-            "`start_builder_task`. The wrapper's enriched description "
-            "becomes the builder's task brief."
+            "`start_builder_task`. The wrapper's description becomes the "
+            "builder's task brief; for an owner under durable memory "
+            "governance it is source-only and carries no personal memories, "
+            "emotional read or ritual context."
         ),
         "graph_id": "sophia_builder",
     }

@@ -165,3 +165,123 @@ describe('Recap Store', () => {
     expect(useRecapStore.getState().getDecisionForCandidate('session-1', 'candidate-1')?.status).toBe('committed');
   });
 });
+
+// =============================================================================
+// MEM00-C2 WP1 — lost successful response recovery through the command receipt
+// =============================================================================
+
+const receiptFixture = {
+  event_id: '3f2504e0-4f89-11d3-9a0c-0305e82c3301',
+  operation_id: 'recap:session-1:candidate-1:4:operation',
+  event_type: 'candidate_approved',
+  resulting_lifecycle: 'active',
+  candidate_id: 'candidate-1',
+  user_catalog_generation: 2,
+  user_revocation_epoch: 0,
+  idempotent_replay: true,
+};
+
+const committedStatus = { status: 'committed', historical_result_only: true, receipt: receiptFixture };
+const notFoundStatus = { status: 'not_found', historical_result_only: true, receipt: null };
+
+function seedApprovedSession(sessionId: string) {
+  const store = useRecapStore.getState();
+  store.setArtifacts(sessionId, {
+    sessionId, sessionType: 'open', contextMode: 'life', status: 'ready',
+    memoryCandidates: [{ id: 'candidate-1', text: 'Synthetic recalled fact', category: 'fact', candidateRevision: 4 }],
+  });
+  store.setDecision(sessionId, 'candidate-1', 'approved');
+}
+
+const postCalls = (fetchMock: ReturnType<typeof vi.fn>) =>
+  fetchMock.mock.calls.filter(([url]) => url === '/api/memory/commit-candidates');
+
+describe('MEM00-C2 WP1 lost-response recovery', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    vi.restoreAllMocks();
+    useRecapStore.setState({ artifacts: {}, decisions: {}, commitStatus: {} });
+  });
+
+  it('recovers the original committed decision without a second mutation', async () => {
+    // The commit succeeded upstream but its response could not be joined.
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url === '/api/memory/commit-candidates') {
+        return { ok: true, json: async () => ({ committed: [], discarded: [], errors: [], ambiguous: ['candidate-1'] }) };
+      }
+      if (url.startsWith('/api/memory/commands/')) {
+        return { ok: true, json: async () => committedStatus };
+      }
+      throw new Error(`unexpected url ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    seedApprovedSession('session-1');
+
+    const result = await useRecapStore.getState().commitMemories('session-1', 'thread-1');
+
+    // Exactly one mutation attempt: recovery reads the receipt, never re-posts.
+    expect(postCalls(fetchMock)).toHaveLength(1);
+    expect(fetchMock.mock.calls.some(([url]) => String(url).startsWith('/api/memory/commands/'))).toBe(true);
+    expect(result).toMatchObject({ committed: ['candidate-1'], errors: [], ambiguous: [] });
+    expect(useRecapStore.getState().getCommitStatus('session-1')).toBe('committed');
+    expect(useRecapStore.getState().getDecisionForCandidate('session-1', 'candidate-1')?.status).toBe('committed');
+  });
+
+  it('recovers a wholly lost response from the original command key', async () => {
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url === '/api/memory/commit-candidates') throw new Error('network transport lost');
+      if (url.startsWith('/api/memory/commands/')) {
+        return { ok: true, json: async () => committedStatus };
+      }
+      throw new Error(`unexpected url ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    seedApprovedSession('session-1');
+
+    await expect(useRecapStore.getState().commitMemories('session-1')).rejects.toThrow('network transport lost');
+
+    expect(postCalls(fetchMock)).toHaveLength(1);
+    // The historical receipt confirms the original decision landed.
+    expect(useRecapStore.getState().getDecisionForCandidate('session-1', 'candidate-1')?.status).toBe('committed');
+  });
+
+  it('reports a definite not-committed receipt as an error, not a silent success', async () => {
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url === '/api/memory/commit-candidates') {
+        return { ok: true, json: async () => ({ committed: [], discarded: [], errors: [], ambiguous: ['candidate-1'] }) };
+      }
+      if (url.startsWith('/api/memory/commands/')) {
+        return { ok: true, json: async () => notFoundStatus };
+      }
+      throw new Error(`unexpected url ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    seedApprovedSession('session-1');
+
+    const result = await useRecapStore.getState().commitMemories('session-1');
+
+    expect(result).toMatchObject({
+      committed: [],
+      ambiguous: [],
+      errors: [{ candidate_id: 'candidate-1', message: 'review_command_not_committed' }],
+    });
+    expect(useRecapStore.getState().getCommitStatus('session-1')).toBe('error');
+  });
+
+  it('keeps an unreadable receipt ambiguous instead of claiming either outcome', async () => {
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url === '/api/memory/commit-candidates') {
+        return { ok: true, json: async () => ({ committed: [], discarded: [], errors: [], ambiguous: ['candidate-1'] }) };
+      }
+      return { ok: false, status: 503, json: async () => ({ available: false }) };
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    seedApprovedSession('session-1');
+
+    const result = await useRecapStore.getState().commitMemories('session-1');
+
+    expect(result).toMatchObject({ committed: [], errors: [], ambiguous: ['candidate-1'] });
+    expect(useRecapStore.getState().getCommitStatus('session-1')).toBe('error');
+  });
+});
+
