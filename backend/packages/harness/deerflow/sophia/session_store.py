@@ -1098,7 +1098,17 @@ class FilesystemSessionTranscriptStore:
             raise SessionEvidenceIntegrityError(
                 "Synthetic finalization transcript file drifted."
             )
-        expected_fields = set(SessionMessageRecord.model_fields)
+        # Derive the expected raw-row key set from the model's own
+        # serialization contract. A field declared with ``exclude=True`` — such
+        # as the database-issued ``memory_source_version`` dependency witness —
+        # is never persisted, so requiring it in the stored row would fail closed
+        # on every legitimate transcript. Genuine drift (extra, missing or
+        # renamed keys) still fails closed.
+        expected_fields = {
+            name
+            for name, field in SessionMessageRecord.model_fields.items()
+            if not field.exclude
+        }
         messages: list[SessionMessageRecord] = []
         for item in data["messages"]:
             if (
