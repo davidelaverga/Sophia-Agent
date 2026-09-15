@@ -3,6 +3,7 @@ import type { Dispatch, SetStateAction } from 'react';
 
 import type { UIMessage } from '../components/session';
 import { haptic } from '../hooks/useHaptics';
+import type { SourceSendInput } from '../lib/memory-source-client';
 import type { FeedbackType } from '../types/sophia-ui-message';
 
 interface UseSessionUiCallbacksParams {
@@ -12,7 +13,9 @@ interface UseSessionUiCallbacksParams {
   setInput: Dispatch<SetStateAction<string>>;
   focusComposer: () => void;
   messages: UIMessage[];
-  sendMessage: (payload: { text: string }) => void | Promise<void>;
+  sendMessage: (payload: SourceSendInput) => void | Promise<void>;
+  retrySourceInput: (text: string, messageId: string | null) => SourceSendInput;
+  showToast: (args: { message: string; variant: 'error' }) => void;
   navigateHome: () => void;
   clearSessionError: () => void;
   endSession: () => void;
@@ -27,6 +30,8 @@ export function useSessionUiCallbacks({
   focusComposer,
   messages,
   sendMessage,
+  retrySourceInput,
+  showToast,
   navigateHome,
   clearSessionError,
   endSession,
@@ -47,12 +52,15 @@ export function useSessionUiCallbacks({
   }, [setFeedback, setShowFeedbackToast]);
 
   const handleStreamErrorRetry = useCallback(() => {
-    setDismissedError(true);
     const lastUserMsg = [...messages].reverse().find((message) => message.role === 'user');
     if (lastUserMsg) {
-      void sendMessage({ text: lastUserMsg.content });
+      let original: SourceSendInput;
+      try { original = retrySourceInput(lastUserMsg.content, lastUserMsg.id); }
+      catch { showToast({ message: 'The original source action is unavailable. No replacement action was created or sent.', variant: 'error' }); return; }
+      setDismissedError(true);
+      void Promise.resolve(sendMessage(original)).catch(() => setDismissedError(false));
     }
-  }, [messages, sendMessage, setDismissedError]);
+  }, [messages, sendMessage, retrySourceInput, setDismissedError, showToast]);
 
   const handleDismissStreamError = useCallback(() => {
     setDismissedError(true);

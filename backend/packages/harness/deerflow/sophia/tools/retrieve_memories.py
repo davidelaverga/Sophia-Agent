@@ -34,16 +34,34 @@ def make_retrieve_memories_tool(user_id: str) -> StructuredTool:
     remains (query, categories) without exposing user_id as a parameter.
     """
 
-    def _retrieve_memories(query: str, categories: list[str] | None = None) -> str:
+    def _retrieve_memories(query: str, categories: list[str] | None = None) -> tuple[str, dict | None]:
         try:
+            from deerflow.sophia.memory_governance.flags import memory_feature_flags_for_owner
+            if memory_feature_flags_for_owner(user_id).canonical_pool_read:
+                from deerflow.sophia.mem0_client import search_memories_with_diagnostics
+                from deerflow.sophia.memory_governance.retrieval_provenance import RETRIEVAL_PROOF_KEY, verify_retrieval_proof
+                from deerflow.sophia.tools.retrieve_memories_contract import sanitize_retrieve_memories_query
+                clean_query, _ = sanitize_retrieve_memories_query(query)
+                if not clean_query:
+                    return "No relevant memories found.", None
+                result = search_memories_with_diagnostics(user_id=user_id, query=clean_query, categories=categories or [],
+                    limit=15, log_content_previews=False, caller="text_explicit_retrieve_memories")
+                rows = result["memories"]
+                if not rows:
+                    return ("No relevant memories found." if result.get("provider_status") == "ok" else "Memory retrieval temporarily unavailable."), None
+                text = "\n".join("- " + item["content"] for item in rows)
+                proof = rows[0].get(RETRIEVAL_PROOF_KEY)
+                if verify_retrieval_proof(owner_id=user_id, proof=proof, rendered_text=text) is None:
+                    return "Memory retrieval temporarily unavailable.", None
+                return text, {RETRIEVAL_PROOF_KEY: proof}
             return retrieve_memories_for_text_companion(
                 user_id=user_id,
                 query=query,
                 categories=categories or [],
-            )
+            ), None
         except Exception:
-            logger.warning("Memory retrieval failed", exc_info=True)
-            return "Memory retrieval temporarily unavailable."
+            logger.warning("Memory retrieval failed ownerExcluded=true contentExcluded=true")
+            return "Memory retrieval temporarily unavailable.", None
 
     return StructuredTool.from_function(
         func=_retrieve_memories,
@@ -54,4 +72,5 @@ def make_retrieve_memories_tool(user_id: str) -> StructuredTool:
             "Returns relevant memories as a formatted list."
         ),
         args_schema=RetrieveMemoriesInput,
+        response_format="content_and_artifact",
     )

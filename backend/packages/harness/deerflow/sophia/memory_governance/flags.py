@@ -85,16 +85,11 @@ def memory_feature_flags(environ: Mapping[str, str] | None = None) -> MemoryFeat
     return MemoryFeatureFlags.from_environ(environ)
 
 
-def memory_feature_flags_for_owner(
+def configured_memory_feature_flags_for_owner(
     owner_id: str,
     environ: Mapping[str, str] | None = None,
 ) -> MemoryFeatureFlags:
-    """Return enabled flags only for an exact server-authorized principal.
-
-    A nonempty feature configuration without an explicit cohort is rejected at
-    request time. Nonmembers retain the pre-cutover behavior while the global
-    contract is in shadow mode; no MEM00 writer or reader activates for them.
-    """
+    """Availability only; a flag or cohort never proves memory authority."""
 
     flags = memory_feature_flags(environ)
     if not flags.any_enabled():
@@ -103,3 +98,10 @@ def memory_feature_flags_for_owner(
     if not principals:
         raise MemoryFlagConfigurationError("memory_features_without_cohort")
     return flags if owner_id.strip() in principals else MemoryFeatureFlags()
+
+
+def memory_feature_flags_for_owner(owner_id: str, environ: Mapping[str, str] | None = None) -> MemoryFeatureFlags:
+    """Resolve durable ownership before computing owner-scoped availability."""
+    from .owner_authority import resolved_memory_flags_for_owner
+
+    return resolved_memory_flags_for_owner(owner_id, environ=environ)

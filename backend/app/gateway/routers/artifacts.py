@@ -10,7 +10,7 @@ from urllib.parse import quote, unquote
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, Response
-from langgraph_sdk import get_client
+from deerflow.sophia.langgraph_client_auth import get_client
 from pydantic import BaseModel, Field
 
 from app.gateway.artifact_registry import (
@@ -911,7 +911,7 @@ async def _associated_builder_task_thread_ids(parent_thread_id: str) -> tuple[st
     normalized output-relative artifact path.
     """
     try:
-        from langgraph_sdk import get_client
+        from deerflow.sophia.langgraph_client_auth import get_client
 
         client = get_client(url=_langgraph_url())
         state = await client.threads.get_state(parent_thread_id)

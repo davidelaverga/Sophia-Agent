@@ -33,6 +33,7 @@ import logging
 from types import SimpleNamespace
 
 import pytest
+from mem00_owner_fixture import declare_memory_owners
 
 from deerflow.agents.sophia_agent.middlewares import (
     companion_provider_fallback as mw_module,
@@ -546,7 +547,7 @@ class TestVisibleReplySurfacing:
     visible reply the same way a successful Anthropic call does."""
 
     def test_fallback_model_does_not_set_streaming(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, declare_memory_owners
     ) -> None:
         # Regression guard for the root cause. Explicit ``streaming=True`` made
         # the fallback drive its own v1 ``.stream()`` path, whose tokens
@@ -561,8 +562,18 @@ class TestVisibleReplySurfacing:
 
         monkeypatch.setenv(FALLBACK_MODEL_ENV, "gpt-4o-mini")
         monkeypatch.setenv("OPENAI_API_KEY", _PLACEHOLDER_KEY)
-        model = build_fallback_chat_model()
-        assert getattr(model, "streaming", False) is False
+        from deerflow.agents.sophia_agent.middlewares.memory_context import MemoryContextEntryMiddleware, MemoryRunGuard
+        from test_mem00_model_clients import close_model
+        import asyncio
+
+        declare_memory_owners({"synthetic-fallback-owner": "legacy"})
+        guard = MemoryRunGuard(owner_id="synthetic-fallback-owner", config={})
+        model = MemoryContextEntryMiddleware(guard).wrap_model_call(None, lambda _: build_fallback_chat_model())
+        try:
+            assert getattr(model, "streaming", False) is False
+            assert model.memory_authority_factory.__self__ is guard
+        finally:
+            asyncio.run(close_model(model))
 
     def test_text_response_surfaces_and_is_not_flagged_empty(
         self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture

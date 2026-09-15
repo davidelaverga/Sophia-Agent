@@ -2,6 +2,7 @@ import { useCallback } from 'react';
 import type { MutableRefObject } from 'react';
 
 import { logger } from '../lib/error-logger';
+import type { SourceSendInput } from '../lib/memory-source-client';
 import { recoverFromDisconnect } from '../lib/stream-recovery';
 
 type ChatMessage = {
@@ -33,7 +34,8 @@ interface UseSessionRetryHandlersParams<TChatMessage extends ChatMessage> {
   lastUserMessageId: string | null;
   chatMessages: TChatMessage[];
   setChatMessages: (messages: TChatMessage[] | ((messages: TChatMessage[]) => TChatMessage[])) => void;
-  sendMessage: (params: { text: string }) => Promise<void>;
+  sendMessage: (params: SourceSendInput) => Promise<void>;
+  retrySourceInput: (text: string, messageId: string | null) => SourceSendInput;
   showToast: (args: { message: string; variant: 'info' | 'success' | 'error'; durationMs?: number }) => void;
   messageCountBeforeSendRef: MutableRefObject<number>;
   setCancelledMessageId: (value: string | null) => void;
@@ -56,6 +58,7 @@ export function useSessionRetryHandlers<TChatMessage extends ChatMessage>({
   chatMessages,
   setChatMessages,
   sendMessage,
+  retrySourceInput,
   showToast,
   messageCountBeforeSendRef,
   setCancelledMessageId,
@@ -71,7 +74,15 @@ export function useSessionRetryHandlers<TChatMessage extends ChatMessage>({
       return { kind: 'none' };
     }
 
-    if (isInterruptedByRefresh && hasValidBackendSessionId && backendSessionId) {
+    let original: SourceSendInput;
+    try { original = retrySourceInput(lastUserMessageContent, lastUserMessageId); }
+    catch {
+      showToast({ message: 'The original source action is unavailable. No replacement action was created or sent.', variant: 'error' });
+      return { kind: 'none' };
+    }
+    // Legacy text-only response recovery cannot establish a governed run's
+    // identity or completion. Never render its inferred reply for this source.
+    if (!original.sourceIntent && isInterruptedByRefresh && hasValidBackendSessionId && backendSessionId) {
       try {
         const recovery = await recoverFromDisconnect({
           sessionId: backendSessionId,
@@ -153,7 +164,11 @@ export function useSessionRetryHandlers<TChatMessage extends ChatMessage>({
     setRefreshInterruptedAt(null);
 
     messageCountBeforeSendRef.current = chatMessages.length;
-    await sendMessage({ text: lastUserMessageContent });
+    try { await sendMessage(original); }
+    catch {
+      showToast({ message: 'Delivery is unconfirmed. The original action remains available for retry.', variant: 'error' });
+      return { kind: 'none' };
+    }
     return { kind: 'resent' };
   }, [
     lastUserMessageContent,
@@ -167,6 +182,7 @@ export function useSessionRetryHandlers<TChatMessage extends ChatMessage>({
     messageCountBeforeSendRef,
     setChatMessages,
     sendMessage,
+    retrySourceInput,
     showToast,
     setCancelledMessageId,
     setIsInterruptedByRefresh,

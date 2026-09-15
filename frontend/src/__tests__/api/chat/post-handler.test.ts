@@ -1,6 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const getAuthenticatedUserIdMock = vi.fn();
+const readAuthorityMock = vi.fn();
+vi.mock('../../../app/api/chat/_lib/memory-authority', () => ({
+  readChatMemoryAuthority: (...args: unknown[]) => readAuthorityMock(...args),
+}));
+beforeEach(() => {
+  configMockState.useMock = false;
+  userOwnsThreadMock.mockResolvedValue(true);
+  // Explicit routing fixtures; real HTTP authority parsing is tested separately.
+  readAuthorityMock.mockImplementation(async () => parseAndValidateChatPayloadMock.getMockImplementation()?.()?.data?.sourceAction ? 'governed' : 'legacy');
+});
 const getUserScopedAuthTokenMock = vi.fn<() => Promise<string | null>>(async () => 'test-token');
 const fetchBackendStreamWithBootstrapMock = vi.fn();
 const parseAndValidateChatPayloadMock = vi.fn();
@@ -83,6 +93,16 @@ import { handleChatPost } from '../../../app/api/chat/_lib/post-handler';
 import { SPILL_THRESHOLD } from '../../../app/api/chat/_lib/request-validation';
 
 describe('handleChatPost auth hardening', () => {
+  it.each(['governed', 'unavailable'])('missing source metadata never reaches legacy dispatch for %s authority', async state => {
+    configMockState.useMock = true;
+    readAuthorityMock.mockImplementation(async () => { if (state === 'unavailable') throw new Error('private'); return 'governed'; });
+    const response = await handleChatPost({ json: async () => ({ message: 'Hello' }) } as never);
+    expect(response.status).toBe(state === 'governed' ? 409 : 503);
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(await response.text()).not.toContain('private');
+    expect(fetchBackendStreamWithBootstrapMock).not.toHaveBeenCalled();
+    expect(userOwnsThreadMock).not.toHaveBeenCalled();
+  });
   beforeEach(() => {
     vi.clearAllMocks();
     parseAndValidateChatPayloadMock.mockReturnValue({
@@ -121,6 +141,27 @@ describe('handleChatPost auth hardening', () => {
     expect(response.status).toBe(401);
     await expect(response.json()).resolves.toEqual({ error: 'Not authenticated' });
     expect(fetchBackendStreamWithBootstrapMock).not.toHaveBeenCalled();
+  });
+
+  it('passes the original request cancellation signal to backend dispatch', async () => {
+    const abort = new AbortController();
+    await handleChatPost({ json: async () => ({ message: 'Hello' }), signal: abort.signal } as never);
+    expect(fetchBackendStreamWithBootstrapMock.mock.calls[0][2]).toBe(abort.signal);
+  });
+
+  it.each([503, 200])('never substitutes a simulated success for a governed source nonstream response: %s', async status => {
+    const parsed = parseAndValidateChatPayloadMock.getMockImplementation()?.();
+    parseAndValidateChatPayloadMock.mockReturnValue({ ...parsed, data: { ...parsed.data,
+      sourceAction: { command_key: 'original-source-command', message_id: 'original-source-message',
+        thread_id: 'thread-1', content: 'Hello Sophia', expected_clear_epoch: 1 } } });
+    fetchBackendStreamWithBootstrapMock.mockResolvedValue({
+      upstream: new Response(JSON.stringify({ response: 'SYNTHETIC UNCONFIRMED REPLY' }), {
+        status, headers: { 'Content-Type': 'application/json' } }), threadId: 'thread-1',
+    });
+    const response = await handleChatPost({ json: async () => ({ message: 'Hello' }) } as never);
+    expect(response.status).toBe(503);
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    await expect(response.json()).resolves.toEqual({ error: 'memory_source_send_unconfirmed' });
   });
 
   it('ignores client user_id and forwards the authenticated server user id', async () => {
@@ -510,6 +551,29 @@ describe('handleChatPost long-message spill (instead of truncation)', () => {
     expect(payload.message.length).toBeLessThan(longMessage.length);
     // raw_message keeps the FULL text for the stale-thread recovery path.
     expect(payload.raw_message).toBe(longMessage);
+  });
+
+  it('never spills a recorded source action and forwards only canonical reference metadata', async () => {
+    const action = { thread_id: '30000000-0000-4000-8000-000000000001', command_key: 'original-action-key',
+      message_id: 'original-message-id', content: longMessage, expected_clear_epoch: 2 };
+    mockValidator({ sourceAction: action, threadId: action.thread_id });
+    const response = await handleChatPost({ json: async () => ({}) } as never);
+    expect(response.status).toBe(200);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(fetchBackendStreamWithBootstrapMock.mock.calls[0][1]).toMatchObject({
+      message: longMessage, raw_message: longMessage, attached_files: [],
+      memory_source_action: action,
+    });
+  });
+
+  it('does not treat a mock response as a governed source run', async () => {
+    configMockState.useMock = true;
+    mockValidator({ sourceAction: { content: longMessage } });
+    const response = await handleChatPost({ json: async () => ({}) } as never);
+    expect(response.status).toBe(503);
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(fetchBackendStreamWithBootstrapMock).not.toHaveBeenCalled();
   });
 
   it('falls back to inline (no truncation, no pointer) when the upload fails', async () => {

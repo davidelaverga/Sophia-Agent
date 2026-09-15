@@ -22,6 +22,7 @@ ExtractionState = Literal[
     "superseded",
 ]
 ProjectionState = Literal[
+    "unavailable",
     "absent",
     "queued",
     "leased",
@@ -55,11 +56,39 @@ class UserGovernance(StrictModel):
     provider_subject: str
 
 
+class OwnerMemoryAuthority(StrictModel):
+    user_id: str
+    authority_state: Literal["unknown", "legacy", "governed"]
+    authority_epoch: int | None = Field(default=None, gt=0)
+    authority_declared_at: datetime | None = None
+
+
 class CandidateSource(StrictModel):
     session_id: str
     message_id: str
     sequence: int = Field(gt=0)
     transcript_revision: int = Field(ge=0)
+
+
+class SourceRecoveryClaim(StrictModel):
+    user_id: str = Field(min_length=1)
+    session_id: str = Field(min_length=1)
+    sweep_id: UUID
+    lease_token: UUID
+    lease_owner: str = Field(min_length=1)
+    lease_expires_at: datetime
+
+
+class SourceRecoveryReceipt(StrictModel):
+    schema_name: Literal["mem00.source-recovery.v1"] = Field(alias="schema")
+    user_id: str
+    session_id: str
+    sweep_id: UUID
+    lease_token: UUID
+    outcome: Literal["target_checked", "source_ineligible", "retryable_failure"]
+    checked_at: datetime
+    extraction_complete: bool = Field(strict=True)
+    idempotent_replay: bool = Field(strict=True)
 
 
 class ExtractedCandidate(StrictModel):
@@ -72,6 +101,19 @@ class ExtractedCandidate(StrictModel):
     producer: str = "memory_extraction_service"
     origin: str = "session_extraction"
     sources: tuple[CandidateSource, ...] = ()
+
+
+class SourceDependency(StrictModel):
+    message_id: str = Field(min_length=1)
+    sequence: int = Field(gt=0, strict=True)
+    source_version: UUID
+
+
+class ExtractionInputContext(StrictModel):
+    schema_name: Literal["mem00.extract-input.v1"] = Field(alias="schema")
+    session_date: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
+    context_mode: str = Field(min_length=1, max_length=512)
+    template_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
 
 
 class ExtractionRun(StrictModel):
@@ -91,6 +133,13 @@ class ExtractionRun(StrictModel):
     processed_through_sequence: int | None = Field(default=None, ge=0)
     safe_terminal_reason: str | None = None
     error_code: str | None = None
+    extractor_model: str | None = None
+    extractor_prompt_version: str | None = None
+    source_dependencies: tuple[SourceDependency, ...] | None = None
+    validated_transcript_revision: int | None = Field(default=None, ge=0)
+    extractor_input_context: ExtractionInputContext | None = None
+    extractor_input_ref: str | None = None
+    memory_clear_epoch: int | None = Field(default=None, ge=0, strict=True)
 
 
 class CandidateRecord(StrictModel):
@@ -127,6 +176,9 @@ class CanonicalMemory(StrictModel):
 
 class GovernanceReceipt(StrictModel):
     event_id: UUID
+    operation_id: str | None = None
+    event_type: str | None = None
+    resulting_lifecycle: MemoryLifecycle | None = None
     memory_id: UUID | None = None
     candidate_id: UUID | None = None
     content_revision: int | None = None
@@ -137,6 +189,12 @@ class GovernanceReceipt(StrictModel):
     status: str | None = None
     tombstone_id: UUID | None = None
     provider_purge: str | None = None
+
+
+class CommandReceipt(GovernanceReceipt):
+    operation_id: str = Field(min_length=1)
+    event_type: str = Field(min_length=1)
+    resulting_lifecycle: MemoryLifecycle | None = None
 
 
 class ProviderHit(StrictModel):

@@ -123,7 +123,7 @@ class CompanionWakeup:
         fixtures and offline imports don't hit the network.
         """
         if self._client is None:
-            from langgraph_sdk import get_client  # type: ignore[import-not-found]
+            from deerflow.sophia.langgraph_client_auth import get_client
 
             self._client = get_client(url=self._langgraph_url)
         return self._client
@@ -161,6 +161,13 @@ class CompanionWakeup:
             self._seen_run_keys.popitem(last=False)
 
     async def wake(self, event: dict[str, Any]) -> bool:
+        from deerflow.sophia.langgraph_client_auth import langgraph_owner_scope
+        # The caller verifies the internal event; scope is per invocation, not
+        # cached on the shared client. This token is not memory/source approval.
+        with langgraph_owner_scope(event.get("user_id")):
+            return await self._wake_owner_bound(event)
+
+    async def _wake_owner_bound(self, event: dict[str, Any]) -> bool:
         """Best-effort wakeup. Returns True iff a run was queued.
 
         Never raises — failures are logged and swallowed so the webhook

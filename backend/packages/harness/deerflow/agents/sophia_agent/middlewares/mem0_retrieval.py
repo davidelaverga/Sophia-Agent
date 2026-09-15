@@ -143,12 +143,8 @@ class BuilderMem0RetrievalMiddleware(AgentMiddleware[BuilderMem0RetrievalState])
 
         empty_update = self._governed_entry_update(state, user_id)
         if empty_update is not None:
-            from deerflow.sophia.memory_governance.flags import memory_feature_flags_for_owner
-
-            if not memory_feature_flags_for_owner(user_id).governed_runtime_read:
-                return empty_update
-            # Never merge an old admission with a fresh owner-scoped result.
-            state = {**state, **empty_update}
+            # C2 text recall does not authorize Builder personalization.
+            return empty_update
 
         query = self._resolve_query(state)
         if not query:
@@ -180,12 +176,9 @@ class BuilderMem0RetrievalMiddleware(AgentMiddleware[BuilderMem0RetrievalState])
     @staticmethod
     def _governed_entry_update(state: BuilderMem0RetrievalState, user_id: str | None) -> dict | None:
         from deerflow.sophia.memory_governance.context_state import cleared_memory_state
-        from deerflow.sophia.memory_governance.flags import memory_feature_flags_for_owner
+        from deerflow.sophia.memory_governance.owner_authority import legacy_memory_lane_allowed
 
-        if not user_id:
-            return None
-        flags = memory_feature_flags_for_owner(user_id)
-        if not flags.canonical_pool_read:
+        if legacy_memory_lane_allowed(user_id):
             return None
         return cleared_memory_state(state)
 

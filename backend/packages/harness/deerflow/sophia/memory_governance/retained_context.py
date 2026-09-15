@@ -180,7 +180,12 @@ def read_revocation_deltas(
         raise ValueError("context_delta_bounds_invalid")
     fields = {"event_id", "user_id", "memory_id", "event_type", "user_revocation_epoch"}
     revoking = {"memory_edited", "memory_forgotten", "memory_tombstoned"}
-    non_revoking = {"candidate_approved", "memory_manual_created", "memory_restored"}
+    # These existing ledger writers record the current clock but do not
+    # advance it. They cannot substitute for an actual revocation delta:
+    # context_transition still requires every intervening epoch exactly once.
+    non_revoking = {"candidate_approved", "memory_manual_created", "memory_restored",
+        "memory_source_action_accepted", "model_dispatch_authorized", "model_result_observed",
+        "builder_source_handoff_recorded", "builder_source_run_bound"}
     cursor = None
     deltas = []
     for _ in range(max_pages):

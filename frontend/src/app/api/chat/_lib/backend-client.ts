@@ -1,7 +1,9 @@
 import { getUserScopedAuthToken } from '../../../lib/auth/server-auth';
+import { sourceActionSchema, type SourceAction } from '../../../lib/memory-source-contract';
 import { getPrimaryGatewayUrl } from '../../_lib/gateway-url';
 
 import { IS_PRODUCTION, SOPHIA_ASSISTANT_ID, secureLog } from './config';
+import { createRunCompletionCheck } from './run-completion';
 
 export interface BackendStreamPayload {
   message: string;
@@ -14,10 +16,10 @@ export interface BackendStreamPayload {
   language: 'en';
   /**
    * Filenames the user attached on THIS turn. Always send (use ``[]``
-   * when empty). Routed on the PER-RUN ``config.configurable
-   * .current_turn_attached_files`` channel — NOT LangGraph ``input``
-   * (which is persisted into thread state under a LAST_VALUE reducer,
-   * so an attachment-free turn would inherit the prior turn's list).
+   * when empty). Routed on fresh ``config.configurable
+   * .current_turn_attached_files``, not message state. Configurable is
+   * also merged with stored configuration by the installed server: explicit
+   * empty values and backend auth-hook clearing fence stale selections.
    * Codex P2 PR #132 latest iteration: this is the server-trusted
    * attachment list, NOT a parse of the synthesized prompt block
    * (which a user can spoof by typing the marker into their message).
@@ -34,6 +36,7 @@ export interface BackendStreamPayload {
    * attachments this equals ``message``.
    */
   raw_message?: string;
+  memory_source_action?: SourceAction;
 }
 
 export type BackendFetchResult = {
@@ -45,6 +48,7 @@ export type BackendFetchResult = {
   recoveredFromTranscript: boolean;
   staleThreadId?: string;
   newThreadId?: string;
+  confirmCompletion?: () => Promise<boolean>;
 };
 
 type CreateThreadResponse = {
@@ -238,9 +242,34 @@ async function fetchContinuationReseedMessages(
 export async function fetchBackendStreamWithBootstrap(
   backendUrl: string,
   backendPayload: BackendStreamPayload,
+  signal?: AbortSignal,
 ): Promise<BackendFetchResult> {
+  signal?.throwIfAborted();
   assertValidSophiaUserId(backendPayload.user_id);
+  if (Object.prototype.hasOwnProperty.call(backendPayload, 'memory_source_action')) {
+    const action = sourceActionSchema.safeParse(backendPayload.memory_source_action);
+    if (!action.success || !backendPayload.thread_id
+      || action.data.thread_id !== backendPayload.thread_id
+      || action.data.content !== backendPayload.message
+      || action.data.content !== (backendPayload.raw_message ?? backendPayload.message)
+      || (backendPayload.attached_files !== undefined
+        && (!Array.isArray(backendPayload.attached_files) || backendPayload.attached_files.length > 0))) {
+      throw new Error('memory_source_action_scope_invalid');
+    }
+  }
+  if (Object.prototype.hasOwnProperty.call(backendPayload, 'memory_source_attachment_keys')) {
+    throw new Error('memory_source_upload_unavailable');
+  }
+  if (backendPayload.memory_source_action) {
+    // Capture before the first await; caller mutation during token retrieval
+    // must not substitute another action or attachment selection.
+    backendPayload = { ...backendPayload,
+      memory_source_action: sourceActionSchema.parse(backendPayload.memory_source_action),
+      attached_files: [],
+    };
+  }
   const authToken = await getUserScopedAuthToken();
+  signal?.throwIfAborted();
   const ritual = resolveRitual(backendPayload.session_type);
   let activeBackendUrl = normalizeBackendUrl(backendUrl);
   const directLangGraphFallbackUrl = getLocalLangGraphFallbackUrl(activeBackendUrl);
@@ -299,13 +328,14 @@ export async function fetchBackendStreamWithBootstrap(
         : (backendPayload.raw_message ?? backendPayload.message);
     return fetch(`${activeBackendUrl}/${threadId}/runs/stream`, {
       method: 'POST',
+      signal,
       headers,
       body: JSON.stringify({
         assistant_id: SOPHIA_ASSISTANT_ID,
         input: {
           messages: [
             ...preludeMessages,
-            { role: 'user', content: messageContent },
+            { role: 'user', content: messageContent, ...(backendPayload.memory_source_action ? { id: backendPayload.memory_source_action.message_id } : {}) },
           ],
         },
         config: {
@@ -316,16 +346,15 @@ export async function fetchBackendStreamWithBootstrap(
             ritual,
             context_mode: backendPayload.context_mode || 'life',
             thread_id: threadId,
+            ...(backendPayload.memory_source_action ? {
+              memory_source_action: backendPayload.memory_source_action,
+              memory_source_session_id: backendPayload.session_id,
+            } : {}),
             // Server-trusted attachment list (Codex P2 PR #132 latest
             // iteration). Always sent — empty array when no attachments.
-            // It rides ``config.configurable`` (a PER-RUN channel),
-            // NOT ``input`` (which LangGraph persists into thread state
-            // under a LAST_VALUE reducer). Routing it through state
-            // meant a later turn that omitted attachments inherited the
-            // prior turn's list — start_builder_task then re-copied
-            // private images from an earlier turn into a new builder
-            // sandbox. config.configurable is never persisted, so each
-            // run reads exactly what THIS turn sent (empty = none).
+            // Configurable is also merged with stored config. Always send
+            // [] for no legacy files; the server auth hook separately clears
+            // absent canonical request/proof slots before that merge.
             // start_builder_task reads it via
             // runtime.config.configurable instead of parsing the
             // synthesized prompt block (which a user can spoof by
@@ -339,6 +368,7 @@ export async function fetchBackendStreamWithBootstrap(
   };
 
   const createThreadWithFallback = async (): Promise<string> => {
+    signal?.throwIfAborted();
     try {
       return await createThread(authToken || null, activeBackendUrl);
     } catch (error) {
@@ -355,16 +385,17 @@ export async function fetchBackendStreamWithBootstrap(
     preludeMessages: LangGraphInputMessage[] = [],
     attachedFiles: string[] = backendPayload.attached_files ?? [],
   ): Promise<Response> => {
+    signal?.throwIfAborted();
     try {
       let response = await runStream(threadId, preludeMessages, attachedFiles);
 
-      if (!response.ok && shouldRetryWithDirectLangGraphResponse(response, activeBackendUrl) && switchToDirectLangGraph(`stream returned ${response.status}`)) {
+      if (!backendPayload.memory_source_action && !response.ok && shouldRetryWithDirectLangGraphResponse(response, activeBackendUrl) && switchToDirectLangGraph(`stream returned ${response.status}`)) {
         response = await runStream(threadId, preludeMessages, attachedFiles);
       }
 
       return response;
     } catch (error) {
-      if (!isRetryableLocalLangGraphError(error) || !switchToDirectLangGraph(error instanceof Error ? error.message : 'stream bootstrap failed')) {
+      if (signal?.aborted || backendPayload.memory_source_action || !isRetryableLocalLangGraphError(error) || !switchToDirectLangGraph(error instanceof Error ? error.message : 'stream bootstrap failed')) {
         throw error;
       }
 
@@ -380,7 +411,7 @@ export async function fetchBackendStreamWithBootstrap(
   let staleThreadId: string | undefined;
   let newThreadId: string | undefined;
 
-  if (!upstream.ok && shouldRetryWithFreshThread(upstream, await upstream.clone().text(), !!backendPayload.thread_id)) {
+  if (!backendPayload.memory_source_action && !upstream.ok && shouldRetryWithFreshThread(upstream, await upstream.clone().text(), !!backendPayload.thread_id)) {
     staleThreadId = threadId;
     const reseedMessages = await fetchContinuationReseedMessages(authToken || null, backendPayload);
     threadId = await createThreadWithFallback();
@@ -421,6 +452,9 @@ export async function fetchBackendStreamWithBootstrap(
   return {
     ok: true,
     upstream,
+    ...(backendPayload.memory_source_action ? {
+      confirmCompletion: createRunCompletionCheck({ backendUrl: activeBackendUrl, threadId, upstream, token: authToken, signal }),
+    } : {}),
     threadId,
     checkpointerResume,
     resumedFromThread: startedWithThreadId && !staleThreadId,

@@ -13,6 +13,7 @@ Both chains gate on ``vision_gate.supports_vision(model_name)``.
 from __future__ import annotations
 
 import importlib
+from mem00_owner_fixture import declare_memory_owners
 
 from langchain_core.tools import BaseTool
 
@@ -37,7 +38,8 @@ def _capture_create_agent(captured: dict):
     return _capture
 
 
-def test_builder_includes_view_image_tool_and_middleware_when_vision_enabled(monkeypatch) -> None:
+def test_builder_includes_view_image_tool_and_middleware_when_vision_enabled(monkeypatch, declare_memory_owners) -> None:
+    declare_memory_owners({"user_123": "legacy"})
     builder_module = importlib.import_module("deerflow.agents.sophia_agent.builder_agent")
 
     monkeypatch.setattr(builder_module, "ChatAnthropic", lambda **kw: {"model": kw["model"]})
@@ -75,7 +77,8 @@ def test_builder_includes_view_image_tool_and_middleware_when_vision_enabled(mon
     ), f"Image middleware in wrong slot: {middleware_names}"
 
 
-def test_builder_excludes_view_image_when_vision_disabled(monkeypatch) -> None:
+def test_builder_excludes_view_image_when_vision_disabled(monkeypatch, declare_memory_owners) -> None:
+    declare_memory_owners({"user_123": "legacy"})
     builder_module = importlib.import_module("deerflow.agents.sophia_agent.builder_agent")
 
     monkeypatch.setattr(builder_module, "ChatAnthropic", lambda **kw: {"model": kw["model"]})

@@ -15,7 +15,7 @@
 'use client';
 
 import { useParams, useRouter } from 'next/navigation';
-import { useCallback, useMemo } from 'react';
+import { useCallback, useMemo, useRef, useLayoutEffect } from 'react';
 
 import {
   RecapMemoryOrbit,
@@ -29,6 +29,7 @@ import type { MemoryDecision } from '../../lib/recap-types';
 import { useRecapStore } from '../../stores/recap-store';
 import { useSessionHistoryStore } from '../../stores/session-history-store';
 import { useUiStore } from '../../stores/ui-store';
+import { useAuth } from '../../providers';
 
 import {
   RecapBottomActionBar,
@@ -39,6 +40,10 @@ import { useRecapArtifactsLoader } from './useRecapArtifactsLoader';
 import { useRecapMemoryActions } from './useRecapMemoryActions';
 
 export default function RecapPage() {
+  const { user, loading: authLoading } = useAuth();
+  const ownerId = authLoading ? null : user?.id ?? null;
+  const ownerRef = useRef(ownerId);
+  ownerRef.current = ownerId;
   const params = useParams();
   const router = useRouter();
   const sessionId = params.sessionId as string;
@@ -54,6 +59,9 @@ export default function RecapPage() {
     commitMemories,
     getCommitStatus,
   } = useRecapStore();
+  useLayoutEffect(() => {
+    invalidateSession(sessionId);
+  }, [ownerId, sessionId, invalidateSession]);
   
   // Toast for feedback
   const showToast = useUiStore((state) => state.showToast);
@@ -76,6 +84,7 @@ export default function RecapPage() {
 
   const { status, reload, telemetry } = useRecapArtifactsLoader({
     sessionId,
+    ownerId,
     artifacts,
     setArtifacts,
     invalidateArtifacts: invalidateSession,
@@ -90,6 +99,7 @@ export default function RecapPage() {
     handleSaveApproved,
     dismissActionError,
   } = useRecapMemoryActions({
+    ownerId,
     artifacts,
     decisions,
     sessionId,
@@ -115,8 +125,10 @@ export default function RecapPage() {
   }, [reload]);
 
   const handleExportDebug = useCallback(async () => {
+    if (!ownerId || status !== 'ready') return;
     try {
       const memoryObservation = await readMemoryObservation();
+      if (ownerRef.current !== ownerId) return;
       const exportedAt = new Date().toISOString();
       const report = buildRecapTelemetryReport({
         memoryObservation,
@@ -143,6 +155,7 @@ export default function RecapPage() {
       showToast({ message: 'Could not export recap debug report.', variant: 'error', durationMs: 2200 });
     }
   }, [
+    ownerId,
     artifacts,
     decisions,
     getCommitStatus,

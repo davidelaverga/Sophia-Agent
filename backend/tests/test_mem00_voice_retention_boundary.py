@@ -4,10 +4,12 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+from mem00_owner_fixture import declare_memory_owners
 
 
 @pytest.mark.parametrize("caller", ["voice_setup", "voice_dynamic_retrieval", "voice_direct_fallback", "voice_retrieval_tool"])
-def test_governed_voice_context_refuses_retained_memory_until_fencing_exists(monkeypatch, caller):
+def test_governed_voice_context_refuses_retained_memory_until_fencing_exists(monkeypatch, caller, declare_memory_owners):
+    declare_memory_owners({'owner': 'governed'})
     from deerflow.sophia import mem0_client
     from deerflow.sophia.memory_governance import flags, mem0_projection_adapter, observability, reader, service, store
 
@@ -64,4 +66,4 @@ def test_voice_entry_clears_carried_memory_before_empty_or_crisis_exit(monkeypat
         {"platform": platform, "messages": [], "skip_expensive": skip_expensive, "injected_memories": ["old"], "injected_memory_contents": ["SYNTHETIC OLD"], "system_prompt_blocks": ["keep", "<memories>old</memories>"]},
         SimpleNamespace(context={}),
     )
-    assert result == {"injected_memories": [], "injected_memory_contents": [], "system_prompt_blocks": ["keep"]}
+    assert result == {"injected_memories": [], "injected_memory_contents": [], "system_prompt_blocks": ["keep"], "memory_retrieval_proof": None}

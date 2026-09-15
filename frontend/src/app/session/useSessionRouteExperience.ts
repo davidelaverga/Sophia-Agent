@@ -12,6 +12,7 @@ import {
 } from '../lib/builder-workflow';
 import { debugLog } from '../lib/debug-logger';
 import { recordSophiaCaptureEvent } from '../lib/session-capture';
+import { useAuth } from '../providers';
 import type { BuilderArtifactV1 } from '../types/builder-artifact';
 import type { BuilderCanvasActivity, BuilderCanvasTaskSnapshotV1 } from '../types/builder-canvas';
 import type { BuilderCompletionEventV1, BuilderFailureDiagnosticsV1 } from '../types/builder-completion';
@@ -23,6 +24,7 @@ import { completionFromTerminalCanvasTask } from './builder-canvas-completion';
 import { useSessionAssistantReplyBackfill } from './useSessionAssistantReplyBackfill';
 import { useSessionMessageViewModel } from './useSessionMessageViewModel';
 import { useSessionOutboundSend } from './useSessionSendActions';
+import { useSessionSourceInputs } from './useSessionSourceInputs';
 import { useSessionVoiceMessages } from './useSessionVoiceMessages';
 import { useSessionVoiceUiControls } from './useSessionVoiceUiControls';
 
@@ -507,11 +509,18 @@ export function useSessionRouteExperience({
     memoryHighlightsCount,
   });
 
+  const auth = useAuth();
+  const matchedOwner = !auth.loading && auth.user?.id === chatRequestBody?.user_id ? auth.user?.id : '';
+  const { captureSourceInput, retrySourceInput, validateSourceInput, refreshSourceProfile, sourceProfileReady } = useSessionSourceInputs(
+    matchedOwner || '',
+    typeof chatRequestBody?.session_id === 'string' ? chatRequestBody.session_id : '',
+    typeof chatRequestBody?.thread_id === 'string' ? chatRequestBody.thread_id : '',
+  );
   const rawSendMessage = useSessionOutboundSend({
     chatStatus,
     sendChatMessage,
     hasValidBackendSessionId,
-    chatRequestBody,
+    chatRequestBody: matchedOwner ? chatRequestBody : undefined,
     debugEnabled,
     markStreamTurnStarted,
     showToast,
@@ -520,6 +529,7 @@ export function useSessionRouteExperience({
   const sendMessage: typeof rawSendMessage = useCallback(
     async (...args) => {
       const [payload] = args;
+      validateSourceInput(payload);
       if (
         builderTask?.phase === 'running'
         && typeof payload?.text === 'string'
@@ -533,11 +543,12 @@ export function useSessionRouteExperience({
         reloadIfStale: true,
       });
       if (!appVersionFresh) {
-        return;
+        throw new Error('memory_source_app_version_unavailable');
       }
+      validateSourceInput(payload);
       return rawSendMessage(...args);
     },
-    [builderTask, cancelBuilderTask, checkAppVersionFreshness, rawSendMessage],
+    [builderTask, cancelBuilderTask, checkAppVersionFreshness, rawSendMessage, validateSourceInput],
   );
 
   const { appendVoiceUserMessage, appendVoiceAssistantMessage } = useSessionVoiceMessages({
@@ -636,11 +647,14 @@ export function useSessionRouteExperience({
    */
   const handleBuilderRetry = useCallback(
     (event: BuilderCompletionEventV1) => {
-      void sendMessage({ text: 'yes, please try that again' });
+      let captured;
+      try { captured = captureSourceInput('yes, please try that again'); }
+      catch { showToast({ message: 'Source verification is unavailable. Builder has not been restarted.', variant: 'warning' }); return; }
+      void sendMessage(captured).catch(() => showToast({ message: 'Builder delivery is unconfirmed. The original action is retained for retry.', variant: 'warning' }));
       const key = builderRunKey(event.task_id, event.run_id);
       if (key) dismissedBuilderRunsRef.current.add(key);
     },
-    [sendMessage],
+    [sendMessage, captureSourceInput, showToast],
   );
 
   /**
@@ -684,6 +698,10 @@ export function useSessionRouteExperience({
     markStreamTurnStarted,
     setStreamInterruptHandler,
     sendMessage,
+    captureSourceInput,
+    retrySourceInput,
+    refreshSourceProfile,
+    sourceProfileReady,
     voiceState,
     voiceStatus,
     isReflectionTtsActive,

@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react';
 
+import type { SourceSendInput, SourceSendIntent } from '../lib/memory-source-client';
 import { useConnectivityStore, type ConnectivityStatus } from '../stores/connectivity-store';
 
 type QueuedMessage = {
@@ -7,6 +8,7 @@ type QueuedMessage = {
   content: string;
   timestamp?: string;
   retryCount?: number;
+  sourceIntent?: SourceSendIntent;
 };
 
 type QueuedMemoryApproval = {
@@ -40,7 +42,7 @@ interface UseSessionQueueSyncParams {
   getQueuedMessages: (sessionId: string) => QueuedMessage[];
   getQueuedMemoryApprovals: (sessionId: string) => QueuedMemoryApproval[];
   getChatMessages: () => ChatMessageLike[];
-  sendMessage: (input: { text: string }) => Promise<void> | void;
+  sendMessage: (input: SourceSendInput) => Promise<void> | void;
   getChatStatus: () => string;
   removeFromQueue: (messageId: string) => void;
   incrementRetry: (messageId: string) => void;
@@ -115,7 +117,7 @@ export function useSessionQueueSync({
   const isMessageSyncInProgressRef = useRef(false);
   const inFlightQueuedMessageIdsRef = useRef<Set<string>>(new Set());
   const queuedMessagesForSession = useConnectivityStore((state) =>
-    state.messageQueue.filter((message) => message.sessionId === sessionId)
+    state.messageQueue.filter((message) => message.sessionId === sessionId && message.delivery !== 'manual')
   );
   const queuedApprovalsForSession = useConnectivityStore((state) =>
     state.memoryApprovalQueue.filter((approval) => approval.sessionId === sessionId)
@@ -150,7 +152,7 @@ export function useSessionQueueSync({
           .filter((text) => text.length > 0)
       );
 
-      const staleQueued = queuedMessages.filter((queuedMsg) => deliveredByContent.has(queuedMsg.content));
+      const staleQueued = queuedMessages.filter((queuedMsg) => !queuedMsg.sourceIntent && deliveredByContent.has(queuedMsg.content));
       if (staleQueued.length > 0) {
         staleQueued.forEach((queuedMsg) => {
           removeFromQueue(queuedMsg.id);
@@ -159,6 +161,7 @@ export function useSessionQueueSync({
 
         setChatMessages((prev) =>
           prev.filter((message) => {
+            if (queuedMessages.some(queued => queued.sourceIntent && message.id === `queued-${queued.id}`)) return true;
             if (!message.id.startsWith('queued-') || message.role !== 'user') return true;
             const bubbleText = extractMessageText(message);
             return !deliveredByContent.has(bubbleText);
@@ -184,10 +187,10 @@ export function useSessionQueueSync({
               continue;
             }
 
-            if (isAvailabilityPing(queuedMsg.content)) {
+            if (!queuedMsg.sourceIntent && isAvailabilityPing(queuedMsg.content)) {
               const hasNewerEquivalentPing = queuedMessages
                 .slice(queuedIndex + 1)
-                .some((candidate) => isAvailabilityPing(candidate.content));
+                .some((candidate) => !candidate.sourceIntent && isAvailabilityPing(candidate.content));
 
               if (hasNewerEquivalentPing) {
                 removeFromQueue(queuedMsg.id);
@@ -204,6 +207,9 @@ export function useSessionQueueSync({
             }
 
             const alreadyDelivered = getChatMessages().some((message) => {
+              // A visible source row proves recording, not successful model
+              // dispatch. The original action must remain retryable.
+              if (queuedMsg.sourceIntent) return false;
               if (message.role !== 'user') return false;
               if (message.id.startsWith('queued-')) return false;
               const text = extractMessageText(message);
@@ -215,6 +221,7 @@ export function useSessionQueueSync({
               setChatMessages((prev) =>
                 prev.filter((message) => {
                   if (message.id === `queued-${queuedMsg.id}`) return false;
+                  if (queuedMsg.sourceIntent || queuedMessages.some(queued => queued.sourceIntent && message.id === `queued-${queued.id}`)) return true;
                   const isQueuedBubble = message.id.startsWith('queued-') && message.role === 'user';
                   if (!isQueuedBubble) return true;
                   return extractMessageText(message) !== queuedMsg.content;
@@ -233,7 +240,7 @@ export function useSessionQueueSync({
             }
 
             try {
-              await Promise.resolve(sendMessage({ text: queuedMsg.content }));
+              await Promise.resolve(sendMessage({ text: queuedMsg.content, ...(queuedMsg.sourceIntent ? { sourceIntent: queuedMsg.sourceIntent } : {}) }));
 
               const started = await waitForCondition(() => {
                 const status = getChatStatus();
@@ -248,6 +255,7 @@ export function useSessionQueueSync({
 
               removeFromQueue(queuedMsg.id);
               const staleSameContent = getQueuedMessages(sessionId).filter((candidate) => {
+                if (queuedMsg.sourceIntent || candidate.sourceIntent) return false;
                 if (candidate.id === queuedMsg.id) return false;
                 if (candidate.content !== queuedMsg.content) return false;
 

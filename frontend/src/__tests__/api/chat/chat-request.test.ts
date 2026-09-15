@@ -4,6 +4,45 @@ import { parseAndValidateChatPayload } from '../../../app/api/chat/_lib/chat-req
 import { SPILL_THRESHOLD } from '../../../app/api/chat/_lib/request-validation';
 
 describe('parseAndValidateChatPayload', () => {
+  const source = { thread_id: '30000000-0000-4000-8000-000000000001', command_key: 'original-action-key',
+    message_id: 'original-message-id', content: 'SYNTHETIC ORIGINAL', expected_clear_epoch: 2 };
+  it('preserves the original source action exactly through chat parsing', () => {
+    const result = parseAndValidateChatPayload({ session_id: '20000000-0000-4000-8000-000000000001',
+      thread_id: source.thread_id, message: source.content, memory_source_action: source });
+    expect(result.kind).toBe('valid');
+    if (result.kind === 'valid') expect(result.data.sourceAction).toEqual(source);
+  });
+  it('C2 refuses otherwise valid source attachment keys', () => {
+    expect(parseAndValidateChatPayload({ session_id: '20000000-0000-4000-8000-000000000001',
+      thread_id: source.thread_id, message: source.content, memory_source_action: source,
+      memory_source_attachment_keys: ['association-one'] }).kind).toBe('invalid');
+  });
+  it.each([null, [], 'association-one', ['short'], ['association-one', 'association-one'],
+    ['../wrong-key'], [12345678], Array.from({ length: 17 }, (_, i) => `association-${i}`)])(
+    'rejects invalid present canonical references without downgrade %j', keys => {
+      const result = parseAndValidateChatPayload({ session_id: '20000000-0000-4000-8000-000000000001',
+        thread_id: source.thread_id, message: source.content, memory_source_action: source,
+        memory_source_attachment_keys: keys });
+      expect(result.kind).toBe('invalid');
+      if (result.kind === 'invalid') expect(result.response.headers.get('cache-control')).toBe('no-store');
+    });
+  it('requires an exact source action for canonical references', () => {
+    expect(parseAndValidateChatPayload({ session_id: '20000000-0000-4000-8000-000000000001',
+      message: source.content, memory_source_attachment_keys: ['association-one'] }).kind).toBe('invalid');
+  });
+  it.each([{ attached_files: ['legacy.txt'] }, { attachedFiles: ['legacy.txt'] },
+    { attached_files: ['../discarded.txt'] }, { attached_files: [] , attachedFiles: ['hidden.txt'] },
+    { attached_files: 'malformed' }, { attachedFiles: null }])('rejects mixed legacy routing %j', files => {
+    expect(parseAndValidateChatPayload({ session_id: '20000000-0000-4000-8000-000000000001',
+      thread_id: source.thread_id, message: source.content, memory_source_action: source, ...files }).kind).toBe('invalid');
+  });
+  it.each([null, { ...source, content: 'SYNTHETIC CHANGED' }, { ...source, expected_clear_epoch: true },
+    { ...source, owner_id: 'forged' }, { ...source, thread_id: '30000000-0000-4000-8000-000000000099' }])('denies malformed source action without downgrading %j', action => {
+    const result = parseAndValidateChatPayload({ session_id: '20000000-0000-4000-8000-000000000001',
+      thread_id: source.thread_id, message: source.content, memory_source_action: action });
+    expect(result.kind).toBe('invalid');
+    if (result.kind === 'invalid') expect(result.response.headers.get('cache-control')).toBe('no-store');
+  });
   it('returns error when message is missing', () => {
     const result = parseAndValidateChatPayload({ session_id: 'sess_valid_123' });
 

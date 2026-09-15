@@ -26,5 +26,6 @@ def cleared_memory_state(state: dict) -> dict:
     return {
         "injected_memories": [],
         "injected_memory_contents": [],
+        "memory_retrieval_proof": None,
         "system_prompt_blocks": [block for block in (state.get("system_prompt_blocks") or []) if not block.lstrip().startswith(("<memory>", "<memories>"))],
     }

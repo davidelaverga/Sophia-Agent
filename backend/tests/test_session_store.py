@@ -9,6 +9,7 @@ import pytest
 
 from deerflow.sophia.session_store import (
     FilesystemSessionTranscriptStore,
+    SessionEvidenceIntegrityError,
     SessionMessageRecord,
     SessionRecord,
     SessionStore,
@@ -522,3 +523,48 @@ def test_render_runtime_does_not_silently_fall_back_to_filesystem(monkeypatch):
         SessionStore()
 
     assert "SOPHIA_SESSION_STORE=supabase" in str(exc_info.value)
+
+def test_excluded_witness_field_does_not_break_exact_transcript_read(tmp_path):
+    """Regression (MEM00-C2 integration): ``exclude=True`` must not become a
+    required raw-row key.
+
+    Adding the database-issued ``memory_source_version`` witness put it in
+    ``SessionMessageRecord.model_fields`` while ``exclude=True`` kept it out of
+    every persisted row. ``read_exact_session_messages`` compared the raw row key
+    set against ``model_fields`` and therefore failed closed on *every*
+    legitimate synthetic finalization transcript, surfacing as
+    ``canonical_evidence_raw_message_set_invalid`` and breaking Voice Lab expiry
+    purge and canonical evidence retention on the published pilot candidate.
+    """
+    store = SessionStore(tmp_path)
+    store.upsert_session(
+        SessionRecord(session_id="session-1", thread_id="thread-1", user_id="user-1")
+    )
+    store.replace_messages_revisioned(
+        "user-1",
+        "session-1",
+        [
+            SessionMessageRecord(
+                message_id="msg-1",
+                session_id="session-1",
+                thread_id="thread-1",
+                role="user",
+                content="synthetic",
+                sequence=0,
+            )
+        ],
+        expected_revision=0,
+    )
+
+    # The witness is a declared model field but is never persisted.
+    assert "memory_source_version" in set(SessionMessageRecord.model_fields)
+    path = store._transcript_path("user-1", "session-1")
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    assert "memory_source_version" not in set(raw["messages"][0])
+
+    # Genuine drift still fails closed: an unexpected extra key is rejected.
+    raw["messages"][0]["injected_field"] = "drift"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    with pytest.raises(SessionEvidenceIntegrityError):
+        store.read_exact_session_messages("user-1", "session-1")
+

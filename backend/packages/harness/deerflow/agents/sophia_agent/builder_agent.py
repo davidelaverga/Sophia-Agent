@@ -21,7 +21,6 @@ import os
 from contextlib import asynccontextmanager
 
 from langchain.agents import create_agent
-from langchain_anthropic import ChatAnthropic
 from langchain_core.runnables import RunnableConfig
 
 from deerflow.agents.sophia_agent.builder_middlewares import (
@@ -39,6 +38,8 @@ from deerflow.agents.sophia_agent.utils import validate_user_id
 from deerflow.agents.sophia_agent.vision_gate import supports_vision
 from deerflow.config.app_config import get_app_config
 from deerflow.sophia.build_runtime.startup import audit_build_foundation
+from deerflow.sophia.memory_governance.model_clients import GovernedChatAnthropic as ChatAnthropic
+from deerflow.sophia.observability import disable_langsmith_tracing_for_runnable
 
 logger = logging.getLogger(__name__)
 DEFAULT_BUILDER_MODEL = "claude-sonnet-5"
@@ -180,12 +181,14 @@ def _create_builder_agent(
     """
     resolved_model, model_source = resolved_model_info or _resolve_builder_model_name(model_name)
     logger.info(
-        "Creating Sophia builder agent: user_id=%s, model=%s, model_source=%s",
-        user_id,
+        "Creating Sophia builder agent: model=%s, model_source=%s",
         resolved_model,
         model_source,
     )
 
+    from deerflow.agents.sophia_agent.middlewares.memory_context import MemoryRunGuard
+    memory_config = (trace_config or {}).get("configurable", {})
+    memory_guard = MemoryRunGuard(owner_id=user_id, config=memory_config, scope="builder")
     model = ChatAnthropic(
         model=resolved_model,
         api_key=os.environ.get("ANTHROPIC_API_KEY", ""),
@@ -215,12 +218,16 @@ def _create_builder_agent(
         # burning extra budget when the model is genuinely struggling.
         timeout=240.0,
         max_retries=1,
+        memory_authority_factory=memory_guard.final_dispatch_authority,
     )
 
     vision_enabled = supports_vision(resolved_model)
     middlewares = build_builder_middleware_chain(
         user_id=user_id,
         vision_enabled=vision_enabled,
+        context_id=(trace_config or {}).get("configurable", {}).get("thread_id"),
+        memory_config=(trace_config or {}).get("configurable", {}),
+        memory_guard=memory_guard,
     )
 
     # Guarded builder tools: sandbox/file ops + web research + artifact tools.
@@ -308,10 +315,23 @@ def _create_builder_agent(
         middleware=middlewares,
         state_schema=SophiaState,
     )
+    if memory_guard.enabled:
+        from deerflow.agents.sophia_agent.middlewares.memory_context import MemoryContextEntryMiddleware
+
+        for middleware in middlewares:
+            if isinstance(middleware, MemoryContextEntryMiddleware):
+                middleware.bind_compiled_state_channels(agent.channels)
     # Keep a slightly roomier built-agent ceiling for direct invocations.
     # The delegated Builder path still enforces its runtime budget through
     # switch_to_builder -> SubagentExecutor.config.max_turns.
     agent.recursion_limit = 80
+    if memory_guard.enabled:
+        # Protect the full state-bearing chain, not only the model callback.
+        # Structural memory events use their separate explicit exporter.
+        return disable_langsmith_tracing_for_runnable(agent.with_config({
+            "run_name": "Sophia Builder", "tags": ["sophia_builder"],
+            "metadata": {"sophia_component": "builder", "builder_model_name": resolved_model, "builder_model_source": model_source},
+        }))
     if external_trace_context:
         return agent
     return wrap_builder_agent_for_observability(

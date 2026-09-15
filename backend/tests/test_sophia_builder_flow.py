@@ -1,6 +1,7 @@
 """End-to-end regression tests for Sophia builder handoff flow."""
 
 import importlib
+from mem00_owner_fixture import declare_memory_owners
 import json
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -51,7 +52,8 @@ def _payload_from_builder_response(response: str | Command) -> dict:
 
 
 
-def test_middleware_parity_in_companion_and_builder_chains(monkeypatch):
+def test_middleware_parity_in_companion_and_builder_chains(monkeypatch, declare_memory_owners):
+    declare_memory_owners({"user_123": "legacy"})
     companion_module = importlib.import_module("deerflow.agents.sophia_agent.agent")
     builder_module = importlib.import_module("deerflow.agents.sophia_agent.builder_agent")
     monkeypatch.setenv("LANGSMITH_TRACING", "false")
@@ -232,7 +234,8 @@ def test_middleware_parity_in_companion_and_builder_chains(monkeypatch):
     )
 
 
-def test_presentation_builder_toolset_removes_excalidraw_diagram(monkeypatch) -> None:
+def test_presentation_builder_toolset_removes_excalidraw_diagram(monkeypatch, declare_memory_owners) -> None:
+    declare_memory_owners({"user_123": "legacy"})
     import deerflow.agents.sophia_agent.builder_agent as builder_module
 
     captured: dict[str, object] = {}
@@ -260,7 +263,8 @@ def test_presentation_builder_toolset_removes_excalidraw_diagram(monkeypatch) ->
     assert "generate_report_chart" not in tool_names
 
 
-def test_report_builder_toolset_uses_render_html_to_pdf(monkeypatch) -> None:
+def test_report_builder_toolset_uses_render_html_to_pdf(monkeypatch, declare_memory_owners) -> None:
+    declare_memory_owners({"user_123": "legacy"})
     builder_module = importlib.import_module("deerflow.agents.sophia_agent.builder_agent")
     monkeypatch.setenv("LANGSMITH_TRACING", "false")
     _reset_tracing_cache()
@@ -292,7 +296,8 @@ def test_report_builder_toolset_uses_render_html_to_pdf(monkeypatch) -> None:
     assert "generate_visual_asset" not in tool_names
 
 
-def test_pdf_presentation_delivery_uses_real_pdf_renderer(monkeypatch) -> None:
+def test_pdf_presentation_delivery_uses_real_pdf_renderer(monkeypatch, declare_memory_owners) -> None:
+    declare_memory_owners({"user_123": "legacy"})
     builder_module = importlib.import_module("deerflow.agents.sophia_agent.builder_agent")
     monkeypatch.setenv("LANGSMITH_TRACING", "false")
     _reset_tracing_cache()
@@ -326,7 +331,8 @@ def test_pdf_presentation_delivery_uses_real_pdf_renderer(monkeypatch) -> None:
     assert "prepare_deck_build" not in tool_names
 
 
-def test_builder_agent_anthropic_timeout_and_retries(monkeypatch) -> None:
+def test_builder_agent_anthropic_timeout_and_retries(monkeypatch, declare_memory_owners) -> None:
+    declare_memory_owners({"user_123": "legacy"})
     """F1 (2026-06-11): 240s timeout, 1 retry, 32k output tokens.
 
     The builder generates large documents (5k+ tokens) which can take 45-90s.
@@ -363,7 +369,8 @@ def test_builder_agent_anthropic_timeout_and_retries(monkeypatch) -> None:
     assert captured["kwargs"]["max_tokens"] == 32768
 
 
-def test_builder_factory_returns_langgraph_compatible_graph(monkeypatch) -> None:
+def test_builder_factory_returns_langgraph_compatible_graph(monkeypatch, declare_memory_owners) -> None:
+    declare_memory_owners({"user_123": "legacy"})
     """The LangGraph server rejects Runnable proxies around compiled graphs."""
 
     from langchain_core.language_models.fake_chat_models import FakeListChatModel
@@ -461,7 +468,8 @@ def _stub_companion_for_chain_inspection(monkeypatch, companion_module, captured
     monkeypatch.setattr(companion_module, "create_agent", _capture)
 
 
-def test_companion_disables_tracing_on_model_only(monkeypatch):
+def test_companion_disables_tracing_on_model_only(monkeypatch, declare_memory_owners):
+    declare_memory_owners({"user_123": "legacy"})
     companion_module = importlib.import_module("deerflow.agents.sophia_agent.agent")
     captured: dict = {}
     _stub_companion_for_chain_inspection(monkeypatch, companion_module, captured)
