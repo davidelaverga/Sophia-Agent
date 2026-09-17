@@ -35,7 +35,11 @@ def test_actual_facade_denies_legacy_cache_and_provider_under_rollback(monkeypat
     monkeypatch.setattr(mem0_client,"_cache",{"owner:recall:::10":[{"content":"UNAPPROVED_SYNTHETIC_CACHE"}]})
     result = mem0_client.search_memories_with_diagnostics("owner","recall")
     assert result["memories"] == [] and result["provider_status"] == "unavailable"
-    assert result["provider_reason"] == ("governed_runtime_disabled" if case in {"decohort","all_off"} else "memory_owner_authority_unavailable")
+    # An undeclared owner reports the narrower reason; the denial itself, the
+    # untouched legacy cache and the unused provider are identical either way.
+    expected = {"decohort":"governed_runtime_disabled","all_off":"governed_runtime_disabled",
+        "unknown":"memory_owner_undeclared","outage":"memory_owner_authority_unavailable"}[case]
+    assert result["provider_reason"] == expected
     legacy.assert_not_called()
 
 
