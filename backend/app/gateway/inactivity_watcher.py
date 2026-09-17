@@ -15,6 +15,7 @@ import logging
 import time
 
 from deerflow.sophia.memory_governance.flags import memory_feature_flags_for_owner
+from deerflow.sophia.memory_governance.owner_authority import ordinary_path_memory_flags_for_owner
 from deerflow.sophia.session_store import SessionStore
 
 logger = logging.getLogger(__name__)
@@ -97,7 +98,10 @@ async def _check_inactive_threads() -> None:
     for thread_id, info in idle_threads:
         user_id = info["user_id"]
         session_id = info["session_id"]
-        memory_enqueue_required = memory_feature_flags_for_owner(user_id).candidate_ledger_write
+        # Ordinary background path: this runs for every idle thread, pilot or
+        # not. An undeclared owner must yield all-off flags here, the same as
+        # the other ordinary call sites; a store outage still fails closed.
+        memory_enqueue_required = ordinary_path_memory_flags_for_owner(user_id).candidate_ledger_write
         durable_memory_ready = not memory_enqueue_required
         logger.info(
             "Thread %s idle for >%ds — firing offline pipeline (user=%s, session=%s)",

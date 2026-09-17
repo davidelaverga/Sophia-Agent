@@ -2,6 +2,92 @@
 
 Successful target: MEMORY_TEXT_PILOT_READY. Current status: IMPLEMENTING — RELEASE CLOSURE; not deployed, not activated. C2 replaces the prior PROMOTE-only/five-core-run prerequisites for this owner-restricted pilot. Historical C1 records and failures remain valid history, not additional first-use gates. Recovered cumulative failure counter: latest failed iteration EI929; last reported five-failure checkpoint 923–927; next five-failure checkpoint 932. The single current authority is the checkpoint immediately below; every later dated paragraph is preserved history, not competing current status.
 
+## Integration-regression triage — 2026-09-18
+
+### Baselines, both re-measured today
+
+| tree | `pytest tests/` |
+| --- | --- |
+| shared line `8c5cf538` (with EI930 containment merged) | **2 failed**, 6,225 passed |
+| integration candidate, current | **119 failed**, 7,062 passed |
+
+The shared line's 2 are the unrelated `test_local_sandbox_encoding` pair. So the
+pilot line accounts for 117.
+
+### Grouped by actual cause, not by file
+
+| cause | count |
+| --- | --- |
+| `assert 503 == 200` (and 404/204/422 variants) at Gateway routes | 41 |
+| `MemoryGovernanceUnavailable: memory_owner_authority_unavailable` | 35 |
+| `MemoryProviderUnavailableError: memory_owner_authority_unavailable` | 8 |
+| assorted assertion/shape mismatches | ~33 |
+
+**The decisive detail is the reason string.** Every one of these reports
+`memory_owner_authority_unavailable`, the **broad** error — *not*
+`memory_owner_undeclared`. Verified directly: in the test environment
+`configured_memory_store()` raises `MemoryGovernanceConfigurationError:
+memory_governance_store_not_configured`, so `resolve_owner_authority` returns the
+outage branch. These tests therefore exercise **store-unavailable**, which must
+fail closed by design — they are not exercising the non-cohort path at all.
+
+That is what makes them fixture gaps rather than product defects, and it is a
+different conclusion from the earlier "the resolver fails closed because no owner
+is declared". The fixtures never configured a store.
+
+### Fixture primitives, corrected and extended
+
+`tests/mem00_owner_fixture.py`:
+
+- **`declare_memory_owners` was unfaithful.** Its stub raised the broad
+  `MemoryGovernanceUnavailable` for an owner it did not hold. The real
+  `SupabaseMemoryGovernanceStore` raises `MemoryOwnerUndeclared` on a successful
+  zero-row read. The stub therefore made every unnamed owner look like an outage
+  and hid the ordinary non-cohort path. Corrected to raise the narrow error.
+- **`ordinary_memory_owner` added**: a reachable store in which every owner is
+  undeclared. That is production's shape for any user outside the pilot. It
+  declares nobody and weakens nothing — an undeclared owner still gets no
+  governed lane and no legacy lane. It is for tests about ordinary non-memory
+  behaviour, so they stop hitting the outage branch.
+
+Explicit owner declarations remain reserved for tests genuinely about legacy
+behaviour. No global declaration, no autouse bypass.
+
+### The fixture immediately exposed a third unguarded call site
+
+Applying `ordinary_memory_owner` to `test_inactivity_watcher.py` did **not** make
+the tests pass — it surfaced `app/gateway/inactivity_watcher.py:100` calling the
+raising resolver on a background path that runs for **every idle thread**, pilot
+or not. That is the EI931 defect class again, at a site neither earlier repair
+covered. Repaired the same way, and the two MEM00-specific tests in that file
+were repointed at the moved seam rather than relaxed. File now 10/10.
+
+This is the argument for the fixture being right: it reports supported-path gaps
+instead of papering over them.
+
+### Full map of remaining raising-resolver call sites
+
+Ordinary paths still calling `memory_feature_flags_for_owner` (raises for an
+undeclared owner) rather than `ordinary_path_memory_flags_for_owner`:
+
+| site | status |
+| --- | --- |
+| `app/gateway/inactivity_watcher.py:100` | **repaired** |
+| `packages/.../offline_pipeline.py:644` (`_write_offline_recap`) | outstanding |
+| `app/gateway/sophia_realtime_context.py:130` | outstanding |
+| `app/gateway/routers/sophia.py:851, 878, 3391` | outstanding, needs per-route review |
+| `app/gateway/routers/sessions.py:956, 979, 987, 1143` | outstanding, needs per-route review |
+
+The router sites need per-route judgement rather than a sweep, because
+`_memory_flags` deliberately converts unavailability into 503 as the C2 cutover.
+Changing that is a product decision, not a fixture fix, and is not done here.
+
+Already correctly guarded and unchanged: `mem0_memory.py` (catches),
+`context_state.allows_unversioned_builder_handoff` (catches),
+`retrieve_memories.py` (catches). Genuinely governed sites left alone:
+`prompt_assembly.py`, `faults.py`, `service.py`, and the `MemoryRunGuard`
+internals.
+
 ## C2-R1 resumed — first unmet requirement: serving grants
 
 With the storm contained and the schema repaired, the first genuinely unmet C2
