@@ -10,10 +10,10 @@ Five states are tracked separately and must not be conflated:
 
 | state | status |
 | --- | --- |
-| code published | **NO** — remote `codex/mem00-text-pilot` is still `c5e64774`; `codex/mem00-c2-integration-r1` and the hotfix branch do not exist on the remote at all |
+| code published | **YES** — pushed over SSH 2026-09-17; remote matches local for all three refs |
 | code deployed | **NO** — Gateway still runs `0c215c1b` |
 | schema repaired | **PARTIAL** — `source_intake` applied; `epoch_review` outstanding, prepared for human execution |
-| serving ready | **NO** — execution stays revoked on the review/inventory functions by design |
+| serving ready | **NO** — review/inventory execution revoked by design; two extraction RPCs also revoked |
 | pilot activated | **NO**, and deliberately kept closed |
 
 ### Minimal Gateway hotfix, built on the deployed base
@@ -60,24 +60,48 @@ new passes are its own regression. This is the compatibility evidence for
 deploying it; it is not evidence that the pilot candidate is deployable, which is
 a separate and much larger question.
 
-### Worker-reachable RPCs — verification still outstanding
+### Worker-reachable RPCs — verified, and two are revoked
 
-Fixing the expiry call does not prove the rest of the pipeline is usable. Once
-the exception no longer aborts `run_once`, extraction and projection will start
-running for the first time since the storm began. Every RPC they need must be
-checked against the current schema **before** deploying, or a different storm may
-replace this one. The worker-reachable set is:
+Measured against the live schema on 2026-09-17 before deploying anything. All
+nine exist; `service_role` EXECUTE is **not** uniform:
 
-`sophia_memory_expire_governed_candidates`, `sophia_memory_claim_extraction`,
-`sophia_memory_complete_extraction`, `sophia_memory_fail_extraction`,
-`sophia_memory_enqueue_extraction`,
-`sophia_memory_finalize_and_enqueue_extraction`,
-`sophia_memory_claim_projection`, `sophia_memory_complete_projection`,
-`sophia_memory_expire_projection_lease`.
+| RPC | service_role EXECUTE |
+| --- | --- |
+| `sophia_memory_expire_governed_candidates` | true |
+| `sophia_memory_claim_extraction` | true |
+| `sophia_memory_complete_extraction` | true |
+| `sophia_memory_fail_extraction` | true |
+| `sophia_memory_claim_projection` | true |
+| `sophia_memory_complete_projection` | true |
+| `sophia_memory_expire_projection_lease` | true |
+| `sophia_memory_enqueue_extraction` | **false** |
+| `sophia_memory_finalize_and_enqueue_extraction` | **false** |
 
-Only the first is confirmed. The read-only query to check existence and
-`service_role` EXECUTE for all nine was prepared but not run — the browser pane
-was closed before it could execute. **This is a pre-deploy gate, not optional.**
+This changed the hotfix. `recover_finalized_sessions` reaches the revoked
+`sophia_memory_enqueue_extraction` through `enqueue_finalized_session`, and
+`_recovery_pending` was cleared only after a successful call — the identical
+defect pattern as the expiry stamp. Fixing expiry alone would therefore have
+**moved** the one-per-second storm to the recovery stage rather than ending it.
+Both stages are now contained. Hotfix head is `3b2eaf65`.
+
+The two revoked grants are left revoked. Adding them belongs to the reviewed C2
+activation step, not to an incident hotfix, and nothing in the current contained
+worker requires them to function — recovery simply reports its failure once per
+process start instead of spinning.
+
+### Production backlog at the time of the hotfix
+
+- Extraction runs: `succeeded_nonzero=1`, `superseded=4`. **No queued, leased or
+  retry_wait runs**, so oldest-unfinished is none and deploying releases no
+  accumulated work.
+- Candidates: 6. Ended sessions: 18.
+- `sophia_memory_user_governance`: **1 row total, 0 with `authority_state='governed'`.**
+  Nobody is enrolled, which is consistent with the pilot being closed and
+  confirms the cutover analysis: every account is undeclared.
+
+Absence of queued work is **not** evidence that nothing was lost. Extraction and
+projection have not run for the duration of the storm; what that cost is not
+established by these counts, and no claim of zero impact is made here.
 
 ### Deployment safety
 
