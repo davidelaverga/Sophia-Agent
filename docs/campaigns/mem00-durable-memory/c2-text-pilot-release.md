@@ -2,6 +2,202 @@
 
 Successful target: MEMORY_TEXT_PILOT_READY. Current status: IMPLEMENTING — RELEASE CLOSURE; not deployed, not activated. C2 replaces the prior PROMOTE-only/five-core-run prerequisites for this owner-restricted pilot. Historical C1 records and failures remain valid history, not additional first-use gates. Recovered cumulative failure counter: latest failed iteration EI929; last reported five-failure checkpoint 923–927; next five-failure checkpoint 932. The single current authority is the checkpoint immediately below; every later dated paragraph is preserved history, not competing current status.
 
+## EI930 incident — containment status, 2026-09-17
+
+Five states are tracked separately and must not be conflated:
+**code published**, **code deployed**, **schema repaired**, **serving ready**,
+**pilot activated**.
+
+| state | status |
+| --- | --- |
+| code published | **YES** — pushed over SSH 2026-09-17; remote matches local for all three refs |
+| code deployed | **NO** — Gateway still runs `0c215c1b` |
+| schema repaired | **PARTIAL** — `source_intake` applied; `epoch_review` outstanding, prepared for human execution |
+| serving ready | **NO** — review/inventory execution revoked by design; two extraction RPCs also revoked |
+| pilot activated | **NO**, and deliberately kept closed |
+
+### Minimal Gateway hotfix, built on the deployed base
+
+Branch `codex/mem00-ei930-worker-hotfix` at `1820c58b515736d222636f20102a770390623992`,
+based directly on the shared head `2deb762a` that Render tracks. Worktree
+`/private/tmp/mem00-shared-baseline`.
+
+It carries **no** MEM00-C2 pilot code — 2 source files, +22 net lines, plus one
+regression file:
+
+- `store.expire_candidates` now calls `sophia_memory_expire_governed_candidates`,
+  which production actually grants to `service_role` (measured `execute=true`,
+  against `execute=false` for the revoked legacy function). Same signature
+  `(p_limit integer)`, same integer return.
+- `MemoryGovernanceWorker.run_once` stamps `_last_expiry_at` before the attempt
+  and contains its failure, so a failing expiry costs one attempt per hour
+  instead of one per second, and no longer suppresses `extraction.run_once` and
+  `projection.run_once` beneath it.
+
+Containment is deliberately narrow, per the incident constraints:
+`asyncio.CancelledError` derives from `BaseException` so shutdown still
+propagates (pinned by test, not assumed); the recovery stage is untouched; and
+extraction and projection keep performing their own ownership, schema and consent
+checks — this only stops housekeeping from suppressing them. No flag, cohort,
+grant, RLS setting or memory authority was changed, and execution on the revoked
+legacy RPC was **not** restored.
+
+Evidence: 9 regression tests, verified meaningful by running them against the
+same base without the fix, where 6 fail. Affected-path selection
+`memory_governance or governance_worker or expiry or extraction or projection or
+gateway_app_mounts or render_config`: **154 passed, 3 skipped**.
+
+Full-suite compatibility against the deployed base, both `pytest tests/`:
+
+| tree | result |
+| --- | --- |
+| shared base `2deb762a`, unmodified | 2 failed, 6,212 passed, 165 skipped |
+| hotfix `1820c58b` | **2 failed, 6,221 passed**, 165 skipped |
+
+The two failures are the identical `test_local_sandbox_encoding.py` pair in both
+runs and are unrelated to memory. The hotfix adds **zero** failures and the nine
+new passes are its own regression. This is the compatibility evidence for
+deploying it; it is not evidence that the pilot candidate is deployable, which is
+a separate and much larger question.
+
+### Worker-reachable RPCs — verified, and two are revoked
+
+Measured against the live schema on 2026-09-17 before deploying anything. All
+nine exist; `service_role` EXECUTE is **not** uniform:
+
+| RPC | service_role EXECUTE |
+| --- | --- |
+| `sophia_memory_expire_governed_candidates` | true |
+| `sophia_memory_claim_extraction` | true |
+| `sophia_memory_complete_extraction` | true |
+| `sophia_memory_fail_extraction` | true |
+| `sophia_memory_claim_projection` | true |
+| `sophia_memory_complete_projection` | true |
+| `sophia_memory_expire_projection_lease` | true |
+| `sophia_memory_enqueue_extraction` | **false** |
+| `sophia_memory_finalize_and_enqueue_extraction` | **false** |
+
+This changed the hotfix. `recover_finalized_sessions` reaches the revoked
+`sophia_memory_enqueue_extraction` through `enqueue_finalized_session`, and
+`_recovery_pending` was cleared only after a successful call — the identical
+defect pattern as the expiry stamp. Fixing expiry alone would therefore have
+**moved** the one-per-second storm to the recovery stage rather than ending it.
+Both stages are now contained. Hotfix head is `3b2eaf65`.
+
+The two revoked grants are left revoked. Adding them belongs to the reviewed C2
+activation step, not to an incident hotfix, and nothing in the current contained
+worker requires them to function — recovery simply reports its failure once per
+process start instead of spinning.
+
+### Production backlog at the time of the hotfix
+
+- Extraction runs: `succeeded_nonzero=1`, `superseded=4`. **No queued, leased or
+  retry_wait runs**, so oldest-unfinished is none and deploying releases no
+  accumulated work.
+- Candidates: 6. Ended sessions: 18.
+- `sophia_memory_user_governance`: **1 row total, 0 with `authority_state='governed'`.**
+  Nobody is enrolled, which is consistent with the pilot being closed and
+  confirms the cutover analysis: every account is undeclared.
+
+Absence of queued work is **not** evidence that nothing was lost. Extraction and
+projection have not run for the duration of the storm; what that cost is not
+established by these counts, and no claim of zero impact is made here.
+
+### Deployment safety
+
+`render.yaml` pins all three services — `sophia-langgraph`, `sophia-gateway`,
+`sophia-voice` — to branch `codex/sophia-observability-v1`. Pushing
+`codex/mem00-text-pilot`, `codex/mem00-c2-integration-r1` or
+`codex/mem00-ei930-worker-hotfix` therefore triggers **no** deployment; only a
+commit landing on the shared branch does. Publication is safe and separate from
+deployment. Deploying the hotfix is a deliberate follow-up requiring a Voice-
+coordinated window, and the actual running artifact SHA must be recorded
+afterwards rather than inferred from the push.
+
+## PRODUCTION INCIDENT — 2026-09-17, live-observed and partially repaired
+
+This section is the current authority for production state. It supersedes the
+schema claims in every section below, including the 2026-09-15 addendum's
+statement that none of the twelve new migrations were applied. That statement
+was **wrong**.
+
+### EI930 already happened to production
+
+The buggy lexical-order `tools/mem00_apply_migrations.mjs` was run against the
+production database at some point before this session. Production is in exactly
+the half-migrated state that a lexical apply produces, confirmed by direct
+read-only query through the authenticated Supabase SQL editor:
+
+| check | production, before this session's repair |
+| --- | --- |
+| 10 of 11 migration witnesses | **present** |
+| `..._source_intake` witness | **absent** — the file never applied |
+| `sophia_memory_review_snapshot` epoch marker | **0/1 overloads** — pre-epoch body |
+| `sophia_memory_inventory_snapshot` epoch marker | **0/1 overloads** — pre-epoch body |
+
+That is the signature predicted by the EI930 analysis: under lexical order
+`epoch_review` fails `42883` and `source_intake` fails `P0001`, and the other
+ten commit. It is not a hypothesis — the production fingerprints match.
+
+### The live error storm and its root cause
+
+Supabase reported the project **Unhealthy**, a **52.7%** API success rate over
+24 hours, and **72,916 Postgres errors out of 73,216 requests**. The Postgres log
+is a continuous wall of `permission denied for function
+sophia_memory_expire_candidates`, roughly **once per second**. PostgREST is
+additionally logging repeated `Warp server error: Thread killed by timeout
+manager`. Production runs **PostgreSQL 17.6**.
+
+Root cause, confirmed by query rather than inference:
+
+- `2026_09_09_mem00_c1_dependency_authority.sql` **did** apply, so it revoked the
+  legacy function and granted the replacement. Measured:
+  `sophia_memory_expire_candidates` → `service_role execute=false`;
+  `sophia_memory_expire_governed_candidates` → `service_role execute=true`.
+- The **deployed** Gateway (`0c215c1b`, shared line) still calls the revoked
+  legacy RPC. This is EI929, live.
+- Two amplifiers in the deployed code, fixed in `9e7364ad` (EI932):
+  `MemoryGovernanceWorker.run_once` stamped `_last_expiry_at` only on success, so
+  a permanently failing hourly job ran once per second against `poll_seconds=1.0`
+  — about 3,600x its intended rate; and the exception escaped `run_once`, which
+  is reached **before** `extraction.run_once` and `projection.run_once`, so
+  memory extraction and projection have not run at all for as long as this has
+  been failing.
+
+### Repair applied this session
+
+Authorized by Davide in-session on 2026-09-17 after the diagnosis was presented.
+
+1. **`2026_09_09_mem00_c1_source_intake.sql` — APPLIED.** Its drift guard was
+   checked first and was satisfied (`sophia_memory_run_source_valid` md5 was the
+   expected pristine `0d447ef95ed420e824d66bdc22380d69`, epoch marker present,
+   not yet patched). The SQL was loaded into the editor and verified **byte-exact
+   against the repository file by SHA-256** (`1f80ebf3724dcb80…bfae01`, 12,396
+   bytes) before running. Result: `Success. No rows returned`. Verified after:
+   `sophia_memory_source_intake_version_trigger` present,
+   `sophia_memory_accept_source_action` present, and
+   `sophia_memory_run_source_valid` now carries
+   `MEM00_C1_EXACT_ACCEPTED_SOURCE_VERSION`.
+2. **`2026_09_09_mem00_c1_epoch_review.sql` — NOT YET APPLIED.** This is the file
+   that must run **last** to restore the epoch-aware
+   `review_snapshot`/`inventory_snapshot` bodies. Loading it was refused by the
+   local permission classifier, not by Supabase. **Production therefore still
+   reads `review_snapshot_epoch: 0/1` and `inventory_epoch: 0/1`** and this
+   repair is incomplete.
+
+### Exact remaining production state
+
+- Schema: 11 of 12 applied; `epoch_review` outstanding, so the canonical review
+  and Pool reads still serve pre-epoch bodies without their clear-epoch and
+  source-exclusion checks. No deployed code calls those two functions today, so
+  this is latent rather than actively harmful — but it must be fixed before any
+  pilot activation.
+- The error storm is **still running**. The schema repair does not stop it; only
+  deploying the code fixes does (`9cb84acf` switches to the governed RPC,
+  `9e7364ad` stops the per-second retry). Both are committed and unpushed.
+- Nothing in this session granted execution to `anon` or `authenticated`,
+  changed Voice Lab gates, or touched user rows.
+
 ## Current checkpoint — 2026-09-15 recovery (MEM00-C2-R1)
 
 Recovered under the MEM00-C2-R1 recovery handoff. Statement classes are marked

@@ -53,16 +53,37 @@ class MemoryGovernanceWorker:
     async def run_once(self) -> bool:
         worked = False
         if self.extraction is not None and self._recovery_pending:
-            recovered = await asyncio.to_thread(
-                self.extraction.recover_finalized_sessions,
-                user_ids=self.recovery_principals,
-            )
+            # Clear the flag BEFORE attempting, for the same reason as the
+            # expiry stamp below: it used to be cleared only on success, so a
+            # failing startup recovery retried every poll interval forever.
+            # Recovery is once-per-process by design and its underlying
+            # mechanism is durably idempotent, so a failure is re-attempted on
+            # the next process start rather than spun on here.
             self._recovery_pending = False
-            worked = recovered > 0
+            try:
+                recovered = await asyncio.to_thread(
+                    self.extraction.recover_finalized_sessions,
+                    user_ids=self.recovery_principals,
+                )
+            except Exception as exc:  # noqa: BLE001 - ended sessions stay durably recoverable.
+                logger.error("memory.governance recovery_failed error_type=%s", type(exc).__name__)
+            else:
+                worked = recovered > 0
         if self.extraction is not None and time.monotonic() - self._last_expiry_at >= 3600:
-            expired = await asyncio.to_thread(self.extraction.governance_store.expire_candidates)
+            # Stamp the attempt BEFORE making it. The stamp used to be written
+            # only on success, so a persistently failing expiry never advanced
+            # it and the surrounding one-second poll loop retried the same RPC
+            # every second indefinitely.
             self._last_expiry_at = time.monotonic()
-            worked = expired > 0 or worked
+            try:
+                expired = await asyncio.to_thread(self.extraction.governance_store.expire_candidates)
+            except Exception as exc:  # noqa: BLE001 - durable rows remain retryable next interval.
+                # Retention expiry is one of several duties. Letting it raise
+                # here skipped extraction and projection entirely for as long as
+                # it kept failing.
+                logger.error("memory.governance expiry_failed error_type=%s", type(exc).__name__)
+            else:
+                worked = expired > 0 or worked
         if self.extraction is not None:
             worked = await asyncio.to_thread(self.extraction.run_once) or worked
         if self.projection is not None:
