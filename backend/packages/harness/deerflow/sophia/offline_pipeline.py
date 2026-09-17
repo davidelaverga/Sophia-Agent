@@ -35,6 +35,7 @@ from deerflow.sophia.handoffs import generate_handoff
 from deerflow.sophia.identity import maybe_update_identity
 from deerflow.sophia.mem0_client import reconcile_review_metadata_with_mem0
 from deerflow.sophia.memory_governance.flags import memory_feature_flags_for_owner
+from deerflow.sophia.memory_governance.owner_authority import ordinary_path_memory_flags_for_owner
 from deerflow.sophia.session_store import (
     SessionMessageRecord,
     SessionStore,
@@ -208,7 +209,8 @@ def run_offline_pipeline(
     )
 
     steps: dict[str, str] = {}
-    memory_flags = memory_feature_flags_for_owner(user_id)
+    # Ordinary End-session finalization runs for everyone, enrolled or not.
+    memory_flags = ordinary_path_memory_flags_for_owner(user_id)
     extraction_scope = _load_incremental_extraction_scope(user_id, session_id)
     processing_key = _build_processing_key(session_id, extraction_scope, messages)
 
