@@ -53,12 +53,22 @@ class MemoryGovernanceWorker:
     async def run_once(self) -> bool:
         worked = False
         if self.extraction is not None and self._recovery_pending:
-            recovered = await asyncio.to_thread(
-                self.extraction.recover_finalized_sessions,
-                user_ids=self.recovery_principals,
-            )
+            # Clear the flag BEFORE attempting, for the same reason as the
+            # expiry stamp below: it used to be cleared only on success, so a
+            # failing startup recovery retried every poll interval forever.
+            # Recovery is once-per-process by design and its underlying
+            # mechanism is durably idempotent, so a failure is re-attempted on
+            # the next process start rather than spun on here.
             self._recovery_pending = False
-            worked = recovered > 0
+            try:
+                recovered = await asyncio.to_thread(
+                    self.extraction.recover_finalized_sessions,
+                    user_ids=self.recovery_principals,
+                )
+            except Exception as exc:  # noqa: BLE001 - ended sessions stay durably recoverable.
+                logger.error("memory.governance recovery_failed error_type=%s", type(exc).__name__)
+            else:
+                worked = recovered > 0
         if self.extraction is not None and time.monotonic() - self._last_expiry_at >= 3600:
             # Stamp the attempt BEFORE making it. The stamp used to be written
             # only on success, so a persistently failing expiry never advanced
