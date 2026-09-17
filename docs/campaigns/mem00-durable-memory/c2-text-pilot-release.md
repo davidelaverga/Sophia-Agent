@@ -2,6 +2,89 @@
 
 Successful target: MEMORY_TEXT_PILOT_READY. Current status: IMPLEMENTING — RELEASE CLOSURE; not deployed, not activated. C2 replaces the prior PROMOTE-only/five-core-run prerequisites for this owner-restricted pilot. Historical C1 records and failures remain valid history, not additional first-use gates. Recovered cumulative failure counter: latest failed iteration EI929; last reported five-failure checkpoint 923–927; next five-failure checkpoint 932. The single current authority is the checkpoint immediately below; every later dated paragraph is preserved history, not competing current status.
 
+## EI930 incident closure — 2026-09-17
+
+### The four states, kept separate
+
+| state | status | evidence |
+| --- | --- | --- |
+| **storm contained** | in code, **not yet deployed** | hotfix `3b2eaf65`, 13 regressions, 9 fail without it |
+| **schema repaired** | **partial** | `source_intake` applied; `epoch_review` outstanding |
+| **serving ready** | **no** | review/inventory + 2 extraction RPCs revoked, by design |
+| **pilot activated** | **no**, deliberately | 0 governed owners in production |
+
+### Deployment safety — the decisive fact
+
+All three Render services carry **`autoDeployTrigger: Off`**, read directly from
+each service's settings page today:
+
+| service | id | branch | autoDeploy |
+| --- | --- | --- | --- |
+| `sophia-gateway` | `srv-d7be5s9r0fns7397l4g0` | `codex/sophia-observability-v1` | **Off** |
+| `sophia-langgraph` | `srv-d7be5s9r0fns7397l4fg` | `codex/sophia-observability-v1` | **Off** |
+| `sophia-voice` | `srv-d7be5s9r0fns7397l4f0` | `codex/sophia-observability-v1` | **Off** |
+
+Every historical deploy shows `TRIGGER: API`. So **merging the hotfix into the
+shared release line deploys nothing**, and a Gateway-only deploy afterwards is a
+separate deliberate action that cannot disturb LangGraph or Voice. This removes
+the tension between "reconcile into the shared line" and "Gateway-only
+deployment" — both are satisfiable, in that order. The Gateway is
+**Blueprint managed**, so its branch was not repointed at the hotfix branch;
+merging first avoids that config drift entirely.
+
+### Voice-safe window — confirmed immediately before preparing the deploy
+
+Gateway and Voice both report `voice_lab_enabled: false`,
+`voice_lab_kill_switch_engaged: true`, `voice_lab_mutation_ready: false`. The
+Gateway retention reaper is alive with `blocking_pending: 0`. No active Voice run
+is at risk, and no Voice gate or flag was touched.
+
+### Approval route opened
+
+**PR #145**, `codex/mem00-ei930-worker-hotfix` → `codex/sophia-observability-v1`,
+2 commits / 3 files. Merging it reconciles the containment into the shared
+release line so a later deployment cannot silently drop it. Merge is the owner's
+decision; the agent opened the request only.
+
+### Carried forward, so no line loses the fix
+
+The emergency candidate sits on the shared base, so it does not reach the pilot
+line on its own. Both downstream lines were checked and updated:
+
+- Pilot `6746f1e8` had expiry containment but **not** startup-recovery
+  containment → now `cfcb2e8f`.
+- Integration `730a28d3` had **neither** (verified by marker count 0/0) → now
+  `db18c878`, with both present (1/1).
+
+Only the worker and its regression file were taken across. The pilot's newer
+`store.py` was **not** replaced by the hotfix branch's older copy; it already
+called `sophia_memory_expire_governed_candidates`. `backend/langgraph.json` still
+has a zero diff against the shared branch. Integration affected-path check:
+113 passed, 1 skipped.
+
+### The 18 ended sessions, reconciled under existing eligibility rules
+
+Read-only inventory of every `status='ended'` session:
+
+- **16 have no `sophia_memory_user_governance` row at all**; **2 are
+  `authority_state='unknown'`**; **0 are `governed`**.
+- None carries `synthetic_voice_lab`, so none is Voice Lab workload.
+- 17 have **zero** extraction runs; one (`b1403a14…`, ended 2026-09-05) has one.
+- They span 2026-05-26 to 2026-09-05; most are from June.
+
+Under the current rules extraction requires a governed owner, and production has
+none. **So none of these 18 sessions was eligible for extraction during the storm
+window**, and the idle queue is explained by ineligibility rather than by work
+having been silently dropped.
+
+That is a statement about **eligibility**, not a claim of zero impact. What is
+established: no eligible extraction work was queued and lost. What is **not**
+established: whether any user-visible behaviour degraded while extraction and
+projection were suppressed, and whether any provider-side effect was missed.
+No re-extraction, back-fill or provider write was performed, and none is
+proposed — doing so would require governed owners that do not exist. The two
+historical uncertain provider obligations remain open and untouched.
+
 ## EI930 incident — containment status, 2026-09-17
 
 Five states are tracked separately and must not be conflated:
