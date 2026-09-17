@@ -504,6 +504,121 @@ configuration and RLS context), and not an application-role serving proof. The
 production applied-history read from 2026-09-15 still stands as the statement
 of what is unapplied there.
 
+### Every MEM00 SQL contract now runs on a real server, not PGlite
+
+The repository's SQL harnesses take their database fixture as `process.argv[2]`,
+and `tools/mem00_native_sql_driver.mjs` already anticipates a native backend
+(`backendKind === 'native-postgres'` is what unlocks the restart and
+duplicate-dispatch checks). That driver needs a disposable
+`embedded-postgres` runtime that is not present here, so a **session-local**
+adapter exposing the same interface was pointed at the Lima VM's PostgreSQL
+16.15 instead. **No harness was modified**; each run gets its own throwaway
+database, which is dropped on close.
+
+| harness | result on PostgreSQL 16.15 |
+| --- | --- |
+| `mem00_c2_model_authority_contract.mjs` | **pass, 78 checks**, 13 selected migrations, `native_restart_and_duplicate_dispatch: true` |
+| `mem00_owner_authority_contract.mjs` | **pass, 27 checks**; owner-authority migration sha256 `1044fd8e…682b0d` |
+| `mem00_command_receipt_contract.mjs` (with the repair migration) | **pass, 24 checks** |
+| `mem00_review_snapshot_contract.mjs` | **pass, 39 checks**, 1,005 candidates across 6 pages |
+| `mem00_inventory_contract.mjs` | **pass, 51 checks**, 2,010 records across 11 pages |
+| `mem00_session_delete_contract.mjs --repair` | **pass**, all ten contract flags true |
+| `mem00_schema_attestation_test.mjs` | **pass** (syntax, contract, stable digest, column change/rollback, ACL change) |
+
+`production_mutations: 0` and `provider_calls: 0` in every report that emits
+them. These are overlapping selections and are deliberately not summed.
+
+Two harnesses appear to fail when launched without their mode flag —
+`mem00_command_receipt_contract.mjs` without a third argument deliberately runs
+against the pre-repair schema, and `mem00_session_delete_contract.mjs` without
+`--repair` deliberately runs against the unrepaired fence. Both are the
+harnesses' own negative modes, **not** defects; both pass in repaired mode.
+Recorded here so a future run does not mistake them for regressions.
+
+What this changes: the campaign previously had native evidence only for the C2
+model-authority file (the "78 native SQL checks"), with the C1 contracts proven
+on PGlite. All of them now hold on the same real PostgreSQL major version family
+that production runs, including a genuine `systemctl restart` of the cluster.
+What it still does not establish: the **production** database, Supabase's own
+role and RLS configuration, application-role serving grants, or any hosted
+behaviour.
+
+### EI931 — the 41 failures are a non-cohort regression, not a fixture gap
+
+This supersedes the classification recorded in the 2026-09-15 addendum. That
+note said the 41 failures in `test_extraction.py` (22), `test_gateway_sophia.py`
+(10), `test_sophia_middlewares.py` (8) and `test_voice_lab_route_isolation.py`
+(1) were "a fixture gap in obsolete legacy tests, not a product defect", because
+the tests set up no durable-owner fixture and the resolver correctly fails
+closed. The first half is right. The conclusion is wrong.
+
+**They are not pre-existing on the line this candidate must merge into.** The
+same four files were run at the shared head `2deb762a`: **407 passed, 0
+failed**, 2.59s. They fail only with the pilot's changes. "Pre-existing at
+`c5e64774`" was true but misleading — `c5e64774` is itself a pilot commit.
+
+**The cause is reachable in production, not only in tests.** `resolve_owner_authority`
+requires `authority_state IN ('legacy','governed')`, but
+`2026_09_08_mem00_c1_owner_authority.sql:8` adds the column as
+`NOT NULL DEFAULT 'unknown'` with a CHECK that keeps `authority_epoch` and
+`authority_declared_at` NULL while it stays `'unknown'`. No application code
+calls `sophia_memory_declare_owner_authority` — declaration is an operator
+action. So **every existing production user is `'unknown'`** until explicitly
+declared, and `resolve_owner_authority` raises `MemoryGovernanceUnavailable`
+for all of them. The store's own comment ("Missing rows/columns and old schemas
+are unavailable, never legacy") confirms this is deliberate, and Section 3 of
+the handoff agrees that unknown authority must not become legacy status.
+
+The defect is not the fail-closed resolver. It is that two **ordinary,
+non-memory** call sites invoke it without a guard, so the failure escapes into
+paths every user traverses:
+
+| call site | ordinary path it breaks |
+| --- | --- |
+| `middlewares/session_state.py:71` — `memory_feature_flags_for_owner(self._user_id).candidate_ledger_write` | turn 0 of **every** chat session |
+| `offline_pipeline.py:211` — `memory_flags = memory_feature_flags_for_owner(user_id)` | End-session finalization / extraction |
+
+Other callers are already guarded and are not affected:
+`tools/retrieve_memories.py` wraps the call in `try`, and
+`context_state.allows_unversioned_builder_handoff` catches and returns `False`.
+
+**Demonstrated directly, not inferred from the failing legacy tests.**
+`backend/tests/test_mem00_noncohort_owner_paths.py` (4 passed) drives the
+resolver with a store that is configured, reachable and returns a row — the row
+simply carries `authority_state='unknown'`, exactly production's state. It
+shows (a) the resolver raises for an undeclared owner, (b)
+`SessionStateMiddleware.before_agent` propagates that error on turn 0, and
+(c) the identical call **succeeds** once the same owner is declared `legacy`,
+which isolates the cause to the undeclared authority rather than to an absent
+store or to the middleware's inputs.
+
+**Release consequence.** Deploying this candidate as it stands would break
+ordinary chat and session finalization for every user who is not explicitly
+declared — the exact opposite of "preserve their existing disposition". It also
+means the repository's required CI cannot pass: `.github/workflows/backend-unit-tests.yml`
+runs on `pull_request` and executes `make test` = `pytest tests/`, the whole
+suite, so these 41 failures turn the required check red. This also explains the
+earlier "zero Actions runs" result: these workflows trigger on `pull_request`,
+and no PR was ever opened for the pilot head, so the empty query said nothing
+about whether CI applies. It does apply.
+
+**Required CI is therefore now identified** (previously "unknown"):
+`backend-unit-tests` (`make lint` = `ruff check`, then `make test`) and
+`sentrux-gate`, both on every non-draft PR, plus `memory-highlights-e2e`, which
+is path-filtered on `frontend/src/**` and so will also run for this candidate.
+
+**Fix not yet applied — it needs a design decision, recorded below.** The
+smallest correct change is for the two ordinary call sites to treat an
+*undeclared* owner as "no memory features" (`MemoryFeatureFlags()`, all off)
+rather than as a fatal error, which restores exactly the pre-pilot behaviour for
+non-cohort users and grants no legacy access. But `resolve_owner_authority`
+currently collapses *undeclared owner* and *store/transport failure* into one
+exception, and those two must not be treated alike: degrading on a transport
+failure would silently drop the guard for a **governed pilot owner** during an
+outage. Separating the two signals is a change to a governance boundary and is
+recorded as the next decision, not made unilaterally. Latest failed iteration
+EI931; next five-failure checkpoint 932.
+
 **Access blockers for this session (unchanged in substance, re-confirmed).**
 No Supabase, Render or Vercel credential exists in this environment, and the
 Claude in Chrome extension is not connected, so the browser has no authenticated
