@@ -37,18 +37,36 @@ then deployed alone and deliberately.
 ### The storm stopped, and the worker is alive
 
 `permission denied for function sophia_memory_expire_candidates` had been logging
-roughly **once per second, continuously**. In the Postgres log:
+roughly **once per second, continuously**. Observed over ~6 minutes after the
+cutover, to 22:58:34, parsing the log by severity rather than by timestamp:
 
-- Last occurrence: **22:51:07**, before the cutover.
-- Occurrences after the 22:52:20 cutover, re-checked at 22:53:24 and again at
-  22:54:06: **zero**.
+| measure, 22:52:20 → 22:58:34 | count |
+| --- | --- |
+| `permission denied` errors | **0** |
+| errors of any level | **0** |
 
-At the previous rate that window would have produced ~180 further errors.
+The error wall ends cleanly at **22:51:07**. The only new entries are routine
+Postgres checkpoints (`checkpoint starting: time`,
+`checkpoint complete: wrote 130 buffers`). At the previous rate that window would
+have produced roughly **370** further errors.
 
-The worker did **not** go quiet by dying — `/ready` reports the retention reaper
-`status: ready`, `running: true`, still cycling with `blocking_pending: 0`,
-`conflicts: 0`, `processing_failed: 0`. Quiet logs plus a live worker is the
-distinction that matters: containment, not suppression.
+(An earlier count in this session reported "2 after cutover"; that tallied log
+*timestamps*, not errors, and both were checkpoint LOG lines. Corrected here.)
+
+The worker did **not** go quiet by dying. Eleven consecutive `/ready` samples
+from 22:53:36 to 22:58:02 all report `commit_sha 8c5cf538`, reaper
+`running: true`, with `last_cycle_at` advancing steadily —
+20:52:58 → 20:54:01 → 20:55:05 → 20:56:10 → 20:57:15 — and
+`blocking_pending: 0`, `conflicts: 0`, `processing_failed: 0`. That roughly
+one-minute cadence is the worker performing real periodic work, which is what
+distinguishes containment from the service having stopped.
+
+**Honest limit of this evidence.** A quiet log is consistent with both "expiry
+now succeeds" and "expiry now fails once an hour instead of once a second". The
+governed RPC is granted to `service_role`, so success is expected, but no
+successful expiry return value has been directly observed and the next scheduled
+attempt is an hour out. What **is** established: the per-second storm is gone and
+the worker is still cycling.
 
 Expiry now calls `sophia_memory_expire_governed_candidates`, which production
 grants to `service_role`, so the hourly job can actually succeed rather than
