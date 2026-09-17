@@ -51,8 +51,19 @@ def test_legacy_resolution_is_not_cached_across_cutover():
     assert resolve_owner_authority("owner",store=authority).authority_state == "governed"
 
 
-@pytest.mark.parametrize("payload,status", [([],200), ([{"user_id":"owner"}],200), ({"error":"OLD_SCHEMA_PRIVATE"},400)])
-def test_real_store_http_boundary_fails_closed_on_absence_or_old_schema(payload,status):
+# An absent row is a definite "this owner is not enrolled"; a wrong-shaped row or
+# an old schema is a failure to find out. Both fail closed, and neither is ever
+# legacy, but only the first is MemoryOwnerUndeclared -- which is what lets
+# ordinary, non-memory paths keep working for users outside the pilot while a
+# real outage still fails closed. See ordinary_path_memory_flags_for_owner.
+@pytest.mark.parametrize("payload,status,reason", [
+    ([],200,"^memory_owner_undeclared$"),
+    ([{"user_id":"owner"}],200,"^memory_owner_authority_unavailable$"),
+    ({"error":"OLD_SCHEMA_PRIVATE"},400,"^memory_owner_authority_unavailable$"),
+])
+def test_real_store_http_boundary_fails_closed_on_absence_or_old_schema(payload,status,reason):
+    from deerflow.sophia.memory_governance.store import MemoryOwnerUndeclared
+
     def handle(request):
         if request.url.path.endswith("sophia_memory_contract"):
             return httpx.Response(200,json=[{"contract_epoch":1,"schema_version":"mem00.v1","mode":"enforced","updated_at":"2026-09-08T00:00:00Z"}])
@@ -60,5 +71,7 @@ def test_real_store_http_boundary_fails_closed_on_absence_or_old_schema(payload,
         assert "authority_state" in request.url.params["select"]
         return httpx.Response(status,json=payload)
     authority = SupabaseMemoryGovernanceStore(url="https://synthetic.invalid",service_role_key="synthetic-key",client=httpx.Client(transport=httpx.MockTransport(handle)))
-    with pytest.raises(MemoryGovernanceUnavailable,match="^memory_owner_authority_unavailable$"):
+    # Fails closed either way: MemoryOwnerUndeclared is a MemoryGovernanceUnavailable.
+    with pytest.raises(MemoryGovernanceUnavailable,match=reason) as raised:
         resolve_owner_authority("owner",store=authority)
+    assert isinstance(raised.value, MemoryOwnerUndeclared) is (payload == [] and status == 200)
