@@ -2,6 +2,80 @@
 
 Successful target: MEMORY_TEXT_PILOT_READY. Current status: IMPLEMENTING — RELEASE CLOSURE; not deployed, not activated. C2 replaces the prior PROMOTE-only/five-core-run prerequisites for this owner-restricted pilot. Historical C1 records and failures remain valid history, not additional first-use gates. Recovered cumulative failure counter: latest failed iteration EI929; last reported five-failure checkpoint 923–927; next five-failure checkpoint 932. The single current authority is the checkpoint immediately below; every later dated paragraph is preserved history, not competing current status.
 
+## C2-R1 resumed — first unmet requirement: serving grants
+
+With the storm contained and the schema repaired, the first genuinely unmet C2
+requirement is **serving ready**. It is unmet for one precise reason: the C1/C2
+migrations revoke application execution as they go, on purpose, deferring grants
+to a reviewed delta once the whole batch is applied ("Release grants require the
+complete approved batch; keep this stage private."). That batch is now complete,
+so this is the delta those comments point at.
+
+### Measured gap, not estimated
+
+All 45 RPCs the pilot store can call were checked against production. Every one
+**exists**. Exactly **21 lack `service_role` EXECUTE**, and each was confirmed to
+have a real non-test caller on the C2 path:
+
+| journey step | ungranted functions |
+| --- | --- |
+| source intake | `accept_source_action`, `source_boundary`, `lookup_source_action`, `check_source_use` |
+| end of session | `finalize_and_enqueue_extraction`, `enqueue_extraction`, `apply_source_target_at_epoch`, `source_snapshot` |
+| extraction dispatch | `authorize_extraction_dispatch` |
+| review and Pool | `review_snapshot`, `inventory_snapshot` |
+| final model admission | `authorize_model_dispatch`, `authorize_legacy_model_dispatch`, `record_prompt_admission`, `record_model_result`, `get_model_result` |
+| source-only Builder | `bind_builder_source_run`, `register_builder_handoff`, `get_builder_handoff`, `get_builder_source_run`, `get_builder_source_run_for_handoff` |
+
+This also explains the two revoked extraction RPCs found during the incident:
+they are not an anomaly, they are part of this same withheld set.
+
+**Tables need no change.** Measured the same day: `service_role` already holds
+SELECT on every MEM00 table the store reads, holds **no** INSERT or UPDATE on the
+governance tables (writes go through SECURITY DEFINER functions), and RLS is
+enabled on all of them. That is already least privilege, so the delta touches no
+table, no sequence and no schema-wide grant.
+
+### Proposed delta — `2026_09_17_mem00_c2_serving_grants.sql` (NOT applied)
+
+EXECUTE only, to `service_role` only, on exactly those 21 named functions.
+No `GRANT ALL`, nothing to `anon` or `authenticated`. Granting by name rather
+than transcribed signature covers every overload and avoids drift against a
+17-argument definition; the assertions make the intent enforceable rather than
+merely stated.
+
+Rehearsed against the disposable PostgreSQL 16 with the full base + twelve
+migrations applied:
+
+| check | result |
+| --- | --- |
+| before | `service_role` 0/21, browser roles 0 |
+| after | **`service_role` 21/21, browser roles 0** |
+| re-apply | idempotent, no error |
+| other `sophia_memory*` functions | 25 keep their prior grant, **unchanged** — the delta is additive and touches nothing else |
+
+Both safety assertions were proven non-vacuous by deliberately breaking each
+precondition: granting one target to `anon` aborts with
+`memory_serving_grant_leaked_to_browser_role`, and renaming one target away
+aborts with `memory_serving_grant_target_missing`. A clean apply then succeeds.
+
+### Recorded separately, not bundled
+
+`sophia_memory_arm_fault`, `sophia_memory_consume_fault` and
+`sophia_memory_clear_faults` **already hold** `service_role` EXECUTE in
+production. These are fault-injection entry points, gated in code by the
+`memory_fault_injection` flag but executable at the database level. That is a
+real least-privilege observation and is **not** folded into an activation grant;
+revoking them is a separate decision.
+
+### Still required before the hosted journey
+
+Granting alone does not make the pilot usable. Also outstanding: the receiving
+LangGraph auth policy and its four unauthenticated caller sites; a compatible
+deployment of the pilot candidate (the integration line still carries ~121
+failing tests from legacy fixture gaps, which would keep required CI red); the
+non-cohort cutover decision, since every account is still undeclared and 0 owners
+are governed; and only then C2's single hosted journey, followed by activation.
+
 ## EI930 SCHEMA REPAIRED in production — 2026-09-17 23:13 CEST
 
 `2026_09_09_mem00_c1_epoch_review.sql` was executed by the owner through the
