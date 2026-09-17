@@ -2,6 +2,68 @@
 
 Successful target: MEMORY_TEXT_PILOT_READY. Current status: IMPLEMENTING — RELEASE CLOSURE; not deployed, not activated. C2 replaces the prior PROMOTE-only/five-core-run prerequisites for this owner-restricted pilot. Historical C1 records and failures remain valid history, not additional first-use gates. Recovered cumulative failure counter: latest failed iteration EI929; last reported five-failure checkpoint 923–927; next five-failure checkpoint 932. The single current authority is the checkpoint immediately below; every later dated paragraph is preserved history, not competing current status.
 
+## EI930 SCHEMA REPAIRED in production — 2026-09-17 23:13 CEST
+
+`2026_09_09_mem00_c1_epoch_review.sql` was executed by the owner through the
+Supabase SQL editor, whole and unchanged, as the single approved operation from
+`ei930-epoch-review-repair-manifest.md`. Not chunked, not replayed as a batch,
+and `source_intake` was not re-run. Result reported: `Success. No rows returned`.
+
+Integrity before execution: the file was taken from the pinned candidate
+`c5e64774` and its SHA-256 verified as
+`1e4b7f2e87dd0414b21133ac728936dfe389d0d4cb11a706d31552b1fa8a460a`, matching the
+manifest. Preflight re-confirmed immediately beforehand: `review_epoch=0/1`,
+`inventory_epoch=0/1`, all four dependencies present, 0 governed owners.
+
+### Postconditions — all pass
+
+| check | `review_snapshot` | `inventory_snapshot` | expected |
+| --- | --- | --- | --- |
+| epoch marker | **1/1** | **1/1** | 1/1 |
+| overloads | **1** | **1** | 1 — no accidental overload |
+| `service_role` EXECUTE | **false** | **false** | false, revoked by design |
+| `authenticated` / `anon` | false / false | false / false | false |
+| `def_md5` before | `052aa245…` | `b7ec2a0f…` | — |
+| `def_md5` after | **`a5e36c94…`** | **`2bfd3b2b…`** | changed |
+
+Both definition hashes changed, which proves replacement rather than a no-op,
+and both epoch markers are now present in every overload. The grant transition
+`true → false` on both functions is the intended C2 end state; narrowly scoped
+application grants belong to the reviewed activation step, never `GRANT ALL`.
+
+### Migration set complete
+
+All **11** witness objects across the twelve files now resolve: `present 11/11,
+missing: none`. The `source_intake` gap and the two pre-epoch bodies left by the
+lexical-order run (EI930) are both closed. Production schema now matches the
+qualified dependency order.
+
+### Schema cache refreshed
+
+PostgREST logged `Received a schema cache reload message on the "pgrst" channel`
+at 23:13:03, then `Schema cache loaded 66 Relations, 34 Relationships, **142
+Functions**` at 23:13:04 — up from 139 functions before the repair, consistent
+with `source_intake` and `epoch_review` having landed. The file's own
+`NOTIFY pgrst,'reload schema'` did its job.
+
+`Warp server error: Thread killed by timeout manager` continues at a low rate
+(23:02, 23:03, 23:09, 23:12). That predates this work and is **not** addressed by
+either the hotfix or the schema repair; it remains an open, unexplained
+observation rather than something silently absorbed.
+
+### State after this repair
+
+| state | status |
+| --- | --- |
+| **storm contained** | **YES** — Gateway `8c5cf538`, zero errors post-cutover, worker cycling |
+| **schema repaired** | **YES** — 11/11 present, epoch bodies restored |
+| **serving ready** | **NO** — execution revoked on review/inventory and on the two extraction RPCs |
+| **pilot activated** | **NO** — 0 governed owners |
+
+The incident interruption is closed. C2-R1 resumes at its first unmet
+requirement; it is **not** unblocked to activation merely because the markers are
+fixed.
+
 ## EI930 storm CONTAINED in production — 2026-09-17 22:52 CEST
 
 **Storm contained** is now true in production. **Schema repaired**, **serving
