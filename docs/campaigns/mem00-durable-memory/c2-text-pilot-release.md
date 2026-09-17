@@ -47,6 +47,19 @@ same base without the fix, where 6 fail. Affected-path selection
 `memory_governance or governance_worker or expiry or extraction or projection or
 gateway_app_mounts or render_config`: **154 passed, 3 skipped**.
 
+Full-suite compatibility against the deployed base, both `pytest tests/`:
+
+| tree | result |
+| --- | --- |
+| shared base `2deb762a`, unmodified | 2 failed, 6,212 passed, 165 skipped |
+| hotfix `1820c58b` | **2 failed, 6,221 passed**, 165 skipped |
+
+The two failures are the identical `test_local_sandbox_encoding.py` pair in both
+runs and are unrelated to memory. The hotfix adds **zero** failures and the nine
+new passes are its own regression. This is the compatibility evidence for
+deploying it; it is not evidence that the pilot candidate is deployable, which is
+a separate and much larger question.
+
 ### Worker-reachable RPCs — verification still outstanding
 
 Fixing the expiry call does not prove the rest of the pipeline is usable. Once
