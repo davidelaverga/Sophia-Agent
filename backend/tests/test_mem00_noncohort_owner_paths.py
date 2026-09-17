@@ -1,16 +1,15 @@
 """Non-cohort behaviour of the ordinary paths under a REAL configured store.
 
-The 41 failures this candidate adds to `tests/test_extraction.py`,
-`tests/test_gateway_sophia.py`, `tests/test_sophia_middlewares.py` and
-`tests/test_voice_lab_route_isolation.py` have been read as a fixture gap: the
-tests set up no durable owner, so `resolve_owner_authority` fails closed.
+`2026_09_08_mem00_c1_owner_authority.sql` adds `authority_state` as
+`NOT NULL DEFAULT 'unknown'`, and no application code ever calls
+`sophia_memory_declare_owner_authority`. Every account is therefore undeclared
+until an operator declares it, including every new signup after activation.
 
-That reading only holds if the sole way to reach `MemoryGovernanceUnavailable`
-is an absent store. This module removes that ambiguity. Here the store IS
-configured, IS reachable and DOES return a row — the row simply has the
-`authority_state='unknown'` that `2026_09_08_mem00_c1_owner_authority.sql` gives
-every pre-existing user by column default. That is exactly the state of every
-production user who has not been explicitly declared.
+These tests pin the boundary that follows from that. The store here is
+configured, reachable and returns a row; the row is simply undeclared. That is
+production's actual state for a non-pilot user, and it must be distinguishable
+from a store that is down — degrading on a real outage would drop the guard for
+a governed owner exactly when it matters.
 """
 
 from datetime import UTC, datetime
@@ -18,9 +17,14 @@ from types import SimpleNamespace
 
 import pytest
 
+PILOT_ENV = {
+    "SOPHIA_MEMORY_CANDIDATE_LEDGER_WRITE": "true",
+    "SOPHIA_MEMORY_COHORT_PRINCIPALS": "governed-pilot-owner",
+}
+
 
 class _StubStore:
-    """A healthy store. The owner row exists; its authority is undeclared."""
+    """A healthy store whose owner row carries the given authority state."""
 
     def __init__(self, authority_state="unknown"):
         self.authority_state = authority_state
@@ -30,10 +34,6 @@ class _StubStore:
 
     def get_owner_authority(self, user_id):
         if self.authority_state == "unknown":
-            # Mirrors SupabaseMemoryGovernanceStore.get_owner_authority, whose
-            # own comment is "Missing rows/columns and old schemas are
-            # unavailable, never legacy." An 'unknown' row fails the
-            # resolver's authority_state check the same way.
             return SimpleNamespace(
                 user_id=user_id, authority_state="unknown",
                 authority_epoch=None, authority_declared_at=None,
@@ -44,75 +44,140 @@ class _StubStore:
         )
 
 
-@pytest.fixture
-def undeclared_owner(monkeypatch):
+class _DownStore:
+    """The store cannot answer: a transport or schema failure, not an answer."""
+
+    def get_contract(self):
+        raise TimeoutError("supabase unreachable")
+
+    def get_owner_authority(self, user_id):
+        raise TimeoutError("supabase unreachable")
+
+
+def _use(monkeypatch, store):
     from deerflow.sophia.memory_governance import owner_authority
 
-    monkeypatch.setattr(owner_authority, "configured_memory_store", lambda: _StubStore("unknown"))
-    return "ordinary-production-user"
+    monkeypatch.setattr(owner_authority, "configured_memory_store", lambda: store)
 
 
-@pytest.fixture
-def declared_legacy_owner(monkeypatch):
-    from deerflow.sophia.memory_governance import owner_authority
-
-    monkeypatch.setattr(owner_authority, "configured_memory_store", lambda: _StubStore("legacy"))
-    return "declared-legacy-user"
+# --- the resolver tells "not enrolled" apart from "cannot find out" ----------
 
 
-def test_undeclared_owner_is_unavailable_not_legacy(undeclared_owner):
-    """The resolver refuses to read an undeclared row as pre-cutover."""
+def test_undeclared_owner_raises_the_narrow_undeclared_error(monkeypatch):
     from deerflow.sophia.memory_governance.owner_authority import resolve_owner_authority
+    from deerflow.sophia.memory_governance.store import (
+        MemoryGovernanceUnavailable,
+        MemoryOwnerUndeclared,
+    )
+
+    _use(monkeypatch, _StubStore("unknown"))
+    with pytest.raises(MemoryOwnerUndeclared):
+        resolve_owner_authority("ordinary-production-user")
+    # Still fails closed for every caller that does not opt into the narrow type.
+    assert issubclass(MemoryOwnerUndeclared, MemoryGovernanceUnavailable)
+
+
+def test_store_failure_is_still_the_broad_unavailable_error(monkeypatch):
+    from deerflow.sophia.memory_governance.owner_authority import resolve_owner_authority
+    from deerflow.sophia.memory_governance.store import (
+        MemoryGovernanceUnavailable,
+        MemoryOwnerUndeclared,
+    )
+
+    _use(monkeypatch, _DownStore())
+    with pytest.raises(MemoryGovernanceUnavailable) as raised:
+        resolve_owner_authority("governed-pilot-owner")
+    assert not isinstance(raised.value, MemoryOwnerUndeclared)
+
+
+def test_undeclared_owner_is_never_treated_as_legacy(monkeypatch):
+    """The whole point of the distinction: it grants no memory access at all."""
+    from deerflow.sophia.memory_governance.owner_authority import legacy_memory_lane_allowed
+
+    _use(monkeypatch, _StubStore("unknown"))
+    assert legacy_memory_lane_allowed("ordinary-production-user") is False
+
+
+# --- ordinary paths degrade for an undeclared owner, fail closed on an outage -
+
+
+def test_ordinary_flags_are_all_off_for_an_undeclared_owner(monkeypatch):
+    from deerflow.sophia.memory_governance.owner_authority import (
+        ordinary_path_memory_flags_for_owner,
+    )
+
+    _use(monkeypatch, _StubStore("unknown"))
+    flags = ordinary_path_memory_flags_for_owner("ordinary-production-user", environ=PILOT_ENV)
+    assert flags.any_enabled() is False
+
+
+def test_ordinary_flags_still_fail_closed_when_the_store_is_down(monkeypatch):
+    from deerflow.sophia.memory_governance.owner_authority import (
+        ordinary_path_memory_flags_for_owner,
+    )
     from deerflow.sophia.memory_governance.store import MemoryGovernanceUnavailable
 
+    _use(monkeypatch, _DownStore())
     with pytest.raises(MemoryGovernanceUnavailable):
-        resolve_owner_authority(undeclared_owner)
+        ordinary_path_memory_flags_for_owner("governed-pilot-owner", environ=PILOT_ENV)
 
 
-def test_session_state_middleware_raises_for_an_undeclared_owner(undeclared_owner):
-    """Turn 0 of an ordinary session for a user who was never declared.
+def test_ordinary_flags_do_not_require_a_store_when_no_feature_is_enabled(monkeypatch):
+    """A deployment with MEM00 switched off has no authority to guard."""
+    from deerflow.sophia.memory_governance.owner_authority import (
+        ordinary_path_memory_flags_for_owner,
+    )
 
-    `SessionStateMiddleware.before_agent` calls
-    `memory_feature_flags_for_owner(...).candidate_ledger_write` without a
-    guard, so the resolver's fail-closed error leaves the middleware and
-    reaches the agent turn.
-    """
+    _use(monkeypatch, _DownStore())
+    assert ordinary_path_memory_flags_for_owner("anyone", environ={}).any_enabled() is False
+
+
+def test_governed_owner_still_resolves_normally(monkeypatch):
+    from deerflow.sophia.memory_governance.owner_authority import (
+        ordinary_path_memory_flags_for_owner,
+    )
+
+    _use(monkeypatch, _StubStore("governed"))
+    flags = ordinary_path_memory_flags_for_owner("governed-pilot-owner", environ=PILOT_ENV)
+    assert flags.candidate_ledger_write is True
+
+
+# --- the two ordinary call sites no longer break for an undeclared owner -----
+
+
+def test_session_state_middleware_survives_an_undeclared_owner(monkeypatch):
+    """Turn 0 of an ordinary session for a user who was never declared."""
+    from deerflow.agents.sophia_agent.middlewares import session_state as mod
+
+    _use(monkeypatch, _StubStore("unknown"))
+    for key, value in PILOT_ENV.items():
+        monkeypatch.setenv(key, value)
+    middleware = mod.SessionStateMiddleware("ordinary-production-user")
+    runtime = SimpleNamespace(context=SimpleNamespace(), store=None)
+    # No handoff file exists for this synthetic user, so the pre-MEM00 path
+    # reaches its ordinary "no handoff" exit instead of raising.
+    assert middleware.before_agent({"messages": [], "turn_count": 0}, runtime) is None
+
+
+def test_session_state_middleware_still_fails_closed_on_a_store_outage(monkeypatch):
     from deerflow.agents.sophia_agent.middlewares import session_state as mod
     from deerflow.sophia.memory_governance.store import MemoryGovernanceUnavailable
 
-    middleware = mod.SessionStateMiddleware(undeclared_owner)
+    _use(monkeypatch, _DownStore())
+    for key, value in PILOT_ENV.items():
+        monkeypatch.setenv(key, value)
+    middleware = mod.SessionStateMiddleware("governed-pilot-owner")
     runtime = SimpleNamespace(context=SimpleNamespace(), store=None)
     with pytest.raises(MemoryGovernanceUnavailable):
         middleware.before_agent({"messages": [], "turn_count": 0}, runtime)
 
 
-def test_session_state_middleware_is_fine_for_a_declared_legacy_owner(declared_legacy_owner):
-    """The same call succeeds once the owner has actually been declared.
-
-    This isolates the cause: it is the undeclared authority, not the absence of
-    a store and not the middleware's own inputs.
-    """
-    from deerflow.agents.sophia_agent.middlewares import session_state as mod
-
-    middleware = mod.SessionStateMiddleware(declared_legacy_owner)
-    runtime = SimpleNamespace(context=SimpleNamespace(), store=None)
-    assert middleware.before_agent({"messages": [], "turn_count": 0}, runtime) is None
-
-
-def test_offline_finalization_raises_for_an_undeclared_owner(undeclared_owner):
-    """The End-session / extraction path has the same unguarded call."""
+def test_offline_finalization_uses_the_ordinary_path_resolver():
+    """End-session finalization must not use the raising resolver."""
     import inspect
 
     from deerflow.sophia import offline_pipeline
 
     source = inspect.getsource(offline_pipeline.run_offline_pipeline)
-    assert "memory_feature_flags_for_owner(user_id)" in source
-    # The call is not inside a try block that would convert it into a
-    # degraded-but-working finalization.
-    call_line = next(
-        index for index, line in enumerate(source.splitlines())
-        if "memory_flags = memory_feature_flags_for_owner(user_id)" in line
-    )
-    preceding = source.splitlines()[:call_line]
-    open_try = sum(1 for line in preceding if line.strip() == "try:")
-    assert open_try == 0, "guarded after all — re-read the non-cohort conclusion"
+    assert "ordinary_path_memory_flags_for_owner(user_id)" in source
+    assert "memory_flags = memory_feature_flags_for_owner(user_id)" not in source

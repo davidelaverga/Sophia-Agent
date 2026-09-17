@@ -43,6 +43,29 @@ class MemoryGovernanceUnavailable(RuntimeError):
         super().__init__(reason)
 
 
+class MemoryOwnerUndeclared(MemoryGovernanceUnavailable):
+    """A definite answer: this owner has no declared durable authority.
+
+    Distinct from its parent, which means "we could not find out". The store
+    answered, the schema was current, and the owner is simply not enrolled —
+    `authority_state` is `'unknown'`, or there is no governance row at all.
+
+    This is NOT permission to use a legacy or ungoverned memory lane; an
+    undeclared owner still has no memory access whatsoever. It exists so that
+    ordinary, non-memory code paths can tell "not enrolled" (every user before
+    activation, and every new signup after it) apart from "the store is down",
+    and degrade to memory-features-off for the former while still failing
+    closed for the latter.
+
+    It subclasses MemoryGovernanceUnavailable deliberately: every existing
+    `except MemoryGovernanceUnavailable` keeps failing closed unchanged, and
+    only a caller that opts into the narrower type behaves differently.
+    """
+
+    def __init__(self, reason: str = "memory_owner_undeclared") -> None:
+        super().__init__(reason)
+
+
 class MemoryGovernanceConflict(RuntimeError):
     def __init__(self, reason: str) -> None:
         self.reason = reason
@@ -144,7 +167,16 @@ class SupabaseMemoryGovernanceStore:
             "select": "user_id,authority_state,authority_epoch,authority_declared_at",
             "user_id": f"eq.{user_id}", "limit": "2",
         })
-        if not isinstance(rows, list) or len(rows) != 1:
+        if not isinstance(rows, list):
+            # A non-list body means the request itself did not answer the
+            # question: an error shape, or an old schema missing a column.
+            raise MemoryGovernanceUnavailable("memory_owner_authority_unavailable")
+        if not rows:
+            # The query succeeded against the current schema and this owner has
+            # no governance row. That is a definite "not enrolled", not a
+            # failure to find out — and still not legacy.
+            raise MemoryOwnerUndeclared("memory_owner_undeclared")
+        if len(rows) != 1:
             raise MemoryGovernanceUnavailable("memory_owner_authority_unavailable")
         result = OwnerMemoryAuthority.model_validate(rows[0])
         if result.user_id != user_id:

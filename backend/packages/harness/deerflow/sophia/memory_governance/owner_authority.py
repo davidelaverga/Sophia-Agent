@@ -7,8 +7,8 @@ legacy decisions are never cached across requests.
 
 from dataclasses import replace
 
-from .flags import MemoryFeatureFlags, configured_memory_feature_flags_for_owner
-from .store import MemoryGovernanceUnavailable, configured_memory_store
+from .flags import MemoryFeatureFlags, configured_memory_feature_flags_for_owner, memory_feature_flags
+from .store import MemoryGovernanceUnavailable, MemoryOwnerUndeclared, configured_memory_store
 
 OWNER_AUTHORITY_READER = "mem00.owner-authority.v1"
 SUPPORTED_OWNER_EPOCHS = frozenset({1})
@@ -20,14 +20,49 @@ def resolve_owner_authority(owner_id, *, store=None):
             raise ValueError("owner_invalid")
         store = store or configured_memory_store()
         contract = store.get_contract()
+        if contract.schema_version != "mem00.v1" or contract.contract_epoch not in SUPPORTED_OWNER_EPOCHS:
+            raise ValueError("contract_unsupported")
         authority = store.get_owner_authority(owner_id)
-        if (authority.user_id != owner_id or authority.authority_state not in {"legacy", "governed"}
+        if authority.user_id != owner_id:
+            raise ValueError("authority_unproven")
+        if authority.authority_state == "unknown":
+            # The schema's own default for every account that has never been
+            # declared. A definite answer, and still not legacy.
+            raise MemoryOwnerUndeclared("memory_owner_undeclared")
+        if (authority.authority_state not in {"legacy", "governed"}
                 or authority.authority_declared_at is None or authority.authority_epoch not in SUPPORTED_OWNER_EPOCHS
-                or authority.authority_epoch != contract.contract_epoch or contract.schema_version != "mem00.v1"):
+                or authority.authority_epoch != contract.contract_epoch):
             raise ValueError("authority_unproven")
         return authority
+    except MemoryOwnerUndeclared:
+        # Propagate the narrower answer; it is still a MemoryGovernanceUnavailable
+        # for every caller that does not distinguish them.
+        raise
     except Exception:
         raise MemoryGovernanceUnavailable("memory_owner_authority_unavailable") from None
+
+
+def ordinary_path_memory_flags_for_owner(owner_id, *, store=None, environ=None) -> MemoryFeatureFlags:
+    """Owner-scoped availability for code paths that are not memory features.
+
+    Ordinary chat and session finalization must keep working for people who are
+    not in the pilot. They call this instead of `resolved_memory_flags_for_owner`
+    so that an owner who is merely *undeclared* yields all-off flags — the
+    pre-MEM00 behaviour — while a store or transport failure still fails closed,
+    which is what keeps the guard honest for a governed owner during an outage.
+
+    Nothing here grants memory access: the result is `MemoryFeatureFlags()` with
+    every flag false, and `legacy_memory_lane_allowed` still answers False.
+    """
+    if not memory_feature_flags(environ).any_enabled():
+        # No MEM00 feature is switched on anywhere, so there is no authority to
+        # guard and no store to require. Mirrors the rule already used by
+        # context_state.allows_unversioned_builder_handoff.
+        return MemoryFeatureFlags()
+    try:
+        return resolved_memory_flags_for_owner(owner_id, store=store, environ=environ)
+    except MemoryOwnerUndeclared:
+        return MemoryFeatureFlags()
 
 
 def resolved_memory_flags_for_owner(owner_id, *, store=None, environ=None):

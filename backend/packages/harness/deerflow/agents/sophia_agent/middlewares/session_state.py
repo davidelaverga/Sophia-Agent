@@ -64,11 +64,13 @@ class SessionStateMiddleware(AgentMiddleware[SessionStateState]):
             log_middleware("SessionState", "skipped (crisis)", _t0)
             return None
 
-        from deerflow.sophia.memory_governance.flags import (
-            memory_feature_flags_for_owner,
+        # Ordinary, non-memory path: an owner who is simply not enrolled must
+        # keep their pre-MEM00 opener, while a store failure still fails closed.
+        from deerflow.sophia.memory_governance.owner_authority import (
+            ordinary_path_memory_flags_for_owner,
         )
 
-        if memory_feature_flags_for_owner(self._user_id).candidate_ledger_write:
+        if ordinary_path_memory_flags_for_owner(self._user_id).candidate_ledger_write:
             log_middleware("SessionState", "disabled (MEM00 unversioned handoff)", _t0)
             return None
 
