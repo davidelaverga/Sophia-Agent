@@ -2,6 +2,81 @@
 
 Successful target: MEMORY_TEXT_PILOT_READY. Current status: IMPLEMENTING — RELEASE CLOSURE; not deployed, not activated. C2 replaces the prior PROMOTE-only/five-core-run prerequisites for this owner-restricted pilot. Historical C1 records and failures remain valid history, not additional first-use gates. Recovered cumulative failure counter: latest failed iteration EI929; last reported five-failure checkpoint 923–927; next five-failure checkpoint 932. The single current authority is the checkpoint immediately below; every later dated paragraph is preserved history, not competing current status.
 
+## EI930 incident — containment status, 2026-09-17
+
+Five states are tracked separately and must not be conflated:
+**code published**, **code deployed**, **schema repaired**, **serving ready**,
+**pilot activated**.
+
+| state | status |
+| --- | --- |
+| code published | **NO** — remote `codex/mem00-text-pilot` is still `c5e64774`; `codex/mem00-c2-integration-r1` and the hotfix branch do not exist on the remote at all |
+| code deployed | **NO** — Gateway still runs `0c215c1b` |
+| schema repaired | **PARTIAL** — `source_intake` applied; `epoch_review` outstanding, prepared for human execution |
+| serving ready | **NO** — execution stays revoked on the review/inventory functions by design |
+| pilot activated | **NO**, and deliberately kept closed |
+
+### Minimal Gateway hotfix, built on the deployed base
+
+Branch `codex/mem00-ei930-worker-hotfix` at `1820c58b515736d222636f20102a770390623992`,
+based directly on the shared head `2deb762a` that Render tracks. Worktree
+`/private/tmp/mem00-shared-baseline`.
+
+It carries **no** MEM00-C2 pilot code — 2 source files, +22 net lines, plus one
+regression file:
+
+- `store.expire_candidates` now calls `sophia_memory_expire_governed_candidates`,
+  which production actually grants to `service_role` (measured `execute=true`,
+  against `execute=false` for the revoked legacy function). Same signature
+  `(p_limit integer)`, same integer return.
+- `MemoryGovernanceWorker.run_once` stamps `_last_expiry_at` before the attempt
+  and contains its failure, so a failing expiry costs one attempt per hour
+  instead of one per second, and no longer suppresses `extraction.run_once` and
+  `projection.run_once` beneath it.
+
+Containment is deliberately narrow, per the incident constraints:
+`asyncio.CancelledError` derives from `BaseException` so shutdown still
+propagates (pinned by test, not assumed); the recovery stage is untouched; and
+extraction and projection keep performing their own ownership, schema and consent
+checks — this only stops housekeeping from suppressing them. No flag, cohort,
+grant, RLS setting or memory authority was changed, and execution on the revoked
+legacy RPC was **not** restored.
+
+Evidence: 9 regression tests, verified meaningful by running them against the
+same base without the fix, where 6 fail. Affected-path selection
+`memory_governance or governance_worker or expiry or extraction or projection or
+gateway_app_mounts or render_config`: **154 passed, 3 skipped**.
+
+### Worker-reachable RPCs — verification still outstanding
+
+Fixing the expiry call does not prove the rest of the pipeline is usable. Once
+the exception no longer aborts `run_once`, extraction and projection will start
+running for the first time since the storm began. Every RPC they need must be
+checked against the current schema **before** deploying, or a different storm may
+replace this one. The worker-reachable set is:
+
+`sophia_memory_expire_governed_candidates`, `sophia_memory_claim_extraction`,
+`sophia_memory_complete_extraction`, `sophia_memory_fail_extraction`,
+`sophia_memory_enqueue_extraction`,
+`sophia_memory_finalize_and_enqueue_extraction`,
+`sophia_memory_claim_projection`, `sophia_memory_complete_projection`,
+`sophia_memory_expire_projection_lease`.
+
+Only the first is confirmed. The read-only query to check existence and
+`service_role` EXECUTE for all nine was prepared but not run — the browser pane
+was closed before it could execute. **This is a pre-deploy gate, not optional.**
+
+### Deployment safety
+
+`render.yaml` pins all three services — `sophia-langgraph`, `sophia-gateway`,
+`sophia-voice` — to branch `codex/sophia-observability-v1`. Pushing
+`codex/mem00-text-pilot`, `codex/mem00-c2-integration-r1` or
+`codex/mem00-ei930-worker-hotfix` therefore triggers **no** deployment; only a
+commit landing on the shared branch does. Publication is safe and separate from
+deployment. Deploying the hotfix is a deliberate follow-up requiring a Voice-
+coordinated window, and the actual running artifact SHA must be recorded
+afterwards rather than inferred from the push.
+
 ## PRODUCTION INCIDENT — 2026-09-17, live-observed and partially repaired
 
 This section is the current authority for production state. It supersedes the
