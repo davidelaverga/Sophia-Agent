@@ -189,13 +189,52 @@ have produced roughly **370** further errors.
 (An earlier count in this session reported "2 after cutover"; that tallied log
 *timestamps*, not errors, and both were checkpoint LOG lines. Corrected here.)
 
-The worker did **not** go quiet by dying. Eleven consecutive `/ready` samples
-from 22:53:36 to 22:58:02 all report `commit_sha 8c5cf538`, reaper
-`running: true`, with `last_cycle_at` advancing steadily —
-20:52:58 → 20:54:01 → 20:55:05 → 20:56:10 → 20:57:15 — and
-`blocking_pending: 0`, `conflicts: 0`, `processing_failed: 0`. That roughly
-one-minute cadence is the worker performing real periodic work, which is what
-distinguishes containment from the service having stopped.
+### CORRECTION — the liveness evidence cited the wrong worker
+
+An earlier version of this section claimed the MEM00 worker was alive by citing
+`/ready`'s `voice_lab_retention_reaper` counters and its advancing
+`last_cycle_at`. **That is the Voice Lab retention reaper, not MEM00.** Those
+counters would have advanced identically if the MEM00 governance worker had
+never started. The claim was unsupported by the evidence offered, and the
+eleven-sample observation proves only that the Gateway process and the Voice Lab
+reaper were alive.
+
+The Gateway exposes **no MEM00 worker field at all** on `/ready` or `/health` —
+`install_memory_governance_worker` stores it on `app.state` and nothing surfaces
+it. That is an observability gap in its own right and is recorded as such; it is
+why a MEM00-specific claim cannot be made from the health endpoints.
+
+**MEM00-specific observation, obtained from the deploy's own application log:**
+
+```
+2026-09-17 20:51:55 - app.gateway.app - INFO - MEM00 governance worker started contentExcluded=true
+```
+
+That line is emitted only after `build_configured_memory_governance_worker()`
+returns a worker and `.start()` is called, so it establishes that the MEM00
+governance worker was constructed and started on release `8c5cf538` — which the
+reaper counters never could.
+
+No `memory.governance expiry_failed` and no `memory.governance recovery_failed`
+line appears in the deploy window (20:46:55–20:53:05 UTC) or in the sampled
+window through 22:18 UTC. Both are the log lines the hotfix added, so their
+absence is meaningful rather than merely quiet:
+
+- **Expiry** now calls `sophia_memory_expire_governed_candidates`, which
+  production grants to `service_role`, so a success emits nothing. Consistent
+  with the storm ending.
+- **Recovery** runs only for `memory_cohort_principals()`. The worker started
+  without raising `memory_certification_principal_not_in_cohort`, so the cohort
+  is non-empty and recovery did run; it reaches
+  `sophia_memory_enqueue_extraction` only for a principal's **ended** sessions,
+  and all 18 ended sessions in production belong to non-cohort users (16 with no
+  governance row, 2 undeclared). Nothing to enqueue means no failure to log.
+
+**What is still not established.** No successful expiry return value has been
+observed, and the next scheduled attempt is an hour after start. A quiet log
+remains consistent with both success and hourly failure. What is established:
+the MEM00 worker started on this release, the per-second storm is gone, and
+neither containment path has reported a failure.
 
 **Honest limit of this evidence.** A quiet log is consistent with both "expiry
 now succeeds" and "expiry now fails once an hour instead of once a second". The
