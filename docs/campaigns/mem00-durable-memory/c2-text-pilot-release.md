@@ -350,6 +350,168 @@ means tracing cannot substitute for the required authoritative
 lifecycle/admission evidence. LangSmith retention is now capped at 180 days
 (notice effective 2026-09-14) and this project is set to 14d, so older traces
 aged out.
+
+**Migration application authorized, and prepared.**
+
+Davide authorized applying the database changes on 2026-09-15 ("I authorize to
+apply the database changes"). The twelve files are additive and already written
+to be re-runnable: each is wrapped in `BEGIN; ... COMMIT;` and guarded with
+`CREATE OR REPLACE` / `ADD COLUMN IF NOT EXISTS` / `CREATE INDEX IF NOT EXISTS`,
+and their in-file comments state lexical order is the dependency order.
+
+Application tooling added as `tools/mem00_apply_migrations.mjs` (syntax-checked):
+it applies the twelve files in lexical order through the Supabase Management API,
+one file per request, and proves each application by checking a distinctive
+witness object before and after. It prints no token and no row contents.
+`--dry-run` reports witness state without mutating. This session could not
+execute it: no Postgres client (`psql`/`docker`) exists locally, no real
+database credential is present in any worktree (only `.env.example`), and the
+browser SQL editor is not a safe vehicle for ~222 KB of production DDL across
+twelve files. A Supabase account token is required to run it; the exact
+credential request is the only thing outstanding for schema application.
+
+### Continuation addendum (2026-09-17, third session)
+
+Source-inspected and locally-tested unless marked otherwise. No deployment, no
+schema application and no activation happened in this session either.
+
+**Live pins re-read 2026-09-17, unchanged from the 2026-09-15 addendum.**
+`sophia-gateway.onrender.com/ready` → 200, `commit_sha` still
+`0c215c1ba0a2218ef224f65601092d5845bb07cf`; `sophia-langgraph.onrender.com/info`
+→ LangGraph `0.8.1`, `langgraph_py` `1.2.0`, `langsmith: false`;
+`sophia-voice-2uzr.onrender.com/ready` → 200 at build `35c6467c`,
+`voice_lab_enabled: false`, kill switch engaged. The Gateway's Voice Lab
+retention reaper is running (last cycle 2026-09-17T11:42:58Z, 1 discovered /
+1 accepted-historical-pending / 0 blocking). Still **no deployed component
+carries any MEM00-C2 commit**.
+
+**Integration candidate re-verified and advanced.** `codex/mem00-c2-integration-r1`
+is now `83253c8544dd72cf74e401f350ce9b9520a16e24`, tree
+`49ae3920afab1cc05f9f70878142c4f19afc3197`, merging shared `2deb762a` with the
+pilot head `5a6c0616` (the earlier `7632e7a2` merged the older pilot head
+`f3378574`). `backend/langgraph.json` still has a **zero** diff against the
+shared branch, so the receiving auth policy remains staged as required. The
+affected backend selection `mem00 or voice_lab or session or gateway_app_mounts
+or render_config` reproduces the recorded result exactly on the new merge:
+**41 failed, 1721 passed, 6 skipped** in 110.72s. The 41 are the same
+pre-existing legacy-fixture failures classified above, not product defects.
+
+**EI930 — migration apply-order defect in the staged tooling, found and fixed.**
+`tools/mem00_apply_migrations.mjs` applied the twelve files in **lexical** order
+and asserted in its own comments that lexical order was the dependency order.
+It is not. The qualified order in `tools/mem00_c2_model_authority_contract.mjs`
+and in Appendix A of the handoff places `epoch_review` **last** among the C1
+files; lexically it sorts fourth, before the two files whose functions it
+replaces and before the file that creates its dependency.
+
+*Empirically demonstrated, not inferred.* Both orders were applied to real
+PostgreSQL 16 databases (details under "Disposable rehearsal" below). Applying
+the twelve files in lexical order gives:
+
+| file | lexical result |
+| --- | --- |
+| `..._epoch_review` (4th) | **fails** `42883` — `public.sophia_memory_source_snapshot(text,text,text)` does not exist; it is created later by `..._epoch_source_target` |
+| `..._source_intake` (10th) | **fails** `P0001 memory_source_predicate_drift` — `..._source_decision_fence` was applied before it |
+| other ten files | apply and **commit** |
+
+So the failure mode is a **partially applied production schema**, not a clean
+abort: ten files commit, two do not, and the database is left serving
+`sophia_memory_review_snapshot` and `sophia_memory_inventory_snapshot` with
+their **pre-epoch bodies** (verified: the epoch markers appear in 0 of 1
+overloads), with the whole source-intake stage missing. Recovering from that
+state on production would have been manual.
+
+Correcting an earlier draft of this note: the corruption is **not** silent at
+the SQL level — Postgres does raise both errors. What was silent was the
+tooling's *witness*: `epoch_review`'s witness was `sophia_memory_review_snapshot`,
+the very object `..._review_snapshot.sql` also creates, so on any re-run after a
+partial apply the file that failed would have reported `present`. The old script
+also continued past both failures into their dependants instead of stopping.
+
+Repaired: the script now applies the qualified dependency order, **stops at the
+first failing file**, and replaces the two ambiguous witnesses with
+**definition-content markers** — `acceptance_unproven` for `review_snapshot`
+and `source_target_at_epoch_aligned` for `inventory_snapshot`, each verified
+present in the epoch body and absent from the older one. A marker reads `stale`
+rather than `present` whenever any overload carries the old body. A post-apply
+invariant check re-asserts both markers and fails loudly if the files are ever
+applied in lexical order again, by this script or by hand. The script also
+accepts `MEM00_DATABASE_URL` and applies through the existing `pg` client, so an
+existing database credential can be reused instead of minting a new
+account-wide Supabase token.
+
+Classification: a real defect in release tooling, caught before execution.
+**It never ran against production**, so there is no production effect to settle
+and no provider state changed. Latest failed iteration EI930; next
+five-failure checkpoint remains 932.
+
+### Disposable rehearsal — the twelve files are now applicable evidence, not a plan
+
+Run against real **PostgreSQL 16.10** in the existing disposable Lima VM
+`mem00-qualification24` (Ubuntu 24.04), reached over an SSH tunnel. Two
+throwaway databases were created and are not production. No production
+database was contacted in this session.
+
+- **Correct order applies cleanly.** Base `2026_09_02_mem00_durable_memory_governance.sql`
+  first, then the twelve in qualified order: every file returns OK and every
+  per-file witness moves `absent → present`. The final ordering invariant passes:
+  both `sophia_memory_review_snapshot` and `sophia_memory_inventory_snapshot`
+  carry the epoch-aware bodies.
+- **Complete function surface.** The twelve files define **54** distinct
+  `public.*` functions; all **54** are present after the apply.
+- **Least privilege holds on a real server.** Of **162** (function, role) pairs
+  across `anon`, `authenticated` and `service_role`, exactly **10** carry
+  EXECUTE, all of them to `service_role`:
+  `sophia_memory_ensure_governance`, `sophia_memory_lookup_command_receipt`,
+  `sophia_memory_expire_governed_candidates`, `sophia_memory_complete_source_recovery`,
+  `sophia_memory_claim_source_recovery`, `sophia_memory_apply_source_target`,
+  `sophia_memory_invalidate_source`, `sophia_memory_resolve_provider_hits`,
+  `sophia_memory_current_view`, `sophia_memory_complete_extraction`.
+  **Zero** grants to `anon` or `authenticated`.
+- **EI929 confirmed against a real schema, not only by source reading.** After
+  the apply, `service_role` has EXECUTE on `sophia_memory_expire_governed_candidates`
+  (`true`) and **not** on the legacy `sophia_memory_expire_candidates` (`false`).
+  The store fix committed in `9cb84acf` is therefore necessary and correct:
+  the pre-fix code path would have failed closed with `42501` exactly as
+  predicted.
+- **Re-application is idempotent and survives restart.** A second full apply
+  returns OK for all twelve with the invariant still passing. After
+  `systemctl restart postgresql`, all 54 functions, the 10 grants and both
+  epoch markers are unchanged.
+- **Correction to an inherited claim.** This record previously stated that the
+  2026-09-02 base migration also creates `sophia_memory_tombstone`. On a real
+  apply it does not — `to_regclass('public.sophia_memory_tombstone')` is `NULL`
+  after the base. It does create `sophia_memory_contract` and
+  `sophia_memory_expire_candidates`, so the inference that the base **is**
+  applied in production (because `sophia_memory_contract` exists there) still
+  stands; only the supporting detail was wrong.
+
+**Operational consequence — apply schema before deploying code.** The set is
+idempotent in its end state but **not atomic across files**: files 4 and 5
+install the pre-epoch `review_snapshot`/`inventory_snapshot` bodies and file 11
+restores the epoch-aware ones, so a *re-run* against a live database exposes a
+window in which those two reads serve the pre-epoch contract. The rehearsal
+shows this directly — on an already fully migrated database the second run
+reports `epoch_review before=[...=stale(0/1) ...=stale(0/1)]`. On a first
+application this window is harmless because no deployed code calls the
+functions yet. Therefore: apply the schema **first**, deploy the candidate
+after, and do not re-run the set against a live pilot outside a maintenance
+window. A re-run is unnecessary anyway, since the end state is idempotent.
+
+What this rehearsal does **not** establish: it is not the production database,
+not the production role set (production has Supabase's own `service_role`
+configuration and RLS context), and not an application-role serving proof. The
+production applied-history read from 2026-09-15 still stands as the statement
+of what is unapplied there.
+
+**Access blockers for this session (unchanged in substance, re-confirmed).**
+No Supabase, Render or Vercel credential exists in this environment, and the
+Claude in Chrome extension is not connected, so the browser has no authenticated
+session. `git push` also has no credential here (`gh` absent, empty keychain),
+which matters because Render and Vercel deploy from a branch. Deployment, schema
+application and Davide's activation therefore remain genuine access blocks, not
+deferred test work.
+
 ## Candidate and scope
 
 - Isolated worktree: Sophia-Agent-mem00-c2, branch codex/mem00-text-pilot.

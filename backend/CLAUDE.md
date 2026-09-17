@@ -64,6 +64,136 @@ deer-flow/
 
 ## Important Development Guidelines
 
+### MEM00 C2 local integration status
+
+The staged Builder factory uses a run-owned model and an outer memory-context
+entry wrapper, including for positively declared legacy owners. OpenAI fallback
+must retain that same active guard; unscoped construction is denied. Governed
+source-only handoff tests do not qualify auxiliary briefing models, launch,
+artifact delivery or task completion. Do not activate the staged LangGraph auth
+or deploy this work until those paths and required SQL grants are qualified.
+See the C2 release record for exact tests and remaining rollout gates. Legacy
+factory fixtures must explicitly declare their synthetic owner; never bypass
+runtime authority to accommodate a dummy graph.
+
+Source-only Builder entry now reconstructs execution state from the bound exact
+HumanMessage after source and zero-memory re-admission. The auth hook derives
+factory tool-selection hints from that same source. Never copy parent budgets,
+artifacts, emotional state, ledger statistics or file paths into this lane.
+Simple tiers retain cost/turn caps; presentation deadlines use the binding's
+acceptance time. `test_mem00_c2_builder_source.py` covers table, PPTX and HTML
+source cases through actual briefing assembly, but not launch/task completion.
+
+Independent handoff retries preserve child-message identity and the original
+historical receipt. Only a changed fresh admission ID may differ during receipt
+recovery; source, payload, owner, parent/run, child, scope and epochs must match.
+Do not apply this exception to generic `register` or treat it as a model permit.
+Native run-create ambiguity still needs its own exact-child recovery path.
+
+The staged `dispatch_independent_builder` adapter now supplies that exact-child
+observation path: duplicate or uncertain allocation cannot dispatch again, and
+confirmation requires both the owner-bound ledger association and native run
+identity/status. Its synthetic transport tests do not activate the task tool;
+wire that tool and native lifecycle before claiming ordinary Builder delivery.
+
+The active-governed start_builder_task path now calls this adapter before any
+legacy enrichment. Its Command retains unconfirmed child identity and prevents
+automatic replacement. Whole-graph guard enforcement, native SQL and lifecycle
+completion are still required; isolated tool tests do not prove those gates.
+
+The unguarded task-tool branch now requires positive durable legacy authority
+before enrichment. Missing guard, missing owner row or DB failure must never
+select legacy on behalf of a governed owner. Legacy unit fixtures must declare
+their intended owner explicitly rather than weakening this runtime check.
+The complete launch suite now declares its legacy owners per affected test;
+the governed missing-guard case asserts zero allocation rather than a sanitized
+legacy launch. Keep both compatibility and refusal coverage when changing it.
+
+Full Builder-chain fixtures must use ainvoke because progress hooks are async.
+Mocking MemoryRunGuard._readmit alone does not model PromptAssembly's separate
+current-admission check. The source-only chain test supplies both explicitly
+and stops at a recording model boundary; artifact/provider delivery remains
+separate evidence and must not be inferred from that test.
+
+The unapplied `2026_09_14_mem00_c2_model_authority.sql` consolidates the selected
+C1 v4 admission/source/result carriers without completion/resume authority or
+Builder personal-memory manifests. Ordinary source witnesses must match the
+actual attempt thread. `tools/mem00_c2_model_authority_contract.mjs` qualifies
+the selected SQL on PGlite or the disposable native driver; native mode also
+checks concurrent one-use admission and restart persistence. No serving grants
+are added. Native fixture PostgreSQL 17.9 and pg 8.16.3 are test-only dependencies,
+not application dependency changes. Inspect and run the embedded package's
+symlink hydration when restoring its isolated runtime; missing ICU links are
+fixture-installation failures, not product SQL evidence.
+The SQL contract also uses actual manual-create/edit/tombstone RPCs to check
+positive canonical inclusion and stale-admission denial. Only provider-binding
+rows are synthetic observations; do not report them as hosted projection proof.
+
+Builder completion webhooks establish LangGraph owner scope only after their
+existing exact-body signature dependency. Hydration and terminal-state updates
+use the scoped SDK factory; missing event owners cannot borrow outer context.
+`test_mem00_builder_event_owner_scope.py` exercises the actual signed route with
+two concurrent owners and verifies downstream route-bound credentials. Synthetic
+cleanup/enumeration and other worker clients remain separate qualification work;
+do not enable global LangGraph auth on this evidence alone.
+The compiled source-only Builder regression now includes the actual write_todos
+tool and a second model boundary. This proves middleware/tool continuation only;
+the fake model does not qualify file origin, provider transport or artifacts.
+SQL/test slice0acc465f is published with no grants; remaining integration WIP is
+not included in that commit. Keep future staging explicit and narrow.
+Frontend recap persistence now serializes an empty state and migrates away the
+version-zero memory cache. Candidate/decision authority must be reloaded; do not
+restore browser-persisted approvals. This storage fix does not close in-flight
+account-switch/action lifetime checks, which remain separate pilot work.
+RecapPage now passes its authenticated owner to the loader. Scope comparisons
+guard every asynchronous publication/status callback and deny signed-out loading;
+the optional undefined owner is retained for existing pure loader fixtures only.
+Do not interpret this as isolation of global recap decisions or pending writes.
+Recap action callbacks now capture an owner/session lifetime token; A→B→A does
+not restore an old callback. Production commit calls pass the same current-action
+predicate into the store, which rechecks before publishing async results/errors.
+Local invalidation does not cancel or undo a server decision. Reload canonical
+state after identity changes; never claim the old action had no effect.
+Full recap-page fixtures must supply authenticated identity. Reopening a page
+revalidates canonical candidates but does not restore an unsaved local decision.
+The page owner-switch regression uses the real loader, store and rendered page;
+it does not substitute for authenticated production review evidence.
+Recap lifetime slice d4436b89 is published separately from backend WIP. The composed
+SQL/Gateway/Next read-chain was rerun with both frontend cases executed, not skipped.
+Governed list_async_tasks branches before legacy normalization and uses the
+existing source-only association plus exact native run status. C2 inventory must
+not import the unselected C1 resume resolver or expose cached task result text.
+The inventory rechecks association and guard after observations; unavailable is
+not an empty successful list. Check/update/cancel and artifact lifecycle remain
+separate qualification work; this does not activate resume or completion memory.
+The installed DeepAgents list-tool factory is now exercised with the real closure
+extractor in sync/async regression tests, including authority/binding/inventory
+changes during observation. Client transport remains synthetic in these tests.
+Governed check_async_task now bypasses the legacy terminal cache. It resolves
+exact current child identity, observes live status and admits a successful child
+checkpoint through the existing run guard before reconciling result text. Never
+pass cached task summaries or raw native error text into this path. Its tests
+exercise installed tool closures but do not establish hosted artifact delivery.
+The composed check test additionally uses real guard entry, source-only binding,
+and whole-state checkpoint validation. Its explicit _readmit seam is not SQL
+admission evidence; synthetic SDK responses are not hosted delivery evidence.
+Gateway ownership tests exercise create_app's real request middleware with
+concurrent authenticated callers, anonymous requests and development bypass.
+Only verified bearer context may populate the remote SDK owner scope; bypass
+must not borrow an ambient service identity. These tests do not activate auth.
+The C2 guard no longer imports deferred C1 resume modules. Deferred entry,
+execution selection and checkpoint methods explicitly deny; original source-only
+Builder binding and checkpoint admission remain available. Do not copy the C1
+resume dependency chain into this pilot just to satisfy an obsolete import.
+The required source_use adapter is now present for the existing preserved-source
+check. It calls the selected sophia_memory_check_source_use RPC and validates an
+exact observation with no memory approval or final model permission. It does not
+refresh source acceptance epochs or enable optional source mutation features.
+Extractor fault fixtures must declare their governed synthetic owner and capture
+the full original messages/metadata/input-reference/dispatch authority before
+injecting execution-time faults. Do not bypass owner checks or create a fresh
+work-item reference after making its original template unavailable.
+
 ### Voice Lab D02 retained receipt lookup
 
 `POST /internal/voice-lab/d02/browser-worker-termination-receipts` uses the
