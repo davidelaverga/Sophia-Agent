@@ -248,7 +248,12 @@ class SupabaseMemoryGovernanceStore:
         )
 
     def expire_candidates(self, *, limit: int = 500) -> int:
-        result = self._rpc("sophia_memory_expire_candidates", {"p_limit": limit})
+        # The C1 dependency-authority migration revoked the original
+        # ``sophia_memory_expire_candidates`` from ``service_role`` and granted
+        # this governed, source-aware replacement. That migration IS applied in
+        # production, so the revoked function fails closed with 42501 on every
+        # call; retention must use the governed RPC.
+        result = self._rpc("sophia_memory_expire_governed_candidates", {"p_limit": limit})
         if isinstance(result, list) and len(result) == 1:
             result = result[0]
         if not isinstance(result, int):
