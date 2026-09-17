@@ -60,9 +60,20 @@ class MemoryGovernanceWorker:
             self._recovery_pending = False
             worked = recovered > 0
         if self.extraction is not None and time.monotonic() - self._last_expiry_at >= 3600:
-            expired = await asyncio.to_thread(self.extraction.governance_store.expire_candidates)
+            # Stamp the attempt BEFORE making it. The stamp used to be written
+            # only on success, so a persistently failing expiry never advanced
+            # it and the surrounding one-second poll loop retried the same RPC
+            # every second indefinitely.
             self._last_expiry_at = time.monotonic()
-            worked = expired > 0 or worked
+            try:
+                expired = await asyncio.to_thread(self.extraction.governance_store.expire_candidates)
+            except Exception as exc:  # noqa: BLE001 - durable rows remain retryable next interval.
+                # Retention expiry is one of several duties. Letting it raise
+                # here skipped extraction and projection entirely for as long as
+                # it kept failing.
+                logger.error("memory.governance expiry_failed error_type=%s", type(exc).__name__)
+            else:
+                worked = expired > 0 or worked
         if self.extraction is not None:
             worked = await asyncio.to_thread(self.extraction.run_once) or worked
         if self.projection is not None:
