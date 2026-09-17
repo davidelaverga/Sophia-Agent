@@ -2,6 +2,69 @@
 
 Successful target: MEMORY_TEXT_PILOT_READY. Current status: IMPLEMENTING — RELEASE CLOSURE; not deployed, not activated. C2 replaces the prior PROMOTE-only/five-core-run prerequisites for this owner-restricted pilot. Historical C1 records and failures remain valid history, not additional first-use gates. Recovered cumulative failure counter: latest failed iteration EI929; last reported five-failure checkpoint 923–927; next five-failure checkpoint 932. The single current authority is the checkpoint immediately below; every later dated paragraph is preserved history, not competing current status.
 
+## EI930 storm CONTAINED in production — 2026-09-17 22:52 CEST
+
+**Storm contained** is now true in production. **Schema repaired**, **serving
+ready** and **pilot activated** are unchanged and remain separate.
+
+### What was deployed
+
+| field | value |
+| --- | --- |
+| Merge | PR #145 → `codex/sophia-observability-v1` |
+| Shared head | `8c5cf538419cbe3f6eabe59e196242dfb7a6f2cf` |
+| Deploy id | `dep-dam53uu7bikc738bpih0` |
+| Trigger | Manual, "Deploy a specific commit", exact SHA entered |
+| Service | `sophia-gateway` (`srv-d7be5s9r0fns7397l4g0`) **only** |
+| **Actual running `commit_sha`** | **`8c5cf538419cbe3f6eabe59e196242dfb7a6f2cf`** — read from `/ready`, not assumed |
+| Live at | 22:52:20 CEST (previous `0c215c1b` served until 22:51:58) |
+
+The merge added exactly three backend files against the old shared head —
+`workers/memory_governance.py`, `memory_governance/store.py` and the regression
+file. No `langgraph.json`, no migration, no frontend, no pilot/C2 code.
+
+### Unrelated services untouched, as required
+
+- `sophia-voice` `build_id` still `35c6467c…` — unchanged.
+- `sophia-langgraph` still `0.8.1`, `langsmith: false` — unchanged.
+- Gateway `voice_lab_enabled: false`, `voice_lab_kill_switch_engaged: true`,
+  `voice_lab_mutation_ready: false` — no Voice gate moved.
+
+This was only possible because all three services carry
+`autoDeployTrigger: Off`: the merge itself deployed nothing, and the Gateway was
+then deployed alone and deliberately.
+
+### The storm stopped, and the worker is alive
+
+`permission denied for function sophia_memory_expire_candidates` had been logging
+roughly **once per second, continuously**. In the Postgres log:
+
+- Last occurrence: **22:51:07**, before the cutover.
+- Occurrences after the 22:52:20 cutover, re-checked at 22:53:24 and again at
+  22:54:06: **zero**.
+
+At the previous rate that window would have produced ~180 further errors.
+
+The worker did **not** go quiet by dying — `/ready` reports the retention reaper
+`status: ready`, `running: true`, still cycling with `blocking_pending: 0`,
+`conflicts: 0`, `processing_failed: 0`. Quiet logs plus a live worker is the
+distinction that matters: containment, not suppression.
+
+Expiry now calls `sophia_memory_expire_governed_candidates`, which production
+grants to `service_role`, so the hourly job can actually succeed rather than
+merely failing more slowly. Extraction and projection are no longer suppressed by
+the expiry exception.
+
+### Deliberately still true after this deploy
+
+- `sophia_memory_enqueue_extraction` and
+  `sophia_memory_finalize_and_enqueue_extraction` remain **revoked**. Startup
+  recovery therefore still fails — once per process start, logged by error type,
+  not spinning. Granting them belongs to the reviewed C2 activation step.
+- `epoch_review` is **not** applied; `review_snapshot` and `inventory_snapshot`
+  still carry pre-epoch bodies. Unchanged by this deploy.
+- **0 governed owners.** Pilot activation remains closed.
+
 ## PR #145 pre-merge CI reconciliation — 2026-09-17
 
 Both GitHub checks on head `3b2eaf65` are red. Reconciled against the correct
