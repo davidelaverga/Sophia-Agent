@@ -52,57 +52,74 @@ should not be left half-applied.
 This operation does **not** address the live error storm. That is the Gateway
 hotfix (§6), which is independent of this approval.
 
-## 3. Prerequisites — all verified present in production
+## 3. Prerequisites — all verified present, 2026-09-17 refresh
 
-`epoch_review` replaces two functions and depends on objects created earlier.
-Read-only verification on 2026-09-17 showed:
+Re-measured directly against production. Every dependency `epoch_review` calls
+exists, with the exact signature it expects:
 
-| prerequisite | created by | production state |
+| function | identity arguments | present |
 | --- | --- | --- |
-| `sophia_memory_source_snapshot` | `..._epoch_source_target.sql` | **present** |
-| `sophia_memory_source_decision_overlaps` | `..._transactional_clear.sql` | **present** |
-| `sophia_memory_run_source_valid` | `..._dependency_authority.sql` | **present**, and now carries `MEM00_C1_EXACT_ACCEPTED_SOURCE_VERSION` |
-| `sophia_memory_source_fenced` | base / C1 | assumed present — **re-assert in §4** |
-| `sophia_memory_run_input_valid` | C1 | assumed present — **re-assert in §4** |
-| `sophia_memory_review_snapshot` | `..._review_snapshot.sql` | present, **pre-epoch body** |
-| `sophia_memory_inventory_snapshot` | `..._snapshot_inventory.sql` | present, **pre-epoch body** |
+| `sophia_memory_source_snapshot` | `(p_user_id text, p_session_id text, p_thread_id text)` | **yes** |
+| `sophia_memory_run_source_valid` | `(p_user_id text, p_session_id text, p_start bigint, p_end bigint, p_dependencies jsonb)` | **yes** |
+| `sophia_memory_run_input_valid` | `(p_user_id text, p_session_id text, p_context jsonb, p_input_ref text)` | **yes** |
+| `sophia_memory_source_fenced` | `(p_user_id text, p_session_id text)` | **yes** |
 
-`sophia_memory_source_intake_version_trigger` and
-`sophia_memory_accept_source_action` are also present following §5.
+The last two were listed as *assumed* in the first draft of this manifest. They
+are now confirmed, so the `42883` failure mode that stopped `epoch_review` during
+the lexical run cannot recur for these dependencies.
 
-## 4. Record current state BEFORE applying
+## 4. Baseline to compare against — recorded 2026-09-17
 
-Run this read-only query first and keep the output. It is the comparison
-baseline, and it re-asserts the two prerequisites not yet directly confirmed.
+Current definition hashes and privileges, to be re-read after the repair:
 
-```sql
-select p.proname,
-       pg_get_function_identity_arguments(p.oid) as args,
-       md5(pg_get_functiondef(p.oid))            as def_md5,
-       has_function_privilege('service_role', p.oid, 'EXECUTE')  as service_role_exec,
-       has_function_privilege('authenticated',  p.oid, 'EXECUTE') as authenticated_exec,
-       has_function_privilege('anon',           p.oid, 'EXECUTE') as anon_exec
-from pg_proc p
-join pg_namespace n on n.oid = p.pronamespace
-where n.nspname = 'public'
-  and p.proname in ('sophia_memory_review_snapshot','sophia_memory_inventory_snapshot',
-                    'sophia_memory_source_snapshot','sophia_memory_run_source_valid',
-                    'sophia_memory_run_input_valid','sophia_memory_source_fenced')
-order by p.proname;
-```
+| function | `def_md5` before | service_role | authenticated | anon |
+| --- | --- | --- | --- | --- |
+| `sophia_memory_review_snapshot` | `052aa245ddb00a01acada5c90046c2a2` | **true** | false | false |
+| `sophia_memory_inventory_snapshot` | `b7ec2a0f39b2968d81196c5632728c21` | **true** | false | false |
+| `sophia_memory_source_snapshot` | `8b9f06a0f86d8999b7fbaaafc658401b` | false | false | false |
+| `sophia_memory_run_source_valid` | `80506bd04f1b4def0a296b9d70e5eb57` | false | false | false |
+| `sophia_memory_run_input_valid` | `8f1d6cd28aa9715c6509818495f09239` | false | false | false |
+| `sophia_memory_source_fenced` | `abb2ba8d431d6cc31e100d768f74534d` | false | false | false |
 
-**Stop and re-plan if** `sophia_memory_source_snapshot`,
-`sophia_memory_run_input_valid` or `sophia_memory_source_fenced` is missing —
-`epoch_review` would fail `42883` again.
+### CORRECTION — this repair REMOVES a live grant, intentionally
 
-**Expected, and important:** `service_role_exec` for `review_snapshot` and
-`inventory_snapshot` should already be **false**. Their own migrations revoke
-application execution. If either currently reads **true**, stop — applying
-`epoch_review` would remove a grant something may depend on, which needs review
-before proceeding.
+The first draft of this manifest said `service_role` execution on
+`review_snapshot` and `inventory_snapshot` "should already be false" and told the
+operator to **stop** if either read true. Both read **true**. That stop-condition
+was written on a wrong assumption and is withdrawn; it does not block the repair.
 
-Backup reference: the dashboard reported **LAST BACKUP 5 hours ago** as of
-2026-09-17 ~17:40 local. Confirm a current backup exists before executing.
+The reason they are granted is that the currently applied pre-epoch files —
+`..._review_snapshot.sql` and `..._snapshot_inventory.sql` — each `GRANT EXECUTE
+… TO service_role`. `epoch_review` instead ends with
+`REVOKE ALL … FROM PUBLIC, anon, authenticated, service_role`. So applying it
+moves both from `true` to `false`.
+
+**That is the intended end state**, not a regression: C2 requires application
+execution to stay revoked until the reviewed activation step grants it narrowly.
+The corroborating evidence is the disposable rehearsal, where after applying all
+twelve files in the qualified order exactly 10 of 162 (function, role) pairs held
+EXECUTE and neither of these two was among them.
+
+**Consequence the operator must accept:** after this repair, any caller invoking
+`sophia_memory_review_snapshot` or `sophia_memory_inventory_snapshot` as
+`service_role` will receive `42501` until the C2 activation step grants them.
+
+Assessed exposure today: **none observed.** Those RPCs are reached through the
+Gateway only after `_memory_flags(user_id)` resolves, and production currently
+has **0 owners with `authority_state='governed'`** (1 governance row total), so
+`resolved_memory_flags_for_owner` raises for every user and the route returns 503
+before touching them. That is an inference from the resolver contract plus the
+measured owner count, not a traffic measurement — it is the reason to do this
+while the pilot is closed rather than after activation.
+
+### Backup observation — refreshed 2026-09-17
+
+Daily `PHYSICAL` scheduled backups, 8 retained (10–17 Sep 2026). Most recent:
+**17 Sep 2026 10:43:40 (+0000)**. Point-in-time restore is available on this plan.
+
+Note the ordering: that backup predates the `source_intake` apply described in
+§5. Restoring it would roll back `source_intake` as well as anything after it, so
+it is a recovery floor, not a targeted undo for this operation.
 
 ## 5. Already applied — do NOT repeat
 
