@@ -2,6 +2,90 @@
 
 Successful target: MEMORY_TEXT_PILOT_READY. Current status: IMPLEMENTING — RELEASE CLOSURE; not deployed, not activated. C2 replaces the prior PROMOTE-only/five-core-run prerequisites for this owner-restricted pilot. Historical C1 records and failures remain valid history, not additional first-use gates. Recovered cumulative failure counter: latest failed iteration EI929; last reported five-failure checkpoint 923–927; next five-failure checkpoint 932. The single current authority is the checkpoint immediately below; every later dated paragraph is preserved history, not competing current status.
 
+## PRODUCTION INCIDENT — 2026-09-17, live-observed and partially repaired
+
+This section is the current authority for production state. It supersedes the
+schema claims in every section below, including the 2026-09-15 addendum's
+statement that none of the twelve new migrations were applied. That statement
+was **wrong**.
+
+### EI930 already happened to production
+
+The buggy lexical-order `tools/mem00_apply_migrations.mjs` was run against the
+production database at some point before this session. Production is in exactly
+the half-migrated state that a lexical apply produces, confirmed by direct
+read-only query through the authenticated Supabase SQL editor:
+
+| check | production, before this session's repair |
+| --- | --- |
+| 10 of 11 migration witnesses | **present** |
+| `..._source_intake` witness | **absent** — the file never applied |
+| `sophia_memory_review_snapshot` epoch marker | **0/1 overloads** — pre-epoch body |
+| `sophia_memory_inventory_snapshot` epoch marker | **0/1 overloads** — pre-epoch body |
+
+That is the signature predicted by the EI930 analysis: under lexical order
+`epoch_review` fails `42883` and `source_intake` fails `P0001`, and the other
+ten commit. It is not a hypothesis — the production fingerprints match.
+
+### The live error storm and its root cause
+
+Supabase reported the project **Unhealthy**, a **52.7%** API success rate over
+24 hours, and **72,916 Postgres errors out of 73,216 requests**. The Postgres log
+is a continuous wall of `permission denied for function
+sophia_memory_expire_candidates`, roughly **once per second**. PostgREST is
+additionally logging repeated `Warp server error: Thread killed by timeout
+manager`. Production runs **PostgreSQL 17.6**.
+
+Root cause, confirmed by query rather than inference:
+
+- `2026_09_09_mem00_c1_dependency_authority.sql` **did** apply, so it revoked the
+  legacy function and granted the replacement. Measured:
+  `sophia_memory_expire_candidates` → `service_role execute=false`;
+  `sophia_memory_expire_governed_candidates` → `service_role execute=true`.
+- The **deployed** Gateway (`0c215c1b`, shared line) still calls the revoked
+  legacy RPC. This is EI929, live.
+- Two amplifiers in the deployed code, fixed in `9e7364ad` (EI932):
+  `MemoryGovernanceWorker.run_once` stamped `_last_expiry_at` only on success, so
+  a permanently failing hourly job ran once per second against `poll_seconds=1.0`
+  — about 3,600x its intended rate; and the exception escaped `run_once`, which
+  is reached **before** `extraction.run_once` and `projection.run_once`, so
+  memory extraction and projection have not run at all for as long as this has
+  been failing.
+
+### Repair applied this session
+
+Authorized by Davide in-session on 2026-09-17 after the diagnosis was presented.
+
+1. **`2026_09_09_mem00_c1_source_intake.sql` — APPLIED.** Its drift guard was
+   checked first and was satisfied (`sophia_memory_run_source_valid` md5 was the
+   expected pristine `0d447ef95ed420e824d66bdc22380d69`, epoch marker present,
+   not yet patched). The SQL was loaded into the editor and verified **byte-exact
+   against the repository file by SHA-256** (`1f80ebf3724dcb80…bfae01`, 12,396
+   bytes) before running. Result: `Success. No rows returned`. Verified after:
+   `sophia_memory_source_intake_version_trigger` present,
+   `sophia_memory_accept_source_action` present, and
+   `sophia_memory_run_source_valid` now carries
+   `MEM00_C1_EXACT_ACCEPTED_SOURCE_VERSION`.
+2. **`2026_09_09_mem00_c1_epoch_review.sql` — NOT YET APPLIED.** This is the file
+   that must run **last** to restore the epoch-aware
+   `review_snapshot`/`inventory_snapshot` bodies. Loading it was refused by the
+   local permission classifier, not by Supabase. **Production therefore still
+   reads `review_snapshot_epoch: 0/1` and `inventory_epoch: 0/1`** and this
+   repair is incomplete.
+
+### Exact remaining production state
+
+- Schema: 11 of 12 applied; `epoch_review` outstanding, so the canonical review
+  and Pool reads still serve pre-epoch bodies without their clear-epoch and
+  source-exclusion checks. No deployed code calls those two functions today, so
+  this is latent rather than actively harmful — but it must be fixed before any
+  pilot activation.
+- The error storm is **still running**. The schema repair does not stop it; only
+  deploying the code fixes does (`9cb84acf` switches to the governed RPC,
+  `9e7364ad` stops the per-second retry). Both are committed and unpushed.
+- Nothing in this session granted execution to `anon` or `authenticated`,
+  changed Voice Lab gates, or touched user rows.
+
 ## Current checkpoint — 2026-09-15 recovery (MEM00-C2-R1)
 
 Recovered under the MEM00-C2-R1 recovery handoff. Statement classes are marked
