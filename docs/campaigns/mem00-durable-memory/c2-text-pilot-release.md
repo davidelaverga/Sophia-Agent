@@ -619,6 +619,127 @@ outage. Separating the two signals is a change to a governance boundary and is
 recorded as the next decision, not made unilaterally. Latest failed iteration
 EI931; next five-failure checkpoint 932.
 
+### The failure count itself was wrong: 41 was a filter artifact
+
+Correcting this session's own earlier entry as well as the 2026-09-15 one. The
+"41 failures" figure came from running `pytest -k "mem00 or voice_lab or session
+or gateway_app_mounts or render_config"`, which **deselects** any test whose name
+does not contain one of those words. Whole clusters — for example
+`TestMem0MemoryMiddleware` — were never run and were therefore counted as
+neither passing nor failing.
+
+Measured properly, with `pytest tests/` (exactly what CI's `make test` runs):
+
+| tree | result |
+| --- | --- |
+| shared baseline `2deb762a` | **2 failed**, 6,212 passed, 165 skipped (307s) |
+| integration candidate, before the EI931 repair | **127 failed**, 7,029 passed, 168 skipped (306s) |
+
+The shared branch's 2 failures are in `test_local_sandbox_encoding.py` and are
+unrelated to memory; they are the genuine pre-existing ones. So the pilot adds
+roughly **125** failures, not 41 — and also ~817 passing tests, since it brings
+its own suites. The four files named in the earlier entry alone go from
+**407 passed / 0 failed** on the shared branch to **97 failed** on the candidate.
+
+**Lint, the other half of the CI job.** `make lint` runs `uvx ruff check .`
+before `make test`. Local ruff 0.14.11 reports **22** errors on the shared
+baseline and **308** on the candidate: 103 `E701`, 65 `F811`, 55 `I001`, 43
+`E702`, 39 `F401`, plus one each of `E402`, `E501` and `F821`. Two honest
+caveats: CI installs ruff through `uvx` unpinned, so its version may not match
+this one and these numbers indicate the **delta the pilot introduces**, not the
+CI verdict; and the shared baseline is itself non-zero, so whether this gate is
+currently green on the deployed line is unverified and worth settling by
+actually opening a PR once the branch is pushed.
+
+The single `F821 Undefined name 'AuthorizedMemory'`
+(`memory_governance/store.py:705`) was checked and is **not** a runtime bug: the
+module has `from __future__ import annotations`, the name is used only in a
+return annotation, and the import is function-local, so the annotation stays a
+string. The module imports cleanly. 62 of the 65 `F811` are
+`declare_memory_owners` imported in 27 test files and then shadowed as a fixture
+parameter; moving that fixture into `tests/conftest.py` would clear most of them
+and is the obvious structural fix, deliberately not bundled into this change.
+
+### EI931 repair, its measured effect, and the cutover decision it exposes
+
+Repaired in `14e645cd`. `MemoryOwnerUndeclared` is added as a **subclass** of
+`MemoryGovernanceUnavailable`, raised only on a definite answer — the store
+responded against a current schema and the owner either has no row or carries
+`authority_state='unknown'`. A transport failure, an error body or an
+unsupported contract stays the broad error. Because it is a subclass, every
+existing `except MemoryGovernanceUnavailable` keeps failing closed unchanged.
+`ordinary_path_memory_flags_for_owner` is what the two ordinary call sites now
+use: an undeclared owner yields all-off flags, a store outage still raises.
+`legacy_memory_lane_allowed` still answers False for an undeclared owner, so
+unknown authority still never becomes legacy status. Ten tests in
+`test_mem00_noncohort_owner_paths.py` pin both directions.
+
+Two existing governance tests asserted the old exact reason string and were
+updated in `91706672` to encode the distinction instead. Their real guarantees
+were untouched and passed throughout: denial, untouched legacy cache, provider
+never reached.
+
+**Measured effect on the whole suite** (`pytest tests/`, the CI command):
+
+| tree | result |
+| --- | --- |
+| shared baseline `2deb762a` | 2 failed, 6,212 passed |
+| candidate before the repair | 127 failed, 7,029 passed |
+| candidate after the repair | **121 failed**, 7,041 passed |
+
+So the repair fixes the crash it targeted and nothing regressed, but it does not
+by itself make CI green. The remaining 121 break down as: `test_gateway_sophia.py`
+53, `test_mem0_client.py` 22, `test_extraction.py` 22,
+`test_sophia_middlewares.py` 13, and 11 elsewhere — of which 2
+(`test_local_sandbox_encoding.py`) are the shared branch's own pre-existing
+failures.
+
+**A discarded hypothesis, recorded so it is not retried.** Most of the remainder
+reach `MemoryGovernanceUnavailable` because those tests configure no store at
+all. The obvious-looking fix — short-circuit `resolved_memory_flags_for_owner`
+to all-off flags when no MEM00 feature is enabled anywhere, mirroring
+`context_state.allows_unversioned_builder_handoff` — was implemented and
+measured: it cut the four big files from ~110 failures to 48, but it **broke**
+`test_actual_facade_denies_legacy_cache_and_provider_under_rollback[unknown]`
+and `[outage]`. Those cases deliberately unset every `SOPHIA_MEMORY_*` variable
+and still expect the authority reason rather than `governed_runtime_disabled`,
+which pins a deliberate contract: the legacy facade consults durable ownership
+**regardless** of flags. The experiment was reverted. The remaining failures are
+genuine fixture gaps needing the existing `tests/mem00_owner_fixture.py`
+`declare_memory_owners` fixture, not another product change.
+
+**The cutover decision this exposes — the real remaining product question.**
+`app/gateway/routers/sophia.py:137` `_memory_flags` converts **any**
+`MemoryGovernanceUnavailable`, now including `MemoryOwnerUndeclared`, into a
+**503**, and 16 routes use it. This is not a crash and not obviously a defect:
+for an undeclared owner it refuses rather than falling through to the
+`LegacyMem0Facade` path. But it means that once this candidate is deployed,
+every ordinary memory endpoint returns 503 for every user who has not been
+declared — and, separately, `legacy_memory_lane_allowed` requires an explicit
+`legacy` declaration, so an undeclared user has **no memory recall at all**.
+
+The EI931 repair stops ordinary chat and session finalization from raising. It
+deliberately does **not** restore recall, because doing so would mean treating
+an undeclared owner as legacy, which the handoff forbids. Restoring recall for
+existing accounts requires declaring them `legacy`, which is a separate,
+authorized operator action. Verified against a real database this session:
+
+- An account with no MEM00 canonical history **can** be declared `legacy`.
+  Since MEM00 has never been deployed, `sophia_memories`,
+  `sophia_memory_extraction_runs` and `sophia_memory_governance_events` should
+  be empty in production, so ordinary accounts should qualify. This **corrects**
+  a claim made earlier in this session that active accounts would be ineligible.
+- `legacy → unknown` is refused (`memory_owner_authority_rollback_denied`), so
+  the declaration is permanent.
+- `legacy → governed` **is** permitted afterwards, so declaring legacy does not
+  block enrolling the pilot owner later.
+- It covers only accounts that exist at the time of the sweep. No application
+  code calls `sophia_memory_declare_owner_authority`, so **every new signup
+  after the sweep is undeclared again**. Closing that needs either an
+  application-side declaration on account creation or an accepted policy that
+  new users have no memory until declared. This is an open release decision, not
+  a defect, and it is not resolved in this record.
+
 **Access blockers for this session (unchanged in substance, re-confirmed).**
 No Supabase, Render or Vercel credential exists in this environment, and the
 Claude in Chrome extension is not connected, so the browser has no authenticated
