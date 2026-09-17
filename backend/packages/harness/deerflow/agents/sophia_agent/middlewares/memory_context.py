@@ -79,13 +79,52 @@ def _serialized_dependencies(method):
 
 
 class MemoryRunGuard:
+    @staticmethod
+    def _owner_is_undeclared(owner_id) -> bool:
+        """A definite "this owner has no durable declaration", nothing weaker.
+
+        Only MemoryOwnerUndeclared counts: the store answered against a current
+        schema and the owner simply is not enrolled. A transport failure, an
+        error body or an unsupported contract is NOT this -- those must keep the
+        governed guard engaged so it fails closed for a governed owner during an
+        outage, rather than silently skipping memory governance.
+        """
+        from deerflow.sophia.memory_governance.owner_authority import resolve_owner_authority
+        from deerflow.sophia.memory_governance.store import MemoryOwnerUndeclared
+
+        try:
+            resolve_owner_authority(owner_id)
+        except MemoryOwnerUndeclared:
+            return True
+        except Exception:
+            return False
+        return False
+
     def __init__(self, *, owner_id, config, scope="global"):
         from deerflow.sophia.memory_governance.context_state import allows_unversioned_builder_handoff
         self.owner = owner_id
         self.config = dict(config)
         self.context_id = self.config.get("thread_id")
         self.scope = scope
-        self.enabled = not allows_unversioned_builder_handoff(owner_id)
+        # An undeclared owner is outside the pilot. The ordinary middlewares have
+        # already resolved all-off flags for this same turn, so engaging the
+        # governed branch here would demand governed_runtime_read from someone
+        # who can never hold it and raise MemoryContextUnavailable out of
+        # before_agent on an ordinary text turn.
+        #
+        # allows_unversioned_builder_handoff cannot express this on its own: it
+        # swallows every exception and returns False, which correctly refuses the
+        # legacy lane to an unknown owner but reads here as "governed owner".
+        # Unknown still never becomes legacy -- both lanes stay closed; this only
+        # stops the governed lane from being demanded.
+        # Three states, not two. The guard previously assumed enabled=True meant
+        # a governed owner and enabled=False meant a declared legacy owner, so
+        # check() demanded the legacy lane whenever the governed one was off.
+        # An undeclared owner is neither: no governed lane, no legacy lane, no
+        # memory at all. Without this third state an ordinary text turn for any
+        # non-pilot user raises out of before_agent.
+        self.undeclared = self._owner_is_undeclared(owner_id)
+        self.enabled = not self.undeclared and not allows_unversioned_builder_handoff(owner_id)
         self.entered = False
         self.admission = None
         self.completion_task_id = None
@@ -363,6 +402,12 @@ class MemoryRunGuard:
 
     @_serialized_dependencies
     def check(self):
+        if self.undeclared:
+            # No lane is open for this owner, so there is no admission to verify
+            # and nothing to deny. enabled is False, so prepare_model returns
+            # None and self.admission stays None -- no memory can reach a model
+            # request through this guard.
+            return
         if not self.enabled:
             from deerflow.sophia.memory_governance.owner_authority import legacy_memory_lane_allowed
             if not legacy_memory_lane_allowed(self.owner):
