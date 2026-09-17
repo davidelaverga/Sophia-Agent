@@ -2,6 +2,89 @@
 
 Successful target: MEMORY_TEXT_PILOT_READY. Current status: IMPLEMENTING — RELEASE CLOSURE; not deployed, not activated. C2 replaces the prior PROMOTE-only/five-core-run prerequisites for this owner-restricted pilot. Historical C1 records and failures remain valid history, not additional first-use gates. Recovered cumulative failure counter: latest failed iteration EI929; last reported five-failure checkpoint 923–927; next five-failure checkpoint 932. The single current authority is the checkpoint immediately below; every later dated paragraph is preserved history, not competing current status.
 
+## PR #145 pre-merge CI reconciliation — 2026-09-17
+
+Both GitHub checks on head `3b2eaf65` are red. Reconciled against the correct
+baselines; **no defect is introduced by the hotfix** and nothing was disabled,
+removed, loosened or cleaned up.
+
+### Unit Tests — `make lint` fails, `make test` never ran
+
+The job fails at `uvx ruff check .` with `Found 22 errors`, exit 2, so the
+`Run unit tests of backend` step is skipped (`0s`). The lint findings are in
+exactly three files, none of them touched by this PR:
+
+| file | findings |
+| --- | --- |
+| `tests/test_voice_lab_process_termination.py` | 16 |
+| `tests/test_voice_lab_process_termination_postgres.py` | 5 |
+| `app/gateway/voice_lab_process_termination.py` | 1 |
+
+By rule: 11 `E701`, 6 `I001`, 3 `F811`, 1 `E731`, 1 `E501`.
+
+**Inherited vs introduced, measured with CI's own tool version.** CI runs
+`uvx ruff`, which resolves to the newest release — **ruff 0.16.8** today, not the
+0.14.11 in the local venv. Installed 0.16.8 in a throwaway venv and ran it on
+both commits:
+
+| commit | result |
+| --- | --- |
+| base `2deb762a` | Found 22 errors |
+| head `3b2eaf65` | Found 22 errors |
+
+The two finding lists are **byte-identical** (`diff` of the sorted concise output
+is empty: zero added, zero removed). **Zero findings touch any of the three files
+this PR changes** — they are lint-clean. So all 22 are inherited from the base
+branch and the PR's contribution to the lint result is nil.
+
+**Evidence for the skipped pytest step**, run on the exact head with CI's own
+command (`PYTHONPATH=. pytest tests/`):
+
+> **2 failed, 6,225 passed, 165 skipped** in 290.85s
+
+Both failures are `test_local_sandbox_encoding.py` — the same two that fail on
+the unmodified base and are unrelated to memory. Focused regression on the exact
+head: **13 tests**, of which **9 fail** against the same base without the fix.
+Affected-path selection including `voice_lab_recovery`: **203 passed, 3 skipped**.
+
+### Sentrux — the gate measures the wrong baseline
+
+`.github/workflows/sentrux-gate.yml` hardcodes
+`git worktree add ../main-baseline origin/main`, so it always baselines against
+**`origin/main`** regardless of the PR's target. This PR targets
+`codex/sophia-observability-v1`, which has diverged from `main` by hundreds of
+commits of Voice Lab work.
+
+Re-ran the **same pinned version, sentrux v0.5.7**, in a disposable Linux VM:
+
+| baseline | Quality | Coupling | Cycles | God files | verdict |
+| --- | --- | --- | --- | --- | --- |
+| `origin/main` — what CI does | 5671 → 4531 | 0.18 → 0.03 | 1 → 5 | 7 → 22 | **✗ DEGRADED** |
+| `codex/sophia-observability-v1` — the actual base | **4531 → 4531** | 0.03 → 0.03 | **5 → 5** | **22 → 22** | **✓ No degradation**, exit 0 |
+
+The reproduction against `main` matches the bot's PR comment exactly, including
+`Complex functions increased: 176 → 674`. Those deltas are the whole
+shared-branch divergence, not this PR. Against its real base the hotfix moves
+**no metric at all**.
+
+### Disposition
+
+No introduced defect exists to fix, so nothing was changed in response to CI.
+Repository rules were checked: `CONTRIBUTING.md` names the backend regression
+workflow but defines no policy for inherited failures; there is no `CODEOWNERS`;
+and GitHub reports **"No conflicts with base branch. Merging can be performed
+automatically"** with the merge button enabled, so **no branch protection
+requires these checks** on this target branch. The permitted disposition is
+therefore a **maintainer merge with the inherited failures documented** — which
+this section is.
+
+Explicitly **not** done, and not proposed: disabling either check, editing the
+workflows, adding ignores or `noqa`, reformatting the three `voice_lab_*` files,
+loosening a sentrux threshold, or any repository-wide lint cleanup. Fixing the 22
+inherited findings and repointing the sentrux baseline at
+`github.base_ref` are both real follow-ups, but they belong to the shared
+branch's own change, not to an incident hotfix.
+
 ## EI930 incident closure — 2026-09-17
 
 ### The four states, kept separate
