@@ -2,6 +2,76 @@
 
 Successful target: MEMORY_TEXT_PILOT_READY. Current status: DEPLOYING — Gateway and LangGraph both run 91a8007b and receiving authentication is LIVE. The frontend is still on 35c6467c. Grants unapplied, no account governed, not activated. C2 replaces the prior PROMOTE-only/five-core-run prerequisites for this owner-restricted pilot. Historical C1 records and failures remain valid history, not additional first-use gates. Recovered cumulative failure counter: latest failed iteration EI929; last reported five-failure checkpoint 923–927; next five-failure checkpoint 932. The single current authority is the checkpoint immediately below; every later dated paragraph is preserved history, not competing current status.
 
+## SMOKE TEST — Builder dispatch on the deployed pair, 2026-09-18
+
+One real Builder dispatch through the live product, as the signed-in owner, on
+Gateway + LangGraph both at `91a8007b` and the frontend still at `35c6467c`.
+
+Request: *"Can you build me a short markdown document listing three simple focus
+techniques?"* The companion answered *"I'm starting a fresh build for that focus
+techniques doc now"*, so `start_builder_task` executed.
+
+### What PASSED
+
+- **The authenticated call path works.** `GET /threads/{thread_id}/state` and
+  the run creation were served by the authenticated runtime. **Zero 401s, zero
+  403s, no `LangGraphServiceAuthError`** across both services during the test.
+  This is the check that was outstanding after the LangGraph deploy, and it is
+  now positive rather than merely untried.
+- Session reads/writes, auth, and `/api/health?deep=true` all 200 from the old
+  frontend against the new Gateway — the mixed pair in 4.5 item 3 behaves as
+  predicted.
+
+### FAILURE 1 — the completion event was dropped, so no artifact arrived
+
+```
+[error] Builder-events webhook exhausted 4 attempts for
+        task_id=01a0b69b-1ad1-7521-ab55-295ac2270917; event dropped
+httpx.ReadTimeout: The read operation timed out
+  File ".../deerflow/sophia/builder_events.py", line 513, in _post_webhook
+```
+
+LangGraph built the document and then could not deliver the completion event to
+the Gateway: four attempts, all `ReadTimeout`, event dropped. The artifact count
+in the UI stayed at 1 for the duration of the test.
+
+**Not an authentication failure** — a read timeout, not a 401 or 403. The
+Gateway was concurrently answering session POSTs with 200, so it was not
+globally hung; the webhook handler specifically did not respond in time.
+
+**Not yet attributed.** It could be the new Gateway build, the Starter instance
+under load, or pre-existing flakiness on this path. One dispatch is not enough
+to tell, and this record does not guess.
+
+### FAILURE 2 — pre-install threads are ownership-rejected, and this is visible
+
+```
+WARNING Builder canvas route ownership rejected
+        user_id=CUyZxRFmDNON parent_thread_id=01a0b69b-004
+GET /api/sophia/.../threads/01a0b69b-004f-.../builder-canvas/snapshot  404
+```
+
+This is the consequence 4.6 predicted — threads created before the `auth` entry
+carry no server-issued owner label, so the owner filter cannot match them — but
+4.6 understated it. It called them "Builder/companion working threads bounded by
+TTL, not durable user data". In fact the **user's saved Aug 21 artifact** is
+attached to such a thread: its card still renders from Supabase, and
+"View in canvas" now 404s.
+
+So the accurate statement is narrower than the one this document made: nothing
+becomes unreclaimable, but **a saved artifact's canvas view does become
+unreachable**, and a user would notice. Whether `Download` still serves it from
+the bucket was not tested.
+
+### Judgement
+
+The authentication work did what it was meant to do. Failure 2 is a known and
+accepted consequence stated too softly, and failure 1 is unattributed and blocks
+artifact delivery — which is core product function, not pilot scope. Neither is
+a MEM00 governance fault, and every `SOPHIA_MEMORY_*` flag is still `false`.
+
+Rollback remains one click per service: Gateway `8c5cf538`, LangGraph `35c6467c`.
+
 ## DEPLOYED — `sophia-langgraph` at `91a8007b`, 2026-09-18 — **receiving authentication is LIVE**
 
 | field | value |
