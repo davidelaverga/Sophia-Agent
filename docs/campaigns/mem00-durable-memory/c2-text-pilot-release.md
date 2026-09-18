@@ -107,6 +107,29 @@ baseline's own** (`test_local_sandbox_encoding.py`, which fails identically at
 `8c5cf538`). The pilot accounts for **zero** failures beyond the line it merges
 into, down from 117 at `5594e0da`.
 
+### Qualified integration SHA — successor to `6ce165af`
+
+All measured with one method: the frozen Python 3.12 venv, `PYTHONPATH` pinned
+to each tree's own `packages/harness`, `pytest tests/ -q -p no:randomly`, and
+`ruff check .` from the backend root.
+
+| tree | SHA | `make test` | `make lint` |
+| --- | --- | --- | --- |
+| shared baseline | `8c5cf538` | 2 failed / 6,225 passed | 22 errors |
+| pilot head | `21113189` | 2 failed / 7,208 passed | **0** |
+| **integration candidate** | **`82f8d584`** | **2 failed / 7,251 passed** | 22 errors |
+
+`82f8d584` is `8c5cf538` merged with `21113189`, on
+`codex/mem00-c2-integration-r2`, superseding `6ce165af`.
+
+The pilot contributes **nothing** to either gate. Both remaining test failures
+are `test_local_sandbox_encoding.py`, identical at the baseline, and all 22
+remaining lint errors are in the baseline's own
+`tests/test_voice_lab_process_termination*.py` and
+`app/gateway/voice_lab_process_termination.py`. Neither is this campaign's to
+fix, and both are named here so the release decision knows CI will still be red
+for reasons that predate the merge.
+
 ### Applicable CI
 
 `.github/workflows/backend-unit-tests.yml` runs `make lint` then `make test`.
