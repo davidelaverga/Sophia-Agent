@@ -1,6 +1,55 @@
 # MEM00-C2 text pilot — current release record
 
-Successful target: MEMORY_TEXT_PILOT_READY. Current status: IMPLEMENTING — RELEASE CLOSURE (second slice); not deployed, not activated. C2 replaces the prior PROMOTE-only/five-core-run prerequisites for this owner-restricted pilot. Historical C1 records and failures remain valid history, not additional first-use gates. Recovered cumulative failure counter: latest failed iteration EI929; last reported five-failure checkpoint 923–927; next five-failure checkpoint 932. The single current authority is the checkpoint immediately below; every later dated paragraph is preserved history, not competing current status.
+Successful target: MEMORY_TEXT_PILOT_READY. Current status: IMPLEMENTING — RELEASE CLOSURE (third slice); authentication installed in the tree, not deployed, not activated. C2 replaces the prior PROMOTE-only/five-core-run prerequisites for this owner-restricted pilot. Historical C1 records and failures remain valid history, not additional first-use gates. Recovered cumulative failure counter: latest failed iteration EI929; last reported five-failure checkpoint 923–927; next five-failure checkpoint 932. The single current authority is the checkpoint immediately below; every later dated paragraph is preserved history, not competing current status.
+
+## Release closure, third slice — 2026-09-18
+
+### Qualified final successor — `91a8007b` (`codex/mem00-c2-integration-r5`)
+
+`8c5cf538` (shared baseline) + `9ed8bedf` (Voice Lab lint) + the pilot through
+`e94b0047` (which installs receiving authentication). One tree, all four gates:
+
+| gate | result |
+| --- | --- |
+| backend suite | **7,256 passed / 0 failed**, 168 skipped, 299s |
+| backend `ruff check .` | **All checks passed** |
+| frontend `vitest run` | **2,394 passed / 0 failed**, 10 skipped, 237 files |
+| frontend `next build` on **Node 24** | compiled, TypeScript passed, 61 static pages, 119 routes |
+
+The frontend build ran on Node **24.21.0**, matching Vercel's observed `24.x`
+rather than the e2e workflow's 22, and the worktree's `frontend/` was made
+byte-identical to r5's for the build. Remaining deviations, both unavoidable
+here: dependencies come from the existing `node_modules` (which match the
+lockfile resolutions) because `pnpm` is absent, and placeholder
+`DATABASE_URL`/`BETTER_AUTH_*` values are needed or page-data collection for
+`/api/test-auth/login` aborts.
+
+Receiving authentication is now **installed in the tree**: `langgraph.json`
+carries the `auth` entry, and `test_render_config` pins the exact entry instead
+of its absence. Authorized by the sponsor and recorded in
+`c2-step-0a-acceptance.md` §4. Installed is not deployed.
+
+### Three CI defects, none of them this campaign's, in the order they surface
+
+Fixing one revealed the next. That is the whole story of PR #146:
+
+| # | defect | evidence | proposed fix |
+| --- | --- | --- | --- |
+| 1 | 22 Voice Lab lint errors fail `make lint`, which runs **before** `make test`, so the suite never ran at all | PR #145 and #147 both die at ~29s on this line; PRs onto `main` run 4–5 min | **[PR #146](https://github.com/davidelaverga/Sophia-Agent/pull/146)** — merge-ready head `9ed8bedf` |
+| 2 | the sentrux gate baselines `origin/main`, so it scores the shared line's whole divergence, not the PR | PR #146 and PR #145 produced **byte-identical** metrics (quality 5671→4531, god files 7→22, complex fns 176→674); 387,151 of #146's 387,176 measured insertions were already in its base | **[PR #147](https://github.com/davidelaverga/Sophia-Agent/pull/147)** — baseline `github.event.pull_request.base.ref` |
+| 3 | `timeout-minutes: 15` is far below the suite's runtime — only visible once #1 was fixed and `make test` finally ran | PR #146's job: lint 1s, then cancelled at 38% after ~14.5 min → ~38 min needed for 6,227 tests, more for 7,256 | `codex/ci-unit-test-timeout` — raise to 60 |
+
+**#1 was masking #2's irrelevance and #3's existence.** Defect 3 in particular
+had never been observed, because no PR on this line had ever reached the test
+step.
+
+None is caused by the lint patch, none is fixed by bypassing a check, and the
+lint patch was not expanded to cover them — each is its own change, and #2 and #3
+are the shared line's to accept.
+
+**Merge order that actually works:** #147 and the timeout fix first or
+concurrently, then #146, then the integration successor. Merging #146 alone
+leaves its own required check timing out.
 
 ## Release closure, second slice — 2026-09-18
 
