@@ -3,13 +3,15 @@
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import MagicMock
+from uuid import uuid4
 
 import httpx
 import pytest
+from mem00_source_snapshot_fixture import source_snapshot_fixture
 
 from deerflow.sophia.memory_governance.extraction_service import MemoryExtractionService
-from deerflow.sophia.memory_governance.models import MemoryContract
-from deerflow.sophia.memory_governance.store import MemoryGovernanceConflict, SupabaseMemoryGovernanceStore
+from deerflow.sophia.memory_governance.models import MemoryContract, OwnerMemoryAuthority
+from deerflow.sophia.memory_governance.store import MemoryGovernanceConflict, MemoryGovernanceUnavailable, SupabaseMemoryGovernanceStore
 from deerflow.sophia.session_store import SessionMessageRecord, SessionRecord
 
 
@@ -32,12 +34,41 @@ def test_finalize_uses_database_status_after_real_session_mapping(database_statu
 
 def _setup(monkeypatch, *, processed=2, messages=2):
     monkeypatch.setenv("SOPHIA_MEMORY_REFERENCE_HMAC_SECRET", "m" * 32)
+    monkeypatch.setenv("SOPHIA_MEMORY_CANDIDATE_LEDGER_WRITE", "true")
+    monkeypatch.setenv("SOPHIA_MEMORY_COHORT_PRINCIPALS", "owner-1")
     record = SessionRecord(session_id="session-1", thread_id="thread-1", user_id="owner-1", status="resumable", message_revision=7, memory_processed_until_sequence=processed)
     sessions = MagicMock()
     sessions.get.return_value = record
     sessions.list_messages.return_value = [SessionMessageRecord(message_id=f"m-{i}", session_id="session-1", thread_id="thread-1", role="user", content="synthetic fact", sequence=i) for i in range(1, messages + 1)]
+    for row in sessions.list_messages.return_value:
+        row.memory_source_version = str(uuid4())
+    sessions.read_memory_source_messages.return_value = sessions.list_messages.return_value
     governance = MagicMock()
     governance.get_contract.return_value = MemoryContract(contract_epoch=1, schema_version="mem00.v1", mode="enforced", updated_at=datetime.now(UTC))
+    def owner_authority(owner):
+        if owner != 'owner-1':
+            raise MemoryGovernanceUnavailable('memory_owner_authority_unavailable')
+        return OwnerMemoryAuthority(user_id=owner, authority_state='governed', authority_epoch=1,
+            authority_declared_at=datetime(2026, 9, 8, tzinfo=UTC))
+    governance.get_owner_authority.side_effect = owner_authority
+    governance.source_snapshot.return_value = source_snapshot_fixture(record, sessions.list_messages.return_value, epoch=0)
+    governance.source_extraction_runs.return_value = ()
+    if processed and messages:
+        from deerflow.sophia.extraction import _PIPELINE_MODEL
+        from deerflow.sophia.memory_governance.extraction_input import capture_context, extraction_input_ref
+        from deerflow.sophia.memory_governance.extraction_service import _manifest_ref, _serialize
+        from deerflow.sophia.memory_governance.models import ExtractionRun
+        from deerflow.sophia.memory_governance.source_target import dependencies
+        items = sessions.list_messages.return_value[:processed]
+        context = capture_context(context_mode=record.context_mode, session_date='2026-09-06')
+        governance.source_extraction_runs.return_value = (ExtractionRun(extraction_run_id=uuid4(), user_id='owner-1',
+            session_id='session-1', thread_id='thread-1', transcript_revision=7, sequence_start=items[0].sequence,
+            sequence_end=items[-1].sequence, state='succeeded_nonzero', terminal_candidate_count=1, memory_clear_epoch=0,
+            extractor_contract_version='mem00.extract.v1', extractor_model=_PIPELINE_MODEL, extractor_prompt_version='mem0_extraction.md:v1',
+            extractor_input_context=context, extractor_input_ref=extraction_input_ref(owner_id='owner-1', session_id='session-1',
+                messages=_serialize(items), context=context, model=_PIPELINE_MODEL), source_dependencies=dependencies(items),
+            input_manifest_ref=_manifest_ref(user_id='owner-1', session_id='session-1', transcript_revision=7, messages=items)),)
+    governance.apply_source_target_at_epoch.return_value = SimpleNamespace(run=None)
     service = MemoryExtractionService(governance_store=governance, session_store=sessions, lease_owner="worker-1", service_name="test")
     return service, sessions, governance
 
@@ -45,14 +76,21 @@ def _setup(monkeypatch, *, processed=2, messages=2):
 def test_already_processed_range_uses_revision_guarded_end_without_new_extraction(monkeypatch):
     service, sessions, governance = _setup(monkeypatch)
     assert service.finalize_and_enqueue_session(user_id="owner-1", session_id="session-1", ended_at="2026-09-06T16:32:00+00:00") is None
-    governance.finalize_processed_session.assert_called_once_with(session=sessions.get.return_value, ended_at="2026-09-06T16:32:00+00:00")
+    payload = governance.apply_source_target_at_epoch.call_args.kwargs
+    assert payload['p_ended_at'] == '2026-09-06T16:32:00+00:00'
+    assert payload['p_next_range'] is None
+    assert len(payload['p_reused_runs']) == 1
+    governance.finalize_processed_session.assert_not_called()
     governance.finalize_and_enqueue_extraction.assert_not_called()
 
 
 def test_empty_session_can_end_without_inventing_extraction(monkeypatch):
     service, _, governance = _setup(monkeypatch, processed=0, messages=0)
     assert service.finalize_and_enqueue_session(user_id="owner-1", session_id="session-1", ended_at="2026-09-06T16:32:00+00:00") is None
-    governance.finalize_processed_session.assert_called_once()
+    payload = governance.apply_source_target_at_epoch.call_args.kwargs
+    assert payload['p_ended_at'] == '2026-09-06T16:32:00+00:00'
+    assert payload['p_next_range'] is None and payload['p_reused_runs'] == []
+    governance.finalize_processed_session.assert_not_called()
     governance.finalize_and_enqueue_extraction.assert_not_called()
 
 
@@ -74,7 +112,7 @@ def test_foreign_snapshot_cannot_finalize(monkeypatch):
 
 def test_concurrent_snapshot_change_does_not_emit_end_receipt(monkeypatch):
     service, _, governance = _setup(monkeypatch)
-    governance.finalize_processed_session.side_effect = MemoryGovernanceConflict("revision_changed")
+    governance.apply_source_target_at_epoch.side_effect = MemoryGovernanceConflict("revision_changed")
     event = MagicMock()
     monkeypatch.setattr("deerflow.sophia.memory_governance.extraction_service.emit_memory_event", event)
     with pytest.raises(MemoryGovernanceConflict):
@@ -102,7 +140,9 @@ def test_actual_product_route_finalizes_processed_range_even_after_failed_recap_
     response = TestClient(app).post("/api/sophia/owner-1/end-session", json={"session_id": "session-1", "thread_id": "thread-1"})
     assert response.status_code == 202
     assert response.json()["status"] == "no_new_messages"
-    governance.finalize_processed_session.assert_called_once()
+    governance.apply_source_target_at_epoch.assert_called_once()
+    assert governance.apply_source_target_at_epoch.call_args.kwargs['p_next_range'] is None
+    governance.finalize_processed_session.assert_not_called()
     governance.finalize_and_enqueue_extraction.assert_not_called()
     sessions.update.assert_not_called()
 

@@ -1,6 +1,7 @@
 import type { MutableRefObject } from 'react';
 
 import type { UIMessage } from '../components/session';
+import type { SourceSendInput, SourceSendIntent } from '../lib/memory-source-client';
 import type { RitualArtifacts } from '../lib/session-types';
 import type { FeedbackType } from '../types/sophia-ui-message';
 
@@ -32,9 +33,11 @@ interface UseSessionInteractionOrchestrationParams {
   setInput: (value: string) => void;
   isTyping: boolean;
   isReadOnly: boolean;
-  sendMessage: (params: { text: string }) => Promise<void>;
+  sendMessage: (params: SourceSendInput) => Promise<void>;
+  captureSourceInput: (text: string) => SourceSendInput;
+  retrySourceInput: (text: string, messageId: string | null) => SourceSendInput;
   connectivityStatus: string;
-  queueMessage: (message: string, sessionId: string) => string;
+  queueMessage: (message: string, sessionId: string, sourceIntent?: SourceSendIntent) => string;
   sessionId: string;
   chatMessagesLength: number;
   setChatMessages: (messages: ChatMessage[] | ((messages: ChatMessage[]) => ChatMessage[])) => void;
@@ -96,6 +99,8 @@ export function useSessionInteractionOrchestration({
   isTyping,
   isReadOnly,
   sendMessage,
+  captureSourceInput,
+  retrySourceInput,
   connectivityStatus,
   queueMessage,
   sessionId,
@@ -153,6 +158,7 @@ export function useSessionInteractionOrchestration({
     isTyping,
     isReadOnly,
     sendMessage,
+    captureSourceInput,
     connectivityStatus,
     queueMessage,
     sessionId,
@@ -165,6 +171,7 @@ export function useSessionInteractionOrchestration({
     setJustSent,
     setDismissedError,
     setLastUserMessageContent,
+    setLastUserMessageId,
     setCancelledMessageId,
     stopStreaming,
     voiceState,
@@ -176,6 +183,7 @@ export function useSessionInteractionOrchestration({
     handleRetry,
     handleDismissCancelled,
   } = useSessionRetryHandlers({
+    retrySourceInput,
     lastUserMessageContent,
     isInterruptedByRefresh,
     hasValidBackendSessionId,
@@ -220,6 +228,8 @@ export function useSessionInteractionOrchestration({
     handleMultiTabGoHome,
     handleMultiTabTakeOver,
   } = useSessionUiCallbacks({
+    retrySourceInput,
+    showToast,
     setFeedback,
     setShowFeedbackToast,
     setDismissedError,

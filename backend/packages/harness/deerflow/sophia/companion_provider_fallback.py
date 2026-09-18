@@ -197,7 +197,7 @@ def build_fallback_chat_model():
 
     Timeout and retry come from the companion env namespace.
     """
-    from langchain_openai import ChatOpenAI
+    from deerflow.sophia.memory_governance.model_clients import fallback_openai_model as ChatOpenAI
 
     model_name = fallback_model_name()
     if not model_name:

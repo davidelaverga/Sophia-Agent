@@ -1,4 +1,5 @@
 import type React from 'react';
+import type { SourceSendInput, SourceSendIntent } from '../lib/memory-source-client';
 
 import type { ConnectivityStatus } from '../stores/connectivity-store';
 
@@ -21,6 +22,7 @@ type QueuedMessage = {
   content: string;
   timestamp?: string;
   retryCount?: number;
+  sourceIntent?: SourceSendIntent;
 };
 
 type QueuedMemoryApproval = {
@@ -45,7 +47,7 @@ interface UseSessionQueueOrchestrationParams {
   sessionId: string;
   getQueuedMessages: (sessionId: string) => QueuedMessage[];
   getQueuedMemoryApprovals: (sessionId: string) => QueuedMemoryApproval[];
-  sendMessage: (input: { text: string }) => Promise<void> | void;
+  sendMessage: (input: SourceSendInput) => Promise<void> | void;
   removeFromQueue: (messageId: string) => void;
   incrementRetry: (messageId: string) => void;
   removeMemoryApprovalFromQueue: (approvalId: string) => void;

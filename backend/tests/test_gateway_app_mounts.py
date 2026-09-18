@@ -72,6 +72,43 @@ def test_gateway_app_mounts_sessions_and_bootstrap_routes(tmp_path, monkeypatch)
     }
 
 
+@pytest.mark.parametrize("bypass", [False, True])
+def test_gateway_request_owner_scope_is_authenticated_and_task_local(monkeypatch, bypass):
+    import asyncio
+    import httpx
+    from app.gateway.app import create_app
+    from deerflow.sophia.langgraph_client_auth import _owner, langgraph_owner_scope
+
+    monkeypatch.setenv("SOPHIA_AUTH_BYPASS", str(bypass).lower())
+    monkeypatch.setenv("SOPHIA_MIGRATION_MAINTENANCE_MODE", "false")
+    monkeypatch.setenv("SOPHIA_VOICE_LAB_TEST_PRINCIPAL", "reserved-voice-owner")
+    async def authenticate(token):
+        if token not in {"owner-a", "owner-b"}:
+            raise HTTPException(401, "invalid synthetic token")
+        return {"id": token}
+    monkeypatch.setattr("app.gateway.auth._get_authenticated_user", authenticate)
+    app = create_app()
+    @app.get("/test-owner-scope")
+    async def scoped():
+        before = _owner.get()
+        await asyncio.sleep(0)
+        return {"before": before, "after": _owner.get()}
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            with langgraph_owner_scope("must-not-borrow"):
+                responses = await asyncio.gather(*(client.get("/test-owner-scope", headers={"Authorization": "Bearer " + owner})
+                    for owner in ("owner-a", "owner-b")))
+                for owner, response in zip(("owner-a", "owner-b"), responses, strict=True):
+                    assert response.status_code == 200
+                    expected = None if bypass else owner
+                    assert response.json() == {"before": expected, "after": expected}
+                anonymous = await client.get("/test-owner-scope")
+                assert anonymous.json() == {"before": None, "after": None}
+                assert _owner.get() == "must-not-borrow"
+            assert _owner.get() is None
+    asyncio.run(run())
+
+
 def test_gateway_version_exposes_safe_render_deployment_identity(monkeypatch):
     gateway_app = importlib.import_module("app.gateway.app")
 

@@ -5,10 +5,12 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+from mem00_owner_fixture import declare_memory_owners
 
 
 @pytest.fixture
-def canonical_review_only(monkeypatch):
+def canonical_review_only(monkeypatch, declare_memory_owners):
+    declare_memory_owners({'rollback-owner': 'governed', 'non-cohort-owner': 'legacy'})
     for key in ("CANDIDATE_LEDGER_WRITE", "CANDIDATE_LEDGER_READ", "CANONICAL_POOL_READ"):
         monkeypatch.setenv(f"SOPHIA_MEMORY_{key}", "true")
     for key in ("PROVIDER_PROJECTION", "GOVERNED_RUNTIME_READ", "FAULT_INJECTION"):
@@ -79,6 +81,7 @@ def test_recall_shutdown_clears_carried_memory_state_before_any_early_exit(canon
         "injected_memories": [],
         "injected_memory_contents": [],
         "system_prompt_blocks": ["keep unrelated context"],
+        "memory_retrieval_proof": None,
     }
 
 
@@ -100,4 +103,5 @@ def test_builder_shutdown_clears_carried_memory_on_empty_query(canonical_review_
         "injected_memories": [],
         "injected_memory_contents": [],
         "system_prompt_blocks": ["keep build instructions"],
+        "memory_retrieval_proof": None,
     }

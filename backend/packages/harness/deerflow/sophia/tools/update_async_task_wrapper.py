@@ -38,6 +38,7 @@ its place. The wrapped name is identical (``update_async_task``) so the
 model's tool-selection from PR #129 remains valid.
 """
 
+import asyncio
 import json
 import logging
 import re
@@ -299,6 +300,10 @@ def make_list_async_tasks_wrapper(native_tool: StructuredTool) -> StructuredTool
         runtime: ToolRuntime,
         status_filter: str | None = None,
     ):
+        from deerflow.agents.sophia_agent.middlewares.memory_context import active_governed_tool_guard
+        from deerflow.sophia.memory_governance.task_inventory import list_governed_tasks
+        if guard := active_governed_tool_guard():
+            return list_governed_tasks(guard=guard, runtime=runtime, clients=_native_clients(native_func), status_filter=status_filter)
         if native_func is None:
             raise ToolException(
                 "Native list_async_tasks sync func is unavailable; call this "
@@ -311,6 +316,10 @@ def make_list_async_tasks_wrapper(native_tool: StructuredTool) -> StructuredTool
         runtime: ToolRuntime,
         status_filter: str | None = None,
     ):
+        from deerflow.agents.sophia_agent.middlewares.memory_context import active_governed_tool_guard
+        from deerflow.sophia.memory_governance.task_inventory import alist_governed_tasks
+        if guard := active_governed_tool_guard():
+            return await alist_governed_tasks(guard=guard, runtime=runtime, clients=_native_clients(native_coroutine), status_filter=status_filter)
         if native_coroutine is None:
             raise ToolException(
                 "Native list_async_tasks coroutine is unavailable."
@@ -375,6 +384,9 @@ def _check_async_task_sync(
     *,
     native_func: Any,
 ) -> Any:
+    from deerflow.agents.sophia_agent.middlewares.memory_context import active_governed_tool_guard
+    if guard := active_governed_tool_guard():
+        return _governed_check_sync(guard, runtime, task_id, _native_clients(native_func))
     if native_func is None:
         raise ToolException(
             "Native check_async_task sync func is unavailable; call this tool from the async path or upgrade deepagents."
@@ -398,6 +410,9 @@ async def _check_async_task_async(
     *,
     native_coroutine: Any,
 ) -> Any:
+    from deerflow.agents.sophia_agent.middlewares.memory_context import active_governed_tool_guard
+    if guard := active_governed_tool_guard():
+        return await _governed_check_async(guard, runtime, task_id, _native_clients(native_coroutine))
     if native_coroutine is None:
         raise ToolException("Native check_async_task coroutine is unavailable.")
     _normalize_runtime_async_tasks_for_check(runtime)
@@ -411,6 +426,73 @@ async def _check_async_task_async(
     if clients is None:
         return await native_coroutine(task_id=task_id, runtime=runtime)
     return await _fetch_builder_check_async(clients.get_async(tracked["agent_name"]), tracked, runtime.tool_call_id)
+
+
+def _governed_check_target(runtime, task_id):
+    from deerflow.sophia.memory_governance.task_inventory import _targets
+    targets = [task for task in _targets(runtime, None) if task['task_id'] == task_id]
+    if len(targets) != 1:
+        raise ValueError('task_identity_unproven')
+    return targets[0]
+
+
+def _governed_check_state(thread, task):
+    if not isinstance(thread, dict) or thread.get('thread_id') != task['thread_id'] or not isinstance(thread.get('values'), dict):
+        raise ValueError('task_checkpoint_scope_unproven')
+    return thread['values']
+
+
+def _governed_check_finish(guard, runtime, task, binding, status, values):
+    guard.check()
+    if guard.resolve_child_association(child_context_id=task['thread_id'], child_run_id=task['run_id']) != binding:
+        raise ValueError('task_binding_changed')
+    if _governed_check_target(runtime, task['task_id']) != task:
+        raise ValueError('task_identity_changed')
+    # Never feed cached summaries/results or unsealed provider error text into
+    # reconciliation. Only the admitted checkpoint may supply result content.
+    return _resolved_builder_check({**task, 'status': status}, {'status': status}, values, runtime.tool_call_id)
+
+
+def _governed_check_sync(guard, runtime, task_id, clients):
+    from deerflow.sophia.memory_governance.task_inventory import _unavailable, observed_native_run_status
+    try:
+        guard.check()
+        task = _governed_check_target(runtime, task_id)
+        binding = guard.resolve_child_association(child_context_id=task['thread_id'], child_run_id=task['run_id'])
+        if binding.child_run_id != task['run_id']:
+            raise ValueError('task_binding_changed')
+        client = clients.get_sync(task['agent_name'])
+        run = client.runs.get(thread_id=task['thread_id'], run_id=task['run_id'])
+        status = observed_native_run_status(thread_id=task['thread_id'], run_id=task['run_id'], run=run)
+        guard.check()
+        values = {}
+        if status == 'success':
+            values = _governed_check_state(client.threads.get(thread_id=task['thread_id']), task)
+            guard.admit_child_checkpoint(child_context_id=task['thread_id'], child_run_id=task['run_id'], state=values)
+        return _governed_check_finish(guard, runtime, task, binding, status, values)
+    except Exception:
+        return _unavailable()
+
+
+async def _governed_check_async(guard, runtime, task_id, clients):
+    from deerflow.sophia.memory_governance.task_inventory import _unavailable, observed_native_run_status
+    try:
+        await asyncio.to_thread(guard.check)
+        task = _governed_check_target(runtime, task_id)
+        binding = await asyncio.to_thread(guard.resolve_child_association, child_context_id=task['thread_id'], child_run_id=task['run_id'])
+        if binding.child_run_id != task['run_id']:
+            raise ValueError('task_binding_changed')
+        client = clients.get_async(task['agent_name'])
+        run = await client.runs.get(thread_id=task['thread_id'], run_id=task['run_id'])
+        status = observed_native_run_status(thread_id=task['thread_id'], run_id=task['run_id'], run=run)
+        await asyncio.to_thread(guard.check)
+        values = {}
+        if status == 'success':
+            values = _governed_check_state(await client.threads.get(thread_id=task['thread_id']), task)
+            await asyncio.to_thread(guard.admit_child_checkpoint, child_context_id=task['thread_id'], child_run_id=task['run_id'], state=values)
+        return await asyncio.to_thread(_governed_check_finish, guard, runtime, task, binding, status, values)
+    except Exception:
+        return _unavailable()
 
 
 def _tracked_builder_task(runtime: ToolRuntime, task_id: str) -> dict[str, Any] | None:

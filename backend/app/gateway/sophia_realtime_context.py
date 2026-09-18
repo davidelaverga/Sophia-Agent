@@ -126,12 +126,28 @@ def build_sophia_realtime_context(
     from deerflow.sophia.memory_governance.flags import (
         memory_feature_flags_for_owner,
     )
+    from deerflow.sophia.memory_governance.store import MemoryOwnerUndeclared
 
-    mem00_containment = memory_feature_flags_for_owner(safe_user_id).candidate_ledger_write
-    identity_file_status = "quarantined_mem00" if mem00_containment else _user_context_file_status(safe_user_id, "identity.md")
-    handoff_file_status = "quarantined_mem00" if mem00_containment else _user_context_file_status(safe_user_id, "handoffs", "latest.md")
-    identity_text = None if mem00_containment else _read_user_context_file(safe_user_id, "identity.md")
-    handoff_text = None if mem00_containment else _read_user_context_file(safe_user_id, "handoffs", "latest.md")
+    # Three states, not two. This used to raise for an undeclared owner and take
+    # the whole realtime context build down with it. The repair must not simply
+    # invert that into the legacy branch: the unversioned identity/handoff files
+    # belong to a DECLARED legacy owner, so reading them for an owner nobody has
+    # declared would be exactly the fall-through this path has to avoid. An
+    # undeclared owner gets the neutral context -- no identity, no handoff -- and
+    # the Mem0 search below already answers "unavailable" for them, so no legacy
+    # memory is reused either. A store outage still raises and fails closed.
+    try:
+        mem00_containment = memory_feature_flags_for_owner(safe_user_id).candidate_ledger_write
+        withheld_status = "quarantined_mem00"
+        unversioned_context_withheld = mem00_containment
+    except MemoryOwnerUndeclared:
+        mem00_containment = False
+        withheld_status = "withheld_undeclared_owner"
+        unversioned_context_withheld = True
+    identity_file_status = withheld_status if unversioned_context_withheld else _user_context_file_status(safe_user_id, "identity.md")
+    handoff_file_status = withheld_status if unversioned_context_withheld else _user_context_file_status(safe_user_id, "handoffs", "latest.md")
+    identity_text = None if unversioned_context_withheld else _read_user_context_file(safe_user_id, "identity.md")
+    handoff_text = None if unversioned_context_withheld else _read_user_context_file(safe_user_id, "handoffs", "latest.md")
     identity_excerpt = _bounded_text(identity_text, IDENTITY_EXCERPT_MAX_CHARS)
     handoff_excerpt = _bounded_text(handoff_text, HANDOFF_EXCERPT_MAX_CHARS)
 

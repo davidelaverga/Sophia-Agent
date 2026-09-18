@@ -34,7 +34,7 @@ from deerflow.sophia.extraction import analyze_explicit_remember_messages, extra
 from deerflow.sophia.handoffs import generate_handoff
 from deerflow.sophia.identity import maybe_update_identity
 from deerflow.sophia.mem0_client import reconcile_review_metadata_with_mem0
-from deerflow.sophia.memory_governance.flags import memory_feature_flags_for_owner
+from deerflow.sophia.memory_governance.owner_authority import ordinary_path_memory_flags_for_owner
 from deerflow.sophia.session_store import (
     SessionMessageRecord,
     SessionStore,
@@ -208,7 +208,8 @@ def run_offline_pipeline(
     )
 
     steps: dict[str, str] = {}
-    memory_flags = memory_feature_flags_for_owner(user_id)
+    # Ordinary End-session finalization runs for everyone, enrolled or not.
+    memory_flags = ordinary_path_memory_flags_for_owner(user_id)
     extraction_scope = _load_incremental_extraction_scope(user_id, session_id)
     processing_key = _build_processing_key(session_id, extraction_scope, messages)
 
@@ -634,12 +635,19 @@ def _write_offline_recap(
     disk (web flow writes a richer one and must always win).  Raises on
     filesystem errors so the caller's try/except can record them.
     """
-    from deerflow.sophia.memory_governance.flags import memory_feature_flags_for_owner
+    from deerflow.sophia.memory_governance.owner_authority import (
+        ordinary_path_memory_flags_for_owner,
+        owner_is_definitely_undeclared,
+    )
     from deerflow.sophia.session_recap import recap_path as scoped_recap_path
     from deerflow.sophia.session_recap import source_revision
     from deerflow.sophia.session_store import SessionStore
 
-    governed = memory_feature_flags_for_owner(user_id).candidate_ledger_write
+    # Offline finalization runs for everyone, enrolled or not (see the call
+    # site). An undeclared owner has no canonical pool to bind this recap to;
+    # a store outage still raises and no recap is written.
+    governed = ordinary_path_memory_flags_for_owner(user_id).canonical_pool_read
+    extraction_lane_open = not owner_is_definitely_undeclared(user_id)
     recap_path = scoped_recap_path(USERS_DIR, user_id, session_id)
     record = None
     before = None
@@ -682,7 +690,10 @@ def _write_offline_recap(
         "started_at": started_at,
         "ended_at": datetime.now(UTC).isoformat(),
         "turn_count": turn_count,
-        "status": "processing",
+        # "processing" tells the recap page to wait for extraction output. With
+        # neither a candidate ledger nor a provider write lane, nothing is
+        # coming and the page would wait forever.
+        "status": "processing" if extraction_lane_open else "ready",
         # Empty dict (NOT None) so the frontend's mapper doesn't early-null-
         # return on the recap envelope. With ``None`` the page treats the
         # whole recap as unrenderable and the hydration step that pulls

@@ -116,7 +116,7 @@ describe('memory item route', () => {
     );
   });
 
-  it('routes revision-bound deletion through the canonical tombstone endpoint', async () => {
+  it('routes revision-bound deletion through canonical tombstone but rejects shortened receipt', async () => {
     fetchSophiaApiMock.mockResolvedValue(new Response(JSON.stringify({
       status: 'accepted_and_fenced',
       provider_purge: 'purge_pending',
@@ -133,7 +133,8 @@ describe('memory item route', () => {
       params: Promise.resolve({ memoryId: 'mem-123' }),
     });
 
-    expect(response.status).toBe(200);
+    expect(response.status).toBe(503);
+    expect(response.headers.get('Cache-Control')).toBe('no-store');
     expect(fetchSophiaApiMock).toHaveBeenCalledWith(
       '/api/sophia/user-123/memories/mem-123/permanent-delete',
       expect.objectContaining({

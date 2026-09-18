@@ -1,4 +1,4 @@
-import { act, renderHook } from '@testing-library/react';
+import { act, renderHook, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const useCompanionArtifactsRuntimeMock = vi.fn();
@@ -12,6 +12,16 @@ const useSessionVoiceUiControlsMock = vi.fn();
 const useBuilderCanvasMock = vi.fn();
 const cancelBuilderTaskMock = vi.fn();
 const getBuilderTaskStatusMock = vi.fn();
+
+vi.mock('../../app/providers', () => ({ useAuth: () => ({ loading: false, user: { id: 'user-1' } }) }));
+
+vi.mock('../../app/lib/memory-source-client', async () => {
+  const actual = await vi.importActual<Record<string, unknown>>('../../app/lib/memory-source-client');
+  return { ...actual, loadSourceProfile: vi.fn(async (owner: string, session: string, thread: string) => ({
+    schema: 'mem00.source-profile.v1', owner_id: owner, session_id: session, thread_id: thread,
+    authority: 'legacy', observation_only: true, boundary: null,
+  })) };
+});
 
 vi.mock('../../app/companion-runtime/artifacts-runtime', () => ({
   useCompanionArtifactsRuntime: (...args: unknown[]) => useCompanionArtifactsRuntimeMock(...args),
@@ -137,7 +147,7 @@ describe('useSessionRouteExperience', () => {
         sessionId: 'session-1',
         activeSessionId: 'session-1',
         activeThreadId: 'thread-1',
-        chatRequestBody: { session_id: 'session-1' },
+        chatRequestBody: { session_id: 'session-1', thread_id: 'thread-1', user_id: 'user-1' },
         hasValidBackendSessionId: true,
         backendSessionId: 'session-1',
         userId: 'user-1',
@@ -189,7 +199,7 @@ describe('useSessionRouteExperience', () => {
 
     expect(useCompanionChatRuntimeMock).toHaveBeenCalledWith(
       expect.objectContaining({
-        chatRequestBody: { session_id: 'session-1' },
+        chatRequestBody: { session_id: 'session-1', thread_id: 'thread-1', user_id: 'user-1' },
         handleDataPart: streamContract.handleDataPart,
         handleFinish: streamContract.handleFinish,
       })
@@ -217,7 +227,8 @@ describe('useSessionRouteExperience', () => {
     );
     // Sanity-check the delegation: invoking the wrapped sendMessage with
     // no in-flight builder calls the raw mock with identical args.
-    const wrappedSendMessage = useCompanionVoiceRuntimeMock.mock.calls[0][0].sendMessage;
+    await waitFor(() => expect(result.current.sourceProfileReady).toBe(true));
+    const wrappedSendMessage = useCompanionVoiceRuntimeMock.mock.calls.at(-1)![0].sendMessage;
     await wrappedSendMessage({ text: 'ping' });
     expect(sendMessage).toHaveBeenCalledWith({ text: 'ping' });
 
@@ -245,7 +256,7 @@ describe('useSessionRouteExperience', () => {
         sessionId: 'session-1',
         activeSessionId: 'session-1',
         activeThreadId: 'thread-1',
-        chatRequestBody: { session_id: 'session-1' },
+        chatRequestBody: { session_id: 'session-1', thread_id: 'thread-1', user_id: 'user-1' },
         hasValidBackendSessionId: true,
         backendSessionId: 'session-1',
         userId: 'user-1',
@@ -277,6 +288,7 @@ describe('useSessionRouteExperience', () => {
       });
     });
 
+    await waitFor(() => expect(result.current.sourceProfileReady).toBe(true));
     await act(async () => {
       await result.current.sendMessage({ text: 'also add Recursive MAS' });
     });
@@ -295,7 +307,7 @@ describe('useSessionRouteExperience', () => {
         sessionId: 'session-1',
         activeSessionId: 'session-1',
         activeThreadId: 'thread-1',
-        chatRequestBody: { session_id: 'session-1' },
+        chatRequestBody: { session_id: 'session-1', thread_id: 'thread-1', user_id: 'user-1' },
         hasValidBackendSessionId: true,
         backendSessionId: 'session-1',
         userId: 'user-1',
@@ -327,6 +339,7 @@ describe('useSessionRouteExperience', () => {
       });
     });
 
+    await waitFor(() => expect(result.current.sourceProfileReady).toBe(true));
     await act(async () => {
       await result.current.sendMessage({ text: 'please terminate the build task' });
     });
@@ -346,7 +359,7 @@ describe('useSessionRouteExperience', () => {
         sessionId: 'session-1',
         activeSessionId: 'session-1',
         activeThreadId: 'thread-1',
-        chatRequestBody: { session_id: 'session-1' },
+        chatRequestBody: { session_id: 'session-1', thread_id: 'thread-1', user_id: 'user-1' },
         hasValidBackendSessionId: true,
         backendSessionId: 'session-1',
         userId: 'user-1',
@@ -408,7 +421,7 @@ describe('useSessionRouteExperience', () => {
         sessionId: 'session-1',
         activeSessionId: 'session-1',
         activeThreadId: 'thread-1',
-        chatRequestBody: { session_id: 'session-1' },
+        chatRequestBody: { session_id: 'session-1', thread_id: 'thread-1', user_id: 'user-1' },
         hasValidBackendSessionId: true,
         backendSessionId: 'session-1',
         userId: 'user-1',
@@ -450,7 +463,7 @@ describe('useSessionRouteExperience', () => {
         sessionId: 'session-1',
         activeSessionId: 'session-1',
         activeThreadId: 'thread-1',
-        chatRequestBody: { session_id: 'session-1' },
+        chatRequestBody: { session_id: 'session-1', thread_id: 'thread-1', user_id: 'user-1' },
         hasValidBackendSessionId: true,
         backendSessionId: 'session-1',
         userId: 'user-1',
@@ -517,7 +530,7 @@ describe('useSessionRouteExperience', () => {
         sessionId: 'session-1',
         activeSessionId: 'session-1',
         activeThreadId: 'thread-1',
-        chatRequestBody: { session_id: 'session-1' },
+        chatRequestBody: { session_id: 'session-1', thread_id: 'thread-1', user_id: 'user-1' },
         hasValidBackendSessionId: true,
         backendSessionId: 'session-1',
         userId: 'user-1',
@@ -585,7 +598,7 @@ describe('useSessionRouteExperience', () => {
         sessionId: 'session-1',
         activeSessionId: 'session-1',
         activeThreadId: 'thread-1',
-        chatRequestBody: { session_id: 'session-1' },
+        chatRequestBody: { session_id: 'session-1', thread_id: 'thread-1', user_id: 'user-1' },
         hasValidBackendSessionId: true,
         backendSessionId: 'session-1',
         userId: 'user-1',
@@ -679,7 +692,7 @@ describe('useSessionRouteExperience', () => {
         sessionId: 'session-1',
         activeSessionId: 'session-1',
         activeThreadId: 'thread-1',
-        chatRequestBody: { session_id: 'session-1' },
+        chatRequestBody: { session_id: 'session-1', thread_id: 'thread-1', user_id: 'user-1' },
         hasValidBackendSessionId: true,
         backendSessionId: 'session-1',
         userId: 'user-1',
@@ -754,7 +767,7 @@ describe('useSessionRouteExperience', () => {
         sessionId: 'session-1',
         activeSessionId: 'session-1',
         activeThreadId: 'thread-1',
-        chatRequestBody: { session_id: 'session-1' },
+        chatRequestBody: { session_id: 'session-1', thread_id: 'thread-1', user_id: 'user-1' },
         hasValidBackendSessionId: true,
         backendSessionId: 'session-1',
         userId: 'user-1',
@@ -814,7 +827,7 @@ describe('useSessionRouteExperience', () => {
         sessionId: 'session-1',
         activeSessionId: 'session-1',
         activeThreadId: 'thread-1',
-        chatRequestBody: { session_id: 'session-1' },
+        chatRequestBody: { session_id: 'session-1', thread_id: 'thread-1', user_id: 'user-1' },
         hasValidBackendSessionId: true,
         backendSessionId: 'session-1',
         userId: 'user-1',
@@ -865,7 +878,7 @@ describe('useSessionRouteExperience', () => {
         sessionId: 'session-1',
         activeSessionId: 'session-1',
         activeThreadId: 'thread-1',
-        chatRequestBody: { session_id: 'session-1' },
+        chatRequestBody: { session_id: 'session-1', thread_id: 'thread-1', user_id: 'user-1' },
         hasValidBackendSessionId: true,
         backendSessionId: 'session-1',
         userId: 'user-1',
@@ -943,7 +956,7 @@ describe('useSessionRouteExperience', () => {
         sessionId: 'session-1',
         activeSessionId: 'session-1',
         activeThreadId: 'thread-1',
-        chatRequestBody: { session_id: 'session-1' },
+        chatRequestBody: { session_id: 'session-1', thread_id: 'thread-1', user_id: 'user-1' },
         hasValidBackendSessionId: true,
         backendSessionId: 'session-1',
         userId: 'user-1',
@@ -1003,7 +1016,7 @@ describe('useSessionRouteExperience', () => {
           sessionId: 'session-1',
           activeSessionId: 'session-1',
           activeThreadId: 'thread-1',
-          chatRequestBody: { session_id: 'session-1' },
+          chatRequestBody: { session_id: 'session-1', thread_id: 'thread-1', user_id: 'user-1' },
           hasValidBackendSessionId: true,
           backendSessionId: 'session-1',
           userId: 'user-1',
@@ -1054,7 +1067,7 @@ describe('useSessionRouteExperience', () => {
         sessionId: 'session-1',
         activeSessionId: 'session-1',
         activeThreadId: 'thread-1',
-        chatRequestBody: { session_id: 'session-1' },
+        chatRequestBody: { session_id: 'session-1', thread_id: 'thread-1', user_id: 'user-1' },
         hasValidBackendSessionId: true,
         backendSessionId: 'session-1',
         userId: 'user-1',

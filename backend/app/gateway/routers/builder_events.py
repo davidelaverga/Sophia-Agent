@@ -653,7 +653,7 @@ async def _resolve_existing_builder_task(
         )
         return None
     try:
-        from langgraph_sdk import get_client
+        from deerflow.sophia.langgraph_client_auth import get_client
 
         client = get_client(url=_langgraph_url())
         state = await client.threads.get_state(parent_thread_id)
@@ -743,7 +743,7 @@ async def _persist_builder_terminal_state(payload: dict[str, Any]) -> bool:
         values["last_builder_artifact"] = _durable_builder_result(payload)
 
     try:
-        from langgraph_sdk import get_client
+        from deerflow.sophia.langgraph_client_auth import get_client
 
         client = get_client(url=_langgraph_url())
         try:
@@ -1982,6 +1982,18 @@ def _require_synthetic_builder_event_capability(
     dependencies=[Depends(require_builder_event_service_auth)],
 )
 async def receive_builder_event(
+    event: BuilderCompletionEvent,
+    request: Request,
+) -> dict[str, Any]:
+    # The route dependency verifies the exact event body before this owner is
+    # used. Runtime authorization independently checks ownership of each thread.
+    from deerflow.sophia.langgraph_client_auth import langgraph_owner_scope
+
+    with langgraph_owner_scope(event.user_id):
+        return await _receive_authenticated_builder_event(event, request)
+
+
+async def _receive_authenticated_builder_event(
     event: BuilderCompletionEvent,
     request: Request,
 ) -> dict[str, Any]:

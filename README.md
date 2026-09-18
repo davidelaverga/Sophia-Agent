@@ -1,5 +1,62 @@
 # Sophia
 
+MEM00 text-memory pilot integration is still staged, not available for use from
+this branch yet. Builder personal-memory inheritance remains disabled for the
+pilot; ordinary independently sourced Builder execution is a required release
+gate, not established by factory unit tests. Current evidence and remaining
+activation requirements are in the [C2 release record](docs/campaigns/mem00-durable-memory/c2-text-pilot-release.md).
+Local task-list tests cover the installed tool wiring and reject observations
+invalidated during a read; hosted task authentication/completion is still unverified.
+The staged single-task check also requires a current child checkpoint admission
+before returning result content; cached terminal output is no longer its authority.
+Composed local tests now cover that check through the real checkpoint verifier,
+including tampered results, wrong-parent state and source-store failure.
+Gateway middleware tests also cover concurrent owner isolation and refuse to
+inherit service identity for anonymous or development-bypass requests.
+Deferred C1 resume paths now deny explicitly instead of importing absent modules;
+the C2 source-only Builder and text paths retain their focused regression coverage.
+The preserved-source validator is now wired to the already selected SQL read
+contract; production grants and hosted behavior are still pending qualification.
+Local tests now cover independently sourced table, PowerPoint and HTML briefing
+setup without personal-memory or emotional-context inheritance. They do not
+yet establish that those tasks complete on the hosted pilot.
+Handoff-retry tests also verify that one unchanged source reuses its original
+association; hosted launch/retry behavior remains an open release check.
+The staged governed Builder tool reports unresolved launches as unconfirmed
+rather than claiming no work began. This local integration is not deployed;
+native lifecycle and hosted completion checks remain open.
+The staged launch path also refuses missing or uncertain owner authority;
+absence of a run guard does not restore legacy memory inheritance.
+The full local launch regression file has been rechecked with explicit legacy
+owner fixtures. Production activation is still pending the remaining gates.
+The complete local async Builder chain also reaches a recording model with the
+independent request. Hosted model execution and artifact delivery remain unverified.
+The selected final-admission SQL now has disposable native PostgreSQL coverage
+for source-only dispatch, concurrent duplicate refusal and restart persistence.
+It is unapplied and grants no application execution; production qualification
+and activation are still required.
+The same local SQL test covers approved canonical admission, edit invalidation,
+indexing-pending refusal and tombstone denial using synthetic projection rows.
+Builder completion hydration and parent-state persistence now have signed,
+owner-scoped webhook regression coverage. Hosted lifecycle remains unverified.
+The isolated SQL/test slice is published at `0acc465f` on the C2 branch; it is
+unapplied. The compiled local Builder test now executes a todo-tool round-trip
+and reaches a second recording-model call, not hosted artifact completion.
+Recap memory candidates and decisions are now transient in the staged frontend;
+the old recap-only local-storage cache is discarded without deleting unrelated
+drafts. This change is not deployed and does not yet certify account switching.
+The staged recap loader now revalidates on authenticated owner changes and
+ignores responses from a previous owner. Pending decision actions still require
+their separate account-switch verification before release.
+Local pending-save tests now reject late results after owner changes, sign-out
+or unmount. The current recap's drafts are invalidated on owner/session changes;
+completed server decisions are recovered by reloading canonical state.
+The local complete-page regression now verifies old-owner text disappears during
+an account switch and draft decisions do not carry into the newly loaded recap.
+The recap-only slice is published as `d4436b89` on the C2 branch, without deployment.
+Governed Builder task listing is now locally wired to source-only child bindings
+and live status, without returning cached task text. This is not yet deployed.
+
 **An AI voice companion with genuine continuity, emotional attunement, and measurable self-improvement.**
 
 [![Python](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white)](./backend/pyproject.toml)

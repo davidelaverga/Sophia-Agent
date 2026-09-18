@@ -5,13 +5,15 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 import pytest
+from mem00_owner_fixture import declare_memory_owners
 
 
 @pytest.fixture(autouse=True)
-def _reset_pipeline():
+def _reset_pipeline(declare_memory_owners):
     """Reset the processed-sessions set between tests."""
     from deerflow.sophia.offline_pipeline import reset_processed_sessions
 
+    declare_memory_owners({'user_abc': 'legacy', 'user-1': 'legacy'})
     reset_processed_sessions()
     yield
     reset_processed_sessions()

@@ -3,13 +3,14 @@
  * Phase 3 - Week 3
  * 
  * Manages recap artifacts and memory decisions.
- * Persists to localStorage for refresh resilience.
+ * Memory-bearing state is transient and must be revalidated after refresh.
  */
 
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
 
 import { logger } from '../lib/error-logger';
+import { commandStatusSchema } from '../lib/memory-command-receipt';
 import type { 
   RecapArtifactsV1, 
   MemoryDecisionState, 
@@ -17,6 +18,56 @@ import type {
   MemoryDecisionStatus,
   CommitMemoriesResponse,
 } from '../lib/recap-types';
+
+// =============================================================================
+// LOST-RESPONSE RECOVERY
+// =============================================================================
+
+type ReceiptRecovery = { committed: string[]; notFound: string[]; unknown: string[] };
+
+/**
+ * Recover the ORIGINAL committed outcome for decisions whose response was lost
+ * or could not be joined exactly.
+ *
+ * Reuses the existing content-free command-receipt route bound to the original
+ * idempotency key, so a successful response that never reached the browser is
+ * recovered instead of re-submitted. A receipt is history only: it never
+ * authorizes a new provider projection, a fresh approval, or a claim that the
+ * text is currently saved. `notFound` is a definite "not committed" (safe to
+ * retry); `unknown` stays unresolved rather than being reported as a failure.
+ */
+async function recoverDecisionReceipts(
+  pending: Array<{ candidateId: string; idempotencyKey?: string }>,
+): Promise<ReceiptRecovery> {
+  const recovery: ReceiptRecovery = { committed: [], notFound: [], unknown: [] };
+  for (const item of pending) {
+    if (!item.idempotencyKey) {
+      recovery.unknown.push(item.candidateId);
+      continue;
+    }
+    try {
+      const response = await fetch(
+        `/api/memory/commands/${encodeURIComponent(item.idempotencyKey)}`,
+        { method: 'GET', cache: 'no-store' },
+      );
+      if (!response.ok) {
+        recovery.unknown.push(item.candidateId);
+        continue;
+      }
+      const status = commandStatusSchema.safeParse(await response.json());
+      if (!status.success) {
+        recovery.unknown.push(item.candidateId);
+      } else if (status.data.status === 'committed') {
+        recovery.committed.push(item.candidateId);
+      } else {
+        recovery.notFound.push(item.candidateId);
+      }
+    } catch {
+      recovery.unknown.push(item.candidateId);
+    }
+  }
+  return recovery;
+}
 
 // =============================================================================
 // TYPES
@@ -68,7 +119,8 @@ interface RecapState {
   /** Commit memories to backend */
   commitMemories: (
     sessionId: string,
-    threadId?: string
+    threadId?: string,
+    isCurrent?: () => boolean
   ) => Promise<CommitMemoriesResponse>;
   
   /** Get commit status for session */
@@ -231,7 +283,9 @@ export const useRecapStore = create<RecapState>()(
         });
       },
       
-      commitMemories: async (sessionId, threadId) => {
+      commitMemories: async (sessionId, threadId, isCurrent = () => true) => {
+        const assertCurrent = () => { if (!isCurrent()) throw new Error('recap_action_context_changed'); };
+        assertCurrent();
         const artifacts = get().artifacts[sessionId];
         const decisions = get().decisions[sessionId] || [];
         const approvedCandidates = decisions.filter(
@@ -252,6 +306,12 @@ export const useRecapStore = create<RecapState>()(
         for (const decision of approvedCandidates) {
           get().updateDecisionStatus(sessionId, decision.candidateId, 'committing');
         }
+
+        // Exact command key per candidate, preserved across a lost response so
+        // recovery reads the original receipt rather than re-deciding.
+        const commandKeyOf = new Map(
+          approvedCandidates.map((decision) => [decision.candidateId, decision.idempotencyKey]),
+        );
         
         try {
           const response = await fetch('/api/memory/commit-candidates', {
@@ -284,9 +344,33 @@ export const useRecapStore = create<RecapState>()(
           }
 
           const result = await response.json() as CommitMemoriesResponse;
+          assertCurrent();
           result.discarded = [
             ...new Set([...result.discarded, ...discardedCandidates.map(d => d.candidateId)]),
           ];
+
+          // WP1: an unjoined outcome is unknown, not failed. Recover the
+          // original committed decision from its own command receipt instead of
+          // re-submitting, so there is no second mutation and no resurrection.
+          const ambiguous = result.ambiguous ?? [];
+          if (ambiguous.length > 0) {
+            const recovered = await recoverDecisionReceipts(ambiguous.map((candidateId) => ({
+              candidateId,
+              idempotencyKey: commandKeyOf.get(candidateId),
+            })));
+            assertCurrent();
+            result.committed = [...new Set([...result.committed, ...recovered.committed])];
+            result.errors = [
+              ...result.errors,
+              ...recovered.notFound.map((candidate_id) => ({
+                candidate_id,
+                message: 'review_command_not_committed',
+              })),
+            ];
+            // Still-unresolved outcomes stay ambiguous, never silent success.
+            result.ambiguous = recovered.unknown;
+          }
+
           // Update statuses based on response
           for (const id of result.committed) {
             get().updateDecisionStatus(sessionId, id, 'committed');
@@ -297,7 +381,7 @@ export const useRecapStore = create<RecapState>()(
           }
           
           // Update commit status
-          const hasErrors = result.errors.length > 0;
+          const hasErrors = result.errors.length > 0 || (result.ambiguous?.length ?? 0) > 0;
           set((state) => ({
             commitStatus: { 
               ...state.commitStatus, 
@@ -308,16 +392,40 @@ export const useRecapStore = create<RecapState>()(
           return result;
           
         } catch (error) {
+          assertCurrent();
           logger.logError(error, { component: 'RecapStore', action: 'commit_memories' });
           
-          // Mark all as error
+          // The response was lost: these decisions may already be committed.
+          // Recover from their own receipts rather than reporting a false
+          // failure that would invite a duplicate submission.
+          let recovered: ReceiptRecovery | null = null;
+          try {
+            recovered = await recoverDecisionReceipts(approvedCandidates.map((decision) => ({
+              candidateId: decision.candidateId,
+              idempotencyKey: commandKeyOf.get(decision.candidateId),
+            })));
+          } catch {
+            recovered = null;
+          }
+
+
+          // A recovered receipt is historical: it confirms the original
+          // decision landed, never that the text is currently saved.
           for (const decision of approvedCandidates) {
-            get().updateDecisionStatus(
-              sessionId, 
-              decision.candidateId, 
-              'error',
-              error instanceof Error ? error.message : 'Unknown error'
-            );
+            const candidateId = decision.candidateId;
+            if (recovered?.committed.includes(candidateId)) {
+              get().updateDecisionStatus(sessionId, candidateId, 'committed');
+            } else if (recovered?.notFound.includes(candidateId)) {
+              get().updateDecisionStatus(sessionId, candidateId, 'error', 'review_command_not_committed');
+            } else {
+              get().updateDecisionStatus(
+                sessionId,
+                candidateId,
+                'error',
+                recovered ? 'review_outcome_unavailable'
+                  : error instanceof Error ? error.message : 'Unknown error'
+              );
+            }
           }
           
           set((state) => ({
@@ -335,12 +443,12 @@ export const useRecapStore = create<RecapState>()(
     {
       name: 'sophia-recap',
       storage: createJSONStorage(() => localStorage),
-      // Only persist what we need
-      partialize: (state) => ({
-        artifacts: state.artifacts,
-        decisions: state.decisions,
-        commitStatus: state.commitStatus,
-      }),
+      // Retain only the existing key's migration plumbing. Never serialize
+      // memory text, edited decisions or historical success as fresh authority.
+      version: 1,
+      partialize: () => ({}),
+      migrate: () => ({}),
+      merge: (_persisted, current) => current,
     }
   )
 );

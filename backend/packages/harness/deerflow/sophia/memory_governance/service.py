@@ -116,9 +116,27 @@ class CanonicalMemoryService:
             p_safe_reason_code=safe_reason_code,
         )
 
-    def list_pool(self, *, include_forgotten: bool = False, limit: int = 500):
+    def list_pool(self, *, include_forgotten: bool = False):
         self._assert_supported_contract()
-        return self.store.list_pool(user_id=self.owner_id, include_forgotten=include_forgotten, limit=limit)
+        return self.store.list_pool(user_id=self.owner_id, include_forgotten=include_forgotten)
+
+    def pool_view(self, *, view: str, category: str | None = None, search: str | None = None):
+        from .pool import read_pool
+
+        self._assert_supported_contract()
+        return read_pool(owner_id=self.owner_id, store=self.store, view=view, category=category, search=search)
+
+    def command_result(self, *, receipt: GovernanceReceipt, idempotency_key: str):
+        from .command_result import command_result
+
+        return command_result(owner_id=self.owner_id, command_key=idempotency_key, receipt=receipt, store=self.store)
+
+    def command_receipt(self, *, idempotency_key: str):
+        self._assert_supported_contract()
+        if not 8 <= len(idempotency_key) <= 200:
+            raise ValueError("memory_command_key_invalid")
+        # Historical logical result only; current lifecycle is a separate view.
+        return self.store.command_receipt(user_id=self.owner_id, idempotency_key=idempotency_key)
 
     def approve_candidate(
         self,

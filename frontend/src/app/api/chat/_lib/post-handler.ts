@@ -1,16 +1,18 @@
 import { type NextRequest } from 'next/server';
 
-import { getPrimaryGatewayUrl } from '../../_lib/gateway-url';
+import { voiceLabOrdinaryProductBoundaryResponse } from '@/server/voice-lab/ordinary-route-isolation';
+
 import { userOwnsThread } from '../../../lib/api/thread-ownership';
 import { getAuthenticatedUserId, getUserScopedAuthToken } from '../../../lib/auth/server-auth';
 import { normalizeBuilderArtifactPayload } from '../../../lib/builder-artifacts';
 import { logger } from '../../../lib/error-logger';
 import { apiLimiters } from '../../../lib/rate-limiter';
 import { buildAttachmentPrompt } from '../../../stores/attachment-prompt';
-import { voiceLabOrdinaryProductBoundaryResponse } from '@/server/voice-lab/ordinary-route-isolation';
+import { getPrimaryGatewayUrl } from '../../_lib/gateway-url';
 
 import { fetchBackendStreamWithBootstrap, isValidSophiaUserId } from './backend-client';
 import { parseAndValidateChatPayload } from './chat-request';
+import { readChatMemoryAuthority } from './memory-authority';
 import {
   AI_SDK_STREAM_HEADER,
   BACKEND_CHAT_ENDPOINT,
@@ -129,6 +131,7 @@ export async function handleChatPost(req: NextRequest): Promise<Response> {
       sessionType,
       contextMode,
       platform,
+      sourceAction,
     } = parsed.data;
 
     // Defensive coalesce: parseAndValidateChatPayload guarantees this
@@ -153,6 +156,17 @@ export async function handleChatPost(req: NextRequest): Promise<Response> {
       );
     }
 
+    const gatewayUrl = getPrimaryGatewayUrl();
+    const apiKey = await getUserScopedAuthToken();
+    let authority: 'legacy' | 'governed';
+    try { authority = await readChatMemoryAuthority(userId, apiKey, gatewayUrl, req.signal); }
+    catch { return new Response(JSON.stringify({ error: 'memory_authority_unavailable' }),
+      { status: 503, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } }); }
+    if ((authority === 'governed') !== Boolean(sourceAction)) {
+      return new Response(JSON.stringify({ error: 'memory_source_action_required_or_incompatible' }),
+        { status: 409, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } });
+    }
+
     // Mock-streaming short-circuit (Codex P2 PR #132 later
     // iteration): the ``USE_MOCK_STREAMING=true`` flag is the
     // offline-dev contract — no backend gateway, no LangGraph. The
@@ -163,6 +177,8 @@ export async function handleChatPost(req: NextRequest): Promise<Response> {
     // over the ownership check — there's no backend thread to verify
     // against in the first place.
     if (USE_MOCK) {
+      if (sourceAction) return new Response(JSON.stringify({ error: 'Governed source runtime unavailable' }),
+        { status: 503, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } });
       secureLog('[/api/chat] Using mock streaming response');
       return mockResponse(sessionId, sessionType || undefined);
     }
@@ -194,9 +210,6 @@ export async function handleChatPost(req: NextRequest): Promise<Response> {
     // the auth-token's user (or a /by-thread/{thread_id} lookup that
     // 404s on cross-user reads) would close this gap globally and
     // remove the recent-100 fallback ceiling. Separate backend ticket.
-    const gatewayUrl = getPrimaryGatewayUrl();
-    const apiKey = await getUserScopedAuthToken();
-
     if (typeof threadId === 'string' && threadId) {
       const owns = await userOwnsThread(threadId, userId, apiKey, gatewayUrl);
       if (!owns) {
@@ -214,7 +227,11 @@ export async function handleChatPost(req: NextRequest): Promise<Response> {
     // truncating it (replaces the old silent 2000-char cut). No-op for
     // short messages and when there's no thread to attach to; falls back
     // to forwarding the full message inline on any upload failure.
-    const spill = await maybeSpillLongMessage({
+    // The recorded action is immutable. Never write its bytes through the
+    // legacy spill path or substitute a filename prompt for the original text.
+    const spill = sourceAction ? {
+      primaryMessage: rawUserMessage, rawMessage: rawUserMessage, attachedFiles: [],
+    } : await maybeSpillLongMessage({
       fullMessage: rawUserMessage,
       threadId,
       attachedFiles,
@@ -260,17 +277,26 @@ export async function handleChatPost(req: NextRequest): Promise<Response> {
       // the FULL text, so a recovered turn still carries the complete
       // content inline rather than a dangling read_user_document pointer.
       raw_message: spill.rawMessage,
+      ...(sourceAction ? { memory_source_action: sourceAction } : {}),
     };
 
     const backendUrl = `${BACKEND_URL}${BACKEND_CHAT_ENDPOINT}`;
     secureLog('[/api/chat] Forwarding to SSE backend');
 
     try {
-      const backendFetch = await fetchBackendStreamWithBootstrap(backendUrl, backendPayload);
+      const backendFetch = await fetchBackendStreamWithBootstrap(backendUrl, backendPayload, ...(req.signal ? [req.signal] : []));
       const upstream = backendFetch.upstream;
       const responseThreadId = backendFetch.threadId;
 
       if (!upstream.ok) {
+        if (sourceAction) {
+          // An unsuccessful original run is not a completed mock turn. Do
+          // not read/log/provider-forward an untrusted diagnostic body.
+          await upstream.body?.cancel().catch(() => undefined);
+          return new Response(JSON.stringify({ error: 'memory_source_send_unconfirmed' }), {
+            status: upstream.status, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
+          });
+        }
         const errorText = await upstream.text();
         logger.logError(new Error(`Backend SSE error: ${upstream.status}`), {
           component: 'api/chat',
@@ -340,6 +366,14 @@ export async function handleChatPost(req: NextRequest): Promise<Response> {
       }
 
       const contentType = upstream.headers.get('content-type') || '';
+      if (sourceAction && (!contentType.includes('text/event-stream') || !upstream.body)) {
+        // The governed run contract is a stream. A JSON/body fallback is not
+        // evidence that the original source turn completed.
+        await upstream.body?.cancel().catch(() => undefined);
+        return new Response(JSON.stringify({ error: 'memory_source_send_unconfirmed' }), {
+          status: 503, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
+        });
+      }
 
       if (contentType.includes('text/event-stream') && upstream.body) {
         secureLog('[/api/chat] Proxying SSE stream');
@@ -352,11 +386,11 @@ export async function handleChatPost(req: NextRequest): Promise<Response> {
           recovered_from_transcript: backendFetch.recoveredFromTranscript,
           stale_thread_id: backendFetch.staleThreadId,
           new_thread_id: backendFetch.newThreadId,
-        });
+        }, sourceAction ? (backendFetch.confirmCompletion ?? (async () => false)) : undefined);
         return new Response(transformStream, {
           headers: {
             'Content-Type': 'text/event-stream; charset=utf-8',
-            'Cache-Control': 'no-cache',
+            'Cache-Control': 'no-store',
             'Connection': 'keep-alive',
             [AI_SDK_STREAM_HEADER]: 'v1',
           },

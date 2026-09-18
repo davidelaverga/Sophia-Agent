@@ -92,6 +92,7 @@ def test_any_expiry_failure_is_contained(failure):
     # No exception escapes, whatever the store raises.
     assert asyncio.run(worker.run_once()) is False
 
+
 def test_cancellation_is_not_swallowed_by_the_expiry_guard():
     """Containment must not turn a shutdown into a caught error.
 
@@ -117,6 +118,7 @@ def test_expiry_guard_does_not_touch_the_recovery_stage():
 
     assert extraction.recover_finalized_sessions.call_count == 1
     assert extraction.run_once.call_count == 1
+
 
 # --- startup recovery: the same defect pattern, and the same containment ------
 

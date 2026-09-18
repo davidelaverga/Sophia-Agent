@@ -949,11 +949,15 @@ def _invalidate_memory_source_before_delete(
 ) -> None:
     """Fence unapproved derived memory before a source transcript disappears."""
 
-    from deerflow.sophia.memory_governance.flags import (
-        memory_feature_flags_for_owner,
+    from deerflow.sophia.memory_governance.owner_authority import (
+        ordinary_path_memory_flags_for_owner,
     )
 
-    if not memory_feature_flags_for_owner(owner_user_id).candidate_ledger_write:
+    # Deleting a session is ordinary session management. An undeclared owner has
+    # no canonical pool and therefore no derived memory to fence, so the delete
+    # proceeds. A governed owner keeps the full invalidation requirement, and a
+    # store outage still raises here and refuses the delete.
+    if not ordinary_path_memory_flags_for_owner(owner_user_id).canonical_pool_read:
         return
     from deerflow.sophia.memory_governance.refs import keyed_ref
     from deerflow.sophia.memory_governance.service import CanonicalMemoryService
@@ -973,10 +977,14 @@ def _invalidate_memory_source_before_delete(
 
 def _cleanup_memory_session_recap(owner_user_id: str, session_id: str) -> None:
     """Keep the canonical parent retryable until its local recap is removed."""
-    from deerflow.sophia.memory_governance.flags import memory_feature_flags_for_owner
+    from deerflow.sophia.memory_governance.owner_authority import (
+        ordinary_path_memory_flags_for_owner,
+    )
 
+    # An undeclared owner has no canonical parent to keep retryable, so there is
+    # no governed recap to clean up. Outage still becomes 503, not a silent skip.
     try:
-        if memory_feature_flags_for_owner(owner_user_id).candidate_ledger_write:
+        if ordinary_path_memory_flags_for_owner(owner_user_id).canonical_pool_read:
             from app.gateway.routers.sophia import _delete_session_recap
 
             _delete_session_recap(owner_user_id, session_id)
@@ -984,7 +992,7 @@ def _cleanup_memory_session_recap(owner_user_id: str, session_id: str) -> None:
         logger.warning("Session recap cleanup unavailable")
         raise HTTPException(status_code=503, detail={"code": "session_recap_cleanup_unavailable"}) from None
     else:
-        if not memory_feature_flags_for_owner(owner_user_id).candidate_ledger_write:
+        if not ordinary_path_memory_flags_for_owner(owner_user_id).canonical_pool_read:
             return
         # This is deliberately a local-file receipt, not global erasure or
         # successful parent deletion (which has not happened yet).
@@ -1135,12 +1143,15 @@ async def end_session(
             status_code=409,
             detail={"code": "voice_lab_canonical_finalization_required"},
         )
-    from deerflow.sophia.memory_governance.flags import (
-        memory_feature_flags_for_owner,
+    from deerflow.sophia.memory_governance.owner_authority import (
+        ordinary_path_memory_flags_for_owner,
     )
 
     record = None
-    if memory_feature_flags_for_owner(owner_user_id).candidate_ledger_write:
+    # Ending a session must work for someone outside the pilot; they take the
+    # ordinary `_store.end` branch below. A governed owner still goes through
+    # atomic durable finalization, and an outage still fails the request.
+    if ordinary_path_memory_flags_for_owner(owner_user_id).candidate_ledger_write:
         try:
             from deerflow.sophia.memory_governance.extraction_service import (
                 MemoryExtractionService,

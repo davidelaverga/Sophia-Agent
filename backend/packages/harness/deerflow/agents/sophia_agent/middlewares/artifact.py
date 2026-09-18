@@ -109,8 +109,9 @@ class ArtifactMiddleware(AgentMiddleware[ArtifactState]):
 
     state_schema = ArtifactState
 
-    def __init__(self, artifact_instructions_path: Path):
+    def __init__(self, artifact_instructions_path: Path, *, memory_guard=None):
         super().__init__()
+        self.memory_guard = memory_guard
         self._instructions = (
             artifact_instructions_path.read_text(encoding="utf-8")
             if artifact_instructions_path.exists()
@@ -195,6 +196,9 @@ class ArtifactMiddleware(AgentMiddleware[ArtifactState]):
     def after_model(self, state: ArtifactState, runtime: Runtime) -> dict | None:
         """Capture emit_artifact tool call result from latest messages."""
         _t0 = time.perf_counter()
+        if self.memory_guard is not None:
+            self.memory_guard.check()
+        governed = self.memory_guard is not None and self.memory_guard.enabled
         messages = state.get("messages", [])
 
         for msg in reversed(messages):
@@ -213,7 +217,15 @@ class ArtifactMiddleware(AgentMiddleware[ArtifactState]):
                     log_middleware("Artifact", "mixed tool calls with emit_artifact; loop continues", _t0)
                     return None
 
-                artifact_data = self._normalize_artifact_args(artifact_calls[-1].get("args", {}))
+                artifact_data = None if governed and (len(artifact_calls) != 1 or not artifact_calls[0].get("id")) else self._normalize_artifact_args(
+                    artifact_calls[-1].get("args", {}), strict=governed)
+                if artifact_data is None:
+                    # Do not replace an independently valid prior artifact or
+                    # report success for malformed/ambiguous model output.
+                    log_middleware("Artifact", "not recorded: invalid payload", _t0)
+                    ids = dict.fromkeys(tc["id"] for tc in artifact_calls if isinstance(tc.get("id"), str) and tc["id"])
+                    return {"jump_to": "end", "messages": [ToolMessage(content="Artifact not recorded: invalid payload.",
+                        tool_call_id=call_id, name="emit_artifact", status="error") for call_id in ids]}
                 builder_result = state.get("builder_result") or self._extract_builder_result_from_messages(messages)
                 # Close the emit_artifact tool_call(s) with synthetic ToolMessages.
                 # Without this, each turn leaves a dangling tool_call in the thread
@@ -251,14 +263,14 @@ class ArtifactMiddleware(AgentMiddleware[ArtifactState]):
         return None
 
     @staticmethod
-    def _normalize_artifact_args(args: object) -> dict:
+    def _normalize_artifact_args(args: object, *, strict: bool = False) -> dict | None:
         if not isinstance(args, Mapping):
-            return {}
+            return None if strict else {}
         try:
             return validate_emit_artifact_args(args)
         except Exception:
-            logger.warning("ArtifactMiddleware could not normalize emit_artifact args", exc_info=True)
-            return dict(args)
+            logger.warning("ArtifactMiddleware could not normalize emit_artifact args")
+            return None if strict else dict(args)
 
     # ------------------------------------------------------------------
     # Builder synthesis

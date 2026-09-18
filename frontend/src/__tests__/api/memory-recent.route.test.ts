@@ -23,6 +23,42 @@ describe('memory recent route', () => {
     resolveSophiaUserIdMock.mockResolvedValue('user-123');
   });
 
+  it('rejects old scoped candidate lists without snapshot proof and never falls back', async () => {
+    fetchSophiaApiMock.mockResolvedValue(new Response(JSON.stringify({
+      source: 'sophia_candidate_ledger', session_id_received: true, count: 1, candidate_count: 1,
+      memories: [{ id: 'candidate-id', content: 'Canonical review text', created_at: '2020-01-01T00:00:00Z',
+        metadata: { authority: 'sophia_candidate_ledger', candidate_revision: 2, review_state: 'pending_review' } }],
+    })));
+    const response = await recentMemoriesGET({ nextUrl: new URL('http://localhost/api/memory/recent?status=pending_review&session_id=session-1&started_at=2026-09-08T00:00:00Z') } as NextRequest);
+    const body = await response.json();
+    expect(body.source).toBe('sophia_candidate_ledger');
+    expect(body.memories).toEqual([]);
+    expect(body.unavailable).toBe(true);
+    expect(fetchSophiaApiMock).toHaveBeenCalledTimes(1);
+    expect(response.headers.get('cache-control')).toBe('no-store');
+  });
+
+  it('does not infer successful zero extraction from an empty canonical pending page', async () => {
+    fetchSophiaApiMock.mockResolvedValue(new Response(JSON.stringify({ source: 'sophia_candidate_ledger', session_id_received: true,
+      count: 0, candidate_count: 0, memories: [], empty_reason: 'terminal_zero_candidates' })));
+    const response = await recentMemoriesGET({ nextUrl: new URL('http://localhost/api/memory/recent?status=pending_review&session_id=session-1') } as NextRequest);
+    const body = await response.json();
+    expect(body.unavailable).toBe(true);
+    expect(body.empty_reason).toBe('review_coverage_unproven');
+    expect(fetchSophiaApiMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('exposes zero candidates when the canonical upstream declares uncertainty despite carrying rows', async () => {
+    fetchSophiaApiMock.mockResolvedValue(new Response(JSON.stringify({ source: 'sophia_candidate_ledger', session_id_received: true,
+      unavailable: true, count: 1, memories: [{ id: 'candidate-id', content: 'UNCERTAIN_PRIVATE_TEXT',
+        metadata: { authority: 'sophia_candidate_ledger', candidate_revision: 2, review_state: 'pending_review' } }] })));
+    const response = await recentMemoriesGET({ nextUrl: new URL('http://localhost/api/memory/recent?status=pending_review&session_id=session-1') } as NextRequest);
+    const body = await response.json();
+    expect(body.unavailable).toBe(true);
+    expect(body.memories).toEqual([]);
+    expect(JSON.stringify(body)).not.toContain('UNCERTAIN_PRIVATE_TEXT');
+  });
+
   it('filters out reviewed memories when fallback uses the unfiltered list', async () => {
     fetchSophiaApiMock
       .mockResolvedValueOnce(
@@ -219,7 +255,7 @@ describe('memory recent route', () => {
 
     expect(fetchSophiaApiMock).toHaveBeenCalledWith(
       '/api/sophia/user-123/memories/recent?status=pending_review&session_id=sess-target',
-      { method: 'GET' },
+      { method: 'GET', cache: 'no-store' },
     );
     expect(response.status).toBe(200);
     expect(payload).toMatchObject({
@@ -262,7 +298,7 @@ describe('memory recent route', () => {
     expect(fetchSophiaApiMock).toHaveBeenCalledTimes(1);
     expect(fetchSophiaApiMock).toHaveBeenCalledWith(
       '/api/sophia/user-123/memories/recent?status=pending_review&session_id=sess-empty',
-      { method: 'GET' },
+      { method: 'GET', cache: 'no-store' },
     );
     expect(payload).toMatchObject({
       memories: [],

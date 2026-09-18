@@ -6,6 +6,9 @@
  * All fields optional except IDs for graceful rendering.
  */
 
+import type { ReviewReceiptReference } from '../lib/memory-command-receipt';
+import type { MemoryReviewEnvelope } from '../lib/memory-review-envelope';
+
 import type { BuilderArtifactV1 } from './builder-artifact';
 import type { PresetType, ContextMode, CanonicalMemoryCategory } from './session';
 
@@ -41,7 +44,7 @@ export interface RecapArtifactsV1 {
     tag?: 'tilt' | 'focus' | 'confidence' | 'communication' | 'boundaries' | 'growth';
   };
   
-  /** Memory candidates for user approval (max 3) */
+  /** Canonical memory candidates for user review, fully enumerated for one snapshot. */
   memoryCandidates?: MemoryCandidateV1[];
 
   /** Builder deliverable emitted during the session */
@@ -49,6 +52,17 @@ export interface RecapArtifactsV1 {
   
   /** Processing status */
   status: 'processing' | 'ready' | 'unavailable';
+  memoryReview?: {
+    snapshotId: string;
+    extractionState: string;
+    sourceEligibility?: MemoryReviewEnvelope['source_eligibility'];
+    produced: number;
+    pending: number;
+    approved: number;
+    rejected: number;
+    invalidated: number;
+    enumerationComplete: boolean;
+  };
 }
 
 export interface MemoryCandidateV1 {
@@ -93,7 +107,7 @@ export type MemoryDecisionStatus =
   | 'edited'         // User edited (pending commit)
   | 'discarded'      // User discarded
   | 'committing'     // Being sent to backend
-  | 'committed'      // Successfully saved to Mem0
+  | 'committed'      // Historical canonical decision receipt, not provider status
   | 'error';         // Failed to commit
 
 /** Simplified decision for UI actions */
@@ -179,11 +193,23 @@ export interface CommitMemoriesRequest {
 
 /** Response from commit-candidates endpoint */
 export interface CommitMemoriesResponse {
+  receipts?: ReviewReceiptReference[];
   committed: string[];
   discarded: string[];
   errors: Array<{
     candidate_id: string;
     message: string;
+  }>;
+  /**
+   * Committed state could not be joined exactly. Recover through the original
+   * command receipt; never re-submit the decision.
+   */
+  ambiguous?: string[];
+  /** Content-free references bound to the original command key. */
+  commands?: Array<{
+    candidate_id: string;
+    idempotency_key: string;
+    expected_candidate_revision: number;
   }>;
 }
 

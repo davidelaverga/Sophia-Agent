@@ -68,6 +68,8 @@ describe('useSessionInteractionOrchestration', () => {
 
     const { result } = renderHook(() =>
       useSessionInteractionOrchestration({
+        captureSourceInput: (text: string) => ({ text }),
+        retrySourceInput: (text: string) => ({ text }),
         input: '',
         setInput: vi.fn(),
         isTyping: false,

@@ -8,14 +8,16 @@ messages sent to the model — this avoids add_messages reducer edge cases
 with RemoveMessage and ensures the system prompt is always the first message.
 """
 
+import asyncio
+import os
 import time
 from collections.abc import Awaitable, Callable
-from typing import NotRequired, override
+from typing import Annotated, NotRequired, override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
-from langchain.agents.middleware.types import ModelCallResult, ModelRequest, ModelResponse
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain.agents.middleware.types import ModelCallResult, ModelRequest, ModelResponse, PrivateStateAttr
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from deerflow.agents.middlewares.dangling_tool_call_middleware import patch_dangling_tool_call_messages
 from deerflow.agents.sophia_agent.utils import log_middleware
@@ -23,6 +25,7 @@ from deerflow.agents.sophia_agent.utils import log_middleware
 
 class PromptAssemblyState(AgentState):
     system_prompt_blocks: NotRequired[list[str]]
+    memory_context_proof: NotRequired[Annotated[dict | None, PrivateStateAttr]]
 
 
 class PromptAssemblyMiddleware(AgentMiddleware[PromptAssemblyState]):
@@ -38,6 +41,102 @@ class PromptAssemblyMiddleware(AgentMiddleware[PromptAssemblyState]):
     state_schema = PromptAssemblyState
 
     _SYSTEM_MSG_ID = "sophia-system-prompt"
+
+    def __init__(self, user_id: str | None = None, *, context_id: str | None = None, memory_scope: str = "global"):
+        super().__init__()
+        self._memory_owner = user_id
+        self._memory_context_id = context_id
+        self._memory_scope = memory_scope
+
+    def _memory_boundary(self, request):
+        """No provenance or current canonical admission means no model dispatch.
+
+        A trusted producer/rotation protocol must supply the private proof. This
+        boundary NEVER blesses request state by signing it on the way through.
+        The factory-bound owner/context cannot be overridden by checkpoint data.
+        """
+        from deerflow.sophia.memory_governance.context_state import allows_unversioned_builder_handoff
+        from deerflow.sophia.memory_governance.owner_authority import owner_is_definitely_undeclared
+
+        if allows_unversioned_builder_handoff(self._memory_owner):
+            return request
+        if self._memory_owner and owner_is_definitely_undeclared(self._memory_owner):
+            # An owner outside the pilot has no producer, so there is no seal to
+            # verify and no canonical row to admit. Demanding one here turned
+            # every ordinary non-pilot turn into "memory context could not be
+            # verified" -- the same shape of gap as the guard's, at a fourth
+            # site, because allows_unversioned_builder_handoff answers False for
+            # an undeclared owner exactly as it does for a governed one.
+            #
+            # This is a pass-through, NOT a blessing: nothing is signed, and a
+            # request that somehow carries memory-shaped material still fails
+            # closed below, so retained state from a previous governed era or a
+            # client-supplied block cannot be reused on this path.
+            return self._neutral_request(request)
+        try:
+            from deerflow.sophia.memory_governance.context_provenance import verify_context_seal
+            from deerflow.sophia.memory_governance.flags import memory_feature_flags_for_owner
+            from deerflow.sophia.memory_governance.mem0_projection_adapter import Mem0ProjectionAdapter
+            from deerflow.sophia.memory_governance.retained_admission import readmit_retained_context
+            from deerflow.sophia.memory_governance.service import MemoryProviderContract
+            from deerflow.sophia.memory_governance.store import configured_memory_store
+
+            if not self._memory_owner or not self._memory_context_id:
+                return None
+            if not memory_feature_flags_for_owner(self._memory_owner).governed_runtime_read:
+                return None
+            manifest = verify_context_seal(value=request.state.get("memory_context_proof"), owner_id=self._memory_owner,
+                context_id=self._memory_context_id, messages=request.messages, blocks=request.state.get("system_prompt_blocks", []))
+            if manifest is None:
+                return None
+            result = readmit_retained_context(store=configured_memory_store(), adapter=Mem0ProjectionAdapter(),
+                provider=MemoryProviderContract.from_environ(), service_name=os.getenv("RENDER_SERVICE_NAME") or "sophia-langgraph",
+                owner_id=self._memory_owner, context=manifest, scope=self._memory_scope, caller="model_retained_context_boundary",
+                query="Retained context availability check")
+            if result.transition.action != "continue":
+                return None
+            # Even verified cached memory blocks are not rendered. Rebuild their
+            # content from current canonical rows admitted by the atomic RPC.
+            blocks = [block for block in request.state.get("system_prompt_blocks", []) if not block.lstrip().startswith(("<memory>", "<memories>"))]
+            if result.memories:
+                blocks.append("<memories>\n" + "\n".join("- " + memory.canonical_content for memory in result.memories) + "\n</memories>")
+            canonical_text = "\n".join("- " + memory.canonical_content for memory in result.memories)
+            messages = [message.model_copy(update={"content": canonical_text or "No currently authorized memories.", "artifact": None})
+                if isinstance(message, ToolMessage) and message.name in {"retrieve_memories", "search_memories"} else message for message in request.messages]
+            return request.override(messages=messages, system_message=None, state={**request.state, "system_prompt_blocks": blocks,
+                "injected_memories": [str(memory.memory_id) for memory in result.memories],
+                "injected_memory_contents": [memory.canonical_content for memory in result.memories]})
+        except Exception:
+            return None
+
+    def _neutral_request(self, request):
+        """The undeclared owner's request, with nothing memory-shaped in it."""
+        state = request.state or {}
+        if state.get("memory_context_proof") is not None or state.get("injected_memories"):
+            return None
+        blocks = state.get("system_prompt_blocks", [])
+        if any(block.lstrip().startswith(("<memory>", "<memories>")) for block in blocks):
+            return None
+        if any(isinstance(message, ToolMessage) and message.name in {"retrieve_memories", "search_memories"}
+               for message in request.messages):
+            return None
+        return request
+
+    def _memory_unavailable(self):
+        # No provider/model call and no claim of erasure or successful rotation.
+        try:
+            from deerflow.sophia.memory_governance.observability import emit_memory_event
+            from deerflow.sophia.memory_governance.refs import keyed_ref
+
+            fields = {"owner_ref": keyed_ref("owner", self._memory_owner)} if self._memory_owner else {}
+            emit_memory_event("memory.context.transition", service=os.getenv("RENDER_SERVICE_NAME") or "sophia-langgraph",
+                outcome="zero_memory", fault_owner_id=self._memory_owner, safe_reason_code="model_context_unavailable", **fields)
+        except Exception:
+            from deerflow.sophia.memory_governance.observability import record_memory_observation_gap
+
+            record_memory_observation_gap()  # Preserve refusal and expose evidence loss.
+        return AIMessage(content="This conversation's memory context could not be verified. Please start a fresh conversation.",
+            additional_kwargs={"sophia_memory_status": "context_unavailable"})
 
     def _assemble_messages(self, request: ModelRequest) -> ModelRequest | None:
         """Build messages with the assembled system prompt prepended."""
@@ -104,6 +203,9 @@ class PromptAssemblyMiddleware(AgentMiddleware[PromptAssemblyState]):
         request: ModelRequest,
         handler: Callable[[ModelRequest], ModelResponse],
     ) -> ModelCallResult:
+        request = self._memory_boundary(request)
+        if request is None:
+            return self._memory_unavailable()
         patched = self._assemble_messages(request)
         if patched is not None:
             request = patched
@@ -119,6 +221,9 @@ class PromptAssemblyMiddleware(AgentMiddleware[PromptAssemblyState]):
         request: ModelRequest,
         handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
     ) -> ModelCallResult:
+        request = await asyncio.to_thread(self._memory_boundary, request)
+        if request is None:
+            return self._memory_unavailable()
         patched = self._assemble_messages(request)
         if patched is not None:
             request = patched

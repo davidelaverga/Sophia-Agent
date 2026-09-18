@@ -11,6 +11,8 @@ describe('useSessionUiCallbacks', () => {
     setInput: vi.fn(),
     focusComposer: vi.fn(),
     sendMessage: vi.fn(),
+    retrySourceInput: (text: string) => ({ text }), // Explicit legacy fixture.
+    showToast: vi.fn(),
     navigateHome: vi.fn(),
     clearSessionError: vi.fn(),
     endSession: vi.fn(),

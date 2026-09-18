@@ -4,6 +4,7 @@ import json
 from unittest.mock import MagicMock
 
 import pytest
+from mem00_owner_fixture import declare_memory_owners
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -12,10 +13,15 @@ from app.gateway.routers import sessions, sophia
 from deerflow.sophia.session_store import SessionRecord
 
 
-@pytest.fixture
-def governed(monkeypatch, tmp_path):
+@pytest.fixture(params=['enabled', 'flags-off', 'cohort-removed'])
+def governed(monkeypatch, tmp_path, declare_memory_owners, request):
+    declare_memory_owners({'owner-1': 'governed'})
     monkeypatch.setenv("SOPHIA_MEMORY_CANDIDATE_LEDGER_WRITE", "true")
     monkeypatch.setenv("SOPHIA_MEMORY_COHORT_PRINCIPALS", "owner-1")
+    if request.param == 'flags-off':
+        monkeypatch.setenv('SOPHIA_MEMORY_CANDIDATE_LEDGER_WRITE', 'false')
+    elif request.param == 'cohort-removed':
+        monkeypatch.setenv('SOPHIA_MEMORY_COHORT_PRINCIPALS', 'different-owner')
     monkeypatch.setattr(sophia, "USERS_DIR", tmp_path)
     record = SessionRecord(user_id="owner-1", session_id="session-1", thread_id="thread-1", message_revision=2)
     store = MagicMock()
@@ -169,12 +175,25 @@ def test_governed_recap_rejects_payload_for_another_thread(governed):
     assert sophia._read_session_recap("owner-1", "session-1") is None
 
 
-def test_recap_cleanup_is_rollout_scoped(governed, monkeypatch):
+def test_recap_cleanup_remains_governed_after_cohort_removal(governed, monkeypatch):
     _, record, path = governed
     client, _ = _delete_client(monkeypatch, record)
     monkeypatch.setenv("SOPHIA_MEMORY_COHORT_PRINCIPALS", "different-owner")
     assert client.delete("/api/v1/sessions/session-1?user_id=owner-1").status_code == 200
-    assert path.exists()
+    assert not path.exists()
+
+
+def test_source_invalidation_remains_required_without_extraction(governed, monkeypatch):
+    from deerflow.sophia.memory_governance import service, refs
+
+    _, record, _ = governed
+    canonical = MagicMock()
+    monkeypatch.setattr(service, 'CanonicalMemoryService', lambda **_: canonical)
+    monkeypatch.setattr(refs, 'keyed_ref', lambda *_: 'synthetic-source-delete')
+    sessions._invalidate_memory_source_before_delete('owner-1', record)
+    canonical.invalidate_source_session.assert_called_once_with(
+        session_id='session-1', current_transcript_revision=None, detach_source=True,
+        idempotency_key='synthetic-source-delete', safe_reason_code='source_session_deleted')
 
 
 @pytest.mark.parametrize("stamp", [None, ["session-1", "thread-1", 1]])

@@ -15,6 +15,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 from langgraph.types import Command
+from mem00_owner_fixture import declare_memory_owners
 
 
 def _make_runtime(
@@ -88,7 +89,8 @@ class _FakeThreadPaths:
 # ---------- dispatch shape ---------------------------------------------------
 
 
-def test_mem00_handoff_does_not_embed_unversioned_memory(monkeypatch):
+def test_mem00_handoff_does_not_embed_unversioned_memory(monkeypatch, declare_memory_owners):
+    declare_memory_owners({"alice": "governed"})
     from deerflow.sophia.memory_governance import flags
 
     monkeypatch.setattr(flags, "memory_feature_flags_for_owner", lambda owner: SimpleNamespace(canonical_pool_read=owner == "alice"))
@@ -97,13 +99,13 @@ def test_mem00_handoff_does_not_embed_unversioned_memory(monkeypatch):
     monkeypatch.setattr("langgraph_sdk.get_client", lambda url=None: fake_client)
     runtime = _make_runtime({"user_id": "spoofed", "injected_memory_contents": ["Prefers concise slide headlines MEM00 STALE"]}, user_id="alice")
     response = asyncio.run(module.start_builder_task.coroutine(description="Create a concise slide deck", task_type="presentation", runtime=runtime))
-    assert isinstance(response, Command)
-    dispatched = captured["run_kwargs"]["input"]
-    assert dispatched["delegation_context"]["relevant_memories"] == []
-    assert "MEM00 STALE" not in repr(dispatched)
+    assert "No launch was attempted" in response
+    assert "run_kwargs" not in captured
+    fake_client.threads.create.assert_not_awaited()
 
 
-def test_start_builder_task_dispatches_via_asgi(monkeypatch):
+def test_start_builder_task_dispatches_via_asgi(monkeypatch, declare_memory_owners):
+    declare_memory_owners({"alice": "legacy"})
     module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
     fake_client, captured = _make_fake_sdk_client(thread_id="asgi-1", run_id="run-1")
     monkeypatch.setattr("langgraph_sdk.get_client", lambda url=None: fake_client)
@@ -185,6 +187,7 @@ def test_start_builder_task_dispatches_via_asgi(monkeypatch):
 
 def test_dispatch_runtime_completion_carries_exact_annotated_builder_trace_root(
     monkeypatch,
+    declare_memory_owners,
 ):
     """Exercise completion with the state/config emitted by real dispatch.
 
@@ -192,6 +195,7 @@ def test_dispatch_runtime_completion_carries_exact_annotated_builder_trace_root(
     ``annotate_builder_completion``. It is deliberately separate from the
     companion-side diagnostic ``trace_id`` on the tool runtime.
     """
+    declare_memory_owners({"alice": "legacy"})
 
     module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
     builder_events = importlib.import_module("deerflow.sophia.builder_events")
@@ -269,7 +273,8 @@ def test_dispatch_runtime_completion_carries_exact_annotated_builder_trace_root(
     assert payload["trace_id"] is None
 
 
-def test_start_builder_task_dispatches_resolved_pdf_target_ext_for_pdf_deck(monkeypatch):
+def test_start_builder_task_dispatches_resolved_pdf_target_ext_for_pdf_deck(monkeypatch, declare_memory_owners):
+    declare_memory_owners({"alice": "legacy"})
     module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
     fake_client, captured = _make_fake_sdk_client(thread_id="asgi-pdf-deck", run_id="run-1")
     monkeypatch.setattr("langgraph_sdk.get_client", lambda url=None: fake_client)
@@ -460,7 +465,8 @@ def test_edit_source_resolves_storage_object_path_from_builder_result():
     )
 
 
-def test_edit_builder_artifact_dispatch_materializes_source(monkeypatch, tmp_path):
+def test_edit_builder_artifact_dispatch_materializes_source(monkeypatch, tmp_path, declare_memory_owners):
+    declare_memory_owners({"alice": "legacy"})
     module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
     fake_client, captured = _make_fake_sdk_client(thread_id="edit-builder", run_id="run-edit")
     monkeypatch.setattr("langgraph_sdk.get_client", lambda url=None: fake_client)
@@ -511,7 +517,8 @@ def test_edit_builder_artifact_dispatch_materializes_source(monkeypatch, tmp_pat
     assert materialized.read_text() == "# Base\n\nKeep this."
 
 
-def test_dispatch_sets_stream_resumable_true(monkeypatch):
+def test_dispatch_sets_stream_resumable_true(monkeypatch, declare_memory_owners):
+    declare_memory_owners({"bob": "legacy"})
     """Phase 4F regression: ``stream_resumable=True`` MUST be set on
     ``client.runs.create`` so the gateway-side ``BuilderProgressSubscriber``
     (HTTP ``runs.join_stream``) can replay events to a late joiner.
@@ -748,7 +755,8 @@ def test_visual_report_without_html_request_still_targets_pdf():
 # ---------- duplicate protection --------------------------------------------
 
 
-def test_start_builder_task_duplicate_protection(monkeypatch):
+def test_start_builder_task_duplicate_protection(monkeypatch, declare_memory_owners):
+    declare_memory_owners({"default_user": "legacy"})
     module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
 
     def _fail(_url=None):  # pragma: no cover — must not be called
@@ -785,7 +793,8 @@ def test_start_builder_task_duplicate_protection(monkeypatch):
     assert "existing-1" in response
 
 
-def test_duplicate_launch_text_enumerates_all_four_lifecycle_tools(monkeypatch):
+def test_duplicate_launch_text_enumerates_all_four_lifecycle_tools(monkeypatch, declare_memory_owners):
+    declare_memory_owners({"default_user": "legacy"})
     """The duplicate-rejection ToolMessage must teach the model the full
     lifecycle-tool matrix so it picks the right alternative instead of
     looping on start_builder_task / check_async_task."""
@@ -847,7 +856,8 @@ def test_duplicate_launch_text_enumerates_all_four_lifecycle_tools(monkeypatch):
     assert 'status_filter="running"' not in response
 
 
-def test_duplicate_launch_text_does_not_truncate_task_id(monkeypatch):
+def test_duplicate_launch_text_does_not_truncate_task_id(monkeypatch, declare_memory_owners):
+    declare_memory_owners({"default_user": "legacy"})
     """Regression guard: deepagents docs call out task_id truncation as a
     common failure mode. The rejection text must always carry the FULL id."""
     module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
@@ -891,7 +901,8 @@ def test_duplicate_launch_text_does_not_truncate_task_id(monkeypatch):
     assert "..." not in response
 
 
-def test_start_builder_task_duplicate_protection_allows_after_terminal(monkeypatch):
+def test_start_builder_task_duplicate_protection_allows_after_terminal(monkeypatch, declare_memory_owners):
+    declare_memory_owners({"default_user": "legacy"})
     """Terminal status (completed/failed/etc.) must not block a new launch."""
     module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
     fake_client, _captured = _make_fake_sdk_client(thread_id="new-1", run_id="r-new")
@@ -925,7 +936,8 @@ def test_start_builder_task_duplicate_protection_allows_after_terminal(monkeypat
     assert "new-1" in response.update["async_tasks"]
 
 
-def test_start_builder_task_duplicate_protection_ignores_other_agents(monkeypatch):
+def test_start_builder_task_duplicate_protection_ignores_other_agents(monkeypatch, declare_memory_owners):
+    declare_memory_owners({"default_user": "legacy"})
     """A non-builder async task in flight must NOT block a builder launch."""
     module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
     fake_client, _captured = _make_fake_sdk_client(thread_id="b-1", run_id="r-b")
@@ -962,8 +974,9 @@ def test_start_builder_task_duplicate_protection_ignores_other_agents(monkeypatc
 # ---------- live-context embedding ------------------------------------------
 
 
-def test_start_builder_task_live_context_embedding(monkeypatch):
+def test_start_builder_task_live_context_embedding(monkeypatch, declare_memory_owners):
     """Memories, emotional context, ritual, and explicit URLs land in the brief."""
+    declare_memory_owners({"alice": "legacy"})
     module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
     fake_client, captured = _make_fake_sdk_client()
     monkeypatch.setattr("langgraph_sdk.get_client", lambda url=None: fake_client)
@@ -1036,7 +1049,8 @@ def _assert_live_context_state(input_state: dict) -> None:
     assert isinstance(input_state["builder_web_budget"], dict)
 
 
-def test_start_builder_task_prefix_idempotent(monkeypatch):
+def test_start_builder_task_prefix_idempotent(monkeypatch, declare_memory_owners):
+    declare_memory_owners({"alice": "legacy"})
     """If the model already prefixed the description, don't double-prefix."""
     module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
     fake_client, captured = _make_fake_sdk_client()
@@ -1059,7 +1073,8 @@ def test_start_builder_task_prefix_idempotent(monkeypatch):
 # ---------- SDK failure -----------------------------------------------------
 
 
-def test_start_builder_task_sdk_failure_returns_string(monkeypatch):
+def test_start_builder_task_sdk_failure_returns_string(monkeypatch, declare_memory_owners):
+    declare_memory_owners({"alice": "legacy"})
     module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
 
     failing = MagicMock()
@@ -1083,7 +1098,8 @@ def test_start_builder_task_sdk_failure_returns_string(monkeypatch):
 # ---------- demo-prompt normalization ---------------------------------------
 
 
-def test_start_builder_task_normalizes_demo_request(monkeypatch):
+def test_start_builder_task_normalizes_demo_request(monkeypatch, declare_memory_owners):
+    declare_memory_owners({"alice": "legacy"})
     module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
     fake_client, captured = _make_fake_sdk_client()
     monkeypatch.setattr("langgraph_sdk.get_client", lambda url=None: fake_client)
@@ -1118,7 +1134,8 @@ def test_start_builder_task_normalizes_demo_request(monkeypatch):
     assert response.update["async_tasks"][task_id]["demo_mode"] is True
 
 
-def test_explicit_pptx_bypasses_stale_demo_and_canonicalizes_presentation(monkeypatch):
+def test_explicit_pptx_bypasses_stale_demo_and_canonicalizes_presentation(monkeypatch, declare_memory_owners):
+    declare_memory_owners({"alice": "legacy"})
     """Prod regression: a stale demo goal must not rewrite a live deck brief."""
     module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
     fake_client, captured = _make_fake_sdk_client()
@@ -1216,7 +1233,8 @@ def test_only_powerpoint_canonicalizes_task_type():
     assert module._canonical_task_type_for_target("visual_report", "pdf") == "visual_report"
 
 
-def test_start_builder_task_keeps_web_research_available_for_frontend(monkeypatch):
+def test_start_builder_task_keeps_web_research_available_for_frontend(monkeypatch, declare_memory_owners):
+    declare_memory_owners({"alice": "legacy"})
     module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
     fake_client, captured = _make_fake_sdk_client()
     monkeypatch.setattr("langgraph_sdk.get_client", lambda url=None: fake_client)
@@ -1241,7 +1259,8 @@ def test_start_builder_task_keeps_web_research_available_for_frontend(monkeypatc
 # ---------- user_id resolution ----------------------------------------------
 
 
-def test_start_builder_task_prefers_runtime_config_user_id(monkeypatch):
+def test_start_builder_task_prefers_runtime_config_user_id(monkeypatch, declare_memory_owners):
+    declare_memory_owners({"alice_from_config": "legacy"})
     module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
     fake_client, captured = _make_fake_sdk_client()
     monkeypatch.setattr("langgraph_sdk.get_client", lambda url=None: fake_client)
@@ -1259,7 +1278,8 @@ def test_start_builder_task_prefers_runtime_config_user_id(monkeypatch):
     assert config_payload["configurable"]["user_id"] == "alice_from_config"
 
 
-def test_make_start_builder_task_tool_uses_bound_user_id_when_runtime_sources_missing(monkeypatch):
+def test_make_start_builder_task_tool_uses_bound_user_id_when_runtime_sources_missing(monkeypatch, declare_memory_owners):
+    declare_memory_owners({"bound_authenticated_user": "legacy"})
     """The factory's bound user_id wins when no trusted runtime source exists."""
     module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
     fake_client, captured = _make_fake_sdk_client()
@@ -1289,7 +1309,8 @@ def test_make_start_builder_task_tool_uses_bound_user_id_when_runtime_sources_mi
     assert config_payload["configurable"]["user_id"] == "bound_authenticated_user"
 
 
-def test_start_builder_task_tool_arg_user_id_does_not_override_runtime_config(monkeypatch, caplog):
+def test_start_builder_task_tool_arg_user_id_does_not_override_runtime_config(monkeypatch, caplog, declare_memory_owners):
+    declare_memory_owners({"trusted_alice": "legacy"})
     """LLM-supplied user_id must NOT override an authenticated runtime user_id."""
     module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
     fake_client, captured = _make_fake_sdk_client()
@@ -1351,7 +1372,8 @@ def test_start_builder_task_refuses_launch_without_tool_call_id(monkeypatch):
 # ---------- status-set coverage (terminal-blacklist semantics) --------------
 
 
-def test_start_builder_task_treats_pending_status_as_active(monkeypatch):
+def test_start_builder_task_treats_pending_status_as_active(monkeypatch, declare_memory_owners):
+    declare_memory_owners({"default_user": "legacy"})
     """LangGraph SDK can write ``status="pending"`` via check_async_task.
 
     The previous whitelist (``{"queued", "running", "started"}``) missed
@@ -1394,7 +1416,8 @@ def test_start_builder_task_treats_pending_status_as_active(monkeypatch):
     assert "pending-1" in response
 
 
-def test_start_builder_task_treats_interrupted_status_as_active(monkeypatch):
+def test_start_builder_task_treats_interrupted_status_as_active(monkeypatch, declare_memory_owners):
+    declare_memory_owners({"default_user": "legacy"})
     """``interrupted`` is also a non-terminal LangGraph SDK run status."""
     module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
 
@@ -1430,7 +1453,8 @@ def test_start_builder_task_treats_interrupted_status_as_active(monkeypatch):
     assert "already in progress" in response
 
 
-def test_start_builder_task_treats_unknown_status_as_active(monkeypatch):
+def test_start_builder_task_treats_unknown_status_as_active(monkeypatch, declare_memory_owners):
+    declare_memory_owners({"default_user": "legacy"})
     """Default-active: any new/unknown status blocks duplicate launches.
 
     Sentinel for forward-compat — when LangGraph SDK adds a new status we
@@ -1471,7 +1495,8 @@ def test_start_builder_task_treats_unknown_status_as_active(monkeypatch):
     assert "already in progress" in response
 
 
-def test_start_builder_task_treats_failed_status_as_terminal(monkeypatch):
+def test_start_builder_task_treats_failed_status_as_terminal(monkeypatch, declare_memory_owners):
+    declare_memory_owners({"default_user": "legacy"})
     """``failed`` (and other terminal statuses) must NOT block a new launch."""
     module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
     fake_client, _captured = _make_fake_sdk_client(thread_id="new-1", run_id="r-new")

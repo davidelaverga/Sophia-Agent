@@ -18,6 +18,7 @@ from app.gateway.inactivity_watcher import (
     reset_watcher as reset_watcher_state,
 )
 from deerflow.sophia.memory_governance.flags import MemoryFeatureFlags
+from mem00_owner_fixture import ordinary_memory_owner  # noqa: F401 - ordinary non-cohort store
 
 
 @pytest.fixture(autouse=True)
@@ -60,7 +61,7 @@ class TestUnregisterThread:
 
 
 class TestCheckInactiveThreads:
-    def test_fires_pipeline_for_idle_thread(self):
+    def test_fires_pipeline_for_idle_thread(self, ordinary_memory_owner):
         register_activity("t1", "user1", "sess1", "work")
         _active_threads["t1"]["last_active"] = time.time() - INACTIVITY_TIMEOUT - 60
 
@@ -85,7 +86,7 @@ class TestCheckInactiveThreads:
             mock_pipeline.assert_not_called()
             mock_pause.assert_not_called()
 
-    def test_pipeline_failure_still_removes_thread(self):
+    def test_pipeline_failure_still_removes_thread(self, ordinary_memory_owner):
         register_activity("t1", "user1", "sess1")
         _active_threads["t1"]["last_active"] = time.time() - INACTIVITY_TIMEOUT - 60
 
@@ -104,7 +105,7 @@ class TestCheckInactiveThreads:
 
         with (
             patch(
-                "app.gateway.inactivity_watcher.memory_feature_flags_for_owner",
+                "app.gateway.inactivity_watcher.ordinary_path_memory_flags_for_owner",
                 return_value=MemoryFeatureFlags(candidate_ledger_write=True),
             ),
             patch(
@@ -127,7 +128,7 @@ class TestCheckInactiveThreads:
 
         with (
             patch(
-                "app.gateway.inactivity_watcher.memory_feature_flags_for_owner",
+                "app.gateway.inactivity_watcher.ordinary_path_memory_flags_for_owner",
                 return_value=MemoryFeatureFlags(candidate_ledger_write=True),
             ),
             patch(

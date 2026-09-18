@@ -1253,10 +1253,11 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
         sections: list[str] = []
 
         # Tone guidance
-        tone_estimate: float = companion_artifact.get("tone_estimate", 2.5)
-        active_tone_band: str = companion_artifact.get("active_tone_band", "engagement")
-        tone_section = self._tone_guidance(tone_estimate, active_tone_band)
-        sections.append(f"<tone_guidance>\n{tone_section}\n</tone_guidance>")
+        if not exclude_inherited_memory:
+            tone_estimate: float = companion_artifact.get("tone_estimate", 2.5)
+            active_tone_band: str = companion_artifact.get("active_tone_band", "engagement")
+            tone_section = self._tone_guidance(tone_estimate, active_tone_band)
+            sections.append(f"<tone_guidance>\n{tone_section}\n</tone_guidance>")
 
         # Ritual guidance (validate + escape to prevent prompt injection via crafted values)
         _VALID_RITUALS = {"prepare", "debrief", "vent", "reset"}
@@ -1640,7 +1641,7 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
 
         log_middleware(
             "BuilderTask",
-            f"task_type={task_type} tone={tone_estimate:.1f} ritual={active_ritual or 'none'} non_artifact_turns={non_artifact_turns}",
+            f"task_type={task_type} personalization={'disabled' if exclude_inherited_memory else 'legacy'} non_artifact_turns={non_artifact_turns}",
             _t0,
         )
         return {

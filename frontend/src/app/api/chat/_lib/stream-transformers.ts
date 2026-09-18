@@ -1,10 +1,6 @@
 import { normalizeBuilderArtifactPayload } from '../../../lib/builder-artifacts';
+import { isMemoryContextRecoveryError, MEMORY_CONTEXT_RECOVERY_REQUIRED } from '../../../lib/memory-context-error';
 import type { BuilderActivityEntryV1, BuilderTaskV1 } from '../../../types/builder-task';
-
-import {
-  IS_PRODUCTION,
-  secureLog,
-} from './config';
 
 type StreamMeta = {
   thread_id?: string;
@@ -898,6 +894,7 @@ export function createUIMessageStreamFromText(
 export function createSSEToUIMessageStream(
   upstream: ReadableStream<Uint8Array>,
   initialMeta?: StreamMeta,
+  confirmCompletion?: () => Promise<boolean>,
 ): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder();
   const decoder = new TextDecoder();
@@ -1021,6 +1018,13 @@ export function createSSEToUIMessageStream(
 
           if (done) {
             ensureTextEnd();
+            // EOF is also produced by failed/interrupted/disconnected runs.
+            // Only the original authenticated run may confirm this finish.
+            if (confirmCompletion && !(await confirmCompletion())) {
+              emit({ type: 'error', errorText: 'memory_source_send_unconfirmed' });
+              safeClose();
+              return;
+            }
 
             if (finalArtifacts) {
               emitArtifacts(finalArtifacts);
@@ -1414,21 +1418,20 @@ export function createSSEToUIMessageStream(
                   break;
                 }
                 case 'error': {
-                  const errorMessage =
-                    data && typeof data === 'object'
-                      ? String((data as Record<string, unknown>).error || '')
-                      : '';
-                  if (!IS_PRODUCTION) {
-                    secureLog('[/api/chat] backend_stream_error_event', {
-                      error: errorMessage,
-                    });
+                  if (isMemoryContextRecoveryError(data)) {
+                    // No fabricated assistant reply, success finish, task
+                    // cancellation, or fresh-thread/transcript fallback.
+                    ensureTextEnd();
+                    emit({ type: 'error', errorText: MEMORY_CONTEXT_RECOVERY_REQUIRED });
+                    safeClose();
+                    await activeReader.cancel().catch(() => undefined);
+                    return;
                   }
-                  if (tokenCount === 0) {
-                    ensureStart();
-                    emit({ type: 'text-delta', id: textId, delta: "I'm having trouble right now. Please try again in a moment." });
-                    tokenCount++;
-                  }
-                  break;
+                  ensureTextEnd();
+                  emit({ type: 'error', errorText: 'memory_source_send_unconfirmed' });
+                  safeClose();
+                  await activeReader.cancel().catch(() => undefined);
+                  return;
                 }
                 case 'token': {
                   const tokenData = data as SSEToken;
@@ -1509,6 +1512,13 @@ export function createSSEToUIMessageStream(
               }
             } catch {
               const fallbackEventType = eventType;
+              if (fallbackEventType === 'error' && isMemoryContextRecoveryError(cleanData)) {
+                ensureTextEnd();
+                emit({ type: 'error', errorText: MEMORY_CONTEXT_RECOVERY_REQUIRED });
+                safeClose();
+                await activeReader.cancel().catch(() => undefined);
+                return;
+              }
               if (fallbackEventType === 'token') {
                 if (!stopTextStreaming) {
                   const cleanedToken = sanitizeTokenChunkForOutput(
@@ -1536,17 +1546,19 @@ export function createSSEToUIMessageStream(
                 continue;
               }
 
-              if (fallbackEventType === 'error' && tokenCount === 0) {
-                ensureStart();
-                emit({ type: 'text-delta', id: textId, delta: "I'm having trouble right now. Please try again in a moment." });
-                tokenCount++;
+              if (fallbackEventType === 'error') {
+                ensureTextEnd();
+                emit({ type: 'error', errorText: 'memory_source_send_unconfirmed' });
+                safeClose();
+                await activeReader.cancel().catch(() => undefined);
+                return;
               }
             }
           }
         }
         } catch {
           ensureTextEnd();
-          emit({ type: 'finish' });
+          emit({ type: 'error', errorText: 'memory_source_send_unconfirmed' });
           safeClose();
         } finally {
           activeReader.releaseLock();

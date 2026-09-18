@@ -22,13 +22,17 @@ if TYPE_CHECKING:
 from .models import (
     CandidateRecord,
     CanonicalMemory,
+    CommandReceipt,
     ExtractedCandidate,
     ExtractionRun,
     GovernanceReceipt,
     MemoryContract,
+    OwnerMemoryAuthority,
     ProjectionLease,
     ProviderHit,
     SourceInvalidationReceipt,
+    SourceRecoveryClaim,
+    SourceRecoveryReceipt,
     UserGovernance,
 )
 
@@ -36,6 +40,29 @@ from .models import (
 class MemoryGovernanceUnavailable(RuntimeError):
     def __init__(self, reason: str = "governance_unavailable") -> None:
         self.reason = reason
+        super().__init__(reason)
+
+
+class MemoryOwnerUndeclared(MemoryGovernanceUnavailable):
+    """A definite answer: this owner has no declared durable authority.
+
+    Distinct from its parent, which means "we could not find out". The store
+    answered, the schema was current, and the owner is simply not enrolled —
+    `authority_state` is `'unknown'`, or there is no governance row at all.
+
+    This is NOT permission to use a legacy or ungoverned memory lane; an
+    undeclared owner still has no memory access whatsoever. It exists so that
+    ordinary, non-memory code paths can tell "not enrolled" (every user before
+    activation, and every new signup after it) apart from "the store is down",
+    and degrade to memory-features-off for the former while still failing
+    closed for the latter.
+
+    It subclasses MemoryGovernanceUnavailable deliberately: every existing
+    `except MemoryGovernanceUnavailable` keeps failing closed unchanged, and
+    only a caller that opts into the narrower type behaves differently.
+    """
+
+    def __init__(self, reason: str = "memory_owner_undeclared") -> None:
         super().__init__(reason)
 
 
@@ -134,6 +161,28 @@ class SupabaseMemoryGovernanceStore:
             raise MemoryGovernanceUnavailable("memory_contract_unavailable")
         return MemoryContract.model_validate(rows[0])
 
+    def get_owner_authority(self, user_id: str) -> OwnerMemoryAuthority:
+        # Missing rows/columns and old schemas are unavailable, never legacy.
+        rows = self._request("GET", "sophia_memory_user_governance", params={
+            "select": "user_id,authority_state,authority_epoch,authority_declared_at",
+            "user_id": f"eq.{user_id}", "limit": "2",
+        })
+        if not isinstance(rows, list):
+            # A non-list body means the request itself did not answer the
+            # question: an error shape, or an old schema missing a column.
+            raise MemoryGovernanceUnavailable("memory_owner_authority_unavailable")
+        if not rows:
+            # The query succeeded against the current schema and this owner has
+            # no governance row. That is a definite "not enrolled", not a
+            # failure to find out — and still not legacy.
+            raise MemoryOwnerUndeclared("memory_owner_undeclared")
+        if len(rows) != 1:
+            raise MemoryGovernanceUnavailable("memory_owner_authority_unavailable")
+        result = OwnerMemoryAuthority.model_validate(rows[0])
+        if result.user_id != user_id:
+            raise MemoryGovernanceUnavailable("memory_owner_authority_unavailable")
+        return result
+
     def get_user_governance(self, user_id: str) -> UserGovernance:
         rows = self._request(
             "GET",
@@ -147,6 +196,124 @@ class SupabaseMemoryGovernanceStore:
         if not isinstance(rows, list) or len(rows) != 1:
             raise MemoryGovernanceUnavailable("memory_user_governance_unavailable")
         return UserGovernance.model_validate(rows[0])
+
+    def source_extraction_runs(self, *, user_id: str, session_id: str) -> tuple[ExtractionRun, ...]:
+        """Complete bounded keyset scan; apply_source_target CAS-checks this set."""
+        result=[]
+        after=""
+        for _ in range(128):
+            params={"select":",".join(ExtractionRun.model_fields),"user_id":f"eq.{user_id}","session_id":f"eq.{session_id}",
+                "state":"neq.superseded","order":"extraction_run_id.asc","limit":"200"}
+            if after:
+                params["extraction_run_id"]=f"gt.{after}"
+            rows=self._request("GET","sophia_memory_extraction_runs",params=params)
+            if not isinstance(rows,list) or len(rows)>200:
+                raise MemoryGovernanceUnavailable("memory_source_runs_unavailable")
+            if not rows:
+                return tuple(result)
+            for row in rows:
+                run=self._model(ExtractionRun,row)
+                if run.user_id!=user_id or run.session_id!=session_id or run.state=="superseded" or str(run.extraction_run_id)<=after:
+                    raise MemoryGovernanceUnavailable("memory_source_runs_unavailable")
+                result.append(run)
+                after=str(run.extraction_run_id)
+                if len(result)>10000:
+                    raise MemoryGovernanceUnavailable("memory_source_runs_budget_exhausted")
+        raise MemoryGovernanceUnavailable("memory_source_runs_budget_exhausted")
+
+    def apply_source_target(self, **payload: object) -> ExtractionRun | None:
+        row=self._rpc("sophia_memory_apply_source_target",payload)
+        if (not isinstance(row,dict) or not row.get("event_id") or row.get("source_manifest_ref")!=payload.get("p_target_manifest_ref")):
+            raise MemoryGovernanceUnavailable("memory_source_target_receipt_invalid")
+        if row.get("run") is None:
+            return None
+        run=self._model(ExtractionRun,row["run"])
+        if (run.user_id,run.session_id,run.thread_id)!=(payload["p_user_id"],payload["p_session_id"],payload["p_thread_id"]):
+            raise MemoryGovernanceUnavailable("memory_source_target_receipt_invalid")
+        return run
+
+    def source_extraction_run(self, *, user_id: str, extraction_run_id: UUID) -> ExtractionRun:
+        rows=self._request("GET","sophia_memory_extraction_runs",params={"select":",".join(ExtractionRun.model_fields),
+            "user_id":f"eq.{user_id}","extraction_run_id":f"eq.{extraction_run_id}","limit":"2"})
+        run=self._model(ExtractionRun,rows)
+        if run.user_id!=user_id or run.extraction_run_id!=extraction_run_id:
+            raise MemoryGovernanceUnavailable("memory_source_run_scope_invalid")
+        return run
+
+    def apply_source_target_at_epoch(self, **payload: object):
+        from .source_snapshot import EpochSourceTargetReceipt
+
+        try:
+            result = EpochSourceTargetReceipt.model_validate(self._rpc("sophia_memory_apply_source_target_at_epoch", payload))
+            if (result.source_snapshot.model_dump(mode="json", by_alias=True) != payload["p_source_snapshot"]
+                or result.source_manifest_ref != payload["p_target_manifest_ref"]
+                or result.memory_clear_epoch != payload["p_expected_clear_epoch"]
+                or (result.source_snapshot.owner_id, result.source_snapshot.session_id, result.source_snapshot.thread_id,
+                    result.source_snapshot.transcript_revision) != (payload["p_user_id"], payload["p_session_id"], payload["p_thread_id"], payload["p_transcript_revision"])):
+                raise ValueError("scope")
+            return result
+        except Exception:
+            raise MemoryGovernanceUnavailable("memory_epoch_source_target_unavailable") from None
+
+    def authorize_extraction_dispatch(self, **payload: object):
+        return self._rpc("sophia_memory_authorize_extraction_dispatch", payload)
+
+    def register_builder_handoff(self, **payload: object):
+        return self._rpc("sophia_memory_register_builder_handoff", payload)
+
+    def get_builder_handoff(self, **payload: object):
+        return self._rpc("sophia_memory_get_builder_handoff", payload)
+
+    def bind_builder_source_run(self, **payload: object):
+        return self._rpc("sophia_memory_bind_builder_source_run", payload)
+
+    def get_builder_source_run(self, **payload: object):
+        return self._rpc("sophia_memory_get_builder_source_run", payload)
+
+    def get_builder_source_run_for_handoff(self, **payload: object):
+        return self._rpc("sophia_memory_get_builder_source_run_for_handoff", payload)
+
+    def authorize_model_dispatch(self, **payload: object):
+        return self._rpc("sophia_memory_authorize_model_dispatch", payload)
+
+    def check_model_source_use(self, **payload: object):
+        return self._rpc("sophia_memory_check_source_use", payload)
+
+    def authorize_legacy_model_dispatch(self, **payload: object):
+        return self._rpc("sophia_memory_authorize_legacy_model_dispatch", payload)
+
+    def get_model_result(self, **payload: object):
+        return self._rpc("sophia_memory_get_model_result", payload)
+
+    def record_model_result(self, **payload: object):
+        return self._rpc("sophia_memory_record_model_result", payload)
+
+    def claim_source_recovery(self, *, user_id: str, lease_owner: str) -> SourceRecoveryClaim | None:
+        raw = self._rpc("sophia_memory_claim_source_recovery", {"p_user_id": user_id, "p_lease_owner": lease_owner})
+        if raw is None:
+            return None
+        try:
+            claim = SourceRecoveryClaim.model_validate(raw)
+            if (claim.user_id, claim.lease_owner) != (user_id, lease_owner) or claim.lease_expires_at <= datetime.now(UTC):
+                raise ValueError
+            return claim
+        except Exception:
+            raise MemoryGovernanceUnavailable("memory_recovery_claim_invalid") from None
+
+    def complete_source_recovery(self, claim: SourceRecoveryClaim, *, outcome: str) -> SourceRecoveryReceipt:
+        raw = self._rpc("sophia_memory_complete_source_recovery", {
+            "p_user_id": claim.user_id, "p_session_id": claim.session_id, "p_sweep_id": str(claim.sweep_id),
+            "p_lease_token": str(claim.lease_token), "p_lease_owner": claim.lease_owner, "p_outcome": outcome,
+        })
+        try:
+            receipt = SourceRecoveryReceipt.model_validate(raw)
+            if receipt.extraction_complete or (receipt.user_id, receipt.session_id, receipt.sweep_id, receipt.lease_token, receipt.outcome) != (
+                claim.user_id, claim.session_id, claim.sweep_id, claim.lease_token, outcome,
+            ):
+                raise ValueError
+            return receipt
+        except Exception:
+            raise MemoryGovernanceUnavailable("memory_recovery_receipt_invalid") from None
 
     def enqueue_extraction(self, **payload: object) -> ExtractionRun:
         row = self._rpc("sophia_memory_enqueue_extraction", payload)
@@ -372,6 +539,66 @@ class SupabaseMemoryGovernanceStore:
             )
         return tuple(result)
 
+    def current_memory(self, *, user_id: str, memory_id: UUID):
+        import json
+
+        from .command_result import CurrentMemoryView
+
+        raw = self._rpc("sophia_memory_current_view", {"p_user_id": user_id, "p_memory_id": str(memory_id)})
+        try:
+            if (not isinstance(raw, dict) or raw.get("provider_state_queried") is not False or raw.get("current_view_only") is not True
+                    or len(json.dumps(raw).encode()) > 2 * 1024 * 1024):
+                raise ValueError
+            view = CurrentMemoryView.model_validate(raw)
+            if view.owner_id != user_id or view.memory_id != memory_id:
+                raise ValueError
+            return view
+        except Exception:
+            raise MemoryGovernanceUnavailable("memory_current_view_unavailable") from None
+
+    def source_boundary(self, *, user_id: str, session_id: str, thread_id: str):
+        return self._rpc("sophia_memory_source_boundary", {"p_user_id": user_id, "p_session_id": session_id, "p_thread_id": thread_id})
+
+    def accept_source_action(self, **payload):
+        return self._rpc("sophia_memory_accept_source_action", payload)
+
+    def source_action_status(self, *, user_id: str, command_key: str):
+        return self._rpc("sophia_memory_lookup_source_action", {"p_user_id": user_id, "p_idempotency_key": command_key})
+
+    def source_snapshot(self, *, user_id: str, session_id: str, thread_id: str):
+        return self._rpc("sophia_memory_source_snapshot", {"p_user_id": user_id, "p_session_id": session_id, "p_thread_id": thread_id})
+
+    def review_snapshot(self, payload: dict[str, object]) -> dict:
+        result = self._rpc("sophia_memory_review_snapshot", payload)
+        if not isinstance(result, dict):
+            raise MemoryGovernanceUnavailable("memory_review_snapshot_invalid")
+        return result
+
+    def inventory_snapshot(self, payload: dict[str, object]) -> dict:
+        result = self._rpc("sophia_memory_inventory_snapshot", payload)
+        if not isinstance(result, dict):
+            raise MemoryGovernanceUnavailable("memory_inventory_unavailable")
+        return result
+
+    def command_receipt(self, *, user_id: str, idempotency_key: str) -> CommandReceipt | None:
+        raw = self._rpc("sophia_memory_lookup_command_receipt", {
+            "p_user_id": user_id, "p_idempotency_key": idempotency_key})
+        try:
+            import json
+
+            if (not isinstance(raw, dict) or set(raw) != {"schema", "owner_id", "command_key", "status", "historical_result_only", "receipt"}
+                    or raw["schema"] != "mem00.command-status.v1" or raw["owner_id"] != user_id
+                    or raw["command_key"] != idempotency_key or raw["historical_result_only"] is not True
+                    or len(json.dumps(raw).encode()) > 65536):
+                raise ValueError
+            if raw["status"] == "not_found" and raw["receipt"] is None:
+                return None
+            if raw["status"] != "committed" or not isinstance(raw["receipt"], dict) or raw["receipt"].get("idempotent_replay") is not True:
+                raise ValueError
+            return CommandReceipt.model_validate(raw["receipt"])
+        except Exception:
+            raise MemoryGovernanceUnavailable("memory_command_receipt_unavailable") from None
+
     def approve_candidate(self, **payload: object) -> GovernanceReceipt:
         return self._model(GovernanceReceipt, self._rpc("sophia_memory_approve_candidate", payload))
 
@@ -393,123 +620,150 @@ class SupabaseMemoryGovernanceStore:
     def tombstone(self, **payload: object) -> GovernanceReceipt:
         return self._model(GovernanceReceipt, self._rpc("sophia_memory_tombstone", payload))
 
-    def list_pool(
-        self,
-        *,
-        user_id: str,
-        include_forgotten: bool = False,
-        limit: int = 500,
-    ) -> tuple[CanonicalMemory, ...]:
-        lifecycles = "in.(active,forgotten)" if include_forgotten else "eq.active"
-        rows = self._request(
-            "GET",
-            "sophia_memories",
-            params={
-                "select": "memory_id,user_id,lifecycle,user_tier,current_content_revision,memory_governance_revision,created_at,updated_at",
-                "user_id": f"eq.{user_id}",
-                "lifecycle": lifecycles,
-                "order": "updated_at.desc",
-                "limit": str(min(max(limit, 1), 500)),
-            },
-        )
-        base_rows = rows if isinstance(rows, list) else []
-        versions = (
-            self._request(
-                "GET",
-                "sophia_memory_versions",
-                params={"select": "memory_id,content_revision,canonical_content,content_ref,category,scope", "user_id": f"eq.{user_id}", "limit": "1000"},
-            )
-            if base_rows
-            else []
-        )
-        version_map = {(str(item.get("memory_id")), int(item.get("content_revision") or 0)): item for item in (versions if isinstance(versions, list) else []) if isinstance(item, dict)}
-        bindings = (
-            self._request(
-                "GET",
-                "sophia_memory_provider_bindings",
-                params={"select": "memory_id,binding_state", "user_id": f"eq.{user_id}", "limit": "1000"},
-            )
-            if base_rows
-            else []
-        )
-        binding_states: dict[str, set[str]] = {}
-        for item in bindings if isinstance(bindings, list) else []:
-            if isinstance(item, dict):
-                binding_states.setdefault(str(item.get("memory_id")), set()).add(str(item.get("binding_state")))
-        result: list[CanonicalMemory] = []
-        for row in base_rows:
-            key = (str(row.get("memory_id")), int(row.get("current_content_revision") or 0))
-            version = version_map.get(key)
-            if version is None:
-                raise MemoryGovernanceUnavailable("canonical_version_unavailable")
-            # Database join keys are not canonical model fields. Only the exact
-            # current version can supply content; never fall back to an older edit.
-            content = {field: version.get(field) for field in ("canonical_content", "content_ref", "category", "scope")}
-            states = binding_states.get(key[0], set())
-            projection_state = "active" if "eligible" in states else ("stale" if states else "absent")
-            result.append(CanonicalMemory.model_validate({**row, **content, "projection_state": projection_state}))
-        return tuple(result)
+    def pool_snapshot(self, *, user_id: str, include_forgotten: bool = False):
+        from .inventory import read_complete_inventory
+
+        try:
+            return read_complete_inventory(owner_id=user_id, governance_store=self,
+                view="saved" if include_forgotten else "active")
+        except MemoryGovernanceConflict:
+            raise MemoryGovernanceUnavailable("memory_inventory_snapshot_changed") from None
+
+    def list_pool(self, *, user_id: str, include_forgotten: bool = False) -> tuple[CanonicalMemory, ...]:
+        # Management snapshot only, not provider-hit authorization or model admission.
+        snapshot = self.pool_snapshot(user_id=user_id, include_forgotten=include_forgotten)
+        return tuple(CanonicalMemory(memory_id=item.id, user_id=user_id, lifecycle=item.state,
+            user_tier=item.user_tier, current_content_revision=item.revision,
+            memory_governance_revision=item.memory_governance_revision, canonical_content=item.content,
+            category=item.category, scope=item.scope, projection_state="unavailable",
+            created_at=item.created_at, updated_at=item.updated_at) for item in snapshot.records)
 
     def authorize_provider_hits(
-        self,
-        *,
-        user_id: str,
-        provider: str,
-        environment: str,
-        provider_project: str,
-        provider_namespace: str,
-        hits: Iterable[ProviderHit],
+        self, *, user_id: str, provider: str, environment: str, provider_project: str,
+        provider_namespace: str, hits: Iterable[ProviderHit],
     ) -> tuple[tuple[CanonicalMemory, float | None], dict[str, int]]:
-        hit_map = {hit.provider_memory_id: hit.score for hit in hits}
-        denials: dict[str, int] = {}
+        """Exact one-snapshot resolution; final atomic prompt admission is still required."""
+        import json
+        import math
+
+        hit_map = {}
+        for hit in hits:
+            if (not isinstance(hit.provider_memory_id, str) or not 1 <= len(hit.provider_memory_id) <= 512
+                    or hit.provider_memory_id != hit.provider_memory_id.strip()
+                    or (hit.score is not None and not math.isfinite(hit.score))):
+                raise MemoryGovernanceUnavailable("memory_hit_selector_invalid")
+            hit_map.setdefault(hit.provider_memory_id, hit.score)
+            if len(hit_map) > 100:
+                raise MemoryGovernanceUnavailable("memory_hit_selector_invalid")
         if not hit_map:
-            return (), denials
-        rows = self._request(
-            "GET",
-            "sophia_memory_provider_bindings",
-            params={
-                "select": "provider_memory_id,memory_id,canonical_content_revision,memory_governance_revision,binding_state,metadata_verification_state",
-                "user_id": f"eq.{user_id}",
-                "provider": f"eq.{provider}",
-                "environment": f"eq.{environment}",
-                "provider_project": f"eq.{provider_project}",
-                "provider_namespace": f"eq.{provider_namespace}",
-                "limit": "1000",
-            },
-        )
-        candidates = [row for row in (rows if isinstance(rows, list) else []) if isinstance(row, dict) and str(row.get("provider_memory_id")) in hit_map]
-        by_provider: dict[str, list[dict[str, Any]]] = {}
-        for row in candidates:
-            by_provider.setdefault(str(row["provider_memory_id"]), []).append(row)
-        eligible_bindings: list[dict[str, Any]] = []
-        for provider_id in hit_map:
-            matched = by_provider.get(provider_id, [])
-            if not matched:
-                denials["unmapped_provider_id"] = denials.get("unmapped_provider_id", 0) + 1
-            elif len(matched) != 1:
-                denials["inactive_projection"] = denials.get("inactive_projection", 0) + 1
-            elif matched[0].get("binding_state") != "eligible" or matched[0].get("metadata_verification_state") != "verified":
-                denials["inactive_projection"] = denials.get("inactive_projection", 0) + 1
-            else:
-                eligible_bindings.append(matched[0])
-        memories = {memory.memory_id: memory for memory in self.list_pool(user_id=user_id)}
-        authorized: list[tuple[CanonicalMemory, float | None]] = []
-        for binding in eligible_bindings:
-            memory = memories.get(UUID(str(binding["memory_id"])))
-            if memory is None or memory.lifecycle != "active":
-                denials["inactive_projection"] = denials.get("inactive_projection", 0) + 1
-                continue
-            if memory.current_content_revision != int(binding["canonical_content_revision"]):
-                denials["stale_content_revision"] = denials.get("stale_content_revision", 0) + 1
-                continue
-            if memory.memory_governance_revision != int(binding["memory_governance_revision"]):
-                denials["stale_memory_governance_revision"] = denials.get("stale_memory_governance_revision", 0) + 1
-                continue
-            if not memory.canonical_content:
-                denials["unknown_status"] = denials.get("unknown_status", 0) + 1
-                continue
-            authorized.append((memory, hit_map[str(binding["provider_memory_id"])]))
-        return tuple(authorized), denials
+            return (), {}
+        raw = self._rpc("sophia_memory_resolve_provider_hits", {
+            "p_user_id": user_id, "p_provider": provider, "p_environment": environment,
+            "p_provider_project": provider_project, "p_provider_namespace": provider_namespace,
+            "p_provider_memory_ids": list(hit_map)})
+        try:
+            expected = {"schema": "mem00.hit-resolution.v1", "memory_contract_epoch": 1, "owner_id": user_id,
+                "provider": provider, "environment": environment, "provider_project": provider_project,
+                "provider_namespace": provider_namespace, "status": "available", "final_admission": False}
+            if (len(json.dumps(raw).encode()) > 2 * 1024 * 1024
+                    or not isinstance(raw, dict) or set(raw) != set(expected) | {"results"}
+                    or any(raw.get(key) != value for key, value in expected.items())
+                    or type(raw["memory_contract_epoch"]) is not int or raw["final_admission"] is not False
+                    or not isinstance(raw["results"], list) or len(raw["results"]) != len(hit_map)):
+                raise ValueError
+            authorized, denials, seen_memories = [], {}, {}
+            reasons = {"unmapped_provider_id", "inactive_projection", "stale_content_revision",
+                "stale_memory_governance_revision", "unknown_status"}
+            for provider_id, row in zip(hit_map, raw["results"], strict=True):
+                if not isinstance(row, dict) or set(row) != {"provider_memory_id", "denial_reason", "memory"} or row["provider_memory_id"] != provider_id:
+                    raise ValueError
+                reason = row["denial_reason"]
+                if reason is not None:
+                    if reason not in reasons or row["memory"] is not None:
+                        raise ValueError
+                    denials[reason] = denials.get(reason, 0) + 1
+                    continue
+                item = row["memory"]
+                if (not isinstance(item, dict) or item.get("user_id") != user_id or item.get("lifecycle") != "active"
+                        or type(item.get("current_content_revision")) is not int or type(item.get("memory_governance_revision")) is not int
+                        or item.get("projection_state") != "active" or not item.get("canonical_content") or not item.get("content_ref")
+                        or not item.get("category") or not item.get("scope")):
+                    raise ValueError
+                memory = CanonicalMemory.model_validate(item)
+                if memory.memory_id in seen_memories:
+                    if seen_memories[memory.memory_id] != memory:
+                        raise ValueError
+                    # Input order is provider rank. Keep its first/best-ranked
+                    # hit, not a second memory or a fabricated combined score.
+                    continue
+                seen_memories[memory.memory_id] = memory
+                authorized.append((memory, hit_map[provider_id]))
+            return tuple(authorized), denials
+        except Exception:
+            raise MemoryGovernanceUnavailable("memory_hit_resolution_unavailable") from None
+
+    def hydrate_inclusions(self, *, user_id: str, inclusions: tuple, scope: str) -> tuple[AuthorizedMemory, ...]:
+        """Hydrate exact current revisions, never a truncated owner-wide Pool.
+
+        This read is NOT prompt admission. The caller must subsequently use
+        record_prompt_admission to fence races, tombstones and provider bindings.
+        Missing/duplicate/extra rows invalidate the whole retained context.
+        """
+        from .retained_context import RetainedMemoryContext, encode_context_manifest
+        from .models import AuthorizedMemory
+
+        # Reuse the strict structural validator before constructing any filter.
+        encode_context_manifest(RetainedMemoryContext("validation-only", 0, inclusions))
+        if not isinstance(user_id, str) or not user_id.strip() or not isinstance(scope, str) or not scope:
+            raise MemoryGovernanceUnavailable("retained_context_selector_invalid")
+        if not inclusions:
+            return ()
+        expected = {str(item.memory_id): item for item in inclusions}
+        rows = self._request("GET", "sophia_memories", params={
+            "select": "memory_id,user_id,lifecycle,current_content_revision,memory_governance_revision",
+            "user_id": f"eq.{user_id}", "memory_id": "in.(" + ",".join(expected) + ")",
+            "limit": str(len(expected) + 1),
+        })
+        fields = {"memory_id", "user_id", "lifecycle", "current_content_revision", "memory_governance_revision"}
+        if not isinstance(rows, list) or len(rows) != len(expected):
+            raise MemoryGovernanceUnavailable("retained_context_incomplete")
+        seen = set()
+        for row in rows:
+            if not isinstance(row, dict) or set(row) != fields:
+                raise MemoryGovernanceUnavailable("retained_context_row_invalid")
+            item = expected.get(row["memory_id"])
+            if item is None or row["memory_id"] in seen or row["user_id"] != user_id or row["lifecycle"] != "active":
+                raise MemoryGovernanceUnavailable("retained_context_ineligible")
+            if (type(row["current_content_revision"]) is not int or type(row["memory_governance_revision"]) is not int
+                    or row["current_content_revision"] != item.content_revision or row["memory_governance_revision"] != item.governance_revision):
+                raise MemoryGovernanceUnavailable("retained_context_revision_changed")
+            seen.add(row["memory_id"])
+        versions = self._request("GET", "sophia_memory_versions", params={
+            "select": "memory_id,user_id,content_revision,canonical_content,content_ref,category,scope",
+            "user_id": f"eq.{user_id}",
+            "or": "(" + ",".join(f"and(memory_id.eq.{item.memory_id},content_revision.eq.{item.content_revision})" for item in inclusions) + ")",
+            "limit": str(len(expected) + 1),
+        })
+        fields = {"memory_id", "user_id", "content_revision", "canonical_content", "content_ref", "category", "scope"}
+        if not isinstance(versions, list) or len(versions) != len(expected):
+            raise MemoryGovernanceUnavailable("retained_context_versions_incomplete")
+        hydrated = {}
+        for row in versions:
+            if not isinstance(row, dict) or set(row) != fields:
+                raise MemoryGovernanceUnavailable("retained_context_version_invalid")
+            item = expected.get(row["memory_id"])
+            if (item is None or row["memory_id"] in hydrated or row["user_id"] != user_id
+                    or type(row["content_revision"]) is not int or row["content_revision"] != item.content_revision
+                    or row["scope"] not in {scope, "global"}
+                    or not isinstance(row["canonical_content"], str) or not row["canonical_content"]
+                    or not isinstance(row["content_ref"], str) or not row["content_ref"]):
+                raise MemoryGovernanceUnavailable("retained_context_version_ineligible")
+            hydrated[row["memory_id"]] = AuthorizedMemory(
+                memory_id=item.memory_id, content_revision=item.content_revision,
+                memory_governance_revision=item.governance_revision,
+                canonical_content=row["canonical_content"], category=row["category"], scope=row["scope"], score=None,
+            )
+        return tuple(hydrated[str(item.memory_id)] for item in inclusions)
 
     def record_prompt_admission(self, payload: dict[str, object]) -> UUID:
         result = self._rpc(

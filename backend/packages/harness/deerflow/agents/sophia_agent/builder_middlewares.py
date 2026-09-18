@@ -75,6 +75,9 @@ def build_builder_middleware_chain(
     user_id: str,
     *,
     vision_enabled: bool = False,
+    context_id: str | None = None,
+    memory_config: dict | None = None,
+    memory_guard=None,
 ) -> list[AgentMiddleware]:
     """Return the canonical builder middleware chain (order is load-bearing).
 
@@ -182,7 +185,7 @@ def build_builder_middleware_chain(
     chain_tail.extend(
         [
             BuildSafeBoundaryMiddleware(),
-            PromptAssemblyMiddleware(),
+            PromptAssemblyMiddleware(user_id, context_id=context_id, memory_scope="builder"),
             DanglingToolCallMiddleware(),
             AnthropicContentBlockSanitizerMiddleware(),
             # Phase 2 — prompt caching. MUST be last (innermost) so it keys off
@@ -194,5 +197,21 @@ def build_builder_middleware_chain(
             AnthropicPromptCachingMiddleware(ttl="5m", unsupported_model_behavior="ignore"),
         ]
     )
+    from deerflow.agents.sophia_agent.middlewares.memory_context import MemoryContextBeforeConsumer, MemoryContextEntryMiddleware, MemoryContextModelProducer, MemoryRunGuard
+
+    memory_guard = memory_guard or MemoryRunGuard(owner_id=user_id, config=memory_config or {"thread_id": context_id}, scope="builder")
+    if memory_guard.owner != user_id or memory_guard.context_id != context_id:
+        from deerflow.agents.sophia_agent.middlewares.memory_context import MemoryContextUnavailable
+        raise MemoryContextUnavailable()
+    # Legacy requests also need a scoped guard for provider fallback. The
+    # guard independently rechecks positive legacy authority at dispatch.
+    middlewares.insert(0, MemoryContextEntryMiddleware(memory_guard))
+    if memory_guard.enabled:
+        # Provenance must be checked before sandbox inheritance or the briefing
+        # classifier, not only before the final Builder model dispatch.
+        briefing_index = next(i for i, item in enumerate(chain_tail) if isinstance(item, BuilderTaskMiddleware))
+        chain_tail.insert(briefing_index, MemoryContextBeforeConsumer(memory_guard))
+        index = next(i for i, item in enumerate(chain_tail) if isinstance(item, PromptAssemblyMiddleware))
+        chain_tail.insert(index, MemoryContextModelProducer(memory_guard))
     middlewares.extend(chain_tail)
     return middlewares

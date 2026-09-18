@@ -718,7 +718,7 @@ class ChannelManager:
     def _get_client(self):
         """Return the ``langgraph_sdk`` async client, creating it on first use."""
         if self._client is None:
-            from langgraph_sdk import get_client
+            from deerflow.sophia.langgraph_client_auth import get_client
 
             self._client = get_client(url=self._langgraph_url)
         return self._client
@@ -778,13 +778,15 @@ class ChannelManager:
             logger.error("[Manager] unhandled error in message task: %s", exc, exc_info=exc)
 
     async def _handle_message(self, msg: InboundMessage) -> None:
+        from deerflow.sophia.langgraph_client_auth import langgraph_owner_scope
         async with self._semaphore:
             self._apply_canonical_user_id(msg)
             try:
-                if msg.msg_type == InboundMessageType.COMMAND:
-                    await self._handle_command(msg)
-                else:
-                    await self._handle_chat(msg)
+                with langgraph_owner_scope(msg.user_id):
+                    if msg.msg_type == InboundMessageType.COMMAND:
+                        await self._handle_command(msg)
+                    else:
+                        await self._handle_chat(msg)
             except Exception:
                 logger.exception(
                     "Error handling message from %s (chat=%s)",

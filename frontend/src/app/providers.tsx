@@ -1,6 +1,6 @@
 'use client'
 
-import { createContext, useContext, useMemo } from 'react'
+import { createContext, useContext, useMemo, useRef } from 'react'
 
 import { useBackendTokenSync } from '@/app/hooks/useBackendTokenSync'
 import { authBypassEnabled, authBypassUserId } from '@/app/lib/auth/dev-bypass'
@@ -16,6 +16,8 @@ type AuthUser = {
 type AuthHookResult = {
   user: AuthUser | null
   loading: boolean
+  /** Opaque local authentication lifetime, never persisted or sent to APIs. */
+  authScope?: object
   signOut: () => Promise<void>
 }
 
@@ -45,11 +47,20 @@ function useAuthInternal(): AuthHookResult {
     ? { data: null, isPending: false }
     : authClient.useSession()
 
+  const sessionId = session?.session?.id
+  const ownerId = session?.user?.id
+  const observedScope = useRef({sessionId, ownerId, loading: isPending, scope: {}})
+  if (observedScope.current.sessionId !== sessionId
+      || observedScope.current.ownerId !== ownerId || observedScope.current.loading !== isPending) {
+    observedScope.current = {sessionId, ownerId, loading: isPending, scope: {}}
+  }
+  const authScope = observedScope.current.scope
   return useMemo(() => {
     if (authBypassEnabled) {
       return {
         user: { id: authBypassUserId, email: 'dev@localhost', name: 'Dev User' },
         loading: false,
+        authScope,
         signOut: async () => {},
       }
     }
@@ -59,9 +70,10 @@ function useAuthInternal(): AuthHookResult {
         ? { id: session.user.id, email: session.user.email ?? null, name: session.user.name ?? null }
         : null,
       loading: isPending,
+      authScope,
       signOut: async () => { await authClient.signOut() },
     }
-  }, [session, isPending])
+  }, [session, isPending, authScope])
 }
 
 /**

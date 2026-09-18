@@ -21,6 +21,7 @@ import {
 import { debugLog } from '../../../lib/debug-logger';
 import type { MicroBriefingIntent } from '../../../types/session';
 import { getPrimaryGatewayUrl } from '../../_lib/gateway-url';
+import { isMemorySourcePath, proxyMemorySource } from '../../_lib/memory-source-proxy';
 
 const BACKEND_URL = getPrimaryGatewayUrl();
 
@@ -80,6 +81,7 @@ function scopeBodyToAuthenticatedUser(rawBody: string | undefined, authenticated
 }
 
 async function proxyRequest(req: NextRequest, pathSegments: string[]) {
+  if (isMemorySourcePath(pathSegments)) return proxyMemorySource(req, pathSegments);
   const path = pathSegments.join('/');
   const url = new URL(`${BACKEND_URL}/api/v1/sessions/${path}`);
   const method = req.method.toUpperCase();

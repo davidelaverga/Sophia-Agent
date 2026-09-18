@@ -23,7 +23,7 @@ describe('canonical memory management routes', () => {
     resolveSophiaUserIdMock.mockResolvedValue('owner-123');
   });
 
-  it('forwards an explicit manual create to the owner-scoped gateway', async () => {
+  it('forwards an explicit manual create but rejects an obsolete flat response', async () => {
     const payload = {
       text: 'Explicit memory',
       category: 'fact',
@@ -39,7 +39,8 @@ describe('canonical memory management routes', () => {
 
     const response = await createMemory(request);
 
-    expect(response.status).toBe(200);
+    expect(response.status).toBe(503);
+    expect(response.headers.get('Cache-Control')).toBe('no-store');
     expect(fetchSophiaApiMock).toHaveBeenCalledWith(
       '/api/sophia/owner-123/memories',
       { method: 'POST', body: JSON.stringify(payload) },
@@ -49,7 +50,7 @@ describe('canonical memory management routes', () => {
   it.each([
     ['forget', forgetMemory],
     ['restore', restoreMemory],
-  ] as const)('forwards revision-bound %s', async (operation, handler) => {
+  ] as const)('forwards revision-bound %s but rejects obsolete shortened results', async (operation, handler) => {
     const payload = {
       expected_governance_revision: 3,
       idempotency_key: `${operation}-operation`,
@@ -64,7 +65,8 @@ describe('canonical memory management routes', () => {
       params: Promise.resolve({ memoryId: 'memory-1' }),
     });
 
-    expect(response.status).toBe(200);
+    expect(response.status).toBe(503);
+    expect(response.headers.get('Cache-Control')).toBe('no-store');
     expect(fetchSophiaApiMock).toHaveBeenCalledWith(
       `/api/sophia/owner-123/memories/memory-1/${operation}`,
       { method: 'POST', body: JSON.stringify(payload) },
