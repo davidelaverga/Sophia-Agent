@@ -1,6 +1,115 @@
 # MEM00-C2 text pilot — current release record
 
-Successful target: MEMORY_TEXT_PILOT_READY. Current status: IMPLEMENTING — RELEASE CLOSURE; not deployed, not activated. C2 replaces the prior PROMOTE-only/five-core-run prerequisites for this owner-restricted pilot. Historical C1 records and failures remain valid history, not additional first-use gates. Recovered cumulative failure counter: latest failed iteration EI929; last reported five-failure checkpoint 923–927; next five-failure checkpoint 932. The single current authority is the checkpoint immediately below; every later dated paragraph is preserved history, not competing current status.
+Successful target: MEMORY_TEXT_PILOT_READY. Current status: IMPLEMENTING — RELEASE CLOSURE (second slice); not deployed, not activated. C2 replaces the prior PROMOTE-only/five-core-run prerequisites for this owner-restricted pilot. Historical C1 records and failures remain valid history, not additional first-use gates. Recovered cumulative failure counter: latest failed iteration EI929; last reported five-failure checkpoint 923–927; next five-failure checkpoint 932. The single current authority is the checkpoint immediately below; every later dated paragraph is preserved history, not competing current status.
+
+## Release closure, second slice — 2026-09-18
+
+### Qualified integration successor — `709200cf` (`codex/mem00-c2-integration-r4`)
+
+This is the first successor measured as **one tree with the lint fix inside it**,
+rather than inferred from two branches measured separately.
+
+`709200cf` = `8c5cf538` (shared baseline) + `9ed8bedf` (Voice Lab lint) +
+`bd19d77a`/`aee14a30` (pilot), built on `1d5200bd` so its conflict resolutions
+carry forward. Measured with the frozen Python 3.12 venv **with its `bin` on
+`PATH`**, `PYTHONPATH` pinned to this tree's own `packages/harness`,
+`pytest tests/ -q -p no:randomly`, and `ruff check .` from the backend root.
+
+| gate | result |
+| --- | --- |
+| backend `make test` equivalent | **7,256 passed / 0 failed**, 168 skipped, 304s |
+| backend `make lint` equivalent | **All checks passed** (0 errors) |
+| frontend `vitest run` | **2,394 passed / 0 failed**, 10 skipped, 237 files |
+| frontend `next build` | compiled, TypeScript passed, 61 static pages across 119 routes |
+
+The 22 Voice Lab lint errors that r3 inherited are **gone in r4** because the fix
+is in the tree, not because two branches were each green on their own half.
+
+Measurement honesty, in both directions:
+
+- Tool versions here are not CI's. CI runs `uvx ruff` (unpinned — it resolves the
+  current release, not the `ruff 0.14.11` in `uv.lock`) and `uv run pytest`;
+  `uv` is absent on this machine, so the frozen venv stands in. `uvx` being
+  unpinned is a real fragility and is written up in the lint coordination record.
+- The frontend build ran with Node 24 against CI/Vercel's Node 22, with the
+  existing `node_modules` (which match the lockfile resolutions) instead of
+  `pnpm install --frozen-lockfile`, and with placeholder `DATABASE_URL` /
+  `BETTER_AUTH_*` values without which page-data collection aborts. It is
+  evidence the source compiles and type-checks at this SHA, not a reproduction
+  of the Vercel build.
+- `709200cf` contains every code change. The two pilot commits after it
+  (`a24c02fa` and this record) are documentation only.
+
+Applicable CI on a PR from this line, taken from the workflow files rather than
+assumed: `backend-unit-tests` (Python 3.12, `uv sync --group dev`, `make lint`
+then `make test`), `sentrux-gate` (sentrux `v0.5.7`, blocking, scored against
+`origin/main`), and `memory-highlights-e2e` (Node 22, pnpm 10.26.2,
+`pnpm run test:e2e:ci`) because the pilot touches `frontend/src/**`.
+`visual-evals` is nightly and does not gate a PR.
+
+Unaffected evidence reused rather than re-measured: the EI930 schema repair and
+its 11/11 witnesses, the disposable-Postgres grant rehearsal, and the containment
+deploy observation.
+
+### The real Builder caller now runs against the installed policy
+
+The five existing runtime tests write the admission by hand, so they answer what
+the policy decides about a request — not whether the product produces a request
+it admits. A sixth test calls `start_builder_task` itself: the thread metadata,
+the cleanup-fence reservation and the run request are the tool's own, and only
+the transport under `get_client(url=None)` and the two configurable fields the
+server inserts from the auth context are stood in for. Scope is now stated in
+the module docstring instead of implied.
+
+That test exposed a real weakness in the five: the runtime denies a run by
+returning an **empty iterator** as well as by raising, and the seeded assistants
+carried no `created_by: system`, so `Runs.put` was rejected at the assistant
+filter and an assertion reading "authorized, not refused" passed on an empty
+result. Assistants are now seeded as the server seeds them, and the created-run
+count is asserted.
+
+### Step 0a has an acceptance record, and it is unsigned
+
+[`c2-step-0a-acceptance.md`](./c2-step-0a-acceptance.md) carries the eight-clause
+contract, the six tests that hold it, the sponsor's in-principle support recorded
+verbatim, and a blank signature block. **Receiving authentication is gated on
+that block, not on the sponsor's support**, so it remains uninstalled:
+`langgraph.json` has no `auth` key and `test_render_config.py:96` still asserts
+its absence.
+
+### The release sequence is now executable
+
+[`c2-coordinated-release-sequence.md`](./c2-coordinated-release-sequence.md)
+gained step 0b (the permission-gated setup that acceptance needs to mean
+anything), step 6 (Davide's activation, written out as three ordered operations
+with the literal SQL in an appendix, rather than omitted because it needs a
+separate authority), the exact frontend build and resolved versions, the intended
+runtime versions from `uv.lock`, the Voice service's disposition (`voice/` is
+untouched — do not redeploy), the intermediate-state constraints, existing-resource
+compatibility, and per-component rollback.
+
+The most dangerous intermediate state is named where it can be acted on: a
+`SOPHIA_MEMORY_*` flag set while `SOPHIA_MEMORY_COHORT_PRINCIPALS` is empty
+raises `memory_features_without_cohort` on **every request for every user**.
+
+### Withdrawn from the defect backlog
+
+The two `test_local_sandbox_encoding` cases. A measurement error of mine, not a
+code defect; the corrected invocation is retained.
+
+### What is still not done, and why
+
+| step | blocked on |
+| --- | --- |
+| lint PR merged | the PR must be opened by an account with write access — no `gh` CLI and no GitHub credential here, and none should be supplied |
+| receiving auth installed | the Voice owner's signature in `c2-step-0a-acceptance.md` §4 |
+| serving grants applied | no Supabase credential on this machine |
+| deployment | no Render or Vercel credential on this machine |
+| hosted C2 lifecycle | requires the deployment above |
+| Davide's activation | requires the deployment, plus an authority this campaign does not hold |
+
+`MEMORY_TEXT_PILOT_READY` is therefore **not** reached, and this record does not
+claim it. Every gate that could be closed from here is closed.
 
 ## Release-closure slice — 2026-09-18
 
