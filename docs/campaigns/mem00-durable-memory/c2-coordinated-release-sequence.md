@@ -73,7 +73,7 @@ to mean anything once authentication is installed. Each item is dashboard-manage
 | --- | --- | --- |
 | `SOPHIA_VOICE_LAB_TEST_PRINCIPAL` | `sophia-langgraph` | `voice_lab_principal()` reads it. If it is empty, **nothing** is ever eligible for the synthetic lane and Voice Lab's Builder returns to a flat 403 — the exact failure step 0a exists to avoid. It is already declared on `sophia-gateway` and `sophia-voice`; all three must carry the **same** value. |
 | `SOPHIA_VOICE_LAB_AUTH_DATABASE_URL` | `sophia-langgraph` | the cleanup fence lives there. `_reserved_builder_admission` fails **closed** on an unreachable fence, so an unset or unroutable value denies every synthetic Builder thread rather than admitting one. |
-| `SOPHIA_MEMORY_REFERENCE_HMAC_SECRET` | both | the owner label is `keyed_ref("langgraph-access-owner", …)`. A per-service mismatch makes every owner filter miss and the runtime returns 404 for threads their owner created. |
+| `SOPHIA_MEMORY_REFERENCE_HMAC_SECRET` | `sophia-langgraph` | the owner label is `keyed_ref("langgraph-access-owner", …)`, an HMAC under this secret. Unset, `_filter` raises and every thread operation returns **503**. **Rotating it** after install re-keys the label, so threads created under the old value become invisible to their owner — a rotation is therefore a thread-draining operation, not a config edit. |
 
 Explicitly **not** part of this setup: `SOPHIA_VOICE_LAB_ENABLED` stays `false`
 and `SOPHIA_VOICE_LAB_KILL_SWITCH` stays `true`. Step 0a is about what the
@@ -81,8 +81,9 @@ policy permits, never about turning the lab on.
 
 ## Step 1 — shared baseline lint (independent, any time)
 
-Merge `codex/voice-lab-lint-hygiene` (from `8c5cf538`), or the Voice owner's
-preferred equivalent. See
+**Opened as [PR #146](https://github.com/davidelaverga/Sophia-Agent/pull/146)**
+(`codex/voice-lab-lint-hygiene` → `codex/sophia-observability-v1`, 1 commit, 3
+files, able to merge). Merge it, or the Voice owner's preferred equivalent. See
 [`c2-shared-baseline-lint-coordination.md`](./c2-shared-baseline-lint-coordination.md),
 which also carries the review request and the PR link.
 Until this lands, `make lint` fails on the merged line and CI never reaches
@@ -117,6 +118,26 @@ necessary, not because the SQL depends on it.
 
 ## Step 4 — deployment
 
+### 4.0 Where production actually is right now
+
+Read from the Render deploy lists and the Vercel API on 2026-09-18, not from
+the campaign's older notes, which were wrong about the Gateway:
+
+| component | deployed commit | trigger | age |
+| --- | --- | --- | --- |
+| `sophia-gateway` | **`8c5cf538`** — the shared baseline | Manual | 23h |
+| `sophia-langgraph` | `35c6467c` | Manual | 4d |
+| `sophia-voice` | `35c6467c` | API | 4d |
+| frontend (Vercel `sophia-agent-front`, team **Sophia**) | `35c6467c`, branch `codex/sophia-observability-v1` | promoted | 2026-09-14 |
+
+**Production is already a split**, and that is the starting state this sequence
+has to deploy from: the Gateway is four days ahead of everything else, on the
+shared baseline. Earlier records naming `0c215c1b` as the Gateway pin describe
+the deploy *underneath* the current one.
+
+Still true, and the thing that matters most: **no deployed component carries any
+MEM00-C2 commit.**
+
 ### 4.1 What each component is, exactly
 
 | component | disposition | exact build |
@@ -137,17 +158,37 @@ at the currently deployed commit is a **mixed pair**, not a partial rollout.
 
 | item | value |
 | --- | --- |
+| project | `sophia-agent-front`, Vercel team **Sophia** (`sophia-30911edf`), linked to this repository |
 | source | the qualified integration successor, same SHA as the backend services |
-| root directory | `frontend` (from `vercel.json`) |
+| root directory | `frontend` (project setting, matching `vercel.json`) |
 | install | `pnpm install --frozen-lockfile` |
 | build | `pnpm build` → `next build`, output `.next` |
 | package manager | **pnpm 10.26.2**, pinned by `packageManager` in `frontend/package.json` and by the e2e workflow |
-| Node | **22**, as `memory-highlights-e2e` pins via `actions/setup-node@v4`. Vercel's project Node version must match; this repo declares no `engines` field, so nothing enforces it at build time |
-| Next.js | `^16.1.7`, React 19.x, TypeScript 5.8.x — **unchanged by the pilot**; `frontend/package.json` and `frontend/pnpm-lock.yaml` are byte-identical to the shared baseline |
+| Node | **Vercel builds on 24.x** (read from the project settings). The `memory-highlights-e2e` workflow pins **22**, and this repo declares no `engines` field, so nothing reconciles the two — CI e2e and production already build on different majors. Worth closing, separately from this release |
+| resolved versions | `next@16.2.2`, `react@19.2.4`, `react-dom@19.2.4`, `vitest@2.1.9`, lockfile version 9.0 — the exact resolutions `--frozen-lockfile` reproduces, not the `^16.1.7` range in `package.json` |
+| dependency change | **none.** `frontend/package.json` and `frontend/pnpm-lock.yaml` are byte-identical to the shared baseline |
 
 Because no dependency moved, the frontend build is a *source* change only: no
 lockfile migration, no framework upgrade, and no Vercel project setting needs to
 change.
+
+**How it actually reaches production.** The project's production branch is set
+to `main`, yet every live production deployment was built from
+`codex/sophia-observability-v1`. So production is reached by **promoting a
+deployment**, not by pushing a branch — and the promotion is the step to plan,
+because changing the production-branch setting instead would make the next
+`main` push deploy itself.
+
+**Built locally, with its deviations named.** `next build` on the pilot tree:
+compiled, TypeScript passed, 61 static pages generated across 119 routes, no
+build error. Deviations from the Vercel build, each of them real: Node **24** on
+this machine against CI/Vercel's 22; dependencies from the existing
+`node_modules` (which match the lockfile resolutions exactly) rather than a
+fresh `--frozen-lockfile` install, because `pnpm` is not present here; and
+placeholder `DATABASE_URL`/`BETTER_AUTH_*` values, without which page-data
+collection for `/api/test-auth/login` aborts the build — Vercel supplies the
+real ones. So this is evidence the source compiles and type-checks at this SHA,
+**not** a reproduction of the production build.
 
 ### 4.3 Voice service disposition
 
@@ -215,10 +256,34 @@ be safe. It is, under these constraints:
 
 What already exists in production when this deploys, and what happens to it:
 
-- **The twelve C1/C2 migrations are unapplied except the EI930 repair.** The
-  additive schema already in place is forward-compatible; `authority_state`
-  defaults to `'unknown'`, so every existing row reads as *undeclared*, which is
-  exactly the state the non-cohort work was built for.
+- **The C1/C2 schema is APPLIED, not unapplied.** An earlier version of this
+  document said "the twelve C1/C2 migrations are unapplied except the EI930
+  repair". Measured in production on 2026-09-18:
+
+  ```sql
+  select count(*) as total_fns,
+         count(*) filter (where has_function_privilege('service_role', p.oid, 'EXECUTE')) as sr_granted,
+         count(*) filter (where not has_function_privilege('service_role', p.oid, 'EXECUTE')) as sr_missing
+  from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+  where n.nspname = 'public' and p.proname like 'sophia_memory%';
+  ```
+
+  | total_fns | sr_granted | sr_missing |
+  | --- | --- | --- |
+  | 76 | 25 | 51 |
+
+  76 `sophia_memory*` functions exist. What is outstanding is the **serving
+  grants**, and `sr_granted = 25` is exactly the "total 25" pre-state the grant
+  rehearsal recorded before going 25 → 46. Production and the rehearsal baseline
+  agree, which is the confirmation step 3 needed and did not have.
+
+  (The dashboard's `LAST MIGRATION: No migrations` means only that the Supabase
+  CLI migration table is empty — everything here was applied by hand through the
+  SQL editor, as the EI930 repair was.)
+
+  The schema is forward-compatible: `authority_state` defaults to `'unknown'`,
+  so every existing row reads as *undeclared*, which is the state the non-cohort
+  work was built for.
 - **Existing ordinary sessions and recaps keep working.** The non-cohort repairs
   make session end, idle finalization, recap read/write and deletion usable for a
   definitely-undeclared owner. A missing MEM00 credential no longer selects
@@ -229,13 +294,27 @@ What already exists in production when this deploys, and what happens to it:
   so an obligation opened before the deploy is judged by the same rule
   afterwards. Reservations are per-thread and short-lived; there is no migration
   of in-flight admissions.
-- **In-flight LangGraph threads at step 2.** Threads created before the `auth`
-  entry exists carry no server-issued owner label. After install, the owner
-  filter will not match them and they read as 404 to their creator. They are
-  Builder/companion working threads bounded by TTL, not durable user data — but
-  **step 2 should be deployed at a quiet moment**, and the Voice Lab run/lease
-  check the campaign already requires before any deploy covers the synthetic
-  side of this.
+- **Existing LangGraph threads at step 2 — continuity and cleanup, specified.**
+  Threads created before the `auth` entry exists carry no server-issued
+  `sophia_authenticated_owner_v1` label. The filter `owned_thread` returns
+  matches only on that label, so after install:
+
+  | thread | what happens | what to do |
+  | --- | --- | --- |
+  | ordinary companion/Builder thread, pre-install | invisible to its owner (404), because no owner label exists to match | nothing: these are working threads, and the product creates a new one per session. No user-visible durable record lives only here — recaps and sessions are in Supabase, not in thread state |
+  | in-flight Builder run, pre-install | the run continues server-side; the parent companion cannot read its thread afterwards, so its completion event is the delivery path | drain before install: deploy step 2 when no Builder run is in flight |
+  | synthetic Voice Lab thread, pre-install | same 404, **and** its cleanup-fence reservation is unaffected — the fence is in Postgres, not in thread metadata | the retention reaper cleans by cleanup-obligation id, not by thread read, so cleanup still completes. Verify with the run/lease check below |
+  | threads created after install | carry the label; normal | — |
+
+  **Cleanup is therefore not at risk, but visibility is**, and the two are worth
+  keeping apart: nothing becomes unreclaimable, some things become unreadable.
+  The campaign's existing pre-deploy guard already covers the synthetic side —
+  query Voice Lab run/lease state immediately before deploying and do not deploy
+  while a run is active or a cleanup is incomplete.
+
+  There is no migration of pre-install threads, and none is proposed: labelling
+  them retroactively would mean minting ownership for threads whose authenticated
+  owner was never recorded, which is precisely what the label exists to prevent.
 - **Artifacts, sessions and the Supabase buckets are untouched.** No bucket,
   object key or registry shape changes in this release.
 
@@ -243,13 +322,31 @@ What already exists in production when this deploys, and what happens to it:
 
 Per component, in the order you would actually use them:
 
-| what went wrong | rollback |
-| --- | --- |
-| frontend regression | redeploy the previous Vercel production deployment. No data shape changes, so this is a pure revert. |
-| Gateway or LangGraph regression | exact-commit manual deploy of the previous SHA (`autoDeployTrigger: off` means nothing else moves). The additive schema is **not** dropped. |
-| step 2 turns out wrong | remove the `auth` entry from `langgraph.json` and redeploy LangGraph. The four callers are inert against an unauthenticated server, so they need no revert. This is the only reason to prefer step 2 as its own deploy. |
-| step 3 turns out wrong | `REVOKE EXECUTE` on the 21 named signatures. Nothing calls them while the flags are off, so the revoke is not racing a caller. |
-| step 6 turns out wrong | **flags off first, then cohort, then the declaration.** Reversing that order re-enters the `memory_features_without_cohort` state. The owner declaration is a state transition with a receipt, not a delete; the additive rows stay. |
+**The governing rule: durable authority is never rolled back.** Availability is
+reversible; ownership is not. `sophia_memory_declare_owner_authority` is a
+receipted state transition that refuses `p_expected_state = p_target_state`, and
+refuses `p_target_state = 'legacy'` outright once the owner has any canonical
+history (`memory_owner_has_canonical_history`). So after the pilot has written a
+single memory, **there is no declaration that returns the account to its prior
+state** — attempting one is not a rollback, it is a new and probably rejected
+declaration. Every phase below therefore rolls back *availability*, and leaves
+`authority_state = 'governed'` and its receipts standing.
+
+| phase | rollback | what is deliberately NOT reversed |
+| --- | --- | --- |
+| **4 — frontend** | redeploy the previous Vercel production deployment (`35c6467c`) by promoting it. No data shape changed, so this is a pure revert. | — |
+| **4 — Gateway / LangGraph** | exact-commit manual deploy of the previous SHA — Gateway `8c5cf538`, LangGraph `35c6467c`. `autoDeployTrigger: off` means nothing else moves. | the applied schema. It is additive and is never dropped. |
+| **2 — receiving auth** | remove the `auth` entry from `langgraph.json` and redeploy LangGraph. The four callers are inert against an unauthenticated server and need no revert. Threads created *while* auth was installed keep their owner label; it simply stops being consulted. | the owner labels already written. They are inert, not wrong. |
+| **3 — serving grants** | `REVOKE EXECUTE` on the 21 named signatures, returning `service_role` to the measured pre-state of **25** granted. Nothing calls them while the flags are off, so the revoke is not racing a caller. | the other 25. They predate this campaign. |
+| **6a — flags** | set `SOPHIA_MEMORY_CANDIDATE_LEDGER_WRITE` and `SOPHIA_MEMORY_GOVERNED_RUNTIME_READ` to `false` on **both** services. The governance worker is not rebuilt, so extraction stops at the next boot. **This is the fast, complete stop** — a governed owner with all availability off reads and writes nothing. | everything else. |
+| **6b — cohort** | only after 6a: clear `SOPHIA_MEMORY_COHORT_PRINCIPALS`. Doing this *before* 6a re-enters `memory_features_without_cohort` (every request, every user) and, if a flag is still on, `memory_certification_principal_not_in_cohort` at the next boot — which is a Gateway that will not start. | — |
+| **6c — the declaration** | **nothing.** `authority_state` stays `governed`, the receipts stay, the canonical rows stay. A governed owner with no availability is exactly the safe resting state, and it is reversible in the direction that matters: turning the flags back on restores the pilot without re-declaring anything. | the declaration, permanently and by design. |
+
+The order is `6a → 6b`, never the reverse, and `6c` is not a step. If the pilot
+has to be abandoned rather than paused, the correct end state is still a governed
+owner with availability off — not an attempt to un-declare, which the database
+will refuse and which would destroy the audit trail the declaration exists to
+provide.
 
 The campaign's existing rollback invariants still hold and are not restated
 here: unknown database/provider state fails closed, provider deletion is not
@@ -278,11 +375,16 @@ in this order, and the order is load-bearing:
    mismatched expected state (`memory_owner_declaration_conflict`) and refuses to
    classify an account that already has canonical history, so it cannot be run
    speculatively.
-2. **Add that exact id to `SOPHIA_MEMORY_COHORT_PRINCIPALS`** on both
+2. **Set `SOPHIA_MEMORY_COHORT_PRINCIPALS` to TWO ids** — Davide's, *and* the
+   configured `SOPHIA_MEMORY_CERTIFICATION_PRINCIPAL` — on both
    `sophia-langgraph` and `sophia-gateway`. Identical values; a per-service
    mismatch produces a user who is governed on one path and not the other.
-3. **Set the text-pilot availability flags** on both services. Only then — see
-   4.5 item 4.
+   Davide's id alone makes the Gateway **fail to boot** at the next step; see
+   "Why the certification principal has to be in that list" in the appendix.
+3. **Set the text-pilot availability flags** on both services, and only then —
+   see 4.5 item 4. This selects an **extraction-only** worker;
+   `SOPHIA_MEMORY_PROVIDER_PROJECTION` stays `false`, so no Mem0 projection
+   adapter is constructed. See "Which worker the text pilot actually selects".
 
 Verification required before calling it done, and this is the part earlier
 records got wrong: join a fresh **signed-in ordinary product request** to its
@@ -305,3 +407,125 @@ Cohort expansion beyond Davide's single account. Legacy import or backfill.
 Provider obligations — historical, preserved, cleanup scope unchanged. The
 fault-injection RPC permissions. Enabling Voice Lab. Each is separately recorded
 and none is implied by completing the seven steps above.
+
+---
+
+## Appendix — step 6, literally
+
+Written out so that activation is an operation someone can perform, not a
+paragraph they have to translate. `sophia_memory_declare_owner_authority` is
+`REVOKE`d from `PUBLIC`, `anon`, `authenticated` and `service_role`, so this runs
+in the Supabase SQL editor as the project owner — the same way the EI930 repair
+was applied. Whole and unchanged, not chunked.
+
+**1. Before.** Confirm the account is undeclared and has no canonical history;
+the function refuses both cases, so this is to know in advance rather than to
+find out from an exception:
+
+```sql
+SELECT user_id, authority_state, authority_epoch, authority_declared_at
+FROM public.sophia_memory_user_governance
+WHERE user_id = '<davide-authenticated-owner-id>';
+```
+
+Expect `authority_state = 'unknown'` or no row at all.
+
+**2. Declare.**
+
+```sql
+SELECT public.sophia_memory_declare_owner_authority(
+    '<davide-authenticated-owner-id>',  -- p_user_id, the exact Better Auth owner
+    'unknown',                          -- p_expected_state
+    'governed',                         -- p_target_state
+    1,                                  -- p_contract_epoch, matches the deployed contract
+    '<approval-ref>'                    -- p_approval_ref, names this authorization
+);
+```
+
+It returns the receipt as `jsonb` and appends it to `authority_receipts`. It is
+idempotent for an identical repeat and raises `memory_owner_declaration_conflict`
+for a different one, so a re-run is safe and a mistaken re-run is refused.
+
+**3. After.** Re-run the query from step 1 and confirm `governed`, epoch `1`, and
+a `declared_at` timestamp.
+
+**4. Cohort, then flags — in that order, on both `sophia-langgraph` and
+`sophia-gateway`, identical values.** The cohort must contain **two** ids, and
+getting this wrong does not degrade the Gateway, it stops it booting:
+
+```
+SOPHIA_MEMORY_COHORT_PRINCIPALS   = <davide-authenticated-owner-id>,<certification-principal>
+# only after the line above is saved on BOTH services:
+SOPHIA_MEMORY_CANDIDATE_LEDGER_WRITE = true
+SOPHIA_MEMORY_GOVERNED_RUNTIME_READ  = true
+```
+
+### Why the certification principal has to be in that list
+
+`app/gateway/app.py` calls `build_configured_memory_governance_worker()` inside
+the FastAPI lifespan, **outside any `try`/`except`**. That builder does this
+(`app/gateway/workers/memory_governance.py`):
+
+```python
+if not resolved.candidate_ledger_write and not resolved.provider_projection:
+    return None                                   # today: no worker at all
+certification_principal = memory_certification_principal()   # raises if env unset
+if certification_principal not in memory_cohort_principals():
+    raise MemoryFlagConfigurationError("memory_certification_principal_not_in_cohort")
+```
+
+So the moment `SOPHIA_MEMORY_CANDIDATE_LEDGER_WRITE` becomes `true`:
+
+| condition | result |
+| --- | --- |
+| `SOPHIA_MEMORY_CERTIFICATION_PRINCIPAL` unset | `memory_certification_principal_missing` → **Gateway fails to start** |
+| set, but not listed in `SOPHIA_MEMORY_COHORT_PRINCIPALS` | `memory_certification_principal_not_in_cohort` → **Gateway fails to start** |
+| set and in the cohort | worker builds and starts |
+
+This is a **boot failure**, not a per-request error, and it fails the Render
+health check — a worse outcome than the `memory_features_without_cohort` case in
+4.5, and the earlier version of this recipe (Davide's id alone) would have caused
+it. Confirm `SOPHIA_MEMORY_CERTIFICATION_PRINCIPAL` is set on
+**`sophia-gateway`** before touching any flag; it is `sync: false`, so its value
+is dashboard-managed and invisible to this repository.
+
+### Which worker the text pilot actually selects
+
+The builder assembles two independent halves, and the text pilot takes one:
+
+| flag | component built | text pilot |
+| --- | --- | --- |
+| `candidate_ledger_write` | `MemoryExtractionService` (extraction, leased, `service_name="sophia-gateway"`) | **yes** |
+| `provider_projection` | `MemoryProjectionReconciler` + `Mem0ProjectionAdapter` | **no — stays `false`** |
+
+So the running worker is **extraction-only**, with `projection=None`. No Mem0
+projection adapter is constructed, no provider write path is opened, and
+`SOPHIA_MEMORY_PROVIDER_PROJECTION` stays `false` through activation. A text
+pilot that began projecting to the provider would be a different release.
+
+The worker's recovery scope is `recovery_principals = tuple(sorted(cohort))` —
+another reason the cohort is a deliberate two-id list rather than a single id.
+
+`memory_fault_injection` stays `false`, so `faults=None` and the fault
+controller is never constructed; the separate question of the three fault RPCs'
+`service_role` EXECUTE is unchanged and still out of scope.
+
+`SOPHIA_MEMORY_CANDIDATE_LEDGER_READ` and `SOPHIA_MEMORY_CANONICAL_POOL_READ`
+may stay `false`: `resolved_memory_flags_for_owner` forces both on for a governed
+owner regardless of the environment. `SOPHIA_MEMORY_PROVIDER_PROJECTION`,
+`SOPHIA_MEMORY_LEGACY_INVENTORY`, `SOPHIA_MEMORY_LEGACY_IMPORT`,
+`SOPHIA_MEMORY_FAULT_INJECTION` and `SOPHIA_MEMORY_LANGSMITH_EXPORT` stay
+`false` — none is part of the text pilot.
+
+**5. Verify as a user, not as an operator.** Sign in to the product, send one
+ordinary request, and join it to its timestamped Gateway route and its exact
+Better Auth owner. Compare that owner against the cohort value in evidence.
+Reject a guessed UUID alias. This is the check EI-078/EI-079 exist because of: a
+UI save click and an empty legacy response both look like success.
+
+**Rollback:** phases `6a` (flags off, both services) then `6b` (clear the
+cohort), and **`6c` does not exist** — the declaration is never reversed. See the
+rollback table in 4.7 for why, and for what each earlier phase reverses. Any
+other order passes through `memory_features_without_cohort` (every request, every
+user) or `memory_certification_principal_not_in_cohort` (a Gateway that will not
+start).

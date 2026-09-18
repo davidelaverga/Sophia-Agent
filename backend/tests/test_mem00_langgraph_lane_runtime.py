@@ -454,6 +454,14 @@ def test_the_real_builder_caller_reaches_the_installed_policy(tmp_path):
     The identity is the Voice Lab principal throughout, as it is during a Voice
     Lab test, and it stays undeclared: the reachable store answers "nobody is
     enrolled", so no input provenance is minted and no memory is inherited.
+
+    The two halves of "real handoff" are covered in two places, because the
+    product has two: the Builder dispatches **in process**, where the transport
+    preserves the parent run's `AuthContext` and mints nothing, which is what
+    this test exercises; the four HTTP callers mint a per-request signed
+    credential, which `tests/test_mem00_langgraph_client_auth.py` covers
+    (`test_shared_client_signs_each_task_owner_without_leakage`). Neither
+    substitutes for the other.
     """
     receipt = _run(PREAMBLE + r"""
 import langgraph_sdk

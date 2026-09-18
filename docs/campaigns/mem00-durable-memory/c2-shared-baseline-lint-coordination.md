@@ -90,11 +90,11 @@ files still pass (42 passed, 3 skipped).
 the remote at the time of writing) - **head** `codex/voice-lab-lint-hygiene`
 (`9ed8bedf`), one commit, fast-forwardable.
 
-The branch is pushed. The PR itself has to be opened from an account with write
-access to the repository: this environment has no `gh` CLI and no GitHub
-credential, and none should be supplied to it. A compare link with the title and
-body pre-filled is in the session where this was prepared; opening it and
-pressing "Create pull request" is the whole action.
+**Opened as [PR #146](https://github.com/davidelaverga/Sophia-Agent/pull/146)**
+on 2026-09-18, through the owner's authenticated browser session — 1 commit, 3
+files changed, 44 additions / 19 deletions, "Able to merge", not stacked. There
+is no `gh` CLI and no GitHub token in this environment, and none was supplied;
+the PR was created through the dashboard UI.
 
 What CI will run on that PR, and what the reviewer should expect:
 
