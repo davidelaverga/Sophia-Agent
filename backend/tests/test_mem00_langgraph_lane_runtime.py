@@ -13,6 +13,26 @@ network call is an assertion failure rather than a hang.
 Still not installed in production: `langgraph.json` has no `auth` entry and
 `test_render_config` asserts that. This is the evidence for the coordinated
 install decision, not the install.
+
+SCOPE, stated exactly, because these tests are release evidence:
+
+* What IS real here -- the policy module, loaded the way the server loads it
+  (`LANGGRAPH_AUTH`, a separate module object from a file path), and the
+  runtime's own `Threads`/`Runs` operations applying its return values.
+* What is SUPPLIED by the test in the first five tests -- the `AuthContext`,
+  and the request values a live server would build from an HTTP request. Those
+  five therefore answer "given this identity and this request, what does the
+  policy decide", which is a question about the POLICY.
+* What is NOT exercised there -- the caller. A hand-written admission dict is
+  not proof that the product writes that dict, and a hand-taken fence
+  reservation is not proof that the product takes it.
+
+`test_the_real_builder_caller_reaches_the_installed_policy` closes that last
+gap for the one caller that matters: it runs the actual `start_builder_task`
+tool, so the admission metadata, the cleanup-fence reservation and the run
+request are all the product's own. Only the transport under the SDK client and
+the two fields the server inserts from the auth context are stood in for, and
+each is marked where it happens.
 """
 
 import json
@@ -237,8 +257,12 @@ async def main():
     from uuid import uuid5
     other = uuid5(COMPANION, "sophia_companion")
     for assistant_id in (DECK_QUALITY_ASSISTANT_ID, other):
-        conn.store["assistants"].append({"assistant_id": assistant_id, "graph_id": "g",
-                                         "config": {}, "context": {}, "metadata": {}, "name": "a", "version": 1})
+        # `created_by: system` is what the server seeds and what
+        # `system_assistants` filters on. Without it the runtime rejects every
+        # run before the thread filter is even consulted, and a test that only
+        # asserts "not refused" passes on an empty result.
+        conn.store["assistants"].append({"assistant_id": assistant_id, "graph_id": "g", "config": {},
+                                         "context": {}, "metadata": {"created_by": "system"}, "name": "a", "version": 1})
     quality = ctx("sophia-service-deck-quality", DECK_QUALITY_PERMISSION)
     thread_id = uuid4()
     created = await collect(await Threads.put(conn, thread_id, metadata={}, if_exists="raise", ctx=quality))
@@ -320,7 +344,11 @@ asyncio.run(main())
 
 
 def test_the_voice_owners_synthetic_builder_path_runs_under_the_installed_policy(tmp_path):
-    """The real tool-to-runtime operation, as the Voice Lab principal.
+    """The Voice Lab principal's admission and refusals, at the policy.
+
+    Scope: this replays the SHAPE `start_builder_task` produces; the test below
+    runs the tool itself. Kept separate because this one also asserts the four
+    ordinary refusals, which the tool has no way to attempt.
 
     `start_builder_task` runs in-process under the parent companion run's
     AuthContext, and during a Voice Lab test that parent is the test principal.
@@ -339,8 +367,12 @@ from deerflow.sophia.langgraph_auth import BUILDER_ASSISTANT_ID, COMPANION_ASSIS
 async def main():
     conn = SimpleNamespace(store={"threads": [], "runs": [], "assistants": [], "crons": [], "checkpoints": [], "writes": [], "blobs": []})
     for assistant_id in (BUILDER_ASSISTANT_ID, COMPANION_ASSISTANT_ID):
-        conn.store["assistants"].append({"assistant_id": assistant_id, "graph_id": "g",
-                                         "config": {}, "context": {}, "metadata": {}, "name": "a", "version": 1})
+        # `created_by: system` is what the server seeds and what
+        # `system_assistants` filters on. Without it the runtime rejects every
+        # run before the thread filter is even consulted, and a test that only
+        # asserts "not refused" passes on an empty result.
+        conn.store["assistants"].append({"assistant_id": assistant_id, "graph_id": "g", "config": {},
+                                         "context": {}, "metadata": {"created_by": "system"}, "name": "a", "version": 1})
     reachable_store_where_nobody_is_declared()
     principal = ctx(PRINCIPAL, USER_PERMISSION)
     ordinary = ctx("ordinary-user", USER_PERMISSION)
@@ -357,16 +389,19 @@ async def main():
         return {"config": {"configurable": {"user_id": identity, "langgraph_auth_user_id": identity}},
                 "input": {"messages": []}}
 
-    builder_run = await denied(lambda: Runs.put(conn, BUILDER_ASSISTANT_ID, run_kwargs(PRINCIPAL),
-        thread_id=thread_id, run_id=uuid4(), metadata={}, prevent_insert_if_inflight=False,
-        multitask_strategy="enqueue", if_not_exists="create", ctx=principal))
+    # Consume the result: the runtime denies by returning an EMPTY iterator as
+    # well as by raising, so "no exception" alone would pass on a refusal.
+    async def put_run(assistant_id):
+        return await collect(await Runs.put(conn, assistant_id, run_kwargs(PRINCIPAL),
+            thread_id=thread_id, run_id=uuid4(), metadata={}, prevent_insert_if_inflight=False,
+            multitask_strategy="enqueue", if_not_exists="create", ctx=principal))
+
+    builder_run = await denied(lambda: put_run(BUILDER_ASSISTANT_ID))
 
     # --- and everything ordinary that stays refused ----------------------
     plain_thread = await denied(lambda: Threads.put(conn, uuid4(), metadata={}, if_exists="raise", ctx=principal))
     unreserved = await denied(lambda: Threads.put(conn, uuid4(), metadata=synthetic(run_id="never-reserved"), if_exists="raise", ctx=principal))
-    companion_run = await denied(lambda: Runs.put(conn, COMPANION_ASSISTANT_ID, run_kwargs(PRINCIPAL),
-        thread_id=thread_id, run_id=uuid4(), metadata={}, prevent_insert_if_inflight=False,
-        multitask_strategy="enqueue", if_not_exists="create", ctx=principal))
+    companion_run = await denied(lambda: put_run(COMPANION_ASSISTANT_ID))
     others_thread = await denied(lambda: Threads.get(conn, thread_id, ctx=ordinary))
 
     print(json.dumps({
@@ -374,6 +409,7 @@ async def main():
         "labelled": created[0]["metadata"].get(MAINTENANCE_KEY) is True,
         "readable_by_its_owner": len(read) == 1,
         "builder_run_admitted": builder_run,
+        "builder_runs_created": len(conn.store["runs"]),
         "plain_thread_denied": plain_thread,
         "unreserved_synthetic_denied": unreserved,
         "companion_run_denied": companion_run,
@@ -386,8 +422,147 @@ asyncio.run(main())
     assert receipt["labelled"] is True
     assert receipt["readable_by_its_owner"] is True
     assert receipt["builder_run_admitted"] is None, "authorized, not refused"
+    assert receipt["builder_runs_created"] == 1, "and actually created, not silently empty"
     # And the refusal is narrowed, not dropped.
     assert receipt["plain_thread_denied"] == 403
     assert receipt["unreserved_synthetic_denied"] == 403
     assert receipt["companion_run_denied"] == 403
     assert receipt["ordinary_owner_cannot_read_it"] == 404
+
+
+def test_the_real_builder_caller_reaches_the_installed_policy(tmp_path):
+    """The supported Builder caller, run for real against the installed policy.
+
+    The five tests above answer what the policy decides about a request. They
+    do not answer whether the product produces a request the policy admits --
+    every one of them writes the admission by hand. This one does not write it:
+    it calls `start_builder_task` itself, so
+
+      * the thread metadata is the tool's `_synthetic_admission_metadata`,
+      * the cleanup-fence reservation is the tool's own barrier around its own
+        `requested_thread_id`, which is what `_reserved_builder_admission`
+        looks for, and
+      * the run request is the tool's, including the assistant it selects.
+
+    Stood in for, and only this: the transport under `get_client(url=None)`,
+    whose job is to carry the parent run's `AuthContext` in process (see the
+    note in `langgraph_client_auth.get_client`), and the two configurable
+    fields a live server inserts from that context. The ops layer inserts
+    neither, so the shim does what the server would and nothing else -- it
+    never touches metadata, assistant or input.
+
+    The identity is the Voice Lab principal throughout, as it is during a Voice
+    Lab test, and it stays undeclared: the reachable store answers "nobody is
+    enrolled", so no input provenance is minted and no memory is inherited.
+    """
+    receipt = _run(PREAMBLE + r"""
+import langgraph_sdk
+from langgraph_runtime_inmem.ops import Runs
+from deerflow.sophia.langgraph_auth import BUILDER_ASSISTANT_ID, COMPANION_ASSISTANT_ID, MAINTENANCE_KEY, OWNER_KEY, USER_PERMISSION
+from deerflow.sophia.memory_governance.refs import keyed_ref
+
+BUILDER_GRAPH = "sophia_builder"
+
+
+class InProcessThreads:
+    '''`client.threads` over the installed policy, carrying the caller's ctx.'''
+
+    def __init__(self, conn, ctx):
+        self.conn, self.ctx = conn, ctx
+
+    async def create(self, *, thread_id=None, metadata=None, ttl=None):
+        rows = await collect(await Threads.put(self.conn, UUID(str(thread_id)) if thread_id else uuid4(),
+            metadata=dict(metadata or {}), if_exists="raise", ctx=self.ctx))
+        return {"thread_id": str(rows[0]["thread_id"]), "metadata": rows[0]["metadata"]}
+
+    async def get(self, task_id):
+        rows = await collect(await Threads.get(self.conn, UUID(str(task_id)), ctx=self.ctx))
+        if not rows:
+            raise RuntimeError("thread_not_found")
+        return {"thread_id": str(rows[0]["thread_id"]), "metadata": rows[0]["metadata"]}
+
+    async def delete(self, task_id):
+        await Threads.delete(self.conn, UUID(str(task_id)), ctx=self.ctx)
+
+
+class InProcessRuns:
+    '''`client.runs` over the installed policy.
+
+    The server resolves a graph name to its assistant id and inserts the
+    authenticated identity into `configurable`; the ops layer does neither.
+    Everything else -- input, config, metadata, the assistant asked for -- is
+    the caller's own value, passed through untouched.
+    '''
+
+    def __init__(self, conn, ctx, identity):
+        self.conn, self.ctx, self.identity = conn, ctx, identity
+        self.requested_assistant = None
+
+    async def create(self, *, thread_id, assistant_id, input, config, **kwargs):
+        self.requested_assistant = assistant_id
+        resolved = BUILDER_ASSISTANT_ID if assistant_id == BUILDER_GRAPH else COMPANION_ASSISTANT_ID
+        config = dict(config)
+        config["configurable"] = {**config.get("configurable", {}),
+                                  "user_id": self.identity, "langgraph_auth_user_id": self.identity}
+        run_id = uuid4()
+        rows = await collect(await Runs.put(self.conn, resolved, {"config": config, "input": input},
+            thread_id=UUID(str(thread_id)), run_id=run_id, metadata={}, prevent_insert_if_inflight=False,
+            multitask_strategy="enqueue", if_not_exists="create", ctx=self.ctx))
+        if not rows:
+            raise RuntimeError("run_not_created")
+        return {"run_id": str(rows[0]["run_id"])}
+
+
+async def main():
+    conn = SimpleNamespace(store={"threads": [], "runs": [], "assistants": [], "crons": [], "checkpoints": [], "writes": [], "blobs": []})
+    for assistant_id in (BUILDER_ASSISTANT_ID, COMPANION_ASSISTANT_ID):
+        # `created_by: system` is what the server seeds and what
+        # `system_assistants` filters on. Without it the runtime rejects every
+        # run before the thread filter is even consulted, and a test that only
+        # asserts "not refused" passes on an empty result.
+        conn.store["assistants"].append({"assistant_id": assistant_id, "graph_id": "g", "config": {},
+                                         "context": {}, "metadata": {"created_by": "system"}, "name": "a", "version": 1})
+    reachable_store_where_nobody_is_declared()
+    principal = ctx(PRINCIPAL, USER_PERMISSION)
+    threads = InProcessThreads(conn, principal)
+    runs = InProcessRuns(conn, principal, PRINCIPAL)
+    langgraph_sdk.get_client = lambda url=None, **kwargs: SimpleNamespace(threads=threads, runs=runs)
+
+    from deerflow.sophia.tools import start_builder_task as tool
+
+    context = synthetic()
+    context["principal_id"] = PRINCIPAL
+    runtime = SimpleNamespace(
+        state={"user_id": PRINCIPAL, "synthetic_test": context, "messages": []},
+        context={"thread_id": "parent-thread"},
+        config={"configurable": {"thread_id": "parent-thread", "user_id": PRINCIPAL,
+                                 "synthetic_test": context}, "metadata": {}},
+        tool_call_id="synthetic-tool-call")
+
+    response = await tool.start_builder_task.coroutine(
+        description="Create an isolated evidence brief.", task_type="document", runtime=runtime)
+
+    tasks = getattr(response, "update", {}).get("async_tasks") or {}
+    task_id = next(iter(tasks), None)
+    stored = conn.store["threads"]
+    metadata = stored[0]["metadata"] if stored else {}
+    print(json.dumps({
+        "dispatched": task_id is not None,
+        "the_policy_admitted_the_tools_own_thread": len(stored) == 1,
+        "and_labelled_it_from_the_tools_own_metadata": metadata.get(MAINTENANCE_KEY) is True,
+        "owned_by_the_principal": metadata.get(OWNER_KEY) == keyed_ref("langgraph-access-owner", PRINCIPAL),
+        "the_tool_asked_for_the_builder_graph": runs.requested_assistant == BUILDER_GRAPH,
+        "the_policy_admitted_that_run": len(conn.store["runs"]) == 1,
+        "no_input_provenance_was_minted": all(
+            row["kwargs"]["config"]["configurable"].get("sophia_input_proof_v1") is None
+            for row in conn.store["runs"]),
+        "network_calls": 0}))
+asyncio.run(main())
+""", tmp_path)
+    assert receipt["dispatched"] is True, "the tool completed its dispatch"
+    assert receipt["the_policy_admitted_the_tools_own_thread"] is True
+    assert receipt["and_labelled_it_from_the_tools_own_metadata"] is True
+    assert receipt["owned_by_the_principal"] is True
+    assert receipt["the_tool_asked_for_the_builder_graph"] is True
+    assert receipt["the_policy_admitted_that_run"] is True
+    assert receipt["no_input_provenance_was_minted"] is True

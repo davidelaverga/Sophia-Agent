@@ -35,6 +35,11 @@ campaign's earlier "2 failed" figures are an artefact of the harness, not a
 property of the shared line. Every measurement in this document and in the
 release record from this date forward puts the venv on `PATH`.
 
+**Withdrawn from the defect backlog on the sponsor's direction, 2026-09-18:**
+these two cases are a measurement error, not a code defect, and nothing about
+them is carried forward as work. The corrected invocation is kept: every
+measurement puts the virtualenv's `bin` on `PATH`, as `uv run` does.
+
 ## 2. The 22 lint errors are real
 
 `ruff check .` is `PATH`-independent, and `make lint` runs before `make test`,
@@ -79,7 +84,38 @@ files still pass (42 passed, 3 skipped).
    independent either way: the pilot branch is already `ruff check .` clean on
    its own files, so this is the only remaining lint blocker on the merged line.
 
-## 5. Out of scope
+## 5. The pull request, and what the review needs to cover
+
+**Base** `codex/sophia-observability-v1` (head `8c5cf538`, verified unmoved on
+the remote at the time of writing) - **head** `codex/voice-lab-lint-hygiene`
+(`9ed8bedf`), one commit, fast-forwardable.
+
+The branch is pushed. The PR itself has to be opened from an account with write
+access to the repository: this environment has no `gh` CLI and no GitHub
+credential, and none should be supplied to it. A compare link with the title and
+body pre-filled is in the session where this was prepared; opening it and
+pressing "Create pull request" is the whole action.
+
+What CI will run on that PR, and what the reviewer should expect:
+
+| workflow | why it triggers | expected |
+| --- | --- | --- |
+| `backend-unit-tests` | always | `make lint` **passes for the first time on this line**, then `make test` runs and passes |
+| `sentrux-gate` | always, blocking | architecture score vs `origin/main`; a whitespace/import-order change should not move it |
+| `memory-highlights-e2e` | paths under `frontend/**` | **not triggered** - this change touches no frontend file |
+
+Two things worth a reviewer's attention rather than a rubber stamp:
+
+1. **The three `F811` noqas.** They assert "this is a pytest fixture named as a
+   parameter". If any of them is actually a genuine redefinition, the noqa hides
+   a real bug. They were read individually, but the Voice owner knows these files.
+2. **`make lint` uses `uvx ruff`, which is unpinned.** It resolves whatever ruff
+   is current when CI runs, not the `ruff 0.14.11` in `backend/uv.lock`. A new
+   ruff release can therefore turn this line red again without any commit. If the
+   owner wants that closed, pinning `uvx ruff@<version>` in the Makefile is a
+   separate one-line change and is deliberately not bundled here.
+
+## 6. Out of scope
 
 Pilot activation, the unapplied serving grants, receiving-authentication
 install, provider obligations, and the fault-injection RPC permissions — all
