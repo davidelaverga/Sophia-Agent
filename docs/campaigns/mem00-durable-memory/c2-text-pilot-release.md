@@ -2,6 +2,71 @@
 
 Successful target: MEMORY_TEXT_PILOT_READY. Current status: DEPLOYING — Gateway and LangGraph both run 91a8007b and receiving authentication is LIVE. The frontend is still on 35c6467c. Grants unapplied, no account governed, not activated. C2 replaces the prior PROMOTE-only/five-core-run prerequisites for this owner-restricted pilot. Historical C1 records and failures remain valid history, not additional first-use gates. Recovered cumulative failure counter: latest failed iteration EI929; last reported five-failure checkpoint 923–927; next five-failure checkpoint 932. The single current authority is the checkpoint immediately below; every later dated paragraph is preserved history, not competing current status.
 
+## FIX — the completion webhook's timeout budget, 2026-09-19
+
+The dropped event from the smoke test, fixed at its cause rather than worked
+around.
+
+### What was wrong
+
+```python
+_WEBHOOK_TIMEOUT_SECONDS = 2.0                       # ONE TOTAL budget
+_WEBHOOK_RETRY_BACKOFFS_SECONDS = (2.0, 5.0, 15.0)   # 4 attempts
+```
+
+A single 2.0-second **total** budget is a reasonable *connect* budget and the
+wrong *read* budget, because the receiving handler does real durable work before
+it answers. Reading `receive_builder_event` on the gateway side, one delivery
+costs: a run-id hydrate, `_persist_builder_terminal_state` (up to twice), an
+artifact-registry upsert, an SSE worker publish and a builder-canvas completion
+publish. Several seconds is ordinary for that; two is not available.
+
+Nothing about the sending code was wrong in kind — the retry policy exists
+precisely because a lost webhook bit production before (2026-06-26, a deck's
+ceiling-fallback `status=success` event). The budget inside each attempt was the
+defect.
+
+### The change
+
+```python
+_WEBHOOK_CONNECT_TIMEOUT_SECONDS = 5.0
+_WEBHOOK_READ_TIMEOUT_SECONDS = 20.0
+_WEBHOOK_TIMEOUT = httpx.Timeout(
+    _WEBHOOK_READ_TIMEOUT_SECONDS,
+    connect=_WEBHOOK_CONNECT_TIMEOUT_SECONDS,
+)
+```
+
+Split rather than merely raised. An unreachable host still fails fast into the
+retry at 5s; a reachable one gets room to finish. **The retry contract is
+untouched** — same four attempts, same `(2, 5, 15)` backoffs.
+
+Waiting longer costs the product nothing: `_post_webhook` already runs on a
+`daemon=True` thread, started fire-and-forget, specifically so its sleeps never
+block the builder graph. That was already true; the timeout simply wasn't
+written to take advantage of it.
+
+### The regression test earns its place
+
+`tests/test_builder_events_webhook_timeout.py`. With the fix reverted it
+reproduces **the exact production log line**:
+
+```
+ERROR Builder-events webhook exhausted 4 attempts for task_id=t-1; event dropped
+```
+
+and takes 22 seconds doing it, because it walks the real `(2, 5, 15)` backoffs.
+With the fix, three tests pass in 0.05s. It pins the two properties rather than
+the numbers: connect stays tight, and read is large enough that a handler slower
+than the old *total* still gets its event.
+
+### Scope
+
+This does **not** make delivery durable. If all four attempts fail, a completed
+artifact is still lost with only an error log. That is a real remaining
+weakness, it predates this campaign, and widening the budget is not a fix for
+it — it is a separate change and is recorded here rather than quietly bundled.
+
 ## SMOKE TEST — Builder dispatch on the deployed pair, 2026-09-18
 
 One real Builder dispatch through the live product, as the signed-in owner, on

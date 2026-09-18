@@ -66,7 +66,22 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_GATEWAY_URL = "http://localhost:8001"
 _WEBHOOK_PATH = "/internal/builder-events"
-_WEBHOOK_TIMEOUT_SECONDS = 2.0
+# Delivery ran on a single 2.0s TOTAL timeout until 2026-09-18, when four
+# attempts all raised ``httpx.ReadTimeout`` and a COMPLETED artifact's event was
+# dropped (LangSmith `builder_terminal_success=1.00`, gateway answering other
+# requests 200 throughout). 2.0s is a plausible budget for a connect and a wrong
+# one for the response: the receiving handler does durable work — artifact
+# registration, storage and database writes — and this whole function already
+# runs on a daemon thread precisely so it can wait without blocking the builder
+# graph. So the budget is split rather than merely raised: a connect that cannot
+# complete in 5s means the host is unreachable and should fail fast into the
+# retry below, while the read is given room for the handler to finish.
+_WEBHOOK_CONNECT_TIMEOUT_SECONDS = 5.0
+_WEBHOOK_READ_TIMEOUT_SECONDS = 20.0
+_WEBHOOK_TIMEOUT = httpx.Timeout(
+    _WEBHOOK_READ_TIMEOUT_SECONDS,
+    connect=_WEBHOOK_CONNECT_TIMEOUT_SECONDS,
+)
 _PRODUCER_FAILURE_SIGNAL_PATH = "/internal/deck-quality-producer-failures"
 _PRODUCER_FAILURE_SIGNAL_TIMEOUT_SECONDS = 1.0
 _PRODUCER_FAILURE_SIGNAL_CLOSE_TIMEOUT_SECONDS = 0.025
@@ -509,7 +524,7 @@ def _post_webhook(
             # the same canonical bytes. Gateway mutation is unreachable until
             # this service boundary authenticates.
             headers = signed_builder_event_headers(body)
-            with httpx.Client(timeout=_WEBHOOK_TIMEOUT_SECONDS) as client:
+            with httpx.Client(timeout=_WEBHOOK_TIMEOUT) as client:
                 response = client.post(url, content=body, headers=headers)
             if 200 <= response.status_code < 300:
                 if attempt > 1:
