@@ -71,6 +71,20 @@ attributed to this change. New coverage:
 `test_mem00_langgraph_service_lanes.py`, 34 tests, most of them asserting what
 the lanes cannot reach.
 
+### Qualified integration SHA
+
+| tree | SHA | `pytest tests/` |
+| --- | --- | --- |
+| shared baseline | `8c5cf538` | 2 failed / 6,225 passed |
+| pilot head | `f1a0dc21` | 115 failed / 7,075 passed |
+| **integration candidate** | **`6ce165af`** | **115 failed / 7,118 passed** |
+
+`6ce165af` is `8c5cf538` merged with `f1a0dc21`, on
+`codex/mem00-c2-integration-r2`. Its failure list `diff`s to **zero** against
+the pilot's: the merge introduces nothing. The baseline's own 2
+(`test_local_sandbox_encoding.py`) are inside the 115, so the pilot accounts for
+113.
+
 ### Still open, and deliberately not guessed
 
 Installing `auth` also reaches the Voice Lab test principal itself, which
