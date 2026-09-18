@@ -23,6 +23,20 @@ auth = Auth()
 OWNER_KEY = "sophia_authenticated_owner_v1"
 USER_PERMISSION = "sophia:user"
 READINESS_PERMISSION = "sophia:readiness"
+MAINTENANCE_PERMISSION = "sophia:maintenance"
+DECK_QUALITY_PERMISSION = "sophia:deck-quality"
+# The synthetic marker the product itself writes onto Voice Lab Builder threads.
+# It is the maintenance lane's entire visible universe: the filter below means
+# that lane can never see, read or delete a thread the product did not mark.
+SYNTHETIC_KEY = "synthetic"
+# The dispatcher's own marker, written by this policy on create -- never taken
+# from the client -- so the lane's filter cannot be widened from outside.
+DECK_QUALITY_KEY = "sophia_deck_quality"
+_SERVICE_SCOPE_PERMISSIONS = {
+    "readiness": [READINESS_PERMISSION],
+    "maintenance": [MAINTENANCE_PERMISSION],
+    "deck_quality": [DECK_QUALITY_PERMISSION],
+}
 COMPANION_ASSISTANT_ID = uuid5(UUID("6ba7b821-9dad-11d1-80b4-00c04fd430c8"), "sophia_companion")
 BUILDER_ASSISTANT_ID = uuid5(UUID("6ba7b821-9dad-11d1-80b4-00c04fd430c8"), "sophia_builder")
 
@@ -39,6 +53,11 @@ def _owner(ctx) -> str:
         if owner != ctx.user.identity:
             _deny()
         if owner == (os.getenv("SOPHIA_VOICE_LAB_TEST_PRINCIPAL") or "").strip():
+            _deny()
+        # A service principal is not an account and can never be an owner, even
+        # if a real identity ever collided with one of those reserved names.
+        from deerflow.sophia.langgraph_service_auth import SERVICE_OWNERS
+        if owner in SERVICE_OWNERS:
             _deny()
         return owner
     except Auth.exceptions.HTTPException:
@@ -61,6 +80,14 @@ def _filter(ctx) -> dict[str, str]:
 def _reject_owner_metadata(value):
     metadata = value.get("metadata")
     if metadata is not None and (not isinstance(metadata, dict) or OWNER_KEY in metadata):
+        _deny()
+    # DECK_QUALITY_KEY is a server-issued lane label like OWNER_KEY, so a client
+    # may not supply it either -- otherwise a user could mark their own thread
+    # and place it inside the dispatcher lane's filter. SYNTHETIC_KEY is NOT
+    # rejected here: it is product-authored Voice Lab admission metadata that
+    # legitimately arrives on the create path, and it is the maintenance lane's
+    # confinement rather than its grant.
+    if isinstance(metadata, dict) and DECK_QUALITY_KEY in metadata:
         _deny()
 
 
@@ -88,7 +115,10 @@ async def _authenticate(authorization: str | None, method: str = "", path: str =
             claims = verify_service_authorization(authorization, method=method, path=path)
         except Exception:
             _deny(401)
-        return {"identity": claims["sub"], "permissions": [READINESS_PERMISSION] if claims["scope"] == "readiness" else [USER_PERMISSION, "sophia:service"]}
+        permissions = _SERVICE_SCOPE_PERMISSIONS.get(claims["scope"])
+        if permissions is None:
+            permissions = [USER_PERMISSION, "sophia:service"]
+        return {"identity": claims["sub"], "permissions": list(permissions)}
     scheme, separator, token = authorization.partition(" ")
     if scheme.lower() != "bearer" or not separator or not token or token != token.strip():
         _deny(401)
@@ -139,6 +169,19 @@ async def deny_unspecified(ctx, value):
 @auth.on.threads.create
 async def create_thread(ctx, value):
     _reject_owner_metadata(value)
+    if MAINTENANCE_PERMISSION in ctx.permissions:
+        # Retention maintenance deletes; it never creates.
+        _deny()
+    if DECK_QUALITY_PERMISSION in ctx.permissions:
+        # Same idempotency rule as the owner lane below: the dispatcher relies
+        # on a deterministic thread id plus do_nothing, and the filter is
+        # applied to the existing row, so a response-loss replay cannot claim
+        # another lane's thread.
+        if value.get("if_exists", "raise") not in {"raise", "do_nothing"}:
+            _deny()
+        quality_filter = {DECK_QUALITY_KEY: True}
+        value.setdefault("metadata", {}).update(quality_filter)
+        return quality_filter
     owner_filter = _filter(ctx)
     # The installed runtime applies this filter to the EXISTING row before
     # honoring do_nothing. Same-owner response-loss retries remain idempotent;
@@ -149,15 +192,40 @@ async def create_thread(ctx, value):
     return owner_filter
 
 
+def _service_thread_filter(ctx):
+    """The non-owner lanes' visible universe, or None if this is not one.
+
+    Returned as a metadata filter rather than as an exemption, so the runtime
+    applies the same mechanism it applies to an owner. Maintenance sees only
+    threads the product marked synthetic; nothing else on the server exists for
+    it. Deck quality reaches only its own deterministic quality threads, which
+    it addresses by id, so it gets no search surface here at all.
+    """
+    if MAINTENANCE_PERMISSION in ctx.permissions:
+        return {SYNTHETIC_KEY: True}
+    if DECK_QUALITY_PERMISSION in ctx.permissions:
+        return {DECK_QUALITY_KEY: True}
+    return None
+
+
 @auth.on.threads
 async def owned_thread(ctx, value):
     _reject_owner_metadata(value)
+    service = _service_thread_filter(ctx)
+    if service is not None:
+        return service
     return _filter(ctx)
 
 
 @auth.on.threads.create_run
 async def create_run(ctx, value):
     _reject_owner_metadata(value)
+    if MAINTENANCE_PERMISSION in ctx.permissions:
+        # The retention lane may cancel a run. It may never start one, so no
+        # memory, source or model path can ever be entered through it.
+        _deny()
+    if DECK_QUALITY_PERMISSION in ctx.permissions:
+        return {DECK_QUALITY_KEY: True}
     owner = _owner(ctx)
     kwargs = value.get("kwargs")
     if not isinstance(kwargs, dict):
@@ -193,8 +261,8 @@ async def create_run(ctx, value):
     # A client must never supply or replay a run-source proof. Every request
     # overwrites this field; only the authenticated create-run hook can mint it.
     from deerflow.sophia.memory_governance.input_provenance import INPUT_PROOF_KEY, INPUT_RUN_KEY
-    from deerflow.sophia.memory_governance.source_input_provenance import SOURCE_ACTION_KEY, SOURCE_SESSION_KEY
     from deerflow.sophia.memory_governance.owner_authority import resolve_owner_authority
+    from deerflow.sophia.memory_governance.source_input_provenance import SOURCE_ACTION_KEY, SOURCE_SESSION_KEY
     from deerflow.sophia.memory_governance.store import MemoryOwnerUndeclared
 
     source_action, source_session = configurable.get(SOURCE_ACTION_KEY), configurable.get(SOURCE_SESSION_KEY)

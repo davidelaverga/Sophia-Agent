@@ -397,11 +397,19 @@ class DeckQualityDispatcher:
         method = getattr(resource, method_name, None)
         if not callable(method):
             raise RuntimeError(f"deck quality client cannot {method_name}")
-        return await self._call_maybe_async(method, *args, **kwargs)
+        # The lane is entered here, around the awaited call, because the
+        # credential is minted per request from the current context -- not
+        # cached on the shared client. Dispatch has no owner to carry: a
+        # quality run belongs to a deck, not to a person, and its thread id is
+        # derived deterministically from the quality run id.
+        from deerflow.sophia.langgraph_client_auth import langgraph_service_scope
+
+        with langgraph_service_scope("deck_quality"):
+            return await self._call_maybe_async(method, *args, **kwargs)
 
     def _get_client(self) -> Any:
         if self._client is None:
-            from langgraph_sdk import get_client
+            from deerflow.sophia.langgraph_client_auth import get_client
 
             self._client = get_client(url=self._langgraph_url)
         return self._client
