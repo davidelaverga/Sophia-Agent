@@ -1,6 +1,376 @@
 # MEM00-C2 text pilot — current release record
 
-Successful target: MEMORY_TEXT_PILOT_READY. Current status: IMPLEMENTING — RELEASE CLOSURE (second slice); not deployed, not activated. C2 replaces the prior PROMOTE-only/five-core-run prerequisites for this owner-restricted pilot. Historical C1 records and failures remain valid history, not additional first-use gates. Recovered cumulative failure counter: latest failed iteration EI929; last reported five-failure checkpoint 923–927; next five-failure checkpoint 932. The single current authority is the checkpoint immediately below; every later dated paragraph is preserved history, not competing current status.
+Successful target: MEMORY_TEXT_PILOT_READY. Current status: DEPLOYING — Gateway and LangGraph both run 91a8007b and receiving authentication is LIVE. The frontend is still on 35c6467c. Grants unapplied, no account governed, not activated. C2 replaces the prior PROMOTE-only/five-core-run prerequisites for this owner-restricted pilot. Historical C1 records and failures remain valid history, not additional first-use gates. Recovered cumulative failure counter: latest failed iteration EI929; last reported five-failure checkpoint 923–927; next five-failure checkpoint 932. The single current authority is the checkpoint immediately below; every later dated paragraph is preserved history, not competing current status.
+
+## FIX — the completion webhook's timeout budget, 2026-09-19
+
+The dropped event from the smoke test, fixed at its cause rather than worked
+around.
+
+### What was wrong
+
+```python
+_WEBHOOK_TIMEOUT_SECONDS = 2.0                       # ONE TOTAL budget
+_WEBHOOK_RETRY_BACKOFFS_SECONDS = (2.0, 5.0, 15.0)   # 4 attempts
+```
+
+A single 2.0-second **total** budget is a reasonable *connect* budget and the
+wrong *read* budget, because the receiving handler does real durable work before
+it answers. Reading `receive_builder_event` on the gateway side, one delivery
+costs: a run-id hydrate, `_persist_builder_terminal_state` (up to twice), an
+artifact-registry upsert, an SSE worker publish and a builder-canvas completion
+publish. Several seconds is ordinary for that; two is not available.
+
+Nothing about the sending code was wrong in kind — the retry policy exists
+precisely because a lost webhook bit production before (2026-06-26, a deck's
+ceiling-fallback `status=success` event). The budget inside each attempt was the
+defect.
+
+### The change
+
+```python
+_WEBHOOK_CONNECT_TIMEOUT_SECONDS = 5.0
+_WEBHOOK_READ_TIMEOUT_SECONDS = 20.0
+_WEBHOOK_TIMEOUT = httpx.Timeout(
+    _WEBHOOK_READ_TIMEOUT_SECONDS,
+    connect=_WEBHOOK_CONNECT_TIMEOUT_SECONDS,
+)
+```
+
+Split rather than merely raised. An unreachable host still fails fast into the
+retry at 5s; a reachable one gets room to finish. **The retry contract is
+untouched** — same four attempts, same `(2, 5, 15)` backoffs.
+
+Waiting longer costs the product nothing: `_post_webhook` already runs on a
+`daemon=True` thread, started fire-and-forget, specifically so its sleeps never
+block the builder graph. That was already true; the timeout simply wasn't
+written to take advantage of it.
+
+### The regression test earns its place
+
+`tests/test_builder_events_webhook_timeout.py`. With the fix reverted it
+reproduces **the exact production log line**:
+
+```
+ERROR Builder-events webhook exhausted 4 attempts for task_id=t-1; event dropped
+```
+
+and takes 22 seconds doing it, because it walks the real `(2, 5, 15)` backoffs.
+With the fix, three tests pass in 0.05s. It pins the two properties rather than
+the numbers: connect stays tight, and read is large enough that a handler slower
+than the old *total* still gets its event.
+
+### Scope
+
+This does **not** make delivery durable. If all four attempts fail, a completed
+artifact is still lost with only an error log. That is a real remaining
+weakness, it predates this campaign, and widening the budget is not a fix for
+it — it is a separate change and is recorded here rather than quietly bundled.
+
+## SMOKE TEST — Builder dispatch on the deployed pair, 2026-09-18
+
+One real Builder dispatch through the live product, as the signed-in owner, on
+Gateway + LangGraph both at `91a8007b` and the frontend still at `35c6467c`.
+
+Request: *"Can you build me a short markdown document listing three simple focus
+techniques?"* The companion answered *"I'm starting a fresh build for that focus
+techniques doc now"*, so `start_builder_task` executed.
+
+### What PASSED
+
+- **The authenticated call path works.** `GET /threads/{thread_id}/state` and
+  the run creation were served by the authenticated runtime. **Zero 401s, zero
+  403s, no `LangGraphServiceAuthError`** across both services during the test.
+  This is the check that was outstanding after the LangGraph deploy, and it is
+  now positive rather than merely untried.
+- Session reads/writes, auth, and `/api/health?deep=true` all 200 from the old
+  frontend against the new Gateway — the mixed pair in 4.5 item 3 behaves as
+  predicted.
+
+### FAILURE 1 — the completion event was dropped, so no artifact arrived
+
+```
+[error] Builder-events webhook exhausted 4 attempts for
+        task_id=01a0b69b-1ad1-7521-ab55-295ac2270917; event dropped
+httpx.ReadTimeout: The read operation timed out
+  File ".../deerflow/sophia/builder_events.py", line 513, in _post_webhook
+```
+
+LangGraph built the document and then could not deliver the completion event to
+the Gateway: four attempts, all `ReadTimeout`, event dropped. The artifact count
+in the UI stayed at 1 for the duration of the test.
+
+**Not an authentication failure** — a read timeout, not a 401 or 403. The
+Gateway was concurrently answering session POSTs with 200, so it was not
+globally hung; the webhook handler specifically did not respond in time.
+
+**Attributed, from LangSmith and a diff.**
+
+*The build itself succeeded.* The `Sophia Builder` trace
+(`01a0b69b-1ad4-73e3-8e0e-60c74b5c4f3a`, same time-prefix as the dropped
+`task_id`) carries feedback `builder_terminal_success = 1.00` and tags
+`builder terminal:completed`, `artifact:md`, `builder model:claude-sonnet-5`.
+Its input is the correctly routed request. The project's error rate is **0%** —
+no errored trace exists. **The document was written; only the delivery hop
+failed.**
+
+*The delivery code did not change in this release.*
+
+| file | side | `35c6467c`/`8c5cf538` → `91a8007b` |
+| --- | --- | --- |
+| `deerflow/sophia/builder_events.py` | sender (LangGraph) | **byte-identical** — no diff at all |
+| `app/gateway/routers/builder_events.py` | receiver (Gateway) | +104 lines, **all** in `_cleanup_synthetic_builder_run` / `_cleanup_synthetic_builder_obligation` / `_reap_expired_synthetic_builder_obligations` — the Voice Lab service-lane migration, not the ordinary completion path |
+
+The governing constants are pre-existing and unchanged:
+
+```python
+_WEBHOOK_TIMEOUT_SECONDS = 2.0
+_WEBHOOK_RETRY_BACKOFFS_SECONDS = (2.0, 5.0, 15.0)   # 4 attempts total
+```
+
+**A 2.0-second per-attempt budget for a cross-service HTTPS call to a
+Starter-plan instance is the fault**, and it predates this release. Attempts ran
+22:21:04 → 22:21:28 and all four timed out.
+
+So this release did not introduce the bug; it is a standing fragility that this
+dispatch happened to expose. It still needs fixing — a 2s budget with no durable
+queue means any Gateway slowness silently loses a finished artifact — but it is
+**not a reason to roll back**, and rolling back would not fix it.
+
+### MEM00 is live and instrumented, with memory off
+
+The same traces show `memory.model.transport` runs tagged `memory-governance`
+and `sophia.memory.event.v1`, carrying `authority_state` and
+`authorization_receipt_validated` metadata. The model-dispatch guard is running
+on the real production path for an undeclared owner, which is the behaviour the
+non-cohort work was built for — observed here for the first time outside tests.
+
+### FAILURE 2 — pre-install threads are ownership-rejected, and this is visible
+
+```
+WARNING Builder canvas route ownership rejected
+        user_id=CUyZxRFmDNON parent_thread_id=01a0b69b-004
+GET /api/sophia/.../threads/01a0b69b-004f-.../builder-canvas/snapshot  404
+```
+
+This is the consequence 4.6 predicted — threads created before the `auth` entry
+carry no server-issued owner label, so the owner filter cannot match them — but
+4.6 understated it. It called them "Builder/companion working threads bounded by
+TTL, not durable user data". In fact the **user's saved Aug 21 artifact** is
+attached to such a thread: its card still renders from Supabase, and
+"View in canvas" now 404s.
+
+So the accurate statement is narrower than the one this document made: nothing
+becomes unreclaimable, but **a saved artifact's canvas view does become
+unreachable**, and a user would notice. Whether `Download` still serves it from
+the bucket was not tested.
+
+### Judgement
+
+The authentication work did what it was meant to do. Failure 2 is a known and
+accepted consequence stated too softly, and failure 1 is a pre-existing
+delivery fragility this dispatch exposed, not a regression from it. Neither is
+a MEM00 governance fault, and every `SOPHIA_MEMORY_*` flag is still `false`.
+
+Rollback remains one click per service: Gateway `8c5cf538`, LangGraph `35c6467c`.
+
+## DEPLOYED — `sophia-langgraph` at `91a8007b`, 2026-09-18 — **receiving authentication is LIVE**
+
+| field | value |
+| --- | --- |
+| target | `sophia-langgraph`, `srv-d7be5s9r0fns7397l4fg` |
+| from → to | `35c6467c` → **`91a8007b`** |
+| trigger | Manual, exact-commit |
+| duration | 2m28s, succeeded |
+| recovery | redeploy `35c6467c` |
+
+Pre-deploy guard, read immediately before: `blocking_pending: 0`,
+`conflicts: 0`, `malformed: 0`, `discovery_failed: false`,
+`processing_failed: 0`. The one pending item is the accepted historical
+obligation under the EI-095 exception. Voice Lab disabled, kill switch engaged.
+
+### Verification
+
+- `GET /ok` → `{"ok":true}`.
+- **The policy is enforcing.** An unauthenticated `GET /favicon.ico` returned
+  **401** from `langgraph_api.server` 0.8.1. Before this deploy that request
+  would have been served.
+- The Gateway's retention reaper cycled at `22:05:16Z`, after authentication
+  went live, with `last_error_type: null` and `processing_failed: 0`.
+- No `LangGraphServiceAuthError`, no traceback, and **no 401 on any
+  Gateway→LangGraph call** in either service's logs.
+
+### The 403 that looks like a failure and is not
+
+LangGraph's startup logged
+`POST /internal/deck-quality-producer-failures "403 Forbidden"` against the
+Gateway. That is the **success** path, not a fault:
+
+```python
+if response.status_code == 403:
+    verify_builder_event_probe_ack(body, getattr(response, "headers", {}))
+    return
+if response.status_code == 401:
+    raise BuilderEventAuthenticationError("builder_event_gateway_auth_mismatch")
+if response.status_code == 409:
+    raise BuilderEventAuthenticationError("builder_event_gateway_canary_scope_mismatch")
+```
+
+The Gateway answers the HMAC startup probe with a side-effect-free 403 carrying
+a signed `probe-ack` header; the probe verifies that ack and returns. A real
+mismatch is 401 or 409, and either raises `BuildFoundationStartupError`, which
+would have stopped the service booting. It booted.
+
+So this is affirmative evidence that the two services' **builder-event HMAC
+secret and exact canary scope match** — a check that had never actually been
+exercised across a deploy of both services at the same commit.
+
+### What is still NOT proven
+
+The Gateway→LangGraph authenticated call path has not been exercised by real
+traffic. The reaper cycled cleanly, but with `blocking_pending: 0` it had no
+cleanup to perform, so it may not have made a LangGraph call at all. The
+conclusive test is one Builder dispatch through `builder_canvas` and
+`builder_events`. Until that runs, "no 401s" means "nothing tried", not
+"everything worked".
+
+### Live pins
+
+| component | commit |
+| --- | --- |
+| `sophia-gateway` | `91a8007b` |
+| `sophia-langgraph` | **`91a8007b`** |
+| `sophia-voice` | `35c6467c` — unchanged by design, `voice/` is untouched by this release |
+| frontend | `35c6467c` — outstanding |
+
+Both backend services are now on the same commit for the first time in this
+campaign. The remaining split is the frontend.
+
+## DEPLOYED — `sophia-gateway` at `91a8007b`, 2026-09-18
+
+The first production-changing operation of this release. Performed by the owner
+in the Render dashboard after the session's permission classifier refused the
+action; this record is the verification, not the action.
+
+| field | value |
+| --- | --- |
+| target | `sophia-gateway`, `srv-d7be5s9r0fns7397l4g0` |
+| from → to | `8c5cf538` → **`91a8007b`** |
+| trigger | Manual, exact-commit | 
+| duration | 2m00s, succeeded |
+| recovery | redeploy `8c5cf538`, unchanged and available |
+
+### Why the Gateway went first, and what the original plan got wrong
+
+The operation first presented was **LangGraph**, and it would have broken
+production. `backend/packages/harness/deerflow/sophia/langgraph_client_auth.py`
+**does not exist at `8c5cf538`**, so the Gateway that was running minted no
+credentials at all. Installing receiving authentication on LangGraph first would
+have returned 401 to every Gateway→LangGraph call, and at `8c5cf538` those are
+`routers/artifacts.py`, `routers/builder_canvas.py` (four sites),
+`routers/builder_events.py`, `workers/companion_wakeup.py` and
+`workers/deck_quality_dispatcher.py` — the core Builder and artifact paths, not
+only Voice Lab cleanup.
+
+This is what 4.5 item 2 of the release sequence already said ("Gateway before
+LangGraph"), stated there as an ordering rule without its consequence. The
+consequence is the reason.
+
+New Gateway against old LangGraph is the safe direction: at the pilot head **no
+Gateway call site uses the raw SDK** — every one goes through the minting
+wrapper — and an uninstalled server ignores the minted header.
+
+### Verification, measured
+
+`GET https://sophia-gateway.onrender.com/ready`:
+
+```json
+{"status":"ready",
+ "commit_sha":"91a8007be1e2c6ac6964cf8a936c5e29a7ca5e71",
+ "voice_lab_enabled":false,"voice_lab_kill_switch_engaged":true,
+ "memory_contract_schema":"mem00.v1","memory_supported_contract_epoch":1,
+ "voice_lab_retention_reaper":{"status":"ready","running":true,
+   "last_cycle":{"lease_acquired":true,"discovered":1,"pending":1,
+     "accepted_historical_pending":1,"blocking_pending":0,
+     "discovery_failed":false,"processing_failed":0}}}
+```
+
+- The running commit is the exact SHA deployed.
+- Voice Lab remains disabled with the kill switch engaged — unchanged, as required.
+- **The retention reaper completed a cycle after the deploy**, acquiring its
+  lease with `discovery_failed: false` and `processing_failed: 0`. It is one of
+  the four migrated callers, so this is direct evidence that entering a service
+  lane and minting a credential does not break against an unauthenticated
+  LangGraph. Its one pending item is the accepted historical obligation, not
+  blocking.
+
+Service logs: **no** `LangGraphServiceAuthError`, no traceback, no 401, no
+startup failure. Honest limit on that: the visible log window covered roughly a
+minute of health checks. Absence of errors there is weaker than it looks, and
+the stronger check — a real Builder dispatch through `builder_canvas` and
+`builder_events` — needs product traffic and has not been run.
+
+### Live pins after this deploy
+
+| component | commit |
+| --- | --- |
+| `sophia-gateway` | **`91a8007b`** |
+| `sophia-langgraph` | `35c6467c` |
+| `sophia-voice` | `35c6467c` (unchanged by design) |
+| frontend | `35c6467c` |
+
+The split did not close, it changed shape: the Gateway is now ahead, on the
+pilot line, and the other three are behind. That is the intended intermediate
+state, and it is the safe direction of the two.
+
+## Release closure, third slice — 2026-09-18
+
+### Qualified final successor — `91a8007b` (`codex/mem00-c2-integration-r5`)
+
+`8c5cf538` (shared baseline) + `9ed8bedf` (Voice Lab lint) + the pilot through
+`e94b0047` (which installs receiving authentication). One tree, all four gates:
+
+| gate | result |
+| --- | --- |
+| backend suite | **7,256 passed / 0 failed**, 168 skipped, 299s |
+| backend `ruff check .` | **All checks passed** |
+| frontend `vitest run` | **2,394 passed / 0 failed**, 10 skipped, 237 files |
+| frontend `next build` on **Node 24** | compiled, TypeScript passed, 61 static pages, 119 routes |
+
+The frontend build ran on Node **24.21.0**, matching Vercel's observed `24.x`
+rather than the e2e workflow's 22, and the worktree's `frontend/` was made
+byte-identical to r5's for the build. Remaining deviations, both unavoidable
+here: dependencies come from the existing `node_modules` (which match the
+lockfile resolutions) because `pnpm` is absent, and placeholder
+`DATABASE_URL`/`BETTER_AUTH_*` values are needed or page-data collection for
+`/api/test-auth/login` aborts.
+
+Receiving authentication is now **installed in the tree**: `langgraph.json`
+carries the `auth` entry, and `test_render_config` pins the exact entry instead
+of its absence. Authorized by the sponsor and recorded in
+`c2-step-0a-acceptance.md` §4. Installed is not deployed.
+
+### Three CI defects, none of them this campaign's, in the order they surface
+
+Fixing one revealed the next. That is the whole story of PR #146:
+
+| # | defect | evidence | proposed fix |
+| --- | --- | --- | --- |
+| 1 | 22 Voice Lab lint errors fail `make lint`, which runs **before** `make test`, so the suite never ran at all | PR #145 and #147 both die at ~29s on this line; PRs onto `main` run 4–5 min | **[PR #146](https://github.com/davidelaverga/Sophia-Agent/pull/146)** — merge-ready head `9ed8bedf` |
+| 2 | the sentrux gate baselines `origin/main`, so it scores the shared line's whole divergence, not the PR | PR #146 and PR #145 produced **byte-identical** metrics (quality 5671→4531, god files 7→22, complex fns 176→674); 387,151 of #146's 387,176 measured insertions were already in its base | **[PR #147](https://github.com/davidelaverga/Sophia-Agent/pull/147)** — baseline `github.event.pull_request.base.ref` |
+| 3 | `timeout-minutes: 15` is far below the suite's runtime — only visible once #1 was fixed and `make test` finally ran | PR #146's job: lint 1s, then cancelled at 38% after ~14.5 min → ~38 min needed for 6,227 tests, more for 7,256 | `codex/ci-unit-test-timeout` — raise to 60 |
+
+**#1 was masking #2's irrelevance and #3's existence.** Defect 3 in particular
+had never been observed, because no PR on this line had ever reached the test
+step.
+
+None is caused by the lint patch, none is fixed by bypassing a check, and the
+lint patch was not expanded to cover them — each is its own change, and #2 and #3
+are the shared line's to accept.
+
+**Merge order that actually works:** #147 and the timeout fix first or
+concurrently, then #146, then the integration successor. Merging #146 alone
+leaves its own required check timing out.
 
 ## Release closure, second slice — 2026-09-18
 
