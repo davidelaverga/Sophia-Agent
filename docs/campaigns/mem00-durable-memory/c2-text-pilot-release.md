@@ -1,6 +1,78 @@
 # MEM00-C2 text pilot — current release record
 
-Successful target: MEMORY_TEXT_PILOT_READY. Current status: DEPLOYING — the Gateway runs 91a8007b; LangGraph, Voice and the frontend do not. Authentication is installed in the tree and not yet live. Not activated. C2 replaces the prior PROMOTE-only/five-core-run prerequisites for this owner-restricted pilot. Historical C1 records and failures remain valid history, not additional first-use gates. Recovered cumulative failure counter: latest failed iteration EI929; last reported five-failure checkpoint 923–927; next five-failure checkpoint 932. The single current authority is the checkpoint immediately below; every later dated paragraph is preserved history, not competing current status.
+Successful target: MEMORY_TEXT_PILOT_READY. Current status: DEPLOYING — Gateway and LangGraph both run 91a8007b and receiving authentication is LIVE. The frontend is still on 35c6467c. Grants unapplied, no account governed, not activated. C2 replaces the prior PROMOTE-only/five-core-run prerequisites for this owner-restricted pilot. Historical C1 records and failures remain valid history, not additional first-use gates. Recovered cumulative failure counter: latest failed iteration EI929; last reported five-failure checkpoint 923–927; next five-failure checkpoint 932. The single current authority is the checkpoint immediately below; every later dated paragraph is preserved history, not competing current status.
+
+## DEPLOYED — `sophia-langgraph` at `91a8007b`, 2026-09-18 — **receiving authentication is LIVE**
+
+| field | value |
+| --- | --- |
+| target | `sophia-langgraph`, `srv-d7be5s9r0fns7397l4fg` |
+| from → to | `35c6467c` → **`91a8007b`** |
+| trigger | Manual, exact-commit |
+| duration | 2m28s, succeeded |
+| recovery | redeploy `35c6467c` |
+
+Pre-deploy guard, read immediately before: `blocking_pending: 0`,
+`conflicts: 0`, `malformed: 0`, `discovery_failed: false`,
+`processing_failed: 0`. The one pending item is the accepted historical
+obligation under the EI-095 exception. Voice Lab disabled, kill switch engaged.
+
+### Verification
+
+- `GET /ok` → `{"ok":true}`.
+- **The policy is enforcing.** An unauthenticated `GET /favicon.ico` returned
+  **401** from `langgraph_api.server` 0.8.1. Before this deploy that request
+  would have been served.
+- The Gateway's retention reaper cycled at `22:05:16Z`, after authentication
+  went live, with `last_error_type: null` and `processing_failed: 0`.
+- No `LangGraphServiceAuthError`, no traceback, and **no 401 on any
+  Gateway→LangGraph call** in either service's logs.
+
+### The 403 that looks like a failure and is not
+
+LangGraph's startup logged
+`POST /internal/deck-quality-producer-failures "403 Forbidden"` against the
+Gateway. That is the **success** path, not a fault:
+
+```python
+if response.status_code == 403:
+    verify_builder_event_probe_ack(body, getattr(response, "headers", {}))
+    return
+if response.status_code == 401:
+    raise BuilderEventAuthenticationError("builder_event_gateway_auth_mismatch")
+if response.status_code == 409:
+    raise BuilderEventAuthenticationError("builder_event_gateway_canary_scope_mismatch")
+```
+
+The Gateway answers the HMAC startup probe with a side-effect-free 403 carrying
+a signed `probe-ack` header; the probe verifies that ack and returns. A real
+mismatch is 401 or 409, and either raises `BuildFoundationStartupError`, which
+would have stopped the service booting. It booted.
+
+So this is affirmative evidence that the two services' **builder-event HMAC
+secret and exact canary scope match** — a check that had never actually been
+exercised across a deploy of both services at the same commit.
+
+### What is still NOT proven
+
+The Gateway→LangGraph authenticated call path has not been exercised by real
+traffic. The reaper cycled cleanly, but with `blocking_pending: 0` it had no
+cleanup to perform, so it may not have made a LangGraph call at all. The
+conclusive test is one Builder dispatch through `builder_canvas` and
+`builder_events`. Until that runs, "no 401s" means "nothing tried", not
+"everything worked".
+
+### Live pins
+
+| component | commit |
+| --- | --- |
+| `sophia-gateway` | `91a8007b` |
+| `sophia-langgraph` | **`91a8007b`** |
+| `sophia-voice` | `35c6467c` — unchanged by design, `voice/` is untouched by this release |
+| frontend | `35c6467c` — outstanding |
+
+Both backend services are now on the same commit for the first time in this
+campaign. The remaining split is the frontend.
 
 ## DEPLOYED — `sophia-gateway` at `91a8007b`, 2026-09-18
 
