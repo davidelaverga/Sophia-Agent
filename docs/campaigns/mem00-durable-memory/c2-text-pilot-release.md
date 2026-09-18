@@ -29,15 +29,50 @@ Two further corrections to the deployment plan, both from the live settings:
   deployment was built from `codex/sophia-observability-v1`. Production is
   reached by **promoting a deployment**, not by pushing a branch.
 
-### One thing observed and deliberately not explained
+### CORRECTION: there were never 2,602 Postgres errors — the database is clean
 
-The Supabase project card reports `POSTGRES 3,171` log events with
-`ERRORS 2,602` for Sep 17 22:00 – Sep 18 21:00. I could not reproduce that from
-the logs: the last hour shows only routine checkpoint lines, and a text search
-for `ERROR` across 18 Sep returns no results. The ClickHouse-backed log explorer
-rejects the older `postgres_logs` schema, so the query that would settle it was
-not run. **Recorded as unexplained rather than attributed to the EI930 storm**,
-which is the convenient answer and not an established one.
+An earlier note in this record reported `POSTGRES 3,171` log events with
+`ERRORS 2,602`. **That was my misreading of truncated page text**, stitched
+across card boundaries while the panel was still loading. Re-read in full, the
+project card says:
+
+```
+POSTGRES    572    WARNINGS 0    ERRORS 0
+```
+
+Queried directly on the ClickHouse logs surface, over the card's own window
+(2026-09-17 22:00 → 2026-09-18 21:00):
+
+```sql
+SELECT log_attributes['parsed.error_severity'] AS sev, count(*) AS c,
+       min(timestamp) AS first_seen, max(timestamp) AS last_seen
+FROM logs WHERE source = 'postgres_logs' GROUP BY sev ORDER BY c DESC
+```
+
+| sev | c | first_seen | last_seen |
+| --- | --- | --- | --- |
+| `LOG` | 545 | 2026-09-17T22:00:51 | 2026-09-18T20:31:19 |
+
+**One severity, `LOG`. Zero `ERROR`, `FATAL`, `PANIC` or `WARNING`**, across the
+whole window rather than a quiet sample of it — every row is a routine
+`checkpoint starting`/`checkpoint complete` pair. The connection pooler agrees:
+`supavisor_logs` is 44,748 rows, all `info`. Source totals in the same window
+are `edge_logs` 366,560, `pgbouncer_logs` 66,448, `supavisor_logs` 44,719,
+`storage_logs` 41,322, `postgrest_logs` 634, `postgres_logs` 545,
+`realtime_logs` 2 — no database-layer source carries error-level rows.
+
+So there is **neither an active failure nor a historical error tail** in the
+database, and no incident to attribute to EI930 or to ungranted functions. The
+earlier flag was mine, not the system's.
+
+### Unrelated finding, surfaced in passing and not acted on
+
+The Supabase Advisor reports **17 issues, several CRITICAL: "RLS Disabled in
+Public"** — `public.turn_feedback`, `public.conversation_sessions_backup_20251127`,
+`public.conversation_messages_backup_20251127`,
+`public.emotion_scores_backup_20251127`. Public tables with row-level security
+off. Outside this campaign's scope and untouched, but it is a live exposure and
+belongs in someone's queue.
 
 ### The lint PR is open
 
