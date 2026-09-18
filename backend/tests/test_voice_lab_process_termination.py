@@ -7,12 +7,12 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+from test_voice_lab_recovery import _claims, _headers, recovery_env  # noqa: F401 - shared auth fixture
 
 from app.gateway import voice_lab_process_termination as process
 from app.gateway.routers import voice_lab_recovery
 from deerflow.sophia import cleanup_fence
 from deerflow.sophia.cleanup_fence import close_cleanup_provider_session as atomic_close
-from test_voice_lab_recovery import _claims, _headers, recovery_env  # noqa: F401 - shared auth fixture
 
 
 def receipt_for(claims, **updates):
@@ -101,12 +101,18 @@ def test_process_receipt_rejects_binding_drift_without_commit(bound, fault):
         field = {"epoch": "provider_connection_epoch", "provider": "provider_session_id_sha256",
             "test": "test_run_id_sha256", "cleanup": "cleanup_obligation_id_sha256"}[fault]
         receipt = receipt_for(claims, **{field: 3 if fault == "epoch" else "b" * 64})
-    if fault == "pending": synthetic["voice_provider_pending_connection_epoch"] = 3
-    if fault == "future": receipt = receipt_for(claims, process_closed_at="2099-01-01T00:00:00.000Z")
-    if fault == "before-activation": receipt = receipt_for(claims, process_closed_at="2025-01-01T00:00:00.000Z")
-    if fault == "admission": admission.status = "consumed"
-    if fault == "d02": claims = _claims(scenario_id="V-D02")
-    if fault == "ordinary": record.metadata = {}
+    if fault == "pending":
+        synthetic["voice_provider_pending_connection_epoch"] = 3
+    if fault == "future":
+        receipt = receipt_for(claims, process_closed_at="2099-01-01T00:00:00.000Z")
+    if fault == "before-activation":
+        receipt = receipt_for(claims, process_closed_at="2025-01-01T00:00:00.000Z")
+    if fault == "admission":
+        admission.status = "consumed"
+    if fault == "d02":
+        claims = _claims(scenario_id="V-D02")
+    if fault == "ordinary":
+        record.metadata = {}
     from fastapi import HTTPException
     with pytest.raises((ValueError, HTTPException)):
         process.accept_browser_process_termination(claims, record, receipt)
@@ -194,7 +200,8 @@ def test_atomic_fence_requires_prior_close_and_rolls_back_failed_persistence(bou
                 atomic_close(admission, **kwargs)
             assert cleanup_fence._LOCAL_ADMISSIONS[admission.admission_id].status == "browser_active"
             assert cleanup_fence._LOCAL_OBLIGATIONS[claims.cleanup_obligation_id].get("provider_settlement_sha256") is None
-            if state == "open": persist.assert_not_called()
+            if state == "open":
+                persist.assert_not_called()
         else:
             closed = atomic_close(admission, **kwargs)
             assert closed.status == "browser_closed"
@@ -214,10 +221,12 @@ def test_strict_parser_rejects_even_rehashed_invalid_receipts(updates):
 
 @pytest.mark.parametrize("fault,expected", [("missing-internal", 401), ("missing-capability", 401),
     ("malformed", 400), ("oversized", 413), ("valid", 202)])
-def test_private_route_auth_bounds_and_no_provider_zero(monkeypatch, recovery_env, fault, expected):
+def test_private_route_auth_bounds_and_no_provider_zero(monkeypatch, recovery_env, fault, expected):  # noqa: F811 - pytest fixture request
     import json
+
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
+
     from app.gateway.voice_lab_capability import VOICE_LAB_CAPABILITY_HEADER, VOICE_LAB_RECOVERY_INTERNAL_AUTH_HEADER
 
     lookup = Mock(return_value=({"status": "found"}, object()))
@@ -229,10 +238,14 @@ def test_private_route_auth_bounds_and_no_provider_zero(monkeypatch, recovery_en
     receipt = receipt_for(_claims())
     headers = _headers()
     body = json.dumps(receipt)
-    if fault == "missing-internal": headers.pop(VOICE_LAB_RECOVERY_INTERNAL_AUTH_HEADER)
-    if fault == "missing-capability": headers.pop(VOICE_LAB_CAPABILITY_HEADER)
-    if fault == "malformed": body = "{}"
-    if fault == "oversized": body = " " * 8193
+    if fault == "missing-internal":
+        headers.pop(VOICE_LAB_RECOVERY_INTERNAL_AUTH_HEADER)
+    if fault == "missing-capability":
+        headers.pop(VOICE_LAB_CAPABILITY_HEADER)
+    if fault == "malformed":
+        body = "{}"
+    if fault == "oversized":
+        body = " " * 8193
     response = TestClient(app).post("/internal/voice-lab/runs/run-001/browser-process-closed", content=body, headers=headers)
     assert response.status_code == expected, response.text
     if fault != "valid":
@@ -257,8 +270,9 @@ def test_private_route_rejects_d02_before_body_or_lookup(monkeypatch):
     lookup.assert_not_called()
 
 
-def test_complete_gateway_stack_reaches_dual_authenticated_process_handler(monkeypatch, recovery_env):
+def test_complete_gateway_stack_reaches_dual_authenticated_process_handler(monkeypatch, recovery_env):  # noqa: F811 - pytest fixture request
     from fastapi.testclient import TestClient
+
     from app.gateway.app import create_app
     lookup = Mock(return_value=({"status": "found"}, object()))
     commit = Mock(return_value="c" * 64)
