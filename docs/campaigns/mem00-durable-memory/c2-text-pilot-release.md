@@ -39,9 +39,46 @@ in the UI stayed at 1 for the duration of the test.
 Gateway was concurrently answering session POSTs with 200, so it was not
 globally hung; the webhook handler specifically did not respond in time.
 
-**Not yet attributed.** It could be the new Gateway build, the Starter instance
-under load, or pre-existing flakiness on this path. One dispatch is not enough
-to tell, and this record does not guess.
+**Attributed, from LangSmith and a diff.**
+
+*The build itself succeeded.* The `Sophia Builder` trace
+(`01a0b69b-1ad4-73e3-8e0e-60c74b5c4f3a`, same time-prefix as the dropped
+`task_id`) carries feedback `builder_terminal_success = 1.00` and tags
+`builder terminal:completed`, `artifact:md`, `builder model:claude-sonnet-5`.
+Its input is the correctly routed request. The project's error rate is **0%** —
+no errored trace exists. **The document was written; only the delivery hop
+failed.**
+
+*The delivery code did not change in this release.*
+
+| file | side | `35c6467c`/`8c5cf538` → `91a8007b` |
+| --- | --- | --- |
+| `deerflow/sophia/builder_events.py` | sender (LangGraph) | **byte-identical** — no diff at all |
+| `app/gateway/routers/builder_events.py` | receiver (Gateway) | +104 lines, **all** in `_cleanup_synthetic_builder_run` / `_cleanup_synthetic_builder_obligation` / `_reap_expired_synthetic_builder_obligations` — the Voice Lab service-lane migration, not the ordinary completion path |
+
+The governing constants are pre-existing and unchanged:
+
+```python
+_WEBHOOK_TIMEOUT_SECONDS = 2.0
+_WEBHOOK_RETRY_BACKOFFS_SECONDS = (2.0, 5.0, 15.0)   # 4 attempts total
+```
+
+**A 2.0-second per-attempt budget for a cross-service HTTPS call to a
+Starter-plan instance is the fault**, and it predates this release. Attempts ran
+22:21:04 → 22:21:28 and all four timed out.
+
+So this release did not introduce the bug; it is a standing fragility that this
+dispatch happened to expose. It still needs fixing — a 2s budget with no durable
+queue means any Gateway slowness silently loses a finished artifact — but it is
+**not a reason to roll back**, and rolling back would not fix it.
+
+### MEM00 is live and instrumented, with memory off
+
+The same traces show `memory.model.transport` runs tagged `memory-governance`
+and `sophia.memory.event.v1`, carrying `authority_state` and
+`authorization_receipt_validated` metadata. The model-dispatch guard is running
+on the real production path for an undeclared owner, which is the behaviour the
+non-cohort work was built for — observed here for the first time outside tests.
 
 ### FAILURE 2 — pre-install threads are ownership-rejected, and this is visible
 
@@ -66,8 +103,8 @@ the bucket was not tested.
 ### Judgement
 
 The authentication work did what it was meant to do. Failure 2 is a known and
-accepted consequence stated too softly, and failure 1 is unattributed and blocks
-artifact delivery — which is core product function, not pilot scope. Neither is
+accepted consequence stated too softly, and failure 1 is a pre-existing
+delivery fragility this dispatch exposed, not a regression from it. Neither is
 a MEM00 governance fault, and every `SOPHIA_MEMORY_*` flag is still `false`.
 
 Rollback remains one click per service: Gateway `8c5cf538`, LangGraph `35c6467c`.
