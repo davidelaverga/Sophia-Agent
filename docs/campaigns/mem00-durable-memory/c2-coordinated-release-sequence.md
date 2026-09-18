@@ -81,8 +81,9 @@ policy permits, never about turning the lab on.
 
 ## Step 1 — shared baseline lint (independent, any time)
 
-Merge `codex/voice-lab-lint-hygiene` (from `8c5cf538`), or the Voice owner's
-preferred equivalent. See
+**Opened as [PR #146](https://github.com/davidelaverga/Sophia-Agent/pull/146)**
+(`codex/voice-lab-lint-hygiene` → `codex/sophia-observability-v1`, 1 commit, 3
+files, able to merge). Merge it, or the Voice owner's preferred equivalent. See
 [`c2-shared-baseline-lint-coordination.md`](./c2-shared-baseline-lint-coordination.md),
 which also carries the review request and the PR link.
 Until this lands, `make lint` fails on the merged line and CI never reaches
@@ -117,6 +118,26 @@ necessary, not because the SQL depends on it.
 
 ## Step 4 — deployment
 
+### 4.0 Where production actually is right now
+
+Read from the Render deploy lists and the Vercel API on 2026-09-18, not from
+the campaign's older notes, which were wrong about the Gateway:
+
+| component | deployed commit | trigger | age |
+| --- | --- | --- | --- |
+| `sophia-gateway` | **`8c5cf538`** — the shared baseline | Manual | 23h |
+| `sophia-langgraph` | `35c6467c` | Manual | 4d |
+| `sophia-voice` | `35c6467c` | API | 4d |
+| frontend (Vercel `sophia-agent-front`, team **Sophia**) | `35c6467c`, branch `codex/sophia-observability-v1` | promoted | 2026-09-14 |
+
+**Production is already a split**, and that is the starting state this sequence
+has to deploy from: the Gateway is four days ahead of everything else, on the
+shared baseline. Earlier records naming `0c215c1b` as the Gateway pin describe
+the deploy *underneath* the current one.
+
+Still true, and the thing that matters most: **no deployed component carries any
+MEM00-C2 commit.**
+
 ### 4.1 What each component is, exactly
 
 | component | disposition | exact build |
@@ -137,18 +158,26 @@ at the currently deployed commit is a **mixed pair**, not a partial rollout.
 
 | item | value |
 | --- | --- |
+| project | `sophia-agent-front`, Vercel team **Sophia** (`sophia-30911edf`), linked to this repository |
 | source | the qualified integration successor, same SHA as the backend services |
-| root directory | `frontend` (from `vercel.json`) |
+| root directory | `frontend` (project setting, matching `vercel.json`) |
 | install | `pnpm install --frozen-lockfile` |
 | build | `pnpm build` → `next build`, output `.next` |
 | package manager | **pnpm 10.26.2**, pinned by `packageManager` in `frontend/package.json` and by the e2e workflow |
-| Node | **22**, as `memory-highlights-e2e` pins via `actions/setup-node@v4`. Vercel's project Node version must match; this repo declares no `engines` field, so nothing enforces it at build time |
+| Node | **Vercel builds on 24.x** (read from the project settings). The `memory-highlights-e2e` workflow pins **22**, and this repo declares no `engines` field, so nothing reconciles the two — CI e2e and production already build on different majors. Worth closing, separately from this release |
 | resolved versions | `next@16.2.2`, `react@19.2.4`, `react-dom@19.2.4`, `vitest@2.1.9`, lockfile version 9.0 — the exact resolutions `--frozen-lockfile` reproduces, not the `^16.1.7` range in `package.json` |
 | dependency change | **none.** `frontend/package.json` and `frontend/pnpm-lock.yaml` are byte-identical to the shared baseline |
 
 Because no dependency moved, the frontend build is a *source* change only: no
 lockfile migration, no framework upgrade, and no Vercel project setting needs to
 change.
+
+**How it actually reaches production.** The project's production branch is set
+to `main`, yet every live production deployment was built from
+`codex/sophia-observability-v1`. So production is reached by **promoting a
+deployment**, not by pushing a branch — and the promotion is the step to plan,
+because changing the production-branch setting instead would make the next
+`main` push deploy itself.
 
 **Built locally, with its deviations named.** `next build` on the pilot tree:
 compiled, TypeScript passed, 61 static pages generated across 119 routes, no

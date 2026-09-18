@@ -4,6 +4,51 @@ Successful target: MEMORY_TEXT_PILOT_READY. Current status: IMPLEMENTING — REL
 
 ## Release closure, second slice — 2026-09-18
 
+### Live production state, re-read — the older pins were wrong
+
+Read directly from the Render deploy lists and the Vercel API on 2026-09-18:
+
+| component | deployed commit | trigger | age |
+| --- | --- | --- | --- |
+| `sophia-gateway` | **`8c5cf538`** (shared baseline) | Manual | 23h |
+| `sophia-langgraph` | `35c6467c` | Manual | 4d |
+| `sophia-voice` | `35c6467c` | API | 4d |
+| frontend — Vercel `sophia-agent-front`, team **Sophia** | `35c6467c` from `codex/sophia-observability-v1` | promoted | 2026-09-14 |
+
+Earlier records name `0c215c1b` as the Gateway pin; that is the deploy
+underneath the current one. **Production is already split**: the Gateway is four
+days ahead of the other three. No deployed component carries a MEM00-C2 commit,
+which is unchanged.
+
+Two further corrections to the deployment plan, both from the live settings:
+
+- Vercel builds `sophia-agent-front` on **Node 24.x**, not the 22 the
+  `memory-highlights-e2e` workflow pins. Nothing reconciles the two — CI e2e and
+  production already build on different majors.
+- The project's production branch is set to `main`, but every live production
+  deployment was built from `codex/sophia-observability-v1`. Production is
+  reached by **promoting a deployment**, not by pushing a branch.
+
+### One thing observed and deliberately not explained
+
+The Supabase project card reports `POSTGRES 3,171` log events with
+`ERRORS 2,602` for Sep 17 22:00 – Sep 18 21:00. I could not reproduce that from
+the logs: the last hour shows only routine checkpoint lines, and a text search
+for `ERROR` across 18 Sep returns no results. The ClickHouse-backed log explorer
+rejects the older `postgres_logs` schema, so the query that would settle it was
+not run. **Recorded as unexplained rather than attributed to the EI930 storm**,
+which is the convenient answer and not an established one.
+
+### The lint PR is open
+
+[PR #146](https://github.com/davidelaverga/Sophia-Agent/pull/146),
+`codex/voice-lab-lint-hygiene` → `codex/sophia-observability-v1`, 1 commit, 3
+files, able to merge, not stacked. Created through the owner's authenticated
+browser session; no GitHub token exists in this environment and none was
+supplied.
+
+## Release closure, second slice (measurements) — 2026-09-18
+
 ### Qualified integration successor — `709200cf` (`codex/mem00-c2-integration-r4`)
 
 This is the first successor measured as **one tree with the lint fix inside it**,
