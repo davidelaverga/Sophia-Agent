@@ -25,13 +25,22 @@ USER_PERMISSION = "sophia:user"
 READINESS_PERMISSION = "sophia:readiness"
 MAINTENANCE_PERMISSION = "sophia:maintenance"
 DECK_QUALITY_PERMISSION = "sophia:deck-quality"
-# The synthetic marker the product itself writes onto Voice Lab Builder threads.
-# It is the maintenance lane's entire visible universe: the filter below means
-# that lane can never see, read or delete a thread the product did not mark.
+# `synthetic` is CLIENT-SUPPLIED metadata. It is what the product writes onto a
+# Voice Lab Builder thread, but nothing stops any caller writing it too, so it
+# is an eligibility *input*, never the eligibility itself.
 SYNTHETIC_KEY = "synthetic"
-# The dispatcher's own marker, written by this policy on create -- never taken
-# from the client -- so the lane's filter cannot be widened from outside.
-DECK_QUALITY_KEY = "sophia_deck_quality"
+# These two are server-issued lane labels, written by this policy and refused
+# from a client like OWNER_KEY. They, not the client's metadata, are what the
+# lane filters match, so no caller can place a thread into a lane's universe.
+MAINTENANCE_KEY = "sophia_synthetic_maintenance_v1"
+DECK_QUALITY_KEY = "sophia_deck_quality_v1"
+SERVER_ISSUED_KEYS = (OWNER_KEY, MAINTENANCE_KEY, DECK_QUALITY_KEY)
+# The one graph the dispatch lane may run. A lane that can start a run on any
+# graph is a lane that can start the companion, with tools and memory behind it.
+DECK_QUALITY_GRAPH_ID = "sophia_deck_quality_shadow"
+# The runtime resolves a graph name to this assistant before the policy sees
+# the value, so the check must accept either spelling of the same one graph.
+DECK_QUALITY_ASSISTANT_ID = uuid5(UUID("6ba7b821-9dad-11d1-80b4-00c04fd430c8"), DECK_QUALITY_GRAPH_ID)
 _SERVICE_SCOPE_PERMISSIONS = {
     "readiness": [READINESS_PERMISSION],
     "maintenance": [MAINTENANCE_PERMISSION],
@@ -87,7 +96,7 @@ def _reject_owner_metadata(value):
     # rejected here: it is product-authored Voice Lab admission metadata that
     # legitimately arrives on the create path, and it is the maintenance lane's
     # confinement rather than its grant.
-    if isinstance(metadata, dict) and DECK_QUALITY_KEY in metadata:
+    if isinstance(metadata, dict) and any(key in metadata for key in SERVER_ISSUED_KEYS):
         _deny()
 
 
@@ -183,6 +192,7 @@ async def create_thread(ctx, value):
         value.setdefault("metadata", {}).update(quality_filter)
         return quality_filter
     owner_filter = _filter(ctx)
+    _admit_synthetic_maintenance(value)
     # The installed runtime applies this filter to the EXISTING row before
     # honoring do_nothing. Same-owner response-loss retries remain idempotent;
     # a different owner cannot claim or read the existing checkpoint.
@@ -192,17 +202,105 @@ async def create_thread(ctx, value):
     return owner_filter
 
 
+def _deck_quality_run(value):
+    """Constrain what the dispatch lane may actually start, not just where.
+
+    The thread marker says which thread; it says nothing about what runs on it.
+    Without this, a credential for the dispatch lane could start the companion
+    graph on a deck-quality thread -- tools, memory and the model boundary
+    behind it -- which is a far larger surface than dispatching an adjudication.
+
+    So: one graph, no command, no webhook, no interrupts, and none of the
+    reserved carriers the ordinary path nulls. Assistant selection by name is
+    the only thing this lane needs.
+    """
+    kwargs = value.get("kwargs")
+    if not isinstance(kwargs, dict):
+        _deny()
+    if str(value.get("assistant_id") or kwargs.get("assistant_id") or "") not in {
+            DECK_QUALITY_GRAPH_ID, str(DECK_QUALITY_ASSISTANT_ID)}:
+        _deny()
+    if kwargs.get("command") is not None or kwargs.get("webhook") is not None:
+        _deny()
+    if kwargs.get("interrupt_before") or kwargs.get("interrupt_after"):
+        _deny()
+    # The runtime carries this beside kwargs, not inside it.
+    for source in (value, kwargs):
+        if source.get("multitask_strategy") not in (None, "enqueue"):
+            _deny()
+    config = kwargs.get("config")
+    if config is not None and not isinstance(config, dict):
+        _deny()
+    configurable = (config or {}).get("configurable")
+    if configurable is not None and not isinstance(configurable, dict):
+        _deny()
+    if isinstance(configurable, dict):
+        from deerflow.sophia.memory_governance.input_provenance import INPUT_PROOF_KEY, INPUT_RUN_KEY
+        from deerflow.sophia.memory_governance.source_input_provenance import SOURCE_ACTION_KEY, SOURCE_SESSION_KEY
+
+        # This lane carries no owner, so it can carry no owner-scoped
+        # provenance either. Null rather than deny: the reserved carriers are
+        # overwritten on every request on the ordinary path too.
+        for key in ("sophia_builder_handoff_v1", "sophia_builder_handoff_run_v1",
+                    "sophia_builder_completion_request_v1", "sophia_builder_completion_run_v1",
+                    "sophia_builder_resume_request_v1", "sophia_builder_resume_run_v1",
+                    "sophia_source_attachments_run_v1", "memory_source_attachment_keys",
+                    INPUT_PROOF_KEY, INPUT_RUN_KEY, SOURCE_ACTION_KEY, SOURCE_SESSION_KEY):
+            configurable[key] = None
+        if configurable.get("user_id") is not None or configurable.get("langgraph_auth_user_id") is not None:
+            _deny()
+    return {DECK_QUALITY_KEY: True}
+
+
+def _admit_synthetic_maintenance(value) -> None:
+    """Decide, once and on the server, whether a thread joins the retention lane.
+
+    `synthetic: true` on its own decides nothing. Anyone can write it, so using
+    it as the maintenance filter would let any caller place their own thread
+    inside a lane that reads and deletes. What this does instead:
+
+      * the declaration must be a COMPLETE synthetic admission, validated by the
+        product's own `normalize_synthetic_builder_context` -- principal, run
+        and cleanup-obligation identity, not a bare boolean;
+      * the principal it names must be this deployment's configured Voice Lab
+        test principal, so a thread cannot volunteer itself into the lane by
+        naming somebody else, and if no principal is configured nothing is ever
+        eligible;
+      * only then is the server-issued MAINTENANCE_KEY written, and a client may
+        never supply that key itself.
+
+    A malformed or mismatched declaration is denied rather than downgraded to an
+    ordinary thread: a caller that says "synthetic" and cannot back it is not
+    making an ordinary request.
+    """
+    metadata = value.get("metadata")
+    if not isinstance(metadata, dict) or metadata.get(SYNTHETIC_KEY) is not True:
+        return
+    principal = (os.getenv("SOPHIA_VOICE_LAB_TEST_PRINCIPAL") or "").strip()
+    if not principal:
+        _deny()
+    try:
+        from deerflow.sophia.synthetic_builder import normalize_synthetic_builder_context
+
+        context = normalize_synthetic_builder_context(metadata, require_complete=True)
+    except Exception:
+        _deny()
+    if not isinstance(context, dict) or context.get("test_principal_id") != principal:
+        _deny()
+    metadata[MAINTENANCE_KEY] = True
+
+
 def _service_thread_filter(ctx):
     """The non-owner lanes' visible universe, or None if this is not one.
 
     Returned as a metadata filter rather than as an exemption, so the runtime
-    applies the same mechanism it applies to an owner. Maintenance sees only
-    threads the product marked synthetic; nothing else on the server exists for
-    it. Deck quality reaches only its own deterministic quality threads, which
-    it addresses by id, so it gets no search surface here at all.
+    applies the same mechanism it applies to an owner. Both filters match only
+    SERVER-ISSUED labels: `_admit_synthetic_maintenance` decides the first on
+    create, and `create_thread` writes the second. Neither can be supplied by a
+    caller, so no thread can put itself inside a lane's universe.
     """
     if MAINTENANCE_PERMISSION in ctx.permissions:
-        return {SYNTHETIC_KEY: True}
+        return {MAINTENANCE_KEY: True}
     if DECK_QUALITY_PERMISSION in ctx.permissions:
         return {DECK_QUALITY_KEY: True}
     return None
@@ -225,7 +323,7 @@ async def create_run(ctx, value):
         # memory, source or model path can ever be entered through it.
         _deny()
     if DECK_QUALITY_PERMISSION in ctx.permissions:
-        return {DECK_QUALITY_KEY: True}
+        return _deck_quality_run(value)
     owner = _owner(ctx)
     kwargs = value.get("kwargs")
     if not isinstance(kwargs, dict):
@@ -347,7 +445,12 @@ async def create_run(ctx, value):
 @auth.on.assistants.read
 @auth.on.assistants.search
 async def system_assistants(ctx, value):
-    if READINESS_PERMISSION not in ctx.permissions:
+    # Starting a run resolves its assistant first, so the dispatch lane reaches
+    # this handler on its own path. It gets the same answer everyone else does
+    # -- system assistants only -- and no more: the lane still cannot run any
+    # graph but its own, which `_deck_quality_run` enforces separately.
+    # Retention maintenance is NOT listed: it never starts a run.
+    if not {READINESS_PERMISSION, DECK_QUALITY_PERMISSION} & set(ctx.permissions):
         _owner(ctx)
     # Only configured system assistants are discoverable. No custom assistant
     # config (which could override owner, tools or governance) is admitted.

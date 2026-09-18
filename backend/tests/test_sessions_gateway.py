@@ -707,8 +707,13 @@ def test_end_session_uses_atomic_mem00_finalization_for_enabled_owner(
     extraction.finalize_and_enqueue_session.side_effect = _atomic_finalize
 
     with (
+        # Session end is an ordinary route now, so it resolves through
+        # `ordinary_path_memory_flags_for_owner`: an owner who is merely
+        # undeclared takes the pre-MEM00 `_store.end` branch instead of a 500.
+        # A governed owner -- which this test is -- still takes the atomic
+        # durable branch, which is what the assertions below check.
         patch(
-            "deerflow.sophia.memory_governance.flags.memory_feature_flags_for_owner",
+            "deerflow.sophia.memory_governance.owner_authority.ordinary_path_memory_flags_for_owner",
             return_value=MemoryFeatureFlags(candidate_ledger_write=True),
         ),
         patch(

@@ -78,9 +78,47 @@ async def test_c2_disabled_transition_cannot_fall_through_to_text(setup, key, su
 
 
 @pytest.mark.anyio
-async def test_unknown_authority_cannot_reopen_legacy(setup):
+async def test_unknown_authority_gets_no_lane_and_no_source_provenance(setup):
+    """An undeclared owner is not enrolled; that is not the same as blocked.
+
+    This used to assert that `create_run` DENIES an unknown owner. It did, and
+    that was the front-door defect: the hook runs on every authenticated run
+    creation, so every account outside the pilot was refused before any
+    middleware existed. The invariant the test is named for -- unknown never
+    reopens the legacy lane -- is unchanged and asserted below: no recorded
+    input proof, no source carriers, and no Builder handoff. The run proceeds
+    with a run id and nothing else.
+    """
     setup.ctx.user.identity = "unknown"
     setup.cfg.update(user_id="unknown", langgraph_auth_user_id="unknown")
+    await policy.create_run(setup.ctx, setup.value)
+    assert setup.cfg[INPUT_PROOF_KEY] is None, "no recorded-input provenance is minted"
+    assert setup.cfg[SOURCE_ACTION_KEY] is None and setup.cfg[SOURCE_SESSION_KEY] is None
+    assert setup.cfg[INPUT_RUN_KEY] == setup.value["run_id"]
+    assert setup.cfg["sophia_builder_handoff_v1"] is None
+
+
+@pytest.mark.anyio
+async def test_unknown_authority_is_still_refused_a_builder_handoff(setup):
+    """The lane that matters stays shut for an owner with no declaration."""
+    setup.ctx.user.identity = "unknown"
+    setup.cfg.update(user_id="unknown", langgraph_auth_user_id="unknown",
+                     sophia_builder_handoff_v1={"claimed": True})
+    with pytest.raises(Auth.exceptions.HTTPException):
+        await policy.create_run(setup.ctx, setup.value)
+
+
+@pytest.mark.anyio
+async def test_an_outage_still_denies_rather_than_degrading_to_unknown(setup, monkeypatch):
+    """Unavailability is not "not enrolled"; the front door still fails closed."""
+    from deerflow.sophia.memory_governance import owner_authority
+
+    def unreachable():
+        raise TimeoutError("supabase unreachable")
+
+    setup.ctx.user.identity = "unknown"
+    setup.cfg.update(user_id="unknown", langgraph_auth_user_id="unknown")
+    monkeypatch.setattr(owner_authority, "configured_memory_store", unreachable)
     with pytest.raises(Auth.exceptions.HTTPException):
         await policy.create_run(setup.ctx, setup.value)
 

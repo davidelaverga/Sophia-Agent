@@ -15,9 +15,91 @@ import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from mem00_owner_fixture import declare_memory_owners  # noqa: F401
 
 from deerflow.sophia.memory_governance.store import MemoryGovernanceConflict
 from deerflow.sophia.session_store import SessionMessageRecord, SessionRecord, SessionStore
+
+
+@pytest.fixture(autouse=True)
+def _declared_owners(declare_memory_owners):  # noqa: F811
+    """The dedicated memory endpoints, exercised for a DECLARED legacy owner.
+
+    `/memories`, `/journal`, `/visual` and `/bulk-review` resolve through
+    `_memory_flags`, which answers 503 for an owner with no durable
+    declaration -- deliberately, and that stays: see
+    `test_mem00_noncohort_ordinary_routes` for the test that pins it. These
+    tests are about what those endpoints DO once an owner is entitled to them,
+    so the owner they use is declared here, once and explicitly.
+
+    `test_user` is legacy because these assertions are the pre-cutover Mem0
+    surface: raw provider listings, local review overlays, the journal. The
+    governed equivalents have their own files. No other id is declared, and
+    `voice-lab-user-1` is deliberately left alone -- the Voice Lab principal
+    must keep failing closed.
+    """
+    declare_memory_owners({"test_user": "legacy", "user": "legacy", "dev-user": "legacy"})
+
+
+def _manual_create_command_result(memory_id):
+    """The exact envelope `CanonicalMemoryService.command_result` returns.
+
+    Built and validated rather than mocked, so the assertions above are about
+    the real contract: one historical receipt plus a separately-read current
+    view, never a single blended record.
+    """
+    from mem00_pool_fixture import pool_page
+
+    from deerflow.sophia.memory_governance.command_result import CanonicalCommandResult
+
+    target = str(memory_id)
+    # Reuse the shared record shape rather than restating every field here.
+    record = {**pool_page(0, count=1)["records"][0], "id": target,
+              "content": "Explicit canonical memory", "revision": 1,
+              "memory_governance_revision": 1, "state": "active"}
+    return CanonicalCommandResult.model_validate({
+        "schema": "mem00.command-result.v1", "owner_id": "test_user",
+        "command_key": "manual-create-operation", "status": "committed",
+        "historical_result_only": True,
+        "receipt": {"event_id": str(uuid.uuid4()), "operation_id": "manual-create-operation",
+                    "event_type": "memory_manual_created", "resulting_lifecycle": "active",
+                    "memory_id": target, "candidate_id": None, "content_revision": 1,
+                    "memory_governance_revision": 1, "user_catalog_generation": 1,
+                    "user_revocation_epoch": 0, "idempotent_replay": False},
+        "current_view": {"schema": "mem00.current-memory.v1", "owner_id": "test_user",
+                         "memory_id": target, "status": "available", "lifecycle": "active",
+                         "content_revision": 1, "memory_governance_revision": 1,
+                         "memory": record,
+                         "provider_state_queried": False, "current_view_only": True},
+    })
+
+
+def _pool_envelope(view, *, lifecycle, content):
+    """Build the envelope `CanonicalMemoryService.pool_view` actually returns.
+
+    These two tests were written against `list_pool(include_forgotten=...)`,
+    which the service no longer has -- it was replaced by `pool_view(view=...)`
+    and the route returns a validated `PoolEnvelope` rather than a tuple. The
+    MagicMock satisfied the old call and then failed serialization, so the
+    endpoint answered 503 and the assertions never ran. Updated here to the
+    current API rather than deleted: the behaviour they pin -- forgotten
+    entries excluded by default, included only on an explicit view -- is still
+    the contract.
+    """
+    from deerflow.sophia.memory_governance.pool import PoolEnvelope
+
+    memory_id = uuid.uuid4()
+    return PoolEnvelope.model_validate({
+        "schema": "mem00.pool.v1", "owner_id": "test_user", "view": view,
+        "snapshot_id": hashlib.md5(view.encode()).hexdigest(), "snapshot_count": 1,
+        "filters": {"category": None, "search": None},
+        "entries": [{"id": memory_id, "content": content, "category": "fact",
+                     "metadata": {"lifecycle": lifecycle, "tier": "none", "scope": "global",
+                                  "content_revision": 1, "memory_governance_revision": 1},
+                     "created_at": datetime.now(UTC).isoformat()}],
+        "count": 1,
+    })
+
 
 VOICE_LAB_BUILD = "41a9b127af780bbe9d88acf34566a6aaf443e6b0"
 VOICE_LAB_SECRET = "capability-secret-at-least-thirty-two-bytes"
@@ -1135,22 +1217,13 @@ class TestCreateMemory:
     def test_canonical_manual_create_uses_single_authority_and_projection_obligation(self, client, mock_mem0):
         memory_id = uuid.uuid4()
         receipt = MagicMock(memory_id=memory_id)
-        memory = MagicMock(
-            memory_id=memory_id,
-            canonical_content="Explicit canonical memory",
-            category="fact",
-            lifecycle="active",
-            user_tier="none",
-            scope="global",
-            projection_state="desired",
-            current_content_revision=1,
-            memory_governance_revision=1,
-            created_at=datetime.now(UTC),
-            updated_at=datetime.now(UTC),
-        )
         service = MagicMock()
         service.manual_create.return_value = receipt
-        service.list_pool.return_value = (memory,)
+        # The route returns `service.command_result(...)`, not a pool listing.
+        # `list_pool` was the pre-`command_result` API; a MagicMock satisfied
+        # the old call and then failed JSON serialization, so the endpoint
+        # answered 503 and none of the assertions below ever ran.
+        service.command_result.return_value = _manual_create_command_result(memory_id)
         flags = MagicMock(canonical_pool_read=True)
 
         with (
@@ -1172,7 +1245,14 @@ class TestCreateMemory:
             )
 
         assert response.status_code == 200
-        assert response.json()["metadata"]["authority"] == "sophia_canonical"
+        body = response.json()
+        assert body["schema"] == "mem00.command-result.v1"
+        assert body["status"] == "committed"
+        assert body["historical_result_only"] is True
+        assert body["receipt"]["event_type"] == "memory_manual_created"
+        assert body["current_view"]["memory"]["content"] == "Explicit canonical memory"
+        service.command_result.assert_called_once_with(
+            receipt=receipt, idempotency_key="manual-create-operation")
         service.manual_create.assert_called_once_with(
             content="Explicit canonical memory",
             category="fact",
@@ -1481,32 +1561,9 @@ class TestReflect:
 
 class TestJournal:
     def test_canonical_forgotten_shelf_is_explicit_and_management_only(self, client):
-        active = MagicMock(
-            memory_id=uuid.uuid4(),
-            canonical_content="active canonical",
-            category="fact",
-            lifecycle="active",
-            user_tier="none",
-            scope="global",
-            projection_state="active",
-            current_content_revision=1,
-            memory_governance_revision=1,
-            created_at=datetime.now(UTC),
-        )
-        forgotten = MagicMock(
-            memory_id=uuid.uuid4(),
-            canonical_content="forgotten canonical",
-            category="fact",
-            lifecycle="forgotten",
-            user_tier="none",
-            scope="global",
-            projection_state="purge_pending",
-            current_content_revision=1,
-            memory_governance_revision=2,
-            created_at=datetime.now(UTC),
-        )
         service = MagicMock()
-        service.list_pool.return_value = (active, forgotten)
+        service.pool_view.return_value = _pool_envelope("forgotten", lifecycle="forgotten",
+                                                        content="forgotten canonical")
         flags = MagicMock(canonical_pool_read=True)
 
         with (
@@ -1521,35 +1578,12 @@ class TestJournal:
         assert response.status_code == 200
         assert response.json()["count"] == 1
         assert response.json()["entries"][0]["metadata"]["lifecycle"] == "forgotten"
-        service.list_pool.assert_called_once_with(include_forgotten=True)
+        service.pool_view.assert_called_once_with(view="forgotten", category=None, search=None)
 
     def test_canonical_default_journal_excludes_forgotten(self, client):
-        active = MagicMock(
-            memory_id=uuid.uuid4(),
-            canonical_content="active canonical",
-            category="fact",
-            lifecycle="active",
-            user_tier="none",
-            scope="global",
-            projection_state="active",
-            current_content_revision=1,
-            memory_governance_revision=1,
-            created_at=datetime.now(UTC),
-        )
-        forgotten = MagicMock(
-            memory_id=uuid.uuid4(),
-            canonical_content="forgotten canonical",
-            category="fact",
-            lifecycle="forgotten",
-            user_tier="none",
-            scope="global",
-            projection_state="purge_pending",
-            current_content_revision=1,
-            memory_governance_revision=2,
-            created_at=datetime.now(UTC),
-        )
         service = MagicMock()
-        service.list_pool.return_value = (active, forgotten)
+        service.pool_view.return_value = _pool_envelope("active", lifecycle="active",
+                                                        content="active canonical")
         flags = MagicMock(canonical_pool_read=True)
 
         with (
@@ -1564,7 +1598,9 @@ class TestJournal:
         assert response.status_code == 200
         assert response.json()["count"] == 1
         assert response.json()["entries"][0]["metadata"]["lifecycle"] == "active"
-        service.list_pool.assert_called_once_with(include_forgotten=False)
+        # The default view excludes the forgotten shelf; only an explicit
+        # status=forgotten asks for it.
+        service.pool_view.assert_called_once_with(view="active", category=None, search=None)
 
     def test_returns_entries(self, client, mock_mem0):
         mock_mem0.get_all.return_value = [

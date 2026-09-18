@@ -4,6 +4,22 @@ import json
 from unittest.mock import MagicMock, patch
 
 import pytest
+from mem00_owner_fixture import declare_memory_owners  # noqa: F401
+
+
+@pytest.fixture(autouse=True)
+def _declared_owners(declare_memory_owners):  # noqa: F811
+    """`extract_session_memories` on the legacy lane, which is what this file is.
+
+    With `candidate_only` false it calls `require_legacy_memory_lane(user_id)`,
+    which only a durably declared pre-cutover owner satisfies. That is the
+    subject of these tests, not an obstacle to them: the governed candidate
+    lane has its own coverage and its own dispatch authority.
+
+    Declares one owner, explicitly, and weakens nothing else.
+    """
+    declare_memory_owners({"user1": "legacy"})
+
 
 # Sample extraction response from Claude Haiku
 _SAMPLE_EXTRACTION = [

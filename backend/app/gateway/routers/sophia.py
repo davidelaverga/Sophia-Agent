@@ -1772,12 +1772,16 @@ def _queue_offline_pipeline(
     thread_state: dict | None,
     ended_at: str,
 ) -> bool:
-    from deerflow.sophia.memory_governance.flags import (
-        memory_feature_flags_for_owner,
+    from deerflow.sophia.memory_governance.owner_authority import (
+        ordinary_path_memory_flags_for_owner,
     )
     from deerflow.sophia.offline_pipeline import run_offline_pipeline
 
-    memory_flags = memory_feature_flags_for_owner(user_id)
+    # Background finalization runs for every ended session, pilot or not. The
+    # governed branch below is unchanged and an outage still raises; an owner
+    # who is merely undeclared falls through to the ordinary offline pipeline,
+    # which is what they had before MEM00 existed.
+    memory_flags = ordinary_path_memory_flags_for_owner(user_id)
     if memory_flags.candidate_ledger_write:
         from deerflow.sophia.memory_governance.extraction_service import (
             MemoryExtractionService,

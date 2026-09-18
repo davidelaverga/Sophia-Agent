@@ -26,6 +26,7 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
+from langchain_core.messages import HumanMessage
 
 PILOT_ENV = {
     "SOPHIA_MEMORY_CANDIDATE_LEDGER_WRITE": "true",
@@ -403,3 +404,235 @@ def test_store_outage_never_reaches_the_no_memory_lane(compiled_env, monkeypatch
     with _as_active_model_guard(guard):
         with pytest.raises(MemoryGovernanceUnavailable):
             guard.final_dispatch_authority(wire)
+
+
+# ---------------------------------------------------------------------------
+# The full companion factory, and the ownership/availability transition.
+#
+# The compiled test above builds three middlewares. Production builds thirty,
+# including file injection, memory recall, summarization and prompt assembly,
+# and it is those that put text into `system_prompt_blocks` and into the
+# messages. An empty guard and a permit with no memory ids say nothing about
+# whether recalled text -- put there while the owner WAS governed -- is still in
+# the checkpoint and gets serialized on a later turn.
+#
+# So the governed turn below is real, produced by the existing governed
+# instrument in `test_mem00_c2_text_context`, and the turn after it runs the
+# same production factory with the real GovernedChatAnthropic and its
+# final-admission transport while the store answers "undeclared" for that owner.
+# The assertion is on the bytes.
+# ---------------------------------------------------------------------------
+
+from mem00_owner_fixture import declare_memory_owners  # noqa: E402, F401
+from test_mem00_c2_text_context import approved_lookup, current, env  # noqa: E402, F401, F811
+
+
+@pytest.fixture
+def factory(monkeypatch, tmp_path):
+    """The production companion chain, with only the provider faked."""
+    import deerflow.agents.sophia_agent.agent as companion
+    from deerflow.config.paths import Paths
+
+    monkeypatch.setenv("LANGSMITH_TRACING", "false")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "synthetic")
+    monkeypatch.setattr(companion, "load_sophia_web_tools", lambda: [])
+    monkeypatch.setattr(companion, "_create_summarization_middleware", lambda: None)
+    paths = Paths(str(tmp_path / "paths"))
+    monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: paths)
+    monkeypatch.setattr("deerflow.agents.middlewares.thread_data_middleware.get_paths", lambda: paths)
+    monkeypatch.setattr("deerflow.sophia.delegation_ledger.ledger_enabled", lambda: False)
+    return companion
+
+
+def _undeclare(monkeypatch, owner):
+    """The transition: the store now answers "not enrolled" for this owner."""
+    from deerflow.sophia.memory_governance import owner_authority
+
+    monkeypatch.setattr(owner_authority, "configured_memory_store", lambda: _StubStore("unknown"))
+    return owner
+
+
+def test_a_governed_owner_who_becomes_undeclared_serializes_no_retained_memory(
+        env,  # noqa: F811
+        factory, monkeypatch, tmp_path):
+    """The ownership/availability transition, through the whole production chain.
+
+    Turn 1 is a real governed turn: approved memory is recalled, rendered into
+    the assembled prompt, and sealed into the checkpoint. Then the store starts
+    answering "undeclared" for that same owner -- a cohort change, a rollback,
+    an enrollment that was never completed -- and turn 2 arrives with clean
+    current input on the same thread.
+
+    Turn 2 must not put the recalled text on the wire. It is refused rather than
+    scrubbed, and refused by provenance: the retained context carries a memory
+    seal that cannot be verified for an owner with no authority. Nothing
+    inspects the messages for memory-shaped content.
+    """
+    import asyncio
+    import json
+
+    import httpx
+    from langchain_core.language_models.fake_chat_models import FakeListChatModel
+    from test_mem00_model_clients import close_model, reply
+
+    from deerflow.sophia.memory_governance.model_clients import GovernedChatAnthropic
+
+    class ToolCapableFake(FakeListChatModel):
+        def bind_tools(self, tools, **kwargs):
+            return self
+
+    monkeypatch.setenv("SOPHIA_MEMORY_REFERENCE_HMAC_SECRET", "synthetic-runtime-key-" * 3)
+    memory, _ = approved_lookup(env, monkeypatch)
+    sentinel = memory.canonical_content
+
+    # The governed turn's own reply quotes the recalled memory, so the sentinel
+    # is in the retained MESSAGES as well as the blocks and the seal. Otherwise
+    # a regression that only cleared the blocks would still pass this test.
+    monkeypatch.setattr(factory, "ChatAnthropic",
+                        lambda **kwargs: ToolCapableFake(responses=[f"As you told me: {sentinel}"]))
+    original = factory.create_agent
+    monkeypatch.setattr(factory, "create_agent",
+                        lambda **kwargs: original(**{**kwargs, "checkpointer": env.checkpointer}))
+
+    cfg, messages = current(env, "GOVERNED_TURN_INPUT")
+    cfg.update(platform="text", context_mode="life")
+    first = factory.make_sophia_agent({"configurable": cfg}).invoke(
+        {"messages": messages}, {"configurable": cfg},
+        context={"thread_id": env.tid, "platform": "text", "user_id": "owner"})
+    assert first["injected_memories"] == [str(memory.memory_id)], "turn 1 really did recall"
+    assert sentinel in first["messages"][-1].content, "and the reply quoted it"
+    retained = env.checkpointer.get({"configurable": {"thread_id": env.tid}})
+    assert sentinel in json.dumps(retained, default=str), "the sentinel really is retained"
+
+    # --- the transition -----------------------------------------------------
+    _undeclare(monkeypatch, "owner")
+
+    # Record WHY turn 2 is refused, so this cannot pass for an unrelated reason
+    # the way the first version of this file's dispatch test did.
+    from deerflow.agents.sophia_agent.middlewares import prompt_assembly
+
+    reasons = []
+    neutral = prompt_assembly.PromptAssemblyMiddleware._neutral_request
+
+    def observed(self, request):
+        state = request.state or {}
+        reasons.append({
+            "retained_seal": state.get("memory_context_proof") is not None,
+            "sentinel_in_messages": sentinel in json.dumps(
+                [item.model_dump(mode="json") for item in request.messages], default=str),
+        })
+        return neutral(self, request)
+
+    monkeypatch.setattr(prompt_assembly.PromptAssemblyMiddleware, "_neutral_request", observed)
+
+    sent = []
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request",
+                        lambda transport, wire: sent.append(json.loads(wire.content)) or reply("anthropic", wire))
+    models = []
+
+    def governed(**kwargs):
+        models.append(GovernedChatAnthropic(model="existing-model", api_key="synthetic",
+                                            max_retries=2, **{"memory_authority_factory": kwargs["memory_authority_factory"]}))
+        return models[-1]
+
+    monkeypatch.setattr(factory, "ChatAnthropic", governed)
+    second_cfg = {**cfg, "user_id": "owner", "langgraph_auth_user_id": "owner"}
+    try:
+        result = factory.make_sophia_agent({"configurable": second_cfg}).invoke(
+            {"messages": [HumanMessage("CLEAN_CURRENT_INPUT")]}, {"configurable": second_cfg},
+            context={"thread_id": env.tid, "platform": "text", "user_id": "owner"})
+    finally:
+        for model in models:
+            asyncio.run(close_model(model))
+
+    assert sentinel not in json.dumps(sent), "retained memory text reached the wire"
+    assert sent == [], "no model request may be made on a context that cannot be verified"
+    assert result["messages"][-1].additional_kwargs.get("sophia_memory_status") == "context_unavailable"
+    assert sentinel not in result["messages"][-1].content
+    # The retained reply itself is still in the thread's own history, and that is
+    # correct: the user was shown it at the time, in their own conversation. The
+    # claim here is about what crosses the boundary to the provider, which is
+    # what the wire assertions above measure -- not about erasing what the
+    # product already said.
+    # The reason, not just the outcome: a retained memory seal this owner has no
+    # authority to verify. Not the message text, which is never inspected.
+    assert reasons == [{"retained_seal": True, "sentinel_in_messages": True}]
+
+
+def test_the_same_transition_leaves_the_governed_owner_alone(env, factory, monkeypatch):  # noqa: F811
+    """Control: without the transition, turn 2 is an ordinary governed turn."""
+    from langchain_core.language_models.fake_chat_models import FakeListChatModel
+
+    class ToolCapableFake(FakeListChatModel):
+        def bind_tools(self, tools, **kwargs):
+            return self
+
+    monkeypatch.setenv("SOPHIA_MEMORY_REFERENCE_HMAC_SECRET", "synthetic-runtime-key-" * 3)
+    memory, _ = approved_lookup(env, monkeypatch)
+    monkeypatch.setattr(factory, "ChatAnthropic",
+                        lambda **kwargs: ToolCapableFake(responses=["GOVERNED_TURN_RESPONSE"]))
+    original = factory.create_agent
+    monkeypatch.setattr(factory, "create_agent",
+                        lambda **kwargs: original(**{**kwargs, "checkpointer": env.checkpointer}))
+
+    for text in ("GOVERNED_TURN_INPUT", "SECOND_GOVERNED_INPUT"):
+        cfg, messages = current(env, text)
+        cfg.update(platform="text", context_mode="life")
+        result = factory.make_sophia_agent({"configurable": cfg}).invoke(
+            {"messages": messages}, {"configurable": cfg},
+            context={"thread_id": env.tid, "platform": "text", "user_id": "owner"})
+    assert result["messages"][-1].content == "GOVERNED_TURN_RESPONSE"
+    assert result["injected_memories"] == [str(memory.memory_id)]
+
+
+def test_the_full_factory_serves_an_ordinary_non_pilot_turn(compiled_env, factory, monkeypatch):
+    """The positive case on the production chain, not the three-middleware one.
+
+    Thirty middlewares, the real GovernedChatAnthropic, the real
+    final-admission transport, an owner nobody has declared, and no retained
+    memory state. The request reaches the provider and comes back, and no
+    governance RPC is called for it.
+    """
+    import asyncio
+    import json
+
+    from langgraph.checkpoint.memory import InMemorySaver
+    from test_mem00_model_clients import close_model
+
+    from deerflow.sophia.memory_governance.model_clients import GovernedChatAnthropic
+
+    monkeypatch.setenv("SOPHIA_MEMORY_REFERENCE_HMAC_SECRET", "synthetic-runtime-key-" * 3)
+    checkpointer = InMemorySaver()
+    original = factory.create_agent
+    monkeypatch.setattr(factory, "create_agent",
+                        lambda **kwargs: original(**{**kwargs, "checkpointer": checkpointer}))
+    models = []
+
+    def governed(**kwargs):
+        models.append(GovernedChatAnthropic(
+            model="existing-model", api_key="synthetic", max_retries=2,
+            memory_authority_factory=kwargs["memory_authority_factory"]))
+        return models[-1]
+
+    monkeypatch.setattr(factory, "ChatAnthropic", governed)
+    cfg = {**compiled_env.cfg, "platform": "text", "context_mode": "life"}
+    try:
+        first = factory.make_sophia_agent({"configurable": cfg}).invoke(
+            {"messages": [HumanMessage("FIRST_CLEAN_INPUT")]}, {"configurable": cfg},
+            context={"thread_id": compiled_env.tid, "platform": "text",
+                     "user_id": "ordinary-production-user"})
+        second = factory.make_sophia_agent({"configurable": cfg}).invoke(
+            {"messages": [HumanMessage("SECOND_CLEAN_INPUT")]}, {"configurable": cfg},
+            context={"thread_id": compiled_env.tid, "platform": "text",
+                     "user_id": "ordinary-production-user"})
+    finally:
+        for model in models:
+            asyncio.run(close_model(model))
+
+    assert first["messages"][-1].content == "SYNTHETIC RESPONSE"
+    assert second["messages"][-1].content == "SYNTHETIC RESPONSE"
+    assert len(compiled_env.sent) == 2
+    assert compiled_env.store.rpc_calls == []
+    # Unsealed history is ordinary conversation and stays: the retained-context
+    # denial must not become "non-pilot users lose their thread on every turn".
+    assert "FIRST_CLEAN_INPUT" in json.dumps(compiled_env.sent[1])

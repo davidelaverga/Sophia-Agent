@@ -10,6 +10,28 @@ from typing import get_type_hints
 from unittest.mock import MagicMock
 
 import pytest
+from mem00_owner_fixture import declare_memory_owners  # noqa: F401
+
+
+@pytest.fixture(autouse=True)
+def _declared_owners(declare_memory_owners):  # noqa: F811
+    """The owners whose LEGACY lane these middleware tests are about.
+
+    Identity-file injection, Mem0 recall and the `retrieve_memories` tool are
+    the unversioned lane, which the campaign gives to a durably declared
+    pre-cutover owner. Declaring these ids is what makes the tests exercise the
+    behaviour they are named for; leaving them undeclared makes them exercise
+    the store-outage branch instead.
+
+    Only these ids, only `legacy`, and no global declaration: an owner not
+    listed here is still undeclared and still gets no lane. `__voice_warmup__`
+    is deliberately absent -- its test is about skipping the search entirely.
+    """
+    declare_memory_owners({
+        "test_user": "legacy", "user_A": "legacy", "user_B": "legacy",
+        "user_test": "legacy", "user-1": "legacy", "user1": "legacy",
+    })
+
 
 # --- User ID validation and path traversal ---
 
@@ -2288,8 +2310,14 @@ class TestMem0MemoryMiddleware:
                 _make_runtime(thread_id="thread-1", platform="voice"),
             )
 
-        assert result is None
+        # The load-bearing claim: no provider search for the warmup principal.
         mock_search.assert_not_called()
+        # It is not declared -- it is a synthetic internal id, not an account --
+        # so the middleware clears the memory channels rather than returning
+        # None. Nothing is recalled either way; this pins the cleared shape
+        # instead of asserting a pre-MEM00 return value that no longer holds.
+        assert result == {"injected_memories": [], "injected_memory_contents": [],
+                          "memory_retrieval_proof": None, "system_prompt_blocks": []}
 
 
 # --- SophiaTitleMiddleware ---

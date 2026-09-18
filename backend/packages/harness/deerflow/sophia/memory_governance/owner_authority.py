@@ -8,7 +8,12 @@ legacy decisions are never cached across requests.
 from dataclasses import replace
 
 from .flags import MemoryFeatureFlags, configured_memory_feature_flags_for_owner, memory_feature_flags
-from .store import MemoryGovernanceUnavailable, MemoryOwnerUndeclared, configured_memory_store
+from .store import (
+    MemoryGovernanceUnavailable,
+    MemoryOwnerUndeclared,
+    configured_memory_store,
+    memory_governance_store_configured,
+)
 
 OWNER_AUTHORITY_READER = "mem00.owner-authority.v1"
 SUPPORTED_OWNER_EPOCHS = frozenset({1})
@@ -79,18 +84,28 @@ def ordinary_path_memory_flags_for_owner(owner_id, *, store=None, environ=None) 
     except MemoryOwnerUndeclared:
         return MemoryFeatureFlags()
     except MemoryGovernanceUnavailable:
-        if not memory_feature_flags(environ).any_enabled():
-            # No MEM00 feature is switched on anywhere, so there is no authority
-            # to guard and no store to require. Mirrors the rule already used by
-            # context_state.allows_unversioned_builder_handoff.
-            #
-            # This check is deliberately AFTER the resolution attempt, not
-            # before it. `resolved_memory_flags_for_owner` forces
-            # candidate_ledger_read and canonical_pool_read True for a governed
-            # owner regardless of the environment -- canonical management stays
-            # routed to the ledger even when recall is off. Short-circuiting on
-            # the environment first silently stripped that from every governed
-            # owner, which is the one thing this helper must never do.
+        # Exactly two things may select all-off flags. One is the definite
+        # MemoryOwnerUndeclared above. The other is a deployment that has no
+        # governance store at all, which is equally definite and equally
+        # network-free. An OUTAGE is neither, and must never land here.
+        #
+        # The combined case is what this guards. With every feature flag rolled
+        # back AND a configured store unreachable, the old test only asked
+        # `any_enabled()` and degraded -- which would skip canonical source
+        # invalidation and recap cleanup on delete, and let `_read_session_recap`
+        # serve a local file without binding it to a canonical source revision.
+        # Rolled-back flags say nothing about whether canonical rows exist; only
+        # the absence of a store does.
+        #
+        # The check also stays AFTER the resolution attempt, not before it:
+        # `resolved_memory_flags_for_owner` forces candidate_ledger_read and
+        # canonical_pool_read True for a governed owner regardless of the
+        # environment, so canonical management stays routed to the ledger even
+        # when recall is off. Short-circuiting on the environment first stripped
+        # that from every governed owner.
+        if (store is None
+                and not memory_governance_store_configured(environ)
+                and not memory_feature_flags(environ).any_enabled()):
             return MemoryFeatureFlags()
         raise
 

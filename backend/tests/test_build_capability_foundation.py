@@ -319,6 +319,14 @@ def test_ordinary_builder_construction_has_zero_dq_startup_validation(
     class _Agent:
         recursion_limit = 0
 
+        def with_config(self, config):
+            # `_create_builder_agent` pins the compiled agent's config before
+            # handing it to the tracing wrapper. The stub predates that and had
+            # no `with_config`, so construction raised AttributeError before
+            # reaching the assertion this test is actually about.
+            self.config = config
+            return self
+
     monkeypatch.delenv("SOPHIA_DECK_QUALITY_OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("SOPHIA_BUILDER_EVENTS_HMAC_SECRET", raising=False)
     monkeypatch.setattr(builder_agent, "get_app_config", lambda: config)

@@ -246,19 +246,251 @@ def test_ordinary_flags_keep_the_governed_ledger_override_with_env_off(monkeypat
     assert flags == resolved_memory_flags_for_owner("governed-pilot-owner")
 
 
-def test_ordinary_flags_degrade_only_when_mem00_is_off_everywhere(monkeypatch):
-    """With MEM00 entirely off there is no store to require; with it on, an
-    outage still raises rather than reading as "this owner has no memory"."""
-    from deerflow.sophia.memory_governance.owner_authority import ordinary_path_memory_flags_for_owner
-    from deerflow.sophia.memory_governance.store import MemoryGovernanceUnavailable
-
+def _roll_back_every_flag(monkeypatch):
     for name in ("CANDIDATE_LEDGER_WRITE", "CANDIDATE_LEDGER_READ", "CANONICAL_POOL_READ",
                  "PROVIDER_PROJECTION", "GOVERNED_RUNTIME_READ", "COHORT_PRINCIPALS"):
         monkeypatch.delenv("SOPHIA_MEMORY_" + name, raising=False)
-    _use(monkeypatch, _DownStore())
-    assert ordinary_path_memory_flags_for_owner("anyone").candidate_ledger_write is False
 
+
+def test_rolled_back_flags_plus_an_outage_must_not_degrade(monkeypatch):
+    """The combined case. This test previously asserted the opposite.
+
+    It read: with every feature flag off, an unreachable store yields all-off
+    flags. That was wrong, and it was wrong in the direction that loses data
+    integrity rather than availability. Rolled-back flags say nothing about
+    whether canonical rows exist -- the rows outlive the flag that produced
+    them -- so degrading here would skip canonical source invalidation and
+    recap cleanup on delete, and would let a local recap be served without
+    binding it to a canonical source revision.
+
+    Only two things may select all-off flags now: a definite
+    MemoryOwnerUndeclared, or a deployment with no governance store at all.
+    """
+    from deerflow.sophia.memory_governance.owner_authority import ordinary_path_memory_flags_for_owner
+    from deerflow.sophia.memory_governance.store import MemoryGovernanceUnavailable
+
+    _roll_back_every_flag(monkeypatch)
+    monkeypatch.setenv("SUPABASE_URL", "https://synthetic.invalid")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "synthetic")
+    _use(monkeypatch, _DownStore())
+    with pytest.raises(MemoryGovernanceUnavailable):
+        ordinary_path_memory_flags_for_owner("anyone")
+
+    # ... and the same with the flags back on, which always raised.
     for key, value in PILOT_ENV.items():
         monkeypatch.setenv(key, value)
     with pytest.raises(MemoryGovernanceUnavailable):
         ordinary_path_memory_flags_for_owner("anyone")
+
+
+def test_a_deployment_with_no_store_at_all_still_degrades(monkeypatch):
+    """"There is no MEM00 here" is definite, and network-free.
+
+    It is the pre-MEM00 product, not an outage: the credentials the store
+    constructor requires are simply absent, so no canonical row can exist to
+    invalidate and nothing is being skipped.
+    """
+    from deerflow.sophia.memory_governance.owner_authority import ordinary_path_memory_flags_for_owner
+
+    _roll_back_every_flag(monkeypatch)
+    monkeypatch.delenv("SUPABASE_URL", raising=False)
+    monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
+    _use(monkeypatch, _DownStore())
+    assert ordinary_path_memory_flags_for_owner("anyone").candidate_ledger_write is False
+
+
+def test_the_store_configured_predicate_touches_nothing(monkeypatch):
+    """It must answer from settings alone, never by trying to reach the store."""
+    from deerflow.sophia.memory_governance.store import memory_governance_store_configured
+
+    monkeypatch.setenv("SUPABASE_URL", "https://synthetic.invalid")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "synthetic")
+    assert memory_governance_store_configured() is True
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "   ")
+    assert memory_governance_store_configured() is False
+    monkeypatch.delenv("SUPABASE_URL")
+    assert memory_governance_store_configured() is False
+    assert memory_governance_store_configured({"SUPABASE_URL": "u", "SUPABASE_SERVICE_ROLE_KEY": "k"}) is True
+
+
+# --- what the combined case actually protects --------------------------------
+#
+# The flags helper above is only a helper. These exercise the two behaviours a
+# wrong answer there would have produced.
+
+
+@pytest.fixture
+def recaps(monkeypatch, tmp_path):
+    """A real on-disk recap directory, wired into the gateway's helpers."""
+    from app.gateway.routers import sophia as router
+
+    users = tmp_path / "users"
+    users.mkdir()
+    monkeypatch.setattr(router, "USERS_DIR", users)
+    monkeypatch.setenv("SUPABASE_URL", "https://synthetic.invalid")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "synthetic")
+    monkeypatch.setenv("SOPHIA_MEMORY_REFERENCE_HMAC_SECRET", "synthetic-runtime-key-" * 3)
+    return SimpleNamespace(router=router, users=users)
+
+
+def test_a_rolled_back_outage_never_serves_an_unvalidated_local_recap(pilot_env, monkeypatch, recaps):
+    """The read half of the combined case.
+
+    With a definitely-undeclared owner the local file IS the recap and is served
+    as-is -- there is no canonical source to bind it to. With the store merely
+    unreachable, the same file must not be served, because whether a canonical
+    binding exists is exactly what could not be determined.
+    """
+    _use(monkeypatch, _StubStore("unknown"))
+    recaps.router._write_session_recap("ordinary-production-user", "synthetic-session",
+                                       {"session_id": "synthetic-session", "turn_count": 3})
+    assert recaps.router._read_session_recap("ordinary-production-user", "synthetic-session") is not None
+
+    _roll_back_every_flag(monkeypatch)
+    _use(monkeypatch, _DownStore())
+    assert recaps.router._read_session_recap("ordinary-production-user", "synthetic-session") is None
+
+
+def test_a_rolled_back_outage_refuses_the_delete_rather_than_skipping_invalidation(pilot_env, monkeypatch):
+    """The deletion half. Canonical rows outlive the flag that produced them."""
+    from fastapi import HTTPException
+
+    from app.gateway.routers import sessions as router
+
+    invalidations = []
+    monkeypatch.setattr(
+        "deerflow.sophia.memory_governance.service.CanonicalMemoryService",
+        lambda **kwargs: SimpleNamespace(
+            invalidate_source_session=lambda **inner: invalidations.append(inner)))
+
+    record = SimpleNamespace(session_id="synthetic-session", message_revision=1)
+    _roll_back_every_flag(monkeypatch)
+    monkeypatch.setenv("SUPABASE_URL", "https://synthetic.invalid")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "synthetic")
+    _use(monkeypatch, _DownStore())
+    with pytest.raises(Exception) as raised:
+        router._invalidate_memory_source_before_delete("ordinary-production-user", record)
+    assert not isinstance(raised.value, HTTPException), "this must not become a silent skip"
+    assert invalidations == [], "nothing was invalidated, and the delete did not proceed"
+
+    # A definitely-undeclared owner has no canonical source, so there is genuinely
+    # nothing to fence and the delete proceeds.
+    _use(monkeypatch, _StubStore("unknown"))
+    assert router._invalidate_memory_source_before_delete("ordinary-production-user", record) is None
+    assert invalidations == []
+
+
+# --- ordinary recap cleanup: create -> delete -> read/retry -------------------
+
+
+def test_ordinary_recap_is_created_deleted_and_stays_deleted(pilot_env, monkeypatch, recaps):
+    """An undeclared owner's recap must not survive the session's deletion.
+
+    `_write_session_recap` works for these owners now, so they have a local
+    recap; the cleanup helper used to delete one only when `canonical_pool_read`
+    was true, which is never true for them. The file would have outlived the
+    session it was derived from.
+    """
+    from app.gateway.routers import sessions as sessions_router
+
+    _use(monkeypatch, _StubStore("unknown"))
+    recaps.router._write_session_recap("ordinary-production-user", "synthetic-session",
+                                       {"session_id": "synthetic-session", "turn_count": 3})
+    path = recaps.router._get_session_recap_path("ordinary-production-user", "synthetic-session")
+    assert path.exists()
+
+    sessions_router._cleanup_memory_session_recap("ordinary-production-user", "synthetic-session")
+    assert not path.exists()
+    assert recaps.router._read_session_recap("ordinary-production-user", "synthetic-session") is None
+
+    # Retry after the file is already gone: idempotent, not an error.
+    sessions_router._cleanup_memory_session_recap("ordinary-production-user", "synthetic-session")
+    assert recaps.router._read_session_recap("ordinary-production-user", "synthetic-session") is None
+
+
+def test_governed_recap_cleanup_keeps_its_receipt(pilot_env, monkeypatch, recaps):
+    """The governed branch is unchanged: file removed AND the receipt emitted."""
+    from app.gateway.routers import sessions as sessions_router
+
+    events = []
+    monkeypatch.setattr("deerflow.sophia.memory_governance.observability.emit_memory_event",
+                        lambda name, **fields: events.append(name))
+    _use(monkeypatch, _StubStore("governed"))
+    path = recaps.router._get_session_recap_path("governed-pilot-owner", "synthetic-session")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{}", encoding="utf-8")
+
+    sessions_router._cleanup_memory_session_recap("governed-pilot-owner", "synthetic-session")
+    assert not path.exists()
+    assert events == ["memory.session.recap_cleanup"]
+
+
+def test_recap_cleanup_still_503s_on_an_outage(pilot_env, monkeypatch, recaps):
+    from fastapi import HTTPException
+
+    from app.gateway.routers import sessions as sessions_router
+
+    _use(monkeypatch, _DownStore())
+    with pytest.raises(HTTPException) as raised:
+        sessions_router._cleanup_memory_session_recap("ordinary-production-user", "synthetic-session")
+    assert raised.value.status_code == 503
+
+
+# --- the synthetic Builder exception, and its limits -------------------------
+
+
+def test_a_complete_synthetic_admission_does_not_need_a_legacy_declaration(pilot_env, monkeypatch):
+    """MEM00 refuses to declare the Voice Lab principal, on purpose.
+
+    `require_legacy_memory_lane` in the ordinary Builder dispatch therefore
+    refused every synthetic run, withdrawing Voice Lab's own Builder path. A
+    complete synthetic admission is exempt because
+    `synthetic_builder_projection` marks those runs memory_retrieval_excluded
+    and memory_learning_excluded -- the unversioned lane the gate protects is
+    structurally absent from them.
+
+    The exemption is the COMPLETE admission, not the word "synthetic": an
+    incomplete one is still refused, and an ordinary undeclared owner still
+    gets no Builder.
+    """
+    from deerflow.sophia.memory_governance.owner_authority import require_legacy_memory_lane
+    from deerflow.sophia.memory_governance.store import MemoryGovernanceUnavailable
+    from deerflow.sophia.synthetic_builder import (
+        SyntheticBuilderContextError,
+        normalize_synthetic_builder_context,
+        synthetic_builder_projection,
+    )
+
+    _use(monkeypatch, _StubStore("unknown"))
+    # Unchanged: an ordinary undeclared owner has no legacy lane.
+    with pytest.raises(MemoryGovernanceUnavailable):
+        require_legacy_memory_lane("ordinary-production-user")
+
+    # A bare claim is not an admission.
+    with pytest.raises(SyntheticBuilderContextError):
+        normalize_synthetic_builder_context({"synthetic": True}, require_complete=True)
+
+    # And a complete one carries the exclusions that make the exemption safe.
+    import hashlib
+    import uuid
+    from datetime import timedelta
+
+    anchor = datetime.now(UTC).replace(microsecond=0)
+    admission = {
+        "synthetic": True, "test_run_id": "voice-lab-run-1", "principal_id": "voice-lab-test",
+        "scenario_id": "builder-presentation", "scenario_version": "1.0", "environment": "production",
+        "cleanup_obligation_id": str(uuid.UUID(
+            hex=hashlib.sha256(b"voice-lab-run-1").hexdigest()[:32], version=4)),
+        "provider_expires_at": (anchor + timedelta(minutes=30)).isoformat(
+            timespec="milliseconds").replace("+00:00", "Z"),
+        "retention_hours": 1, "retention_anchor": "builder_task_created_at_provisional",
+        "retention_anchor_at": anchor.isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+        "retention_expires_at": (anchor + timedelta(hours=1)).isoformat(
+            timespec="milliseconds").replace("+00:00", "Z"),
+        "deployment_identity": {"frontend_deployment_id": "f-1", "voice_deployment_id": "v-1"},
+    }
+    context = normalize_synthetic_builder_context(admission, require_complete=True)
+    assert context["isolation_status"] == "isolated"
+    projection = synthetic_builder_projection(context)
+    assert projection["memory_retrieval_excluded"] is True
+    assert projection["memory_learning_excluded"] is True

@@ -2,6 +2,163 @@
 
 Successful target: MEMORY_TEXT_PILOT_READY. Current status: IMPLEMENTING — RELEASE CLOSURE; not deployed, not activated. C2 replaces the prior PROMOTE-only/five-core-run prerequisites for this owner-restricted pilot. Historical C1 records and failures remain valid history, not additional first-use gates. Recovered cumulative failure counter: latest failed iteration EI929; last reported five-failure checkpoint 923–927; next five-failure checkpoint 932. The single current authority is the checkpoint immediately below; every later dated paragraph is preserved history, not competing current status.
 
+## Rollback/outage, the no-memory proof, and the lane tightening — 2026-09-18
+
+### The combined case the helper got wrong
+
+`ordinary_path_memory_flags_for_owner` still returned all-off flags after
+`MemoryGovernanceUnavailable` whenever every feature flag happened to be off.
+Flags rolled back **and** the store unreachable is the combined case, and it
+landed there: canonical source invalidation and recap cleanup would be skipped
+on delete, and `_read_session_recap` would serve a local file without binding it
+to a canonical source revision. Rolled-back flags say nothing about whether
+canonical rows exist — the rows outlive the flag that produced them.
+
+Only two things may select all-off flags now:
+
+| selector | why it is definite |
+| --- | --- |
+| `MemoryOwnerUndeclared` | the store answered, the schema was current, the owner is not enrolled |
+| `memory_governance_store_configured()` is false | the credentials the store constructor requires are absent; network-free, and never true of an outage |
+
+`memory_governance_store_configured` is new and reads only `SUPABASE_URL` and
+`SUPABASE_SERVICE_ROLE_KEY`. The test that asserted the old degradation is
+replaced by one asserting the opposite, plus two regressions on what it actually
+protects: the unvalidated recap read, and the skipped invalidation on delete.
+
+### A bug this campaign introduced, and the create → delete → read it needed
+
+Making `_write_session_recap` work for undeclared owners gave them a local recap
+file. `_cleanup_memory_session_recap` deleted one only when `canonical_pool_read`
+was true, which is never true for them — so the transcript-derived file outlived
+the session it came from. That is the delete failing to delete, not a governance
+nuance. The delete is now unconditional; only the governed *receipt* stays
+conditional, because it is about a canonical parent these owners do not have.
+Covered create → delete → read → retry, plus the governed receipt and the 503.
+
+### The no-memory proof through the full companion factory
+
+The compiled test built three middlewares. Production builds thirty, and it is
+those that put text into `system_prompt_blocks` and into the messages. So the
+governed turn is now real — produced by the existing instrument in
+`test_mem00_c2_text_context` — and the turn after it runs the same production
+factory with the real `GovernedChatAnthropic` and its final-admission transport
+while the store answers "undeclared" for that owner.
+
+Turn 1 recalls approved memory, its reply quotes it, and the checkpoint retains
+it. Turn 2 arrives with clean current input. **No request is made at all**: the
+retained context carries a memory seal that cannot be verified for an owner with
+no authority, which is the same retained-context denial the governed path
+already applies. The test asserts the *reason*, not just the outcome, so it
+cannot pass the way the earlier dispatch test did.
+
+Two things it deliberately does not claim. The retained reply stays in the
+thread's own history — the user was shown it at the time, in their own
+conversation; the claim is about what crosses to the provider. And an undeclared
+owner's ordinary unsealed history is not wiped, which a content-inspecting fix
+would have caused.
+
+### Receiving authentication, tightened before install
+
+| was | now |
+| --- | --- |
+| maintenance filter matched `synthetic: true` | matches a **server-issued** `MAINTENANCE_KEY` |
+| any caller could write `synthetic: true` | the declaration must be a complete synthetic admission (`normalize_synthetic_builder_context`, `require_complete=True`) naming **this deployment's configured** Voice Lab principal; anything else is denied, not downgraded |
+| dispatch lane constrained by thread marker only | one graph (by name or resolved assistant id), no command, no webhook, no interrupts, `enqueue` only, no borrowed owner, reserved provenance carriers nulled |
+| — | all three lane labels are refused from a client, like `OWNER_KEY` |
+
+Exercised through the installed disposable runtime — the real policy loaded via
+`LANGGRAPH_AUTH`, `langgraph_runtime_inmem` ops, `socket.connect` replaced so a
+network call is an assertion failure — in
+`test_mem00_langgraph_lane_runtime.py`: the three ways of trying to
+self-elect into the maintenance lane, legitimate cleanup end to end, the
+dispatch surface, and the Voice Lab refusal.
+
+Starting a run resolves its assistant first, so the dispatch lane reaches
+`system_assistants`; it is allowed there and gets the same system-assistant
+answer everyone else does. Retention maintenance is not, because it never starts
+a run.
+
+### The §4c measurement, taken
+
+The coordination record said the Voice Lab creation question was reasoned about
+rather than measured. It is now measured, in that runtime:
+
+- parent run owned by an **ordinary** owner, admission naming the configured test
+  principal → thread created and labelled;
+- parent run owned by **the test principal itself** → **denied, 403**.
+
+So if a Voice Lab test runs its companion turn as that principal, installing
+this policy denies its Builder thread. That is question 5 for the Voice owner,
+now with a number rather than an inference.
+
+### Remaining failure clusters
+
+| cluster | was | now | how |
+| --- | --- | --- | --- |
+| `test_gateway_sophia.py` | 47 | 0 | one explicit legacy declaration, plus two genuinely stale tests |
+| `test_mem0_client.py` | 22 | 0 | explicit legacy/governed declarations |
+| `test_extraction.py` | 22 | 0 | explicit legacy declaration |
+| `test_sophia_middlewares.py` | 13 | 0 | explicit legacy declarations, one corrected assertion |
+| the remaining 11 | 11 | 0 | see below |
+
+**The suite is now 2 failed / 7,208 passed, and both failures are the shared
+baseline's own** (`test_local_sandbox_encoding.py`, which fails identically at
+`8c5cf538`). The pilot accounts for **zero** failures beyond the line it merges
+into, down from 117 at `5594e0da`.
+
+The declarations are opt-in and per-file, name their owners, and are justified in
+each fixture's docstring: every one of those files is *about* the legacy lane —
+`add_memories` refuses a governed owner by design, `extract_session_memories`
+calls `require_legacy_memory_lane`, and identity-file injection is the
+unversioned lane. Nothing is declared globally; an owner not named is still
+undeclared and still gets no lane. `voice-lab-user-1` is deliberately left
+undeclared.
+
+Two were not fixture gaps at all. `TestJournal`'s canonical tests mocked
+`list_pool(include_forgotten=...)`, which the service replaced with
+`pool_view(view=...)`, and `TestCreateMemory` mocked a pool listing where the
+route now returns `command_result`. In both cases the mock satisfied the old
+call and then failed serialization, so the endpoint answered 503 and the
+assertions never ran. Updated to the current API rather than deleted — the
+behaviour they pin is still the contract.
+
+Two further sites of the non-cohort class turned up while finishing them, both
+found by a failing test rather than by reading:
+
+- `routers/sophia.py` `_queue_offline_pipeline` — background finalization for
+  **every** ended session, raising for an undeclared owner. Repaired with the
+  ordinary helper.
+A third looked like one and was not. `routers/memory.py`
+`_reject_when_mem00_owns_sophia_memory` answers 503 for an undeclared owner, and
+that was changed to a pass-through before
+`test_mem00_owner_authority_entrypoints.py` named the contract it breaks:
+`/api/memory` must resolve durable authority *before touching files*, and is a
+dedicated memory endpoint, which stays protected. The change was reverted and
+the failing route-isolation test declares its owner instead. Recorded because
+the wrong version was written first.
+
+And one genuine cross-owner regression this campaign had introduced.
+`start_builder_task` required `require_legacy_memory_lane` outside a governed
+run, which refused every **Voice Lab synthetic Builder** dispatch — MEM00
+deliberately will not declare that principal, so the gate refused a run it could
+never satisfy. A complete synthetic admission is now exempt, and the exemption
+is safe for a structural reason rather than a stated one:
+`synthetic_builder_projection` marks those runs `memory_retrieval_excluded` and
+`memory_learning_excluded`, so the unversioned lane the gate protects is absent
+from them. An incomplete declaration is still refused and is never downgraded to
+an ordinary dispatch; an ordinary undeclared owner still gets no Builder, which
+remains an open non-cohort question rather than something changed here.
+
+`test_build_capability_foundation`'s agent stub had no `with_config`, which
+`_create_builder_agent` now calls — a stale stub, unrelated to MEM00.
+
+One assertion was corrected rather than satisfied:
+`test_voice_warmup_user_skips_search` expected `None`. `__voice_warmup__` is a
+synthetic internal id, not an account, so it is undeclared and the middleware
+clears the memory channels instead. Nothing is recalled either way; the test now
+pins the cleared shape and keeps `assert_not_called` as its load-bearing claim.
+
 ## Receiving authentication and the four callers — 2026-09-18
 
 Built, tested, **not installed**. `backend/langgraph.json` still has no `auth`
