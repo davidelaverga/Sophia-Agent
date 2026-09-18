@@ -1,6 +1,83 @@
 # MEM00-C2 text pilot — current release record
 
-Successful target: MEMORY_TEXT_PILOT_READY. Current status: IMPLEMENTING — RELEASE CLOSURE (third slice); authentication installed in the tree, not deployed, not activated. C2 replaces the prior PROMOTE-only/five-core-run prerequisites for this owner-restricted pilot. Historical C1 records and failures remain valid history, not additional first-use gates. Recovered cumulative failure counter: latest failed iteration EI929; last reported five-failure checkpoint 923–927; next five-failure checkpoint 932. The single current authority is the checkpoint immediately below; every later dated paragraph is preserved history, not competing current status.
+Successful target: MEMORY_TEXT_PILOT_READY. Current status: DEPLOYING — the Gateway runs 91a8007b; LangGraph, Voice and the frontend do not. Authentication is installed in the tree and not yet live. Not activated. C2 replaces the prior PROMOTE-only/five-core-run prerequisites for this owner-restricted pilot. Historical C1 records and failures remain valid history, not additional first-use gates. Recovered cumulative failure counter: latest failed iteration EI929; last reported five-failure checkpoint 923–927; next five-failure checkpoint 932. The single current authority is the checkpoint immediately below; every later dated paragraph is preserved history, not competing current status.
+
+## DEPLOYED — `sophia-gateway` at `91a8007b`, 2026-09-18
+
+The first production-changing operation of this release. Performed by the owner
+in the Render dashboard after the session's permission classifier refused the
+action; this record is the verification, not the action.
+
+| field | value |
+| --- | --- |
+| target | `sophia-gateway`, `srv-d7be5s9r0fns7397l4g0` |
+| from → to | `8c5cf538` → **`91a8007b`** |
+| trigger | Manual, exact-commit | 
+| duration | 2m00s, succeeded |
+| recovery | redeploy `8c5cf538`, unchanged and available |
+
+### Why the Gateway went first, and what the original plan got wrong
+
+The operation first presented was **LangGraph**, and it would have broken
+production. `backend/packages/harness/deerflow/sophia/langgraph_client_auth.py`
+**does not exist at `8c5cf538`**, so the Gateway that was running minted no
+credentials at all. Installing receiving authentication on LangGraph first would
+have returned 401 to every Gateway→LangGraph call, and at `8c5cf538` those are
+`routers/artifacts.py`, `routers/builder_canvas.py` (four sites),
+`routers/builder_events.py`, `workers/companion_wakeup.py` and
+`workers/deck_quality_dispatcher.py` — the core Builder and artifact paths, not
+only Voice Lab cleanup.
+
+This is what 4.5 item 2 of the release sequence already said ("Gateway before
+LangGraph"), stated there as an ordering rule without its consequence. The
+consequence is the reason.
+
+New Gateway against old LangGraph is the safe direction: at the pilot head **no
+Gateway call site uses the raw SDK** — every one goes through the minting
+wrapper — and an uninstalled server ignores the minted header.
+
+### Verification, measured
+
+`GET https://sophia-gateway.onrender.com/ready`:
+
+```json
+{"status":"ready",
+ "commit_sha":"91a8007be1e2c6ac6964cf8a936c5e29a7ca5e71",
+ "voice_lab_enabled":false,"voice_lab_kill_switch_engaged":true,
+ "memory_contract_schema":"mem00.v1","memory_supported_contract_epoch":1,
+ "voice_lab_retention_reaper":{"status":"ready","running":true,
+   "last_cycle":{"lease_acquired":true,"discovered":1,"pending":1,
+     "accepted_historical_pending":1,"blocking_pending":0,
+     "discovery_failed":false,"processing_failed":0}}}
+```
+
+- The running commit is the exact SHA deployed.
+- Voice Lab remains disabled with the kill switch engaged — unchanged, as required.
+- **The retention reaper completed a cycle after the deploy**, acquiring its
+  lease with `discovery_failed: false` and `processing_failed: 0`. It is one of
+  the four migrated callers, so this is direct evidence that entering a service
+  lane and minting a credential does not break against an unauthenticated
+  LangGraph. Its one pending item is the accepted historical obligation, not
+  blocking.
+
+Service logs: **no** `LangGraphServiceAuthError`, no traceback, no 401, no
+startup failure. Honest limit on that: the visible log window covered roughly a
+minute of health checks. Absence of errors there is weaker than it looks, and
+the stronger check — a real Builder dispatch through `builder_canvas` and
+`builder_events` — needs product traffic and has not been run.
+
+### Live pins after this deploy
+
+| component | commit |
+| --- | --- |
+| `sophia-gateway` | **`91a8007b`** |
+| `sophia-langgraph` | `35c6467c` |
+| `sophia-voice` | `35c6467c` (unchanged by design) |
+| frontend | `35c6467c` |
+
+The split did not close, it changed shape: the Gateway is now ahead, on the
+pilot line, and the other three are behind. That is the intended intermediate
+state, and it is the safe direction of the two.
 
 ## Release closure, third slice — 2026-09-18
 
