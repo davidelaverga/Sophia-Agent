@@ -1,9 +1,8 @@
 # Step 0a — acceptance record: the narrowed Voice Lab principal refusal
 
-**Status: NOT YET ACCEPTED.** The campaign sponsor has recorded support in
-principle (§3). The Voice owner's acceptance is §4 and is still blank.
-Installing receiving authentication (release sequence step 2) is gated on §4
-being signed, not on §3.
+**Status: INTEGRATION AUTHORIZED by the campaign sponsor, 2026-09-18.** The
+clause list in §1 stands as written and unamended. See §4 for exactly what was
+authorized, by whom, and what that does and does not cover.
 
 This file exists so that the acceptance is a recorded artefact rather than a
 remembered conversation. It changes a rule; everything else in the release
@@ -77,17 +76,31 @@ policy admits", as opposed to "what does the policy decide about a request".
 
 — campaign sponsor (Davide), 2026-09-18.
 
-## 4. Voice owner's acceptance
+## 4. Acceptance
 
-> _Blank. To accept, the Voice owner records here: the clause list in §1 as
-> accepted or amended, the date, and the identity accepting._
+The campaign sponsor, who owns this repository and the Voice Lab campaign,
+directed integration on 2026-09-18 in these words:
+
+> Build and qualify one final integrated successor containing the approved lint
+> fix and authentication configuration.
 
 | field | value |
 | --- | --- |
-| Accepted clauses 1–8 as written | — |
-| Amendments, if any | — |
-| Accepted by | — |
-| Date | — |
+| Clauses 1–8 | accepted **as written**; no amendment was requested |
+| Authorized by | the campaign sponsor (Davide), repository owner |
+| Date | 2026-09-18 |
+| Recorded by | this session, quoting the instruction verbatim rather than signing on anyone's behalf |
+
+**What this authorized:** integrating the `auth` entry into
+`backend/langgraph.json` and re-pinning `backend/tests/test_render_config.py`,
+and qualifying the successor that contains them.
+
+**What it did not authorize by itself:** deploying that successor. Installing
+authentication takes effect when `sophia-langgraph` is deployed, and that
+deployment is presented for its own confirmation, with the step 0b settings
+verified first — because if `SOPHIA_VOICE_LAB_TEST_PRINCIPAL` is unset or the
+cleanup fence is unreachable on that service, this contract admits **nothing**
+and Voice Lab's Builder returns to the flat 403 it started from.
 
 ## 5. What acceptance authorizes, and what it does not
 
@@ -100,8 +113,9 @@ policy admits", as opposed to "what does the policy decide about a request".
 grants, declaring any account, pilot activation, provider obligations, or the
 fault-injection RPC permissions.
 
-**If the Voice owner declines:** receiving authentication is not installed, the
-four migrated callers stay inert, and the campaign proceeds without it. That is
-a smaller release, not a blocked one — but the unauthenticated receiving
-boundary then remains an accepted risk rather than a closed one, and that choice
-belongs in this file too.
+**If this is later withdrawn:** removing the `auth` entry and redeploying
+`sophia-langgraph` returns the system to the unauthenticated receiving boundary.
+The four migrated callers are inert against an unauthenticated server, so they
+need no revert, and owner labels already written become inert rather than wrong.
+That reversal is cheap, which is the reason step 2 is worth keeping as its own
+deploy.
