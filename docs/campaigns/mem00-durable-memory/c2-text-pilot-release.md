@@ -4,6 +4,33 @@ Successful target: MEMORY_TEXT_PILOT_READY. Current status: IMPLEMENTING — REL
 
 ## Release-closure slice — 2026-09-18
 
+### Qualified integration successor — `1d5200bd`
+
+All measured with one method: the frozen Python 3.12 venv **with its `bin` on
+`PATH`, as `uv run` sets it**, `PYTHONPATH` pinned to each tree's own
+`packages/harness`, `pytest tests/ -q -p no:randomly`, and `ruff check .` from
+the backend root.
+
+| tree | SHA | `make test` | `make lint` |
+| --- | --- | --- | --- |
+| shared baseline | `8c5cf538` | 6,227 passed / **0 failed** | 22 errors |
+| shared baseline + lint fix | `9ed8bedf` | 6,227 passed / 0 failed | **0** |
+| pilot head | `5e3683b2` | 7,212 passed / **0 failed** | **0** |
+| **integration successor** | **`1d5200bd`** | **7,255 passed / 0 failed** | 22 errors |
+
+`1d5200bd` is `8c5cf538` merged with `5e3683b2`, published as
+`codex/mem00-c2-integration-r3`, superseding `82f8d584`. The earlier r2 branch is
+left where it is rather than rewritten.
+
+Both gates are now green except the 22 lint errors the merge inherits from the
+shared baseline, every one of them in the three Voice Lab files that
+`codex/voice-lab-lint-hygiene` fixes. With that branch merged first, the
+integration line is green on both.
+
+Unaffected evidence reused rather than re-measured: the EI930 schema repair and
+its 11/11 witnesses, the disposable-Postgres grant rehearsal, and the containment
+deploy observation. None of them is touched by this slice.
+
 ### CORRECTION: the shared baseline has no failing tests
 
 Earlier entries in this record report the shared baseline as *2 failed / 6,225
