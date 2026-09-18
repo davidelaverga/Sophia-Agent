@@ -96,7 +96,8 @@ def accept_browser_process_termination(claims: Any, record: Any, raw: object) ->
     from app.gateway.routers import sessions, voice
     from app.gateway.voice_lab_capability import assert_voice_lab_session_record
     from deerflow.sophia.cleanup_fence import (
-        cleanup_admissions, close_cleanup_provider_session,
+        cleanup_admissions,
+        close_cleanup_provider_session,
         verify_cleanup_provider_settlement_replay,
     )
 

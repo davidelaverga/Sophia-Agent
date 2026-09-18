@@ -7,15 +7,17 @@ from unittest.mock import Mock
 from urllib.parse import urlsplit, urlunsplit
 
 import pytest
-from deerflow.sophia import cleanup_fence
 from test_voice_lab_process_termination import bound, receipt_for  # noqa: F401
+
 from app.gateway import voice_lab_process_termination as process
+from deerflow.sophia import cleanup_fence
 
 
 @pytest.mark.skipif(os.getenv("SOPHIA_VOICE_LAB_PRODUCT_AUTH_FIXTURE_READY") != "YES",
     reason="requires migrated disposable product PostgreSQL")
-def test_process_termination_atomic_database_binding_and_owner_ack(bound, monkeypatch):
+def test_process_termination_atomic_database_binding_and_owner_ack(bound, monkeypatch):  # noqa: F811 - pytest fixture request
     import psycopg
+
     # The shared fixture mocks the public symbol; recover the real implementation
     # through the unmodified imported alias used by its local atomic regression.
     from test_voice_lab_process_termination import atomic_close
@@ -35,7 +37,9 @@ def test_process_termination_atomic_database_binding_and_owner_ack(bound, monkey
     retention = now + timedelta(hours=24)
     provider = now + timedelta(minutes=20)
     lease = now + timedelta(minutes=1)
-    text = lambda value: value.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    def text(value):
+        return value.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
     desired = kwargs["metadata"]["synthetic_voice_lab"]
     desired.update(cleanup_obligation_id=cleanup_id, cleanup_provider_admission_id=admission_id,
         retention_expires_at=text(retention), provider_expires_at=text(provider),
@@ -54,7 +58,13 @@ def test_process_termination_atomic_database_binding_and_owner_ack(bound, monkey
         resource_expires_at=provider, status="browser_active")
     with psycopg.connect(dsn) as db:
         db.execute("INSERT INTO public.sophia_voice_lab_cleanup_obligations (cleanup_obligation_id,lifecycle_phase,retention_expires_at,provider_expires_at) VALUES (%s,'session_provisional',%s,%s)", (cleanup_id,retention,provider))
-        db.execute("INSERT INTO public.sophia_voice_lab_cleanup_admissions (admission_id,cleanup_obligation_id,resource_kind,resource_id,status,lease_expires_at,resource_expires_at) VALUES (%s,%s,'provider','provider-test','browser_active',%s,%s)", (admission_id,cleanup_id,lease,provider))
+        db.execute(
+            "INSERT INTO public.sophia_voice_lab_cleanup_admissions"
+            " (admission_id,cleanup_obligation_id,resource_kind,resource_id,status,"
+            "lease_expires_at,resource_expires_at)"
+            " VALUES (%s,%s,'provider','provider-test','browser_active',%s,%s)",
+            (admission_id, cleanup_id, lease, provider),
+        )
         # Seed the already-created session as the fixture owner; restore every
         # trigger before exercising the restricted runtime atomic transition.
         db.execute("SET LOCAL session_replication_role = replica")
