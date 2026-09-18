@@ -88,13 +88,31 @@ for them, so no legacy memory is reused either.
 In every one of these, a store outage still raises. Unavailability never becomes
 undeclared status, and never becomes a successful empty answer.
 
-### Results
+### Results — qualified integration SHA
 
-| tree | `pytest tests/` |
-| --- | --- |
-| shared baseline `8c5cf538` | 2 failed / 6,225 passed |
-| pilot head before this slice (`5594e0da`) | 119 failed |
-| this slice | **115 failed / 7,039 passed** |
+All three measured today with one method: the frozen Python 3.12 venv,
+`PYTHONPATH` pinned to each tree's own `packages/harness` so no run borrows
+another tree's code, `pytest tests/ -q -p no:randomly`.
+
+| tree | SHA | `pytest tests/` |
+| --- | --- | --- |
+| shared baseline | `8c5cf538` | 2 failed / 6,225 passed |
+| pilot head | `6c093531` | 115 failed / 7,039 passed |
+| **integration candidate** | **`ba8bf8c1`** | **115 failed / 7,084 passed** |
+
+`ba8bf8c1` is `8c5cf538` merged with `6c093531`. Two comment-only conflicts
+(`store.py` retention comment, two blank lines in
+`test_memory_governance_worker_expiry_backoff.py`); the shared baseline's
+wording was kept for the first.
+
+The merge introduces **no** failure the pilot does not already have: the failure
+distribution is identical across `6c093531` and `ba8bf8c1`, file for file. The
+baseline's own 2 (`test_local_sandbox_encoding.py`) are inside the 115, so the
+pilot accounts for **113**, down from 117 at `5594e0da`.
+
+The previous integration branch `codex/mem00-c2-integration-r1` merged against
+`2deb762a`, which predates PR #145; `ba8bf8c1` is on
+`codex/mem00-c2-integration-r2` and merges against the current shared baseline.
 
 Affected-path files, all green: `test_mem00_noncohort_model_entry.py` (16),
 `test_mem00_noncohort_owner_paths.py` (10), `test_mem00_noncohort_ordinary_routes.py`
