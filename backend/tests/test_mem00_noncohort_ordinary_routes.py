@@ -387,125 +387,6 @@ def test_the_declared_local_case_still_degrades(monkeypatch):
     assert ordinary_path_memory_flags_for_owner("anyone").candidate_ledger_write is False
 
 
-# --- realtime context: neutral, not a fall-through --------------------------
-
-
-@pytest.fixture
-def realtime(monkeypatch, tmp_path):
-    """A user whose identity.md and handoff file both exist on disk."""
-    from app.gateway import sophia_realtime_context as module
-
-    users = tmp_path / "users"
-    for owner in ("ordinary-production-user", "declared-legacy-user", "governed-pilot-owner"):
-        (users / owner / "handoffs").mkdir(parents=True)
-        (users / owner / "identity.md").write_text("PRIVATE_IDENTITY_TEXT", encoding="utf-8")
-        (users / owner / "handoffs" / "latest.md").write_text("PRIVATE_HANDOFF_TEXT", encoding="utf-8")
-    monkeypatch.setattr(module, "USERS_DIR", users)
-    monkeypatch.setattr(module, "memory_provider_status",
-                        lambda: {"available": False, "provider_reason": "missing_api_key"})
-    return module
-
-
-def test_realtime_context_for_an_undeclared_owner_is_neutral(pilot_env, monkeypatch, realtime):
-    """Not an outage, and not the legacy lane either."""
-    _use(monkeypatch, _StubStore("unknown"))
-    result = realtime.build_sophia_realtime_context(user_id="ordinary-production-user")
-    payload = result.model_dump_json()
-    # The unversioned identity/handoff lane belongs to a DECLARED legacy owner.
-    assert "PRIVATE_IDENTITY_TEXT" not in payload
-    assert "PRIVATE_HANDOFF_TEXT" not in payload
-    assert result.diagnostics["identity_file_status"] == "withheld_undeclared_owner"
-    assert result.diagnostics["handoff_file_status"] == "withheld_undeclared_owner"
-
-
-def test_realtime_context_for_a_declared_legacy_owner_is_unchanged(pilot_env, monkeypatch, realtime):
-    _use(monkeypatch, _StubStore("legacy"))
-    result = realtime.build_sophia_realtime_context(user_id="declared-legacy-user")
-    assert result.diagnostics["identity_file_status"] == "present"
-
-
-def test_realtime_context_for_a_contained_governed_owner_is_unchanged(pilot_env, monkeypatch, realtime):
-    _use(monkeypatch, _StubStore("governed"))
-    result = realtime.build_sophia_realtime_context(user_id="governed-pilot-owner")
-    payload = result.model_dump_json()
-    assert "PRIVATE_IDENTITY_TEXT" not in payload
-    assert result.diagnostics["identity_file_status"] == "quarantined_mem00"
-
-
-def test_realtime_context_still_fails_on_a_store_outage(pilot_env, monkeypatch, realtime):
-    from deerflow.sophia.memory_governance.store import MemoryGovernanceUnavailable
-
-    _use(monkeypatch, _DownStore())
-    with pytest.raises(MemoryGovernanceUnavailable):
-        realtime.build_sophia_realtime_context(user_id="ordinary-production-user")
-
-
-# --- the governed override must survive the ordinary helper ------------------
-
-
-def test_ordinary_flags_keep_the_governed_ledger_override_with_env_off(monkeypatch):
-    """A governed owner keeps ledger routing even with every env flag off.
-
-    `resolved_memory_flags_for_owner` forces `candidate_ledger_read` and
-    `canonical_pool_read` True for a governed owner regardless of the
-    environment -- canonical management stays routed to the ledger when recall
-    is off. An earlier version of `ordinary_path_memory_flags_for_owner`
-    short-circuited on `memory_feature_flags().any_enabled()` BEFORE resolving,
-    which stripped that from every governed owner in exactly the environment
-    the gateway tests run in. Ordering is the whole property here.
-    """
-    from deerflow.sophia.memory_governance.owner_authority import (
-        ordinary_path_memory_flags_for_owner,
-        resolved_memory_flags_for_owner,
-    )
-
-    for name in ("CANDIDATE_LEDGER_WRITE", "CANDIDATE_LEDGER_READ", "CANONICAL_POOL_READ",
-                 "PROVIDER_PROJECTION", "GOVERNED_RUNTIME_READ", "COHORT_PRINCIPALS"):
-        monkeypatch.delenv("SOPHIA_MEMORY_" + name, raising=False)
-    _use(monkeypatch, _StubStore("governed"))
-    flags = ordinary_path_memory_flags_for_owner("governed-pilot-owner")
-    assert flags.candidate_ledger_read is True
-    assert flags.canonical_pool_read is True
-    assert flags == resolved_memory_flags_for_owner("governed-pilot-owner")
-
-
-def _roll_back_every_flag(monkeypatch):
-    for name in ("CANDIDATE_LEDGER_WRITE", "CANDIDATE_LEDGER_READ", "CANONICAL_POOL_READ",
-                 "PROVIDER_PROJECTION", "GOVERNED_RUNTIME_READ", "COHORT_PRINCIPALS"):
-        monkeypatch.delenv("SOPHIA_MEMORY_" + name, raising=False)
-
-
-def test_rolled_back_flags_plus_an_outage_must_not_degrade(monkeypatch):
-    """The combined case. This test previously asserted the opposite.
-
-    It read: with every feature flag off, an unreachable store yields all-off
-    flags. That was wrong, and it was wrong in the direction that loses data
-    integrity rather than availability. Rolled-back flags say nothing about
-    whether canonical rows exist -- the rows outlive the flag that produced
-    them -- so degrading here would skip canonical source invalidation and
-    recap cleanup on delete, and would let a local recap be served without
-    binding it to a canonical source revision.
-
-    Only two things may select all-off flags now: a definite
-    MemoryOwnerUndeclared, or a deployment with no governance store at all.
-    """
-    from deerflow.sophia.memory_governance.owner_authority import ordinary_path_memory_flags_for_owner
-    from deerflow.sophia.memory_governance.store import MemoryGovernanceUnavailable
-
-    _roll_back_every_flag(monkeypatch)
-    monkeypatch.setenv("SUPABASE_URL", "https://synthetic.invalid")
-    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "synthetic")
-    _use(monkeypatch, _DownStore())
-    with pytest.raises(MemoryGovernanceUnavailable):
-        ordinary_path_memory_flags_for_owner("anyone")
-
-    # ... and the same with the flags back on, which always raised.
-    for key, value in PILOT_ENV.items():
-        monkeypatch.setenv(key, value)
-    with pytest.raises(MemoryGovernanceUnavailable):
-        ordinary_path_memory_flags_for_owner("anyone")
-
-
 # --- what the combined case actually protects --------------------------------
 #
 # The flags helper above is only a helper. These exercise the two behaviours a
@@ -706,6 +587,7 @@ def test_an_undeclared_owner_dispatches_the_builder_source_only(pilot_env, monke
     import asyncio
 
     from langchain_core.messages import HumanMessage
+    from test_start_builder_task import _make_fake_sdk_client, _make_runtime
 
     from deerflow.sophia.memory_governance.owner_authority import (
         owner_is_definitely_undeclared,
@@ -713,7 +595,6 @@ def test_an_undeclared_owner_dispatches_the_builder_source_only(pilot_env, monke
     )
     from deerflow.sophia.memory_governance.store import MemoryGovernanceUnavailable
     from deerflow.sophia.tools import start_builder_task as module
-    from test_start_builder_task import _make_fake_sdk_client, _make_runtime
 
     _use(monkeypatch, _StubStore("unknown"))
     assert owner_is_definitely_undeclared("ordinary-production-user") is True

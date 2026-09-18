@@ -99,6 +99,15 @@ more, so it was split: the governed half keeps the full "no legacy context or
 dispatch" assertion, and the undeclared half asserts dispatch **with** nothing
 memory-derived in it.
 
+### A duplicated test block, removed
+
+`ruff` caught seven `F811`s in this slice's own test file: an earlier splice had
+left a whole block — the realtime-context section and two flags tests —
+duplicated verbatim. Python keeps the last definition, so the first copies were
+dead code rather than shadowed coverage (the collected count is unchanged at 23
+either way), but it is exactly the kind of thing a passing suite does not
+report. Removed; `ruff check .` is clean and stays a gate for this reason.
+
 ### The shared baseline's lint, coordinated separately
 
 The 22 `ruff` errors are real and are the step that actually fails CI on the
