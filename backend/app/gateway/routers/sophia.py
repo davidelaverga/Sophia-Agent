@@ -144,6 +144,39 @@ def _memory_flags(user_id: str):
         raise HTTPException(status_code=503, detail=exc.reason) from None
 
 
+def _owner_has_no_extraction_lane(user_id: str) -> bool:
+    """True only for an owner with neither the ledger nor the provider lane."""
+    from deerflow.sophia.memory_governance.owner_authority import owner_is_definitely_undeclared
+
+    return owner_is_definitely_undeclared(user_id)
+
+
+def _ordinary_session_flags(user_id: str):
+    """`_memory_flags` for routes that are session management, not memory.
+
+    Ending a session and reading its recap are ordinary product surfaces that
+    worked before MEM00 existed and must keep working for someone outside the
+    pilot. They differ from the dedicated memory endpoints in exactly one way:
+    an owner who is merely *undeclared* resolves all-off flags and takes the
+    pre-MEM00 local path, instead of being told memory is unavailable for a
+    feature they were never using.
+
+    Everything else is unchanged and deliberately so. A store or transport
+    outage still raises and still becomes 503 -- unavailability never becomes
+    "undeclared", and it never becomes a successful empty answer. A governed
+    owner resolves exactly the same flags as before, so atomic finalization,
+    source invalidation and recap cleanup keep their existing requirements.
+    `_memory_flags` itself is untouched: the memory endpoints stay protected.
+    """
+    from deerflow.sophia.memory_governance.owner_authority import ordinary_path_memory_flags_for_owner
+    from deerflow.sophia.memory_governance.store import MemoryGovernanceUnavailable
+
+    try:
+        return ordinary_path_memory_flags_for_owner(user_id)
+    except MemoryGovernanceUnavailable as exc:
+        raise HTTPException(status_code=503, detail=exc.reason) from None
+
+
 def _canonical_memory_service(user_id: str):
     from deerflow.sophia.memory_governance.service import CanonicalMemoryService
 
@@ -845,10 +878,13 @@ def _recap_source_revision(user_id: str, session_id: str) -> tuple | None:
 
 
 def _read_session_recap(user_id: str, session_id: str) -> dict | None:
-    from deerflow.sophia.memory_governance.flags import memory_feature_flags_for_owner
+    from deerflow.sophia.memory_governance.owner_authority import ordinary_path_memory_flags_for_owner
 
     try:
-        governed = memory_feature_flags_for_owner(user_id).canonical_pool_read
+        # Ordinary flags: an undeclared owner has no canonical pool to bind the
+        # recap to, so the plain local file is the whole truth for them. The
+        # `except` below is unchanged, so a store outage still exposes nothing.
+        governed = ordinary_path_memory_flags_for_owner(user_id).canonical_pool_read
         before = _recap_source_revision(user_id, session_id) if governed else None
         if governed and before is None:
             return None
@@ -872,10 +908,10 @@ def _read_session_recap(user_id: str, session_id: str) -> dict | None:
 
 
 def _write_session_recap(user_id: str, session_id: str, payload: dict) -> None:
-    from deerflow.sophia.memory_governance.flags import memory_feature_flags_for_owner
+    from deerflow.sophia.memory_governance.owner_authority import ordinary_path_memory_flags_for_owner
 
     try:
-        governed = memory_feature_flags_for_owner(user_id).canonical_pool_read
+        governed = ordinary_path_memory_flags_for_owner(user_id).canonical_pool_read
         before = _recap_source_revision(user_id, session_id) if governed else None
         if governed and before is None:
             raise OSError("recap_source_unavailable")
@@ -1503,9 +1539,19 @@ def _build_session_recap_payload(
     ended_at: str,
     *,
     thread_id: str | None = None,
+    extraction_lane_open: bool = True,
 ) -> dict:
     recap_artifacts = body.recap_artifacts.model_dump(exclude_none=True) if body.recap_artifacts else None
     turn_count = body.turn_count if body.turn_count is not None else len(body.messages)
+    status = "ready" if recap_artifacts else "processing"
+    if not recap_artifacts and not extraction_lane_open:
+        # "processing" is an instruction to the recap page to keep waiting for
+        # extraction output. For an owner with no extraction lane at all -- no
+        # candidate ledger and no legacy provider write -- nothing is coming,
+        # and the page sat on a spinner forever. The ordinary session facts
+        # below are complete as they stand, so say so. An empty dict rather
+        # than None keeps the page's mapper from discarding the envelope.
+        status, recap_artifacts = "ready", {}
     return {
         "session_id": body.session_id,
         "thread_id": thread_id or body.thread_id,
@@ -1514,7 +1560,7 @@ def _build_session_recap_payload(
         "started_at": body.started_at,
         "ended_at": ended_at,
         "turn_count": turn_count,
-        "status": "ready" if recap_artifacts else "processing",
+        "status": status,
         "recap_artifacts": recap_artifacts,
     }
 
@@ -2615,7 +2661,7 @@ async def get_session_recap(user_id: str, session_id: str, response: Response,
     cursor: str | None = Query(default=None, max_length=512), page_size: int = Query(default=100, ge=1, le=200)) -> SessionRecapResponse:
     _validate_user(user_id)
     response.headers["Cache-Control"] = "no-store"
-    if _memory_flags(user_id).candidate_ledger_read:
+    if _ordinary_session_flags(user_id).candidate_ledger_read:
         from deerflow.sophia.memory_governance.review import read_review_envelope
 
         try:
@@ -3386,9 +3432,11 @@ async def end_session(
         if isinstance(recap_turn_count, int):
             has_new_messages = current_max_sequence > max(last_processed_sequence, recap_turn_count)
 
-    from deerflow.sophia.memory_governance.flags import memory_feature_flags_for_owner
+    from deerflow.sophia.memory_governance.owner_authority import ordinary_path_memory_flags_for_owner
 
-    atomic_memory_finalization = memory_feature_flags_for_owner(user_id).candidate_ledger_write
+    # Ending a session must work for everyone. A governed owner still takes the
+    # atomic finalization branch; an outage still raises and fails the request.
+    atomic_memory_finalization = ordinary_path_memory_flags_for_owner(user_id).candidate_ledger_write
     if isinstance(existing_recap, dict) and not has_new_messages and not atomic_memory_finalization:
         existing_ended_at = existing_recap.get("ended_at") if isinstance(existing_recap.get("ended_at"), str) else ended_at
         _mark_session_record_ended(user_id, body.session_id, existing_ended_at)
@@ -3421,6 +3469,10 @@ async def end_session(
             body,
             ended_at,
             thread_id=authoritative_thread_id,
+            # Exactly one question: does ANY extraction lane exist for this
+            # owner? A declared legacy owner still has the provider lane and a
+            # governed owner still has the ledger, so neither changes here.
+            extraction_lane_open=not _owner_has_no_extraction_lane(user_id),
         )
     )
     duration_minutes = _compute_duration_minutes(body.started_at, ended_at)

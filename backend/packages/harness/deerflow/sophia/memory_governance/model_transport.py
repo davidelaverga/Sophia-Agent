@@ -14,6 +14,7 @@ import httpx
 from .legacy_model_dispatch import LegacyModelDispatchAuthority
 from .model_dispatch import FinalModelDispatchAuthority
 from .model_observation import observe_model_transport
+from .no_memory_model_dispatch import NoMemoryModelDispatchAuthority
 from .store import MemoryGovernanceUnavailable
 
 
@@ -28,7 +29,7 @@ class FinalModelTransport(httpx.BaseTransport):
         entered = False
         try:
             authority = self.authority_factory(request)
-            if not isinstance(authority, (FinalModelDispatchAuthority, LegacyModelDispatchAuthority)):
+            if not isinstance(authority, (FinalModelDispatchAuthority, LegacyModelDispatchAuthority, NoMemoryModelDispatchAuthority)):
                 raise MemoryGovernanceUnavailable("memory_model_authority_missing")
             receipt = authority.admit(request)
             receipt.require_live()
@@ -57,7 +58,7 @@ class FinalModelAsyncTransport(httpx.AsyncBaseTransport):
         def authorize():
             nonlocal authority
             authority = self.authority_factory(request)
-            if not isinstance(authority, (FinalModelDispatchAuthority, LegacyModelDispatchAuthority)):
+            if not isinstance(authority, (FinalModelDispatchAuthority, LegacyModelDispatchAuthority, NoMemoryModelDispatchAuthority)):
                 raise MemoryGovernanceUnavailable("memory_model_authority_missing")
             return authority, authority.admit(request)
         # Cancellation cannot stop a synchronous database request already in

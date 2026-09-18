@@ -170,6 +170,12 @@ class ParsedModelCapture:
         self.observations = []
         self.invalid = False
         self.used = False
+        # A lane that admits no memory records no model result, because there
+        # is no admission event to key one to. That is an absence by design,
+        # not evidence loss, so it must not raise the observation-gap alarm --
+        # which would otherwise fire on every ordinary non-pilot request and
+        # bury the genuine gaps it exists to surface.
+        self.unrecorded = False
 
     def complete_generation(self, generation, metadata=None):
         if generation is None:
@@ -184,7 +190,17 @@ class ParsedModelCapture:
             if len(self.observations) >= 8:
                 self.invalid = True
                 return
+            from .no_memory_model_dispatch import NoMemoryModelDispatchAuthority
+            if isinstance(authority, NoMemoryModelDispatchAuthority):
+                # Mixing lanes inside one capture scope is still ambiguous.
+                if self.observations:
+                    self.invalid = True
+                self.unrecorded = True
+                return
             if not isinstance(authority, FinalModelDispatchAuthority):
+                self.invalid = True
+                return
+            if self.unrecorded:
                 self.invalid = True
                 return
             self.observations.append((authority, receipt, entered, response.status_code if response is not None else None, cancelled))
@@ -197,6 +213,9 @@ class ParsedModelCapture:
                     raise ValueError("model_result_capture_reused")
                 self.used = True
                 rows = list(self.observations)
+                unrecorded = self.unrecorded
+            if unrecorded and not self.invalid and not rows:
+                return None  # Nothing was admitted, so nothing is recordable.
             if self.invalid or len(messages) != 1 or not rows:
                 raise ValueError("model_result_origin_ambiguous")
             winners = [row for row in rows if row[2] and row[3] is not None and 200 <= row[3] < 300 and not row[4]]

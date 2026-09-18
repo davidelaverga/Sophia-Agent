@@ -81,24 +81,10 @@ def _serialized_dependencies(method):
 class MemoryRunGuard:
     @staticmethod
     def _owner_is_undeclared(owner_id) -> bool:
-        """A definite "this owner has no durable declaration", nothing weaker.
+        """See owner_authority.owner_is_definitely_undeclared for the contract."""
+        from deerflow.sophia.memory_governance.owner_authority import owner_is_definitely_undeclared
 
-        Only MemoryOwnerUndeclared counts: the store answered against a current
-        schema and the owner simply is not enrolled. A transport failure, an
-        error body or an unsupported contract is NOT this -- those must keep the
-        governed guard engaged so it fails closed for a governed owner during an
-        outage, rather than silently skipping memory governance.
-        """
-        from deerflow.sophia.memory_governance.owner_authority import resolve_owner_authority
-        from deerflow.sophia.memory_governance.store import MemoryOwnerUndeclared
-
-        try:
-            resolve_owner_authority(owner_id)
-        except MemoryOwnerUndeclared:
-            return True
-        except Exception:
-            return False
-        return False
+        return owner_is_definitely_undeclared(owner_id)
 
     def __init__(self, *, owner_id, config, scope="global"):
         from deerflow.sophia.memory_governance.context_state import allows_unversioned_builder_handoff
@@ -543,6 +529,28 @@ class MemoryRunGuard:
                 raise MemoryContextUnavailable()
             if self.resume_binding is not None or self.resumed_completion_binding is not None or self._resumed_completion_pending:
                 raise MemoryContextUnavailable()
+            if self.undeclared:
+                # Neither SQL permit can answer for this owner: the governed one
+                # requires authority_state='governed', the legacy one a durable
+                # 'legacy' declaration. Sending them through either turns "not in
+                # the pilot" into "cannot use the product". Nothing was admitted
+                # -- prepare_model returned None and self.admission is still None
+                # -- so there is no memory here for a permit to authorize. The
+                # emptiness is proven at the authority boundary, not assumed.
+                from deerflow.sophia.memory_governance.no_memory_model_dispatch import NoMemoryModelAttempt, NoMemoryModelDispatchAuthority
+                self.check()
+                if self.config.get("langgraph_auth_user_id") != self.owner:
+                    raise MemoryContextUnavailable()
+                attempt = NoMemoryModelAttempt.model_validate({"schema": "mem00.no-memory-model-attempt.v1",
+                    "attempt_id": str(uuid4()), "run_id": self.config.get(INPUT_RUN_KEY), "thread_id": self.context_id,
+                    "scope": self.scope, "authority_state": "unknown", "memory_material_present": False,
+                    **snapshot_model_request(wire).__dict__})
+                return NoMemoryModelDispatchAuthority(owner_id=self.owner, attempt=attempt, memory_state=(
+                    self.entered, self.admission, self.source_witness, self.source_dependencies,
+                    self.builder_binding, self.completion_binding, self.resume_binding,
+                    self.resumed_completion_binding, self._resumed_completion_pending,
+                    self.completion_task_id, self._rebuilt_source_view_ref, self._rebuilt_source_count,
+                    self._retained_task_marker, self._last_model_result_receipts))
             if not self.enabled:
                 from deerflow.sophia.memory_governance.legacy_model_dispatch import LegacyModelAttempt, LegacyModelDispatchAuthority
                 self.check()

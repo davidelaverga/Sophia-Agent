@@ -56,9 +56,23 @@ class PromptAssemblyMiddleware(AgentMiddleware[PromptAssemblyState]):
         The factory-bound owner/context cannot be overridden by checkpoint data.
         """
         from deerflow.sophia.memory_governance.context_state import allows_unversioned_builder_handoff
+        from deerflow.sophia.memory_governance.owner_authority import owner_is_definitely_undeclared
 
         if allows_unversioned_builder_handoff(self._memory_owner):
             return request
+        if self._memory_owner and owner_is_definitely_undeclared(self._memory_owner):
+            # An owner outside the pilot has no producer, so there is no seal to
+            # verify and no canonical row to admit. Demanding one here turned
+            # every ordinary non-pilot turn into "memory context could not be
+            # verified" -- the same shape of gap as the guard's, at a fourth
+            # site, because allows_unversioned_builder_handoff answers False for
+            # an undeclared owner exactly as it does for a governed one.
+            #
+            # This is a pass-through, NOT a blessing: nothing is signed, and a
+            # request that somehow carries memory-shaped material still fails
+            # closed below, so retained state from a previous governed era or a
+            # client-supplied block cannot be reused on this path.
+            return self._neutral_request(request)
         try:
             from deerflow.sophia.memory_governance.context_provenance import verify_context_seal
             from deerflow.sophia.memory_governance.flags import memory_feature_flags_for_owner
@@ -94,6 +108,19 @@ class PromptAssemblyMiddleware(AgentMiddleware[PromptAssemblyState]):
                 "injected_memory_contents": [memory.canonical_content for memory in result.memories]})
         except Exception:
             return None
+
+    def _neutral_request(self, request):
+        """The undeclared owner's request, with nothing memory-shaped in it."""
+        state = request.state or {}
+        if state.get("memory_context_proof") is not None or state.get("injected_memories"):
+            return None
+        blocks = state.get("system_prompt_blocks", [])
+        if any(block.lstrip().startswith(("<memory>", "<memories>")) for block in blocks):
+            return None
+        if any(isinstance(message, ToolMessage) and message.name in {"retrieve_memories", "search_memories"}
+               for message in request.messages):
+            return None
+        return request
 
     def _memory_unavailable(self):
         # No provider/model call and no claim of erasure or successful rotation.

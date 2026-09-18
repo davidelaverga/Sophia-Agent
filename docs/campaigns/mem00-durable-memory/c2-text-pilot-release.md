@@ -2,6 +2,127 @@
 
 Successful target: MEMORY_TEXT_PILOT_READY. Current status: IMPLEMENTING — RELEASE CLOSURE; not deployed, not activated. C2 replaces the prior PROMOTE-only/five-core-run prerequisites for this owner-restricted pilot. Historical C1 records and failures remain valid history, not additional first-use gates. Recovered cumulative failure counter: latest failed iteration EI929; last reported five-failure checkpoint 923–927; next five-failure checkpoint 932. The single current authority is the checkpoint immediately below; every later dated paragraph is preserved history, not competing current status.
 
+## No-memory model path and ordinary-route repairs — 2026-09-18
+
+The published guard recognised undeclared owners at entry, but that was only
+half a path. `final_dispatch_authority()` still sent every disabled guard
+through `LegacyModelDispatchAuthority`, and the first test file asserted
+`pytest.raises((MemoryContextUnavailable, Exception))` against a guard that was
+not the active one — so it passed at the `active_model_guard() is not self`
+check and established nothing about undeclared owners. Both are corrected here,
+and the claim is now made by a test that executes a compiled model request.
+
+### The third lane
+
+`NoMemoryModelDispatchAuthority` (`no_memory_model_dispatch.py`) is final
+admission for a request that carries no memory. It is the only locally-minted
+authority in the system, and it earns that three ways:
+
+| obligation | how |
+| --- | --- |
+| cannot name a memory | `NoMemoryModelAttempt` has no manifest, witness, binding or epoch field |
+| cannot cover a non-empty request | the constructor refuses unless all 14 memory-bearing guard values are empty |
+| cannot be replayed | same single-use lock and `require_exact` as the other two lanes |
+
+The reason it does not go to SQL is that neither permit can answer for this
+owner: `authorize_model_dispatch` requires `authority_state='governed'` and
+`authorize_legacy_model_dispatch` requires a durable `'legacy'` declaration.
+Routing a non-pilot user through either turns "not in the pilot" into "cannot
+use the product", and would also put a governance round trip on every ordinary
+request from every undeclared account.
+
+The transport, the dispatch detector and transport observation accept the lane
+explicitly rather than by omission. `ParsedModelCapture` gained an `unrecorded`
+state so the absent model-result record stops raising the observation-gap
+alarm — otherwise that alarm would fire on the majority of production traffic
+and bury the genuine evidence loss it exists to surface.
+
+### Two more supported-path gaps, found by executing the path
+
+Writing the positive test surfaced two sites neither earlier repair reached:
+
+1. **`langgraph_auth.create_run`** — `resolve_owner_authority(owner)` ran on
+   EVERY authenticated run creation, inside a `try` whose handler is `_deny()`.
+   An undeclared owner was refused at the front door, before any guard or
+   middleware existed. This is the most upstream instance of the class.
+2. **`prompt_assembly._memory_boundary`** — returned `None` for an undeclared
+   owner, so `wrap_model_call` answered "This conversation's memory context
+   could not be verified" on every ordinary turn. Repaired with a pass-through
+   that is *not* a blessing: a request carrying a context proof, injected
+   memories, a `<memories>` block or a retrieval ToolMessage still fails closed.
+
+`MemoryRunGuard._owner_is_undeclared` was lifted to
+`owner_authority.owner_is_definitely_undeclared` so all four sites share one
+primitive rather than four copies of the same `except` discrimination.
+
+### Ordinary routes
+
+Session end, idle finalization and owned session recap/management now resolve
+through `ordinary_path_memory_flags_for_owner`. `_memory_flags` is unchanged and
+the dedicated memory endpoints still answer 503 for an undeclared owner — the
+two helpers are pinned apart by test.
+
+| site | repair |
+| --- | --- |
+| `routers/sophia.py` `_read_session_recap` / `_write_session_recap` | ordinary flags; `except` conservatism unchanged |
+| `routers/sophia.py` `get_session_recap` | `_ordinary_session_flags` |
+| `routers/sophia.py` `end_session` | ordinary flags |
+| `routers/sessions.py` source invalidation / recap cleanup / session end | ordinary flags |
+| `offline_pipeline.py` `_write_offline_recap` | ordinary flags |
+| `sophia_realtime_context.py` | three states, see below |
+
+Recaps no longer show endless extraction processing. `"processing"` instructs
+the recap page to wait for extraction output; for an owner with neither the
+candidate ledger nor the provider write lane, nothing is coming. The
+discriminator is `owner_is_definitely_undeclared`, not a flag, so a declared
+legacy owner keeps the provider lane and a governed owner keeps the ledger —
+neither changes.
+
+Realtime context was the one place where the obvious repair was wrong. Swapping
+to ordinary flags alone would have set `mem00_containment = False` and read
+`identity.md` and `handoffs/latest.md` — the unversioned lane that belongs to a
+*declared* legacy owner. An undeclared owner now gets the neutral context
+(`withheld_undeclared_owner`), and the Mem0 search already answers "unavailable"
+for them, so no legacy memory is reused either.
+
+In every one of these, a store outage still raises. Unavailability never becomes
+undeclared status, and never becomes a successful empty answer.
+
+### Results
+
+| tree | `pytest tests/` |
+| --- | --- |
+| shared baseline `8c5cf538` | 2 failed / 6,225 passed |
+| pilot head before this slice (`5594e0da`) | 119 failed |
+| this slice | **115 failed / 7,039 passed** |
+
+Affected-path files, all green: `test_mem00_noncohort_model_entry.py` (16),
+`test_mem00_noncohort_owner_paths.py` (10), `test_mem00_noncohort_ordinary_routes.py`
+(13, new), `test_inactivity_watcher.py` (10), `test_mem00_recap_lifecycle.py`,
+`test_mem00_review_snapshot_http.py`, `test_mem00_c2_text_context.py`,
+`test_mem00_model_clients.py`, `test_mem00_model_dispatch.py`,
+`test_mem00_legacy_model_dispatch.py`.
+
+### A defect this slice introduced and then caught
+
+The first pass at the route repairs raised the failure count to 159, not
+lowered it. `ordinary_path_memory_flags_for_owner` short-circuited on
+`memory_feature_flags().any_enabled()` *before* resolving the owner, which
+stripped the forced `candidate_ledger_read` / `canonical_pool_read` that
+`resolved_memory_flags_for_owner` gives a governed owner regardless of the
+environment. 44 governed-owner tests in `test_mem00_recap_lifecycle.py` and
+`test_mem00_review_snapshot_http.py` caught it. The check now runs only in the
+`MemoryGovernanceUnavailable` handler, and the ordering is pinned by test. This
+was a live defect in the helper, not only in its new callers:
+`inactivity_watcher` and `session_state` already used it.
+
+### Not changed, deliberately
+
+`_memory_flags`, the dedicated memory endpoints, governed atomic finalization,
+source invalidation, deletion and cleanup requirements, the serving-grant
+migration (still unapplied), the fault-injection RPC permissions, cohort
+settings, account declarations and pilot activation.
+
 ## Integration-regression triage — 2026-09-18
 
 ### Baselines, both re-measured today
@@ -73,10 +194,15 @@ undeclared owner) rather than `ordinary_path_memory_flags_for_owner`:
 | site | status |
 | --- | --- |
 | `app/gateway/inactivity_watcher.py:100` | **repaired** |
-| `packages/.../offline_pipeline.py:644` (`_write_offline_recap`) | outstanding |
-| `app/gateway/sophia_realtime_context.py:130` | outstanding |
-| `app/gateway/routers/sophia.py:851, 878, 3391` | outstanding, needs per-route review |
-| `app/gateway/routers/sessions.py:956, 979, 987, 1143` | outstanding, needs per-route review |
+| `packages/.../offline_pipeline.py:644` (`_write_offline_recap`) | **repaired**, see 2026-09-18 above |
+| `app/gateway/sophia_realtime_context.py:130` | **repaired** — neutral context, not the legacy lane |
+| `app/gateway/routers/sophia.py:851, 878, 3391` | **repaired** — ordinary session routes only |
+| `app/gateway/routers/sessions.py:956, 979, 987, 1143` | **repaired** — ordinary session routes only |
+
+Two further sites of the same class, found by executing the compiled path rather
+than by reading it, and also repaired: `deerflow/sophia/langgraph_auth.py`
+(`create_run`, the front door) and `middlewares/prompt_assembly.py`
+(`_memory_boundary`).
 
 The router sites need per-route judgement rather than a sweep, because
 `_memory_flags` deliberately converts unavailability into 503 as the C2 cutover.

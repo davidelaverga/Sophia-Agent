@@ -195,6 +195,7 @@ async def create_run(ctx, value):
     from deerflow.sophia.memory_governance.input_provenance import INPUT_PROOF_KEY, INPUT_RUN_KEY
     from deerflow.sophia.memory_governance.source_input_provenance import SOURCE_ACTION_KEY, SOURCE_SESSION_KEY
     from deerflow.sophia.memory_governance.owner_authority import resolve_owner_authority
+    from deerflow.sophia.memory_governance.store import MemoryOwnerUndeclared
 
     source_action, source_session = configurable.get(SOURCE_ACTION_KEY), configurable.get(SOURCE_SESSION_KEY)
     handoff_key, handoff_run_key = "sophia_builder_handoff_v1", "sophia_builder_handoff_run_v1"
@@ -214,8 +215,21 @@ async def create_run(ctx, value):
     if disabled:
         _deny()
     try:
-        authority = resolve_owner_authority(owner)
-        if authority.authority_state == "governed":
+        try:
+            authority_state = resolve_owner_authority(owner).authority_state
+        except MemoryOwnerUndeclared:
+            # A definite "this account was never declared" is not an outage, and
+            # this hook runs on EVERY authenticated run creation. Letting it fall
+            # into the blanket handler below denied the front door to every user
+            # outside the pilot -- before any guard or middleware was built, so
+            # none of the no-memory work downstream could ever be reached.
+            #
+            # An undeclared owner takes neither branch that follows: no recorded
+            # input provenance is minted and no Builder handoff is accepted, the
+            # same as a declared legacy owner. A store or transport failure still
+            # reaches `except Exception: _deny()` and fails closed.
+            authority_state = "unknown"
+        if authority_state == "governed":
             from deerflow.agents.sophia_agent.middlewares.memory_context import active_governed_tool_owner
             from deerflow.sophia.memory_governance.input_provenance import issue_recorded_authenticated_input
             from deerflow.sophia.memory_governance.store import configured_memory_store

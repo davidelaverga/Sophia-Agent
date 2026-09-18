@@ -1,6 +1,7 @@
 """Post-entry detector; never substitutes for canonical pre-dispatch authority."""
 from .model_dispatch import FinalModelDispatchAuthority
 from .legacy_model_dispatch import LegacyModelAttempt, LegacyModelDispatchAuthority
+from .no_memory_model_dispatch import NoMemoryModelAttempt, NoMemoryModelDispatchAuthority
 from .observability import emit_memory_event, increment_counter, record_memory_observation_gap
 from .refs import keyed_ref
 
@@ -9,7 +10,7 @@ def detect_dispatch_violation(*, authority, receipt, entered):
     # A refused attempt is not a policy escape. This does not re-read current
     # ownership after dispatch: a later cutover cannot invalidate an earlier
     # legitimate admission retroactively.
-    if not entered or not isinstance(authority, (FinalModelDispatchAuthority, LegacyModelDispatchAuthority)):
+    if not entered or not isinstance(authority, (FinalModelDispatchAuthority, LegacyModelDispatchAuthority, NoMemoryModelDispatchAuthority)):
         return
     try:
         attempt = authority.attempt
@@ -21,6 +22,19 @@ def detect_dispatch_violation(*, authority, receipt, entered):
             fields = set(LegacyModelAttempt.model_fields) - {"schema_name"}
             if receipt is not None:
                 mismatch = mismatch or receipt.authority_state != "legacy" or receipt.canonical_approval_granted is not False
+        elif isinstance(authority, NoMemoryModelDispatchAuthority):
+            # This lane mints its own receipt, so the detector cannot rely on an
+            # independent database reply to catch substitution. What it can
+            # still check independently is the claim the lane is built on: that
+            # nothing was admitted, neither canonically nor through the legacy
+            # lane. A request that entered the transport under this authority
+            # while declaring memory material is a policy escape.
+            fields = set(NoMemoryModelAttempt.model_fields) - {"schema_name"}
+            if receipt is not None:
+                mismatch = (mismatch or receipt.authority_state != "unknown"
+                    or receipt.memory_material_present is not False
+                    or receipt.canonical_approval_granted is not False
+                    or receipt.legacy_lane_used is not False)
         if receipt is not None:
             mismatch = mismatch or receipt.model_dump(include=fields) != attempt.model_dump(include=fields)
             if isinstance(authority, FinalModelDispatchAuthority):

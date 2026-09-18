@@ -42,6 +42,26 @@ def resolve_owner_authority(owner_id, *, store=None):
         raise MemoryGovernanceUnavailable("memory_owner_authority_unavailable") from None
 
 
+def owner_is_definitely_undeclared(owner_id, *, store=None) -> bool:
+    """True only for a definite "this owner has no durable declaration".
+
+    Only MemoryOwnerUndeclared counts: the store answered against a current
+    schema and the owner simply is not enrolled. A transport failure, an error
+    body or an unsupported contract is NOT this -- those keep the governed path
+    engaged so it fails closed for a governed owner during an outage, rather
+    than silently skipping memory governance for everyone.
+
+    Callers use this to open the no-memory path, never to grant memory access.
+    """
+    try:
+        resolve_owner_authority(owner_id, store=store)
+    except MemoryOwnerUndeclared:
+        return True
+    except Exception:
+        return False
+    return False
+
+
 def ordinary_path_memory_flags_for_owner(owner_id, *, store=None, environ=None) -> MemoryFeatureFlags:
     """Owner-scoped availability for code paths that are not memory features.
 
@@ -54,15 +74,25 @@ def ordinary_path_memory_flags_for_owner(owner_id, *, store=None, environ=None) 
     Nothing here grants memory access: the result is `MemoryFeatureFlags()` with
     every flag false, and `legacy_memory_lane_allowed` still answers False.
     """
-    if not memory_feature_flags(environ).any_enabled():
-        # No MEM00 feature is switched on anywhere, so there is no authority to
-        # guard and no store to require. Mirrors the rule already used by
-        # context_state.allows_unversioned_builder_handoff.
-        return MemoryFeatureFlags()
     try:
         return resolved_memory_flags_for_owner(owner_id, store=store, environ=environ)
     except MemoryOwnerUndeclared:
         return MemoryFeatureFlags()
+    except MemoryGovernanceUnavailable:
+        if not memory_feature_flags(environ).any_enabled():
+            # No MEM00 feature is switched on anywhere, so there is no authority
+            # to guard and no store to require. Mirrors the rule already used by
+            # context_state.allows_unversioned_builder_handoff.
+            #
+            # This check is deliberately AFTER the resolution attempt, not
+            # before it. `resolved_memory_flags_for_owner` forces
+            # candidate_ledger_read and canonical_pool_read True for a governed
+            # owner regardless of the environment -- canonical management stays
+            # routed to the ledger even when recall is off. Short-circuiting on
+            # the environment first silently stripped that from every governed
+            # owner, which is the one thing this helper must never do.
+            return MemoryFeatureFlags()
+        raise
 
 
 def resolved_memory_flags_for_owner(owner_id, *, store=None, environ=None):

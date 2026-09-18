@@ -10,6 +10,14 @@ from .refs import keyed_ref
 logger = logging.getLogger(__name__)
 
 
+def _transport_outcome(*, entered, response, cancelled):
+    if cancelled:
+        return "cancelled_after_transport" if entered else "cancelled_before_transport"
+    if response is not None:
+        return "response_headers_received"
+    return "transport_effect_unknown" if entered else "admission_denied"
+
+
 def observe_model_transport(*, authority, receipt, entered, response, cancelled, started):
     """Do no evidence I/O between the last permit check and transport entry.
 
@@ -21,12 +29,36 @@ def observe_model_transport(*, authority, receipt, entered, response, cancelled,
     detect_dispatch_violation(authority=authority, receipt=receipt, entered=entered)
     from .model_result_provenance import observe_parsed_transport
     observe_parsed_transport(authority=authority, receipt=receipt, entered=entered, response=response, cancelled=cancelled)
+    from .no_memory_model_dispatch import NoMemoryModelDispatchAuthority
+    if isinstance(authority, NoMemoryModelDispatchAuthority):
+        # The no-memory lane is the ordinary non-pilot path, so it must be
+        # visible rather than silent -- but only the fields it actually has.
+        # No manifest, no epochs and no admission event are invented for it.
+        try:
+            attempt = authority.attempt
+            emit_memory_event("memory.model.transport",
+                service=os.getenv("RENDER_SERVICE_NAME") or "sophia-langgraph",
+                outcome=_transport_outcome(entered=entered, response=response, cancelled=cancelled),
+                safe_reason_code="no_memory_lane_no_admission", fault_owner_id=authority.owner_id,
+                observation_scope="sdk_http_transport_no_memory", transport_entered=entered,
+                provider_effect="unknown", response_body_observed=False, model_result_observed=False,
+                http_status=response.status_code if response is not None else None,
+                latency_ms=max(0, int((monotonic() - started) * 1000)),
+                owner_ref=keyed_ref("owner", authority.owner_id),
+                attempt_ref=keyed_ref("model-attempt", attempt.attempt_id),
+                run_ref=keyed_ref("run", attempt.run_id), context_ref=keyed_ref("context", attempt.thread_id),
+                payload_ref=attempt.payload_ref, endpoint_ref=attempt.endpoint_ref, model_ref=attempt.model_ref,
+                inclusion_count=0, memory_material_present=False, authority_state="unknown",
+                authorization_receipt_validated=receipt is not None)
+        except Exception:
+            record_memory_observation_gap()
+            logger.warning("memory_model_transport_observation unavailable contentExcluded=true", exc_info=False)
+        return
     if not isinstance(authority, FinalModelDispatchAuthority):
         return  # Legacy or unbound factory coverage is not invented.
     try:
         attempt = authority.attempt
-        outcome = ("cancelled_after_transport" if entered else "cancelled_before_transport") if cancelled else (
-            "response_headers_received" if response is not None else "transport_effect_unknown" if entered else "admission_denied")
+        outcome = _transport_outcome(entered=entered, response=response, cancelled=cancelled)
         fields = {
             "observation_scope": "sdk_http_transport",
             "transport_entered": entered,
