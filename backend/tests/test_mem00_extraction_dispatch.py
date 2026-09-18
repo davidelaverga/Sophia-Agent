@@ -4,9 +4,9 @@ from unittest.mock import Mock
 
 import httpx
 import pytest
-from mem00_owner_fixture import declare_memory_owners
 from anthropic import Anthropic as HttpAnthropic
 from mem00_dispatch_fixture import dispatch_authority, dispatch_receipt
+from mem00_owner_fixture import declare_memory_owners  # noqa: F401 - pytest fixture, used by name
 
 from deerflow.sophia import extraction
 from deerflow.sophia.memory_governance.extraction_input import capture_context, extraction_input_ref
@@ -103,7 +103,7 @@ def test_store_uses_only_fixed_dispatch_rpc():
 
 
 @pytest.fixture
-def sdk_boundary(monkeypatch, declare_memory_owners):
+def sdk_boundary(monkeypatch, declare_memory_owners):  # noqa: F811 - pytest fixture request
     declare_memory_owners({"owner": "governed"})
     monkeypatch.setenv("SOPHIA_MEMORY_COHORT_PRINCIPALS", "owner")
     monkeypatch.setenv("SOPHIA_MEMORY_CANDIDATE_LEDGER_WRITE", "true")

@@ -34,10 +34,10 @@ from app.gateway.voice_lab_capability import (
 )
 from deerflow.agents.sophia_agent.paths import USERS_DIR
 from deerflow.agents.sophia_agent.utils import safe_user_path
-from deerflow.sophia.memory_governance.store import MemoryGovernanceConflict
-from deerflow.sophia.memory_governance.models import CommandReceipt, GovernanceReceipt
 from deerflow.sophia.memory_governance.command_result import CanonicalCommandResult
+from deerflow.sophia.memory_governance.models import CommandReceipt, GovernanceReceipt
 from deerflow.sophia.memory_governance.pool import PoolEnvelope
+from deerflow.sophia.memory_governance.store import MemoryGovernanceConflict
 from deerflow.sophia.review_metadata_store import (
     apply_review_metadata_overlays,
     remove_review_metadata,
@@ -1772,12 +1772,16 @@ def _queue_offline_pipeline(
     thread_state: dict | None,
     ended_at: str,
 ) -> bool:
-    from deerflow.sophia.memory_governance.flags import (
-        memory_feature_flags_for_owner,
+    from deerflow.sophia.memory_governance.owner_authority import (
+        ordinary_path_memory_flags_for_owner,
     )
     from deerflow.sophia.offline_pipeline import run_offline_pipeline
 
-    memory_flags = memory_feature_flags_for_owner(user_id)
+    # Background finalization runs for every ended session, pilot or not. The
+    # governed branch below is unchanged and an outage still raises; an owner
+    # who is merely undeclared falls through to the ordinary offline pipeline,
+    # which is what they had before MEM00 existed.
+    memory_flags = ordinary_path_memory_flags_for_owner(user_id)
     if memory_flags.candidate_ledger_write:
         from deerflow.sophia.memory_governance.extraction_service import (
             MemoryExtractionService,

@@ -5,11 +5,11 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 import pytest
-from mem00_owner_fixture import declare_memory_owners
+from mem00_owner_fixture import declare_memory_owners  # noqa: F401 - pytest fixture, used by name
 
 
 @pytest.fixture(autouse=True)
-def _reset_pipeline(declare_memory_owners):
+def _reset_pipeline(declare_memory_owners):  # noqa: F811 - pytest fixture request
     """Reset the processed-sessions set between tests."""
     from deerflow.sophia.offline_pipeline import reset_processed_sessions
 

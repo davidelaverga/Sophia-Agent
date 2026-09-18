@@ -9,14 +9,14 @@ from uuid import UUID
 
 import pytest
 from langchain_core.messages import HumanMessage
-from mem00_owner_fixture import declare_memory_owners
+from mem00_owner_fixture import declare_memory_owners  # noqa: F401 - pytest fixture, used by name
 
 from deerflow.agents.sophia_agent.middlewares.mem0_memory import Mem0MemoryMiddleware
 from deerflow.agents.sophia_agent.middlewares.mem0_retrieval import BuilderMem0RetrievalMiddleware
 
 
 @pytest.fixture(autouse=True)
-def governed_owner(monkeypatch, declare_memory_owners):
+def governed_owner(monkeypatch, declare_memory_owners):  # noqa: F811 - pytest fixture request
     from deerflow.sophia.memory_governance import flags
 
     monkeypatch.setattr(flags, "memory_feature_flags_for_owner", lambda owner: SimpleNamespace(canonical_pool_read=True, governed_runtime_read=True))
@@ -53,7 +53,7 @@ def test_text_entry_replaces_prior_admission(monkeypatch, outcome):
             return []
         from deerflow.sophia.memory_governance.models import AuthorizedMemory
         from deerflow.sophia.memory_governance.refs import keyed_ref
-        from deerflow.sophia.memory_governance.retrieval_provenance import issue_retrieval_proof, RETRIEVAL_PROOF_KEY
+        from deerflow.sophia.memory_governance.retrieval_provenance import RETRIEVAL_PROOF_KEY, issue_retrieval_proof
         item = AuthorizedMemory(memory_id=UUID(int=1), content_revision=1, memory_governance_revision=1, canonical_content="MEM00 CURRENT")
         receipt = SimpleNamespace(owner_ref=keyed_ref("owner", "owner"), provider_status="ok", prompt_admission_id=UUID(int=2),
             revocation_epoch_checked=1, authorized_memory_ids=(keyed_ref("memory-revision", f"{item.memory_id}:1:1"),))

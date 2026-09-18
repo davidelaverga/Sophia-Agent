@@ -2,7 +2,7 @@ from types import SimpleNamespace
 from uuid import UUID
 
 import pytest
-from mem00_owner_fixture import declare_memory_owners
+from mem00_owner_fixture import declare_memory_owners  # noqa: F401 - pytest fixture, used by name
 
 from deerflow.sophia.memory_governance.models import AuthorizedMemory
 from deerflow.sophia.memory_governance.refs import keyed_ref
@@ -101,7 +101,7 @@ def test_subset_can_remove_but_not_approve_memories(fixture):
 
 @pytest.mark.parametrize("owner_state", ["governed", "unknown"])
 @pytest.mark.parametrize("recall_enabled", [False, True])
-def test_pilot_builder_denies_personal_memory(fixture, monkeypatch, declare_memory_owners, owner_state, recall_enabled):
+def test_pilot_builder_denies_personal_memory(fixture, monkeypatch, declare_memory_owners, owner_state, recall_enabled):  # noqa: F811 - pytest fixture request
     import asyncio
 
     from langchain_core.messages import HumanMessage
@@ -128,8 +128,9 @@ def test_pilot_builder_denies_personal_memory(fixture, monkeypatch, declare_memo
 
 
 @pytest.mark.parametrize("mutation", [None, "text", "owner", "missing_proof"])
-def test_automatic_text_injection_requires_exact_proof(fixture, monkeypatch, declare_memory_owners, mutation):
+def test_automatic_text_injection_requires_exact_proof(fixture, monkeypatch, declare_memory_owners, mutation):  # noqa: F811 - pytest fixture request
     from langchain_core.messages import HumanMessage
+
     from deerflow.agents.sophia_agent.middlewares import mem0_memory
 
     declare_memory_owners({"owner": "governed"})
@@ -159,7 +160,7 @@ def test_automatic_text_injection_requires_exact_proof(fixture, monkeypatch, dec
 
 
 @pytest.mark.parametrize("platform", ["voice", "ios_voice", "web"])
-def test_unknown_authority_clears_warm_automatic_injection(fixture, monkeypatch, declare_memory_owners, platform):
+def test_unknown_authority_clears_warm_automatic_injection(fixture, monkeypatch, declare_memory_owners, platform):  # noqa: F811 - pytest fixture request
     from deerflow.agents.sophia_agent.middlewares import mem0_memory
     declare_memory_owners({})
     monkeypatch.setattr(mem0_memory, "warm_up", lambda: None)

@@ -19,6 +19,8 @@ import httpx
 if TYPE_CHECKING:
     from deerflow.sophia.session_store import SessionRecord
 
+    from .models import AuthorizedMemory
+
 from .models import (
     CandidateRecord,
     CanonicalMemory,
@@ -709,8 +711,8 @@ class SupabaseMemoryGovernanceStore:
         record_prompt_admission to fence races, tombstones and provider bindings.
         Missing/duplicate/extra rows invalidate the whole retained context.
         """
-        from .retained_context import RetainedMemoryContext, encode_context_manifest
         from .models import AuthorizedMemory
+        from .retained_context import RetainedMemoryContext, encode_context_manifest
 
         # Reuse the strict structural validator before constructing any filter.
         encode_context_manifest(RetainedMemoryContext("validation-only", 0, inclusions))
@@ -826,6 +828,23 @@ class SupabaseMemoryGovernanceStore:
 
 _STORE: SupabaseMemoryGovernanceStore | None = None
 _STORE_LOCK = threading.Lock()
+
+
+def memory_governance_store_configured(environ=None) -> bool:
+    """Whether this deployment has a MEM00 governance store AT ALL.
+
+    A definite, network-free statement about the deployment, exactly parallel to
+    what MemoryOwnerUndeclared is about an owner. It reads the same two settings
+    the store constructor requires and touches nothing, so it is False only when
+    the credentials are absent -- never because a configured store is
+    unreachable, slow, or answering with errors.
+
+    Callers use this to tell "there is no MEM00 here" apart from "MEM00 is here
+    and I could not reach it". The second must never degrade.
+    """
+    source = os.environ if environ is None else environ
+    return bool((source.get("SUPABASE_URL") or "").strip()) and bool(
+        (source.get("SUPABASE_SERVICE_ROLE_KEY") or "").strip())
 
 
 def configured_memory_store() -> SupabaseMemoryGovernanceStore:

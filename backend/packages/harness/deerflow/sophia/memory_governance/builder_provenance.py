@@ -68,10 +68,12 @@ async def dispatch_independent_builder(*, guard, owner_id, parent_thread_id, sou
     Existing/uncertain child allocation is never followed by another create.
     """
     from uuid import uuid5
-    from .input_provenance import INPUT_RUN_KEY
-    from .builder_source_binding import BuilderRunBinding, BuilderSourceBindingService
-    from .store import configured_memory_store
+
     from deerflow.sophia.langgraph_client_auth import get_client
+
+    from .builder_source_binding import BuilderRunBinding, BuilderSourceBindingService
+    from .input_provenance import INPUT_RUN_KEY
+    from .store import configured_memory_store
 
     if not isinstance(tool_call_id, str) or not tool_call_id.strip() or len(tool_call_id) > 256:
         raise ValueError("builder_tool_call_invalid")

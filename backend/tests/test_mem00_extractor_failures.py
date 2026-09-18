@@ -4,14 +4,14 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
+from mem00_dispatch_fixture import dispatch_authority
+from mem00_owner_fixture import declare_memory_owners  # noqa: F401 - pytest fixture, used by name
 
 from deerflow.sophia import extraction
-from mem00_owner_fixture import declare_memory_owners
-from mem00_dispatch_fixture import dispatch_authority
 
 
 @pytest.fixture(autouse=True)
-def extraction_boundary(monkeypatch, declare_memory_owners):
+def extraction_boundary(monkeypatch, declare_memory_owners):  # noqa: F811 - pytest fixture request
     declare_memory_owners({'synthetic-owner': 'governed'})
     monkeypatch.setenv('SOPHIA_MEMORY_CANDIDATE_LEDGER_WRITE', 'true')
     monkeypatch.setenv('SOPHIA_MEMORY_COHORT_PRINCIPALS', 'synthetic-owner')

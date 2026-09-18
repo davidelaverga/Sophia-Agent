@@ -202,7 +202,7 @@ class MemoryRunGuard:
             if handoff_requested:
                 if self.scope != "builder" or self.config.get(INPUT_PROOF_KEY) is not None:
                     raise MemoryContextUnavailable()
-                from deerflow.sophia.memory_governance.builder_provenance import HANDOFF_RUN_KEY, verify_builder_run, verified_builder_sources
+                from deerflow.sophia.memory_governance.builder_provenance import HANDOFF_RUN_KEY, verified_builder_sources, verify_builder_run
                 context = verify_builder_run(owner_id=self.owner, child_thread_id=self.context_id,
                     run_id=self.config.get(INPUT_RUN_KEY), state=state, proof=self.config[HANDOFF_RUN_KEY])
                 if context is None or context.inclusions:
@@ -216,8 +216,9 @@ class MemoryRunGuard:
                 self.admission = self._readmit(context)
                 if self.admission.context.inclusions or self.admission.memories:
                     raise MemoryContextUnavailable()
-                from deerflow.sophia.memory_governance.builder_source_binding import independent_builder_runtime_seed
                 from langchain_core.messages import convert_to_messages
+
+                from deerflow.sophia.memory_governance.builder_source_binding import independent_builder_runtime_seed
                 wire = {"messages": [item.model_dump(mode="json") for item in convert_to_messages(state["messages"])]}
                 seed = independent_builder_runtime_seed(binding=self.builder_binding, wire_input=wire)
                 self.entered = True
@@ -359,8 +360,8 @@ class MemoryRunGuard:
         """
         if not self.enabled or not self.entered or self._rebuilt_source_view_ref is None:
             return False
-        from deerflow.sophia.memory_governance.context_provenance import MAX_MESSAGES
         from deerflow.sophia.memory_governance.chat_context_recovery import rebuilt_source_view_ref
+        from deerflow.sophia.memory_governance.context_provenance import MAX_MESSAGES
         try:
             messages = state["messages"]
             if not isinstance(messages, list) or len(messages) > MAX_MESSAGES:

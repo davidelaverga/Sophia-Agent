@@ -150,19 +150,57 @@ identities in case a real account ever carried one of those names.
 Coverage: `backend/tests/test_mem00_langgraph_service_lanes.py`, 34 tests. Most
 of them assert what the lanes *cannot* reach.
 
-## 4c. A fifth coupling, not yet resolved
+## 4c. A fifth coupling — now measured — 2026-09-18
 
 Installing receiving authentication also reaches the Voice Lab test principal
 itself: `_owner` denies it, so once `auth` is installed that principal cannot
-create threads or runs through the Gateway → LangGraph boundary. The synthetic
-Builder path appears to create its threads in-process
-(`start_builder_task` uses `get_client(url=None)`, whose comment says the
-in-process transport preserves the authenticated parent AuthContext), which
-would mean it is not affected — but that has been reasoned about, **not
-measured**, and it is the Voice owner's path.
+create threads or runs through the Gateway → LangGraph boundary. The first
+version of this section said the in-process transport probably made the
+synthetic Builder path immune, and marked that as reasoning rather than
+evidence. It has now been run against the installed policy in the disposable
+runtime (`backend/tests/test_mem00_langgraph_lane_runtime.py`):
 
-This is stated rather than fixed, because guessing here would be the unilateral
-move this document exists to avoid. It is question 5 below.
+| the parent companion run is owned by | result |
+| --- | --- |
+| an ordinary owner, admission naming the configured test principal | thread **created and labelled** for the maintenance lane |
+| the Voice Lab test principal itself | **denied, 403** |
+
+So the answer depends on something only the Voice owner knows: which identity
+owns the companion run during a Voice Lab test. If it is an ordinary owner, the
+install is clear. If it is the test principal, the install stops synthetic
+Builder creation, and either the run must be owned differently or the refusal in
+`_owner` needs a deliberate, reviewed exception — which this document still
+recommends against.
+
+Still stated rather than fixed, because the choice is not this campaign's.
+
+## 4d. Maintenance eligibility, tightened — 2026-09-18
+
+The first version of §4b said maintenance sees `{"synthetic": true}` — threads
+"the product itself marked". That was too generous: `synthetic` is ordinary
+metadata and any caller can write it, so any caller could have put their own
+thread inside a lane that reads and deletes.
+
+Eligibility is now decided once, on the server, in `_admit_synthetic_maintenance`:
+
+1. the declaration must be a **complete** synthetic admission, validated by the
+   product's own `normalize_synthetic_builder_context` — principal, run and
+   cleanup-obligation identity, not a bare boolean;
+2. the principal it names must equal this deployment's configured
+   `SOPHIA_VOICE_LAB_TEST_PRINCIPAL`, so a thread cannot volunteer itself by
+   naming somebody else, and nothing is eligible when none is configured;
+3. only then is the server-issued `MAINTENANCE_KEY` written — and a client may
+   never supply that key, exactly like `OWNER_KEY`.
+
+A malformed or mismatched declaration is denied rather than downgraded to an
+ordinary thread: a caller that says "synthetic" and cannot back it is not making
+an ordinary request.
+
+The dispatch lane gained the equivalent for *what it may run*, not only where:
+one graph, no command, no webhook, no interrupts, `enqueue` only, no borrowed
+owner, and the reserved provenance carriers nulled as on the ordinary path.
+Without that, a dispatch credential could have started the companion graph on a
+deck-quality thread, with tools, memory and the model boundary behind it.
 
 ## 5. What the Voice owner is being asked to decide
 
@@ -178,10 +216,9 @@ move this document exists to avoid. It is question 5 below.
    recommendation) or gains an exception. The recommendation is that it stays
    absolute and the maintenance scope never carries a user id at all. **Built
    this way.**
-5. **Open.** Whether installing `auth` affects synthetic Builder *creation* by
-   the Voice Lab test principal, which `_owner` denies. See §4c: the in-process
-   transport suggests it does not, but that is reasoning, not a measurement, and
-   it needs the Voice owner to confirm against their own path before install.
+5. **Open, now with a measurement.** Which identity owns the companion run
+   during a Voice Lab test. An ordinary owner is clear; the test principal is
+   denied 403 under the installed policy. See §4c.
 
 ## 6. Explicitly out of scope of this document
 

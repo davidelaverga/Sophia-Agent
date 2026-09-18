@@ -7,6 +7,24 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from cachetools import TTLCache
+from mem00_owner_fixture import declare_memory_owners  # noqa: F401
+
+
+@pytest.fixture(autouse=True)
+def _declared_owners(declare_memory_owners):  # noqa: F811
+    """Explicit declarations for a file that IS about legacy provider behaviour.
+
+    Every test here exercises the Mem0 client itself -- its cache, its REST
+    fallback, its add/update metadata handling. Those paths are the legacy lane,
+    and `add_memories` refuses a governed owner by design
+    (`raw_memory_write_disabled_by_mem00`), so a declared legacy owner is the
+    subject, not a convenience. `owner-1` is the one governed-read test in the
+    file and is declared governed for the same reason.
+
+    This declares nothing globally and weakens nothing: an owner not named here
+    is still undeclared and still gets no lane.
+    """
+    declare_memory_owners({"user1": "legacy", "user2": "legacy", "owner-1": "governed"})
 
 
 @pytest.fixture(autouse=True)

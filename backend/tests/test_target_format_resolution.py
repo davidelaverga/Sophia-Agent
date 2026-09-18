@@ -13,6 +13,8 @@ overrides convert to the user's explicitly requested format.
 
 from __future__ import annotations
 
+from mem00_owner_fixture import declare_memory_owners  # noqa: F401
+
 from deerflow.sophia.tools.start_builder_task import (
     _requested_output_extension_match,
     _requested_output_extension_match_with_vetoes,
@@ -417,7 +419,7 @@ def test_suggest_path_without_override_unchanged():
 # ---- end-to-end dispatch stamps -------------------------------------------------
 
 
-def test_dispatch_stamps_user_requested_ext_and_targets_pdf(monkeypatch):
+def test_dispatch_stamps_user_requested_ext_and_targets_pdf(monkeypatch, declare_memory_owners):  # noqa: F811
     """Incident replay through the real tool: the current user turn (in
     companion state messages) says PDF-not-presentation; the model-authored
     description carries deck contamination. Dispatch must target .pdf and
@@ -428,6 +430,11 @@ def test_dispatch_stamps_user_requested_ext_and_targets_pdf(monkeypatch):
     from langchain_core.messages import HumanMessage
     from test_start_builder_task import _make_fake_sdk_client, _make_runtime
 
+    # Outside a governed run, `start_builder_task` requires a declared legacy
+    # lane before it will dispatch -- "missing middleware is not evidence that
+    # this owner is legacy". This test is about format resolution, not about
+    # ownership, so it names its owner rather than exercising the refusal.
+    declare_memory_owners({"alice": "legacy"})
     module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
     fake_client, captured = _make_fake_sdk_client(thread_id="fmt-1", run_id="run-fmt")
     monkeypatch.setattr("langgraph_sdk.get_client", lambda url=None: fake_client)

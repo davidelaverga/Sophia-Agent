@@ -9,17 +9,17 @@ timeout / error / no-user-id.
 from __future__ import annotations
 
 import pytest
-from mem00_owner_fixture import declare_memory_owners
-
-
-@pytest.fixture
-def legacy_builder_owners(declare_memory_owners):
-    declare_memory_owners({"u": "legacy", "user-abc": "legacy"})
+from mem00_owner_fixture import declare_memory_owners  # noqa: F401 - pytest fixture, used by name
 
 from deerflow.agents.sophia_agent.middlewares.mem0_retrieval import (
     _MAX_SNIPPET_CHARS,
     BuilderMem0RetrievalMiddleware,
 )
+
+
+@pytest.fixture
+def legacy_builder_owners(declare_memory_owners):  # noqa: F811 - pytest fixture request
+    declare_memory_owners({"u": "legacy", "user-abc": "legacy"})
 
 
 def _patch_search(monkeypatch: pytest.MonkeyPatch, behaviour) -> dict:

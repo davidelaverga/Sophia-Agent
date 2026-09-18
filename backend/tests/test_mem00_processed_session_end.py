@@ -132,7 +132,10 @@ def test_actual_product_route_finalizes_processed_range_even_after_failed_recap_
     monkeypatch.setattr(sophia, "_session_store", sessions)
     monkeypatch.setattr(sophia, "_read_session_recap", lambda *_: existing_recap)
     monkeypatch.setattr(sophia, "_write_session_recap", MagicMock())
-    monkeypatch.setattr("deerflow.sophia.memory_governance.flags.memory_feature_flags_for_owner", lambda _: SimpleNamespace(candidate_ledger_write=True))
+    # The route resolves session end through `ordinary_path_memory_flags_for_owner`
+    # now, so that an owner who is merely undeclared takes the pre-MEM00 branch
+    # instead of a 500. A governed owner -- this one -- is unaffected.
+    monkeypatch.setattr("deerflow.sophia.memory_governance.owner_authority.ordinary_path_memory_flags_for_owner", lambda _: SimpleNamespace(candidate_ledger_write=True))
     monkeypatch.setattr("deerflow.sophia.memory_governance.store.configured_memory_store", lambda: governance)
     app = FastAPI()
     app.include_router(sophia.router)
@@ -180,7 +183,10 @@ def test_compare_and_set_filters_owner_thread_revision_watermark_and_status():
 def test_gateway_accepts_confirmed_no_new_range_without_duplicate_work(monkeypatch):
     from app.gateway.routers import sophia
 
-    monkeypatch.setattr("deerflow.sophia.memory_governance.flags.memory_feature_flags_for_owner", lambda _: SimpleNamespace(candidate_ledger_write=True))
+    # The route resolves session end through `ordinary_path_memory_flags_for_owner`
+    # now, so that an owner who is merely undeclared takes the pre-MEM00 branch
+    # instead of a 500. A governed owner -- this one -- is unaffected.
+    monkeypatch.setattr("deerflow.sophia.memory_governance.owner_authority.ordinary_path_memory_flags_for_owner", lambda _: SimpleNamespace(candidate_ledger_write=True))
     monkeypatch.setattr("deerflow.sophia.memory_governance.store.configured_memory_store", MagicMock())
     monkeypatch.setattr("deerflow.sophia.memory_governance.refs.keyed_ref", lambda *_: "hmac-test")
     extraction = MagicMock()

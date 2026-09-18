@@ -12,7 +12,6 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from deerflow.sophia.langgraph_client_auth import get_client
 from langgraph_sdk.errors import NotFoundError
 from pydantic import BaseModel, Field
 
@@ -28,6 +27,7 @@ from app.gateway.voice_lab_capability import (
 )
 from app.gateway.workers.builder_canvas import DEFAULT_TERMINAL_TTL_SECONDS, get_builder_canvas_worker
 from deerflow.sophia.builder_failure_diagnostics import merge_builder_failure_diagnostics
+from deerflow.sophia.langgraph_client_auth import get_client
 from deerflow.sophia.session_store import SessionRecord, SessionStore
 
 router = APIRouter(

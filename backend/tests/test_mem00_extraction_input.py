@@ -4,15 +4,15 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
-from mem00_owner_fixture import declare_memory_owners
 from mem00_dispatch_fixture import dispatch_authority
+from mem00_owner_fixture import declare_memory_owners  # noqa: F401 - pytest fixture, used by name
 
 from deerflow.sophia import extraction
 from deerflow.sophia.memory_governance.extraction_input import capture_context, extraction_input_ref
 
 
 @pytest.fixture
-def boundary(monkeypatch, declare_memory_owners):
+def boundary(monkeypatch, declare_memory_owners):  # noqa: F811 - pytest fixture request
     declare_memory_owners({"owner": "governed"})
     monkeypatch.setenv("SOPHIA_MEMORY_REFERENCE_HMAC_SECRET", "i" * 32)
     monkeypatch.setenv("SOPHIA_MEMORY_COHORT_PRINCIPALS", "owner")
@@ -33,8 +33,7 @@ def test_actual_sdk_payload_uses_frozen_date_and_existing_model_contract(boundar
     client, messages, metadata, authority = boundary
     assert extraction.extract_session_memories("owner", "session", messages, metadata, candidate_only=True, dispatch_authority=authority) == []
     request = client.messages.create.call_args.kwargs
-    assert request == {"model": extraction._PIPELINE_MODEL, "max_tokens": 4096,
-        "messages": [{"role": "user", "content": "session|2026-01-01|life|None|None|unknown|unknown|None|User: SYNTHETIC-INPUT"}]}
+    assert request == {"model": extraction._PIPELINE_MODEL, "max_tokens": 4096, "messages": [{"role": "user", "content": "session|2026-01-01|life|None|None|unknown|unknown|None|User: SYNTHETIC-INPUT"}]}
     assert metadata["extractor_input_ref"] not in str(request)
 
 
@@ -44,11 +43,16 @@ def test_any_changed_actual_input_is_denied_before_sdk(boundary, monkeypatch, fa
     session_id = "session"
     if fault in {"session_date", "context_mode", "artifacts", "existing_memories", "ritual_type", "tone_start", "tone_end"}:
         metadata[fault] = "SYNTHETIC-CHANGED"
-    elif fault == "session_id": session_id = "other-session"
-    elif fault == "template": monkeypatch.setattr(extraction, "_load_template", lambda: "SYNTHETIC-CHANGED-TEMPLATE")
-    elif fault == "model": monkeypatch.setattr(extraction, "_PIPELINE_MODEL", "synthetic-wrong-model")
-    elif fault == "missing_proof": metadata.pop("extractor_input_ref")
-    elif fault == "transcript": messages[0]["content"] = "SYNTHETIC-CHANGED"
+    elif fault == "session_id":
+        session_id = "other-session"
+    elif fault == "template":
+        monkeypatch.setattr(extraction, "_load_template", lambda: "SYNTHETIC-CHANGED-TEMPLATE")
+    elif fault == "model":
+        monkeypatch.setattr(extraction, "_PIPELINE_MODEL", "synthetic-wrong-model")
+    elif fault == "missing_proof":
+        metadata.pop("extractor_input_ref")
+    elif fault == "transcript":
+        messages[0]["content"] = "SYNTHETIC-CHANGED"
     with pytest.raises(extraction.MemoryWriteError, match="extractor_input_unproven"):
         extraction.extract_session_memories("owner", session_id, messages, metadata, candidate_only=True, dispatch_authority=authority)
     client.messages.create.assert_not_called()

@@ -21,7 +21,9 @@ from .task_inventory import _targets
 TASK_RETENTION_KEY = "memory_task_retention"
 FIELDS = {"schema", "owner_ref", "context_ref", "origin_state_ref", "tasks_ref", "memory_manifest", "source_dependencies",
     "scope", "model_reuse_permission"}
-NOTICE = "Previously created Builder tasks are preserved, but their retained descriptions and results are unavailable after memory-context recovery. Use list_async_tasks for a fresh identity/status-only observation. No task was cancelled or restarted."
+NOTICE = ("Previously created Builder tasks are preserved, but their retained descriptions and results are "
+    "unavailable after memory-context recovery. Use list_async_tasks for a fresh identity/status-only "
+    "observation. No task was cancelled or restarted.")
 HELD_TOOLS = frozenset({"start_builder_task", "start_async_task", "update_async_task", "check_async_task", "cancel_async_task"})
 
 

@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
+from mem00_owner_fixture import declare_memory_owners  # noqa: F401
 from starlette.requests import Request
 
 from app.gateway.auth import (
@@ -213,7 +214,14 @@ def test_sensitive_global_reads_reject_unauthenticated_before_data_access(
 
 def test_ordinary_authenticated_global_read_contract_is_unchanged(
     monkeypatch: pytest.MonkeyPatch,
+    declare_memory_owners,  # noqa: F811
 ) -> None:
+    # `/api/memory` is a dedicated memory endpoint and stays protected: it
+    # resolves durable authority before touching files and answers 503 for an
+    # owner with no declaration (see
+    # `test_mem00_owner_authority_entrypoints.py`). This test is about Voice Lab
+    # route isolation, not about non-cohort behaviour, so it names its owner.
+    declare_memory_owners({"ordinary-user-1": "legacy"})
     monkeypatch.setenv("SOPHIA_USER_ID", "ordinary-user-1")
     app = FastAPI()
     app.include_router(memory.router)

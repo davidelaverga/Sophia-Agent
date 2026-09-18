@@ -1,6 +1,6 @@
 """Post-entry detector; never substitutes for canonical pre-dispatch authority."""
-from .model_dispatch import FinalModelDispatchAuthority
 from .legacy_model_dispatch import LegacyModelAttempt, LegacyModelDispatchAuthority
+from .model_dispatch import FinalModelDispatchAuthority
 from .no_memory_model_dispatch import NoMemoryModelAttempt, NoMemoryModelDispatchAuthority
 from .observability import emit_memory_event, increment_counter, record_memory_observation_gap
 from .refs import keyed_ref

@@ -6,9 +6,9 @@ from uuid import uuid4
 
 import httpx
 import pytest
-from mem00_owner_fixture import declare_memory_owners
 from langchain_anthropic import ChatAnthropic
 from langchain_openai import ChatOpenAI
+from mem00_owner_fixture import declare_memory_owners  # noqa: F401 - pytest fixture, used by name
 from test_mem00_model_dispatch import PermitStore, attempt, recorded_model_context
 
 from deerflow.sophia.memory_governance.model_clients import GovernedChatAnthropic, GovernedChatOpenAI, ModelDispatchDenied
@@ -100,7 +100,7 @@ def test_governance_abort_cannot_become_provider_fallback(monkeypatch, surface, 
 
 
 @pytest.mark.parametrize("surface", ["companion", "builder"])
-def test_real_sophia_factory_binds_model_and_middleware_to_same_guard(monkeypatch, declare_memory_owners, surface, caplog):
+def test_real_sophia_factory_binds_model_and_middleware_to_same_guard(monkeypatch, declare_memory_owners, surface, caplog):  # noqa: F811 - pytest fixture request
     owner = "synthetic-private-factory-owner"
     declare_memory_owners({owner: "governed"})
     caplog.set_level("INFO")

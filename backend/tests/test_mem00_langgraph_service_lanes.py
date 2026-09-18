@@ -197,7 +197,9 @@ def test_each_lane_is_confined_to_its_own_threads_by_filter():
 
     maintenance = asyncio.run(policy.owned_thread(
         _Ctx([policy.MAINTENANCE_PERMISSION]), {}))
-    assert maintenance == {policy.SYNTHETIC_KEY: True}, "only product-marked synthetic threads exist for it"
+    # The SERVER-issued label, not the client-suppliable `synthetic` boolean.
+    assert maintenance == {policy.MAINTENANCE_KEY: True}
+    assert policy.MAINTENANCE_KEY != policy.SYNTHETIC_KEY
 
     quality = asyncio.run(policy.owned_thread(
         _Ctx([policy.DECK_QUALITY_PERMISSION]), {}))
@@ -216,13 +218,14 @@ def test_the_maintenance_lane_cannot_create_a_thread_or_a_run():
             asyncio.run(handler(_Ctx([policy.MAINTENANCE_PERMISSION]), {}))
 
 
-def test_a_client_cannot_label_its_own_thread_into_the_dispatch_lane():
+@pytest.mark.parametrize("key", ["OWNER_KEY", "MAINTENANCE_KEY", "DECK_QUALITY_KEY"])
+def test_a_client_cannot_label_its_own_thread_into_a_lane(key):
     from langgraph_sdk import Auth
 
     from deerflow.sophia import langgraph_auth as policy
 
     with pytest.raises(Auth.exceptions.HTTPException):
-        policy._reject_owner_metadata({"metadata": {policy.DECK_QUALITY_KEY: True}})
+        policy._reject_owner_metadata({"metadata": {getattr(policy, key): True}})
 
 
 def test_a_service_principal_can_never_be_an_owner():

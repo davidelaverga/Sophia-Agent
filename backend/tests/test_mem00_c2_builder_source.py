@@ -2,8 +2,9 @@ from uuid import uuid4
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
+from mem00_owner_fixture import declare_memory_owners  # noqa: F401 - pytest fixture, used by name
 from mem00_recorded_input_fixture import RecordedInputFixture
-from mem00_owner_fixture import declare_memory_owners
+
 from deerflow.sophia.memory_governance.builder_source_binding import independent_builder_source_text
 from deerflow.sophia.memory_governance.input_provenance import issue_recorded_authenticated_input
 from deerflow.sophia.memory_governance.store import MemoryGovernanceUnavailable
@@ -21,13 +22,15 @@ def source(monkeypatch, request):
         messages=[HumanMessage(**wire["messages"][0])], store=store)
 
 
-def test_builder_fallback_requires_and_keeps_actual_run_guard(monkeypatch, declare_memory_owners):
+def test_builder_fallback_requires_and_keeps_actual_run_guard(monkeypatch, declare_memory_owners):  # noqa: F811 - pytest fixture request
     import asyncio
+
+    from test_mem00_model_clients import close_model
+
     from deerflow.agents.sophia_agent.builder_middlewares import build_builder_middleware_chain
     from deerflow.agents.sophia_agent.middlewares.memory_context import MemoryContextEntryMiddleware, active_model_guard
-    from deerflow.sophia.builder_provider_fallback import build_fallback_chat_model, FALLBACK_MODEL_ENV
+    from deerflow.sophia.builder_provider_fallback import FALLBACK_MODEL_ENV, build_fallback_chat_model
     from deerflow.sophia.memory_governance.model_clients import GovernedChatOpenAI, ModelDispatchDenied
-    from test_mem00_model_clients import close_model
 
     declare_memory_owners({"owner": "legacy"})
     monkeypatch.setenv(FALLBACK_MODEL_ENV, "gpt-4o-mini")
@@ -73,6 +76,7 @@ def test_unprovable_source_cannot_become_independent_builder_text(source, fault)
 @pytest.mark.parametrize("fault", [None, "nonempty", "inactive", "outage"])
 def test_independent_child_registration_does_not_inherit_parent_admission(source, monkeypatch, fault):
     from types import SimpleNamespace
+
     from deerflow.sophia.memory_governance.builder_source_binding import BuilderSourceBindingService
     from deerflow.sophia.memory_governance.input_provenance import INPUT_PROOF_KEY, INPUT_RUN_KEY
     from deerflow.sophia.memory_governance.retained_admission import RetainedAdmission
@@ -118,11 +122,12 @@ def test_independent_child_registration_does_not_inherit_parent_admission(source
 def test_source_only_transport_binds_actual_child_run_and_rejects_old_contract(source, monkeypatch, tmp_path, expected_type, expected_ext):
     from copy import deepcopy
     from types import SimpleNamespace
-    from deerflow.sophia.memory_governance.builder_provenance import issue_builder_handoff, bind_builder_run, verify_builder_run, _json
+
+    from deerflow.sophia.memory_governance.builder_provenance import _json, bind_builder_run, issue_builder_handoff, verify_builder_run
     from deerflow.sophia.memory_governance.input_provenance import INPUT_PROOF_KEY, INPUT_RUN_KEY
+    from deerflow.sophia.memory_governance.refs import keyed_ref
     from deerflow.sophia.memory_governance.retained_admission import RetainedAdmission
     from deerflow.sophia.memory_governance.retained_context import ContextTransition
-    from deerflow.sophia.memory_governance.refs import keyed_ref
     parent = object()
     guard = SimpleNamespace(enabled=True, context_id=source["thread_id"], owner="owner", scope="life", admission=parent,
         check=lambda: None, _readmit=lambda context: RetainedAdmission(ContextTransition("continue", "empty", 0), context, (), uuid4()),
@@ -146,6 +151,7 @@ def test_source_only_transport_binds_actual_child_run_and_rejects_old_contract(s
     manifest = verify_builder_run(owner_id="owner", child_thread_id=child, run_id=run, state=bound, proof=run_proof)
     assert manifest is not None and manifest.inclusions == ()
     import asyncio
+
     from deerflow.sophia import langgraph_auth as policy
     from deerflow.sophia.memory_governance.builder_provenance import HANDOFF_KEY, HANDOFF_RUN_KEY
     monkeypatch.setattr("deerflow.sophia.memory_governance.owner_authority.resolve_owner_authority",
@@ -163,7 +169,7 @@ def test_source_only_transport_binds_actual_child_run_and_rejects_old_contract(s
     assert cfg["parent_thread_id"] == source["thread_id"]
     assert verify_builder_run(owner_id="owner", child_thread_id=child, run_id=run,
         state=value["kwargs"]["input"], proof=cfg[HANDOFF_RUN_KEY]).inclusions == ()
-    from deerflow.agents.sophia_agent.middlewares.memory_context import MemoryRunGuard, MemoryContextUnavailable
+    from deerflow.agents.sophia_agent.middlewares.memory_context import MemoryContextUnavailable, MemoryRunGuard
     monkeypatch.setattr("deerflow.sophia.memory_governance.flags.memory_feature_flags_for_owner",
         lambda owner: SimpleNamespace(governed_runtime_read=True, canonical_pool_read=True))
     monkeypatch.setattr(MemoryRunGuard, "_readmit", lambda self, context: RetainedAdmission(
@@ -207,9 +213,10 @@ def test_source_only_transport_binds_actual_child_run_and_rejects_old_contract(s
         from langchain.agents.middleware import AgentMiddleware
         from langchain_core.language_models.fake_chat_models import FakeListChatModel
         from langgraph.errors import GraphBubbleUp
-        from deerflow.config.paths import Paths
+
         from deerflow.agents.sophia_agent import builder_agent
         from deerflow.agents.sophia_agent.middlewares.memory_context import MemoryContextModelProducer
+        from deerflow.config.paths import Paths
         monkeypatch.setattr("deerflow.sophia.memory_governance.mem0_projection_adapter.Mem0ProjectionAdapter", lambda: object())
         monkeypatch.setattr("deerflow.sophia.memory_governance.service.MemoryProviderContract.from_environ", lambda: object())
         monkeypatch.setattr("deerflow.sophia.memory_governance.retained_admission.readmit_retained_context",
@@ -289,10 +296,11 @@ def test_source_only_transport_binds_actual_child_run_and_rejects_old_contract(s
 @pytest.mark.parametrize("nonempty", [False, True])
 def test_builder_readmission_never_accepts_personal_memory(source, monkeypatch, nonempty):
     from types import SimpleNamespace
-    from deerflow.agents.sophia_agent.middlewares.memory_context import MemoryRunGuard, MemoryContextUnavailable
-    from deerflow.sophia.memory_governance.retained_admission import RetainedAdmission
-    from deerflow.sophia.memory_governance.retained_context import ContextTransition, RetainedMemoryContext, MemoryInclusion
+
+    from deerflow.agents.sophia_agent.middlewares.memory_context import MemoryContextUnavailable, MemoryRunGuard
     from deerflow.sophia.memory_governance.refs import keyed_ref
+    from deerflow.sophia.memory_governance.retained_admission import RetainedAdmission
+    from deerflow.sophia.memory_governance.retained_context import ContextTransition, MemoryInclusion, RetainedMemoryContext
     monkeypatch.setattr("deerflow.sophia.memory_governance.flags.memory_feature_flags_for_owner",
         lambda owner: SimpleNamespace(governed_runtime_read=True, canonical_pool_read=True))
     monkeypatch.setattr("deerflow.sophia.memory_governance.store.configured_memory_store", lambda: source["store"])
@@ -313,7 +321,8 @@ def test_builder_readmission_never_accepts_personal_memory(source, monkeypatch, 
 def test_source_only_dispatch_recovers_exact_run_without_duplicate_create(source, monkeypatch, fault):
     import asyncio
     from types import SimpleNamespace
-    from deerflow.sophia.memory_governance.builder_provenance import dispatch_independent_builder, bind_builder_run, HANDOFF_KEY
+
+    from deerflow.sophia.memory_governance.builder_provenance import HANDOFF_KEY, bind_builder_run, dispatch_independent_builder
     from deerflow.sophia.memory_governance.input_provenance import INPUT_PROOF_KEY, INPUT_RUN_KEY
     from deerflow.sophia.memory_governance.retained_admission import RetainedAdmission
     from deerflow.sophia.memory_governance.retained_context import ContextTransition
@@ -364,6 +373,7 @@ def test_source_only_dispatch_recovers_exact_run_without_duplicate_create(source
     if not first["confirmed"]:
         assert first["status"] == "unconfirmed" and first["run_id"] is None
     import importlib
+
     from langgraph.types import Command
     launch = importlib.import_module("deerflow.sophia.tools.start_builder_task")
     monkeypatch.setattr("deerflow.agents.sophia_agent.middlewares.memory_context.active_governed_tool_guard", lambda: guard)
@@ -387,7 +397,7 @@ def test_source_only_dispatch_recovers_exact_run_without_duplicate_create(source
 
 
 @pytest.mark.parametrize("authority", ["governed", "unknown"])
-def test_missing_guard_cannot_route_governed_or_unknown_owner_to_legacy(monkeypatch, declare_memory_owners, authority):
+def test_missing_guard_cannot_route_governed_or_unknown_owner_to_legacy(monkeypatch, declare_memory_owners, authority):  # noqa: F811 - pytest fixture request
     import asyncio
     import importlib
     from types import SimpleNamespace

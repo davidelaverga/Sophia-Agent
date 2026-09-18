@@ -976,23 +976,37 @@ def _invalidate_memory_source_before_delete(
 
 
 def _cleanup_memory_session_recap(owner_user_id: str, session_id: str) -> None:
-    """Keep the canonical parent retryable until its local recap is removed."""
+    """Remove the local recap; keep a canonical parent retryable until it is gone.
+
+    The delete is unconditional. An earlier version only removed the file when
+    `canonical_pool_read` was true, which was correct while an undeclared owner
+    could not have a recap at all -- but this campaign made
+    `_write_session_recap` work for them, so they now do, and skipping the
+    delete would leave the transcript-derived file on disk after the session it
+    came from was deleted. That is the delete failing to delete, not a
+    governance nuance.
+
+    What stays conditional is the governed *receipt* below, which is about a
+    canonical parent this owner does not have.
+    """
     from deerflow.sophia.memory_governance.owner_authority import (
         ordinary_path_memory_flags_for_owner,
     )
 
-    # An undeclared owner has no canonical parent to keep retryable, so there is
-    # no governed recap to clean up. Outage still becomes 503, not a silent skip.
     try:
-        if ordinary_path_memory_flags_for_owner(owner_user_id).canonical_pool_read:
-            from app.gateway.routers.sophia import _delete_session_recap
+        from app.gateway.routers.sophia import _delete_session_recap
 
-            _delete_session_recap(owner_user_id, session_id)
+        _delete_session_recap(owner_user_id, session_id)
+        governed = ordinary_path_memory_flags_for_owner(owner_user_id).canonical_pool_read
     except Exception:
+        # Still 503 rather than a silent skip: an outage leaves ownership
+        # unresolved, and the caller must retry rather than assume the local
+        # derivative is gone. `_delete_session_recap` is idempotent, so the
+        # retry is safe.
         logger.warning("Session recap cleanup unavailable")
         raise HTTPException(status_code=503, detail={"code": "session_recap_cleanup_unavailable"}) from None
     else:
-        if not ordinary_path_memory_flags_for_owner(owner_user_id).canonical_pool_read:
+        if not governed:
             return
         # This is deliberately a local-file receipt, not global erasure or
         # successful parent deletion (which has not happened yet).

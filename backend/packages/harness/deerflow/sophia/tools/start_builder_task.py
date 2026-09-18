@@ -2551,16 +2551,9 @@ async def _start_builder_task_impl(
         return await _start_independent_builder_task(guard=memory_guard, runtime=runtime, state=state,
             tool_name=tool_name, edit_context=edit_context, configured_user_id=configured_user_id)
 
-    # Missing middleware is not evidence that this owner is legacy. Resolve
-    # before reading enrichment or copying files; uncertainty starts no work.
-    from deerflow.sophia.memory_governance.owner_authority import require_legacy_memory_lane
-    try:
-        dispatch_owner, _, _ = _resolve_user_id(runtime, state, configured_user_id=configured_user_id,
-            explicit_tool_arg=user_id_arg)
-        require_legacy_memory_lane(dispatch_owner)
-    except Exception:
-        return "Builder unavailable: current owner authority and an admitted run are required. No launch was attempted."
-
+    # The isolation identity is resolved FIRST, because it decides whether the
+    # ownership gate below applies at all. A malformed synthetic declaration is
+    # still refused; it is never downgraded to an ordinary dispatch.
     try:
         synthetic_context = normalize_synthetic_builder_context(
             state,
@@ -2569,6 +2562,26 @@ async def _start_builder_task_impl(
     except SyntheticBuilderContextError:
         logger.warning("[Builder] refusing synthetic dispatch with incomplete isolation identity")
         return "Cannot launch builder task: synthetic_builder_identity_invalid. No background work was started."
+
+    # Missing middleware is not evidence that this owner is legacy. Resolve
+    # before reading enrichment or copying files; uncertainty starts no work.
+    #
+    # A complete synthetic admission is the one exception, and it is not a
+    # loosening: `synthetic_builder_projection` marks these runs
+    # memory_retrieval_excluded and memory_learning_excluded, so the unversioned
+    # lane this gate protects is structurally absent from them. Requiring a
+    # durable legacy declaration here instead withdrew the Voice Lab synthetic
+    # Builder path from its own test principal -- which MEM00 deliberately
+    # refuses to declare -- so the gate was refusing a run that can carry no
+    # memory to protect.
+    from deerflow.sophia.memory_governance.owner_authority import require_legacy_memory_lane
+    try:
+        dispatch_owner, _, _ = _resolve_user_id(runtime, state, configured_user_id=configured_user_id,
+            explicit_tool_arg=user_id_arg)
+        if synthetic_context is None:
+            require_legacy_memory_lane(dispatch_owner)
+    except Exception:
+        return "Builder unavailable: current owner authority and an admitted run are required. No launch was attempted."
     if synthetic_context is not None and edit_context is not None:
         return "Cannot launch builder edit: synthetic_builder_project_edit_excluded. No background work was started."
 

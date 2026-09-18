@@ -33,7 +33,7 @@ import logging
 from types import SimpleNamespace
 
 import pytest
-from mem00_owner_fixture import declare_memory_owners
+from mem00_owner_fixture import declare_memory_owners  # noqa: F401 - pytest fixture, used by name
 
 from deerflow.agents.sophia_agent.middlewares import (
     companion_provider_fallback as mw_module,
@@ -547,7 +547,7 @@ class TestVisibleReplySurfacing:
     visible reply the same way a successful Anthropic call does."""
 
     def test_fallback_model_does_not_set_streaming(
-        self, monkeypatch: pytest.MonkeyPatch, declare_memory_owners
+        self, monkeypatch: pytest.MonkeyPatch, declare_memory_owners  # noqa: F811 - pytest fixture request
     ) -> None:
         # Regression guard for the root cause. Explicit ``streaming=True`` made
         # the fallback drive its own v1 ``.stream()`` path, whose tokens
@@ -562,9 +562,11 @@ class TestVisibleReplySurfacing:
 
         monkeypatch.setenv(FALLBACK_MODEL_ENV, "gpt-4o-mini")
         monkeypatch.setenv("OPENAI_API_KEY", _PLACEHOLDER_KEY)
-        from deerflow.agents.sophia_agent.middlewares.memory_context import MemoryContextEntryMiddleware, MemoryRunGuard
-        from test_mem00_model_clients import close_model
         import asyncio
+
+        from test_mem00_model_clients import close_model
+
+        from deerflow.agents.sophia_agent.middlewares.memory_context import MemoryContextEntryMiddleware, MemoryRunGuard
 
         declare_memory_owners({"synthetic-fallback-owner": "legacy"})
         guard = MemoryRunGuard(owner_id="synthetic-fallback-owner", config={})
