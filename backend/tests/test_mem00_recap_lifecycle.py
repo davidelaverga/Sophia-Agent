@@ -4,9 +4,9 @@ import json
 from unittest.mock import MagicMock
 
 import pytest
-from mem00_owner_fixture import declare_memory_owners
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from mem00_owner_fixture import declare_memory_owners  # noqa: F401 - pytest fixture, used by name
 
 from app.gateway.auth import require_authenticated_user
 from app.gateway.routers import sessions, sophia
@@ -14,7 +14,7 @@ from deerflow.sophia.session_store import SessionRecord
 
 
 @pytest.fixture(params=['enabled', 'flags-off', 'cohort-removed'])
-def governed(monkeypatch, tmp_path, declare_memory_owners, request):
+def governed(monkeypatch, tmp_path, declare_memory_owners, request):  # noqa: F811 - pytest fixture request
     declare_memory_owners({'owner-1': 'governed'})
     monkeypatch.setenv("SOPHIA_MEMORY_CANDIDATE_LEDGER_WRITE", "true")
     monkeypatch.setenv("SOPHIA_MEMORY_COHORT_PRINCIPALS", "owner-1")
@@ -184,7 +184,7 @@ def test_recap_cleanup_remains_governed_after_cohort_removal(governed, monkeypat
 
 
 def test_source_invalidation_remains_required_without_extraction(governed, monkeypatch):
-    from deerflow.sophia.memory_governance import service, refs
+    from deerflow.sophia.memory_governance import refs, service
 
     _, record, _ = governed
     canonical = MagicMock()

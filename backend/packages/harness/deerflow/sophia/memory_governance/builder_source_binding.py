@@ -28,8 +28,8 @@ def independent_builder_source_text(*, owner_id, thread_id, run_id, input_proof,
     caller must bind a fresh child with zero memory inclusions independently.
     """
     from .input_provenance import RECORDED_SCHEMA, verified_current_input
-    from .source_input_provenance import SourceInputWitness, recheck_recorded_source
     from .refs import keyed_ref
+    from .source_input_provenance import SourceInputWitness, recheck_recorded_source
 
     try:
         assert_not_voice_lab_principal(owner_id)
@@ -135,13 +135,19 @@ def independent_builder_runtime_seed(*, binding, wire_input):
     caller-supplied task type, budget, artifact, file or parent state is used.
     """
     from datetime import datetime
+
     from langchain_core.messages import HumanMessage, convert_to_messages
-    from .context_provenance import _state_ref
-    from deerflow.sophia.tools.start_builder_task import (
-        _resolve_target_format, _suggest_artifact_target_path,
-        should_allow_builder_web_research, extract_explicit_user_urls, make_builder_web_budget,
-    )
+
     from deerflow.agents.sophia_agent.middlewares.builder_budget import builder_budget_for_task
+    from deerflow.sophia.tools.start_builder_task import (
+        _resolve_target_format,
+        _suggest_artifact_target_path,
+        extract_explicit_user_urls,
+        make_builder_web_budget,
+        should_allow_builder_web_research,
+    )
+
+    from .context_provenance import _state_ref
 
     try:
         binding = BuilderRunBinding.model_validate(binding)
@@ -207,8 +213,11 @@ class BuilderSourceBindingService:
         independently required.
         """
         from uuid import UUID, uuid5
+
         from langchain_core.messages import HumanMessage
+
         from deerflow.agents.sophia_agent.middlewares.memory_context import active_builder_parent_guard
+
         from .context_provenance import _state_ref
         from .input_provenance import INPUT_PROOF_KEY, INPUT_RUN_KEY
         from .refs import keyed_ref

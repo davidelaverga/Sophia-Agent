@@ -34,10 +34,10 @@ from app.gateway.voice_lab_capability import (
 )
 from deerflow.agents.sophia_agent.paths import USERS_DIR
 from deerflow.agents.sophia_agent.utils import safe_user_path
-from deerflow.sophia.memory_governance.store import MemoryGovernanceConflict
-from deerflow.sophia.memory_governance.models import CommandReceipt, GovernanceReceipt
 from deerflow.sophia.memory_governance.command_result import CanonicalCommandResult
+from deerflow.sophia.memory_governance.models import CommandReceipt, GovernanceReceipt
 from deerflow.sophia.memory_governance.pool import PoolEnvelope
+from deerflow.sophia.memory_governance.store import MemoryGovernanceConflict
 from deerflow.sophia.review_metadata_store import (
     apply_review_metadata_overlays,
     remove_review_metadata,

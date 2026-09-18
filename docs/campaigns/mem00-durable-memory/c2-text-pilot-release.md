@@ -107,6 +107,36 @@ baseline's own** (`test_local_sandbox_encoding.py`, which fails identically at
 `8c5cf538`). The pilot accounts for **zero** failures beyond the line it merges
 into, down from 117 at `5594e0da`.
 
+### Applicable CI
+
+`.github/workflows/backend-unit-tests.yml` runs `make lint` then `make test`.
+Lint is `ruff check .` across the whole backend, tests included, and it was the
+step that failed first:
+
+| tree | `ruff check .` |
+| --- | --- |
+| shared baseline `8c5cf538` | 22 errors |
+| pilot, before this slice | 332 errors |
+| pilot, now | **0** |
+
+312 of the 332 were in the campaign's own test files — a compressed style
+(`E701`/`E702`), import order, and fixtures imported for pytest to resolve and
+then named again as parameters. Fixed by `ruff format` on the twelve files
+carrying the compressed style, import sorting, and an explicit
+`# noqa: F811 - pytest fixture request` at the 63 request sites. No source
+behaviour changed: the non-test diff is import ordering and formatting only.
+
+**A mistake worth recording.** The first pass ran a blanket `ruff check --fix`,
+whose `F401` rule deleted 32 pytest fixture imports — ruff cannot see a fixture
+used by name — and the next full run came back with 477 collection errors. The
+imports were restored with an explicit noqa rather than left to the autofixer,
+and one restoration landed inside a multi-line import and had to be corrected.
+Auto-fix is not safe on test files that import fixtures.
+
+`make test` still fails on the two `test_local_sandbox_encoding` cases, which
+fail identically on the shared baseline. CI has never been green on this line;
+the pilot no longer contributes to that, and those two are the shared owner's.
+
 The declarations are opt-in and per-file, name their owners, and are justified in
 each fixture's docstring: every one of those files is *about* the legacy lane —
 `add_memories` refuses a governed owner by design, `extract_session_memories`

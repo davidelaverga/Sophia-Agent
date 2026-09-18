@@ -19,6 +19,8 @@ import httpx
 if TYPE_CHECKING:
     from deerflow.sophia.session_store import SessionRecord
 
+    from .models import AuthorizedMemory
+
 from .models import (
     CandidateRecord,
     CanonicalMemory,
@@ -709,8 +711,8 @@ class SupabaseMemoryGovernanceStore:
         record_prompt_admission to fence races, tombstones and provider bindings.
         Missing/duplicate/extra rows invalidate the whole retained context.
         """
-        from .retained_context import RetainedMemoryContext, encode_context_manifest
         from .models import AuthorizedMemory
+        from .retained_context import RetainedMemoryContext, encode_context_manifest
 
         # Reuse the strict structural validator before constructing any filter.
         encode_context_manifest(RetainedMemoryContext("validation-only", 0, inclusions))

@@ -3,8 +3,8 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
-
 from test_mem00_owner_authority_foundation import store
+
 from deerflow.agents.sophia_agent.middlewares import user_identity
 from deerflow.sophia.memory_governance import owner_authority
 

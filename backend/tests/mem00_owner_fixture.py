@@ -1,5 +1,6 @@
 import pytest
 
+
 @pytest.fixture
 def declare_memory_owners(monkeypatch):
     """Explicit per-test durable declarations; NOT an autouse legacy bypass.

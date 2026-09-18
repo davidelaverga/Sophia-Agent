@@ -1,10 +1,10 @@
 import pytest
-from mem00_owner_fixture import declare_memory_owners
+from mem00_owner_fixture import declare_memory_owners  # noqa: F401 - pytest fixture, used by name
 
 from deerflow.agents.sophia_agent.middlewares.memory_context import MemoryContextUnavailable, MemoryRunGuard
 
 
-def test_guard_constructed_legacy_rechecks_cutover_before_consumer(declare_memory_owners):
+def test_guard_constructed_legacy_rechecks_cutover_before_consumer(declare_memory_owners):  # noqa: F811 - pytest fixture request
     declare_memory_owners({"owner": "legacy"})
     guard = MemoryRunGuard(owner_id="owner", config={})
     assert not guard.enabled
@@ -31,11 +31,10 @@ async def test_actual_legacy_sdk_attempt_is_fenced(monkeypatch, provider, asynch
     from test_mem00_model_clients import close_model, reply
 
     from deerflow.agents.sophia_agent.middlewares.memory_context import MemoryContextEntryMiddleware
-    from deerflow.sophia.memory_governance import owner_authority
-    from deerflow.sophia.memory_governance import observability
-    from deerflow.sophia.memory_governance.legacy_model_dispatch import LegacyModelDispatchAuthority
+    from deerflow.sophia.memory_governance import observability, owner_authority
     from deerflow.sophia.memory_governance import store as store_module
     from deerflow.sophia.memory_governance.input_provenance import INPUT_RUN_KEY
+    from deerflow.sophia.memory_governance.legacy_model_dispatch import LegacyModelDispatchAuthority
     from deerflow.sophia.memory_governance.model_clients import GovernedChatAnthropic, GovernedChatOpenAI, ModelDispatchDenied
     from deerflow.sophia.memory_governance.models import OwnerMemoryAuthority
 

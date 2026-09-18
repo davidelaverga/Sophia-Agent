@@ -9,9 +9,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
-from mem00_owner_fixture import declare_memory_owners
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
+from mem00_owner_fixture import declare_memory_owners  # noqa: F401 - pytest fixture, used by name
 
 import app.gateway.routers.sessions as sessions_router
 from app.gateway.auth import require_authenticated_user
@@ -139,7 +139,7 @@ def _synthetic_session_record(
 
 
 @pytest.fixture(autouse=True)
-def isolated_session_store(tmp_path, monkeypatch, declare_memory_owners):
+def isolated_session_store(tmp_path, monkeypatch, declare_memory_owners):  # noqa: F811 - pytest fixture request
     declare_memory_owners({'dev-user': 'legacy', 'real-user-123': 'legacy'})
     store = SessionStore(tmp_path / "users")
     monkeypatch.setattr(sessions_router, "_store", store)

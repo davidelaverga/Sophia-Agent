@@ -5,11 +5,11 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
-from mem00_owner_fixture import declare_memory_owners
+from mem00_owner_fixture import declare_memory_owners  # noqa: F401 - pytest fixture, used by name
 
 
 @pytest.fixture
-def canonical_review_only(monkeypatch, declare_memory_owners):
+def canonical_review_only(monkeypatch, declare_memory_owners):  # noqa: F811 - pytest fixture request
     declare_memory_owners({'rollback-owner': 'governed', 'non-cohort-owner': 'legacy'})
     for key in ("CANDIDATE_LEDGER_WRITE", "CANDIDATE_LEDGER_READ", "CANONICAL_POOL_READ"):
         monkeypatch.setenv(f"SOPHIA_MEMORY_{key}", "true")

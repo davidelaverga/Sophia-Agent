@@ -40,6 +40,7 @@ async def authenticated_subject(request: Request):
 async def authenticated_memory_authority(request: Request):
     """Current routing observation, not a source or model admission."""
     from starlette.concurrency import run_in_threadpool
+
     from deerflow.sophia.memory_governance.owner_authority import resolve_owner_authority
 
     owner = await _subject_id(request)

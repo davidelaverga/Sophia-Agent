@@ -8,8 +8,6 @@ import httpx
 import pytest
 
 from deerflow.sophia.memory_governance.models import OwnerMemoryAuthority
-from deerflow.sophia.memory_governance.owner_authority import resolve_owner_authority, resolved_memory_flags_for_owner
-from deerflow.sophia.memory_governance.store import MemoryGovernanceUnavailable, SupabaseMemoryGovernanceStore
 
 
 def store(state="governed", epoch=1, owner="owner"):

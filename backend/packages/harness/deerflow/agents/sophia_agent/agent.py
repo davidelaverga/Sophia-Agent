@@ -17,7 +17,6 @@ from deepagents.middleware.async_subagents import (
     AsyncSubAgentMiddleware,
 )
 from langchain.agents import create_agent
-from deerflow.sophia.memory_governance.model_clients import GovernedChatAnthropic as ChatAnthropic
 from langchain_core.runnables import RunnableConfig
 
 from deerflow.agents.middlewares.anthropic_content_block_sanitizer import AnthropicContentBlockSanitizerMiddleware
@@ -52,6 +51,7 @@ from deerflow.agents.sophia_agent.utils import validate_user_id
 from deerflow.agents.sophia_agent.vision_gate import supports_vision
 from deerflow.config.summarization_config import get_summarization_config
 from deerflow.models import create_chat_model
+from deerflow.sophia.memory_governance.model_clients import GovernedChatAnthropic as ChatAnthropic
 from deerflow.sophia.observability import disable_langsmith_tracing_for_runnable
 from deerflow.sophia.tools.emit_artifact import emit_artifact
 from deerflow.sophia.tools.read_user_document import read_user_document

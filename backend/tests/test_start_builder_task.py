@@ -15,7 +15,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 from langgraph.types import Command
-from mem00_owner_fixture import declare_memory_owners
+from mem00_owner_fixture import declare_memory_owners  # noqa: F401 - pytest fixture, used by name
 
 
 def _make_runtime(
@@ -89,7 +89,7 @@ class _FakeThreadPaths:
 # ---------- dispatch shape ---------------------------------------------------
 
 
-def test_mem00_handoff_does_not_embed_unversioned_memory(monkeypatch, declare_memory_owners):
+def test_mem00_handoff_does_not_embed_unversioned_memory(monkeypatch, declare_memory_owners):  # noqa: F811 - pytest fixture request
     declare_memory_owners({"alice": "governed"})
     from deerflow.sophia.memory_governance import flags
 
@@ -104,7 +104,7 @@ def test_mem00_handoff_does_not_embed_unversioned_memory(monkeypatch, declare_me
     fake_client.threads.create.assert_not_awaited()
 
 
-def test_start_builder_task_dispatches_via_asgi(monkeypatch, declare_memory_owners):
+def test_start_builder_task_dispatches_via_asgi(monkeypatch, declare_memory_owners):  # noqa: F811 - pytest fixture request
     declare_memory_owners({"alice": "legacy"})
     module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
     fake_client, captured = _make_fake_sdk_client(thread_id="asgi-1", run_id="run-1")
@@ -187,7 +187,7 @@ def test_start_builder_task_dispatches_via_asgi(monkeypatch, declare_memory_owne
 
 def test_dispatch_runtime_completion_carries_exact_annotated_builder_trace_root(
     monkeypatch,
-    declare_memory_owners,
+    declare_memory_owners,  # noqa: F811 - pytest fixture request
 ):
     """Exercise completion with the state/config emitted by real dispatch.
 
@@ -273,7 +273,7 @@ def test_dispatch_runtime_completion_carries_exact_annotated_builder_trace_root(
     assert payload["trace_id"] is None
 
 
-def test_start_builder_task_dispatches_resolved_pdf_target_ext_for_pdf_deck(monkeypatch, declare_memory_owners):
+def test_start_builder_task_dispatches_resolved_pdf_target_ext_for_pdf_deck(monkeypatch, declare_memory_owners):  # noqa: F811 - pytest fixture request
     declare_memory_owners({"alice": "legacy"})
     module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
     fake_client, captured = _make_fake_sdk_client(thread_id="asgi-pdf-deck", run_id="run-1")
@@ -465,7 +465,7 @@ def test_edit_source_resolves_storage_object_path_from_builder_result():
     )
 
 
-def test_edit_builder_artifact_dispatch_materializes_source(monkeypatch, tmp_path, declare_memory_owners):
+def test_edit_builder_artifact_dispatch_materializes_source(monkeypatch, tmp_path, declare_memory_owners):  # noqa: F811 - pytest fixture request
     declare_memory_owners({"alice": "legacy"})
     module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
     fake_client, captured = _make_fake_sdk_client(thread_id="edit-builder", run_id="run-edit")
@@ -517,7 +517,7 @@ def test_edit_builder_artifact_dispatch_materializes_source(monkeypatch, tmp_pat
     assert materialized.read_text() == "# Base\n\nKeep this."
 
 
-def test_dispatch_sets_stream_resumable_true(monkeypatch, declare_memory_owners):
+def test_dispatch_sets_stream_resumable_true(monkeypatch, declare_memory_owners):  # noqa: F811 - pytest fixture request
     declare_memory_owners({"bob": "legacy"})
     """Phase 4F regression: ``stream_resumable=True`` MUST be set on
     ``client.runs.create`` so the gateway-side ``BuilderProgressSubscriber``
@@ -755,7 +755,7 @@ def test_visual_report_without_html_request_still_targets_pdf():
 # ---------- duplicate protection --------------------------------------------
 
 
-def test_start_builder_task_duplicate_protection(monkeypatch, declare_memory_owners):
+def test_start_builder_task_duplicate_protection(monkeypatch, declare_memory_owners):  # noqa: F811 - pytest fixture request
     declare_memory_owners({"default_user": "legacy"})
     module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
 
@@ -793,7 +793,7 @@ def test_start_builder_task_duplicate_protection(monkeypatch, declare_memory_own
     assert "existing-1" in response
 
 
-def test_duplicate_launch_text_enumerates_all_four_lifecycle_tools(monkeypatch, declare_memory_owners):
+def test_duplicate_launch_text_enumerates_all_four_lifecycle_tools(monkeypatch, declare_memory_owners):  # noqa: F811 - pytest fixture request
     declare_memory_owners({"default_user": "legacy"})
     """The duplicate-rejection ToolMessage must teach the model the full
     lifecycle-tool matrix so it picks the right alternative instead of
@@ -856,7 +856,7 @@ def test_duplicate_launch_text_enumerates_all_four_lifecycle_tools(monkeypatch, 
     assert 'status_filter="running"' not in response
 
 
-def test_duplicate_launch_text_does_not_truncate_task_id(monkeypatch, declare_memory_owners):
+def test_duplicate_launch_text_does_not_truncate_task_id(monkeypatch, declare_memory_owners):  # noqa: F811 - pytest fixture request
     declare_memory_owners({"default_user": "legacy"})
     """Regression guard: deepagents docs call out task_id truncation as a
     common failure mode. The rejection text must always carry the FULL id."""
@@ -901,7 +901,7 @@ def test_duplicate_launch_text_does_not_truncate_task_id(monkeypatch, declare_me
     assert "..." not in response
 
 
-def test_start_builder_task_duplicate_protection_allows_after_terminal(monkeypatch, declare_memory_owners):
+def test_start_builder_task_duplicate_protection_allows_after_terminal(monkeypatch, declare_memory_owners):  # noqa: F811 - pytest fixture request
     declare_memory_owners({"default_user": "legacy"})
     """Terminal status (completed/failed/etc.) must not block a new launch."""
     module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
@@ -936,7 +936,7 @@ def test_start_builder_task_duplicate_protection_allows_after_terminal(monkeypat
     assert "new-1" in response.update["async_tasks"]
 
 
-def test_start_builder_task_duplicate_protection_ignores_other_agents(monkeypatch, declare_memory_owners):
+def test_start_builder_task_duplicate_protection_ignores_other_agents(monkeypatch, declare_memory_owners):  # noqa: F811 - pytest fixture request
     declare_memory_owners({"default_user": "legacy"})
     """A non-builder async task in flight must NOT block a builder launch."""
     module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
@@ -974,7 +974,7 @@ def test_start_builder_task_duplicate_protection_ignores_other_agents(monkeypatc
 # ---------- live-context embedding ------------------------------------------
 
 
-def test_start_builder_task_live_context_embedding(monkeypatch, declare_memory_owners):
+def test_start_builder_task_live_context_embedding(monkeypatch, declare_memory_owners):  # noqa: F811 - pytest fixture request
     """Memories, emotional context, ritual, and explicit URLs land in the brief."""
     declare_memory_owners({"alice": "legacy"})
     module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
@@ -1049,7 +1049,7 @@ def _assert_live_context_state(input_state: dict) -> None:
     assert isinstance(input_state["builder_web_budget"], dict)
 
 
-def test_start_builder_task_prefix_idempotent(monkeypatch, declare_memory_owners):
+def test_start_builder_task_prefix_idempotent(monkeypatch, declare_memory_owners):  # noqa: F811 - pytest fixture request
     declare_memory_owners({"alice": "legacy"})
     """If the model already prefixed the description, don't double-prefix."""
     module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
@@ -1073,7 +1073,7 @@ def test_start_builder_task_prefix_idempotent(monkeypatch, declare_memory_owners
 # ---------- SDK failure -----------------------------------------------------
 
 
-def test_start_builder_task_sdk_failure_returns_string(monkeypatch, declare_memory_owners):
+def test_start_builder_task_sdk_failure_returns_string(monkeypatch, declare_memory_owners):  # noqa: F811 - pytest fixture request
     declare_memory_owners({"alice": "legacy"})
     module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
 
@@ -1098,7 +1098,7 @@ def test_start_builder_task_sdk_failure_returns_string(monkeypatch, declare_memo
 # ---------- demo-prompt normalization ---------------------------------------
 
 
-def test_start_builder_task_normalizes_demo_request(monkeypatch, declare_memory_owners):
+def test_start_builder_task_normalizes_demo_request(monkeypatch, declare_memory_owners):  # noqa: F811 - pytest fixture request
     declare_memory_owners({"alice": "legacy"})
     module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
     fake_client, captured = _make_fake_sdk_client()
@@ -1134,7 +1134,7 @@ def test_start_builder_task_normalizes_demo_request(monkeypatch, declare_memory_
     assert response.update["async_tasks"][task_id]["demo_mode"] is True
 
 
-def test_explicit_pptx_bypasses_stale_demo_and_canonicalizes_presentation(monkeypatch, declare_memory_owners):
+def test_explicit_pptx_bypasses_stale_demo_and_canonicalizes_presentation(monkeypatch, declare_memory_owners):  # noqa: F811 - pytest fixture request
     declare_memory_owners({"alice": "legacy"})
     """Prod regression: a stale demo goal must not rewrite a live deck brief."""
     module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
@@ -1233,7 +1233,7 @@ def test_only_powerpoint_canonicalizes_task_type():
     assert module._canonical_task_type_for_target("visual_report", "pdf") == "visual_report"
 
 
-def test_start_builder_task_keeps_web_research_available_for_frontend(monkeypatch, declare_memory_owners):
+def test_start_builder_task_keeps_web_research_available_for_frontend(monkeypatch, declare_memory_owners):  # noqa: F811 - pytest fixture request
     declare_memory_owners({"alice": "legacy"})
     module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
     fake_client, captured = _make_fake_sdk_client()
@@ -1259,7 +1259,7 @@ def test_start_builder_task_keeps_web_research_available_for_frontend(monkeypatc
 # ---------- user_id resolution ----------------------------------------------
 
 
-def test_start_builder_task_prefers_runtime_config_user_id(monkeypatch, declare_memory_owners):
+def test_start_builder_task_prefers_runtime_config_user_id(monkeypatch, declare_memory_owners):  # noqa: F811 - pytest fixture request
     declare_memory_owners({"alice_from_config": "legacy"})
     module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
     fake_client, captured = _make_fake_sdk_client()
@@ -1278,7 +1278,7 @@ def test_start_builder_task_prefers_runtime_config_user_id(monkeypatch, declare_
     assert config_payload["configurable"]["user_id"] == "alice_from_config"
 
 
-def test_make_start_builder_task_tool_uses_bound_user_id_when_runtime_sources_missing(monkeypatch, declare_memory_owners):
+def test_make_start_builder_task_tool_uses_bound_user_id_when_runtime_sources_missing(monkeypatch, declare_memory_owners):  # noqa: F811 - pytest fixture request
     declare_memory_owners({"bound_authenticated_user": "legacy"})
     """The factory's bound user_id wins when no trusted runtime source exists."""
     module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
@@ -1309,7 +1309,7 @@ def test_make_start_builder_task_tool_uses_bound_user_id_when_runtime_sources_mi
     assert config_payload["configurable"]["user_id"] == "bound_authenticated_user"
 
 
-def test_start_builder_task_tool_arg_user_id_does_not_override_runtime_config(monkeypatch, caplog, declare_memory_owners):
+def test_start_builder_task_tool_arg_user_id_does_not_override_runtime_config(monkeypatch, caplog, declare_memory_owners):  # noqa: F811 - pytest fixture request
     declare_memory_owners({"trusted_alice": "legacy"})
     """LLM-supplied user_id must NOT override an authenticated runtime user_id."""
     module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
@@ -1372,7 +1372,7 @@ def test_start_builder_task_refuses_launch_without_tool_call_id(monkeypatch):
 # ---------- status-set coverage (terminal-blacklist semantics) --------------
 
 
-def test_start_builder_task_treats_pending_status_as_active(monkeypatch, declare_memory_owners):
+def test_start_builder_task_treats_pending_status_as_active(monkeypatch, declare_memory_owners):  # noqa: F811 - pytest fixture request
     declare_memory_owners({"default_user": "legacy"})
     """LangGraph SDK can write ``status="pending"`` via check_async_task.
 
@@ -1416,7 +1416,7 @@ def test_start_builder_task_treats_pending_status_as_active(monkeypatch, declare
     assert "pending-1" in response
 
 
-def test_start_builder_task_treats_interrupted_status_as_active(monkeypatch, declare_memory_owners):
+def test_start_builder_task_treats_interrupted_status_as_active(monkeypatch, declare_memory_owners):  # noqa: F811 - pytest fixture request
     declare_memory_owners({"default_user": "legacy"})
     """``interrupted`` is also a non-terminal LangGraph SDK run status."""
     module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
@@ -1453,7 +1453,7 @@ def test_start_builder_task_treats_interrupted_status_as_active(monkeypatch, dec
     assert "already in progress" in response
 
 
-def test_start_builder_task_treats_unknown_status_as_active(monkeypatch, declare_memory_owners):
+def test_start_builder_task_treats_unknown_status_as_active(monkeypatch, declare_memory_owners):  # noqa: F811 - pytest fixture request
     declare_memory_owners({"default_user": "legacy"})
     """Default-active: any new/unknown status blocks duplicate launches.
 
@@ -1495,7 +1495,7 @@ def test_start_builder_task_treats_unknown_status_as_active(monkeypatch, declare
     assert "already in progress" in response
 
 
-def test_start_builder_task_treats_failed_status_as_terminal(monkeypatch, declare_memory_owners):
+def test_start_builder_task_treats_failed_status_as_terminal(monkeypatch, declare_memory_owners):  # noqa: F811 - pytest fixture request
     declare_memory_owners({"default_user": "legacy"})
     """``failed`` (and other terminal statuses) must NOT block a new launch."""
     module = importlib.import_module("deerflow.sophia.tools.start_builder_task")

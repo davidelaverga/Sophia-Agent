@@ -14,7 +14,6 @@ import asyncio
 import logging
 import time
 
-from deerflow.sophia.memory_governance.flags import memory_feature_flags_for_owner
 from deerflow.sophia.memory_governance.owner_authority import ordinary_path_memory_flags_for_owner
 from deerflow.sophia.session_store import SessionStore
 

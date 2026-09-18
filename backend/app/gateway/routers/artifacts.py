@@ -10,7 +10,6 @@ from urllib.parse import quote, unquote
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, Response
-from deerflow.sophia.langgraph_client_auth import get_client
 from pydantic import BaseModel, Field
 
 from app.gateway.artifact_registry import (
@@ -36,6 +35,7 @@ from app.gateway.voice_lab_capability import (
     assert_voice_lab_session_record,
     capability_for_gateway_action,
 )
+from deerflow.sophia.langgraph_client_auth import get_client
 from deerflow.sophia.session_store import SessionStore
 from deerflow.sophia.storage import supabase_artifact_store
 from deerflow.sophia.synthetic_builder import (

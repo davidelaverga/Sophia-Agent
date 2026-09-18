@@ -75,7 +75,9 @@ def test_gateway_app_mounts_sessions_and_bootstrap_routes(tmp_path, monkeypatch)
 @pytest.mark.parametrize("bypass", [False, True])
 def test_gateway_request_owner_scope_is_authenticated_and_task_local(monkeypatch, bypass):
     import asyncio
+
     import httpx
+
     from app.gateway.app import create_app
     from deerflow.sophia.langgraph_client_auth import _owner, langgraph_owner_scope
 

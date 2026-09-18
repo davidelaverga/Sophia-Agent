@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 import pytest
-from mem00_owner_fixture import declare_memory_owners
+from mem00_owner_fixture import declare_memory_owners  # noqa: F401 - pytest fixture, used by name
 from mem00_source_snapshot_fixture import source_snapshot_fixture
 
 from deerflow.sophia.extraction import _PIPELINE_MODEL
@@ -23,7 +23,7 @@ from deerflow.sophia.session_store import SessionMessageRecord, SessionRecord
 
 
 @pytest.fixture(autouse=True)
-def _memory_ref_secret(monkeypatch: pytest.MonkeyPatch, declare_memory_owners) -> None:
+def _memory_ref_secret(monkeypatch: pytest.MonkeyPatch, declare_memory_owners) -> None:  # noqa: F811 - pytest fixture request
     monkeypatch.setenv("SOPHIA_MEMORY_REFERENCE_HMAC_SECRET", "m" * 32)
     monkeypatch.setenv("SOPHIA_MEMORY_COHORT_PRINCIPALS", "owner-1")
     monkeypatch.setenv("SOPHIA_MEMORY_CANDIDATE_LEDGER_WRITE", "true")
@@ -74,7 +74,7 @@ class _Sessions:
 
 def _run(sessions: _Sessions, *, state: str = "leased") -> ExtractionRun:
     selected = sessions.messages[1:]
-    context=capture_context(context_mode=sessions.record.context_mode,session_date="2026-01-01")
+    context = capture_context(context_mode=sessions.record.context_mode, session_date="2026-01-01")
     return ExtractionRun(
         extraction_run_id=uuid4(),
         user_id="owner-1",
@@ -94,7 +94,7 @@ def _run(sessions: _Sessions, *, state: str = "leased") -> ExtractionRun:
         extractor_prompt_version="mem0_extraction.md:v1",
         source_dependencies=dependencies(selected),
         extractor_input_context=context,
-        extractor_input_ref=extraction_input_ref(owner_id="owner-1",session_id="session-1",messages=_serialize(selected),context=context,model=_PIPELINE_MODEL),
+        extractor_input_ref=extraction_input_ref(owner_id="owner-1", session_id="session-1", messages=_serialize(selected), context=context, model=_PIPELINE_MODEL),
         state=state,
         memory_clear_epoch=0,
         lease_token=uuid4(),
@@ -119,33 +119,49 @@ class _Governance:
         if self.recovery_claimed:
             return None
         self.recovery_claimed = True
-        return SourceRecoveryClaim(user_id=user_id,session_id="session-1",sweep_id=uuid4(),lease_token=uuid4(),
-            lease_owner=lease_owner,lease_expires_at=self.recovery_expiry)
+        return SourceRecoveryClaim(user_id=user_id, session_id="session-1", sweep_id=uuid4(), lease_token=uuid4(), lease_owner=lease_owner, lease_expires_at=self.recovery_expiry)
 
     def complete_source_recovery(self, claim, *, outcome):
         self.recovery_outcome = outcome
 
     def source_extraction_runs(self, *, user_id, session_id):
-        assert (user_id,session_id)==("owner-1","session-1")
-        first=[_message(1)]
-        context=capture_context(context_mode="life",session_date="2026-01-01")
-        previous=ExtractionRun(extraction_run_id=UUID(int=999),user_id=user_id,session_id=session_id,thread_id="thread-1",
-            transcript_revision=7,sequence_start=1,sequence_end=1,state="succeeded_zero",terminal_candidate_count=0,memory_clear_epoch=0,
-            extractor_contract_version="mem00.extract.v1",extractor_model=_PIPELINE_MODEL,extractor_prompt_version="mem0_extraction.md:v1",
-            extractor_input_context=context,extractor_input_ref=extraction_input_ref(owner_id=user_id,session_id=session_id,messages=_serialize(first),context=context,model=_PIPELINE_MODEL),
-            source_dependencies=dependencies(first),input_manifest_ref=_manifest_ref(user_id=user_id,session_id=session_id,transcript_revision=7,messages=first))
-        return (previous,)+((self.completed_result,) if self.completed_result and self.completed_result.state!="superseded" else ())
+        assert (user_id, session_id) == ("owner-1", "session-1")
+        first = [_message(1)]
+        context = capture_context(context_mode="life", session_date="2026-01-01")
+        previous = ExtractionRun(
+            extraction_run_id=UUID(int=999),
+            user_id=user_id,
+            session_id=session_id,
+            thread_id="thread-1",
+            transcript_revision=7,
+            sequence_start=1,
+            sequence_end=1,
+            state="succeeded_zero",
+            terminal_candidate_count=0,
+            memory_clear_epoch=0,
+            extractor_contract_version="mem00.extract.v1",
+            extractor_model=_PIPELINE_MODEL,
+            extractor_prompt_version="mem0_extraction.md:v1",
+            extractor_input_context=context,
+            extractor_input_ref=extraction_input_ref(owner_id=user_id, session_id=session_id, messages=_serialize(first), context=context, model=_PIPELINE_MODEL),
+            source_dependencies=dependencies(first),
+            input_manifest_ref=_manifest_ref(user_id=user_id, session_id=session_id, transcript_revision=7, messages=first),
+        )
+        return (previous,) + ((self.completed_result,) if self.completed_result and self.completed_result.state != "superseded" else ())
 
     def source_snapshot(self, *, user_id, session_id, thread_id):
-        assert (user_id,session_id,thread_id)==("owner-1","session-1","thread-1")
+        assert (user_id, session_id, thread_id) == ("owner-1", "session-1", "thread-1")
         return source_snapshot_fixture(self.sessions.record, self.sessions.messages, epoch=0)
 
     def apply_source_target_at_epoch(self, **payload):
-        if self.target_failure: raise self.target_failure
-        selected=payload["p_next_range"]
-        observed={**payload,**({"p_sequence_start":selected["sequence_start"],"p_sequence_end":selected["sequence_end"],"p_input_manifest_ref":selected["input_manifest_ref"]} if selected else {})}
-        if payload["p_ended_at"] is None: self.enqueued=observed
-        else: self.finalized=observed
+        if self.target_failure:
+            raise self.target_failure
+        selected = payload["p_next_range"]
+        observed = {**payload, **({"p_sequence_start": selected["sequence_start"], "p_sequence_end": selected["sequence_end"], "p_input_manifest_ref": selected["input_manifest_ref"]} if selected else {})}
+        if payload["p_ended_at"] is None:
+            self.enqueued = observed
+        else:
+            self.finalized = observed
         return SimpleNamespace(run=self.enqueue_result if selected else None)
 
     def apply_source_target(self, **payload):
@@ -283,7 +299,7 @@ def test_replacement_enqueue_failure_keeps_stale_run_retryable() -> None:
     sessions = _Sessions(revision=8)
     run_sessions = _Sessions(revision=7)
     store = _Governance(_run(run_sessions))
-    sessions.messages[1]=sessions.messages[1].model_copy(update={"content":"SYNTHETIC-CORRECTED","memory_source_version":str(uuid4())})
+    sessions.messages[1] = sessions.messages[1].model_copy(update={"content": "SYNTHETIC-CORRECTED", "memory_source_version": str(uuid4())})
     store.target_failure = MemoryGovernanceUnavailable("memory_source_runs_changed")
 
     with pytest.raises(MemoryGovernanceUnavailable, match="memory_source_runs_changed"):
@@ -444,12 +460,14 @@ def test_extractor_failure_returns_durable_run_to_retry_state() -> None:
 def test_slow_source_cannot_report_a_successful_expired_recovery_claim(monkeypatch) -> None:
     sessions = _Sessions()
     store = _Governance(_run(sessions, state="queued"))
+
     class AfterSourceRead:
         @staticmethod
         def now(zone):
             return store.recovery_expiry + timedelta(seconds=1)
+
     monkeypatch.setattr("deerflow.sophia.memory_governance.extraction_service.datetime", AfterSourceRead)
-    assert _service(store, sessions, lambda *_: []).recover_finalized_sessions(user_ids=("owner-1",),limit=1) == 1
+    assert _service(store, sessions, lambda *_: []).recover_finalized_sessions(user_ids=("owner-1",), limit=1) == 1
     assert store.recovery_outcome == "retryable_failure"
 
 

@@ -1,30 +1,29 @@
 """Real local agent/checkpointer flow with fake model and canonical authorities."""
 
+import asyncio
+import json
 from dataclasses import replace
 from types import SimpleNamespace
 from uuid import UUID, uuid4
 
-import pytest
-from mem00_owner_fixture import declare_memory_owners
-import asyncio
-import json
 import httpx
+import pytest
 from langchain.agents import create_agent
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.language_models.fake_chat_models import FakeListChatModel
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.memory import InMemorySaver
+from mem00_owner_fixture import declare_memory_owners  # noqa: F401 - pytest fixture, used by name
 
 from deerflow.agents.sophia_agent.middlewares.memory_context import MemoryContextEntryMiddleware, MemoryContextModelProducer, MemoryContextUnavailable, MemoryRunGuard
 from deerflow.agents.sophia_agent.middlewares.prompt_assembly import PromptAssemblyMiddleware
 from deerflow.sophia.memory_governance.context_provenance import CHECKPOINT_PROOF_KEY
 from deerflow.sophia.memory_governance.input_provenance import INPUT_PROOF_KEY, INPUT_RUN_KEY, issue_recorded_authenticated_input
 from deerflow.sophia.memory_governance.retained_admission import RetainedAdmission
-from deerflow.sophia.memory_governance.retained_context import ContextTransition
 
 
 @pytest.fixture
-def env(monkeypatch, tmp_path, declare_memory_owners):
+def env(monkeypatch, tmp_path, declare_memory_owners):  # noqa: F811 - pytest fixture request
     declare_memory_owners({"owner": "governed"})
     for name in ("CANDIDATE_LEDGER_WRITE", "CANDIDATE_LEDGER_READ", "CANONICAL_POOL_READ", "PROVIDER_PROJECTION", "GOVERNED_RUNTIME_READ"):
         monkeypatch.setenv("SOPHIA_MEMORY_" + name, "true")
@@ -94,11 +93,12 @@ def test_fresh_authenticated_turn_executes_and_retained_second_turn_continues(en
 
 @pytest.mark.parametrize("revoke_at_dispatch", [False, True])
 def test_compiled_text_agent_reaches_exact_sdk_boundary(env, monkeypatch, revoke_at_dispatch):
+    from test_mem00_model_clients import close_model, reply
+    from test_mem00_model_dispatch import PermitStore
+
+    from deerflow.agents.sophia_agent.state import SophiaState
     from deerflow.sophia.memory_governance.model_clients import GovernedChatAnthropic, ModelDispatchDenied
     from deerflow.sophia.memory_governance.service import MemoryProviderContract
-    from deerflow.agents.sophia_agent.state import SophiaState
-    from test_mem00_model_clients import reply, close_model
-    from test_mem00_model_dispatch import PermitStore
 
     memory, automatic = approved_lookup(env, monkeypatch)
     cfg, messages = current(env)
@@ -155,6 +155,7 @@ def test_c2_text_refuses_disabled_lineage_before_consumers(env, key):
 @pytest.mark.parametrize("asynchronous", [False, True])
 def test_pilot_build_awareness_preserves_tasks_without_rendering_retained_text(monkeypatch, asynchronous):
     from copy import deepcopy
+
     from deerflow.agents.sophia_agent.middlewares.build_awareness import BuildAwarenessMiddleware
     checked = []
     guard = SimpleNamespace(enabled=True, check=lambda: checked.append(True))
@@ -246,7 +247,6 @@ def test_complete_companion_middleware_chain_continues_on_sealed_checkpoint(env,
     monkeypatch.setattr(companion, "load_sophia_web_tools", lambda: [])
     monkeypatch.setattr(companion, "_create_summarization_middleware", lambda: None)
     def checked_factory(**kwargs):
-        from langchain.agents.middleware import AgentMiddleware
 
         chain = kwargs["middleware"]
         producer_index = next(index for index, item in enumerate(chain) if isinstance(item, MemoryContextModelProducer))

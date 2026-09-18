@@ -4,9 +4,9 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from mem00_owner_fixture import declare_memory_owners  # noqa: F401
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
+from mem00_owner_fixture import declare_memory_owners  # noqa: F401
 from starlette.requests import Request
 
 from app.gateway.auth import (

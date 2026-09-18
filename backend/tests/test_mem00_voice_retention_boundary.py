@@ -4,11 +4,11 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
-from mem00_owner_fixture import declare_memory_owners
+from mem00_owner_fixture import declare_memory_owners  # noqa: F401 - pytest fixture, used by name
 
 
 @pytest.mark.parametrize("caller", ["voice_setup", "voice_dynamic_retrieval", "voice_direct_fallback", "voice_retrieval_tool"])
-def test_governed_voice_context_refuses_retained_memory_until_fencing_exists(monkeypatch, caller, declare_memory_owners):
+def test_governed_voice_context_refuses_retained_memory_until_fencing_exists(monkeypatch, caller, declare_memory_owners):  # noqa: F811 - pytest fixture request
     declare_memory_owners({'owner': 'governed'})
     from deerflow.sophia import mem0_client
     from deerflow.sophia.memory_governance import flags, mem0_projection_adapter, observability, reader, service, store

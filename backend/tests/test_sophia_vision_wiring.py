@@ -13,9 +13,9 @@ Both chains gate on ``vision_gate.supports_vision(model_name)``.
 from __future__ import annotations
 
 import importlib
-from mem00_owner_fixture import declare_memory_owners
 
 from langchain_core.tools import BaseTool
+from mem00_owner_fixture import declare_memory_owners  # noqa: F401 - pytest fixture, used by name
 
 
 class _DummyAgent:
@@ -38,7 +38,7 @@ def _capture_create_agent(captured: dict):
     return _capture
 
 
-def test_builder_includes_view_image_tool_and_middleware_when_vision_enabled(monkeypatch, declare_memory_owners) -> None:
+def test_builder_includes_view_image_tool_and_middleware_when_vision_enabled(monkeypatch, declare_memory_owners) -> None:  # noqa: F811 - pytest fixture request
     declare_memory_owners({"user_123": "legacy"})
     builder_module = importlib.import_module("deerflow.agents.sophia_agent.builder_agent")
 
@@ -77,7 +77,7 @@ def test_builder_includes_view_image_tool_and_middleware_when_vision_enabled(mon
     ), f"Image middleware in wrong slot: {middleware_names}"
 
 
-def test_builder_excludes_view_image_when_vision_disabled(monkeypatch, declare_memory_owners) -> None:
+def test_builder_excludes_view_image_when_vision_disabled(monkeypatch, declare_memory_owners) -> None:  # noqa: F811 - pytest fixture request
     declare_memory_owners({"user_123": "legacy"})
     builder_module = importlib.import_module("deerflow.agents.sophia_agent.builder_agent")
 
