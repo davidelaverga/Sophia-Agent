@@ -7,12 +7,12 @@ legacy decisions are never cached across requests.
 
 from dataclasses import replace
 
-from .flags import MemoryFeatureFlags, configured_memory_feature_flags_for_owner, memory_feature_flags
+from .flags import MemoryFeatureFlags, configured_memory_feature_flags_for_owner
 from .store import (
     MemoryGovernanceUnavailable,
     MemoryOwnerUndeclared,
     configured_memory_store,
-    memory_governance_store_configured,
+    memory_governance_deliberately_absent,
 )
 
 OWNER_AUTHORITY_READER = "mem00.owner-authority.v1"
@@ -85,17 +85,17 @@ def ordinary_path_memory_flags_for_owner(owner_id, *, store=None, environ=None) 
         return MemoryFeatureFlags()
     except MemoryGovernanceUnavailable:
         # Exactly two things may select all-off flags. One is the definite
-        # MemoryOwnerUndeclared above. The other is a deployment that has no
-        # governance store at all, which is equally definite and equally
-        # network-free. An OUTAGE is neither, and must never land here.
+        # MemoryOwnerUndeclared above. The other is an operator DECLARING that
+        # MEM00 is not installed here, which is only honoured outside a
+        # deployment. An OUTAGE is neither, and must never land here.
         #
-        # The combined case is what this guards. With every feature flag rolled
-        # back AND a configured store unreachable, the old test only asked
-        # `any_enabled()` and degraded -- which would skip canonical source
-        # invalidation and recap cleanup on delete, and let `_read_session_recap`
-        # serve a local file without binding it to a canonical source revision.
-        # Rolled-back flags say nothing about whether canonical rows exist; only
-        # the absence of a store does.
+        # Two earlier versions of this were wrong, in the same direction. The
+        # first asked only `any_enabled()`, so rolled-back flags plus an
+        # unreachable store degraded. The second asked whether the Supabase
+        # credentials were present, which reads a missing SETTING as an absence
+        # of durable records -- a deploy that drops one variable would then skip
+        # source invalidation on delete and serve recaps never bound to a
+        # canonical revision, over a database still full of canonical rows.
         #
         # The check also stays AFTER the resolution attempt, not before it:
         # `resolved_memory_flags_for_owner` forces candidate_ledger_read and
@@ -103,9 +103,7 @@ def ordinary_path_memory_flags_for_owner(owner_id, *, store=None, environ=None) 
         # environment, so canonical management stays routed to the ledger even
         # when recall is off. Short-circuiting on the environment first stripped
         # that from every governed owner.
-        if (store is None
-                and not memory_governance_store_configured(environ)
-                and not memory_feature_flags(environ).any_enabled()):
+        if store is None and memory_governance_deliberately_absent(environ):
             return MemoryFeatureFlags()
         raise
 

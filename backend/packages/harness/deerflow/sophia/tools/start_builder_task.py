@@ -1079,7 +1079,14 @@ def _resolve_memory_snippets(state: SophiaState, *, owner_id: str | None = None)
       2. ``injected_memories`` values that do not look like opaque IDs
     """
     from deerflow.sophia.memory_governance.context_state import allows_unversioned_builder_handoff
+    from deerflow.sophia.memory_governance.owner_authority import owner_is_definitely_undeclared
 
+    if owner_is_definitely_undeclared(owner_id):
+        # Source-only dispatch. Stated rather than left to follow from the lane
+        # check below, because it is the property that makes dispatching for an
+        # undeclared owner safe: there is nothing approved to carry, and this
+        # must stay true if the lane check ever changes.
+        return []
     if not allows_unversioned_builder_handoff(owner_id):
         return []
     snippets_raw = state.get("injected_memory_contents") or []
@@ -2574,11 +2581,22 @@ async def _start_builder_task_impl(
     # Builder path from its own test principal -- which MEM00 deliberately
     # refuses to declare -- so the gate was refusing a run that can carry no
     # memory to protect.
-    from deerflow.sophia.memory_governance.owner_authority import require_legacy_memory_lane
+    from deerflow.sophia.memory_governance.owner_authority import (
+        owner_is_definitely_undeclared,
+        require_legacy_memory_lane,
+    )
     try:
         dispatch_owner, _, _ = _resolve_user_id(runtime, state, configured_user_id=configured_user_id,
             explicit_tool_arg=user_id_arg)
-        if synthetic_context is None:
+        # A definitely-undeclared owner dispatches SOURCE-ONLY. The brief is
+        # this turn's own tool-call text inside an already-authenticated run,
+        # and the owner is the one the trusted runtime config names, never the
+        # model's argument. Requiring a legacy declaration instead withdrew the
+        # Builder from every account outside the pilot, which is not what the
+        # lane protects: `_resolve_memory_snippets` returns nothing for these
+        # owners, so no memory can be inherited into the brief, and no
+        # declaration is minted for them here or anywhere else.
+        if synthetic_context is None and not owner_is_definitely_undeclared(dispatch_owner):
             require_legacy_memory_lane(dispatch_owner)
     except Exception:
         return "Builder unavailable: current owner authority and an admitted run are required. No launch was attempted."

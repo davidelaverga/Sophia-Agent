@@ -122,14 +122,31 @@ def test_ordinary_flags_still_fail_closed_when_the_store_is_down(monkeypatch):
         ordinary_path_memory_flags_for_owner("governed-pilot-owner", environ=PILOT_ENV)
 
 
-def test_ordinary_flags_do_not_require_a_store_when_no_feature_is_enabled(monkeypatch):
-    """A deployment with MEM00 switched off has no authority to guard."""
+def test_flags_being_off_is_not_a_reason_to_stop_requiring_a_store(monkeypatch):
+    """This test used to assert the opposite, and the opposite was unsafe.
+
+    "No MEM00 feature is switched on" says nothing about whether durable
+    governance records exist -- they outlive the flag that produced them. Only
+    an operator's explicit declaration that MEM00 is not installed can select
+    all-off behaviour now, and that declaration is refused in a deployment.
+    """
     from deerflow.sophia.memory_governance.owner_authority import (
         ordinary_path_memory_flags_for_owner,
     )
+    from deerflow.sophia.memory_governance.store import (
+        GOVERNANCE_ABSENT_ENV,
+        MemoryGovernanceUnavailable,
+    )
 
     _use(monkeypatch, _DownStore())
-    assert ordinary_path_memory_flags_for_owner("anyone", environ={}).any_enabled() is False
+    with pytest.raises(MemoryGovernanceUnavailable):
+        ordinary_path_memory_flags_for_owner("anyone", environ={})
+    # Declared absent, and not in a deployment: the pre-MEM00 product.
+    declared = {GOVERNANCE_ABSENT_ENV: "true"}
+    assert ordinary_path_memory_flags_for_owner("anyone", environ=declared).any_enabled() is False
+    # Declared absent, but this is a deployment: refused.
+    with pytest.raises(MemoryGovernanceUnavailable):
+        ordinary_path_memory_flags_for_owner("anyone", environ={**declared, "RENDER": "true"})
 
 
 def test_governed_owner_still_resolves_normally(monkeypatch):

@@ -2,6 +2,123 @@
 
 Successful target: MEMORY_TEXT_PILOT_READY. Current status: IMPLEMENTING — RELEASE CLOSURE; not deployed, not activated. C2 replaces the prior PROMOTE-only/five-core-run prerequisites for this owner-restricted pilot. Historical C1 records and failures remain valid history, not additional first-use gates. Recovered cumulative failure counter: latest failed iteration EI929; last reported five-failure checkpoint 923–927; next five-failure checkpoint 932. The single current authority is the checkpoint immediately below; every later dated paragraph is preserved history, not competing current status.
 
+## Release-closure slice — 2026-09-18
+
+### CORRECTION: the shared baseline has no failing tests
+
+Earlier entries in this record report the shared baseline as *2 failed / 6,225
+passed*, and the pilot as "adding nothing to them". The two failures were
+**mine, not the baseline's**.
+
+`tests/test_local_sandbox_encoding.py` builds a command beginning with the
+literal `python`, and `local_sandbox._trusted_image_provider_command` resolves
+it with `shutil.which`. This machine has no bare `python` on `PATH`, only
+`python3`. I ran pytest as `.venv/bin/python -m pytest`, which does **not** put
+the virtualenv's `bin` on `PATH`; CI runs `make test` = `uv run pytest`, which
+does. Re-measured on `8c5cf538` with `PATH` set the way `uv run` sets it:
+
+```
+6,227 passed, 165 skipped, 0 failed
+```
+
+Every figure from here on puts the venv on `PATH`. The earlier ones are left in
+place as history with this correction above them, not edited in retrospect.
+
+### Missing credentials are a missing setting, not an absence of records
+
+`ordinary_path_memory_flags_for_owner` selected all-off behaviour when the
+Supabase credentials were absent. That reads a dropped environment variable as
+"there are no canonical rows", which in production would skip source
+invalidation on delete and serve recaps never bound to a canonical revision —
+over a database still full of them.
+
+`memory_governance_store_configured` is gone. Its replacement,
+`memory_governance_deliberately_absent`, requires a positive operator
+declaration (`SOPHIA_MEMORY_GOVERNANCE_ABSENT`) **and** refuses it wherever the
+runtime looks like a deployment — `RENDER`, `RENDER_SERVICE_ID`,
+`RENDER_GIT_COMMIT`, `VERCEL`, `RAILWAY_ENVIRONMENT`, or a `SOPHIA_ENV` /
+`APP_ENV` / `ENVIRONMENT` naming prod or staging. A dropped setting can no
+longer reach it; only someone saying MEM00 is not installed here can.
+
+Tested against an already-written **protected** recap: a governed owner's recap
+is written with a real revision binding and reads back, then the credentials go
+missing with the flags rolled back — the read returns nothing, the file is not
+deleted, the recap cleanup answers 503, and the source invalidation raises
+rather than skipping. Two previously-passing tests asserted the opposite rule
+and now assert this one.
+
+### Synthetic authorization, not just normalization
+
+`_admit_synthetic_maintenance` accepted any complete, correctly shaped
+declaration naming the configured principal. Shape is not authorization: anyone
+can write a well-formed declaration.
+
+Server-label issuance is now bound to the machinery the product already uses.
+`start_builder_task` reserves a `builder` admission for the exact thread id
+against an open cleanup obligation before it asks the runtime to create the
+thread; the policy asks the fence whether that reservation exists, through
+`cleanup_admission_authorized` — the fence's own recheck, reused rather than
+reimplemented, so it cannot drift. An unreachable or erroring fence answers no.
+
+The negative case the earlier version would have admitted is now explicit: a
+complete, correctly shaped declaration naming the configured principal with no
+reservation behind it is **denied**.
+
+### The Builder path, resolved rather than measured
+
+The tool runs in-process under the parent companion run's AuthContext, which
+during a Voice Lab test is the test principal — and the policy denied that
+principal everywhere. Resolved by narrowing the refusal, not dropping it:
+
+| the principal may | the principal may not |
+| --- | --- |
+| create a thread whose cleanup-fence reservation exists | create a plain thread |
+| read and operate its own such threads | create a synthetic thread with no reservation |
+| start the **Builder** graph on one | start the companion graph |
+| resolve system assistants, like everyone | anything an ordinary owner is refused |
+
+Exercised end to end through the installed disposable runtime as the principal
+itself, with the ordinary refusals asserted in the same test. No ordinary owner
+was substituted to make it pass. The principal stays undeclared in MEM00, so
+`create_run` mints no input provenance for it and no memory can be inherited.
+
+### The Builder is no longer pilot-only
+
+`require_legacy_memory_lane` outside a governed run refused every account
+without a durable pre-cutover declaration — that is, every ordinary account. A
+definitely-undeclared owner now dispatches **source-only**, and what makes that
+safe is asserted rather than assumed: `_resolve_memory_snippets` returns nothing
+for them (stated explicitly now, not left to follow from the lane check), the
+dispatch owner is the trusted runtime one rather than the model's argument, and
+the owner is still undeclared afterwards. No legacy declaration is minted for
+anyone.
+
+One governance test covered `governed` and `unknown` together on the premise
+that the legacy lane was the only alternative to the governed one. It is not any
+more, so it was split: the governed half keeps the full "no legacy context or
+dispatch" assertion, and the undeclared half asserts dispatch **with** nothing
+memory-derived in it.
+
+### A duplicated test block, removed
+
+`ruff` caught seven `F811`s in this slice's own test file: an earlier splice had
+left a whole block — the realtime-context section and two flags tests —
+duplicated verbatim. Python keeps the last definition, so the first copies were
+dead code rather than shadowed coverage (the collected count is unchanged at 23
+either way), but it is exactly the kind of thing a passing suite does not
+report. Removed; `ruff check .` is clean and stays a gate for this reason.
+
+### The shared baseline's lint, coordinated separately
+
+The 22 `ruff` errors are real and are the step that actually fails CI on the
+shared line. They are in three Voice Lab files, so the fix is prepared on
+``codex/voice-lab-lint-hygiene`` — off `8c5cf538`, **not** on the pilot branch and
+not in the integration candidate — with a record at
+[`c2-shared-baseline-lint-coordination.md`](./c2-shared-baseline-lint-coordination.md).
+Fixed per rule, never `--fix .` or `ruff format`, no check disabled and no rule
+ignored in configuration. `ruff check .` passes and the baseline suite is
+6,227 passed / 0 failed.
+
 ## Rollback/outage, the no-memory proof, and the lane tightening — 2026-09-18
 
 ### The combined case the helper got wrong
@@ -106,6 +223,29 @@ now with a number rather than an inference.
 baseline's own** (`test_local_sandbox_encoding.py`, which fails identically at
 `8c5cf538`). The pilot accounts for **zero** failures beyond the line it merges
 into, down from 117 at `5594e0da`.
+
+### Qualified integration SHA — successor to `6ce165af`
+
+All measured with one method: the frozen Python 3.12 venv, `PYTHONPATH` pinned
+to each tree's own `packages/harness`, `pytest tests/ -q -p no:randomly`, and
+`ruff check .` from the backend root.
+
+| tree | SHA | `make test` | `make lint` |
+| --- | --- | --- | --- |
+| shared baseline | `8c5cf538` | 2 failed / 6,225 passed | 22 errors |
+| pilot head | `21113189` | 2 failed / 7,208 passed | **0** |
+| **integration candidate** | **`82f8d584`** | **2 failed / 7,251 passed** | 22 errors |
+
+`82f8d584` is `8c5cf538` merged with `21113189`, on
+`codex/mem00-c2-integration-r2`, superseding `6ce165af`.
+
+The pilot contributes **nothing** to either gate. Both remaining test failures
+are `test_local_sandbox_encoding.py`, identical at the baseline, and all 22
+remaining lint errors are in the baseline's own
+`tests/test_voice_lab_process_termination*.py` and
+`app/gateway/voice_lab_process_termination.py`. Neither is this campaign's to
+fix, and both are named here so the release decision knows CI will still be red
+for reasons that predate the merge.
 
 ### Applicable CI
 

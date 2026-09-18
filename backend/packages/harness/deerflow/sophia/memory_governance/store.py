@@ -830,21 +830,33 @@ _STORE: SupabaseMemoryGovernanceStore | None = None
 _STORE_LOCK = threading.Lock()
 
 
-def memory_governance_store_configured(environ=None) -> bool:
-    """Whether this deployment has a MEM00 governance store AT ALL.
+GOVERNANCE_ABSENT_ENV = "SOPHIA_MEMORY_GOVERNANCE_ABSENT"
+_DEPLOYMENT_MARKERS = ("RENDER", "RENDER_SERVICE_ID", "RENDER_GIT_COMMIT", "VERCEL", "RAILWAY_ENVIRONMENT")
+_DEPLOYED_ENV_NAMES = {"prod", "production", "staging", "stage"}
 
-    A definite, network-free statement about the deployment, exactly parallel to
-    what MemoryOwnerUndeclared is about an owner. It reads the same two settings
-    the store constructor requires and touches nothing, so it is False only when
-    the credentials are absent -- never because a configured store is
-    unreachable, slow, or answering with errors.
 
-    Callers use this to tell "there is no MEM00 here" apart from "MEM00 is here
-    and I could not reach it". The second must never degrade.
+def memory_governance_deliberately_absent(environ=None) -> bool:
+    """True only where an operator has DECLARED that MEM00 is not installed.
+
+    An earlier version of this predicate answered from the absence of
+    SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY. That was wrong in the direction
+    that loses data integrity: missing credentials prove a missing *setting*,
+    not the absence of durable governance records. A deploy that drops one of
+    those variables would have silently selected all-off behaviour over a
+    database still full of canonical rows -- skipping source invalidation on
+    delete and serving recaps that were never bound to a canonical revision.
+
+    So the answer now requires a positive declaration, and refuses it anywhere
+    that looks like a deployment even if the declaration is present. It is for
+    a local checkout or an isolated test runner and nothing else.
     """
     source = os.environ if environ is None else environ
-    return bool((source.get("SUPABASE_URL") or "").strip()) and bool(
-        (source.get("SUPABASE_SERVICE_ROLE_KEY") or "").strip())
+    if (source.get(GOVERNANCE_ABSENT_ENV) or "").strip().lower() not in {"1", "true", "yes", "on"}:
+        return False
+    if any((source.get(name) or "").strip() for name in _DEPLOYMENT_MARKERS):
+        return False
+    named = (source.get("SOPHIA_ENV") or source.get("APP_ENV") or source.get("ENVIRONMENT") or "").strip().lower()
+    return named not in _DEPLOYED_ENV_NAMES
 
 
 def configured_memory_store() -> SupabaseMemoryGovernanceStore:

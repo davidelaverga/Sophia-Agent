@@ -17,6 +17,7 @@ The dedicated memory endpoints are deliberately not touched by any of this:
 `_memory_flags` is unchanged and still answers 503 for an undeclared owner.
 """
 
+import json
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
@@ -283,34 +284,107 @@ def test_rolled_back_flags_plus_an_outage_must_not_degrade(monkeypatch):
         ordinary_path_memory_flags_for_owner("anyone")
 
 
-def test_a_deployment_with_no_store_at_all_still_degrades(monkeypatch):
-    """"There is no MEM00 here" is definite, and network-free.
+def test_missing_credentials_do_not_degrade_an_existing_protected_recap(pilot_env, monkeypatch, recaps):
+    """Missing settings are not an absence of durable records.
 
-    It is the pre-MEM00 product, not an outage: the credentials the store
-    constructor requires are simply absent, so no canonical row can exist to
-    invalidate and nothing is being skipped.
+    This is the production-shaped hazard: a deploy drops SUPABASE_URL or
+    SUPABASE_SERVICE_ROLE_KEY while the feature flags happen to be rolled back.
+    The database still holds every canonical row. An earlier version of the
+    helper read that as "there is no MEM00 here" and returned all-off flags,
+    which would have served a governed owner's local recap without binding it to
+    a canonical revision, and skipped source invalidation on delete.
+
+    Exercised against an already-written protected recap rather than against the
+    helper alone, because the helper's answer is only interesting for what the
+    routes do with it.
     """
-    from deerflow.sophia.memory_governance.owner_authority import ordinary_path_memory_flags_for_owner
+    from fastapi import HTTPException
 
+    from app.gateway.routers import sessions as sessions_router
+    from deerflow.sophia.memory_governance.owner_authority import ordinary_path_memory_flags_for_owner
+    from deerflow.sophia.memory_governance.store import MemoryGovernanceUnavailable
+
+    # A governed owner writes a recap while everything is healthy. The revision
+    # binding is the real one -- the write refuses without it -- so what the
+    # read below rejects is a recap that WAS properly bound.
+    _use(monkeypatch, _StubStore("governed"))
+    revision = ("rev-1", "synthetic-thread")
+    monkeypatch.setattr(recaps.router, "_recap_source_revision", lambda *_: revision)
+    recaps.router._write_session_recap("governed-pilot-owner", "synthetic-session",
+                                       {"session_id": "synthetic-session",
+                                        "thread_id": "synthetic-thread", "turn_count": 3})
+    path = recaps.router._get_session_recap_path("governed-pilot-owner", "synthetic-session")
+    assert path.exists()
+    assert recaps.router._read_session_recap("governed-pilot-owner", "synthetic-session") is not None
+
+    # Then the credentials go missing and the flags are rolled back.
     _roll_back_every_flag(monkeypatch)
     monkeypatch.delenv("SUPABASE_URL", raising=False)
     monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
+    monkeypatch.delenv("SOPHIA_MEMORY_GOVERNANCE_ABSENT", raising=False)
+    _use(monkeypatch, _DownStore())
+
+    with pytest.raises(MemoryGovernanceUnavailable):
+        ordinary_path_memory_flags_for_owner("governed-pilot-owner")
+    # The protected recap is not served...
+    assert recaps.router._read_session_recap("governed-pilot-owner", "synthetic-session") is None
+    assert path.exists(), "and it is not deleted either"
+    # ...and the session delete is refused rather than skipping invalidation.
+    with pytest.raises(HTTPException) as raised:
+        sessions_router._cleanup_memory_session_recap("governed-pilot-owner", "synthetic-session")
+    assert raised.value.status_code == 503
+    with pytest.raises(MemoryGovernanceUnavailable):
+        sessions_router._invalidate_memory_source_before_delete(
+            "governed-pilot-owner",
+            SimpleNamespace(session_id="synthetic-session", message_revision=1))
+
+
+def test_the_absent_declaration_is_explicit_and_refused_in_a_deployment(monkeypatch):
+    """The only remaining way to select all-off without an undeclared owner.
+
+    It takes a positive operator declaration, and it is refused anywhere that
+    looks like a deployment even when the declaration is present -- so it cannot
+    be reached by a dropped setting, only by someone saying MEM00 is not
+    installed here.
+    """
+    from deerflow.sophia.memory_governance.store import (
+        GOVERNANCE_ABSENT_ENV,
+        memory_governance_deliberately_absent,
+    )
+
+    for name in (GOVERNANCE_ABSENT_ENV, "RENDER", "RENDER_SERVICE_ID", "RENDER_GIT_COMMIT",
+                 "VERCEL", "RAILWAY_ENVIRONMENT", "SOPHIA_ENV", "APP_ENV", "ENVIRONMENT"):
+        monkeypatch.delenv(name, raising=False)
+
+    assert memory_governance_deliberately_absent() is False, "silence is not a declaration"
+    monkeypatch.setenv(GOVERNANCE_ABSENT_ENV, "true")
+    assert memory_governance_deliberately_absent() is True
+
+    for name, value in [("RENDER", "true"), ("RENDER_SERVICE_ID", "srv-1"),
+                        ("RENDER_GIT_COMMIT", "abc123"), ("VERCEL", "1"),
+                        ("RAILWAY_ENVIRONMENT", "production"), ("SOPHIA_ENV", "production"),
+                        ("APP_ENV", "staging"), ("ENVIRONMENT", "prod")]:
+        monkeypatch.setenv(name, value)
+        assert memory_governance_deliberately_absent() is False, name
+        monkeypatch.delenv(name)
+
+    # And it answers from settings alone, never by reaching a store.
+    assert memory_governance_deliberately_absent({GOVERNANCE_ABSENT_ENV: "yes"}) is True
+    assert memory_governance_deliberately_absent({GOVERNANCE_ABSENT_ENV: "maybe"}) is False
+
+
+def test_the_declared_local_case_still_degrades(monkeypatch):
+    """A local checkout with MEM00 genuinely absent keeps the pre-MEM00 product."""
+    from deerflow.sophia.memory_governance.owner_authority import ordinary_path_memory_flags_for_owner
+    from deerflow.sophia.memory_governance.store import GOVERNANCE_ABSENT_ENV
+
+    _roll_back_every_flag(monkeypatch)
+    for name in ("RENDER", "RENDER_SERVICE_ID", "RENDER_GIT_COMMIT", "VERCEL",
+                 "RAILWAY_ENVIRONMENT", "SOPHIA_ENV", "APP_ENV", "ENVIRONMENT"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv(GOVERNANCE_ABSENT_ENV, "true")
     _use(monkeypatch, _DownStore())
     assert ordinary_path_memory_flags_for_owner("anyone").candidate_ledger_write is False
-
-
-def test_the_store_configured_predicate_touches_nothing(monkeypatch):
-    """It must answer from settings alone, never by trying to reach the store."""
-    from deerflow.sophia.memory_governance.store import memory_governance_store_configured
-
-    monkeypatch.setenv("SUPABASE_URL", "https://synthetic.invalid")
-    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "synthetic")
-    assert memory_governance_store_configured() is True
-    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "   ")
-    assert memory_governance_store_configured() is False
-    monkeypatch.delenv("SUPABASE_URL")
-    assert memory_governance_store_configured() is False
-    assert memory_governance_store_configured({"SUPABASE_URL": "u", "SUPABASE_SERVICE_ROLE_KEY": "k"}) is True
 
 
 # --- what the combined case actually protects --------------------------------
@@ -494,3 +568,67 @@ def test_a_complete_synthetic_admission_does_not_need_a_legacy_declaration(pilot
     projection = synthetic_builder_projection(context)
     assert projection["memory_retrieval_excluded"] is True
     assert projection["memory_learning_excluded"] is True
+
+
+def test_an_undeclared_owner_dispatches_the_builder_source_only(pilot_env, monkeypatch, tmp_path):
+    """The Builder restriction on non-pilot accounts, closed.
+
+    `require_legacy_memory_lane` outside a governed run refused every owner
+    without a durable pre-cutover declaration -- that is, every ordinary account
+    -- so the Builder was a pilot-only feature by accident. It is now dispatched
+    for a definitely-undeclared owner, and what makes that safe is stated by the
+    assertions rather than assumed:
+
+      * no declaration is minted: the owner is still undeclared afterwards;
+      * no memory is inherited: `_resolve_memory_snippets` returns nothing even
+        with injected memory sitting in state;
+      * the owner is the trusted runtime one, not the model's argument.
+    """
+    import asyncio
+
+    from langchain_core.messages import HumanMessage
+    from test_start_builder_task import _make_fake_sdk_client, _make_runtime
+
+    from deerflow.sophia.memory_governance.owner_authority import (
+        owner_is_definitely_undeclared,
+        require_legacy_memory_lane,
+    )
+    from deerflow.sophia.memory_governance.store import MemoryGovernanceUnavailable
+    from deerflow.sophia.tools import start_builder_task as module
+
+    _use(monkeypatch, _StubStore("unknown"))
+    assert owner_is_definitely_undeclared("ordinary-production-user") is True
+    # Unchanged: they have no legacy lane, and dispatch does not give them one.
+    with pytest.raises(MemoryGovernanceUnavailable):
+        require_legacy_memory_lane("ordinary-production-user")
+
+    # Memory-shaped state is present and must not reach the brief.
+    state = {
+        "user_id": "ordinary-production-user",
+        "messages": [HumanMessage("Write me a short report on the migration.")],
+        "injected_memory_contents": ["SYNTHETIC_MEMORY_MUST_NOT_ENTER"],
+        "injected_memories": ["SYNTHETIC_MEMORY_MUST_NOT_ENTER"],
+    }
+    assert module._resolve_memory_snippets(state, owner_id="ordinary-production-user") == []
+
+    fake_client, captured = _make_fake_sdk_client(thread_id="ord-1", run_id="run-ord")
+    monkeypatch.setattr("langgraph_sdk.get_client", lambda url=None: fake_client)
+    asyncio.run(module.start_builder_task.coroutine(
+        description="Write me a short report on the migration.",
+        task_type="document",
+        # The model's own argument names somebody else; the trusted runtime
+        # owner is what dispatch must use.
+        user_id="someone-else",
+        runtime=_make_runtime(state),
+    ))
+
+    run_input = captured["run_kwargs"]["input"]
+    delegation = run_input["delegation_context"]
+    assert delegation["task"] == "Write me a short report on the migration."
+    assert delegation["relevant_memories"] == [], "source-only: nothing carried in"
+    # The trusted runtime owner won over the model's argument.
+    assert captured["run_kwargs"]["config"]["configurable"]["user_id"] == "ordinary-production-user"
+    assert "SYNTHETIC_MEMORY_MUST_NOT_ENTER" not in json.dumps(captured, default=str)
+    assert "someone-else" not in json.dumps(captured, default=str)
+    # And still undeclared: dispatching did not enrol anybody.
+    assert owner_is_definitely_undeclared("ordinary-production-user") is True

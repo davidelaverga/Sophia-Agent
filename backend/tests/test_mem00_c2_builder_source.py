@@ -396,13 +396,20 @@ def test_source_only_dispatch_recovers_exact_run_without_duplicate_create(source
     assert "already tracked" in held and len(requests) == 1
 
 
-@pytest.mark.parametrize("authority", ["governed", "unknown"])
-def test_missing_guard_cannot_route_governed_or_unknown_owner_to_legacy(monkeypatch, declare_memory_owners, authority):  # noqa: F811 - pytest fixture request
+def test_missing_guard_cannot_route_a_governed_owner_to_legacy(monkeypatch, declare_memory_owners):  # noqa: F811 - pytest fixture request
+    """A governed owner without its guard gets nothing, as before.
+
+    Previously this also covered an `unknown` owner, on the grounds that the
+    legacy lane was the only alternative to the governed one. It no longer is:
+    an undeclared owner dispatches SOURCE-ONLY, which the companion test below
+    pins. What must never happen for either is reaching the legacy memory
+    context, and that is still what is asserted here.
+    """
     import asyncio
     import importlib
     from types import SimpleNamespace
     launch = importlib.import_module("deerflow.sophia.tools.start_builder_task")
-    declare_memory_owners({"owner": "governed"} if authority == "governed" else {})
+    declare_memory_owners({"owner": "governed"})
     monkeypatch.setattr("deerflow.agents.sophia_agent.middlewares.memory_context.active_governed_tool_guard", lambda: None)
     def forbidden(*args, **kwargs):
         pytest.fail("missing guard reached legacy context or dispatch")
@@ -412,3 +419,36 @@ def test_missing_guard_cannot_route_governed_or_unknown_owner_to_legacy(monkeypa
         config={"configurable": {"user_id": "owner", "thread_id": str(uuid4())}}, context={}, tool_call_id="synthetic")
     result = asyncio.run(launch._start_builder_task_impl("synthetic", "document", runtime, configured_user_id="owner"))
     assert "No launch was attempted" in result
+
+
+def test_missing_guard_gives_an_undeclared_owner_no_memory_only_its_own_turn(monkeypatch, declare_memory_owners):  # noqa: F811 - pytest fixture request
+    """The undeclared owner dispatches, and carries nothing memory-derived.
+
+    Dispatching is the point -- the Builder is not a pilot feature -- but the
+    brief must come from this turn alone. Injected memory sitting in state must
+    not reach it, and no declaration may be minted on the way.
+    """
+    import asyncio
+    import importlib
+    from types import SimpleNamespace
+    launch = importlib.import_module("deerflow.sophia.tools.start_builder_task")
+    from deerflow.sophia.memory_governance.owner_authority import owner_is_definitely_undeclared
+
+    declare_memory_owners({})
+    monkeypatch.setattr("deerflow.agents.sophia_agent.middlewares.memory_context.active_governed_tool_guard", lambda: None)
+    state = {"messages": [HumanMessage(content="synthetic request")],
+             "injected_memory_contents": ["SYNTHETIC MEMORY MUST NOT ENTER"],
+             "injected_memories": ["SYNTHETIC MEMORY MUST NOT ENTER"]}
+    assert launch._resolve_memory_snippets(state, owner_id="owner") == []
+
+    captured = {}
+    async def dispatch(**kwargs):
+        captured.update(kwargs)
+        return "synthetic-task", "synthetic-run"
+    monkeypatch.setattr(launch, "_dispatch_via_asgi", dispatch)
+    runtime = SimpleNamespace(state=state,
+        config={"configurable": {"user_id": "owner", "thread_id": str(uuid4())}}, context={}, tool_call_id="synthetic")
+    result = asyncio.run(launch._start_builder_task_impl("synthetic", "document", runtime, configured_user_id="owner"))
+    assert not isinstance(result, str) or "No launch was attempted" not in result
+    assert "SYNTHETIC MEMORY MUST NOT ENTER" not in str(captured)
+    assert owner_is_definitely_undeclared("owner") is True

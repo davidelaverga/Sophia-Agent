@@ -54,14 +54,33 @@ def _deny(status: int = 403):
     raise Auth.exceptions.HTTPException(status_code=status, detail="sophia_auth_unavailable" if status == 503 else "sophia_access_denied")
 
 
-def _owner(ctx) -> str:
+def voice_lab_principal() -> str:
+    return (os.getenv("SOPHIA_VOICE_LAB_TEST_PRINCIPAL") or "").strip()
+
+
+def _owner(ctx, *, synthetic: bool = False) -> str:
+    """Resolve the authenticated owner. `synthetic` narrows one refusal only.
+
+    The Voice Lab test principal is refused every ordinary surface, which is the
+    isolation rule and stays. But that principal is also the one that owns the
+    companion run during a Voice Lab test, so a blanket refusal stopped Voice
+    Lab's own synthetic Builder from being created at all -- the coupling
+    measured in the coordination record.
+
+    `synthetic=True` is passed by exactly one caller, and only after
+    `_admit_synthetic_maintenance` has verified an authorized cleanup-fence
+    reservation for the exact thread being created. So the principal is admitted
+    for a run the product itself already authorized, and for nothing else. It
+    remains undeclared in MEM00, so `create_run` mints no input provenance for
+    it and no memory can be inherited.
+    """
     if USER_PERMISSION not in ctx.permissions:
         _deny()
     try:
         owner = validate_user_id(ctx.user.identity)
         if owner != ctx.user.identity:
             _deny()
-        if owner == (os.getenv("SOPHIA_VOICE_LAB_TEST_PRINCIPAL") or "").strip():
+        if owner == voice_lab_principal() and not synthetic:
             _deny()
         # A service principal is not an account and can never be an owner, even
         # if a real identity ever collided with one of those reserved names.
@@ -75,11 +94,11 @@ def _owner(ctx) -> str:
         _deny()
 
 
-def _filter(ctx) -> dict[str, str]:
+def _filter(ctx, *, synthetic: bool = False) -> dict[str, str]:
     try:
         # Domain-separated, unguessable label prevents pre-auth public metadata
         # from being mistaken for a server-issued ownership label.
-        return {OWNER_KEY: keyed_ref("langgraph-access-owner", _owner(ctx))}
+        return {OWNER_KEY: keyed_ref("langgraph-access-owner", _owner(ctx, synthetic=synthetic))}
     except Auth.exceptions.HTTPException:
         raise
     except Exception:
@@ -191,8 +210,11 @@ async def create_thread(ctx, value):
         quality_filter = {DECK_QUALITY_KEY: True}
         value.setdefault("metadata", {}).update(quality_filter)
         return quality_filter
-    owner_filter = _filter(ctx)
-    _admit_synthetic_maintenance(value)
+    # Order matters: the admission is verified first, because whether this is an
+    # authorized synthetic Builder thread decides whether the Voice Lab
+    # principal may own it at all.
+    synthetic = _admit_synthetic_maintenance(value)
+    owner_filter = _filter(ctx, synthetic=synthetic)
     # The installed runtime applies this filter to the EXISTING row before
     # honoring do_nothing. Same-owner response-loss retries remain idempotent;
     # a different owner cannot claim or read the existing checkpoint.
@@ -252,8 +274,11 @@ def _deck_quality_run(value):
     return {DECK_QUALITY_KEY: True}
 
 
-def _admit_synthetic_maintenance(value) -> None:
+def _admit_synthetic_maintenance(value) -> bool:
     """Decide, once and on the server, whether a thread joins the retention lane.
+
+    Returns True when an authorized synthetic admission was established, which
+    is also what lets the Voice Lab principal own the thread (see `_owner`).
 
     `synthetic: true` on its own decides nothing. Anyone can write it, so using
     it as the maintenance filter would let any caller place their own thread
@@ -275,8 +300,8 @@ def _admit_synthetic_maintenance(value) -> None:
     """
     metadata = value.get("metadata")
     if not isinstance(metadata, dict) or metadata.get(SYNTHETIC_KEY) is not True:
-        return
-    principal = (os.getenv("SOPHIA_VOICE_LAB_TEST_PRINCIPAL") or "").strip()
+        return False
+    principal = voice_lab_principal()
     if not principal:
         _deny()
     try:
@@ -287,7 +312,49 @@ def _admit_synthetic_maintenance(value) -> None:
         _deny()
     if not isinstance(context, dict) or context.get("test_principal_id") != principal:
         _deny()
+    if not _reserved_builder_admission(context.get("cleanup_obligation_id"), value.get("thread_id")):
+        _deny()
     metadata[MAINTENANCE_KEY] = True
+    return True
+
+
+def _reserved_builder_admission(cleanup_obligation_id, thread_id) -> bool:
+    """Was THIS thread reserved through the Voice Lab cleanup fence?
+
+    Normalization is not authorization. `normalize_synthetic_builder_context`
+    checks that a declaration is well formed and internally consistent; anyone
+    can write a well-formed declaration. The authorization is the one the
+    product already performs: `start_builder_task` reserves a `builder`
+    admission against an OPEN cleanup obligation, for this exact thread id,
+    before it asks the runtime to create the thread. So the question here is
+    whether that reservation exists, which a caller cannot manufacture without
+    going through the fence.
+
+    An unreachable or erroring fence answers False. An absent authorization and
+    an unknown one are both refusals; only a present reservation is an
+    admission.
+    """
+    if not isinstance(cleanup_obligation_id, str) or not cleanup_obligation_id:
+        return False
+    try:
+        target = str(UUID(str(thread_id)))
+    except (AttributeError, TypeError, ValueError):
+        return False
+    try:
+        from deerflow.sophia.cleanup_fence import cleanup_admission_authorized, cleanup_admissions
+
+        # `cleanup_admission_authorized` is the fence's own recheck: obligation
+        # still open, retention not elapsed, admission current and unexpired.
+        # Reused rather than reimplemented, so this cannot drift from it.
+        return any(
+            item.resource_kind == "builder"
+            and isinstance(item.resource_id, str)
+            and item.resource_id == target
+            and cleanup_admission_authorized(item)
+            for item in cleanup_admissions(cleanup_obligation_id)
+        )
+    except Exception:
+        return False
 
 
 def _service_thread_filter(ctx):
@@ -306,13 +373,26 @@ def _service_thread_filter(ctx):
     return None
 
 
+def _owns_only_authorized_synthetic_threads(ctx) -> bool:
+    """Whether this identity's own threads are, by construction, synthetic ones.
+
+    The Voice Lab principal can only ever have created a thread through
+    `create_thread`'s authorized-admission path, so the set of threads carrying
+    its owner label IS the set of authorized synthetic Builder threads. The
+    owner filter is therefore the containment here, and re-deriving the
+    admission from a read (which carries no metadata to check) would add
+    nothing it does not already give.
+    """
+    return bool(voice_lab_principal()) and ctx.user.identity == voice_lab_principal()
+
+
 @auth.on.threads
 async def owned_thread(ctx, value):
     _reject_owner_metadata(value)
     service = _service_thread_filter(ctx)
     if service is not None:
         return service
-    return _filter(ctx)
+    return _filter(ctx, synthetic=_owns_only_authorized_synthetic_threads(ctx))
 
 
 @auth.on.threads.create_run
@@ -324,7 +404,14 @@ async def create_run(ctx, value):
         _deny()
     if DECK_QUALITY_PERMISSION in ctx.permissions:
         return _deck_quality_run(value)
-    owner = _owner(ctx)
+    synthetic_owner = _owns_only_authorized_synthetic_threads(ctx)
+    if synthetic_owner:
+        # The Voice Lab principal may start the Builder on its own authorized
+        # synthetic thread, and nothing else. Not the companion, which is the
+        # surface that carries tools, recall and the model boundary.
+        if str(value.get("assistant_id")) != str(BUILDER_ASSISTANT_ID):
+            _deny()
+    owner = _owner(ctx, synthetic=synthetic_owner)
     kwargs = value.get("kwargs")
     if not isinstance(kwargs, dict):
         _deny()
@@ -437,7 +524,7 @@ async def create_run(ctx, value):
         raise
     except Exception:
         _deny()
-    owner_filter = _filter(ctx)
+    owner_filter = _filter(ctx, synthetic=synthetic_owner)
     value.setdefault("metadata", {}).update(owner_filter)
     return owner_filter
 
@@ -451,7 +538,11 @@ async def system_assistants(ctx, value):
     # graph but its own, which `_deck_quality_run` enforces separately.
     # Retention maintenance is NOT listed: it never starts a run.
     if not {READINESS_PERMISSION, DECK_QUALITY_PERMISSION} & set(ctx.permissions):
-        _owner(ctx)
+        # Starting a run resolves its assistant first, so the Voice Lab
+        # principal reaches this on its own Builder path too. It gets the same
+        # answer as everyone else -- system assistants only -- and `create_run`
+        # separately restricts it to the Builder graph.
+        _owner(ctx, synthetic=_owns_only_authorized_synthetic_threads(ctx))
     # Only configured system assistants are discoverable. No custom assistant
     # config (which could override owner, tools or governance) is admitted.
     return {"created_by": "system"}

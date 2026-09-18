@@ -84,6 +84,43 @@ async def denied(call):
     except (HTTPException, Auth.exceptions.HTTPException) as exc:
         return exc.status_code
     return None
+
+
+def reachable_store_where_nobody_is_declared():
+    """Production's shape for MEM00: the store answers, nobody is enrolled.
+
+    `create_run` resolves durable ownership on every request. Without a store
+    it raises the broad unavailable error and denies, which is correct but is
+    an artifact of a test environment rather than the behaviour under test.
+    """
+    from deerflow.sophia.memory_governance import owner_authority
+    from deerflow.sophia.memory_governance.store import MemoryOwnerUndeclared
+
+    def undeclared(owner):  # noqa: ARG001 - mirrors the real store signature
+        raise MemoryOwnerUndeclared("memory_owner_undeclared")
+
+    owner_authority.configured_memory_store = lambda: SimpleNamespace(
+        get_owner_authority=undeclared,
+        get_contract=lambda: SimpleNamespace(contract_epoch=1, schema_version="mem00.v1", mode="enforced"))
+
+
+def authorize(admission, thread_id):
+    """Do what `start_builder_task` does before it asks for the thread.
+
+    It reserves a `builder` admission for the exact thread id against an open
+    cleanup obligation. Shape alone is not authorization, so the policy checks
+    that this reservation exists; a test that skips it is testing the
+    unauthorized case, which is exactly what one of the cases below wants.
+    """
+    from deerflow.sophia.cleanup_fence import reserve_cleanup_admission
+
+    return reserve_cleanup_admission(
+        admission["cleanup_obligation_id"],
+        admission["retention_expires_at"],
+        provider_expires_at=admission["provider_expires_at"],
+        resource_kind="builder",
+        resource_id=str(thread_id),
+    )
 '''
 
 
@@ -112,10 +149,17 @@ async def main():
     # 3. Supplying the server-issued label directly.
     forged = await denied(lambda: Threads.put(conn, uuid4(), metadata={MAINTENANCE_KEY: True}, if_exists="raise", ctx=user))
 
-    # 4. An ordinary thread, and a legitimate synthetic one.
+    # 4. Complete, correctly shaped, naming the configured principal -- and
+    #    never reserved through the cleanup fence. Denied: normalization is not
+    #    authorization.
+    unauthorized = await denied(lambda: Threads.put(conn, uuid4(), metadata=synthetic(run_id="never-reserved"), if_exists="raise", ctx=user))
+
+    # 5. An ordinary thread, and a legitimately reserved synthetic one.
     ordinary_id, synthetic_id = uuid4(), uuid4()
     await collect(await Threads.put(conn, ordinary_id, metadata={}, if_exists="raise", ctx=user))
-    created = await collect(await Threads.put(conn, synthetic_id, metadata=synthetic(), if_exists="raise", ctx=user))
+    admission = synthetic()
+    authorize(admission, synthetic_id)
+    created = await collect(await Threads.put(conn, synthetic_id, metadata=admission, if_exists="raise", ctx=user))
     labelled = created[0]["metadata"].get(MAINTENANCE_KEY) is True
 
     rows, _ = await Threads.search(conn, metadata={}, values={}, status=None, limit=50, offset=0, ctx=maintenance)
@@ -125,6 +169,7 @@ async def main():
 
     print(json.dumps({
         "bare_boolean_denied": bare, "foreign_principal_denied": foreign, "forged_label_denied": forged,
+        "unauthorized_but_well_formed_denied": unauthorized,
         "legitimate_thread_labelled": labelled,
         "maintenance_sees_only_the_legitimate_one": visible == [str(synthetic_id)],
         "ordinary_read_denied": ordinary_read, "ordinary_delete_denied": ordinary_delete,
@@ -134,6 +179,8 @@ asyncio.run(main())
     assert receipt["bare_boolean_denied"] == 403
     assert receipt["foreign_principal_denied"] == 403
     assert receipt["forged_label_denied"] == 403
+    assert receipt["unauthorized_but_well_formed_denied"] == 403, (
+        "a complete, correctly shaped declaration with no reservation behind it")
     assert receipt["legitimate_thread_labelled"] is True
     assert receipt["maintenance_sees_only_the_legitimate_one"] is True
     assert receipt["ordinary_read_denied"] == 404
@@ -150,7 +197,9 @@ async def main():
     user = ctx("ordinary-user", USER_PERMISSION)
     maintenance = ctx("sophia-service-maintenance", MAINTENANCE_PERMISSION)
     tid = uuid4()
-    await collect(await Threads.put(conn, tid, metadata=synthetic(), if_exists="raise", ctx=user))
+    admission = synthetic()
+    authorize(admission, tid)
+    await collect(await Threads.put(conn, tid, metadata=admission, if_exists="raise", ctx=user))
 
     # What the reaper does: search by the product marker, read identity, delete.
     rows, _ = await Threads.search(conn, metadata={"synthetic": True}, values={}, status=None, limit=50, offset=0, ctx=maintenance)
@@ -270,40 +319,75 @@ asyncio.run(main())
     assert receipt["threads"] == 0
 
 
-def test_the_voice_owners_synthetic_builder_creation_path_under_the_installed_policy(tmp_path):
-    """The measurement §4c of the coordination record said was missing.
+def test_the_voice_owners_synthetic_builder_path_runs_under_the_installed_policy(tmp_path):
+    """The real tool-to-runtime operation, as the Voice Lab principal.
 
-    `start_builder_task` creates the synthetic Builder thread in-process, so it
-    runs under whatever identity owns the parent companion run. This records
-    what the installed policy does for each of the two candidates, rather than
-    reasoning about it: an ordinary owner carrying a Voice Lab admission, and
-    the Voice Lab test principal itself.
+    `start_builder_task` runs in-process under the parent companion run's
+    AuthContext, and during a Voice Lab test that parent is the test principal.
+    The blanket refusal of that principal therefore stopped Voice Lab's own
+    Builder from being created at all -- measured earlier as a flat 403.
+
+    Resolved here by narrowing the refusal rather than dropping it: the
+    principal is admitted only for a thread whose cleanup-fence reservation the
+    product already made, and only to run the Builder on it. Every ordinary
+    surface stays refused, which the second half asserts.
     """
-    receipt = _run(PREAMBLE + r'''
-from deerflow.sophia.langgraph_auth import MAINTENANCE_KEY, USER_PERMISSION
+    receipt = _run(PREAMBLE + r"""
+from langgraph_runtime_inmem.ops import Runs
+from deerflow.sophia.langgraph_auth import BUILDER_ASSISTANT_ID, COMPANION_ASSISTANT_ID, MAINTENANCE_KEY, USER_PERMISSION
 
 async def main():
     conn = SimpleNamespace(store={"threads": [], "runs": [], "assistants": [], "crons": [], "checkpoints": [], "writes": [], "blobs": []})
-    ordinary = ctx("ordinary-user", USER_PERMISSION)
+    for assistant_id in (BUILDER_ASSISTANT_ID, COMPANION_ASSISTANT_ID):
+        conn.store["assistants"].append({"assistant_id": assistant_id, "graph_id": "g",
+                                         "config": {}, "context": {}, "metadata": {}, "name": "a", "version": 1})
+    reachable_store_where_nobody_is_declared()
     principal = ctx(PRINCIPAL, USER_PERMISSION)
+    ordinary = ctx("ordinary-user", USER_PERMISSION)
 
-    ordinary_id = uuid4()
-    created = await collect(await Threads.put(conn, ordinary_id, metadata=synthetic(), if_exists="raise", ctx=ordinary))
-    as_principal = await denied(lambda: Threads.put(conn, uuid4(), metadata=synthetic(), if_exists="raise", ctx=principal))
+    # --- the path the tool actually takes -------------------------------
+    thread_id = uuid4()
+    admission = synthetic()
+    authorize(admission, thread_id)
+    created = await collect(await Threads.put(conn, thread_id, metadata=admission, if_exists="raise", ctx=principal))
+    read = await collect(await Threads.get(conn, thread_id, ctx=principal))
+    # The installed server inserts these two from the auth context; the ops
+    # layer does not, so the test supplies what the real request would carry.
+    def run_kwargs(identity):
+        return {"config": {"configurable": {"user_id": identity, "langgraph_auth_user_id": identity}},
+                "input": {"messages": []}}
+
+    builder_run = await denied(lambda: Runs.put(conn, BUILDER_ASSISTANT_ID, run_kwargs(PRINCIPAL),
+        thread_id=thread_id, run_id=uuid4(), metadata={}, prevent_insert_if_inflight=False,
+        multitask_strategy="enqueue", if_not_exists="create", ctx=principal))
+
+    # --- and everything ordinary that stays refused ----------------------
+    plain_thread = await denied(lambda: Threads.put(conn, uuid4(), metadata={}, if_exists="raise", ctx=principal))
+    unreserved = await denied(lambda: Threads.put(conn, uuid4(), metadata=synthetic(run_id="never-reserved"), if_exists="raise", ctx=principal))
+    companion_run = await denied(lambda: Runs.put(conn, COMPANION_ASSISTANT_ID, run_kwargs(PRINCIPAL),
+        thread_id=thread_id, run_id=uuid4(), metadata={}, prevent_insert_if_inflight=False,
+        multitask_strategy="enqueue", if_not_exists="create", ctx=principal))
+    others_thread = await denied(lambda: Threads.get(conn, thread_id, ctx=ordinary))
 
     print(json.dumps({
-        "parent_is_ordinary_owner": {"created": len(created) == 1,
-                                     "labelled": created[0]["metadata"].get(MAINTENANCE_KEY) is True},
-        "parent_is_the_test_principal": {"denied": as_principal},
+        "created": len(created) == 1,
+        "labelled": created[0]["metadata"].get(MAINTENANCE_KEY) is True,
+        "readable_by_its_owner": len(read) == 1,
+        "builder_run_admitted": builder_run,
+        "plain_thread_denied": plain_thread,
+        "unreserved_synthetic_denied": unreserved,
+        "companion_run_denied": companion_run,
+        "ordinary_owner_cannot_read_it": others_thread,
         "network_calls": 0}))
 asyncio.run(main())
-''', tmp_path)
-    # The supported shape: the parent run belongs to an ordinary owner and the
-    # admission names the configured test principal. That creates and labels.
-    assert receipt["parent_is_ordinary_owner"] == {"created": True, "labelled": True}
-    # And the shape that does NOT work, measured rather than assumed: if a Voice
-    # Lab test runs its companion turn AS the test principal, installing this
-    # policy denies its Builder thread. That is question 5 in
-    # docs/campaigns/mem00-durable-memory/c2-receiving-auth-cross-owner-coordination.md
-    # and it is the Voice owner's to answer before install.
-    assert receipt["parent_is_the_test_principal"] == {"denied": 403}
+""", tmp_path)
+    # The Voice owner's path works, end to end, as the principal.
+    assert receipt["created"] is True
+    assert receipt["labelled"] is True
+    assert receipt["readable_by_its_owner"] is True
+    assert receipt["builder_run_admitted"] is None, "authorized, not refused"
+    # And the refusal is narrowed, not dropped.
+    assert receipt["plain_thread_denied"] == 403
+    assert receipt["unreserved_synthetic_denied"] == 403
+    assert receipt["companion_run_denied"] == 403
+    assert receipt["ordinary_owner_cannot_read_it"] == 404
