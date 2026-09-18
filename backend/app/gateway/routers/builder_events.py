@@ -1368,6 +1368,35 @@ async def cleanup_synthetic_builder_run(
     langgraph_client: Any | None = None,
     purge_artifacts: bool = True,
 ) -> SyntheticBuilderCleanupReceipt:
+    """Enter the retention maintenance lane, then do the work.
+
+    A lane, not an owner scope. Two of the three
+    callers here run AFTER the raw principal has been erased -- that is the
+    obligation they implement -- and the third's principal is the Voice Lab
+    test principal, which `_scope` refuses to mint a token for on purpose. The
+    lane reaches thread search, read, delete and run cancel, and nothing else;
+    it cannot create a run, so no memory, source or model path exists behind
+    it. The runtime policy additionally confines it to threads the product
+    itself marked synthetic.
+    """
+    from deerflow.sophia.langgraph_client_auth import langgraph_service_scope
+
+    with langgraph_service_scope("maintenance"):
+        return await _cleanup_synthetic_builder_run(
+            cleanup=cleanup,
+            artifact_registry=artifact_registry,
+            langgraph_client=langgraph_client,
+            purge_artifacts=purge_artifacts,
+        )
+
+
+async def _cleanup_synthetic_builder_run(
+    *,
+    cleanup: SyntheticBuilderCleanupRequest,
+    artifact_registry: LocalArtifactRegistry | None = None,
+    langgraph_client: Any | None = None,
+    purge_artifacts: bool = True,
+) -> SyntheticBuilderCleanupReceipt:
     """Cancel/delete exact synthetic Builder tasks and their artifact records.
 
     This callable is shared by the authenticated recovery endpoint and the
@@ -1400,7 +1429,7 @@ async def cleanup_synthetic_builder_run(
             targets.setdefault(task_id, record.run_id)
 
     if langgraph_client is None:
-        from langgraph_sdk import get_client
+        from deerflow.sophia.langgraph_client_auth import get_client
 
         langgraph_client = get_client(url=_langgraph_url())
 
@@ -1583,6 +1612,35 @@ async def cleanup_synthetic_builder_obligation(
     langgraph_client: Any | None = None,
     purge_artifacts: bool = True,
 ) -> dict[str, object]:
+    """Enter the retention maintenance lane, then do the work.
+
+    A lane, not an owner scope. Two of the three
+    callers here run AFTER the raw principal has been erased -- that is the
+    obligation they implement -- and the third's principal is the Voice Lab
+    test principal, which `_scope` refuses to mint a token for on purpose. The
+    lane reaches thread search, read, delete and run cancel, and nothing else;
+    it cannot create a run, so no memory, source or model path exists behind
+    it. The runtime policy additionally confines it to threads the product
+    itself marked synthetic.
+    """
+    from deerflow.sophia.langgraph_client_auth import langgraph_service_scope
+
+    with langgraph_service_scope("maintenance"):
+        return await _cleanup_synthetic_builder_obligation(
+            cleanup_obligation_id=cleanup_obligation_id,
+            artifact_registry=artifact_registry,
+            langgraph_client=langgraph_client,
+            purge_artifacts=purge_artifacts,
+        )
+
+
+async def _cleanup_synthetic_builder_obligation(
+    *,
+    cleanup_obligation_id: str,
+    artifact_registry: LocalArtifactRegistry | None = None,
+    langgraph_client: Any | None = None,
+    purge_artifacts: bool = True,
+) -> dict[str, object]:
     """Delete/read-zero Builder resources using only the opaque obligation id.
 
     This is the post-retention recovery authority.  It deliberately derives
@@ -1601,7 +1659,7 @@ async def cleanup_synthetic_builder_obligation(
 
     registry = artifact_registry or _artifact_registry
     if langgraph_client is None:
-        from langgraph_sdk import get_client
+        from deerflow.sophia.langgraph_client_auth import get_client
 
         langgraph_client = get_client(url=_langgraph_url())
 
@@ -1762,6 +1820,35 @@ async def reap_expired_synthetic_builder_obligations(
     artifact_registry: LocalArtifactRegistry | None = None,
     langgraph_client: Any | None = None,
 ) -> dict[str, object]:
+    """Enter the retention maintenance lane, then do the work.
+
+    A lane, not an owner scope. Two of the three
+    callers here run AFTER the raw principal has been erased -- that is the
+    obligation they implement -- and the third's principal is the Voice Lab
+    test principal, which `_scope` refuses to mint a token for on purpose. The
+    lane reaches thread search, read, delete and run cancel, and nothing else;
+    it cannot create a run, so no memory, source or model path exists behind
+    it. The runtime policy additionally confines it to threads the product
+    itself marked synthetic.
+    """
+    from deerflow.sophia.langgraph_client_auth import langgraph_service_scope
+
+    with langgraph_service_scope("maintenance"):
+        return await _reap_expired_synthetic_builder_obligations(
+            now=now,
+            limit=limit,
+            artifact_registry=artifact_registry,
+            langgraph_client=langgraph_client,
+        )
+
+
+async def _reap_expired_synthetic_builder_obligations(
+    *,
+    now: datetime,
+    limit: int,
+    artifact_registry: LocalArtifactRegistry | None = None,
+    langgraph_client: Any | None = None,
+) -> dict[str, object]:
     """Globally reap expired Builder threads without a PREPARED raw handle.
 
     The scan is keyed only by the product-authored synthetic marker, then
@@ -1774,7 +1861,7 @@ async def reap_expired_synthetic_builder_obligations(
         raise ValueError("synthetic Builder reaper limit must be between 1 and 100")
     observed_at = now.astimezone(UTC)
     if langgraph_client is None:
-        from langgraph_sdk import get_client
+        from deerflow.sophia.langgraph_client_auth import get_client
 
         langgraph_client = get_client(url=_langgraph_url())
 

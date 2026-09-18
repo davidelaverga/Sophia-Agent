@@ -2,6 +2,83 @@
 
 Successful target: MEMORY_TEXT_PILOT_READY. Current status: IMPLEMENTING — RELEASE CLOSURE; not deployed, not activated. C2 replaces the prior PROMOTE-only/five-core-run prerequisites for this owner-restricted pilot. Historical C1 records and failures remain valid history, not additional first-use gates. Recovered cumulative failure counter: latest failed iteration EI929; last reported five-failure checkpoint 923–927; next five-failure checkpoint 932. The single current authority is the checkpoint immediately below; every later dated paragraph is preserved history, not competing current status.
 
+## Receiving authentication and the four callers — 2026-09-18
+
+Built, tested, **not installed**. `backend/langgraph.json` still has no `auth`
+key and `test_render_config.py:96` still asserts `"auth" not in config`. The
+coordination record is
+[`c2-receiving-auth-cross-owner-coordination.md`](./c2-receiving-auth-cross-owner-coordination.md);
+this is the implementation half.
+
+### What was actually missing
+
+The receiving handler in `deerflow/sophia/langgraph_auth.py` has existed and
+been unit-tested for some time. It is simply not installed — the module's own
+docstring says why: *"Do not enable the JSON auth entry until service callers
+and checkpoint continuation have passed compatibility tests."* Installing it
+would have returned 401 to four callers that import `langgraph_sdk.get_client`
+directly and therefore send no credential at all.
+
+Three of those four **cannot** be fixed with an owner scope, and the reason is
+structural rather than incidental: post-retention Builder cleanup and the global
+reaper run *after* the raw principal has been erased, which is the Voice Lab
+retention obligation they implement, and the third carries the Voice Lab test
+principal, which `_scope` refuses to mint for on purpose. Reaching for that
+refusal would have undone the MEM00/Voice Lab isolation the campaign already
+committed to.
+
+### Two non-owner lanes, built narrow
+
+| lane | reaches | cannot reach |
+| --- | --- | --- |
+| `maintenance` | thread search, thread read, thread delete, run list/read/cancel | run **create**, `/state`, `/state/checkpoint`, `/history`, `/copy`, anything outside `/threads` |
+| `deck_quality` | thread create, run list, run create | thread delete, thread search, thread read, `/state`, `/history`, `/copy` |
+
+Separate scopes because deck-quality dispatch creates runs and the retention
+lane must never gain that — a run is the whole memory, source and model surface.
+Both allow-lists are narrower than `_THREAD_PATH`, which the ordinary owner lane
+uses; neither lane can read another owner's content.
+
+Each lane is confined by a **metadata filter**, the same mechanism an owner
+gets, not by an exemption from the check. Maintenance sees `{"synthetic": true}`
+— only threads the product itself marked, which is exactly what its three
+callers already search for. Dispatch sees `{"sophia_deck_quality": true}`,
+written by the policy on create and rejected if a client supplies it, so no user
+can label their own thread into that lane. `_owner` additionally refuses all
+three service principals as user identities.
+
+### The four callers
+
+| site | now |
+| --- | --- |
+| `builder_events.py` `cleanup_synthetic_builder_run` | thin wrapper enters `maintenance`, body unchanged |
+| `builder_events.py` `cleanup_synthetic_builder_obligation` | same |
+| `builder_events.py` `reap_expired_synthetic_builder_obligations` | same |
+| `workers/deck_quality_dispatcher.py` | `_client_call` enters `deck_quality` around the awaited call |
+
+The lane is entered around the awaited call, not at client construction, because
+the credential is minted per request from the current context rather than cached
+on the shared client — the property `langgraph_owner_scope` already relies on.
+
+### Results
+
+115 failed / 7,075 passed, the **same failure set** as the slice above, file for
+file. One run showed an extra
+`test_voice_lab_recovery.py::test_recovery_retains_canonical_evidence_until_expiry_then_purges_exact_run[True]`;
+an identical re-run (`-p no:randomly`, same order) did not, and it passes in
+isolation and with its neighbours, so it is recorded as a flake rather than
+attributed to this change. New coverage:
+`test_mem00_langgraph_service_lanes.py`, 34 tests, most of them asserting what
+the lanes cannot reach.
+
+### Still open, and deliberately not guessed
+
+Installing `auth` also reaches the Voice Lab test principal itself, which
+`_owner` denies. The synthetic Builder path appears to create its threads
+in-process (`start_builder_task` uses `get_client(url=None)`), which would make
+it unaffected — but that is reasoning, not a measurement, and it is the Voice
+owner's path. It is question 5 in the coordination record.
+
 ## No-memory model path and ordinary-route repairs — 2026-09-18
 
 The published guard recognised undeclared owners at entry, but that was only
@@ -88,13 +165,31 @@ for them, so no legacy memory is reused either.
 In every one of these, a store outage still raises. Unavailability never becomes
 undeclared status, and never becomes a successful empty answer.
 
-### Results
+### Results — qualified integration SHA
 
-| tree | `pytest tests/` |
-| --- | --- |
-| shared baseline `8c5cf538` | 2 failed / 6,225 passed |
-| pilot head before this slice (`5594e0da`) | 119 failed |
-| this slice | **115 failed / 7,039 passed** |
+All three measured today with one method: the frozen Python 3.12 venv,
+`PYTHONPATH` pinned to each tree's own `packages/harness` so no run borrows
+another tree's code, `pytest tests/ -q -p no:randomly`.
+
+| tree | SHA | `pytest tests/` |
+| --- | --- | --- |
+| shared baseline | `8c5cf538` | 2 failed / 6,225 passed |
+| pilot head | `6c093531` | 115 failed / 7,039 passed |
+| **integration candidate** | **`ba8bf8c1`** | **115 failed / 7,084 passed** |
+
+`ba8bf8c1` is `8c5cf538` merged with `6c093531`. Two comment-only conflicts
+(`store.py` retention comment, two blank lines in
+`test_memory_governance_worker_expiry_backoff.py`); the shared baseline's
+wording was kept for the first.
+
+The merge introduces **no** failure the pilot does not already have: the failure
+distribution is identical across `6c093531` and `ba8bf8c1`, file for file. The
+baseline's own 2 (`test_local_sandbox_encoding.py`) are inside the 115, so the
+pilot accounts for **113**, down from 117 at `5594e0da`.
+
+The previous integration branch `codex/mem00-c2-integration-r1` merged against
+`2deb762a`, which predates PR #145; `ba8bf8c1` is on
+`codex/mem00-c2-integration-r2` and merges against the current shared baseline.
 
 Affected-path files, all green: `test_mem00_noncohort_model_entry.py` (16),
 `test_mem00_noncohort_owner_paths.py` (10), `test_mem00_noncohort_ordinary_routes.py`

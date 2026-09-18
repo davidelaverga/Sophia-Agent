@@ -23,7 +23,46 @@ from deerflow.sophia.builder_event_auth import _secret_bytes
 PREFIX = "SophiaLG1"
 MAX_TTL = 30
 READINESS_OWNER = "sophia-service-readiness"
+
+# Non-owner service principals. These are not accounts: no person can sign in as
+# one, `_owner` in the runtime policy refuses them as user identities, and a
+# token for one can only be minted by a process holding the shared secret. They
+# exist because three of the callers below cannot carry a principal at all --
+# post-retention cleanup and the global reaper run precisely AFTER the raw
+# identity has been erased, which is the Voice Lab retention obligation they
+# implement.
+MAINTENANCE_OWNER = "sophia-service-maintenance"
+DECK_QUALITY_OWNER = "sophia-service-deck-quality"
+SERVICE_OWNERS = frozenset({READINESS_OWNER, MAINTENANCE_OWNER, DECK_QUALITY_OWNER})
+
 _THREAD_PATH = re.compile(r"^/threads(?:/[0-9a-f-]{36}(?:/(?:state(?:/checkpoint)?|history|copy|runs(?:/[0-9a-f-]{36}(?:/(?:join|stream|cancel))?|/(?:stream|wait))?))?|/search)?$")
+_UUID = "[0-9a-f-]{36}"
+
+# Exact (method, path) allow-lists, deliberately NOT `_THREAD_PATH`. The owner
+# lane may reach /state, /history and /copy; a lane that is not owner-scoped
+# must not, or it becomes a cross-owner content read. Retention maintenance
+# needs to enumerate, identify, cancel and delete -- nothing else, and no run
+# creation at all.
+_MAINTENANCE_ROUTES = {
+    "POST": (re.compile(r"^/threads/search$"),
+             re.compile(rf"^/threads/{_UUID}/runs/{_UUID}/cancel$")),
+    "GET": (re.compile(rf"^/threads/{_UUID}$"),
+            re.compile(rf"^/threads/{_UUID}/runs$"),
+            re.compile(rf"^/threads/{_UUID}/runs/{_UUID}$")),
+    "DELETE": (re.compile(rf"^/threads/{_UUID}$"),),
+}
+# Deck quality dispatch DOES create runs, on its own deterministic thread id.
+# It is a separate scope for that reason: the retention lane above must never
+# gain run creation by sharing one.
+_DECK_QUALITY_ROUTES = {
+    "POST": (re.compile(r"^/threads$"), re.compile(rf"^/threads/{_UUID}/runs$")),
+    "GET": (re.compile(rf"^/threads/{_UUID}/runs$"),),
+}
+_SERVICE_LANES = {
+    MAINTENANCE_OWNER: ("maintenance", _MAINTENANCE_ROUTES),
+    DECK_QUALITY_OWNER: ("deck_quality", _DECK_QUALITY_ROUTES),
+}
+
 _TOKEN_CHARS = re.compile(r"^[A-Za-z0-9_-]+$")
 _DOMAIN = b"sophia.langgraph.service-auth.v1\x00"
 
@@ -37,6 +76,14 @@ def _scope(owner, method, path):
     if validate_user_id(owner) != owner or method not in {"GET", "POST", "PATCH", "DELETE"}:
         raise LangGraphServiceAuthError()
     if owner == (os.getenv("SOPHIA_VOICE_LAB_TEST_PRINCIPAL") or "").strip():
+        raise LangGraphServiceAuthError()
+    # Checked BEFORE the readiness route below: a lane principal is confined to
+    # its own list and nothing else, not even a route every ordinary owner may
+    # reach. Only READINESS_OWNER itself, which is not a lane, gets that one.
+    if owner in _SERVICE_LANES:
+        scope, routes = _SERVICE_LANES[owner]
+        if any(pattern.fullmatch(path) for pattern in routes.get(method, ())):
+            return scope
         raise LangGraphServiceAuthError()
     if method == "POST" and path == "/assistants/search":
         return "readiness"

@@ -13,14 +13,43 @@ from contextvars import ContextVar
 
 import httpx
 
-from .langgraph_service_auth import LangGraphServiceAuthError, mint_service_authorization
+from .langgraph_service_auth import (
+    DECK_QUALITY_OWNER,
+    MAINTENANCE_OWNER,
+    LangGraphServiceAuthError,
+    mint_service_authorization,
+)
 
 _owner: ContextVar[str | None] = ContextVar("sophia_gateway_langgraph_owner", default=None)
+
+_SERVICE_LANES = {"maintenance": MAINTENANCE_OWNER, "deck_quality": DECK_QUALITY_OWNER}
 
 
 @contextmanager
 def langgraph_owner_scope(owner_id):
     token = _owner.set(owner_id)
+    try:
+        yield
+    finally:
+        _owner.reset(token)
+
+
+@contextmanager
+def langgraph_service_scope(lane):
+    """Enter a named non-owner lane, for callers that have no owner to carry.
+
+    Deliberately the same mechanism as `langgraph_owner_scope`, so a service
+    lane is a *value* in the existing owner context rather than a second,
+    parallel credential path. The minting side refuses any route outside the
+    lane's allow-list, so entering a lane grants nothing on its own.
+
+    A caller that HAS an owner must use `langgraph_owner_scope`; this is only
+    for the paths that structurally cannot, such as post-retention cleanup
+    after the raw identity has been erased.
+    """
+    if lane not in _SERVICE_LANES:
+        raise LangGraphServiceAuthError()
+    token = _owner.set(_SERVICE_LANES[lane])
     try:
         yield
     finally:

@@ -107,9 +107,62 @@ owner explicitly accepts a window.
 The status quo. Receiving authentication stays uninstalled, and the C2
 `create_run` policy stays unexercised in production.
 
-**Recommendation: A**, with the route list fixed and reviewed before any install,
-and the install and the four caller changes shipped as one change rather than
-two — because either half alone is one of C or D.
+**Recommendation: A**, with the route list fixed and reviewed before any
+install. The four caller changes are now done (§4b), so the install itself is
+the only remaining step and it is a single reviewed switch — not a change that
+has to break something to land.
+
+## 4b. Option A is now built, and still not installed — 2026-09-18
+
+Rather than leave this as a question with no shape, option A is implemented and
+tested on `codex/mem00-text-pilot`. **Nothing is activated**: `langgraph.json`
+still has no `auth` key and `test_render_config.py` still asserts that. Both
+halves of the coupling in §2 are now ready, so installing becomes one reviewed
+switch rather than a change that breaks four callers.
+
+What building it established that the first draft of this document only guessed:
+
+**Two lanes, not one.** Deck-quality dispatch calls `threads.create` and
+`runs.create`; the Voice Lab retention paths call `threads.search`,
+`threads.get`, `threads.delete` and `runs.cancel`. Sharing one scope would have
+given the retention lane run creation — the entire memory, source and model
+surface — so they are separate scopes with separate allow-lists.
+
+**The allow-lists are narrower than the owner lane, not wider.** `_THREAD_PATH`,
+which the owner lane uses, permits `/state`, `/state/checkpoint`, `/history` and
+`/copy`. Those are cross-owner *content*. Neither service lane can reach any of
+them, and neither can reach anything outside `/threads`. The retention lane also
+cannot create a run at all.
+
+**A metadata filter, not an exemption.** The runtime policy hands each lane a
+filter — the same mechanism it hands an owner — rather than waving it past the
+check. Retention maintenance sees `{"synthetic": true}`: only threads the
+product itself marked, which is exactly what its three callers already search
+for. Dispatch sees `{"sophia_deck_quality": true}`, written by the policy on
+create and **rejected** if a client supplies it, so nobody can label their own
+thread into that lane.
+
+**The Voice Lab refusal stayed absolute.** `_scope` still refuses to mint for
+`SOPHIA_VOICE_LAB_TEST_PRINCIPAL`, the lanes are not a way around it, and
+`_owner` now additionally refuses all three service principals as user
+identities in case a real account ever carried one of those names.
+
+Coverage: `backend/tests/test_mem00_langgraph_service_lanes.py`, 34 tests. Most
+of them assert what the lanes *cannot* reach.
+
+## 4c. A fifth coupling, not yet resolved
+
+Installing receiving authentication also reaches the Voice Lab test principal
+itself: `_owner` denies it, so once `auth` is installed that principal cannot
+create threads or runs through the Gateway → LangGraph boundary. The synthetic
+Builder path appears to create its threads in-process
+(`start_builder_task` uses `get_client(url=None)`, whose comment says the
+in-process transport preserves the authenticated parent AuthContext), which
+would mean it is not affected — but that has been reasoned about, **not
+measured**, and it is the Voice owner's path.
+
+This is stated rather than fixed, because guessing here would be the unilateral
+move this document exists to avoid. It is question 5 below.
 
 ## 5. What the Voice owner is being asked to decide
 
@@ -123,7 +176,12 @@ two — because either half alone is one of C or D.
    *does* create runs and therefore needs a different route set.
 4. Whether the Voice Lab principal refusal in `_scope()` stays absolute (the
    recommendation) or gains an exception. The recommendation is that it stays
-   absolute and the maintenance scope never carries a user id at all.
+   absolute and the maintenance scope never carries a user id at all. **Built
+   this way.**
+5. **Open.** Whether installing `auth` affects synthetic Builder *creation* by
+   the Voice Lab test principal, which `_owner` denies. See §4c: the in-process
+   transport suggests it does not, but that is reasoning, not a measurement, and
+   it needs the Voice owner to confirm against their own path before install.
 
 ## 6. Explicitly out of scope of this document
 
