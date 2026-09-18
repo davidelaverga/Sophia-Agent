@@ -73,7 +73,7 @@ to mean anything once authentication is installed. Each item is dashboard-manage
 | --- | --- | --- |
 | `SOPHIA_VOICE_LAB_TEST_PRINCIPAL` | `sophia-langgraph` | `voice_lab_principal()` reads it. If it is empty, **nothing** is ever eligible for the synthetic lane and Voice Lab's Builder returns to a flat 403 — the exact failure step 0a exists to avoid. It is already declared on `sophia-gateway` and `sophia-voice`; all three must carry the **same** value. |
 | `SOPHIA_VOICE_LAB_AUTH_DATABASE_URL` | `sophia-langgraph` | the cleanup fence lives there. `_reserved_builder_admission` fails **closed** on an unreachable fence, so an unset or unroutable value denies every synthetic Builder thread rather than admitting one. |
-| `SOPHIA_MEMORY_REFERENCE_HMAC_SECRET` | both | the owner label is `keyed_ref("langgraph-access-owner", …)`. A per-service mismatch makes every owner filter miss and the runtime returns 404 for threads their owner created. |
+| `SOPHIA_MEMORY_REFERENCE_HMAC_SECRET` | `sophia-langgraph` | the owner label is `keyed_ref("langgraph-access-owner", …)`, an HMAC under this secret. Unset, `_filter` raises and every thread operation returns **503**. **Rotating it** after install re-keys the label, so threads created under the old value become invisible to their owner — a rotation is therefore a thread-draining operation, not a config edit. |
 
 Explicitly **not** part of this setup: `SOPHIA_VOICE_LAB_ENABLED` stays `false`
 and `SOPHIA_VOICE_LAB_KILL_SWITCH` stays `true`. Step 0a is about what the
@@ -143,11 +143,23 @@ at the currently deployed commit is a **mixed pair**, not a partial rollout.
 | build | `pnpm build` → `next build`, output `.next` |
 | package manager | **pnpm 10.26.2**, pinned by `packageManager` in `frontend/package.json` and by the e2e workflow |
 | Node | **22**, as `memory-highlights-e2e` pins via `actions/setup-node@v4`. Vercel's project Node version must match; this repo declares no `engines` field, so nothing enforces it at build time |
-| Next.js | `^16.1.7`, React 19.x, TypeScript 5.8.x — **unchanged by the pilot**; `frontend/package.json` and `frontend/pnpm-lock.yaml` are byte-identical to the shared baseline |
+| resolved versions | `next@16.2.2`, `react@19.2.4`, `react-dom@19.2.4`, `vitest@2.1.9`, lockfile version 9.0 — the exact resolutions `--frozen-lockfile` reproduces, not the `^16.1.7` range in `package.json` |
+| dependency change | **none.** `frontend/package.json` and `frontend/pnpm-lock.yaml` are byte-identical to the shared baseline |
 
 Because no dependency moved, the frontend build is a *source* change only: no
 lockfile migration, no framework upgrade, and no Vercel project setting needs to
 change.
+
+**Built locally, with its deviations named.** `next build` on the pilot tree:
+compiled, TypeScript passed, 61 static pages generated across 119 routes, no
+build error. Deviations from the Vercel build, each of them real: Node **24** on
+this machine against CI/Vercel's 22; dependencies from the existing
+`node_modules` (which match the lockfile resolutions exactly) rather than a
+fresh `--frozen-lockfile` install, because `pnpm` is not present here; and
+placeholder `DATABASE_URL`/`BETTER_AUTH_*` values, without which page-data
+collection for `/api/test-auth/login` aborts the build — Vercel supplies the
+real ones. So this is evidence the source compiles and type-checks at this SHA,
+**not** a reproduction of the production build.
 
 ### 4.3 Voice service disposition
 
@@ -305,3 +317,72 @@ Cohort expansion beyond Davide's single account. Legacy import or backfill.
 Provider obligations — historical, preserved, cleanup scope unchanged. The
 fault-injection RPC permissions. Enabling Voice Lab. Each is separately recorded
 and none is implied by completing the seven steps above.
+
+---
+
+## Appendix — step 6, literally
+
+Written out so that activation is an operation someone can perform, not a
+paragraph they have to translate. `sophia_memory_declare_owner_authority` is
+`REVOKE`d from `PUBLIC`, `anon`, `authenticated` and `service_role`, so this runs
+in the Supabase SQL editor as the project owner — the same way the EI930 repair
+was applied. Whole and unchanged, not chunked.
+
+**1. Before.** Confirm the account is undeclared and has no canonical history;
+the function refuses both cases, so this is to know in advance rather than to
+find out from an exception:
+
+```sql
+SELECT user_id, authority_state, authority_epoch, authority_declared_at
+FROM public.sophia_memory_user_governance
+WHERE user_id = '<davide-authenticated-owner-id>';
+```
+
+Expect `authority_state = 'unknown'` or no row at all.
+
+**2. Declare.**
+
+```sql
+SELECT public.sophia_memory_declare_owner_authority(
+    '<davide-authenticated-owner-id>',  -- p_user_id, the exact Better Auth owner
+    'unknown',                          -- p_expected_state
+    'governed',                         -- p_target_state
+    1,                                  -- p_contract_epoch, matches the deployed contract
+    '<approval-ref>'                    -- p_approval_ref, names this authorization
+);
+```
+
+It returns the receipt as `jsonb` and appends it to `authority_receipts`. It is
+idempotent for an identical repeat and raises `memory_owner_declaration_conflict`
+for a different one, so a re-run is safe and a mistaken re-run is refused.
+
+**3. After.** Re-run the query from step 1 and confirm `governed`, epoch `1`, and
+a `declared_at` timestamp.
+
+**4. Cohort, then flags — in that order, on both `sophia-langgraph` and
+`sophia-gateway`, identical values:**
+
+```
+SOPHIA_MEMORY_COHORT_PRINCIPALS   = <davide-authenticated-owner-id>
+# only after the line above is saved on BOTH services:
+SOPHIA_MEMORY_CANDIDATE_LEDGER_WRITE = true
+SOPHIA_MEMORY_GOVERNED_RUNTIME_READ  = true
+```
+
+`SOPHIA_MEMORY_CANDIDATE_LEDGER_READ` and `SOPHIA_MEMORY_CANONICAL_POOL_READ`
+may stay `false`: `resolved_memory_flags_for_owner` forces both on for a governed
+owner regardless of the environment. `SOPHIA_MEMORY_PROVIDER_PROJECTION`,
+`SOPHIA_MEMORY_LEGACY_INVENTORY`, `SOPHIA_MEMORY_LEGACY_IMPORT`,
+`SOPHIA_MEMORY_FAULT_INJECTION` and `SOPHIA_MEMORY_LANGSMITH_EXPORT` stay
+`false` — none is part of the text pilot.
+
+**5. Verify as a user, not as an operator.** Sign in to the product, send one
+ordinary request, and join it to its timestamped Gateway route and its exact
+Better Auth owner. Compare that owner against the cohort value in evidence.
+Reject a guessed UUID alias. This is the check EI-078/EI-079 exist because of: a
+UI save click and an empty legacy response both look like success.
+
+**Rollback, exactly reversed:** flags to `false` on both services first, then
+clear `SOPHIA_MEMORY_COHORT_PRINCIPALS`, and only then consider the authority
+state. Any other order passes through `memory_features_without_cohort`, which
+raises on every request for every user.
