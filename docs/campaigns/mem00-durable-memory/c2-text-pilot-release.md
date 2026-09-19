@@ -1,6 +1,60 @@
 # MEM00-C2 text pilot — current release record
 
-Successful target: MEMORY_TEXT_PILOT_READY. Current status: HEALTHY on the rolled-back pair — fresh sessions work end to end and a document was delivered on 35c6467c. One Aug 21 session remains stranded (403 THREAD_OWNERSHIP_REJECTED, thread absent from the gateway session listing). Receiving authentication is NOT installed. Grants unapplied, no account governed, not activated. Grants unapplied, no account governed, not activated. C2 replaces the prior PROMOTE-only/five-core-run prerequisites for this owner-restricted pilot. Historical C1 records and failures remain valid history, not additional first-use gates. Recovered cumulative failure counter: latest failed iteration EI929; last reported five-failure checkpoint 923–927; next five-failure checkpoint 932. The single current authority is the checkpoint immediately below; every later dated paragraph is preserved history, not competing current status.
+Successful target: MEMORY_TEXT_PILOT_READY. Current status: HEALTHY on the rolled-back pair — fresh sessions work end to end and a document was delivered on 35c6467c. One Aug 21 session remains stranded (403 THREAD_OWNERSHIP_REJECTED, thread absent from the gateway session listing). Receiving authentication is NOT installed. Serving grants APPLIED (service_role 25 -> 46). No account governed, not activated. Grants unapplied, no account governed, not activated. C2 replaces the prior PROMOTE-only/five-core-run prerequisites for this owner-restricted pilot. Historical C1 records and failures remain valid history, not additional first-use gates. Recovered cumulative failure counter: latest failed iteration EI929; last reported five-failure checkpoint 923–927; next five-failure checkpoint 932. The single current authority is the checkpoint immediately below; every later dated paragraph is preserved history, not competing current status.
+
+## APPLIED — step 3, serving grants, 2026-09-19
+
+The first MEM00-C2 **database** change ever applied in production. Run by the
+owner in the Supabase SQL editor, whole and unchanged, as the EI930 repair was.
+
+| field | value |
+| --- | --- |
+| target | Supabase `vlxnwmyvhchwbousrdzc`, as project owner |
+| source | `backend/migrations/2026_09_17_mem00_c2_serving_grants.sql`, 150 lines |
+| SHA-256 | `25527243cde8b15a172b20b7aca59fa476a0ef26de39f9a53d291fa7410a8c10` |
+| provenance | unchanged since `73c69bad`, verified by diff before running |
+| result | applied, committed |
+
+### Measured, before and after
+
+```sql
+select count(*) filter (where has_function_privilege('service_role', p.oid, 'EXECUTE')) as sr_granted,
+       count(*) as total_fns,
+       count(*) filter (where has_function_privilege('anon', p.oid, 'EXECUTE')
+                          or has_function_privilege('authenticated', p.oid, 'EXECUTE')) as browser_role_exec
+from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+where n.nspname = 'public' and p.proname like 'sophia_memory%';
+```
+
+| | `sr_granted` | `total_fns` | `browser_role_exec` |
+| --- | --- | --- | --- |
+| before | 25 | 76 | 0 |
+| after | **46** | 76 | **0** |
+
+`25 → 46` is exactly the rehearsed delta, and exactly +21. No browser role holds
+EXECUTE on any MEM00 function, before or after.
+
+The four in-transaction guards all passed — signature resolution, overload
+uniqueness, argument-list identity, and final set equality against
+`before ∪ the 21`. Any of them would have aborted the whole transaction rather
+than granting partially, so a committed result *is* the assertion that the
+granted set is the reviewed set.
+
+Deliberately still not granted: `sophia_memory_arm_fault`,
+`consume_fault`, `clear_faults`. They already held `service_role` EXECUTE before
+this campaign and remain a separate least-privilege question, not bundled here.
+
+### What this does and does not change
+
+**Does:** `service_role` can now execute the 21 serving functions, which is the
+database-side prerequisite for a governed owner to read and write memory.
+
+**Does not:** nothing calls them. Every `SOPHIA_MEMORY_*` flag is `false` and
+**0 accounts are governed**, so this grant changes no runtime behaviour today.
+That is why it was safe to apply ahead of the remaining steps.
+
+**Recovery, still available and still not racing a caller:** `REVOKE EXECUTE` on
+the same 21 signatures returns `service_role` to 25.
 
 ## ARTIFACT-TYPE MATRIX on `35c6467c` — 2026-09-19
 
