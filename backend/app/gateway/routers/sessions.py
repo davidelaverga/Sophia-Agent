@@ -8,6 +8,7 @@ records plus durable transcript messages.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import re
@@ -233,15 +234,37 @@ def _get_langgraph_base_url() -> str:
     return (os.getenv("SOPHIA_LANGGRAPH_BASE_URL") or os.getenv("SOPHIA_BACKEND_BASE_URL") or "http://127.0.0.1:2024").strip().rstrip("/")
 
 
+@contextlib.asynccontextmanager
+async def _langgraph_client(owner_id: str, *, timeout: float = LANGGRAPH_THREAD_CREATE_TIMEOUT_SECONDS):
+    """An httpx client that SIGNS every LangGraph request for this owner.
+
+    These routes were the last direct `httpx` callers of LangGraph left
+    unmigrated when the receiving auth policy was installed. Unsigned, they are
+    denied at the auth layer before any handler runs -- measured in production
+    2026-09-19 as `POST /threads 401 0ms`, which surfaced to the user as
+    "LangGraph thread creation failed with HTTP 401" and made it impossible to
+    start a new session.
+
+    `OwnerScopedAuth` mints a fresh per-request credential from the owner in
+    context, so the owner must be an authenticated application owner, never a
+    guess. `_scope` confines an owner credential to the thread routes and
+    refuses the Voice Lab principal outright.
+    """
+    from deerflow.sophia.langgraph_client_auth import OwnerScopedAuth, langgraph_owner_scope
+
+    with langgraph_owner_scope(owner_id):
+        async with httpx.AsyncClient(timeout=timeout, auth=OwnerScopedAuth()) as client:
+            yield client
+
+
 async def _create_langgraph_thread(
+    owner_id: str,
     metadata: dict[str, object] | None = None,
     *,
     thread_id: str | None = None,
 ) -> str:
     try:
-        async with httpx.AsyncClient(
-            timeout=LANGGRAPH_THREAD_CREATE_TIMEOUT_SECONDS,
-        ) as client:
+        async with _langgraph_client(owner_id) as client:
             response = await client.post(
                 f"{_get_langgraph_base_url()}/threads",
                 # Voice sessions can launch builders before the companion graph
@@ -289,12 +312,12 @@ async def _create_langgraph_thread(
     return payload["thread_id"]
 
 
-async def _delete_langgraph_thread_authoritatively(thread_id: str) -> bool:
+async def _delete_langgraph_thread_authoritatively(owner_id: str, thread_id: str) -> bool:
     """Delete/read-zero a synthetic pre-persistence thread after admission loss."""
 
     base_url = _get_langgraph_base_url()
     try:
-        async with httpx.AsyncClient(timeout=LANGGRAPH_THREAD_CREATE_TIMEOUT_SECONDS) as client:
+        async with _langgraph_client(owner_id) as client:
             before = await client.get(f"{base_url}/threads/{thread_id}")
             if before.status_code == 200:
                 try:
@@ -314,6 +337,7 @@ async def _delete_langgraph_thread_authoritatively(thread_id: str) -> bool:
 
 
 async def _delete_langgraph_threads_authoritatively(
+    owner_id: str,
     thread_ids: set[str],
 ) -> bool:
     """Read-zero every plausible allocation identity before releasing admission."""
@@ -321,7 +345,7 @@ async def _delete_langgraph_threads_authoritatively(
     results = []
     for thread_id in sorted(thread_ids):
         if thread_id:
-            results.append(await _delete_langgraph_thread_authoritatively(thread_id))
+            results.append(await _delete_langgraph_thread_authoritatively(owner_id, thread_id))
     return bool(results) and all(results)
 
 
@@ -347,6 +371,17 @@ async def _fence_langgraph_thread_cleanup_admission(
         "resource_kind": "session_thread",
     }
     base_url = _get_langgraph_base_url()
+    # KNOWN UNMIGRATED, deliberately. This is the only direct LangGraph caller
+    # left unsigned, and it cannot use the same fix as the four above:
+    #   * its callers are Voice Lab recovery paths, whose owner is the Voice Lab
+    #     test principal -- and `_scope` refuses that principal outright;
+    #   * the `maintenance` service lane covers thread delete but deliberately
+    #     excludes `POST /threads`, which this function must perform.
+    # So it needs a decision about which identity may re-create a fenced thread,
+    # not a mechanical migration. It will fail with 401 while receiving
+    # authentication is installed. Acceptable for now only because Voice Lab is
+    # disabled with its kill switch engaged in production; it is recorded as
+    # outstanding rather than silently left.
     try:
         async with httpx.AsyncClient(timeout=LANGGRAPH_THREAD_CREATE_TIMEOUT_SECONDS) as client:
             for _attempt in range(3):
@@ -653,6 +688,7 @@ async def start_session(
     admission_releasable = False
     try:
         thread_id = await _create_langgraph_thread(
+            user_id,
             {
                 **(synthetic_context or {}),
                 **({"scenario_version": voice_lab_claims.scenario_version} if voice_lab_claims and voice_lab_claims.scenario_version else {}),
@@ -678,7 +714,7 @@ async def start_session(
                 cleanup_admission,
             )
             if not authorized:
-                admission_releasable = await _delete_langgraph_thread_authoritatively(thread_id)
+                admission_releasable = await _delete_langgraph_thread_authoritatively(user_id, thread_id)
                 raise HTTPException(
                     status_code=409,
                     detail={"code": "voice_lab_cleanup_obligation_closed"},
@@ -719,7 +755,7 @@ async def start_session(
         admission_releasable = True
     except BaseException:
         if thread_created and allocated_thread_ids and not admission_releasable:
-            admission_releasable = await _delete_langgraph_threads_authoritatively(allocated_thread_ids)
+            admission_releasable = await _delete_langgraph_threads_authoritatively(user_id, allocated_thread_ids)
         raise
     finally:
         if cleanup_admission is not None and admission_releasable:
@@ -1385,7 +1421,7 @@ async def get_session_messages(
     base_url = _get_langgraph_base_url()
 
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
+        async with _langgraph_client(owner_user_id, timeout=5.0) as client:
             resp = await client.get(f"{base_url}/threads/{thread_id}/state")
             resp.raise_for_status()
     except httpx.TimeoutException as exc:

@@ -2,6 +2,81 @@
 
 Successful target: MEMORY_TEXT_PILOT_READY. Current status: STEP 4 DONE — gateway 91a8007b and LangGraph 89e4eb83 both run MEM00-C2 WITH receiving authentication, which is required rather than optional. Serving grants applied and idle. Frontend still 35c6467c. One Aug 21 session remains stranded (403 THREAD_OWNERSHIP_REJECTED, thread absent from the gateway session listing). Receiving authentication is NOT installed. Serving grants APPLIED (service_role 25 -> 46). No account governed, not activated. Grants unapplied, no account governed, not activated. C2 replaces the prior PROMOTE-only/five-core-run prerequisites for this owner-restricted pilot. Historical C1 records and failures remain valid history, not additional first-use gates. Recovered cumulative failure counter: latest failed iteration EI929; last reported five-failure checkpoint 923–927; next five-failure checkpoint 932. The single current authority is the checkpoint immediately below; every later dated paragraph is preserved history, not competing current status.
 
+## SECOND OUTAGE — unsigned gateway callers, and the fix, 2026-09-19
+
+Installing receiving authentication exposed **four direct `httpx` callers in
+`app/gateway/routers/sessions.py` that were never migrated**. Unsigned, they are
+denied before any handler runs:
+
+```
+POST /threads 401 0ms
+```
+
+Surfaced to the user as *"LangGraph thread creation failed with HTTP 401"*, and
+it made **starting a new session impossible**.
+
+### Why it appeared only now
+
+The 2026-09-18 smoke test *resumed* an existing session. Thread **creation**
+only happens when a new session starts, so the path was never exercised while
+authentication was live. Both times auth has been installed, the failure has
+been in a path the previous test happened not to touch — which is an argument
+for exercising session creation, not only session continuation, before believing
+a deploy.
+
+### The "four migrated callers" were not the only callers
+
+The campaign has said "the four caller sites are already migrated" since the
+receiving-auth work began. That was true of the four it knew about, and there
+were **five more**: four here, plus
+`_fence_langgraph_thread_cleanup_admission`. The phrase had hardened into an
+assurance that the migration was complete. It was not, and nothing tested the
+claim.
+
+### Fix
+
+One signing helper, used by all four:
+
+```python
+@contextlib.asynccontextmanager
+async def _langgraph_client(owner_id, *, timeout=...):
+    with langgraph_owner_scope(owner_id):
+        async with httpx.AsyncClient(timeout=timeout, auth=OwnerScopedAuth()) as client:
+            yield client
+```
+
+| call site | owner used |
+| --- | --- |
+| `POST /threads` (create) | `start_session`'s authenticated `user_id` |
+| `GET`/`DELETE /threads/{id}` (authoritative delete) | same |
+| plural delete | same |
+| `GET /threads/{id}/state` | `owner_user_id`, already in scope |
+
+It reuses the existing minting mechanism rather than adding a second credential
+path, and every owner is an authenticated application owner, never inferred.
+
+### Known unmigrated, recorded rather than hidden
+
+`_fence_langgraph_thread_cleanup_admission` stays unsigned and **will 401 while
+authentication is installed**. It cannot take the same fix:
+
+* its callers are Voice Lab recovery paths, whose owner is the Voice Lab test
+  principal — and `_scope` refuses that principal outright;
+* the `maintenance` lane covers thread delete but excludes `POST /threads`,
+  which this function must perform.
+
+It needs a decision about which identity may re-create a fenced thread. Tolerable
+only because Voice Lab is disabled with its kill switch engaged. The reasoning is
+written at the call site, not just here.
+
+### The test gap this closes
+
+Nothing asserted these calls carried a credential, so nothing failed when they
+did not. `tests/test_gateway_session_langgraph_auth.py` now asserts the header is
+present, **verifies against the policy** rather than merely existing, and carries
+scope `owner` — plus that the Voice Lab principal cannot be minted for. Confirmed
+to fail against the unsigned code.
+
 ## OUTAGE AND FIX — MEM00-C2 without auth denies every model request, 2026-09-19
 
 **Cause: mine.** Withdrawing the `auth` entry while deploying the MEM00-C2
