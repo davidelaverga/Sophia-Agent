@@ -20,10 +20,6 @@
       "excludes": ["x-sophia-deck-lift-*"]
     }
   },
-  "auth": {
-    "path": "./packages/harness/deerflow/sophia/langgraph_auth.py:auth",
-    "disable_studio_auth": true
-  },
   "checkpointer": {
     "path": "./packages/harness/deerflow/agents/checkpointer/async_provider.py:make_checkpointer"
   }
