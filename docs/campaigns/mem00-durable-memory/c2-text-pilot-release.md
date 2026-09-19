@@ -1,6 +1,50 @@
 # MEM00-C2 text pilot — current release record
 
-Successful target: MEMORY_TEXT_PILOT_READY. Current status: DEGRADED, CAUSE UNKNOWN — LangGraph is rolled back to 35c6467c (auth removed) and the 403 THREAD_OWNERSHIP_REJECTED persists, so the auth install was not the cause. Gateway remains 91a8007b. One fresh-session turn is the outstanding discriminating test. Grants unapplied, no account governed, not activated. C2 replaces the prior PROMOTE-only/five-core-run prerequisites for this owner-restricted pilot. Historical C1 records and failures remain valid history, not additional first-use gates. Recovered cumulative failure counter: latest failed iteration EI929; last reported five-failure checkpoint 923–927; next five-failure checkpoint 932. The single current authority is the checkpoint immediately below; every later dated paragraph is preserved history, not competing current status.
+Successful target: MEMORY_TEXT_PILOT_READY. Current status: HEALTHY on the rolled-back pair — fresh sessions work end to end and a document was delivered on 35c6467c. One Aug 21 session remains stranded (403 THREAD_OWNERSHIP_REJECTED, thread absent from the gateway session listing). Receiving authentication is NOT installed. Grants unapplied, no account governed, not activated. Grants unapplied, no account governed, not activated. C2 replaces the prior PROMOTE-only/five-core-run prerequisites for this owner-restricted pilot. Historical C1 records and failures remain valid history, not additional first-use gates. Recovered cumulative failure counter: latest failed iteration EI929; last reported five-failure checkpoint 923–927; next five-failure checkpoint 932. The single current authority is the checkpoint immediately below; every later dated paragraph is preserved history, not competing current status.
+
+## RESOLVED — fresh sessions work, and delivery is FLAKY not broken, 2026-09-19
+
+The discriminating test was run by the owner. Both open questions are answered.
+
+### 1. The product is not broadly broken
+
+A **fresh session works end to end**: companion replies, Builder dispatches,
+document delivered. So the 403 is confined to the Aug 21 session whose thread is
+absent from the gateway's session listing — one stranded conversation, not an
+outage. The gateway at `91a8007b` needs no rollback.
+
+### 2. The webhook failure is intermittent, not deterministic
+
+This build was `35c6467c` — **without** the timeout fix — and the completion
+still arrived. Observed live during the run:
+
+```
+POST .../internal/builder-progress        "HTTP/1.1 202 Accepted"
+Uploaded builder artifact to Supabase: bucket=sophia-builder-artifacts
+  thread_id=01a0b97d-1452-7e41-8228-23859ff16c41
+[BuilderBudget] usage in=141799 out=2122 cache_read=100482 est_cost=$0.21
+```
+
+So the 2.0s budget **sometimes** suffices. The earlier framing — "a standing
+fragility this dispatch exposed" — was right in kind but overstated in degree:
+it is a flaky margin, not a hard break. The fix in `83053614` raises that margin
+and is still worth deploying; it was never fixing a deterministic failure.
+
+That also explains the first smoke test cleanly: a dropped event then, a
+delivered one now, same code. Nothing about the auth install was involved in
+either.
+
+### What this does NOT yet cover — artifact type
+
+Both observed dispatches produced **markdown**. The completion path's cost is
+not uniform across types: a PPTX carries a far larger artifact, may involve
+image generation, and makes the gateway's completion handler do correspondingly
+more work before it answers. That is precisely where a 2.0s budget is most
+likely to be exceeded, and it is untested.
+
+So the honest status of the timeout fix is: **correct, qualified, unverified in
+production, and most valuable for exactly the case not yet exercised.** Next
+test matrix, heaviest first: PPTX, then PDF, then HTML or XLSX.
 
 ## RETRACTION — the 403 is NOT the authentication install, 2026-09-19
 
