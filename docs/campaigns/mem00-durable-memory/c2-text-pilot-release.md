@@ -1,6 +1,68 @@
 # MEM00-C2 text pilot — current release record
 
-Successful target: MEMORY_TEXT_PILOT_READY. Current status: HEALTHY on the rolled-back pair — fresh sessions work end to end and a document was delivered on 35c6467c. One Aug 21 session remains stranded (403 THREAD_OWNERSHIP_REJECTED, thread absent from the gateway session listing). Receiving authentication is NOT installed. Serving grants APPLIED (service_role 25 -> 46). No account governed, not activated. Grants unapplied, no account governed, not activated. C2 replaces the prior PROMOTE-only/five-core-run prerequisites for this owner-restricted pilot. Historical C1 records and failures remain valid history, not additional first-use gates. Recovered cumulative failure counter: latest failed iteration EI929; last reported five-failure checkpoint 923–927; next five-failure checkpoint 932. The single current authority is the checkpoint immediately below; every later dated paragraph is preserved history, not competing current status.
+Successful target: MEMORY_TEXT_PILOT_READY. Current status: STEP 4 DONE — gateway 91a8007b and LangGraph 68fc26dc both run MEM00-C2, no receiving auth, serving grants applied and idle. Frontend still 35c6467c. One Aug 21 session remains stranded (403 THREAD_OWNERSHIP_REJECTED, thread absent from the gateway session listing). Receiving authentication is NOT installed. Serving grants APPLIED (service_role 25 -> 46). No account governed, not activated. Grants unapplied, no account governed, not activated. C2 replaces the prior PROMOTE-only/five-core-run prerequisites for this owner-restricted pilot. Historical C1 records and failures remain valid history, not additional first-use gates. Recovered cumulative failure counter: latest failed iteration EI929; last reported five-failure checkpoint 923–927; next five-failure checkpoint 932. The single current authority is the checkpoint immediately below; every later dated paragraph is preserved history, not competing current status.
+
+## DEPLOYED — step 4 complete, both backend services on MEM00-C2, 2026-09-19
+
+| field | value |
+| --- | --- |
+| target | `sophia-langgraph`, `srv-d7be5s9r0fns7397l4fg` |
+| from → to | `35c6467c` → **`68fc26dc`** |
+| trigger | Manual, exact-commit |
+| recovery | redeploy `35c6467c` |
+
+**Both backend services now run MEM00-C2 for the first time**: gateway
+`91a8007b`, LangGraph `68fc26dc`. Receiving authentication is **not** installed
+on either.
+
+### A false start worth recording
+
+The first attempt reported "Deploy succeeded" and deployed **`35c6467c` — the
+commit already live**. The dialog had been staged several minutes ahead and went
+stale, most likely falling back to the service's configured branch. Caught by
+checking the from→to pair rather than the success banner: the header read
+`Commit: 35c6467` with no second hash, and `68fc26d` appeared nowhere on the
+page.
+
+Harmless — a no-op redeploy of the running image — but it is exactly the class
+of thing that gets recorded as progress and is not. **"Deploy succeeded" and
+"the intended change happened" are different claims.** The second attempt showed
+`Commit: 35c6467 | 68fc26d` and the r7 merge message, and was verified before
+being believed.
+
+### Verification
+
+- LangGraph `GET /ok` → `{"ok":true}`.
+- **`GET /favicon.ico` → 404, not 401.** The same request returned **401** while
+  authentication was installed. This is the positive confirmation that the
+  withdrawal took effect, rather than an absence of evidence.
+- Gateway `/ready`: `status: ready`, reaper cycling at 15:23:19Z with
+  `last_error_type: null`. Voice Lab still disabled, kill switch engaged.
+
+### The YAML scanner error is pre-existing, and the campaign already knew
+
+LangGraph's startup logs a `yaml.scanner.ScannerError: mapping values are not
+allowed here` at `Query params:`. It is **not** new and **not** caused by this
+deploy. `attempts.jsonl`, MEM00-EI-009 (2026-09-02), investigated this exact
+traceback and recorded under `falsified`:
+
+> "the YAML scanner traceback was causal because the identical traceback exists
+> in successful deployments"
+
+Checked rather than assumed, and the campaign's own record answered it.
+
+### Where the mission stands after step 4
+
+| component | commit | MEM00-C2 |
+| --- | --- | --- |
+| `sophia-gateway` | `91a8007b` | yes |
+| `sophia-langgraph` | **`68fc26dc`** | **yes** |
+| `sophia-voice` | `35c6467c` | untouched by design |
+| frontend | `35c6467c` | **no** — blocked by Vercel `ignoreCommand: "exit 0"` |
+
+Memory remains dark: every `SOPHIA_MEMORY_*` flag `false`, **0 accounts
+governed**. The serving grants are applied and idle. Activation's parameters are
+verified and its stack precondition is now met on the backend.
 
 ## Qualified — integration successor `68fc26dc` (`codex/mem00-c2-integration-r7`)
 
