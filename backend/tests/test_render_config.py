@@ -93,14 +93,13 @@ def test_langgraph_exposes_dq2_only_through_the_private_http_app() -> None:
         "sophia_builder",
         "sophia_deck_quality_shadow",
     }.issubset(graphs)
-    # Receiving authentication is INSTALLED. This assertion previously pinned
-    # its absence; it now pins the exact entry, because a silent change to the
-    # path or to `disable_studio_auth` would move the policy without moving any
-    # code the policy tests cover.
-    assert config["auth"] == {
-        "path": "./packages/harness/deerflow/sophia/langgraph_auth.py:auth",
-        "disable_studio_auth": True,
-    }
+    # Receiving authentication is NOT installed. Step 2 of the coordinated
+    # release sequence is a separate, separately-authorized step from the
+    # deployment in step 4; installing it here once meant a single deploy
+    # carried both, which made a production incident harder to attribute than
+    # it needed to be. The policy and its six runtime tests stay built and
+    # exercised; only the entry that activates them is withheld.
+    assert "auth" not in config
     assert config["http"] == {
         "app": "deerflow.sophia.deck_design_lift.http_app:app",
         "configurable_headers": {"excludes": ["x-sophia-deck-lift-*"]},

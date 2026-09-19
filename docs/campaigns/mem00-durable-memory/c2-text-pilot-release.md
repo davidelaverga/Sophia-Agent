@@ -2,6 +2,46 @@
 
 Successful target: MEMORY_TEXT_PILOT_READY. Current status: HEALTHY on the rolled-back pair — fresh sessions work end to end and a document was delivered on 35c6467c. One Aug 21 session remains stranded (403 THREAD_OWNERSHIP_REJECTED, thread absent from the gateway session listing). Receiving authentication is NOT installed. Serving grants APPLIED (service_role 25 -> 46). No account governed, not activated. Grants unapplied, no account governed, not activated. C2 replaces the prior PROMOTE-only/five-core-run prerequisites for this owner-restricted pilot. Historical C1 records and failures remain valid history, not additional first-use gates. Recovered cumulative failure counter: latest failed iteration EI929; last reported five-failure checkpoint 923–927; next five-failure checkpoint 932. The single current authority is the checkpoint immediately below; every later dated paragraph is preserved history, not competing current status.
 
+## Step 4 prepared — LangGraph onto the pilot line, WITHOUT auth, 2026-09-19
+
+### The blocker activation actually has
+
+Step 6's parameters are now all verified against production:
+
+| parameter | verified |
+| --- | --- |
+| `p_user_id` | `CUyZxRFmDNONbR0eKqkJjTrJ2z8nkDKd` — observed on the live request path |
+| `p_expected_state` | **`unknown`** — matches the row |
+| `p_contract_epoch` | **1** — matches `sophia_memory_contract` and both services |
+| governance table | **1 row total**, 0 governed, 0 legacy |
+| contract | `mem00.v1`, mode **`enforced`** |
+
+So activation is not blocked on authorization or on unknowns. It is blocked on
+this: **`sophia-langgraph` runs `35c6467c`, which contains no MEM00-C2 code.**
+Declaring Davide governed today would put a governed owner on a stack where the
+gateway implements the governance and LangGraph does not — a worse mixed state
+than anything encountered on 2026-09-18.
+
+### The correction: step 2 and step 4 are separate, and the branch stopped saying so
+
+The `auth` entry has been **removed from `backend/langgraph.json`**, and
+`test_render_config` pins its absence again.
+
+This is a sequencing fix, not a reversal of the contract. §4 of
+`c2-step-0a-acceptance.md` stands; §1's clauses were never found wanting, and
+when authentication was live it enforced correctly. What went wrong was
+structural: installing the entry into the branch meant **one deploy carried both
+"MEM00-C2 reaches LangGraph" and "receiving authentication becomes live"**. When
+something then broke, there was no way to attribute it — and the first
+attribution reached for was the wrong one.
+
+The release sequence had always listed these as separate, separately-gated
+steps. The branch had quietly collapsed them. It no longer does.
+
+Preserved: the policy module, its six runtime tests, the four migrated callers,
+and the recorded authorization. Withheld: the four lines that activate them.
+Re-installing is one commit, whenever step 2 is taken on its own terms.
+
 ## APPLIED — step 3, serving grants, 2026-09-19
 
 The first MEM00-C2 **database** change ever applied in production. Run by the

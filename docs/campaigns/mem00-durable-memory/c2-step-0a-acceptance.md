@@ -1,8 +1,13 @@
 # Step 0a — acceptance record: the narrowed Voice Lab principal refusal
 
-**Status: INTEGRATION AUTHORIZED by the campaign sponsor, 2026-09-18.** The
-clause list in §1 stands as written and unamended. See §4 for exactly what was
-authorized, by whom, and what that does and does not cover.
+**Status: AUTHORIZED, INSTALLED, DEPLOYED, AND WITHDRAWN — 2026-09-19.** The
+clause list in §1 stands as written and unamended, and the authorization in §4
+stands. The `auth` entry has been removed from `backend/langgraph.json` again,
+for a sequencing reason rather than a contract one. See §6.
+
+**Nothing in §1 was found wanting.** When authentication was live it enforced
+correctly, and its startup handshake proved both services agree on the
+builder-event HMAC secret and the exact canary scope.
 
 This file exists so that the acceptance is a recorded artefact rather than a
 remembered conversation. It changes a rule; everything else in the release
@@ -119,3 +124,25 @@ The four migrated callers are inert against an unauthenticated server, so they
 need no revert, and owner labels already written become inert rather than wrong.
 That reversal is cheap, which is the reason step 2 is worth keeping as its own
 deploy.
+
+## 6. Why the entry was withdrawn on 2026-09-19
+
+It was deployed to `sophia-langgraph` as `91a8007b` on 2026-09-18, enforced
+correctly, and was rolled back a few hours later during an incident. **The
+incident was not caused by it** — the 403 `THREAD_OWNERSHIP_REJECTED` persisted
+after the rollback, which is recorded in the release record as a retraction.
+
+The entry is nonetheless staying out of the mainline until step 2 is taken on its
+own, for a reason worth stating plainly:
+
+**Bundling step 2 into step 4 is what made that incident hard to attribute.** One
+deploy carried both "MEM00-C2 reaches LangGraph" and "receiving authentication
+becomes live", so when something broke there was no way to tell which had done
+it — and the first answer reached for was the wrong one. The release sequence
+already separates these as distinct, separately-gated steps; installing the
+entry into the branch collapsed that separation before the deploy even happened.
+
+What is preserved: the policy module, its six runtime tests, the four migrated
+callers, and this acceptance. What is withheld: only the four lines that
+activate them. Re-installing is a one-commit change whenever step 2 is taken
+deliberately, and §4's authorization does not need to be sought again.
