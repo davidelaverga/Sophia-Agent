@@ -93,13 +93,20 @@ def test_langgraph_exposes_dq2_only_through_the_private_http_app() -> None:
         "sophia_builder",
         "sophia_deck_quality_shadow",
     }.issubset(graphs)
-    # Receiving authentication is NOT installed. Step 2 of the coordinated
-    # release sequence is a separate, separately-authorized step from the
-    # deployment in step 4; installing it here once meant a single deploy
-    # carried both, which made a production incident harder to attribute than
-    # it needed to be. The policy and its six runtime tests stay built and
-    # exercised; only the entry that activates them is withheld.
-    assert "auth" not in config
+    # Receiving authentication is INSTALLED, and MUST be whenever the MEM00-C2
+    # runtime is deployed. This is not a preference: `final_dispatch_authority`
+    # compares `configurable["langgraph_auth_user_id"]` against the owner on
+    # EVERY undeclared owner's request, and nothing in this codebase ever sets
+    # that field -- the LangGraph server injects it from the auth context, which
+    # only exists when this entry is present. Deploying the MEM00-C2 runtime
+    # without it denied model dispatch for every user in production on
+    # 2026-09-19 (`ModelDispatchDenied`). Steps 2 and 4 of the coordinated
+    # release sequence are therefore coupled, and this assertion is where that
+    # coupling is enforced.
+    assert config["auth"] == {
+        "path": "./packages/harness/deerflow/sophia/langgraph_auth.py:auth",
+        "disable_studio_auth": True,
+    }
     assert config["http"] == {
         "app": "deerflow.sophia.deck_design_lift.http_app:app",
         "configurable_headers": {"excludes": ["x-sophia-deck-lift-*"]},

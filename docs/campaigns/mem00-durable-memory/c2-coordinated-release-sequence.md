@@ -91,6 +91,26 @@ Until this lands, `make lint` fails on the merged line and CI never reaches
 
 ## Step 2 — receiving authentication install (needs steps 0a and 0b)
 
+> **COUPLING, measured in production 2026-09-19: step 2 is not optional once the
+> MEM00-C2 runtime is deployed, and it cannot be sequenced after step 4.**
+>
+> `final_dispatch_authority` compares
+> `configurable["langgraph_auth_user_id"]` against the owner on **every**
+> undeclared owner's request — which today is every request, since 0 accounts
+> are governed. **Nothing in this codebase ever sets that field.** The LangGraph
+> server injects it from the auth context, and only when this entry exists.
+>
+> Deploying the MEM00-C2 runtime to `sophia-langgraph` *without* this entry
+> therefore denied model dispatch for **every user**
+> (`ModelDispatchDenied`), with no run reaching the graph at all. Steps 2 and 4
+> must land together on that service.
+>
+> The unit tests do not catch this: `test_mem00_noncohort_model_entry.py`
+> supplies `langgraph_auth_user_id` itself, because it is standing in for the
+> authenticated server. The test is correct; it simply cannot observe the
+> configuration in which the field is absent. `test_render_config.py` now pins
+> the entry and carries this reason.
+
 One change, two files, and it must land with the callers in the same commit:
 
 - `backend/langgraph.json` — add the `auth` entry pointing at

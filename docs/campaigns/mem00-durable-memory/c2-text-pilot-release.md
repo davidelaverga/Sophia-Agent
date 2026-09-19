@@ -1,6 +1,74 @@
 # MEM00-C2 text pilot — current release record
 
-Successful target: MEMORY_TEXT_PILOT_READY. Current status: STEP 4 DONE — gateway 91a8007b and LangGraph 68fc26dc both run MEM00-C2, no receiving auth, serving grants applied and idle. Frontend still 35c6467c. One Aug 21 session remains stranded (403 THREAD_OWNERSHIP_REJECTED, thread absent from the gateway session listing). Receiving authentication is NOT installed. Serving grants APPLIED (service_role 25 -> 46). No account governed, not activated. Grants unapplied, no account governed, not activated. C2 replaces the prior PROMOTE-only/five-core-run prerequisites for this owner-restricted pilot. Historical C1 records and failures remain valid history, not additional first-use gates. Recovered cumulative failure counter: latest failed iteration EI929; last reported five-failure checkpoint 923–927; next five-failure checkpoint 932. The single current authority is the checkpoint immediately below; every later dated paragraph is preserved history, not competing current status.
+Successful target: MEMORY_TEXT_PILOT_READY. Current status: STEP 4 DONE — gateway 91a8007b and LangGraph 89e4eb83 both run MEM00-C2 WITH receiving authentication, which is required rather than optional. Serving grants applied and idle. Frontend still 35c6467c. One Aug 21 session remains stranded (403 THREAD_OWNERSHIP_REJECTED, thread absent from the gateway session listing). Receiving authentication is NOT installed. Serving grants APPLIED (service_role 25 -> 46). No account governed, not activated. Grants unapplied, no account governed, not activated. C2 replaces the prior PROMOTE-only/five-core-run prerequisites for this owner-restricted pilot. Historical C1 records and failures remain valid history, not additional first-use gates. Recovered cumulative failure counter: latest failed iteration EI929; last reported five-failure checkpoint 923–927; next five-failure checkpoint 932. The single current authority is the checkpoint immediately below; every later dated paragraph is preserved history, not competing current status.
+
+## OUTAGE AND FIX — MEM00-C2 without auth denies every model request, 2026-09-19
+
+**Cause: mine.** Withdrawing the `auth` entry while deploying the MEM00-C2
+runtime produced a configuration that cannot serve anyone.
+
+### What happened
+
+A markdown build failed. LangGraph logged:
+
+```
+File ".../memory_governance/model_clients.py", line 233, in _astream
+    raise ModelDispatchDenied() from None
+ModelDispatchDenied: memory_context_rotation_required
+```
+
+Blast radius was **every user**, not one task type: `final_dispatch_authority`
+routes every *undeclared* owner — which is everyone, 0 accounts governed —
+through
+
+```python
+if self.config.get("langgraph_auth_user_id") != self.owner:
+    raise MemoryContextUnavailable()
+```
+
+`langgraph_auth_user_id` is injected by the LangGraph server from the auth
+context. **Nothing in this codebase ever sets it** — six references, all reads.
+Without the `auth` entry the field is absent, so `None != owner` on every
+request → `_AdmissionAbort` → `ModelDispatchDenied`, with no run reaching the
+graph.
+
+### Two wrong turns on the way to it, both worth recording
+
+1. **The exception message is not a diagnosis.** `ModelDispatchDenied.__init__`
+   hardcodes `"memory_context_rotation_required"`. I read that string as the
+   cause and spent effort in the memory-context middleware before noticing it is
+   a fixed literal.
+2. **I nearly shipped a fix for a bug that did not exist.** I concluded
+   `owner_is_definitely_undeclared` mishandled `authority_state='unknown'` and
+   patched it — then found `resolve_owner_authority` already raises
+   `MemoryOwnerUndeclared` for exactly that case, at line 31, with a comment
+   saying so. Reverted before commit. Reading the callee before patching the
+   caller would have saved it.
+
+### Why the tests did not catch it
+
+`test_mem00_noncohort_model_entry.py` — the test that proves the no-memory model
+path — **supplies `langgraph_auth_user_id` itself**, three times, because it
+stands in for the authenticated server. The test is correct and the path it
+tests is correct. It simply cannot observe the configuration where the field is
+absent, and I wrote the runtime test that documents the server injecting it
+without connecting the two.
+
+### Fix
+
+`sophia-langgraph` deployed to **`89e4eb83`** (r6: MEM00-C2 **with** auth, plus
+the webhook fix). Verified: `/ok` healthy; `GET /favicon.ico` **401** again,
+which is the positive signal that auth enforces; startup probe present; **no
+`ModelDispatchDenied` or `_AdmissionAbort`**.
+
+The `auth` entry is restored on the branch, and `test_render_config` now pins it
+**with the coupling as its stated reason**, so the branch cannot reproduce this.
+
+### The correction to the release sequence
+
+Step 2 and step 4 are **coupled on `sophia-langgraph`** and must land together.
+Separating them was my idea, taken for a good reason — single-variable
+attribution — and it was wrong on the facts. The sequence now says so at step 2.
 
 ## DEPLOYED — step 4 complete, both backend services on MEM00-C2, 2026-09-19
 
