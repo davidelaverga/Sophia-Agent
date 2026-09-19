@@ -1,6 +1,89 @@
 # MEM00-C2 text pilot — current release record
 
-Successful target: MEMORY_TEXT_PILOT_READY. Current status: DEPLOYING — Gateway and LangGraph both run 91a8007b and receiving authentication is LIVE. The frontend is still on 35c6467c. Grants unapplied, no account governed, not activated. C2 replaces the prior PROMOTE-only/five-core-run prerequisites for this owner-restricted pilot. Historical C1 records and failures remain valid history, not additional first-use gates. Recovered cumulative failure counter: latest failed iteration EI929; last reported five-failure checkpoint 923–927; next five-failure checkpoint 932. The single current authority is the checkpoint immediately below; every later dated paragraph is preserved history, not competing current status.
+Successful target: MEMORY_TEXT_PILOT_READY. Current status: DEGRADED — LangGraph runs 89e4eb83 with receiving authentication LIVE, and existing sessions cannot chat (403 THREAD_OWNERSHIP_REJECTED). Rollback to 35c6467c is the recommended immediate action. Grants unapplied, no account governed, not activated. C2 replaces the prior PROMOTE-only/five-core-run prerequisites for this owner-restricted pilot. Historical C1 records and failures remain valid history, not additional first-use gates. Recovered cumulative failure counter: latest failed iteration EI929; last reported five-failure checkpoint 923–927; next five-failure checkpoint 932. The single current authority is the checkpoint immediately below; every later dated paragraph is preserved history, not competing current status.
+
+## PRODUCTION REGRESSION — existing sessions cannot chat, 2026-09-19
+
+**Severity: the product is degraded for any session with pre-auth history.**
+Not caused by the webhook fix. Caused by the receiving-authentication install,
+and it is the same root cause this record has now underestimated twice.
+
+### What happens
+
+Every turn on the existing session returns:
+
+```
+POST /api/chat  ->  403
+{"error":"Thread not owned by current user","code":"THREAD_OWNERSHIP_REJECTED"}
+```
+
+The user sees "Connection interrupted. Retry?" and no reply. Retrying reproduces
+it. **No run reaches LangGraph at all** — the service logs show only startup and
+queue-stats lines for the whole attempt, so this is not a backend failure, it is
+a refusal before dispatch.
+
+### Why
+
+The rejection is emitted by the **deployed frontend** (`35c6467c`),
+`frontend/src/app/api/chat/_lib/post-handler.ts`:
+
+```ts
+if (typeof threadId === 'string' && threadId) {
+  const owns = await userOwnsThread(threadId, userId, apiKey, gatewayUrl);
+  if (!owns) {  /* 403 THREAD_OWNERSHIP_REJECTED */ }
+}
+```
+
+The session is bound to companion thread `01a0b69b-004f-7cb2-9f15-059a461fc0e0`,
+created on Aug 21 — **before** the `auth` entry existed. It therefore carries no
+server-issued `sophia_authenticated_owner_v1` label, the owner filter cannot
+match it, the gateway does not report it as owned, and `userOwnsThread` returns
+false. The frontend then refuses to forward the turn.
+
+### This record underestimated it twice, and should say so
+
+| when | what this document claimed | what is true |
+| --- | --- | --- |
+| §4.6, before deploy | "Builder/companion working threads bounded by TTL, **not durable user data**" | wrong |
+| after the first smoke test | "a saved artifact's **canvas view** becomes unreachable" | true but incomplete |
+| now | — | **the conversation itself cannot be continued** |
+
+The escalation was predictable from the same premise each time and was not
+predicted. The mechanism was understood; its blast radius was not.
+
+### Why it did not appear in the first smoke test
+
+The ownership check is guarded by `if (threadId)`. The first dispatch was sent
+on a turn that carried no thread id yet, so the check was skipped and the turn
+succeeded. Once a thread id is bound to the session, every subsequent turn is
+checked and refused. So the first smoke test passing was **luck of ordering**,
+not evidence of health.
+
+### The webhook fix is deployed and UNVERIFIED
+
+`89e4eb83` is Live on `sophia-langgraph` (6m54s, `/ok` healthy, auth still
+enforcing, startup probe's expected 403 present). Its fix could not be exercised,
+because reaching a Builder dispatch requires a chat turn and chat turns are
+refused. **No claim is made that the webhook fix works in production.**
+
+### Options, with the honest cost of each
+
+1. **Roll back `sophia-langgraph` to `35c6467c`.** Removes receiving
+   authentication, restores every existing session immediately. Loses the auth
+   install and the webhook fix. Fastest restoration.
+2. **Roll back to `91a8007b`.** Pointless — that is the commit that introduced
+   the regression.
+3. **Fix forward**: treat a thread carrying *no* owner label as a legacy thread
+   and fall back to the pre-auth ownership determination, rather than denying.
+   Narrow and defensible — it preserves the filter for every labelled thread —
+   but it is a real change to an authorization path and must not become a
+   blanket allow.
+4. **Backfill owner labels** onto pre-auth threads. **Rejected**, for the reason
+   4.6 already gives: it means minting ownership for threads whose authenticated
+   owner was never recorded, which is exactly what the label exists to prevent.
+
+Recommended: **1 now, then 3 deliberately**, rather than leaving production
+degraded while a forward fix is designed.
 
 ## FIX — the completion webhook's timeout budget, 2026-09-19
 
