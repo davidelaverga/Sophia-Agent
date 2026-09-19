@@ -2,6 +2,49 @@
 
 Successful target: MEMORY_TEXT_PILOT_READY. Current status: STEP 4 DONE — gateway 91a8007b and LangGraph 89e4eb83 both run MEM00-C2 WITH receiving authentication, which is required rather than optional. Serving grants applied and idle. Frontend still 35c6467c. One Aug 21 session remains stranded (403 THREAD_OWNERSHIP_REJECTED, thread absent from the gateway session listing). Receiving authentication is NOT installed. Serving grants APPLIED (service_role 25 -> 46). No account governed, not activated. Grants unapplied, no account governed, not activated. C2 replaces the prior PROMOTE-only/five-core-run prerequisites for this owner-restricted pilot. Historical C1 records and failures remain valid history, not additional first-use gates. Recovered cumulative failure counter: latest failed iteration EI929; last reported five-failure checkpoint 923–927; next five-failure checkpoint 932. The single current authority is the checkpoint immediately below; every later dated paragraph is preserved history, not competing current status.
 
+## Qualified — `3aebc59a` (`codex/mem00-c2-integration-r8`), a GATEWAY-only deploy
+
+| gate | result |
+| --- | --- |
+| backend suite | **7,262 passed / 0 failed**, 168 skipped |
+| `ruff check .` | clean |
+
+### It is one service, not two, and that was worth checking
+
+The instinct was to deploy both services together, since steps 2 and 4 are
+coupled. Measured instead of assumed:
+
+```
+git diff --name-only 89e4eb83 3aebc59a | grep -v ^docs/
+  backend/app/gateway/routers/sessions.py
+  backend/tests/test_gateway_session_langgraph_auth.py
+  backend/tests/test_render_config.py
+```
+
+The only runtime change against the **live** LangGraph build is a gateway
+router, which `sophia-langgraph` does not serve. So LangGraph stays on
+`89e4eb83` and only the gateway moves: one deploy, no coordination window, less
+to go wrong.
+
+| service | before | after |
+| --- | --- | --- |
+| `sophia-gateway` | `91a8007b` | **`3aebc59a`** |
+| `sophia-langgraph` | `89e4eb83` | unchanged |
+
+### The verification must use a path neither previous smoke test touched
+
+Both earlier smoke tests passed while the real break sat elsewhere: the first
+because that turn carried no thread id, the second because the session already
+existed. Neither exercised **session creation**, which is the path that failed.
+
+So the check is: start a **brand-new session**, send a turn, dispatch a Builder.
+Resuming an existing session proves nothing about this fix.
+
+Expected to remain broken afterwards, recorded so it is not mistaken for a new
+regression: the Voice Lab recovery fence (`_fence_langgraph_thread_cleanup_admission`,
+service disabled and kill-switched) and every thread created before
+authentication was installed, including the stranded Aug 21 session.
+
 ## SECOND OUTAGE — unsigned gateway callers, and the fix, 2026-09-19
 
 Installing receiving authentication exposed **four direct `httpx` callers in
