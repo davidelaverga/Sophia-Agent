@@ -93,10 +93,16 @@ def test_langgraph_exposes_dq2_only_through_the_private_http_app() -> None:
         "sophia_builder",
         "sophia_deck_quality_shadow",
     }.issubset(graphs)
-    # Receiving authentication is INSTALLED. This assertion previously pinned
-    # its absence; it now pins the exact entry, because a silent change to the
-    # path or to `disable_studio_auth` would move the policy without moving any
-    # code the policy tests cover.
+    # Receiving authentication is INSTALLED, and MUST be whenever the MEM00-C2
+    # runtime is deployed. This is not a preference: `final_dispatch_authority`
+    # compares `configurable["langgraph_auth_user_id"]` against the owner on
+    # EVERY undeclared owner's request, and nothing in this codebase ever sets
+    # that field -- the LangGraph server injects it from the auth context, which
+    # only exists when this entry is present. Deploying the MEM00-C2 runtime
+    # without it denied model dispatch for every user in production on
+    # 2026-09-19 (`ModelDispatchDenied`). Steps 2 and 4 of the coordinated
+    # release sequence are therefore coupled, and this assertion is where that
+    # coupling is enforced.
     assert config["auth"] == {
         "path": "./packages/harness/deerflow/sophia/langgraph_auth.py:auth",
         "disable_studio_auth": True,

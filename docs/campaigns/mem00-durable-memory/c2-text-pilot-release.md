@@ -1,6 +1,577 @@
 # MEM00-C2 text pilot — current release record
 
-Successful target: MEMORY_TEXT_PILOT_READY. Current status: DEPLOYING — Gateway and LangGraph both run 91a8007b and receiving authentication is LIVE. The frontend is still on 35c6467c. Grants unapplied, no account governed, not activated. C2 replaces the prior PROMOTE-only/five-core-run prerequisites for this owner-restricted pilot. Historical C1 records and failures remain valid history, not additional first-use gates. Recovered cumulative failure counter: latest failed iteration EI929; last reported five-failure checkpoint 923–927; next five-failure checkpoint 932. The single current authority is the checkpoint immediately below; every later dated paragraph is preserved history, not competing current status.
+Successful target: MEMORY_TEXT_PILOT_READY. Current status: STEP 4 DONE — gateway 91a8007b and LangGraph 89e4eb83 both run MEM00-C2 WITH receiving authentication, which is required rather than optional. Serving grants applied and idle. Frontend still 35c6467c. One Aug 21 session remains stranded (403 THREAD_OWNERSHIP_REJECTED, thread absent from the gateway session listing). Receiving authentication is NOT installed. Serving grants APPLIED (service_role 25 -> 46). No account governed, not activated. Grants unapplied, no account governed, not activated. C2 replaces the prior PROMOTE-only/five-core-run prerequisites for this owner-restricted pilot. Historical C1 records and failures remain valid history, not additional first-use gates. Recovered cumulative failure counter: latest failed iteration EI929; last reported five-failure checkpoint 923–927; next five-failure checkpoint 932. The single current authority is the checkpoint immediately below; every later dated paragraph is preserved history, not competing current status.
+
+## SECOND OUTAGE — unsigned gateway callers, and the fix, 2026-09-19
+
+Installing receiving authentication exposed **four direct `httpx` callers in
+`app/gateway/routers/sessions.py` that were never migrated**. Unsigned, they are
+denied before any handler runs:
+
+```
+POST /threads 401 0ms
+```
+
+Surfaced to the user as *"LangGraph thread creation failed with HTTP 401"*, and
+it made **starting a new session impossible**.
+
+### Why it appeared only now
+
+The 2026-09-18 smoke test *resumed* an existing session. Thread **creation**
+only happens when a new session starts, so the path was never exercised while
+authentication was live. Both times auth has been installed, the failure has
+been in a path the previous test happened not to touch — which is an argument
+for exercising session creation, not only session continuation, before believing
+a deploy.
+
+### The "four migrated callers" were not the only callers
+
+The campaign has said "the four caller sites are already migrated" since the
+receiving-auth work began. That was true of the four it knew about, and there
+were **five more**: four here, plus
+`_fence_langgraph_thread_cleanup_admission`. The phrase had hardened into an
+assurance that the migration was complete. It was not, and nothing tested the
+claim.
+
+### Fix
+
+One signing helper, used by all four:
+
+```python
+@contextlib.asynccontextmanager
+async def _langgraph_client(owner_id, *, timeout=...):
+    with langgraph_owner_scope(owner_id):
+        async with httpx.AsyncClient(timeout=timeout, auth=OwnerScopedAuth()) as client:
+            yield client
+```
+
+| call site | owner used |
+| --- | --- |
+| `POST /threads` (create) | `start_session`'s authenticated `user_id` |
+| `GET`/`DELETE /threads/{id}` (authoritative delete) | same |
+| plural delete | same |
+| `GET /threads/{id}/state` | `owner_user_id`, already in scope |
+
+It reuses the existing minting mechanism rather than adding a second credential
+path, and every owner is an authenticated application owner, never inferred.
+
+### Known unmigrated, recorded rather than hidden
+
+`_fence_langgraph_thread_cleanup_admission` stays unsigned and **will 401 while
+authentication is installed**. It cannot take the same fix:
+
+* its callers are Voice Lab recovery paths, whose owner is the Voice Lab test
+  principal — and `_scope` refuses that principal outright;
+* the `maintenance` lane covers thread delete but excludes `POST /threads`,
+  which this function must perform.
+
+It needs a decision about which identity may re-create a fenced thread. Tolerable
+only because Voice Lab is disabled with its kill switch engaged. The reasoning is
+written at the call site, not just here.
+
+### The test gap this closes
+
+Nothing asserted these calls carried a credential, so nothing failed when they
+did not. `tests/test_gateway_session_langgraph_auth.py` now asserts the header is
+present, **verifies against the policy** rather than merely existing, and carries
+scope `owner` — plus that the Voice Lab principal cannot be minted for. Confirmed
+to fail against the unsigned code.
+
+## OUTAGE AND FIX — MEM00-C2 without auth denies every model request, 2026-09-19
+
+**Cause: mine.** Withdrawing the `auth` entry while deploying the MEM00-C2
+runtime produced a configuration that cannot serve anyone.
+
+### What happened
+
+A markdown build failed. LangGraph logged:
+
+```
+File ".../memory_governance/model_clients.py", line 233, in _astream
+    raise ModelDispatchDenied() from None
+ModelDispatchDenied: memory_context_rotation_required
+```
+
+Blast radius was **every user**, not one task type: `final_dispatch_authority`
+routes every *undeclared* owner — which is everyone, 0 accounts governed —
+through
+
+```python
+if self.config.get("langgraph_auth_user_id") != self.owner:
+    raise MemoryContextUnavailable()
+```
+
+`langgraph_auth_user_id` is injected by the LangGraph server from the auth
+context. **Nothing in this codebase ever sets it** — six references, all reads.
+Without the `auth` entry the field is absent, so `None != owner` on every
+request → `_AdmissionAbort` → `ModelDispatchDenied`, with no run reaching the
+graph.
+
+### Two wrong turns on the way to it, both worth recording
+
+1. **The exception message is not a diagnosis.** `ModelDispatchDenied.__init__`
+   hardcodes `"memory_context_rotation_required"`. I read that string as the
+   cause and spent effort in the memory-context middleware before noticing it is
+   a fixed literal.
+2. **I nearly shipped a fix for a bug that did not exist.** I concluded
+   `owner_is_definitely_undeclared` mishandled `authority_state='unknown'` and
+   patched it — then found `resolve_owner_authority` already raises
+   `MemoryOwnerUndeclared` for exactly that case, at line 31, with a comment
+   saying so. Reverted before commit. Reading the callee before patching the
+   caller would have saved it.
+
+### Why the tests did not catch it
+
+`test_mem00_noncohort_model_entry.py` — the test that proves the no-memory model
+path — **supplies `langgraph_auth_user_id` itself**, three times, because it
+stands in for the authenticated server. The test is correct and the path it
+tests is correct. It simply cannot observe the configuration where the field is
+absent, and I wrote the runtime test that documents the server injecting it
+without connecting the two.
+
+### Fix
+
+`sophia-langgraph` deployed to **`89e4eb83`** (r6: MEM00-C2 **with** auth, plus
+the webhook fix). Verified: `/ok` healthy; `GET /favicon.ico` **401** again,
+which is the positive signal that auth enforces; startup probe present; **no
+`ModelDispatchDenied` or `_AdmissionAbort`**.
+
+The `auth` entry is restored on the branch, and `test_render_config` now pins it
+**with the coupling as its stated reason**, so the branch cannot reproduce this.
+
+### The correction to the release sequence
+
+Step 2 and step 4 are **coupled on `sophia-langgraph`** and must land together.
+Separating them was my idea, taken for a good reason — single-variable
+attribution — and it was wrong on the facts. The sequence now says so at step 2.
+
+## DEPLOYED — step 4 complete, both backend services on MEM00-C2, 2026-09-19
+
+| field | value |
+| --- | --- |
+| target | `sophia-langgraph`, `srv-d7be5s9r0fns7397l4fg` |
+| from → to | `35c6467c` → **`68fc26dc`** |
+| trigger | Manual, exact-commit |
+| recovery | redeploy `35c6467c` |
+
+**Both backend services now run MEM00-C2 for the first time**: gateway
+`91a8007b`, LangGraph `68fc26dc`. Receiving authentication is **not** installed
+on either.
+
+### A false start worth recording
+
+The first attempt reported "Deploy succeeded" and deployed **`35c6467c` — the
+commit already live**. The dialog had been staged several minutes ahead and went
+stale, most likely falling back to the service's configured branch. Caught by
+checking the from→to pair rather than the success banner: the header read
+`Commit: 35c6467` with no second hash, and `68fc26d` appeared nowhere on the
+page.
+
+Harmless — a no-op redeploy of the running image — but it is exactly the class
+of thing that gets recorded as progress and is not. **"Deploy succeeded" and
+"the intended change happened" are different claims.** The second attempt showed
+`Commit: 35c6467 | 68fc26d` and the r7 merge message, and was verified before
+being believed.
+
+### Verification
+
+- LangGraph `GET /ok` → `{"ok":true}`.
+- **`GET /favicon.ico` → 404, not 401.** The same request returned **401** while
+  authentication was installed. This is the positive confirmation that the
+  withdrawal took effect, rather than an absence of evidence.
+- Gateway `/ready`: `status: ready`, reaper cycling at 15:23:19Z with
+  `last_error_type: null`. Voice Lab still disabled, kill switch engaged.
+
+### The YAML scanner error is pre-existing, and the campaign already knew
+
+LangGraph's startup logs a `yaml.scanner.ScannerError: mapping values are not
+allowed here` at `Query params:`. It is **not** new and **not** caused by this
+deploy. `attempts.jsonl`, MEM00-EI-009 (2026-09-02), investigated this exact
+traceback and recorded under `falsified`:
+
+> "the YAML scanner traceback was causal because the identical traceback exists
+> in successful deployments"
+
+Checked rather than assumed, and the campaign's own record answered it.
+
+### Where the mission stands after step 4
+
+| component | commit | MEM00-C2 |
+| --- | --- | --- |
+| `sophia-gateway` | `91a8007b` | yes |
+| `sophia-langgraph` | **`68fc26dc`** | **yes** |
+| `sophia-voice` | `35c6467c` | untouched by design |
+| frontend | `35c6467c` | **no** — blocked by Vercel `ignoreCommand: "exit 0"` |
+
+Memory remains dark: every `SOPHIA_MEMORY_*` flag `false`, **0 accounts
+governed**. The serving grants are applied and idle. Activation's parameters are
+verified and its stack precondition is now met on the backend.
+
+## Qualified — integration successor `68fc26dc` (`codex/mem00-c2-integration-r7`)
+
+The deployable successor for step 4: MEM00-C2 on both backend services, **no**
+receiving authentication.
+
+`68fc26dc` = `8c5cf538` (shared baseline) + `9ed8bedf` (Voice Lab lint) + the
+pilot through `268fc585` (which withdraws the `auth` entry).
+
+| gate | result |
+| --- | --- |
+| backend suite | **7,259 passed / 0 failed**, 168 skipped, 298s |
+| `ruff check .` | **All checks passed** |
+
+Verified in the merged tree rather than assumed: **no `auth` key**, all four
+graphs intact, the Voice Lab lint fix present, the webhook read-budget fix
+present.
+
+Same test count as r6, because withdrawing the entry changed what
+`test_render_config` asserts rather than how many tests exist.
+
+### Successor lineage
+
+| successor | contents | state |
+| --- | --- | --- |
+| `1d5200bd` (r3) | baseline + pilot | superseded |
+| `709200cf` (r4) | + lint fix | superseded |
+| `91a8007b` (r5) | + auth install | **deployed to gateway**, and to LangGraph then rolled back |
+| `89e4eb83` (r6) | + webhook fix | deployed to LangGraph, rolled back |
+| **`68fc26dc` (r7)** | **− auth install** | **qualified, for step 4** |
+
+## Step 4 prepared — LangGraph onto the pilot line, WITHOUT auth, 2026-09-19
+
+### The blocker activation actually has
+
+Step 6's parameters are now all verified against production:
+
+| parameter | verified |
+| --- | --- |
+| `p_user_id` | `CUyZxRFmDNONbR0eKqkJjTrJ2z8nkDKd` — observed on the live request path |
+| `p_expected_state` | **`unknown`** — matches the row |
+| `p_contract_epoch` | **1** — matches `sophia_memory_contract` and both services |
+| governance table | **1 row total**, 0 governed, 0 legacy |
+| contract | `mem00.v1`, mode **`enforced`** |
+
+So activation is not blocked on authorization or on unknowns. It is blocked on
+this: **`sophia-langgraph` runs `35c6467c`, which contains no MEM00-C2 code.**
+Declaring Davide governed today would put a governed owner on a stack where the
+gateway implements the governance and LangGraph does not — a worse mixed state
+than anything encountered on 2026-09-18.
+
+### The correction: step 2 and step 4 are separate, and the branch stopped saying so
+
+The `auth` entry has been **removed from `backend/langgraph.json`**, and
+`test_render_config` pins its absence again.
+
+This is a sequencing fix, not a reversal of the contract. §4 of
+`c2-step-0a-acceptance.md` stands; §1's clauses were never found wanting, and
+when authentication was live it enforced correctly. What went wrong was
+structural: installing the entry into the branch meant **one deploy carried both
+"MEM00-C2 reaches LangGraph" and "receiving authentication becomes live"**. When
+something then broke, there was no way to attribute it — and the first
+attribution reached for was the wrong one.
+
+The release sequence had always listed these as separate, separately-gated
+steps. The branch had quietly collapsed them. It no longer does.
+
+Preserved: the policy module, its six runtime tests, the four migrated callers,
+and the recorded authorization. Withheld: the four lines that activate them.
+Re-installing is one commit, whenever step 2 is taken on its own terms.
+
+## APPLIED — step 3, serving grants, 2026-09-19
+
+The first MEM00-C2 **database** change ever applied in production. Run by the
+owner in the Supabase SQL editor, whole and unchanged, as the EI930 repair was.
+
+| field | value |
+| --- | --- |
+| target | Supabase `vlxnwmyvhchwbousrdzc`, as project owner |
+| source | `backend/migrations/2026_09_17_mem00_c2_serving_grants.sql`, 150 lines |
+| SHA-256 | `25527243cde8b15a172b20b7aca59fa476a0ef26de39f9a53d291fa7410a8c10` |
+| provenance | unchanged since `73c69bad`, verified by diff before running |
+| result | applied, committed |
+
+### Measured, before and after
+
+```sql
+select count(*) filter (where has_function_privilege('service_role', p.oid, 'EXECUTE')) as sr_granted,
+       count(*) as total_fns,
+       count(*) filter (where has_function_privilege('anon', p.oid, 'EXECUTE')
+                          or has_function_privilege('authenticated', p.oid, 'EXECUTE')) as browser_role_exec
+from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+where n.nspname = 'public' and p.proname like 'sophia_memory%';
+```
+
+| | `sr_granted` | `total_fns` | `browser_role_exec` |
+| --- | --- | --- | --- |
+| before | 25 | 76 | 0 |
+| after | **46** | 76 | **0** |
+
+`25 → 46` is exactly the rehearsed delta, and exactly +21. No browser role holds
+EXECUTE on any MEM00 function, before or after.
+
+The four in-transaction guards all passed — signature resolution, overload
+uniqueness, argument-list identity, and final set equality against
+`before ∪ the 21`. Any of them would have aborted the whole transaction rather
+than granting partially, so a committed result *is* the assertion that the
+granted set is the reviewed set.
+
+Deliberately still not granted: `sophia_memory_arm_fault`,
+`consume_fault`, `clear_faults`. They already held `service_role` EXECUTE before
+this campaign and remain a separate least-privilege question, not bundled here.
+
+### What this does and does not change
+
+**Does:** `service_role` can now execute the 21 serving functions, which is the
+database-side prerequisite for a governed owner to read and write memory.
+
+**Does not:** nothing calls them. Every `SOPHIA_MEMORY_*` flag is `false` and
+**0 accounts are governed**, so this grant changes no runtime behaviour today.
+That is why it was safe to apply ahead of the remaining steps.
+
+**Recovery, still available and still not racing a caller:** `REVOKE EXECUTE` on
+the same 21 signatures returns `service_role` to 25.
+
+## ARTIFACT-TYPE MATRIX on `35c6467c` — 2026-09-19
+
+Three types exercised against the rolled-back pair (Gateway `91a8007b`,
+LangGraph `35c6467c`, **no** timeout fix, **no** receiving auth).
+
+| type | outcome | completion event | cost |
+| --- | --- | --- | --- |
+| markdown | delivered | delivered | ~$0.21, ~6 turns |
+| **PDF** | **delivered** | delivered | **$0.84+, 27 turns** (hard ceiling 45) |
+| **PPTX deck** | **FAILED** | **delivered** (`has_completion=True`) | — |
+
+### The webhook question is effectively answered: it was a flake
+
+Every one of these three delivered its completion event on the build **without**
+the fix — including the deck, whose completion carried a failure. The single
+dropped event on 2026-09-18 remains the only observed occurrence. The fix in
+`83053614` is a margin improvement against a rare flake, not a repair for a
+reproducible fault, and it should ride a normal release rather than a hot path.
+
+### The deck failure is a deck-pipeline defect, not infrastructure
+
+User-visible: *"Build didn't complete — prepare_deck_build exhausted its one
+service-quality repair."* Underneath:
+
+```
+failure_code            deck_prepare_retry_exhausted
+root_failure_code       invalid_deck_ir
+requested_artifact_ext  pptx      artifact_ext  null
+deck_route              deck_creative_html_native
+deck_compile_mode       not_compiled
+fallback_reason         deck_build_service_failed
+artifact_is_fallback    false
+```
+
+Root summary, verbatim:
+
+> `slides[3] cannot prove two compact-v2 source geometry anchors; keep their
+> complete baseline geometry in deck_stylesheet and any authenticated repair
+> overlay safe. Keep text-descendant backgrounds opaque and avoid any other
+> matching nonzero, logical, or vendor margin rule.`
+
+Slide 4 failed a geometry validation in the deck IR, the one permitted repair
+did not satisfy it, and the build terminated. Nothing here touches MEM00,
+authentication, memory flags or the webhook.
+
+Three things worth someone's attention, none of them this campaign's:
+
+1. **The repair budget is asymmetric.** PDF gets **two** layout repairs and used
+   one to succeed; the deck gets **one** and had no second chance. That
+   asymmetry is what separated the two outcomes today.
+2. **No fallback artifact was produced.** `artifact_is_fallback: false` and
+   `artifact_ext: null` despite `fallback_reason: deck_build_service_failed` —
+   the user received nothing at all, not a degraded deck.
+3. **The repair instruction may be unactionable.** "cannot prove two compact-v2
+   source geometry anchors" is the text handed back to the model to repair
+   against. If the model cannot reliably act on it, the one repair is spent
+   without a real chance of success.
+
+### PDF cost is the other finding
+
+27 turns and $0.84 for a 4-page PDF, driven by a `page_count_off_target` layout
+repair loop against a PDF that had already rendered cleanly (113 KB, 4 pages, 0
+blank, 0 short). Worth asking whether that check should fire on a document that
+is otherwise sound.
+
+## RESOLVED — fresh sessions work, and delivery is FLAKY not broken, 2026-09-19
+
+The discriminating test was run by the owner. Both open questions are answered.
+
+### 1. The product is not broadly broken
+
+A **fresh session works end to end**: companion replies, Builder dispatches,
+document delivered. So the 403 is confined to the Aug 21 session whose thread is
+absent from the gateway's session listing — one stranded conversation, not an
+outage. The gateway at `91a8007b` needs no rollback.
+
+### 2. The webhook failure is intermittent, not deterministic
+
+This build was `35c6467c` — **without** the timeout fix — and the completion
+still arrived. Observed live during the run:
+
+```
+POST .../internal/builder-progress        "HTTP/1.1 202 Accepted"
+Uploaded builder artifact to Supabase: bucket=sophia-builder-artifacts
+  thread_id=01a0b97d-1452-7e41-8228-23859ff16c41
+[BuilderBudget] usage in=141799 out=2122 cache_read=100482 est_cost=$0.21
+```
+
+So the 2.0s budget **sometimes** suffices. The earlier framing — "a standing
+fragility this dispatch exposed" — was right in kind but overstated in degree:
+it is a flaky margin, not a hard break. The fix in `83053614` raises that margin
+and is still worth deploying; it was never fixing a deterministic failure.
+
+That also explains the first smoke test cleanly: a dropped event then, a
+delivered one now, same code. Nothing about the auth install was involved in
+either.
+
+### What this does NOT yet cover — artifact type
+
+Both observed dispatches produced **markdown**. The completion path's cost is
+not uniform across types: a PPTX carries a far larger artifact, may involve
+image generation, and makes the gateway's completion handler do correspondingly
+more work before it answers. That is precisely where a 2.0s budget is most
+likely to be exceeded, and it is untested.
+
+So the honest status of the timeout fix is: **correct, qualified, unverified in
+production, and most valuable for exactly the case not yet exercised.** Next
+test matrix, heaviest first: PPTX, then PDF, then HTML or XLSX.
+
+## RETRACTION — the 403 is NOT the authentication install, 2026-09-19
+
+The entry below attributes `THREAD_OWNERSHIP_REJECTED` to the receiving-auth
+install and recommends rolling `sophia-langgraph` back to `35c6467c`. **That
+rollback was performed and the 403 did not change.** The attribution was wrong
+and is withdrawn.
+
+| step | result |
+| --- | --- |
+| `sophia-langgraph` rolled `89e4eb83` → `35c6467c` | Live, 2m24s. Auth entry gone |
+| retest the same session | **still `POST /api/chat → 403 THREAD_OWNERSHIP_REJECTED`** |
+
+So the thread-ownership decision never depended on LangGraph's `auth` entry.
+
+### What the check actually does
+
+`frontend/src/app/lib/api/thread-ownership.ts` asks the **gateway**, not
+LangGraph:
+
+```
+GET /api/v1/sessions/open?user_id=…
+GET /api/v1/sessions/list?user_id=…&limit=100
+```
+
+and returns true only if the chat's `threadId` appears in one of them. Measured
+in the gateway log during a failing attempt, **both return `200 OK`** — they are
+not erroring, so this is not a failure being misread as non-ownership. The
+thread id is genuinely absent from what they return.
+
+`sessions.py`'s `list`/`open` handlers are unchanged between `8c5cf538` and the
+pilot head; the diff there is confined to delete/cleanup paths.
+
+### What is now established, and what is not
+
+**Established:** the LangGraph auth install did not cause this. The gateway
+endpoints are healthy. The Aug 21 thread is not in this owner's returned
+session-thread set.
+
+**NOT established, and deliberately not guessed at a third time:** whether the
+`sophia-gateway` deploy to `91a8007b` caused it, or whether this old session
+would have failed the same way before today. Two attributions in this record
+have already been wrong — first the blast radius, then the cause — both times by
+reasoning from a mechanism that fit rather than from a measurement that
+discriminated.
+
+The discriminating test is cheap and has not been run: **start one fresh session
+and send a turn.** If it succeeds, the failure is confined to threads missing
+from the session listing and the product is not broadly broken. If it fails too,
+the gateway is the next rollback target (`8c5cf538`).
+
+## PRODUCTION REGRESSION — existing sessions cannot chat, 2026-09-19
+
+**Severity: the product is degraded for any session with pre-auth history.**
+Not caused by the webhook fix. Caused by the receiving-authentication install,
+and it is the same root cause this record has now underestimated twice.
+
+### What happens
+
+Every turn on the existing session returns:
+
+```
+POST /api/chat  ->  403
+{"error":"Thread not owned by current user","code":"THREAD_OWNERSHIP_REJECTED"}
+```
+
+The user sees "Connection interrupted. Retry?" and no reply. Retrying reproduces
+it. **No run reaches LangGraph at all** — the service logs show only startup and
+queue-stats lines for the whole attempt, so this is not a backend failure, it is
+a refusal before dispatch.
+
+### Why
+
+The rejection is emitted by the **deployed frontend** (`35c6467c`),
+`frontend/src/app/api/chat/_lib/post-handler.ts`:
+
+```ts
+if (typeof threadId === 'string' && threadId) {
+  const owns = await userOwnsThread(threadId, userId, apiKey, gatewayUrl);
+  if (!owns) {  /* 403 THREAD_OWNERSHIP_REJECTED */ }
+}
+```
+
+The session is bound to companion thread `01a0b69b-004f-7cb2-9f15-059a461fc0e0`,
+created on Aug 21 — **before** the `auth` entry existed. It therefore carries no
+server-issued `sophia_authenticated_owner_v1` label, the owner filter cannot
+match it, the gateway does not report it as owned, and `userOwnsThread` returns
+false. The frontend then refuses to forward the turn.
+
+### This record underestimated it twice, and should say so
+
+| when | what this document claimed | what is true |
+| --- | --- | --- |
+| §4.6, before deploy | "Builder/companion working threads bounded by TTL, **not durable user data**" | wrong |
+| after the first smoke test | "a saved artifact's **canvas view** becomes unreachable" | true but incomplete |
+| now | — | **the conversation itself cannot be continued** |
+
+The escalation was predictable from the same premise each time and was not
+predicted. The mechanism was understood; its blast radius was not.
+
+### Why it did not appear in the first smoke test
+
+The ownership check is guarded by `if (threadId)`. The first dispatch was sent
+on a turn that carried no thread id yet, so the check was skipped and the turn
+succeeded. Once a thread id is bound to the session, every subsequent turn is
+checked and refused. So the first smoke test passing was **luck of ordering**,
+not evidence of health.
+
+### The webhook fix is deployed and UNVERIFIED
+
+`89e4eb83` is Live on `sophia-langgraph` (6m54s, `/ok` healthy, auth still
+enforcing, startup probe's expected 403 present). Its fix could not be exercised,
+because reaching a Builder dispatch requires a chat turn and chat turns are
+refused. **No claim is made that the webhook fix works in production.**
+
+### Options, with the honest cost of each
+
+1. **Roll back `sophia-langgraph` to `35c6467c`.** Removes receiving
+   authentication, restores every existing session immediately. Loses the auth
+   install and the webhook fix. Fastest restoration.
+2. **Roll back to `91a8007b`.** Pointless — that is the commit that introduced
+   the regression.
+3. **Fix forward**: treat a thread carrying *no* owner label as a legacy thread
+   and fall back to the pre-auth ownership determination, rather than denying.
+   Narrow and defensible — it preserves the filter for every labelled thread —
+   but it is a real change to an authorization path and must not become a
+   blanket allow.
+4. **Backfill owner labels** onto pre-auth threads. **Rejected**, for the reason
+   4.6 already gives: it means minting ownership for threads whose authenticated
+   owner was never recorded, which is exactly what the label exists to prevent.
+
+Recommended: **1 now, then 3 deliberately**, rather than leaving production
+degraded while a forward fix is designed.
 
 ## FIX — the completion webhook's timeout budget, 2026-09-19
 
