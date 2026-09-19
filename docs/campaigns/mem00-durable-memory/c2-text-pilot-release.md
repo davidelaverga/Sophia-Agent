@@ -2,6 +2,36 @@
 
 Successful target: MEMORY_TEXT_PILOT_READY. Current status: HEALTHY on the rolled-back pair — fresh sessions work end to end and a document was delivered on 35c6467c. One Aug 21 session remains stranded (403 THREAD_OWNERSHIP_REJECTED, thread absent from the gateway session listing). Receiving authentication is NOT installed. Serving grants APPLIED (service_role 25 -> 46). No account governed, not activated. Grants unapplied, no account governed, not activated. C2 replaces the prior PROMOTE-only/five-core-run prerequisites for this owner-restricted pilot. Historical C1 records and failures remain valid history, not additional first-use gates. Recovered cumulative failure counter: latest failed iteration EI929; last reported five-failure checkpoint 923–927; next five-failure checkpoint 932. The single current authority is the checkpoint immediately below; every later dated paragraph is preserved history, not competing current status.
 
+## Qualified — integration successor `68fc26dc` (`codex/mem00-c2-integration-r7`)
+
+The deployable successor for step 4: MEM00-C2 on both backend services, **no**
+receiving authentication.
+
+`68fc26dc` = `8c5cf538` (shared baseline) + `9ed8bedf` (Voice Lab lint) + the
+pilot through `268fc585` (which withdraws the `auth` entry).
+
+| gate | result |
+| --- | --- |
+| backend suite | **7,259 passed / 0 failed**, 168 skipped, 298s |
+| `ruff check .` | **All checks passed** |
+
+Verified in the merged tree rather than assumed: **no `auth` key**, all four
+graphs intact, the Voice Lab lint fix present, the webhook read-budget fix
+present.
+
+Same test count as r6, because withdrawing the entry changed what
+`test_render_config` asserts rather than how many tests exist.
+
+### Successor lineage
+
+| successor | contents | state |
+| --- | --- | --- |
+| `1d5200bd` (r3) | baseline + pilot | superseded |
+| `709200cf` (r4) | + lint fix | superseded |
+| `91a8007b` (r5) | + auth install | **deployed to gateway**, and to LangGraph then rolled back |
+| `89e4eb83` (r6) | + webhook fix | deployed to LangGraph, rolled back |
+| **`68fc26dc` (r7)** | **− auth install** | **qualified, for step 4** |
+
 ## Step 4 prepared — LangGraph onto the pilot line, WITHOUT auth, 2026-09-19
 
 ### The blocker activation actually has
