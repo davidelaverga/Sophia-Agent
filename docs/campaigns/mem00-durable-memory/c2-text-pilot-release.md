@@ -1,6 +1,56 @@
 # MEM00-C2 text pilot — current release record
 
-Successful target: MEMORY_TEXT_PILOT_READY. Current status: DEGRADED — LangGraph runs 89e4eb83 with receiving authentication LIVE, and existing sessions cannot chat (403 THREAD_OWNERSHIP_REJECTED). Rollback to 35c6467c is the recommended immediate action. Grants unapplied, no account governed, not activated. C2 replaces the prior PROMOTE-only/five-core-run prerequisites for this owner-restricted pilot. Historical C1 records and failures remain valid history, not additional first-use gates. Recovered cumulative failure counter: latest failed iteration EI929; last reported five-failure checkpoint 923–927; next five-failure checkpoint 932. The single current authority is the checkpoint immediately below; every later dated paragraph is preserved history, not competing current status.
+Successful target: MEMORY_TEXT_PILOT_READY. Current status: DEGRADED, CAUSE UNKNOWN — LangGraph is rolled back to 35c6467c (auth removed) and the 403 THREAD_OWNERSHIP_REJECTED persists, so the auth install was not the cause. Gateway remains 91a8007b. One fresh-session turn is the outstanding discriminating test. Grants unapplied, no account governed, not activated. C2 replaces the prior PROMOTE-only/five-core-run prerequisites for this owner-restricted pilot. Historical C1 records and failures remain valid history, not additional first-use gates. Recovered cumulative failure counter: latest failed iteration EI929; last reported five-failure checkpoint 923–927; next five-failure checkpoint 932. The single current authority is the checkpoint immediately below; every later dated paragraph is preserved history, not competing current status.
+
+## RETRACTION — the 403 is NOT the authentication install, 2026-09-19
+
+The entry below attributes `THREAD_OWNERSHIP_REJECTED` to the receiving-auth
+install and recommends rolling `sophia-langgraph` back to `35c6467c`. **That
+rollback was performed and the 403 did not change.** The attribution was wrong
+and is withdrawn.
+
+| step | result |
+| --- | --- |
+| `sophia-langgraph` rolled `89e4eb83` → `35c6467c` | Live, 2m24s. Auth entry gone |
+| retest the same session | **still `POST /api/chat → 403 THREAD_OWNERSHIP_REJECTED`** |
+
+So the thread-ownership decision never depended on LangGraph's `auth` entry.
+
+### What the check actually does
+
+`frontend/src/app/lib/api/thread-ownership.ts` asks the **gateway**, not
+LangGraph:
+
+```
+GET /api/v1/sessions/open?user_id=…
+GET /api/v1/sessions/list?user_id=…&limit=100
+```
+
+and returns true only if the chat's `threadId` appears in one of them. Measured
+in the gateway log during a failing attempt, **both return `200 OK`** — they are
+not erroring, so this is not a failure being misread as non-ownership. The
+thread id is genuinely absent from what they return.
+
+`sessions.py`'s `list`/`open` handlers are unchanged between `8c5cf538` and the
+pilot head; the diff there is confined to delete/cleanup paths.
+
+### What is now established, and what is not
+
+**Established:** the LangGraph auth install did not cause this. The gateway
+endpoints are healthy. The Aug 21 thread is not in this owner's returned
+session-thread set.
+
+**NOT established, and deliberately not guessed at a third time:** whether the
+`sophia-gateway` deploy to `91a8007b` caused it, or whether this old session
+would have failed the same way before today. Two attributions in this record
+have already been wrong — first the blast radius, then the cause — both times by
+reasoning from a mechanism that fit rather than from a measurement that
+discriminated.
+
+The discriminating test is cheap and has not been run: **start one fresh session
+and send a turn.** If it succeeds, the failure is confined to threads missing
+from the session listing and the product is not broadly broken. If it fails too,
+the gateway is the next rollback target (`8c5cf538`).
 
 ## PRODUCTION REGRESSION — existing sessions cannot chat, 2026-09-19
 
