@@ -1,6 +1,48 @@
 # MEM00-C2 text pilot — current release record
 
-Successful target: MEMORY_TEXT_PILOT_READY. Current status: STEP 4 DONE — gateway 91a8007b and LangGraph 89e4eb83 both run MEM00-C2 WITH receiving authentication, which is required rather than optional. Serving grants applied and idle. Frontend still 35c6467c. One Aug 21 session remains stranded (403 THREAD_OWNERSHIP_REJECTED, thread absent from the gateway session listing). Receiving authentication is NOT installed. Serving grants APPLIED (service_role 25 -> 46). No account governed, not activated. Grants unapplied, no account governed, not activated. C2 replaces the prior PROMOTE-only/five-core-run prerequisites for this owner-restricted pilot. Historical C1 records and failures remain valid history, not additional first-use gates. Recovered cumulative failure counter: latest failed iteration EI929; last reported five-failure checkpoint 923–927; next five-failure checkpoint 932. The single current authority is the checkpoint immediately below; every later dated paragraph is preserved history, not competing current status.
+Successful target: MEMORY_TEXT_PILOT_READY. Current status: STEP 4 DONE AND VERIFIED ON THE HOSTED PRODUCT — gateway 3aebc59a, LangGraph 89e4eb83, both running MEM00-C2 with receiving authentication, which is required rather than optional. A new session, a turn and a Builder artifact all completed against the live deployment. Serving grants applied (service_role EXECUTE 25 -> 46) and idle. Frontend still 35c6467c. One Aug 21 session remains stranded (403 THREAD_OWNERSHIP_REJECTED, thread absent from the gateway session listing); cause still unknown. No account governed; the pilot is NOT activated. C2 replaces the prior PROMOTE-only/five-core-run prerequisites for this owner-restricted pilot. Historical C1 records and failures remain valid history, not additional first-use gates. Recovered cumulative failure counter: latest failed iteration EI929; last reported five-failure checkpoint 923–927; next five-failure checkpoint 932. The single current authority is the checkpoint immediately below; every later dated paragraph is preserved history, not competing current status.
+
+## STEP 4 VERIFIED — `3aebc59a` live on the gateway, session creation works
+
+Deployed 2026-09-19 23:23:25 GMT+2, manual, `SOURCE 3aebc59`, "Deploy
+succeeded / Live", 2m02s. The from->to pair was checked, not the success
+banner: an earlier stale dialog in this campaign reported success while
+redeploying the already-live commit. Boot clean — every worker installed,
+`Application startup complete`, `/ready` 200 from 23:25:25 on.
+
+Verified on the hosted product in the order that tests the fix rather than
+avoiding it. Session **creation** is the path that 401'd, so it went first.
+Both earlier smoke tests in this campaign passed while the real break sat in a
+path they did not touch.
+
+| step | result |
+| --- | --- |
+| brand-new session, through the real UI | `POST /api/sessions/start` **200**, thread `01a0bba8-34a8-74c1-9a62-cd735ac9dbd2` |
+| ordinary turn, text mode | model answered — `ModelDispatchDenied` gone |
+| Builder dispatch | artifact "Ranked Gaming Warm-Up Routine" delivered, `ready` |
+| gateway log across the journey | 200/202 throughout, incl. `POST /internal/builder-progress 202` |
+
+The thread id in that response is the direct evidence. The gateway can only
+return one by completing `POST /threads` against LangGraph — exactly the call
+that returned `401 0ms` before `9243a3e3` signed it.
+
+### Three 502s that are not explained
+
+The first UI attempt produced `POST /api/sessions/start` 502 three times
+(client retries). Those requests never reached the gateway: no matching line in
+its log for that minute, while the same page's GETs arrived and returned 200.
+A direct `fetch` seconds later returned 200, and every later attempt through
+the UI returned 200. I could not reproduce them and I am not claiming a cause.
+
+Recorded as an open observation, not a closed defect. What is known: a 502 in
+front of the gateway belongs to the Vercel proxy, and the frontend there is
+still the old `35c6467c` build.
+
+### Not verified
+
+Render's log pane would not accept a search filter or live-tail under
+automation, so "no 401s anywhere" rests on reading the unfiltered window during
+the journey, not on a grep. The LangGraph service's own log was not read.
 
 ## Qualified — `3aebc59a` (`codex/mem00-c2-integration-r8`), a GATEWAY-only deploy
 
