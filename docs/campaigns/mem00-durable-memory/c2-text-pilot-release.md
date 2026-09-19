@@ -2,6 +2,71 @@
 
 Successful target: MEMORY_TEXT_PILOT_READY. Current status: HEALTHY on the rolled-back pair — fresh sessions work end to end and a document was delivered on 35c6467c. One Aug 21 session remains stranded (403 THREAD_OWNERSHIP_REJECTED, thread absent from the gateway session listing). Receiving authentication is NOT installed. Grants unapplied, no account governed, not activated. Grants unapplied, no account governed, not activated. C2 replaces the prior PROMOTE-only/five-core-run prerequisites for this owner-restricted pilot. Historical C1 records and failures remain valid history, not additional first-use gates. Recovered cumulative failure counter: latest failed iteration EI929; last reported five-failure checkpoint 923–927; next five-failure checkpoint 932. The single current authority is the checkpoint immediately below; every later dated paragraph is preserved history, not competing current status.
 
+## ARTIFACT-TYPE MATRIX on `35c6467c` — 2026-09-19
+
+Three types exercised against the rolled-back pair (Gateway `91a8007b`,
+LangGraph `35c6467c`, **no** timeout fix, **no** receiving auth).
+
+| type | outcome | completion event | cost |
+| --- | --- | --- | --- |
+| markdown | delivered | delivered | ~$0.21, ~6 turns |
+| **PDF** | **delivered** | delivered | **$0.84+, 27 turns** (hard ceiling 45) |
+| **PPTX deck** | **FAILED** | **delivered** (`has_completion=True`) | — |
+
+### The webhook question is effectively answered: it was a flake
+
+Every one of these three delivered its completion event on the build **without**
+the fix — including the deck, whose completion carried a failure. The single
+dropped event on 2026-09-18 remains the only observed occurrence. The fix in
+`83053614` is a margin improvement against a rare flake, not a repair for a
+reproducible fault, and it should ride a normal release rather than a hot path.
+
+### The deck failure is a deck-pipeline defect, not infrastructure
+
+User-visible: *"Build didn't complete — prepare_deck_build exhausted its one
+service-quality repair."* Underneath:
+
+```
+failure_code            deck_prepare_retry_exhausted
+root_failure_code       invalid_deck_ir
+requested_artifact_ext  pptx      artifact_ext  null
+deck_route              deck_creative_html_native
+deck_compile_mode       not_compiled
+fallback_reason         deck_build_service_failed
+artifact_is_fallback    false
+```
+
+Root summary, verbatim:
+
+> `slides[3] cannot prove two compact-v2 source geometry anchors; keep their
+> complete baseline geometry in deck_stylesheet and any authenticated repair
+> overlay safe. Keep text-descendant backgrounds opaque and avoid any other
+> matching nonzero, logical, or vendor margin rule.`
+
+Slide 4 failed a geometry validation in the deck IR, the one permitted repair
+did not satisfy it, and the build terminated. Nothing here touches MEM00,
+authentication, memory flags or the webhook.
+
+Three things worth someone's attention, none of them this campaign's:
+
+1. **The repair budget is asymmetric.** PDF gets **two** layout repairs and used
+   one to succeed; the deck gets **one** and had no second chance. That
+   asymmetry is what separated the two outcomes today.
+2. **No fallback artifact was produced.** `artifact_is_fallback: false` and
+   `artifact_ext: null` despite `fallback_reason: deck_build_service_failed` —
+   the user received nothing at all, not a degraded deck.
+3. **The repair instruction may be unactionable.** "cannot prove two compact-v2
+   source geometry anchors" is the text handed back to the model to repair
+   against. If the model cannot reliably act on it, the one repair is spent
+   without a real chance of success.
+
+### PDF cost is the other finding
+
+27 turns and $0.84 for a 4-page PDF, driven by a `page_count_off_target` layout
+repair loop against a PDF that had already rendered cleanly (113 KB, 4 pages, 0
+blank, 0 short). Worth asking whether that check should fire on a document that
+is otherwise sound.
+
 ## RESOLVED — fresh sessions work, and delivery is FLAKY not broken, 2026-09-19
 
 The discriminating test was run by the owner. Both open questions are answered.
