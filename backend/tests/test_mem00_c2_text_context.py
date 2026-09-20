@@ -271,3 +271,33 @@ def test_complete_companion_middleware_chain_continues_on_sealed_checkpoint(env,
         assert result["messages"][-1].content == "SYNTHETIC_FULL_CHAIN_RESPONSE"
     assert len(result["messages"]) == 4
     assert result["injected_memories"] == [str(memory.memory_id)]
+
+
+def test_unverifiable_retrieve_memories_proof_currently_aborts_the_turn(env):
+    """Characterisation of the C3 finding, not an endorsement of the behaviour.
+
+    A ``retrieve_memories`` result whose proof fails re-verification makes
+    ``prepare_model`` raise, which aborts the whole run. The tool itself
+    degrades to a sentinel in the same situation, so the guard is strictly
+    harsher than its own producer.
+    """
+    from langchain_core.messages import ToolMessage
+
+    cfg, messages = current(env)
+    guard = MemoryRunGuard(owner_id="owner", config=cfg)
+    guard.enter({"messages": messages})
+    unproven = ToolMessage(content="- UNPROVEN_SYNTHETIC_MEMORY_TEXT", name="retrieve_memories", tool_call_id="call-1")
+    with pytest.raises(MemoryContextUnavailable):
+        guard.prepare_model({"messages": [*messages, unproven]})
+
+
+def test_sentinel_retrieve_memories_result_is_skipped_and_turn_survives(env):
+    """The existing graceful path: sentinel content with no artifact is skipped."""
+    from langchain_core.messages import ToolMessage
+
+    cfg, messages = current(env)
+    guard = MemoryRunGuard(owner_id="owner", config=cfg)
+    guard.enter({"messages": messages})
+    sentinel = ToolMessage(content="Memory retrieval temporarily unavailable.", name="retrieve_memories", tool_call_id="call-2")
+    update = guard.prepare_model({"messages": [*messages, sentinel]})
+    assert "memory_context_proof" in update
