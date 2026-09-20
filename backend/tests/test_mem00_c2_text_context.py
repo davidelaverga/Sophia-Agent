@@ -301,3 +301,44 @@ def test_sentinel_retrieve_memories_result_is_skipped_and_turn_survives(env):
     sentinel = ToolMessage(content="Memory retrieval temporarily unavailable.", name="retrieve_memories", tool_call_id="call-2")
     update = guard.prepare_model({"messages": [*messages, sentinel]})
     assert "memory_context_proof" in update
+
+
+def test_edited_revision_conflicts_with_retained_context(env, monkeypatch):
+    """Reproduces the C3 edit-then-recall failure shape.
+
+    A retained context holding content_revision 1, plus a fresh retrieval
+    proving content_revision 2 for the same memory, is a replacement rather
+    than an addition. The guard treats that as the documented "requires
+    rotation" case and refuses the turn.
+    """
+    from deerflow.agents.sophia_agent.middlewares.mem0_memory import Mem0MemoryMiddleware
+    from deerflow.sophia.memory_governance.models import AuthorizedMemory
+    from deerflow.sophia.memory_governance.refs import keyed_ref
+    from deerflow.sophia.memory_governance.retrieval_provenance import issue_retrieval_proof
+
+    memory_id = UUID(int=7)
+
+    def lookup(**kwargs):
+        held = env.canonical.get(memory_id)
+        if held is None:
+            return []
+        receipt = SimpleNamespace(
+            owner_ref=keyed_ref("owner", "owner"), provider_status="ok", prompt_admission_id=UUID(int=8),
+            revocation_epoch_checked=env.clock.user_revocation_epoch,
+            authorized_memory_ids=(keyed_ref("memory-revision", f"{memory_id}:{held.content_revision}:{held.memory_governance_revision}"),))
+        proof = issue_retrieval_proof(owner_id="owner", memories=(held,), receipt=receipt)
+        return [{"id": str(memory_id), "content": held.canonical_content, "category": "fact", "memory_retrieval_proof": proof}]
+
+    monkeypatch.setattr("deerflow.agents.sophia_agent.middlewares.mem0_memory.search_memories", lookup)
+    automatic = Mem0MemoryMiddleware("owner")
+
+    env.canonical[memory_id] = AuthorizedMemory(memory_id=memory_id, content_revision=1, memory_governance_revision=1,
+        canonical_content="TIN_OTTER_SYNTHETIC_BEFORE_EDIT", category="fact")
+    cfg, messages = current(env)
+    graph(env, cfg, [automatic]).invoke({"messages": messages}, {"configurable": {"thread_id": env.tid}}, context={"platform": "text", "thread_id": env.tid})
+
+    env.canonical[memory_id] = AuthorizedMemory(memory_id=memory_id, content_revision=2, memory_governance_revision=1,
+        canonical_content="TIN_OTTER_SYNTHETIC_AFTER_EDIT", category="fact")
+    cfg, messages = current(env, "AFTER_EDIT_INPUT")
+    with pytest.raises(MemoryContextUnavailable):
+        graph(env, cfg, [automatic]).invoke({"messages": messages}, {"configurable": {"thread_id": env.tid}}, context={"platform": "text", "thread_id": env.tid})
