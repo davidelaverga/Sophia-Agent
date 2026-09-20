@@ -1,109 +1,145 @@
 # MEM00-C3 — current checkpoint
 
 Updated: 2026-09-20
-Mission authorization reference: user chat message adopting `04_LAUNCH_PROMPT.md` / `01_MISSION.md` §3, 2026-09-20. No signature fabricated, no historical authorization reattributed.
+Mission authorization reference: user chat message adopting `04_LAUNCH_PROMPT.md` / `01_MISSION.md` §3, 2026-09-20. No signature fabricated.
 Git root: `…/pl/work/Sophia-Agent-publish`
-Work branch: `codex/mem00-c3-first-use`, created at `3aebc59a` (r8), pushed to origin
-Current phase: **C — compatible frontend release (in progress)**
+Work branch: `codex/mem00-c3-first-use`
+Current phase: **C complete → D not started**
 Terminal status: IN_PROGRESS
 
 ## Product result
 
-`MEMORY_TEXT_PILOT_READY` requires compatible production frontend/backends, real hosted memory lifecycle, verified Davide activation and handover. Frontend release is underway; D and E not started.
+`MEMORY_TEXT_PILOT_READY` requires compatible frontend/backends, real hosted memory lifecycle, verified Davide activation and handover. **The frontend release is done.** D (activation profile) and E (lifecycle) have not started.
+
+## ✅ Phase C — compatible frontend live on sophia-ei.com
+
+| Item | Value |
+|---|---|
+| Live production deployment | **`dpl_99vszUEXAXnZ5LP68EPKWJ3w843t`** |
+| Source | `a5982c6` on `codex/mem00-c3-first-use`; `frontend/` **byte-identical to r8 `3aebc59a`** |
+| Build | Ready, 1m 25s, Environment=Production, clean build (no cache) |
+| Previous production | `dpl_4TxUxd6Ee27JF8T42jre5f7Xz2W8` / `35c6467` — **rollback target** (Instant Rollback) |
+| Verified how | `curl` of the served domain: every asset references the new `dpl_`; old id absent. HTTP 200 in 0.44s; apex 308 → www intact; `/session` 200, `/journal` 200; title `Sophia – Voice-first emotional companion` |
+
+Not a dashboard banner — the served domain was inspected after the change, per the recorded incident where a success banner masked a redeploy of the already-live SHA.
+
+### How the ignored-build blocker was actually cleared
+
+The package's route (per-deployment *Use project's Ignore Build Step* override) presumed an existing r8 deployment. **None existed** — Vercel reported "No successful deploy, yet" for `codex/mem00-c2-integration-r8`, and the only mem00-line deployment was **r5 `91a8007`**, the wrong candidate.
+
+Sequence actually used:
+1. Pushed `codex/mem00-c3-first-use`. A push at exactly `3aebc59a` produced **no** deployment (no new commit SHA). A docs-only commit `a5982c6` supplied a fresh SHA with `frontend/` and `backend/` byte-identical to r8.
+2. Created a deployment from `a5982c6` → **CANCELED** by `exit 0`, exactly as documented. That canceled record is what gave the per-deployment override a correct candidate to act on.
+3. Redeploy with *Use project's Ignore Build Step* **unchecked** → **first real build ever attempted** → **failed**.
+4. Fixed the cause (below), rebuilt → Preview Ready, renders correctly.
+5. Redeploy with **Environment=Production**, ignore step unchecked → Ready → live.
+
+**Project setting `exit 0` was never modified.** Ignored Build Step remains Behavior="Don't build anything", Command=`exit 0`. Production Branch remains `codex/sophia-observability-v1`, unchanged. No DNS, protection or auto-deploy setting touched.
+
+### Defect found and fixed — the frontend had never built
+
+`exit 0` had skipped every build, so this was invisible:
+
+```
+✓ Compiled successfully   ✓ Finished TypeScript
+Collecting page data ... Error: database_tls_ca_required
+Failed to collect page data for /api/test-auth/login
+```
+
+- Thrown at `frontend/src/server/better-auth/database-tls.mjs:97` — `if (supabase && !ca) throw`.
+- **Not a regression**: `/api/test-auth/login` and the TLS module are byte-identical between `35c6467c` (which built fine) and r8.
+- **Not a runtime hole**: the route 404s unless `SOPHIA_E2E_TEST_AUTH === 'true'` (confirmed unset in Vercel).
+- `export const dynamic = 'force-dynamic'` would **not** have helped: `config.ts` does `export const auth = betterAuth({ database: getBetterAuthDatabase() })` **eagerly at module scope**, and Next imports every route module during page-data collection.
+- **Cause**: the Preview environment had `BETTER_AUTH_DATABASE_URL` (the throw requires a parsed Supabase hostname) but not `BETTER_AUTH_DATABASE_SSL_CA`. Owner added Preview scope to that variable; build then succeeded. The CA is a public trust anchor, not a credential, so this granted no new database access.
+
+### Why "Promote to Production" was deliberately NOT used
+
+The frontend inlines **21 `NEXT_PUBLIC_*` values at build time**, including `NEXT_PUBLIC_SOPHIA_AUTH_BYPASS` (11 refs), `NEXT_PUBLIC_DEV_BYPASS_AUTH` (9) and `NEXT_PUBLIC_SOPHIA_USER_ID` (4). Promoting the Preview-built artifact would have shipped Preview-scoped values — potentially an auth bypass — onto the live domain. A Production-target rebuild uses Production values instead. (`01_MISSION.md` §6: no "placeholder-auth build" as deployment evidence.)
+
+**Standing caveat:** production now serves a deployment built from `codex/mem00-c3-first-use`, while the project's Production Branch is still `codex/sophia-observability-v1`. Auto-deploys remain blocked by `exit 0`, but if that ignore step is ever removed, a push to the production branch would rebuild the old lineage and replace this deployment.
 
 ## Observed components
 
-| Component | Exact ID | Observed at | Direct or source-reported? |
-|---|---|---|---|
-| Gateway | `commit_sha` = `3aebc59a27e8a8a381c915bc535fe041d8b2a17b`; `service_id` = `srv-d7be5s9r0fns7397l4g0` | 2026-09-20 | ✅ **DIRECT** — public `GET /ready`. Matches r8 exactly. |
-| LangGraph + auth | `89e4eb83…`; `auth` key present in `3aebc59a:backend/langgraph.json` | 2026-09-20 | `auth` presence ✅ **DIRECT in git**. Live pin source-reported. |
-| Frontend (production) | `dpl_4TxUxd6Ee27JF8T42jre5f7Xz2W8` → branch `codex/sophia-observability-v1`, commit **`35c6467`**, created Sep 14, state READY, target production | 2026-09-20 | ✅ **DIRECT** — Vercel API + deployment page + live `link:` headers agree. |
-| Voice (unchanged) | `voice_lab_enabled=false`, `voice_lab_kill_switch_engaged=true`, `voice_internal_auth_configured=true` | 2026-09-20 | ✅ **DIRECT** via `/ready`. Not touched. |
-| Memory contract | `memory_contract_schema="mem00.v1"`, `memory_supported_contract_epoch=1` | 2026-09-20 | ✅ **DIRECT** via `/ready`. Required input for the Phase D declaration RPC. |
-| Supabase | project `vlxnwmyvhchwbousrdzc`; grants service_role EXECUTE 25→46 | — | Source-reported. Not yet inspected. Not rerun. |
-| Mem0 / cohort | 0 governed owners; pilot dark | — | Source-reported. Not yet inspected. |
+| Component | Exact ID | Direct or reported? |
+|---|---|---|
+| Gateway | `commit_sha`=`3aebc59a…`; `service_id`=`srv-d7be5s9r0fns7397l4g0`; oregon | ✅ DIRECT — public `/ready` |
+| LangGraph | `89e4eb83…`; oregon, Deployed; `auth` key present in `3aebc59a:backend/langgraph.json` | `auth` ✅ DIRECT in git; live pin reported |
+| Frontend | `dpl_99vszUEXAXnZ5LP68EPKWJ3w843t` / `a5982c6` (frontend ≡ r8) | ✅ DIRECT — served domain |
+| Voice | `voice_lab_enabled=false`, `kill_switch_engaged=true` | ✅ DIRECT via `/ready`. Untouched |
+| Memory contract | `mem00.v1`, **epoch 1** | ✅ DIRECT via `/ready` |
+| Supabase | `vlxnwmyvhchwbousrdzc`, Healthy, us-west-1, MICRO | ✅ DIRECT — dashboard |
+| Mem0 | project `default-project` (Starter); namespaces `sophia-memory-v2-2df20d06afbe4c27ab4b2413bcdeafd9` (active) and `sophia-memory-v2:mem00-cert:700f15ea-3961-5710-8506-7c8a4c9a97c3` | ✅ DIRECT — dashboard |
+| LangSmith | **EU** (`eu.smith.langchain.com`), project `Sophia` (44 traces, 5% errors). A second, empty `"Sophia"` exists — do not confuse | ✅ DIRECT |
 
-### Git anchors — verified against the live remote
+## Phase D — activation profile, derived from source (not the old recipe)
 
-| Ref | Live SHA | Anchor | Match |
-|---|---|---|---|
-| `codex/mem00-text-pilot` | `fdf6cf2d8bb1fda391d2c2ed0835989064a3a106` | R1 | ✅ |
-| `codex/mem00-c2-integration-r8` | `3aebc59a27e8a8a381c915bc535fe041d8b2a17b` | R2 | ✅ |
-| `codex/mem00-c2-integration-r6` | `89e4eb834e002d93abccb6144657d7fe50bd3f8e` | LangGraph | ✅ |
+| Requirement | Enforced at | Failure |
+|---|---|---|
+| `SOPHIA_MEMORY_CERTIFICATION_PRINCIPAL` set | `identity.py:13` | `memory_certification_principal_missing` |
+| ≠ `SOPHIA_VOICE_LAB_TEST_PRINCIPAL` | `identity.py:16` | `memory_and_voice_lab_principals_overlap` |
+| In `SOPHIA_MEMORY_COHORT_PRINCIPALS` | worker builder `:139` | `memory_certification_principal_not_in_cohort` |
+| `SOPHIA_MEMORY_PROVIDER_PROJECTION` enabled | worker builder `:154` | projection reconciler never constructed |
+| ≥1 of ledger-write / projection | worker builder `:133` | returns `None` — no worker at all |
 
-### Frontend candidate justification (causal, not assumed)
+Truthy = `1|true|yes|on`. Cohort = comma-separated. An owner outside the cohort resolves to **all-flags-off** (`flags.py:100`) — the isolation mechanism.
 
-- `35c6467c` **is an ancestor of** `3aebc59a` → r8 is a strict fast-forward. No divergence, no cherry-pick risk.
-- `git diff 35c6467c 3aebc59a -- frontend/` = 89 files, of which **49 are non-test product files**: `/api/memories` (+ `forget`, `restore`, `[memoryId]`), `/api/memory/commit-candidates`, `/api/memory/recent`, `/api/memory/commands/[key]`, Pool/recap envelopes, `RecapComponents`, `JournalPageClient`, `session/` orchestration hooks, `recap-store`. This is exactly the C2 memory surface.
-- `frontend/package.json` and `frontend/pnpm-lock.yaml` are **unchanged** → dependency set identical, build profile stable, "no dependency upgrades" satisfied structurally.
+**The superseded "Davide-only cohort + projection=false" recipe would build a worker with no projection reconciler**, so approved memory would never reach Mem0 and E3 recall would fail while everything upstream looked healthy.
 
-## Access bootstrap
+Contract epoch for the declaration RPC: **1**, schema `mem00.v1`.
 
-Host is the **Claude Desktop app** (no `claude` CLI). `02_PERMISSION_BOOTSTRAP.md` §3's `claude --settings … --permission-mode auto` route is **not executable here**; the settings seed was never loaded. Scope is adopted from the user's chat message only.
+The Mem0 namespace exposes a prior certification principal `700f15ea-3961-5710-8506-7c8a4c9a97c3` — **a candidate to reverify, not authority**.
 
-Access route: **the built-in browser pane**, in which the user signed in to all six platforms plus the app. No Chrome extension, no platform CLI, no MCP connector for any platform.
+## Access
 
-| Platform | Scope | Read | Mutation | Notes |
-|---|---|---|---|---|
-| GitHub | `davidelaverga/Sophia-Agent` | `VERIFIED_IN_SCOPE` | push `VERIFIED_IN_SCOPE` (SSH key `id_ed25519_sophia_agent` → authenticates as `davidelaverga`) | **PR/CI/merge `BLOCKED`** — no `gh`, no API token. |
-| Render | Gateway `srv-d7be5s9r0fns7397l4g0` | Public `/ready`,`/health` ✅; dashboard session open | `CONFIGURED_NOT_EXERCISED` | |
-| Vercel | team `sophia-30911edf`, project `sophia-agent-front` | `VERIFIED_IN_SCOPE` | `CONFIGURED_NOT_EXERCISED` | Dashboard SPA is slow and rate-limits (HTTP 429) under repeated reloads — prefer its JSON API over the session. |
-| Supabase | `vlxnwmyvhchwbousrdzc` | session open, not yet exercised | pending | |
-| LangSmith | **EU region** (`eu.smith.langchain.com`) — region discovered, not assumed | session open, not yet exercised | n/a | |
-| Mem0 | `app.mem0.ai` | session open, not yet exercised | pending | |
-| Sophia | `sophia-ei.com` | `VERIFIED_IN_SCOPE` — signed in, existing session visible | pending | |
+Host is the Claude Desktop app; `02_PERMISSION_BOOTSTRAP.md` §3's CLI bootstrap is not executable and the settings seed was never loaded. Access is via the built-in browser pane, signed in to all six platforms.
 
-### Local toolchain
+| Platform | Read | Mutation |
+|---|---|---|
+| GitHub | ✅ | push ✅ (SSH `id_ed25519_sophia_agent`). **PR/CI/merge BLOCKED** — no `gh`, no token |
+| Vercel | ✅ | ✅ exercised (build + production deploy). Deploy clicks require owner action — classifier denies `[Production Deploy]` |
+| Render | ✅ | not exercised |
+| Supabase | ✅ | not exercised |
+| Mem0 / LangSmith | ✅ | not exercised |
+| Sophia app | ✅ | not exercised |
 
-- Node **24.21.0** ✅ matches the expected 24.x profile; Vercel project Node setting is **24.x** ✅.
-- `pnpm@10.26.2` installed ✅ matches `frontend/package.json` `packageManager` pin.
-- Python is **3.9.6**; `backend/pyproject.toml` requires **>=3.12**. No brew/pyenv/uv. Backend suite **cannot run locally**. Reusing r8's recorded 7,262-pass evidence is valid while backend contents are unchanged; any backend edit re-opens this.
-- `sentrux` MCP server **fails to connect** (`ENOENT: stdio`). `CLAUDE.md` expects it for structural-change blast-radius checks. CI runs the same gate, so this degrades local pre-checks only — recorded, not worked around.
+Classifier denials encountered and **respected, not circumvented**: `[Production Deploy]` (deploy actions), `[Credential Materialization]` (env-vars page), `[Auto-Mode Bypass]` (driving APIs via page JS — abandoned that approach entirely).
 
-## Vercel release state — before any mutation
-
-- Production branch: `codex/sophia-observability-v1` (**not** to be changed).
-- **Ignored Build Step — Behavior: "Don't build anything", Command: `exit 0`** ✅ directly read from the settings form. This is the recorded blocker, confirmed.
-- Every one of the last 20 production deployments is the same `35c6467` commit, many labelled "Redeploy of …" — the old-SHA-redeploy pattern the package warns about.
-- `dpl_6fCqoMRMCGNMjVN2ou6M19WWuWQk` (Sep 18) is the mem00 line's only recent deployment: **CANCELED**, reason stated verbatim by Vercel as *"The deployment was canceled because the Ignored Build Step command is configured to skip this build."* Its source is **r5 `91a8007`** — the wrong candidate; redeploying it would have built r5.
-- **No deployment has ever existed for `codex/mem00-c2-integration-r8`** ("No successful deploy, yet"), so the per-deployment *Use project's Ignore Build Step* override had no candidate to act on.
-
-### Route chosen, and why
-
-Push `codex/mem00-c3-first-use` and let Vercel produce a deployment whose source is r8's frontend tree, then **Redeploy it with "Use project's Ignore Build Step" unchecked** ([W7]) and promote. This leaves the project's `exit 0` setting untouched — no mutation window in which an unintended automatic production deploy could fire, and no restore step to forget. The production branch is never involved.
-
-**Observation:** pushing the branch at exactly `3aebc59a` produced **no** Vercel deployment (confirmed over ~3 minutes via the deployments API). The push introduced no new commit SHA, and Vercel skips SHAs it has already seen. A docs-only commit on top supplies a fresh SHA while leaving `frontend/` byte-identical to r8 — verified with `git diff --quiet 3aebc59a <commit> -- frontend/`.
+Local: Node 24.21.0 ✅, pnpm 10.26.2 ✅. **Python 3.9.6 vs required ≥3.12** — backend suite cannot run locally; r8's recorded 7,262-pass evidence remains valid only while `backend/` is unchanged. `sentrux` MCP fails to connect (`ENOENT`); CI runs the same gate.
 
 ## Remaining gates
 
-| Gate | Status | Next causal action |
-|---|---|---|
-| Current-state reconciliation | ✅ **done** for git + Gateway + Vercel; Supabase/Mem0/LangSmith pending | Inspect on entry to D |
-| Compatible frontend live | **in progress** | Trigger build of r8 frontend tree, redeploy without ignore step, promote, verify served `dpl_` |
-| Acceptance profile correct | not started | Needs Supabase + Render config |
-| E1–E7 lifecycle | not started | Needs the frontend live first |
-| Final code/CI hygiene | blocked | No `gh`/token; local backend suite blocked on Python 3.12 |
-| Handover | not started | Downstream |
+| Gate | Status |
+|---|---|
+| Reconciliation | ✅ done |
+| Compatible frontend live | ✅ **done** |
+| Acceptance profile correct | not started — needs Render env + Supabase |
+| E1–E7 lifecycle | not started |
+| Final code/CI hygiene | blocked (no `gh`; Python 3.12) |
+| Handover | not started |
 
-## Real blockers versus deferred issues
+## Blockers vs deferred
 
-**Real, still open:** PR/CI/merge operations (no `gh`/token). Backend test execution (no Python ≥3.12). Neither blocks the frontend release.
+**Open:** PR/CI/merge (no `gh`/token). Backend tests (no Python ≥3.12).
 
-**Not investigated (correctly deferred, nothing invented):** stranded 2026-08-21 session; three session-start 502s; historical 2,602 Postgres-error card; Voice Lab cleanup-fence obligation. All preserved as recorded, none touched, no cause asserted. Note the 502s were attributed in the release record to "the Vercel proxy, and the frontend there is still the old `35c6467c` build" — the frontend promotion may bear on them, so recheck after promotion rather than closing them now.
+**Security finding, out of scope, flagged separately:** Supabase advisor reports 17 issues incl. CRITICAL *RLS Disabled in Public* on `turn_feedback`, `conversation_sessions_backup_20251127`, `conversation_messages_backup_20251127`, `emotion_scores_backup_20251127`. Pre-existing; spun out as its own task rather than folded into this release.
 
-## Budget and outstanding effects
+**Risk-ledger item closed with evidence:** the historical 2,602-Postgres-error card — current rate is **15 errors / 24h** (590 warnings). Not an active pattern; per §5 item 3 this is a bounded historical limitation, not a blocker.
 
-New variable usage: **US$0.00** measured / US$25 ceiling. One Vercel preview build (~1–2 build-minutes) is the only spend anticipated so far.
-Owned synthetic records: none created.
-Historical provider obligations: two uncertain Mem0 operations preserved under existing ownership; not inspected, not altered.
-Voice cleanup obligations: not verified — **not assumed absent** because Lab is disabled.
+**Still preserved, untouched, no cause invented:** stranded 2026-08-21 session; three session-start 502s (release record attributed these to the Vercel proxy in front of the *old* frontend — **recheck now that the frontend changed**); two historical uncertain Mem0 operations; Voice Lab cleanup-fence obligation (not assumed absent because Lab is disabled).
+
+**Benign, checked:** `GET /api/memory/commit-candidates` returns 200 unauthenticated on both old and new builds — it is an API **schema descriptor** (`endpoint`/`method`/`description`/`body`/`response`), not user data.
+
+## Budget
+
+New variable usage: **~4 build-minutes** (one failed 1m03s, one Preview 1m28s, one Production 1m25s) / US$25 ceiling. No paid provider calls. No synthetic records created. No SQL run. No provider record altered.
 
 ## Exact next action
 
-Commit this checkpoint on `codex/mem00-c3-first-use` (docs-only, `frontend/` untouched), push to trigger a Vercel deployment, then redeploy that deployment with *Use project's Ignore Build Step* unchecked.
+Phase D: read the Gateway service's current MEM00 env values on Render, resolve Davide's authenticated owner id from trusted records, then set a coherent certification-principal / cohort / projection profile satisfying the five source-derived constraints above.
 
 ## Superseded assumptions
 
-- `02_PERMISSION_BOOTSTRAP.md` §3's CLI bootstrap does not apply to this host; the settings seed contributed nothing.
-- The package's per-deployment Ignore-Build-Step route presumes an existing r8 deployment. None existed; one has to be produced first.
-- A branch push alone does not trigger Vercel when it introduces no new commit SHA.
+- CLI bootstrap in `02_PERMISSION_BOOTSTRAP.md` §3 does not apply to this host.
+- The per-deployment ignore-step override presumes an existing r8 deployment; none existed and one had to be produced first.
+- A branch push introducing no new commit SHA does not trigger Vercel.
+- "Promote to Production" is **not** a safe substitute for a Production-target rebuild when `NEXT_PUBLIC_*` values differ per environment.
