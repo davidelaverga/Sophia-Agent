@@ -78,6 +78,17 @@ def _serialized_dependencies(method):
     return guarded
 
 
+def _supersedes(candidate, held) -> bool:
+    """Forward-only revision movement for one already-retained memory.
+
+    An ordinary edit advances content_revision and a governance action advances
+    memory_governance_revision. Either may be admitted over a retained value.
+    Neither may move backwards, which would re-admit superseded content.
+    """
+    return (candidate.content_revision >= held.content_revision
+        and candidate.governance_revision >= held.governance_revision)
+
+
 class MemoryRunGuard:
     @staticmethod
     def _owner_is_undeclared(owner_id) -> bool:
@@ -430,10 +441,14 @@ class MemoryRunGuard:
             if addition is None:
                 self.entered = False
                 raise MemoryContextUnavailable()
-            # An admission may add exact revisions, never silently replace a
-            # retained revision after an edit. The latter requires rotation.
+            # An edit supersedes the retained revision: admit the newer one so
+            # this request carries current content and the obsolete revision is
+            # excluded. Refusing instead would strand every open conversation
+            # that still references the memory. A revision that moves backwards
+            # is still refused, because that would re-admit superseded content.
             for item in addition.inclusions:
-                if item.memory_id in inclusions and inclusions[item.memory_id] != item:
+                held = inclusions.get(item.memory_id)
+                if held is not None and held != item and not _supersedes(item, held):
                     self.entered = False
                     raise MemoryContextUnavailable()
                 inclusions[item.memory_id] = item

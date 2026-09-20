@@ -303,20 +303,10 @@ def test_sentinel_retrieve_memories_result_is_skipped_and_turn_survives(env):
     assert "memory_context_proof" in update
 
 
-def test_edited_revision_conflicts_with_retained_context(env, monkeypatch):
-    """Reproduces the C3 edit-then-recall failure shape.
-
-    A retained context holding content_revision 1, plus a fresh retrieval
-    proving content_revision 2 for the same memory, is a replacement rather
-    than an addition. The guard treats that as the documented "requires
-    rotation" case and refuses the turn.
-    """
-    from deerflow.agents.sophia_agent.middlewares.mem0_memory import Mem0MemoryMiddleware
-    from deerflow.sophia.memory_governance.models import AuthorizedMemory
+def _revisioned_lookup(env, monkeypatch, memory_id):
+    """Serve whatever revision env.canonical currently holds, with a valid proof."""
     from deerflow.sophia.memory_governance.refs import keyed_ref
     from deerflow.sophia.memory_governance.retrieval_provenance import issue_retrieval_proof
-
-    memory_id = UUID(int=7)
 
     def lookup(**kwargs):
         held = env.canonical.get(memory_id)
@@ -330,15 +320,55 @@ def test_edited_revision_conflicts_with_retained_context(env, monkeypatch):
         return [{"id": str(memory_id), "content": held.canonical_content, "category": "fact", "memory_retrieval_proof": proof}]
 
     monkeypatch.setattr("deerflow.agents.sophia_agent.middlewares.mem0_memory.search_memories", lookup)
-    automatic = Mem0MemoryMiddleware("owner")
+    from deerflow.agents.sophia_agent.middlewares.mem0_memory import Mem0MemoryMiddleware
+    return Mem0MemoryMiddleware("owner")
 
-    env.canonical[memory_id] = AuthorizedMemory(memory_id=memory_id, content_revision=1, memory_governance_revision=1,
-        canonical_content="TIN_OTTER_SYNTHETIC_BEFORE_EDIT", category="fact")
+
+def _authorized(memory_id, content_revision, governance_revision, content):
+    from deerflow.sophia.memory_governance.models import AuthorizedMemory
+    return AuthorizedMemory(memory_id=memory_id, content_revision=content_revision,
+        memory_governance_revision=governance_revision, canonical_content=content, category="fact")
+
+
+def test_edited_revision_supersedes_retained_context(env, monkeypatch):
+    """An edit must not strand an already-open conversation.
+
+    After a canonical edit advances content_revision, a continued conversation
+    admits the newer revision and the obsolete revision is excluded from the
+    next model request. Previously this raised and aborted the turn.
+    """
+    memory_id = UUID(int=7)
+    automatic = _revisioned_lookup(env, monkeypatch, memory_id)
+    captured = []
+
+    class CaptureModel(FakeListChatModel):
+        def _call(self, messages, *args, **kwargs):
+            captured.append(messages)
+            return super()._call(messages, *args, **kwargs)
+
+    model = CaptureModel(responses=["SYNTHETIC_MODEL_RESPONSE"] * 4)
+    env.canonical[memory_id] = _authorized(memory_id, 1, 1, "TIN_OTTER_SYNTHETIC_BEFORE_EDIT")
+    cfg, messages = current(env)
+    graph(env, cfg, [automatic], model).invoke({"messages": messages}, {"configurable": {"thread_id": env.tid}}, context={"platform": "text", "thread_id": env.tid})
+
+    env.canonical[memory_id] = _authorized(memory_id, 2, 1, "TIN_OTTER_SYNTHETIC_AFTER_EDIT")
+    cfg, messages = current(env, "AFTER_EDIT_INPUT")
+    result = graph(env, cfg, [automatic], model).invoke({"messages": messages}, {"configurable": {"thread_id": env.tid}}, context={"platform": "text", "thread_id": env.tid})
+
+    assert result["messages"][-1].content == "SYNTHETIC_MODEL_RESPONSE"
+    assert "TIN_OTTER_SYNTHETIC_AFTER_EDIT" in str(captured[-1])
+    assert "TIN_OTTER_SYNTHETIC_BEFORE_EDIT" not in str(captured[-1])
+
+
+def test_revision_moving_backwards_is_still_refused(env, monkeypatch):
+    """Supersession is forward-only; a rollback must not re-admit old content."""
+    memory_id = UUID(int=7)
+    automatic = _revisioned_lookup(env, monkeypatch, memory_id)
+    env.canonical[memory_id] = _authorized(memory_id, 2, 1, "TIN_OTTER_SYNTHETIC_CURRENT")
     cfg, messages = current(env)
     graph(env, cfg, [automatic]).invoke({"messages": messages}, {"configurable": {"thread_id": env.tid}}, context={"platform": "text", "thread_id": env.tid})
 
-    env.canonical[memory_id] = AuthorizedMemory(memory_id=memory_id, content_revision=2, memory_governance_revision=1,
-        canonical_content="TIN_OTTER_SYNTHETIC_AFTER_EDIT", category="fact")
-    cfg, messages = current(env, "AFTER_EDIT_INPUT")
+    env.canonical[memory_id] = _authorized(memory_id, 1, 1, "TIN_OTTER_SYNTHETIC_SUPERSEDED")
+    cfg, messages = current(env, "ROLLBACK_INPUT")
     with pytest.raises(MemoryContextUnavailable):
         graph(env, cfg, [automatic]).invoke({"messages": messages}, {"configurable": {"thread_id": env.tid}}, context={"platform": "text", "thread_id": env.tid})
