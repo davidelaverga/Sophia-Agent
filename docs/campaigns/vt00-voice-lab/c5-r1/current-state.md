@@ -62,12 +62,22 @@ create model runs, read state/history, or obtain memory authority. Focused tests
 cover actual create, failed persistence, lost allocation response, repeated fence,
 unreserved replay, wrong-owner read and malformed fence creation. See receipts.
 
-Next: publish/review the exact candidate (655 focused tests passed), verify
-deployment and spend/service permissions (including suspension agreement), publish
-the narrow compatible change, and coordinate its rollout. After reauthentication,
+Candidate `d12c0b4b4917d8c3b3da27808f1026ee1152103a` is published on
+`codex/vt00-c5-authenticated-session` as draft
+[PR #149](https://github.com/davidelaverga/Sophia-Agent/pull/149), based on the
+MEM00-C3 handover branch. No production deployment has occurred.
+
+Next: review the exact candidate (655 focused tests passed), verify deployment
+and spend/service permissions (including suspension agreement), and coordinate
+its narrow rollout. After reauthentication,
 refresh capabilities and obligations, update exact pins, then execute one governed
 two-turn plugin journey and its complete close/export/settlement procedure.
 The user was asked once to resolve whether post-settlement suspension covers both
 Lab services; that answer remains pending. The current Codex browser needs Render
 login, while the existing Claude controller has an authenticated Render session.
 No new spending or continuously running service is authorized by this checkpoint.
+
+Latest deployment access check: native UI returned that the Mac is locked and
+automatic unlock failed. User was asked to unlock it. The authenticated Claude
+Render session is therefore currently inaccessible; no deployment window has
+been claimed and no shared mutation was attempted.

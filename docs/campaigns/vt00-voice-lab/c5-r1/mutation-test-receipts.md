@@ -1,6 +1,6 @@
 # VT00-C5-R1 mutation and test receipts
 
-All actions below are local unless explicitly identified as public read-only.
+Actions below are local unless explicitly identified as publication or public read-only.
 
 - Created a detached isolated worktree from C3 `5f4ed1cb`, then fast-forwarded to
   `46cd2302` and `2e949238` as MEM00 published its repair and handover. Preserved
@@ -37,3 +37,13 @@ All actions below are local unless explicitly identified as public read-only.
 These tests exercise disposable stores, real installed auth and runtime filters.
 They are not hosted SQL qualification, a live plugin journey, provider closure
 proof, or a readiness verdict. No schema or cleanup-ledger function changed.
+
+- Publication: committed code and receipts as `d12c0b4b4917d8c3b3da27808f1026ee1152103a`,
+  pushed `codex/vt00-c5-authenticated-session` through the existing authorized SSH
+  identity, and created draft [PR #149](https://github.com/davidelaverga/Sophia-Agent/pull/149)
+  against `codex/mem00-c3-first-use`. Attached the PR to the current Codex task.
+  Removed duplicate `.log` copies; retained the identical `.txt` evidence.
+
+- GitHub candidate checks: combined commit statuses empty; Unit Tests run
+  `35613143170` and Architecture gate run `35613142610` both concluded `skipped`
+  on the draft PR. These are not additional passing test evidence.
