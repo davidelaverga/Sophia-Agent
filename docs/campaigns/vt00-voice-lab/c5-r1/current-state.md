@@ -120,3 +120,24 @@ Sentrux could start with existing bundled OpenSSL but crashed at scan (exit139),
 so no actual-base result exists. Temporary measurement worktrees were removed.
 The next action is a coordinated review/window for the integrated candidate,
 then exact pin qualification and the one plugin demonstration.
+
+## Authoritative rollout blocker, 2026-09-21T16:40:51Z
+
+Claude completed independent review with no candidate regression reported and
+reported 7,278 passed, 168 skipped, and two local-sandbox-encoding failures it
+reproduced on the unchanged base. MEM00's deployment window is closed; its
+LangGraph remains 13eb09d3 and Gateway remains46cd2302.
+
+The requested VT00 rollout did NOT start. Although the UI continued to show its
+browser operation as running, the exact tool result in the controller's execution
+record is terminal: Claude Code auto mode classifier denied it as [Production Deploy]
+at 16:40:51.429Z. See evidence/deployment-permission-denial.json. No Render candidate
+deployment receipt exists. No alternate controller was used to bypass the denial.
+User was asked to approve only the specific Gateway-then-LangGraph deployment at
+406ff0a6, preserving all closed gates, rather than broaden platform permissions.
+
+Historical J01 source records retain accepted proof557a783aa59d6e0ab2292700ff00154ce2d557b9b919f8400460c3537af4b531
+and canonical settlementba413dbffaac15426bc952553804c8faf14d7c7d30cb33ed0e35dd7d018ebf61.
+Installed inspection of J01 and the Sep14 fourth-window run now returns RUN_NOT_FOUND;
+that is not fresh cleanup evidence and does not extend the separately accepted
+unverified historical exception. Current-run settlement remains an explicit gate.

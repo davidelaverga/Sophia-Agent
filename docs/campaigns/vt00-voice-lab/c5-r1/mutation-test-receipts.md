@@ -69,3 +69,8 @@ proof, or a readiness verdict. No schema or cleanup-ledger function changed.
 - Backend CI 35622117255 ended cancelled; no test-pass inference.
 - Local Sentrux scan with bundled OpenSSL exited139; no baseline was generated.
   Removed the two clean, temporary measurement worktrees.
+
+- Read the deployment controller's exact terminal tool result after its UI remained
+  stale. Production deploy was denied by its automatic approval classifier at
+  16:40:51.429Z. No retry/alternate deployment route was attempted. User asked for
+  approval of the specific action only. Candidate code remains406ff0a6.
