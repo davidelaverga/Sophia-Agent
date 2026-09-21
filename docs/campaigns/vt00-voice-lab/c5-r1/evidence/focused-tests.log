@@ -1,0 +1,42 @@
+........................................................................ [ 44%]
+........................................................................ [ 88%]
+..................                                                       [100%]
+=============================== warnings summary ===============================
+app/gateway/routers/voice.py:1447
+  /Users/davidelaverga/Documents/Codex/2026-08-19/pl/work/Sophia-Agent-vt00-c5-r1/backend/app/gateway/routers/voice.py:1447: UserWarning: Field name "schema" in "GeminiSyntheticToolEvidenceRequest" shadows an attribute in parent "BaseModel"
+    class GeminiSyntheticToolEvidenceRequest(BaseModel):
+
+app/gateway/routers/voice.py:1563
+  /Users/davidelaverga/Documents/Codex/2026-08-19/pl/work/Sophia-Agent-vt00-c5-r1/backend/app/gateway/routers/voice.py:1563: UserWarning: Field name "schema" in "GeminiBrowserProviderCloseReceipt" shadows an attribute in parent "BaseModel"
+    class GeminiBrowserProviderCloseReceipt(BaseModel):
+
+app/gateway/routers/voice.py:1577
+  /Users/davidelaverga/Documents/Codex/2026-08-19/pl/work/Sophia-Agent-vt00-c5-r1/backend/app/gateway/routers/voice.py:1577: UserWarning: Field name "schema" in "GeminiBrowserProviderActivationAbortReceipt" shadows an attribute in parent "BaseModel"
+    class GeminiBrowserProviderActivationAbortReceipt(BaseModel):
+
+app/gateway/routers/voice.py:1591
+  /Users/davidelaverga/Documents/Codex/2026-08-19/pl/work/Sophia-Agent-vt00-c5-r1/backend/app/gateway/routers/voice.py:1591: UserWarning: Field name "schema" in "GeminiBrowserProviderActivationReceipt" shadows an attribute in parent "BaseModel"
+    class GeminiBrowserProviderActivationReceipt(BaseModel):
+
+app/gateway/routers/voice_lab_d02_settlement.py:432
+  /Users/davidelaverga/Documents/Codex/2026-08-19/pl/work/Sophia-Agent-vt00-c5-r1/backend/app/gateway/routers/voice_lab_d02_settlement.py:432: UserWarning: Field name "schema" in "D02FreezeRequest" shadows an attribute in parent "_StrictModel"
+    class D02FreezeRequest(_StrictModel):
+
+app/gateway/routers/voice_lab_d02_settlement.py:494
+  /Users/davidelaverga/Documents/Codex/2026-08-19/pl/work/Sophia-Agent-vt00-c5-r1/backend/app/gateway/routers/voice_lab_d02_settlement.py:494: UserWarning: Field name "schema" in "D02SettlementRequest" shadows an attribute in parent "_StrictModel"
+    class D02SettlementRequest(_StrictModel):
+
+app/gateway/routers/voice_lab_d02_settlement.py:559
+  /Users/davidelaverga/Documents/Codex/2026-08-19/pl/work/Sophia-Agent-vt00-c5-r1/backend/app/gateway/routers/voice_lab_d02_settlement.py:559: UserWarning: Field name "schema" in "D02SettlementReceiptLookupRequest" shadows an attribute in parent "_StrictModel"
+    class D02SettlementReceiptLookupRequest(_StrictModel):
+
+app/gateway/routers/voice_lab_d02_settlement.py:590
+  /Users/davidelaverga/Documents/Codex/2026-08-19/pl/work/Sophia-Agent-vt00-c5-r1/backend/app/gateway/routers/voice_lab_d02_settlement.py:590: UserWarning: Field name "schema" in "D02ContinuityObservationRequest" shadows an attribute in parent "_StrictModel"
+    class D02ContinuityObservationRequest(_StrictModel):
+
+app/gateway/routers/sophia.py:537
+  /Users/davidelaverga/Documents/Codex/2026-08-19/pl/work/Sophia-Agent-vt00-c5-r1/backend/app/gateway/routers/sophia.py:537: UserWarning: Field name "schema" in "SyntheticCanonicalTranscript" shadows an attribute in parent "BaseModel"
+    class SyntheticCanonicalTranscript(BaseModel):
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+162 passed, 9 warnings in 30.24s

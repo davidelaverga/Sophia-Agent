@@ -1,0 +1,7 @@
+{
+  "operation": "installed get_capabilities",
+  "status": "UNAUTHORIZED",
+  "reason": "oauth_token_invalid_grant",
+  "action": "TRIGGER_REAUTHENTICATION",
+  "live_run_created": false
+}

@@ -64,6 +64,25 @@ deer-flow/
 
 ## Important Development Guidelines
 
+### VT00-C5 synthetic session thread authority
+
+The Voice Lab session container uses `langgraph_voice_lab_auth`, a short-lived
+exact-method/path/admission credential under the existing service signing key.
+The ordinary owner signer still refuses the Lab principal. The receiver checks
+the canonical `session` reservation and signed metadata digest, then labels the
+container for existing synthetic maintenance without granting owner/model access.
+Failed-start discard stays bound to that reservation. Overdue recovery callers
+pass the actual expired admission into the delete/create/read fence; the receiver
+allows only that exact synthetic resource or its opaque fence. The maintenance
+lane still cannot create threads. No schema, memory authority, D02 receipt, or
+provider settlement contract changes are implied.
+
+`test_voice_lab_session_auth_runtime.py` uses real Gateway capability validation,
+httpx signing, installed LangGraph authentication/HTTP handlers and runtime filters.
+Its ASGI transport isolates request tasks as a real HTTP server does; canonical
+fence storage and graph storage are disposable. This proves the local boundary,
+not a deployed voice journey. Keep the exact live-plugin acceptance outstanding.
+
 ### MEM00 C2 local integration status
 
 The staged Builder factory uses a run-owned model and an outer memory-context

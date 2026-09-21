@@ -17,6 +17,8 @@ from langgraph_sdk import Auth
 from starlette.exceptions import HTTPException
 
 from deerflow.agents.sophia_agent.utils import validate_user_id
+from deerflow.sophia.langgraph_voice_lab_auth import BINDING_KEY
+from deerflow.sophia.langgraph_voice_lab_auth import PERMISSION as VOICE_LAB_THREAD_PERMISSION
 from deerflow.sophia.memory_governance.refs import keyed_ref
 
 auth = Auth()
@@ -34,7 +36,7 @@ SYNTHETIC_KEY = "synthetic"
 # lane filters match, so no caller can place a thread into a lane's universe.
 MAINTENANCE_KEY = "sophia_synthetic_maintenance_v1"
 DECK_QUALITY_KEY = "sophia_deck_quality_v1"
-SERVER_ISSUED_KEYS = (OWNER_KEY, MAINTENANCE_KEY, DECK_QUALITY_KEY)
+SERVER_ISSUED_KEYS = (OWNER_KEY, MAINTENANCE_KEY, DECK_QUALITY_KEY, "synthetic_cleanup_fence", "cleanup_obligation_id_hmac")
 # The one graph the dispatch lane may run. A lane that can start a run on any
 # graph is a lane that can start the companion, with tools and memory behind it.
 DECK_QUALITY_GRAPH_ID = "sophia_deck_quality_shadow"
@@ -137,6 +139,14 @@ async def authenticate(authorization: str | None, method: str = "", path: str = 
 async def _authenticate(authorization: str | None, method: str = "", path: str = ""):
     if not isinstance(authorization, str):
         _deny(401)
+    from deerflow.sophia.langgraph_voice_lab_auth import PREFIX as VOICE_LAB_PREFIX
+    from deerflow.sophia.langgraph_voice_lab_auth import verify_authorization
+    if authorization.startswith(VOICE_LAB_PREFIX):
+        try:
+            claims = verify_authorization(authorization, method=method, path=path)
+        except Exception:
+            _deny(401)
+        return {"identity": claims["sub"], "permissions": [VOICE_LAB_THREAD_PERMISSION], BINDING_KEY: claims}
     from deerflow.sophia.langgraph_service_auth import PREFIX, verify_service_authorization
     if authorization.startswith(PREFIX):
         try:
@@ -196,6 +206,8 @@ async def deny_unspecified(ctx, value):
 
 @auth.on.threads.create
 async def create_thread(ctx, value):
+    if VOICE_LAB_THREAD_PERMISSION in ctx.permissions:
+        return _voice_lab_thread_filter(ctx, value, creating=True)
     _reject_owner_metadata(value)
     if MAINTENANCE_PERMISSION in ctx.permissions:
         # Retention maintenance deletes; it never creates.
@@ -386,8 +398,18 @@ def _owns_only_authorized_synthetic_threads(ctx) -> bool:
     return bool(voice_lab_principal()) and ctx.user.identity == voice_lab_principal()
 
 
+def _voice_lab_thread_filter(ctx, value, *, creating=False):
+    from deerflow.sophia.langgraph_voice_lab_auth import authorize_thread
+    try:
+        return authorize_thread(ctx, value, creating=creating)
+    except Exception:
+        _deny()
+
+
 @auth.on.threads
 async def owned_thread(ctx, value):
+    if VOICE_LAB_THREAD_PERMISSION in ctx.permissions:
+        return _voice_lab_thread_filter(ctx, value)
     _reject_owner_metadata(value)
     service = _service_thread_filter(ctx)
     if service is not None:
@@ -397,6 +419,8 @@ async def owned_thread(ctx, value):
 
 @auth.on.threads.create_run
 async def create_run(ctx, value):
+    if VOICE_LAB_THREAD_PERMISSION in ctx.permissions:
+        _deny()
     _reject_owner_metadata(value)
     if MAINTENANCE_PERMISSION in ctx.permissions:
         # The retention lane may cancel a run. It may never start one, so no
