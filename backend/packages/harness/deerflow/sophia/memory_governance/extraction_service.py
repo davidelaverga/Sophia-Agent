@@ -230,6 +230,22 @@ class MemoryExtractionService:
                 emit_memory_event("memory.extraction.source_realigned",service=self.service_name,
                     outcome="current_run_present" if replacement is not None else "no_current_run",
                     fault_owner_id=run.user_id,extraction_run_ref=keyed_ref("extraction-run",str(run.extraction_run_id)))
+                if replacement is None:
+                    # No replacement means realignment made no progress: the
+                    # source could not be aligned, so the next claim lands back
+                    # here on the same run. Reporting that as work skipped the
+                    # worker's poll delay, so the claim/realign cycle spun at
+                    # full speed, and leaving the run leased meant the retry
+                    # budget in fail_extraction was never consulted. Record the
+                    # durable failure instead, exactly as every other failure in
+                    # this method does, so the existing backoff and attempt
+                    # budget bound it.
+                    self.governance_store.fail_extraction(
+                        run,
+                        error_code="memory_extraction_source_realignment_unavailable",
+                        retryable=True,
+                    )
+                    return False
                 return True
             serialized = _serialize(selected)
             require_candidate_extraction(run.user_id, store=self.governance_store)

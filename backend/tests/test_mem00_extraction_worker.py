@@ -319,10 +319,42 @@ def test_source_realign_without_new_run_never_reports_replacement_queued(monkeyp
     monkeypatch.setattr(service, "enqueue_finalized_session", Mock(return_value=None))
     event = Mock()
     monkeypatch.setattr("deerflow.sophia.memory_governance.extraction_service.emit_memory_event", event)
-    assert service.run_once()
+    # Realignment that produced no replacement did no work. It used to report
+    # True, which the worker reads as "work happened" and therefore skips its
+    # poll delay -- see the bounded-failure regression below.
+    assert service.run_once() is False
     assert store.completed is None
     assert event.call_args.args == ("memory.extraction.source_realigned",)
     assert event.call_args.kwargs["outcome"] == "no_current_run"
+
+
+def test_source_realign_without_new_run_records_a_bounded_failure(monkeypatch):
+    """A realignment that cannot progress must consume the retry budget.
+
+    Regression for the 2026-09-21 outage. When a run's source could not be
+    realigned and no replacement was queued, this path returned True without
+    recording a failure. ``MemoryGovernanceWorker._run`` treats a True result
+    as work and skips its poll delay entirely, so the claim/realign cycle ran
+    with no pause; because ``fail_extraction`` was never reached, the run stayed
+    leased, ``sophia_memory_claim_extraction`` re-leased it on the very next
+    iteration, and the eight-attempt budget was never consulted. One run held
+    that loop for fourteen hours and saturated the PostgREST connection pool,
+    which in turn fail-closed the gateway and langgraph startup probes.
+    """
+
+    from unittest.mock import Mock
+
+    sessions = _Sessions()
+    store = _Governance(_run(sessions))
+    service = _service(store, sessions, Mock(side_effect=AssertionError("ineligible source reached model")))
+    sessions.messages[1] = sessions.messages[1].model_copy(update={"content": "SYNTHETIC-CHANGED", "memory_source_version": str(uuid4())})
+    monkeypatch.setattr(service, "enqueue_finalized_session", Mock(return_value=None))
+
+    assert service.run_once() is False
+    assert store.completed is None
+    # Durably failed, so the existing backoff and attempt budget bound the run
+    # instead of it remaining leased and immediately re-claimable.
+    assert store.failed[1:] == ("memory_extraction_source_realignment_unavailable", True)
 
 
 @pytest.mark.parametrize("epoch", [None, 1])
