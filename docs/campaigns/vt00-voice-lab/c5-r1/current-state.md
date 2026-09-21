@@ -63,7 +63,7 @@ cover actual create, failed persistence, lost allocation response, repeated fenc
 unreserved replay, wrong-owner read and malformed fence creation. See receipts.
 
 Candidate `d12c0b4b4917d8c3b3da27808f1026ee1152103a` is published on
-`codex/vt00-c5-authenticated-session` as draft
+`codex/vt00-c5-authenticated-session` as
 [PR #149](https://github.com/davidelaverga/Sophia-Agent/pull/149), based on the
 MEM00-C3 handover branch. No production deployment has occurred.
 
@@ -81,3 +81,21 @@ Latest deployment access check: native UI returned that the Mac is locked and
 automatic unlock failed. User was asked to unlock it. The authenticated Claude
 Render session is therefore currently inaccessible; no deployment window has
 been claimed and no shared mutation was attempted.
+
+## Resumed access and CI, 2026-09-21
+
+The Mac is unlocked. MEM00 resumed its E-phase work in the existing Claude task;
+Codex sent a coordination notice and Claude acknowledged preserving PR149.
+No VT00 shared deployment window was claimed. The plugin still returns
+`oauth_token_invalid_grant`. Computer Use explicitly denied access to the Codex
+app for safety reasons, so the user must perform the normal reconnect there.
+No alternate controller or credential path was attempted.
+
+PR149 is now ready for review (not a Voice readiness verdict). Required CI ran:
+hosted lint passed; architecture run `35621734249` failed against `origin/main`
+(quality 5671→4272, cycles 1→7, god files 7→27, complex functions 176→719).
+This is not an isolated comparison against the actual MEM00 PR base. Review did
+identify and remove a new helper→receiver circular import by passing the receiver's
+fixed metadata labels into the helper. The 57 affected auth/runtime tests and Ruff
+passed after this change. The pinned macOS Sentrux binary cannot run locally
+because its Homebrew OpenSSL dylib is absent; no architecture pass is claimed.

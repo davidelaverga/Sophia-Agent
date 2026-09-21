@@ -401,7 +401,7 @@ def _owns_only_authorized_synthetic_threads(ctx) -> bool:
 def _voice_lab_thread_filter(ctx, value, *, creating=False):
     from deerflow.sophia.langgraph_voice_lab_auth import authorize_thread
     try:
-        return authorize_thread(ctx, value, creating=creating)
+        return authorize_thread(ctx, value, owner_key=OWNER_KEY, maintenance_key=MAINTENANCE_KEY, creating=creating)
     except Exception:
         _deny()
 

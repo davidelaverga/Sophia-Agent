@@ -47,3 +47,17 @@ proof, or a readiness verdict. No schema or cleanup-ledger function changed.
 - GitHub candidate checks: combined commit statuses empty; Unit Tests run
   `35613143170` and Architecture gate run `35613142610` both concluded `skipped`
   on the draft PR. These are not additional passing test evidence.
+
+- Resumption: Mac unlocked; MEM00 resumed, acknowledged the coordination notice,
+  and retains the current shared window. No VT00 deployment/run occurred.
+- Marked PR149 ready for review to execute the repository-required CI. Hosted
+  lint passed. Sentrux run 35621734249 failed against origin/main, not the PR base.
+  Backend run 35621734266 was still running when the follow-up was prepared.
+- Removed the new helper→receiver circular import without changing auth labels or
+  policy. Exact receiver constants are now passed to the helper. Rechecked runtime,
+  authority, framework-auth, service-lanes and lane-runtime suites: 57 passed in
+  11.67s. Ruff and diff checks passed. This supersedes the original code candidate
+  for deployment; do not deploy d12c0b4b without this follow-up.
+- Downloaded the CI-pinned Sentrux v0.5.7 macOS binary from its official GitHub
+  release into runtime-tools. It failed before execution because the required
+  Homebrew OpenSSL library is absent. No local architecture result was produced.

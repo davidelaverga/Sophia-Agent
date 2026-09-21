@@ -122,16 +122,15 @@ def verify_authorization(authorization, *, method, path):
         raise LangGraphServiceAuthError() from None
 
 
-def authorize_thread(ctx, value, *, creating=False):
+def authorize_thread(ctx, value, *, owner_key, maintenance_key, creating=False):
     """Called by the installed policy; recheck canonical admission at use time."""
     claims = ctx.user[BINDING_KEY]
     _validate(claims, claims["method"], claims["path"])
     binding, purpose = claims["binding"], claims["purpose"]
     if str(value.get("thread_id")) != binding["resource_id"]:
         raise LangGraphServiceAuthError()
-    from .langgraph_auth import MAINTENANCE_KEY, OWNER_KEY
 
-    synthetic_filter = {MAINTENANCE_KEY: True, "cleanup_obligation_id": binding["cleanup_obligation_id"], "principal_id": claims["sub"]}
+    synthetic_filter = {maintenance_key: True, "cleanup_obligation_id": binding["cleanup_obligation_id"], "principal_id": claims["sub"]}
     fence_filter = {"synthetic_cleanup_fence": True, "cleanup_obligation_id_hmac": claims["fence_hmac"], "resource_kind": "session_thread"}
     if creating:
         if purpose not in {"session_create", "fence"} or value.get("if_exists", "raise") != "raise":
@@ -147,9 +146,9 @@ def authorize_thread(ctx, value, *, creating=False):
                 or metadata.get("cleanup_obligation_id") != binding["cleanup_obligation_id"]
                 or metadata.get("cleanup_admission_id") != binding["admission_id"]
                 or metadata.get("graph_id") != "sophia_companion"
-                or any(key in metadata for key in (MAINTENANCE_KEY, OWNER_KEY, "sophia_deck_quality_v1", "synthetic_cleanup_fence"))):
+                or any(key in metadata for key in (maintenance_key, owner_key, "sophia_deck_quality_v1", "synthetic_cleanup_fence"))):
             raise LangGraphServiceAuthError()
-        metadata[MAINTENANCE_KEY] = True
+        metadata[maintenance_key] = True
         return synthetic_filter
     if purpose not in {"discard", "fence"} or ctx.action not in {"read", "delete"}:
         raise LangGraphServiceAuthError()

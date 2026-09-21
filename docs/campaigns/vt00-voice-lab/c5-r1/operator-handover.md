@@ -6,8 +6,8 @@ requires the real installed-plugin demonstration and present-run settlement.
 1. Reauthenticate the existing Sophia Voice Lab connection through its supported
    client flow; call installed get_capabilities and retain its exact versions,
    package hash, limits, targets and obligations. No recurring provisioning.
-2. Review draft [PR #149](https://github.com/davidelaverga/Sophia-Agent/pull/149)
-   (`d12c0b4b` code candidate), then finish qualification/deployment on the
+2. Review [PR #149](https://github.com/davidelaverga/Sophia-Agent/pull/149)
+   (use its latest head, including the circular-import follow-up), then finish qualification/deployment on the
    current MEM00-compatible source. One shared deployment owner/window. Keep
    receiving authentication installed and memory configuration unchanged.
 3. Verify current resources and permissions; preserve the historical exception.
