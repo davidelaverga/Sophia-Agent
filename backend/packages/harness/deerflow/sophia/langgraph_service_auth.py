@@ -17,8 +17,8 @@ import re
 import time
 from uuid import uuid4
 
-from deerflow.agents.sophia_agent.utils import validate_user_id
 from deerflow.sophia.builder_event_auth import _secret_bytes
+from deerflow.sophia.user_id import validate_user_id
 
 PREFIX = "SophiaLG1"
 MAX_TTL = 30
