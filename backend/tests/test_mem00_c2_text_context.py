@@ -372,3 +372,55 @@ def test_revision_moving_backwards_is_still_refused(env, monkeypatch):
     cfg, messages = current(env, "ROLLBACK_INPUT")
     with pytest.raises(MemoryContextUnavailable):
         graph(env, cfg, [automatic]).invoke({"messages": messages}, {"configurable": {"thread_id": env.tid}}, context={"platform": "text", "thread_id": env.tid})
+
+
+def test_denied_entry_identifies_which_refusal_fired_without_exporting_content(env, monkeypatch):
+    """A denial must name its own cause, not just repeat the policy label.
+
+    Regression for the 2026-09-21 D1 investigation. ``enter`` guards roughly
+    twenty distinct refusals behind one ``except Exception`` that discarded the
+    original exception and stamped a fixed ``safe_reason_code`` on every one of
+    them. A production denial therefore reported a policy label and nothing
+    that could distinguish an expired proof from a storage fault, which is why
+    the defect survived two days of investigation. The class name and the
+    deepest line reached inside the middleware module are program structure,
+    never owner content, so they can be exported where exception text cannot.
+    """
+
+    captured: list[tuple[str, dict]] = []
+    from deerflow.sophia.memory_governance import observability
+
+    def _capture(name, **kwargs):
+        captured.append((name, kwargs))
+        return "disabled"
+
+    monkeypatch.setattr(observability, "emit_memory_event", _capture)
+
+    cfg, messages = current(env)
+    cfg["sophia_builder_resume_request_v1"] = {"untrusted_or_old": True}
+    with pytest.raises(MemoryContextUnavailable):
+        graph(env, cfg).invoke({"messages": messages}, {"configurable": {"thread_id": env.tid}})
+
+    denied = [kwargs for name, kwargs in captured if name == "memory.context.entry_denied"]
+    assert denied, "a refusal must still be observed"
+    event = denied[-1]
+
+    # The fixed policy label is preserved, so nothing downstream changes.
+    assert event["safe_reason_code"] == "memory_context_rotation_required"
+    assert event["final_dispatch_permission"] is False
+    # ...but the refusal is now identifiable.
+    assert event["error_type"] == "MemoryContextUnavailable"
+    assert isinstance(event["denied_at_line"], int)
+    assert event["denied_at_line"] > 0
+
+    # Structure only: the payload carries exactly these keys, so neither the
+    # exception text nor any owner content can ride along on a future edit.
+    assert set(event) == {
+        "service", "outcome", "fault_owner_id", "safe_reason_code",
+        "final_dispatch_permission", "error_type", "denied_at_line",
+        "owner_ref", "context_ref", "run_ref",
+    }
+    blob = json.dumps(event, sort_keys=True, default=str)
+    assert "CURRENT_SYNTHETIC_INPUT" not in blob
+    # Identity travels only as a domain-separated keyed reference.
+    assert event["owner_ref"].startswith("hmac-sha256:owner:")

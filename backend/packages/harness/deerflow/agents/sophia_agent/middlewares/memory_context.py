@@ -318,12 +318,27 @@ class MemoryRunGuard:
                 return update
             self.entered = True
             return {"memory_context_proof": None}
-        except Exception:
+        except Exception as exc:
             self.entered = False
             # Source verification can fail before any retained read-admission
             # event exists (notably the first run). Observe this actual refusal
             # without exporting exception text or granting a model permission.
             from deerflow.sophia.memory_governance.observability import emit_memory_event, record_memory_observation_gap
+            # This block guards roughly twenty distinct refusals and every one
+            # of them reported the same fixed safe_reason_code, so a denial in
+            # production named a policy label rather than a cause. The class
+            # name and the deepest line reached inside THIS module are program
+            # structure, never owner content, and they are the only thing that
+            # tells those refusals apart. Exception text stays excluded.
+            diagnosis: dict[str, object] = {"error_type": type(exc).__name__}
+            try:
+                frame = exc.__traceback__
+                while frame is not None:
+                    if frame.tb_frame.f_code.co_filename == __file__:
+                        diagnosis["denied_at_line"] = frame.tb_lineno
+                    frame = frame.tb_next
+            except Exception:
+                diagnosis.pop("denied_at_line", None)
             try:
                 references = {}
                 for domain, value in (("owner", self.owner), ("context", self.context_id), ("run", self.config.get(INPUT_RUN_KEY))):
@@ -331,7 +346,7 @@ class MemoryRunGuard:
                         references[domain + "_ref"] = keyed_ref(domain, value)
                 emit_memory_event("memory.context.entry_denied", service=os.getenv("RENDER_SERVICE_NAME") or "sophia-langgraph",
                     outcome="unavailable", fault_owner_id=self.owner, safe_reason_code="memory_context_rotation_required",
-                    final_dispatch_permission=False, **references)
+                    final_dispatch_permission=False, **diagnosis, **references)
             except Exception:
                 record_memory_observation_gap()
             raise MemoryContextUnavailable() from None
