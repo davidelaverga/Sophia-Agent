@@ -141,3 +141,25 @@ and canonical settlementba413dbffaac15426bc952553804c8faf14d7c7d30cb33ed0e35dd7d
 Installed inspection of J01 and the Sep14 fourth-window run now returns RUN_NOT_FOUND;
 that is not fresh cleanup evidence and does not extend the separately accepted
 unverified historical exception. Current-run settlement remains an explicit gate.
+# Current checkpoint — 2026-09-21T17:02:03Z
+
+The user manually completed the previously denied code deployment. Gateway
+`dep-daom0f5bedkc73aq9f10` and LangGraph `dep-daom262d0e5s73fgogug` are live at
+`406ff0a6f9d64c04bbfd55ae1ea87b5a559cf490`. Installed-plugin capabilities independently
+observe both exact builds and HTTP 200 readiness. Gateway protected-plane and
+admission readiness are true, with its mutation gate still closed. See
+`evidence/compatible-code-pair.json`. The earlier deployment denial remains an
+accurate historical receipt, but no longer describes code-rollout completion.
+
+The existing installed plugin is authenticated, with unchanged read/run/fault
+scopes and package hash
+`f799c321aee48f59833918d07e4cb19d0ff2cc12ac521ea1be619affdf8b4f0b`.
+Frontend remains `a5982c6e57efde05311a6add245e0258693f1471`, Voice remains
+`35c6467c36b9ae052ec3dd943cf7c9f0ac28d589`, and Lab MCP/worker source remains
+`2deb762a7a03ca7f260ec2efd670b5993f7dc977`. Lab expected pins are still stale;
+all Voice mutation gates remain closed. No present-run resource was allocated.
+
+Remaining work is exact pin reconciliation and the ordered bounded activation,
+the installed-plugin two-turn journey, supported end/export, current resource
+settlement, ordered closure, and the established service-suspension posture.
+Neither readiness nor current/historical resource zero is inferred here.

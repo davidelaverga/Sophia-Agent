@@ -1,5 +1,16 @@
 # VT00-C5-R1 operator handover — validation pending
 
+Latest checkpoint (2026-09-21 17:07 UTC): OAuth is connected and both repaired
+product components are deployed, independently verified at406ff0a6. See
+deployment-receipt.md and evidence/pre-activation-capabilities.json. Earlier
+access/deployment-blocker entries below are historical. Current activation is
+still blocked by the controller's Production Deploy approval gate; all Voice
+gates remain closed. The exact remaining configuration/run/close scope is in
+the worktree-root activation-scope.md. The user has been asked once for the
+remaining supported platform action and an explicit MCP+worker suspension
+posture, because the referenced agreement could not be recovered. No live run
+has started. Do not use a different controller to route around the denial.
+
 This is a resumable work record, not a readiness handover. Completion still
 requires the real installed-plugin demonstration and present-run settlement.
 

@@ -1,0 +1,39 @@
+{
+  "observed_at": "2026-09-21T16:52:44.754Z",
+  "service": "sophia-gateway",
+  "service_id": "srv-d7be5s9r0fns7397l4g0",
+  "deploy_id": "dep-daom0f5bedkc73aq9f10",
+  "render_status": "Deploy succeeded | Live",
+  "execution": "user manual deployment after automatic approval denial",
+  "candidate_code_sha": "406ff0a6f9d64c04bbfd55ae1ea87b5a559cf490",
+  "plugin_observation": {
+    "ready": false,
+    "identity_status": "deployment_mismatch",
+    "config_status": "ready",
+    "expected": "0c215c1ba0a2218ef224f65601092d5845bb07cf",
+    "observed": "406ff0a6f9d64c04bbfd55ae1ea87b5a559cf490",
+    "version_http_status": 200,
+    "readiness_http_status": 200,
+    "product_mutation_gate": {
+      "valid": true,
+      "health_ready": true,
+      "open": false,
+      "voice_lab_enabled": false,
+      "voice_lab_kill_switch_engaged": true,
+      "voice_lab_protected_plane_ready": true,
+      "voice_lab_admission_ready": true,
+      "voice_lab_mutation_ready": false
+    }
+  },
+  "remaining_langgraph_observation": {
+    "ready": false,
+    "identity_status": "deployment_mismatch",
+    "config_status": "ready",
+    "expected": "35c6467c36b9ae052ec3dd943cf7c9f0ac28d589",
+    "observed": "13eb09d3e9744ebe01ced9ea551dbb6d03f613de",
+    "version_http_status": 200,
+    "readiness_http_status": 200
+  },
+  "lab_kill_switch": "engaged",
+  "live_run_started": false
+}
