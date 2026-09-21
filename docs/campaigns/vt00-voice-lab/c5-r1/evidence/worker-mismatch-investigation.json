@@ -1,0 +1,18 @@
+{
+  "observed_at": "2026-09-21T20:40:04.704669+00:00",
+  "worker": {
+    "ready": false,
+    "runtime_ready": false,
+    "live_workers": 1,
+    "execution_gate_settled": false,
+    "expected_kill_switch_engaged": true,
+    "observed_kill_switch_engaged": null,
+    "expected_deployment_identity_sha256": "a4452b155afa90c9dd7951606b13623bf0fa737890c8c3890a454f0d50dc2fff",
+    "heartbeat_attestation": null,
+    "detail": {
+      "reason": "heartbeat_deployment_identity_mismatch"
+    }
+  },
+  "execution": "kill_switch_engaged",
+  "mutation_ready": false
+}
