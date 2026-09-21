@@ -61,3 +61,11 @@ proof, or a readiness verdict. No schema or cleanup-ledger function changed.
 - Downloaded the CI-pinned Sentrux v0.5.7 macOS binary from its official GitHub
   release into runtime-tools. It failed before execution because the required
   Homebrew OpenSSL library is absent. No local architecture result was produced.
+
+- User completed supported OAuth reconnect. Installed get_capabilities succeeded,
+  matching package hash and previous bounded limits; saved plugin-reconnected.json.
+- Integrated newer MEM00 commit 13eb09d3 without conflicts as 406ff0a6; affected
+  auth/runtime suites passed again: 57 tests in 19.94s.
+- Backend CI 35622117255 ended cancelled; no test-pass inference.
+- Local Sentrux scan with bundled OpenSSL exited139; no baseline was generated.
+  Removed the two clean, temporary measurement worktrees.

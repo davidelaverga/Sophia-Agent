@@ -5,7 +5,7 @@ Harness verdict: **not assessed**. Product verdict: **not assessed**.
 
 | Required evidence | Current evidence / gap |
 |---|---|
-| Installed authenticated controller | get_capabilities rejected with oauth_token_invalid_grant; reauthentication pending |
+| Installed authenticated controller | Installed get_capabilities succeeded at 16:26:31Z; evidence/plugin-reconnected.json |
 | Exact compatible tuple | Public read-only `evidence/lab-readiness.json`; currently mismatched pins |
 | Worker/web and schema | `evidence/lab-health.json`, `evidence/lab-readiness.json` |
 | Current cleanup inventory | `evidence/gateway-readiness.json`: accepted historical exception only; new-run settlement still required |

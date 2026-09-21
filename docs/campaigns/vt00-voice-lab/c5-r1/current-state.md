@@ -99,3 +99,24 @@ identify and remove a new helper→receiver circular import by passing the recei
 fixed metadata labels into the helper. The 57 affected auth/runtime tests and Ruff
 passed after this change. The pinned macOS Sentrux binary cannot run locally
 because its Homebrew OpenSSL dylib is absent; no architecture pass is claimed.
+
+## Reconnected controller and preserved newer MEM00 work
+
+At 2026-09-21T16:26:31.943Z, installed get_capabilities succeeded after the user
+reconnected the existing ChatGPT plugin. See evidence/plugin-reconnected.json.
+The registered app/package hash matches the local installed package. Authorized
+scopes remain read/run/fault; no new client or expanded permission was created.
+Kill switch remains engaged; expected product pins are stale.
+
+MEM00 now contains 13eb09d3e9744ebe01ced9ea551dbb6d03f613de and has an active
+LangGraph deploy dep-daolkuugekts73ao8av0. Preserved that two-file memory-context
+diagnostic change by merging into this branch as code candidate
+406ff0a6f9d64c04bbfd55ae1ea87b5a559cf490. No conflict. The 57 affected auth/runtime
+tests passed again in 19.94s. No shared deployment or admission opening by VT00.
+
+Hosted backend run 35622117255 ended cancelled, not passed. Its log archive
+returned BlobNotFound. Architecture CI remains failed against main. Local pinned
+Sentrux could start with existing bundled OpenSSL but crashed at scan (exit139),
+so no actual-base result exists. Temporary measurement worktrees were removed.
+The next action is a coordinated review/window for the integrated candidate,
+then exact pin qualification and the one plugin demonstration.
