@@ -235,7 +235,7 @@ def _get_langgraph_base_url() -> str:
 
 
 @contextlib.asynccontextmanager
-async def _langgraph_client(owner_id: str, *, timeout: float = LANGGRAPH_THREAD_CREATE_TIMEOUT_SECONDS):
+async def _langgraph_client(owner_id: str, *, timeout: float = LANGGRAPH_THREAD_CREATE_TIMEOUT_SECONDS, thread_authority=None):
     """An httpx client that SIGNS every LangGraph request for this owner.
 
     These routes were the last direct `httpx` callers of LangGraph left
@@ -252,8 +252,12 @@ async def _langgraph_client(owner_id: str, *, timeout: float = LANGGRAPH_THREAD_
     """
     from deerflow.sophia.langgraph_client_auth import OwnerScopedAuth, langgraph_owner_scope
 
+    if thread_authority is not None and owner_id != (os.getenv("SOPHIA_VOICE_LAB_TEST_PRINCIPAL") or "").strip():
+        from deerflow.sophia.langgraph_service_auth import LangGraphServiceAuthError
+        raise LangGraphServiceAuthError()
+
     with langgraph_owner_scope(owner_id):
-        async with httpx.AsyncClient(timeout=timeout, auth=OwnerScopedAuth()) as client:
+        async with httpx.AsyncClient(timeout=timeout, auth=thread_authority or OwnerScopedAuth()) as client:
             yield client
 
 
@@ -263,8 +267,20 @@ async def _create_langgraph_thread(
     *,
     thread_id: str | None = None,
 ) -> str:
+    thread_metadata = {"graph_id": SOPHIA_COMPANION_GRAPH_ID, **(metadata or {})}
+    thread_authority = None
+    if owner_id == (os.getenv("SOPHIA_VOICE_LAB_TEST_PRINCIPAL") or "").strip():
+        from deerflow.sophia.cleanup_fence import inspect_cleanup_admission
+        from deerflow.sophia.langgraph_voice_lab_auth import VoiceLabThreadAuth
+
+        admission = inspect_cleanup_admission(
+            admission_id=str(thread_metadata.get("cleanup_admission_id") or ""),
+            cleanup_obligation_id=str(thread_metadata.get("cleanup_obligation_id") or ""),
+            resource_kind="session", resource_id=str(thread_id or ""),
+        )
+        thread_authority = VoiceLabThreadAuth(admission, purpose="session_create", metadata=thread_metadata)
     try:
-        async with _langgraph_client(owner_id) as client:
+        async with _langgraph_client(owner_id, thread_authority=thread_authority) as client:
             response = await client.post(
                 f"{_get_langgraph_base_url()}/threads",
                 # Voice sessions can launch builders before the companion graph
@@ -272,10 +288,7 @@ async def _create_langgraph_thread(
                 # builder state can always be checkpointed on this thread.
                 json={
                     **({"thread_id": thread_id} if thread_id is not None else {}),
-                    "metadata": {
-                        "graph_id": SOPHIA_COMPANION_GRAPH_ID,
-                        **(metadata or {}),
-                    },
+                    "metadata": thread_metadata,
                 },
             )
             response.raise_for_status()
@@ -312,12 +325,18 @@ async def _create_langgraph_thread(
     return payload["thread_id"]
 
 
-async def _delete_langgraph_thread_authoritatively(owner_id: str, thread_id: str) -> bool:
+async def _delete_langgraph_thread_authoritatively(owner_id: str, thread_id: str, *, admission=None) -> bool:
     """Delete/read-zero a synthetic pre-persistence thread after admission loss."""
 
     base_url = _get_langgraph_base_url()
+    authority = None
+    if admission is not None:
+        from deerflow.sophia.langgraph_voice_lab_auth import VoiceLabThreadAuth
+        if admission.resource_id != thread_id or owner_id != (os.getenv("SOPHIA_VOICE_LAB_TEST_PRINCIPAL") or "").strip():
+            return False
+        authority = VoiceLabThreadAuth(admission, purpose="discard")
     try:
-        async with _langgraph_client(owner_id) as client:
+        async with _langgraph_client(owner_id, thread_authority=authority) as client:
             before = await client.get(f"{base_url}/threads/{thread_id}")
             if before.status_code == 200:
                 try:
@@ -332,20 +351,21 @@ async def _delete_langgraph_thread_authoritatively(owner_id: str, thread_id: str
                 return False
             observed = await client.get(f"{base_url}/threads/{thread_id}")
             return observed.status_code == 404
-    except (httpx.HTTPError, RuntimeError):
+    except (httpx.HTTPError, RuntimeError, ValueError):
         return False
 
 
 async def _delete_langgraph_threads_authoritatively(
     owner_id: str,
     thread_ids: set[str],
+    *, admission=None,
 ) -> bool:
     """Read-zero every plausible allocation identity before releasing admission."""
 
     results = []
     for thread_id in sorted(thread_ids):
         if thread_id:
-            results.append(await _delete_langgraph_thread_authoritatively(owner_id, thread_id))
+            results.append(await _delete_langgraph_thread_authoritatively(owner_id, thread_id, admission=admission))
     return bool(results) and all(results)
 
 
@@ -354,6 +374,7 @@ async def _fence_langgraph_thread_cleanup_admission(
     *,
     cleanup_obligation_id_hmac: str,
     retention_expires_at: datetime,
+    admission=None,
 ) -> bool:
     """Replace an overdue in-flight thread create with a durable opaque fence."""
 
@@ -371,19 +392,12 @@ async def _fence_langgraph_thread_cleanup_admission(
         "resource_kind": "session_thread",
     }
     base_url = _get_langgraph_base_url()
-    # KNOWN UNMIGRATED, deliberately. This is the only direct LangGraph caller
-    # left unsigned, and it cannot use the same fix as the four above:
-    #   * its callers are Voice Lab recovery paths, whose owner is the Voice Lab
-    #     test principal -- and `_scope` refuses that principal outright;
-    #   * the `maintenance` service lane covers thread delete but deliberately
-    #     excludes `POST /threads`, which this function must perform.
-    # So it needs a decision about which identity may re-create a fenced thread,
-    # not a mechanical migration. It will fail with 401 while receiving
-    # authentication is installed. Acceptable for now only because Voice Lab is
-    # disabled with its kill switch engaged in production; it is recorded as
-    # outstanding rather than silently left.
+    from deerflow.sophia.langgraph_voice_lab_auth import VoiceLabThreadAuth
+    if admission is None or admission.resource_id != thread_id or admission.resource_expires_at != retention_expires_at:
+        return False
+    authority = VoiceLabThreadAuth(admission, purpose="fence", metadata=expected_metadata, fence_hmac=cleanup_obligation_id_hmac)
     try:
-        async with httpx.AsyncClient(timeout=LANGGRAPH_THREAD_CREATE_TIMEOUT_SECONDS) as client:
+        async with httpx.AsyncClient(timeout=LANGGRAPH_THREAD_CREATE_TIMEOUT_SECONDS, auth=authority) as client:
             for _attempt in range(3):
                 deleted = await client.delete(f"{base_url}/threads/{thread_id}")
                 if deleted.status_code not in {200, 202, 204, 404}:
@@ -409,7 +423,7 @@ async def _fence_langgraph_thread_cleanup_admission(
                 if metadata == expected_metadata:
                     return True
             return False
-    except (httpx.HTTPError, RuntimeError):
+    except (httpx.HTTPError, RuntimeError, ValueError):
         return False
 
 
@@ -714,7 +728,7 @@ async def start_session(
                 cleanup_admission,
             )
             if not authorized:
-                admission_releasable = await _delete_langgraph_thread_authoritatively(user_id, thread_id)
+                admission_releasable = await _delete_langgraph_thread_authoritatively(user_id, thread_id, admission=cleanup_admission)
                 raise HTTPException(
                     status_code=409,
                     detail={"code": "voice_lab_cleanup_obligation_closed"},
@@ -755,7 +769,7 @@ async def start_session(
         admission_releasable = True
     except BaseException:
         if thread_created and allocated_thread_ids and not admission_releasable:
-            admission_releasable = await _delete_langgraph_threads_authoritatively(user_id, allocated_thread_ids)
+            admission_releasable = await _delete_langgraph_threads_authoritatively(user_id, allocated_thread_ids, admission=cleanup_admission)
         raise
     finally:
         if cleanup_admission is not None and admission_releasable:

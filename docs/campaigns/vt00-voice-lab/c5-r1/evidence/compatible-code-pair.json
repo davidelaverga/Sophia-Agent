@@ -1,0 +1,72 @@
+{
+  "observed_at": "2026-09-21T16:57:58.185Z",
+  "code_sha": "406ff0a6f9d64c04bbfd55ae1ea87b5a559cf490",
+  "gateway": {
+    "service_id": "srv-d7be5s9r0fns7397l4g0",
+    "deploy_id": "dep-daom0f5bedkc73aq9f10",
+    "render_status": "Deploy succeeded | Live"
+  },
+  "langgraph": {
+    "service_id": "srv-d7be5s9r0fns7397l4fg",
+    "deploy_id": "dep-daom262d0e5s73fgogug",
+    "render_status": "Deploy succeeded | Live"
+  },
+  "plugin_build_observations": {
+    "frontend": {
+      "ready": false,
+      "identity_status": "deployment_mismatch",
+      "config_status": "ready",
+      "expected": "35c6467c36b9ae052ec3dd943cf7c9f0ac28d589",
+      "observed": "a5982c6e57efde05311a6add245e0258693f1471",
+      "version_http_status": 200,
+      "readiness_http_status": null
+    },
+    "backend": {
+      "ready": false,
+      "identity_status": "deployment_mismatch",
+      "config_status": "ready",
+      "expected": "0c215c1ba0a2218ef224f65601092d5845bb07cf",
+      "observed": "406ff0a6f9d64c04bbfd55ae1ea87b5a559cf490",
+      "version_http_status": 200,
+      "readiness_http_status": 200,
+      "product_mutation_gate": {
+        "valid": true,
+        "health_ready": true,
+        "open": false,
+        "voice_lab_enabled": false,
+        "voice_lab_kill_switch_engaged": true,
+        "voice_lab_protected_plane_ready": true,
+        "voice_lab_admission_ready": true,
+        "voice_lab_mutation_ready": false
+      }
+    },
+    "voice": {
+      "ready": true,
+      "identity_status": "verified",
+      "config_status": "ready",
+      "expected": "35c6467c36b9ae052ec3dd943cf7c9f0ac28d589",
+      "observed": "35c6467c36b9ae052ec3dd943cf7c9f0ac28d589",
+      "version_http_status": 200,
+      "readiness_http_status": 200,
+      "product_mutation_gate": {
+        "valid": true,
+        "health_ready": true,
+        "open": false,
+        "voice_lab_enabled": false,
+        "voice_lab_kill_switch_engaged": true,
+        "voice_lab_mutation_ready": false
+      }
+    },
+    "langgraph": {
+      "ready": false,
+      "identity_status": "deployment_mismatch",
+      "config_status": "ready",
+      "expected": "35c6467c36b9ae052ec3dd943cf7c9f0ac28d589",
+      "observed": "406ff0a6f9d64c04bbfd55ae1ea87b5a559cf490",
+      "version_http_status": 200,
+      "readiness_http_status": 200
+    }
+  },
+  "lab_kill_switch": "engaged",
+  "live_run_started": false
+}

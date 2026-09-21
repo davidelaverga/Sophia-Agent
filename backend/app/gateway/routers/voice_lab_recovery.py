@@ -1884,6 +1884,7 @@ def _reconcile_database_cleanup_admissions(work: Any) -> bool:
                     work.cleanup_obligation_id
                 ),
                 retention_expires_at=admission.resource_expires_at,
+                admission=admission,
             )
         )
         if not fenced:
@@ -3154,6 +3155,7 @@ async def _reconcile_overdue_cleanup_admissions(
                     claims.cleanup_obligation_id
                 ),
                 retention_expires_at=admission.resource_expires_at,
+                admission=admission,
             )
             if not fenced:
                 return _component(
@@ -3172,6 +3174,7 @@ async def _reconcile_overdue_cleanup_admissions(
                     claims.cleanup_obligation_id
                 ),
                 retention_expires_at=admission.resource_expires_at,
+                admission=admission,
             )
             if not fenced:
                 return _component(

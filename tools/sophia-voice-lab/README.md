@@ -376,3 +376,14 @@ discharge: quarantine, original statuses and `historicalCleanupProven:false`
 remain. The inventory reports `operator_accepted_unverified_history` separately.
 Future quarantine identities and ordinary new-run cleanup constraints are not
 exempted. Without this explicit option, the original blocking behavior remains.
+
+## VT00-C5 continuation qualification
+
+The current continuation targets `VOICE_LAB_INTERNAL_USE_READY`: one installed,
+authenticated plugin run with two adaptive audio turns, real playback evidence,
+supported end, durable export and verified present-run settlement. Full VT00
+promotion and advanced scenarios remain separate. See
+[the C5-R1 checkpoint](../../docs/campaigns/vt00-voice-lab/c5-r1/current-state.md) for the current qualification
+and access status. The new Gateway/receiving-auth session repair requires a
+compatible pair; local tests alone do not authorize opening admission or establish
+readiness. Preserve per-component pins and the existing closed/suspended posture.
