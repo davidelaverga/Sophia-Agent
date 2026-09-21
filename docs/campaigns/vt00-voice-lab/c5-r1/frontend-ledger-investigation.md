@@ -1,7 +1,55 @@
 # C5-R1 frontend signed-readiness investigation — 2026-09-21
 
-Status: blocker narrowed, exact failing ledger predicate not yet identified. No
+Status: concrete deployed-schema/frontend compatibility mismatch identified. No
 journey or resource-settlement verdict follows from these checks.
+
+## Confirmed sufficient cause: three newer MEM00 companions
+
+Corrected catalog query 09 returns eight non-internal triggers. The existing
+`withoutAttestedMem00Trigger` accepts/removes only
+`sophia_mem00_ordinary_session_delete_order`. Seven rows remain, while
+`EXPECTED_PRODUCT_CLEANUP_TRIGGERS.size` is four. The exact check at
+session-ledger.ts:2171 therefore throws ledgerNotReady. The three additional
+MEM00 triggers are all on sophia_session_messages:
+
+| Trigger | Function source SHA256 |
+| --- | --- |
+| sophia_memory_source_acceptance_epoch | b17c97cb0ff43cc2886c91167f3892e55dbf81d901749b7489eb8b20dff88f78 |
+| sophia_memory_source_version | 3698f8af3e80860903d7600709eae539ac38a955ac54f1e396856f938dbe38a1 |
+| zz_mem00_source_intake_version | 5234c90212fde254bdf0876ea11891857c6d9a4612f14b7193c5af348f2ba095 |
+
+These live hashes independently match the function bodies in the repository's
+2026_09_09_mem00_c1_transactional_clear.sql, dependency_authority.sql, and
+source_intake.sql migrations respectively. Live metadata: enabled O, invoker
+(prosecdef=false), volatile v, plpgsql, public function identity, owner postgres
+matching the control table, search_path=pg_catalog, public; existing function
+authority predicate true. Their BEFORE INSERT OR UPDATE definitions match the
+named migration triggers. These are legitimate memory-governance companions;
+they must not be removed or disabled to satisfy the Voice Lab validator.
+
+Repair requested from Claude Code: extend the shared runtime/operator companion
+validator with exact contracts for these three functions/triggers, preserving
+all four mandatory Voice Lab fences and rejection of unknown, duplicate, or
+drifted companions. No blanket exclusion or schema/permission change. Focused
+regressions and compatible PostgreSQL verification precede any frontend deploy.
+
+### Diagnostic qualification
+
+All 41 extracted catalog queries executed without SQL errors using read-only
+transactions. The initial generated harness contained two bind bugs: query08
+used table names instead of index names; query09 omitted the session table.
+Both initial results were invalidated. Only those two queries were rerun with
+bindings checked against source. Query08 returned both expected cleanup indexes;
+query09 returned the eight triggers described above. Claude audited the other
+39 bindings and removed its resolver's fallback. The generic boolean metadata
+scan found no ownership, role, ACL, RLS, or validity-flag mismatch; it is not a
+replacement for the full runtime acceptance predicate.
+
+Raw catalog metadata was temporarily captured at
+`/tmp/vt00-c5-ledger-catalog.json` in the existing Gateway service instance for
+read-only comparison. No credential values or application record contents were
+queried. This database evidence proves a sufficient contract mismatch; it does
+not establish that it is the sole possible frontend configuration failure.
 
 ## Decisive observation
 
@@ -75,6 +123,26 @@ admission-store observation and is not resource-settlement proof.
 Existing IAB Vercel access redirects to login. User sign-in was requested for
 read-only frontend configuration inspection; no credentials were requested in
 chat. Claude is preparing the narrower read-only diagnostic.
+
+### After user sign-in
+
+Vercel project `sophia-30911edf/sophia-agent-front` displays www.sophia-ei.com and
+Production deployment `3EfesqH5ZgqxnhpZB9HRnwwAMVgH` at a5982c6e. Project
+environment metadata directly shows both
+`SOPHIA_VOICE_LAB_AUTH_TOMBSTONE_KEYS` and
+`SOPHIA_VOICE_LAB_AUTH_TOMBSTONE_ACTIVE_KID` as Secret variables scoped to
+Production, added August 25. `BETTER_AUTH_DATABASE_URL` is also a Production
+Secret variable, updated August 26. No values were revealed or edited.
+This rules out absent keyring variable names, not malformed/empty secret values
+or active-kid mismatch in the deployed runtime. Claude received these findings.
+
+A further read-only Gateway auth connection with frontend-style startup
+search_path options returned `pg_catalog,public,pg_temp`, replication role
+`origin`, synchronous_commit `on`, and in_recovery false. The diagnostic also
+forced transaction_read_only=on for safety, so that setting cannot be compared
+to frontend's required off. This tests the existing Gateway auth route only;
+Vercel's hidden database URL has not been equated to that route. A backend's
+inet_server_port would not independently establish the client's pooler route.
 
 ## Remaining discriminators
 
