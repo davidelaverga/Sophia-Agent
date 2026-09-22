@@ -1,71 +1,54 @@
 # MEM00-C3 — current checkpoint
 
-Updated: 2026-09-22, Codex takeover from Claude.
-Target: **MEMORY_TEXT_PILOT_READY — NOT ACHIEVED**.
-Owner: Codex, by Davide's direct takeover request. Claude confirmed idle at 07:22:10Z and returned deployment ownership. Davide subsequently authorized bounded delegation; Claude completed a local-only investigation in a separate worktree (4dc06455), with no live runs or deployment authority. His result concerns a separate clear/new-session edge case, not the proven timestamp failure. The frontend deployment window completed; a narrow LangGraph warm-recovery repair is being qualified under the same owner.
-Branch: `codex/mem00-c3-closure`, integration `d7f4c93437c638d58bb96f7e0f7341257a0279a8`, frontend repair `ef12097b876869b8d3dae13e70c287371847866a`, pushed. Draft PR: https://github.com/davidelaverga/Sophia-Agent/pull/150 (stacks on current VT00 branch).
+Updated 2026-09-22. **MEMORY_TEXT_PILOT_READY** for Davide's bounded ordinary text-memory pilot. Code and hosted acceptance complete; no claim of full certification, independent PR approval, or historical global cleanup.
 
-## Scope and authorization
+Codex owns and has completed the shared deployment window. Claude's local-only delegation is finished; no overlapping deployment. Worktree: `/Users/davidelaverga/Documents/Codex/2026-08-19/pl/work/Sophia-Agent-mem00-closure`, branch `codex/mem00-c3-closure`. Product commit63d9810ebd567c8a6d79a8b789a838385bd12a68, frontend fixef12097b876869b8d3dae13e70c287371847866a. Draft PR [#150](https://github.com/davidelaverga/Sophia-Agent/pull/150) remains unmerged; independent review is not fabricated. Other worktrees/WIP preserved.
 
-Continue the adopted MEM00-C3 mission, preserving canonical-ledger authority, receiving authentication and exact-owner isolation. Frontend Production deployment C3-0018 completed after renewed explicit user approval. One bounded ordinary text diagnostic has now been submitted in session `19acce9c-c2d3-4e9e-b53b-5f2387d3d42c`, thread `01a0c810-8fa8-7ee3-895e-7cd9b59a64eb`; it reproduced the post-model failure. Its actual cost remains unquantified; LangSmith exact-run lookup returned 404 and the bounded configured-project query returned no LLM rows. These are not zero-cost proof. Claude reports a $25 cumulative acceptance ceiling but no spend tally. Davide explicitly approved up to $5 NEW variable spend on 2026-09-22. Track this separately from the unquantified earlier $25; no recurring spend. Existing platform denials remain applicable; switching controllers does not bypass them. No recurring spend authorized.
+## Compatible deployed tuple
 
-## Versions and connections
+| Component | Exact deployed revision / record |
+|---|---|
+| Frontend | b103c4afb8da032c2f4169d7a40e89be96a2433b; Production dpl_vj3NWuHsv4uf1iT5HjDJWsfLCGj8, ready09:40:46Z; current domain and served assets verified |
+| Gateway | 406ff0a6f9d64c04bbfd55ae1ea87b5a559cf490; srv-d7be5s9r0fns7397l4g0; unchanged |
+| LangGraph | 63d9810ebd567c8a6d79a8b789a838385bd12a68; srv-d7be5s9r0fns7397l4fg; dep-dap559h42hec738uifk0 Live, start10:04:22Z/duration2m32s |
+| Voice | Last verified5538d08b20a4cfed29e85e61abdffd4c22af6ce8; unchanged |
+| Lab MCP / worker | Last verified2deb762a7a03ca7f260ec2efd670b5993f7dc977; unchanged |
 
-- Gateway: **directly refreshed** `/health` 200, `406ff0a6f9d64c04bbfd55ae1ea87b5a559cf490`, service `srv-d7be5s9r0fns7397l4g0`; authenticated Render shell reads succeeded. Contract `mem00.v1`, epoch 1.
-- LangGraph: **directly refreshed** `/ok` 200. Fresh diagnostic run logs directly verify `406ff0a6` and local_dev API 0.8.1.
-- Frontend: **live verified** b103c4afb8da032c2f4169d7a40e89be96a2433b, Production rebuild dpl_vj3NWuHsv4uf1iT5HjDJWsfLCGj8, ready09:40:46Z. Exact dashboard source and ordinary-app loaded assets agree. Per-deployment Ignore Build Step unchecked; no global settings change.
-- Voice: last verified `5538d08b20a4cfed29e85e61abdffd4c22af6ce8`. Keep this repair; old integrated code cannot restart Voice against receiving auth.
-- Lab worker/MCP: last verified `2deb762a7a03ca7f260ec2efd670b5993f7dc977`. Separate VT00 activation is open but test-auth blocked. MEM00 does not authorize changing those gates. Suspension agreement remains unresolved.
-- Supabase `vlxnwmyvhchwbousrdzc`: scoped read-only application queries succeeded. Mem0 dashboard and Supabase dashboard are signed in. LangSmith EU authenticated reads returned no matching trace; run cost is not verified.
+Receiving authentication and signed callers exercised by a brand-new ordinary session and exact-owner GET /state200. LangGraph API0.8.1 uses AsyncPostgresSaver; local_dev is an API variant, not proof of volatile checkpoints. Only frontend and causally affected LangGraph were deployed. No migrations, auth weakening, key rotation, Blueprint sync, uniform-SHA rollout, new services or recurring spend.
 
-Local integration preserves `cdb6cebf`, Claude's undeployed `f0ef5f53` trigger compatibility repair, and Voice `5538d08b`. No uniform-SHA deployment is required. Original worktrees and uncommitted activation receipts are untouched.
+## Account, readiness and posture
 
-## Verified current owner/profile and obligations
+Verified owner and sole cohort member: CUyZxRFmDNONbR0eKqkJjTrJ2z8nkDKd (Davide). Actual new UI sources and final model permits carry this owner. Contract mem00.v1/epoch1. Candidate write/read, canonical Pool, provider projection and governed text recall enabled. Legacy inventory/import false. Existing fault feature true; fault settings previously verified empty, no fault enabled by this mission. Existing authenticated dashboards/runtime credentials exercised; secrets never exported. Native Claude remains unavailable while locked; CLI review is not logged in.
 
-Gateway resolves certification principal and sole cohort member `CUyZxRFmDNONbR0eKqkJjTrJ2z8nkDKd`. Candidate write/read, canonical Pool, provider projection and governed runtime read are true; legacy inventory/import false. Fault feature enabled, but **fault-settings table empty**. The actual ordinary UI run and its accepted source rows carry this exact owner. The /api/auth/me browser probe was blocked by the client; no bypass was attempted.
+Hosted evidence: E1/E2 retained valid historical source/decision receipts; fresh automatic and explicit E3 completed. E4 same-conversation edit admitted only current revision3 and answered Silver Wren; E5 soft-forget advanced governance4/epoch8 and both subsequent model permits had empty manifests, zero retrieved memories and no old markers in rebuilt state. Source timestamps remained stable. E6 all current test sessions ended and current effects settled; E7 same real account exercised these operations and receives c3-handover.md.
 
-Current exact canonical records:
+Final sessiond789b614-5804-48ed-94e1-4b6e56288e8b ended10:17:41.019346Z; extraction3cc59cd9-d3a3-4813-ba75-5c707c2c0d06 succeeded_zero/attempt1. Prior ae44 session ended and its sole incidental candidate rejected. Registered preferencea9352106 is forgotten3/4; all three known provider effects purged with current-run job98fd5923-b91b-47ff-a41c-bf27ea4f3424/provider_rows_absent at10:15:51.913300Z. Active Journal empty; both test records appear on the recoverable Forgotten shelf. Canonical history/transcripts intentionally remain. Unrelated paused a8636ea6 remains resumable/zero messages and untouched. No current acceptance run, mic stream or Builder workload remains.
 
-| Record | State | Content/governance revisions | Binding |
-|---|---|---|---|
-| `14c6a3f8-dab6-4d50-9e58-3956d90642f4` Tin Otter | forgotten | 2 / 3 | both prior revisions purged |
-| `a9352106-8ee7-43aa-8a7b-881f3b613219` synthetic summary preference | active | 1 / 1 | eligible, metadata verified |
-| `07fe7c4d-5c24-4ec3-9f16-5ea946451d17` pre-existing | tombstoned | 2 / 4 | purged; do not mutate |
+## Bounded limitations retained
 
-Tin Otter has a durable `purge_verified / provider_rows_absent` completion at 2026-09-20T21:40:24.934709Z. This is a newly read historical provider receipt, not a new provider inventory query. The summary preference remains an owned cleanup obligation. Preserve other historical uncertain provider operations; these owner-scoped reads do not clear them.
+- Five historical terminal extractions (attempt8/retry_budget_exhausted) remain: dfb38056, c7c5c0a4,3008536f,a14ec967,50cfec91. Exact IDs and next action below. They are terminal historical failed outcomes, not successful extractions. No budgets reset. Final inventory24=8 succeeded_nonzero+6 succeeded_zero+5 superseded+5 failed_terminal, no processing rows.
+- Two separately registered historical uncertain provider operations remain unverified under their original ownership. The empty current-owner pending queue does not settle them. No historical exception is extended to the fresh effects.
+- Journal indexing status says unavailable although current projection/purge receipts are verified; do not interpret that header as provider absence. Model's after-forget explanation speculates about scope/authorization; actual admission remains correctly fenced. Follow-up wording/observability work is documented.
+- Separate VT00 activation/suspension posture remains unresolved, last reported open/test-auth blocked; the new frontend/LangGraph tuple may invalidate its expected pins. No Voice/Lab run, enablement or suspension change was made under MEM00. This is not VOICE_LAB_INTERNAL_USE_READY or PROMOTE VT00.
+- LangSmith coverage degraded (bounded reads found no matching trace); canonical/final-permit/checkpoint/model outputs provide primary proof. Exact invoice costs unavailable. New-work conservative estimate < $2.30 against approved $5, including $2 reserves; no new paid retries needed.
+- Startup YAML scanner and Deck-quality reporting403 are outside this passing memory path; not silently fixed. Unaffected source-only Builder evidence and negative Builder isolation tests reused; no artifact matrix.
 
-`ebd83dbc-2e26-4d1b-a345-9b716c6ac0b2` is now ended (2026-09-21T15:53:07.708640Z), extraction succeeded_zero. `f1a7f011-b57e-4b86-841d-ef2cacc95663` is ended with succeeded_nonzero. Do not repeatedly close them from stale instructions.
+## Checks and next use
 
-Session `9531d9e2-9612-47f0-9859-451db04acf39` is now durably ended at 2026-09-22T07:42:00.198906+00:00 after ordinary Start fresh. Its previous failed_terminal extraction obligation remains. Its thread `01a0c4ab-d608-7480-972c-0b6ac91a8564` returns **404** to an exact-owner authenticated GET /state; no checkpoint recovered. This does not independently prove physical deletion.
+Frontend2423 passed/10 skipped, TypeScript passed. Backend focused recovery/provenance/dispatch201 passed, including12 causal edit/forget and refusal cases; Ruff clean. Exact product-head GitHub Memory Highlights E2E passed (run35713828515); Architecture and Unit Tests were skipped on the draft. Full independent review not claimed. Draft status does not undo verified exact-source deployment.
 
-Latest owner extraction inventory: 22 rows, 7 succeeded_nonzero, 5 succeeded_zero, 5 superseded, **5 failed_terminal**, zero queued/leased/retry_wait. This does not certify physical provider settlement. All five terminal failures have attempt_count 8 and retry_budget_exhausted:
+Normal use starts at [Sophia](https://www.sophia-ei.com): text session → End → review each candidate → Journal → later recall; edit/forget apply to next model admission. See c3-handover.md for disable/recovery. Release work stops here; normal use provides follow-up reliability evidence. No scheduled work created.
 
-- `dfb38056-0278-4c76-be67-1e9471c26555` / session `707ac996-1a0d-45be-b9b1-488ce6c3a838`
-- `c7c5c0a4-5867-4fc8-b060-b770b1e13c74` / `5d6c4f9c-a48f-4fde-bf1c-65f4fc9dc148`
-- `3008536f-97d6-42fc-8a82-85dc280eb7a9` / `534d30bf-c6d4-4bb7-837d-9a254b6dd9a3`
-- `a14ec967-2db1-4428-a039-d3a7e2360e92` / `dc8aa777-9fa5-4500-aab6-bd10dbc9c32b`
-- **newly reconciled:** `50cfec91-bc28-4b55-8ebb-7ed130f76ebd` / previous session above.
+Evidence index: c3-first-use-proof.md, c3-hosted-acceptance-2026-09-22.md, c3-hosted-diagnostic-2026-09-22.md, c3-actions.jsonl, c3-handover.md, c3-defects.md.
 
-No retries were reset or manufactured. `source_target.py` reuses matching current input even for failed_terminal runs, so calling enqueue again is not proof of a fresh retry. Reconcile through supported exact-source machinery; preserve original receipts and budgets.
+## Preserved historical terminal extraction targets
 
-## Defects and acceptance
+| Extraction | Session |
+|---|---|
+| dfb38056-0278-4c76-be67-1e9471c26555 | 707ac996-1a0d-45be-b9b1-488ce6c3a838 |
+| c7c5c0a4-5867-4fc8-b060-b770b1e13c74 | 5d6c4f9c-a48f-4fde-bf1c-65f4fc9dc148 |
+| 3008536f-97d6-42fc-8a82-85dc280eb7a9 | 534d30bf-c6d4-4bb7-837d-9a254b6dd9a3 |
+| a14ec967-2db1-4428-a039-d3a7e2360e92 | dc8aa777-9fa5-4500-aab6-bd10dbc9c32b |
+| 50cfec91-bc28-4b55-8ebb-7ed130f76ebd | 9531d9e2-9612-47f0-9859-451db04acf39 |
 
-D1 source cause is proven and fixed locally at ef12097b: stream persistence rewrote the accepted user message timestamp, rotating its source_version during model execution. The exact receipt/row comparison and causal regression are in c3-hosted-diagnostic-2026-09-22.md. Deployed; automatic and explicit retrieval completed with stable accepted source versions. Warm-edit recovery exposed a separate blocker detailed in c3-hosted-acceptance-2026-09-22.md. The backend source-version guard is unchanged.
-
-D2 wrong-run-owner hypothesis is retracted: Claude distinguished correct-owner run logs from default_user GET /state construction. Retain the state-poll load observation separately.
-
-The Tin Otter marker exists in still-active approved summary preference a9352106; retained context names that exact record. Output text alone is not evidence of a forgotten-record leak. The distinct warm-forget admission test remains unproven.
-
-Acceptance: E1/E2 and automatic E3 have historical evidence; explicit-tool E3, actual E4 next admission, E5 warm revocation, E6 complete cleanup/reload, and E7 practical owner handover remain unproven.
-
-## Checks and next action
-
-Frontend: 2423 passed, 10 skipped (238 passed files, 4 skipped); TypeScript passed. The new timestamp regression fails without the fix. Changed-test lint passed; one pre-existing route warning remains. Integrated backend baseline: 120 tests passed through the dedicated Python 3.12 uv environment. PR Memory Highlights E2E succeeded; draft Unit Tests and Architecture workflows skipped. Required independent review and architecture validation are not claimed.
-
-The new diagnostic session 19acce9c-c2d3-4e9e-b53b-5f2387d3d42c was durably ended at 2026-09-22T08:08:17.692276+00:00. Its extraction e29e6af7-81d2-454f-8c34-301b19b06daf progressed from retry_wait (attempt 7) to succeeded_nonzero (attempt 8, two candidates). The old error_code remained on the successful row. Recap loaded after refresh. Both incidental synthetic candidates (73dfe4fc-7c89-4379-b9ea-61bdbef860ef and 52594f43-1cbb-4ae8-9993-d0e6fc9a1523) were rejected through Sophia and rejection verified in the canonical table. Complete reported zero memories saved. No new canonical approval or provider projection was requested. Debug-export click did not yield a located durable file; do not claim portable export.
-
-Read-only Supabase diagnostics: extraction dispatch EXECUTE privilege is present; governance events estimated 150 rows and extraction runs 22. The dashboard reports high CPU. At 08:21Z, 15 PostgREST connections were associated with sophia_memory_authorize_extraction_dispatch, many waiting for tuple/transaction locks. Query ages were near zero; the traffic origin and persistence remain unproven. No connection was killed, no grant/schema changed, and no service restarted. Gateway logs showed bounded dispatch-authority failures; the latest owned run nevertheless completed. Do not infer all historical failures are repaired.
-
-Next: finish the narrow warm-recovery repair and exact LangGraph deployment after current session settlement; then retest edit/forget in an ordinary new text session. Read c3-hosted-acceptance-2026-09-22.md for fresh E3 passes, exact E4 failure and tests. The frontend is already deployed; do not repeat the old deployment blocker. The previous Claude classifier refusal was reported; the user explicitly renewed deployment approval and the ordinary current dashboard action succeeded without another denial. Native Claude remains locked and CLI is not authenticated, so no independent review is claimed. Draft PR checks remain as recorded above.
-
-Evidence index: c3-hosted-acceptance-2026-09-22.md, c3-hosted-diagnostic-2026-09-22.md, c3-actions.jsonl (through C3-0018), c3-first-use-proof.md, c3-defects.md. Older statements are historical; readiness remains withheld.
+Recovery follow-up: inspect the exact retained source target and original retry failure; use supported source/reconciliation machinery only if that historical result is needed. Enqueue of the same target reuses its terminal row. Do not alter source revisions, reset attempt counters, fabricate a replay or call a terminal failure settled merely because a lease expired. Prior 15-connection extraction lock observation has not been globally disproved; the new run's first-attempt success is bounded evidence only.
