@@ -19,18 +19,21 @@ from .task_context_retention import TASK_RETENTION_KEY, retain_verified_tasks
 
 RECOVERY_KEY = "memory_chat_recovery_receipt"
 # Only these owned transient channels may be replaced. In particular, Builder
-# tasks, summaries, artifact state and unknown extensions are not discarded.
+# tasks, Builder artifacts and unknown extensions are not discarded.
 # These owned derived fields are reset; ordinary middleware recomputes routing
 # from current runtime configuration and the independently authorized view.
 # The old compaction marker/skill history do not bless memory-derived state.
 # Thread paths are not a license to read files: the entry guard separately
 # requires the native workspace/uploads/outputs surface to be empty.
 RECOMPUTED = {"thread_data": {}, "platform": None, "turn_count": 0, "context_mode": None,
-    "active_tone_band": None, "active_skill": None, "skill_session_data": {}, "was_summarized": False}
-# These two identity/display fields are retained ONLY in the strict neutral
-# forms checked below. An arbitrary title may contain generated memory text or
-# user-authored state; it is not erased or relabeled as a safe routing channel.
-REPLACEABLE = {*RECOMPUTED, "user_id", "title", "messages", "system_prompt_blocks", "injected_memories", "injected_memory_contents",
+    "active_tone_band": None, "active_skill": None, "skill_session_data": {}, "was_summarized": False,
+    "active_ritual": None, "ritual_phase": None, "current_artifact": None, "previous_artifact": None, "title": None}
+# Companion emit_artifact insights, ritual progress and generated titles can
+# contain revoked memory just like assistant messages. Clear their MODEL VIEW
+# after whole-checkpoint/source verification; never hydrate their old text as
+# fresh input. The durable transcript, Journal and historical checkpoints remain
+# untouched. Builder task/result/artifact channels remain outside this allowlist.
+REPLACEABLE = {*RECOMPUTED, "user_id", "messages", "system_prompt_blocks", "injected_memories", "injected_memory_contents",
     "memory_context_proof", "memory_retrieval_proof", CHECKPOINT_PROOF_KEY, RECOVERY_KEY}
 PRESERVABLE = {"async_tasks", TASK_RETENTION_KEY}
 FIELDS = {"id", "message_id", "user_id", "session_id", "thread_id", "sequence", "role", "content", "final", "memory_source_version"}
@@ -55,8 +58,6 @@ def rebuild_plain_chat_sources(*, owner_id, context_id, run_id, previous, curren
     try:
         if "user_id" in previous and previous["user_id"] != owner_id:
             raise ValueError("state_owner_mismatch")
-        if previous.get("title") not in (None, "", "New session"):
-            raise ValueError("nonneutral_title")
         if any(value not in (None, [], {}, False, "") for key, value in previous.items() if key not in REPLACEABLE | PRESERVABLE):
             raise ValueError("task_or_unknown_state")
         proof = previous[CHECKPOINT_PROOF_KEY]
