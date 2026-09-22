@@ -2,6 +2,8 @@
 
 Release blockers repaired and hosted-verified: frontend accepted-source timestamp rewrite (ef12097b, deployedb103c4af) and ordinary companion warm-recovery refusal (63d9810, deployed). The final same-thread edit/forget journey completed with current/empty final manifests and verified provider cleanup. See c3-hosted-acceptance-2026-09-22.md. **MEMORY_TEXT_PILOT_READY** is limited to the bounded ordinary text pilot.
 
+Fresh app rerun (c3-app-e2e-2026-09-22.md) also observed a combined duplicate recap candidate, broad semantic match to the one approved record for a different project query, and an explicitly false explanation that Journal is separate from Sophia memory. Rejected content was not admitted; warm edit/forget and physical cleanup passed. These are recorded, not silently fixed.
+
 Follow-up defects: (1) Journal projection-status observation says unavailable despite verified effects; (2) no-memory response gives speculative authorization/session-scope explanations; (3) older exhausted extraction targets and prior database lock observation need exact-source investigation if historical recovery is required; (4) startup YAML scanner and Deck-quality reporting403 remain outside this passing memory path. Separate Claude clear/new-session edge case is not claimed repaired. No full destructive matrix, provider replacement or client migration is required for first use.
 
 Earlier D1 causal hypotheses and deployment statuses below are historical, not instructions to implement a dangling-tool-call workaround. D2 wrong-owner hypothesis remains retracted.

@@ -2,6 +2,9 @@
 
 Updated 2026-09-22. **MEMORY_TEXT_PILOT_READY** for Davide's bounded ordinary text-memory pilot. Code and hosted acceptance complete; no claim of full certification, independent PR approval, or historical global cleanup.
 
+
+Fresh user-requested app test completed at12:49Z: see **c3-app-e2e-2026-09-22.md**. Newly extracted Cedar Kite approved, Copper Fern and duplicate rejected, new-session automatic/explicit recall succeeded, warm edit/forget independently passed. Both new sessions ended; two new provider effects verified purged. Current active Journal empty; three synthetic records now remain only on Forgotten shelf. Cumulative new-work estimate remains below$3 of the approved$5, including existing reserves; exact invoice unverified. The previous24-row extraction inventory below predates these two successful runs. No live component changed.
+
 Codex owns and has completed the shared deployment window. Claude's local-only delegation is finished; no overlapping deployment. Worktree: `/Users/davidelaverga/Documents/Codex/2026-08-19/pl/work/Sophia-Agent-mem00-closure`, branch `codex/mem00-c3-closure`. Product commit63d9810ebd567c8a6d79a8b789a838385bd12a68, frontend fixef12097b876869b8d3dae13e70c287371847866a. Draft PR [#150](https://github.com/davidelaverga/Sophia-Agent/pull/150) remains unmerged; independent review is not fabricated. Other worktrees/WIP preserved.
 
 ## Compatible deployed tuple
