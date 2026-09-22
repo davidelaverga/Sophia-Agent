@@ -46,6 +46,13 @@ export type D02ProductCleanupAcknowledgement = {
 };
 export interface DriverOperationResult { receipt: Record<string, unknown>; events: Omit<LabEvent, "runId" | "seq" | "at">[]; }
 export interface DriverEndResult { events: Omit<LabEvent, "runId" | "seq" | "at">[]; artifacts: { id: string; kind: string; contentType: string; bytes: Buffer }[]; }
+/** Carry already-drained evidence through a failed end without claiming cleanup. */
+export class DriverEndFailure extends VoiceLabError {
+  constructor(readonly original: unknown, readonly events: DriverEndResult["events"]) {
+    super(original instanceof VoiceLabError ? original.detail : labError("END_DRIVER_FAILED", "The browser end operation failed after evidence collection.", "harness", true));
+  }
+}
+
 export type ActiveProductTarget = Record<string, unknown>;
 
 const CONTROL_ADAPTER_RECEIPT_KEYS = [
@@ -1077,34 +1084,35 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
   async end(run: RunRecord, frontendFinalizeCapability: string, frontendCleanupCapability: string): Promise<DriverEndResult> {
     const session = this.#requireSession(run.id);
     const artifacts: DriverEndResult["artifacts"] = [];
-    {
+    const events: DriverEndResult["events"] = [];
+    try {
       const refreshUrl = new URL(this.config.authRefreshPath, new URL(run.target.frontendUrl).origin).toString();
       const { response: refreshed } = await requestBoundJson(session.context.request, "POST", refreshUrl, 15_000, frontendFinalizeCapability);
       if (!refreshed.ok()) throw new VoiceLabError(labError("FINALIZATION_GRANT_REJECTED", `Frontend finalization grant refresh was rejected with HTTP ${refreshed.status()}.`, "authorization"));
       const frontendOrigin = new URL(run.target.frontendUrl).origin;
       const finalizationResponse = session.page.waitForResponse((response) => isExactFinalizationResponse(response, frontendOrigin), { timeout: 20_000 }).catch(() => null);
+      // Register before the UI click: stop fences its callbacks, but the owned
+      // page still exposes the real authenticated receiving acknowledgement.
+      const providerResponse = session.page.waitForResponse((candidate) => isExactProviderDisconnectResponse(candidate, frontendOrigin), { timeout: 20_000 }).catch(() => null);
       await clickEndSessionThroughExitGuards(session.page);
       const response = await finalizationResponse;
       if (!response || response.status() !== 202 || !isJsonResponse(response)) throw new VoiceLabError(labError("PRODUCT_FINALIZATION_UNCONFIRMED", "The ordinary UI did not produce an exact-origin JSON 202 product finalization receipt.", "product", true, { status: response?.status() ?? null }));
       const responseBody = await response.json().catch(() => null) as Record<string, unknown> | null;
       const evidenceReceipt = responseBody?.evidence_receipt as Record<string, unknown> | undefined;
       if (!hasExactFinalizationEnvelope(run, responseBody, true) || typeof evidenceReceipt?.sha256 !== "string") throw new VoiceLabError(labError("FINALIZATION_ISOLATION_UNCONFIRMED", "Finalization receipt did not prove the bound synthetic run, cleanup obligation, exact retention policy, durable evidence, and exact isolation exclusions.", "product", false));
-      const events: Omit<LabEvent, "runId" | "seq" | "at">[] = [];
-      const closeDeadline = Date.now() + 10_000;
-      let providerClosedEvent: Omit<LabEvent, "runId" | "seq" | "at"> | null = null;
-      while (Date.now() < closeDeadline) {
-        const batch = await this.drain(run.id);
-        events.push(...batch);
-        providerClosedEvent = batch.find((event) => event.kind === "provider.stage" && isValidatedAppBinding(event.payload._app_synthetic_binding, session.expectedBinding) && (event.payload.stage === "closed" || event.payload.stage === "ended")) ?? null;
-        if (providerClosedEvent) break;
-        await waitOnWorkerClock(100);
-      }
-      if (!providerClosedEvent) throw new VoiceLabError(labError("PROVIDER_CLEANUP_UNCONFIRMED", "Product finalization succeeded but provider transport closure was not observed.", "product", true));
+      events.push({ kind: "session.finalized", source: "canonical", payload: redact({ http_status: response.status(), receipt: responseBody }), dedupeKey: `canonical:${run.id}:finalized` });
+      const disconnect = await providerResponse;
+      const acknowledgement = await validateNormalProviderDisconnectResponse(disconnect, frontendOrigin, run);
+      const providerClosedEvent: DriverEndResult["events"][number] = {
+        kind: "provider.disconnect_acknowledged", source: "canonical",
+        payload: { stage: "closed", ...acknowledgement },
+        dedupeKey: `canonical:${run.id}:provider-disconnect`,
+      };
+      events.push(...await this.drain(run.id), providerClosedEvent);
       events.push(this.#providerTransportClosedEvent(run, session, providerClosedEvent));
       const finalDeployment = await this.#verifyDeployment(run);
       events.push({ kind: "deployment.reverified", source: "canonical", payload: finalDeployment.components, dedupeKey: `deployment:${run.id}:final` });
       events.push(await this.#snapshotEvent(session, "finalization"));
-      events.push({ kind: "session.finalized", source: "canonical", payload: redact({ http_status: response.status(), receipt: responseBody }), dedupeKey: `canonical:${run.id}:finalized` });
       if (run.capturePolicy.screenshot) {
         const bytes = await session.page.screenshot({ type: "jpeg", quality: 60, fullPage: false });
         artifacts.push({ id: randomUUID(), kind: "final_screenshot", contentType: "image/jpeg", bytes });
@@ -1123,6 +1131,8 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       }), dedupeKey: `canonical:${run.id}:auth-cleanup` });
       events.push(await this.#closeContextEvent(run.id, session.context, "normal_end"));
       return { events, artifacts };
+    } catch (error) {
+      throw new DriverEndFailure(error, events);
     }
   }
 
@@ -1402,6 +1412,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
         browser_boot_id_sha256: session.ownership.bootIdSha256,
         execution_epoch_sha256: session.ownership.executionEpochSha256,
         provider_stage: String(providerEvent.payload.stage),
+        proof_basis: providerEvent.kind === "provider.disconnect_acknowledged" ? "authenticated_receiving_disconnect_acknowledgement" : "bound_product_transport_event",
         provider_event_sha256: canonicalRequestHash({ kind: providerEvent.kind, payload: redact(providerEvent.payload) }),
         exact_product_binding_validated: true,
         raw_process_and_provider_identifiers_excluded: true,
@@ -1585,6 +1596,46 @@ export function isExactFinalizationResponse(response: Pick<PlaywrightResponse, "
     const url = new URL(response.url());
     return url.origin === frontendOrigin && url.search === "" && url.hash === "" && (url.pathname === "/api/sophia/end-session" || url.pathname === "/api/sessions/end");
   } catch { return false; }
+}
+
+export function isExactProviderDisconnectResponse(response: Pick<PlaywrightResponse, "url" | "request">, frontendOrigin: string): boolean {
+  if (response.request().method() !== "POST") return false;
+  try {
+    const url = new URL(response.url());
+    return url.origin === frontendOrigin && url.pathname === "/api/sophia/voice/gemini/disconnect" && url.search === "" && url.hash === "";
+  } catch { return false; }
+}
+
+/** Passive evidence only: never initiate disconnect or inspect/store credentials. */
+export async function validateNormalProviderDisconnectResponse(
+  response: Pick<PlaywrightResponse, "url" | "request" | "status" | "headers" | "json"> | null,
+  frontendOrigin: string,
+  run: Pick<RunRecord, "id" | "testRunId" | "cleanupObligationId" | "providerSessionId" | "providerEpoch">,
+): Promise<Record<string, unknown>> {
+  const reject = () => new VoiceLabError(labError("PROVIDER_CLEANUP_UNCONFIRMED", "The ordinary UI did not yield an exact authenticated provider disconnect acknowledgement with all owned websocket epochs settled.", "product", true));
+  if (!response || !isExactProviderDisconnectResponse(response, frontendOrigin) || response.status() !== 202 || !isJsonResponse(response)
+    || !run.providerSessionId || !Number.isSafeInteger(run.providerEpoch) || Number(run.providerEpoch) < 1 || Number(run.providerEpoch) > 64) throw reject();
+  try {
+    const request = response.request().postDataJSON() as Record<string, unknown> | null;
+    const body = await response.json() as Record<string, unknown> | null;
+    if (request?.session_id !== run.providerSessionId || body?.ok !== true || body?.closed !== true) throw reject();
+    const epochs = Array.from({ length: Number(run.providerEpoch) }, (_, index) => index + 1);
+    const project = (value: Record<string, unknown>) => ({ browser_provider_close_receipts: value.browser_provider_close_receipts, browser_provider_activation_abort_receipts: value.browser_provider_activation_abort_receipts });
+    const submitted = validateD02ProductCleanupEcho(project(request), run.providerSessionId, epochs);
+    const accepted = validateD02ProductCleanupEcho(project(body), run.providerSessionId, epochs);
+    if (canonicalRequestHash(submitted) !== canonicalRequestHash(accepted)
+      || !accepted.browser_provider_close_receipts.some((receipt) => receipt.provider_connection_epoch === run.providerEpoch)) throw reject();
+    return {
+      schema: "sophia_voice_lab_normal_provider_disconnect_ack_v1",
+      voice_lab_run_id_sha256: sha256(run.id), test_run_id_sha256: sha256(run.testRunId),
+      cleanup_obligation_id_sha256: sha256(run.cleanupObligationId),
+      provider_session_id_sha256: sha256(run.providerSessionId), provider_connection_epochs: epochs,
+      receiving_http_status: 202, receiving_acknowledgement_sha256: canonicalRequestHash(accepted),
+      browser_provider_close_receipt_count: accepted.browser_provider_close_receipts.length,
+      browser_provider_activation_abort_receipt_count: accepted.browser_provider_activation_abort_receipts.length,
+      raw_provider_and_receipt_identifiers_excluded: true,
+    };
+  } catch { throw reject(); }
 }
 
 function isJsonResponse(response: Pick<APIResponse, "headers">): boolean {

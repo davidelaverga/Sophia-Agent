@@ -5,7 +5,7 @@ import { gzip } from "node:zlib";
 import pino, { type Logger } from "pino";
 
 import { assertAudioByteLimit, parseWav, type AudioResolver } from "./audio.js";
-import { hasExactFinalizationEnvelope, type BrowserStartStage, type D02BrowserContextBinding, type D02ProductCleanupAcknowledgement, type DriverStartResult, type VoiceBrowserDriver } from "./browser-driver.js";
+import { DriverEndFailure, hasExactFinalizationEnvelope, type BrowserStartStage, type D02BrowserContextBinding, type D02ProductCleanupAcknowledgement, type DriverStartResult, type VoiceBrowserDriver } from "./browser-driver.js";
 import { BUNDLED_FIXTURE_MANIFEST_SHA256, type VoiceLabConfig } from "./config.js";
 import { D02GatewayContinuityObservationReceiptSchema, D02GatewaySettlementReceiptSchema } from "./d02-gateway.js";
 import { TERMINAL_RUN_STATES, VoiceLabError, initialVerdicts, labError, type EvidenceRef, type LabError, type RunRecord, type RunState, type SuiteRecord, type Verdicts } from "./domain.js";
@@ -943,7 +943,10 @@ export class VoiceLabWorker {
     const cleanupGrant = await this.#mintAndVerify(run, "sophia-voice-lab-frontend", ["session:cleanup"], "session:cleanup");
     if (run.state !== "ending") run = await transitionRun(this.ledger, run, "ending");
     await this.#fenceMutation(claimed, signal);
-    const ended = await this.driver.end(run, finalizeGrant.token, cleanupGrant.token);
+    const ended = await this.driver.end(run, finalizeGrant.token, cleanupGrant.token).catch(async (error: unknown) => {
+      if (error instanceof DriverEndFailure) await this.#persistEvents(run.id, error.events);
+      throw error;
+    });
     await this.#persistEvents(run.id, ended.events);
     run = await this.#freshRun(run.id);
     const recoveredAfterEnd = await this.#recoverRun(run);
@@ -1045,7 +1048,7 @@ export class VoiceLabWorker {
     const browserLeaseReleased = await this.#releaseBrowserLeaseProof(run.id);
     eventPage = await this.#allEvents(run.id);
     const taskCleanup = deriveTaskCleanup(eventPage.events, run);
-    const providerDisconnected = eventPage.events.some((event) => isExactBoundProductEvent(run, event) && event.kind === "provider.stage" && ["closed", "ended"].includes(String(event.payload.stage))) || recoveryComponentComplete(eventPage.events, "voice_provider");
+    const providerDisconnected = executionEpochCleanup.ready || eventPage.events.some((event) => isExactBoundProductEvent(run, event) && event.kind === "provider.stage" && ["closed", "ended"].includes(String(event.payload.stage))) || recoveryComponentComplete(eventPage.events, "voice_provider");
     const authSessionRevoked = eventPage.events.some(authCleanupConfirmed) || recoveryComponentComplete(eventPage.events, "auth_sessions");
     const canonicalFinalized = eventPage.events.some((event) => isCanonicalFinalizationReceipt(run, event));
     const liveCleanupComplete = authoritativeLiveCleanupComplete(eventPage.events, run);
@@ -1967,7 +1970,7 @@ export class VoiceLabWorker {
     const browserLeaseReleased = eventPage.events.some((event) =>
       event.kind === "cleanup.browser_lease_released" && event.payload.cas_deleted === true
       || event.kind === "cleanup.browser_lease_absent" && event.payload.authoritative_ledger_read === true);
-    const providerDisconnected = productEvents.some((event) => event.kind === "provider.stage" && ["closed", "ended"].includes(String(event.payload.stage))) || recoveryComponentComplete(eventPage.events, "voice_provider");
+    const providerDisconnected = executionEpochCleanup.ready || productEvents.some((event) => event.kind === "provider.stage" && ["closed", "ended"].includes(String(event.payload.stage))) || recoveryComponentComplete(eventPage.events, "voice_provider");
     const authSessionRevoked = eventPage.events.some(authCleanupConfirmed) || recoveryComponentComplete(eventPage.events, "auth_sessions");
     const liveCleanupComplete = authoritativeLiveCleanupComplete(eventPage.events, run);
     const assertions = evaluateScenarioAssertions(run, eventPage.events, operations, authAudit);
@@ -3325,7 +3328,7 @@ export function deriveCompletedVerdicts(run: RunRecord, events: import("./domain
   const failedHarness = events.some((event) => event.kind === "audio.input.rejected" || event.kind.includes("cursor_gap") || event.kind === "cleanup.capture_unavailable" || event.kind === "audio.input.interrupted");
   const taskCleanup = deriveTaskCleanup(events, run);
   const finalized = kinds.has("session.finalized");
-  const providerClosed = eligibleEvents.some((event) => event.kind === "provider.stage" && ["closed", "ended"].includes(String(event.payload.stage)));
+  const providerClosed = deriveExecutionEpochCleanupProof(run, events).ready || eligibleEvents.some((event) => event.kind === "provider.stage" && ["closed", "ended"].includes(String(event.payload.stage)));
   const providerObserved = kinds.has("provider.connection_epoch");
   const providerDegraded = eligibleEvents.some((event) => event.kind === "provider.connection_epoch" && (event.payload.receipt as Record<string, unknown> | undefined)?.phase === "degraded");
   const authClean = events.some(authCleanupConfirmed);

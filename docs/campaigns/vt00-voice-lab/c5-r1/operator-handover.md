@@ -1,3 +1,11 @@
+# VT00-C5-R1 operator handover — NOT READY, 2026-09-22
+
+Current authoritative status is `current-state.md` and `first-use-evidence-index.md`; the older record below is retained history. User approved the separate $5 Voice cap and BOTH Lab services' post-cleanup suspension. OAuth is connected; no new provisioning is needed. Product pins are current. One installed-plugin attempt failed basic audio and normal-End evidence, then completed verified recovery and durable export. MCP admission is closed; both Lab services are verified suspended as of16:02Z during repair. Final product-gate closure is still owed. Wake the existing services only for the verified candidate retry.
+
+Next use is not yet qualified. Finish the narrow authenticated End receipt repair, verify its exact compatible deployment, and retry the same C5 audio journey within the remaining authorized cap. No automatic/provider-model upgrade or broader certification. Do not reuse old pinned hashes from the historical instructions. The two adaptive audio turns and playback must pass before declaring VOICE_LAB_INTERNAL_USE_READY.
+
+## Historical record
+
 # VT00-C5-R1 operator handover — validation pending
 
 Latest checkpoint (2026-09-21 17:07 UTC): OAuth is connected and both repaired

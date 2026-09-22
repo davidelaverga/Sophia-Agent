@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import pino from "pino";
 import { expect, it, vi } from "vitest";
 import { AudioResolver } from "../src/audio.js";
-import type { VoiceBrowserDriver } from "../src/browser-driver.js";
+import { DriverEndFailure, type VoiceBrowserDriver } from "../src/browser-driver.js";
 import { VoiceLabError, labError } from "../src/domain.js";
 import { MemoryVoiceLabLedger } from "../src/memory-ledger.js";
 import { CapabilityCodec, sha256 } from "../src/security.js";
@@ -28,7 +28,7 @@ it.each([false, true])("does not cancel abort after terminal operation heartbeat
     start: async () => ({ observedDeployment: run.target.expectedDeployment, events: [] }),
     readiness: async () => ({ ok: true, detail: "fixture", engine: "chromium", version: "fixture" }),
     drain: async () => [],
-    end: async () => { throw new VoiceLabError(labError("PRODUCT_FINALIZATION_UNCONFIRMED", "Synthetic HTTP409", "product", true)); },
+    end: async () => { throw new DriverEndFailure(new VoiceLabError(labError("PRODUCT_FINALIZATION_UNCONFIRMED", "Synthetic HTTP409", "product", true)), [{ kind: "capture.drained_before_end_failure", source: "browser", payload: { observed: true }, dedupeKey: "captured-before-end-failure" }]); },
     abort: async () => { abortEntered(); await abortGate; browserPresent = false; return { events: [], artifacts: [] }; },
     recover: async () => ({ events: [], artifacts: [] }), cancel,
   } as unknown as VoiceBrowserDriver;
@@ -45,6 +45,7 @@ it.each([false, true])("does not cancel abort after terminal operation heartbeat
     work = worker.runOnce();
     await entered;
     expect((await ledger.getOperation(end.id))?.state).toBe("failed");
+    expect((await ledger.listEvents(run.id, 0, 100)).events).toContainEqual(expect.objectContaining({ kind: "capture.drained_before_end_failure", payload: expect.objectContaining({ observed: true }) }));
     // The pre-effect fence legitimately renews once before driver.end.
     operationHeartbeat.mockClear();
     browserHeartbeat.mockClear();
