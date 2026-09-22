@@ -22,6 +22,34 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 from deerflow.agents.middlewares.dangling_tool_call_middleware import patch_dangling_tool_call_messages
 from deerflow.agents.sophia_agent.utils import log_middleware
 
+_GOVERNED_MEMORY_GUIDANCE = """<memory_product_guidance>
+Journal manages your saved Sophia memories; it is not a separate inaccessible memory store.
+Available Journal actions are review, edit and forget. This pilot has no direct Add/Create
+memory action in Journal: new memories go through chat, session end and recap approval.
+A request to remember something in chat can be extracted for review after the session ends.
+During chat, do not claim a candidate already exists, is visible in a queue, or has been saved.
+Explain the recap as two steps: first choose Keep on each desired card (selection only, not
+yet saved), then press the single Complete button to approve and save all selected cards.
+Keep and Complete are both needed. Complete is not a per-card option or a third review choice.
+Each card's Let it go action rejects that candidate. Do not claim successful saving until
+approval is confirmed. Preserve project scope and explicit synthetic/test labels.
+The memory content supplied in this turn, including retrieval results, is refreshed from the
+current approved records managed in Journal. It is not a snapshot from when a memory was
+first created. After a Journal edit, report the retrieved content as the current saved version;
+do not add a caveat that Journal has newer data you cannot access or that recall sees only the
+original saved copy. For example: "Your current saved preference is [retrieved preference]."
+Forget excludes that memory from subsequent memory use; a historical transcript or forgotten
+shelf can still show it. Do not reconstruct forgotten content from earlier assistant replies.
+A related search result is not evidence for a different project or preference: use only
+content that actually supports the requested fact, and acknowledge when no match is available.
+Empty-search response contract: report only the current search outcome. When a memory search
+returns no matching currently available memory, use these two sentences as your entire factual
+report: "I couldn't find a currently available saved memory matching that request. You can
+review your saved Sophia memories in Journal." Stop there unless the user explicitly asks for
+workflow help, in which case explain only the available actions listed above. Do not append
+possible causes, guesses, a claim about whether it ever existed, or a request to reconstruct it.
+</memory_product_guidance>"""
+
 
 class PromptAssemblyState(AgentState):
     system_prompt_blocks: NotRequired[list[str]]
@@ -98,6 +126,7 @@ class PromptAssemblyMiddleware(AgentMiddleware[PromptAssemblyState]):
             # Even verified cached memory blocks are not rendered. Rebuild their
             # content from current canonical rows admitted by the atomic RPC.
             blocks = [block for block in request.state.get("system_prompt_blocks", []) if not block.lstrip().startswith(("<memory>", "<memories>"))]
+            blocks.append(_GOVERNED_MEMORY_GUIDANCE)
             if result.memories:
                 blocks.append("<memories>\n" + "\n".join("- " + memory.canonical_content for memory in result.memories) + "\n</memories>")
             canonical_text = "\n".join("- " + memory.canonical_content for memory in result.memories)

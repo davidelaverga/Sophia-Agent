@@ -432,6 +432,10 @@ services:
         sync: false
       - key: SOPHIA_BACKEND_MODE
         value: deerflow
+      # Same existing signing value as LangGraph/Gateway. Required even by the
+      # DeerFlow readiness probe; never generate an independent Voice value.
+      - key: SOPHIA_BUILDER_EVENTS_HMAC_SECRET
+        sync: false
       - key: SOPHIA_LANGGRAPH_BASE_URL
         sync: false
       - key: SOPHIA_ASSISTANT_ID

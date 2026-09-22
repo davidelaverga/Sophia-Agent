@@ -40,6 +40,17 @@ COPY backend/packages/harness/deerflow/sophia/tools/builder_lifecycle_contract.p
     ./backend/packages/harness/deerflow/sophia/tools/builder_lifecycle_contract.py
 COPY backend/packages/harness/deerflow/sophia/tools/retrieve_memories_contract.py \
     ./backend/packages/harness/deerflow/sophia/tools/retrieve_memories_contract.py
+
+# LangGraph enforces receiving authentication, so every call this service makes
+# must be signed. These are the shared minter and its dependencies, reused
+# rather than reimplemented so the signing domain, TTL and per-path scope rules
+# stay in exactly one place. All three are stdlib-only.
+COPY backend/packages/harness/deerflow/sophia/builder_event_auth.py \
+    ./backend/packages/harness/deerflow/sophia/builder_event_auth.py
+COPY backend/packages/harness/deerflow/sophia/langgraph_service_auth.py \
+    ./backend/packages/harness/deerflow/sophia/langgraph_service_auth.py
+COPY backend/packages/harness/deerflow/sophia/user_id.py \
+    ./backend/packages/harness/deerflow/sophia/user_id.py
 ENV PYTHONPATH="/app/backend/packages/harness:${PYTHONPATH}"
 
 # Voice server uses $PORT from Render

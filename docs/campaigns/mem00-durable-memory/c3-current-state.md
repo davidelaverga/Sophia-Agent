@@ -1,130 +1,74 @@
 # MEM00-C3 — current checkpoint
 
-Updated: 2026-09-21 (after the P1 extraction-loop outage and the `46cd2302` release)
-Mission authorization reference: user chat message adopting `04_LAUNCH_PROMPT.md` / `01_MISSION.md` §3, 2026-09-20. No signature fabricated.
-Work branch: `codex/mem00-c3-first-use` @ `46cd23026838cce6fdae7995df6c566639c33891`
-Current phase: **E — resumable; D1 unresolved, P1 outage closed**
-Terminal status: **IN_PROGRESS — NOT `MEMORY_TEXT_PILOT_READY`**
+## Restore acceptance — 2026-09-22, 15:07Z
 
-Companion artifacts: `c3-first-use-proof.md` (E1–E7 matrix), `c3-defects.md` (D1, D2, retractions), `c3-actions.jsonl` (receipts).
+**RESTORE_END_TO_END_PASS** through the signed-in ordinary app: restored synthetic Amber Finch at current content2/governance4, verified fresh recall, forgot again to2/5, observed empty warm recall at epoch13, verified the newly created provider binding purged, and completed supported end/zero-candidate recap. Session809d8e46 ended15:06:42.902012Z; extraction27db1f7f succeeded_zero/attempt1. Only the pre-existing paused session remains, no processing extraction. No deployment or service change. Full evidence: **c3-restore-e2e-2026-09-22.md**.
 
-## Product result
+## UX repair checkpoint — 2026-09-22, 14:26Z
 
-Phases C and D are complete and verified. E1–E3 pass. E4 is half-proven. E5–E7 are unattempted, blocked by a release-blocking defect. **Do not emit `MEMORY_TEXT_PILOT_READY`.**
+Product fixes are pushed in ready, unmerged PR #150. Current tuple: frontend **b103c4afb8da032c2f4169d7a40e89be96a2433b** / Production **dpl_vj3NWuHsv4uf1iT5HjDJWsfLCGj8**; Gateway **7d0f0fb815a300a4416fb329d4edd8be5feec8f3** / **dep-dap8a38ae00c739e57b0**; LangGraph **def5c454e665628875cbad2ffd39a21a9f72749a** / **dep-dap8uvjtqb8s73fom2bg**, live14:26:41Z, /ok200. Voice and Lab unchanged. This supersedes the tuple and draft-review status in the prior checkpoint below.
 
-## Live components (all directly observed)
+The ordinary app lifecycle produced exactly two scoped candidates, approved only Amber Finch, recalled only approved content, retrieved the edited revision in the same conversation, and excluded it after Forget. Both known provider bindings were verified purged. See **c3-ux-retest-2026-09-22.md** for exact sessions, projections, final manifests, failed intermediate wording probes, and final response.
 
-| Component | Exact ID |
+310 focused backend checks passed; subsequent prompt changes passed61 affected tests and Ruff. Product-head Memory Highlights E2E35739907149 passed. Both automated review findings were fixed and resolved; no independent approval claimed. Architecture35739907040 remains red against unrelated main; full Unit Tests35739907008 still running at this checkpoint. No merge or gate bypass.
+
+Final probef7a641af ended14:33:28.711870Z, extraction728a0a5f succeeded_zero/attempt1. All five current sessions ended; active Journal empty and both current provider bindings purged. Final empty reply was factually correct; optional help exceeded the requested two-sentence concision. **MEMORY_TEXT_PILOT_READY**, with that minor wording residual and non-green full CI. Current evidence: c3-ux-retest-2026-09-22.md.
+
+## Previous checkpoint — retained historical evidence
+
+
+Updated 2026-09-22. **MEMORY_TEXT_PILOT_READY** for Davide's bounded ordinary text-memory pilot. Code and hosted acceptance complete; no claim of full certification, independent PR approval, or historical global cleanup.
+
+
+Fresh user-requested app test completed at12:49Z: see **c3-app-e2e-2026-09-22.md**. Newly extracted Cedar Kite approved, Copper Fern and duplicate rejected, new-session automatic/explicit recall succeeded, warm edit/forget independently passed. Both new sessions ended; two new provider effects verified purged. Current active Journal empty; three synthetic records now remain only on Forgotten shelf. Cumulative new-work estimate remains below$3 of the approved$5, including existing reserves; exact invoice unverified. The previous24-row extraction inventory below predates these two successful runs. No live component changed.
+
+Codex owns and has completed the shared deployment window. Claude's local-only delegation is finished; no overlapping deployment. Worktree: `/Users/davidelaverga/Documents/Codex/2026-08-19/pl/work/Sophia-Agent-mem00-closure`, branch `codex/mem00-c3-closure`. Product commit63d9810ebd567c8a6d79a8b789a838385bd12a68, frontend fixef12097b876869b8d3dae13e70c287371847866a. Draft PR [#150](https://github.com/davidelaverga/Sophia-Agent/pull/150) remains unmerged; independent review is not fabricated. Other worktrees/WIP preserved.
+
+## Compatible deployed tuple
+
+| Component | Exact deployed revision / record |
 |---|---|
-| Frontend | `dpl_99vszUEXAXnZ5LP68EPKWJ3w843t` ← source `a5982c6`, `frontend/` **byte-identical to r8 `3aebc59a`** |
-| Rollback target | `dpl_4TxUxd6Ee27JF8T42jre5f7Xz2W8` (`35c6467`) — Vercel Instant Rollback |
-| Gateway | `commit_sha 46cd23026838cce6fdae7995df6c566639c33891`, `service_id srv-d7be5s9r0fns7397l4g0`, oregon, `/ready` = `ready` |
-| LangGraph | `commit 46cd23026838cce6fdae7995df6c566639c33891` via `dep-daojnn3bc2fs73e9vosg`, `service_id srv-d7be5s9r0fns7397l4fg`, oregon, `/ok` = 200; `api_variant=local_dev`, `langgraph_api_version=0.8.1` |
-| Memory contract | `mem00.v1`, epoch **1** |
-| Voice | `voice_lab_enabled=false`, `kill_switch_engaged=true` — untouched |
-| Supabase | `vlxnwmyvhchwbousrdzc`, healthy, us-west-1 |
-| Mem0 | project `default-project` (Starter), namespace `sophia-memory-v2-2df20d06afbe4c27ab4b2413bcdeafd9` |
-| LangSmith | **EU** `eu.smith.langchain.com`, project `Sophia` (note: a second, empty `"Sophia"` exists — do not confuse) |
-| Governed owner | `CUyZxRFmDNONbR0eKqkJjTrJ2z8nkDKd` — governed, epoch 1 |
+| Frontend | b103c4afb8da032c2f4169d7a40e89be96a2433b; Production dpl_vj3NWuHsv4uf1iT5HjDJWsfLCGj8, ready09:40:46Z; current domain and served assets verified |
+| Gateway | 406ff0a6f9d64c04bbfd55ae1ea87b5a559cf490; srv-d7be5s9r0fns7397l4g0; unchanged |
+| LangGraph | 63d9810ebd567c8a6d79a8b789a838385bd12a68; srv-d7be5s9r0fns7397l4fg; dep-dap559h42hec738uifk0 Live, start10:04:22Z/duration2m32s |
+| Voice | Last verified5538d08b20a4cfed29e85e61abdffd4c22af6ce8; unchanged |
+| Lab MCP / worker | Last verified2deb762a7a03ca7f260ec2efd670b5993f7dc977; unchanged |
 
-### Activation profile as deployed
+Receiving authentication and signed callers exercised by a brand-new ordinary session and exact-owner GET /state200. LangGraph API0.8.1 uses AsyncPostgresSaver; local_dev is an API variant, not proof of volatile checkpoints. Only frontend and causally affected LangGraph were deployed. No migrations, auth weakening, key rotation, Blueprint sync, uniform-SHA rollout, new services or recurring spend.
 
-`SOPHIA_MEMORY_CERTIFICATION_PRINCIPAL` = `SOPHIA_MEMORY_COHORT_PRINCIPALS` = the owner's own account id; `PROVIDER_PROJECTION=true`; `CANDIDATE_LEDGER_WRITE=true`; Voice Lab principal `vt00-e1df2c74-…` (distinct ✅).
+## Account, readiness and posture
 
-**Known deviation, accepted by the owner and recorded here:** the certification principal is the owner's real account rather than an isolated synthetic identity, so the cohort holds one id where the C2 runbook expects two (`<owner>,<cert>`). All five source-derived constraints are still satisfied, so the worker builds with projection. Consequence: acceptance artefacts share an owner with real memories — mitigated by marking every test record with "Tin Otter".
+Verified owner and sole cohort member: CUyZxRFmDNONbR0eKqkJjTrJ2z8nkDKd (Davide). Actual new UI sources and final model permits carry this owner. Contract mem00.v1/epoch1. Candidate write/read, canonical Pool, provider projection and governed text recall enabled. Legacy inventory/import false. Existing fault feature true; fault settings previously verified empty, no fault enabled by this mission. Existing authenticated dashboards/runtime credentials exercised; secrets never exported. Native Claude remains unavailable while locked; CLI review is not logged in.
 
-**Correction to the package:** `01_MISSION.md` §7 requires projection ON; the C2 coordinated runbook says it stays OFF ("a text pilot that began projecting would be a different release"). Live config already had it ON, and E3 cannot be proven without it. Owner decided: **projection stays ON**.
+Hosted evidence: E1/E2 retained valid historical source/decision receipts; fresh automatic and explicit E3 completed. E4 same-conversation edit admitted only current revision3 and answered Silver Wren; E5 soft-forget advanced governance4/epoch8 and both subsequent model permits had empty manifests, zero retrieved memories and no old markers in rebuilt state. Source timestamps remained stable. E6 all current test sessions ended and current effects settled; E7 same real account exercised these operations and receives c3-handover.md.
 
-## Release window 2026-09-21 — P1 outage and the `46cd2302` rollout
+Final sessiond789b614-5804-48ed-94e1-4b6e56288e8b ended10:17:41.019346Z; extraction3cc59cd9-d3a3-4813-ba75-5c707c2c0d06 succeeded_zero/attempt1. Prior ae44 session ended and its sole incidental candidate rejected. Registered preferencea9352106 is forgotten3/4; all three known provider effects purged with current-run job98fd5923-b91b-47ff-a41c-bf27ea4f3424/provider_rows_absent at10:15:51.913300Z. Active Journal empty; both test records appear on the recoverable Forgotten shelf. Canonical history/transcripts intentionally remain. Unrelated paused a8636ea6 remains resumable/zero messages and untouched. No current acceptance run, mic stream or Builder workload remains.
 
-Recorded at the request of Codex VT00-C5-R1, which held off deploying and opened no Voice/Lab surface during this window.
+## Bounded limitations retained
 
-**Live component tuple at window close (all directly observed, 2026-09-21 ~16:20 CEST):**
+- Five historical terminal extractions (attempt8/retry_budget_exhausted) remain: dfb38056, c7c5c0a4,3008536f,a14ec967,50cfec91. Exact IDs and next action below. They are terminal historical failed outcomes, not successful extractions. No budgets reset. Final inventory24=8 succeeded_nonzero+6 succeeded_zero+5 superseded+5 failed_terminal, no processing rows.
+- Two separately registered historical uncertain provider operations remain unverified under their original ownership. The empty current-owner pending queue does not settle them. No historical exception is extended to the fresh effects.
+- Journal indexing status says unavailable although current projection/purge receipts are verified; do not interpret that header as provider absence. Model's after-forget explanation speculates about scope/authorization; actual admission remains correctly fenced. Follow-up wording/observability work is documented.
+- Separate VT00 activation/suspension posture remains unresolved, last reported open/test-auth blocked; the new frontend/LangGraph tuple may invalidate its expected pins. No Voice/Lab run, enablement or suspension change was made under MEM00. This is not VOICE_LAB_INTERNAL_USE_READY or PROMOTE VT00.
+- LangSmith coverage degraded (bounded reads found no matching trace); canonical/final-permit/checkpoint/model outputs provide primary proof. Exact invoice costs unavailable. New-work conservative estimate < $2.30 against approved $5, including $2 reserves; no new paid retries needed.
+- Startup YAML scanner and Deck-quality reporting403 are outside this passing memory path; not silently fixed. Unaffected source-only Builder evidence and negative Builder isolation tests reused; no artifact matrix.
 
-| Component | Exact ID |
+## Checks and next use
+
+Frontend2423 passed/10 skipped, TypeScript passed. Backend focused recovery/provenance/dispatch201 passed, including12 causal edit/forget and refusal cases; Ruff clean. Exact product-head GitHub Memory Highlights E2E passed (run35713828515); Architecture and Unit Tests were skipped on the draft. Full independent review not claimed. Draft status does not undo verified exact-source deployment.
+
+Normal use starts at [Sophia](https://www.sophia-ei.com): text session → End → review each candidate → Journal → later recall; edit/forget apply to next model admission. See c3-handover.md for disable/recovery. Release work stops here; normal use provides follow-up reliability evidence. No scheduled work created.
+
+Evidence index: c3-first-use-proof.md, c3-hosted-acceptance-2026-09-22.md, c3-hosted-diagnostic-2026-09-22.md, c3-actions.jsonl, c3-handover.md, c3-defects.md.
+
+## Preserved historical terminal extraction targets
+
+| Extraction | Session |
 |---|---|
-| Gateway | `46cd23026838cce6fdae7995df6c566639c33891` · `srv-d7be5s9r0fns7397l4g0` · `/ready` = `ready` |
-| LangGraph | `46cd23026838cce6fdae7995df6c566639c33891` · `srv-d7be5s9r0fns7397l4fg` · `dep-daojnn3bc2fs73e9vosg` · `/ok` = 200 |
-| Frontend | `dpl_99vszUEXAXnZ5LP68EPKWJ3w843t` (fra1) — **unchanged this window**, not rebuilt or promoted |
-| Memory contract | `mem00.v1`, epoch 1 |
-| Voice | `voice_lab_enabled=false`, `voice_lab_kill_switch_engaged=true`, `voice_internal_auth_configured=true` — **untouched** |
-| Voice Lab admission | `voice_lab_admission_ready=true`, `voice_lab_mutation_ready=false`, reaper `ready`/running |
-| Supabase | `vlxnwmyvhchwbousrdzc` — healthy, idle, 0 active backends, 0 lock waits |
+| dfb38056-0278-4c76-be67-1e9471c26555 | 707ac996-1a0d-45be-b9b1-488ce6c3a838 |
+| c7c5c0a4-5867-4fc8-b060-b770b1e13c74 | 5d6c4f9c-a48f-4fde-bf1c-65f4fc9dc148 |
+| 3008536f-97d6-42fc-8a82-85dc280eb7a9 | 534d30bf-c6d4-4bb7-837d-9a254b6dd9a3 |
+| a14ec967-2db1-4428-a039-d3a7e2360e92 | dc8aa777-9fa5-4500-aab6-bd10dbc9c32b |
+| 50cfec91-bc28-4b55-8ebb-7ed130f76ebd | 9531d9e2-9612-47f0-9859-451db04acf39 |
 
-Deploy route: **Manual Deploy → "Deploy a specific commit"**, which deploys from any branch. Both services remain wired to Production Branch `codex/sophia-observability-v1`; that setting was **not** changed, and `46cd2302` was **not** merged into it. Gateway was deployed and confirmed `ready` *before* LangGraph, because LangGraph's DQ-2 startup audit POSTs to the Gateway and would fail spuriously against a restarting one.
-
-### P1 outage — 22:08 UTC 2026-09-20 → 12:40 UTC 2026-09-21 (~14.5 h, both backends down)
-
-**Root cause.** Extraction run `942f3f97-550c-49bb-82a2-49bbdfe7d311` was enqueued for session `ebd83dbc-2e26-4d1b-a345-9b716c6ac0b2`, which never left `status='resumable'`. Its source could therefore never be realigned, so `MemoryExtractionService.run_once` took the realignment branch, got `None` from `enqueue_finalized_session`, and **returned `True` anyway**. `MemoryGovernanceWorker._run` reads `True` as work and skips its poll delay entirely, and the branch never reached `fail_extraction`, so the run stayed `leased` and `sophia_memory_claim_extraction` re-leased it every iteration. The eight-attempt budget was never consulted.
-
-**Blast radius.** ~1,344 PostgREST requests/second sustained; 4.57 M Postgres errors in 24 h; 4.9 % success rate; t4g.micro CPU pinned at 95 %; 17 backends convoying on `Lock/tuple`. PostgREST's connection pool saturated, so the Gateway's Voice Lab retention-reaper probe 504'd with `PGRST003` and fail-closed (`gateway_voice_lab_retention_reaper_probe_failed`), and LangGraph's DQ-2 `configured_build_mutation_store(...).probe()` fail-closed (`enabled DQ-2 requires the durable mutation transaction RPCs`). Both services then crash-looped and could not restart.
-
-**Containment (owner executed all SQL; the agent was classifier-denied `[Modify Shared Resources]`).**
-1. Superseded the poisoned run — `safe_terminal_reason='operator_outage_containment_2026_09_21'`. Necessary but not sufficient: it removed the discovery path, not the in-flight convoy.
-2. `REVOKE EXECUTE ON FUNCTION sophia_memory_authorize_extraction_dispatch(text,uuid,uuid,uuid,text,text) FROM service_role` — broke the convoy immediately (18 → 0 active backends). Both services self-healed on their next restart with **no deploy**.
-3. Grant restored after recovery; `has_function_privilege('service_role', …)` = `true` at window close.
-
-**Collateral, owned.** Four legitimate backlog runs (sessions `534d30bf…` ended 2026-08-21 — the previously-recorded stranded session — plus `5d6c4f9c…`, `dc8aa777…`, `707ac996…`) exhausted their retry budget against the revoke and are now `failed_terminal` / `retry_budget_exhausted` at `attempt_count=8`. Transcripts and sessions are intact; only the automatic extraction was lost. **Whether these can be re-enqueued is unresolved** — `sophia_memory_enqueue_extraction` needs an `idempotency_key`, `request_digest` and `input_manifest_ref` that the pipeline derives as HMACs from real source state, and hand-crafting them would fabricate provenance. The two relevant unique indexes are *partial* on `extractor_input_ref` nullability and all four dead rows carry a non-null ref, so a worker-issued re-enqueue is likely permissible; this was not verified and must not be assumed.
-
-**Fix shipped in `46cd2302`.** Record the durable failure when realignment queues nothing, so the existing 5 s→900 s backoff and eight-attempt budget bound the run. Causal regression proven by reverting the source change and observing both new assertions fail. Qualified on Python 3.12: `ruff` clean; 7265 passed, 168 skipped. Two failures in `test_local_sandbox_encoding.py` are **pre-existing and unrelated** — confirmed identical with the change stashed; tracked separately.
-
-**Still open from this incident:** why session `ebd83dbc-…` never reached `ended`. That is upstream of everything above and would poison another run the same way.
-
-## Phase C — how the ignored-build blocker was cleared
-
-The package's route presumed an existing r8 deployment to apply the per-deployment override to. **None existed.** Sequence used: push branch → docs-only commit for a fresh SHA → deployment created and CANCELED by `exit 0` → **Redeploy with "Use project's Ignore Build Step" unchecked** → first real build → fix → **Production-target rebuild**.
-
-- Project setting `exit 0` ("Don't build anything") was **never modified**.
-- Production Branch remains `codex/sophia-observability-v1`. No DNS/protection/auto-deploy change.
-- **"Promote to Production" was deliberately avoided**: 21 `NEXT_PUBLIC_*` values inline at build time, including `NEXT_PUBLIC_SOPHIA_AUTH_BYPASS` and `NEXT_PUBLIC_DEV_BYPASS_AUTH`. Promoting a Preview artefact could have shipped an auth bypass.
-- **The frontend had never once built.** `exit 0` had been masking `database_tls_ca_required`, caused by `BETTER_AUTH_DATABASE_SSL_CA` missing from the Preview scope (owner added it). Not a code regression — the failing route is byte-identical to the commit that builds fine.
-
-**Standing caveat:** production serves a deployment built from `codex/mem00-c3-first-use` while Production Branch is still `codex/sophia-observability-v1`. Auto-deploys remain blocked by `exit 0`, but if that ignore step is ever removed, a push to the production branch would rebuild the old lineage and replace this deployment.
-
-## Open defects
-
-**D1 (release-blocking)** — governed turns fail `confirmCompletion()` at SSE EOF; on tool-call turns the continuation is lost, leaving a dangling tool call that **permanently bricks the thread**. Latent until Phase D activated the governed code path. Full trace, ruled-out causes and candidate fixes in `c3-defects.md`.
-
-**D2 (high)** — `memory.context.entry_denied → unavailable` correlated with LangGraph resolving `user_id=eq.default_user` and `platform=voice` on a text session. Correlation, not proof — no run-path log captured yet.
-
-**Retracted** (do not re-investigate): "Journal UI broken" (it's a correct `visibilityState` guard) and "projection not happening" (Mem0 confirms both memories stored, `Active`).
-
-## Access
-
-Host is the Claude Desktop app; `02_PERMISSION_BOOTSTRAP.md` §3's CLI bootstrap is not executable and the settings seed was never loaded. Platform access is via the built-in browser pane.
-
-Host-enforced denials encountered and **respected, not circumvented**: `[Modify Shared Resources]` (all production SQL writes — owner executed every one), `[Credential Materialization]` (env-var pages), `[Auto-Mode Bypass]` (driving APIs via page JS — that approach was abandoned entirely). Earlier `[Production Deploy]` denials did not recur on 2026-09-21; the agent performed both `46cd2302` deploys directly under the adopted standing scope.
-
-Resolved since 2026-09-20: Python 3.12.14 via `uv` (full backend suite now runnable locally — 7267 collected); git push works over SSH with `id_ed25519_sophia_agent` (note `origin` is HTTPS and has no credentials here, so pushes must target the `git@github.com:` URL explicitly).
-
-Still blocked: PR/CI/merge (no `gh`, no token). `sentrux` MCP fails to connect (`ENOENT: stdio`), so the CLAUDE.md Sentrux baseline/score gate was **not** run for `46cd2302`.
-
-## Cleanup owed
-
-| Item | State |
-|---|---|
-| `14c6a3f8-…`, `a9352106-…` canonical test records | **outstanding** — forget during E6 |
-| Their 2 Mem0 projections | **outstanding** |
-| Session `f1a7f011-…` | **stuck, should be closed** |
-| Owner's 2 real candidates from `f7199e38-…` | **owner's decision — agent must not touch** |
-| 6 pre-existing withheld candidates, 1 pre-existing canonical | untouched, correctly withheld |
-
-## Budget
-
-New variable usage: **~4 build-minutes + a handful of model turns**, well under the US$25 ceiling. No paid provider calls, no new services, no plan change.
-
-## Exact next action
-
-Both backends now run `46cd2302`, which carries the retained-revision fix (`5f4ed1cb`) that LangGraph had never received — E4's edit-then-recall half was previously unprovable in production for that reason. Re-run **E4 (edit → recall current revision)** against the live stack, then continue E5–E7.
-
-Independently, and before any further E-phase runs: determine why session `ebd83dbc-…` never reached `ended`. Until that is understood, another session can strand the same way. `46cd2302` bounds the *consequence* (the run now retires after eight attempts instead of spinning forever); it does not prevent the *cause*.
-
-Still unresolved from 2026-09-20: D1's `confirmCompletion()` failure at SSE EOF, and D2. The earlier "exact next action" — live-tailing `sophia-langgraph` during one governed text turn to read `POST /threads/{id}/runs/stream`, **without typing in the search box** (a search freezes the tail) — remains the right capture for both.
-
-## Superseded assumptions
-
-- `02_PERMISSION_BOOTSTRAP.md` §3's CLI bootstrap does not apply to this host.
-- The per-deployment ignore-step override presumes an existing r8 deployment; none existed.
-- A branch push introducing no new commit SHA does not trigger Vercel.
-- "Promote to Production" is not a safe substitute for a Production-target rebuild when `NEXT_PUBLIC_*` differ per environment.
-- Extraction correctly discards content framed as "not a real preference" — synthetic test facts must be category-shaped and stated plainly, marked by content rather than by disclaimer.
+Recovery follow-up: inspect the exact retained source target and original retry failure; use supported source/reconciliation machinery only if that historical result is needed. Enqueue of the same target reuses its terminal row. Do not alter source revisions, reset attempt counters, fabricate a replay or call a terminal failure settled merely because a lease expired. Prior 15-connection extraction lock observation has not been globally disproved; the new run's first-attempt success is bounded evidence only.

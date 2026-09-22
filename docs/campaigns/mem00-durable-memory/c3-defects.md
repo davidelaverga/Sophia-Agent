@@ -1,3 +1,33 @@
+# UX repair update — 2026-09-22
+
+The combined recap fallback defect is fixed in7d0f0fb8 and the hosted app produced exactly two distinct scoped cards. Governed model guidance now distinguishes Keep selection from the single final Complete commit, Journal review/edit/forget from new-memory creation through chat, and current saved records from conversation snapshots. Earlier wording probes failed and were followed by91979394 anddef5c454; exact outcomes are retained in c3-ux-retest-2026-09-22.md.
+
+Finaldef5c454 hosted empty recall reported only the actual no-match result and real Journal actions, with no invented cause. It still appended optional workflow help beyond the desired two sentences: minor concision follow-up, not a governance/data-path failure.
+
+Two automated PR review findings were repaired in65507755: Voice shared-secret Blueprint declaration and documented local signer import path. No live Voice configuration or secret changed. Journal indexing-status observability, historical exhausted extractions/provider uncertainties, and unrelated architecture-gate debt remain follow-ups. The older observations below are historical evidence, not current deployment instructions.
+
+---
+
+# Closure correction — 2026-09-22
+
+Release blockers repaired and hosted-verified: frontend accepted-source timestamp rewrite (ef12097b, deployedb103c4af) and ordinary companion warm-recovery refusal (63d9810, deployed). The final same-thread edit/forget journey completed with current/empty final manifests and verified provider cleanup. See c3-hosted-acceptance-2026-09-22.md. **MEMORY_TEXT_PILOT_READY** is limited to the bounded ordinary text pilot.
+
+Fresh app rerun (c3-app-e2e-2026-09-22.md) also observed a combined duplicate recap candidate, broad semantic match to the one approved record for a different project query, and an explicitly false explanation that Journal is separate from Sophia memory. Rejected content was not admitted; warm edit/forget and physical cleanup passed. These are recorded, not silently fixed.
+
+Follow-up defects: (1) Journal projection-status observation says unavailable despite verified effects; (2) no-memory response gives speculative authorization/session-scope explanations; (3) older exhausted extraction targets and prior database lock observation need exact-source investigation if historical recovery is required; (4) startup YAML scanner and Deck-quality reporting403 remain outside this passing memory path. Separate Claude clear/new-session edge case is not claimed repaired. No full destructive matrix, provider replacement or client migration is required for first use.
+
+Earlier D1 causal hypotheses and deployment statuses below are historical, not instructions to implement a dangling-tool-call workaround. D2 wrong-owner hypothesis remains retracted.
+
+---
+
+# Current correction — 2026-09-22
+
+The entries below are historical hypotheses, not the current diagnosis. Claude's 2026-09-21 15:58Z capture shows a real background-run MemoryContextUnavailable failure in before_agent. A parsed model result or HTTP 200 never proved complete graph success. The dangling-tool-call explanation and automatic persistence workaround below are unproven and must not be implemented without causal evidence. Installed local langgraph-api 0.8.1 emits relative Content-Location; its absence in production has not been demonstrated.
+
+D2 wrong-owner-on-run is **retracted**: correct owner appeared on the run; default_user appeared on GET /state. The subsequent `13eb09d3` refusal diagnostic awaits a hosted failing-turn receipt. Latest retained test thread now returns owner-scoped 404, so it cannot supply that old state. See c3-current-state.md for current obligations and exact versions.
+
+---
+
 # MEM00-C3 — open defects
 
 Date: 2026-09-20. Frontend `dpl_99vszUEXAXnZ5LP68EPKWJ3w843t` (`a5982c6`, `frontend/` ≡ r8).

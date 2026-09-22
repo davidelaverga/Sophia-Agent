@@ -141,7 +141,7 @@ it.each(['online', 'offline'])('actual submit/profile/outbox/outbound hooks pres
   let pending: Promise<void> | undefined;
   const { result } = renderHook(() => {
     const source = useSessionSourceInputs('owner', session, thread);
-    const outbound = useSessionOutboundSend({ chatStatus: 'ready', sendChatMessage, hasValidBackendSessionId: true,
+    const outbound = useSessionOutboundSend({ setMessageTimestamp: vi.fn(), chatStatus: 'ready', sendChatMessage, hasValidBackendSessionId: true,
       chatRequestBody: { user_id: 'owner', session_id: session, thread_id: thread }, debugEnabled: false,
       markStreamTurnStarted: vi.fn(), showToast: vi.fn() });
     const submit = useSessionSendActions({ input: 'SYNTHETIC COMPOSED', setInput, isTyping: false, isReadOnly: false,

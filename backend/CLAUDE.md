@@ -64,6 +64,16 @@ deer-flow/
 
 ## Important Development Guidelines
 
+MEM00 warm companion recovery treats `current_artifact`/`previous_artifact`
+(the companion insight signal), ritual state and generated title as derived
+model context. After exact checkpoint/source verification, the existing rebuild
+clears these channels and reconstructs only recorded user sources. Historical
+checkpoints, transcript and Journal are unchanged. Builder task/result/artifact
+channels, unknown extensions and native retained files keep their existing
+refusal/retention policy. The compiled regression is
+`tests/test_mem00_companion_warm_recovery.py`; deployed edit/forget evidence is
+separate from local test qualification.
+
 ### VT00-C5 synthetic session thread authority
 
 The Voice Lab session container uses `langgraph_voice_lab_auth`, a short-lived

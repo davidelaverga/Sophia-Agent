@@ -48,6 +48,7 @@ interface UseSessionSendActionsParams {
 }
 
 interface UseSessionOutboundSendParams {
+  setMessageTimestamp: (id: string, createdAt: string) => void;
   chatStatus: 'submitted' | 'streaming' | 'ready' | 'error';
   sendChatMessage: (
     message: { text: string } | { id: string; role: 'user'; parts: Array<{ type: 'text'; text: string }> },
@@ -61,6 +62,7 @@ interface UseSessionOutboundSendParams {
 }
 
 export function useSessionOutboundSend({
+  setMessageTimestamp,
   chatStatus,
   sendChatMessage,
   hasValidBackendSessionId,
@@ -177,6 +179,11 @@ export function useSessionOutboundSend({
       assertScope();
       const sourceReceipt = sourceIntent ? await recordSourceSendIntent(sourceIntent) : undefined;
       assertScope();
+      // Transcript persistence must retain the database timestamp byte-for-byte.
+      // A display-generated time would update the accepted source row and rotate
+      // its version while the model is running, invalidating the intake witness.
+      // Keep microseconds; converting through Date would truncate them.
+      if (sourceReceipt) setMessageTimestamp(sourceReceipt.message_id, sourceReceipt.created_at);
       const requestOptions = {
         body: { ...chatRequestBody },
       };
@@ -216,6 +223,7 @@ export function useSessionOutboundSend({
     hasValidBackendSessionId,
     markStreamTurnStarted,
     sendChatMessage,
+    setMessageTimestamp,
     sendScope,
     sendGeneration,
     syncSessionDescriptor,

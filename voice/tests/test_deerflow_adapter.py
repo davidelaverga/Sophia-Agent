@@ -114,9 +114,9 @@ async def test_warmup_precreates_real_thread_but_streams_on_isolated_warmup_thre
     def handler(request: httpx.Request) -> httpx.Response:
         request_paths.append(request.url.path)
         if request.url.path == "/threads":
-            thread_id = "thread-user" if request_paths.count("/threads") == 1 else "thread-warmup"
+            thread_id = "11111111-1111-4111-8111-111111111111" if request_paths.count("/threads") == 1 else "22222222-2222-4222-8222-222222222222"
             return httpx.Response(200, json={"thread_id": thread_id})
-        if request.url.path == "/threads/thread-warmup/runs/stream":
+        if request.url.path == "/threads/22222222-2222-4222-8222-222222222222/runs/stream":
             run_payloads.append(json.loads(request.content))
             return _sse_response(
                 "event: messages",
@@ -126,7 +126,7 @@ async def test_warmup_precreates_real_thread_but_streams_on_isolated_warmup_thre
                 ]),
                 "data: [DONE]",
             )
-        if request.url.path == "/threads/thread-user/runs/stream":
+        if request.url.path == "/threads/11111111-1111-4111-8111-111111111111/runs/stream":
             run_payloads.append(json.loads(request.content))
             return _sse_response(
                 "event: messages",
@@ -158,8 +158,8 @@ async def test_warmup_precreates_real_thread_but_streams_on_isolated_warmup_thre
     assert request_paths == [
         "/threads",
         "/threads",
-        "/threads/thread-warmup/runs/stream",
-        "/threads/thread-user/runs/stream",
+        "/threads/22222222-2222-4222-8222-222222222222/runs/stream",
+        "/threads/11111111-1111-4111-8111-111111111111/runs/stream",
     ]
     assert [event.kind for event in events] == ["text", "artifact"]
     assert run_payloads[0]["config"]["configurable"] == {
@@ -167,7 +167,7 @@ async def test_warmup_precreates_real_thread_but_streams_on_isolated_warmup_thre
         "platform": "voice",
         "ritual": "prepare",
         "context_mode": "work",
-        "thread_id": "thread-warmup",
+        "thread_id": "22222222-2222-4222-8222-222222222222",
     }
     assert run_payloads[0]["on_disconnect"] == "cancel"
     assert run_payloads[0]["multitask_strategy"] == "rollback"
@@ -176,7 +176,7 @@ async def test_warmup_precreates_real_thread_but_streams_on_isolated_warmup_thre
         "platform": "voice",
         "ritual": "prepare",
         "context_mode": "work",
-        "thread_id": "thread-user",
+        "thread_id": "11111111-1111-4111-8111-111111111111",
     }
     assert run_payloads[1]["on_disconnect"] == "cancel"
     assert run_payloads[1]["multitask_strategy"] == "rollback"
@@ -195,8 +195,8 @@ async def test_stream_events_text_and_artifact_via_content_blocks() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         request_paths.append(request.url.path)
         if request.url.path == "/threads":
-            return httpx.Response(200, json={"thread_id": "thread-123"})
-        if request.url.path == "/threads/thread-123/runs/stream":
+            return httpx.Response(200, json={"thread_id": "33333333-3333-4333-8333-333333333333"})
+        if request.url.path == "/threads/33333333-3333-4333-8333-333333333333/runs/stream":
             run_payloads.append(json.loads(request.content))
             return _sse_response(
                 "event: messages",
@@ -238,7 +238,7 @@ async def test_stream_events_text_and_artifact_via_content_blocks() -> None:
         adapter = DeerFlowBackendAdapter(settings, client=client)
         events = [event async for event in adapter.stream_events(_make_request())]
 
-    assert request_paths == ["/threads", "/threads/thread-123/runs/stream"]
+    assert request_paths == ["/threads", "/threads/33333333-3333-4333-8333-333333333333/runs/stream"]
     assert [event.kind for event in events] == ["text", "text", "artifact"]
     assert [event.text for event in events[:2]] == ["Hello ", "there"]
     assert events[2].artifact == artifact
@@ -253,7 +253,7 @@ async def test_stream_events_text_and_artifact_via_content_blocks() -> None:
                     "platform": "voice",
                     "ritual": "prepare",
                     "context_mode": "work",
-                    "thread_id": "thread-123",
+                    "thread_id": "33333333-3333-4333-8333-333333333333",
                 }
             },
             "stream_mode": ["messages-tuple", "values", "custom"],
@@ -267,8 +267,8 @@ async def test_stream_events_text_and_artifact_via_content_blocks() -> None:
 async def test_stream_events_report_invalid_json_as_backend_contract_error() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/threads":
-            return httpx.Response(200, json={"thread_id": "thread-123"})
-        if request.url.path == "/threads/thread-123/runs/stream":
+            return httpx.Response(200, json={"thread_id": "33333333-3333-4333-8333-333333333333"})
+        if request.url.path == "/threads/33333333-3333-4333-8333-333333333333/runs/stream":
             return _sse_response("data: not-json")
         raise AssertionError(f"Unexpected request path: {request.url.path}")
 
@@ -298,7 +298,7 @@ async def test_stream_events_reuse_explicit_thread_id_without_creating_thread() 
 
     def handler(request: httpx.Request) -> httpx.Response:
         request_paths.append(request.url.path)
-        if request.url.path == "/threads/thread-explicit/runs/stream":
+        if request.url.path == "/threads/44444444-4444-4444-8444-444444444444/runs/stream":
             run_payloads.append(json.loads(request.content))
             return _sse_response(
                 "event: messages",
@@ -328,12 +328,12 @@ async def test_stream_events_reuse_explicit_thread_id_without_creating_thread() 
             async for event in adapter.stream_events(
                 _make_request(
                     session_id="session-123",
-                    thread_id="thread-explicit",
+                    thread_id="44444444-4444-4444-8444-444444444444",
                 )
             )
         ]
 
-    assert request_paths == ["/threads/thread-explicit/runs/stream"]
+    assert request_paths == ["/threads/44444444-4444-4444-8444-444444444444/runs/stream"]
     assert [event.kind for event in events] == ["text"]
     assert events[0].text == "Hello"
     assert run_payloads == [
@@ -347,7 +347,7 @@ async def test_stream_events_reuse_explicit_thread_id_without_creating_thread() 
                     "platform": "voice",
                     "ritual": "prepare",
                     "context_mode": "work",
-                    "thread_id": "thread-explicit",
+                    "thread_id": "44444444-4444-4444-8444-444444444444",
                 }
             },
             "stream_mode": ["messages-tuple", "values", "custom"],
@@ -362,8 +362,8 @@ async def test_stream_events_report_data_level_error() -> None:
     """Data-level error (type=run_error) detected without event: error line."""
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/threads":
-            return httpx.Response(200, json={"thread_id": "thread-123"})
-        if request.url.path == "/threads/thread-123/runs/stream":
+            return httpx.Response(200, json={"thread_id": "33333333-3333-4333-8333-333333333333"})
+        if request.url.path == "/threads/33333333-3333-4333-8333-333333333333/runs/stream":
             return _sse_response(
                 "data: " + json.dumps({"type": "run_error", "data": "boom"})
             )
@@ -392,8 +392,8 @@ async def test_stream_events_sse_error_event() -> None:
     """SSE event: error line with message payload."""
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/threads":
-            return httpx.Response(200, json={"thread_id": "thread-123"})
-        if request.url.path == "/threads/thread-123/runs/stream":
+            return httpx.Response(200, json={"thread_id": "33333333-3333-4333-8333-333333333333"})
+        if request.url.path == "/threads/33333333-3333-4333-8333-333333333333/runs/stream":
             return _sse_response(
                 "event: error",
                 "data: " + json.dumps({"message": "Internal error"}),
@@ -423,8 +423,8 @@ async def test_stream_events_report_malformed_emit_artifact_payloads() -> None:
     """Tool_use start with no input_json_delta results in unparseable artifact."""
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/threads":
-            return httpx.Response(200, json={"thread_id": "thread-123"})
-        if request.url.path == "/threads/thread-123/runs/stream":
+            return httpx.Response(200, json={"thread_id": "33333333-3333-4333-8333-333333333333"})
+        if request.url.path == "/threads/33333333-3333-4333-8333-333333333333/runs/stream":
             return _sse_response(
                 "event: messages",
                 "data: " + json.dumps([
@@ -467,8 +467,8 @@ async def test_stream_events_accept_complete_ai_message_with_string_content() ->
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/threads":
-            return httpx.Response(200, json={"thread_id": "thread-123"})
-        if request.url.path == "/threads/thread-123/runs/stream":
+            return httpx.Response(200, json={"thread_id": "33333333-3333-4333-8333-333333333333"})
+        if request.url.path == "/threads/33333333-3333-4333-8333-333333333333/runs/stream":
             return _sse_response(
                 "event: messages",
                 "data: " + json.dumps([
@@ -513,8 +513,8 @@ async def test_stream_events_artifact_from_tool_calls_array() -> None:
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/threads":
-            return httpx.Response(200, json={"thread_id": "thread-123"})
-        if request.url.path == "/threads/thread-123/runs/stream":
+            return httpx.Response(200, json={"thread_id": "33333333-3333-4333-8333-333333333333"})
+        if request.url.path == "/threads/33333333-3333-4333-8333-333333333333/runs/stream":
             return _sse_response(
                 "event: messages",
                 "data: " + json.dumps([
@@ -563,8 +563,8 @@ async def test_stream_events_ignore_partial_emit_artifact_args() -> None:
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/threads":
-            return httpx.Response(200, json={"thread_id": "thread-123"})
-        if request.url.path == "/threads/thread-123/runs/stream":
+            return httpx.Response(200, json={"thread_id": "33333333-3333-4333-8333-333333333333"})
+        if request.url.path == "/threads/33333333-3333-4333-8333-333333333333/runs/stream":
             return _sse_response(
                 "event: messages",
                 "data: " + json.dumps([
@@ -615,8 +615,8 @@ async def test_stream_events_emit_artifact_only_once() -> None:
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/threads":
-            return httpx.Response(200, json={"thread_id": "thread-123"})
-        if request.url.path == "/threads/thread-123/runs/stream":
+            return httpx.Response(200, json={"thread_id": "33333333-3333-4333-8333-333333333333"})
+        if request.url.path == "/threads/33333333-3333-4333-8333-333333333333/runs/stream":
             return _sse_response(
                 "event: messages",
                 "data: " + json.dumps([
@@ -665,8 +665,8 @@ async def test_stream_events_prefer_final_values_artifact_over_streamed_args() -
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/threads":
-            return httpx.Response(200, json={"thread_id": "thread-123"})
-        if request.url.path == "/threads/thread-123/runs/stream":
+            return httpx.Response(200, json={"thread_id": "33333333-3333-4333-8333-333333333333"})
+        if request.url.path == "/threads/33333333-3333-4333-8333-333333333333/runs/stream":
             return _sse_response(
                 "event: messages",
                 "data: " + json.dumps([
@@ -708,8 +708,8 @@ async def test_stream_events_return_immediately_after_final_values_artifact() ->
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/threads":
-            return httpx.Response(200, json={"thread_id": "thread-123"})
-        if request.url.path == "/threads/thread-123/runs/stream":
+            return httpx.Response(200, json={"thread_id": "33333333-3333-4333-8333-333333333333"})
+        if request.url.path == "/threads/33333333-3333-4333-8333-333333333333/runs/stream":
             return _sse_response(
                 "event: messages",
                 "data: " + json.dumps([
@@ -753,8 +753,8 @@ async def test_stream_events_recover_artifact_from_final_values_after_partial_to
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/threads":
-            return httpx.Response(200, json={"thread_id": "thread-123"})
-        if request.url.path == "/threads/thread-123/runs/stream":
+            return httpx.Response(200, json={"thread_id": "33333333-3333-4333-8333-333333333333"})
+        if request.url.path == "/threads/33333333-3333-4333-8333-333333333333/runs/stream":
             return _sse_response(
                 "event: messages",
                 "data: " + json.dumps([
@@ -807,8 +807,8 @@ async def test_stream_events_forward_builder_task_events() -> None:
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/threads":
-            return httpx.Response(200, json={"thread_id": "thread-123"})
-        if request.url.path == "/threads/thread-123/runs/stream":
+            return httpx.Response(200, json={"thread_id": "33333333-3333-4333-8333-333333333333"})
+        if request.url.path == "/threads/33333333-3333-4333-8333-333333333333/runs/stream":
             return _sse_response(
                 "event: task_started",
                 "data: " + json.dumps({"task_id": "builder-1", "description": "Builder: document about the dangers of war"}),
@@ -853,8 +853,8 @@ async def test_stream_events_forward_builder_task_events() -> None:
 async def test_stream_events_fail_active_builder_task_before_backend_error() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/threads":
-            return httpx.Response(200, json={"thread_id": "thread-123"})
-        if request.url.path == "/threads/thread-123/runs/stream":
+            return httpx.Response(200, json={"thread_id": "33333333-3333-4333-8333-333333333333"})
+        if request.url.path == "/threads/33333333-3333-4333-8333-333333333333/runs/stream":
             return _sse_response(
                 "event: task_started",
                 "data: " + json.dumps({"task_id": "builder-1", "description": "Builder: document about the dangers of war"}),
@@ -895,8 +895,8 @@ async def test_stream_events_fail_active_builder_task_before_backend_error() -> 
 async def test_stream_events_emit_builder_failure_from_values_state() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/threads":
-            return httpx.Response(200, json={"thread_id": "thread-123"})
-        if request.url.path == "/threads/thread-123/runs/stream":
+            return httpx.Response(200, json={"thread_id": "33333333-3333-4333-8333-333333333333"})
+        if request.url.path == "/threads/33333333-3333-4333-8333-333333333333/runs/stream":
             return _sse_response(
                 "event: task_started",
                 "data: " + json.dumps({"task_id": "builder-1", "description": "Builder: document about the dangers of war"}),
@@ -960,8 +960,8 @@ async def test_stream_events_merge_builder_result_into_final_values_artifact() -
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/threads":
-            return httpx.Response(200, json={"thread_id": "thread-123"})
-        if request.url.path == "/threads/thread-123/runs/stream":
+            return httpx.Response(200, json={"thread_id": "33333333-3333-4333-8333-333333333333"})
+        if request.url.path == "/threads/33333333-3333-4333-8333-333333333333/runs/stream":
             return _sse_response(
                 "event: messages",
                 "data: " + json.dumps([
@@ -1008,8 +1008,8 @@ async def test_stream_events_merge_builder_result_from_final_values_into_streame
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/threads":
-            return httpx.Response(200, json={"thread_id": "thread-123"})
-        if request.url.path == "/threads/thread-123/runs/stream":
+            return httpx.Response(200, json={"thread_id": "33333333-3333-4333-8333-333333333333"})
+        if request.url.path == "/threads/33333333-3333-4333-8333-333333333333/runs/stream":
             return _sse_response(
                 "event: task_started",
                 "data: " + json.dumps({"task_id": "builder-1", "description": "Builder: document about the dangers of war"}),
@@ -1055,8 +1055,8 @@ async def test_stream_events_text_before_artifact_in_same_chunk() -> None:
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/threads":
-            return httpx.Response(200, json={"thread_id": "thread-123"})
-        if request.url.path == "/threads/thread-123/runs/stream":
+            return httpx.Response(200, json={"thread_id": "33333333-3333-4333-8333-333333333333"})
+        if request.url.path == "/threads/33333333-3333-4333-8333-333333333333/runs/stream":
             return _sse_response(
                 "event: messages",
                 "data: " + json.dumps([
@@ -1088,3 +1088,62 @@ async def test_stream_events_text_before_artifact_in_same_chunk() -> None:
     assert [event.kind for event in events] == ["text", "artifact"]
     assert events[0].text == "Hello"
     assert events[1].artifact == artifact
+
+
+@pytest.mark.anyio
+async def test_every_langgraph_request_carries_a_verifiable_authorization() -> None:
+    """LangGraph refuses unsigned calls, so no path may go out unauthenticated.
+
+    Regression for the 2026-09-21 Voice outage. The adapter built its client
+    with only a base_url and timeouts, so every request reached an
+    authenticating LangGraph without credentials. Startup died on the probe
+    with "Unable to reach the DeerFlow server for readiness checks", and the
+    service could not be restarted at all. It stayed hidden because the tests
+    injected their own client and therefore never exercised a signed request.
+
+    This asserts the header exists AND verifies, on every path the adapter
+    uses, under the same minter the receiving side checks against.
+    """
+
+    from deerflow.sophia.langgraph_service_auth import (
+        READINESS_OWNER,
+        verify_service_authorization,
+    )
+
+    thread_id = "55555555-5555-4555-8555-555555555555"
+    seen: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        authorization = request.headers.get("Authorization")
+        assert authorization, f"unsigned request to {path}"
+        # Verified exactly as the receiving side does: a header that does not
+        # verify for this method and path is as useless as no header.
+        claims = verify_service_authorization(
+            authorization, method=request.method, path=path
+        )
+        seen.append((path, claims["sub"]))
+
+        if path == "/assistants/search":
+            return httpx.Response(200, json=[{"graph_id": "sophia_companion"}])
+        if path == "/threads":
+            return httpx.Response(200, json={"thread_id": thread_id})
+        raise AssertionError(f"Unexpected request path: {path}")
+
+    async with httpx.AsyncClient(
+        base_url="http://testserver",
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        adapter = DeerFlowBackendAdapter(
+            make_settings(backend_mode="deerflow"),
+            client=client,
+        )
+        await adapter.probe()
+        assert await adapter._get_or_create_thread("user-1") == thread_id
+
+    # The probe cannot borrow a user identity, so it signs as the dedicated
+    # readiness principal; thread work signs as the owner it belongs to.
+    assert seen == [
+        ("/assistants/search", READINESS_OWNER),
+        ("/threads", "user-1"),
+    ]

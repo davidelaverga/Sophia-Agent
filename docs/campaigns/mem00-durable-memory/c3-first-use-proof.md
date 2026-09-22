@@ -1,3 +1,29 @@
+# Current qualification — 2026-09-22
+
+**MEMORY_TEXT_PILOT_READY** for Davide's bounded text-memory pilot. This section supersedes the historical matrix retained below. Exact live tuple and limitations: c3-current-state.md. Full fresh receipts: c3-hosted-acceptance-2026-09-22.md.
+
+| Stage | Result | Evidence |
+|---|---|---|
+| E1 source/extraction | PASS, valid historical evidence reused | Original source-manifest/candidate receipts below; fresh final extraction3cc59cd9 succeeded_zero on first attempt confirms deployed end/extraction path |
+| E2 decisions | PASS | Historical approvals/rejection preserved; current incidental00cadf43 rejected through recap and durable row; no genuine candidate approved |
+| E3 automatic and explicit recall | PASS | Fresh ae44 automatic+retrieve_memories completion with stable source versions; finald789 session retrieves revision2 and exact provider/canonical joins |
+| E4 warm edit | PASS | a935 edit3/3 at10:13:40Z; same thread01a0c899 run01a0c89c admits only3/3, responds Silver Wren, old Amber Finch absent from rebuilt state |
+| E5 warm revocation | PASS | Forget3/4/epoch8 at10:15:49Z precedes run01a0c89d; both actual-model permits empty, explicit tool returns no relevant memories, both old markers absent |
+| E6 reload/cleanup | PASS for current effects; historical limits preserved | d789 ended; no candidates; reloaded recap/Journal agree; all3 knowna935 providerIDs purged by current verified receipt98fd5923. No current test workload remains |
+| E7 real account handover | PASS | Actual UI sources/final permits join Davide CUyZxRFmDNONbR0eKqkJjTrJ2z8nkDKd, sole live governed cohort. Practical use/disable recipe in c3-handover.md |
+
+Soft-forget is recoverable through Forgotten shelf and retains canonical history; it is not permanent deletion. Five older terminal extraction failures and two separately registered historical uncertain provider operations remain explicit. No claim of global cleanup, full C1/VT00 certification or independent review. Pool indexing-status visibility and model's speculative no-memory explanations remain follow-up defects. Current model permits plus execution outputs provide proof; permit dispatch_observed=false alone is not execution evidence.
+
+---
+
+## Historical record below — superseded statuses, retained evidence
+
+# Current qualification — 2026-09-22
+
+Historical E1/E2 and automatic recall evidence is retained below. Do not interpret this as full E3: explicit-tool recall remains unproved. Tin Otter is now forgotten with a historical verified purge receipt; the test preference remains active. E4/E5 actual next-request admission, E6 complete settlement and E7 practical handover are still open. See c3-current-state.md for the reconciled inventory. No new hosted acceptance run during Codex takeover; spend question pending.
+
+---
+
 # MEM00-C3 — first-use proof matrix
 
 Date: 2026-09-20
