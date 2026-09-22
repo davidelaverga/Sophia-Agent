@@ -1,130 +1,67 @@
 # MEM00-C3 — current checkpoint
 
-Updated: 2026-09-21 (after the P1 extraction-loop outage and the `46cd2302` release)
-Mission authorization reference: user chat message adopting `04_LAUNCH_PROMPT.md` / `01_MISSION.md` §3, 2026-09-20. No signature fabricated.
-Work branch: `codex/mem00-c3-first-use` @ `46cd23026838cce6fdae7995df6c566639c33891`
-Current phase: **E — resumable; D1 unresolved, P1 outage closed**
-Terminal status: **IN_PROGRESS — NOT `MEMORY_TEXT_PILOT_READY`**
+Updated: 2026-09-22, Codex takeover from Claude.
+Target: **MEMORY_TEXT_PILOT_READY — NOT ACHIEVED**.
+Owner: Codex, by Davide's direct takeover request. Claude confirmed idle at 07:22:10Z and returned deployment ownership. Davide subsequently authorized bounded delegation; Codex is assigning a local-only D1 reproduction in a separate Claude worktree, with no live runs or deployment authority. No deployment window is open.
+Branch: `codex/mem00-c3-closure`, integration `d7f4c93437c638d58bb96f7e0f7341257a0279a8`.
 
-Companion artifacts: `c3-first-use-proof.md` (E1–E7 matrix), `c3-defects.md` (D1, D2, retractions), `c3-actions.jsonl` (receipts).
+## Scope and authorization
 
-## Product result
+Continue the adopted MEM00-C3 mission, preserving canonical-ledger authority, receiving authentication and exact-owner isolation. No production change or new provider/model run occurred during takeover. Claude reports a $25 cumulative acceptance ceiling but no spend tally. A single request for up to $5 NEW variable spend is pending with Davide; no approval inferred. Existing platform denials remain applicable; switching controllers does not bypass them. No recurring spend authorized.
 
-Phases C and D are complete and verified. E1–E3 pass. E4 is half-proven. E5–E7 are unattempted, blocked by a release-blocking defect. **Do not emit `MEMORY_TEXT_PILOT_READY`.**
+## Versions and connections
 
-## Live components (all directly observed)
+- Gateway: **directly refreshed** `/health` 200, `406ff0a6f9d64c04bbfd55ae1ea87b5a559cf490`, service `srv-d7be5s9r0fns7397l4g0`; authenticated Render shell reads succeeded. Contract `mem00.v1`, epoch 1.
+- LangGraph: **directly refreshed** `/ok` 200. Last deployment receipt/Claude handover reports `406ff0a6`; SHA not independently reread this window.
+- Frontend: authenticated ordinary app is open. Last verified tuple remains `a5982c6e57efde05311a6add245e0258693f1471`, Production rebuild `dpl_3EfesqH5ZgqxnhpZB9HRnwwAMVgH`. Vercel remains signed in; do not substitute Preview promotion.
+- Voice: last verified `5538d08b20a4cfed29e85e61abdffd4c22af6ce8`. Keep this repair; old integrated code cannot restart Voice against receiving auth.
+- Lab worker/MCP: last verified `2deb762a7a03ca7f260ec2efd670b5993f7dc977`. Separate VT00 activation is open but test-auth blocked. MEM00 does not authorize changing those gates. Suspension agreement remains unresolved.
+- Supabase `vlxnwmyvhchwbousrdzc`: scoped read-only application queries succeeded. Mem0 dashboard and Supabase dashboard are signed in. LangSmith EU connection not yet refreshed.
 
-| Component | Exact ID |
-|---|---|
-| Frontend | `dpl_99vszUEXAXnZ5LP68EPKWJ3w843t` ← source `a5982c6`, `frontend/` **byte-identical to r8 `3aebc59a`** |
-| Rollback target | `dpl_4TxUxd6Ee27JF8T42jre5f7Xz2W8` (`35c6467`) — Vercel Instant Rollback |
-| Gateway | `commit_sha 46cd23026838cce6fdae7995df6c566639c33891`, `service_id srv-d7be5s9r0fns7397l4g0`, oregon, `/ready` = `ready` |
-| LangGraph | `commit 46cd23026838cce6fdae7995df6c566639c33891` via `dep-daojnn3bc2fs73e9vosg`, `service_id srv-d7be5s9r0fns7397l4fg`, oregon, `/ok` = 200; `api_variant=local_dev`, `langgraph_api_version=0.8.1` |
-| Memory contract | `mem00.v1`, epoch **1** |
-| Voice | `voice_lab_enabled=false`, `kill_switch_engaged=true` — untouched |
-| Supabase | `vlxnwmyvhchwbousrdzc`, healthy, us-west-1 |
-| Mem0 | project `default-project` (Starter), namespace `sophia-memory-v2-2df20d06afbe4c27ab4b2413bcdeafd9` |
-| LangSmith | **EU** `eu.smith.langchain.com`, project `Sophia` (note: a second, empty `"Sophia"` exists — do not confuse) |
-| Governed owner | `CUyZxRFmDNONbR0eKqkJjTrJ2z8nkDKd` — governed, epoch 1 |
+Local integration preserves `cdb6cebf`, Claude's undeployed `f0ef5f53` trigger compatibility repair, and Voice `5538d08b`. No uniform-SHA deployment is required. Original worktrees and uncommitted activation receipts are untouched.
 
-### Activation profile as deployed
+## Verified current owner/profile and obligations
 
-`SOPHIA_MEMORY_CERTIFICATION_PRINCIPAL` = `SOPHIA_MEMORY_COHORT_PRINCIPALS` = the owner's own account id; `PROVIDER_PROJECTION=true`; `CANDIDATE_LEDGER_WRITE=true`; Voice Lab principal `vt00-e1df2c74-…` (distinct ✅).
+Gateway resolves certification principal and sole cohort member `CUyZxRFmDNONbR0eKqkJjTrJ2z8nkDKd`. Candidate write/read, canonical Pool, provider projection and governed runtime read are true; legacy inventory/import false. Fault feature enabled, but **fault-settings table empty**. Browser account ID still needs direct product-route verification before acceptance.
 
-**Known deviation, accepted by the owner and recorded here:** the certification principal is the owner's real account rather than an isolated synthetic identity, so the cohort holds one id where the C2 runbook expects two (`<owner>,<cert>`). All five source-derived constraints are still satisfied, so the worker builds with projection. Consequence: acceptance artefacts share an owner with real memories — mitigated by marking every test record with "Tin Otter".
+Current exact canonical records:
 
-**Correction to the package:** `01_MISSION.md` §7 requires projection ON; the C2 coordinated runbook says it stays OFF ("a text pilot that began projecting would be a different release"). Live config already had it ON, and E3 cannot be proven without it. Owner decided: **projection stays ON**.
+| Record | State | Content/governance revisions | Binding |
+|---|---|---|---|
+| `14c6a3f8-dab6-4d50-9e58-3956d90642f4` Tin Otter | forgotten | 2 / 3 | both prior revisions purged |
+| `a9352106-8ee7-43aa-8a7b-881f3b613219` synthetic summary preference | active | 1 / 1 | eligible, metadata verified |
+| `07fe7c4d-5c24-4ec3-9f16-5ea946451d17` pre-existing | tombstoned | 2 / 4 | purged; do not mutate |
 
-## Release window 2026-09-21 — P1 outage and the `46cd2302` rollout
+Tin Otter has a durable `purge_verified / provider_rows_absent` completion at 2026-09-20T21:40:24.934709Z. This is a newly read historical provider receipt, not a new provider inventory query. The summary preference remains an owned cleanup obligation. Preserve other historical uncertain provider operations; these owner-scoped reads do not clear them.
 
-Recorded at the request of Codex VT00-C5-R1, which held off deploying and opened no Voice/Lab surface during this window.
+`ebd83dbc-2e26-4d1b-a345-9b716c6ac0b2` is now ended (2026-09-21T15:53:07.708640Z), extraction succeeded_zero. `f1a7f011-b57e-4b86-841d-ef2cacc95663` is ended with succeeded_nonzero. Do not repeatedly close them from stale instructions.
 
-**Live component tuple at window close (all directly observed, 2026-09-21 ~16:20 CEST):**
+Newest test session `9531d9e2-9612-47f0-9859-451db04acf39` remains resumable, 3 canonical messages, no ended_at. Its thread `01a0c4ab-d608-7480-972c-0b6ac91a8564` returns **404** to an exact-owner authenticated GET /state; no checkpoint recovered. This does not independently prove physical deletion.
 
-| Component | Exact ID |
-|---|---|
-| Gateway | `46cd23026838cce6fdae7995df6c566639c33891` · `srv-d7be5s9r0fns7397l4g0` · `/ready` = `ready` |
-| LangGraph | `46cd23026838cce6fdae7995df6c566639c33891` · `srv-d7be5s9r0fns7397l4fg` · `dep-daojnn3bc2fs73e9vosg` · `/ok` = 200 |
-| Frontend | `dpl_99vszUEXAXnZ5LP68EPKWJ3w843t` (fra1) — **unchanged this window**, not rebuilt or promoted |
-| Memory contract | `mem00.v1`, epoch 1 |
-| Voice | `voice_lab_enabled=false`, `voice_lab_kill_switch_engaged=true`, `voice_internal_auth_configured=true` — **untouched** |
-| Voice Lab admission | `voice_lab_admission_ready=true`, `voice_lab_mutation_ready=false`, reaper `ready`/running |
-| Supabase | `vlxnwmyvhchwbousrdzc` — healthy, idle, 0 active backends, 0 lock waits |
+Owner extraction inventory: 21 rows, 6 succeeded_nonzero, 5 succeeded_zero, 5 superseded, **5 failed_terminal**, zero queued/leased/retry_wait. All five terminal failures have attempt_count 8 and retry_budget_exhausted:
 
-Deploy route: **Manual Deploy → "Deploy a specific commit"**, which deploys from any branch. Both services remain wired to Production Branch `codex/sophia-observability-v1`; that setting was **not** changed, and `46cd2302` was **not** merged into it. Gateway was deployed and confirmed `ready` *before* LangGraph, because LangGraph's DQ-2 startup audit POSTs to the Gateway and would fail spuriously against a restarting one.
+- `dfb38056-0278-4c76-be67-1e9471c26555` / session `707ac996-1a0d-45be-b9b1-488ce6c3a838`
+- `c7c5c0a4-5867-4fc8-b060-b770b1e13c74` / `5d6c4f9c-a48f-4fde-bf1c-65f4fc9dc148`
+- `3008536f-97d6-42fc-8a82-85dc280eb7a9` / `534d30bf-c6d4-4bb7-837d-9a254b6dd9a3`
+- `a14ec967-2db1-4428-a039-d3a7e2360e92` / `dc8aa777-9fa5-4500-aab6-bd10dbc9c32b`
+- **newly reconciled:** `50cfec91-bc28-4b55-8ebb-7ed130f76ebd` / newest resumable session above.
 
-### P1 outage — 22:08 UTC 2026-09-20 → 12:40 UTC 2026-09-21 (~14.5 h, both backends down)
+No retries were reset or manufactured. `source_target.py` reuses matching current input even for failed_terminal runs, so calling enqueue again is not proof of a fresh retry. Reconcile through supported exact-source machinery; preserve original receipts and budgets.
 
-**Root cause.** Extraction run `942f3f97-550c-49bb-82a2-49bbdfe7d311` was enqueued for session `ebd83dbc-2e26-4d1b-a345-9b716c6ac0b2`, which never left `status='resumable'`. Its source could therefore never be realigned, so `MemoryExtractionService.run_once` took the realignment branch, got `None` from `enqueue_finalized_session`, and **returned `True` anyway**. `MemoryGovernanceWorker._run` reads `True` as work and skips its poll delay entirely, and the branch never reached `fail_extraction`, so the run stayed `leased` and `sophia_memory_claim_extraction` re-leased it every iteration. The eight-attempt budget was never consulted.
+## Defects and acceptance
 
-**Blast radius.** ~1,344 PostgREST requests/second sustained; 4.57 M Postgres errors in 24 h; 4.9 % success rate; t4g.micro CPU pinned at 95 %; 17 backends convoying on `Lock/tuple`. PostgREST's connection pool saturated, so the Gateway's Voice Lab retention-reaper probe 504'd with `PGRST003` and fail-closed (`gateway_voice_lab_retention_reaper_probe_failed`), and LangGraph's DQ-2 `configured_build_mutation_store(...).probe()` fail-closed (`enabled DQ-2 requires the durable mutation transaction RPCs`). Both services then crash-looped and could not restart.
+D1 remains open: actual memory context entry failure was observed by Claude on 2026-09-21, not merely a frontend completion-banner problem. The diagnostic change `13eb09d3` is integrated/deployed but has no fresh failing-turn receipt. The local installed langgraph-api 0.8.1 source DOES emit relative Content-Location on runs/stream; missing-header hypothesis is not established. Do not weaken completion confirmation or bless unproven output.
 
-**Containment (owner executed all SQL; the agent was classifier-denied `[Modify Shared Resources]`).**
-1. Superseded the poisoned run — `safe_terminal_reason='operator_outage_containment_2026_09_21'`. Necessary but not sufficient: it removed the discovery path, not the in-flight convoy.
-2. `REVOKE EXECUTE ON FUNCTION sophia_memory_authorize_extraction_dispatch(text,uuid,uuid,uuid,text,text) FROM service_role` — broke the convoy immediately (18 → 0 active backends). Both services self-healed on their next restart with **no deploy**.
-3. Grant restored after recovery; `has_function_privilege('service_role', …)` = `true` at window close.
+D2 wrong-run-owner hypothesis is retracted: Claude distinguished correct-owner run logs from default_user GET /state construction. Retain the state-poll load observation separately.
 
-**Collateral, owned.** Four legitimate backlog runs (sessions `534d30bf…` ended 2026-08-21 — the previously-recorded stranded session — plus `5d6c4f9c…`, `dc8aa777…`, `707ac996…`) exhausted their retry budget against the revoke and are now `failed_terminal` / `retry_budget_exhausted` at `attempt_count=8`. Transcripts and sessions are intact; only the automatic extraction was lost. **Whether these can be re-enqueued is unresolved** — `sophia_memory_enqueue_extraction` needs an `idempotency_key`, `request_digest` and `input_manifest_ref` that the pipeline derives as HMACs from real source state, and hand-crafting them would fabricate provenance. The two relevant unique indexes are *partial* on `extractor_input_ref` nullability and all four dead rows carry a non-null ref, so a worker-issued re-enqueue is likely permissible; this was not verified and must not be assumed.
+Potential forgotten-content admission remains **unverified**: Claude observed Tin Otter in a response after forget, but did not establish its source or actual admission. Needs scoped hosted evidence, not inference from generated text.
 
-**Fix shipped in `46cd2302`.** Record the durable failure when realignment queues nothing, so the existing 5 s→900 s backoff and eight-attempt budget bound the run. Causal regression proven by reverting the source change and observing both new assertions fail. Qualified on Python 3.12: `ruff` clean; 7265 passed, 168 skipped. Two failures in `test_local_sandbox_encoding.py` are **pre-existing and unrelated** — confirmed identical with the change stashed; tracked separately.
+Acceptance: E1/E2 and automatic E3 have historical evidence; explicit-tool E3, actual E4 next admission, E5 warm revocation, E6 complete cleanup/reload, and E7 practical owner handover remain unproven.
 
-**Still open from this incident:** why session `ebd83dbc-…` never reached `ended`. That is upstream of everything above and would poison another run the same way.
+## Checks and next action
 
-## Phase C — how the ignored-build blocker was cleared
+Fresh dedicated uv Python 3.12.14 environment; editable harness resolves to this branch. Focused backend tests: **120 passed** (text context, checkpoint provenance, extraction worker, service auth). Focused frontend: **50 passed** (22 completion + 28 companion trigger), via project-pinned pnpm. No full-suite claim. Real-PG companion integration and Sentrux remain unverified; Sentrux tool not callable in Codex and Claude reported ENOENT.
 
-The package's route presumed an existing r8 deployment to apply the per-deployment override to. **None existed.** Sequence used: push branch → docs-only commit for a fresh SHA → deployment created and CANCELED by `exit 0` → **Redeploy with "Use project's Ignore Build Step" unchecked** → first real build → fix → **Production-target rebuild**.
+Next: after spend answer, verify ordinary app owner, close/resume the exact owned test session through supported UI, and execute one fresh bounded governed text turn with LangGraph logs. Capture actual run completion and denied_at_line without retaining secret/content-bearing logs. Repair the causal path, qualify only affected components, respect deployment denials, then finish remaining E stages and cleanup. Keep ready verdict withheld until evidence is complete.
 
-- Project setting `exit 0` ("Don't build anything") was **never modified**.
-- Production Branch remains `codex/sophia-observability-v1`. No DNS/protection/auto-deploy change.
-- **"Promote to Production" was deliberately avoided**: 21 `NEXT_PUBLIC_*` values inline at build time, including `NEXT_PUBLIC_SOPHIA_AUTH_BYPASS` and `NEXT_PUBLIC_DEV_BYPASS_AUTH`. Promoting a Preview artefact could have shipped an auth bypass.
-- **The frontend had never once built.** `exit 0` had been masking `database_tls_ca_required`, caused by `BETTER_AUTH_DATABASE_SSL_CA` missing from the Preview scope (owner added it). Not a code regression — the failing route is byte-identical to the commit that builds fine.
-
-**Standing caveat:** production serves a deployment built from `codex/mem00-c3-first-use` while Production Branch is still `codex/sophia-observability-v1`. Auto-deploys remain blocked by `exit 0`, but if that ignore step is ever removed, a push to the production branch would rebuild the old lineage and replace this deployment.
-
-## Open defects
-
-**D1 (release-blocking)** — governed turns fail `confirmCompletion()` at SSE EOF; on tool-call turns the continuation is lost, leaving a dangling tool call that **permanently bricks the thread**. Latent until Phase D activated the governed code path. Full trace, ruled-out causes and candidate fixes in `c3-defects.md`.
-
-**D2 (high)** — `memory.context.entry_denied → unavailable` correlated with LangGraph resolving `user_id=eq.default_user` and `platform=voice` on a text session. Correlation, not proof — no run-path log captured yet.
-
-**Retracted** (do not re-investigate): "Journal UI broken" (it's a correct `visibilityState` guard) and "projection not happening" (Mem0 confirms both memories stored, `Active`).
-
-## Access
-
-Host is the Claude Desktop app; `02_PERMISSION_BOOTSTRAP.md` §3's CLI bootstrap is not executable and the settings seed was never loaded. Platform access is via the built-in browser pane.
-
-Host-enforced denials encountered and **respected, not circumvented**: `[Modify Shared Resources]` (all production SQL writes — owner executed every one), `[Credential Materialization]` (env-var pages), `[Auto-Mode Bypass]` (driving APIs via page JS — that approach was abandoned entirely). Earlier `[Production Deploy]` denials did not recur on 2026-09-21; the agent performed both `46cd2302` deploys directly under the adopted standing scope.
-
-Resolved since 2026-09-20: Python 3.12.14 via `uv` (full backend suite now runnable locally — 7267 collected); git push works over SSH with `id_ed25519_sophia_agent` (note `origin` is HTTPS and has no credentials here, so pushes must target the `git@github.com:` URL explicitly).
-
-Still blocked: PR/CI/merge (no `gh`, no token). `sentrux` MCP fails to connect (`ENOENT: stdio`), so the CLAUDE.md Sentrux baseline/score gate was **not** run for `46cd2302`.
-
-## Cleanup owed
-
-| Item | State |
-|---|---|
-| `14c6a3f8-…`, `a9352106-…` canonical test records | **outstanding** — forget during E6 |
-| Their 2 Mem0 projections | **outstanding** |
-| Session `f1a7f011-…` | **stuck, should be closed** |
-| Owner's 2 real candidates from `f7199e38-…` | **owner's decision — agent must not touch** |
-| 6 pre-existing withheld candidates, 1 pre-existing canonical | untouched, correctly withheld |
-
-## Budget
-
-New variable usage: **~4 build-minutes + a handful of model turns**, well under the US$25 ceiling. No paid provider calls, no new services, no plan change.
-
-## Exact next action
-
-Both backends now run `46cd2302`, which carries the retained-revision fix (`5f4ed1cb`) that LangGraph had never received — E4's edit-then-recall half was previously unprovable in production for that reason. Re-run **E4 (edit → recall current revision)** against the live stack, then continue E5–E7.
-
-Independently, and before any further E-phase runs: determine why session `ebd83dbc-…` never reached `ended`. Until that is understood, another session can strand the same way. `46cd2302` bounds the *consequence* (the run now retires after eight attempts instead of spinning forever); it does not prevent the *cause*.
-
-Still unresolved from 2026-09-20: D1's `confirmCompletion()` failure at SSE EOF, and D2. The earlier "exact next action" — live-tailing `sophia-langgraph` during one governed text turn to read `POST /threads/{id}/runs/stream`, **without typing in the search box** (a search freezes the tail) — remains the right capture for both.
-
-## Superseded assumptions
-
-- `02_PERMISSION_BOOTSTRAP.md` §3's CLI bootstrap does not apply to this host.
-- The per-deployment ignore-step override presumes an existing r8 deployment; none existed.
-- A branch push introducing no new commit SHA does not trigger Vercel.
-- "Promote to Production" is not a safe substitute for a Production-target rebuild when `NEXT_PUBLIC_*` differ per environment.
-- Extraction correctly discards content framed as "not a real preference" — synthetic test facts must be category-shaped and stated plainly, marked by content rather than by disclaimer.
+Historical rollout details remain in git history and c3-actions.jsonl. Current state above supersedes older activation, record lifecycle and stuck-session statements.

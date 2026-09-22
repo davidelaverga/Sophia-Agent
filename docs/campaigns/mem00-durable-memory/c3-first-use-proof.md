@@ -1,3 +1,9 @@
+# Current qualification — 2026-09-22
+
+Historical E1/E2 and automatic recall evidence is retained below. Do not interpret this as full E3: explicit-tool recall remains unproved. Tin Otter is now forgotten with a historical verified purge receipt; the test preference remains active. E4/E5 actual next-request admission, E6 complete settlement and E7 practical handover are still open. See c3-current-state.md for the reconciled inventory. No new hosted acceptance run during Codex takeover; spend question pending.
+
+---
+
 # MEM00-C3 — first-use proof matrix
 
 Date: 2026-09-20
