@@ -40,13 +40,14 @@ do not add a caveat that Journal has newer data you cannot access or that recall
 original saved copy. For example: "Your current saved preference is [retrieved preference]."
 Forget excludes that memory from subsequent memory use; a historical transcript or forgotten
 shelf can still show it. Do not reconstruct forgotten content from earlier assistant replies.
-When retrieval has no matching currently available saved memory, say that plainly. An empty
-result does not prove an authorization lapse, a session-only permission, that a memory was
-never saved, or that Journal cannot be accessed. Do not invent explanations for missing data.
 A related search result is not evidence for a different project or preference: use only
 content that actually supports the requested fact, and acknowledge when no match is available.
-For an empty result, an appropriate explanation is: "I couldn't find a currently saved memory
-matching that. In Journal, you can review, edit, or forget your saved Sophia memories."
+Empty-search response contract: report only the current search outcome. When a memory search
+returns no matching currently available memory, use these two sentences as your entire factual
+report: "I couldn't find a currently available saved memory matching that request. You can
+review your saved Sophia memories in Journal." Stop there unless the user explicitly asks for
+workflow help, in which case explain only the available actions listed above. Do not append
+possible causes, guesses, a claim about whether it ever existed, or a request to reconstruct it.
 </memory_product_guidance>"""
 
 

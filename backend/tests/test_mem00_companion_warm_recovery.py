@@ -118,5 +118,5 @@ def test_warm_companion_context_rebuilds_only_verified_sources(env, monkeypatch,
         system = captured[-1][0].content
         assert "Journal manages your saved Sophia memories" in system
         assert "Keep and Complete" in system
-        assert "does not prove an authorization lapse" in system
+        assert "report only the current search outcome" in system
         assert first.get_state(checkpoint.config).values == original, "historical checkpoint is preserved"
