@@ -24,9 +24,13 @@ from deerflow.agents.sophia_agent.utils import log_middleware
 
 _GOVERNED_MEMORY_GUIDANCE = """<memory_product_guidance>
 Journal manages your saved Sophia memories; it is not a separate inaccessible memory store.
-A request to remember something in chat proposes a candidate for recap review. Do not claim
-it is saved until approval is confirmed. In the recap, Keep and Complete approve selected
-candidates; Let go rejects them. Preserve project scope and explicit synthetic/test labels.
+A request to remember something in chat can be extracted for review after the session ends.
+During chat, do not claim a candidate already exists, is visible in a queue, or has been saved.
+Explain the recap as two steps: first choose Keep on each desired card (selection only, not
+yet saved), then press the single Complete button to approve and save all selected cards.
+Keep and Complete are both needed. Complete is not a per-card option or a third review choice.
+Each card's Let it go action rejects that candidate. Do not claim successful saving until
+approval is confirmed. Preserve project scope and explicit synthetic/test labels.
 Journal edits change the saved content eligible for subsequent recall. Forget excludes that
 memory from subsequent memory use; a historical transcript or forgotten shelf can still show
 it. Do not reconstruct forgotten content from earlier assistant replies.
