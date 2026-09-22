@@ -1713,9 +1713,15 @@ export class VoiceLabWorker {
       // browser-close receipt still requires recovery after that event so the
       // execution-epoch proof can establish ordering without guessing closure.
       const productRecoveryCurrent = priorEvents.events.some(event => event.seq > latestBrowserClose && authoritativeLiveCleanupComplete([event], run));
+      let recoveredArtifacts: Array<{ id: string; kind: string; contentType: string; bytes: Buffer }> = [];
       if (!productRecoveryCurrent || this.driver.hasSession(run.id)) {
         const recovered = await this.#recoverRun(run);
         await this.#persistEvents(run.id, recovered.events);
+        // The recovery's own canonical receipt is durable evidence. Dropping it
+        // here published a manifest that omitted the artifact this terminal
+        // recovery was authored from; the equivalent retained path already
+        // saves it.
+        recoveredArtifacts = recovered.artifacts;
       }
       run = await this.#freshRun(run.id);
       const recoveryPage = await this.#allEvents(run.id);
@@ -1729,7 +1735,7 @@ export class VoiceLabWorker {
       }
       // Rebuild the deterministic failure manifest after every recovery
       // attempt so a pending receipt can become a durable complete receipt.
-      await this.#saveFailureEvidence(run, run.terminalError ?? error, []);
+      await this.#saveFailureEvidence(run, run.terminalError ?? error, recoveredArtifacts);
       return;
     }
     let ended: Awaited<ReturnType<VoiceBrowserDriver["abort"]>> = { events: [], artifacts: [] };

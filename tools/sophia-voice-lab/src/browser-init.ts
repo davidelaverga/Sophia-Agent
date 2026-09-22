@@ -196,9 +196,69 @@ export function buildVoiceLabInitScript(options: InitScriptOptions): string {
         // exact-origin provider frame. Native send remains the mutation.
         super.send(data);
         const entry = state.sockets.find((candidate) => candidate.socket === this);
-        if (!entry || typeof data !== 'string') return;
+        if (!entry) return;
+        // Content-free census of EVERY outbound frame on the provider socket.
+        // The projections below are deliberately selective, so without this a
+        // realtimeInput.text/video or toolResponse frame is sent and never
+        // recorded, and the evidence cannot show what the client actually put
+        // on the wire.
+        //
+        // Classification is a FIXED allowlist of documented protocol keys.
+        // Arbitrary property names are never exported: anything outside the
+        // allowlist is only counted, because a caller-chosen field name is
+        // itself payload-derived content.
+        const wireByteLength = (value) => {
+          try {
+            if (typeof value === 'string') return new TextEncoder().encode(value).length;
+            if (value instanceof ArrayBuffer) return value.byteLength;
+            if (ArrayBuffer.isView(value)) return value.byteLength;
+            if (value && typeof value.size === 'number') return value.size;
+          } catch {}
+          return null;
+        };
+        const classify = (record, allowed) => {
+          if (!record || typeof record !== 'object' || Array.isArray(record)) return { known: [], unknown: 0 };
+          const known = [];
+          let unknown = 0;
+          for (const key of Object.keys(record)) {
+            if (allowed.indexOf(key) === -1) unknown += 1;
+            else if (known.indexOf(key) === -1) known.push(key);
+          }
+          known.sort();
+          return { known, unknown };
+        };
+        if (typeof data !== 'string') {
+          // Binary frames are recorded by fixed kind and size only; their
+          // contents are never inspected.
+          emit('harness.provider_frame_sent', { harness_socket_ordinal: entry.epoch, frame_kind: 'binary',
+            realtime_input_kind: null, unknown_top_level_field_count: 0, unknown_realtime_input_field_count: 0,
+            byte_length: wireByteLength(data) });
+          return;
+        }
         let payload;
-        try { payload = JSON.parse(data); } catch { return; }
+        try { payload = JSON.parse(data); } catch {
+          emit('harness.provider_frame_sent', { harness_socket_ordinal: entry.epoch, frame_kind: 'unparsed',
+            realtime_input_kind: null, unknown_top_level_field_count: 0, unknown_realtime_input_field_count: 0,
+            byte_length: wireByteLength(data) });
+          return;
+        }
+        try {
+          const top = classify(payload, ['setup', 'realtimeInput', 'clientContent', 'toolResponse']);
+          const realtime = classify(payload ? payload.realtimeInput : null,
+            ['audio', 'video', 'text', 'audioStreamEnd', 'activityStart', 'activityEnd', 'mediaChunks']);
+          emit('harness.provider_frame_sent', {
+            harness_socket_ordinal: entry.epoch,
+            frame_kind: top.known.join('+') || (top.unknown > 0 ? 'unrecognized' : 'empty'),
+            realtime_input_kind: realtime.known.join('+') || null,
+            unknown_top_level_field_count: top.unknown,
+            unknown_realtime_input_field_count: realtime.unknown,
+            byte_length: wireByteLength(data),
+          });
+        } catch {
+          emit('harness.provider_frame_sent', { harness_socket_ordinal: entry.epoch, frame_kind: 'uninspectable',
+            realtime_input_kind: null, unknown_top_level_field_count: 0, unknown_realtime_input_field_count: 0,
+            byte_length: wireByteLength(data) });
+        }
         // Setup and stream-end precede/follow active synthetic input. Observe
         // only this fixed content-free projection, never the setup envelope.
         const setup = payload?.setup;

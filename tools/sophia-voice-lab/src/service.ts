@@ -2,7 +2,8 @@ import { createHmac, createPublicKey, randomUUID, timingSafeEqual, verify as ver
 
 import { z } from "zod";
 import { productTurnId } from "./product-turn.js";
-import { ServiceOwnerFenceReceiptSchema, serviceFenceSourceLabSha } from "./service-owner-fence.js";
+import { AnyServiceOwnerFenceReceiptSchema, isVerifiedServiceOwnerFenceV2, serviceFenceSourceLabSha } from "./service-owner-fence.js";
+import { derivePlatformExecutionTermination, PLATFORM_EXECUTION_TERMINATION_KIND } from "./platform-execution-termination.js";
 
 import { FINAL_CODEX_PLUGIN_VERSION_PATTERN, type VoiceLabConfig } from "./config.js";
 import { D02GatewayClient, D02GatewayContinuityObservationReceiptSchema } from "./d02-gateway.js";
@@ -586,7 +587,7 @@ export class VoiceLabService {
       z.object({ action: z.literal("prepare"), runId, expectedVersion: version, requestId: z.string().uuid() }).strict(),
       z.object({ action: z.literal("consume"), runId, expectedVersion: version, preparedProofSha256: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
       z.object({ action: z.literal("ingest_owner_loss"), runId, expectedVersion: version, receipt: z.unknown() }).strict(),
-      z.object({ action: z.literal("ingest_service_fence"), runId, expectedVersion: version, receipt: ServiceOwnerFenceReceiptSchema }).strict(),
+      z.object({ action: z.literal("ingest_service_fence"), runId, expectedVersion: version, receipt: AnyServiceOwnerFenceReceiptSchema }).strict(),
     ]).parse(raw);
     const control = await this.ledger.getRecoveryControl(input.runId);
     if (!control || control.binding.scenarioId === "V-D02" || control.binding.principalId !== this.config.principalId
@@ -608,6 +609,15 @@ export class VoiceLabService {
           : this.config.serviceVersion, expectedLangGraphSha: target.expectedDependencies.langgraph });
       const persisted = await this.ledger.getRecoveryControl(input.runId);
       if (!persisted?.genericOwnerLoss) throw new Error("GENERIC_OWNER_PERSISTENCE_UNCONFIRMED");
+      // A verified v2 service fence is the only source permitted to author the
+      // canonical platform-termination receipt. It is appended under a durable
+      // dedupe key, so an exact retry replays one receipt rather than settling
+      // the epoch twice, and it never stands in for provider/resource cleanup.
+      const settled = persisted.genericOwnerLoss;
+      if (input.action === "ingest_service_fence" && settled.schema === "sophia.voice-lab.verified-service-owner-fence.v2" && isVerifiedServiceOwnerFenceV2(settled)) {
+        const termination = derivePlatformExecutionTermination(persisted, settled);
+        await this.ledger.appendEvent(input.runId, PLATFORM_EXECUTION_TERMINATION_KIND, "canonical", termination.payload, termination.dedupeKey);
+      }
       return { dispatchAllowed: false, control: persisted, workerServiceId: this.config.genericRecoveryWorkerServiceId };
     }
     if (input.action === "prepare") return { dispatchAllowed: false, control: await this.ledger.prepareGenericOwnerDispatch({ runId: input.runId, expectedVersion: input.expectedVersion, requestId: input.requestId, workerServiceId: this.config.genericRecoveryWorkerServiceId }), workerServiceId: this.config.genericRecoveryWorkerServiceId };
