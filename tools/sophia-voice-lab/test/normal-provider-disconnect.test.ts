@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Response } from "playwright";
-import { DriverEndFailure, PlaywrightVoiceDriver, SYNTHETIC_FINALIZATION_EXCLUSION_KEYS, validateNormalProviderDisconnectResponse } from "../src/browser-driver.js";
+import { DriverEndFailure, PlaywrightVoiceDriver, SYNTHETIC_FINALIZATION_EXCLUSION_KEYS, readProviderActivationAcknowledgement, validateNormalProviderDisconnectResponse } from "../src/browser-driver.js";
 import { sha256 } from "../src/security.js";
 import { testConfig, testRun } from "./helpers.js";
 
@@ -77,7 +77,7 @@ describe("normal end authenticated receiving acknowledgement", () => {
 // Drive public start/end through the same response predicates and UI guards.
 // The disposable browser transport is mocked; no provider.stage close callback
 // exists, matching the fenced callbacks of the ordinary production hook.
-it.each([false, true])("real driver end consumes receiving ack; rejected=%s", async rejected => {
+it.each([[false, false], [true, false], [false, true], [true, true]])("real driver end consumes receiving ack; rejected=%s prior-activation=%s", async (rejected, priorActivation) => {
   const config = testConfig();
   const ownedRun = testRun({ scenarioId: "V-O01", providerSessionId: run.providerSessionId, providerEpoch: 2,
     capturePolicy: { rawAudio: false, screenshot: false, video: false, retentionHours: 24 } });
@@ -105,6 +105,13 @@ it.each([false, true])("real driver end consumes receiving ack; rejected=%s", as
     canonical_transcript: { provider_expires_at: ownedRun.expiresAt.toISOString(), retention_expires_at: retained, retention_hours: 24, retention_anchor: "finalized_at" },
     evidence_receipt: { sha256: "a".repeat(64) } };
   const f = fixture();
+  const activation = { schema: "sophia_gemini_browser_provider_activation_v1", activation_id: "00000000-0000-4000-8000-000000000099",
+    session_id: ownedRun.providerSessionId, previous_activated_epoch: 1, candidate_epoch: 2, websocket_open_observed: true,
+    close_observer_attached: true, websocket_opened_at: close(1).websocket_closed_at, previous_socket_close_receipt: close(1) };
+  if (priorActivation) {
+    f.body.browser_provider_close_receipts.shift();
+    f.request.browser_provider_close_receipts.shift();
+  }
   const locator = (leave: boolean) => ({ first() { return this; }, last() { return this; }, waitFor: async () => {},
     isVisible: async () => false, click: async () => {
       if (leave) return;
@@ -152,6 +159,9 @@ it.each([false, true])("real driver end consumes receiving ack; rejected=%s", as
   const driver = new PlaywrightVoiceDriver(config, async url => new globalThis.Response(JSON.stringify({ build_id: builds[new URL(String(url)).hostname] }), { status: 200 }),
     undefined, undefined, (async () => server) as any, (async () => browser) as any);
   await driver.start(ownedRun, "grant");
+  if (priorActivation) emit(networkResponse("/api/sophia/voice/gemini/activate", {
+    activated: true, session_id: ownedRun.providerSessionId, provider_connection_epoch: 2, provider_activation_receipt: activation,
+  }, 202, activation));
   vi.spyOn(driver, "drain").mockResolvedValue([]);
   if (rejected) {
     const error = await driver.end(ownedRun, "finalize", "cleanup").catch(error => error);
@@ -168,4 +178,29 @@ it.each([false, true])("real driver end consumes receiving ack; rejected=%s", as
     expect(driver.hasSession(ownedRun.id)).toBe(false);
     expect(child.exitCode).toBe(0);
   }
+});
+
+it.each(["valid", "unauthorized", "foreign-origin", "mutated-echo", "wrong-session", "missing-close", "wrong-epoch", "false-close", "missing-ack"])("prior receiving activation evidence: %s", async failure => {
+  const activation: Record<string, unknown> = { schema: "sophia_gemini_browser_provider_activation_v1",
+    activation_id: "00000000-0000-4000-8000-000000000099", session_id: run.providerSessionId,
+    previous_activated_epoch: 1, candidate_epoch: 2, websocket_open_observed: true, close_observer_attached: true,
+    websocket_opened_at: close(1).websocket_closed_at, previous_socket_close_receipt: close(1) };
+  if (failure === "wrong-session") activation.session_id = "foreign";
+  if (failure === "missing-close") activation.previous_socket_close_receipt = null;
+  if (failure === "wrong-epoch") activation.previous_socket_close_receipt = close(2);
+  if (failure === "false-close") activation.previous_socket_close_receipt = { ...close(1), websocket_close_observed: false };
+  const request = structuredClone(activation);
+  if (failure === "mutated-echo") activation.activation_id = "00000000-0000-4000-8000-000000000098";
+  const response = {
+    url: () => `${failure === "foreign-origin" ? "https://other.test" : origin}/api/sophia/voice/gemini/activate`,
+    status: () => failure === "unauthorized" ? 401 : 202, headers: () => ({ "content-type": "application/json" }),
+    json: async () => ({ activated: failure !== "missing-ack", session_id: activation.session_id, provider_connection_epoch: 2, provider_activation_receipt: activation }),
+    request: () => ({ method: () => "POST", postDataJSON: () => request }),
+  } as unknown as Response;
+  const accepted = await readProviderActivationAcknowledgement(response, origin);
+  const f = fixture();
+  f.request.browser_provider_close_receipts.shift(); f.body.browser_provider_close_receipts.shift();
+  const result = validateNormalProviderDisconnectResponse(f.response, origin, run, accepted ? [accepted] : []);
+  if (failure === "valid") await expect(result).resolves.toMatchObject({ provider_connection_epochs: [1, 2], prior_activation_acknowledgement_sha256s: [expect.stringMatching(/^[a-f0-9]{64}$/)] });
+  else await expect(result).rejects.toMatchObject({ detail: { code: "PROVIDER_CLEANUP_UNCONFIRMED" } });
 });

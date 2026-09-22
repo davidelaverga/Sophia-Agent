@@ -503,6 +503,7 @@ interface BrowserSession {
   contextExpiresAt: number;
   expectedBinding: { testRunId: string; cleanupObligationId: string; principalId: string; scenarioId: string | null; scenarioVersion: string | null; environment: string; retentionHours: number; providerExpiresAt: string; browserContextBinding?: D02BrowserContextBinding };
   startupPush: StartupPushState;
+  providerActivationAcknowledgements: Array<Promise<Record<string, unknown> | null>>;
 }
 
 export type OwnedBrowserProcess = {
@@ -746,7 +747,14 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       await enterStage("frontend_home_navigation");
       let activePage = await context.newPage();
       page = activePage;
+      const providerActivationAcknowledgements: BrowserSession["providerActivationAcknowledgements"] = [];
       const attachPageDiagnostics = (targetPage: Page): void => {
+        // Continuation activation settles its prior socket before the final
+        // disconnect. Keep only validated receiving echoes, never credentials.
+        targetPage.on("response", (response) => {
+          if (providerActivationAcknowledgements.length >= 192 || !isExactProviderActivationResponse(response, frontendOrigin)) return;
+          providerActivationAcknowledgements.push(readProviderActivationAcknowledgement(response, frontendOrigin));
+        });
         targetPage.on("pageerror", (error) => {
           latestClientPageError = classifyClientPageError(error);
         });
@@ -795,7 +803,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
         });
       };
       attachPageDiagnostics(page);
-      const session: BrowserSession = { ownership, context, page: activePage, harnessCursor: 0, productCursor: null, latestProviderReceipt: null, contextExpiresAt: Number(grantReceipt.expires_at), expectedBinding: { testRunId: run.testRunId, cleanupObligationId: run.cleanupObligationId, principalId: run.principalId, scenarioId: run.scenarioId, scenarioVersion: run.scenarioVersion, environment: run.environment, retentionHours: run.capturePolicy.retentionHours, providerExpiresAt: run.expiresAt.toISOString(), ...(exactBrowserContextBinding === undefined ? {} : { browserContextBinding: exactBrowserContextBinding }) }, startupPush };
+      const session: BrowserSession = { ownership, context, page: activePage, harnessCursor: 0, productCursor: null, latestProviderReceipt: null, contextExpiresAt: Number(grantReceipt.expires_at), expectedBinding: { testRunId: run.testRunId, cleanupObligationId: run.cleanupObligationId, principalId: run.principalId, scenarioId: run.scenarioId, scenarioVersion: run.scenarioVersion, environment: run.environment, retentionHours: run.capturePolicy.retentionHours, providerExpiresAt: run.expiresAt.toISOString(), ...(exactBrowserContextBinding === undefined ? {} : { browserContextBinding: exactBrowserContextBinding }) }, startupPush, providerActivationAcknowledgements };
       this.#sessions.set(run.id, session);
       this.#pendingContexts.delete(run.id);
       this.#pendingProcesses.delete(run.id);
@@ -1102,7 +1110,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       if (!hasExactFinalizationEnvelope(run, responseBody, true) || typeof evidenceReceipt?.sha256 !== "string") throw new VoiceLabError(labError("FINALIZATION_ISOLATION_UNCONFIRMED", "Finalization receipt did not prove the bound synthetic run, cleanup obligation, exact retention policy, durable evidence, and exact isolation exclusions.", "product", false));
       events.push({ kind: "session.finalized", source: "canonical", payload: redact({ http_status: response.status(), receipt: responseBody }), dedupeKey: `canonical:${run.id}:finalized` });
       const disconnect = await providerResponse;
-      const acknowledgement = await validateNormalProviderDisconnectResponse(disconnect, frontendOrigin, run);
+      const acknowledgement = await validateNormalProviderDisconnectResponse(disconnect, frontendOrigin, run, (await Promise.all(session.providerActivationAcknowledgements)).filter((receipt): receipt is Record<string, unknown> => receipt !== null));
       const providerClosedEvent: DriverEndResult["events"][number] = {
         kind: "provider.disconnect_acknowledged", source: "canonical",
         payload: { stage: "closed", ...acknowledgement },
@@ -1606,31 +1614,96 @@ export function isExactProviderDisconnectResponse(response: Pick<PlaywrightRespo
   } catch { return false; }
 }
 
+export function isExactProviderActivationResponse(response: Pick<PlaywrightResponse, "url" | "request">, frontendOrigin: string): boolean {
+  if (response.request().method() !== "POST") return false;
+  try {
+    const url = new URL(response.url());
+    return url.origin === frontendOrigin && url.pathname === "/api/sophia/voice/gemini/activate" && url.search === "" && url.hash === "";
+  } catch { return false; }
+}
+
+export async function readProviderActivationAcknowledgement(response: Pick<PlaywrightResponse, "url" | "request" | "status" | "headers" | "json">, frontendOrigin: string): Promise<Record<string, unknown> | null> {
+  try {
+    if (!isExactProviderActivationResponse(response, frontendOrigin) || response.status() !== 202 || !isJsonResponse(response)) return null;
+    const request = response.request().postDataJSON();
+    const body = await response.json();
+    const receipt = body?.provider_activation_receipt;
+    if (!hasExactObjectKeys(receipt, ["schema", "activation_id", "session_id", "previous_activated_epoch", "candidate_epoch", "websocket_open_observed", "close_observer_attached", "websocket_opened_at", "previous_socket_close_receipt"])
+      || receipt.schema !== "sophia_gemini_browser_provider_activation_v1" || typeof receipt.activation_id !== "string" || !UUID_V4.test(receipt.activation_id)
+      || typeof receipt.session_id !== "string" || !PRODUCT_SAFE_ID.test(receipt.session_id)
+      || !Number.isSafeInteger(receipt.previous_activated_epoch) || Number(receipt.previous_activated_epoch) < 0
+      || !Number.isSafeInteger(receipt.candidate_epoch) || Number(receipt.candidate_epoch) !== Number(receipt.previous_activated_epoch) + 1 || Number(receipt.candidate_epoch) > 64
+      || receipt.websocket_open_observed !== true || receipt.close_observer_attached !== true || !canonicalUtcMillis(receipt.websocket_opened_at)
+      || body.activated !== true || body.session_id !== receipt.session_id || body.provider_connection_epoch !== receipt.candidate_epoch
+      || canonicalRequestHash(request) !== canonicalRequestHash(receipt)) return null;
+    if (receipt.previous_activated_epoch === 0) {
+      if (receipt.previous_socket_close_receipt !== null) return null;
+    } else {
+      validateD02ProductCleanupEcho({ browser_provider_close_receipts: [receipt.previous_socket_close_receipt], browser_provider_activation_abort_receipts: [] }, receipt.session_id, [Number(receipt.previous_activated_epoch)]);
+    }
+    return receipt;
+  } catch { return null; }
+}
+
 /** Passive evidence only: never initiate disconnect or inspect/store credentials. */
 export async function validateNormalProviderDisconnectResponse(
   response: Pick<PlaywrightResponse, "url" | "request" | "status" | "headers" | "json"> | null,
   frontendOrigin: string,
   run: Pick<RunRecord, "id" | "testRunId" | "cleanupObligationId" | "providerSessionId" | "providerEpoch">,
+  activationAcknowledgements: Record<string, unknown>[] = [],
 ): Promise<Record<string, unknown>> {
-  const reject = () => new VoiceLabError(labError("PROVIDER_CLEANUP_UNCONFIRMED", "The ordinary UI did not yield an exact authenticated provider disconnect acknowledgement with all owned websocket epochs settled.", "product", true));
+  let validationStage = "network_receipt";
+  const reject = () => new VoiceLabError(labError("PROVIDER_CLEANUP_UNCONFIRMED", "The ordinary UI did not yield an exact authenticated provider disconnect acknowledgement with all owned websocket epochs settled.", "product", true, { validation_stage: validationStage, receiving_http_status: response?.status() ?? null }));
   if (!response || !isExactProviderDisconnectResponse(response, frontendOrigin) || response.status() !== 202 || !isJsonResponse(response)
     || !run.providerSessionId || !Number.isSafeInteger(run.providerEpoch) || Number(run.providerEpoch) < 1 || Number(run.providerEpoch) > 64) throw reject();
   try {
+    validationStage = "session_receipt_binding";
     const request = response.request().postDataJSON() as Record<string, unknown> | null;
     const body = await response.json() as Record<string, unknown> | null;
     if (request?.session_id !== run.providerSessionId || body?.ok !== true || body?.closed !== true) throw reject();
     const epochs = Array.from({ length: Number(run.providerEpoch) }, (_, index) => index + 1);
     const project = (value: Record<string, unknown>) => ({ browser_provider_close_receipts: value.browser_provider_close_receipts, browser_provider_activation_abort_receipts: value.browser_provider_activation_abort_receipts });
-    const submitted = validateD02ProductCleanupEcho(project(request), run.providerSessionId, epochs);
-    const accepted = validateD02ProductCleanupEcho(project(body), run.providerSessionId, epochs);
-    if (canonicalRequestHash(submitted) !== canonicalRequestHash(accepted)
-      || !accepted.browser_provider_close_receipts.some((receipt) => receipt.provider_connection_epoch === run.providerEpoch)) throw reject();
+    validationStage = "prior_activation_binding";
+    const previouslyClosed = new Map<number, Record<string, unknown>>();
+    const activationHashes = new Set<string>();
+    for (const activation of activationAcknowledgements) {
+      if (activation.session_id !== run.providerSessionId || Number(activation.candidate_epoch) > Number(run.providerEpoch)) throw reject();
+      const previous = activation.previous_socket_close_receipt as Record<string, unknown> | null;
+      if (!previous) continue;
+      const epoch = Number(previous.provider_connection_epoch);
+      const existing = previouslyClosed.get(epoch);
+      if (existing && canonicalRequestHash(existing) !== canonicalRequestHash(previous)) throw reject();
+      previouslyClosed.set(epoch, previous);
+      activationHashes.add(canonicalRequestHash(activation));
+    }
+    validationStage = "final_receipt_echo";
+    const submittedProjection = project(request);
+    const acceptedProjection = project(body);
+    if (canonicalRequestHash(submittedProjection) !== canonicalRequestHash(acceptedProjection)) throw reject();
+    // The final receiver may echo only still-unsettled epochs. Validate that
+    // echo strictly, then join earlier positive receiving acknowledgements.
+    if (!Array.isArray(acceptedProjection.browser_provider_close_receipts) || !Array.isArray(acceptedProjection.browser_provider_activation_abort_receipts)) throw reject();
+    const finalEpochs = [...acceptedProjection.browser_provider_close_receipts.map((receipt) => Number(receipt?.provider_connection_epoch)),
+      ...acceptedProjection.browser_provider_activation_abort_receipts.map((receipt) => Number(receipt?.candidate_epoch))].sort((a, b) => a - b);
+    const accepted = validateD02ProductCleanupEcho(acceptedProjection, run.providerSessionId, finalEpochs);
+    for (const receipt of accepted.browser_provider_close_receipts) {
+      const epoch = Number(receipt.provider_connection_epoch);
+      const existing = previouslyClosed.get(epoch);
+      if (existing && canonicalRequestHash(existing) !== canonicalRequestHash(receipt)) throw reject();
+      previouslyClosed.set(epoch, receipt);
+    }
+    validationStage = "settled_epoch_union";
+    const joined = validateD02ProductCleanupEcho({ browser_provider_close_receipts: [...previouslyClosed.values()].sort((a, b) => Number(a.provider_connection_epoch) - Number(b.provider_connection_epoch)),
+      browser_provider_activation_abort_receipts: accepted.browser_provider_activation_abort_receipts }, run.providerSessionId, epochs);
+    if (!accepted.browser_provider_close_receipts.some((receipt) => receipt.provider_connection_epoch === run.providerEpoch)) throw reject();
     return {
       schema: "sophia_voice_lab_normal_provider_disconnect_ack_v1",
       voice_lab_run_id_sha256: sha256(run.id), test_run_id_sha256: sha256(run.testRunId),
       cleanup_obligation_id_sha256: sha256(run.cleanupObligationId),
       provider_session_id_sha256: sha256(run.providerSessionId), provider_connection_epochs: epochs,
       receiving_http_status: 202, receiving_acknowledgement_sha256: canonicalRequestHash(accepted),
+      prior_activation_acknowledgement_sha256s: [...activationHashes].sort(),
+      settled_epoch_union_sha256: canonicalRequestHash(joined),
       browser_provider_close_receipt_count: accepted.browser_provider_close_receipts.length,
       browser_provider_activation_abort_receipt_count: accepted.browser_provider_activation_abort_receipts.length,
       raw_provider_and_receipt_identifiers_excluded: true,

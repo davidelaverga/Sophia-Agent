@@ -18,11 +18,12 @@ class FakeSource {
 
 function harness() {
   const sources: FakeSource[] = [];
+  const nativeSends: unknown[] = [];
   const listeners = new Map<string, (event?: unknown) => void>();
   const productEvents: Array<{ type: string; detail: Record<string, unknown> }> = [];
   const pagePushes: Array<Record<string, unknown>> = [];
   const audio = { currentTime: 0, state: "running", resume: async () => { audio.state = "running"; }, createMediaStreamDestination: () => ({ stream: { getAudioTracks: () => [{}] } }), decodeAudioData: async () => ({ duration: 0.1 }), createBufferSource: () => { const source = new FakeSource(); sources.push(source); return source; } };
-  class FakeWebSocket { static CONNECTING=0; static OPEN=1; static CLOSING=2; static CLOSED=3; readyState=1; constructor(_url: string, _protocols?: unknown) {} close() { this.readyState=3; } }
+  class FakeWebSocket { static CONNECTING=0; static OPEN=1; static CLOSING=2; static CLOSED=3; readyState=1; constructor(_url: string, _protocols?: unknown) {} send(data: unknown) { if (data === "native-throw") throw new Error("native-send-failed"); nativeSends.push(data); } close() { this.readyState=3; } }
   class FakeAudioContext { constructor(_options?: unknown) { return audio; } }
   const storage = new Map<string, string>();
   const sandbox: any = {
@@ -40,7 +41,7 @@ function harness() {
   sandbox.window = sandbox;
   sandbox.top = sandbox;
   vm.runInNewContext(buildVoiceLabInitScript({ pageOrigin: "https://frontend.test", websocketOrigins: ["wss://provider.test"], maxAudioBytes: 1024, testRunId: "00000000-0000-4000-8000-000000000001", cleanupObligationId: "00000000-0000-4000-8000-000000000002" }), sandbox);
-  return { sandbox, audio, sources, listeners, productEvents, pagePushes, storage };
+  return { sandbox, audio, sources, listeners, productEvents, pagePushes, storage, nativeSends };
 }
 
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -187,5 +188,62 @@ describe("page-owned dynamic WebAudio injection", () => {
     expect(socket.readyState).toBe(3);
     const kinds = sandbox.__sophiaVoiceLab.drain(0).events.map((event: any) => event.kind);
     expect(kinds.indexOf("harness.product_active_target_fenced")).toBeLessThan(kinds.indexOf("harness.socket_rotation_requested"));
+  });
+});
+
+describe("passive provider setup diagnostics", () => {
+  it("observes setup before input gating without retaining private envelope contents", () => {
+    const { sandbox, nativeSends } = harness();
+    const socket = new sandbox.WebSocket("wss://provider.test/socket?key=URL_SECRET");
+    const wire = JSON.stringify({ setup: {
+      model: "models/gemini-2.5-flash-native-audio-preview-12-2025",
+      generationConfig: { responseModalities: ["AUDIO"], speechConfig: { secret: "SPEECH_SECRET" } },
+      inputAudioTranscription: {}, outputAudioTranscription: {},
+      realtimeInputConfig: { automaticActivityDetection: { disabled: false } },
+      systemInstruction: { parts: [{ text: "SYSTEM_SECRET" }] }, tools: [{ declaration: "TOOLS_SECRET" }],
+      sessionResumption: { handle: "HANDLE_SECRET" }, auth: "AUTH_SECRET", arbitrary: "ARBITRARY_SECRET",
+    } });
+    socket.send(wire);
+    expect(nativeSends).toEqual([wire]);
+    const events = sandbox.__sophiaVoiceLab.drain(0).events;
+    expect(events.find((event: any) => event.kind === "harness.provider_setup_sent").payload).toEqual({
+      harness_socket_ordinal: 1, model: "models/gemini-2.5-flash-native-audio-preview-12-2025", response_modalities: ["AUDIO"],
+      input_audio_transcription_present: true, output_audio_transcription_present: true, automatic_activity_detection_disabled: false,
+    });
+    expect(JSON.stringify(events)).not.toMatch(/SECRET/);
+  });
+  it("counts native stream-end sends per allowed socket even without active injection", () => {
+    const { sandbox, nativeSends } = harness();
+    const first = new sandbox.WebSocket("wss://provider.test/socket");
+    const second = new sandbox.WebSocket("wss://provider.test/another");
+    const wire = JSON.stringify({ realtimeInput: { audioStreamEnd: true, text: "PRIVATE_TEXT" } });
+    first.send(wire); first.send(wire); second.send(wire);
+    expect(nativeSends).toEqual([wire, wire, wire]);
+    expect(sandbox.__sophiaVoiceLab.drain(0).events.filter((event: any) => event.kind === "harness.provider_audio_stream_end_sent").map((event: any) => event.payload)).toEqual([
+      { harness_socket_ordinal: 1, audio_stream_end_count: 1 }, { harness_socket_ordinal: 1, audio_stream_end_count: 2 }, { harness_socket_ordinal: 2, audio_stream_end_count: 1 },
+    ]);
+    expect(JSON.stringify(sandbox.__sophiaVoiceLab.drain(0))).not.toContain("PRIVATE_TEXT");
+  });
+  it("ignores foreign origins, non-JSON and unrecognized metadata without changing native sends", () => {
+    const { sandbox, nativeSends } = harness();
+    const foreign = new sandbox.WebSocket("wss://provider.test.evil/socket");
+    const allowed = new sandbox.WebSocket("wss://provider.test/socket");
+    foreign.send(JSON.stringify({ setup: { model: "models/gemini-secret" }, realtimeInput: { audioStreamEnd: true } }));
+    allowed.send("NOT_JSON_SECRET");
+    allowed.send(JSON.stringify({ setup: { model: "TOKEN_SECRET", generationConfig: { responseModalities: ["PRIVATE_SECRET"] } }, realtimeInput: { audioStreamEnd: "true" } }));
+    expect(nativeSends).toHaveLength(3);
+    const events = sandbox.__sophiaVoiceLab.drain(0).events;
+    expect(events.filter((event: any) => event.kind === "harness.provider_setup_sent").map((event: any) => event.payload)).toEqual([
+      { harness_socket_ordinal: 1, model: null, response_modalities: null, input_audio_transcription_present: false, output_audio_transcription_present: false, automatic_activity_detection_disabled: null },
+    ]);
+    expect(events.some((event: any) => event.kind === "harness.provider_audio_stream_end_sent")).toBe(false);
+    expect(JSON.stringify(events)).not.toMatch(/SECRET/);
+  });
+  it("preserves native send exceptions and produces no successful-send diagnostic", () => {
+    const { sandbox, nativeSends } = harness();
+    const socket = new sandbox.WebSocket("wss://provider.test/socket");
+    expect(() => socket.send("native-throw")).toThrow("native-send-failed");
+    expect(nativeSends).toEqual([]);
+    expect(sandbox.__sophiaVoiceLab.drain(0).events.some((event: any) => event.kind.startsWith("harness.provider_"))).toBe(false);
   });
 });

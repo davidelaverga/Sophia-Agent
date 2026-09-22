@@ -186,7 +186,7 @@ export function buildVoiceLabInitScript(options: InitScriptOptions): string {
         try { origin = new URL(String(url), location.href).origin; } catch {}
         if (origin && allowedWsOrigins.has(origin)) {
           state.socketEpoch += 1;
-          state.sockets.push({ socket: this, origin, epoch: state.socketEpoch });
+          state.sockets.push({ socket: this, origin, epoch: state.socketEpoch, audioStreamEndCount: 0 });
           if (state.sockets.length > 8) state.sockets.shift();
           emit('harness.socket_observed', { origin, epoch: state.socketEpoch });
         }
@@ -197,6 +197,29 @@ export function buildVoiceLabInitScript(options: InitScriptOptions): string {
         super.send(data);
         const entry = state.sockets.find((candidate) => candidate.socket === this);
         if (!entry || typeof data !== 'string') return;
+        let payload;
+        try { payload = JSON.parse(data); } catch { return; }
+        // Setup and stream-end precede/follow active synthetic input. Observe
+        // only this fixed content-free projection, never the setup envelope.
+        const setup = payload?.setup;
+        if (setup && typeof setup === 'object' && !Array.isArray(setup)) {
+          const modalities = setup.generationConfig?.responseModalities;
+          const validModalities = Array.isArray(modalities) && modalities.length <= 2
+            && modalities.every((value) => ['AUDIO', 'TEXT'].includes(value));
+          const aad = setup.realtimeInputConfig?.automaticActivityDetection;
+          emit('harness.provider_setup_sent', {
+            harness_socket_ordinal: entry.epoch,
+            model: typeof setup.model === 'string' && /^models\\/gemini-[a-z0-9.-]{1,120}$/.test(setup.model) ? setup.model : null,
+            response_modalities: validModalities ? modalities : null,
+            input_audio_transcription_present: Object.prototype.hasOwnProperty.call(setup, 'inputAudioTranscription'),
+            output_audio_transcription_present: Object.prototype.hasOwnProperty.call(setup, 'outputAudioTranscription'),
+            automatic_activity_detection_disabled: typeof aad?.disabled === 'boolean' ? aad.disabled : null,
+          });
+        }
+        if (payload?.realtimeInput?.audioStreamEnd === true) {
+          entry.audioStreamEndCount += 1;
+          emit('harness.provider_audio_stream_end_sent', { harness_socket_ordinal: entry.epoch, audio_stream_end_count: entry.audioStreamEndCount });
+        }
         const active = [...state.activeInputs.values()].filter((candidate) => candidate.started && !candidate.terminal);
         if (active.length !== 1) {
           if (active.length > 1) emit('harness.input_frame_ambiguous', { active_injection_count: active.length, harness_socket_ordinal: entry.epoch });
@@ -204,7 +227,6 @@ export function buildVoiceLabInitScript(options: InitScriptOptions): string {
         }
         let audio = null;
         try {
-          const payload = JSON.parse(data);
           const candidate = payload?.realtimeInput?.audio;
           if (candidate && typeof candidate.data === 'string' && typeof candidate.mimeType === 'string' && candidate.mimeType.startsWith('audio/pcm')) audio = candidate;
         } catch { return; }
