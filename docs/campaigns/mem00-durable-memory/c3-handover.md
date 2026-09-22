@@ -18,6 +18,8 @@ Frontend b103c4af / Production dpl_vj3NWuHsv4uf1iT5HjDJWsfLCGj8; Gateway7d0f0fb8
 
 This is an ordinary **text-memory** pilot. Legacy import, Voice personal-memory admission and Builder inherited personal memory remain outside its enabled scope. Separate Voice Lab activation/suspension remains unresolved from VT00; this mission did not alter it or demonstrate a voice journey.
 
+Restore was also tested end to end on the edited Amber Finch record: fresh recall preserved Indigo Swan/three bullets, then Forget removed it from warm recall and the newly created provider copy was verified purged. See c3-restore-e2e-2026-09-22.md. The record is forgotten again.
+
 ## Known limits
 
 Journal may say “Search indexing status unavailable” even when projection succeeded; that means its status view is unavailable, not that a saved memory is absent. Intermediate after-forget probes returned no saved memory but added speculative explanations. The final prompt repair constrains this to the actual current-search result; see the retest evidence for the final hosted outcome.

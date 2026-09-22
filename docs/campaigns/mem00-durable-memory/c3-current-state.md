@@ -1,5 +1,9 @@
 # MEM00-C3 — current checkpoint
 
+## Restore acceptance — 2026-09-22, 15:07Z
+
+**RESTORE_END_TO_END_PASS** through the signed-in ordinary app: restored synthetic Amber Finch at current content2/governance4, verified fresh recall, forgot again to2/5, observed empty warm recall at epoch13, verified the newly created provider binding purged, and completed supported end/zero-candidate recap. Session809d8e46 ended15:06:42.902012Z; extraction27db1f7f succeeded_zero/attempt1. Only the pre-existing paused session remains, no processing extraction. No deployment or service change. Full evidence: **c3-restore-e2e-2026-09-22.md**.
+
 ## UX repair checkpoint — 2026-09-22, 14:26Z
 
 Product fixes are pushed in ready, unmerged PR #150. Current tuple: frontend **b103c4afb8da032c2f4169d7a40e89be96a2433b** / Production **dpl_vj3NWuHsv4uf1iT5HjDJWsfLCGj8**; Gateway **7d0f0fb815a300a4416fb329d4edd8be5feec8f3** / **dep-dap8a38ae00c739e57b0**; LangGraph **def5c454e665628875cbad2ffd39a21a9f72749a** / **dep-dap8uvjtqb8s73fom2bg**, live14:26:41Z, /ok200. Voice and Lab unchanged. This supersedes the tuple and draft-review status in the prior checkpoint below.
