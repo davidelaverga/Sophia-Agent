@@ -1,5 +1,18 @@
 # MEM00-C3 — current checkpoint
 
+## UX repair checkpoint — 2026-09-22, 14:26Z
+
+Product fixes are pushed in ready, unmerged PR #150. Current tuple: frontend **b103c4afb8da032c2f4169d7a40e89be96a2433b** / Production **dpl_vj3NWuHsv4uf1iT5HjDJWsfLCGj8**; Gateway **7d0f0fb815a300a4416fb329d4edd8be5feec8f3** / **dep-dap8a38ae00c739e57b0**; LangGraph **def5c454e665628875cbad2ffd39a21a9f72749a** / **dep-dap8uvjtqb8s73fom2bg**, live14:26:41Z, /ok200. Voice and Lab unchanged. This supersedes the tuple and draft-review status in the prior checkpoint below.
+
+The ordinary app lifecycle produced exactly two scoped candidates, approved only Amber Finch, recalled only approved content, retrieved the edited revision in the same conversation, and excluded it after Forget. Both known provider bindings were verified purged. See **c3-ux-retest-2026-09-22.md** for exact sessions, projections, final manifests, failed intermediate wording probes, and final response.
+
+310 focused backend checks passed; subsequent prompt changes passed61 affected tests and Ruff. Product-head Memory Highlights E2E35739907149 passed. Both automated review findings were fixed and resolved; no independent approval claimed. Architecture35739907040 remains red against unrelated main; full Unit Tests35739907008 still running at this checkpoint. No merge or gate bypass.
+
+Final probef7a641af ended14:33:28.711870Z, extraction728a0a5f succeeded_zero/attempt1. All five current sessions ended; active Journal empty and both current provider bindings purged. Final empty reply was factually correct; optional help exceeded the requested two-sentence concision. **MEMORY_TEXT_PILOT_READY**, with that minor wording residual and non-green full CI. Current evidence: c3-ux-retest-2026-09-22.md.
+
+## Previous checkpoint — retained historical evidence
+
+
 Updated 2026-09-22. **MEMORY_TEXT_PILOT_READY** for Davide's bounded ordinary text-memory pilot. Code and hosted acceptance complete; no claim of full certification, independent PR approval, or historical global cleanup.
 
 

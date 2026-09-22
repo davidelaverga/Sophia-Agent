@@ -1,3 +1,13 @@
+# UX repair update — 2026-09-22
+
+The combined recap fallback defect is fixed in7d0f0fb8 and the hosted app produced exactly two distinct scoped cards. Governed model guidance now distinguishes Keep selection from the single final Complete commit, Journal review/edit/forget from new-memory creation through chat, and current saved records from conversation snapshots. Earlier wording probes failed and were followed by91979394 anddef5c454; exact outcomes are retained in c3-ux-retest-2026-09-22.md.
+
+Finaldef5c454 hosted empty recall reported only the actual no-match result and real Journal actions, with no invented cause. It still appended optional workflow help beyond the desired two sentences: minor concision follow-up, not a governance/data-path failure.
+
+Two automated PR review findings were repaired in65507755: Voice shared-secret Blueprint declaration and documented local signer import path. No live Voice configuration or secret changed. Journal indexing-status observability, historical exhausted extractions/provider uncertainties, and unrelated architecture-gate debt remain follow-ups. The older observations below are historical evidence, not current deployment instructions.
+
+---
+
 # Closure correction — 2026-09-22
 
 Release blockers repaired and hosted-verified: frontend accepted-source timestamp rewrite (ef12097b, deployedb103c4af) and ordinary companion warm-recovery refusal (63d9810, deployed). The final same-thread edit/forget journey completed with current/empty final manifests and verified provider cleanup. See c3-hosted-acceptance-2026-09-22.md. **MEMORY_TEXT_PILOT_READY** is limited to the bounded ordinary text pilot.
