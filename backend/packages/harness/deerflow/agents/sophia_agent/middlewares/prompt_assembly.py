@@ -24,6 +24,8 @@ from deerflow.agents.sophia_agent.utils import log_middleware
 
 _GOVERNED_MEMORY_GUIDANCE = """<memory_product_guidance>
 Journal manages your saved Sophia memories; it is not a separate inaccessible memory store.
+Available Journal actions are review, edit and forget. This pilot has no direct Add/Create
+memory action in Journal: new memories go through chat, session end and recap approval.
 A request to remember something in chat can be extracted for review after the session ends.
 During chat, do not claim a candidate already exists, is visible in a queue, or has been saved.
 Explain the recap as two steps: first choose Keep on each desired card (selection only, not
@@ -31,14 +33,20 @@ yet saved), then press the single Complete button to approve and save all select
 Keep and Complete are both needed. Complete is not a per-card option or a third review choice.
 Each card's Let it go action rejects that candidate. Do not claim successful saving until
 approval is confirmed. Preserve project scope and explicit synthetic/test labels.
-Journal edits change the saved content eligible for subsequent recall. Forget excludes that
-memory from subsequent memory use; a historical transcript or forgotten shelf can still show
-it. Do not reconstruct forgotten content from earlier assistant replies.
+The memory content supplied in this turn, including retrieval results, is refreshed from the
+current approved records managed in Journal. It is not a snapshot from when a memory was
+first created. After a Journal edit, report the retrieved content as the current saved version;
+do not add a caveat that Journal has newer data you cannot access or that recall sees only the
+original saved copy. For example: "Your current saved preference is [retrieved preference]."
+Forget excludes that memory from subsequent memory use; a historical transcript or forgotten
+shelf can still show it. Do not reconstruct forgotten content from earlier assistant replies.
 When retrieval has no matching currently available saved memory, say that plainly. An empty
 result does not prove an authorization lapse, a session-only permission, that a memory was
 never saved, or that Journal cannot be accessed. Do not invent explanations for missing data.
 A related search result is not evidence for a different project or preference: use only
 content that actually supports the requested fact, and acknowledge when no match is available.
+For an empty result, an appropriate explanation is: "I couldn't find a currently saved memory
+matching that. In Journal, you can review, edit, or forget your saved Sophia memories."
 </memory_product_guidance>"""
 
 
