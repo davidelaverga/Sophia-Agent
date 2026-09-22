@@ -7,7 +7,7 @@ Branch: `codex/mem00-c3-closure`, integration `d7f4c93437c638d58bb96f7e0f7341257
 
 ## Scope and authorization
 
-Continue the adopted MEM00-C3 mission, preserving canonical-ledger authority, receiving authentication and exact-owner isolation. No production change or new provider/model run occurred during takeover. Claude reports a $25 cumulative acceptance ceiling but no spend tally. A single request for up to $5 NEW variable spend is pending with Davide; no approval inferred. Existing platform denials remain applicable; switching controllers does not bypass them. No recurring spend authorized.
+Continue the adopted MEM00-C3 mission, preserving canonical-ledger authority, receiving authentication and exact-owner isolation. No deployment occurred during takeover. One bounded ordinary text diagnostic has now been submitted in session `19acce9c-c2d3-4e9e-b53b-5f2387d3d42c`, thread `01a0c810-8fa8-7ee3-895e-7cd9b59a64eb`; its cost/result is pending. Claude reports a $25 cumulative acceptance ceiling but no spend tally. Davide explicitly approved up to $5 NEW variable spend on 2026-09-22. Track this separately from the unquantified earlier $25; no recurring spend. Existing platform denials remain applicable; switching controllers does not bypass them. No recurring spend authorized.
 
 ## Versions and connections
 
@@ -62,6 +62,10 @@ Acceptance: E1/E2 and automatic E3 have historical evidence; explicit-tool E3, a
 
 Fresh dedicated uv Python 3.12.14 environment; editable harness resolves to this branch. Focused backend tests: **120 passed** (text context, checkpoint provenance, extraction worker, service auth). Focused frontend: **50 passed** (22 completion + 28 companion trigger), via project-pinned pnpm. No full-suite claim. Real-PG companion integration and Sentrux remain unverified; Sentrux tool not callable in Codex and Claude reported ENOENT.
 
-Next: after spend answer, verify ordinary app owner, close/resume the exact owned test session through supported UI, and execute one fresh bounded governed text turn with LangGraph logs. Capture actual run completion and denied_at_line without retaining secret/content-bearing logs. Repair the causal path, qualify only affected components, respect deployment denials, then finish remaining E stages and cleanup. Keep ready verdict withheld until evidence is complete.
+Next: verify ordinary app owner, close/resume the exact owned test session through supported UI, and execute one fresh bounded governed text turn with LangGraph logs. Capture actual run completion and denied_at_line without retaining secret/content-bearing logs. Repair the causal path, qualify only affected components, respect deployment denials, then finish remaining E stages and cleanup. Keep ready verdict withheld until evidence is complete.
 
 Historical rollout details remain in git history and c3-actions.jsonl. Current state above supersedes older activation, record lifecycle and stuck-session statements.
+
+## Fresh hosted diagnostic, 07:43Z
+
+See `c3-hosted-diagnostic-2026-09-22.md` and C3-0016. The live failure occurs in the **post-model** `check()` at line436, after a parsed model result, on a fresh session with no new forget/clear. The current test session remains open. Mac locked before further evidence capture or supported End; unlock requested. No deploy/restart is allowed to discard this current evidence. Actual cost of the single approved live turn is pending.
