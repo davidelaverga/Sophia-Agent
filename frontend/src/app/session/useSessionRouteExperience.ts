@@ -517,6 +517,7 @@ export function useSessionRouteExperience({
     typeof chatRequestBody?.thread_id === 'string' ? chatRequestBody.thread_id : '',
   );
   const rawSendMessage = useSessionOutboundSend({
+    setMessageTimestamp,
     chatStatus,
     sendChatMessage,
     hasValidBackendSessionId,

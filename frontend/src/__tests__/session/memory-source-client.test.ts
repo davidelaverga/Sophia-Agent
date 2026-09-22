@@ -1,8 +1,10 @@
 import { act, renderHook } from '@testing-library/react';
+import { useState } from 'react';
 import { beforeEach, expect, it, vi } from 'vitest';
 
 import { createSourceSendIntent, loadSourceProfile, recordSourceSendIntent } from '../../app/lib/memory-source-client';
 import type { SourceProfile } from '../../app/lib/memory-source-contract';
+import { useSessionMessageViewModel } from '../../app/session/useSessionMessageViewModel';
 import { useSessionOutboundSend } from '../../app/session/useSessionSendActions';
 import { useConnectivityStore } from '../../app/stores/connectivity-store';
 
@@ -62,7 +64,7 @@ it('actual outbound hook records first and sends the canonical source ID through
   const receipt = actionReceipt(intent);
   fetchMock.mockResolvedValue(new Response(JSON.stringify(receipt)));
   const sendChatMessage = vi.fn(async () => { expect(fetchMock).toHaveBeenCalledTimes(1); });
-  const { result } = renderHook(() => useSessionOutboundSend({ chatStatus: 'ready', sendChatMessage,
+  const { result } = renderHook(() => useSessionOutboundSend({ setMessageTimestamp: vi.fn(), chatStatus: 'ready', sendChatMessage,
     hasValidBackendSessionId: true, chatRequestBody: { user_id: 'owner', session_id: session, thread_id: thread },
     debugEnabled: false, markStreamTurnStarted: vi.fn(), showToast: vi.fn() }));
   await act(async () => result.current({ text: intent.action.content, sourceIntent: intent }));
@@ -73,7 +75,7 @@ it('actual outbound hook records first and sends the canonical source ID through
 it.each(['submitted', 'streaming', 'initializing'] as const)('a governed %s no-op cannot resolve as successful delivery', async status => {
   const intent = createSourceSendIntent(profile, 'SYNTHETIC HELD');
   const sendChatMessage = vi.fn(async () => undefined);
-  const { result } = renderHook(() => useSessionOutboundSend({
+  const { result } = renderHook(() => useSessionOutboundSend({ setMessageTimestamp: vi.fn(),
     chatStatus: status === 'initializing' ? 'ready' : status, sendChatMessage,
     hasValidBackendSessionId: status !== 'initializing',
     chatRequestBody: { user_id: 'owner', session_id: session, thread_id: thread },
@@ -87,7 +89,7 @@ it.each(['submitted', 'streaming', 'initializing'] as const)('a governed %s no-o
 it('source outage prevents chat dispatch and an immediate retry preserves the original action', async () => {
   const intent = createSourceSendIntent(profile, 'SYNTHETIC RETRY');
   const sendChatMessage = vi.fn(async () => undefined);
-  const { result } = renderHook(() => useSessionOutboundSend({ chatStatus: 'ready', sendChatMessage,
+  const { result } = renderHook(() => useSessionOutboundSend({ setMessageTimestamp: vi.fn(), chatStatus: 'ready', sendChatMessage,
     hasValidBackendSessionId: true, chatRequestBody: { user_id: 'owner', session_id: session, thread_id: thread },
     debugEnabled: false, markStreamTurnStarted: vi.fn(), showToast: vi.fn() }));
   fetchMock.mockRejectedValueOnce(new Error('SYNTHETIC OUTAGE'));
@@ -101,7 +103,7 @@ it('source outage prevents chat dispatch and an immediate retry preserves the or
 it('a persisted action from another owner cannot reach source or chat dispatch after account change', async () => {
   const intent = createSourceSendIntent(profile, 'SYNTHETIC OLD OWNER');
   const sendChatMessage = vi.fn(async () => undefined);
-  const { result } = renderHook(() => useSessionOutboundSend({ chatStatus: 'ready', sendChatMessage,
+  const { result } = renderHook(() => useSessionOutboundSend({ setMessageTimestamp: vi.fn(), chatStatus: 'ready', sendChatMessage,
     hasValidBackendSessionId: true, chatRequestBody: { user_id: 'new-owner', session_id: session, thread_id: thread },
     debugEnabled: false, markStreamTurnStarted: vi.fn(), showToast: vi.fn() }));
   await act(async () => { await expect(result.current({ text: intent.action.content, sourceIntent: intent })).rejects.toThrow('memory_source_action_scope_invalid'); });
@@ -113,7 +115,7 @@ it.each([false, true])('account change while source acceptance is in flight fenc
   let finish: (response: Response) => void;
   fetchMock.mockImplementationOnce(() => new Promise<Response>(resolve => { finish = resolve; }));
   const sendChatMessage = vi.fn(async () => undefined);
-  const { result, rerender } = renderHook(({ owner }) => useSessionOutboundSend({ chatStatus: 'ready', sendChatMessage,
+  const { result, rerender } = renderHook(({ owner }) => useSessionOutboundSend({ setMessageTimestamp: vi.fn(), chatStatus: 'ready', sendChatMessage,
     hasValidBackendSessionId: true, chatRequestBody: { user_id: owner, session_id: session, thread_id: thread },
     debugEnabled: false, markStreamTurnStarted: vi.fn(), showToast: vi.fn() }), { initialProps: { owner: 'owner' } });
   const pending = result.current({ text: intent.action.content, sourceIntent: intent });
@@ -122,4 +124,33 @@ it.each([false, true])('account change while source acceptance is in flight fenc
   finish(new Response(JSON.stringify(actionReceipt(intent))));
   await expect(pending).rejects.toThrow('memory_source_action_scope_changed');
   expect(sendChatMessage).not.toHaveBeenCalled();
+});
+
+it('keeps the accepted source timestamp, including microseconds, in the transcript view during streaming', async () => {
+  const intent = createSourceSendIntent(profile, 'SYNTHETIC SOURCE TIMESTAMP');
+  const receipt = { ...actionReceipt(intent), created_at: '2026-09-22T07:43:36.227854+00:00' };
+  fetchMock.mockResolvedValue(new Response(JSON.stringify(receipt)));
+  type Message = { id: string; role: 'user'; parts: Array<{ type: 'text'; text: string }> };
+  const { result } = renderHook(() => {
+    const [chatMessages, setChatMessages] = useState<Message[]>([]);
+    const view = useSessionMessageViewModel({ chatMessages, greetingAnchorId: null, markOffline: vi.fn() });
+    const send = useSessionOutboundSend({
+      setMessageTimestamp: view.setMessageTimestamp,
+      chatStatus: 'ready', hasValidBackendSessionId: true,
+      chatRequestBody: { user_id: 'owner', session_id: session, thread_id: thread },
+      debugEnabled: false, markStreamTurnStarted: vi.fn(), showToast: vi.fn(),
+      sendChatMessage: async message => {
+        if (!('id' in message)) throw new Error('source_id_missing');
+        setChatMessages([message]);
+      },
+    });
+    return { send, messages: view.messages };
+  });
+  await act(async () => result.current.send({ text: intent.action.content, sourceIntent: intent }));
+  // Actual view records consumed by useSessionStreamPersistence. Render time
+  // or Date.toISOString changes the source version despite unchanged text.
+  expect(result.current.messages).toHaveLength(1);
+  expect(result.current.messages[0]).toMatchObject({
+    id: receipt.message_id, content: intent.action.content, createdAt: receipt.created_at,
+  });
 });

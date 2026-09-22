@@ -83,7 +83,7 @@ describe('useSessionOutboundSend', () => {
       ],
     });
 
-    const { result } = renderHook(() => useSessionOutboundSend({
+    const { result } = renderHook(() => useSessionOutboundSend({ setMessageTimestamp: vi.fn(),
       chatStatus: 'ready',
       sendChatMessage,
       hasValidBackendSessionId: true,
@@ -153,7 +153,7 @@ describe('useSessionOutboundSend', () => {
       ],
     });
 
-    const { result } = renderHook(() => useSessionOutboundSend({
+    const { result } = renderHook(() => useSessionOutboundSend({ setMessageTimestamp: vi.fn(),
       chatStatus: 'ready',
       sendChatMessage,
       hasValidBackendSessionId: true,
