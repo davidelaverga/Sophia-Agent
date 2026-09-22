@@ -96,11 +96,35 @@ Success looks like this:
 
 Once `sophia_companion` exists and LangGraph is running, switch modes without changing the rest of the voice service:
 
+DeerFlow mode also requires `SOPHIA_BUILDER_EVENTS_HMAC_SECRET` in the local
+environment or `.env`, matching the existing value configured on the receiving
+LangGraph service. The readiness probe and every subsequent request are signed;
+missing or mismatched authentication must fail closed. Do not generate a separate
+Voice signing value. The Render Blueprint declares this dashboard-managed secret
+with `sync: false`; an existing deployment's value must be preserved.
+
+The shared signer lives in `backend/packages/harness`, which is not installed by
+the lightweight Voice requirements. Add that source directory to `PYTHONPATH`
+from the repository root before running any local DeerFlow command (including
+`serve`). This exposes the same contract modules copied by the Voice Dockerfile
+without importing the backend agent package or installing its dependency graph.
+
 ```powershell
+$env:PYTHONPATH = (Join-Path (Get-Location) "backend/packages/harness") + [IO.Path]::PathSeparator + $env:PYTHONPATH
 $env:SOPHIA_BACKEND_MODE = "deerflow"
 $env:SOPHIA_LANGGRAPH_BASE_URL = "http://127.0.0.1:2024"
 $env:SOPHIA_ASSISTANT_ID = "sophia_companion"
 voice\.venv\Scripts\python.exe -m voice.server run --call-id sophia-dev
+```
+
+On macOS/Linux, from the repository root:
+
+```bash
+export PYTHONPATH="$PWD/backend/packages/harness${PYTHONPATH:+:$PYTHONPATH}"
+export SOPHIA_BACKEND_MODE=deerflow
+export SOPHIA_LANGGRAPH_BASE_URL=http://127.0.0.1:2024
+export SOPHIA_ASSISTANT_ID=sophia_companion
+voice/.venv/bin/python -m voice.server run --call-id sophia-dev
 ```
 
 If readiness fails in this mode, startup stops before joining the call.
