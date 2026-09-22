@@ -311,8 +311,11 @@ def _explicit_preference_entry_from_statement(
 
 
 def _explicit_my_preference_content(statement: str) -> str | None:
-    match = re.search(
-        r"(?is)\bmy\s+(?P<label>[a-z0-9][^.!?]{1,90}?)\s+(?:is|are)\s+(?P<value>[^.!?]{1,200})",
+    # A fallback must account for the whole statement. Searching inside a
+    # scoped/compound request drops project names and duplicates model entries.
+    # Leave those requests to the structured extractor instead of truncating.
+    match = re.fullmatch(
+        r"(?is)my\s+(?P<label>[a-z0-9][^.!?;:]{1,90}?)\s+(?:is|are)\s+(?P<value>[^.!?;:]{1,200})",
         statement,
     )
     if not match:
@@ -333,8 +336,10 @@ def _explicit_my_preference_content(statement: str) -> str | None:
 
 
 def _explicit_i_prefer_content(statement: str) -> str | None:
-    match = re.search(r"(?is)\bi\s+prefer\s+(?P<value>[^.!?]{1,200})", statement)
+    match = re.fullmatch(r"(?is)i\s+prefer\s+(?P<value>[^.!?;:]{1,200})", statement)
     if not match:
+        return None
+    if re.search(r"(?i)\bi\s+prefer\b", match.group("value")):
         return None
 
     value, reason = _split_reason(match.group("value"))

@@ -22,6 +22,21 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 from deerflow.agents.middlewares.dangling_tool_call_middleware import patch_dangling_tool_call_messages
 from deerflow.agents.sophia_agent.utils import log_middleware
 
+_GOVERNED_MEMORY_GUIDANCE = """<memory_product_guidance>
+Journal manages your saved Sophia memories; it is not a separate inaccessible memory store.
+A request to remember something in chat proposes a candidate for recap review. Do not claim
+it is saved until approval is confirmed. In the recap, Keep and Complete approve selected
+candidates; Let go rejects them. Preserve project scope and explicit synthetic/test labels.
+Journal edits change the saved content eligible for subsequent recall. Forget excludes that
+memory from subsequent memory use; a historical transcript or forgotten shelf can still show
+it. Do not reconstruct forgotten content from earlier assistant replies.
+When retrieval has no matching currently available saved memory, say that plainly. An empty
+result does not prove an authorization lapse, a session-only permission, that a memory was
+never saved, or that Journal cannot be accessed. Do not invent explanations for missing data.
+A related search result is not evidence for a different project or preference: use only
+content that actually supports the requested fact, and acknowledge when no match is available.
+</memory_product_guidance>"""
+
 
 class PromptAssemblyState(AgentState):
     system_prompt_blocks: NotRequired[list[str]]
@@ -98,6 +113,7 @@ class PromptAssemblyMiddleware(AgentMiddleware[PromptAssemblyState]):
             # Even verified cached memory blocks are not rendered. Rebuild their
             # content from current canonical rows admitted by the atomic RPC.
             blocks = [block for block in request.state.get("system_prompt_blocks", []) if not block.lstrip().startswith(("<memory>", "<memories>"))]
+            blocks.append(_GOVERNED_MEMORY_GUIDANCE)
             if result.memories:
                 blocks.append("<memories>\n" + "\n".join("- " + memory.canonical_content for memory in result.memories) + "\n</memories>")
             canonical_text = "\n".join("- " + memory.canonical_content for memory in result.memories)

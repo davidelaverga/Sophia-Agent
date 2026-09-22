@@ -115,4 +115,8 @@ def test_warm_companion_context_rebuilds_only_verified_sources(env, monkeypatch,
         assert "FIRST_INDEPENDENT_SOURCE" in str(captured[-1])
         assert "SECOND_INDEPENDENT_SOURCE" in str(captured[-1])
         assert ("NEW_SYNTHETIC_MEMORY" in str(captured[-1])) is not forget
+        system = captured[-1][0].content
+        assert "Journal manages your saved Sophia memories" in system
+        assert "Keep and Complete" in system
+        assert "does not prove an authorization lapse" in system
         assert first.get_state(checkpoint.config).values == original, "historical checkpoint is preserved"
