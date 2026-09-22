@@ -49,6 +49,40 @@ _BUILDER_TASK_TERMINAL_EVENT_TYPES = {
 }
 
 
+def _signed_headers(*, owner_id: str, method: str, path: str) -> dict[str, str]:
+    """Sign one LangGraph request. The receiving side requires it.
+
+    Every call this adapter makes is refused with 401 unless it carries a
+    service authorization, so signing is not optional on any path. The shared
+    minter is reused rather than reimplemented: the signing domain, TTL, nonce
+    and per-path scope rules must stay in exactly one place.
+
+    Imported inside the function because `voice` has no other import of the
+    backend harness, and this module must still import where that path is not
+    present -- the voice image copies only the specific contract files it
+    needs.
+    """
+    from deerflow.sophia.langgraph_service_auth import mint_service_authorization
+
+    return {
+        "Authorization": mint_service_authorization(
+            owner_id=owner_id, method=method, path=path
+        )
+    }
+
+
+def _readiness_headers(path: str) -> dict[str, str]:
+    """Sign the startup probe under the dedicated readiness principal.
+
+    The probe runs before any user exists, so it cannot borrow an owner
+    identity. `_scope` grants exactly `POST /assistants/search` to this
+    principal and nothing else -- notably not any thread route.
+    """
+    from deerflow.sophia.langgraph_service_auth import READINESS_OWNER
+
+    return _signed_headers(owner_id=READINESS_OWNER, method="POST", path=path)
+
+
 class DeerFlowBackendAdapter(BackendAdapter):
     mode = "deerflow"
 
@@ -80,6 +114,7 @@ class DeerFlowBackendAdapter(BackendAdapter):
             response = await self._http.post(
                 "/assistants/search",
                 json={"graph_id": self.settings.assistant_id, "limit": 1},
+                headers=_readiness_headers("/assistants/search"),
                 timeout=self.settings.readiness_timeout_seconds,
             )
             response.raise_for_status()
@@ -145,6 +180,11 @@ class DeerFlowBackendAdapter(BackendAdapter):
                 "POST",
                 f"/threads/{thread_id}/runs/stream",
                 json=payload,
+                headers=_signed_headers(
+                    owner_id=request.user_id,
+                    method="POST",
+                    path=f"/threads/{thread_id}/runs/stream",
+                ),
                 timeout=self.settings.backend_timeout_seconds,
             ) as response:
                 response.raise_for_status()
@@ -428,7 +468,7 @@ class DeerFlowBackendAdapter(BackendAdapter):
         if request.thread_id is None:
             await self._get_or_create_thread(request.user_id)
 
-        warmup_thread_id = await self._create_thread()
+        warmup_thread_id = await self._create_thread(owner_id=_DEERFLOW_WARMUP_USER_ID)
         payload = self._build_run_payload(
             text=_DEERFLOW_WARMUP_TEXT,
             user_id=_DEERFLOW_WARMUP_USER_ID,
@@ -451,6 +491,11 @@ class DeerFlowBackendAdapter(BackendAdapter):
                 "POST",
                 f"/threads/{warmup_thread_id}/runs/stream",
                 json=payload,
+                headers=_signed_headers(
+                    owner_id=_DEERFLOW_WARMUP_USER_ID,
+                    method="POST",
+                    path=f"/threads/{warmup_thread_id}/runs/stream",
+                ),
                 timeout=self.settings.backend_timeout_seconds,
             ) as response:
                 response.raise_for_status()
@@ -526,15 +571,18 @@ class DeerFlowBackendAdapter(BackendAdapter):
             if existing:
                 return existing
 
-            thread_id = await self._create_thread()
+            thread_id = await self._create_thread(owner_id=user_id)
             self._thread_ids[user_id] = thread_id
             return thread_id
 
-    async def _create_thread(self) -> str:
+    async def _create_thread(self, *, owner_id: str) -> str:
         try:
             response = await self._http.post(
                 "/threads",
                 json={},
+                headers=_signed_headers(
+                    owner_id=owner_id, method="POST", path="/threads"
+                ),
                 timeout=self.settings.readiness_timeout_seconds,
             )
             response.raise_for_status()
