@@ -3,7 +3,10 @@ import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import type { Response } from "playwright";
 import { DriverEndFailure, END_POST_DISCONNECT_RESERVE_MS, PlaywrightVoiceDriver, SYNTHETIC_FINALIZATION_EXCLUSION_KEYS, observeProviderDisconnect, PRODUCT_ERROR_CODES, productErrorCode, providerDisconnectDeadlineAt, providerDisconnectWaitMs, readProviderActivationAcknowledgement, validateNormalProviderDisconnectResponse } from "../src/browser-driver.js";
-import { projectPublicData, redact, sha256 } from "../src/security.js";
+import type { LabEvent } from "../src/domain.js";
+import { UNCONFIRMED_AUTH_CLEANUP_SCHEMA, authCleanupConfirmed, deriveExecutionEpochCleanupProof } from "../src/execution-cleanup.js";
+import { assertNoSecret, projectPublicData, redact, sha256 } from "../src/security.js";
+import { ownership } from "./execution-cleanup-fixture.js";
 import { testConfig, testRun } from "./helpers.js";
 
 const origin = "https://frontend.test";
@@ -96,12 +99,20 @@ it.each([
   // C042: the worker already spent 30 s of its end budget (grant minting,
   // fencing) before driver entry; the 202 wait must honour the real deadline.
   [false, false, "delayed-entry"],
+  // C059: after bound finalization and the authenticated disconnect, a direct
+  // cleanup that does not confirm is recorded unconfirmed and the context
+  // still closes; session:recover must then settle auth.
+  [false, false, "cleanup-403"], [false, false, "cleanup-timeout"], [false, false, "cleanup-transport"],
+  [false, false, "cleanup-foreign-receipt"], [false, false, "cleanup-malformed"],
+  // C061: the abort path's direct cleanup uses the same validator and typed booleans.
+  [false, false, "abort-confirmed"], [false, false, "abort-403"], [false, false, "abort-foreign-receipt"],
 ] as const)("real driver end consumes receiving ack; rejected=%s prior-activation=%s mode=%s", async (rejected, priorActivation, mode) => {
   const config = testConfig();
   const ownedRun = testRun({ scenarioId: "V-O01", providerSessionId: run.providerSessionId, providerEpoch: mode === "stale-epoch" ? 1 : 2,
     capturePolicy: { rawAudio: false, screenshot: false, video: false, retentionHours: 24 } });
   const frontendOrigin = ownedRun.target.frontendUrl;
   let connected = true, contextOpen = true, pageUrl = `${frontendOrigin}/`;
+  let cleanupPosts = 0;
   const child = { pid: 4173, exitCode: null as number | null, signalCode: null };
   const responseListeners: Array<(response: any) => void> = [];
   const waiting: Array<{ predicate: (response: any) => boolean; resolve: (response: any) => void; timeout?: number }> = [];
@@ -180,7 +191,18 @@ it.each([
     exposeBinding: async (_name: string, callback: typeof push) => { push = callback; }, addInitScript: async () => {}, newPage: async () => page,
     close: async () => { contextOpen = false; },
     request: {
-      post: async (url: string) => networkResponse(url, url.endsWith(config.authCleanupPath) ? { ...authReceipt, session_revoked: true, cookies_cleared: true } : authReceipt),
+      post: async (url: string) => {
+        if (!url.endsWith(config.authCleanupPath)) return networkResponse(url, authReceipt);
+        cleanupPosts += 1;
+        if (mode === "cleanup-403" || mode === "abort-403") return networkResponse(url, { ok: false, error: "voice_lab_authenticated_principal_required", note: "PRIVATE free text" }, 403);
+        if (mode === "cleanup-timeout") throw Object.assign(new Error("apiRequestContext.post: Timeout 15000ms exceeded. SECRET-cookie"), { name: "TimeoutError" });
+        if (mode === "cleanup-transport") throw new Error("read ECONNRESET SECRET-cookie");
+        if (mode === "cleanup-foreign-receipt" || mode === "abort-foreign-receipt") return networkResponse(url, { ...authReceipt, test_run_id: "another-run", session_revoked: true, cookies_cleared: true, raw_cookie: "SECRET-cookie-value" });
+        if (mode === "cleanup-malformed") return networkResponse(url, ["not", "a", "receipt"]);
+        // The confirmed receipt also carries a cookie-named field that generic
+        // redaction must still mask.
+        return networkResponse(url, { ...authReceipt, cleanup_obligation_id: ownedRun.cleanupObligationId, session_revoked: true, cookies_cleared: true, raw_cookie: "SECRET-cookie-value" });
+      },
       get: async (url: string) => networkResponse(url, { user: { id: ownedRun.principalId } }),
     },
   };
@@ -191,7 +213,13 @@ it.each([
     "voice.test": ownedRun.target.expectedDeployment.voice, "langgraph.test": ownedRun.target.expectedDependencies.langgraph };
   const driver = new PlaywrightVoiceDriver(config, async url => new globalThis.Response(JSON.stringify({ build_id: builds[new URL(String(url)).hostname] }), { status: 200 }),
     undefined, undefined, (async () => server) as any, (async () => browser) as any);
-  await driver.start(ownedRun, "grant");
+  const started = await driver.start(ownedRun, "grant");
+  // The worker authors the runtime acquisition between the browser-authored
+  // process acquisition and every later receipt.
+  const sequenced = (later: Array<Omit<LabEvent, "runId" | "seq" | "at">>): LabEvent[] => {
+    const acquisition = started.events.filter(e => e.kind === "harness.browser_process_acquired");
+    return [...acquisition, ownership(ownedRun)[1]!, ...later].map((e, index) => ({ ...e, runId: ownedRun.id, seq: index + 1, at: new Date(index * 1_000) }) as LabEvent);
+  };
   if (priorActivation) emit(networkResponse("/api/sophia/voice/gemini/activate", {
     activated: true, session_id: ownedRun.providerSessionId, provider_connection_epoch: 2, provider_activation_receipt: activation,
   }, 202, activation));
@@ -200,6 +228,13 @@ it.each([
     return [];
   });
   const listenersBeforeEnd = responseListeners.length;
+  const unconfirmedCleanup: Record<string, Record<string, unknown>> = {
+    "cleanup-403": { status: 403, product_error_code: "voice_lab_authenticated_principal_required" },
+    "cleanup-timeout": { status: null, product_error_code: null, transport_failure: "timeout" },
+    "cleanup-transport": { status: null, product_error_code: null, transport_failure: "transport_error" },
+    "cleanup-foreign-receipt": { status: 200, product_error_code: null },
+    "cleanup-malformed": { status: null, product_error_code: null, transport_failure: "receipt_invalid" },
+  };
   const endEnteredAt = Date.now();
   const disconnectWaitTimeout = () => {
     const accepted = networkResponse("/api/sophia/voice/gemini/disconnect", {}, 202);
@@ -216,12 +251,33 @@ it.each([
     expect(disconnectWaitTimeout()).toBeGreaterThan(allowedUntil - Date.now() - 1);
     expect(disconnectWaitTimeout()).toBeLessThanOrEqual(allowedUntil - endEnteredAt);
   };
+  if (mode === "abort-confirmed" || mode === "abort-403" || mode === "abort-foreign-receipt") {
+    const aborted = await driver.abort(ownedRun, "test_abort", undefined, "cleanup");
+    const authEvents = aborted.events.filter(e => e.kind === "auth.session_cleanup");
+    expect(cleanupPosts).toBe(1);
+    expect(authEvents).toHaveLength(1);
+    const payload = authEvents[0]!.payload as Record<string, any>;
+    if (mode === "abort-confirmed") {
+      expect(payload).toMatchObject({ confirmed: true, receipt: { session_revoked: true, cookies_cleared: true, raw_cookie: "[REDACTED]" } });
+      expect(authCleanupConfirmed(authEvents[0]!)).toBe(true);
+    } else {
+      // Never manufactured: the unvalidated receipt keeps only its catalogued code.
+      expect(payload).toMatchObject({ confirmed: false, receipt: { product_error_code: mode === "abort-403" ? "voice_lab_authenticated_principal_required" : null } });
+      expect(Object.keys(payload.receipt)).toEqual(["product_error_code"]);
+      expect(authCleanupConfirmed(authEvents[0]!)).toBe(false);
+    }
+    expect(JSON.stringify(aborted.events)).not.toMatch(/SECRET|PRIVATE/);
+    expect(() => assertNoSecret(aborted.events)).not.toThrow();
+    expect(driver.hasSession(ownedRun.id)).toBe(false);
+    return;
+  }
   if (mode === "finalization-409-coded") {
     const error = await driver.end(ownedRun, "finalize", "cleanup", operationDeadlineAt).catch(error => error);
     expect(error).toBeInstanceOf(DriverEndFailure);
     expect(error.detail).toMatchObject({ code: "PRODUCT_FINALIZATION_UNCONFIRMED", details: { status: 409, product_error_code: "voice_lab_run_binding_mismatch" } });
     expect(JSON.stringify(error.detail)).not.toContain("PRIVATE");
     expect(responseListeners.length).toBe(listenersBeforeEnd);
+    expect(cleanupPosts).toBe(0); // pre-proof failure unchanged: cleanup never attempted
     return;
   }
   if (mode === "finalization-fails") {
@@ -229,6 +285,7 @@ it.each([
     expect(error).toBeInstanceOf(DriverEndFailure);
     expect(error.detail.code).toBe("PRODUCT_FINALIZATION_UNCONFIRMED");
     expect(responseListeners.length).toBe(listenersBeforeEnd);
+    expect(cleanupPosts).toBe(0); // pre-proof failure unchanged: cleanup never attempted
     return;
   }
   if (rejected) {
@@ -240,6 +297,7 @@ it.each([
     expect(error.events).toContainEqual(expect.objectContaining({ kind: "session.finalized" }));
     expect(error.events.some((event: any) => event.kind === "cleanup.provider_transport_closed")).toBe(false);
     expect(driver.hasSession(ownedRun.id)).toBe(true); // Recovery still owns the browser.
+    expect(cleanupPosts).toBe(0);
     expect(responseListeners.length).toBe(listenersBeforeEnd);
     expectBudgetedDisconnectWait();
   } else {
@@ -255,6 +313,27 @@ it.each([
       payload: expect.objectContaining({ proof_basis: "authenticated_receiving_disconnect_acknowledgement" }) }));
     expect(ended.events.some(event => event.kind === "provider.stage")).toBe(false);
     expect(driver.hasSession(ownedRun.id)).toBe(false);
+    const authEvents = ended.events.filter(event => event.kind === "auth.session_cleanup");
+    expect(cleanupPosts).toBe(1);
+    expect(ended.events).toContainEqual(expect.objectContaining({ kind: "session.finalized" }));
+    if (mode in unconfirmedCleanup) {
+      expect(authEvents).toHaveLength(1);
+      expect(authEvents[0]!.payload).toEqual({ cleanup_proof_schema: UNCONFIRMED_AUTH_CLEANUP_SCHEMA, confirmed: false, recovery_required: true,
+        ...unconfirmedCleanup[mode], voice_lab_run_id_sha256: sha256(ownedRun.id), cleanup_obligation_id_sha256: sha256(ownedRun.cleanupObligationId),
+        process_id_sha256: expect.stringMatching(/^[a-f0-9]{64}$/), browser_boot_id_sha256: expect.stringMatching(/^[a-f0-9]{64}$/), execution_epoch_sha256: expect.stringMatching(/^[a-f0-9]{64}$/) });
+      expect(authEvents.some(authCleanupConfirmed)).toBe(false);
+      expect(JSON.stringify(ended.events)).not.toMatch(/SECRET|PRIVATE|ECONNRESET/);
+      expect(deriveExecutionEpochCleanupProof(ownedRun, sequenced(ended.events))).toMatchObject({ ready: false, reason: "provider_or_auth_cleanup_unconfirmed" });
+    } else {
+      // C061: the ACTUAL driver receipt satisfies authCleanupConfirmed and the
+      // exact direct epoch proof; generic redaction still masks cookie fields.
+      expect(authEvents).toHaveLength(1);
+      expect(authEvents[0]!.payload).toMatchObject({ cleanup_proof_schema: "sophia_voice_lab_execution_epoch_auth_cleanup_v1", session_revoked: true, cookies_cleared: true, raw_cookie: "[REDACTED]" });
+      expect(authEvents.map(authCleanupConfirmed)).toEqual([true]);
+      expect(deriveExecutionEpochCleanupProof(ownedRun, sequenced(ended.events))).toMatchObject({ ready: true, reason: "direct_cleanup_before_process_death" });
+      expect(JSON.stringify(ended.events)).not.toMatch(/SECRET/);
+      expect(() => assertNoSecret(ended.events)).not.toThrow();
+    }
     expect(child.exitCode).toBe(0);
     expect(responseListeners.length).toBe(listenersBeforeEnd);
   }

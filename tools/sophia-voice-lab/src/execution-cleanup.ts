@@ -55,11 +55,92 @@ export function authoritativeLiveCleanupComplete(events: Array<{ kind: string; s
   });
 }
 
+/**
+ * C061: generic redaction masks every "cookie" key, including the typed
+ * cookies_cleared boolean. The driver authors session_revoked/cookies_cleared
+ * as literal `true` only after exact receipt validation; redaction at the
+ * durable boundary must not erase that typed evidence. Restore exactly the
+ * literal pair the pre-redaction canonical auth.session_cleanup payload held
+ * (top level, or the abort path's confirmed receipt). Nothing else is copied,
+ * and a pair that was not literally `true` is never manufactured.
+ */
+export function preserveAuthCleanupBooleans(
+  event: { kind: string; source: string; payload: Record<string, unknown> },
+  redacted: Record<string, unknown>,
+): Record<string, unknown> {
+  if (event.kind !== "auth.session_cleanup" || event.source !== "canonical") return redacted;
+  const preserved = { ...redacted };
+  if (event.payload.session_revoked === true && event.payload.cookies_cleared === true) Object.assign(preserved, { session_revoked: true, cookies_cleared: true });
+  const receipt = event.payload.receipt as Record<string, unknown> | undefined;
+  if (event.payload.confirmed === true && receipt?.session_revoked === true && receipt?.cookies_cleared === true
+    && preserved.receipt && typeof preserved.receipt === "object" && !Array.isArray(preserved.receipt)) {
+    preserved.receipt = { ...(preserved.receipt as Record<string, unknown>), session_revoked: true, cookies_cleared: true };
+  }
+  return preserved;
+}
+
 export function authCleanupConfirmed(event: { kind: string; payload: Record<string, unknown> }): boolean {
   if (event.kind !== "auth.session_cleanup") return false;
   if (event.payload.session_revoked === true && event.payload.cookies_cleared === true) return true;
   const receipt = event.payload.receipt as Record<string, unknown> | undefined;
   return event.payload.confirmed === true && receipt?.session_revoked === true && receipt?.cookies_cleared === true;
+}
+
+/** C059: schema of the canonical record of a direct auth-cleanup attempt that
+ * did not confirm AFTER bound normal finalization and the authenticated
+ * provider disconnect. It is never a revocation proof (authCleanupConfirmed is
+ * false for it); it only marks that session:recover must settle auth. */
+export const UNCONFIRMED_AUTH_CLEANUP_SCHEMA = "sophia_voice_lab_execution_epoch_auth_cleanup_unconfirmed_v1";
+
+/**
+ * How the dedicated auth session is proven revoked for a completed run.
+ * "direct": the frontend cleanup receipt (unchanged). "recovery": only the
+ * exact ordinary-End shape where the direct call did not confirm: a ready
+ * execution-epoch proof whose path is recovery-after-close, the provider
+ * cleanup and the unconfirmed direct attempt both inside that epoch and before
+ * the close, and the settling post-close canonical session:recover receipt
+ * reporting auth_sessions terminal for this run. D02 keeps its own protocol.
+ */
+export function authCleanupPath(
+  run: Pick<RunRecord, "id" | "testRunId" | "cleanupObligationId" | "scenarioId">,
+  events: import("./domain.js").LabEvent[],
+  proof: ExecutionEpochCleanupProof = deriveExecutionEpochCleanupProof(run, events),
+): "direct" | "recovery" | null {
+  if (events.some(authCleanupConfirmed)) return "direct";
+  if (run.scenarioId === "V-D02" || !proof.ready || proof.reason !== "authoritative_recovery_after_process_death") return null;
+  return unconfirmedAttemptInEpoch(run, events, proof) && settlingRecoveryProvesAuth(run, events, proof) ? "recovery" : null;
+}
+
+/** The unconfirmed direct attempt lies between the epoch's provider cleanup and its close. */
+function unconfirmedAttemptInEpoch(run: Pick<RunRecord, "id" | "cleanupObligationId">, events: import("./domain.js").LabEvent[], proof: ExecutionEpochCleanupProof): boolean {
+  const { providerCleanup, processClosed } = proof.eventSeqs;
+  const acquired = acquiredProcessIdentity(events, proof);
+  if (providerCleanup === null || processClosed === null || acquired === null) return false;
+  return events.some((event) => event.kind === "auth.session_cleanup" && event.source === "canonical"
+    && event.payload.process_id_sha256 === acquired.processIdSha256
+    && event.payload.browser_boot_id_sha256 === acquired.bootIdSha256
+    && event.seq > providerCleanup && event.seq < processClosed
+    && event.payload.cleanup_proof_schema === UNCONFIRMED_AUTH_CLEANUP_SCHEMA && event.payload.confirmed === false
+    && event.payload.voice_lab_run_id_sha256 === sha256(run.id)
+    && event.payload.cleanup_obligation_id_sha256 === sha256(run.cleanupObligationId)
+    && event.payload.execution_epoch_sha256 === proof.executionEpochSha256);
+}
+
+/** Process and boot of the acquisition the proof selected: the attempt binds to
+ * these, not to the epoch hash alone (the proof derivation excludes it). */
+function acquiredProcessIdentity(events: import("./domain.js").LabEvent[], proof: ExecutionEpochCleanupProof): { processIdSha256: string; bootIdSha256: string } | null {
+  const acquired = events.find((event) => event.seq === proof.eventSeqs.processAcquired && event.kind === "harness.browser_process_acquired");
+  const processIdSha256 = acquired?.payload.process_id_sha256;
+  const bootIdSha256 = acquired?.payload.browser_boot_id_sha256;
+  return isSha256(processIdSha256) && isSha256(bootIdSha256) ? { processIdSha256, bootIdSha256 } : null;
+}
+
+/** The proof's settling post-close recovery reports this run's auth sessions terminal. */
+function settlingRecoveryProvesAuth(run: Pick<RunRecord, "testRunId" | "cleanupObligationId">, events: import("./domain.js").LabEvent[], proof: ExecutionEpochCleanupProof): boolean {
+  const { processClosed, recovery } = proof.eventSeqs;
+  const settling = recovery === null ? undefined : events.find((event) => event.seq === recovery);
+  return settling !== undefined && processClosed !== null && settling.seq > processClosed
+    && authoritativeLiveCleanupComplete([settling], run) && recoveryComponentComplete([settling], "auth_sessions");
 }
 
 export type ExecutionEpochCleanupProof = {

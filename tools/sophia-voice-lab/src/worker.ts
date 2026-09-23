@@ -15,7 +15,7 @@ import { productTurnId } from "./product-turn.js";
 import { deriveBrowserProcessTermination } from "./browser-process-termination.js";
 import { pkceS256 } from "./oauth.js";
 import { deriveRecoveryBrowserBinding, RecoveryControlBindingSchema, recoveryTransportBinding, validateRecoveryBrowserBinding, type RecoveryControlRecord } from "./recovery-control.js";
-import { authCleanupConfirmed, authoritativeLiveCleanupComplete, deriveExecutionEpochCleanupProof, recoveryComponentComplete, type ExecutionEpochCleanupProof } from "./execution-cleanup.js";
+import { UNCONFIRMED_AUTH_CLEANUP_SCHEMA, authCleanupConfirmed, authCleanupPath, preserveAuthCleanupBooleans, authoritativeLiveCleanupComplete, deriveExecutionEpochCleanupProof, recoveryComponentComplete, type ExecutionEpochCleanupProof } from "./execution-cleanup.js";
 import { PLATFORM_EXECUTION_TERMINATION_KIND } from "./platform-execution-termination.js";
 export { deriveExecutionEpochCleanupProof, type ExecutionEpochCleanupProof } from "./execution-cleanup.js";
 import { CapabilityCodec, StaticBearerAuthenticator, assertNoSecret, canonicalRequestHash, redact, requireScope, sha256 } from "./security.js";
@@ -956,6 +956,16 @@ export class VoiceLabWorker {
     const recoveredAfterEnd = await this.#recoverRun(run);
     await this.#persistEvents(run.id, recoveredAfterEnd.events);
     run = await this.#freshRun(run.id);
+    // C059: a direct cleanup recorded unconfirmed after proven normal End is
+    // settled only by the exact post-close session:recover path; otherwise End
+    // fails exactly as the direct failure did before.
+    if (ended.events.some((event) => event.kind === "auth.session_cleanup" && event.source === "canonical" && event.payload.cleanup_proof_schema === UNCONFIRMED_AUTH_CLEANUP_SCHEMA)) {
+      const settled = await this.#allEvents(run.id);
+      const finalized = settled.events.some((event) => isCanonicalFinalizationReceipt(run, event));
+      if (!finalized || authCleanupPath(run, settled.events) !== "recovery") {
+        throw new VoiceLabError(labError("AUTH_SESSION_CLEANUP_UNCONFIRMED", "Direct auth cleanup was unconfirmed and session:recover did not prove this run's auth sessions terminal after the browser close.", "authorization", true, { canonical_finalization: finalized, execution_cleanup_reason: deriveExecutionEpochCleanupProof(run, settled.events).reason }));
+      }
+    }
     run = await transitionRun(this.ledger, run, "finalizing");
     for (const artifact of ended.artifacts) {
       if (artifact.bytes.byteLength > 2_000_000) {
@@ -2099,6 +2109,7 @@ export class VoiceLabWorker {
         browser_lease_released: browserLeaseReleased,
         provider_disconnect: input.intentionallyUnallocated ? intentionallyUnavailable : providerDisconnected,
         auth_session_revoked: input.intentionallyUnallocated ? intentionallyUnavailable : authSessionRevoked,
+        auth_cleanup_path: input.intentionallyUnallocated ? intentionallyUnavailable : authCleanupPath(run, eventPage.events, executionEpochCleanup) ?? "unavailable",
         synthetic_tasks: taskCleanup,
         gateway_live_resources_zero: liveCleanupComplete,
         live_execution_resources_zero: liveCleanupComplete && browserContextClosed && browserLeaseReleased && taskCleanup.unresolved_count === 0,
@@ -3345,7 +3356,7 @@ export function deriveCompletedVerdicts(run: RunRecord, events: import("./domain
   const providerClosed = deriveExecutionEpochCleanupProof(run, events).ready || eligibleEvents.some((event) => event.kind === "provider.stage" && ["closed", "ended"].includes(String(event.payload.stage)));
   const providerObserved = kinds.has("provider.connection_epoch");
   const providerDegraded = eligibleEvents.some((event) => event.kind === "provider.connection_epoch" && (event.payload.receipt as Record<string, unknown> | undefined)?.phase === "degraded");
-  const authClean = events.some(authCleanupConfirmed);
+  const authClean = authCleanupPath(run, events) !== null;
   const injectedOperations = operations.filter((operation) => (operation.type === "speak" || operation.type === "barge_in") && operation.state === "succeeded");
   const nonSilenceOperations = injectedOperations.filter((operation) => !String(operation.input.fixture_id ?? "").toLowerCase().includes("silence"));
   const inputTranscript = eligibleEvents.some((event) => event.kind.endsWith(".sophia.user_transcript") || event.kind === "transcript.input.final");
@@ -4612,12 +4623,12 @@ export function isExactBoundProductEvent(run: RunRecord, event: Pick<import("./d
     && record.provider_expires_at === run.expiresAt.toISOString()
     && record.cleanup_obligation_id_sha256 === sha256(run.cleanupObligationId);
 }
-function governedDriverEventPayload(run: RunRecord, event: { source: string; payload: Record<string, unknown> }): Record<string, unknown> {
+function governedDriverEventPayload(run: RunRecord, event: { kind: string; source: string; payload: Record<string, unknown> }): Record<string, unknown> {
   const appBinding = strictProductRunBinding(event.source, event.payload, run);
-  return redact({ ...event.payload,
+  return preserveAuthCleanupBooleans(event, redact({ ...event.payload,
     _runner_binding: { run_id: run.id, test_run_id_sha256: sha256(run.testRunId) },
     ...(appBinding === null ? {} : { _product_run_binding: appBinding }),
-  });
+  }));
 }
 
 function strictProductRunBinding(source: string, payload: Record<string, unknown>, expected: RunRecord): Record<string, unknown> | null {

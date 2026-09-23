@@ -12,6 +12,7 @@ import { BrowserProcessTerminationSchema, type BrowserProcessTermination } from 
 import type { VoiceLabConfig } from "./config.js";
 import { VoiceLabError, labError, type DeploymentDependencies, type DeploymentIdentity, type LabEvent, type RunRecord } from "./domain.js";
 import { canonicalRequestHash, redact, sha256, validateAllowedOrigin } from "./security.js";
+import { UNCONFIRMED_AUTH_CLEANUP_SCHEMA } from "./execution-cleanup.js";
 import { isTerminalRecoveryComponentStatus } from "./recovery-control.js";
 
 export interface DriverStartResult {
@@ -1147,17 +1148,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
         artifacts.push({ id: randomUUID(), kind: "final_screenshot", contentType: "image/jpeg", bytes });
       }
       const cleanupUrl = new URL(this.config.authCleanupPath, new URL(run.target.frontendUrl).origin).toString();
-      const { response: cleanup, payload: cleanupReceipt } = await requestBoundJson(session.context.request, "POST", cleanupUrl, 15_000, frontendCleanupCapability);
-      if (!authCleanupReceiptConfirmed(cleanup.ok(), cleanupReceipt, run)) throw new VoiceLabError(labError("AUTH_SESSION_CLEANUP_UNCONFIRMED", "Dedicated test auth session and cookie cleanup was not confirmed for this run.", "authorization", true, { status: cleanup.status(), product_error_code: productErrorCode(cleanupReceipt) }));
-      events.push({ kind: "auth.session_cleanup", source: "canonical", payload: redact({
-        ...cleanupReceipt,
-        cleanup_proof_schema: "sophia_voice_lab_execution_epoch_auth_cleanup_v1",
-        voice_lab_run_id_sha256: sha256(run.id),
-        cleanup_obligation_id_sha256: sha256(run.cleanupObligationId),
-        process_id_sha256: session.ownership.processIdSha256,
-        browser_boot_id_sha256: session.ownership.bootIdSha256,
-        execution_epoch_sha256: session.ownership.executionEpochSha256,
-      }), dedupeKey: `canonical:${run.id}:auth-cleanup` });
+      events.push(await directAuthCleanupEvent(session, run, cleanupUrl, frontendCleanupCapability));
       events.push(await this.#closeContextEvent(run.id, session.context, "normal_end"));
       return { events, artifacts };
     } catch (error) {
@@ -1213,17 +1204,17 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
         const cleanupResult = await requestBoundJson(session.context.request, "POST", cleanupUrl, 10_000, frontendCleanupCapability).catch(() => null);
         const cleanup = cleanupResult?.response ?? null;
         const receipt = cleanupResult?.payload ?? null;
-        events.push({ kind: "auth.session_cleanup", source: "canonical", payload: redact({
+        const confirmed = cleanup !== null && authCleanupReceiptConfirmed(cleanup.ok(), receipt, run);
+        events.push({ kind: "auth.session_cleanup", source: "canonical", payload: { ...redact({
           status: cleanup?.status() ?? null,
-          receipt,
-          confirmed: Boolean(cleanup?.ok() && (receipt as any)?.session_revoked === true && (receipt as any)?.cookies_cleared === true && (receipt as any)?.test_run_id === run.testRunId && (receipt as any)?.cleanup_obligation_id === run.cleanupObligationId),
+          confirmed,
           cleanup_proof_schema: "sophia_voice_lab_execution_epoch_auth_cleanup_v1",
           voice_lab_run_id_sha256: sha256(run.id),
           cleanup_obligation_id_sha256: sha256(run.cleanupObligationId),
           process_id_sha256: session.ownership.processIdSha256,
           browser_boot_id_sha256: session.ownership.bootIdSha256,
           execution_epoch_sha256: session.ownership.executionEpochSha256,
-        }), dedupeKey: `cleanup:${run.id}:auth` });
+        }), receipt: confirmed ? validatedAuthCleanupReceipt(receipt!) : unconfirmedAuthCleanupReceipt(receipt) }, dedupeKey: `cleanup:${run.id}:auth` });
       }
       events.push(await this.#closeContextEvent(run.id, session.context, reason));
       return { events, artifacts };
@@ -1726,6 +1717,69 @@ function effectiveProviderEpoch(runEpoch: number | null, latestReceipt: Record<s
   const observed = latestReceipt?.providerConnectionEpoch;
   return typeof observed === "number" && Number.isSafeInteger(observed) && observed > 0
     && (runEpoch === null || observed > runEpoch) ? observed : runEpoch;
+}
+
+/**
+ * C059: the direct auth cleanup of a normal End, called only after bound
+ * finalization and the authenticated provider disconnect are proven. A lost
+ * or refused direct call (the first may commit and delete the session its
+ * retry would need) becomes a canonical UNCONFIRMED record, never a revocation
+ * proof; the owned context still closes and the worker's session:recover must
+ * prove auth terminal. Target/redirect violations and D02 still throw.
+ */
+async function directAuthCleanupEvent(
+  session: { context: Pick<BrowserContext, "request">; ownership: { processIdSha256: string; bootIdSha256: string; executionEpochSha256: string } },
+  run: RunRecord,
+  cleanupUrl: string,
+  frontendCleanupCapability: string,
+): Promise<Omit<LabEvent, "runId" | "seq" | "at">> {
+  const epochBinding = {
+    voice_lab_run_id_sha256: sha256(run.id),
+    cleanup_obligation_id_sha256: sha256(run.cleanupObligationId),
+    process_id_sha256: session.ownership.processIdSha256,
+    browser_boot_id_sha256: session.ownership.bootIdSha256,
+    execution_epoch_sha256: session.ownership.executionEpochSha256,
+  };
+  const d02 = run.scenarioId === "V-D02";
+  const direct = await requestBoundJson(session.context.request, "POST", cleanupUrl, 15_000, frontendCleanupCapability)
+    .catch((error: unknown) => {
+      if (d02 || (error instanceof VoiceLabError && error.detail.code !== "PRIVILEGED_RECEIPT_INVALID")) throw error;
+      return { failure: error instanceof VoiceLabError ? "receipt_invalid" as const : isTimeoutError(error) ? "timeout" as const : "transport_error" as const };
+    });
+  if ("response" in direct && authCleanupReceiptConfirmed(direct.response.ok(), direct.payload, run)) {
+    return { kind: "auth.session_cleanup", source: "canonical", payload: {
+      ...validatedAuthCleanupReceipt(direct.payload!),
+      cleanup_proof_schema: "sophia_voice_lab_execution_epoch_auth_cleanup_v1",
+      ...epochBinding,
+    }, dedupeKey: `canonical:${run.id}:auth-cleanup` };
+  }
+  const details = "response" in direct
+    ? { status: direct.response.status(), product_error_code: productErrorCode(direct.payload) }
+    : { status: null, product_error_code: null, transport_failure: direct.failure };
+  if (d02) throw new VoiceLabError(labError("AUTH_SESSION_CLEANUP_UNCONFIRMED", "Dedicated test auth session and cookie cleanup was not confirmed for this run.", "authorization", true, details));
+  return { kind: "auth.session_cleanup", source: "canonical", payload: {
+    cleanup_proof_schema: UNCONFIRMED_AUTH_CLEANUP_SCHEMA, confirmed: false, recovery_required: true, ...details, ...epochBinding,
+  }, dedupeKey: `canonical:${run.id}:auth-cleanup` };
+}
+
+/** Bounded transport category only; the raw message is never retained. */
+function isTimeoutError(error: unknown): boolean {
+  return error instanceof Error && (error.name === "TimeoutError" || /\bTimeout \d+ms exceeded\b/.test(error.message));
+}
+
+/**
+ * C061: generic redaction masks every "cookie" key, so a validated receipt's
+ * cookies_cleared would read "[REDACTED]" and never satisfy
+ * authCleanupConfirmed. Only AFTER authCleanupReceiptConfirmed has passed are
+ * the two typed booleans re-authored as literals over the redacted receipt.
+ */
+function validatedAuthCleanupReceipt(receipt: Record<string, unknown>): Record<string, unknown> {
+  return { ...redact(receipt), session_revoked: true, cookies_cleared: true };
+}
+
+/** A receipt that did not pass the validator keeps only its catalogued code. */
+function unconfirmedAuthCleanupReceipt(receipt: Record<string, unknown> | null): Record<string, unknown> | null {
+  return receipt === null ? null : { product_error_code: productErrorCode(receipt) };
 }
 
 /** Dedicated test auth session and cookies are confirmed cleared for exactly this run. */

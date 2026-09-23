@@ -2095,10 +2095,17 @@ describe('dedicated Voice Lab Better Auth session ledger', () => {
       expect(await cleaned.json()).toMatchObject({ ok: true, session_revoked: true, revoked_session_count: 1 });
       expect(database.rows).toEqual([]);
       expect(database.grants.map((row) => row.status)).toEqual(['revoked']);
-      // An exact replay of cleanup stays idempotent; enrolment replay stays refused.
+      // C058: the cleanup deleted the Better Auth session, so a lost-response
+      // replay has NO live session. The route keeps requiring one: the replay
+      // is refused and changes nothing. Settlement after a lost response
+      // belongs to the Gateway session:recover receipt, not this route.
+      lifecycle.getSession.mockResolvedValue(null);
+      const settled = JSON.stringify({ rows: database.rows, grants: database.grants, obligations: database.obligations });
       const replay = await post(cleanupPOST, 'cleanup', fresh, binding);
-      expect(replay.status).toBe(200);
-      expect(await replay.json()).toMatchObject({ ok: true, revoked_session_count: 0 });
+      expect(replay.status).toBe(403);
+      expect(await replay.json()).toEqual({ ok: false, error: 'voice_lab_authenticated_principal_required' });
+      expect(JSON.stringify({ rows: database.rows, grants: database.grants, obligations: database.obligations })).toBe(settled);
+      // Enrolment replay stays refused.
       const reenrol = await post(grantPOST, 'grant', start);
       expect(reenrol.status).toBe(409);
       expect(await reenrol.json()).toMatchObject({ error: 'voice_lab_grant_replayed_after_cleanup' });
