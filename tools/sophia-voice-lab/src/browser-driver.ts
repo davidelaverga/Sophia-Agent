@@ -1093,6 +1093,9 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
     const session = this.#requireSession(run.id);
     const artifacts: DriverEndResult["artifacts"] = [];
     const events: DriverEndResult["events"] = [];
+    // Removed in finally: an early failure must not leave it attached for the
+    // browser's recovery lifetime, nor let a repeated end stack listeners.
+    let onDisconnectResponse: ((candidate: PlaywrightResponse) => void) | null = null;
     try {
       const refreshUrl = new URL(this.config.authRefreshPath, new URL(run.target.frontendUrl).origin).toString();
       const { response: refreshed } = await requestBoundJson(session.context.request, "POST", refreshUrl, 15_000, frontendFinalizeCapability);
@@ -1101,7 +1104,18 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       const finalizationResponse = session.page.waitForResponse((response) => isExactFinalizationResponse(response, frontendOrigin), { timeout: 20_000 }).catch(() => null);
       // Register before the UI click: stop fences its callbacks, but the owned
       // page still exposes the real authenticated receiving acknowledgement.
-      const providerResponse = session.page.waitForResponse((candidate) => isExactProviderDisconnectResponse(candidate, frontendOrigin), { timeout: 20_000 }).catch(() => null);
+      // A synthetic product retries a non-accepted disconnect with backoff, so
+      // only an exact 202 can be that acknowledgement; earlier rejected
+      // attempts are counted for evidence, never treated as the final answer.
+      let rejectedDisconnectCount = 0;
+      let lastRejectedDisconnectStatus: number | null = null;
+      onDisconnectResponse = (candidate) => {
+        if (!isExactProviderDisconnectResponse(candidate, frontendOrigin) || candidate.status() === 202) return;
+        rejectedDisconnectCount += 1;
+        lastRejectedDisconnectStatus = candidate.status();
+      };
+      session.page.on("response", onDisconnectResponse);
+      const providerResponse = session.page.waitForResponse((candidate) => isExactProviderDisconnectResponse(candidate, frontendOrigin) && candidate.status() === 202, { timeout: 20_000 }).catch(() => null);
       await clickEndSessionThroughExitGuards(session.page);
       const response = await finalizationResponse;
       if (!response || response.status() !== 202 || !isJsonResponse(response)) throw new VoiceLabError(labError("PRODUCT_FINALIZATION_UNCONFIRMED", "The ordinary UI did not produce an exact-origin JSON 202 product finalization receipt.", "product", true, { status: response?.status() ?? null }));
@@ -1110,10 +1124,21 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       if (!hasExactFinalizationEnvelope(run, responseBody, true) || typeof evidenceReceipt?.sha256 !== "string") throw new VoiceLabError(labError("FINALIZATION_ISOLATION_UNCONFIRMED", "Finalization receipt did not prove the bound synthetic run, cleanup obligation, exact retention policy, durable evidence, and exact isolation exclusions.", "product", false));
       events.push({ kind: "session.finalized", source: "canonical", payload: redact({ http_status: response.status(), receipt: responseBody }), dedupeKey: `canonical:${run.id}:finalized` });
       const disconnect = await providerResponse;
-      const acknowledgement = await validateNormalProviderDisconnectResponse(disconnect, frontendOrigin, run, (await Promise.all(session.providerActivationAcknowledgements)).filter((receipt): receipt is Record<string, unknown> => receipt !== null));
+      if (!disconnect && rejectedDisconnectCount > 0) throw new VoiceLabError(labError("PROVIDER_CLEANUP_UNCONFIRMED", "The ordinary UI did not yield an exact authenticated provider disconnect acknowledgement with all owned websocket epochs settled.", "product", true, { validation_stage: "network_receipt", receiving_http_status: lastRejectedDisconnectStatus, rejected_attempt_count: rejectedDisconnectCount }));
+      // The run record only reflects epochs the worker has already drained. An
+      // automatic reconnect since then has a bound product epoch receipt that
+      // the receiving echo legitimately settles, so drain first and validate
+      // against the newest epoch those authenticated receipts established.
+      // Drained events are pushed at once: the cursors have advanced, so a
+      // validation failure must still carry them in the end-failure evidence.
+      events.push(...await this.drain(run.id));
+      const observedEpoch = session.latestProviderReceipt?.providerConnectionEpoch;
+      const providerEpoch = typeof observedEpoch === "number" && Number.isSafeInteger(observedEpoch) && observedEpoch > 0
+        && (run.providerEpoch === null || observedEpoch > run.providerEpoch) ? observedEpoch : run.providerEpoch;
+      const acknowledgement = await validateNormalProviderDisconnectResponse(disconnect, frontendOrigin, { ...run, providerEpoch }, (await Promise.all(session.providerActivationAcknowledgements)).filter((receipt): receipt is Record<string, unknown> => receipt !== null));
       const providerClosedEvent: DriverEndResult["events"][number] = {
         kind: "provider.disconnect_acknowledged", source: "canonical",
-        payload: { stage: "closed", ...acknowledgement },
+        payload: { stage: "closed", ...acknowledgement, rejected_receiving_attempt_count: rejectedDisconnectCount },
         dedupeKey: `canonical:${run.id}:provider-disconnect`,
       };
       events.push(...await this.drain(run.id), providerClosedEvent);
@@ -1141,6 +1166,8 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       return { events, artifacts };
     } catch (error) {
       throw new DriverEndFailure(error, events);
+    } finally {
+      if (onDisconnectResponse) session.page.off("response", onDisconnectResponse);
     }
   }
 

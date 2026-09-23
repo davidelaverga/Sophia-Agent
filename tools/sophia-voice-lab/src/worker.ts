@@ -16,6 +16,7 @@ import { deriveBrowserProcessTermination } from "./browser-process-termination.j
 import { pkceS256 } from "./oauth.js";
 import { deriveRecoveryBrowserBinding, RecoveryControlBindingSchema, recoveryTransportBinding, validateRecoveryBrowserBinding, type RecoveryControlRecord } from "./recovery-control.js";
 import { authCleanupConfirmed, authoritativeLiveCleanupComplete, deriveExecutionEpochCleanupProof, recoveryComponentComplete, type ExecutionEpochCleanupProof } from "./execution-cleanup.js";
+import { PLATFORM_EXECUTION_TERMINATION_KIND } from "./platform-execution-termination.js";
 export { deriveExecutionEpochCleanupProof, type ExecutionEpochCleanupProof } from "./execution-cleanup.js";
 import { CapabilityCodec, StaticBearerAuthenticator, assertNoSecret, canonicalRequestHash, redact, requireScope, sha256 } from "./security.js";
 import { validateAllowedOrigin } from "./security.js";
@@ -1706,13 +1707,17 @@ export class VoiceLabWorker {
     if (TERMINAL_RUN_STATES.has(run.state)) {
       const control = await this.ledger.getRecoveryControl(run.id);
       const priorEvents = await this.#allEvents(run.id);
-      const latestBrowserClose = priorEvents.events.reduce((seq, event) => event.kind === "cleanup.browser_context_closed" ? Math.max(seq, event.seq) : seq, 0);
+      // A canonical platform termination stands in for the browser close, so
+      // it anchors recovery freshness exactly as a close does.
+      const latestExecutionClose = priorEvents.events.reduce((seq, event) => event.kind === "cleanup.browser_context_closed"
+        || (event.kind === PLATFORM_EXECUTION_TERMINATION_KIND && event.source === "canonical") ? Math.max(seq, event.seq) : seq, 0);
       // Product settlement and browser settlement are independent obligations.
       // Reissuing an already complete product receipt while browser proof is
       // missing creates fresh audits/manifests on every maintenance tick. A new
-      // browser-close receipt still requires recovery after that event so the
-      // execution-epoch proof can establish ordering without guessing closure.
-      const productRecoveryCurrent = priorEvents.events.some(event => event.seq > latestBrowserClose && authoritativeLiveCleanupComplete([event], run));
+      // browser-close or platform-termination receipt still requires recovery
+      // after that event so the execution-epoch proof can establish ordering
+      // without guessing closure.
+      const productRecoveryCurrent = priorEvents.events.some(event => event.seq > latestExecutionClose && authoritativeLiveCleanupComplete([event], run));
       let recoveredArtifacts: Array<{ id: string; kind: string; contentType: string; bytes: Buffer }> = [];
       if (!productRecoveryCurrent || this.driver.hasSession(run.id)) {
         const recovered = await this.#recoverRun(run);

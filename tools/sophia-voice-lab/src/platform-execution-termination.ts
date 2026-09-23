@@ -1,6 +1,5 @@
-import { sha256 } from "./security.js";
 import { parseExecutionOwnership } from "./execution-ownership.js";
-import { isVerifiedServiceOwnerFenceV2, type VerifiedServiceOwnerFence } from "./service-owner-fence.js";
+import { bindsExecutionOwnership, isVerifiedServiceOwnerFenceV2, type VerifiedServiceOwnerFence } from "./service-owner-fence.js";
 import type { RecoveryControlRecord } from "./recovery-control.js";
 
 export const PLATFORM_EXECUTION_TERMINATION_KIND = "cleanup.platform_execution_terminated";
@@ -34,16 +33,7 @@ export function derivePlatformExecutionTermination(
   // Re-join every field against the control's own ownership. The proof was
   // verified against this control, so a divergence here is a programming fault,
   // not an untrusted input, and must fail loudly rather than be written.
-  if (ownership.proofSha256 !== proof.executionOwnershipProofSha256
-    || ownership.executionEpochSha256 !== proof.executionEpochSha256
-    || ownership.processIdSha256 !== proof.processIdSha256
-    || ownership.browserBootIdSha256 !== proof.browserBootIdSha256
-    || ownership.workerIdSha256 !== proof.workerIdSha256
-    || ownership.browserLeaseEpoch !== proof.browserLeaseEpoch
-    || ownership.processAcquiredSeq !== proof.processAcquiredSeq
-    || ownership.runtimeAcquiredSeq !== proof.runtimeAcquiredSeq
-    || ownership.runIdSha256 !== sha256(control.binding.runId)
-    || ownership.cleanupObligationIdSha256 !== sha256(control.binding.cleanupObligationId)) {
+  if (!bindsExecutionOwnership(ownership, proof, control)) {
     throw new Error("PLATFORM_TERMINATION_OWNERSHIP_INVALID");
   }
   return {

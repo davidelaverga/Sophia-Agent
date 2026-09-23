@@ -12,7 +12,20 @@ jobs:
   backend-unit-tests:
     if: github.event.pull_request.draft == false
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # 15 was never enough for this branch's suite; it was simply never reached,
+    # because `make lint` failed first and the job died at ~29s. With the lint
+    # errors fixed (#146) `make test` finally runs, and on PR #146 it was killed
+    # by this timeout at roughly 38% of the suite after ~14.5 minutes of test
+    # time -- extrapolating to ~38 minutes for the 6,227 tests on this line, and
+    # more for the MEM00 integration line's 7,256.
+    #
+    # Raised rather than worked around. Two cheaper follow-ups are deliberately
+    # NOT bundled here: `make test` passes `-v`, which writes one log line per
+    # test (6,000+ lines) and is likely a large part of the gap between CI and
+    # a local run of the same suite; and pytest-xdist (`-n auto`) is not a
+    # dependency yet. Both touch the shared Makefile, so they are their own
+    # decisions.
+    timeout-minutes: 60
 
     steps:
       - name: Checkout

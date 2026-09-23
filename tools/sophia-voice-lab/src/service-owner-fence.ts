@@ -134,6 +134,28 @@ export const ServiceOwnerFenceReceiptV2Schema = z.object({
 });
 export type ServiceOwnerFenceReceiptV2 = z.infer<typeof ServiceOwnerFenceReceiptV2Schema>;
 
+/** The execution-ownership fields a v2 claim carries. */
+type ExecutionOwnershipClaim = Pick<ServiceOwnerFenceReceiptV2,
+  "executionOwnershipProofSha256" | "executionEpochSha256" | "processIdSha256" | "browserBootIdSha256"
+  | "workerIdSha256" | "browserLeaseEpoch" | "processAcquiredSeq" | "runtimeAcquiredSeq">;
+
+/** True only when a v2 claim names exactly the execution the control owns: one
+ * epoch of this run's cleanup obligation, held by one worker lease. Admission,
+ * the retained proof and the canonical termination all use this single join,
+ * so the three checkpoints cannot drift apart. */
+export function bindsExecutionOwnership(ownership: ExecutionOwnership, claim: ExecutionOwnershipClaim, control: RecoveryControlRecord): boolean {
+  return ownership.proofSha256 === claim.executionOwnershipProofSha256
+    && ownership.executionEpochSha256 === claim.executionEpochSha256
+    && ownership.processIdSha256 === claim.processIdSha256
+    && ownership.browserBootIdSha256 === claim.browserBootIdSha256
+    && ownership.workerIdSha256 === claim.workerIdSha256
+    && ownership.browserLeaseEpoch === claim.browserLeaseEpoch
+    && ownership.processAcquiredSeq === claim.processAcquiredSeq
+    && ownership.runtimeAcquiredSeq === claim.runtimeAcquiredSeq
+    && ownership.runIdSha256 === sha256(control.binding.runId)
+    && ownership.cleanupObligationIdSha256 === sha256(control.binding.cleanupObligationId);
+}
+
 export const AnyServiceOwnerFenceReceiptSchema = z.union([ServiceOwnerFenceReceiptSchema, ServiceOwnerFenceReceiptV2Schema]);
 export type ServiceOwnerFenceReceipt = ServiceOwnerFenceReceiptV1 | ServiceOwnerFenceReceiptV2;
 
@@ -201,16 +223,7 @@ export function parseVerifiedServiceOwnerFence(raw: unknown, control?: RecoveryC
       // and re-digested, never a caller-supplied projection.
       if (!control.executionOwnership) throw new Error("SERVICE_FENCE_PROOF_OWNERSHIP_MISSING");
       const ownership = parseExecutionOwnership(control.executionOwnership);
-      if (ownership.proofSha256 !== value.executionOwnershipProofSha256
-        || ownership.executionEpochSha256 !== value.executionEpochSha256
-        || ownership.processIdSha256 !== value.processIdSha256
-        || ownership.browserBootIdSha256 !== value.browserBootIdSha256
-        || ownership.workerIdSha256 !== value.workerIdSha256
-        || ownership.browserLeaseEpoch !== value.browserLeaseEpoch
-        || ownership.processAcquiredSeq !== value.processAcquiredSeq
-        || ownership.runtimeAcquiredSeq !== value.runtimeAcquiredSeq
-        || ownership.runIdSha256 !== sha256(control.binding.runId)
-        || ownership.cleanupObligationIdSha256 !== sha256(control.binding.cleanupObligationId)) throw new Error("SERVICE_FENCE_PROOF_OWNERSHIP_INVALID");
+      if (!bindsExecutionOwnership(ownership, value, control)) throw new Error("SERVICE_FENCE_PROOF_OWNERSHIP_INVALID");
     }
   }
   return value;
@@ -257,16 +270,7 @@ export function verifyServiceOwnerFence(input: {
     // and a control without ownership cannot be settled by this path at all.
     if (!c.executionOwnership) throw new Error("SERVICE_FENCE_OWNERSHIP_MISSING");
     ownership = parseExecutionOwnership(c.executionOwnership);
-    if (ownership.proofSha256 !== v2.executionOwnershipProofSha256
-      || ownership.executionEpochSha256 !== v2.executionEpochSha256
-      || ownership.processIdSha256 !== v2.processIdSha256
-      || ownership.browserBootIdSha256 !== v2.browserBootIdSha256
-      || ownership.workerIdSha256 !== v2.workerIdSha256
-      || ownership.browserLeaseEpoch !== v2.browserLeaseEpoch
-      || ownership.processAcquiredSeq !== v2.processAcquiredSeq
-      || ownership.runtimeAcquiredSeq !== v2.runtimeAcquiredSeq
-      || ownership.runIdSha256 !== sha256(c.binding.runId)
-      || ownership.cleanupObligationIdSha256 !== sha256(c.binding.cleanupObligationId)) throw new Error("SERVICE_FENCE_OWNERSHIP_INVALID");
+    if (!bindsExecutionOwnership(ownership, v2, c)) throw new Error("SERVICE_FENCE_OWNERSHIP_INVALID");
   }
   const core = {
     schema: (v2 ? "sophia.voice-lab.verified-service-owner-fence.v2" : "sophia.voice-lab.verified-service-owner-fence.v1") as

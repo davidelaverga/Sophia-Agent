@@ -77,9 +77,17 @@ describe("normal end authenticated receiving acknowledgement", () => {
 // Drive public start/end through the same response predicates and UI guards.
 // The disposable browser transport is mocked; no provider.stage close callback
 // exists, matching the fenced callbacks of the ordinary production hook.
-it.each([[false, false], [true, false], [false, true], [true, true]])("real driver end consumes receiving ack; rejected=%s prior-activation=%s", async (rejected, priorActivation) => {
+it.each([
+  [false, false, "first"], [true, false, "first"], [false, true, "first"], [true, true, "first"],
+  // The product retries a rejected disconnect; the later exact 202 is the acknowledgement.
+  [false, false, "retried"],
+  // The worker's run record predates an automatic reconnect to epoch 2.
+  [false, false, "stale-epoch"],
+  // Finalization fails before the disconnect is awaited: the listener must still go.
+  [false, false, "finalization-fails"],
+] as const)("real driver end consumes receiving ack; rejected=%s prior-activation=%s mode=%s", async (rejected, priorActivation, mode) => {
   const config = testConfig();
-  const ownedRun = testRun({ scenarioId: "V-O01", providerSessionId: run.providerSessionId, providerEpoch: 2,
+  const ownedRun = testRun({ scenarioId: "V-O01", providerSessionId: run.providerSessionId, providerEpoch: mode === "stale-epoch" ? 1 : 2,
     capturePolicy: { rawAudio: false, screenshot: false, video: false, retentionHours: 24 } });
   const frontendOrigin = ownedRun.target.frontendUrl;
   let connected = true, contextOpen = true, pageUrl = `${frontendOrigin}/`;
@@ -115,14 +123,21 @@ it.each([[false, false], [true, false], [false, true], [true, true]])("real driv
   const locator = (leave: boolean) => ({ first() { return this; }, last() { return this; }, waitFor: async () => {},
     isVisible: async () => false, click: async () => {
       if (leave) return;
-      emit(networkResponse("/api/sophia/voice/gemini/disconnect", f.body, rejected ? 401 : 202, f.request));
-      emit(networkResponse("/api/sophia/end-session", finalization, 202));
+      if (mode === "retried") {
+        emit(networkResponse("/api/sophia/voice/gemini/disconnect", { ok: false }, 503, f.request));
+        setTimeout(() => emit(networkResponse("/api/sophia/voice/gemini/disconnect", f.body, 202, f.request)), 5);
+      } else emit(networkResponse("/api/sophia/voice/gemini/disconnect", f.body, rejected ? 401 : 202, f.request));
+      emit(networkResponse("/api/sophia/end-session", finalization, mode === "finalization-fails" ? 500 : 202));
     } });
   const binding = { synthetic: true, principal_id: ownedRun.principalId, test_run_id: ownedRun.testRunId,
     cleanup_obligation_id: ownedRun.cleanupObligationId, scenario_id: ownedRun.scenarioId, scenario_version: ownedRun.scenarioVersion,
     environment: ownedRun.environment, retention_hours: 24, provider_expires_at: ownedRun.expiresAt.toISOString() };
   const page = {
     on: (kind: string, listener: (response: any) => void) => { if (kind === "response") responseListeners.push(listener); },
+    off: (kind: string, listener: (response: any) => void) => {
+      const index = kind === "response" ? responseListeners.indexOf(listener) : -1;
+      if (index >= 0) responseListeners.splice(index, 1);
+    },
     url: () => pageUrl,
     goto: async () => {
       for (const action of ["session-start", "voice-start"]) emit(networkResponse(`/api/voice-lab/control/${action}`, {
@@ -139,7 +154,12 @@ it.each([[false, false], [true, false], [false, true], [true, true]])("real driv
       ] as const).entries()) send("product", { generation: 1, seq: index + 1, name, category: "voice", payload, synthetic_test: binding });
     },
     waitForURL: async () => { pageUrl = `${frontendOrigin}/session`; },
-    waitForResponse: (predicate: (response: any) => boolean) => new Promise(resolve => waiting.push({ predicate, resolve })),
+    // Playwright times a waiter out; compressed here because this mock emits
+    // every response during the click (plus one 5 ms retry).
+    waitForResponse: (predicate: (response: any) => boolean, options?: { timeout?: number }) => new Promise((resolve, reject) => {
+      waiting.push({ predicate, resolve });
+      if (options?.timeout) setTimeout(() => reject(new Error("synthetic waitForResponse timeout")), 50);
+    }),
     getByRole: (_role: string, options: { name: RegExp }) => locator(options.name.source.includes("Leave")),
     evaluate: async () => null,
   };
@@ -163,20 +183,36 @@ it.each([[false, false], [true, false], [false, true], [true, true]])("real driv
     activated: true, session_id: ownedRun.providerSessionId, provider_connection_epoch: 2, provider_activation_receipt: activation,
   }, 202, activation));
   vi.spyOn(driver, "drain").mockResolvedValue([]);
+  const listenersBeforeEnd = responseListeners.length;
+  if (mode === "finalization-fails") {
+    const error = await driver.end(ownedRun, "finalize", "cleanup").catch(error => error);
+    expect(error).toBeInstanceOf(DriverEndFailure);
+    expect(error.detail.code).toBe("PRODUCT_FINALIZATION_UNCONFIRMED");
+    expect(responseListeners.length).toBe(listenersBeforeEnd);
+    return;
+  }
   if (rejected) {
     const error = await driver.end(ownedRun, "finalize", "cleanup").catch(error => error);
     expect(error).toBeInstanceOf(DriverEndFailure);
     expect(error.detail.code).toBe("PROVIDER_CLEANUP_UNCONFIRMED");
+    expect(error.detail.details).toMatchObject({ receiving_http_status: 401 });
+    expect(error.detail.details.rejected_attempt_count).toBeGreaterThanOrEqual(1);
     expect(error.events).toContainEqual(expect.objectContaining({ kind: "session.finalized" }));
     expect(error.events.some((event: any) => event.kind === "cleanup.provider_transport_closed")).toBe(false);
     expect(driver.hasSession(ownedRun.id)).toBe(true); // Recovery still owns the browser.
+    expect(responseListeners.length).toBe(listenersBeforeEnd);
   } else {
     const ended = await driver.end(ownedRun, "finalize", "cleanup");
+    const acknowledged = ended.events.find(event => event.kind === "provider.disconnect_acknowledged")!;
+    expect(acknowledged.payload).toMatchObject({ provider_connection_epochs: [1, 2] });
+    if (mode === "retried") expect(acknowledged.payload.rejected_receiving_attempt_count).toBeGreaterThanOrEqual(1);
+    else expect(acknowledged.payload.rejected_receiving_attempt_count).toBe(0);
     expect(ended.events).toContainEqual(expect.objectContaining({ kind: "cleanup.provider_transport_closed",
       payload: expect.objectContaining({ proof_basis: "authenticated_receiving_disconnect_acknowledgement" }) }));
     expect(ended.events.some(event => event.kind === "provider.stage")).toBe(false);
     expect(driver.hasSession(ownedRun.id)).toBe(false);
     expect(child.exitCode).toBe(0);
+    expect(responseListeners.length).toBe(listenersBeforeEnd);
   }
 });
 

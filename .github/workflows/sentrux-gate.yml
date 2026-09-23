@@ -36,14 +36,38 @@ jobs:
           sudo chmod +x /usr/local/bin/sentrux
           sentrux --version
 
-      - name: Capture main baseline
+      # Baseline the PR's OWN base revision, not `main`.
+      #
+      # Hard-coding `origin/main` scores every PR against main, which is only
+      # the intended comparison when the PR targets main. For a PR onto a
+      # long-lived branch it measures that branch's entire divergence, so the
+      # gate reports degradation the PR neither introduced nor can fix, and it
+      # reports the SAME degradation for every PR on that branch.
+      #
+      # Measured on 2026-09-18: PR #146 (3 files, +44/-19) and PR #145
+      # (unrelated content) both produced byte-identical numbers -- quality
+      # 5671 -> 4531, cycles 1 -> 5, god files 7 -> 22, complex functions
+      # 176 -> 674 -- because both target codex/sophia-observability-v1, which
+      # differs from main by 1262 files. 387151 of PR #146's 387176 measured
+      # insertions were already in its base.
+      #
+      # The event's recorded base commit is used rather than the moving branch
+      # ref, so a push to the base branch mid-run cannot change what is
+      # measured, and the value reaches the shell only through env.
+      - name: Capture base-revision baseline
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
-          git worktree add ../main-baseline origin/main
-          (cd ../main-baseline && sentrux gate --save .)
+          if [[ ! "${BASE_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Unexpected pull_request.base.sha" >&2
+            exit 1
+          fi
+          git worktree add --detach ../base-baseline "${BASE_SHA}"
+          (cd ../base-baseline && sentrux gate --save .)
           mkdir -p .sentrux
           # Sentrux writes the baseline to .sentrux/baseline.json.
-          cp ../main-baseline/.sentrux/baseline.json .sentrux/baseline.json
+          cp ../base-baseline/.sentrux/baseline.json .sentrux/baseline.json
 
       - name: Score-regression gate (BLOCKING)
         # If sentrux gate does not exit non-zero on regression, replace this with
@@ -66,7 +90,7 @@ jobs:
             echo "**Sentrux architecture gate**"
             echo
             echo '```'
-            sentrux gate . --json 2>/dev/null || sentrux gate . || echo 'Score regressed vs `main` — see job logs for details.'
+            sentrux gate . --json 2>/dev/null || sentrux gate . || echo 'Score regressed vs the PR base — see job logs for details.'
             echo '```'
           } > /tmp/sentrux-comment.md
           python - <<'PY'

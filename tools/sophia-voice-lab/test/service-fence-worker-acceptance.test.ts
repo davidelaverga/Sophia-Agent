@@ -60,6 +60,39 @@ async function admitFence(ledger: MemoryVoiceLabLedger, runId: string, ownership
   return ledger.appendEvent(runId, PLATFORM_EXECUTION_TERMINATION_KIND, "canonical", termination.payload, termination.dedupeKey);
 }
 
+/** A complete, authoritative Gateway recovery receipt for this run. */
+function gatewayRecoveryEvent(run: ReturnType<typeof testRun>, identity: { recoveryId: string; attemptId: string; issuedAt: string }) {
+  const builder = { status: "completed", cleanup_complete: true, discovery_complete: true, authoritative_zero_tasks: true, discovered_task_count: 0 };
+  return { kind: "cleanup.recovery", source: "canonical" as const, payload: { complete: true, http_status: 200, receipt: {
+    test_run_id: run.testRunId, cleanup_obligation_id_sha256: sha256(run.cleanupObligationId),
+    complete: true, live_cleanup_complete: true, live_resources_zero: true,
+    recovery_id: identity.recoveryId, attempt_id: identity.attemptId, attempt_issued_at: identity.issuedAt,
+    recovered_at: new Date().toISOString(),
+    receipt: { storage: "postgres", object_path: `runs/${run.id}/recovery`, sha256: sha256("gateway-recovery-object") },
+    components: { canonical_session: { status: "completed" }, voice_provider: { status: "completed" },
+      auth_sessions: { status: "completed" }, builder } } } };
+}
+
+/** The replacement worker, with ONLY the external Gateway recovery transport
+ * mocked. The worker decides when to call it and authors every durable event. */
+function replacementWorker(ledger: MemoryVoiceLabLedger, config: ReturnType<typeof testConfig>, run: ReturnType<typeof testRun>) {
+  const codec = new CapabilityCodec(config.capabilitySecret, config.capabilityIssuer, config.capabilityTtlSeconds);
+  const recover = vi.fn(async (_binding: unknown, token: string) => {
+    const claims = codec.verify(token, { audience: "sophia-voice-lab-recovery", operation: "session:recover",
+      principalId: run.principalId, testRunId: run.testRunId, cleanupObligationId: run.cleanupObligationId,
+      environment: run.environment, retentionHours: run.capturePolicy.retentionHours,
+      providerExpiresAt: run.expiresAt.toISOString(), expectedDeployment: run.target.expectedDeployment,
+      scenarioId: run.scenarioId, scenarioVersion: run.scenarioVersion });
+    return { events: [gatewayRecoveryEvent(run, recoveryAttemptIdentity(claims))],
+      // A real recovery returns its canonical receipt artifact.
+      artifacts: [{ id: randomUUID(), kind: "canonical_receipt", contentType: "application/json",
+        bytes: Buffer.from(JSON.stringify({ recovery_id: recoveryAttemptIdentity(claims).recoveryId })) }] };
+  });
+  const driver = { recover, hasSession: () => false, close: async () => undefined } as unknown as VoiceBrowserDriver;
+  const worker = new VoiceLabWorker("replacement-worker", ledger, config, {} as AudioResolver, driver, codec, pino({ level: "silent" }));
+  return { worker, recover };
+}
+
 it("lets the worker recover, release the foreign lease and export the manifest", async () => {
   vi.useFakeTimers({ shouldAdvanceTime: true });
   try {
@@ -67,31 +100,7 @@ it("lets the worker recover, release the foreign lease and export the manifest",
     expect(renderInventoryInstanceId(FOREIGN_OWNER)).toBe(`${SERVICE_ID}-2gj6p`);
     const termination = await admitFence(ledger, run.id, ownership);
 
-    const codec = new CapabilityCodec(config.capabilitySecret, config.capabilityIssuer, config.capabilityTtlSeconds);
-    // ONLY the external Gateway recovery transport is mocked. The worker
-    // decides when to call it and authors every durable event itself.
-    const recover = vi.fn(async (_binding: unknown, token: string) => {
-      const claims = codec.verify(token, { audience: "sophia-voice-lab-recovery", operation: "session:recover",
-        principalId: run.principalId, testRunId: run.testRunId, cleanupObligationId: run.cleanupObligationId,
-        environment: run.environment, retentionHours: run.capturePolicy.retentionHours,
-        providerExpiresAt: run.expiresAt.toISOString(), expectedDeployment: run.target.expectedDeployment,
-        scenarioId: run.scenarioId, scenarioVersion: run.scenarioVersion });
-      const identity = recoveryAttemptIdentity(claims);
-      const builder = { status: "completed", cleanup_complete: true, discovery_complete: true, authoritative_zero_tasks: true, discovered_task_count: 0 };
-      return { events: [{ kind: "cleanup.recovery", source: "canonical" as const, payload: { complete: true, http_status: 200, receipt: {
-        test_run_id: run.testRunId, cleanup_obligation_id_sha256: sha256(run.cleanupObligationId),
-        complete: true, live_cleanup_complete: true, live_resources_zero: true,
-        recovery_id: identity.recoveryId, attempt_id: identity.attemptId, attempt_issued_at: identity.issuedAt,
-        recovered_at: new Date().toISOString(),
-        receipt: { storage: "postgres", object_path: `runs/${run.id}/recovery`, sha256: sha256("gateway-recovery-object") },
-        components: { canonical_session: { status: "completed" }, voice_provider: { status: "completed" },
-          auth_sessions: { status: "completed" }, builder } } } }],
-        // A real recovery returns its canonical receipt artifact.
-        artifacts: [{ id: randomUUID(), kind: "canonical_receipt", contentType: "application/json",
-          bytes: Buffer.from(JSON.stringify({ recovery_id: identity.recoveryId })) }] };
-    });
-    const driver = { recover, hasSession: () => false, close: async () => undefined } as unknown as VoiceBrowserDriver;
-    const worker = new VoiceLabWorker("replacement-worker", ledger, config, {} as AudioResolver, driver, codec, pino({ level: "silent" }));
+    const { worker, recover } = replacementWorker(ledger, config, run);
 
     const held = await ledger.getBrowserLease(run.id);
     expect(held).not.toBeNull();
@@ -150,5 +159,37 @@ it("lets the worker recover, release the foreign lease and export the manifest",
     expect(manifestText).toContain(receipt!.id);
     expect(manifestText).toContain(receipt!.sha256);
     expect(canonicalRequestHash(exported.data)).toEqual(expect.any(String));
+  } finally { vi.useRealTimers(); }
+});
+
+it("recovers again after the platform termination even when an earlier recovery already completed", async () => {
+  // The present run's exact shape: Gateway recovery completed (seq296) BEFORE
+  // the platform termination can exist. The execution proof requires a
+  // recovery AFTER the termination, so that earlier receipt must not be taken
+  // as current or the proof stays provider_or_auth_cleanup_unconfirmed forever.
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  try {
+    const { ledger, config, run, ownership } = await seedTerminalObligation();
+    const earlier = await ledger.appendEvent(run.id, "cleanup.recovery", "canonical",
+      gatewayRecoveryEvent(run, { recoveryId: randomUUID(), attemptId: randomUUID(), issuedAt: new Date().toISOString() }).payload);
+    const termination = await admitFence(ledger, run.id, ownership);
+    expect(termination.seq).toBeGreaterThan(earlier.seq);
+
+    const { worker, recover } = replacementWorker(ledger, config, run);
+    await worker.maintainSessions();
+
+    expect(recover).toHaveBeenCalledTimes(1);
+    const cleanup = (await ledger.listEvents(run.id, 0, 500)).events.filter(event => event.kind === "cleanup.recovery");
+    expect(cleanup).toHaveLength(2);
+    expect(cleanup.at(-1)!.seq).toBeGreaterThan(termination.seq);
+    const control = (await ledger.getRecoveryControl(run.id))!;
+    expect(control.executionCleanupProof).toMatchObject({ ready: true, reason: "authoritative_platform_fence_after_owner_loss" });
+    expect(control.executionCleanupProof!.eventSeqs).toMatchObject({ platformTerminated: termination.seq, recovery: cleanup.at(-1)!.seq, processClosed: null });
+    expect(await ledger.getBrowserLease(run.id)).toBeNull();
+    expect((await ledger.getRun(run.id))!.cleanupComplete).toBe(true);
+
+    // Once the post-termination recovery exists it is current: no repeat.
+    await worker.maintainSessions();
+    expect(recover).toHaveBeenCalledTimes(1);
   } finally { vi.useRealTimers(); }
 });
