@@ -238,4 +238,26 @@ describe("content-free inbound provider census", () => {
     await settle();
     expect(received().at(-1).payload).toMatchObject({ received_count: 7, inspected_count: 5, queue_dropped_count: 2, in_flight_count: 0, capture_limited: true });
   });
+
+  it("marks the cap exactly once when 512 events drained before the first post-cap frame", async () => {
+    const { sandbox, settle, received } = harness();
+    const socket = new sandbox.WebSocket("wss://provider.test/socket");
+    // 512 distinct frames in drained batches of 32 (divides 512): no pre-queued tail.
+    for (let index = 0; index < 512; index += 1) {
+      socket.deliver({ data: JSON.stringify({ serverContent: { outputTranscription: { text: "d".repeat(index) } } }) });
+      if (index % 32 === 31) await settle();
+    }
+    expect(received().filter((event: any) => event.kind === "harness.provider_frame_received")).toHaveLength(512);
+    expect(received().filter((event: any) => event.kind === "harness.provider_frame_received_capped")).toHaveLength(0);
+    socket.deliver({ data: JSON.stringify({ serverContent: { outputTranscription: { text: "post-cap-1" } } }) });
+    socket.deliver({ data: JSON.stringify({ serverContent: { outputTranscription: { text: "post-cap-2" } } }) });
+    await settle();
+    socket.deliverClose();
+    await settle();
+    const events = received();
+    expect(events.filter((event: any) => event.kind === "harness.provider_frame_received_capped")).toEqual([
+      expect.objectContaining({ payload: expect.objectContaining({ inbound_ordinal: 513, emitted_count: 512 }) })]);
+    expect(events.at(-1).payload).toMatchObject({ received_count: 514, emitted_count: 512, suppressed_count: 0, uninspected_after_cap_count: 2,
+      queue_dropped_count: 0, in_flight_count: 0, cap_reached: true, capture_limited: true });
+  });
 });

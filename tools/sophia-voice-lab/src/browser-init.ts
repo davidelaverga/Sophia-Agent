@@ -288,13 +288,20 @@ export function buildVoiceLabInitScript(options: InitScriptOptions): string {
         queue_dropped_count: inbound.queueDropped, uninspected_after_cap_count: inbound.uninspectedAfterCap, in_flight_count: inbound.queued,
         capture_limited: inbound.queueDropped > 0 || inbound.uninspectedAfterCap > 0 });
     };
+    // Exactly one capped event per socket, from whichever path first meets the cap.
+    const markInboundCapReached = (entry, ordinal) => {
+      const inbound = entry.inbound;
+      if (inbound.capReached) return;
+      inbound.capReached = true;
+      emit('harness.provider_frame_received_capped', { harness_socket_ordinal: entry.epoch, inbound_ordinal: ordinal, emitted_count: inbound.emitted });
+    };
     const recordInbound = (entry, projection, ordinal) => {
       const inbound = entry.inbound;
       const key = JSON.stringify(projection);
       if (key === inbound.lastKey && inbound.repeats + 1 < INBOUND_REPEAT_FLUSH) { inbound.repeats += 1; inbound.suppressed += 1; return; }
       if (inbound.emitted >= INBOUND_MAX_EVENTS) {
         inbound.suppressed += 1;
-        if (!inbound.capReached) { inbound.capReached = true; emit('harness.provider_frame_received_capped', { harness_socket_ordinal: entry.epoch, inbound_ordinal: ordinal, emitted_count: inbound.emitted }); }
+        markInboundCapReached(entry, ordinal);
         return;
       }
       inbound.emitted += 1;
@@ -308,7 +315,7 @@ export function buildVoiceLabInitScript(options: InitScriptOptions): string {
       inbound.received += 1;
       const ordinal = inbound.received;
       // After the event cap nothing is inspected; the frame is only counted.
-      if (inbound.emitted >= INBOUND_MAX_EVENTS) { inbound.uninspectedAfterCap += 1; return; }
+      if (inbound.emitted >= INBOUND_MAX_EVENTS) { inbound.uninspectedAfterCap += 1; markInboundCapReached(entry, ordinal); return; }
       let observed = data;
       let retained = 0;
       try {
