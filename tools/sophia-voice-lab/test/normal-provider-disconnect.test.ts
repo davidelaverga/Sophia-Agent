@@ -87,6 +87,8 @@ it.each([
   [false, false, "finalization-fails"],
   // A rejected attempt observed while end drains after the 202 still counts (C011).
   [false, false, "late-rejection"],
+  // A failed continuation left candidate 3 aborted after activated epoch 2 (C021).
+  [false, false, "aborted-candidate"],
 ] as const)("real driver end consumes receiving ack; rejected=%s prior-activation=%s mode=%s", async (rejected, priorActivation, mode) => {
   const config = testConfig();
   const ownedRun = testRun({ scenarioId: "V-O01", providerSessionId: run.providerSessionId, providerEpoch: mode === "stale-epoch" ? 1 : 2,
@@ -122,6 +124,7 @@ it.each([
     f.body.browser_provider_close_receipts.shift();
     f.request.browser_provider_close_receipts.shift();
   }
+  if (mode === "aborted-candidate") withAbortedCandidate(f, abort(3));
   const locator = (leave: boolean) => ({ first() { return this; }, last() { return this; }, waitFor: async () => {},
     isVisible: async () => false, click: async () => {
       if (leave) return;
@@ -210,6 +213,8 @@ it.each([
     const ended = await driver.end(ownedRun, "finalize", "cleanup");
     const acknowledged = ended.events.find(event => event.kind === "provider.disconnect_acknowledged")!;
     expect(acknowledged.payload).toMatchObject({ provider_connection_epochs: [1, 2] });
+    if (mode === "aborted-candidate") expect(acknowledged.payload).toMatchObject({ aborted_candidate_epochs: [3], browser_provider_activation_abort_receipt_count: 1 });
+    else expect(acknowledged.payload).not.toHaveProperty("aborted_candidate_epochs");
     if (mode === "retried" || mode === "late-rejection") expect(acknowledged.payload.rejected_receiving_attempt_count).toBeGreaterThanOrEqual(1);
     else expect(acknowledged.payload.rejected_receiving_attempt_count).toBe(0);
     expect(ended.events).toContainEqual(expect.objectContaining({ kind: "cleanup.provider_transport_closed",
@@ -292,4 +297,52 @@ it.each([
   f.request.browser_provider_close_receipts.shift(); f.body.browser_provider_close_receipts.shift();
   await expect(validateNormalProviderDisconnectResponse(f.response, origin, run, activations as unknown as Record<string, unknown>[]))
     .rejects.toMatchObject({ detail: { code: "PROVIDER_CLEANUP_UNCONFIRMED", details: { validation_stage: "prior_activation_binding" } } });
+});
+
+// C021: a continuation reserves N+1 and fails before activating it. The product
+// keeps N+1 unsettled and submits an exact activation-abort receipt for it; the
+// run (and every bound epoch receipt) still says N. The receiving 202 must be
+// accepted, while the latest ACTIVATED epoch still needs its close receipt.
+function abort(candidate: number, overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return { schema: "sophia_gemini_browser_provider_activation_abort_v1", receipt_id: `00000000-0000-4000-8000-${String(900 + candidate).padStart(12, "0")}`,
+    session_id: run.providerSessionId, previous_activated_epoch: candidate - 1, candidate_epoch: candidate, websocket_created: false,
+    aborted_at: "2026-09-22T12:00:01.000Z", ...overrides };
+}
+function withAbortedCandidate(f: ReturnType<typeof fixture>, receipt: Record<string, unknown>, into: "both" | "body" = "both") {
+  f.body.browser_provider_activation_abort_receipts.push(structuredClone(receipt));
+  if (into === "both") f.request.browser_provider_activation_abort_receipts.push(structuredClone(receipt));
+}
+
+describe("normal end with an aborted continuation candidate", () => {
+  it("accepts N activated plus the bound aborted candidate N+1", async () => {
+    const f = fixture();
+    withAbortedCandidate(f, abort(3));
+    const result = await validateNormalProviderDisconnectResponse(f.response, origin, run);
+    expect(result).toMatchObject({ provider_connection_epochs: [1, 2], aborted_candidate_epochs: [3],
+      browser_provider_close_receipt_count: 2, browser_provider_activation_abort_receipt_count: 1 });
+  });
+
+  it("keeps the acknowledgement shape unchanged when no candidate was aborted", async () => {
+    const result = await validateNormalProviderDisconnectResponse(fixture().response, origin, run);
+    expect(result).not.toHaveProperty("aborted_candidate_epochs");
+  });
+
+  it.each([
+    ["a candidate beyond N+1", () => abort(4), "both"],
+    ["an aborted candidate from another session", () => abort(3, { session_id: "foreign" }), "both"],
+    ["a candidate that did create a websocket", () => abort(3, { websocket_created: true }), "both"],
+    ["a non-consecutive candidate", () => abort(3, { previous_activated_epoch: 1 }), "both"],
+    ["an abort the product never submitted", () => abort(3), "body"],
+  ] as const)("refuses %s", async (_label, build, into) => {
+    const f = fixture();
+    withAbortedCandidate(f, build(), into);
+    await expect(validateNormalProviderDisconnectResponse(f.response, origin, run)).rejects.toMatchObject({ detail: { code: "PROVIDER_CLEANUP_UNCONFIRMED" } });
+  });
+
+  it("still requires the close receipt of the latest activated epoch", async () => {
+    const f = fixture();
+    for (const value of [f.request, f.body]) value.browser_provider_close_receipts.pop();
+    withAbortedCandidate(f, abort(3));
+    await expect(validateNormalProviderDisconnectResponse(f.response, origin, run)).rejects.toMatchObject({ detail: { code: "PROVIDER_CLEANUP_UNCONFIRMED" } });
+  });
 });

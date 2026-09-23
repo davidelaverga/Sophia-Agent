@@ -1711,6 +1711,17 @@ export async function readProviderActivationAcknowledgement(response: Pick<Playw
 }
 
 /** Passive evidence only: never initiate disconnect or inspect/store credentials. */
+/** A continuation reserves exactly the next epoch, activatedEpoch + 1, and a
+ * failure before activation leaves it unsettled with an exact activation-abort
+ * receipt while every bound epoch receipt still names activatedEpoch. That one
+ * candidate joins the settled union only when the already validated,
+ * request-echoed acknowledgement carries its abort receipt; any other abort
+ * epoch is left to fail the exact union check. */
+function boundAbortedCandidateEpochs(accepted: D02ProductCleanupEcho, activatedEpoch: number): number[] {
+  const candidate = activatedEpoch + 1;
+  return accepted.browser_provider_activation_abort_receipts.some((receipt) => Number(receipt.candidate_epoch) === candidate) ? [candidate] : [];
+}
+
 /** Exact-origin JSON 202 disconnect acknowledgement for a run that has a bound
  * provider session and 1..64 owned epochs. Returns that session id, or null. */
 function normalDisconnectSessionId(
@@ -1783,14 +1794,16 @@ export async function validateNormalProviderDisconnectResponse(
       previouslyClosed.set(epoch, receipt);
     }
     validationStage = "settled_epoch_union";
+    const abortedCandidates = boundAbortedCandidateEpochs(accepted, Number(run.providerEpoch));
     const joined = validateD02ProductCleanupEcho({ browser_provider_close_receipts: [...previouslyClosed.values()].sort((a, b) => Number(a.provider_connection_epoch) - Number(b.provider_connection_epoch)),
-      browser_provider_activation_abort_receipts: accepted.browser_provider_activation_abort_receipts }, providerSessionId, epochs);
+      browser_provider_activation_abort_receipts: accepted.browser_provider_activation_abort_receipts }, providerSessionId, [...epochs, ...abortedCandidates]);
     if (!accepted.browser_provider_close_receipts.some((receipt) => receipt.provider_connection_epoch === run.providerEpoch)) throw reject();
     return {
       schema: "sophia_voice_lab_normal_provider_disconnect_ack_v1",
       voice_lab_run_id_sha256: sha256(run.id), test_run_id_sha256: sha256(run.testRunId),
       cleanup_obligation_id_sha256: sha256(run.cleanupObligationId),
       provider_session_id_sha256: sha256(providerSessionId), provider_connection_epochs: epochs,
+      ...(abortedCandidates.length > 0 ? { aborted_candidate_epochs: abortedCandidates } : {}),
       receiving_http_status: 202, receiving_acknowledgement_sha256: canonicalRequestHash(accepted),
       prior_activation_acknowledgement_sha256s: [...activationHashes].sort(),
       settled_epoch_union_sha256: canonicalRequestHash(joined),
