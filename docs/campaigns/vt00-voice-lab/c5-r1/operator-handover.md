@@ -2,7 +2,7 @@
 
 Checkpoint: 2026-09-23 20:39 UTC, closeout C088. This supersedes September22 instructions; historical failures remain archived, not current repair instructions.
 
-C5 technical first-use criteria are met by existing J6 evidence. CI reconciliation is complete. The closeout-only scope permits the bounded executable retention disposition below; three future purges and final worker suspension are scheduled maintenance, not claimed completed. Readiness verdict is VOICE_LAB_INTERNAL_USE_READY under that approved disposition, pending publication verification. No new live voice run, full VT00 certification, Builder campaign or migration is authorized or needed.
+C5 technical first-use criteria are met by existing J6 evidence. CI reconciliation is complete. The closeout-only scope permits the bounded executable retention disposition below; three future purges and final worker suspension are scheduled maintenance, not claimed completed. Readiness verdict is VOICE_LAB_INTERNAL_USE_READY under that approved disposition. No new live voice run, full VT00 certification, Builder campaign or migration is authorized or needed.
 
 MCP `srv-da6uiqfavr4c739mtbng` is suspended/zero instances (last authoritative observation20:39:01Z). Worker `srv-da6uiqfavr4c739mtbo0` runs one instance (last authoritative observation20:39:02Z), deployment `dep-dapvg80u01pc73e3o900`, solely for approved retention maintenance. Its kill switch is true; product Lab gates remain closed. Ordinary Sophia runs normally. Release branch points at qualified d467ab97; no uniform-SHA redeployment is needed. Existing OAuth remains reusable.
 
