@@ -1,0 +1,80 @@
+{
+  "schema": "vt00.c5-manifest-readback.v1",
+  "observed_at": "2026-09-23T15:44:40.658Z",
+  "source": "Authenticated Render Web Shell; read-only transaction, artifact bytes selected by installed-plugin-export manifest id",
+  "manifest_id": "95084ded-65de-5850-bfef-f59bf750734f",
+  "stored_sha256": "bf104b67bc04ce0f00671ca48207b63216cfba79d9a2a0bd45a99f2f14712056",
+  "computed_sha256": "bf104b67bc04ce0f00671ca48207b63216cfba79d9a2a0bd45a99f2f14712056",
+  "c5_assessment": {
+    "schema": "sophia.voice-lab.c5-first-use-assessment.v1",
+    "status": "met",
+    "separate_from_scenario_verdicts": true,
+    "criteria": [
+      {
+        "id": "exact_deployment_tuple",
+        "status": "met"
+      },
+      {
+        "id": "authenticated_synthetic_session_and_capture",
+        "status": "met"
+      },
+      {
+        "id": "two_or_more_non_silent_utterances",
+        "status": "met"
+      },
+      {
+        "id": "input_delivery_and_transcript_receipts_each_utterance",
+        "status": "met"
+      },
+      {
+        "id": "audible_exact_output_each_utterance",
+        "status": "met"
+      },
+      {
+        "id": "later_utterances_after_prior_reply",
+        "status": "met"
+      },
+      {
+        "id": "ordinary_end_and_settlement",
+        "status": "met"
+      },
+      {
+        "id": "canonical_evidence_retained",
+        "status": "met"
+      }
+    ],
+    "utterances": [
+      {
+        "operation_id": "8d70fbb5-34bf-4408-a0e2-67edf6cff99f",
+        "input": "met",
+        "audible_exact_chain_count": 15,
+        "audible_seconds": 2.6,
+        "output": "met",
+        "adaptive_ordering": "not_applicable_first_utterance"
+      },
+      {
+        "operation_id": "6f2e6881-079d-45f5-b19a-624699855089",
+        "input": "met",
+        "audible_exact_chain_count": 47,
+        "audible_seconds": 11.7,
+        "output": "met",
+        "adaptive_ordering": "met"
+      }
+    ],
+    "semantic_adaptivity": "coordinator_assessment_required",
+    "not_assessed": [
+      "recognition_accuracy",
+      "semantic_adaptivity",
+      "acoustic_quality",
+      "all_chunk_output_certification"
+    ]
+  },
+  "verdicts": {
+    "harness": "fail",
+    "product": "fail",
+    "provider": "pass",
+    "auth": "pass",
+    "evidence": "fail"
+  },
+  "note": "Compact exact readback projection; full stored artifact digest above. Coordinator semantic interpretation in first-use-evidence-index.md. Retention pending is not claimed purged."
+}

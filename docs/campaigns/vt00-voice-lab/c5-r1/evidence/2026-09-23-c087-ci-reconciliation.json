@@ -1,0 +1,34 @@
+{
+  "base": "3754c3022bcfc2be1e3b8d097040b7d81ad23ac6",
+  "head": "d467ab97464908b4e7c7752701eee9d24db7faf6",
+  "run": 35916904466,
+  "job": 107370625089,
+  "same_runner": true,
+  "base_failures": [
+    "FAILED tests/test_deck_native_service.py::test_deck_native_lint_fix_rolls_back_seam_that_would_wrap_text - AssertionError: assert 1 == 0",
+    "FAILED tests/test_deck_native_service.py::test_deck_native_lint_fix_repairs_canary_headline_and_kpi_overflow - assert 37.5 < 37.5",
+    "FAILED tests/test_memory_governance_worker_expiry_backoff.py::test_failing_expiry_is_attempted_once_per_interval_not_once_per_poll - AssertionError: assert 0 == 1",
+    "FAILED tests/test_memory_governance_worker_expiry_backoff.py::test_expiry_runs_again_once_the_interval_has_elapsed - AssertionError: assert 0 == 1",
+    "FAILED tests/test_memory_governance_worker_expiry_backoff.py::test_successful_expiry_still_reports_work - assert False is True",
+    "FAILED tests/test_memory_governance_worker_expiry_backoff.py::test_cancellation_is_not_swallowed_by_the_expiry_guard - Failed: DID NOT RAISE <class 'asyncio.exceptions.CancelledError'>",
+    "FAILED tests/test_memory_governance_worker_expiry_backoff.py::test_failing_startup_recovery_does_not_stop_the_later_stages - AssertionError: assert 0 == 1"
+  ],
+  "head_failures": [
+    "FAILED tests/test_deck_native_service.py::test_deck_native_lint_fix_rolls_back_seam_that_would_wrap_text - AssertionError: assert 1 == 0",
+    "FAILED tests/test_deck_native_service.py::test_deck_native_lint_fix_repairs_canary_headline_and_kpi_overflow - assert 37.5 < 37.5",
+    "FAILED tests/test_memory_governance_worker_expiry_backoff.py::test_failing_expiry_is_attempted_once_per_interval_not_once_per_poll - AssertionError: assert 0 == 1",
+    "FAILED tests/test_memory_governance_worker_expiry_backoff.py::test_expiry_runs_again_once_the_interval_has_elapsed - AssertionError: assert 0 == 1",
+    "FAILED tests/test_memory_governance_worker_expiry_backoff.py::test_successful_expiry_still_reports_work - assert False is True",
+    "FAILED tests/test_memory_governance_worker_expiry_backoff.py::test_cancellation_is_not_swallowed_by_the_expiry_guard - Failed: DID NOT RAISE <class 'asyncio.exceptions.CancelledError'>",
+    "FAILED tests/test_memory_governance_worker_expiry_backoff.py::test_failing_startup_recovery_does_not_stop_the_later_stages - AssertionError: assert 0 == 1"
+  ],
+  "same_failure_set_and_assertions": true,
+  "setup": "Both dependency sync and provenance checks succeeded; lock unchanged",
+  "environment": "Linux6.17 azure x86_64; Python3.12.14; Pillow12.1.1; raqm0.10.3/fribidi1.0.13/harfbuzz12.3.0; natural runner uptime50seconds",
+  "log_sha256": "6c12d9a51c7b4e57201c47c25bf2cbe8f7dde2a8f4243a71c7789b3554959d20",
+  "issues": [
+    152,
+    153
+  ],
+  "disposition": "All seven inherited from actual base; no source fix, test weakening, CI waiver or merge performed."
+}

@@ -1,0 +1,20 @@
+{
+  "schema": "vt00.c086-existing-evidence-audit.v1",
+  "event_count": 1629,
+  "gap_free": true,
+  "manifest_export_readback_hash_agree": true,
+  "machine_criteria_met": 8,
+  "second_source_text_sha256": "918af93b0f15d580a8075c7a4fdc71b578da3dac5ae853acce1db8c0e005c879",
+  "source_text_match": true,
+  "semantic_assessment": "The chosen calm discussion explicitly answers the first assistant reply invitation; coordinator interpretation, not chronology alone. See first-use-evidence-index.md.",
+  "operator_zip_sha256": "dfdd0fd55e7a0cd3d2030cd6a0d640fdbff028065fe4c2e05e63adf2d05db39d",
+  "zip_crc_valid": true,
+  "legacy_verdicts": {
+    "auth": "pass",
+    "harness": "fail",
+    "product": "fail",
+    "evidence": "fail",
+    "provider": "pass"
+  },
+  "limitations": "Verifies stored immutable export/readback records, not a new server fetch; no new run or purge claim."
+}

@@ -1,49 +1,86 @@
-# VT00-C5-R1 operator handover — NOT READY, 2026-09-22
+# Current operator handover
 
-Current authoritative status is `current-state.md` and `first-use-evidence-index.md`; the older record below is retained history. User approved the separate $5 Voice cap and BOTH Lab services' post-cleanup suspension. OAuth is connected; no new provisioning is needed. Product pins are current. One installed-plugin attempt failed basic audio and normal-End evidence, then completed verified recovery and durable export. MCP admission is closed; both Lab services are verified suspended as of16:02Z during repair. Final product-gate closure is still owed. Wake the existing services only for the verified candidate retry.
+Checkpoint: 2026-09-23 20:39 UTC, closeout C088. This supersedes September22 instructions; historical failures remain archived, not current repair instructions.
 
-Next use is not yet qualified. Finish the narrow authenticated End receipt repair, verify its exact compatible deployment, and retry the same C5 audio journey within the remaining authorized cap. No automatic/provider-model upgrade or broader certification. Do not reuse old pinned hashes from the historical instructions. The two adaptive audio turns and playback must pass before declaring VOICE_LAB_INTERNAL_USE_READY.
+C5 technical first-use criteria are met by existing J6 evidence. CI reconciliation is complete. The closeout-only scope permits the bounded executable retention disposition below; three future purges and final worker suspension are scheduled maintenance, not claimed completed. Readiness verdict is VOICE_LAB_INTERNAL_USE_READY under that approved disposition, pending publication verification. No new live voice run, full VT00 certification, Builder campaign or migration is authorized or needed.
 
-## Historical record
+MCP `srv-da6uiqfavr4c739mtbng` is suspended/zero instances (last authoritative observation20:39:01Z). Worker `srv-da6uiqfavr4c739mtbo0` runs one instance (last authoritative observation20:39:02Z), deployment `dep-dapvg80u01pc73e3o900`, solely for approved retention maintenance. Its kill switch is true; product Lab gates remain closed. Ordinary Sophia runs normally. Release branch points at qualified d467ab97; no uniform-SHA redeployment is needed. Existing OAuth remains reusable.
 
-# VT00-C5-R1 operator handover — validation pending
+| Component | Exact qualified identity |
+|---|---|
+| Frontend | `083d4cb0f6e026133ba0e08c5a61220e396d21b8` — Production `dpl_FVi7Dp1eVxKfM9UHzKZ8PdifzA1p` |
+| Gateway | `6f15f5e2790941342c23d046733ee1d4992a9e0c` |
+| Voice | `f128af0c5604139b3d20d10424877001b1c0a7cd` |
+| LangGraph | `def5c454e665628875cbad2ffd39a21a9f72749a` |
+| Lab MCP and worker | `d467ab97464908b4e7c7752701eee9d24db7faf6`, schema6 |
+| Installed plugin | `0.1.0+codex.20260913232552`, SHA256 `f799c321aee48f59833918d07e4cb19d0ff2cc12ac521ea1be619affdf8b4f0b` |
 
-Latest checkpoint (2026-09-21 17:07 UTC): OAuth is connected and both repaired
-product components are deployed, independently verified at406ff0a6. See
-deployment-receipt.md and evidence/pre-activation-capabilities.json. Earlier
-access/deployment-blocker entries below are historical. Current activation is
-still blocked by the controller's Production Deploy approval gate; all Voice
-gates remain closed. The exact remaining configuration/run/close scope is in
-the worktree-root activation-scope.md. The user has been asked once for the
-remaining supported platform action and an explicit MCP+worker suspension
-posture, because the referenced agreement could not be recovered. No live run
-has started. Do not use a different controller to route around the denial.
+J6 ran with Gateway083d4cb0; the later Gateway6f15 canonical-reader repair recovered its evidence without another run. Do not conflate run tuple and current tuple. Receiving authentication, principal separation, no-memory isolation and exact cleanup fencing remain installed.
 
-This is a resumable work record, not a readiness handover. Completion still
-requires the real installed-plugin demonstration and present-run settlement.
+## Acceptance and known limitations
 
-1. Reauthenticate the existing Sophia Voice Lab connection through its supported
-   client flow; call installed get_capabilities and retain its exact versions,
-   package hash, limits, targets and obligations. No recurring provisioning.
-2. Review [PR #149](https://github.com/davidelaverga/Sophia-Agent/pull/149)
-   (use its latest head, including the circular-import follow-up), then finish qualification/deployment on the
-   current MEM00-compatible source. One shared deployment owner/window. Keep
-   receiving authentication installed and memory configuration unchanged.
-3. Verify current resources and permissions; preserve the historical exception.
-   Use the original bounded window (concurrency one; ceiling 30 minutes,
-   20 utterances, 180 seconds injected audio, 30 seconds per utterance) only
-   after confirming these are still the authorized limits. This demo uses two
-   short utterances, no Builder/fault/reconnect/endurance campaign. Raw audio off.
-4. Open in existing frontend → product → worker → MCP order, with exact verified
-   pins and fresh singleton readiness. Start via plugin; wait for actual READY.
-5. Speak once, inspect the actual reply and input/output/playback chain, choose
-   the second utterance from that reply, then wait and inspect both chains.
-6. End via the supported plugin operation, wait for finalization and resource
-   receipts, export durable evidence. Account for browser/process/provider,
-   session, operation queues and any unexpected Builder task.
-7. Close MCP admission, settle resources, close worker, Gateway/Voice, frontend,
-   and suspend the services required by the established agreement. Preserve
-   inspection/recovery until obligations are disposed. Report separate harness
-   and product verdicts plus exact versions and next-use recipe.
+Run `bb39a997-a819-40e6-a276-53c088055f52`; session `6710658c-905e-4ccf-9493-8eb6f5f81a0b`; test `5dd8d167-85cd-40f8-a81a-881ac2d94c0e`. Latest immutable manifest `95084ded-65de-5850-bfef-f59bf750734f`, resource `voice-lab://evidence/95084ded-65de-5850-bfef-f59bf750734f`, 77053bytes, SHA256 `bf104b67bc04ce0f00671ca48207b63216cfba79d9a2a0bd45a99f2f14712056`. Installed export and authenticated stored-byte hash readback agree. See `evidence/2026-09-23-j6-refreshed-export.json` and `evidence/2026-09-23-j6-c5-manifest-readback.json`. Original manifest6456326d and original full V-O01 verdicts remain unchanged.
 
-Do not label this plan `VOICE_LAB_INTERNAL_USE_READY` or `PROMOTE VT00`.
+| Mission requirement | Existing proof |
+|---|---|
+| Installed authenticated control and exact tuple | J6 start/tool responses; maintenance capabilities; expected/observed identities match |
+| Real synthetic input through ordinary application | PCM event199:39frames/115908bytes; event1398:74frames/219928bytes; app-owned microphone/provider path |
+| Two assistant audio replies | Exact interaction-bound audible chains15/2.6seconds and47/11.7seconds; manifest assessment |
+| Semantic adaptive second turn | Coordinator assessment below plus matching source-text hash |
+| Supported End | End operation32539498-1269-444b-9158-1107ce1c4227 succeeded event1624 |
+| Canonical transcript and durable post-End export | Four messages/revision5; recovery1628; export after restart;1629 contiguous events |
+| Present-run resource settlement | Exact provider disconnect, auth revocation, browser/context/process closure, Builderzero, closed admission/fence, proof-backed lease release; recovery1628 live_resources_zero |
+| Bounds and isolation | Concurrency1,2utterances,15sclip,900srun; synthetic bindings/no-memory; no raw audio |
+| Retention and suspension | Bounded approved disposition in retention-closeout.md; final execution pending |
+
+## Coordinator semantic-adaptivity assessment
+
+Event803 records the final first response: “I can't actually view that 'Calm Harbor' page right now. The tool isn't working. What about it did you want to talk about? I'm still having trouble getting that page to load, but I want to hear what's on your mind. What about that 'Calm Harbor' page did you want to discuss? I'm ready whenever you are.” The application marks its transcript approximate; it is not an acoustic transcription guarantee.
+
+After inspecting that reply, the controller chose: “Let's just discuss calm. Please suggest one small way to feel calm.” The words directly answer Sophia's invitation to discuss a topic and move from the unavailable page to its calm theme. This is a semantic dependency, not just chronological ordering. SHA256 of that exact UTF-8 utterance is `918af93b0f15d580a8075c7a4fdc71b578da3dac5ae853acce1db8c0e005c879`, independently recomputed and matching `source_text_hash` in installed `2026-09-23-j6speak2.json`, operation6f2e6881-079d-45f5-b19a-624699855089. Its TTS scheduling at14:19:27Z follows inspected reply event803 at14:19:05Z. Coordinator verdict: semantic adaptivity MET. Automated ordering is supporting evidence only.
+
+## Separate verdicts and limitations
+
+C5 instrument witnesses: all eight machine criteria met plus coordinator semantic adaptivity met. Full V-O01 remains harness=fail, product=fail, evidence=fail; auth/provider=pass. Do not rewrite these as full certification. Product defects: turn1 missed the initial “create”; turn2 English audio was transcribed incompletely as French; repeated-intent output suppression occurred. Structural playback is proven; acoustic quality, all-chunk certification, recognition accuracy, Builder quality and endurance are not.
+
+Full event archive: `evidence/2026-09-23-j6-events-final.json`. Operator ZIP: `evidence/2026-09-23-j6-operator-evidence.zip`, SHA256 `dfdd0fd55e7a0cd3d2030cd6a0d640fdbff028065fe4c2e05e63adf2d05db39d`; labeled collection of plugin receipts/operator verification, not a fabricated server manifest. All earlier attempt records remain in evidence/ and history/; they do not instruct another run.
+
+## Retention disposition
+
+The five obligations from the original closeout request are below. A1 was already positively purged locally/remotely; A2/A3 are now also confirmed. All five have positive live-resource settlement; retained content is a separate obligation.
+
+| Run | Exact deadline UTC (2026) | Rome | Present result |
+|---|---|---|---|
+| A2 `a2a9308c-1ee8-43d8-8798-6fdbfb6ca02a` | Sep23 16:41:16.942 | Sep23 18:41:16.942 | Local16:41:17.074Z; remote confirmed |
+| A3 `c31c0117-0e95-4374-9981-762eeebe9716` | Sep23 17:09:33.731 | Sep23 19:09:33.731 | Local17:09:33.899Z; remote confirmed |
+| J4 `6a05f180-0d8d-44d5-b08b-422c8c8526e1` | Sep24 08:39:46.775 | Sep24 10:39:46.775 | Retained; not yet due |
+| J5 `d356836c-269d-42c9-9599-233a0c790a87` | Sep24 13:27:55.991 | Sep24 15:27:55.991 | Retained; not yet due |
+| J6 `bb39a997-a819-40e6-a276-53c088055f52` | Sep24 14:20:06.803 | Sep24 16:20:06.803 | Retained; not yet due |
+
+Storage and ownership: Lab PostgreSQL stores run content, events, operations and evidence artifacts under `sophia_voice_lab`; the worker's `maintainSessions` calls `purgeExpiredRetention` and deletes expired run content through the schema's cascades. Separate recovery controls and HMAC tombstones survive for bounded recovery/audit. Product storage targets are canonical synthetic sessions/messages, immutable finalization receipts and any Builder artifact metadata/objects in the existing product stores. Gateway’s restart-safe retention worker discovers those three indexes, obtains its PostgreSQL advisory lease and reuses exact recovery before deleting raw identity. Cleanup runs independently of enable/kill gates. Product canonical/session evidence is owned by Gateway retention/recovery machinery; authenticated exact-session recovery verifies its disposition. The worker records remote confirmation only from a verified purge/maintenance-complete receipt. Local deletion alone is insufficient. No raw audio was retained. The local operator ZIP is an explicitly labeled evidence export, not a live provider or server-retention substitute.
+
+Approved executable disposition: keep only the existing worker running with kill=true and all admission closed, under the original total $5 cap, through the final existing deadline. No deadline extension, new session or historical exception. One-time thread automation `finish-voice-lab-retention-and-suspend-worker` was actually created and read back, scheduled Sep24 16:25 Rome. Revalidate it before relying on it. At closeout, use authenticated read-only worker-shell queries to join exact run recovery controls with retention tombstones. Require `content_purged_at`, `remote_purge_complete=true`, `remote_purge_status=confirmed`, and recorded settlement receipt hashes for J4/J5/J6. Export/inspect through the installed MCP if already available; do not wake it merely to replace adequate authoritative readback. Then suspend worker via Render and verify both Lab services suspended with zero instances. If proof is missing, bound investigation, suspend to prevent indefinite spend, and report the exact unresolved obligation. Never infer purge from an empty run list or expired lease.
+
+Authoritative receipts: `evidence/2026-09-23-a1-retention-confirmed.json`, `evidence/2026-09-23-a2-a3-retention-confirmed.json`; remaining inventory observed18:35Z. Historical136 quarantined/136accepted and one Gateway accepted pending remain unverified and excluded.
+
+## CI closeout
+
+All seven backend failures are now reproduced at the actual PR151 base3754c3022bcfc2be1e3b8d097040b7d81ad23ac6 and headd467ab97 on the SAME Linux runner with identical assertions. Diagnostic run35916904466/job107370625089 used exact checkouts, Python3.12.14, uv setup, unchanged lockfile and natural runner clock. Setup succeeded for both; the diagnostic correctly finished red. Machine-checked14failure lines split into identical groups of seven: evidence/2026-09-23-c087-ci-reconciliation.json. Five memory failures are young-boot expiry handling (issue152); two deck failures are Linux layout behavior, exact layout cause unproven (issue153). Both issues are normal maintainer tracking, not waivers. No introduced failure found in this set; no source/test/check changes, force-merge or ordinary-product redeploy. PR151 remains open; failed CI remains failed. Independent Lab/architecture/memory-E2E qualification is unchanged.
+
+
+## Tested next-use recipe
+
+1. Recover current checkpoint, exact component identities, existing OAuth and current obligations; choose one deployment owner. Obtain a new bounded run authorization for a future use; this closeout authorizes none.
+2. Verify release HEAD and schema6. Resume existing MCP/worker with admission closed; inspect installed `get_capabilities`, fresh worker heartbeat and obligations. Preserve separate exact target pins.
+3. Open only approved gates and start through installed `start_voice_run` with discovered schema/exact targets. Wait for its exact successful ready receipt.
+4. Speak a short synthetic utterance through the plugin, inspect real input/output/playback, then choose a second utterance from Sophia's actual answer. One run only; enforce approved limits.
+5. Supported `end_voice_run`, inspect settlement, then `export_voice_evidence`. Verify positive resource receipts; retain original scenario and product verdicts separately.
+6. Close admission/execution in established order. Frontend closure requires same-source Production rebuild with Ignore Build Step unchecked. Account for retained evidence with its exact deadlines; verify local/remote purge under the agreed bounded maintenance plan. Suspend both Labs and verify zero instances. Keep ordinary Sophia running.
+
+## Cost
+
+Original total Voice cap $5 remains controlling. Conservative provider aggregate valuation ~$0.350418 is delayed/rounded usage, not an invoice. Approved temporary worker compute estimate ~$0.25; no new recurring service. Raw audio off.
+
+## Evidence custody
+
+Full plugin responses, event archive and operator ZIP remain in the operator-local campaign directory `/Users/davidelaverga/Documents/Codex/2026-08-19/pl/work/Sophia-Agent-mem00-closure/docs/campaigns/vt00-voice-lab/c5-r1/evidence/`. Relative evidence filenames above identify that archive unless included alongside this published handover. Public handover publication does not imply public upload of the full operational bundle. The immutable manifest identity and hashes are recorded for verification.
