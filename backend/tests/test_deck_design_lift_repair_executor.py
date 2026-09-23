@@ -506,6 +506,8 @@ def test_existing_intent_must_match_exact_canonical_bytes(
         (b"{", "result_invalid"),
         (b"x" * (MAX_REPAIR_RESULT_BYTES + 1), "result_oversize"),
     ),
+    # Explicit ids: the default id embeds the oversized bytes in the nodeid.
+    ids=("result-invalid", "result-oversize"),
 )
 def test_malformed_or_oversized_persisted_result_fails_closed_without_author(
     replacement: bytes,
