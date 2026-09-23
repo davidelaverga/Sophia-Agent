@@ -3724,7 +3724,13 @@ export function deriveC5FirstUseAssessment(run: RunRecord, events: import("./dom
     && (event.payload.receipt as Record<string, unknown> | undefined)?.operation_id === operation.id && (event.payload.receipt as Record<string, unknown> | undefined)?.phase === "assistant_response_completed");
   const utterances = ordered.map((operation, index) => assessC5Utterance(operation, index > 0 ? ordered[index - 1]! : null, eligible, chains, accepted, replyCompleted));
   const finalization = eligible.filter((event) => isCanonicalFinalizationReceipt(run, event));
-  const settled = finalization.length > 0 && c5Settled(run, events, eligible);
+  // C082: this run's supported End must itself have succeeded, with its durable
+  // completion witness. Recovery after a failed or timed-out End is settlement,
+  // not an ordinary End. Full-scenario success is NOT required here.
+  const endCompletions = operations.filter((operation) => operation.type === "end" && operation.state === "succeeded" && operation.runId === run.id)
+    .flatMap((operation) => eligible.filter((event) => event.kind === "operation.succeeded" && event.source === "worker"
+      && event.payload.operation_id === operation.id && event.payload.operation_type === "end"));
+  const settled = endCompletions.length > 0 && finalization.length > 0 && c5Settled(run, events, eligible);
   const recoveries = eligible.filter((event) => event.kind === "cleanup.recovery" && event.source === "canonical");
   const canonicalEvidence = ((recoveries.at(-1)?.payload.receipt as Record<string, unknown> | undefined)?.components as Record<string, Record<string, unknown>> | undefined)?.canonical_evidence;
   const criteria: C5Criterion[] = [
@@ -3734,7 +3740,7 @@ export function deriveC5FirstUseAssessment(run: RunRecord, events: import("./dom
     { id: "input_delivery_and_transcript_receipts_each_utterance", status: utterances.length > 0 && utterances.every((utterance) => utterance.input === "met") ? "met" : "gap", evidence_seqs: [] },
     { id: "audible_exact_output_each_utterance", status: utterances.length > 0 && utterances.every((utterance) => utterance.output === "met") ? "met" : "gap", evidence_seqs: utterances.flatMap((utterance) => utterance.evidence_seqs) },
     { id: "later_utterances_after_prior_reply", status: utterances.length >= 2 && utterances.every((utterance) => utterance.adaptive_ordering !== "gap") ? "met" : "gap", evidence_seqs: [] },
-    criterion("ordinary_end_and_settlement", settled, [...finalization, ...recoveries.slice(-1)]),
+    criterion("ordinary_end_and_settlement", settled, [...endCompletions, ...finalization, ...recoveries.slice(-1)]),
     criterion("canonical_evidence_retained", ["retention_pending", "completed", "already_terminal"].includes(String(canonicalEvidence?.status)), recoveries.slice(-1), { canonical_evidence_status: canonicalEvidence?.status ?? null, code: canonicalEvidence?.code ?? null }),
   ];
   return {

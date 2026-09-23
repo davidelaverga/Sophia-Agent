@@ -64,14 +64,20 @@ function settlement(canonicalEvidence: Record<string, unknown>): Draft[] {
 }
 const sequence = (drafts: Draft[]): LabEvent[] => drafts.map((draft, index) => ({ ...draft, seq: index + 1 }) as LabEvent);
 
-function scenario(options: { canonicalEvidence?: Record<string, unknown>; secondBeforeFirstReply?: boolean; secondDropped?: boolean; secondNoTranscript?: boolean; single?: boolean } = {}) {
+type EndShape = "succeeded" | "failed" | "timed_out" | "succeeded_without_witness";
+const endOperation = (state: string) => ({ id: randomUUID(), runId: run.id, callerId: run.callerId, type: "end", idempotencyKey: randomUUID(), requestHash: sha256("end"), input: {}, state, result: state === "succeeded" ? { run_state: "exporting" } : null, error: state === "succeeded" ? null : { code: "AUTH_SESSION_CLEANUP_UNCONFIRMED" }, attemptCount: 1 }) as any;
+function scenario(options: { canonicalEvidence?: Record<string, unknown>; secondBeforeFirstReply?: boolean; secondDropped?: boolean; secondNoTranscript?: boolean; single?: boolean; end?: EndShape } = {}) {
   const first = speak(), second = speak();
+  const endShape = options.end ?? "succeeded";
+  const end = endOperation(endShape === "succeeded_without_witness" ? "succeeded" : endShape);
+  const endWitness = endShape === "succeeded" ? [ev("operation.succeeded", "worker", { operation_id: end.id, operation_type: "end" })]
+    : endShape === "succeeded_without_witness" ? [] : [ev("operation.failed", "worker", { operation_id: end.id, operation_type: "end", error: { code: "AUTH_SESSION_CLEANUP_UNCONFIRMED" } })];
   const firstTurn = [accepted(first.id), ...input(first.id), ...output(first.id, 18, "69a61205")];
   const secondTurn = [accepted(second.id), ...input(second.id, !options.secondNoTranscript), ...output(second.id, 107, "c414ce66", options.secondDropped ? "repeated_intent_gate" : undefined)];
   const turns = options.single ? firstTurn : options.secondBeforeFirstReply ? [firstTurn[0]!, secondTurn[0]!, ...firstTurn.slice(1), ...secondTurn.slice(1)] : [...firstTurn, ...secondTurn];
   const events = sequence([deployment("deployment.verified"), ev("harness.initialized", "browser", {}), ev("harness.media_stream_issued", "browser", {}), ev("session.microphone_stream_acquired", "product", {}),
-    ...turns, finalization(), deployment("deployment.reverified"), ...settlement(options.canonicalEvidence ?? { status: "retention_pending", retention_expires_at: "2026-09-24T14:20:06.803Z" })]);
-  return { events, operations: options.single ? [first] : [first, second] };
+    ...turns, finalization(), deployment("deployment.reverified"), ...settlement(options.canonicalEvidence ?? { status: "retention_pending", retention_expires_at: "2026-09-24T14:20:06.803Z" }), ...endWitness]);
+  return { events, operations: [...(options.single ? [first] : [first, second]), end] };
 }
 const criterion = (result: ReturnType<typeof deriveC5FirstUseAssessment>, id: string) => result.criteria.find((item) => item.id === id)?.status;
 
@@ -107,9 +113,28 @@ describe("C5 first-use assessment (C079)", () => {
     expect(result.status).toBe("gap");
   });
 
+  it.each([
+    ["a failed End later settled by recovery", "failed"],
+    ["a timed-out End later settled by recovery", "timed_out"],
+    ["a succeeded End without its durable completion witness", "succeeded_without_witness"],
+  ] as const)("C082: treats %s as an ordinary-End gap", (_label, end) => {
+    const { events, operations } = scenario({ end });
+    const result = deriveC5FirstUseAssessment(run, events, operations);
+    expect(criterion(result, "ordinary_end_and_settlement")).toBe("gap");
+    expect(result.status).toBe("gap");
+  });
+
+  it("C082: a succeeded ordinary End stays met while the full V-O01 scenario fails (J6 shape)", () => {
+    const { events, operations } = scenario();
+    const speakOps = operations.filter((operation: any) => operation.type === "speak");
+    const withDrop = sequence([...events.map(({ seq: _seq, ...draft }) => draft), ...output(speakOps[1].id, 150, "0bf31dad", "repeated_intent_gate").slice(0, 2)]);
+    expect(criterion(deriveC5FirstUseAssessment(run, withDrop, operations), "ordinary_end_and_settlement")).toBe("met");
+    expect(evaluateScenarioAssertions(run, withDrop, operations).harness.find((a) => a.id === "o01.provider_chunk_to_playback_to_output_leg_join")?.status).toBe("fail");
+  });
+
   it("stays separate: V-O01 still fails on a gate-dropped chunk while the audible C5 witness is met", () => {
     const { events, operations } = scenario();
-    const withDrop = sequence([...events.map(({ seq: _seq, ...draft }) => draft), ...output(operations[1].id, 150, "0bf31dad", "repeated_intent_gate").slice(0, 2)]);
+    const withDrop = sequence([...events.map(({ seq: _seq, ...draft }) => draft), ...output(operations.filter((operation: any) => operation.type === "speak")[1].id, 150, "0bf31dad", "repeated_intent_gate").slice(0, 2)]);
     expect(criterion(deriveC5FirstUseAssessment(run, withDrop, operations), "audible_exact_output_each_utterance")).toBe("met");
     expect(evaluateScenarioAssertions(run, withDrop, operations).harness.find((a) => a.id === "o01.provider_chunk_to_playback_to_output_leg_join")?.status).toBe("fail");
   });
