@@ -7,7 +7,7 @@ import { derivePlatformExecutionTermination, PLATFORM_EXECUTION_TERMINATION_KIND
 
 import { FINAL_CODEX_PLUGIN_VERSION_PATTERN, type VoiceLabConfig } from "./config.js";
 import { D02GatewayClient, D02GatewayContinuityObservationReceiptSchema } from "./d02-gateway.js";
-import type { TtsEngineInfo } from "./audio.js";
+import { TTS_TRAILING_SILENCE_MS, type TtsEngineInfo } from "./audio.js";
 import {
   CONTRACT_VERSION,
   SCENARIO_CATALOG_VERSION,
@@ -474,7 +474,9 @@ export async function reserveAudioInput(
     return { duration_ms: fixture.durationMs, bytes };
   }
   const words = input.text?.trim().split(/\s+/u).filter(Boolean).length ?? 0;
-  const durationMs = Math.min(config.maxAudioDurationMs, Math.max(500, Math.ceil(words / 155 * 60_000) + 1_000));
+  // The resolver appends TTS_TRAILING_SILENCE_MS of zero PCM; reserve it so the
+  // durable fence never under-reserves. Existing caps still bound the total.
+  const durationMs = Math.min(config.maxAudioDurationMs, Math.max(500, Math.ceil(words / 155 * 60_000) + 1_000) + TTS_TRAILING_SILENCE_MS);
   const bytes = Math.ceil(durationMs * 22_050 * 2 / 1_000) + 44;
   if (bytes > config.maxAudioBytes) throw new VoiceLabError(labError("AUDIO_TOO_LARGE", "TTS reservation exceeds the per-utterance audio byte limit.", "validation"));
   return { duration_ms: durationMs, bytes };
