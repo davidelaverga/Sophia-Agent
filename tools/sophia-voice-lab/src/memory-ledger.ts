@@ -1,4 +1,5 @@
 import { deriveExecutionOwnership } from "./execution-ownership.js";
+import { canonicalEvidenceRefreshDue } from "./canonical-evidence-refresh.js";
 import { ingestGenericOwnerLoss } from "./generic-owner-loss.js";
 import { deriveRetainedGenericRecovery } from "./retained-generic-recovery.js";
 import { z } from "zod";
@@ -298,6 +299,12 @@ export class MemoryVoiceLabLedger implements VoiceLabLedger {
   }
   async listRunsCertificationDue(now: Date, limit: number): Promise<RunRecord[]> {
     return clone([...this.#runs.values()].filter((run) => run.state === "pending_external_evidence" && run.expiresAt <= now).sort((left, right) => left.expiresAt.getTime() - right.expiresAt.getTime()).slice(0, limit));
+  }
+  async listRunsCanonicalEvidenceRefreshDue(now: Date, limit: number): Promise<RunRecord[]> {
+    return clone([...this.#runs.values()]
+      .filter((run) => canonicalEvidenceRefreshDue(run, this.#events.get(run.id) ?? [], now).due)
+      .sort((left, right) => left.updatedAt.getTime() - right.updatedAt.getTime())
+      .slice(0, limit));
   }
   async listRunsRetentionDue(now: Date, limit: number): Promise<RunRecord[]> {
     return clone([...this.#runs.values()]

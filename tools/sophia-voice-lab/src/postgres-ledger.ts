@@ -1,4 +1,5 @@
 import pg from "pg";
+import { CANONICAL_EVIDENCE_REFRESH_BASE_BACKOFF_MS, CANONICAL_EVIDENCE_REFRESH_EVENT, CANONICAL_EVIDENCE_REFRESH_MAX_ATTEMPTS } from "./canonical-evidence-refresh.js";
 import { retentionHmac } from "./retention-identity.js";
 
 import {
@@ -164,6 +165,23 @@ export class PostgresVoiceLabLedger implements VoiceLabLedger {
   }
   async listRunsCertificationDue(now: Date, limit: number): Promise<RunRecord[]> {
     const result = await this.pool.query(`select * from ${SCHEMA}.runs where state='pending_external_evidence' and expires_at <= $1 order by expires_at asc limit $2`, [now, limit]);
+    return result.rows.map(mapRun);
+  }
+  async listRunsCanonicalEvidenceRefreshDue(now: Date, limit: number): Promise<RunRecord[]> {
+    const terminal = ["pending_external_evidence", "completed", "product_failed", "invalid_test", "inconclusive_provider", "failed_harness", "authorization_failed", "deployment_mismatch", "aborted_driver_restart", "expired", "cancelled"];
+    const result = await this.pool.query(
+      `select r.* from ${SCHEMA}.runs r
+        where r.state=any($1::text[]) and r.cleanup_complete=true and r.evidence_purged_at is null
+          and r.retention_purge_verified_at is null and r.retention_purge_pending=false
+          and coalesce(r.retention_purge_due_at, r.updated_at+make_interval(hours=>greatest(1,least(168,coalesce((r.capture_policy->>'retentionHours')::integer,24))))) > $2
+          and (select e.payload->'receipt'->'components'->'canonical_evidence'->>'status' from ${SCHEMA}.run_events e
+                where e.run_id=r.id and e.kind='cleanup.recovery' and e.source='canonical' order by e.seq desc limit 1) in ('failed','pending')
+          and (select count(*) from ${SCHEMA}.run_events a where a.run_id=r.id and a.kind=$3 and a.source='worker') < $4
+          and coalesce((select max(a.observed_at) from ${SCHEMA}.run_events a where a.run_id=r.id and a.kind=$3 and a.source='worker'), '-infinity'::timestamptz)
+              <= $2 - make_interval(secs => $5::double precision * power(2, greatest(0, (select count(*) from ${SCHEMA}.run_events a where a.run_id=r.id and a.kind=$3 and a.source='worker') - 1)))
+        order by r.updated_at asc limit $6`,
+      [terminal, now, CANONICAL_EVIDENCE_REFRESH_EVENT, CANONICAL_EVIDENCE_REFRESH_MAX_ATTEMPTS, CANONICAL_EVIDENCE_REFRESH_BASE_BACKOFF_MS / 1000, limit],
+    );
     return result.rows.map(mapRun);
   }
   async listRunsRetentionDue(now: Date, limit: number): Promise<RunRecord[]> {

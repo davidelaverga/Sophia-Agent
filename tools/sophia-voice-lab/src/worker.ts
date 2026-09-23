@@ -15,6 +15,7 @@ import { productTurnId } from "./product-turn.js";
 import { deriveBrowserProcessTermination } from "./browser-process-termination.js";
 import { pkceS256 } from "./oauth.js";
 import { deriveRecoveryBrowserBinding, RecoveryControlBindingSchema, recoveryTransportBinding, validateRecoveryBrowserBinding, type RecoveryControlRecord } from "./recovery-control.js";
+import { CANONICAL_EVIDENCE_REFRESH_EVENT, CANONICAL_EVIDENCE_REFRESH_MAX_ATTEMPTS, canonicalEvidenceRefreshDue, localRetentionDeadline } from "./canonical-evidence-refresh.js";
 import { UNCONFIRMED_AUTH_CLEANUP_SCHEMA, authCleanupConfirmed, authCleanupPath, preserveAuthCleanupBooleans, authoritativeLiveCleanupComplete, deriveExecutionEpochCleanupProof, recoveryComponentComplete, type ExecutionEpochCleanupProof } from "./execution-cleanup.js";
 import { PLATFORM_EXECUTION_TERMINATION_KIND } from "./platform-execution-termination.js";
 export { deriveExecutionEpochCleanupProof, type ExecutionEpochCleanupProof } from "./execution-cleanup.js";
@@ -467,6 +468,17 @@ export class VoiceLabWorker {
       } catch (error) {
         this.logger.error({ run_id_sha256: sha256(pending.id), error: safeError(error) }, "terminal run recovery remains unconfirmed");
       }
+    }
+    // C077: bounded re-verification of retained canonical evidence that an
+    // earlier recovery left failed/pending (e.g. a since-fixed Gateway reader).
+    // Runs before evidence publication so a real new receipt republishes.
+    const evidenceRefresh = await this.ledger.listRunsCanonicalEvidenceRefreshDue(maintenanceNow, 5).catch(error => {
+      this.logger.error({ error: safeError(error) }, "canonical evidence refresh listing unavailable; other maintenance continues");
+      return [];
+    });
+    for (const retained of evidenceRefresh) {
+      try { await this.#refreshCanonicalEvidence(retained.id, maintenanceNow); }
+      catch (error) { this.logger.error({ run_id_sha256: sha256(retained.id), error: safeError(error) }, "canonical evidence refresh remains unconfirmed"); }
     }
     // Zero-orphan recovery must run before terminal evidence publication.
     // A bounded per-run artifact cap can make evidence revision unavailable,
@@ -1775,6 +1787,46 @@ export class VoiceLabWorker {
     run = await this.ledger.updateRun(run.id, run.version, { state, verdicts, terminalError: error, cleanupComplete: liveCleanupComplete, ...retentionPatchFromEvents(ended.events) });
     await this.ledger.appendEvent(run.id, `run.${state}`, "worker", { error }, `run:${run.id}:${state}`);
     await this.#saveFailureEvidence(run, error, ended.artifacts);
+  }
+
+  /**
+   * C077: one bounded canonical-evidence refresh through the existing
+   * session:recover authority (Gateway HTTP only; no browser, provider or start
+   * reservation). Every durable write advances updated_at, and the local hard
+   * deadline falls back to updated_at, so the deadline is first pinned to the
+   * run's authenticated finalization receipt, never later than today's
+   * deadline. Without that proof nothing is written. Prior manifests and
+   * receipts are retained; only real new observations are appended.
+   */
+  async #refreshCanonicalEvidence(runId: string, now: Date): Promise<void> {
+    let run = await this.#freshRun(runId);
+    const page = await this.#allEvents(run.id);
+    const decision = canonicalEvidenceRefreshDue(run, page.events, now);
+    if (!decision.due) return;
+    const finalization = page.events.find((event) => isCanonicalFinalizationReceipt(run, event));
+    const signedRaw = (finalization?.payload.receipt as Record<string, unknown> | undefined)?.retention_expires_at;
+    const signed = typeof signedRaw === "string" ? new Date(signedRaw) : null;
+    // An already-passed signed deadline belongs to the local hard purge.
+    if (!signed || Number.isNaN(signed.getTime()) || signed.toISOString() !== signedRaw || signed <= now) return;
+    if (run.retentionPurgeDueAt === null) {
+      if (signed > localRetentionDeadline(run)) return;
+      run = await this.ledger.updateRun(run.id, run.version, { retentionPurgeDueAt: signed });
+    }
+    const pinned = run.retentionPurgeDueAt!;
+    await this.ledger.appendEvent(run.id, CANONICAL_EVIDENCE_REFRESH_EVENT, "worker", {
+      attempt: decision.attempt, max_attempts: CANONICAL_EVIDENCE_REFRESH_MAX_ATTEMPTS,
+      prior_canonical_evidence_status: decision.status, prior_canonical_evidence_code: decision.code,
+      local_deadline_at: pinned.toISOString(), test_run_id_sha256: sha256(run.testRunId), cleanup_obligation_id_sha256: sha256(run.cleanupObligationId),
+    }, `canonical-evidence-refresh:${run.id}:${decision.attempt}`);
+    const recovered = await this.#recoverRun(run);
+    await this.#persistEvents(run.id, recovered.events);
+    const patch = retentionPatchFromEvents(recovered.events);
+    if (Object.keys(patch).length === 0) return;
+    // Remote retention truth comes only from the validated recovery receipt,
+    // and it may never move the pinned local deadline later.
+    if (patch.retentionPurgeDueAt && patch.retentionPurgeDueAt > pinned) patch.retentionPurgeDueAt = pinned;
+    const fresh = await this.#freshRun(run.id);
+    await this.ledger.updateRun(fresh.id, fresh.version, patch);
   }
 
   async #recoverRetainedControl(control: RecoveryControlRecord): Promise<void> {
@@ -3462,6 +3514,79 @@ export function reconcileProductInputLeg(
   return { verified, reason: verified ? null : "harness_product_pcm_digest_or_metric_mismatch", frame_count: frames.length, byte_length: byteLength, nonzero_byte_count: nonzeroBytes, computed_pcm_sha256_chain: computed };
 }
 
+/**
+ * C075: the product's native output identity. chunkHash is its FNV-1a 32-bit
+ * (8 hex) consistency fingerprint (hashGeminiOutputAudioChunk), never identity
+ * or cryptographic proof. Identity is the composite the product derives from
+ * the provider receipt (gemini-output-{epoch}-{receiveSeq}-{chunkIndex}-
+ * {fingerprint}-{duplicateOrdinal}), recomputed here from the diagnostic's own
+ * fields, plus playback generation and relay correlation.
+ */
+export const PRODUCT_OUTPUT_FINGERPRINT_ALGORITHM = "fnv1a32-hex8";
+function nativeOutputRealizationId(diagnostic: Record<string, unknown> | undefined): string | null {
+  const epoch = diagnostic?.providerConnectionEpoch, sequence = diagnostic?.providerReceiveSequence, index = diagnostic?.chunkIndex;
+  const fingerprint = diagnostic?.chunkHash, ordinal = diagnostic?.duplicateOrdinal;
+  if (!Number.isSafeInteger(epoch) || Number(epoch) < 1 || !Number.isSafeInteger(sequence) || Number(sequence) < 0
+    || !Number.isSafeInteger(index) || Number(index) < 0 || typeof fingerprint !== "string" || !/^[a-f0-9]{8}$/.test(fingerprint)
+    || !Number.isSafeInteger(ordinal) || Number(ordinal) < 1) return null;
+  return `gemini-output-${epoch}-${sequence}-${index}-${fingerprint}-${ordinal}`;
+}
+function outputChunkIdentity(diagnostic: Record<string, unknown>): string | null {
+  const realization = nativeOutputRealizationId(diagnostic);
+  return realization === null || !Number.isSafeInteger(diagnostic.playbackGeneration) || typeof diagnostic.relayCorrelationId !== "string"
+    ? null : `${realization}|generation:${diagnostic.playbackGeneration}|relay:${diagnostic.relayCorrelationId}`;
+}
+
+/**
+ * C075: the product-authored per-utterance output binding
+ * (sophia_gemini_interaction_v1). The latest receipt per interaction lists the
+ * output realizations it owns. It carries the product's own synthetic
+ * response/turn id; no provider response id is inferred. Invalid, foreign,
+ * duplicate-per-utterance or overlapping bindings make the whole set invalid.
+ */
+function outputInteractionBindings(
+  run: RunRecord,
+  receiptEvents: import("./domain.js").LabEvent[],
+  utteranceOperations: import("./domain.js").OperationRecord[],
+): { valid: boolean; byRealization: Map<string, { operationId: string; epoch: number; event: import("./domain.js").LabEvent }> } {
+  const latest = new Map<string, import("./domain.js").LabEvent>();
+  let valid = true;
+  for (const event of receiptEvents) {
+    const receipt = event.payload.receipt as Record<string, unknown> | undefined;
+    const id = receipt?.interaction_id;
+    if (typeof id !== "string" || id.length === 0) { valid = false; continue; }
+    const prior = latest.get(id);
+    if (!prior || prior.seq < event.seq) latest.set(id, event);
+  }
+  const byRealization = new Map<string, { operationId: string; epoch: number; event: import("./domain.js").LabEvent }>();
+  const operationIds = new Set(utteranceOperations.map((operation) => operation.id));
+  const interactionByOperation = new Map<string, string>();
+  for (const [id, event] of latest) {
+    const receipt = event.payload.receipt as Record<string, unknown>;
+    const operationId = String(receipt.operation_id);
+    if (!validInteractionReceipt(run, receipt, operationIds)
+      || (interactionByOperation.has(operationId) && interactionByOperation.get(operationId) !== id)) { valid = false; continue; }
+    interactionByOperation.set(operationId, id);
+    const epoch = receipt.provider_connection_epoch;
+    for (const realization of receipt.output_realization_ids as unknown[]) {
+      if (typeof realization !== "string" || byRealization.has(realization)) { valid = false; continue; }
+      byRealization.set(realization, { operationId, epoch: Number(epoch), event });
+    }
+  }
+  return { valid, byRealization: valid ? byRealization : new Map() };
+}
+
+/** One interaction receipt is exactly this run's, for one of its utterances. */
+function validInteractionReceipt(run: RunRecord, receipt: Record<string, unknown>, operationIds: ReadonlySet<string>): boolean {
+  const nonEmpty = (value: unknown) => typeof value === "string" && value.length > 0;
+  return receipt.schema === "sophia_gemini_interaction_v1" && receipt.synthetic === true && receipt.test_run_id === run.testRunId
+    && receipt.scenario_id === run.scenarioId && receipt.scenario_version === run.scenarioVersion
+    && typeof receipt.operation_id === "string" && operationIds.has(receipt.operation_id)
+    && nonEmpty(receipt.response_id) && nonEmpty(receipt.assistant_turn_id)
+    && Number.isSafeInteger(receipt.provider_connection_epoch) && Number(receipt.provider_connection_epoch) >= 1
+    && Array.isArray(receipt.output_realization_ids);
+}
+
 function exactProductInputChain(events: import("./domain.js").LabEvent[], operation: import("./domain.js").OperationRecord): boolean {
   const byOperation = (kind: string) => events.filter((event) => event.kind === kind && event.payload.operation_id === operation.id);
   const resolved = byOperation("utterance.resolved");
@@ -3652,6 +3777,8 @@ export function evaluateScenarioAssertions(run: RunRecord, events: import("./dom
       break;
     }
     case "V-O01": {
+      const utteranceOperations = operations.filter((operation) => operation.type === "speak" && operation.state === "succeeded" && !String(operation.input.fixture_id ?? "").toLowerCase().includes("silence"));
+      const interactions = outputInteractionBindings(run, productByKind("product.voice-session.gemini-synthetic-interaction-receipt"), utteranceOperations);
       const received = productByKind("audio.output.received");
       const providerChunks = productByKind("audio.output.provider_chunk");
       const playback = ["audio.output.scheduled", "audio.output.started", "audio.output.completed"].flatMap(productByKind);
@@ -3688,16 +3815,19 @@ export function evaluateScenarioAssertions(run: RunRecord, events: import("./dom
             && diagnostic?.chunkHash === terminal?.chunkHash
             && diagnostic?.byteLength === terminal?.byteLength
             && diagnostic?.scheduled === true && diagnostic?.dropReason === null
-            && /^[a-f0-9]{64}$/.test(String(diagnostic?.chunkHash));
+            && diagnostic?.realizationId === realizationId && nativeOutputRealizationId(diagnostic) === realizationId
+            && diagnostic?.providerChunkSequence === `${diagnostic?.providerConnectionEpoch}:${diagnostic?.providerReceiveSequence}:${diagnostic?.chunkIndex}`;
         });
+        const interaction = realizationId === null ? undefined : interactions.byRealization.get(realizationId);
         const exact = leg?.schema === "sophia_gemini_output_leg_v1" && leg.status === "verified" && leg.completionPhase === "completed"
           && /^[a-f0-9]{64}$/.test(String(leg.monitorDigestSha256)) && Number(leg.monitorFrameCount) > 0 && Number(leg.monitorNonSilentFrameCount) > 0 && leg.rawAudioExcluded === true
           && scheduled.length === 1 && started.length === 1 && completed.length === 1 && receivedEvent !== undefined && chunkEvent !== undefined
-          && typeof terminal?.responseId === "string" && terminal.responseId.length > 0
+          && interaction !== undefined && interaction.epoch === leg.providerConnectionEpoch
           && leg.providerChunkFingerprint === terminal?.chunkHash && leg.providerConnectionEpoch === terminal?.providerConnectionEpoch && leg.playbackGeneration === terminal?.playbackGeneration
           && receivedEvent.seq < chunkEvent.seq && chunkEvent.seq < scheduled[0]!.seq && scheduled[0]!.seq < started[0]!.seq && started[0]!.seq < completed[0]!.seq && completed[0]!.seq < legEvent.seq
           && typeof leg.scheduledAt === "string" && typeof leg.completedAt === "string" && Number(leg.monitorDurationMs) >= 0 && Number(terminal?.durationSeconds) > 0;
-        return { exact, realizationId, fingerprint: leg?.providerChunkFingerprint, receivedSeq: receivedEvent?.seq ?? null, chunkSeq: chunkEvent?.seq ?? null, events: [...(receivedEvent ? [receivedEvent] : []), ...(chunkEvent ? [chunkEvent] : []), ...receipts, legEvent] };
+        const identity = chunkEvent ? outputChunkIdentity(chunkEvent.payload.diagnostic as Record<string, unknown>) : null;
+        return { exact, realizationId, identity, operationId: interaction?.operationId ?? null, receivedSeq: receivedEvent?.seq ?? null, chunkSeq: chunkEvent?.seq ?? null, events: [...(receivedEvent ? [receivedEvent] : []), ...(chunkEvent ? [chunkEvent] : []), ...receipts, ...(interaction ? [interaction.event] : []), legEvent] };
       });
       const scheduledReceipts = playback.filter((event) => (event.payload.receipt as Record<string, unknown> | undefined)?.phase === "scheduled");
       const startedReceipts = playback.filter((event) => (event.payload.receipt as Record<string, unknown> | undefined)?.phase === "started");
@@ -3718,12 +3848,16 @@ export function evaluateScenarioAssertions(run: RunRecord, events: import("./dom
         const indexes = group.map((event) => Number((event.payload.diagnostic as Record<string, unknown> | undefined)?.chunkIndex)).sort((left, right) => left - right);
         return Number.isSafeInteger(count) && count > 0 && group.length === count
           && indexes.every((value, index) => value === index)
-          && typeof aggregate?.responseId === "string" && aggregate.responseId.length > 0;
+          && typeof aggregate?.relayCorrelationId === "string" && aggregate.relayCorrelationId.length > 0;
       });
+      // Every non-silent utterance must own exactly one interaction and at
+      // least one exact audible chain bound to it.
+      const utterancesCovered = interactions.valid && utteranceOperations.every((operation) => chains.some((chain) => chain.exact && chain.operationId === operation.id));
       const exactNaturalChains = chains.length > 0 && chains.every((chain) => chain.exact)
         && receivedCoverage && providerChunks.length === chains.length && scheduledReceipts.length === chains.length && startedReceipts.length === chains.length && completedReceipts.length === chains.length && playback.length === chains.length * 3
         && new Set(chains.map((chain) => chain.realizationId)).size === chains.length
-        && new Set(chains.map((chain) => chain.fingerprint)).size === chains.length
+        && utterancesCovered
+        && new Set(chains.map((chain) => chain.identity)).size === chains.length && chains.every((chain) => chain.identity !== null)
         && new Set(chains.map((chain) => chain.chunkSeq)).size === chains.length
         && completedRealizations.length === chains.length && new Set(completedRealizations).size === completedRealizations.length
         && new Set(scheduledReceipts.map((event) => (event.payload.receipt as Record<string, unknown> | undefined)?.realizationId)).size === chains.length

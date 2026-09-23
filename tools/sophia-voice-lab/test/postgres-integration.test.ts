@@ -328,6 +328,32 @@ describePostgres("real PostgreSQL Voice Lab adapter", () => {
     expect(await ledger!.releaseBrowserLease(run.id, lease.workerId, lease.leaseEpoch)).toBe(true);
   });
 
+  it("C077 selects only an in-deadline, bounded failed canonical-evidence refresh", async () => {
+    const run = testRun({ state: "failed_harness", cleanupComplete: true });
+    await ledger!.createRunWithOperation(run, { id: randomUUID(), runId: run.id, callerId: run.callerId, type: "start", idempotencyKey: randomUUID(), requestHash: sha256(run.id), input: {} }, { global: 1, caller: 1 });
+    await ledger!.cancelPendingRunOperations(run.id, null, labError("TEST_FIXTURE_COMPLETE", "Ledger-only selector test does not dispatch a start.", "harness"));
+    const recovery = (status: string, key: string) => ledger!.appendEvent(run.id, "cleanup.recovery", "canonical", { receipt: { components: { canonical_evidence: { status } } } }, key);
+    const selected = async (now = new Date()) => (await ledger!.listRunsCanonicalEvidenceRefreshDue(now, 50)).map((candidate) => candidate.id).includes(run.id);
+    await recovery("failed", `c077:${run.id}:r1`);
+    expect(await selected()).toBe(true);
+    await ledger!.appendEvent(run.id, "cleanup.canonical_evidence_refresh", "worker", { attempt: 1 }, `c077:${run.id}:a1`);
+    expect(await selected()).toBe(false); // backoff
+    expect(await selected(new Date(Date.now() + 11 * 60_000))).toBe(true);
+    for (const n of [2, 3]) await ledger!.appendEvent(run.id, "cleanup.canonical_evidence_refresh", "worker", { attempt: n }, `c077:${run.id}:a${n}`);
+    expect(await selected(new Date(Date.now() + 24 * 3_600_000 - 60_000))).toBe(false); // exhausted
+    const other = testRun({ state: "failed_harness", cleanupComplete: true });
+    await ledger!.createRunWithOperation(other, { id: randomUUID(), runId: other.id, callerId: other.callerId, type: "start", idempotencyKey: randomUUID(), requestHash: sha256(other.id), input: {} }, { global: 1, caller: 1 });
+    await ledger!.cancelPendingRunOperations(other.id, null, labError("TEST_FIXTURE_COMPLETE", "Ledger-only selector test does not dispatch a start.", "harness"));
+    await ledger!.appendEvent(other.id, "cleanup.recovery", "canonical", { receipt: { components: { canonical_evidence: { status: "failed" } } } }, `c077:${other.id}:r1`);
+    await ledger!.appendEvent(other.id, "cleanup.recovery", "canonical", { receipt: { components: { canonical_evidence: { status: "retention_pending" } } } }, `c077:${other.id}:r2`);
+    const ids = async (now = new Date()) => (await ledger!.listRunsCanonicalEvidenceRefreshDue(now, 50)).map((candidate) => candidate.id);
+    expect(await ids()).not.toContain(other.id); // latest receipt governs
+    expect(await ids(new Date(Date.now() + 25 * 3_600_000))).not.toContain(other.id);
+    const fresh = (await ledger!.getRun(other.id))!;
+    await ledger!.updateRun(other.id, fresh.version, { retentionPurgePending: true, retentionPurgeDueAt: new Date(Date.now() + 3_600_000) });
+    expect(await ids()).not.toContain(other.id);
+  });
+
   it("pages expired receipts on the database clock without losing any lease", async () => {
     const leases = [];
     for (let i = 0; i < 12; i++) {
