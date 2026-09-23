@@ -70,7 +70,10 @@ export async function publishServiceOwnerFence(input: {
   const initial = await request({ action: "inspect", runId: input.runId });
   const existing = verified(initial);
   if (existing) {
-    if (v2 && !initial.liveCleanupComplete) {
+    // Independent recovery can settle the control without this event, so
+    // liveCleanupComplete is not evidence it exists. The receiver admits a
+    // replay into settled control (only FIRST admission is refused there).
+    if (v2) {
       const replayed = verified(await request({ action: "ingest_service_fence", runId: input.runId, expectedVersion: initial.version, receipt }));
       if (!replayed || replayed.proofSha256 !== existing.proofSha256) throw new Error("Service fence replay changed the persisted proof.");
     }

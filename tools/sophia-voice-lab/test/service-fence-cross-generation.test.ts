@@ -341,3 +341,29 @@ it("never reports a v2 publication settled while the canonical termination may b
   expect(f.terminations()).toBe(1);
   expect(f.restarts()).toBe(1);
 });
+
+it("replays v2 ingestion even after independent settlement when the termination is still missing", async () => {
+  // C007: the proof persisted, the termination append failed, then an
+  // independent recovery settled the control (liveCleanupComplete). A settled
+  // flag is not evidence the canonical termination exists, so the publisher
+  // must still replay the immutable ingestion that writes it.
+  const f = await crossGenerationFixture({ failTerminationAppendOnce: true });
+  const { args, renderPath, runtime } = await cliFiles(f);
+  const output: string[] = [];
+  expect(await runCli(["collect-service-owner-fence", ...args, "--render-token", renderPath], line => output.push(line), runtime)).toBe(0);
+  f.upgradeReceiver(JSON.parse(output.at(-1)!).receipt_sha256);
+  expect(await runCli(["publish-service-owner-fence", ...args], line => output.push(line), runtime)).not.toBe(0);
+  expect(f.terminations()).toBe(0);
+  const proof = structuredClone(f.control().genericOwnerLoss);
+
+  f.control().liveCleanupComplete = true;
+  expect(await runCli(["publish-service-owner-fence", ...args], line => output.push(line), runtime), output.join("\n")).toBe(0);
+  expect(JSON.parse(output.at(-1)!)).toMatchObject({ status: "ingested", durable_recovery_ingested: true, cleanup_proven: false });
+  expect(f.terminations()).toBe(1);
+
+  // A fully completed retry stays harmless: same proof, one termination, one restart.
+  expect(await runCli(["publish-service-owner-fence", ...args], line => output.push(line), runtime)).toBe(0);
+  expect(f.terminations()).toBe(1);
+  expect(f.control().genericOwnerLoss).toEqual(proof);
+  expect(f.restarts()).toBe(1);
+});
