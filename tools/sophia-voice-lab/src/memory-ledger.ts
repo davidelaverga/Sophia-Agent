@@ -25,7 +25,7 @@ import {
 } from "./domain.js";
 import type { AuthAuditRecord, BrowserLease, ClaimedOperation, EventAppendInput, EventClaimGuard, EventPage, LedgerHealth, NewOperation, OperationAdmission, PrincipalProvisionCapabilityRotation, PrincipalProvisionClaim, PrincipalProvisionControlRecord, PrincipalProvisionPreparation, PrincipalProvisionReadiness, RetentionTombstone, RollingAdmissionFence, RollingAdmissionLimits, RollingAdmissionReservation, RollingAdmissionResult, RunPatch, VoiceLabLedger, WorkerHeartbeat } from "./ledger.js";
 import { parseExactPrincipalProvisionReceipt } from './principal-provision-receipt.js';
-import { deriveExecutionEpochCleanupProof } from "./execution-cleanup.js";
+import { deriveExecutionEpochCleanupProof, sameExecutionCleanupProof } from "./execution-cleanup.js";
 import { canonicalRequestHash, sha256 } from "./security.js";
 import { CallerPartitioner, type CallerPartitionKeyRing } from "./caller-partition.js";
 import { RETAINED_RECOVERY_RETRY_MS, executionMatchesRecoveryAllocation } from "./recovery-control.js";
@@ -128,7 +128,7 @@ export class MemoryVoiceLabLedger implements VoiceLabLedger {
     const lease = this.#browserLeases.get(runId);
     if (!proof.ready || !executionMatchesRecoveryAllocation(current, proof) || (lease && (proof.workerIdSha256 !== sha256(lease.workerId) || proof.browserLeaseEpoch !== lease.leaseEpoch))) throw conflict("RECOVERY_EXECUTION_PROOF_UNCONFIRMED", "Exact execution ownership and cleanup are not proven.");
     if (current.executionCleanupProof) {
-      if (canonicalRequestHash(current.executionCleanupProof) !== canonicalRequestHash(proof)) throw conflict("RECOVERY_EXECUTION_PROOF_CONFLICT", "Preserved execution cleanup is immutable.");
+      if (!sameExecutionCleanupProof(current.executionCleanupProof, proof)) throw conflict("RECOVERY_EXECUTION_PROOF_CONFLICT", "Preserved execution cleanup is immutable.");
       return clone(current);
     }
     const updated = { ...current, version: current.version + 1, executionCleanupProof: proof };
@@ -697,7 +697,7 @@ export class MemoryVoiceLabLedger implements VoiceLabLedger {
       || !TERMINAL_RUN_STATES.has(run.state) || control.contentPurgedAt !== null) return false;
     const proof = deriveExecutionEpochCleanupProof(run, this.#events.get(runId) ?? []);
     if (!proof.ready || !control.executionCleanupProof
-      || canonicalRequestHash(control.executionCleanupProof) !== canonicalRequestHash(proof)
+      || !sameExecutionCleanupProof(control.executionCleanupProof, proof)
       || !executionMatchesRecoveryAllocation(control, proof)
       || proof.workerIdSha256 !== sha256(lease.workerId) || proof.browserLeaseEpoch !== lease.leaseEpoch) return false;
     this.#browserLeases.delete(runId);

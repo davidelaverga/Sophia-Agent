@@ -17,6 +17,20 @@ export function parsePreservedExecutionCleanupProof(input: unknown): ExecutionEp
   }).strict().parse(input);
 }
 
+/** Immutable-proof identity. A proof preserved before the platform-fence path
+ * (deployed 7d4 and earlier) has no eventSeqs.platformTerminated key, while the
+ * current derivation emits null for the same close-path run; its proofSha256 is
+ * identical because the hashed core omits that ordinal off the fence path.
+ * Absent and null are therefore the same identity. Every other field, and a
+ * non-null fence ordinal, stays bound exactly. */
+export function sameExecutionCleanupProof(preserved: ExecutionEpochCleanupProof, derived: ExecutionEpochCleanupProof): boolean {
+  const identity = (proof: ExecutionEpochCleanupProof) => {
+    const { platformTerminated, ...seqs } = proof.eventSeqs;
+    return canonicalRequestHash({ ...proof, eventSeqs: platformTerminated == null ? seqs : { ...seqs, platformTerminated } });
+  };
+  return identity(preserved) === identity(derived);
+}
+
 export function recoveryComponentComplete(events: import("./domain.js").LabEvent[], component: "canonical_session" | "voice_provider" | "builder" | "auth_sessions"): boolean {
   return events.some((event) => {
     if (event.kind !== "cleanup.recovery" || event.source !== "canonical" || event.payload.complete !== true) return false;
