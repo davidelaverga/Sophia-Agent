@@ -1532,6 +1532,7 @@ class SupabaseSessionTranscriptStore:
         params: dict[str, str] | None = None,
         json_body: object | None = None,
         prefer: str | None = None,
+        missing_column_is_integrity_error: bool = False,
     ) -> object:
         try:
             response = self._client.request(
@@ -1545,6 +1546,15 @@ class SupabaseSessionTranscriptStore:
             raise SessionStoreError(f"Supabase session store request failed: {exc}") from exc
 
         if response.status_code >= 400:
+            if missing_column_is_integrity_error and response.status_code == 400:
+                try:
+                    error = response.json()
+                except ValueError:
+                    error = None
+                if isinstance(error, dict) and error.get("code") in ("42703", "PGRST204"):
+                    raise SessionEvidenceIntegrityError(
+                        "Synthetic finalization transcript schema is missing a required column."
+                    )
             raise SessionStoreError(f"Supabase session store request failed status={response.status_code} body={response.text[:200]!r}")
 
         if not response.text:
@@ -2292,6 +2302,7 @@ class SupabaseSessionTranscriptStore:
                 "session_id": f"eq.{session_id}",
                 "order": "sequence.asc,created_at.asc",
             },
+            missing_column_is_integrity_error=True,
         )
         if not isinstance(result, list):
             raise SessionEvidenceIntegrityError(

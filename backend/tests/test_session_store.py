@@ -587,7 +587,9 @@ class _ColumnProjectingPostgrest(FakeSupabasePostgrest):
         select = params.get("select", "*")
         if select != "*":
             columns = select.split(",")
-            rows = [{column: row[column] for column in columns if column in row} for row in rows]
+            if any(column not in row for row in rows for column in columns):
+                return httpx.Response(400, json={"code": "42703", "message": "required column does not exist"})
+            rows = [{column: row[column] for column in columns} for row in rows]
         return httpx.Response(200, json=rows)
 
 
@@ -619,3 +621,31 @@ def test_supabase_exact_transcript_read_ignores_additive_mem00_columns():
         row.pop("approximate", None)
     with pytest.raises(SessionEvidenceIntegrityError):
         store.read_exact_session_messages("user-1", "session-1")
+
+
+@pytest.mark.parametrize("status,code,expected", [
+    (400, "42703", SessionEvidenceIntegrityError),
+    (400, "PGRST204", SessionEvidenceIntegrityError),
+    (400, "22P02", SessionStoreError),
+    (401, "PGRST301", SessionStoreError),
+    (503, "42703", SessionStoreError),
+])
+def test_exact_transcript_projection_classifies_postgrest_errors(status, code, expected):
+    fake = _ColumnProjectingPostgrest()
+    store = _supabase_store(fake)
+    store._client = httpx.Client(transport=httpx.MockTransport(
+        lambda request: httpx.Response(status, json={"code": code, "message": "query rejected"})
+    ))
+    with pytest.raises(expected) as exc:
+        store.read_exact_session_messages("user-1", "session-1")
+    assert type(exc.value) is expected
+
+
+def test_ordinary_session_request_preserves_missing_column_store_error():
+    store = _supabase_store(_ColumnProjectingPostgrest())
+    store._client = httpx.Client(transport=httpx.MockTransport(
+        lambda request: httpx.Response(400, json={"code": "42703"})
+    ))
+    with pytest.raises(SessionStoreError) as exc:
+        store._request("GET", "sophia_session_messages")
+    assert type(exc.value) is SessionStoreError
