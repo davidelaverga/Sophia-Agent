@@ -317,11 +317,14 @@ export class VoiceLabWorker {
     }, leaseHeartbeatIntervalMs(this.config.operationLeaseSeconds, this.config.browserLeaseSeconds));
     heartbeat.unref();
     const deadlineSeconds = claimed.operation.type === "start" ? this.config.startOperationSeconds : claimed.operation.type === "end" ? this.config.endOperationSeconds : claimed.operation.type === "force_socket_rotation" ? this.config.faultOperationSeconds : this.config.maxOperationSeconds;
+    // Absolute operation deadline, shared with the driver so its internal waits
+    // are bounded by the real remaining budget, never a fresh window.
+    const deadlineAt = Date.now() + deadlineSeconds * 1_000;
     const deadline = setTimeout(() => controller.abort(new VoiceLabError(labError("OPERATION_TIMEOUT", "Operation exceeded its bounded execution deadline and was cancelled.", "harness", true, { operation_type: claimed.operation.type, deadline_seconds: deadlineSeconds }))), deadlineSeconds * 1_000);
     deadline.unref();
     let operationSettled = false;
     try {
-      const execution = this.#execute(claimed, controller.signal);
+      const execution = this.#execute(claimed, controller.signal, deadlineAt);
       const cancellation = new Promise<never>((_resolve, reject) => controller.signal.addEventListener("abort", () => {
         if (this.#d02ShutdownArms.has(claimed.run.id)) {
           reject(controller.signal.reason);
@@ -776,7 +779,7 @@ export class VoiceLabWorker {
     }
   }
 
-  async #execute(claimed: ClaimedOperation, signal: AbortSignal): Promise<Record<string, unknown>> {
+  async #execute(claimed: ClaimedOperation, signal: AbortSignal, deadlineAt?: number): Promise<Record<string, unknown>> {
     const { operation } = claimed;
     let run = await this.#freshRun(claimed.run.id);
     if (operation.type !== "end" && this.#killSwitchEngaged()) throw new VoiceLabError(labError("KILL_SWITCH_ENGAGED", `${operation.type} was rejected by the worker kill switch.`, "authorization", true));
@@ -944,7 +947,7 @@ export class VoiceLabWorker {
     const cleanupGrant = await this.#mintAndVerify(run, "sophia-voice-lab-frontend", ["session:cleanup"], "session:cleanup");
     if (run.state !== "ending") run = await transitionRun(this.ledger, run, "ending");
     await this.#fenceMutation(claimed, signal);
-    const ended = await this.driver.end(run, finalizeGrant.token, cleanupGrant.token).catch(async (error: unknown) => {
+    const ended = await this.driver.end(run, finalizeGrant.token, cleanupGrant.token, deadlineAt).catch(async (error: unknown) => {
       if (error instanceof DriverEndFailure) await this.#persistEvents(run.id, error.events);
       throw error;
     });

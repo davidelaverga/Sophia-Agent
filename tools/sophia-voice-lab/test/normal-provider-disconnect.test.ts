@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Response } from "playwright";
-import { DriverEndFailure, END_POST_DISCONNECT_RESERVE_MS, PlaywrightVoiceDriver, SYNTHETIC_FINALIZATION_EXCLUSION_KEYS, observeProviderDisconnect, providerDisconnectWaitMs, readProviderActivationAcknowledgement, validateNormalProviderDisconnectResponse } from "../src/browser-driver.js";
+import { DriverEndFailure, END_POST_DISCONNECT_RESERVE_MS, PlaywrightVoiceDriver, SYNTHETIC_FINALIZATION_EXCLUSION_KEYS, observeProviderDisconnect, providerDisconnectDeadlineAt, providerDisconnectWaitMs, readProviderActivationAcknowledgement, validateNormalProviderDisconnectResponse } from "../src/browser-driver.js";
 import { sha256 } from "../src/security.js";
 import { testConfig, testRun } from "./helpers.js";
 
@@ -89,6 +89,9 @@ it.each([
   [false, false, "late-rejection"],
   // A failed continuation left candidate 3 aborted after activated epoch 2 (C021).
   [false, false, "aborted-candidate"],
+  // C042: the worker already spent 30 s of its end budget (grant minting,
+  // fencing) before driver entry; the 202 wait must honour the real deadline.
+  [false, false, "delayed-entry"],
 ] as const)("real driver end consumes receiving ack; rejected=%s prior-activation=%s mode=%s", async (rejected, priorActivation, mode) => {
   const config = testConfig();
   const ownedRun = testRun({ scenarioId: "V-O01", providerSessionId: run.providerSessionId, providerEpoch: mode === "stale-epoch" ? 1 : 2,
@@ -198,21 +201,25 @@ it.each([
     return waiting.filter(waiter => waiter.predicate(accepted)).at(-1)?.timeout;
   };
   // C036: the 202 waiter is bounded by the end budget, not a fixed 20 s.
+  const operationDeadlineAt = mode === "delayed-entry" ? endEnteredAt + config.endOperationSeconds * 1_000 - 30_000 : undefined;
   const expectBudgetedDisconnectWait = () => {
-    // Literal contract (end budget less a 45 s reserve), independent of the helper.
-    const budget = Math.max(20_000, config.endOperationSeconds * 1_000 - 45_000);
-    expect(disconnectWaitTimeout()).toBeGreaterThan(budget - (Date.now() - endEnteredAt) - 1);
-    expect(disconnectWaitTimeout()).toBeLessThanOrEqual(budget);
+    // Literal contract, independent of the helper: the entry-relative window
+    // (budget less a 45 s reserve), capped by the worker's absolute deadline
+    // less the same reserve.
+    const window = Math.max(20_000, config.endOperationSeconds * 1_000 - 45_000);
+    const allowedUntil = Math.min(endEnteredAt + window, operationDeadlineAt === undefined ? Infinity : operationDeadlineAt - 45_000);
+    expect(disconnectWaitTimeout()).toBeGreaterThan(allowedUntil - Date.now() - 1);
+    expect(disconnectWaitTimeout()).toBeLessThanOrEqual(allowedUntil - endEnteredAt);
   };
   if (mode === "finalization-fails") {
-    const error = await driver.end(ownedRun, "finalize", "cleanup").catch(error => error);
+    const error = await driver.end(ownedRun, "finalize", "cleanup", operationDeadlineAt).catch(error => error);
     expect(error).toBeInstanceOf(DriverEndFailure);
     expect(error.detail.code).toBe("PRODUCT_FINALIZATION_UNCONFIRMED");
     expect(responseListeners.length).toBe(listenersBeforeEnd);
     return;
   }
   if (rejected) {
-    const error = await driver.end(ownedRun, "finalize", "cleanup").catch(error => error);
+    const error = await driver.end(ownedRun, "finalize", "cleanup", operationDeadlineAt).catch(error => error);
     expect(error).toBeInstanceOf(DriverEndFailure);
     expect(error.detail.code).toBe("PROVIDER_CLEANUP_UNCONFIRMED");
     expect(error.detail.details).toMatchObject({ receiving_http_status: 401 });
@@ -223,7 +230,7 @@ it.each([
     expect(responseListeners.length).toBe(listenersBeforeEnd);
     expectBudgetedDisconnectWait();
   } else {
-    const ended = await driver.end(ownedRun, "finalize", "cleanup");
+    const ended = await driver.end(ownedRun, "finalize", "cleanup", operationDeadlineAt);
     expectBudgetedDisconnectWait();
     const acknowledged = ended.events.find(event => event.kind === "provider.disconnect_acknowledged")!;
     expect(acknowledged.payload).toMatchObject({ provider_connection_epochs: [1, 2] });
@@ -432,3 +439,52 @@ describe("receiving disconnect deadline versus the product retry schedule", () =
     for (const seconds of [75, 120, 300]) expect(providerDisconnectWaitMs(seconds)).toBeLessThanOrEqual(seconds * 1_000 - END_POST_DISCONNECT_RESERVE_MS);
   });
 });
+
+// C042: the wait is bounded by the worker's absolute end-operation deadline.
+describe("receiving disconnect wait under the worker's absolute end deadline", () => {
+  it("still accepts the authenticated 202 on the 31 s retry after a delayed driver entry", async () => {
+    vi.useFakeTimers();
+    try {
+      const operationStartedAt = Date.now();
+      const deadlineAt = operationStartedAt + 120_000;
+      const enteredAt = operationStartedAt + 10_000; // minting/fencing before driver entry
+      const allowedUntil = providerDisconnectDeadlineAt(enteredAt, 120, deadlineAt);
+      expect(allowedUntil).toBe(deadlineAt - END_POST_DISCONNECT_RESERVE_MS);
+      await vi.advanceTimersByTimeAsync(12_000); // UI click lands 12 s into the operation
+      const responses: Array<(response: any) => void> = [];
+      const page = {
+        on: (_kind: string, listener: (response: any) => void) => { responses.push(listener); },
+        off: () => undefined,
+        waitForResponse: (predicate: (response: any) => boolean, options: { timeout: number }) => new Promise((resolve, reject) => {
+          responses.push((response) => { if (predicate(response)) resolve(response); });
+          setTimeout(() => reject(new Error("Timeout exceeded")), options.timeout);
+        }),
+      };
+      [0, 1, 3, 7, 15, 31].forEach((at, attempt) => setTimeout(() => {
+        const response = { url: () => `${origin}/api/sophia/voice/gemini/disconnect`, status: () => attempt < 5 ? 503 : 202, request: () => ({ method: () => "POST" }) };
+        for (const listener of [...responses]) listener(response);
+      }, at * 1_000));
+      const observer = observeProviderDisconnect(page as any, origin, allowedUntil - Date.now());
+      let acknowledged: any;
+      void observer.acknowledgement.then(value => { acknowledged = value; });
+      await vi.advanceTimersByTimeAsync(31_000);
+      expect(acknowledged?.status()).toBe(202);
+      expect(Date.now()).toBeLessThan(deadlineAt - END_POST_DISCONNECT_RESERVE_MS); // reserve intact
+      observer.dispose();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("never waits past the operation deadline less the reserve, however late the entry", () => {
+    const deadlineAt = 1_000_000;
+    // Late entry: the absolute deadline wins over the fresh entry window.
+    expect(providerDisconnectDeadlineAt(deadlineAt - 60_000, 120, deadlineAt)).toBe(deadlineAt - 45_000);
+    expect(providerDisconnectDeadlineAt(deadlineAt - 40_000, 120, deadlineAt)).toBe(deadlineAt - 45_000); // already past: fails fast, bounded
+    // Early entry: the entry window can only shorten it.
+    expect(providerDisconnectDeadlineAt(deadlineAt - 120_000, 120, deadlineAt)).toBe(deadlineAt - 45_000);
+    expect(providerDisconnectDeadlineAt(deadlineAt - 300_000, 120, deadlineAt)).toBe(deadlineAt - 300_000 + 75_000);
+    // Direct driver use without a worker deadline keeps the entry window.
+    expect(providerDisconnectDeadlineAt(500, 120)).toBe(500 + 75_000);
+    expect(providerDisconnectDeadlineAt(500, 120, Number.NaN)).toBe(500 + 75_000);
+  });
+});
+

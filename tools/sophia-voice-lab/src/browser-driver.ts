@@ -484,7 +484,8 @@ export interface VoiceBrowserDriver {
   continueSession(run: RunRecord, frontendContinueCapability: string): Promise<Omit<LabEvent, "runId" | "seq" | "at">[]>;
   quiesceD02Provider(run: RunRecord, request: D02ProductCleanupRequest): Promise<D02ProductCleanupAcknowledgement>;
   drain(runId: string): Promise<Omit<LabEvent, "runId" | "seq" | "at">[]>;
-  end(run: RunRecord, frontendFinalizeCapability: string, frontendCleanupCapability: string): Promise<DriverEndResult>;
+  /** operationDeadlineAt: the worker's absolute end-operation deadline (epoch ms). */
+  end(run: RunRecord, frontendFinalizeCapability: string, frontendCleanupCapability: string, operationDeadlineAt?: number): Promise<DriverEndResult>;
   abort(run: RunRecord, reason: string, frontendFinalizeCapability?: string, frontendCleanupCapability?: string): Promise<DriverEndResult>;
   recover(run: RecoveryTransportBinding, recoveryCapability: string, processTermination?: BrowserProcessTermination): Promise<DriverEndResult>;
   cancel(runId: string, reason: string): Promise<void>;
@@ -1089,7 +1090,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
     return events;
   }
 
-  async end(run: RunRecord, frontendFinalizeCapability: string, frontendCleanupCapability: string): Promise<DriverEndResult> {
+  async end(run: RunRecord, frontendFinalizeCapability: string, frontendCleanupCapability: string, operationDeadlineAt?: number): Promise<DriverEndResult> {
     const session = this.#requireSession(run.id);
     const artifacts: DriverEndResult["artifacts"] = [];
     const events: DriverEndResult["events"] = [];
@@ -1097,7 +1098,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
     // attached for the browser's recovery lifetime, nor let a repeated end
     // stack listeners.
     let disconnectObserver: ProviderDisconnectObserver | null = null;
-    const disconnectDeadline = Date.now() + providerDisconnectWaitMs(this.config.endOperationSeconds);
+    const disconnectDeadline = providerDisconnectDeadlineAt(Date.now(), this.config.endOperationSeconds, operationDeadlineAt);
     try {
       const refreshUrl = new URL(this.config.authRefreshPath, new URL(run.target.frontendUrl).origin).toString();
       const { response: refreshed } = await requestBoundJson(session.context.request, "POST", refreshUrl, 15_000, frontendFinalizeCapability);
@@ -1651,9 +1652,9 @@ export function observeProviderDisconnect(page: Pick<Page, "on" | "off" | "waitF
 }
 
 /** Part of the bounded end operation that must remain after the receiving
- * acknowledgement: grant minting before the driver, drain/validation,
- * deployment re-verification (10 s bound), snapshot/screenshot, auth cleanup
- * (15 s bound) and context close. */
+ * acknowledgement: drain/validation, deployment re-verification (10 s bound),
+ * snapshot/screenshot, auth cleanup (15 s bound), context close, and the
+ * worker's own persistence/recovery after the driver returns. */
 export const END_POST_DISCONNECT_RESERVE_MS = 45_000;
 
 /** The product retries a rejected disconnect at about 0, 1, 3, 7, 15, 31, 61 s
@@ -1662,6 +1663,16 @@ export const END_POST_DISCONNECT_RESERVE_MS = 45_000;
  * Production (120 s) waits 75 s, covering the 31 s and 61 s attempts. */
 export function providerDisconnectWaitMs(endOperationSeconds: number): number {
   return Math.max(20_000, endOperationSeconds * 1_000 - END_POST_DISCONNECT_RESERVE_MS);
+}
+
+/** Absolute deadline for the exact-202 wait. With the worker's real operation
+ * deadline it is that deadline less the reserve, so time already consumed by
+ * capability minting and fencing before driver entry is never re-granted and
+ * the operation deadline is never extended. Without it (direct driver use),
+ * the entry-relative window stands. The earlier of the two always wins. */
+export function providerDisconnectDeadlineAt(enteredAt: number, endOperationSeconds: number, operationDeadlineAt?: number): number {
+  const window = enteredAt + providerDisconnectWaitMs(endOperationSeconds);
+  return operationDeadlineAt === undefined || !Number.isFinite(operationDeadlineAt) ? window : Math.min(window, operationDeadlineAt - END_POST_DISCONNECT_RESERVE_MS);
 }
 
 /** The run record only reflects epochs the worker has already drained. The
