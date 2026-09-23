@@ -568,3 +568,54 @@ def test_excluded_witness_field_does_not_break_exact_transcript_read(tmp_path):
     with pytest.raises(SessionEvidenceIntegrityError):
         store.read_exact_session_messages("user-1", "session-1")
 
+
+
+class _ColumnProjectingPostgrest(FakeSupabasePostgrest):
+    """PostgREST projects ``select``; production rows carry MEM00 columns."""
+
+    MEM00_COLUMNS = {
+        "memory_source_accepted_version": None,
+        "memory_source_acceptance_epoch": 0,
+        "memory_source_version": "00000000-0000-4000-8000-000000000001",
+    }
+
+    def _handle_messages(self, request: httpx.Request, params: dict[str, str]) -> httpx.Response:
+        response = super()._handle_messages(request, params)
+        if request.method != "GET":
+            return response
+        rows = [{**row, **self.MEM00_COLUMNS} for row in response.json()]
+        select = params.get("select", "*")
+        if select != "*":
+            columns = select.split(",")
+            rows = [{column: row[column] for column in columns if column in row} for row in rows]
+        return httpx.Response(200, json=rows)
+
+
+def test_supabase_exact_transcript_read_ignores_additive_mem00_columns():
+    """Regression (C074/J6): the 2026-09-09 MEM00 migrations added
+    memory_source_accepted_version / _acceptance_epoch / memory_source_version
+    to sophia_session_messages. The exact reader selected ``*`` and compared the
+    raw key set, so every synthetic canonical-evidence recovery failed with
+    canonical_evidence_raw_message_set_invalid.
+    """
+    fake = _ColumnProjectingPostgrest()
+    store = _supabase_store(fake)
+    store.upsert_session(SessionRecord(session_id="session-1", thread_id="thread-1", user_id="user-1"))
+    store.replace_messages_revisioned(
+        "user-1",
+        "session-1",
+        [SessionMessageRecord(message_id="msg-1", session_id="session-1", thread_id="thread-1",
+                              role="user", content="synthetic", sequence=1)],
+        expected_revision=0,
+    )
+
+    messages = store.read_exact_session_messages("user-1", "session-1")
+
+    assert [message.message_id for message in messages] == ["msg-1"]
+    assert all(not hasattr(message, "memory_source_accepted_version") for message in messages)
+
+    # Genuine drift of a required transcript column still fails closed.
+    for row in fake.messages.values():
+        row.pop("approximate", None)
+    with pytest.raises(SessionEvidenceIntegrityError):
+        store.read_exact_session_messages("user-1", "session-1")

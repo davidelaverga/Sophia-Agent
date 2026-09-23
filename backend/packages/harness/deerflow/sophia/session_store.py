@@ -2264,19 +2264,6 @@ class SupabaseSessionTranscriptStore:
         user_id: str,
         session_id: str,
     ) -> list[SessionMessageRecord]:
-        result = self._request(
-            "GET",
-            self._config.messages_table,
-            params={
-                "select": "*",
-                "session_id": f"eq.{session_id}",
-                "order": "sequence.asc,created_at.asc",
-            },
-        )
-        if not isinstance(result, list):
-            raise SessionEvidenceIntegrityError(
-                "Synthetic finalization transcript query returned an invalid result."
-            )
         expected_fields = {
             "id",
             "message_id",
@@ -2294,6 +2281,22 @@ class SupabaseSessionTranscriptStore:
             "created_at",
             "metadata",
         }
+        # Select exactly the transcript columns: additive columns on the table
+        # (the MEM00 memory_source_* witnesses) are not transcript evidence and
+        # must not make the exact raw-row check fail closed on every read.
+        result = self._request(
+            "GET",
+            self._config.messages_table,
+            params={
+                "select": ",".join(sorted(expected_fields)),
+                "session_id": f"eq.{session_id}",
+                "order": "sequence.asc,created_at.asc",
+            },
+        )
+        if not isinstance(result, list):
+            raise SessionEvidenceIntegrityError(
+                "Synthetic finalization transcript query returned an invalid result."
+            )
         messages: list[SessionMessageRecord] = []
         storage_ids: set[str] = set()
         for row in result:
