@@ -3,7 +3,7 @@ import { readFile, realpath } from "node:fs/promises";
 import path from "node:path";
 
 import pg from "pg";
-import { composeServiceFenceMigration } from "../service-fence-migration.js";
+import { composeServiceFenceV2Migration } from "../service-fence-migration.js";
 
 import { acquireMigrationLock, closeMigrationClient, configureMigrationSession, createMigrationClient, logMigrationStage } from "../migration-runtime.js";
 import { canonicalRequestHash } from "../security.js";
@@ -16,7 +16,7 @@ const defaultPath = path.resolve(process.cwd(), "../../backend/migrations/2026_0
 const configuredPath = process.env.SOPHIA_VOICE_LAB_MIGRATION_PATH?.trim();
 if (configuredPath && process.env.NODE_ENV === "production" && await realpath(configuredPath) !== await realpath(defaultPath)) throw new Error("Production migration path must be the immutable bundled Voice Lab migration.");
 const migrationPath = configuredPath || defaultPath;
-const sqlBytes = composeServiceFenceMigration(await readFile(migrationPath), await readFile(path.resolve(process.cwd(), "migrations/004_recovery_controls.sql")), await readFile(path.resolve(process.cwd(), "migrations/005_service_owner_fence.sql")));
+const sqlBytes = composeServiceFenceV2Migration(await readFile(migrationPath), await readFile(path.resolve(process.cwd(), "migrations/004_recovery_controls.sql")), await readFile(path.resolve(process.cwd(), "migrations/005_service_owner_fence.sql")), await readFile(path.resolve(process.cwd(), "migrations/006_service_fence_v2.sql")));
 const migrationSha256 = createHash("sha256").update(sqlBytes).digest("hex");
 if (migrationSha256 !== VOICE_LAB_MIGRATION_SHA256) throw new Error("Voice Lab migration bytes do not match the compiled release checksum.");
 const client = createMigrationClient(databaseUrl);

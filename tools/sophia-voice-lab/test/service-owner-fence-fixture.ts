@@ -7,13 +7,15 @@ import { deriveExecutionOwnership } from "../src/execution-ownership.js";
 import { renderInventoryInstanceId } from "../src/worker-identity.js";
 import { testRun } from "./helpers.js";
 
-export function serviceOwnerFenceFixture(createdAt?: Date) {
+/** `pod` varies only the Render pod suffix, so suites sharing one database do
+ * not collide on the once-per-(service, worker) dispatch index. */
+export function serviceOwnerFenceFixture(createdAt?: Date, pod = "2gj6p") {
   const run = testRun(createdAt ? { createdAt } : {});
   const at = (ms: number) => new Date(run.createdAt.getTime() + ms);
   const serviceId = "srv-0123456789abcdefghij";
   // Real Render shape: srv-<20>-<replica-set>-<pod>. Its inventory projection
   // drops the replica-set segment, so the two hashes deliberately differ.
-  const owner = `${serviceId}-65566bc6c7-2gj6p`;
+  const owner = `${serviceId}-65566bc6c7-${pod}`;
   const control: RecoveryControlRecord = { binding: projectRecoveryControlBinding(run, `cp1:test:${"a".repeat(64)}`),
     version: 2, browserAllocationEver: true, browserAllocationBinding: deriveRecoveryBrowserBinding(run.id, owner, 1),
     liveCleanupComplete: false, remotePurgeComplete: false, contentPurgedAt: at(0), retentionPurgeDueAt: null };
@@ -44,8 +46,8 @@ export function serviceOwnerFenceFixture(createdAt?: Date) {
 
 /** v2: the ORIGINAL allocated pod is still present immediately before the
  * prospective one-shot action, and is replaced by it. */
-export function serviceOwnerFenceV2Fixture(createdAt?: Date) {
-  const base = serviceOwnerFenceFixture(createdAt);
+export function serviceOwnerFenceV2Fixture(createdAt?: Date, pod?: string) {
+  const base = serviceOwnerFenceFixture(createdAt, pod);
   const { input, unsigned, at } = base;
   const control = input.control;
   const ownerHash = control.browserAllocationBinding!.browser_worker_id_sha256;
