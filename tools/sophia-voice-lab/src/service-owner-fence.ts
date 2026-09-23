@@ -102,12 +102,22 @@ export type ServiceOwnerFenceReceiptV1 = z.infer<typeof ServiceOwnerFenceReceipt
  * replaced pod owned. It never attests a restart that already happened: the
  * dispatch claim, action request and post-action observations are all required
  * to follow the recorded ownership. */
+/** The signed pre-action state of the ORIGINAL owner. Absent from a receipt it
+ * means "present", the original v2 contract, so every present-mode receipt,
+ * proof and journal keeps its exact bytes and hashes. "absent" is only ever an
+ * explicit, signed claim: the collector observed the original already gone
+ * (every gate closed) and its own one-shot restart then produced a further
+ * distinct singleton. It never claims that this action removed the original. */
+const originalOwnerPreAction = z.literal("absent").optional();
+export type OriginalOwnerPreAction = "present" | "absent";
+
 export const ServiceOwnerFenceReceiptV2Schema = z.object({
   schema: z.literal("sophia.voice-lab.service-owner-fence-receipt.v2"),
   ...receiptBaseShape,
   executionOwnershipProofSha256: hash, executionEpochSha256: hash,
   processIdSha256: hash, browserBootIdSha256: hash,
   processAcquiredSeq: seq, runtimeAcquiredSeq: seq,
+  originalOwnerPreAction,
 }).strict().superRefine((r, ctx) => {
   refineFenceTimes(r, ctx, SERVICE_FENCE_V2_VALIDITY_MS);
   if (r.runtimeAcquiredSeq <= r.processAcquiredSeq) {
@@ -122,16 +132,23 @@ export const ServiceOwnerFenceReceiptV2Schema = z.object({
     ctx.addIssue({ code: "custom", message: "Service fence v2 original owner has no supported Render inventory projection." });
     return;
   }
-  const originalInventorySha256 = sha256(inventoryId);
-  // The original owner must be OBSERVED PRESENT before the action and ABSENT
-  // after it. This is the exact inversion of v1, and it establishes only that
-  // the platform replaced the pod that owned this epoch.
-  if (r.before.instanceIdsSha256[0] !== originalInventorySha256
-    || r.after.instanceIdsSha256[0] === originalInventorySha256
-    || r.before.instanceIdsSha256[0] === r.after.instanceIdsSha256[0]) {
-    ctx.addIssue({ code: "custom", message: "Service fence v2 requires the original owner present before and replaced after." });
+  if (!originalOwnerStatesValid(r.originalOwnerPreAction ?? "present", r.before.instanceIdsSha256[0]!, r.after.instanceIdsSha256[0]!, sha256(inventoryId))) {
+    ctx.addIssue({ code: "custom", message: r.originalOwnerPreAction === "absent"
+      ? "Service fence v2 absent mode requires the original owner absent before and a further distinct replacement after."
+      : "Service fence v2 requires the original owner present before and replaced after." });
   }
 });
+
+/** Present: the original is OBSERVED PRESENT before the action and ABSENT after
+ * it (the exact inversion of v1), so the platform replaced the pod that owned
+ * this epoch. Absent: the original is already absent before, still absent
+ * after, and the action produced a singleton distinct from the pre-state. In
+ * both, before and after must differ. */
+function originalOwnerStatesValid(preAction: OriginalOwnerPreAction, before: string, after: string, originalInventorySha256: string): boolean {
+  const presentBefore = before === originalInventorySha256;
+  if (presentBefore !== (preAction === "present")) return false;
+  return after !== originalInventorySha256 && before !== after;
+}
 export type ServiceOwnerFenceReceiptV2 = z.infer<typeof ServiceOwnerFenceReceiptV2Schema>;
 
 /** The execution-ownership fields a v2 claim carries. */
@@ -194,6 +211,8 @@ const retainedSchemaV2 = z.object({
   executionOwnershipProofSha256: hash, executionEpochSha256: hash,
   processIdSha256: hash, browserBootIdSha256: hash,
   processAcquiredSeq: seq, runtimeAcquiredSeq: seq,
+  // Carried verbatim from the verified receipt; absent means present mode.
+  originalOwnerPreAction,
 }).strict();
 
 const retainedSchema = z.union([retainedSchemaV1, retainedSchemaV2]);
@@ -286,6 +305,7 @@ export function verifyServiceOwnerFence(input: {
       executionOwnershipProofSha256: ownership.proofSha256, executionEpochSha256: ownership.executionEpochSha256,
       processIdSha256: ownership.processIdSha256, browserBootIdSha256: ownership.browserBootIdSha256,
       processAcquiredSeq: ownership.processAcquiredSeq, runtimeAcquiredSeq: ownership.runtimeAcquiredSeq,
+      ...(v2.originalOwnerPreAction === "absent" ? { originalOwnerPreAction: "absent" as const } : {}),
     } : {}),
   };
   return parseVerifiedServiceOwnerFence({ ...core, proofSha256: canonicalRequestHash(core) }, c);

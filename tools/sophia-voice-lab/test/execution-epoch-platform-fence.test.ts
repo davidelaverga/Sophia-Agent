@@ -143,3 +143,52 @@ describe("preserved proof digest compatibility", () => {
     expect(fence.proofSha256).not.toBe(close.proofSha256);
   });
 });
+
+// C018: later legitimate recoveries must not regress a settled epoch, the
+// preserved digest must not move, and intermediate failures keep typed provenance.
+describe("repeated recovery and failure provenance", () => {
+  const base = (run = testRun()) => [...ownership(run), platformTerminated(run, 5), recovery(run, 6)];
+  it("stays ready with the earliest post-termination recovery when a later one arrives", () => {
+    const run = testRun();
+    const single = deriveExecutionEpochCleanupProof(run, base(run));
+    const repeated = deriveExecutionEpochCleanupProof(run, [...base(run), recovery(run, 9)]);
+    expect(repeated.ready).toBe(true);
+    expect(repeated.reason).toBe("authoritative_platform_fence_after_owner_loss");
+    expect(repeated.eventSeqs.recovery).toBe(6);
+    // The preserved proof is compared by digest at lease release and in manifests.
+    expect(repeated.proofSha256).toBe(single.proofSha256);
+  });
+
+  it("selects the earliest recovery by sequence, not by array order", () => {
+    const run = testRun();
+    const ordered = deriveExecutionEpochCleanupProof(run, [...ownership(run), platformTerminated(run, 5), recovery(run, 6), recovery(run, 9)]);
+    const reversed = deriveExecutionEpochCleanupProof(run, [...ownership(run), platformTerminated(run, 5), recovery(run, 9), recovery(run, 6)]);
+    expect(reversed).toEqual(ordered);
+    expect(reversed.eventSeqs.recovery).toBe(6);
+  });
+
+  it("keeps the browser-close recovery digest when a later recovery arrives", () => {
+    const run = testRun();
+    const single = deriveExecutionEpochCleanupProof(run, [...ownership(run), closed(run, 5), recovery(run, 6)]);
+    const repeated = deriveExecutionEpochCleanupProof(run, [...ownership(run), closed(run, 5), recovery(run, 6), recovery(run, 9)]);
+    expect(single.reason).toBe("authoritative_recovery_after_process_death");
+    expect(repeated).toEqual(single);
+  });
+
+  it("records the platform termination, never a process close, while downstream cleanup is pending", () => {
+    const run = testRun();
+    const pending = deriveExecutionEpochCleanupProof(run, [...ownership(run), platformTerminated(run, 5)]);
+    expect(pending.ready).toBe(false);
+    expect(pending.reason).toBe("provider_or_auth_cleanup_unconfirmed");
+    expect(pending.eventSeqs.platformTerminated).toBe(5);
+    expect(pending.eventSeqs.processClosed).toBeNull();
+  });
+
+  it("still records a genuine browser close while downstream cleanup is pending", () => {
+    const run = testRun();
+    const pending = deriveExecutionEpochCleanupProof(run, [...ownership(run), closed(run, 5)]);
+    expect(pending.reason).toBe("provider_or_auth_cleanup_unconfirmed");
+    expect(pending.eventSeqs.processClosed).toBe(5);
+    expect(pending.eventSeqs.platformTerminated).toBeNull();
+  });
+});

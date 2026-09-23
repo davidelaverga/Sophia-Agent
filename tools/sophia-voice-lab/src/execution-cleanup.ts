@@ -172,21 +172,26 @@ export function deriveExecutionEpochCleanupProof(
     return receipt?.test_run_id === run.testRunId && receipt.cleanup_obligation_id_sha256 === cleanupHash
       && authoritativeLiveCleanupComplete([event], run) && recoveryComponentComplete([event], "voice_provider") && recoveryComponentComplete([event], "auth_sessions");
   });
-  const recovered = recoveries.length === 1;
-  if (!direct && !recovered) return fail("provider_or_auth_cleanup_unconfirmed", {
+  // Recovery is repeatable (e.g. a later retention recovery), so any number of
+  // authoritative receipts after the close may exist. The EARLIEST one is the
+  // settlement anchor: a preserved proof is compared by digest at lease release
+  // and in manifests, so later receipts must never move it, and every proof
+  // that was ready with exactly one recovery keeps its identical digest.
+  const settlingRecovery = earliestBySeq(recoveries);
+  const closeSeqs = { processClosed: terminated ? null : closed.seq, platformTerminated: terminated ? terminated.seq : null };
+  if (!direct && !settlingRecovery) return fail("provider_or_auth_cleanup_unconfirmed", {
     executionEpochSha256: epoch,
     workerIdSha256: workerId,
     browserLeaseEpoch: Number(leaseEpoch),
-    eventSeqs: { ...emptySeqs, processAcquired: acquired.seq, runtimeAcquired: runtime.seq, providerCleanup: providers[0]?.seq ?? null, authCleanup: auth[0]?.seq ?? null, processClosed: closed.seq, recovery: recoveries[0]?.seq ?? null },
+    eventSeqs: { ...emptySeqs, processAcquired: acquired.seq, runtimeAcquired: runtime.seq, providerCleanup: providers[0]?.seq ?? null, authCleanup: auth[0]?.seq ?? null, ...closeSeqs, recovery: null },
   });
   const eventSeqs = {
     processAcquired: acquired.seq,
     runtimeAcquired: runtime.seq,
     providerCleanup: providers[0]?.seq ?? null,
     authCleanup: auth[0]?.seq ?? null,
-    processClosed: terminated ? null : closed.seq,
-    platformTerminated: terminated ? terminated.seq : null,
-    recovery: recoveries[0]?.seq ?? null,
+    ...closeSeqs,
+    recovery: settlingRecovery?.seq ?? null,
   };
   const cleanupPath = terminated ? "platform_fence" : direct ? "direct" : "recovery";
   // Digest compatibility: a run settled by a browser close must hash exactly as
@@ -201,4 +206,9 @@ export function deriveExecutionEpochCleanupProof(
   const proofCore = { run_id_sha256: runHash, cleanup_obligation_id_sha256: cleanupHash, process_id_sha256: processId, browser_boot_id_sha256: bootId, execution_epoch_sha256: epoch, worker_id_sha256: workerId, browser_lease_epoch: Number(leaseEpoch), cleanup_path: cleanupPath, event_seqs: hashedSeqs };
   const reason = terminated ? "authoritative_platform_fence_after_owner_loss" : direct ? "direct_cleanup_before_process_death" : "authoritative_recovery_after_process_death";
   return { required: true, ready: true, reason, executionEpochSha256: epoch, workerIdSha256: workerId, browserLeaseEpoch: Number(leaseEpoch), proofSha256: canonicalRequestHash(proofCore), eventSeqs };
+}
+
+/** The lowest-sequence event, independent of array order. */
+function earliestBySeq<T extends { seq: number }>(events: readonly T[]): T | null {
+  return events.reduce<T | null>((earliest, event) => (earliest === null || event.seq < earliest.seq ? event : earliest), null);
 }

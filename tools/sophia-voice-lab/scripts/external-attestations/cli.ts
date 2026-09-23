@@ -155,6 +155,9 @@ export async function runCli(argv: readonly string[], write: (line: string) => v
         allocatedWorkerId: z.string().regex(/^srv-[0-9a-z]{20}-[A-Za-z0-9_-]{5,96}$/), voiceLabOrigin: z.string().url(),
         // Absent means v1, so an existing v1 input file keeps its journal hash.
         generation: z.enum(["v1", "v2"]).optional(),
+        // v2 only; absent means "present" so existing v2 inputs keep their hash.
+        // Original-owner-absent collection must be named here explicitly.
+        originalOwnerPreAction: z.enum(["present", "absent"]).optional(),
         expectedLabSha: z.string().regex(/^[a-f0-9]{40}$/), expectedLangGraphSha: z.string().regex(/^[a-f0-9]{40}$/), expectedRecoveryDeployment: RecoveryProductDeploymentSchema,
       }).strict().parse(await readSecureJson(requiredFlag(flags, "input")));
       const publicConfig = await loadPublicConfig(requiredFlag(flags, "public-config"));

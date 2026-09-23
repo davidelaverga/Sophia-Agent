@@ -10,7 +10,7 @@ import { GENERIC_RECOVERY_ORIGIN } from "../scripts/external-attestations/generi
 import { deriveRecoveryBrowserBinding, projectRecoveryControlBinding, type RecoveryControlRecord } from "../src/recovery-control.js";
 import { prepareGenericOwnerDispatch, consumeGenericOwnerDispatch } from "../src/generic-owner-dispatch.js";
 import { ingestGenericOwnerLoss } from "../src/generic-owner-loss.js";
-import { serviceFenceSourceLabSha } from "../src/service-owner-fence.js";
+import { AnyServiceOwnerFenceReceiptSchema, serviceFenceSourceLabSha } from "../src/service-owner-fence.js";
 import { derivePlatformExecutionTermination } from "../src/platform-execution-termination.js";
 import { deriveExecutionOwnership } from "../src/execution-ownership.js";
 import { renderInventoryInstanceId } from "../src/worker-identity.js";
@@ -62,7 +62,7 @@ function receiverOwnerDispatch(receiver: FixtureReceiver, body: Record<string, u
   return new Response(JSON.stringify({ control, dispatchAllowed, workerServiceId: serviceId }), { status: 200 });
 }
 
-async function crossGenerationFixture(options: { retired?: boolean; preActionInventoryId?: string; failTerminationAppendOnce?: boolean } = {}) {
+async function crossGenerationFixture(options: { retired?: boolean; preActionInventoryId?: string; failTerminationAppendOnce?: boolean; preActionGateOpen?: boolean; staleHeartbeat?: boolean } = {}) {
   const dir = await mkdtemp(path.join(os.tmpdir(), "vt00-cross-gen-")); dirs.push(dir);
   const keys = { external_mcp_client: path.join(dir, "client.key"), deployment_control: path.join(dir, "deploy.key"), platform_plugin: path.join(dir, "platform.key") };
   const initialized = await initializeAuthorityFiles({ publicConfigPath: path.join(dir, "public.json"), transportTokensPath: path.join(dir, "tokens.json"), privateKeyPaths: keys,
@@ -99,16 +99,23 @@ async function crossGenerationFixture(options: { retired?: boolean; preActionInv
     const url = new URL(raw instanceof Request ? raw.url : raw.toString());
     const json = (value: unknown) => new Response(JSON.stringify(value), { status: 200 });
     if (url.origin === GENERIC_RECOVERY_ORIGIN && url.pathname.endsWith("owner-dispatch")) return receiverOwnerDispatch(receiver, JSON.parse(String(init?.body)));
-    // Before the prospective action the ORIGINAL pod is still the live owner.
-    const ownerGone = options.retired || restartedAt !== null;
-    const liveInventoryId = ownerGone ? `${serviceId}-9kd2f` : options.preActionInventoryId ?? originalInventoryId;
-    const liveFullId = ownerGone ? `${serviceId}-77ffaa1122-9kd2f` : allocatedWorkerId;
+    // Three pods: the ORIGINAL owner; replacement A, the supported same-SHA
+    // closure deploy that already retired it (retired); and replacement B,
+    // produced by this collector's own one-shot restart.
+    const { inventory: liveInventoryId, full: liveFullId } = restartedAt !== null
+      ? { inventory: `${serviceId}-9kd2f`, full: `${serviceId}-77ffaa1122-9kd2f` }
+      : options.retired
+        ? { inventory: options.preActionInventoryId ?? `${serviceId}-a1b2c`, full: `${serviceId}-5566778899-a1b2c` }
+        : { inventory: options.preActionInventoryId ?? originalInventoryId, full: allocatedWorkerId };
+    // The original pod booted with its execution gate open; only a new pod can close it.
+    const gateClosed = !(options.preActionGateOpen === true && restartedAt === null);
+    const heartbeatAt = options.staleHeartbeat === true ? new Date(now().getTime() - 60_000) : now();
     if (url.origin === GENERIC_RECOVERY_ORIGIN && url.pathname === "/readyz") {
       const gate = { valid: true, open: false, voice_lab_enabled: false, voice_lab_kill_switch_engaged: true, voice_lab_mutation_ready: false };
       return json({ version: DEPLOYED_LAB_SHA, execution: "kill_switch_engaged", active_runs: 1, mutation_ready: false, product_mutation_gates_open: false,
-        components: { database: { ready: true }, browser_worker: { runtime_ready: true, live_workers: 1, execution_gate_settled: true, observed_kill_switch_engaged: true,
+        components: { database: { ready: true }, browser_worker: { runtime_ready: true, live_workers: 1, execution_gate_settled: gateClosed, observed_kill_switch_engaged: gateClosed,
           heartbeat_attestation: { service_version: DEPLOYED_LAB_SHA, repository_candidate_sha: DEPLOYED_LAB_SHA,
-            worker_instance_id_sha256: sha256(liveFullId), render_inventory_instance_id_sha256: sha256(liveInventoryId), observed_at: now().toISOString() } },
+            worker_instance_id_sha256: sha256(liveFullId), render_inventory_instance_id_sha256: sha256(liveInventoryId), observed_at: heartbeatAt.toISOString() } },
           test_auth: { ok: true, frontend_kill_switch_engaged: true, mutation_gate_order_safe: true },
           target_environment: { builds: { frontend: { observed: expectedRecoveryDeployment.frontend }, backend: { observed: expectedRecoveryDeployment.backend, product_mutation_gate: gate },
             voice: { observed: expectedRecoveryDeployment.voice, product_mutation_gate: gate }, langgraph: { observed: LANGGRAPH_SHA } } } } });
@@ -138,9 +145,10 @@ async function cliFiles(f: Awaited<ReturnType<typeof crossGenerationFixture>>) {
   const dir = path.dirname(f.input.privateKeyPath);
   const bundle = path.join(dir, "cli-journal"); await mkdir(bundle, { mode: 0o700 });
   const { runId, requestId, workerServiceId, allocatedWorkerId, voiceLabOrigin, generation, expectedLabSha, expectedLangGraphSha, expectedRecoveryDeployment } = f.input;
+  const { originalOwnerPreAction } = f.input as { originalOwnerPreAction?: "present" | "absent" };
   const inputPath = path.join(dir, "input.json"), renderPath = path.join(dir, "render.json");
   await writeFile(inputPath, JSON.stringify({ runId, requestId, workerServiceId, allocatedWorkerId, voiceLabOrigin, generation,
-    expectedLabSha, expectedLangGraphSha, expectedRecoveryDeployment }), { mode: 0o600 });
+    ...(originalOwnerPreAction ? { originalOwnerPreAction } : {}), expectedLabSha, expectedLangGraphSha, expectedRecoveryDeployment }), { mode: 0o600 });
   await writeFile(renderPath, JSON.stringify({ bearer_token: "synthetic-render-token-00000000000000000000" }), { mode: 0o600 });
   const args = ["--input", inputPath, "--public-config", path.join(dir, "public.json"), "--transport-tokens", path.join(dir, "tokens.json"),
     "--deployment-key", f.input.privateKeyPath, "--bundle-dir", bundle];
@@ -379,4 +387,89 @@ it("replays v2 ingestion even after independent settlement when the termination 
   expect(f.terminations()).toBe(1);
   expect(f.control().genericOwnerLoss).toEqual(proof);
   expect(f.restarts()).toBe(1);
+});
+
+// ---- C016: explicit original-owner-absent v2 mode ----------------------------
+
+/** Counts provider restarts; every refusal below must happen before one. */
+function guardRestarts(f: Awaited<ReturnType<typeof crossGenerationFixture>>) {
+  let restarts = 0;
+  const fetchImpl: typeof fetch = async (raw, init) => {
+    const url = new URL(raw instanceof Request ? raw.url : raw.toString());
+    if (url.origin === "https://api.render.com" && init?.method === "POST") restarts++;
+    return f.input.fetchImpl(raw as never, init as never);
+  };
+  return { fetchImpl, restarts: () => restarts };
+}
+
+it("collects an explicit absent-mode v2 receipt and publishes a truthful proof and termination", async () => {
+  const f = await crossGenerationFixture({ retired: true });
+  (f.input as Record<string, unknown>).originalOwnerPreAction = "absent";
+  const { args, renderPath, runtime } = await cliFiles(f);
+  const output: string[] = [];
+  expect(await runCli(["collect-service-owner-fence", ...args, "--render-token", renderPath], line => output.push(line), runtime), output.join("\n")).toBe(0);
+  f.upgradeReceiver(JSON.parse(output.at(-1)!).receipt_sha256);
+  expect(await runCli(["publish-service-owner-fence", ...args], line => output.push(line), runtime), output.join("\n")).toBe(0);
+  expect(f.control().genericOwnerLoss).toMatchObject({ schema: "sophia.voice-lab.verified-service-owner-fence.v2", originalOwnerPreAction: "absent" });
+  expect(f.terminations()).toBe(1);
+  const termination = derivePlatformExecutionTermination(f.control(), f.control().genericOwnerLoss as never);
+  expect(termination.payload).toMatchObject({ original_owner_pre_action: "absent", owner_replacement_observed: true,
+    browser_context_closed_fabricated: false, provider_cleanup_proven: false, live_resources_zero_proven: false });
+  expect(f.restarts()).toBe(1);
+});
+
+it.each([
+  // The present-mode preflight requires the heartbeat to be the original owner.
+  ["present mode while the original is already absent", { retired: true }, "present", /live worker identity is stale or mismatched/],
+  ["absent mode while the original is still present", {}, "absent", /original owner is still current/],
+  ["absent mode while the live inventory is the original's projection", { retired: true, preActionInventoryId: "srv-0123456789abcdefghij-2gj6p" }, "absent", /still present/],
+  ["absent mode with the execution gate open", { retired: true, preActionGateOpen: true }, "absent", /execution_gate_settled|observed_kill_switch_engaged/],
+  ["absent mode with a stale heartbeat", { retired: true, staleHeartbeat: true }, "absent", /stale or mismatched/],
+] as const)("refuses %s before any mutation", async (_label, options, preAction, message) => {
+  const f = await crossGenerationFixture(options);
+  const guard = guardRestarts(f);
+  await expect(collectServiceOwnerFence({ ...f.input, originalOwnerPreAction: preAction, fetchImpl: guard.fetchImpl } as never)).rejects.toThrow(message);
+  expect(guard.restarts()).toBe(0);
+  expect(f.control().genericOwnerDispatch).toBeUndefined();
+  expect(f.entries).toHaveLength(0);
+});
+
+it("refuses absent mode with missing or drifted execution ownership before any mutation", async () => {
+  for (const drift of ["missing", "another-owner"] as const) {
+    const f = await crossGenerationFixture({ retired: true });
+    const guard = guardRestarts(f);
+    if (drift === "missing") delete (f.control() as { executionOwnership?: unknown }).executionOwnership;
+    else {
+      const { proofSha256: _old, ...core } = f.control().executionOwnership as unknown as Record<string, unknown>;
+      const drifted = { ...core, workerIdSha256: sha256("srv-0123456789abcdefghij-aaaaaaaaaa-zzzzz") };
+      f.control().executionOwnership = { ...drifted, proofSha256: canonicalRequestHash(drifted) } as never;
+    }
+    await expect(collectServiceOwnerFence({ ...f.input, originalOwnerPreAction: "absent", fetchImpl: guard.fetchImpl } as never)).rejects.toThrow();
+    expect(guard.restarts()).toBe(0);
+    expect(f.entries.map(entry => entry.phase)).not.toContain("consumed");
+  }
+});
+
+it("never selects absent mode implicitly and binds it into the signed receipt and journal scope", async () => {
+  const f = await crossGenerationFixture({ retired: true });
+  await expect(collectServiceOwnerFence({ ...f.input, generation: "v1", originalOwnerPreAction: "absent" } as never)).rejects.toThrow(/exists only for v2/);
+  const absent = await crossGenerationFixture({ retired: true });
+  const collected = await collectServiceOwnerFence({ ...absent.input, originalOwnerPreAction: "absent" } as never);
+  const receipt = collected.receipt as Record<string, unknown> & { before: { instanceIdsSha256: string[] }; after: { instanceIdsSha256: string[] } };
+  expect(receipt).toMatchObject({ schema: "sophia.voice-lab.service-owner-fence-receipt.v2", originalOwnerPreAction: "absent" });
+  // Truthful pre-state: the original was already absent, and the action produced a further distinct singleton.
+  expect(receipt.before.instanceIdsSha256[0]).not.toBe(sha256(absent.originalInventoryId));
+  expect(receipt.after.instanceIdsSha256[0]).not.toBe(sha256(absent.originalInventoryId));
+  expect(receipt.after.instanceIdsSha256[0]).not.toBe(receipt.before.instanceIdsSha256[0]);
+  expect(absent.restarts()).toBe(1);
+  // Flipping the signed claim either breaks the schema's pre-state rule or the signature.
+  const { originalOwnerPreAction: _claim, ...asPresent } = receipt;
+  expect(() => AnyServiceOwnerFenceReceiptSchema.parse(asPresent)).toThrow(/original owner present before/);
+  // The mode is part of the journal scope, so an absent journal cannot be resumed as present.
+  const scope = (absent.entries.find(entry => entry.phase === "prepared")!.value as { scopeSha256: string }).scopeSha256;
+  const present = await crossGenerationFixture();
+  await collectServiceOwnerFence(present.input as never);
+  expect((present.entries.find(entry => entry.phase === "prepared")!.value as { scopeSha256: string }).scopeSha256).not.toBe(scope);
+  await expect(collectServiceOwnerFence({ ...absent.input, resume: Object.fromEntries(absent.entries.map(entry => [entry.phase, entry.value])) } as never))
+    .rejects.toThrow(/scope mismatch|not the original owner/);
 });

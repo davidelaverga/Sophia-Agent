@@ -57,6 +57,10 @@ export function derivePlatformExecutionTermination(
       signed_receipt_sha256: proof.signedReceiptSha256,
       authority_public_key_sha256: proof.authorityPublicKeySha256,
       execution_ownership_proof_sha256: ownership.proofSha256,
+      // Absent mode certifies the original's continued absence plus a further
+      // platform replacement; it never claims this action removed the owner.
+      // Present-mode payloads carry no such field and keep their exact bytes.
+      ...(proof.originalOwnerPreAction === "absent" ? { original_owner_pre_action: "absent" } : {}),
     },
   };
 }

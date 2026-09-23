@@ -3,8 +3,8 @@ import { canonicalRequestHash, sha256 } from "../../src/security.js";
 import { RecoveryControlBindingSchema, validateRecoveryAllocationBinding, type RecoveryControlRecord } from "../../src/recovery-control.js";
 import { parseGenericOwnerDispatch, genericOwnerLossDispatchFromControl } from "../../src/generic-owner-dispatch.js";
 import { parseExecutionOwnership } from "../../src/execution-ownership.js";
-import { AnyServiceOwnerFenceReceiptSchema, ServiceOwnerFenceReceiptSchema, SERVICE_FENCE_V1_VALIDITY_MS, SERVICE_FENCE_V2_VALIDITY_MS, verifyServiceOwnerFence } from "../../src/service-owner-fence.js";
-import { genericRecoveryOrigin, readServiceOwnerFencePreflight, readServiceOwnerFenceV2Preflight, RecoveryProductDeploymentSchema } from "./generic-worker-preflight.js";
+import { AnyServiceOwnerFenceReceiptSchema, ServiceOwnerFenceReceiptSchema, SERVICE_FENCE_V1_VALIDITY_MS, SERVICE_FENCE_V2_VALIDITY_MS, verifyServiceOwnerFence, type OriginalOwnerPreAction } from "../../src/service-owner-fence.js";
+import { genericRecoveryOrigin, readServiceOwnerFencePreflight, readServiceOwnerFenceV2AbsentPreflight, readServiceOwnerFenceV2Preflight, RecoveryProductDeploymentSchema } from "./generic-worker-preflight.js";
 import { renderInventoryInstanceId } from "../../src/worker-identity.js";
 import { readRenderWorkerSnapshot } from "./render-worker-controller.js";
 import { retryableRenderObservation } from "./render-inventory.js";
@@ -32,6 +32,9 @@ export type ServiceOwnerFenceCheckpoint =
 export async function collectServiceOwnerFence(input: {
   runId: string; requestId: string; workerServiceId: string; allocatedWorkerId: string; voiceLabOrigin: string;
   generation?: "v1" | "v2" | undefined;
+  // v2 only. Omitted means "present" (the original v2 contract). "absent" must
+  // be requested explicitly; the collector never switches modes on its own.
+  originalOwnerPreAction?: OriginalOwnerPreAction | undefined;
   expectedLabSha: string; expectedLangGraphSha: string; expectedRecoveryDeployment: z.infer<typeof RecoveryProductDeploymentSchema>;
   renderBearer: string; deploymentBearer: string; publicConfig: PublicAuthorityConfig; privateKeyPath: string;
   checkpoint: (entry: ServiceOwnerFenceCheckpoint) => Promise<void>; resume?: unknown;
@@ -51,8 +54,8 @@ export async function collectServiceOwnerFence(input: {
   // v1 collects after the allocated owner is already gone. v2 collects while it
   // is still present, so the prospective replacement is what removes it. The
   // caller selects explicitly; v1 remains the default and is unchanged.
-  const generation = input.generation ?? "v1";
-  const readFencePreflight = generation === "v2" ? readServiceOwnerFenceV2Preflight : readServiceOwnerFencePreflight;
+  const { generation, preAction } = serviceFenceMode(input);
+  const readFencePreflight = serviceFencePreflight(generation, preAction);
   // Render's inventory omits the replica-set segment, so the identity a
   // replacement must differ from is the ORIGINAL's projection, not its full id.
   const originalInventoryId = renderInventoryInstanceId(input.allocatedWorkerId);
@@ -107,7 +110,7 @@ export async function collectServiceOwnerFence(input: {
     expectedLangGraphSha: input.expectedLangGraphSha, expectedRecoveryDeployment: input.expectedRecoveryDeployment, authority: input.publicConfig.deployment_control,
     // Scope compatibility: these fields exist only for v2, so a historical v1
     // journal keeps its exact resume hash and stays resumable.
-    ...(ownership ? { generation, executionOwnershipProofSha256: ownership.proofSha256 } : {}) });
+    ...(ownership ? { generation, executionOwnershipProofSha256: ownership.proofSha256, ...absentPreActionClaim(preAction) } : {}) });
   if (resume && resume.prepared.scopeSha256 !== scopeSha256) throw new Error("Service fence resume scope mismatch.");
   if (control.genericOwnerDispatch && control.genericOwnerDispatch.requestId !== input.requestId) throw new Error("Service fence dispatch request mismatch.");
   const verification = () => ({ control, authority: input.publicConfig.deployment_control, expectedWorkerServiceIdSha256: sha256(input.workerServiceId),
@@ -128,8 +131,7 @@ export async function collectServiceOwnerFence(input: {
     // The preflight trusts the heartbeat's own projection; the v2 receipt is
     // checked against the locally derived projection of the allocated id. Join
     // them here, because a mismatch found at signing is after the restart.
-    if (generation === "v2" && (observed.before.instanceIdsSha256.length !== 1
-      || observed.before.instanceIdsSha256[0] !== originalComparisonSha256)) throw new Error("Service fence v2 live inventory is not the original owner's inventory projection.");
+    if (generation === "v2") assertPreActionOwnerState(preAction, observed.before.instanceIdsSha256, originalComparisonSha256);
     if (!control.genericOwnerDispatch) ({ control } = await request({ action: "prepare", runId: input.runId, requestId: input.requestId, expectedVersion: control.version }));
     before = { scopeSha256, preparedProofSha256: control.genericOwnerDispatch!.proofSha256,
       before: { ...observed.before, readinessResponseSha256: observed.readinessResponseSha256 } };
@@ -175,6 +177,7 @@ export async function collectServiceOwnerFence(input: {
       executionOwnershipProofSha256: ownership.proofSha256, executionEpochSha256: ownership.executionEpochSha256,
       processIdSha256: ownership.processIdSha256, browserBootIdSha256: ownership.browserBootIdSha256,
       processAcquiredSeq: ownership.processAcquiredSeq, runtimeAcquiredSeq: ownership.runtimeAcquiredSeq,
+      ...absentPreActionClaim(preAction),
     } : {}), schema: generation === "v2" ? "sophia.voice-lab.service-owner-fence-receipt.v2" : "sophia.voice-lab.service-owner-fence-receipt.v1", receiptId: input.requestId,
       authority: "deployment_control", issuer: authority.issuer, subject: authority.subject, authorityKeyId: authority.key_id,
       audience: "sophia-voice-lab-service-owner-fence", ...dispatch, allocatedWorkerId: input.allocatedWorkerId,
@@ -195,4 +198,33 @@ async function readBody(response: Response) {
   const bytes = Buffer.from(await response.arrayBuffer());
   if (bytes.length > 2_000_000) throw new Error("Service fence response exceeds source byte limit.");
   return { bytes, sha256: sha256(bytes) };
+}
+
+/** The collection mode, stated by the caller and never inferred. v1 stays the
+ * default; "absent" exists only for v2 and only when named. */
+function serviceFenceMode(input: { generation?: "v1" | "v2" | undefined; originalOwnerPreAction?: OriginalOwnerPreAction | undefined }): { generation: "v1" | "v2"; preAction: OriginalOwnerPreAction } {
+  const generation = input.generation ?? "v1";
+  const preAction = z.enum(["present", "absent"]).parse(input.originalOwnerPreAction ?? "present");
+  if (preAction === "absent" && generation !== "v2") throw new Error("Service fence original-owner-absent mode exists only for v2.");
+  return { generation, preAction };
+}
+
+function serviceFencePreflight(generation: "v1" | "v2", preAction: OriginalOwnerPreAction) {
+  if (generation === "v1") return readServiceOwnerFencePreflight;
+  return preAction === "absent" ? readServiceOwnerFenceV2AbsentPreflight : readServiceOwnerFenceV2Preflight;
+}
+
+/** Before the one-shot action, the live singleton must be exactly the original
+ * projection in present mode, and anything but it in absent mode. */
+function assertPreActionOwnerState(preAction: OriginalOwnerPreAction, instanceIdsSha256: string[], originalInventorySha256: string): void {
+  if (instanceIdsSha256.length !== 1) throw new Error("Service fence v2 live inventory is not a singleton.");
+  const originalPresent = instanceIdsSha256[0] === originalInventorySha256;
+  if (preAction === "present" && !originalPresent) throw new Error("Service fence v2 live inventory is not the original owner's inventory projection.");
+  if (preAction === "absent" && originalPresent) throw new Error("Service fence v2 absent mode found the original owner still present.");
+}
+
+/** The signed and journal-scoped claim; empty in present mode so its bytes and
+ * hashes are exactly those of the original v2 contract. */
+function absentPreActionClaim(preAction: OriginalOwnerPreAction): { originalOwnerPreAction?: "absent" } {
+  return preAction === "absent" ? { originalOwnerPreAction: "absent" } : {};
 }
