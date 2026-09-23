@@ -178,6 +178,141 @@ export function buildVoiceLabInitScript(options: InitScriptOptions): string {
         emit('harness.media_observer_wrapper_installed', { synthetic_pipeline_sealed: true });
       },
     });
+    // Passive, content-free census of INBOUND provider frames (C038). It only
+    // reads a copy of each message after the browser delivered it; it never
+    // alters, consumes, reorders or suppresses what the product receives.
+    // Exported: fixed documented keys, booleans as true/false/absent/
+    // unavailable, transcript UTF-8 byte LENGTHS, part counts, finite
+    // non-negative token counts, and unknown-key COUNTS. Never text, audio,
+    // handles, field names outside the allowlist, or any other value.
+    // Identical consecutive projections are coalesced with explicit counts;
+    // emitted events per socket are capped, and the close summary accounts
+    // for every received frame (received = emitted + suppressed).
+    const INBOUND_MAX_BYTES = 1048576;
+    const INBOUND_MAX_EVENTS = 512;
+    const INBOUND_REPEAT_FLUSH = 25;
+    const SERVER_TOP_KEYS = ['setupComplete', 'serverContent', 'toolCall', 'toolCallCancellation', 'goAway', 'sessionResumptionUpdate', 'usageMetadata'];
+    const SERVER_CONTENT_KEYS = ['modelTurn', 'turnComplete', 'interrupted', 'generationComplete', 'waitingForInput', 'inputTranscription', 'interimInputTranscription', 'outputTranscription', 'groundingMetadata', 'urlContextMetadata', 'interactionStatus', 'speechState'];
+    const USAGE_TOKEN_KEYS = ['promptTokenCount', 'cachedContentTokenCount', 'responseTokenCount', 'toolUsePromptTokenCount', 'thoughtsTokenCount', 'totalTokenCount'];
+    const isPlainRecord = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
+    const hasOwn = (record, key) => Object.prototype.hasOwnProperty.call(record, key);
+    const allowlistedKeys = (record, allowed) => {
+      const known = [];
+      let unknown = 0;
+      for (const key of Object.keys(record)) {
+        if (allowed.indexOf(key) === -1) unknown += 1;
+        else known.push(key);
+      }
+      known.sort();
+      return { known, unknown };
+    };
+    const booleanState = (record, key) => !hasOwn(record, key) ? 'absent' : record[key] === true ? 'true' : record[key] === false ? 'false' : 'unavailable';
+    const transcriptUtf8Bytes = (record, key) => {
+      if (!hasOwn(record, key)) return null;
+      const value = record[key];
+      if (!isPlainRecord(value) || typeof value.text !== 'string') return 'unavailable';
+      try { return new TextEncoder().encode(value.text).length; } catch { return 'unavailable'; }
+    };
+    const projectServerContent = (content) => {
+      if (!isPlainRecord(content)) return 'unavailable';
+      const keys = allowlistedKeys(content, SERVER_CONTENT_KEYS);
+      const turn = content.modelTurn;
+      const parts = isPlainRecord(turn) && Array.isArray(turn.parts) ? turn.parts : null;
+      const countParts = (predicate) => parts === null ? null : parts.filter((part) => isPlainRecord(part) && predicate(part)).length;
+      return {
+        fields: keys.known,
+        unknown_field_count: keys.unknown,
+        turn_complete: booleanState(content, 'turnComplete'),
+        interrupted: booleanState(content, 'interrupted'),
+        generation_complete: booleanState(content, 'generationComplete'),
+        waiting_for_input: booleanState(content, 'waitingForInput'),
+        input_transcription_utf8_bytes: transcriptUtf8Bytes(content, 'inputTranscription'),
+        interim_input_transcription_utf8_bytes: transcriptUtf8Bytes(content, 'interimInputTranscription'),
+        output_transcription_utf8_bytes: transcriptUtf8Bytes(content, 'outputTranscription'),
+        model_turn_part_count: hasOwn(content, 'modelTurn') ? (parts === null ? 'unavailable' : parts.length) : null,
+        model_turn_audio_part_count: countParts((part) => isPlainRecord(part.inlineData) && typeof part.inlineData.mimeType === 'string' && part.inlineData.mimeType.startsWith('audio/')),
+        model_turn_text_part_count: countParts((part) => typeof part.text === 'string'),
+      };
+    };
+    const projectInbound = (payload) => {
+      if (!isPlainRecord(payload)) return { frame_kind: 'unrecognized' };
+      const top = allowlistedKeys(payload, SERVER_TOP_KEYS);
+      const resumption = payload.sessionResumptionUpdate;
+      const usage = payload.usageMetadata;
+      return {
+        frame_kind: top.known.join('+') || (top.unknown > 0 ? 'unrecognized' : 'empty'),
+        unknown_top_level_field_count: top.unknown,
+        server_content: hasOwn(payload, 'serverContent') ? projectServerContent(payload.serverContent) : null,
+        session_resumption: !hasOwn(payload, 'sessionResumptionUpdate') ? null : isPlainRecord(resumption)
+          ? { resumable: booleanState(resumption, 'resumable'), new_handle_present: typeof resumption.newHandle === 'string' && resumption.newHandle.length > 0 }
+          : 'unavailable',
+        usage_tokens: !hasOwn(payload, 'usageMetadata') ? null : isPlainRecord(usage)
+          ? Object.fromEntries(USAGE_TOKEN_KEYS.map((key) => [key, Number.isSafeInteger(usage[key]) && usage[key] >= 0 ? usage[key] : null]))
+          : 'unavailable',
+      };
+    };
+    const UNREADABLE_INBOUND = Symbol('unreadable');
+    const inboundText = async (data) => {
+      if (data === UNREADABLE_INBOUND) return { uninspectable: true };
+      if (typeof data === 'string') return data.length > INBOUND_MAX_BYTES ? { oversized: true } : { text: data };
+      if (data instanceof ArrayBuffer || ArrayBuffer.isView(data)) return data.byteLength > INBOUND_MAX_BYTES ? { oversized: true } : { text: new TextDecoder().decode(data) };
+      if (data && typeof data.size === 'number' && typeof data.text === 'function') return data.size > INBOUND_MAX_BYTES ? { oversized: true } : { text: await data.text() };
+      return { unrecognized: true };
+    };
+    const emitInboundSummary = (entry) => {
+      const inbound = entry.inbound;
+      emit('harness.provider_frame_received_summary', { harness_socket_ordinal: entry.epoch, received_count: inbound.received,
+        emitted_count: inbound.emitted, suppressed_count: inbound.suppressed, pending_repeat_count: inbound.repeats,
+        oversized_count: inbound.oversized, unparsed_count: inbound.unparsed, cap_reached: inbound.capReached });
+    };
+    const recordInbound = (entry, projection, ordinal) => {
+      const inbound = entry.inbound;
+      const key = JSON.stringify(projection);
+      if (key === inbound.lastKey && inbound.repeats + 1 < INBOUND_REPEAT_FLUSH) { inbound.repeats += 1; inbound.suppressed += 1; return; }
+      if (inbound.emitted >= INBOUND_MAX_EVENTS) {
+        inbound.suppressed += 1;
+        if (!inbound.capReached) { inbound.capReached = true; emit('harness.provider_frame_received_capped', { harness_socket_ordinal: entry.epoch, inbound_ordinal: ordinal, emitted_count: inbound.emitted }); }
+        return;
+      }
+      inbound.emitted += 1;
+      emit('harness.provider_frame_received', { harness_socket_ordinal: entry.epoch, inbound_ordinal: ordinal,
+        repeats_suppressed_before: key === inbound.lastKey ? inbound.repeats : 0, previous_repeats_suppressed: key === inbound.lastKey ? 0 : inbound.repeats, ...projection });
+      inbound.lastKey = key;
+      inbound.repeats = 0;
+    };
+    const observeInbound = (entry, data) => {
+      const inbound = entry.inbound;
+      inbound.received += 1;
+      const ordinal = inbound.received;
+      inbound.chain = inbound.chain.then(async () => {
+        let projection;
+        try {
+          const read = await inboundText(data);
+          if (read.uninspectable) projection = { frame_kind: 'uninspectable' };
+          else if (read.oversized) { inbound.oversized += 1; projection = { frame_kind: 'oversized' }; }
+          else if (read.unrecognized) projection = { frame_kind: 'unrecognized_transport' };
+          else {
+            let payload;
+            try { payload = JSON.parse(read.text); } catch { inbound.unparsed += 1; payload = undefined; }
+            projection = payload === undefined ? { frame_kind: 'unparsed' } : projectInbound(payload);
+          }
+        } catch { projection = { frame_kind: 'uninspectable' }; }
+        recordInbound(entry, projection, ordinal);
+      }).catch(() => undefined);
+    };
+    const attachInboundCensus = (socket, entry) => {
+      entry.inbound = { received: 0, emitted: 0, suppressed: 0, oversized: 0, unparsed: 0, capReached: false, lastKey: null, repeats: 0, chain: Promise.resolve() };
+      try {
+        if (typeof socket.addEventListener !== 'function') return;
+        socket.addEventListener('message', (event) => {
+          // A frame whose data cannot even be read is still counted.
+          let data = UNREADABLE_INBOUND;
+          try { data = event ? event.data : undefined; } catch {}
+          try { observeInbound(entry, data); } catch {}
+        });
+        socket.addEventListener('close', () => { entry.inbound.chain = entry.inbound.chain.then(() => emitInboundSummary(entry)).catch(() => undefined); });
+      } catch {}
+    };
     const NativeWebSocket = window.WebSocket;
     class LabWebSocket extends NativeWebSocket {
       constructor(url, protocols) {
@@ -186,8 +321,10 @@ export function buildVoiceLabInitScript(options: InitScriptOptions): string {
         try { origin = new URL(String(url), location.href).origin; } catch {}
         if (origin && allowedWsOrigins.has(origin)) {
           state.socketEpoch += 1;
-          state.sockets.push({ socket: this, origin, epoch: state.socketEpoch, audioStreamEndCount: 0 });
+          const entry = { socket: this, origin, epoch: state.socketEpoch, audioStreamEndCount: 0 };
+          state.sockets.push(entry);
           if (state.sockets.length > 8) state.sockets.shift();
+          attachInboundCensus(this, entry);
           emit('harness.socket_observed', { origin, epoch: state.socketEpoch });
         }
       }
