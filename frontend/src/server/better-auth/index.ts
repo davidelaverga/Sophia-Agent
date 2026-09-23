@@ -1,1 +1,0 @@
-export { getSession } from "./server";

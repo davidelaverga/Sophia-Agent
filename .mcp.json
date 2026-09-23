@@ -1,8 +1,0 @@
-{
-  "mcpServers": {
-    "sentrux": {
-      "command": "sentrux",
-      "args": ["--mcp"]
-    }
-  }
-}

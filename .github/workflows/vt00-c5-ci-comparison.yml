@@ -1,0 +1,171 @@
+# VT00-C5 C087: one-off same-runner diagnostic, NOT a PR/required check.
+# Runs the PR151 backend CI setup (ubuntu-latest, Python 3.12, uv sync --group dev,
+# pandoc) against the exact base and head SHAs on ONE runner, then runs only the
+# CI-failing tests. Diagnostic results are recorded as-is. The job fails if any
+# selected test fails, so nothing is hidden. It gates nothing.
+name: vt00-c5-ci-comparison
+
+on:
+  push:
+    branches: [codex/vt00-c5-ci-comparison]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vt00-c5-ci-comparison
+  cancel-in-progress: false
+
+jobs:
+  same-runner-comparison:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      BASE_SHA: 3754c3022bcfc2be1e3b8d097040b7d81ad23ac6
+      HEAD_SHA: d467ab97464908b4e7c7752701eee9d24db7faf6
+      DECK_TESTS: >-
+        tests/test_deck_native_service.py::test_deck_native_lint_fix_rolls_back_seam_that_would_wrap_text
+        tests/test_deck_native_service.py::test_deck_native_lint_fix_repairs_canary_headline_and_kpi_overflow
+      MEMORY_TESTS: tests/test_memory_governance_worker_expiry_backoff.py
+    steps:
+      - name: Check out base (exact SHA)
+        uses: actions/checkout@v6
+        with:
+          repository: davidelaverga/Sophia-Agent
+          ref: 3754c3022bcfc2be1e3b8d097040b7d81ad23ac6
+          path: rev-base
+          persist-credentials: false
+
+      - name: Check out head (exact SHA)
+        uses: actions/checkout@v6
+        with:
+          repository: davidelaverga/Sophia-Agent
+          ref: d467ab97464908b4e7c7752701eee9d24db7faf6
+          path: rev-head
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        run: python -m pip install --upgrade pip uv
+
+      - name: Install pandoc (mirrors backend-unit-tests.yml)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends pandoc
+
+      - name: Runner provenance
+        shell: bash
+        run: |
+          # Actions runs `bash --noprofile --norc -e -o pipefail`; probes are
+          # informational and must never abort before the comparison runs.
+          set +e
+          set -u
+          mkdir -p "$RUNNER_TEMP/diag"
+          {
+            echo "utc_now=$(date -u +%FT%TZ)"
+            echo "uname=$(uname -a)"
+            echo "os_release=$(. /etc/os-release && echo "$PRETTY_NAME")"
+            echo "uptime_seconds=$(cut -d' ' -f1 /proc/uptime)"
+            echo "python=$(python -V 2>&1)"
+            echo "pip=$(python -m pip --version)"
+            echo "uv=$(uv --version)"
+            echo "pandoc=$(pandoc --version | head -1)"
+            echo "fc_list_count=$(fc-list 2>/dev/null | wc -l)"
+            echo "libfribidi=$(ldconfig -p | grep -c libfribidi || true)"
+            echo "libraqm=$(ldconfig -p | grep -c libraqm || true)"
+            echo "libharfbuzz=$(ldconfig -p | grep -c libharfbuzz || true)"
+          } | tee "$RUNNER_TEMP/diag/runner.txt"
+
+      - name: Run comparison (base then head, same runner)
+        shell: bash
+        run: |
+          # Actions invokes `bash --noprofile --norc -e -o pipefail`. Expected
+          # test failures must not abort before the other revision runs, so
+          # errexit is disabled here and every outcome is folded into status.
+          set +e
+          set -u
+          D="$RUNNER_TEMP/diag"
+          mkdir -p "$D"
+          status=0
+          for rev in base head; do
+            want="$BASE_SHA"; [ "$rev" = head ] && want="$HEAD_SHA"
+            P="$D/$rev-provenance.txt"
+            if ! cd "$GITHUB_WORKSPACE/rev-$rev/backend"; then
+              echo "$rev setup_failed=checkout_missing" | tee -a "$P" "$D/results.txt"; status=1; continue
+            fi
+            got="$(git rev-parse HEAD)"
+            echo "$rev sha=$got expected=$want" | tee -a "$P"
+            if [ "$got" != "$want" ]; then
+              echo "$rev setup_failed=sha_mismatch" | tee -a "$P" "$D/results.txt"; status=1; continue
+            fi
+            echo "uv.lock sha256=$(sha256sum uv.lock | cut -d' ' -f1)" | tee -a "$P"
+            uv sync --group dev > "$D/$rev-uv-sync.log" 2>&1
+            setup_rc=$?
+            echo "uv_sync_rc=$setup_rc" | tee -a "$P"
+            if [ "$setup_rc" -ne 0 ]; then
+              echo "$rev setup_failed=uv_sync rc=$setup_rc (tests not run)" | tee -a "$P" "$D/results.txt"; status=1; continue
+            fi
+            if git diff --quiet -- uv.lock; then
+              echo "lock_unchanged_after_sync=yes" | tee -a "$P"
+            else
+              echo "lock_unchanged_after_sync=no" | tee -a "$P"
+              echo "$rev setup_failed=uv_lock_changed_by_sync (tests not run)" | tee -a "$D/results.txt"; status=1; continue
+            fi
+            uv run python - >> "$P" 2>&1 <<'PY'
+          import sys, platform, importlib.metadata as md
+          from PIL import features
+          print("python", sys.version.split()[0], platform.platform())
+          for pkg in ("pillow", "python-pptx", "fonttools", "pytest"):
+              try: print(pkg, md.version(pkg))
+              except md.PackageNotFoundError: print(pkg, "absent")
+          for feat in ("raqm", "fribidi", "harfbuzz"):
+              print("PIL feature", feat, features.check(feat), features.version(feat))
+          print("PIL freetype2", features.version("freetype2"))
+          PY
+            prov_rc=$?
+            echo "provenance_import_rc=$prov_rc" | tee -a "$P"
+            cat "$P"
+            if [ "$prov_rc" -ne 0 ]; then
+              echo "$rev setup_failed=provenance_import rc=$prov_rc (tests not run)" | tee -a "$D/results.txt"; status=1; continue
+            fi
+            # Word-splitting of the test id lists is intentional.
+            # shellcheck disable=SC2086
+            PYTHONPATH=. uv run pytest $DECK_TESTS -v -p no:cacheprovider --junitxml="$D/$rev-deck.xml" > "$D/$rev-deck.log" 2>&1
+            deck_rc=$?
+            # shellcheck disable=SC2086
+            PYTHONPATH=. uv run pytest $MEMORY_TESTS -v -p no:cacheprovider --junitxml="$D/$rev-memory.xml" > "$D/$rev-memory.log" 2>&1
+            memory_rc=$?
+            echo "$rev deck_rc=$deck_rc memory_rc=$memory_rc" | tee -a "$D/results.txt"
+            for part in deck memory; do
+              echo "[$rev $part]" >> "$D/$rev-assertions.txt"
+              grep -hE "::.* (PASSED|FAILED|ERROR|SKIPPED)|^E  |^(FAILED|ERROR) |passed|failed" "$D/$rev-$part.log" >> "$D/$rev-assertions.txt" || true
+            done
+            cat "$D/$rev-assertions.txt"
+            [ "$deck_rc" -eq 0 ] && [ "$memory_rc" -eq 0 ] || status=1
+          done
+          {
+            echo "## VT00-C5 same-runner comparison (diagnostic, gates nothing)"
+            echo '```'; cat "$D/runner.txt" "$D/results.txt"; echo '```'
+            for rev in base head; do echo "### $rev"; echo '```'; cat "$D/$rev-assertions.txt" 2>/dev/null; echo '```'; done
+            echo "overall_status=$status"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "$status" > "$D/overall_status"
+          exit 0
+
+      - name: Upload diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vt00-c5-ci-comparison
+          path: ${{ runner.temp }}/diag
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Report diagnostic status truthfully
+        if: always()
+        run: |
+          s="$(cat "$RUNNER_TEMP/diag/overall_status" 2>/dev/null || echo 1)"
+          echo "diagnostic overall_status=$s (nonzero = at least one selected test failed or setup failed)"
+          exit "$s"
