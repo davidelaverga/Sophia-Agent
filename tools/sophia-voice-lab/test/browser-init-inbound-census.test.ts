@@ -111,7 +111,11 @@ describe("content-free inbound provider census", () => {
   it("coalesces identical repeats with explicit counts and caps distinct events without losing accounting", async () => {
     const { sandbox, settle, received } = harness();
     const socket = new sandbox.WebSocket("wss://provider.test/socket");
-    for (let index = 0; index < 100; index += 1) socket.deliver({ data: JSON.stringify({ sessionResumptionUpdate: { newHandle: `h${index}`, resumable: true } }) });
+    // Spaced below the observation-queue bound (64), so every frame is inspected.
+    for (let index = 0; index < 100; index += 1) {
+      socket.deliver({ data: JSON.stringify({ sessionResumptionUpdate: { newHandle: `h${index}`, resumable: true } }) });
+      if (index % 20 === 19) await settle();
+    }
     socket.deliver({ data: JSON.stringify({ sessionResumptionUpdate: { newHandle: "h", resumable: false } }) });
     await settle();
     const repeats = received().map((event: any) => [event.payload.inbound_ordinal, event.payload.repeats_suppressed_before, event.payload.previous_repeats_suppressed]);
@@ -119,11 +123,15 @@ describe("content-free inbound provider census", () => {
     expect(repeats).toEqual([[1, 0, 0], [26, 24, 0], [51, 24, 0], [76, 24, 0], [101, 0, 24]]);
     socket.deliverClose();
     await settle();
-    expect(received().at(-1).payload).toMatchObject({ received_count: 101, emitted_count: 5, suppressed_count: 96, pending_repeat_count: 0, cap_reached: false });
+    expect(received().at(-1).payload).toMatchObject({ received_count: 101, inspected_count: 101, emitted_count: 5, suppressed_count: 96, pending_repeat_count: 0,
+      cap_reached: false, queue_dropped_count: 0, uninspected_after_cap_count: 0, in_flight_count: 0, capture_limited: false });
 
     const capped = harness();
     const second = new capped.sandbox.WebSocket("wss://provider.test/socket");
-    for (let index = 0; index < 600; index += 1) second.deliver({ data: JSON.stringify({ serverContent: { outputTranscription: { text: "a".repeat(index) } } }) });
+    for (let index = 0; index < 600; index += 1) {
+      second.deliver({ data: JSON.stringify({ serverContent: { outputTranscription: { text: "a".repeat(index) } } }) });
+      if (index % 50 === 49) await capped.settle();
+    }
     await capped.settle();
     second.deliverClose();
     await capped.settle();
@@ -131,7 +139,10 @@ describe("content-free inbound provider census", () => {
     expect(events.filter((event: any) => event.kind === "harness.provider_frame_received")).toHaveLength(512);
     expect(events.filter((event: any) => event.kind === "harness.provider_frame_received_capped")).toEqual([
       expect.objectContaining({ payload: expect.objectContaining({ inbound_ordinal: 513, emitted_count: 512 }) })]);
-    expect(events.at(-1).payload).toMatchObject({ received_count: 600, emitted_count: 512, suppressed_count: 88, cap_reached: true });
+    // 501..550 were queued before the cap: 12 emitted, 38 inspected and
+    // suppressed. 551..600 arrive after the cap and are counted, never inspected.
+    expect(events.at(-1).payload).toMatchObject({ received_count: 600, inspected_count: 550, emitted_count: 512, suppressed_count: 38, cap_reached: true,
+      queue_dropped_count: 0, uninspected_after_cap_count: 50, in_flight_count: 0, capture_limited: true });
   });
 
   it("never alters, reorders or withholds what the product's own handlers receive", async () => {
@@ -160,5 +171,71 @@ describe("content-free inbound provider census", () => {
     await settle();
     expect(foreign.listeners.get("message")).toBeUndefined();
     expect(received()).toHaveLength(4);
+  });
+
+  it("enforces the 1 MiB bound in UTF-8 bytes, not UTF-16 code units", async () => {
+    const { sandbox, settle, received } = harness();
+    const socket = new sandbox.WebSocket("wss://provider.test/socket");
+    const over = JSON.stringify({ serverContent: { outputTranscription: { text: "€".repeat(349_530) } } });
+    const fits = JSON.stringify({ serverContent: { outputTranscription: { text: "€".repeat(300_000) } } });
+    expect(over.length).toBeLessThan(1_048_576); // fits in code units ...
+    expect(new TextEncoder().encode(over).length).toBeGreaterThan(1_048_576); // ... but not in bytes
+    socket.deliver({ data: over });
+    socket.deliver({ data: fits });
+    await settle();
+    socket.deliverClose();
+    await settle();
+    const events = received();
+    expect(events.filter((event: any) => event.kind === "harness.provider_frame_received").map((event: any) => [event.payload.frame_kind, event.payload.server_content?.output_transcription_utf8_bytes ?? null]))
+      .toEqual([["oversized", null], ["serverContent", 900_000]]);
+    expect(events.at(-1).payload).toMatchObject({ oversized_count: 1, received_count: 2, inspected_count: 2 });
+  });
+
+  it("bounds queued observation work behind a stalled Blob and accounts for every dropped frame", async () => {
+    const { sandbox, settle, received } = harness();
+    const socket = new sandbox.WebSocket("wss://provider.test/socket");
+    const seen: unknown[] = [];
+    socket.onmessage = (event: any) => seen.push(event.data);
+    let release!: (text: string) => void;
+    const stalled = { size: 24, text: () => new Promise<string>((resolve) => { release = resolve; }) };
+    socket.deliver({ data: stalled });
+    for (let index = 0; index < 200; index += 1) socket.deliver({ data: JSON.stringify({ serverContent: { outputTranscription: { text: "b".repeat(index % 7) } } }) });
+    // The product saw every frame immediately, while the census is stalled.
+    expect(seen).toHaveLength(201);
+    expect(seen[0]).toBe(stalled);
+    await settle();
+    const limited = received().filter((event: any) => event.kind === "harness.provider_frame_received_limited");
+    expect(limited).toEqual([expect.objectContaining({ payload: expect.objectContaining({ inbound_ordinal: 65, reason: "observation_queue_frames", queued_frames: 64 }) })]);
+    expect(received().filter((event: any) => event.kind === "harness.provider_frame_received")).toHaveLength(0); // ordered behind the Blob
+    release(JSON.stringify({ setupComplete: {} }));
+    await settle();
+    socket.deliverClose();
+    await settle();
+    const events = received();
+    const perFrame = events.filter((event: any) => event.kind === "harness.provider_frame_received").map((event: any) => event.payload.inbound_ordinal);
+    expect(perFrame[0]).toBe(1);
+    expect(perFrame).toEqual([...perFrame].sort((a: number, b: number) => a - b));
+    expect(Math.max(...perFrame)).toBeLessThanOrEqual(64); // only admitted frames were inspected
+    expect(events.at(-1).payload).toMatchObject({ received_count: 201, inspected_count: 64, queue_dropped_count: 137, uninspected_after_cap_count: 0,
+      in_flight_count: 0, capture_limited: true });
+    const summary = events.at(-1).payload;
+    expect(summary.emitted_count + summary.suppressed_count + summary.queue_dropped_count + summary.uninspected_after_cap_count + summary.in_flight_count).toBe(201);
+  });
+
+  it("bounds retained observation bytes as well as frame count", async () => {
+    const { sandbox, settle, received } = harness();
+    const socket = new sandbox.WebSocket("wss://provider.test/socket");
+    let release!: (text: string) => void;
+    socket.deliver({ data: { size: 24, text: () => new Promise<string>((resolve) => { release = resolve; }) } });
+    // ~1.8 MB retained estimate each (UTF-16): the fifth would exceed 8 MiB.
+    for (let index = 0; index < 6; index += 1) socket.deliver({ data: JSON.stringify({ serverContent: { outputTranscription: { text: "c".repeat(900_000) } } }) });
+    await settle();
+    expect(received().filter((event: any) => event.kind === "harness.provider_frame_received_limited")).toEqual([
+      expect.objectContaining({ payload: expect.objectContaining({ inbound_ordinal: 6, reason: "observation_queue_bytes", queued_frames: 5 }) })]);
+    release(JSON.stringify({ setupComplete: {} }));
+    await settle();
+    socket.deliverClose();
+    await settle();
+    expect(received().at(-1).payload).toMatchObject({ received_count: 7, inspected_count: 5, queue_dropped_count: 2, in_flight_count: 0, capture_limited: true });
   });
 });

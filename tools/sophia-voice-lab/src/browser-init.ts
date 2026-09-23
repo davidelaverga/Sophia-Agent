@@ -186,9 +186,15 @@ export function buildVoiceLabInitScript(options: InitScriptOptions): string {
     // non-negative token counts, and unknown-key COUNTS. Never text, audio,
     // handles, field names outside the allowlist, or any other value.
     // Identical consecutive projections are coalesced with explicit counts;
-    // emitted events per socket are capped, and the close summary accounts
-    // for every received frame (received = emitted + suppressed).
+    // emitted events per socket are capped. Observation WORK is bounded too:
+    // at most INBOUND_MAX_QUEUED_FRAMES / _BYTES (estimate) await inspection,
+    // oversized frames are typed without retaining their payload, and after
+    // the cap nothing is inspected. Every frame is accounted for in the close
+    // summary: received = emitted + suppressed + queue_dropped
+    // + uninspected_after_cap + in_flight.
     const INBOUND_MAX_BYTES = 1048576;
+    const INBOUND_MAX_QUEUED_FRAMES = 64;
+    const INBOUND_MAX_QUEUED_BYTES = 8388608;
     const INBOUND_MAX_EVENTS = 512;
     const INBOUND_REPEAT_FLUSH = 25;
     const SERVER_TOP_KEYS = ['setupComplete', 'serverContent', 'toolCall', 'toolCallCancellation', 'goAway', 'sessionResumptionUpdate', 'usageMetadata'];
@@ -252,9 +258,24 @@ export function buildVoiceLabInitScript(options: InitScriptOptions): string {
       };
     };
     const UNREADABLE_INBOUND = Symbol('unreadable');
+    const OVERSIZED_INBOUND = Symbol('oversized');
+    const isBinaryInbound = (data) => data instanceof ArrayBuffer || ArrayBuffer.isView(data);
+    const isBlobInbound = (data) => Boolean(data) && typeof data.size === 'number' && typeof data.text === 'function';
+    // Cheap, synchronous screen: every UTF-16 code unit encodes to >= 1 UTF-8 byte.
+    const inboundCheaplyOversized = (data) => typeof data === 'string' ? data.length > INBOUND_MAX_BYTES
+      : isBinaryInbound(data) ? data.byteLength > INBOUND_MAX_BYTES : isBlobInbound(data) ? data.size > INBOUND_MAX_BYTES : false;
+    const inboundRetainedBytes = (data) => typeof data === 'string' ? data.length * 2
+      : isBinaryInbound(data) ? data.byteLength : isBlobInbound(data) ? data.size : 0;
     const inboundText = async (data) => {
       if (data === UNREADABLE_INBOUND) return { uninspectable: true };
-      if (typeof data === 'string') return data.length > INBOUND_MAX_BYTES ? { oversized: true } : { text: data };
+      if (data === OVERSIZED_INBOUND) return { oversized: true };
+      if (typeof data === 'string') {
+        if (data.length > INBOUND_MAX_BYTES) return { oversized: true };
+        // Enforce the UTF-8 byte bound before parsing; encode only when the
+        // code-unit count cannot already prove the string fits.
+        if (data.length * 3 > INBOUND_MAX_BYTES && new TextEncoder().encode(data).length > INBOUND_MAX_BYTES) return { oversized: true };
+        return { text: data };
+      }
       if (data instanceof ArrayBuffer || ArrayBuffer.isView(data)) return data.byteLength > INBOUND_MAX_BYTES ? { oversized: true } : { text: new TextDecoder().decode(data) };
       if (data && typeof data.size === 'number' && typeof data.text === 'function') return data.size > INBOUND_MAX_BYTES ? { oversized: true } : { text: await data.text() };
       return { unrecognized: true };
@@ -262,8 +283,10 @@ export function buildVoiceLabInitScript(options: InitScriptOptions): string {
     const emitInboundSummary = (entry) => {
       const inbound = entry.inbound;
       emit('harness.provider_frame_received_summary', { harness_socket_ordinal: entry.epoch, received_count: inbound.received,
-        emitted_count: inbound.emitted, suppressed_count: inbound.suppressed, pending_repeat_count: inbound.repeats,
-        oversized_count: inbound.oversized, unparsed_count: inbound.unparsed, cap_reached: inbound.capReached });
+        inspected_count: inbound.emitted + inbound.suppressed, emitted_count: inbound.emitted, suppressed_count: inbound.suppressed,
+        pending_repeat_count: inbound.repeats, oversized_count: inbound.oversized, unparsed_count: inbound.unparsed, cap_reached: inbound.capReached,
+        queue_dropped_count: inbound.queueDropped, uninspected_after_cap_count: inbound.uninspectedAfterCap, in_flight_count: inbound.queued,
+        capture_limited: inbound.queueDropped > 0 || inbound.uninspectedAfterCap > 0 });
     };
     const recordInbound = (entry, projection, ordinal) => {
       const inbound = entry.inbound;
@@ -284,10 +307,30 @@ export function buildVoiceLabInitScript(options: InitScriptOptions): string {
       const inbound = entry.inbound;
       inbound.received += 1;
       const ordinal = inbound.received;
+      // After the event cap nothing is inspected; the frame is only counted.
+      if (inbound.emitted >= INBOUND_MAX_EVENTS) { inbound.uninspectedAfterCap += 1; return; }
+      let observed = data;
+      let retained = 0;
+      try {
+        if (observed !== UNREADABLE_INBOUND && inboundCheaplyOversized(observed)) observed = OVERSIZED_INBOUND;
+        retained = typeof observed === 'symbol' ? 0 : inboundRetainedBytes(observed);
+      } catch { observed = UNREADABLE_INBOUND; retained = 0; }
+      if (inbound.queued + 1 > INBOUND_MAX_QUEUED_FRAMES || inbound.queuedBytes + retained > INBOUND_MAX_QUEUED_BYTES) {
+        inbound.queueDropped += 1;
+        if (!inbound.queueLimited) {
+          inbound.queueLimited = true;
+          emit('harness.provider_frame_received_limited', { harness_socket_ordinal: entry.epoch, inbound_ordinal: ordinal,
+            reason: inbound.queued + 1 > INBOUND_MAX_QUEUED_FRAMES ? 'observation_queue_frames' : 'observation_queue_bytes',
+            queued_frames: inbound.queued, queued_bytes_estimate: inbound.queuedBytes });
+        }
+        return;
+      }
+      inbound.queued += 1;
+      inbound.queuedBytes += retained;
       inbound.chain = inbound.chain.then(async () => {
         let projection;
         try {
-          const read = await inboundText(data);
+          const read = await inboundText(observed);
           if (read.uninspectable) projection = { frame_kind: 'uninspectable' };
           else if (read.oversized) { inbound.oversized += 1; projection = { frame_kind: 'oversized' }; }
           else if (read.unrecognized) projection = { frame_kind: 'unrecognized_transport' };
@@ -297,11 +340,15 @@ export function buildVoiceLabInitScript(options: InitScriptOptions): string {
             projection = payload === undefined ? { frame_kind: 'unparsed' } : projectInbound(payload);
           }
         } catch { projection = { frame_kind: 'uninspectable' }; }
+        observed = null;
+        inbound.queued -= 1;
+        inbound.queuedBytes -= retained;
         recordInbound(entry, projection, ordinal);
       }).catch(() => undefined);
     };
     const attachInboundCensus = (socket, entry) => {
-      entry.inbound = { received: 0, emitted: 0, suppressed: 0, oversized: 0, unparsed: 0, capReached: false, lastKey: null, repeats: 0, chain: Promise.resolve() };
+      entry.inbound = { received: 0, emitted: 0, suppressed: 0, oversized: 0, unparsed: 0, capReached: false, lastKey: null, repeats: 0,
+        queued: 0, queuedBytes: 0, queueDropped: 0, queueLimited: false, uninspectedAfterCap: 0, chain: Promise.resolve() };
       try {
         if (typeof socket.addEventListener !== 'function') return;
         socket.addEventListener('message', (event) => {
