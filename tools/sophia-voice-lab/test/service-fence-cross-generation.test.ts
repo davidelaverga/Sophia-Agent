@@ -27,6 +27,41 @@ const DEPLOYED_LAB_SHA = "d".repeat(40);
 const UPGRADED_LAB_SHA = "ab".repeat(20);
 const LANGGRAPH_SHA = "e".repeat(40);
 
+/** The receiver's owner-dispatch endpoint as the fixture's fetch sees it. It
+ * shares the fixture's control object, so tests that mutate f.control() act on
+ * the same record the receiver serves. */
+type FixtureReceiver = {
+  control: RecoveryControlRecord; serviceId: string; now: () => Date; authority: unknown;
+  expectedRecoveryDeployment: { frontend: string; backend: string; voice: string };
+  // Null while the deployed generation serves; set when the receiver is
+  // upgraded with the exact approved receipt hash, mirroring production config.
+  approvedReceiptSha256: string | null;
+  failTerminationAppend: boolean;
+  // Mirrors service.ts: the proof is persisted first, then the canonical
+  // platform-termination event is appended under its durable dedupe key.
+  terminations: Map<string, Record<string, unknown>>;
+};
+
+function receiverOwnerDispatch(receiver: FixtureReceiver, body: Record<string, unknown> & { action: string }): Response {
+  const { control, serviceId, now } = receiver;
+  let dispatchAllowed = false;
+  if (body.action === "prepare") { control.genericOwnerDispatch = prepareGenericOwnerDispatch(control, { ...body, workerServiceId: serviceId } as never, now()); control.version++; }
+  if (body.action === "consume") { dispatchAllowed = control.genericOwnerDispatch?.consumedAt === null; control.genericOwnerDispatch = consumeGenericOwnerDispatch(control, body as never, now()); if (dispatchAllowed) control.version++; }
+  if (body.action === "ingest_service_fence") {
+    // The deployed generation cannot parse a v2 receipt at all.
+    if (receiver.approvedReceiptSha256 === null) return new Response("{}", { status: 400 });
+    const result = ingestGenericOwnerLoss(control, { ...body, authority: receiver.authority,
+      expectedWorkerServiceIdSha256: sha256(serviceId), expectedRecoveryDeployment: receiver.expectedRecoveryDeployment, expectedLangGraphSha: LANGGRAPH_SHA,
+      expectedLabSha: serviceFenceSourceLabSha(body.receipt, UPGRADED_LAB_SHA, receiver.approvedReceiptSha256) } as never, now());
+    control.genericOwnerLoss = result.proof; control.version = result.version;
+    if (receiver.failTerminationAppend) { receiver.failTerminationAppend = false; return new Response("{}", { status: 500 }); }
+    const termination = derivePlatformExecutionTermination(control, result.proof as never);
+    receiver.terminations.set(termination.dedupeKey, termination.payload);
+  }
+  if (!["inspect", "prepare", "consume", "ingest_service_fence"].includes(body.action)) throw new Error("Unexpected mutation");
+  return new Response(JSON.stringify({ control, dispatchAllowed, workerServiceId: serviceId }), { status: 200 });
+}
+
 async function crossGenerationFixture(options: { retired?: boolean; preActionInventoryId?: string; failTerminationAppendOnce?: boolean } = {}) {
   const dir = await mkdtemp(path.join(os.tmpdir(), "vt00-cross-gen-")); dirs.push(dir);
   const keys = { external_mcp_client: path.join(dir, "client.key"), deployment_control: path.join(dir, "deploy.key"), platform_plugin: path.join(dir, "platform.key") };
@@ -56,36 +91,14 @@ async function crossGenerationFixture(options: { retired?: boolean; preActionInv
 
   let restartedAt: Date | null = null;
   let restarts = 0;
-  // Null while the deployed generation serves; set when the receiver is
-  // upgraded with the exact approved receipt hash, mirroring production config.
-  let upgradedApprovedReceiptSha256: string | null = null;
-  // Mirrors service.ts: the proof is persisted first, then the canonical
-  // platform-termination event is appended under its durable dedupe key.
-  const terminations = new Map<string, Record<string, unknown>>();
-  let failTerminationAppend = options.failTerminationAppendOnce === true;
   const entries: ServiceOwnerFenceCheckpoint[] = [];
   const expectedRecoveryDeployment = { frontend: "1".repeat(40), backend: "2".repeat(40), voice: "3".repeat(40) };
+  const receiver: FixtureReceiver = { control, serviceId, now, authority: initialized.publicConfig.deployment_control, expectedRecoveryDeployment,
+    approvedReceiptSha256: null, failTerminationAppend: options.failTerminationAppendOnce === true, terminations: new Map() };
   const fetchImpl: typeof fetch = async (raw, init) => {
     const url = new URL(raw instanceof Request ? raw.url : raw.toString());
     const json = (value: unknown) => new Response(JSON.stringify(value), { status: 200 });
-    if (url.origin === GENERIC_RECOVERY_ORIGIN && url.pathname.endsWith("owner-dispatch")) {
-      const body = JSON.parse(String(init?.body)); let dispatchAllowed = false;
-      if (body.action === "prepare") { control.genericOwnerDispatch = prepareGenericOwnerDispatch(control, { ...body, workerServiceId: serviceId }, now()); control.version++; }
-      if (body.action === "consume") { dispatchAllowed = control.genericOwnerDispatch?.consumedAt === null; control.genericOwnerDispatch = consumeGenericOwnerDispatch(control, body, now()); if (dispatchAllowed) control.version++; }
-      if (body.action === "ingest_service_fence") {
-        // The deployed generation cannot parse a v2 receipt at all.
-        if (upgradedApprovedReceiptSha256 === null) return new Response("{}", { status: 400 });
-        const result = ingestGenericOwnerLoss(control, { ...body, authority: initialized.publicConfig.deployment_control,
-          expectedWorkerServiceIdSha256: sha256(serviceId), expectedRecoveryDeployment, expectedLangGraphSha: LANGGRAPH_SHA,
-          expectedLabSha: serviceFenceSourceLabSha(body.receipt, UPGRADED_LAB_SHA, upgradedApprovedReceiptSha256) } as never, now());
-        control.genericOwnerLoss = result.proof; control.version = result.version;
-        if (failTerminationAppend) { failTerminationAppend = false; return new Response("{}", { status: 500 }); }
-        const termination = derivePlatformExecutionTermination(control, result.proof as never);
-        terminations.set(termination.dedupeKey, termination.payload);
-      }
-      if (!["inspect", "prepare", "consume", "ingest_service_fence"].includes(body.action)) throw new Error("Unexpected mutation");
-      return json({ control, dispatchAllowed, workerServiceId: serviceId });
-    }
+    if (url.origin === GENERIC_RECOVERY_ORIGIN && url.pathname.endsWith("owner-dispatch")) return receiverOwnerDispatch(receiver, JSON.parse(String(init?.body)));
     // Before the prospective action the ORIGINAL pod is still the live owner.
     const ownerGone = options.retired || restartedAt !== null;
     const liveInventoryId = ownerGone ? `${serviceId}-9kd2f` : options.preActionInventoryId ?? originalInventoryId;
@@ -115,9 +128,9 @@ async function crossGenerationFixture(options: { retired?: boolean; preActionInv
     checkpoint: async (entry: ServiceOwnerFenceCheckpoint) => { entries.push(structuredClone(entry)); },
     fetchImpl, now, sleep: async (ms: number) => { clock += ms; }, intervalMs: 10_000, timeoutMs: 400_000 };
   return { input, run, serviceId, allocatedWorkerId, originalInventoryId, initialized,
-    expectedRecoveryDeployment, control: () => control, entries, restarts: () => restarts, terminations: () => terminations.size,
+    expectedRecoveryDeployment, control: () => control, entries, restarts: () => restarts, terminations: () => receiver.terminations.size,
     advance: (ms: number) => { clock += ms; },
-    upgradeReceiver: (approvedReceiptSha256: string) => { upgradedApprovedReceiptSha256 = approvedReceiptSha256; } };
+    upgradeReceiver: (approvedReceiptSha256: string) => { receiver.approvedReceiptSha256 = approvedReceiptSha256; } };
 }
 
 /** Writes the operator's secure CLI inputs exactly as production supplies them. */

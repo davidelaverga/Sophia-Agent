@@ -29,28 +29,7 @@ export async function publishServiceOwnerFence(input: {
       body: JSON.stringify(body),
     });
     if (response.status !== 200) throw new Error(`Service fence publication HTTP ${response.status}.`);
-    const bytes = Buffer.from(await response.arrayBuffer());
-    if (bytes.byteLength > 2_000_000) throw new Error("Service fence publication response too large.");
-    const result = z.object({ dispatchAllowed: z.literal(false), workerServiceId: z.literal(input.workerServiceId), control: z.object({
-      binding: RecoveryControlBindingSchema, version: z.number().int().positive(), browserAllocationEver: z.literal(true),
-      browserAllocationBinding: z.unknown(), genericOwnerDispatch: z.unknown(), genericOwnerLoss: z.unknown().optional(),
-      // A v2 proof binds the retained execution ownership; without it neither
-      // the receipt nor a stored v2 proof can be verified against this control.
-      executionOwnership: z.unknown().optional(),
-      liveCleanupComplete: z.boolean(), remotePurgeComplete: z.boolean(),
-      contentPurgedAt: z.string().datetime().nullable(), retentionPurgeDueAt: z.string().datetime().nullable(),
-    }).passthrough() }).strict().parse(JSON.parse(bytes.toString("utf8")));
-    const raw = result.control;
-    if (raw.binding.runId !== input.runId) throw new Error("Service fence publication control mismatch.");
-    return { binding: raw.binding, version: raw.version, browserAllocationEver: true,
-      browserAllocationBinding: validateRecoveryAllocationBinding(raw.binding, raw.browserAllocationBinding),
-      genericOwnerDispatch: parseGenericOwnerDispatch(raw.genericOwnerDispatch),
-      ...(raw.executionOwnership === undefined || raw.executionOwnership === null
-        ? {} : { executionOwnership: parseExecutionOwnership(raw.executionOwnership) }),
-      ...(raw.genericOwnerLoss ? { genericOwnerLoss: parseVerifiedServiceOwnerFence(raw.genericOwnerLoss) } : {}),
-      liveCleanupComplete: raw.liveCleanupComplete, remotePurgeComplete: raw.remotePurgeComplete,
-      contentPurgedAt: raw.contentPurgedAt ? new Date(raw.contentPurgedAt) : null,
-      retentionPurgeDueAt: raw.retentionPurgeDueAt ? new Date(raw.retentionPurgeDueAt) : null };
+    return parsePublicationControl(Buffer.from(await response.arrayBuffer()), input.runId, input.workerServiceId);
   };
   const verified = (control: RecoveryControlRecord) => {
     const stored = control.genericOwnerLoss ? parseVerifiedServiceOwnerFence(control.genericOwnerLoss, control) : null;
@@ -94,4 +73,30 @@ export async function publishServiceOwnerFence(input: {
     if (proof && !v2) return { status: "ingested" as const, proofSha256: proof.proofSha256, replay: true, cleanupProven: false as const };
   } catch { /* Leave publication unconfirmed, never infer resource closure. */ }
   return { status: "unconfirmed" as const, proofSha256: null, replay: false, cleanupProven: false as const };
+}
+
+/** The receiver's owner-dispatch envelope, bounded and reduced to the exact
+ * control record every verifier joins against. Errors are unchanged. */
+function parsePublicationControl(bytes: Buffer, runId: string, workerServiceId: string): RecoveryControlRecord {
+  if (bytes.byteLength > 2_000_000) throw new Error("Service fence publication response too large.");
+  const result = z.object({ dispatchAllowed: z.literal(false), workerServiceId: z.literal(workerServiceId), control: z.object({
+    binding: RecoveryControlBindingSchema, version: z.number().int().positive(), browserAllocationEver: z.literal(true),
+    browserAllocationBinding: z.unknown(), genericOwnerDispatch: z.unknown(), genericOwnerLoss: z.unknown().optional(),
+    // A v2 proof binds the retained execution ownership; without it neither
+    // the receipt nor a stored v2 proof can be verified against this control.
+    executionOwnership: z.unknown().optional(),
+    liveCleanupComplete: z.boolean(), remotePurgeComplete: z.boolean(),
+    contentPurgedAt: z.string().datetime().nullable(), retentionPurgeDueAt: z.string().datetime().nullable(),
+  }).passthrough() }).strict().parse(JSON.parse(bytes.toString("utf8")));
+  const raw = result.control;
+  if (raw.binding.runId !== runId) throw new Error("Service fence publication control mismatch.");
+  return { binding: raw.binding, version: raw.version, browserAllocationEver: true,
+    browserAllocationBinding: validateRecoveryAllocationBinding(raw.binding, raw.browserAllocationBinding),
+    genericOwnerDispatch: parseGenericOwnerDispatch(raw.genericOwnerDispatch),
+    ...(raw.executionOwnership === undefined || raw.executionOwnership === null
+      ? {} : { executionOwnership: parseExecutionOwnership(raw.executionOwnership) }),
+    ...(raw.genericOwnerLoss ? { genericOwnerLoss: parseVerifiedServiceOwnerFence(raw.genericOwnerLoss) } : {}),
+    liveCleanupComplete: raw.liveCleanupComplete, remotePurgeComplete: raw.remotePurgeComplete,
+    contentPurgedAt: raw.contentPurgedAt ? new Date(raw.contentPurgedAt) : null,
+    retentionPurgeDueAt: raw.retentionPurgeDueAt ? new Date(raw.retentionPurgeDueAt) : null };
 }

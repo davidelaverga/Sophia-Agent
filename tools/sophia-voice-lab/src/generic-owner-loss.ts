@@ -62,10 +62,15 @@ const verifiedSchema = z.object({
 }).strict();
 export type VerifiedGenericOwnerLoss = z.infer<typeof verifiedSchema> | VerifiedServiceOwnerFence;
 
+/** Exactly the verified service-fence generations routed to their own parser. */
+const VERIFIED_SERVICE_FENCE_SCHEMAS: ReadonlySet<unknown> = new Set([
+  "sophia.voice-lab.verified-service-owner-fence.v1",
+  "sophia.voice-lab.verified-service-owner-fence.v2",
+]);
+
 export function parseVerifiedGenericOwnerLoss(raw: unknown, control?: RecoveryControlRecord): VerifiedGenericOwnerLoss {
   if (raw && typeof raw === "object" && "schema" in raw
-    && (raw.schema === "sophia.voice-lab.verified-service-owner-fence.v1"
-      || raw.schema === "sophia.voice-lab.verified-service-owner-fence.v2")) return parseVerifiedServiceOwnerFence(raw, control);
+    && VERIFIED_SERVICE_FENCE_SCHEMAS.has(raw.schema)) return parseVerifiedServiceOwnerFence(raw, control);
   const value = verifiedSchema.parse(raw);
   const { proofSha256, ...core } = value;
   if (canonicalRequestHash(core) !== proofSha256) throw new Error("GENERIC_OWNER_PROOF_INVALID");

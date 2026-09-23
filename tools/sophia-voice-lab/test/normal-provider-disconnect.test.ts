@@ -85,6 +85,8 @@ it.each([
   [false, false, "stale-epoch"],
   // Finalization fails before the disconnect is awaited: the listener must still go.
   [false, false, "finalization-fails"],
+  // A rejected attempt observed while end drains after the 202 still counts (C011).
+  [false, false, "late-rejection"],
 ] as const)("real driver end consumes receiving ack; rejected=%s prior-activation=%s mode=%s", async (rejected, priorActivation, mode) => {
   const config = testConfig();
   const ownedRun = testRun({ scenarioId: "V-O01", providerSessionId: run.providerSessionId, providerEpoch: mode === "stale-epoch" ? 1 : 2,
@@ -182,7 +184,10 @@ it.each([
   if (priorActivation) emit(networkResponse("/api/sophia/voice/gemini/activate", {
     activated: true, session_id: ownedRun.providerSessionId, provider_connection_epoch: 2, provider_activation_receipt: activation,
   }, 202, activation));
-  vi.spyOn(driver, "drain").mockResolvedValue([]);
+  vi.spyOn(driver, "drain").mockImplementation(async () => {
+    if (mode === "late-rejection") emit(networkResponse("/api/sophia/voice/gemini/disconnect", { ok: false }, 503, f.request));
+    return [];
+  });
   const listenersBeforeEnd = responseListeners.length;
   if (mode === "finalization-fails") {
     const error = await driver.end(ownedRun, "finalize", "cleanup").catch(error => error);
@@ -205,7 +210,7 @@ it.each([
     const ended = await driver.end(ownedRun, "finalize", "cleanup");
     const acknowledged = ended.events.find(event => event.kind === "provider.disconnect_acknowledged")!;
     expect(acknowledged.payload).toMatchObject({ provider_connection_epochs: [1, 2] });
-    if (mode === "retried") expect(acknowledged.payload.rejected_receiving_attempt_count).toBeGreaterThanOrEqual(1);
+    if (mode === "retried" || mode === "late-rejection") expect(acknowledged.payload.rejected_receiving_attempt_count).toBeGreaterThanOrEqual(1);
     else expect(acknowledged.payload.rejected_receiving_attempt_count).toBe(0);
     expect(ended.events).toContainEqual(expect.objectContaining({ kind: "cleanup.provider_transport_closed",
       payload: expect.objectContaining({ proof_basis: "authenticated_receiving_disconnect_acknowledgement" }) }));
@@ -239,4 +244,52 @@ it.each(["valid", "unauthorized", "foreign-origin", "mutated-echo", "wrong-sessi
   const result = validateNormalProviderDisconnectResponse(f.response, origin, run, accepted ? [accepted] : []);
   if (failure === "valid") await expect(result).resolves.toMatchObject({ provider_connection_epochs: [1, 2], prior_activation_acknowledgement_sha256s: [expect.stringMatching(/^[a-f0-9]{64}$/)] });
   else await expect(result).rejects.toMatchObject({ detail: { code: "PROVIDER_CLEANUP_UNCONFIRMED" } });
+});
+
+// C010 E/F moved these predicates into helpers (one clause inverted at a
+// time), so every clause is pinned individually against the public boundary.
+function activationReceipt(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return { schema: "sophia_gemini_browser_provider_activation_v1", activation_id: "00000000-0000-4000-8000-000000000099",
+    session_id: run.providerSessionId, previous_activated_epoch: 1, candidate_epoch: 2, websocket_open_observed: true,
+    close_observer_attached: true, websocket_opened_at: close(1).websocket_closed_at, previous_socket_close_receipt: close(1), ...overrides };
+}
+function activationResponse(receipt: Record<string, unknown>, request: unknown = structuredClone(receipt)): Response {
+  return {
+    url: () => `${origin}/api/sophia/voice/gemini/activate`, status: () => 202, headers: () => ({ "content-type": "application/json" }),
+    json: async () => ({ activated: true, session_id: receipt.session_id, provider_connection_epoch: receipt.candidate_epoch, provider_activation_receipt: receipt }),
+    request: () => ({ method: () => "POST", postDataJSON: () => request }),
+  } as unknown as Response;
+}
+
+it("accepts the exact activation receipt shape", async () => {
+  await expect(readProviderActivationAcknowledgement(activationResponse(activationReceipt()), origin)).resolves.toMatchObject({ candidate_epoch: 2 });
+});
+
+it.each([
+  ["extra key", { extra: true }],
+  ["wrong schema", { schema: "sophia_gemini_browser_provider_activation_v0" }],
+  ["non-string activation id", { activation_id: 99 }],
+  ["non-v4 activation id", { activation_id: "00000000-0000-1000-8000-000000000099" }],
+  ["non-string session id", { session_id: 7 }],
+  ["unsafe session id", { session_id: "bad session" }],
+  ["non-integer previous epoch", { previous_activated_epoch: 1.5, candidate_epoch: 2.5 }],
+  ["negative previous epoch", { previous_activated_epoch: -1, candidate_epoch: 0 }],
+  ["non-consecutive candidate", { candidate_epoch: 3 }],
+  ["candidate beyond 64", { previous_activated_epoch: 64, candidate_epoch: 65 }],
+  ["open not observed", { websocket_open_observed: false }],
+  ["close observer missing", { close_observer_attached: false }],
+  ["non-canonical opened_at", { websocket_opened_at: "yesterday" }],
+] as const)("refuses an activation receipt with %s", async (_label, overrides) => {
+  await expect(readProviderActivationAcknowledgement(activationResponse(activationReceipt(overrides)), origin)).resolves.toBeNull();
+});
+
+it.each([
+  ["a candidate beyond the owned epoch", [activationReceipt({ previous_activated_epoch: 2, candidate_epoch: 3, previous_socket_close_receipt: close(2) })]],
+  ["two different receipts for one epoch", [activationReceipt(), activationReceipt({ activation_id: "00000000-0000-4000-8000-000000000098",
+    previous_socket_close_receipt: { ...close(1), websocket_close_code: 1001 } })]],
+] as const)("refuses normal end when prior activation evidence has %s", async (_label, activations) => {
+  const f = fixture();
+  f.request.browser_provider_close_receipts.shift(); f.body.browser_provider_close_receipts.shift();
+  await expect(validateNormalProviderDisconnectResponse(f.response, origin, run, activations as unknown as Record<string, unknown>[]))
+    .rejects.toMatchObject({ detail: { code: "PROVIDER_CLEANUP_UNCONFIRMED", details: { validation_stage: "prior_activation_binding" } } });
 });
