@@ -1101,8 +1101,8 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
     const disconnectDeadline = providerDisconnectDeadlineAt(Date.now(), this.config.endOperationSeconds, operationDeadlineAt);
     try {
       const refreshUrl = new URL(this.config.authRefreshPath, new URL(run.target.frontendUrl).origin).toString();
-      const { response: refreshed } = await requestBoundJson(session.context.request, "POST", refreshUrl, 15_000, frontendFinalizeCapability);
-      if (!refreshed.ok()) throw new VoiceLabError(labError("FINALIZATION_GRANT_REJECTED", `Frontend finalization grant refresh was rejected with HTTP ${refreshed.status()}.`, "authorization"));
+      const { response: refreshed, payload: refreshPayload } = await requestBoundJson(session.context.request, "POST", refreshUrl, 15_000, frontendFinalizeCapability);
+      if (!refreshed.ok()) throw new VoiceLabError(labError("FINALIZATION_GRANT_REJECTED", `Frontend finalization grant refresh was rejected with HTTP ${refreshed.status()}.`, "authorization", false, { status: refreshed.status(), product_error_code: productErrorCode(refreshPayload) }));
       const frontendOrigin = new URL(run.target.frontendUrl).origin;
       const finalizationResponse = session.page.waitForResponse((response) => isExactFinalizationResponse(response, frontendOrigin), { timeout: 20_000 }).catch(() => null);
       // Register before the UI click: stop fences its callbacks, but the owned
@@ -1110,7 +1110,10 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       disconnectObserver = observeProviderDisconnect(session.page, frontendOrigin, Math.max(1, disconnectDeadline - Date.now()));
       await clickEndSessionThroughExitGuards(session.page);
       const response = await finalizationResponse;
-      if (!response || response.status() !== 202 || !isJsonResponse(response)) throw new VoiceLabError(labError("PRODUCT_FINALIZATION_UNCONFIRMED", "The ordinary UI did not produce an exact-origin JSON 202 product finalization receipt.", "product", true, { status: response?.status() ?? null }));
+      if (!response || response.status() !== 202 || !isJsonResponse(response)) {
+        const failureBody = response && isJsonResponse(response) ? await response.json().catch(() => null) : null;
+        throw new VoiceLabError(labError("PRODUCT_FINALIZATION_UNCONFIRMED", "The ordinary UI did not produce an exact-origin JSON 202 product finalization receipt.", "product", true, { status: response?.status() ?? null, product_error_code: productErrorCode(failureBody) }));
+      }
       const responseBody = await response.json().catch(() => null) as Record<string, unknown> | null;
       const evidenceReceipt = responseBody?.evidence_receipt as Record<string, unknown> | undefined;
       if (!hasExactFinalizationEnvelope(run, responseBody, true) || typeof evidenceReceipt?.sha256 !== "string") throw new VoiceLabError(labError("FINALIZATION_ISOLATION_UNCONFIRMED", "Finalization receipt did not prove the bound synthetic run, cleanup obligation, exact retention policy, durable evidence, and exact isolation exclusions.", "product", false));
@@ -1145,7 +1148,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       }
       const cleanupUrl = new URL(this.config.authCleanupPath, new URL(run.target.frontendUrl).origin).toString();
       const { response: cleanup, payload: cleanupReceipt } = await requestBoundJson(session.context.request, "POST", cleanupUrl, 15_000, frontendCleanupCapability);
-      if (!authCleanupReceiptConfirmed(cleanup.ok(), cleanupReceipt, run)) throw new VoiceLabError(labError("AUTH_SESSION_CLEANUP_UNCONFIRMED", "Dedicated test auth session and cookie cleanup was not confirmed for this run.", "authorization", true, { status: cleanup.status() }));
+      if (!authCleanupReceiptConfirmed(cleanup.ok(), cleanupReceipt, run)) throw new VoiceLabError(labError("AUTH_SESSION_CLEANUP_UNCONFIRMED", "Dedicated test auth session and cookie cleanup was not confirmed for this run.", "authorization", true, { status: cleanup.status(), product_error_code: productErrorCode(cleanupReceipt) }));
       events.push({ kind: "auth.session_cleanup", source: "canonical", payload: redact({
         ...cleanupReceipt,
         cleanup_proof_schema: "sophia_voice_lab_execution_epoch_auth_cleanup_v1",
@@ -1616,6 +1619,47 @@ export async function requestBoundJsonWithOneTransientRetry(
   if (first && first.response.status() < 500) return first;
   if (retryDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
   return requestBoundJson(request, method, expectedUrl, timeoutMs, capability);
+}
+
+/** C046: a FINITE catalog, not a shape filter. Exactly the machine codes the
+ * frontend Voice Lab capability/ledger/auth routes and the gateway
+ * end-session/capability paths can return (extracted from b103 frontend and
+ * 7d0f gateway source). Any other string, however code-shaped, is omitted. */
+export const PRODUCT_ERROR_CODES: ReadonlySet<string> = new Set([
+  "voice_lab_auth_active_run_conflict", "voice_lab_auth_ledger_binding_mismatch", "voice_lab_auth_ledger_not_ready", "voice_lab_auth_run_not_found",
+  "voice_lab_auth_session_mutation_unconfirmed", "voice_lab_authenticated_principal_required", "voice_lab_canonical_transcript_invalid",
+  "voice_lab_capability_deployment_mismatch", "voice_lab_capability_expired_or_not_yet_valid", "voice_lab_capability_invalid_lifetime",
+  "voice_lab_capability_invalid_signature", "voice_lab_capability_malformed", "voice_lab_capability_missing",
+  "voice_lab_capability_operation_denied", "voice_lab_capability_wrong_audience", "voice_lab_capability_wrong_environment",
+  "voice_lab_capability_wrong_principal", "voice_lab_cleanup_failed", "voice_lab_cleanup_obligation_closed", "voice_lab_configuration_invalid",
+  "voice_lab_configuration_missing", "voice_lab_continue_failed", "voice_lab_control_adapter_disabled",
+  "voice_lab_dedicated_principal_session_conflict", "voice_lab_deployment_identity_unavailable", "voice_lab_disabled",
+  "voice_lab_expired_session_cleanup_unconfirmed", "voice_lab_finalization_evidence_invalid", "voice_lab_finalization_readback_conflict",
+  "voice_lab_finalization_receipt_readback_conflict", "voice_lab_finalization_started_at_invalid", "voice_lab_finalization_transaction_failed",
+  "voice_lab_finalization_transcript_conflict", "voice_lab_finalization_unavailable", "voice_lab_grant_failed", "voice_lab_grant_order_conflict",
+  "voice_lab_grant_replay_without_live_session", "voice_lab_grant_replayed_after_cleanup", "voice_lab_kill_switch_active",
+  "voice_lab_message_timestamp_invalid", "voice_lab_provisional_retention_binding_invalid", "voice_lab_provisional_retention_expired",
+  "voice_lab_provisioning_disabled", "voice_lab_provisioning_failed", "voice_lab_provisioning_kill_switch_required", "voice_lab_readiness_failed",
+  "voice_lab_recovery_internal_auth_required", "voice_lab_recovery_run_mismatch", "voice_lab_recovery_secret_not_distinct",
+  "voice_lab_refresh_failed", "voice_lab_request_body_not_allowed", "voice_lab_run_binding_expired", "voice_lab_run_binding_invalid_lifetime",
+  "voice_lab_run_binding_invalid_signature", "voice_lab_run_binding_malformed", "voice_lab_run_binding_mismatch", "voice_lab_run_binding_missing",
+  "voice_lab_session_binding_mismatch", "voice_lab_session_cleanup_binding_mismatch", "voice_lab_session_record_not_found",
+  "voice_lab_session_retention_missing", "voice_lab_session_thread_mismatch", "voice_lab_stale_grant_rejected",
+  "voice_lab_test_principal_not_provisioned", "voice_lab_transcript_base_revision_required", "voice_lab_transcript_revision_conflict",
+  "voice_lab_transcript_too_large",
+]);
+
+/** Content-free failure code from a product error body (C043-C046): only a
+ * catalogued code from `error`, `detail.code` or `code`. Free text, other
+ * fields and uncatalogued strings are never recorded. */
+export function productErrorCode(body: unknown): string | null {
+  const record = body !== null && typeof body === "object" && !Array.isArray(body) ? body as Record<string, unknown> : null;
+  if (!record) return null;
+  const detail = record.detail !== null && typeof record.detail === "object" && !Array.isArray(record.detail) ? record.detail as Record<string, unknown> : null;
+  for (const candidate of [record.error, detail?.code, record.code]) {
+    if (typeof candidate === "string" && PRODUCT_ERROR_CODES.has(candidate)) return candidate;
+  }
+  return null;
 }
 
 export function isExactFinalizationResponse(response: Pick<PlaywrightResponse, "url" | "request">, frontendOrigin: string): boolean {

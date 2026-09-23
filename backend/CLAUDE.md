@@ -468,6 +468,15 @@ and builds offline recap/memory context from the canonical stored rows. A
 revisionless end request is allowed to seed only a revision-zero transcript;
 after that it is non-authoritative and cannot overwrite or resurrect rows.
 
+Synthetic (Voice Lab) transcript writes must not issue any follow-up session
+metadata write after the revisioned write commits. The production store's
+`update` is an upsert, and the cleanup write fence's BEFORE INSERT branch
+refuses a synthetic session once it left `auth_provisional`; a post-commit
+metadata upsert therefore returned 500 after advancing the revision and split
+client/server revisions (J4 ordinary End 409, C051). Synthetic `message_count`
+is set atomically by finalization. Regression:
+`tests/test_voice_lab_synthetic_persist_end_revision.py`.
+
 ### Sandbox System (`packages/harness/deerflow/sandbox/`)
 
 **Interface**: Abstract `Sandbox` with `execute_command`, `read_file`, `write_file`, `list_dir`

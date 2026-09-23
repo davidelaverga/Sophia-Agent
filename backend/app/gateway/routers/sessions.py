@@ -1622,15 +1622,9 @@ async def persist_session_messages(
             records,
             expected_revision=body.base_revision,
         )
-        visible_records = canonical_visible_messages(snapshot.messages)
-        if snapshot.accepted:
-            _store.update(
-                owner_user_id,
-                session_id,
-                message_count=len(visible_records),
-                last_message_preview=None,
-                title=record.title,
-            )
+        # The synthetic CAS has already committed; no secondary upsert (the
+        # cleanup fence refuses it after the revision advanced). Finalization
+        # owns synthetic session metadata.
         return _synthetic_transcript_response(
             session_id=session_id,
             record=record,

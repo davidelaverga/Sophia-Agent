@@ -1,7 +1,9 @@
+import { readFile } from "node:fs/promises";
+import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import type { Response } from "playwright";
-import { DriverEndFailure, END_POST_DISCONNECT_RESERVE_MS, PlaywrightVoiceDriver, SYNTHETIC_FINALIZATION_EXCLUSION_KEYS, observeProviderDisconnect, providerDisconnectDeadlineAt, providerDisconnectWaitMs, readProviderActivationAcknowledgement, validateNormalProviderDisconnectResponse } from "../src/browser-driver.js";
-import { sha256 } from "../src/security.js";
+import { DriverEndFailure, END_POST_DISCONNECT_RESERVE_MS, PlaywrightVoiceDriver, SYNTHETIC_FINALIZATION_EXCLUSION_KEYS, observeProviderDisconnect, PRODUCT_ERROR_CODES, productErrorCode, providerDisconnectDeadlineAt, providerDisconnectWaitMs, readProviderActivationAcknowledgement, validateNormalProviderDisconnectResponse } from "../src/browser-driver.js";
+import { projectPublicData, redact, sha256 } from "../src/security.js";
 import { testConfig, testRun } from "./helpers.js";
 
 const origin = "https://frontend.test";
@@ -85,6 +87,8 @@ it.each([
   [false, false, "stale-epoch"],
   // Finalization fails before the disconnect is awaited: the listener must still go.
   [false, false, "finalization-fails"],
+  // C043/C044: the product's 409 names its machine code; only that code is kept.
+  [false, false, "finalization-409-coded"],
   // A rejected attempt observed while end drains after the 202 still counts (C011).
   [false, false, "late-rejection"],
   // A failed continuation left candidate 3 aborted after activated epoch 2 (C021).
@@ -135,7 +139,8 @@ it.each([
         emit(networkResponse("/api/sophia/voice/gemini/disconnect", { ok: false }, 503, f.request));
         setTimeout(() => emit(networkResponse("/api/sophia/voice/gemini/disconnect", f.body, 202, f.request)), 5);
       } else emit(networkResponse("/api/sophia/voice/gemini/disconnect", f.body, rejected ? 401 : 202, f.request));
-      emit(networkResponse("/api/sophia/end-session", finalization, mode === "finalization-fails" ? 500 : 202));
+      if (mode === "finalization-409-coded") emit(networkResponse("/api/sophia/end-session", { error: "voice_lab_run_binding_mismatch", note: "PRIVATE free text" }, 409));
+      else emit(networkResponse("/api/sophia/end-session", finalization, mode === "finalization-fails" ? 500 : 202));
     } });
   const binding = { synthetic: true, principal_id: ownedRun.principalId, test_run_id: ownedRun.testRunId,
     cleanup_obligation_id: ownedRun.cleanupObligationId, scenario_id: ownedRun.scenarioId, scenario_version: ownedRun.scenarioVersion,
@@ -211,6 +216,14 @@ it.each([
     expect(disconnectWaitTimeout()).toBeGreaterThan(allowedUntil - Date.now() - 1);
     expect(disconnectWaitTimeout()).toBeLessThanOrEqual(allowedUntil - endEnteredAt);
   };
+  if (mode === "finalization-409-coded") {
+    const error = await driver.end(ownedRun, "finalize", "cleanup", operationDeadlineAt).catch(error => error);
+    expect(error).toBeInstanceOf(DriverEndFailure);
+    expect(error.detail).toMatchObject({ code: "PRODUCT_FINALIZATION_UNCONFIRMED", details: { status: 409, product_error_code: "voice_lab_run_binding_mismatch" } });
+    expect(JSON.stringify(error.detail)).not.toContain("PRIVATE");
+    expect(responseListeners.length).toBe(listenersBeforeEnd);
+    return;
+  }
   if (mode === "finalization-fails") {
     const error = await driver.end(ownedRun, "finalize", "cleanup", operationDeadlineAt).catch(error => error);
     expect(error).toBeInstanceOf(DriverEndFailure);
@@ -486,5 +499,33 @@ describe("receiving disconnect wait under the worker's absolute end deadline", (
     expect(providerDisconnectDeadlineAt(500, 120)).toBe(500 + 75_000);
     expect(providerDisconnectDeadlineAt(500, 120, Number.NaN)).toBe(500 + 75_000);
   });
+});
+
+it("extracts only a catalogued product failure code, never free text, other fields or uncatalogued strings", () => {
+  expect(productErrorCode({ error: "voice_lab_auth_run_not_found" })).toBe("voice_lab_auth_run_not_found");
+  expect(productErrorCode({ detail: { code: "voice_lab_session_thread_mismatch", message: "PRIVATE" } })).toBe("voice_lab_session_thread_mismatch");
+  expect(productErrorCode({ code: "voice_lab_cleanup_obligation_closed" })).toBe("voice_lab_cleanup_obligation_closed");
+  // Code-shaped but uncatalogued: could be an identifier or credential, so omitted (C046).
+  for (const body of [{ error: "voice_lab_secret_abcdef0123456789" }, { error: "session_token_abc123" }, { detail: { code: "abcdef0123456789abcdef" } },
+    { error: "Failed to end Sophia session" }, { error: "PRIVATE user text" }, { detail: "voice_lab_auth_run_not_found" }, { error: 409 },
+    { error: "Voice_Lab_Auth_Run_Not_Found" }, null, "voice_lab_auth_run_not_found", ["voice_lab_auth_run_not_found"], {}]) {
+    expect(productErrorCode(body)).toBeNull();
+  }
+  expect(productErrorCode({ error: "voice_lab_not_catalogued_x", detail: { code: "voice_lab_session_record_not_found" } })).toBe("voice_lab_session_record_not_found");
+  // The evidence projector and redaction retain a catalogued code unchanged.
+  const detail = { code: "PRODUCT_FINALIZATION_UNCONFIRMED", details: { status: 409, product_error_code: productErrorCode({ error: "voice_lab_run_binding_mismatch" }) } };
+  expect(projectPublicData(detail)).toEqual(detail);
+  expect(redact(detail)).toEqual(detail);
+});
+
+it("catalogues every Voice Lab error code the frontend auth/capability routes and gateway end-session paths can return", async () => {
+  const root = path.resolve(process.cwd(), "../..");
+  const sources = ["frontend/src/server/voice-lab/capability.ts", "frontend/src/server/voice-lab/session-ledger.ts", "frontend/src/app/api/sophia/end-session/route.ts",
+    ...["cleanup", "continue", "grant", "provision", "readiness", "refresh"].map(name => `frontend/src/app/api/voice-lab/auth/${name}/route.ts`),
+    "backend/app/gateway/routers/sophia.py", "backend/app/gateway/voice_lab_capability.py", "backend/app/gateway/voice_lab_historical_acceptance.py", "backend/app/gateway/voice_lab_process_termination.py"];
+  const found = new Set<string>();
+  for (const file of sources) for (const match of (await readFile(path.join(root, file), "utf8")).matchAll(/["'](voice_lab_[a-z_]+)["']/g)) found.add(match[1]!);
+  expect(found.size).toBeGreaterThan(50);
+  expect([...found].filter(code => !PRODUCT_ERROR_CODES.has(code))).toEqual([]);
 });
 

@@ -78,7 +78,7 @@ export async function POST(request: NextRequest) {
     );
 
     const authContext = await auth.$context;
-    const revokedSessionCount = await revokeVoiceLabSessions(config.principalId, grant);
+    const revokedSessionCount = await revokeVoiceLabSessions(config.principalId, grant, session.session.token);
 
     const response = NextResponse.json({
       ok: true,
