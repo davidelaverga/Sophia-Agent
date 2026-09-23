@@ -1097,6 +1097,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
     // attached for the browser's recovery lifetime, nor let a repeated end
     // stack listeners.
     let disconnectObserver: ProviderDisconnectObserver | null = null;
+    const disconnectDeadline = Date.now() + providerDisconnectWaitMs(this.config.endOperationSeconds);
     try {
       const refreshUrl = new URL(this.config.authRefreshPath, new URL(run.target.frontendUrl).origin).toString();
       const { response: refreshed } = await requestBoundJson(session.context.request, "POST", refreshUrl, 15_000, frontendFinalizeCapability);
@@ -1105,7 +1106,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       const finalizationResponse = session.page.waitForResponse((response) => isExactFinalizationResponse(response, frontendOrigin), { timeout: 20_000 }).catch(() => null);
       // Register before the UI click: stop fences its callbacks, but the owned
       // page still exposes the real authenticated receiving acknowledgement.
-      disconnectObserver = observeProviderDisconnect(session.page, frontendOrigin);
+      disconnectObserver = observeProviderDisconnect(session.page, frontendOrigin, Math.max(1, disconnectDeadline - Date.now()));
       await clickEndSessionThroughExitGuards(session.page);
       const response = await finalizationResponse;
       if (!response || response.status() !== 202 || !isJsonResponse(response)) throw new VoiceLabError(labError("PRODUCT_FINALIZATION_UNCONFIRMED", "The ordinary UI did not produce an exact-origin JSON 202 product finalization receipt.", "product", true, { status: response?.status() ?? null }));
@@ -1636,7 +1637,7 @@ type ProviderDisconnectObserver = {
  * an exact 202 can be the receiving acknowledgement; earlier rejected attempts
  * are counted for evidence, never treated as the final answer. Both the waiter
  * and the counting listener are registered at once, before the UI click. */
-function observeProviderDisconnect(page: Pick<Page, "on" | "off" | "waitForResponse">, frontendOrigin: string): ProviderDisconnectObserver {
+export function observeProviderDisconnect(page: Pick<Page, "on" | "off" | "waitForResponse">, frontendOrigin: string, timeoutMs: number): ProviderDisconnectObserver {
   let count = 0;
   let lastStatus: number | null = null;
   const onResponse = (candidate: PlaywrightResponse) => {
@@ -1645,8 +1646,22 @@ function observeProviderDisconnect(page: Pick<Page, "on" | "off" | "waitForRespo
     lastStatus = candidate.status();
   };
   page.on("response", onResponse);
-  const acknowledgement = page.waitForResponse((candidate) => isExactProviderDisconnectResponse(candidate, frontendOrigin) && candidate.status() === 202, { timeout: 20_000 }).catch(() => null);
+  const acknowledgement = page.waitForResponse((candidate) => isExactProviderDisconnectResponse(candidate, frontendOrigin) && candidate.status() === 202, { timeout: timeoutMs }).catch(() => null);
   return { acknowledgement, rejected: () => ({ count, lastStatus }), dispose: () => { page.off("response", onResponse); } };
+}
+
+/** Part of the bounded end operation that must remain after the receiving
+ * acknowledgement: grant minting before the driver, drain/validation,
+ * deployment re-verification (10 s bound), snapshot/screenshot, auth cleanup
+ * (15 s bound) and context close. */
+export const END_POST_DISCONNECT_RESERVE_MS = 45_000;
+
+/** The product retries a rejected disconnect at about 0, 1, 3, 7, 15, 31, 61 s
+ * (1 s x 2^n, capped at 30 s). Wait for the exact 202 until the end budget
+ * less its reserve, measured from end entry, never below the prior fixed 20 s.
+ * Production (120 s) waits 75 s, covering the 31 s and 61 s attempts. */
+export function providerDisconnectWaitMs(endOperationSeconds: number): number {
+  return Math.max(20_000, endOperationSeconds * 1_000 - END_POST_DISCONNECT_RESERVE_MS);
 }
 
 /** The run record only reflects epochs the worker has already drained. The

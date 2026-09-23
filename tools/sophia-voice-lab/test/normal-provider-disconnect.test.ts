@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Response } from "playwright";
-import { DriverEndFailure, PlaywrightVoiceDriver, SYNTHETIC_FINALIZATION_EXCLUSION_KEYS, readProviderActivationAcknowledgement, validateNormalProviderDisconnectResponse } from "../src/browser-driver.js";
+import { DriverEndFailure, END_POST_DISCONNECT_RESERVE_MS, PlaywrightVoiceDriver, SYNTHETIC_FINALIZATION_EXCLUSION_KEYS, observeProviderDisconnect, providerDisconnectWaitMs, readProviderActivationAcknowledgement, validateNormalProviderDisconnectResponse } from "../src/browser-driver.js";
 import { sha256 } from "../src/security.js";
 import { testConfig, testRun } from "./helpers.js";
 
@@ -97,7 +97,7 @@ it.each([
   let connected = true, contextOpen = true, pageUrl = `${frontendOrigin}/`;
   const child = { pid: 4173, exitCode: null as number | null, signalCode: null };
   const responseListeners: Array<(response: any) => void> = [];
-  const waiting: Array<{ predicate: (response: any) => boolean; resolve: (response: any) => void }> = [];
+  const waiting: Array<{ predicate: (response: any) => boolean; resolve: (response: any) => void; timeout?: number }> = [];
   let push!: (source: unknown, envelope: unknown) => void;
   const networkResponse = (path: string, body: unknown, status = 200, requestBody?: unknown) => ({
     url: () => new URL(path, frontendOrigin).toString(), status: () => status, ok: () => status >= 200 && status < 300,
@@ -162,7 +162,7 @@ it.each([
     // Playwright times a waiter out; compressed here because this mock emits
     // every response during the click (plus one 5 ms retry).
     waitForResponse: (predicate: (response: any) => boolean, options?: { timeout?: number }) => new Promise((resolve, reject) => {
-      waiting.push({ predicate, resolve });
+      waiting.push({ predicate, resolve, ...(options?.timeout === undefined ? {} : { timeout: options.timeout }) });
       if (options?.timeout) setTimeout(() => reject(new Error("synthetic waitForResponse timeout")), 50);
     }),
     getByRole: (_role: string, options: { name: RegExp }) => locator(options.name.source.includes("Leave")),
@@ -192,6 +192,18 @@ it.each([
     return [];
   });
   const listenersBeforeEnd = responseListeners.length;
+  const endEnteredAt = Date.now();
+  const disconnectWaitTimeout = () => {
+    const accepted = networkResponse("/api/sophia/voice/gemini/disconnect", {}, 202);
+    return waiting.filter(waiter => waiter.predicate(accepted)).at(-1)?.timeout;
+  };
+  // C036: the 202 waiter is bounded by the end budget, not a fixed 20 s.
+  const expectBudgetedDisconnectWait = () => {
+    // Literal contract (end budget less a 45 s reserve), independent of the helper.
+    const budget = Math.max(20_000, config.endOperationSeconds * 1_000 - 45_000);
+    expect(disconnectWaitTimeout()).toBeGreaterThan(budget - (Date.now() - endEnteredAt) - 1);
+    expect(disconnectWaitTimeout()).toBeLessThanOrEqual(budget);
+  };
   if (mode === "finalization-fails") {
     const error = await driver.end(ownedRun, "finalize", "cleanup").catch(error => error);
     expect(error).toBeInstanceOf(DriverEndFailure);
@@ -209,8 +221,10 @@ it.each([
     expect(error.events.some((event: any) => event.kind === "cleanup.provider_transport_closed")).toBe(false);
     expect(driver.hasSession(ownedRun.id)).toBe(true); // Recovery still owns the browser.
     expect(responseListeners.length).toBe(listenersBeforeEnd);
+    expectBudgetedDisconnectWait();
   } else {
     const ended = await driver.end(ownedRun, "finalize", "cleanup");
+    expectBudgetedDisconnectWait();
     const acknowledged = ended.events.find(event => event.kind === "provider.disconnect_acknowledged")!;
     expect(acknowledged.payload).toMatchObject({ provider_connection_epochs: [1, 2] });
     if (mode === "aborted-candidate") expect(acknowledged.payload).toMatchObject({ aborted_candidate_epochs: [3], browser_provider_activation_abort_receipt_count: 1 });
@@ -344,5 +358,77 @@ describe("normal end with an aborted continuation candidate", () => {
     for (const value of [f.request, f.body]) value.browser_provider_close_receipts.pop();
     withAbortedCandidate(f, abort(3));
     await expect(validateNormalProviderDisconnectResponse(f.response, origin, run)).rejects.toMatchObject({ detail: { code: "PROVIDER_CLEANUP_UNCONFIRMED" } });
+  });
+});
+
+// C036: the product retries a rejected disconnect at 1 s x 2^n (capped at 30 s)
+// from its first attempt: 0, 1, 3, 7, 15, 31, 61 s. The receiving 202 waiter
+// must span that schedule within the bounded end operation.
+describe("receiving disconnect deadline versus the product retry schedule", () => {
+  const PRODUCT_RETRY_AT_S = [0, 1, 3, 7, 15, 31, 61];
+  function scheduledPage(statusAt: (attempt: number) => number) {
+    const listeners: Array<(response: any) => void> = [];
+    const waiters: Array<{ predicate: (response: any) => boolean; resolve: (response: any) => void }> = [];
+    const page = {
+      on: (_kind: string, listener: (response: any) => void) => { listeners.push(listener); },
+      off: (_kind: string, listener: (response: any) => void) => { listeners.splice(listeners.indexOf(listener), 1); },
+      // Honours the requested timeout on the (fake) clock, as Playwright does.
+      waitForResponse: (predicate: (response: any) => boolean, options: { timeout: number }) => new Promise((resolve, reject) => {
+        const waiter = { predicate, resolve };
+        waiters.push(waiter);
+        setTimeout(() => { waiters.splice(waiters.indexOf(waiter), 1); reject(new Error("Timeout exceeded")); }, options.timeout);
+      }),
+    };
+    PRODUCT_RETRY_AT_S.forEach((at, attempt) => setTimeout(() => {
+      const status = statusAt(attempt);
+      const response = { url: () => `${origin}/api/sophia/voice/gemini/disconnect`, status: () => status, request: () => ({ method: () => "POST" }) };
+      for (const listener of [...listeners]) listener(response);
+      for (const waiter of [...waiters]) if (waiter.predicate(response)) waiter.resolve(response);
+    }, at * 1_000));
+    return page as any;
+  }
+  const settled = (promise: Promise<unknown>) => { const state = { done: false, value: undefined as unknown }; void promise.then(value => { state.done = true; state.value = value; }); return state; };
+
+  it("takes the authenticated 202 from the product's 31 s retry under the production end budget", async () => {
+    vi.useFakeTimers();
+    try {
+      // Five transient failures (0..15 s), then the exact 202 on the 31 s attempt.
+      const statusAt = (attempt: number) => attempt < 5 ? 503 : 202;
+      const fixed = observeProviderDisconnect(scheduledPage(statusAt), origin, 20_000);
+      const budgeted = observeProviderDisconnect(scheduledPage(statusAt), origin, providerDisconnectWaitMs(120));
+      const [missed, accepted] = [settled(fixed.acknowledgement), settled(budgeted.acknowledgement)];
+      await vi.advanceTimersByTimeAsync(31_000);
+      // The previous fixed 20 s waiter (the reported race) had already given up.
+      expect(missed).toEqual({ done: true, value: null });
+      expect(fixed.rejected()).toEqual({ count: 5, lastStatus: 503 });
+      expect(accepted.done).toBe(true);
+      expect((accepted.value as any).status()).toBe(202);
+      expect(budgeted.rejected()).toEqual({ count: 5, lastStatus: 503 });
+      fixed.dispose(); budgeted.dispose();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("terminates boundedly at the budget-derived deadline when no 202 ever arrives", async () => {
+    vi.useFakeTimers();
+    try {
+      const deadline = providerDisconnectWaitMs(120);
+      const observer = observeProviderDisconnect(scheduledPage(() => 503), origin, deadline);
+      const state = settled(observer.acknowledgement);
+      await vi.advanceTimersByTimeAsync(deadline - 1);
+      expect(state.done).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(state).toEqual({ done: true, value: null });
+      expect(observer.rejected()).toEqual({ count: 7, lastStatus: 503 });
+      observer.dispose();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("derives the wait from the end operation budget less a fixed reserve, never below 20 s", () => {
+    expect(END_POST_DISCONNECT_RESERVE_MS).toBe(45_000);
+    expect(providerDisconnectWaitMs(120)).toBe(75_000); // production: covers the 31 s and 61 s retries
+    expect(providerDisconnectWaitMs(75)).toBe(30_000); // configured minimum
+    expect(providerDisconnectWaitMs(300)).toBe(255_000); // configured maximum still leaves the reserve
+    expect(providerDisconnectWaitMs(50)).toBe(20_000);
+    for (const seconds of [75, 120, 300]) expect(providerDisconnectWaitMs(seconds)).toBeLessThanOrEqual(seconds * 1_000 - END_POST_DISCONNECT_RESERVE_MS);
   });
 });
