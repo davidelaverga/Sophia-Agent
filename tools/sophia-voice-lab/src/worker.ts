@@ -3684,6 +3684,12 @@ function assessC5Utterance(operation: Operation, previous: Operation | null, eli
     evidence_seqs: [...(acceptedEvent ? [acceptedEvent.seq] : []), ...(priorCompletion ? [priorCompletion.seq] : []), ...audible.flatMap((chain) => chain.events.map((event) => event.seq))],
   };
 }
+/** C082: completion witnesses of this run's durably succeeded supported End. */
+function c5EndCompletions(run: RunRecord, operations: Operation[], eligible: Event[]): Event[] {
+  return operations.filter((operation) => operation.type === "end" && operation.state === "succeeded" && operation.runId === run.id)
+    .flatMap((operation) => eligible.filter((event) => event.kind === "operation.succeeded" && event.source === "worker"
+      && event.payload.operation_id === operation.id && event.payload.operation_type === "end"));
+}
 /** Ordinary settlement: live zero, execution-epoch proof, auth path, lease release. */
 function c5Settled(run: RunRecord, events: Event[], eligible: Event[]): boolean {
   const proof = deriveExecutionEpochCleanupProof(run, events);
@@ -3727,9 +3733,7 @@ export function deriveC5FirstUseAssessment(run: RunRecord, events: import("./dom
   // C082: this run's supported End must itself have succeeded, with its durable
   // completion witness. Recovery after a failed or timed-out End is settlement,
   // not an ordinary End. Full-scenario success is NOT required here.
-  const endCompletions = operations.filter((operation) => operation.type === "end" && operation.state === "succeeded" && operation.runId === run.id)
-    .flatMap((operation) => eligible.filter((event) => event.kind === "operation.succeeded" && event.source === "worker"
-      && event.payload.operation_id === operation.id && event.payload.operation_type === "end"));
+  const endCompletions = c5EndCompletions(run, operations, eligible);
   const settled = endCompletions.length > 0 && finalization.length > 0 && c5Settled(run, events, eligible);
   const recoveries = eligible.filter((event) => event.kind === "cleanup.recovery" && event.source === "canonical");
   const canonicalEvidence = ((recoveries.at(-1)?.payload.receipt as Record<string, unknown> | undefined)?.components as Record<string, Record<string, unknown>> | undefined)?.canonical_evidence;
