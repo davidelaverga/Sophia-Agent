@@ -427,6 +427,18 @@ export class VoiceLabWorker {
         this.logger.error({ run_id: retained.id, error: safeError(error) }, "remote retention purge could not be confirmed before local hard deadline");
       }
     }
+    // C077: bounded re-verification of retained canonical evidence that an
+    // earlier recovery left failed/pending (e.g. a since-fixed Gateway reader).
+    // Runs before the hard purge (C080: a pinned past deadline purges in this
+    // same pass) and before evidence publication (a real receipt republishes).
+    const evidenceRefresh = await this.ledger.listRunsCanonicalEvidenceRefreshDue(maintenanceNow, 5).catch(error => {
+      this.logger.error({ error: safeError(error) }, "canonical evidence refresh listing unavailable; other maintenance continues");
+      return [];
+    });
+    for (const retained of evidenceRefresh) {
+      try { await this.#refreshCanonicalEvidence(retained.id, maintenanceNow); }
+      catch (error) { this.logger.error({ run_id_sha256: sha256(retained.id), error: safeError(error) }, "canonical evidence refresh remains unconfirmed"); }
+    }
     try { await this.ledger.purgeExpiredRetention(maintenanceNow, 20); }
     catch (error) { this.logger.error({ error: safeError(error) }, "local retention purge unconfirmed; independent resource recovery continues"); }
     const retainedControls = await this.ledger.scheduleRetainedRecovery(10).catch(error => {
@@ -468,17 +480,6 @@ export class VoiceLabWorker {
       } catch (error) {
         this.logger.error({ run_id_sha256: sha256(pending.id), error: safeError(error) }, "terminal run recovery remains unconfirmed");
       }
-    }
-    // C077: bounded re-verification of retained canonical evidence that an
-    // earlier recovery left failed/pending (e.g. a since-fixed Gateway reader).
-    // Runs before evidence publication so a real new receipt republishes.
-    const evidenceRefresh = await this.ledger.listRunsCanonicalEvidenceRefreshDue(maintenanceNow, 5).catch(error => {
-      this.logger.error({ error: safeError(error) }, "canonical evidence refresh listing unavailable; other maintenance continues");
-      return [];
-    });
-    for (const retained of evidenceRefresh) {
-      try { await this.#refreshCanonicalEvidence(retained.id, maintenanceNow); }
-      catch (error) { this.logger.error({ run_id_sha256: sha256(retained.id), error: safeError(error) }, "canonical evidence refresh remains unconfirmed"); }
     }
     // Zero-orphan recovery must run before terminal evidence publication.
     // A bounded per-run artifact cap can make evidence revision unavailable,
@@ -1806,12 +1807,15 @@ export class VoiceLabWorker {
     const finalization = page.events.find((event) => isCanonicalFinalizationReceipt(run, event));
     const signedRaw = (finalization?.payload.receipt as Record<string, unknown> | undefined)?.retention_expires_at;
     const signed = typeof signedRaw === "string" ? new Date(signedRaw) : null;
-    // An already-passed signed deadline belongs to the local hard purge.
-    if (!signed || Number.isNaN(signed.getTime()) || signed.toISOString() !== signedRaw || signed <= now) return;
+    if (!signed || Number.isNaN(signed.getTime()) || signed.toISOString() !== signedRaw) return;
     if (run.retentionPurgeDueAt === null) {
       if (signed > localRetentionDeadline(run)) return;
       run = await this.ledger.updateRun(run.id, run.version, { retentionPurgeDueAt: signed });
     }
+    // C080: an authenticated deadline that has already passed is now pinned,
+    // so the hard purge that follows in this maintenance pass removes the
+    // content. Nothing is recovered or allocated past the signed expiry.
+    if (signed <= now) return;
     const pinned = run.retentionPurgeDueAt!;
     await this.ledger.appendEvent(run.id, CANONICAL_EVIDENCE_REFRESH_EVENT, "worker", {
       attempt: decision.attempt, max_attempts: CANONICAL_EVIDENCE_REFRESH_MAX_ATTEMPTS,
@@ -2155,6 +2159,7 @@ export class VoiceLabWorker {
       video: { status: "unavailable", reason: "video_capture_disabled_or_not_implemented" },
       raw_audio: { status: "not_captured", reason: "privacy_default" },
       metrics: deriveEvidenceMetrics(eventPage.events, operations),
+      c5_first_use_assessment: run.scenarioId === "V-O01" ? deriveC5FirstUseAssessment(run, eventPage.events, operations) : { schema: C5_FIRST_USE_ASSESSMENT_SCHEMA, status: "not_applicable", scenario_id: run.scenarioId },
       cleanup_audit: {
         browser_context_closed: browserContextClosed,
         execution_epoch_cleanup: executionEpochCleanup,
@@ -3514,6 +3519,78 @@ export function reconcileProductInputLeg(
   return { verified, reason: verified ? null : "harness_product_pcm_digest_or_metric_mismatch", frame_count: frames.length, byte_length: byteLength, nonzero_byte_count: nonzeroBytes, computed_pcm_sha256_chain: computed };
 }
 
+type OutputChainSources = { playback: import("./domain.js").LabEvent[]; received: import("./domain.js").LabEvent[]; providerChunks: import("./domain.js").LabEvent[]; interactions: ReturnType<typeof outputInteractionBindings> };
+type Receipt = Record<string, unknown> | undefined;
+const receiptOf = (event: import("./domain.js").LabEvent | undefined): Receipt => event?.payload.receipt as Receipt;
+const diagnosticOf = (event: import("./domain.js").LabEvent): Receipt => event.payload.diagnostic as Receipt;
+/** The provider receive join shared by the received aggregate and the chunk. */
+function sameProviderReceive(diagnostic: Receipt, terminal: Receipt): boolean {
+  return diagnostic?.providerReceiveSequence === terminal?.providerReceiveSequence && diagnostic?.providerConnectionEpoch === terminal?.providerConnectionEpoch
+    && diagnostic?.playbackGeneration === terminal?.playbackGeneration && diagnostic?.relayCorrelationId === terminal?.relayCorrelationId
+    && diagnostic?.providerRelaySequence === terminal?.providerRelaySequence && diagnostic?.providerReceivedAt === terminal?.providerReceivedAt;
+}
+function sameChunk(diagnostic: Receipt, terminal: Receipt): boolean {
+  return diagnostic?.chunkIndex === terminal?.chunkIndex && diagnostic?.chunksInEvent === terminal?.chunksInEvent
+    && diagnostic?.chunkHash === terminal?.chunkHash && diagnostic?.byteLength === terminal?.byteLength;
+}
+/** Scheduled, undropped, and carrying the native composite identity it claims. */
+function playableNativeChunk(diagnostic: Receipt, realizationId: string | null): boolean {
+  return diagnostic?.scheduled === true && diagnostic?.dropReason === null
+    && diagnostic?.realizationId === realizationId && nativeOutputRealizationId(diagnostic) === realizationId
+    && diagnostic?.providerChunkSequence === `${diagnostic?.providerConnectionEpoch}:${diagnostic?.providerReceiveSequence}:${diagnostic?.chunkIndex}`;
+}
+/** A verified, completed, non-silent, raw-free output leg with timing. */
+function audibleOutputLeg(leg: Receipt): boolean {
+  return leg?.schema === "sophia_gemini_output_leg_v1" && leg.status === "verified" && leg.completionPhase === "completed"
+    && /^[a-f0-9]{64}$/.test(String(leg.monitorDigestSha256)) && Number(leg.monitorFrameCount) > 0 && Number(leg.monitorNonSilentFrameCount) > 0 && leg.rawAudioExcluded === true
+    && typeof leg.scheduledAt === "string" && typeof leg.completedAt === "string" && Number(leg.monitorDurationMs) >= 0;
+}
+function orderedSeqs(...seqs: Array<number | undefined>): boolean {
+  return seqs.every((seq, index) => seq !== undefined && (index === 0 || seq > seqs[index - 1]!));
+}
+/** The leg, its terminal playback receipt and its utterance binding agree. */
+function legBoundToTerminal(leg: Receipt, terminal: Receipt, interactionEpoch: number | undefined): boolean {
+  return interactionEpoch !== undefined && interactionEpoch === leg?.providerConnectionEpoch
+    && leg?.providerChunkFingerprint === terminal?.chunkHash && leg?.providerConnectionEpoch === terminal?.providerConnectionEpoch
+    && leg?.playbackGeneration === terminal?.playbackGeneration;
+}
+function buildOutputChain(legEvent: import("./domain.js").LabEvent, sources: OutputChainSources) {
+  const leg = receiptOf(legEvent);
+  const realizationId = typeof leg?.realizationId === "string" ? leg.realizationId : null;
+  const receipts = sources.playback.filter((event) => receiptOf(event)?.realizationId === realizationId);
+  const phase = (name: string) => receipts.filter((event) => receiptOf(event)?.phase === name);
+  const scheduled = phase("scheduled"), started = phase("started"), completed = phase("completed");
+  const terminal = receiptOf(completed[0]);
+  const receivedEvent = sources.received.find((event) => sameProviderReceive(diagnosticOf(event), terminal)
+    && diagnosticOf(event)?.responseId === terminal?.responseId && diagnosticOf(event)?.providerEventId === terminal?.providerEventId);
+  const chunkEvent = sources.providerChunks.find((event) => sameProviderReceive(diagnosticOf(event), terminal) && sameChunk(diagnosticOf(event), terminal) && playableNativeChunk(diagnosticOf(event), realizationId));
+  const interaction = realizationId === null ? undefined : sources.interactions.byRealization.get(realizationId);
+  const exact = audibleOutputLeg(leg) && scheduled.length === 1 && started.length === 1 && completed.length === 1
+    && legBoundToTerminal(leg, terminal, interaction?.epoch)
+    && orderedSeqs(receivedEvent?.seq, chunkEvent?.seq, scheduled[0]?.seq, started[0]?.seq, completed[0]?.seq, legEvent.seq) && Number(terminal?.durationSeconds) > 0;
+  const identity = chunkEvent ? outputChunkIdentity(chunkEvent.payload.diagnostic as Record<string, unknown>) : null;
+  const durationSeconds = Number(terminal?.durationSeconds);
+  return { exact, realizationId, identity, durationSeconds: Number.isFinite(durationSeconds) ? durationSeconds : 0, operationId: interaction?.operationId ?? null, receivedSeq: receivedEvent?.seq ?? null, chunkSeq: chunkEvent?.seq ?? null, events: [...(receivedEvent ? [receivedEvent] : []), ...(chunkEvent ? [chunkEvent] : []), ...receipts, ...(interaction ? [interaction.event] : []), legEvent] };
+}
+
+/**
+ * The V-O01 output-chain join (C075), shared with the C5 first-use assessment.
+ * Every chain is one output leg with its playback receipts, provider chunk and
+ * received aggregate under the product's native composite identity, bound to
+ * at most one utterance interaction. Pure: it certifies nothing by itself.
+ */
+export function deriveOutputChains(run: RunRecord, productEvents: import("./domain.js").LabEvent[], operations: import("./domain.js").OperationRecord[]) {
+  const productByKind = (kind: string) => productEvents.filter((event) => event.kind === kind);
+  const utteranceOperations = operations.filter((operation) => operation.type === "speak" && operation.state === "succeeded" && !String(operation.input.fixture_id ?? "").toLowerCase().includes("silence"));
+  const interactions = outputInteractionBindings(run, productByKind("product.voice-session.gemini-synthetic-interaction-receipt"), utteranceOperations);
+  const received = productByKind("audio.output.received");
+  const providerChunks = productByKind("audio.output.provider_chunk");
+  const playback = ["audio.output.scheduled", "audio.output.started", "audio.output.completed"].flatMap(productByKind);
+  const legs = productByKind("audio.output.leg_receipt");
+  const chains = legs.map((legEvent) => buildOutputChain(legEvent, { playback, received, providerChunks, interactions }));
+  return { utteranceOperations, interactions, received, providerChunks, playback, legs, chains };
+}
+
 /**
  * C075: the product's native output identity. chunkHash is its FNV-1a 32-bit
  * (8 hex) consistency fingerprint (hashGeminiOutputAudioChunk), never identity
@@ -3585,6 +3662,91 @@ function validInteractionReceipt(run: RunRecord, receipt: Record<string, unknown
     && nonEmpty(receipt.response_id) && nonEmpty(receipt.assistant_turn_id)
     && Number.isSafeInteger(receipt.provider_connection_epoch) && Number(receipt.provider_connection_epoch) >= 1
     && Array.isArray(receipt.output_realization_ids);
+}
+
+type Event = import("./domain.js").LabEvent;
+type Operation = import("./domain.js").OperationRecord;
+/** One utterance: complete input with transcript receipts, >=1 exact audible chain, ordering after the prior reply. */
+function assessC5Utterance(operation: Operation, previous: Operation | null, eligible: Event[], chains: ReturnType<typeof deriveOutputChains>["chains"],
+  accepted: (operation: Operation) => Event | undefined, replyCompleted: (operation: Operation) => Event[]) {
+  const audible = chains.filter((chain) => chain.exact && chain.operationId === operation.id);
+  const acceptedEvent = accepted(operation);
+  const priorCompletion = previous ? replyCompleted(previous)[0] : undefined;
+  const ordering = previous === null ? "not_applicable_first_utterance" as const
+    : acceptedEvent !== undefined && priorCompletion !== undefined && acceptedEvent.seq > priorCompletion.seq ? "met" as const : "gap" as const;
+  return {
+    operation_id: operation.id,
+    input: exactProductInputChain(eligible, operation) ? "met" as const : "gap" as const,
+    audible_exact_chain_count: audible.length,
+    audible_seconds: Math.round(audible.reduce((total, chain) => total + chain.durationSeconds, 0) * 1000) / 1000,
+    output: audible.length > 0 ? "met" as const : "gap" as const,
+    adaptive_ordering: ordering,
+    evidence_seqs: [...(acceptedEvent ? [acceptedEvent.seq] : []), ...(priorCompletion ? [priorCompletion.seq] : []), ...audible.flatMap((chain) => chain.events.map((event) => event.seq))],
+  };
+}
+/** Ordinary settlement: live zero, execution-epoch proof, auth path, lease release. */
+function c5Settled(run: RunRecord, events: Event[], eligible: Event[]): boolean {
+  const proof = deriveExecutionEpochCleanupProof(run, events);
+  return authoritativeLiveCleanupComplete(events, run) && proof.ready && authCleanupPath(run, events, proof) !== null
+    && eligible.some((event) => event.kind === "cleanup.browser_lease_released" || event.kind === "cleanup.browser_lease_absent");
+}
+
+export const C5_FIRST_USE_ASSESSMENT_SCHEMA = "sophia.voice-lab.c5-first-use-assessment.v1";
+type C5Criterion = { id: string; status: "met" | "gap"; evidence_seqs: number[]; detail?: Record<string, unknown> };
+
+/**
+ * C079: the restricted first-use assessment, reported beside (never instead
+ * of) the scenario verdicts, certification and terminal state. It asks only
+ * what the continuation mission asks: exact deployment, an authenticated
+ * synthetic session, at least two non-silent synthetic utterances each with
+ * complete input delivery plus provider/public transcript receipts and at
+ * least one exact audible output chain, second and later utterances accepted
+ * only after the prior reply completed, ordinary settlement, and canonical
+ * evidence. Recognition accuracy, semantic adaptivity, acoustic quality and
+ * all-chunk certification are not assessed here; semantic adaptivity needs
+ * coordinator review.
+ */
+export function deriveC5FirstUseAssessment(run: RunRecord, events: import("./domain.js").LabEvent[], operations: import("./domain.js").OperationRecord[]) {
+  const eligible = events.filter((event) => event.source !== "product" || isExactBoundProductEvent(run, event));
+  const productEvents = eligible.filter((event) => event.source === "product");
+  const seqsOf = (list: import("./domain.js").LabEvent[]) => list.map((event) => event.seq);
+  const criterion = (id: string, met: boolean, evidence: import("./domain.js").LabEvent[], detail?: Record<string, unknown>): C5Criterion => ({ id, status: met ? "met" : "gap", evidence_seqs: seqsOf(evidence), ...(detail ? { detail } : {}) });
+  const deployment = eligible.filter((event) => event.kind === "deployment.verified" || event.kind === "deployment.reverified");
+  const exactTuple = (event: import("./domain.js").LabEvent) => (["frontend", "backend", "voice"] as const).every((component) => (event.payload[component] as Record<string, unknown> | undefined)?.commit_sha === run.target.expectedDeployment[component])
+    && (event.payload.langgraph as Record<string, unknown> | undefined)?.commit_sha === run.target.expectedDependencies.langgraph;
+  const tupleMet = (["deployment.verified", "deployment.reverified"] as const).every((kind) => deployment.some((event) => event.kind === kind && exactTuple(event)));
+  const capture = eligible.filter((event) => ["harness.initialized", "harness.media_stream_issued", "session.microphone_stream_acquired"].includes(event.kind));
+  const sessionMet = run.canonicalSessionId !== null && ["harness.initialized", "harness.media_stream_issued", "session.microphone_stream_acquired"].every((kind) => capture.some((event) => event.kind === kind));
+  const { utteranceOperations, chains } = deriveOutputChains(run, productEvents, operations);
+  const accepted = (operation: import("./domain.js").OperationRecord) => eligible.find((event) => event.kind === "operation.speak.accepted" && event.payload.operation_id === operation.id);
+  const ordered = [...utteranceOperations].sort((left, right) => (accepted(left)?.seq ?? Number.MAX_SAFE_INTEGER) - (accepted(right)?.seq ?? Number.MAX_SAFE_INTEGER));
+  const replyCompleted = (operation: import("./domain.js").OperationRecord) => productEvents.filter((event) => event.kind === "product.voice-session.gemini-synthetic-interaction-receipt"
+    && (event.payload.receipt as Record<string, unknown> | undefined)?.operation_id === operation.id && (event.payload.receipt as Record<string, unknown> | undefined)?.phase === "assistant_response_completed");
+  const utterances = ordered.map((operation, index) => assessC5Utterance(operation, index > 0 ? ordered[index - 1]! : null, eligible, chains, accepted, replyCompleted));
+  const finalization = eligible.filter((event) => isCanonicalFinalizationReceipt(run, event));
+  const settled = finalization.length > 0 && c5Settled(run, events, eligible);
+  const recoveries = eligible.filter((event) => event.kind === "cleanup.recovery" && event.source === "canonical");
+  const canonicalEvidence = ((recoveries.at(-1)?.payload.receipt as Record<string, unknown> | undefined)?.components as Record<string, Record<string, unknown>> | undefined)?.canonical_evidence;
+  const criteria: C5Criterion[] = [
+    criterion("exact_deployment_tuple", tupleMet, deployment),
+    criterion("authenticated_synthetic_session_and_capture", sessionMet, capture),
+    criterion("two_or_more_non_silent_utterances", utterances.length >= 2, eligible.filter((event) => event.kind === "operation.speak.accepted")),
+    { id: "input_delivery_and_transcript_receipts_each_utterance", status: utterances.length > 0 && utterances.every((utterance) => utterance.input === "met") ? "met" : "gap", evidence_seqs: [] },
+    { id: "audible_exact_output_each_utterance", status: utterances.length > 0 && utterances.every((utterance) => utterance.output === "met") ? "met" : "gap", evidence_seqs: utterances.flatMap((utterance) => utterance.evidence_seqs) },
+    { id: "later_utterances_after_prior_reply", status: utterances.length >= 2 && utterances.every((utterance) => utterance.adaptive_ordering !== "gap") ? "met" : "gap", evidence_seqs: [] },
+    criterion("ordinary_end_and_settlement", settled, [...finalization, ...recoveries.slice(-1)]),
+    criterion("canonical_evidence_retained", ["retention_pending", "completed", "already_terminal"].includes(String(canonicalEvidence?.status)), recoveries.slice(-1), { canonical_evidence_status: canonicalEvidence?.status ?? null, code: canonicalEvidence?.code ?? null }),
+  ];
+  return {
+    schema: C5_FIRST_USE_ASSESSMENT_SCHEMA,
+    scope: "restricted_internal_use_first_use",
+    separate_from_scenario_verdicts: true,
+    status: criteria.every((item) => item.status === "met") ? "met" as const : "gap" as const,
+    criteria,
+    utterances,
+    semantic_adaptivity: "coordinator_assessment_required" as const,
+    not_assessed: ["recognition_accuracy", "semantic_adaptivity", "acoustic_quality", "all_chunk_output_certification"],
+  };
 }
 
 function exactProductInputChain(events: import("./domain.js").LabEvent[], operation: import("./domain.js").OperationRecord): boolean {
@@ -3777,58 +3939,7 @@ export function evaluateScenarioAssertions(run: RunRecord, events: import("./dom
       break;
     }
     case "V-O01": {
-      const utteranceOperations = operations.filter((operation) => operation.type === "speak" && operation.state === "succeeded" && !String(operation.input.fixture_id ?? "").toLowerCase().includes("silence"));
-      const interactions = outputInteractionBindings(run, productByKind("product.voice-session.gemini-synthetic-interaction-receipt"), utteranceOperations);
-      const received = productByKind("audio.output.received");
-      const providerChunks = productByKind("audio.output.provider_chunk");
-      const playback = ["audio.output.scheduled", "audio.output.started", "audio.output.completed"].flatMap(productByKind);
-      const legs = productByKind("audio.output.leg_receipt");
-      const chains = legs.map((legEvent) => {
-        const leg = legEvent.payload.receipt as Record<string, unknown> | undefined;
-        const realizationId = typeof leg?.realizationId === "string" ? leg.realizationId : null;
-        const receipts = playback.filter((event) => (event.payload.receipt as Record<string, unknown> | undefined)?.realizationId === realizationId);
-        const scheduled = receipts.filter((event) => (event.payload.receipt as Record<string, unknown> | undefined)?.phase === "scheduled");
-        const started = receipts.filter((event) => (event.payload.receipt as Record<string, unknown> | undefined)?.phase === "started");
-        const completed = receipts.filter((event) => (event.payload.receipt as Record<string, unknown> | undefined)?.phase === "completed");
-        const terminal = completed[0]?.payload.receipt as Record<string, unknown> | undefined;
-        const receivedEvent = received.find((event) => {
-          const diagnostic = event.payload.diagnostic as Record<string, unknown> | undefined;
-          return diagnostic?.providerReceiveSequence === terminal?.providerReceiveSequence
-            && diagnostic?.providerConnectionEpoch === terminal?.providerConnectionEpoch
-            && diagnostic?.playbackGeneration === terminal?.playbackGeneration
-            && diagnostic?.relayCorrelationId === terminal?.relayCorrelationId
-            && diagnostic?.providerRelaySequence === terminal?.providerRelaySequence
-            && diagnostic?.providerReceivedAt === terminal?.providerReceivedAt
-            && diagnostic?.responseId === terminal?.responseId
-            && diagnostic?.providerEventId === terminal?.providerEventId;
-        });
-        const chunkEvent = providerChunks.find((event) => {
-          const diagnostic = event.payload.diagnostic as Record<string, unknown> | undefined;
-          return diagnostic?.providerReceiveSequence === terminal?.providerReceiveSequence
-            && diagnostic?.providerConnectionEpoch === terminal?.providerConnectionEpoch
-            && diagnostic?.playbackGeneration === terminal?.playbackGeneration
-            && diagnostic?.relayCorrelationId === terminal?.relayCorrelationId
-            && diagnostic?.providerRelaySequence === terminal?.providerRelaySequence
-            && diagnostic?.providerReceivedAt === terminal?.providerReceivedAt
-            && diagnostic?.chunkIndex === terminal?.chunkIndex
-            && diagnostic?.chunksInEvent === terminal?.chunksInEvent
-            && diagnostic?.chunkHash === terminal?.chunkHash
-            && diagnostic?.byteLength === terminal?.byteLength
-            && diagnostic?.scheduled === true && diagnostic?.dropReason === null
-            && diagnostic?.realizationId === realizationId && nativeOutputRealizationId(diagnostic) === realizationId
-            && diagnostic?.providerChunkSequence === `${diagnostic?.providerConnectionEpoch}:${diagnostic?.providerReceiveSequence}:${diagnostic?.chunkIndex}`;
-        });
-        const interaction = realizationId === null ? undefined : interactions.byRealization.get(realizationId);
-        const exact = leg?.schema === "sophia_gemini_output_leg_v1" && leg.status === "verified" && leg.completionPhase === "completed"
-          && /^[a-f0-9]{64}$/.test(String(leg.monitorDigestSha256)) && Number(leg.monitorFrameCount) > 0 && Number(leg.monitorNonSilentFrameCount) > 0 && leg.rawAudioExcluded === true
-          && scheduled.length === 1 && started.length === 1 && completed.length === 1 && receivedEvent !== undefined && chunkEvent !== undefined
-          && interaction !== undefined && interaction.epoch === leg.providerConnectionEpoch
-          && leg.providerChunkFingerprint === terminal?.chunkHash && leg.providerConnectionEpoch === terminal?.providerConnectionEpoch && leg.playbackGeneration === terminal?.playbackGeneration
-          && receivedEvent.seq < chunkEvent.seq && chunkEvent.seq < scheduled[0]!.seq && scheduled[0]!.seq < started[0]!.seq && started[0]!.seq < completed[0]!.seq && completed[0]!.seq < legEvent.seq
-          && typeof leg.scheduledAt === "string" && typeof leg.completedAt === "string" && Number(leg.monitorDurationMs) >= 0 && Number(terminal?.durationSeconds) > 0;
-        const identity = chunkEvent ? outputChunkIdentity(chunkEvent.payload.diagnostic as Record<string, unknown>) : null;
-        return { exact, realizationId, identity, operationId: interaction?.operationId ?? null, receivedSeq: receivedEvent?.seq ?? null, chunkSeq: chunkEvent?.seq ?? null, events: [...(receivedEvent ? [receivedEvent] : []), ...(chunkEvent ? [chunkEvent] : []), ...receipts, ...(interaction ? [interaction.event] : []), legEvent] };
-      });
+      const { utteranceOperations, interactions, received, providerChunks, playback, chains } = deriveOutputChains(run, productEvents, operations);
       const scheduledReceipts = playback.filter((event) => (event.payload.receipt as Record<string, unknown> | undefined)?.phase === "scheduled");
       const startedReceipts = playback.filter((event) => (event.payload.receipt as Record<string, unknown> | undefined)?.phase === "started");
       const completedReceipts = playback.filter((event) => (event.payload.receipt as Record<string, unknown> | undefined)?.phase === "completed");

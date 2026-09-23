@@ -3,7 +3,7 @@ import pino from "pino";
 import { describe, expect, it, vi } from "vitest";
 import { AudioResolver } from "../src/audio.js";
 import type { VoiceBrowserDriver } from "../src/browser-driver.js";
-import { CANONICAL_EVIDENCE_REFRESH_EVENT, canonicalEvidenceRefreshDue } from "../src/canonical-evidence-refresh.js";
+import { CANONICAL_EVIDENCE_REFRESH_EVENT, canonicalEvidenceRefreshDue, localRetentionDeadline } from "../src/canonical-evidence-refresh.js";
 import type { LabEvent, RunRecord } from "../src/domain.js";
 import { MemoryVoiceLabLedger } from "../src/memory-ledger.js";
 import { CapabilityCodec, sha256 } from "../src/security.js";
@@ -92,9 +92,25 @@ describe("canonical evidence refresh (C077)", () => {
     } finally { vi.useRealTimers(); }
   });
 
+  it("C080: purges at an already-passed signed deadline even though later writes moved updated_at", async () => {
+    // Finalized 25 h ago; the failed recovery was written just now, so the
+    // updated_at fallback lies ~24 h ahead while the signed expiry has passed.
+    const { ledger, run, finalizedAt } = await j6Like({ finalizedAt: new Date(Date.now() - 25 * 3_600_000) });
+    const signed = new Date(finalizedAt.getTime() + 24 * 3_600_000);
+    expect(signed.getTime()).toBeLessThan(Date.now());
+    expect(localRetentionDeadline(run).getTime()).toBeGreaterThan(Date.now() + 23 * 3_600_000);
+    expect(run.retentionPurgeDueAt).toBeNull();
+    const { worker: w, calls } = worker(ledger, async () => { throw new Error("remote purge confirmation unavailable"); });
+    await w.maintainSessions();
+    // No browser/start/abort; the only recover is the existing post-purge
+    // retained-recovery confirmation, never a refresh past the signed expiry.
+    expect(calls.filter((call) => call !== "recover")).toEqual([]);
+    expect(await ledger.getRetentionTombstone(run.id, run.callerId)).not.toBeNull(); // hard-purged in the same pass
+    expect((await ledger.listEvents(run.id, 0, 10).catch(() => ({ events: [] }))).events).toEqual([]);
+  });
+
   it.each([
     ["no authenticated finalization receipt", { finalization: false }],
-    ["a signed deadline already passed", { finalizedAt: new Date(Date.now() - 25 * 3_600_000) }],
   ])("writes nothing with %s", async (_label, options) => {
     const { ledger, run } = await j6Like(options);
     const before = (await ledger.getRun(run.id))!;
