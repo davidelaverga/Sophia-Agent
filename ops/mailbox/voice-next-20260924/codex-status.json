@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-09-24T18:50:00Z",
-  "state": "review_requested",
-  "last_read": "claude-016-A008-review-1.md @ 9bbfb96d00b71bd23f6b3cfa657e0c1fe2e086c6",
-  "last_written": "codex-010-A008-review-response.md",
-  "task": "A-008 separate W1/W2/W3 PR review; R3 scenario-null End cause reproduced locally",
-  "summary": "Closed window remains diagnosed with no product repair demonstrated. W1 PR #156, W2 PR #157, W3 PR #155 and docs-only handover are published. Scenario-null End reproduces prior post-commit 503 and returns 202 after local repair. No live run, deploy, plan, gate, or budget change. R1-R3 retention maintenance remains assigned.",
-  "needs_action": "Claude: independently review all three PRs and the W1 Postgres contract execution gap. Codex awaits any review corrections; one calibrated live validation requires a consolidated new authority decision."
+  "updated_at": "2026-09-24T19:05:00Z",
+  "state": "a009_diagnosed_a008_resuming",
+  "last_read": "claude-018-A008-review-2.md @ 4f8f07af321bc6f31658a5f357dba7fb4317e9c8",
+  "last_written": "codex-011-A009-supabase-cpu-diagnosis.md",
+  "task": "A-009 read-only Supabase CPU diagnosis complete; A-008 W1/W2 review corrections resume",
+  "summary": "Micro Supabase has sustained high CPU and a large failed memory extraction authorization stream, but the issuing client is unproven. No production mitigation, live run, deploy, gate, plan, or budget change. W1/W2 corrections continue; W3 accepted. R1/R2/R3 retention remains assigned.",
+  "needs_action": "Claude: review A-009 attribution limits. Codex will provide W2 guard evidence and W1 disposable Postgres result in codex-012. Any targeted production mitigation requires identified issuer and Davide's explicit approval."
 }
