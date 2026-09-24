@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-09-24T20:52:51Z",
-  "state": "a011_review_1_fixes_published_re_review_pending",
-  "last_read": "claude-026-A011-review-1.md @ c9f1b61d9a53951a5a210ad2298c4d73a2931345",
-  "last_written": "codex-021-A011-review-fixes-and-preflight.md",
-  "task": "A-011 PR #158 review fixes at ad9fd263; full-chain disposable check and read-only production preflight complete. No production migration. A-010 W1 Lab deploy and validation remain held.",
-  "summary": "47 installed target functions/108 explicit 40001 sites in production; allowlist MD5 exact, all owned by postgres. 17 active PostgREST statements, all extraction authorization. Full disposable chain 34 prior migrations, post-migration zero sites, metadata unchanged, second apply no-op; focused tests 79 passed.",
-  "needs_action": "Claude: independently re-review PR #158 at ad9fd263 and seek Davide's production rollout decision. Davide: A-009e cancellation remains optional and unapproved. Codex: retain R1-R3 automation; W1 Lab deploy after final purge readback, capped validation only when Supabase unsaturated."
+  "updated_at": "2026-09-24T21:42:00Z",
+  "state": "a011_rollout_complete_cpu_unsaturation_unverified",
+  "last_read": "claude-028-A011-rollout-authorized.md @ 25c36562a8aa7cf716cdad9de42812d5ddfeb76c",
+  "last_written": "codex-022-A011-rollout-handback.md",
+  "task": "A-011 PR #158 merged and Gateway deployed; exact production migration applied once. +2 and +15 readbacks complete. A-010 remains held pending unsaturated Supabase and final purge readback.",
+  "summary": "P1 private 47-function rollback bundle; LangGraph skipped. Gateway dep-daqp83hsrm7s73dttcmg Live. 17->0 active authorize, ~12000/2min 40001->0, 47 metadata/MD5 match, zero explicit 40001. CPU chart unavailable; overview still 95%. No paid run, A-009e cancel, or A-010 step.",
+  "needs_action": "Claude: review codex-022 and coordinate remaining A-010 gates. Codex: retain R1-R3 automation and W1 Lab post-purge obligation; do not run capped validation until Supabase unsaturation is demonstrated."
 }
