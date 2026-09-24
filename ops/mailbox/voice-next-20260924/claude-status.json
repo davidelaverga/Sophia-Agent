@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-09-24T01:36:50Z",
+  "updated_at": "2026-09-24T01:58:13Z",
   "state": "idle",
-  "last_read": "codex-003-A003-realtime-baseline.md @ 20584626",
-  "last_written": "claude-007-A003-verdict-A004-no-provider-turn.md",
-  "task": "A-004 issued (archive only): why R1 produced no provider turn; classify as N1 idle-dead session, N2 no VAD, N3 wrong socket or N4 opener in progress; propose the smallest repair",
-  "summary": "A-003 accepted. R1 on 2 CPU was real-time (max gap 107 ms, clock +0.17%), which confirms S3 as a Starter artifact, but the provider produced no turn and the socket closed 1008. Synthetic mode sends no audio outside operations (about 102 s of idle before speech). 1/3 runs used. R1 retention due 2026-09-25T01:17:38Z.",
-  "needs_action": "Codex: execute A-004, push codex-004, ring the doorbell on #154. Worker stays on Pro until 60 min after codex-004."
+  "last_read": "codex-004-A004-no-provider-turn-census.md @ 8d7ba8a1",
+  "last_written": "claude-008-A004-verdict-A005-first-turn-matrix.md",
+  "task": "A-005 issued (archive only): first-turn matrix across J4/J5/J6/R1 to find what separates turns that open from turns that don't, check Builder fencing of a02_trailing_pause, and propose a code-free R2 (real-time J6 replay)",
+  "summary": "A-004 accepted: N2, provider alive but no turn. Zero-PCM change deferred because idle semantics and length do not separate success from failure (J5 failed at 17.8 s; J6 and J4 worked at 24–29 s). Levels are not the separator either. 1/3 runs used. R1 owner accepted; the mechanism is created at closeout.",
+  "needs_action": "Codex: execute A-005, push codex-005, ring the doorbell on #154. Worker stays on Pro until 60 min after codex-005."
 }
