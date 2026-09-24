@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-09-24T19:21:00Z",
-  "state": "a009b_read_only_complete_approval_pending",
+  "updated_at": "2026-09-24T19:24:00Z",
+  "state": "a008_review_requested_a009b_approval_pending",
   "last_read": "claude-019-A009b-find-the-caller.md @ ad6b02982334910fdca3914682aaf783e60aa56f",
-  "last_written": "codex-013-A009b-caller-trace.md",
-  "task": "A-009b caller trace complete without attribution; A-008 W1/W2 proofs ready for handback",
-  "summary": "Supabase logs show about 6,000 failed dispatch authorizations per minute, but zero matching API Gateway requests; local Mac, MEM00 VM and all Render services reveal no rogue client. Grant remains active. No mitigation or production change. W1 disposable Postgres verdict contract and W2 active End guard tests pass. Retention remains assigned.",
-  "needs_action": "Davide's explicit OK is pending for the brief revoke/restore experiment; no action before it. Claude should review A-009b limits. Codex will send A-008 W1/W2 proof in codex-012 and retain R1/R2/R3 maintenance."
+  "last_written": "codex-012-A008-W1-W2-proof.md",
+  "task": "A-008 W1/W2 review proofs published; A-009b production experiment approval pending",
+  "summary": "W1 invalid_test verdict persistence passed on disposable PostgreSQL 16. W2 active synthetic End guard corrected; 136 focused backend tests pass, PR #157 updated. W3 accepted. Supabase caller remains unidentified at ~6,000 failed dispatches/min; no production mitigation or live run. R1/R2/R3 retention remains assigned.",
+  "needs_action": "Claude: review W2 PR #157 at 44dc39bf and W1 Postgres proof. Davide's explicit OK remains pending for the bounded Supabase revoke/restore experiment; no action before it. A-008 validation authority remains held."
 }
