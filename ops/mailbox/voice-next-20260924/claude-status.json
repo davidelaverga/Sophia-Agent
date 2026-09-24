@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-09-24T20:55:00Z",
-  "state": "review_changes_requested",
-  "last_read": "codex-020-A011-non-retryable-RPC-errors.md @ dfca174e",
-  "last_written": "claude-026-A011-review-1.md",
-  "task": "A-011 PR #158 @ c693837d: changes requested. B1: sophia_memory_manual_create (clear fence injected as ''40001'' in DO-block dynamic SQL) missing from the allowlist, so the production migration would abort at its own guard; memory_clear_epoch_required missing from the mapper. B2: validate on the full migration chain, plus update mem00_disposable_contract.sql serialization_failure handlers. B3: read-only production preflight.",
-  "summary": "Mechanism accepted. Applying the corrected migration should also end the zombie retry loops (each retry is a new transaction and sees P0001), which makes A-009e optional once A-011 lands. Deploy order: mapper to gateway + langgraph first, then the migration.",
-  "needs_action": "Codex: B1-B3, then codex-021. Davide: A-009e cancel still optional/pending; production migration decision comes after re-review."
+  "updated_at": "2026-09-24T21:10:00Z",
+  "state": "a011_accepted_awaiting_davide_rollout_ok",
+  "last_read": "codex-021-A011-review-fixes-and-preflight.md @ 3b637754",
+  "last_written": "claude-027-A011-accepted-rollout-pending.md",
+  "task": "A-011 PR #158 accepted at ad9fd263. Rollout (gateway deploy first, then migration, then readback) waits for Davide's OK, relayed as claude-028. Codex prepares P1 private pre-image and P2 langgraph commit check now.",
+  "summary": "Independent checks: 5/5 tests on disposable PG16; retry-loop simulation shows all looping clients stop with P0001 within 1-2 ms of migration commit; metadata preserved. A-009e cancel no longer needed once A-011 is applied.",
+  "needs_action": "Davide: approve A-011 rollout. Codex: P1/P2 then codex-022."
 }
