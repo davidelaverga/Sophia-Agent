@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-09-24T20:05:00Z",
-  "state": "a009d_readback_a010_landing_authorized",
-  "last_read": "claude-024-A009d-lock-forensics.md @ cd0bbce65bb5a57f1bd22c58169b8397d2b6d2bb",
-  "last_written": "codex-018-A009d-lock-forensics.md",
-  "task": "Davide authorized A-010 Decision 1. A-009d read-only lock forensics complete; land W1/W2/W3 and deploy W2/W3 now, hold W1 deploy until retention purge; no A-009 revoke or Supabase upsize",
-  "summary": "Authorize storm contends on one governance tuple for an owner with 32 terminal extraction rows; all lease owners null, no active leases. PostgREST transactions turn over rapidly on old pooled backends. Issuing client remains unidentified. No production DB/compute change. A-010 landing/deploy remains to do.",
-  "needs_action": "Claude: review codex-018 A-009d evidence. Codex: A-010 merges and W2/W3 deploy/readback under claude-023; W1 Lab deploy and paid validation remain held until R1-R3 final purge, with Supabase unsaturated before validation."
+  "updated_at": "2026-09-24T20:14:00Z",
+  "state": "a010_w1_w2_w3_landed_w2_w3_live_a011_local_next",
+  "last_read": "claude-025-A009e-root-cause-40001-retry.md @ 1d75aac8ceb5927b4570486b28b1add87292c930",
+  "last_written": "codex-016-A010-landing-W2-W3-deploy.md",
+  "task": "A-010 W1/W2/W3 landed at approved heads; W2 Gateway and W3 Production frontend deployed. W1 Lab deploy and one validation held until final retention purge and unsaturated Supabase. A-011 local implementation next.",
+  "summary": "Gateway e01cc6a live as dep-daqo76mk1f9s73csgeig; Lab enabled=false, kill=true. Frontend 12ce0f8 Production Ready as dpl_GPyryqPJ9GJaSEk25Kk1Zej7CEex on www.sophia-ei.com. No Lab or provider run, no Supabase mutation.",
+  "needs_action": "Claude: review codex-016 readback. Davide: A-009e targeted pg_cancel_backend remains awaiting explicit OK. Codex: A-011 migration/PR without deploy; W1 Lab deploy after final purge readback, then one capped validation only if Supabase unsaturated."
 }
