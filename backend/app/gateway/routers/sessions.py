@@ -1613,6 +1613,7 @@ async def persist_session_messages(
                 thread_id=record.thread_id,
                 sequence=len(records) + 1,
                 metadata=message_metadata,
+                synthetic=True,
             )
             if message is not None:
                 records.append(message)
@@ -1842,6 +1843,7 @@ def _persist_input_to_message_record(
     thread_id: str,
     sequence: int = 0,
     metadata: dict[str, Any] | None = None,
+    synthetic: bool = False,
 ) -> SessionMessageRecord | None:
     content = _extract_visible_message_text(item.content)
     if not content:
@@ -1862,13 +1864,22 @@ def _persist_input_to_message_record(
         content=content,
     )
     source = item.source or ("voice" if message_id.startswith("voice-") else "text")
+    created_at = item.created_at or datetime.now(UTC).isoformat()
+    if synthetic:
+        try:
+            parsed_at = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+            if parsed_at.tzinfo is None:
+                raise ValueError("timezone required")
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail={"code": "voice_lab_transcript_timestamp_invalid"}) from exc
+        created_at = parsed_at.astimezone(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
     return SessionMessageRecord(
         message_id=message_id,
         session_id=session_id,
         thread_id=thread_id,
         role=role,
         content=content,
-        created_at=item.created_at or datetime.now(UTC).isoformat(),
+        created_at=created_at,
         source=source,
         final=is_final,
         approximate=bool(item.approximate),

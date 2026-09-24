@@ -1020,9 +1020,22 @@ def _validate_synthetic_finalization_transcript(body: SessionEndRequest) -> None
             )
 
 
-def _read_exact_synthetic_messages(user_id: str, session_id: str) -> list[SessionMessageRecord]:
+def _read_exact_synthetic_messages(
+    user_id: str, session_id: str, *, record: SessionRecord, terminal: bool = False,
+) -> list[SessionMessageRecord]:
     try:
-        return canonical_visible_messages(_session_store.read_exact_session_messages(user_id, session_id))
+        raw = _session_store.read_exact_session_messages(user_id, session_id)
+        if record.transcript_available and not raw:
+            raise SessionEvidenceIntegrityError("Available transcript rows are missing.")
+        visible = canonical_visible_messages(raw)
+        # Finalization writes only canonical rows. A terminal retry must not
+        # silently accept extra raw rows even if the visible count matches.
+        if terminal and len(raw) != len(visible):
+            raise SessionEvidenceIntegrityError("Terminal transcript rows drifted.")
+        # A valid active snapshot can contain a later preferred duplicate or
+        # a non-final row, leaving gaps in raw sequence numbers. The canonical
+        # End contract numbers only the visible final rows.
+        return [message.model_copy(update={"sequence": index}) for index, message in enumerate(visible, 1)]
     except SessionEvidenceIntegrityError as exc:
         raise HTTPException(status_code=503, detail={"code": "voice_lab_canonical_transcript_invalid"}) from exc
     except (OSError, RuntimeError, SessionStoreError) as exc:
@@ -1041,9 +1054,10 @@ def _synthetic_finalization_messages(
     # A zero-row exact read is valid empty canonical data. A malformed or
     # unavailable read must raise, rather than masquerade as the same empty
     # transcript during the irreversible finalization boundary.
-    existing = _read_exact_synthetic_messages(user_id, body.session_id)
-    if len(existing) != record.message_count:
-        raise HTTPException(status_code=503, detail={"code": "voice_lab_canonical_transcript_invalid"})
+    existing = _read_exact_synthetic_messages(user_id, body.session_id, record=record)
+    # During an active synthetic session the revisioned transcript CAS updates
+    # message_revision but deliberately does not upsert message_count. That
+    # count is set atomically by finalization, so it cannot guard this read.
     if not body.messages:
         return existing, max(0, int(record.message_revision))
     if body.base_revision is None:
@@ -1124,7 +1138,7 @@ def _assert_synthetic_terminal_transcript_replay(
     claims: VoiceLabClaims,
 ) -> tuple[SessionRecord, list[SessionMessageRecord]]:
     """Verify a terminal retry without granting any transcript mutation."""
-    stored = _read_exact_synthetic_messages(user_id, body.session_id)
+    stored = _read_exact_synthetic_messages(user_id, body.session_id, record=record, terminal=True)
     if len(stored) != record.message_count:
         raise HTTPException(status_code=503, detail={"code": "voice_lab_canonical_transcript_invalid"})
     current = _session_store.get(user_id, body.session_id) or record

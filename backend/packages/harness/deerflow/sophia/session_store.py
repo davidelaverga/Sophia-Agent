@@ -533,7 +533,6 @@ def _validate_exact_finalization_messages(
         raise SessionEvidenceIntegrityError(
             "Synthetic finalization transcript sequence set drifted."
         )
-    message_ids: set[str] = set()
     storage_ids: set[str] = set()
     total_content_bytes = 0
     for message in ordered:
@@ -543,12 +542,9 @@ def _validate_exact_finalization_messages(
         if (
             message.session_id != session_id
             or message.role not in {"user", "assistant"}
-            or message.final is not True
             or not message.message_id
-            or message.message_id in message_ids
             or storage_id in storage_ids
             or not message.thread_id
-            or not message.content.strip()
             or content_bytes > 32 * 1024
             or _parse_canonical_utc_millis(message.created_at) is None
             or not isinstance(message.metadata, dict)
@@ -556,7 +552,6 @@ def _validate_exact_finalization_messages(
             raise SessionEvidenceIntegrityError(
                 "Synthetic finalization transcript row drifted."
             )
-        message_ids.add(message.message_id)
         storage_ids.add(storage_id)
     if total_content_bytes > 1024 * 1024:
         raise SessionEvidenceIntegrityError(
@@ -2324,7 +2319,7 @@ class SupabaseSessionTranscriptStore:
                 or row.get("role") not in {"user", "assistant"}
                 or not isinstance(row.get("content"), str)
                 or not isinstance(row.get("source"), str)
-                or row.get("final") is not True
+                or type(row.get("final")) is not bool
                 or type(row.get("approximate")) is not bool
                 or type(row.get("sequence")) is not int
                 or not isinstance(row.get("metadata"), dict)
