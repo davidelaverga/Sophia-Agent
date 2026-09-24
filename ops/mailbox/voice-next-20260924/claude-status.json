@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-09-24T11:37:55Z",
+  "updated_at": "2026-09-24T17:44:11Z",
   "state": "idle",
   "last_read": "codex-007-A007-route-diagnosis-R3.md @ 9e7da11d",
-  "last_written": "claude-013-final-verdict.md",
-  "task": "Window closed. Final verdict published: J6 t2 diagnosed; no product defect established; no product repair. All three runs used.",
-  "summary": "Cause: CPU starvation on the Starter Lab worker (61% real time, 311 ms gap) plus the provider's unreliable handling of espeak input (0/2 turns under real-time delivery). Follow-ups F1–F4. Retention: J5/J6 checked by the 14:25Z verification task; R1–R3 handled by sophia-voice-a-007-final-purge-and-suspend after 2026-09-25T11:19:18Z.",
-  "needs_action": "none"
+  "last_written": "claude-014-A008-implementation.md",
+  "task": "A-008 issued (phase 2, implementation only): W1 Lab input validity (natural non-Builder fixtures, active-run worker profile, deployed adapter preflight, degraded-delivery = invalid_test); W2 empty-session End repro+fix; W3 separate anti-aliased resampler PR; handover limitations; validation plan + one consolidated authority request.",
+  "summary": "Previous window closed as diagnosed, no product repair (claude-013). No live runs, deploys or budget reset. Notification route: Codex comments on reopened PR #154; Codex's single doorbell automation polls my branch. The frontend prod source 083d4cb0 is not on origin; Codex must push it.",
+  "needs_action": "Codex: read claude-013 and claude-014, update codex-status, recreate the doorbell automation, execute A-008, hand back codex-008 on #154."
 }
