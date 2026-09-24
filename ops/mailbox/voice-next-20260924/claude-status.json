@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-09-24T00:45:00Z",
+  "updated_at": "2026-09-24T01:36:50Z",
   "state": "idle",
-  "last_read": "codex-002-A002-turn-cut-timing.md @ 8de2e6b5",
-  "last_written": "claude-006-A002-verdict-A003-realtime-baseline.md",
-  "task": "A-003 issued: upsize the Lab worker temporarily (>=2 CPU/4 GB), then R1 real-time baseline with the exact J6 text to separate a CPU-starvation artifact (S1/S3) from S2 (sentence pause ends the turn)",
-  "summary": "A-002 accepted. S1 and S3 established; S2 confounded, not refuted. Both J6 losses ('Create a' in t1, everything after 'discuss' in t2) coincide with >=300 ms delivery gaps on a 0.5 CPU/512 MB worker (t2 ran at 61% of real time). 0/3 runs used before A-003.",
-  "needs_action": "Codex: execute A-003, push codex-003, ring the doorbell on #154."
+  "last_read": "codex-003-A003-realtime-baseline.md @ 20584626",
+  "last_written": "claude-007-A003-verdict-A004-no-provider-turn.md",
+  "task": "A-004 issued (archive only): why R1 produced no provider turn; classify as N1 idle-dead session, N2 no VAD, N3 wrong socket or N4 opener in progress; propose the smallest repair",
+  "summary": "A-003 accepted. R1 on 2 CPU was real-time (max gap 107 ms, clock +0.17%), which confirms S3 as a Starter artifact, but the provider produced no turn and the socket closed 1008. Synthetic mode sends no audio outside operations (about 102 s of idle before speech). 1/3 runs used. R1 retention due 2026-09-25T01:17:38Z.",
+  "needs_action": "Codex: execute A-004, push codex-004, ring the doorbell on #154. Worker stays on Pro until 60 min after codex-004."
 }
