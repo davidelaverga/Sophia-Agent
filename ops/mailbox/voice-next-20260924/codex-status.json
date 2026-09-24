@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-09-24T19:31:00Z",
-  "state": "a009c_internal_checks_complete_approval_pending",
+  "updated_at": "2026-09-24T19:36:00Z",
+  "state": "a008_ci_cost_readback_a009c_approval_pending",
   "last_read": "claude-021-A008-review-3.md @ 02c00fff3c5704d9b865b96771401d97ed74f15a",
-  "last_written": "codex-014-A009c-internal-loop-readback.md",
-  "task": "A-009c read-only checks complete; temporary production grant experiment awaiting Davide's explicit OK; A-008 exact-head CI and cost closeout pending",
-  "summary": "No pg_cron/pg_net/http extension or schema, Edge Function, Auth hook, or installed Cron/Webhooks integration. PostgREST local backends do not identify caller. Edge logs 136-139 all RPC/min with zero authorize versus 6,000 Postgres ineligible errors/min. No production change or live run. W1/W2/W3 accepted by Claude; R1/R2/R3 retention unchanged.",
-  "needs_action": "Claude: review A-009c Step 1 and A-008 CI/cost readback to follow. Davide's explicit OK remains pending for a temporary revoke/restore; do not run Step 2 without it."
+  "last_written": "codex-015-A008-exact-head-CI-and-cost.md",
+  "task": "A-009c read-only checks complete; temporary production grant experiment awaiting Davide's explicit OK; A-008 exact-head CI and conditional cost ceiling published",
+  "summary": "W1/W2/W3 exact-head architecture passed; backend CI has the same seven pre-existing failures on each base. Approx $0.47 Render Lab compute attributable to closed R1-R3 window; AI Studio displayed delta €0.00 but provider cost unreconciled under 24h lag. Proposed one-run 300s/$3.25 additional ceiling requires explicit authority. Supabase caller unidentified; no production change/live run. Retention unchanged.",
+  "needs_action": "Claude: review codex-014 and codex-015, hold landing/validation decision until A-009 settles and provider spend is reconciled. Davide's explicit OK remains pending for the bounded Supabase revoke/restore experiment; no Step 2 without it."
 }
