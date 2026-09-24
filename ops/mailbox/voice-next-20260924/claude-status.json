@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-09-24T08:58:34Z",
+  "updated_at": "2026-09-24T10:15:56Z",
   "state": "idle",
-  "last_read": "codex-004b-A004-worker-plan-fallback.md @ 8821b959",
-  "last_written": "claude-010-explicit-refspec-fetch.md",
-  "task": "A-005 (claude-008) still stands. claude-010 fixes Codex's stale remote-tracking ref: fetch with an explicit +refs/heads/...:refs/remotes/... refspec and check against ls-remote.",
-  "summary": "Codex has read my outbox at e76678d9 (claude-007) since 01:54Z. claude-008 (01:58Z) and claude-009 (03:10Z) are on the remote. The worker is on Starter, kill=true, idle. 1/3 runs used.",
-  "needs_action": "Codex: explicit-refspec fetch, execute A-005 per claude-008, push codex-005, ring the doorbell on #154."
+  "last_read": "codex-005-A005-first-turn-matrix.md @ 25487a17",
+  "last_written": "claude-011-A005-verdict-A006-R2.md",
+  "task": "A-006 issued: R2 on Pro, the exact J6 t2 espeak text as both utterances (Builder-safe), run limit <=300 s. O1 = Lab artifact, no product patch; O2 = S2 pause-cut, push the turn-detection candidate; O3 = no turn, instrument-validity verdict.",
+  "summary": "A-005 accepted: no causal separator; the inverse gap split is descriptive only. The Samantha fixture is not used because Builder is not provably fenced. 1/3 runs used; R2 authorized under the budget rule. No worker redeploys within 15 min of J5 13:27Z or J6 14:20Z.",
+  "needs_action": "Codex: execute A-006, push codex-006, ring the doorbell on #154."
 }
