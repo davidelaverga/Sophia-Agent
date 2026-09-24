@@ -17,6 +17,7 @@ from deerflow.sophia.session_store import (
     SessionStoreError,
     SupabaseSessionStoreConfig,
     SupabaseSessionTranscriptStore,
+    canonical_visible_messages,
 )
 
 
@@ -620,6 +621,46 @@ def test_supabase_exact_transcript_read_ignores_additive_mem00_columns():
     for row in fake.messages.values():
         row.pop("approximate", None)
     with pytest.raises(SessionEvidenceIntegrityError):
+        store.read_exact_session_messages("user-1", "session-1")
+
+
+def test_supabase_exact_transcript_read_accepts_valid_nonfinal_and_duplicate_rows():
+    fake = _ColumnProjectingPostgrest()
+    store = _supabase_store(fake)
+    store.upsert_session(SessionRecord(session_id="session-1", thread_id="thread-1", user_id="user-1"))
+    first = SessionMessageRecord(
+        message_id="msg-1", session_id="session-1", thread_id="thread-1",
+        role="user", content="synthetic", sequence=1,
+        created_at="2026-09-24T19:00:00.000Z",
+    )
+    store.replace_messages_revisioned("user-1", "session-1", [first], expected_revision=0)
+    duplicate = first.model_copy(update={"message_id": "msg-duplicate", "sequence": 2})
+    nonfinal = first.model_copy(update={
+        "message_id": "msg-pending", "content": "unfinished", "sequence": 3, "final": False,
+    })
+    for message in (duplicate, nonfinal):
+        row = store._message_row_from_record("user-1", message)
+        fake.messages[row["id"]] = row
+
+    raw = store.read_exact_session_messages("user-1", "session-1")
+    assert len(raw) == 3
+    assert [item.message_id for item in canonical_visible_messages(raw)] == ["msg-duplicate"]
+
+
+def test_empty_exact_transcript_is_valid_but_malformed_or_unavailable_is_not():
+    store = _supabase_store(_ColumnProjectingPostgrest())
+    assert store.read_exact_session_messages("user-1", "session-1") == []
+
+    store._client = httpx.Client(transport=httpx.MockTransport(
+        lambda request: httpx.Response(200, json={"unexpected": "shape"})
+    ))
+    with pytest.raises(SessionEvidenceIntegrityError):
+        store.read_exact_session_messages("user-1", "session-1")
+
+    store._client = httpx.Client(transport=httpx.MockTransport(
+        lambda request: httpx.Response(503, json={"code": "unavailable"})
+    ))
+    with pytest.raises(SessionStoreError):
         store.read_exact_session_messages("user-1", "session-1")
 
 

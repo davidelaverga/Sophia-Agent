@@ -186,6 +186,8 @@ def test_synthetic_persist_returns_the_committed_revision_and_ordinary_end_final
     assert body["synthetic_isolated"] is True and body["canonical_persistence"] is True
     assert store.metadata_upserts == 0  # no post-commit synthetic metadata upsert
 
+    assert store.read_exact_session_messages(USER, "sess-c051")
+
     ended = client.post(
         f"/api/sophia/{USER}/end-session",
         headers={"X-Sophia-Voice-Lab-Capability": _capability(["session:finalize"], "jti-end")},
@@ -196,6 +198,57 @@ def test_synthetic_persist_returns_the_committed_revision_and_ordinary_end_final
     finalized = store.get(USER, "sess-c051")
     assert finalized.status == "ended"
     assert finalized.message_count == len(MESSAGES)  # set atomically by finalization, not by the PUT
+
+
+def test_active_synthetic_end_accepts_canonical_rows_with_duplicate_and_nonfinal(lab):
+    client, store = lab
+    persisted = _persist(client, 0)
+    assert persisted.status_code == 200, persisted.text
+    active = store.get(USER, "sess-c051")
+    assert active is not None and active.status == "open"
+    assert active.message_revision == 1 and active.message_count == 0
+
+    visible = store.list_messages(USER, "sess-c051")
+    assert len(visible) == 2
+    duplicate = visible[0].model_copy(update={
+        "message_id": "c051-user-duplicate", "provider_event_id": "input-final-duplicate",
+        "sequence": 3,
+    })
+    nonfinal = visible[1].model_copy(update={
+        "message_id": "c051-output-pending", "provider_event_id": "output-pending",
+        "content": "unfinished reply", "final": False, "sequence": 4,
+    })
+    # Model historical rows in an active transcript. The exact read must
+    # validate their shape, then canonicalize without requiring the active
+    # session's finalization-only message_count to have been updated.
+    store._write_messages(USER, "sess-c051", [*visible, duplicate, nonfinal])
+
+    ended = client.post(
+        f"/api/sophia/{USER}/end-session",
+        headers={"X-Sophia-Voice-Lab-Capability": _capability(["session:finalize"], "jti-end-duplicate")},
+        json={"session_id": "sess-c051", "thread_id": "thread-c051", "started_at": CREATED_AT.isoformat(),
+              "turn_count": 1},
+    )
+    assert ended.status_code == 202, ended.text
+    assert ended.json()["canonical_transcript"]["message_count"] == 2
+    assert store.get(USER, "sess-c051").message_count == 2
+
+
+def test_active_synthetic_end_rejects_missing_transcript_rows(lab):
+    client, store = lab
+    assert _persist(client, 0).status_code == 200
+    active = store.get(USER, "sess-c051")
+    assert active is not None and active.transcript_available is True
+    store._transcript_path(USER, "sess-c051").unlink()
+
+    ended = client.post(
+        f"/api/sophia/{USER}/end-session",
+        headers={"X-Sophia-Voice-Lab-Capability": _capability(["session:finalize"], "jti-end-missing")},
+        json={"session_id": "sess-c051", "thread_id": "thread-c051", "turn_count": 1},
+    )
+    assert ended.status_code == 503
+    assert ended.json()["detail"]["code"] == "voice_lab_canonical_transcript_invalid"
+    assert store.get(USER, "sess-c051").status == "open"
 
 
 def test_a_stale_base_revision_still_conflicts_at_finalization(lab):
