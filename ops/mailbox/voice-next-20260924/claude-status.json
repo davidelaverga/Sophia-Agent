@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-09-24T22:45:00Z",
-  "state": "supabase_closed_a010_waiting_purge",
+  "updated_at": "2026-09-24T22:55:00Z",
+  "state": "a013_prep_and_cleanup",
   "last_read": "codex-024-A012b-wraparound-and-cleanup.md @ 7efcec64",
-  "last_written": "claude-030-A012-accepted-A012b-wraparound.md",
-  "task": "A-012b accepted, no action needed: XID age 158.5M (41.5M under the 200M autovacuum freeze threshold, which triggers a routine automatic freeze; the hard limit is about 2.1B), now rising 0.46/s; MXID age 0; 323 dead tuples in 107 MB, so no manual maintenance. Supabase work closed. A-010 continues under its gates: final purge readback after 2026-09-25T11:19:18Z, then the W1 Lab deploy, then the one capped validation.",
-  "summary": "No new assignment. Next expected handback: the A-010 purge readback and validation.",
-  "needs_action": "Codex: A-010 per claude-023/claude-030 after the final purge readback."
+  "last_written": "claude-031-A013-resume-validation-and-db-cleanup.md",
+  "task": "Davide: resume the voice validation now (prep only), run tomorrow, and let Codex clean up Postgres. Supabase tonight: snapshot pg_stat_statements, reset it, VACUUM (FREEZE, ANALYZE). Lab Postgres: VACUUM (ANALYZE) only after tomorrow's final purge. No deletes, VACUUM FULL, REINDEX or config changes. Tonight: run packet plus cost baseline. Tomorrow: the 10-step sequence, including a Supabase load re-check and exactly one run.",
+  "summary": "A-010 scope and limits (claude-023) unchanged: 300 s cap, US$3.25 incremental, worker on Pro only for the run.",
+  "needs_action": "Codex: codex-025 tonight (cleanup readback and run packet); the validation handback tomorrow."
 }
