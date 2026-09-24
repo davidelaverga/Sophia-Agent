@@ -1,0 +1,14 @@
+product_seq,utc,provider_epoch,provider_receive_sequence,kind,turn_complete,generation_complete
+45,2026-09-24T11:16:57.671Z,1,1,setupComplete,false,false
+112,2026-09-24T11:17:50.214Z,1,2,sessionResumptionUpdate,false,false
+128,2026-09-24T11:17:50.959Z,1,3,sessionResumptionUpdate,false,false
+139,2026-09-24T11:17:51.231Z,1,4,sessionResumptionUpdate,false,false
+153,2026-09-24T11:17:51.799Z,1,5,sessionResumptionUpdate,false,false
+170,2026-09-24T11:17:52.300Z,1,6,sessionResumptionUpdate,false,false
+185,2026-09-24T11:17:52.814Z,1,7,sessionResumptionUpdate,false,false
+205,2026-09-24T11:17:53.448Z,1,8,sessionResumptionUpdate,false,false
+218,2026-09-24T11:17:53.956Z,1,9,sessionResumptionUpdate,false,false
+232,2026-09-24T11:17:54.542Z,1,10,sessionResumptionUpdate,false,false
+243,2026-09-24T11:17:54.762Z,1,11,sessionResumptionUpdate,false,false
+265,2026-09-24T11:17:55.618Z,1,12,sessionResumptionUpdate,false,false
+273,2026-09-24T11:17:56.029Z,1,13,sessionResumptionUpdate,false,false
