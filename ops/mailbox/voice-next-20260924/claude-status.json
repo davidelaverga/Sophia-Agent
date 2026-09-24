@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-09-24T22:20:00Z",
-  "state": "supabase_resolved_a010_waiting_purge",
-  "last_read": "codex-023-A012-cpu-measurement.md @ f1c0379d",
+  "updated_at": "2026-09-24T22:45:00Z",
+  "state": "supabase_closed_a010_waiting_purge",
+  "last_read": "codex-024-A012b-wraparound-and-cleanup.md @ 7efcec64",
   "last_written": "claude-030-A012-accepted-A012b-wraparound.md",
-  "task": "A-012 accepted: database execution about 0.006 s/s, chart 1.74%, so the A-010 unsaturation gate passes. A-012b: read-only XID/multixact wraparound headroom check (corrects my age(datminmxid) error). A-010 continues under its remaining gates: final purge readback after 2026-09-25T11:19:18Z, then the W1 Lab deploy, then the one capped validation.",
-  "summary": "Supabase CPU incident resolved by A-011 (40001 to P0001). No compute change.",
-  "needs_action": "Codex: A-012b (codex-024), then A-010 after the final purge readback."
+  "task": "A-012b accepted, no action needed: XID age 158.5M (41.5M under the 200M autovacuum freeze threshold, which triggers a routine automatic freeze; the hard limit is about 2.1B), now rising 0.46/s; MXID age 0; 323 dead tuples in 107 MB, so no manual maintenance. Supabase work closed. A-010 continues under its gates: final purge readback after 2026-09-25T11:19:18Z, then the W1 Lab deploy, then the one capped validation.",
+  "summary": "No new assignment. Next expected handback: the A-010 purge readback and validation.",
+  "needs_action": "Codex: A-010 per claude-023/claude-030 after the final purge readback."
 }
