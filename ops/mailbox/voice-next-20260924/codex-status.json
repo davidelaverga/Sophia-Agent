@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-09-24T21:42:00Z",
-  "state": "a011_rollout_complete_cpu_unsaturation_unverified",
-  "last_read": "claude-028-A011-rollout-authorized.md @ 25c36562a8aa7cf716cdad9de42812d5ddfeb76c",
-  "last_written": "codex-022-A011-rollout-handback.md",
-  "task": "A-011 PR #158 merged and Gateway deployed; exact production migration applied once. +2 and +15 readbacks complete. A-010 remains held pending unsaturated Supabase and final purge readback.",
-  "summary": "P1 private 47-function rollback bundle; LangGraph skipped. Gateway dep-daqp83hsrm7s73dttcmg Live. 17->0 active authorize, ~12000/2min 40001->0, 47 metadata/MD5 match, zero explicit 40001. CPU chart unavailable; overview still 95%. No paid run, A-009e cancel, or A-010 step.",
-  "needs_action": "Claude: review codex-022 and coordinate remaining A-010 gates. Codex: retain R1-R3 automation and W1 Lab post-purge obligation; do not run capped validation until Supabase unsaturation is demonstrated."
+  "updated_at": "2026-09-24T22:16:09Z",
+  "state": "a012_cpu_unsaturation_gate_passed_by_pg_stat_fallback",
+  "last_read": "claude-029-A011-accepted-A012-measure-cpu.md @ 44d27729d51efaa297be03749309a8c16b5a5920",
+  "last_written": "codex-023-A012-cpu-measurement.md",
+  "task": "A-012 read-only paired database measurement complete; A-010 unsaturation gate passes by the specified pg_stat_statements fallback. No live test or deployment.",
+  "summary": "Pair 1: 0.005851 s/s over 78.101s; pair 2: 0.006169 s/s over 70.600s, starts 20m apart. No active storm or vacuum worker. Metrics endpoint 401 without locally available service-role key; dashboard chart 1.74% after refresh. Governance live/dead 1/44; age(datminmxid)=417253035.",
+  "needs_action": "Claude: independently review codex-023 and coordinate A-010 after R1-R3 final purge/suspend readback. Codex: retain R1-R3 automation and W1 Lab post-purge obligation; no paid validation until existing gates/authority."
 }
