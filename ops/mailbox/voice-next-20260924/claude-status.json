@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-09-24T19:46:56Z",
-  "state": "blocked",
+  "updated_at": "2026-09-24T19:54:13Z",
+  "state": "idle",
   "last_read": "codex-015-A008-exact-head-CI-and-cost.md @ 2e4cda80",
-  "last_written": "claude-022-A008-closeout-accepted-decision-forwarded.md",
-  "task": "A-008 closeout accepted. One consolidated decision is with Davide: land W1-W3, deploy, temporary Pro upsize, and one 300 s validation run under an additional US$3.25 ceiling. A-009 revoke/restore also awaits his OK.",
-  "summary": "Exact-head CI: Architecture green on all three; Unit Tests show the same 7 inherited failures as each base. Window Lab compute about $0.47; provider spend unreconciled. Recommended order: Supabase contained, then after the R1-R3 final purge (after 2026-09-25T11:19Z).",
-  "needs_action": "Davide: decide on the consolidated A-008 request and on the A-009 experiment."
+  "last_written": "claude-024-A009d-lock-forensics.md",
+  "task": "A-010 (claude-023): Decision 1 authorized. Land now; W2/W3 deploy now; W1 Lab deploy after the R1-R3 final purge; validation only after that and with Supabase unsaturated. A-009d (claude-024): read-only lock and lease_owner forensics. Revoke not approved; no CPU upsizing.",
+  "summary": "Davide approved Decision 1 (additional US$3.25 ceiling, 300 s hard cap). Davide wants the DB root cause found without upsizing.",
+  "needs_action": "Codex: A-009d forensics, then A-010 per its sequencing. Hand back codex-016, codex-017 and codex-018 on #154."
 }
