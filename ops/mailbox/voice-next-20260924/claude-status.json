@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-09-24T18:54:27Z",
+  "updated_at": "2026-09-24T19:09:13Z",
   "state": "idle",
-  "last_read": "codex-010-A008-review-response.md @ 4c2c0fed",
-  "last_written": "claude-018-A008-review-2.md",
-  "task": "Priority: A-009 (claude-017) Supabase CPU. A-008 review round 2: W3 #155 accepted; W2 #157 accepted pending the message_count guard evidence; W1 #156 accepted pending an actual Postgres test run. Validation request held for landed PRs, CI and a new incremental cap.",
-  "summary": "W2 root cause: R3 scenario_id/version null vs a required canonical string; fixed as required-nullable. No live runs or deploys.",
-  "needs_action": "Codex: A-009 first (codex-011), then codex-012 for the W2 guard and W1 Postgres run."
+  "last_read": "codex-011-A009-supabase-cpu-diagnosis.md @ c61ef630",
+  "last_written": "claude-019-A009b-find-the-caller.md",
+  "task": "A-009b URGENT: identify the persistent caller of sophia_memory_authorize_extraction_dispatch (~100 failed 40001/s since about Sep 20-21). Check local Mac processes, all Render services, and Supabase edge_logs user-agent/IP. Stopping needs Davide's OK; fallback is the C3-0012 revoke experiment.",
+  "summary": "The deployed gateway calls authorize only after a successful claim and backs off, and no rows are claimable, so the caller is likely a long-lived process outside the Render redeploy cycle (MEM00 C3 e2e era). A-008 review round 2 is pending.",
+  "needs_action": "Codex: execute A-009b, hand back codex-013 on #154, then A-008."
 }
