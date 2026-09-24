@@ -1,4 +1,5 @@
 import { isCoReviewStillFrameEnabled } from './co-review-flags';
+import { StreamingPcm16Resampler } from './streaming-pcm-resampler';
 import {
   COREVIEW_ADD_ANNOTATION_TOOL_NAME,
   COREVIEW_FOCUS_ANCHOR_TOOL_NAME,
@@ -5227,16 +5228,7 @@ export function pcm16Base64FromFloat32(
     return '';
   }
 
-  const ratio = sourceSampleRate / targetSampleRate;
-  const outputLength = Math.max(1, Math.floor(input.length / ratio));
-  const pcm = new Int16Array(outputLength);
-
-  for (let index = 0; index < outputLength; index += 1) {
-    const sourceIndex = Math.min(input.length - 1, Math.floor(index * ratio));
-    const sample = Math.max(-1, Math.min(1, input[sourceIndex] ?? 0));
-    pcm[index] = sample < 0 ? sample * 0x8000 : sample * 0x7fff;
-  }
-
+  const pcm = new StreamingPcm16Resampler(sourceSampleRate, targetSampleRate).process(input);
   return bytesToBase64(new Uint8Array(pcm.buffer));
 }
 
@@ -8314,6 +8306,7 @@ function startMicrophoneAudioPipeline(options: {
 }): AudioPipeline {
   const source = options.audioContext.createMediaStreamSource(options.localStream);
   const processor = options.audioContext.createScriptProcessor(4096, 1, 1);
+  const microphoneResampler = new StreamingPcm16Resampler(options.audioContext.sampleRate, INPUT_AUDIO_RATE_HZ);
   let muted = false;
   let audioStreamEndSent = false;
   let localSequence = 0;
@@ -8393,7 +8386,8 @@ function startMicrophoneAudioPipeline(options: {
     audioStreamEndSent = false;
 
     const input = event.inputBuffer.getChannelData(0);
-    const data = pcm16Base64FromFloat32(input, options.audioContext.sampleRate, INPUT_AUDIO_RATE_HZ);
+    const pcm = microphoneResampler.process(input);
+    const data = pcm.length ? bytesToBase64(new Uint8Array(pcm.buffer)) : '';
     if (!data) {
       return;
     }
@@ -8417,7 +8411,7 @@ function startMicrophoneAudioPipeline(options: {
       emitInputAudioActivity('input_audio_frame_sent', {
         audioFrameSequence,
         framesRepresented: framesSinceLastDiagnostic,
-        frameByteLength: estimatePcm16ByteLength(input.length, options.audioContext.sampleRate, INPUT_AUDIO_RATE_HZ),
+        frameByteLength: pcm.byteLength,
         frameDurationMs: Math.round((input.length / options.audioContext.sampleRate) * 1000),
         audioStreamEndSent: false,
         trigger: 'audio_process',
