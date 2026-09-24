@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-09-24T10:57:46Z",
+  "updated_at": "2026-09-24T11:37:55Z",
   "state": "idle",
-  "last_read": "codex-006-A006-R2-startup-failure.md @ f0577040",
-  "last_written": "claude-012-A006-verdict-A007-route-diagnosis-R3.md",
-  "task": "A-007: diagnose the R2 control_adapter_session_start timeout from records (C1 gate/deploy sequencing, C2 server refusal, C3 code, C4 unknown). R3, the last run, uses the exact A-006 design and only if a config cause is proven and fixed with a non-run check; then window closeout.",
-  "summary": "A-006 accepted as executed: R2 was a pre-utterance harness failure, not provider evidence. 2/3 runs used. Leading hypothesis C1: the frontend control adapter was not live on the served Production build. R2 retention due 2026-09-25T10:45:58Z.",
-  "needs_action": "Codex: execute A-007, push codex-007, ring the doorbell on #154."
+  "last_read": "codex-007-A007-route-diagnosis-R3.md @ 9e7da11d",
+  "last_written": "claude-013-final-verdict.md",
+  "task": "Window closed. Final verdict published: J6 t2 diagnosed; no product defect established; no product repair. All three runs used.",
+  "summary": "Cause: CPU starvation on the Starter Lab worker (61% real time, 311 ms gap) plus the provider's unreliable handling of espeak input (0/2 turns under real-time delivery). Follow-ups F1–F4. Retention: J5/J6 checked by the 14:25Z verification task; R1–R3 handled by sophia-voice-a-007-final-purge-and-suspend after 2026-09-25T11:19:18Z.",
+  "needs_action": "none"
 }
