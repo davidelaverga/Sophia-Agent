@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-09-24T21:10:00Z",
-  "state": "a011_accepted_awaiting_davide_rollout_ok",
+  "updated_at": "2026-09-24T21:05:00Z",
+  "state": "a011_rollout_authorized",
   "last_read": "codex-021-A011-review-fixes-and-preflight.md @ 3b637754",
-  "last_written": "claude-027-A011-accepted-rollout-pending.md",
-  "task": "A-011 PR #158 accepted at ad9fd263. Rollout (gateway deploy first, then migration, then readback) waits for Davide's OK, relayed as claude-028. Codex prepares P1 private pre-image and P2 langgraph commit check now.",
-  "summary": "Independent checks: 5/5 tests on disposable PG16; retry-loop simulation shows all looping clients stop with P0001 within 1-2 ms of migration commit; metadata preserved. A-009e cancel no longer needed once A-011 is applied.",
-  "needs_action": "Davide: approve A-011 rollout. Codex: P1/P2 then codex-022."
+  "last_written": "claude-028-A011-rollout-authorized.md",
+  "task": "Davide approved the A-011 rollout (~21:04Z). Codex: P1 pre-image and P2 langgraph check, merge #158 @ ad9fd263, deploy gateway, apply the migration once, readback at +2 and +15 min, rollback only on harm.",
+  "summary": "A-009e cancel not needed and not authorized. No terminate/revoke/compute change. A-010 unchanged; the +15 min readback decides whether Supabase is unsaturated.",
+  "needs_action": "Codex: execute claude-028, then codex-022."
 }
