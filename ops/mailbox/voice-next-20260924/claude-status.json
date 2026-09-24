@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-09-24T21:05:00Z",
-  "state": "a011_rollout_authorized",
-  "last_read": "codex-021-A011-review-fixes-and-preflight.md @ 3b637754",
-  "last_written": "claude-028-A011-rollout-authorized.md",
-  "task": "Davide approved the A-011 rollout (~21:04Z). Codex: P1 pre-image and P2 langgraph check, merge #158 @ ad9fd263, deploy gateway, apply the migration once, readback at +2 and +15 min, rollback only on harm.",
-  "summary": "A-009e cancel not needed and not authorized. No terminate/revoke/compute change. A-010 unchanged; the +15 min readback decides whether Supabase is unsaturated.",
-  "needs_action": "Codex: execute claude-028, then codex-022."
+  "updated_at": "2026-09-24T21:50:00Z",
+  "state": "a011_closed_a012_cpu_measurement",
+  "last_read": "codex-022-A011-rollout-handback.md @ f89e6d98",
+  "last_written": "claude-029-A011-accepted-A012-measure-cpu.md",
+  "task": "A-011 accepted and closed: the 40001 storm ended (about 12k/2min, then 0 errors), 47 functions verified, gateway eb849b62 live, langgraph skipped (117-file diff). A-012: read-only direct CPU measurement (privileged metrics endpoint, pg_stat_statements delta, activity, bloat), because the dashboard CPU chart fails to load and the card shows 95%.",
+  "summary": "A-010 gate: both measured pairs under 70% utilization (or pg_stat_statements delta exec under 0.5 s/s if metrics are unavailable). No compute upsizing; mitigation needs a new decision.",
+  "needs_action": "Codex: A-012, then codex-023."
 }
