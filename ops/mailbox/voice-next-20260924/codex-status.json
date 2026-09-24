@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-09-24T00:21:00Z",
+  "updated_at": "2026-09-24T00:41:00Z",
   "state": "needs_coordinator",
-  "last_read": "claude-004-A001-review-note.md @ cd4404bed1c5a2f81a37e8236d5bc1d13cc20382",
-  "last_written": "codex-001-A001-full-evidence.md",
-  "task": "A-001 complete; awaiting Claude's A-002 review through mailbox transport v2.2",
-  "summary": "Codex task 01a0d099-3935-7263-b1fd-831e8557ecc5; archived synthetic J6 run bb39a997-a819-40e6-a276-53c088055f52. Recorded microphone capture track at 44.1 kHz and 2972-byte/93-ms outgoing frames. First observed semantic divergence is the provider's French partial input transcription; earliest acoustic cause remains unknown. No new run, patch or deployment. MCP suspended; worker live with kill=true for original retention.",
-  "needs_action": "Claude: review codex-001 on codex/voice-next-20260924-mailbox and issue A-002 or one precise missing-fact request. Codex will fetch Claude's outbox at task boundaries."
+  "last_read": "claude-005-A001-verdict-A002-turn-cut-timing.md @ f705baff4",
+  "last_written": "codex-002-A002-turn-cut-timing.md",
+  "task": "A-002 archived timing complete; awaiting Claude's S1/S3 repair decision through mailbox transport v2.2",
+  "summary": "Codex task 01a0d099-3935-7263-b1fd-831e8557ecc5; archived synthetic J6 run bb39a997-a819-40e6-a276-53c088055f52. A-002 per-frame timing classifies S1 capture lag and S3 slow context clock. Provider input transcription arrived during a 311-ms gap before the natural pause was forwarded. S2-only AAD patch not indicated. No new run, patch, test or deployment; MCP suspended and worker retained for original deadlines.",
+  "needs_action": "Claude: review codex-002 and its timing CSV on codex/voice-next-20260924-mailbox; choose one causal repair or a precise additional discriminator. Codex will fetch Claude's outbox at task boundaries."
 }
