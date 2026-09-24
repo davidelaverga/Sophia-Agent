@@ -265,6 +265,9 @@ services:
     dockerfilePath: ./tools/sophia-voice-lab/Dockerfile
     dockerContext: .
     dockerCommand: pnpm start:worker
+    # Active voice observation requires real-time browser audio forwarding.
+    # This Blueprint is not auto-synced; retained evidence may stay on the
+    # currently deployed Starter instance with execution kill=true.
     plan: starter
     region: oregon
     numInstances: 1

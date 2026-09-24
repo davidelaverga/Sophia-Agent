@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -9,7 +11,8 @@ import { SCENARIO_IDS } from "../src/scenarios.js";
 import { CapabilityCodec, sha256 } from "../src/security.js";
 import { VoiceLabService, assertFreshProductAdmissionProof, targetAdmissionBinding } from "../src/service.js";
 import { assertTransition } from "../src/state-machine.js";
-import { VoiceLabWorker, assertResolvedAudioWithinAdmission, augmentOperationTimeoutWithInterruptedDriverError, certificationTerminalDecision, deriveCompletedVerdicts, evaluateScenarioAssertions, exactOutputLifecyclesAtEpoch, leaseHeartbeatIntervalMs, settleInterruptedExecution, suiteCertificationProjection, suiteCertificationState } from "../src/worker.js";
+import { VoiceLabWorker, assertResolvedAudioWithinAdmission, augmentOperationTimeoutWithInterruptedDriverError, certificationTerminalDecision, classifyInputDelivery, deriveCompletedVerdicts, evaluateScenarioAssertions, exactOutputLifecyclesAtEpoch, leaseHeartbeatIntervalMs, settleInterruptedExecution, suiteCertificationProjection, suiteCertificationState } from "../src/worker.js";
+import { assertActiveRunWorkerProfile, measureWorkerProfile } from "../src/worker-profile.js";
 import { caller, SHA, SHA_B, SHA_C, SHA_D, testConfig, testRun } from "./helpers.js";
 import { ownership, recovery as boundRecoveryFixture } from "./execution-cleanup-fixture.js";
 
@@ -23,6 +26,42 @@ const target = {
 };
 
 describe("service and durable memory-ledger contracts", () => {
+  it("marks timing-degraded waveform delivery invalid without a product verdict", () => {
+    const frames = (observed: number[], ingested: number[] = observed) => observed.map((ms, index) => ({
+      kind: "harness.input_frame_forwarded", source: "browser", at: new Date(1_000 + ingested[index]!),
+      payload: { operation_id: "input-1", frame_seq: index + 1, byte_length: 2972, nonzero_byte_count: 100,
+        _capture_provenance: { observed_at: new Date(1_000 + ms).toISOString() } },
+    })) as any;
+    expect(classifyInputDelivery(frames([0, 93, 186, 279]), "input-1").status).toBe("valid");
+    expect(classifyInputDelivery(frames([0, 93, 404, 497]), "input-1")).toMatchObject({ status: "degraded", delivery_valid: false, max_speech_gap_ms: 311 });
+    expect(classifyInputDelivery(frames([0, 93, 186, 279], [0, 300, 301, 302]), "input-1")).toMatchObject({ status: "valid", timestamp_source: "browser_observed" });
+    expect(classifyInputDelivery(frames([0, 93, 404, 497], [0, 93, 186, 279]), "input-1")).toMatchObject({ status: "degraded", max_speech_gap_ms: 311 });
+    expect(classifyInputDelivery([], "input-1").status).toBe("unavailable");
+  });
+  it("replays retained content-free J6, R1 and R3 frame timing", () => {
+    const replay = (name: string, turn: string) => readFileSync(path.join(import.meta.dirname, "fixtures/input-delivery", `${name}.csv`), "utf8")
+      .trim().split(/\r?\n/).slice(1).map((line) => line.split(","))
+      .filter((row) => row[0] === turn)
+      .map((row) => ({ kind: "harness.input_frame_forwarded", source: "browser", at: new Date(row[3]!), payload: {
+        operation_id: "archived-input", frame_seq: Number(row[1]), byte_length: Number(row[8]), nonzero_byte_count: Number(row[9]),
+        ...(name === "j6" ? {} : { _capture_provenance: { observed_at: row[3] } }),
+      } })) as any;
+    // R1/R3 Postgres read-only comparison found 71/71 browser provenance
+    // timestamps equal to each run_events.observed_at (0 ms max difference).
+    // J6 was purged before that comparison, so its archive remains fallback.
+    const historical = { allowLedgerTimestampFallback: true };
+    expect(classifyInputDelivery(replay("j6", "turn2"), "archived-input", historical)).toMatchObject({ status: "degraded", delivery_valid: false, timestamp_source: "ledger_fallback" });
+    expect(classifyInputDelivery(replay("r1", "R1-1"), "archived-input")).toMatchObject({ status: "valid", delivery_valid: true, timestamp_source: "browser_observed" });
+    expect(classifyInputDelivery(replay("r3", "R3-1"), "archived-input")).toMatchObject({ status: "valid", delivery_valid: true, timestamp_source: "browser_observed" });
+  });
+  it("refuses an effective Starter worker before active-run resources", () => {
+    const starter = measureWorkerProfile((path) => ({ '/sys/fs/cgroup/cpu.max': '50000 100000', '/sys/fs/cgroup/memory.max': String(512 * 1024 ** 2) } as Record<string, string>)[path] ?? null);
+    const pro = measureWorkerProfile((path) => ({ '/sys/fs/cgroup/cpu.max': '200000 100000', '/sys/fs/cgroup/memory.max': String(4 * 1024 ** 3) } as Record<string, string>)[path] ?? null);
+    expect(() => assertActiveRunWorkerProfile("production", starter)).toThrowError(
+      expect.objectContaining({ detail: expect.objectContaining({ code: "WORKER_PROFILE_INSUFFICIENT" }) }),
+    );
+    expect(() => assertActiveRunWorkerProfile("production", pro)).not.toThrow();
+  });
   let ledger: MemoryVoiceLabLedger;
   let audio: AudioResolver;
   let service: VoiceLabService;
@@ -342,7 +381,7 @@ describe("service and durable memory-ledger contracts", () => {
     expect(result.data.scenario_versions).toEqual(["vt00.scenarios.v1"]);
     expect((result.data.scenarios as unknown[])).toHaveLength(21);
     expect((result.data.scenarios as Array<{ id: string }>).map((item) => item.id)).toEqual(SCENARIO_IDS);
-    expect((result.data.fixtures as Array<{ fixtureClass: string }>).map((fixture) => fixture.fixtureClass).sort()).toEqual(["long_brief", "noisy_command", "short_command", "silence", "trailing_pause"]);
+    expect((result.data.fixtures as Array<{ fixtureClass: string }>).map((fixture) => fixture.fixtureClass).sort()).toEqual(["conversation_probe", "conversation_probe", "long_brief", "noisy_command", "short_command", "silence", "trailing_pause"]);
     expect(result.data.restricted_fault_capabilities).toEqual(["force_socket_rotation"]);
     expect(result.data.raw_audio).toBe("unavailable_until_isolated_storage");
     expect(result.data.versions).toEqual({ harness: "0.1.0", mcp: "0.1.0", plugin: "0.1.0+codex.test", evidence_schema: "sophia.voice-lab.evidence.v1", scenario_catalog: "vt00.scenarios.v1" });
@@ -440,6 +479,11 @@ describe("service and durable memory-ledger contracts", () => {
     closedProductMutationGates.product_mutation_gates_open = false;
     expect(() => assertFreshProductAdmissionProof(config, config.readinessTarget!, closedProductMutationGates)).toThrowError(
       expect.objectContaining({ detail: expect.objectContaining({ code: "PRODUCT_ADMISSION_NOT_READY" }) }),
+    );
+    const disabledServedAdapter = productAdmissionProof(config, true);
+    disabledServedAdapter.frontend_control_adapter_enabled = false;
+    expect(() => assertFreshProductAdmissionProof(config, config.readinessTarget!, disabledServedAdapter)).toThrowError(
+      expect.objectContaining({ detail: expect.objectContaining({ code: "FRONTEND_CONTROL_ADAPTER_DISABLED" }) }),
     );
     let admissionReady = false;
     const probe = async () => productAdmissionProof(config, admissionReady);
@@ -1565,6 +1609,10 @@ function productAdmissionProof(config: ReturnType<typeof testConfig>, ready: boo
     probe_id: randomUUID(),
     observed_at: new Date().toISOString(),
     product_mutation_gates_open: ready,
+    frontend_auth_readiness_status: "verified",
+    frontend_control_adapter_enabled: true,
+    frontend_voice_lab_enabled: true,
+    frontend_kill_switch_engaged: false,
     builds: {
       frontend: component(configured.expectedDeployment.frontend),
       backend: component(configured.expectedDeployment.backend),

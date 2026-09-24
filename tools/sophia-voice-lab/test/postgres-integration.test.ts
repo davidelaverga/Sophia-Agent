@@ -191,6 +191,18 @@ describePostgres("real PostgreSQL Voice Lab adapter", () => {
     finally { await admin.end(); }
   }, 30_000);
 
+  it("persists an invalid input-delivery verdict without a product conclusion", async () => {
+    const run = testRun({ state: "completed", cleanupComplete: true });
+    await ledger!.createRunWithOperation(run, { id: randomUUID(), runId: run.id, callerId: run.callerId, type: "start", idempotencyKey: randomUUID(), requestHash: sha256(run.id), input: {} }, { global: 20, caller: 20 });
+    const persisted = await ledger!.updateRun(run.id, run.version, {
+      verdicts: { harness: "invalid_test", product: "unavailable", provider: "unavailable", auth: "pass", evidence: "fail" },
+    });
+    expect(persisted.verdicts).toMatchObject({ harness: "invalid_test", product: "unavailable" });
+    const row = await ledger!.pool.query("select verdicts from sophia_voice_lab.runs where id=$1", [run.id]);
+    expect(row.rows[0]?.verdicts).toMatchObject({ harness: "invalid_test", product: "unavailable" });
+    expect((await ledger!.getRun(run.id))?.verdicts).toMatchObject({ harness: "invalid_test", product: "unavailable" });
+  });
+
   it("refuses to seal pre-existing column/index/ACL drift against the release reference", async () => {
     await ledger!.pool.query("alter table sophia_voice_lab.runs add column unexpected_drift text");
     await expect(runMigration(databaseUrl)).rejects.toThrow();

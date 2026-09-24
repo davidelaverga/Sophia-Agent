@@ -437,7 +437,7 @@ export interface FixtureSummary {
   id: string;
   fixtureVersion: string;
   family: string;
-  fixtureClass: "short_command" | "long_brief" | "silence" | "trailing_pause" | "noisy_command";
+  fixtureClass: "short_command" | "long_brief" | "silence" | "trailing_pause" | "noisy_command" | "conversation_probe";
   sha256: string;
   sampleRate: number;
   channels: number;
@@ -534,7 +534,7 @@ export class VoiceLabService {
   async getCapabilities(caller: AuthenticatedCaller, raw: unknown): Promise<LabEnvelope> {
     toolInputSchemas.get_capabilities.parse(raw);
     requireScope(caller, "voice_lab:read");
-    const [fixtures, ttsEngine, targetIdentity] = await Promise.all([this.fixtures(), this.ttsEngine(), this.targetIdentity()]);
+    const [fixtures, ttsEngine, targetIdentity, workers] = await Promise.all([this.fixtures(), this.ttsEngine(), this.targetIdentity(), this.ledger.listLiveWorkers(new Date(Date.now() - 10_000))]);
     const configuredTarget = this.config.readinessTarget;
     return envelope({ status: "ok", data: {
       tools: Object.keys(toolInputSchemas),
@@ -562,6 +562,7 @@ export class VoiceLabService {
       persistence: "postgres-required",
       browser: "chromium-web-audio-dynamic-injection",
       tts: { adaptive: { engine: ttsEngine.engine, status: ttsEngine.status, expected_version: ttsEngine.expectedVersion, observed_version: ttsEngine.observedVersion, voice: ttsEngine.voice, rate: ttsEngine.rate }, deterministic_fixture_count: fixtures.length },
+      active_run_worker_profile: workers.length === 1 ? workers[0]!.detail.active_run_profile ?? { status: "unavailable" } : { status: "unavailable", live_workers: workers.length },
       fixtures,
       fixture_families: [...new Set(fixtures.map((fixture) => fixture.family))],
       restricted_fault_capabilities: caller.scopes.has("voice_lab:fault") ? ["force_socket_rotation"] : [],
@@ -2194,6 +2195,11 @@ export class VoiceLabService {
     if (this.config.readinessTarget === null && this.config.nodeEnv === "test") return;
     const proof = await this.targetIdentity();
     assertFreshProductAdmissionProof(this.config, target, proof);
+    if (this.config.nodeEnv !== "test") {
+      const workers = await this.ledger.listLiveWorkers(new Date(Date.now() - 10_000));
+      const profile = workers.length === 1 ? workers[0]!.detail.active_run_profile as Record<string, unknown> | undefined : undefined;
+      if (profile?.status !== "sufficient") throw new VoiceLabError(labError("WORKER_PROFILE_INSUFFICIENT", "The live singleton worker has not attested the minimum active-run cgroup profile.", "deployment", true, { live_workers: workers.length, profile_status: profile?.status ?? "unavailable" }));
+    }
   }
 
   private assertMutationEnabled(tool: string): void {
@@ -2252,6 +2258,15 @@ export function assertFreshProductAdmissionProof(config: VoiceLabConfig, target:
   const fresh = Number.isFinite(observedAt) && observedAt <= now + 2_000 && observedAt >= now - 15_000;
   const probeId = typeof proof.probe_id === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(proof.probe_id);
   const productMutationGatesOpen = proof.product_mutation_gates_open === true;
+  // /api/app-version can match while the effective deployed frontend has the
+  // control adapter disabled. Require its signed, live readiness response.
+  const frontendControlAdapterReady = proof.frontend_auth_readiness_status === "verified"
+    && proof.frontend_control_adapter_enabled === true
+    && proof.frontend_voice_lab_enabled === true
+    && proof.frontend_kill_switch_engaged === false;
+  if (proof.frontend_auth_readiness_status === "control_adapter_disabled" || proof.frontend_control_adapter_enabled === false) {
+    throw new VoiceLabError(labError("FRONTEND_CONTROL_ADAPTER_DISABLED", "The signed readiness response from the exact served frontend deployment reports the Voice Lab control adapter disabled.", "deployment", true));
+  }
   const builds = proof.builds && typeof proof.builds === "object" ? proof.builds as Record<string, unknown> : {};
   const expectedComponents = [
     ["frontend", target.expectedDeployment.frontend],
@@ -2266,13 +2281,14 @@ export function assertFreshProductAdmissionProof(config: VoiceLabConfig, target:
       && typeof entry.observed === "string" && entry.observed.toLowerCase() === expected;
   });
   if (!sameTarget || proof.ok !== true || proof.status !== "verified" || proof.environment !== config.environment
-    || proof.target_binding_sha256 !== targetAdmissionBinding(target) || !fresh || !probeId || !components || !productMutationGatesOpen) {
+    || proof.target_binding_sha256 !== targetAdmissionBinding(target) || !fresh || !probeId || !components || !productMutationGatesOpen || !frontendControlAdapterReady) {
     throw new VoiceLabError(labError("PRODUCT_ADMISSION_NOT_READY", "The exact deployed Voice Lab target did not provide a fresh all-component admission-ready proof.", "deployment", true, {
       configured_target_match: sameTarget,
       probe_status: typeof proof.status === "string" ? proof.status : "malformed",
       fresh,
       component_readiness: components,
       product_mutation_gates_open: productMutationGatesOpen,
+      frontend_control_adapter_ready: frontendControlAdapterReady,
     }));
   }
 }

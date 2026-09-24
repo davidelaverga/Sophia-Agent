@@ -37,9 +37,11 @@ describe("governed deterministic V-A02 fixtures", () => {
     }
   });
 
-  it("has all five explicit fixture classes with silence governed as no-turn input", async () => {
+  it("has the calibration conversation and five legacy classes with silence governed as no-turn input", async () => {
     const manifest = JSON.parse(await readFile(path.join(fixtureRoot, "manifest.json"), "utf8"));
-    expect(manifest.fixtures.map((fixture: any) => fixture.fixture_class).sort()).toEqual(["long_brief", "noisy_command", "short_command", "silence", "trailing_pause"]);
+    expect(manifest.fixtures.map((fixture: any) => fixture.fixture_class).sort()).toEqual(["conversation_probe", "conversation_probe", "long_brief", "noisy_command", "short_command", "silence", "trailing_pause"]);
+    expect(manifest.fixtures.find((fixture: any) => fixture.fixture_class === "conversation_probe").source_text.expected_slots.intent).toBe("ordinary_conversation");
+    expect(manifest.fixtures.filter((fixture: any) => fixture.fixture_class === "conversation_probe").every((fixture: any) => fixture.assertion_policy.trailing_silence_ms === 1500)).toBe(true);
     expect(manifest.fixtures.find((fixture: any) => fixture.fixture_class === "silence").assertion_policy).toMatchObject({ expect_transcript: false, semantic_threshold: "no_fabricated_injected_or_product_turn" });
   });
 
