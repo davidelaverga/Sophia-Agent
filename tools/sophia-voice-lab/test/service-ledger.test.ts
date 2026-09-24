@@ -27,12 +27,15 @@ const target = {
 
 describe("service and durable memory-ledger contracts", () => {
   it("marks timing-degraded waveform delivery invalid without a product verdict", () => {
-    const frames = (gaps: number[]) => gaps.map((gap, index) => ({
-      kind: "harness.input_frame_forwarded", source: "browser", at: new Date(1_000 + gap),
-      payload: { operation_id: "input-1", frame_seq: index + 1, byte_length: 2972, nonzero_byte_count: 100 },
+    const frames = (observed: number[], ingested: number[] = observed) => observed.map((ms, index) => ({
+      kind: "harness.input_frame_forwarded", source: "browser", at: new Date(1_000 + ingested[index]!),
+      payload: { operation_id: "input-1", frame_seq: index + 1, byte_length: 2972, nonzero_byte_count: 100,
+        _capture_provenance: { observed_at: new Date(1_000 + ms).toISOString() } },
     })) as any;
     expect(classifyInputDelivery(frames([0, 93, 186, 279]), "input-1").status).toBe("valid");
     expect(classifyInputDelivery(frames([0, 93, 404, 497]), "input-1")).toMatchObject({ status: "degraded", delivery_valid: false, max_speech_gap_ms: 311 });
+    expect(classifyInputDelivery(frames([0, 93, 186, 279], [0, 300, 301, 302]), "input-1")).toMatchObject({ status: "valid", timestamp_source: "browser_observed" });
+    expect(classifyInputDelivery(frames([0, 93, 404, 497], [0, 93, 186, 279]), "input-1")).toMatchObject({ status: "degraded", max_speech_gap_ms: 311 });
     expect(classifyInputDelivery([], "input-1").status).toBe("unavailable");
   });
   it("replays retained content-free J6, R1 and R3 frame timing", () => {
@@ -41,10 +44,15 @@ describe("service and durable memory-ledger contracts", () => {
       .filter((row) => row[0] === turn)
       .map((row) => ({ kind: "harness.input_frame_forwarded", source: "browser", at: new Date(row[3]!), payload: {
         operation_id: "archived-input", frame_seq: Number(row[1]), byte_length: Number(row[8]), nonzero_byte_count: Number(row[9]),
+        ...(name === "j6" ? {} : { _capture_provenance: { observed_at: row[3] } }),
       } })) as any;
-    expect(classifyInputDelivery(replay("j6", "turn2"), "archived-input")).toMatchObject({ status: "degraded", delivery_valid: false });
-    expect(classifyInputDelivery(replay("r1", "R1-1"), "archived-input")).toMatchObject({ status: "valid", delivery_valid: true });
-    expect(classifyInputDelivery(replay("r3", "R3-1"), "archived-input")).toMatchObject({ status: "valid", delivery_valid: true });
+    // R1/R3 Postgres read-only comparison found 71/71 browser provenance
+    // timestamps equal to each run_events.observed_at (0 ms max difference).
+    // J6 was purged before that comparison, so its archive remains fallback.
+    const historical = { allowLedgerTimestampFallback: true };
+    expect(classifyInputDelivery(replay("j6", "turn2"), "archived-input", historical)).toMatchObject({ status: "degraded", delivery_valid: false, timestamp_source: "ledger_fallback" });
+    expect(classifyInputDelivery(replay("r1", "R1-1"), "archived-input")).toMatchObject({ status: "valid", delivery_valid: true, timestamp_source: "browser_observed" });
+    expect(classifyInputDelivery(replay("r3", "R3-1"), "archived-input")).toMatchObject({ status: "valid", delivery_valid: true, timestamp_source: "browser_observed" });
   });
   it("refuses an effective Starter worker before active-run resources", () => {
     const starter = measureWorkerProfile((path) => ({ '/sys/fs/cgroup/cpu.max': '50000 100000', '/sys/fs/cgroup/memory.max': String(512 * 1024 ** 2) } as Record<string, string>)[path] ?? null);

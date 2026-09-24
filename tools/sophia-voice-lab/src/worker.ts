@@ -3425,7 +3425,7 @@ export function deriveCompletedVerdicts(run: RunRecord, events: import("./domain
   const providerDegraded = eligibleEvents.some((event) => event.kind === "provider.connection_epoch" && (event.payload.receipt as Record<string, unknown> | undefined)?.phase === "degraded");
   const authClean = authCleanupPath(run, events) !== null;
   const injectedOperations = operations.filter((operation) => (operation.type === "speak" || operation.type === "barge_in") && operation.state === "succeeded");
-  const degradedInputDelivery = injectedOperations.some((operation) => classifyInputDelivery(events, operation.id).status === "degraded");
+  const invalidInputDelivery = injectedOperations.some((operation) => classifyInputDelivery(events, operation.id).status !== "valid");
   const nonSilenceOperations = injectedOperations.filter((operation) => !String(operation.input.fixture_id ?? "").toLowerCase().includes("silence"));
   const inputTranscript = eligibleEvents.some((event) => event.kind.endsWith(".sophia.user_transcript") || event.kind === "transcript.input.final");
   const assistantAudio = kinds.has("audio.output.started");
@@ -3454,11 +3454,11 @@ export function deriveCompletedVerdicts(run: RunRecord, events: import("./domain
   const baseHarnessPass = preResource
     ? !failedHarness && preResourceCleanup
     : !failedHarness && injectionChains && deploymentVerified && joinsComplete && captureProven && cleanupProven;
-  const harness: Verdicts["harness"] = degradedInputDelivery ? "invalid_test" : !baseHarnessPass || scenarioHasFailure ? "fail" : scenarioHasUnavailable ? "unavailable" : "pass";
+  const harness: Verdicts["harness"] = invalidInputDelivery ? "invalid_test" : !baseHarnessPass || scenarioHasFailure ? "fail" : scenarioHasUnavailable ? "unavailable" : "pass";
   const productStatuses = scenarioEvaluation.product.map((assertion) => assertion.status);
   const product: Verdicts["product"] = preResource
     ? "unavailable"
-    : degradedInputDelivery
+    : invalidInputDelivery
     ? "unavailable"
     : !finalized
     ? "fail"
@@ -3481,8 +3481,20 @@ export function deriveCompletedVerdicts(run: RunRecord, events: import("./domain
  * content-free; compare their timestamps with their exact 16 kHz PCM bytes. */
 export const INPUT_DELIVERY_LIMITS = { max_speech_gap_ms: 150, max_lag_growth_ms: 100, max_context_wall_ratio_error: 0.05 } as const;
 type InputDeliveryEvent = import("./domain.js").LabEvent;
+type InputDeliveryOptions = { allowLedgerTimestampFallback?: boolean };
 
-function frameTiming(frames: InputDeliveryEvent[]): { audioMs: number; maxSpeechGap: number } | null {
+function inputObservedMs(event: InputDeliveryEvent, options: InputDeliveryOptions): number | null {
+  const provenance = event.payload._capture_provenance;
+  const observedAt = provenance && typeof provenance === "object" && !Array.isArray(provenance)
+    ? (provenance as Record<string, unknown>).observed_at : null;
+  if (typeof observedAt === "string") {
+    const parsed = Date.parse(observedAt);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return options.allowLedgerTimestampFallback === true ? event.at.getTime() : null;
+}
+
+function frameTiming(frames: InputDeliveryEvent[], options: InputDeliveryOptions): { audioMs: number; maxSpeechGap: number } | null {
   let maxSpeechGap = 0;
   let audioMs = 0;
   for (let index = 0; index < frames.length; index += 1) {
@@ -3490,7 +3502,10 @@ function frameTiming(frames: InputDeliveryEvent[]): { audioMs: number; maxSpeech
     if (!Number.isSafeInteger(bytes) || bytes <= 0 || bytes % 2 !== 0) return null;
     if (index < frames.length - 1) audioMs += bytes / 32;
     if (index === 0) continue;
-    const gap = frames[index]!.at.getTime() - frames[index - 1]!.at.getTime();
+    const current = inputObservedMs(frames[index]!, options);
+    const previous = inputObservedMs(frames[index - 1]!, options);
+    if (current === null || previous === null) return null;
+    const gap = current - previous;
     if (!Number.isFinite(gap) || gap < 0) return null;
     if (Number(frames[index]!.payload.nonzero_byte_count) > 0 || Number(frames[index - 1]!.payload.nonzero_byte_count) > 0) {
       maxSpeechGap = Math.max(maxSpeechGap, gap);
@@ -3499,32 +3514,36 @@ function frameTiming(frames: InputDeliveryEvent[]): { audioMs: number; maxSpeech
   return { audioMs, maxSpeechGap };
 }
 
-function contextWallRatio(events: InputDeliveryEvent[], operationId: string, audioMs: number, wallMs: number): number {
+function contextWallRatio(events: InputDeliveryEvent[], operationId: string, audioMs: number, wallMs: number, options: InputDeliveryOptions): number | null {
   const started = events.find((event) => event.kind === "audio.input.started" && event.payload.operation_id === operationId);
   const completed = events.find((event) => event.kind === "audio.input.completed" && event.payload.operation_id === operationId);
   if (!started || !completed) return audioMs / wallMs;
   const contextMs = (Number(completed.payload.actual_context_time) - Number(started.payload.actual_context_time)) * 1000;
-  const contextWallMs = completed.at.getTime() - started.at.getTime();
-  return Number.isFinite(contextMs) && contextWallMs > 0 ? contextMs / contextWallMs : audioMs / wallMs;
+  const completedMs = inputObservedMs(completed, options);
+  const startedMs = inputObservedMs(started, options);
+  if (completedMs === null || startedMs === null) return null;
+  const contextWallMs = completedMs - startedMs;
+  return Number.isFinite(contextMs) && contextWallMs > 0 ? contextMs / contextWallMs : null;
 }
 
-export function classifyInputDelivery(events: import("./domain.js").LabEvent[], operationId: string): { status: "valid" | "degraded" | "unavailable"; delivery_valid: boolean | null; max_speech_gap_ms: number | null; lag_growth_ms: number | null; context_wall_ratio: number | null } {
+export function classifyInputDelivery(events: import("./domain.js").LabEvent[], operationId: string, options: InputDeliveryOptions = {}): { status: "valid" | "degraded" | "unavailable"; delivery_valid: boolean | null; max_speech_gap_ms: number | null; lag_growth_ms: number | null; context_wall_ratio: number | null; timestamp_source: "browser_observed" | "ledger_fallback" | "unavailable" } {
   const frames = events.filter((event) => event.kind === "harness.input_frame_forwarded" && event.source === "browser" && event.payload.operation_id === operationId)
     .sort((a, b) => Number(a.payload.frame_seq) - Number(b.payload.frame_seq));
-  const unavailable = { status: "unavailable" as const, delivery_valid: null, max_speech_gap_ms: null, lag_growth_ms: null, context_wall_ratio: null };
+  const unavailable = { status: "unavailable" as const, delivery_valid: null, max_speech_gap_ms: null, lag_growth_ms: null, context_wall_ratio: null, timestamp_source: "unavailable" as const };
   if (frames.length < 2) return unavailable;
-  const timing = frameTiming(frames);
+  const timing = frameTiming(frames, options);
   if (timing === null) return unavailable;
-  const wallMs = frames.at(-1)!.at.getTime() - frames[0]!.at.getTime();
+  const firstMs = inputObservedMs(frames[0]!, options);
+  const lastMs = inputObservedMs(frames.at(-1)!, options);
+  if (firstMs === null || lastMs === null) return unavailable;
+  const wallMs = lastMs - firstMs;
   if (wallMs <= 0 || timing.audioMs <= 0) return unavailable;
-  const ratio = contextWallRatio(events, operationId, timing.audioMs, wallMs);
+  const ratio = contextWallRatio(events, operationId, timing.audioMs, wallMs, options);
+  if (ratio === null) return unavailable;
   const lagGrowth = wallMs - timing.audioMs;
   const degraded = timing.maxSpeechGap > INPUT_DELIVERY_LIMITS.max_speech_gap_ms || lagGrowth > INPUT_DELIVERY_LIMITS.max_lag_growth_ms || Math.abs(ratio - 1) > INPUT_DELIVERY_LIMITS.max_context_wall_ratio_error;
-  return { status: degraded ? "degraded" : "valid", delivery_valid: !degraded, max_speech_gap_ms: timing.maxSpeechGap, lag_growth_ms: lagGrowth, context_wall_ratio: ratio };
+  return { status: degraded ? "degraded" : "valid", delivery_valid: !degraded, max_speech_gap_ms: timing.maxSpeechGap, lag_growth_ms: lagGrowth, context_wall_ratio: ratio, timestamp_source: options.allowLedgerTimestampFallback ? "ledger_fallback" : "browser_observed" };
 }
-
-/** Render's runtime CPU count is derived from the effective deployed plan;
- * this refuses Starter execution even if an unsynced Blueprint says Pro. */
 
 export type ScenarioAssertion = {
   id: string;
