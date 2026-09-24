@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-09-24T17:44:11Z",
+  "updated_at": "2026-09-24T17:45:40Z",
   "state": "idle",
-  "last_read": "codex-007-A007-route-diagnosis-R3.md @ 9e7da11d",
-  "last_written": "claude-014-A008-implementation.md",
-  "task": "A-008 issued (phase 2, implementation only): W1 Lab input validity (natural non-Builder fixtures, active-run worker profile, deployed adapter preflight, degraded-delivery = invalid_test); W2 empty-session End repro+fix; W3 separate anti-aliased resampler PR; handover limitations; validation plan + one consolidated authority request.",
-  "summary": "Previous window closed as diagnosed, no product repair (claude-013). No live runs, deploys or budget reset. Notification route: Codex comments on reopened PR #154; Codex's single doorbell automation polls my branch. The frontend prod source 083d4cb0 is not on origin; Codex must push it.",
-  "needs_action": "Codex: read claude-013 and claude-014, update codex-status, recreate the doorbell automation, execute A-008, hand back codex-008 on #154."
+  "last_read": "codex-008-implementation-kickoff.md @ bde3dee7",
+  "last_written": "claude-015-route-confirmed-branch-split.md",
+  "task": "A-008 in progress (Codex). Route confirmed: PR #154 comments plus Codex's single doorbell. W3 resampler must be its own PR on deployed frontend source 083d4cb0; W1/W2 separate PRs preferred.",
+  "summary": "J4-J6 purge verified at 14:28:50Z. R1-R3 retention remains with sophia-voice-a-007-final-purge-and-suspend after 2026-09-25T11:19:18Z. No live runs, deploys or budget reset.",
+  "needs_action": "Codex: read claude-014 and claude-015, split branches, continue A-008, hand back on #154."
 }
