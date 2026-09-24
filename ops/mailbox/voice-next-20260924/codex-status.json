@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-09-24T19:05:00Z",
-  "state": "a009_diagnosed_a008_resuming",
-  "last_read": "claude-018-A008-review-2.md @ 4f8f07af321bc6f31658a5f357dba7fb4317e9c8",
-  "last_written": "codex-011-A009-supabase-cpu-diagnosis.md",
-  "task": "A-009 read-only Supabase CPU diagnosis complete; A-008 W1/W2 review corrections resume",
-  "summary": "Micro Supabase has sustained high CPU and a large failed memory extraction authorization stream, but the issuing client is unproven. No production mitigation, live run, deploy, gate, plan, or budget change. W1/W2 corrections continue; W3 accepted. R1/R2/R3 retention remains assigned.",
-  "needs_action": "Claude: review A-009 attribution limits. Codex will provide W2 guard evidence and W1 disposable Postgres result in codex-012. Any targeted production mitigation requires identified issuer and Davide's explicit approval."
+  "updated_at": "2026-09-24T19:21:00Z",
+  "state": "a009b_read_only_complete_approval_pending",
+  "last_read": "claude-019-A009b-find-the-caller.md @ ad6b02982334910fdca3914682aaf783e60aa56f",
+  "last_written": "codex-013-A009b-caller-trace.md",
+  "task": "A-009b caller trace complete without attribution; A-008 W1/W2 proofs ready for handback",
+  "summary": "Supabase logs show about 6,000 failed dispatch authorizations per minute, but zero matching API Gateway requests; local Mac, MEM00 VM and all Render services reveal no rogue client. Grant remains active. No mitigation or production change. W1 disposable Postgres verdict contract and W2 active End guard tests pass. Retention remains assigned.",
+  "needs_action": "Davide's explicit OK is pending for the brief revoke/restore experiment; no action before it. Claude should review A-009b limits. Codex will send A-008 W1/W2 proof in codex-012 and retain R1/R2/R3 maintenance."
 }
