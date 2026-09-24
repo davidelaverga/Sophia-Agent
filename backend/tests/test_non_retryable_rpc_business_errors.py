@@ -26,8 +26,15 @@ from deerflow.sophia.rpc_business_errors import (
 
 MIGRATIONS = Path(__file__).parents[1] / "migrations"
 MIGRATION = MIGRATIONS / "2026_09_24_non_retryable_rpc_business_errors.sql"
-EXPLICIT_40001 = re.compile(r"ERRCODE\s*=\s*'40001'", re.IGNORECASE)
+EXPLICIT_40001 = re.compile(r"ERRCODE\s*=\s*('{1,2})40001\1", re.IGNORECASE)
 FUNCTION = re.compile(r"CREATE\s+OR\s+REPLACE\s+FUNCTION\s+public\.([a-z0-9_]+)", re.IGNORECASE)
+DYNAMIC_TARGET = re.compile(r"p\.proname\s*=\s*'([a-z0-9_]+)'", re.IGNORECASE)
+# The qualified C1 chain renames two earlier completion bodies; both retain
+# their original explicit 40001 raises and are invoked by the wrappers.
+RENAMED_COMPLETION_BODIES = {
+    "sophia_memory_complete_extraction_pre_c1",
+    "sophia_memory_complete_extraction_pre_decision_fence",
+}
 
 
 def _reviewed_business_errors() -> tuple[set[str], set[str]]:
@@ -38,18 +45,21 @@ def _reviewed_business_errors() -> tuple[set[str], set[str]]:
             continue
         sql = migration.read_text()
         functions = list(FUNCTION.finditer(sql))
+        dynamic_targets = list(DYNAMIC_TARGET.finditer(sql))
         for match in EXPLICIT_40001.finditer(sql):
-            owner = next((f for f in reversed(functions) if f.start() < match.start()), None)
+            owners = dynamic_targets if match.group(1) == "''" else functions
+            owner = next((f for f in reversed(owners) if f.start() < match.start()), None)
             assert owner is not None, f"unowned 40001 in {migration.name}"
             names.add(owner.group(1))
             before = sql[max(0, match.start() - 180) : match.start()]
             after = sql[match.end() : match.end() + 140]
-            message = re.search(r"MESSAGE\s*=\s*'([^']+)'", after, re.IGNORECASE)
+            message = re.search(r"MESSAGE\s*=\s*'{1,2}([^']+)'{1,2}", after, re.IGNORECASE)
             if message is None:
-                message = re.search(r"RAISE\s+EXCEPTION\s+'([^']+)'\s+USING\s*$", before, re.IGNORECASE)
+                message = re.search(r"RAISE\s+EXCEPTION\s+'{1,2}([^']+)'{1,2}\s+USING\s*$", before, re.IGNORECASE)
             assert message is not None, f"unmapped 40001 message in {migration.name}"
             messages.add(message.group(1))
-    return names, messages
+    assert "sophia_memory_complete_extraction" in names
+    return names | RENAMED_COMPLETION_BODIES, messages
 
 
 def test_migration_covers_every_explicit_business_error_and_preserves_messages() -> None:
@@ -67,6 +77,7 @@ def test_migration_covers_every_explicit_business_error_and_preserves_messages()
 def test_only_exact_reviewed_p0001_messages_keep_previous_store_status() -> None:
     legacy = httpx.Response(400, json={"code": "P0001", "message": "memory_extraction_dispatch_ineligible"})
     assert store_error_status(legacy) == 500
+    assert store_error_status(httpx.Response(400, json={"code": "P0001", "message": "memory_clear_epoch_required"})) == 500
     assert store_error_status(httpx.Response(400, json={"code": "P0001", "message": "unrelated"})) == 400
     assert store_error_status(httpx.Response(400, json={"code": "22023", "message": "memory_extraction_dispatch_ineligible"})) == 400
     assert store_error_status(httpx.Response(400, text="not JSON")) == 400

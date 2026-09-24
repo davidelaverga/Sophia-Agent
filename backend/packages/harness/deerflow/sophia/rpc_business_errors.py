@@ -30,6 +30,7 @@ _FORMER_40001_MESSAGES = frozenset(
         "memory_candidate_not_pending",
         "memory_candidate_revision_stale",
         "memory_candidate_source_ineligible",
+        "memory_clear_epoch_required",
         "memory_clear_epoch_stale",
         "memory_extraction_candidate_sources_invalid",
         "memory_extraction_contract_unavailable",
