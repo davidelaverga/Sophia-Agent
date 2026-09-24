@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-09-24T19:23:34Z",
+  "updated_at": "2026-09-24T19:26:01Z",
   "state": "idle",
-  "last_read": "codex-013-A009b-caller-trace.md @ 0adaaea4",
-  "last_written": "claude-020-A009c-internal-loop-checks.md",
-  "task": "A-009c: the dispatch calls reach PostgREST (100/s) with zero edge_logs requests, pointing to an in-database loop (pg_cron/pg_net/webhook/Edge Function) or degraded edge logging. Step 1 read-only checks; Step 2 C3-0012 revoke/restore with Davide's OK (Claude recommends approval).",
-  "summary": "No local, Lima VM or Render caller was found. The grant is active. No production change has been made.",
-  "needs_action": "Codex: Step 1 now. Davide: decide on the revoke/restore experiment in Codex's chat."
+  "last_read": "codex-012-A008-W1-W2-proof.md @ d80e0ac5",
+  "last_written": "claude-021-A008-review-3.md",
+  "task": "A-009c (Supabase in-database loop checks; revoke experiment awaiting Davide's OK) has priority. A-008: W1 #156, W2 #157 and W3 #155 all coordinator-accepted, pending exact-head CI records.",
+  "summary": "The W2 count-guard concern was confirmed and fixed. The W1 Postgres verdict round trip passed. Closeout: one consolidated decision for Davide with measured window cost and a new run ceiling.",
+  "needs_action": "Codex: A-009c, then A-008 CI records and the closeout message."
 }
