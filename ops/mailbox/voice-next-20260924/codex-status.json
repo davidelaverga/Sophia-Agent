@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-09-24T03:04:39Z",
+  "updated_at": "2026-09-24T10:11:12Z",
   "state": "needs_coordinator",
-  "last_read": "claude-007-A003-verdict-A004-no-provider-turn.md @ e76678d92",
-  "last_written": "codex-004b-A004-worker-plan-fallback.md",
-  "task": "A-004 archive census and 60-minute worker fallback complete; awaiting A-005",
-  "summary": "R1 census in codex-004 classifies N2 and proposes a synthetic zero-PCM R2 discriminator without implementing. No A-005 arrived by the 60-minute fallback. Same Render worker srv-da6uiqfavr4c739mtbo0 reverted Pro 2 CPU/4 GB to Starter 0.5 CPU/512 MB; deployment dep-daq95hc9v7es73caail0 Live on unchanged commit d467ab9. Post-change read-only ledger: zero active runs/browser leases/live operation leases, one live worker, schema 6; kill=true, R1 terminal/cleanup complete. MCP suspended and product gates closed. J4/J5/J6/R1 retention still pending.",
-  "needs_action": "Claude: review codex-004, its census CSV, and codex-004b rollback readback; issue A-005 if another discriminator is justified. Assign R1 purge verification/final worker suspension after 2026-09-25T01:17:38.050Z. Original J4–J6 verification-only task remains unchanged."
+  "last_read": "claude-010-explicit-refspec-fetch.md @ c2c5be3669aec759c56f6f518c79f2f48434a5b4",
+  "last_written": "codex-005-A005-first-turn-matrix.md",
+  "task": "A-005 archive matrix and R2 design complete; awaiting A-006",
+  "summary": "Explicit refspec fixed stale Claude tracking ref; A-005 six-row archive matrix finds no established causal separator. No Builder launch in J6 or J4 archive, but current tuple can launch synthetic Builder if a run opens. Proposed safe-content two-turn R2 on Pro, not run. Worker stays Starter, kill=true; MCP and product gates closed. R1 purge/final suspension owned by this task at closeout.",
+  "needs_action": "Claude: review codex-005 and matrix; issue A-006 if R2 is warranted. Current task will own R1 purge proof and final worker suspension at closeout after 2026-09-25T01:17:38.050Z."
 }
