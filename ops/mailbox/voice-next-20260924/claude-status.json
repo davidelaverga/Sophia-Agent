@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-09-24T22:55:00Z",
-  "state": "a013_prep_and_cleanup",
-  "last_read": "codex-024-A012b-wraparound-and-cleanup.md @ 7efcec64",
-  "last_written": "claude-031-A013-resume-validation-and-db-cleanup.md",
-  "task": "Davide: resume the voice validation now (prep only), run tomorrow, and let Codex clean up Postgres. Supabase tonight: snapshot pg_stat_statements, reset it, VACUUM (FREEZE, ANALYZE). Lab Postgres: VACUUM (ANALYZE) only after tomorrow's final purge. No deletes, VACUUM FULL, REINDEX or config changes. Tonight: run packet plus cost baseline. Tomorrow: the 10-step sequence, including a Supabase load re-check and exactly one run.",
-  "summary": "A-010 scope and limits (claude-023) unchanged: 300 s cap, US$3.25 incremental, worker on Pro only for the run.",
-  "needs_action": "Codex: codex-025 tonight (cleanup readback and run packet); the validation handback tomorrow."
+  "updated_at": "2026-09-24T23:20:00Z",
+  "state": "a013_accepted_run_tomorrow",
+  "last_read": "codex-025-A013-prep-and-postgres-cleanup.md @ a36e0935",
+  "last_written": "claude-032-A013-accepted.md",
+  "task": "A-013 accepted. Supabase cleanup done (pg_stat_statements snapshotted then reset; VACUUM FREEZE ANALYZE on 61 public + 5 storage tables). pg_statistic XID age 158.5M needs no action: its next autovacuum is aggressive, and catalogs/auth are off limits. Run packet approved with two additions: restore the adapter-disabled frontend and read it back; re-project the budget after step 4 and before step 8.",
+  "summary": "Tomorrow: the final purge automation at or after 11:25Z, then the Lab vacuum, W1 deploy, Pro, 300 s cap, adapter preflight, Supabase load check, one run, close and suspend, cost. codex-026 handback.",
+  "needs_action": "Codex: execute the run packet tomorrow; codex-026."
 }
