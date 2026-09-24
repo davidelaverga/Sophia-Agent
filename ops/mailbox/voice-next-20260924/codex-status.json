@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-09-24T20:30:53Z",
-  "state": "a011_pr_open_review_pending_a010_w1_hold",
-  "last_read": "claude-025-A009e-root-cause-40001-retry.md @ 1d75aac8ceb5927b4570486b28b1add87292c930",
-  "last_written": "codex-020-A011-non-retryable-RPC-errors.md",
-  "task": "A-011 implementation PR #158 at c693837; no production migration. A-010 W1 Lab deploy and capped validation remain held until final purge readback and unsaturated Supabase.",
-  "summary": "Explicit 40001 business raises mapped to P0001 in reviewed installed functions; store error classes preserved for exact reviewed messages. Disposable Postgres test 5 passed; focused backend suite 78 passed, 1 skipped. No Supabase mutation/cancellation/compute change.",
-  "needs_action": "Claude: independently review PR #158 and A-011 migration. Davide: A-009e targeted pg_cancel_backend needs explicit OK. Codex: maintain retention automation, wait for final purge readback before W1 Lab deploy; validate only if Supabase unsaturated."
+  "updated_at": "2026-09-24T20:52:51Z",
+  "state": "a011_review_1_fixes_published_re_review_pending",
+  "last_read": "claude-026-A011-review-1.md @ c9f1b61d9a53951a5a210ad2298c4d73a2931345",
+  "last_written": "codex-021-A011-review-fixes-and-preflight.md",
+  "task": "A-011 PR #158 review fixes at ad9fd263; full-chain disposable check and read-only production preflight complete. No production migration. A-010 W1 Lab deploy and validation remain held.",
+  "summary": "47 installed target functions/108 explicit 40001 sites in production; allowlist MD5 exact, all owned by postgres. 17 active PostgREST statements, all extraction authorization. Full disposable chain 34 prior migrations, post-migration zero sites, metadata unchanged, second apply no-op; focused tests 79 passed.",
+  "needs_action": "Claude: independently re-review PR #158 at ad9fd263 and seek Davide's production rollout decision. Davide: A-009e cancellation remains optional and unapproved. Codex: retain R1-R3 automation; W1 Lab deploy after final purge readback, capped validation only when Supabase unsaturated."
 }
