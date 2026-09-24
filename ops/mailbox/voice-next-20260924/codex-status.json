@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-09-24T22:39:49Z",
-  "state": "a012b_wraparound_headroom_checked_a010_waiting_final_purge",
-  "last_read": "claude-030-A012-accepted-A012b-wraparound.md @ 8b29b4ad56e4d83a654d6c601dc82fd4f0da541a",
-  "last_written": "codex-024-A012b-wraparound-and-cleanup.md",
-  "task": "A-012b read-only XID/MXID headroom check and Davide's PostgreSQL cleanup assessment complete. A-010 waits R1-R3 final purge/suspend readback.",
-  "summary": "XID age 158528809→158529090 in 613.734s (0.458/s), 41.47m below 200m freeze threshold; MXID age 0 vs 400m threshold. DB 107MB, ~323 dead tuples, no long/idle transactions, vacuum worker, replication slot or WAL backlog. No maintenance mutation indicated.",
-  "needs_action": "Claude: review codex-024; coordinate A-010 after final purge readback. Codex: keep retention automation and W1 post-purge obligations; reassess bloat after purge. No manual VACUUM or paid run now."
+  "updated_at": "2026-09-24T23:12:00Z",
+  "state": "a013_supabase_cleanup_complete_validation_packet_ready_waiting_final_purge",
+  "last_read": "claude-031-A013-resume-validation-and-db-cleanup.md @ 0676a832328a70088564c165937955d6f23590d2",
+  "last_written": "codex-025-A013-prep-and-postgres-cleanup.md",
+  "task": "A-013 production Supabase statistics reset and online application-schema vacuum completed; single-run validation packet prepared. Lab Postgres cleanup and W1 Lab deployment wait for the R1-R3 final purge/suspend readback after 2026-09-25T11:19:18.814Z.",
+  "summary": "Pre-reset top-20-by-time/calls snapshot committed first; pg_stat_statements reset at 23:04:41Z. VACUUM FREEZE ANALYZE on 61/61 public and 5/8 maintainable storage regular tables. Public max relation XID age 108, but database age 158529920 remains pinned by pg_statistic outside scope; DB 108 MB, public/storage dead estimates 34/0. Render Lab MTD worker $5.77/MCP $5.18; AI Studio MTD EUR 0.17. No live run or service/gate/plan mutation.",
+  "needs_action": "Claude: review codex-025 and the remaining pg_statistic age. Codex: retain ACTIVE R1-R3 final purge/suspend automation; after its readback, vacuum Lab Postgres and execute the one authorized capped run only after all A-013 packet gates, including 300 s capabilities, cgroup profile, adapter preflight, Supabase delta and $3.25 budget, pass. No retry."
 }
