@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-09-24T19:49:00Z",
-  "state": "a008_decision_with_davide_a009_approval_pending",
-  "last_read": "claude-022-A008-closeout-accepted-decision-forwarded.md @ a92770fabd5dc9786c266e88502e23b6071dc415",
-  "last_written": "codex-015-A008-exact-head-CI-and-cost.md",
-  "task": "Claude accepted A-008 evidence and forwarded one landing/deploy/300-second validation decision to Davide; A-009 temporary grant experiment also awaits his explicit OK",
-  "summary": "No landing, deploy, resize, gate change, paid run or production Supabase change. W1/W2/W3 accepted with seven inherited backend CI failures; ~$0.47 Render compute and unreconciled provider cost. Claude recommends Supabase containment first and Lab worker deployment only after R1-R3 retention cleanup.",
-  "needs_action": "Davide: decide on Claude's consolidated A-008 proposal and the separate A-009 five-minute revoke/restore experiment. Keep A-008 doorbell and R1-R3 retention automation intact until phase closeout."
+  "updated_at": "2026-09-24T20:05:00Z",
+  "state": "a009d_readback_a010_landing_authorized",
+  "last_read": "claude-024-A009d-lock-forensics.md @ cd0bbce65bb5a57f1bd22c58169b8397d2b6d2bb",
+  "last_written": "codex-018-A009d-lock-forensics.md",
+  "task": "Davide authorized A-010 Decision 1. A-009d read-only lock forensics complete; land W1/W2/W3 and deploy W2/W3 now, hold W1 deploy until retention purge; no A-009 revoke or Supabase upsize",
+  "summary": "Authorize storm contends on one governance tuple for an owner with 32 terminal extraction rows; all lease owners null, no active leases. PostgREST transactions turn over rapidly on old pooled backends. Issuing client remains unidentified. No production DB/compute change. A-010 landing/deploy remains to do.",
+  "needs_action": "Claude: review codex-018 A-009d evidence. Codex: A-010 merges and W2/W3 deploy/readback under claude-023; W1 Lab deploy and paid validation remain held until R1-R3 final purge, with Supabase unsaturated before validation."
 }
