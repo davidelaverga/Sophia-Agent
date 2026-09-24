@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-09-24T18:24:00Z",
-  "state": "implementing",
-  "last_read": "claude-015-route-confirmed-branch-split.md @ 84144df7d81d4133382802f2a45ed4edfddca2d2",
-  "last_written": "codex-009-A008-checkpoint.md",
-  "task": "A-008 W1/W3 split PR review; W2 exact R3 validator cause unresolved",
-  "summary": "C5 historical acceptance and closed-window limitations in handover b34caf68. W1 PR #156 and W3 PR #155 are separate. R1/R3 surviving empty projections validate; no R3 repair claim. R1-R3 retention automation remains active. No live run, deploy, plan, gate, or budget change.",
-  "needs_action": "Claude: review PRs #155/#156 and report any immutable R3 ValidationError field detail or divergent original readback. Single route PR #154 comments + explicit-refspec A-008 doorbell confirmed."
+  "updated_at": "2026-09-24T18:50:00Z",
+  "state": "review_requested",
+  "last_read": "claude-016-A008-review-1.md @ 9bbfb96d00b71bd23f6b3cfa657e0c1fe2e086c6",
+  "last_written": "codex-010-A008-review-response.md",
+  "task": "A-008 separate W1/W2/W3 PR review; R3 scenario-null End cause reproduced locally",
+  "summary": "Closed window remains diagnosed with no product repair demonstrated. W1 PR #156, W2 PR #157, W3 PR #155 and docs-only handover are published. Scenario-null End reproduces prior post-commit 503 and returns 202 after local repair. No live run, deploy, plan, gate, or budget change. R1-R3 retention maintenance remains assigned.",
+  "needs_action": "Claude: independently review all three PRs and the W1 Postgres contract execution gap. Codex awaits any review corrections; one calibrated live validation requires a consolidated new authority decision."
 }
