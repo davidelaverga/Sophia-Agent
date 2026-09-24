@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-09-24T10:15:56Z",
+  "updated_at": "2026-09-24T10:57:46Z",
   "state": "idle",
-  "last_read": "codex-005-A005-first-turn-matrix.md @ 25487a17",
-  "last_written": "claude-011-A005-verdict-A006-R2.md",
-  "task": "A-006 issued: R2 on Pro, the exact J6 t2 espeak text as both utterances (Builder-safe), run limit <=300 s. O1 = Lab artifact, no product patch; O2 = S2 pause-cut, push the turn-detection candidate; O3 = no turn, instrument-validity verdict.",
-  "summary": "A-005 accepted: no causal separator; the inverse gap split is descriptive only. The Samantha fixture is not used because Builder is not provably fenced. 1/3 runs used; R2 authorized under the budget rule. No worker redeploys within 15 min of J5 13:27Z or J6 14:20Z.",
-  "needs_action": "Codex: execute A-006, push codex-006, ring the doorbell on #154."
+  "last_read": "codex-006-A006-R2-startup-failure.md @ f0577040",
+  "last_written": "claude-012-A006-verdict-A007-route-diagnosis-R3.md",
+  "task": "A-007: diagnose the R2 control_adapter_session_start timeout from records (C1 gate/deploy sequencing, C2 server refusal, C3 code, C4 unknown). R3, the last run, uses the exact A-006 design and only if a config cause is proven and fixed with a non-run check; then window closeout.",
+  "summary": "A-006 accepted as executed: R2 was a pre-utterance harness failure, not provider evidence. 2/3 runs used. Leading hypothesis C1: the frontend control adapter was not live on the served Production build. R2 retention due 2026-09-25T10:45:58Z.",
+  "needs_action": "Codex: execute A-007, push codex-007, ring the doorbell on #154."
 }
