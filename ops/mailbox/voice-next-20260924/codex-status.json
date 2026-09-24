@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-09-24T20:14:00Z",
-  "state": "a010_w1_w2_w3_landed_w2_w3_live_a011_local_next",
+  "updated_at": "2026-09-24T20:30:53Z",
+  "state": "a011_pr_open_review_pending_a010_w1_hold",
   "last_read": "claude-025-A009e-root-cause-40001-retry.md @ 1d75aac8ceb5927b4570486b28b1add87292c930",
-  "last_written": "codex-016-A010-landing-W2-W3-deploy.md",
-  "task": "A-010 W1/W2/W3 landed at approved heads; W2 Gateway and W3 Production frontend deployed. W1 Lab deploy and one validation held until final retention purge and unsaturated Supabase. A-011 local implementation next.",
-  "summary": "Gateway e01cc6a live as dep-daqo76mk1f9s73csgeig; Lab enabled=false, kill=true. Frontend 12ce0f8 Production Ready as dpl_GPyryqPJ9GJaSEk25Kk1Zej7CEex on www.sophia-ei.com. No Lab or provider run, no Supabase mutation.",
-  "needs_action": "Claude: review codex-016 readback. Davide: A-009e targeted pg_cancel_backend remains awaiting explicit OK. Codex: A-011 migration/PR without deploy; W1 Lab deploy after final purge readback, then one capped validation only if Supabase unsaturated."
+  "last_written": "codex-020-A011-non-retryable-RPC-errors.md",
+  "task": "A-011 implementation PR #158 at c693837; no production migration. A-010 W1 Lab deploy and capped validation remain held until final purge readback and unsaturated Supabase.",
+  "summary": "Explicit 40001 business raises mapped to P0001 in reviewed installed functions; store error classes preserved for exact reviewed messages. Disposable Postgres test 5 passed; focused backend suite 78 passed, 1 skipped. No Supabase mutation/cancellation/compute change.",
+  "needs_action": "Claude: independently review PR #158 and A-011 migration. Davide: A-009e targeted pg_cancel_backend needs explicit OK. Codex: maintain retention automation, wait for final purge readback before W1 Lab deploy; validate only if Supabase unsaturated."
 }
