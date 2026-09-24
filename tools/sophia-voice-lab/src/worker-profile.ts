@@ -21,26 +21,40 @@ const defaultReader: Reader = (path) => {
   try { return readFileSync(path, 'utf8').trim(); } catch { return null; }
 };
 
+function positiveFinite(value: number): number | null {
+  return Number.isFinite(value) && value > 0 ? value : null;
+}
+
+function cpuLimits(read: Reader): { value: number | null; source: WorkerProfile['cpu_source'] } {
+  const v2 = read('/sys/fs/cgroup/cpu.max')?.split(/\s+/);
+  const v2Quota = v2?.length === 2 ? positiveFinite(Number(v2[0]) / Number(v2[1])) : null;
+  if (v2Quota !== null) return { value: v2Quota, source: 'cgroup_v2' };
+  const v1Quota = positiveFinite(Number(read('/sys/fs/cgroup/cpu/cpu.cfs_quota_us')));
+  const v1Period = positiveFinite(Number(read('/sys/fs/cgroup/cpu/cpu.cfs_period_us')));
+  const value = v1Quota !== null && v1Period !== null ? positiveFinite(v1Quota / v1Period) : null;
+  return { value, source: value === null ? null : 'cgroup_v1' };
+}
+
+function memoryLimits(read: Reader): { value: number | null; source: WorkerProfile['memory_source'] } {
+  const v2 = Number(read('/sys/fs/cgroup/memory.max'));
+  if (Number.isSafeInteger(v2) && v2 > 0) return { value: v2, source: 'cgroup_v2' };
+  const v1 = Number(read('/sys/fs/cgroup/memory/memory.limit_in_bytes'));
+  if (Number.isSafeInteger(v1) && v1 > 0) return { value: v1, source: 'cgroup_v1' };
+  return { value: null, source: null };
+}
+
 export function measureWorkerProfile(read: Reader = defaultReader): WorkerProfile {
-  const v2Cpu = read('/sys/fs/cgroup/cpu.max')?.split(/\s+/);
-  const v1Quota = Number(read('/sys/fs/cgroup/cpu/cpu.cfs_quota_us'));
-  const v1Period = Number(read('/sys/fs/cgroup/cpu/cpu.cfs_period_us'));
-  const cpuV2 = v2Cpu?.length === 2 && v2Cpu[0] !== 'max' ? Number(v2Cpu[0]) / Number(v2Cpu[1]) : null;
-  const cpuV1 = v1Quota > 0 && v1Period > 0 ? v1Quota / v1Period : null;
-  const cpu = cpuV2 !== null && Number.isFinite(cpuV2) && cpuV2 > 0 ? cpuV2 : cpuV1 !== null && Number.isFinite(cpuV1) ? cpuV1 : null;
-  const v2Memory = read('/sys/fs/cgroup/memory.max');
-  const v1Memory = read('/sys/fs/cgroup/memory/memory.limit_in_bytes');
-  const memoryV2 = v2Memory && v2Memory !== 'max' ? Number(v2Memory) : null;
-  const memoryV1 = v1Memory ? Number(v1Memory) : null;
-  const memory = memoryV2 !== null && Number.isSafeInteger(memoryV2) && memoryV2 > 0 ? memoryV2
-    : memoryV1 !== null && Number.isSafeInteger(memoryV1) && memoryV1 > 0 ? memoryV1 : null;
+  const cpu = cpuLimits(read);
+  const memory = memoryLimits(read);
+  const status = cpu.value === null || memory.value === null ? 'unavailable'
+    : cpu.value >= ACTIVE_RUN_MIN_CPU && memory.value >= ACTIVE_RUN_MIN_MEMORY_BYTES ? 'sufficient' : 'insufficient';
   return {
     schema: 'sophia_voice_lab_worker_profile_v1',
-    status: cpu === null || memory === null ? 'unavailable' : cpu >= ACTIVE_RUN_MIN_CPU && memory >= ACTIVE_RUN_MIN_MEMORY_BYTES ? 'sufficient' : 'insufficient',
-    cpu_quota: cpu,
-    memory_limit_bytes: memory,
-    cpu_source: cpuV2 !== null && cpu === cpuV2 ? 'cgroup_v2' : cpuV1 !== null && cpu === cpuV1 ? 'cgroup_v1' : null,
-    memory_source: memoryV2 !== null && memory === memoryV2 ? 'cgroup_v2' : memoryV1 !== null && memory === memoryV1 ? 'cgroup_v1' : null,
+    status,
+    cpu_quota: cpu.value,
+    memory_limit_bytes: memory.value,
+    cpu_source: cpu.source,
+    memory_source: memory.source,
     minimum_cpu: ACTIVE_RUN_MIN_CPU,
     minimum_memory_bytes: ACTIVE_RUN_MIN_MEMORY_BYTES,
   };

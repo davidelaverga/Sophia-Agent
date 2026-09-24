@@ -3480,33 +3480,47 @@ export function deriveCompletedVerdicts(run: RunRecord, events: import("./domain
  * waveform slower than real time. Frame receipts are already durable and
  * content-free; compare their timestamps with their exact 16 kHz PCM bytes. */
 export const INPUT_DELIVERY_LIMITS = { max_speech_gap_ms: 150, max_lag_growth_ms: 100, max_context_wall_ratio_error: 0.05 } as const;
+type InputDeliveryEvent = import("./domain.js").LabEvent;
+
+function frameTiming(frames: InputDeliveryEvent[]): { audioMs: number; maxSpeechGap: number } | null {
+  let maxSpeechGap = 0;
+  let audioMs = 0;
+  for (let index = 0; index < frames.length; index += 1) {
+    const bytes = Number(frames[index]!.payload.byte_length);
+    if (!Number.isSafeInteger(bytes) || bytes <= 0 || bytes % 2 !== 0) return null;
+    if (index < frames.length - 1) audioMs += bytes / 32;
+    if (index === 0) continue;
+    const gap = frames[index]!.at.getTime() - frames[index - 1]!.at.getTime();
+    if (!Number.isFinite(gap) || gap < 0) return null;
+    if (Number(frames[index]!.payload.nonzero_byte_count) > 0 || Number(frames[index - 1]!.payload.nonzero_byte_count) > 0) {
+      maxSpeechGap = Math.max(maxSpeechGap, gap);
+    }
+  }
+  return { audioMs, maxSpeechGap };
+}
+
+function contextWallRatio(events: InputDeliveryEvent[], operationId: string, audioMs: number, wallMs: number): number {
+  const started = events.find((event) => event.kind === "audio.input.started" && event.payload.operation_id === operationId);
+  const completed = events.find((event) => event.kind === "audio.input.completed" && event.payload.operation_id === operationId);
+  if (!started || !completed) return audioMs / wallMs;
+  const contextMs = (Number(completed.payload.actual_context_time) - Number(started.payload.actual_context_time)) * 1000;
+  const contextWallMs = completed.at.getTime() - started.at.getTime();
+  return Number.isFinite(contextMs) && contextWallMs > 0 ? contextMs / contextWallMs : audioMs / wallMs;
+}
+
 export function classifyInputDelivery(events: import("./domain.js").LabEvent[], operationId: string): { status: "valid" | "degraded" | "unavailable"; delivery_valid: boolean | null; max_speech_gap_ms: number | null; lag_growth_ms: number | null; context_wall_ratio: number | null } {
   const frames = events.filter((event) => event.kind === "harness.input_frame_forwarded" && event.source === "browser" && event.payload.operation_id === operationId)
     .sort((a, b) => Number(a.payload.frame_seq) - Number(b.payload.frame_seq));
   const unavailable = { status: "unavailable" as const, delivery_valid: null, max_speech_gap_ms: null, lag_growth_ms: null, context_wall_ratio: null };
   if (frames.length < 2) return unavailable;
-  let maxSpeechGap = 0;
-  let audioMs = 0;
-  for (let index = 0; index < frames.length; index += 1) {
-    const bytes = Number(frames[index]!.payload.byte_length);
-    if (!Number.isSafeInteger(bytes) || bytes <= 0 || bytes % 2 !== 0) return unavailable;
-    if (index < frames.length - 1) audioMs += bytes / 32;
-    if (index > 0) {
-      const gap = frames[index]!.at.getTime() - frames[index - 1]!.at.getTime();
-      if (!Number.isFinite(gap) || gap < 0) return unavailable;
-      if (Number(frames[index]!.payload.nonzero_byte_count) > 0 || Number(frames[index - 1]!.payload.nonzero_byte_count) > 0) maxSpeechGap = Math.max(maxSpeechGap, gap);
-    }
-  }
+  const timing = frameTiming(frames);
+  if (timing === null) return unavailable;
   const wallMs = frames.at(-1)!.at.getTime() - frames[0]!.at.getTime();
-  if (wallMs <= 0 || audioMs <= 0) return unavailable;
-  const started = events.find((event) => event.kind === "audio.input.started" && event.payload.operation_id === operationId);
-  const completed = events.find((event) => event.kind === "audio.input.completed" && event.payload.operation_id === operationId);
-  const contextMs = started && completed ? (Number(completed.payload.actual_context_time) - Number(started.payload.actual_context_time)) * 1000 : null;
-  const contextWallMs = started && completed ? completed.at.getTime() - started.at.getTime() : null;
-  const ratio = contextMs !== null && contextWallMs !== null && Number.isFinite(contextMs) && contextWallMs > 0 ? contextMs / contextWallMs : audioMs / wallMs;
-  const lagGrowth = wallMs - audioMs;
-  const degraded = maxSpeechGap > INPUT_DELIVERY_LIMITS.max_speech_gap_ms || lagGrowth > INPUT_DELIVERY_LIMITS.max_lag_growth_ms || Math.abs(ratio - 1) > INPUT_DELIVERY_LIMITS.max_context_wall_ratio_error;
-  return { status: degraded ? "degraded" : "valid", delivery_valid: !degraded, max_speech_gap_ms: maxSpeechGap, lag_growth_ms: lagGrowth, context_wall_ratio: ratio };
+  if (wallMs <= 0 || timing.audioMs <= 0) return unavailable;
+  const ratio = contextWallRatio(events, operationId, timing.audioMs, wallMs);
+  const lagGrowth = wallMs - timing.audioMs;
+  const degraded = timing.maxSpeechGap > INPUT_DELIVERY_LIMITS.max_speech_gap_ms || lagGrowth > INPUT_DELIVERY_LIMITS.max_lag_growth_ms || Math.abs(ratio - 1) > INPUT_DELIVERY_LIMITS.max_context_wall_ratio_error;
+  return { status: degraded ? "degraded" : "valid", delivery_valid: !degraded, max_speech_gap_ms: timing.maxSpeechGap, lag_growth_ms: lagGrowth, context_wall_ratio: ratio };
 }
 
 /** Render's runtime CPU count is derived from the effective deployed plan;
