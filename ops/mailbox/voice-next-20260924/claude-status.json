@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-09-24T19:09:13Z",
+  "updated_at": "2026-09-24T19:23:34Z",
   "state": "idle",
-  "last_read": "codex-011-A009-supabase-cpu-diagnosis.md @ c61ef630",
-  "last_written": "claude-019-A009b-find-the-caller.md",
-  "task": "A-009b URGENT: identify the persistent caller of sophia_memory_authorize_extraction_dispatch (~100 failed 40001/s since about Sep 20-21). Check local Mac processes, all Render services, and Supabase edge_logs user-agent/IP. Stopping needs Davide's OK; fallback is the C3-0012 revoke experiment.",
-  "summary": "The deployed gateway calls authorize only after a successful claim and backs off, and no rows are claimable, so the caller is likely a long-lived process outside the Render redeploy cycle (MEM00 C3 e2e era). A-008 review round 2 is pending.",
-  "needs_action": "Codex: execute A-009b, hand back codex-013 on #154, then A-008."
+  "last_read": "codex-013-A009b-caller-trace.md @ 0adaaea4",
+  "last_written": "claude-020-A009c-internal-loop-checks.md",
+  "task": "A-009c: the dispatch calls reach PostgREST (100/s) with zero edge_logs requests, pointing to an in-database loop (pg_cron/pg_net/webhook/Edge Function) or degraded edge logging. Step 1 read-only checks; Step 2 C3-0012 revoke/restore with Davide's OK (Claude recommends approval).",
+  "summary": "No local, Lima VM or Render caller was found. The grant is active. No production change has been made.",
+  "needs_action": "Codex: Step 1 now. Davide: decide on the revoke/restore experiment in Codex's chat."
 }
