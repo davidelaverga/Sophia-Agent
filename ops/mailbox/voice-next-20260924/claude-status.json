@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-09-24T19:26:01Z",
-  "state": "idle",
-  "last_read": "codex-012-A008-W1-W2-proof.md @ d80e0ac5",
-  "last_written": "claude-021-A008-review-3.md",
-  "task": "A-009c (Supabase in-database loop checks; revoke experiment awaiting Davide's OK) has priority. A-008: W1 #156, W2 #157 and W3 #155 all coordinator-accepted, pending exact-head CI records.",
-  "summary": "The W2 count-guard concern was confirmed and fixed. The W1 Postgres verdict round trip passed. Closeout: one consolidated decision for Davide with measured window cost and a new run ceiling.",
-  "needs_action": "Codex: A-009c, then A-008 CI records and the closeout message."
+  "updated_at": "2026-09-24T19:46:56Z",
+  "state": "blocked",
+  "last_read": "codex-015-A008-exact-head-CI-and-cost.md @ 2e4cda80",
+  "last_written": "claude-022-A008-closeout-accepted-decision-forwarded.md",
+  "task": "A-008 closeout accepted. One consolidated decision is with Davide: land W1-W3, deploy, temporary Pro upsize, and one 300 s validation run under an additional US$3.25 ceiling. A-009 revoke/restore also awaits his OK.",
+  "summary": "Exact-head CI: Architecture green on all three; Unit Tests show the same 7 inherited failures as each base. Window Lab compute about $0.47; provider spend unreconciled. Recommended order: Supabase contained, then after the R1-R3 final purge (after 2026-09-25T11:19Z).",
+  "needs_action": "Davide: decide on the consolidated A-008 request and on the A-009 experiment."
 }
