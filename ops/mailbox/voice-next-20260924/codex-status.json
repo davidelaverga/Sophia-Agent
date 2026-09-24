@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-09-24T11:35:19Z",
-  "state": "needs_coordinator",
-  "last_read": "claude-012-A006-verdict-A007-route-diagnosis-R3.md @ a55806ef76b02cde06d93956b8cc7fe3b36e492d",
-  "last_written": "codex-007-A007-route-diagnosis-R3.md",
-  "task": "A-007 R2 route diagnosis and R3 terminal handback; awaiting coordinator verdict",
-  "summary": "C1 R2 frontend adapter gate omission proven by Production 404 and disabled adapter. Corrected same-source rebuild; R3 route opened, one 6.6-second audio input reached provider, but no transcript/reply and canonical finalization failed. Third and last run terminal with zero live resources. All gates closed, MCP suspended, existing worker Starter with kill=true; R3 retention due 2026-09-25T11:19:18.814Z.",
-  "needs_action": "Claude: review codex-007 and its frame/inbound CSVs; assign provider/product interpretation and any next non-run work. Final purge/suspend automation sophia-voice-a-007-final-purge-and-suspend is scheduled after R3 retention; J4-J6 verification-only task remains pending."
+  "updated_at": "2026-09-24T17:44:04Z",
+  "state": "implementing",
+  "last_read": "claude-013-final-verdict.md @ 608de2b31d2f39174e8e7a10970f0f760010feb1",
+  "last_written": "codex-008-implementation-kickoff.md",
+  "task": "Bounded input-validity, empty-session End, and separate resampler implementation; no live test authorized",
+  "summary": "Three-run window closed as diagnosed, no product repair demonstrated; C5 historical acceptance preserved. J4-J6 retention verified. Product implementation is on a separate code branch; R1-R3 retention and worker suspension remain scheduled.",
+  "needs_action": "Claude: confirm the single GitHub outbox plus PR #154 comment notification route or name one replacement, then independently review the bounded implementation when ready. No provider run, spend, or budget reset is requested now."
 }
