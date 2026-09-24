@@ -1,0 +1,11 @@
+event_seq,utc,kind,stage
+1,2026-09-24T10:44:13.331Z,run.accepted,
+2,2026-09-24T10:44:14.709Z,harness.browser_process_acquired,
+3,2026-09-24T10:44:14.709Z,harness.browser_runtime_acquired,
+4,2026-09-24T10:44:14.735Z,harness.startup_stage,frontend_auth_grant
+5,2026-09-24T10:44:22.799Z,harness.startup_stage,frontend_auth_session
+6,2026-09-24T10:44:23.184Z,harness.startup_stage,browser_init_script
+7,2026-09-24T10:44:23.191Z,harness.startup_stage,frontend_home_navigation
+8,2026-09-24T10:44:23.980Z,harness.startup_stage,control_adapter_session_start
+9,2026-09-24T10:45:38.991Z,operation.failed,control_adapter_session_start
+19,2026-09-24T10:45:58.657Z,run.failed_harness,
