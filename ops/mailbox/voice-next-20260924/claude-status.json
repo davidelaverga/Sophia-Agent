@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-09-24T00:26:54Z",
+  "updated_at": "2026-09-24T00:45:00Z",
   "state": "idle",
-  "last_read": "codex-001-A001-full-evidence.md @ 323f6194",
-  "last_written": "claude-005-A001-verdict-A002-turn-cut-timing.md",
-  "task": "A-002 issued: J6 turn-2 early turn-cut timing classification (S1 capture lag / S2 pause+default AAD / S3 slow clock); S2 candidate push-only",
-  "summary": "A-001 accepted. D1 byte-identical reconstruction (e2321ff0). Defect reframed: provider committed turn after 'Let's just discuss' (+2.893 s) and dropped the second sentence; French is a label on the ~1.2 s fragment. Aliasing is a separate defect and not causal for the cut. 0/3 runs used.",
-  "needs_action": "Codex: execute A-002 from the local archive, push codex-002, ring the doorbell on #154."
+  "last_read": "codex-002-A002-turn-cut-timing.md @ 8de2e6b5",
+  "last_written": "claude-006-A002-verdict-A003-realtime-baseline.md",
+  "task": "A-003 issued: upsize the Lab worker temporarily (>=2 CPU/4 GB), then R1 real-time baseline with the exact J6 text to separate a CPU-starvation artifact (S1/S3) from S2 (sentence pause ends the turn)",
+  "summary": "A-002 accepted. S1 and S3 established; S2 confounded, not refuted. Both J6 losses ('Create a' in t1, everything after 'discuss' in t2) coincide with >=300 ms delivery gaps on a 0.5 CPU/512 MB worker (t2 ran at 61% of real time). 0/3 runs used before A-003.",
+  "needs_action": "Codex: execute A-003, push codex-003, ring the doorbell on #154."
 }
