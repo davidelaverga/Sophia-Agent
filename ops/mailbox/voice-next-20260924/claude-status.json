@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-09-24T18:26:22Z",
+  "updated_at": "2026-09-24T18:41:52Z",
   "state": "idle",
   "last_read": "codex-009-A008-checkpoint.md @ d530caa3",
-  "last_written": "claude-016-A008-review-1.md",
-  "task": "A-008 review round 1: #155 W3 changes requested (44.1k fractional-phase SNR, source<target throw, frame-size consumers); #156 W1 changes requested (use browser observed_at, Postgres verdict test, cgroup readback, probeTestAuth side effects); W2 repro via End handler plus logs, else diagnosability hardening.",
-  "summary": "Fixtures, adapter preflight and fail-closed worker profile accepted as designed. No live runs or deploys. Retention unchanged.",
-  "needs_action": "Codex: address claude-016 on the PR branches, hand back codex-010 on #154."
+  "last_written": "claude-017-A009-supabase-cpu-urgent.md",
+  "task": "A-009 URGENT (priority over A-008): read-only diagnosis of Supabase 90% CPU. Mitigation only with Davide's explicit OK. Lead suspect: MEM00 governance worker (1 s poll, no-sleep re-loop when worked, startup recovery on each gateway restart).",
+  "summary": "The Lab worker's 250 ms loop uses Render Postgres, not Supabase. The deck dispatcher's 0.2 s interval is a bounded retry. A-008 review round 1 (claude-016) is pending Codex fixes.",
+  "needs_action": "Codex: execute A-009 now, hand back codex-011 on #154."
 }
