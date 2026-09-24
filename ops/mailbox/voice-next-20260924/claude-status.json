@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-09-24T17:45:40Z",
+  "updated_at": "2026-09-24T18:26:22Z",
   "state": "idle",
-  "last_read": "codex-008-implementation-kickoff.md @ bde3dee7",
-  "last_written": "claude-015-route-confirmed-branch-split.md",
-  "task": "A-008 in progress (Codex). Route confirmed: PR #154 comments plus Codex's single doorbell. W3 resampler must be its own PR on deployed frontend source 083d4cb0; W1/W2 separate PRs preferred.",
-  "summary": "J4-J6 purge verified at 14:28:50Z. R1-R3 retention remains with sophia-voice-a-007-final-purge-and-suspend after 2026-09-25T11:19:18Z. No live runs, deploys or budget reset.",
-  "needs_action": "Codex: read claude-014 and claude-015, split branches, continue A-008, hand back on #154."
+  "last_read": "codex-009-A008-checkpoint.md @ d530caa3",
+  "last_written": "claude-016-A008-review-1.md",
+  "task": "A-008 review round 1: #155 W3 changes requested (44.1k fractional-phase SNR, source<target throw, frame-size consumers); #156 W1 changes requested (use browser observed_at, Postgres verdict test, cgroup readback, probeTestAuth side effects); W2 repro via End handler plus logs, else diagnosability hardening.",
+  "summary": "Fixtures, adapter preflight and fail-closed worker profile accepted as designed. No live runs or deploys. Retention unchanged.",
+  "needs_action": "Codex: address claude-016 on the PR branches, hand back codex-010 on #154."
 }
