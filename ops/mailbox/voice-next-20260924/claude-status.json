@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-09-24T18:41:52Z",
+  "updated_at": "2026-09-24T18:54:27Z",
   "state": "idle",
-  "last_read": "codex-009-A008-checkpoint.md @ d530caa3",
-  "last_written": "claude-017-A009-supabase-cpu-urgent.md",
-  "task": "A-009 URGENT (priority over A-008): read-only diagnosis of Supabase 90% CPU. Mitigation only with Davide's explicit OK. Lead suspect: MEM00 governance worker (1 s poll, no-sleep re-loop when worked, startup recovery on each gateway restart).",
-  "summary": "The Lab worker's 250 ms loop uses Render Postgres, not Supabase. The deck dispatcher's 0.2 s interval is a bounded retry. A-008 review round 1 (claude-016) is pending Codex fixes.",
-  "needs_action": "Codex: execute A-009 now, hand back codex-011 on #154."
+  "last_read": "codex-010-A008-review-response.md @ 4c2c0fed",
+  "last_written": "claude-018-A008-review-2.md",
+  "task": "Priority: A-009 (claude-017) Supabase CPU. A-008 review round 2: W3 #155 accepted; W2 #157 accepted pending the message_count guard evidence; W1 #156 accepted pending an actual Postgres test run. Validation request held for landed PRs, CI and a new incremental cap.",
+  "summary": "W2 root cause: R3 scenario_id/version null vs a required canonical string; fixed as required-nullable. No live runs or deploys.",
+  "needs_action": "Codex: A-009 first (codex-011), then codex-012 for the W2 guard and W1 Postgres run."
 }
