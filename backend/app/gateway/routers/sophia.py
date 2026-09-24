@@ -10,7 +10,7 @@ import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
@@ -44,6 +44,7 @@ from deerflow.sophia.review_metadata_store import (
     upsert_review_metadata,
 )
 from deerflow.sophia.session_store import (
+    SessionEvidenceIntegrityError,
     SessionMessageRecord,
     SessionRecord,
     SessionStore,
@@ -542,8 +543,10 @@ class SyntheticCanonicalTranscript(BaseModel):
     synthetic: Literal[True]
     principal_id: str = Field(min_length=1, max_length=256)
     test_run_id: str = Field(min_length=1, max_length=256)
-    scenario_id: str = Field(min_length=1, max_length=256)
-    scenario_version: str = Field(min_length=1, max_length=256)
+    # Ad hoc ordinary-app Lab runs have no scenario identity. The keys remain
+    # required, while null is a valid value distinct from an omitted field.
+    scenario_id: str | None = Field(min_length=1, max_length=256)
+    scenario_version: str | None = Field(min_length=1, max_length=256)
     environment: str = Field(min_length=1, max_length=128)
     session_id: str = Field(min_length=1, max_length=256)
     thread_id: str = Field(min_length=1, max_length=256)
@@ -1017,6 +1020,15 @@ def _validate_synthetic_finalization_transcript(body: SessionEndRequest) -> None
             )
 
 
+def _read_exact_synthetic_messages(user_id: str, session_id: str) -> list[SessionMessageRecord]:
+    try:
+        return canonical_visible_messages(_session_store.read_exact_session_messages(user_id, session_id))
+    except SessionEvidenceIntegrityError as exc:
+        raise HTTPException(status_code=503, detail={"code": "voice_lab_canonical_transcript_invalid"}) from exc
+    except (OSError, RuntimeError, SessionStoreError) as exc:
+        raise HTTPException(status_code=503, detail={"code": "voice_lab_canonical_transcript_unavailable"}) from exc
+
+
 def _synthetic_finalization_messages(
     user_id: str,
     body: SessionEndRequest,
@@ -1026,7 +1038,12 @@ def _synthetic_finalization_messages(
     """Build a bounded transcript without performing a pre-finalization write."""
 
     _validate_synthetic_finalization_transcript(body)
-    existing = canonical_visible_messages(_session_store.list_messages(user_id, body.session_id))
+    # A zero-row exact read is valid empty canonical data. A malformed or
+    # unavailable read must raise, rather than masquerade as the same empty
+    # transcript during the irreversible finalization boundary.
+    existing = _read_exact_synthetic_messages(user_id, body.session_id)
+    if len(existing) != record.message_count:
+        raise HTTPException(status_code=503, detail={"code": "voice_lab_canonical_transcript_invalid"})
     if not body.messages:
         return existing, max(0, int(record.message_revision))
     if body.base_revision is None:
@@ -1107,7 +1124,9 @@ def _assert_synthetic_terminal_transcript_replay(
     claims: VoiceLabClaims,
 ) -> tuple[SessionRecord, list[SessionMessageRecord]]:
     """Verify a terminal retry without granting any transcript mutation."""
-    stored = canonical_visible_messages(_session_store.list_messages(user_id, body.session_id))
+    stored = _read_exact_synthetic_messages(user_id, body.session_id)
+    if len(stored) != record.message_count:
+        raise HTTPException(status_code=503, detail={"code": "voice_lab_canonical_transcript_invalid"})
     current = _session_store.get(user_id, body.session_id) or record
     if body.messages:
         _validate_synthetic_finalization_transcript(body)
@@ -1355,9 +1374,26 @@ def _synthetic_transcript_evidence(
     try:
         return SyntheticCanonicalTranscript.model_validate(payload).model_dump(mode="json")
     except ValidationError as exc:
+        correlation_id = uuid4().hex
+        diagnostics = [
+            {
+                "loc": [part for part in error["loc"] if isinstance(part, str)],
+                "type": error["type"],
+            }
+            for error in exc.errors(include_input=False, include_context=False, include_url=False)
+        ]
+        logger.error(
+            "synthetic transcript validation failed correlation_id=%s fields=%s",
+            correlation_id,
+            diagnostics,
+        )
         raise HTTPException(
             status_code=503,
-            detail={"code": "voice_lab_canonical_transcript_invalid"},
+            detail={
+                "code": "voice_lab_canonical_transcript_invalid",
+                "correlation_id": correlation_id,
+                "fields": sorted({".".join(item["loc"]) or "root" for item in diagnostics}),
+            },
         ) from exc
 
 

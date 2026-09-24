@@ -2061,9 +2061,11 @@ class SupabaseSessionTranscriptStore:
                 "order": "sequence.asc,created_at.asc",
             },
         )
-        raw_message_rows = (
-            raw_message_result if isinstance(raw_message_result, list) else []
-        )
+        if not isinstance(raw_message_result, list):
+            raise SessionEvidenceIntegrityError(
+                "Synthetic finalization message read-back returned an invalid result."
+            )
+        raw_message_rows = raw_message_result
         final_message_metadata = {
             **message_metadata_base,
             "retention_hours": retention_hours,

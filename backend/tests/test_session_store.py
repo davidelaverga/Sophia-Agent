@@ -623,6 +623,23 @@ def test_supabase_exact_transcript_read_ignores_additive_mem00_columns():
         store.read_exact_session_messages("user-1", "session-1")
 
 
+def test_empty_exact_transcript_is_valid_but_malformed_or_unavailable_is_not():
+    store = _supabase_store(_ColumnProjectingPostgrest())
+    assert store.read_exact_session_messages("user-1", "session-1") == []
+
+    store._client = httpx.Client(transport=httpx.MockTransport(
+        lambda request: httpx.Response(200, json={"unexpected": "shape"})
+    ))
+    with pytest.raises(SessionEvidenceIntegrityError):
+        store.read_exact_session_messages("user-1", "session-1")
+
+    store._client = httpx.Client(transport=httpx.MockTransport(
+        lambda request: httpx.Response(503, json={"code": "unavailable"})
+    ))
+    with pytest.raises(SessionStoreError):
+        store.read_exact_session_messages("user-1", "session-1")
+
+
 @pytest.mark.parametrize("status,code,expected", [
     (400, "42703", SessionEvidenceIntegrityError),
     (400, "PGRST204", SessionEvidenceIntegrityError),
