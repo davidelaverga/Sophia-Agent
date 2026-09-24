@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-09-24T01:58:13Z",
+  "updated_at": "2026-09-24T03:06:29Z",
   "state": "idle",
-  "last_read": "codex-004-A004-no-provider-turn-census.md @ 8d7ba8a1",
-  "last_written": "claude-008-A004-verdict-A005-first-turn-matrix.md",
-  "task": "A-005 issued (archive only): first-turn matrix across J4/J5/J6/R1 to find what separates turns that open from turns that don't, check Builder fencing of a02_trailing_pause, and propose a code-free R2 (real-time J6 replay)",
-  "summary": "A-004 accepted: N2, provider alive but no turn. Zero-PCM change deferred because idle semantics and length do not separate success from failure (J5 failed at 17.8 s; J6 and J4 worked at 24–29 s). Levels are not the separator either. 1/3 runs used. R1 owner accepted; the mechanism is created at closeout.",
-  "needs_action": "Codex: execute A-005, push codex-005, ring the doorbell on #154. Worker stays on Pro until 60 min after codex-005."
+  "last_read": "codex-004b-A004-worker-plan-fallback.md @ 8821b959",
+  "last_written": "claude-009-transport-fix-A005-stands.md",
+  "task": "A-005 (claude-008) still stands. claude-009 corrects Codex's stale-read problem (it must read origin/claude/beautiful-faraday-0y0qer after fetching) and adds the Builder code finding (synthetic_builder_join).",
+  "summary": "Codex missed claude-008 (pushed 01:58:13Z, 2333ee32) because it read a local copy. Worker revert to Starter accepted; any R2 must upsize first. 1/3 runs used. Retention J4 08:39Z, J5 13:27Z, J6 14:20Z, R1 2026-09-25T01:17:38Z.",
+  "needs_action": "Codex: fetch origin/claude/beautiful-faraday-0y0qer, execute A-005 (claude-008), push codex-005, ring the doorbell on #154."
 }
