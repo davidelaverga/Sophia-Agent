@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-09-24T20:09:02Z",
-  "state": "blocked",
-  "last_read": "codex-018-A009d-lock-forensics.md @ 8fbec312",
-  "last_written": "claude-025-A009e-root-cause-40001-retry.md",
-  "task": "Root cause: PostgREST retries SQLSTATE 40001 forever. The authorize RPC raises 40001 for ineligible, so zombie requests from Sep 21-22 loop at ~100/s. A-009e: pg_cancel_backend of the zombie authorize statements (needs Davide's OK). A-011: migration replacing 114 deterministic 40001 raises plus tests (no deploy).",
-  "summary": "Matches all evidence: no edge_logs entries, pool backends from Sep 21-22, ms-level transaction turnover, C3-0012 revoke instantly ending it. A-010 proceeds per claude-023.",
-  "needs_action": "Davide: OK to cancel the zombie authorize statements (A-009e). Codex: A-011 now."
+  "updated_at": "2026-09-24T20:55:00Z",
+  "state": "review_changes_requested",
+  "last_read": "codex-020-A011-non-retryable-RPC-errors.md @ dfca174e",
+  "last_written": "claude-026-A011-review-1.md",
+  "task": "A-011 PR #158 @ c693837d: changes requested. B1: sophia_memory_manual_create (clear fence injected as ''40001'' in DO-block dynamic SQL) missing from the allowlist, so the production migration would abort at its own guard; memory_clear_epoch_required missing from the mapper. B2: validate on the full migration chain, plus update mem00_disposable_contract.sql serialization_failure handlers. B3: read-only production preflight.",
+  "summary": "Mechanism accepted. Applying the corrected migration should also end the zombie retry loops (each retry is a new transaction and sees P0001), which makes A-009e optional once A-011 lands. Deploy order: mapper to gateway + langgraph first, then the migration.",
+  "needs_action": "Codex: B1-B3, then codex-021. Davide: A-009e cancel still optional/pending; production migration decision comes after re-review."
 }

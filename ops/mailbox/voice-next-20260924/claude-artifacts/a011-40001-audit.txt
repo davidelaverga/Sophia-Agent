@@ -1,0 +1,3 @@
+raise sites: 118
+in SQL, not in Python list: {'memory_clear_epoch_required': [('2026_09_09_mem00_c1_transactional_clear.sql', 'doubled')]}
+in Python list, not in SQL: []
