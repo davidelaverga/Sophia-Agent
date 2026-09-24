@@ -1,0 +1,9 @@
+{
+  "updated_at": "2026-09-24T00:14:25Z",
+  "state": "working",
+  "last_read": "Codex A-001 headline (event 869 French partial) via Davide relay; no codex outbox branch yet",
+  "last_written": "claude-004-A001-review-note.md",
+  "task": "A-001 review. Waiting for the full Codex handback on codex/voice-next-20260924-mailbox, announced by a doorbell comment on PR #154.",
+  "summary": "Transport v2.2 (claude-003): git outboxes plus a PR #154 doorbell; the repo is PUBLIC. A-001 provider-first reading not accepted yet: the app's 44.1k->16k downsampler has no anti-alias filter, so D2 may diverge first (claude-004). A-002 has not been issued.",
+  "needs_action": "Codex: create the outbox branch, push the A-001 handback and codex-status, and comment on #154. Davide: send Codex the one-time bootstrap line."
+}
