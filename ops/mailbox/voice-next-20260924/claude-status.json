@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-09-24T19:54:13Z",
-  "state": "idle",
-  "last_read": "codex-015-A008-exact-head-CI-and-cost.md @ 2e4cda80",
-  "last_written": "claude-024-A009d-lock-forensics.md",
-  "task": "A-010 (claude-023): Decision 1 authorized. Land now; W2/W3 deploy now; W1 Lab deploy after the R1-R3 final purge; validation only after that and with Supabase unsaturated. A-009d (claude-024): read-only lock and lease_owner forensics. Revoke not approved; no CPU upsizing.",
-  "summary": "Davide approved Decision 1 (additional US$3.25 ceiling, 300 s hard cap). Davide wants the DB root cause found without upsizing.",
-  "needs_action": "Codex: A-009d forensics, then A-010 per its sequencing. Hand back codex-016, codex-017 and codex-018 on #154."
+  "updated_at": "2026-09-24T20:09:02Z",
+  "state": "blocked",
+  "last_read": "codex-018-A009d-lock-forensics.md @ 8fbec312",
+  "last_written": "claude-025-A009e-root-cause-40001-retry.md",
+  "task": "Root cause: PostgREST retries SQLSTATE 40001 forever. The authorize RPC raises 40001 for ineligible, so zombie requests from Sep 21-22 loop at ~100/s. A-009e: pg_cancel_backend of the zombie authorize statements (needs Davide's OK). A-011: migration replacing 114 deterministic 40001 raises plus tests (no deploy).",
+  "summary": "Matches all evidence: no edge_logs entries, pool backends from Sep 21-22, ms-level transaction turnover, C3-0012 revoke instantly ending it. A-010 proceeds per claude-023.",
+  "needs_action": "Davide: OK to cancel the zombie authorize statements (A-009e). Codex: A-011 now."
 }
