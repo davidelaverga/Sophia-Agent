@@ -1,5 +1,16 @@
 # Current operator handover
 
+## 2026-09-24 continuation (voice-next-20260924)
+
+The three-run follow-up window is closed as **diagnosed; no product repair was demonstrated**. C5's historical `VOICE_LAB_INTERNAL_USE_READY` acceptance remains intact. It does not certify the J6 recognition symptom or make this test input a reliable speech benchmark. Claude's independent verdict is `ops/mailbox/voice-next-20260924/claude-013-final-verdict.md`; Codex's A-001 through A-007 handbacks are `codex-001`…`codex-007` in the same mailbox epoch. These mailbox records are coordination evidence and are not merged into product code.
+
+- **L1 — input validity:** espeak opened 1 of 4 first turns and 0 of 2 under real-time delivery. On the Starter 0.5 CPU / 512 MB worker, the browser audio graph ran at 61% of real time with gaps of at least 300 ms. J6's French partial and missing second sentence cannot be attributed to the product from this input.
+- **L2 — R2:** the effective Production frontend control adapter had not been reopened (C1), so R2 never supplied provider evidence.
+- **L3 — empty-session End:** R1's supported End succeeded. R3's End returned 503 `voice_lab_canonical_transcript_invalid` after a zero-turn canonical commit; automatic recovery later proved `live_resources_zero`. That recovery is not a successful supported End. The surviving R1/R3 records both contain valid empty canonical data, so the original 503's exact invalid field remains undetermined.
+- **L4 — resampler:** the microphone downsampler was unfiltered during this window. Its anti-aliasing repair is a separate product patch. No controlled comparison has tied it to J6.
+
+J4/J5/J6 purges were verified at 2026-09-24T14:28:50.883Z. R1/R2/R3 retention remains assigned to `sophia-voice-a-007-final-purge-and-suspend` after 2026-09-25T11:19:18Z. Lab gates remain closed, MCP suspended, and the Starter worker kill switch engaged for retention maintenance. No live run, deploy, plan change, or budget reset is authorized by this continuation.
+
 Checkpoint: 2026-09-23 20:39 UTC, closeout C088. This supersedes September22 instructions; historical failures remain archived, not current repair instructions.
 
 C5 technical first-use criteria are met by existing J6 evidence. CI reconciliation is complete. The closeout-only scope permits the bounded executable retention disposition below; three future purges and final worker suspension are scheduled maintenance, not claimed completed. Readiness verdict is VOICE_LAB_INTERNAL_USE_READY under that approved disposition. No new live voice run, full VT00 certification, Builder campaign or migration is authorized or needed.
