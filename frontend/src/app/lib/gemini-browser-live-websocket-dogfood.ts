@@ -5228,6 +5228,8 @@ export function pcm16Base64FromFloat32(
     return '';
   }
 
+  // One-shot helper: a fresh filter includes its startup transient. The live
+  // microphone path below retains one resampler across AudioProcess callbacks.
   const pcm = new StreamingPcm16Resampler(sourceSampleRate, targetSampleRate).process(input);
   return bytesToBase64(new Uint8Array(pcm.buffer));
 }
@@ -8465,11 +8467,6 @@ function startMicrophoneAudioPipeline(options: {
 
 function shouldEmitInputAudioFrameDiagnostic(audioFrameSequence: number): boolean {
   return audioFrameSequence <= 12 || audioFrameSequence % 25 === 0;
-}
-
-function estimatePcm16ByteLength(sourceSampleCount: number, sourceRate: number, targetRate: number): number {
-  const targetSampleCount = Math.max(0, Math.floor(sourceSampleCount * targetRate / sourceRate));
-  return targetSampleCount * 2;
 }
 
 export function createGeminiOutputAudioPlaybackController(

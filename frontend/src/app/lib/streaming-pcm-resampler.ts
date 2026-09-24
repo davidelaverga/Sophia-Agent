@@ -12,12 +12,12 @@ export class StreamingPcm16Resampler {
   #outputSamples = 0;
 
   constructor(sourceRate: number, targetRate: number) {
-    if (!Number.isFinite(sourceRate) || !Number.isFinite(targetRate) || sourceRate <= 0 || targetRate <= 0 || targetRate > sourceRate) {
-      throw new RangeError('Microphone resampler requires positive rates and source rate at least target rate.');
+    if (!Number.isFinite(sourceRate) || !Number.isFinite(targetRate) || sourceRate <= 0 || targetRate <= 0) {
+      throw new RangeError('Microphone resampler requires positive rates.');
     }
     this.sourceRate = sourceRate;
     this.targetRate = targetRate;
-    this.groupDelayInputSamples = sourceRate === targetRate ? 0 : 31;
+    this.groupDelayInputSamples = sourceRate <= targetRate ? 0 : 31;
     const cutoff = Math.min(0.5, 0.45 * targetRate / sourceRate);
     const kernel = new Float64Array(63);
     let sum = 0;
@@ -36,6 +36,15 @@ export class StreamingPcm16Resampler {
   get outputSampleCount(): number { return this.#outputSamples; }
   get groupDelayMs(): number { return this.groupDelayInputSamples * 1000 / this.sourceRate; }
 
+  #filteredAt(center: number): number {
+    let filtered = 0;
+    for (let tap = 0; tap < this.#kernel.length; tap += 1) {
+      const sourceIndex = center - tap;
+      if (sourceIndex >= 0) filtered += this.#history[sourceIndex % this.#history.length]! * this.#kernel[tap]!;
+    }
+    return filtered;
+  }
+
   process(input: Float32Array): Int16Array {
     const expected = Math.floor((this.#inputSamples + input.length) * this.targetRate / this.sourceRate) - this.#outputSamples;
     const output = new Int16Array(expected);
@@ -45,16 +54,14 @@ export class StreamingPcm16Resampler {
       this.#history[this.#inputSamples % this.#history.length] = sample;
       this.#inputSamples += 1;
       while ((this.#outputSamples + 1) * this.sourceRate <= this.#inputSamples * this.targetRate) {
-        const center = Math.floor(this.#outputSamples * this.sourceRate / this.targetRate);
-        let filtered = 0;
-        if (this.sourceRate === this.targetRate) {
-          filtered = sample;
-        } else {
-          for (let tap = 0; tap < this.#kernel.length; tap += 1) {
-            const sourceIndex = center - tap;
-            if (sourceIndex >= 0) filtered += this.#history[sourceIndex % this.#history.length]! * this.#kernel[tap]!;
-          }
-        }
+        const position = this.#outputSamples * this.sourceRate / this.targetRate;
+        const center = Math.floor(position);
+        // Low-rate capture can occur with Bluetooth HFP. Duplicate its latest
+        // available source sample; no decimation filter is needed in that path.
+        const phase = position - center;
+        const filtered = this.sourceRate <= this.targetRate
+          ? this.#history[center % this.#history.length]!
+          : this.#filteredAt(center) * (1 - phase) + this.#filteredAt(Math.ceil(position)) * phase;
         const clipped = Math.max(-1, Math.min(1, filtered));
         output[written++] = clipped < 0 ? clipped * 0x8000 : clipped * 0x7fff;
         this.#outputSamples += 1;

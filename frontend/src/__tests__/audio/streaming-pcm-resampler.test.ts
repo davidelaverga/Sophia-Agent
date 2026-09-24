@@ -13,6 +13,18 @@ function rms(samples: Int16Array, skip = 0): number {
   return Math.sqrt(window.reduce((sum, sample) => sum + (sample / 32768) ** 2, 0) / window.length);
 }
 
+function sineSnrDb(samples: Int16Array, sourceRate: number, frequency: number, delay: number): number {
+  let signal = 0;
+  let error = 0;
+  for (let index = 2000; index < samples.length; index += 1) {
+    const ideal = Math.sin(2 * Math.PI * frequency * (index * sourceRate / 16000 - delay) / sourceRate);
+    const actual = samples[index]! / 32768;
+    signal += ideal * ideal;
+    error += (actual - ideal) ** 2;
+  }
+  return 10 * Math.log10(signal / error);
+}
+
 describe('streaming microphone PCM resampler', () => {
   it('passes speech-band energy and filters input above the 16 kHz Nyquist limit', () => {
     for (const sourceRate of [44100, 48000]) {
@@ -21,6 +33,26 @@ describe('streaming microphone PCM resampler', () => {
       expect(rms(speech, 2000)).toBeGreaterThan(0.6);
       expect(rms(speech, 2000)).toBeLessThan(0.79); // 1 kHz gain within ±1 dB of 0.707 RMS.
       expect(rms(alias, 2000) / rms(speech, 2000)).toBeLessThan(10 ** (-30 / 20));
+    }
+  });
+
+  it('uses fractional phase at 44.1 kHz without speech-band timing distortion', () => {
+    for (const [frequency, minimumSnr] of [[1000, 40], [3000, 30]]) {
+      const stream = new StreamingPcm16Resampler(44100, 16000);
+      const output = stream.process(sine(44100, frequency!, 1));
+      const snr = sineSnrDb(output, 44100, frequency!, stream.groupDelayInputSamples);
+      console.info(`44.1 kHz fractional-phase SNR at ${frequency} Hz: ${snr.toFixed(1)} dB`);
+      expect(snr).toBeGreaterThan(minimumSnr!);
+    }
+  });
+
+  it('accepts low-rate Bluetooth capture without throwing or miscounting samples', () => {
+    for (const sourceRate of [8000, 16000]) {
+      const stream = new StreamingPcm16Resampler(sourceRate, 16000);
+      const output = stream.process(sine(sourceRate, 1000, 1));
+      expect(output.length).toBe(16000);
+      expect(stream.groupDelayInputSamples).toBe(0);
+      expect(rms(output, 2000)).toBeGreaterThan(0.6);
     }
   });
 
@@ -45,6 +77,14 @@ describe('streaming microphone PCM resampler', () => {
     expect(stream.groupDelayMs).toBeLessThan(1);
   });
 
+  it('emits exact cumulative samples even when 44.1 kHz callback frame bytes vary', () => {
+    const stream = new StreamingPcm16Resampler(44100, 16000);
+    const lengths = Array.from({ length: 100 }, () => stream.process(new Float32Array(4096)).byteLength);
+    expect(new Set(lengths)).toEqual(new Set([2972, 2974]));
+    expect(lengths.reduce((sum, length) => sum + length, 0)).toBe(stream.outputSampleCount * 2);
+    expect(lengths.every((length) => length > 0 && length % 2 === 0)).toBe(true);
+  });
+
   it('accounts for ten minutes without rounding drift', () => {
     const stream = new StreamingPcm16Resampler(44100, 16000);
     const chunk = new Float32Array(4096);
@@ -67,6 +107,10 @@ describe('streaming microphone PCM resampler', () => {
       expect(stream.outputSampleCount).toBe(16000);
       expect(stream.groupDelayMs).toBeLessThan(1);
     }
-    expect(elapsed.sort((a, b) => a - b)[Math.floor(elapsed.length / 2)]).toBeLessThan(20);
+    elapsed.sort((a, b) => a - b);
+    const median = elapsed[Math.floor(elapsed.length / 2)]!;
+    const p95 = elapsed[Math.floor(elapsed.length * 0.95)]!;
+    console.info(`Streaming PCM CPU per callback: median=${median.toFixed(3)}ms p95=${p95.toFixed(3)}ms`);
+    expect(median).toBeLessThanOrEqual(5);
   });
 });
