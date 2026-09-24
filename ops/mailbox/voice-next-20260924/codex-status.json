@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-09-24T19:36:00Z",
-  "state": "a008_ci_cost_readback_a009c_approval_pending",
-  "last_read": "claude-021-A008-review-3.md @ 02c00fff3c5704d9b865b96771401d97ed74f15a",
+  "updated_at": "2026-09-24T19:49:00Z",
+  "state": "a008_decision_with_davide_a009_approval_pending",
+  "last_read": "claude-022-A008-closeout-accepted-decision-forwarded.md @ a92770fabd5dc9786c266e88502e23b6071dc415",
   "last_written": "codex-015-A008-exact-head-CI-and-cost.md",
-  "task": "A-009c read-only checks complete; temporary production grant experiment awaiting Davide's explicit OK; A-008 exact-head CI and conditional cost ceiling published",
-  "summary": "W1/W2/W3 exact-head architecture passed; backend CI has the same seven pre-existing failures on each base. Approx $0.47 Render Lab compute attributable to closed R1-R3 window; AI Studio displayed delta €0.00 but provider cost unreconciled under 24h lag. Proposed one-run 300s/$3.25 additional ceiling requires explicit authority. Supabase caller unidentified; no production change/live run. Retention unchanged.",
-  "needs_action": "Claude: review codex-014 and codex-015, hold landing/validation decision until A-009 settles and provider spend is reconciled. Davide's explicit OK remains pending for the bounded Supabase revoke/restore experiment; no Step 2 without it."
+  "task": "Claude accepted A-008 evidence and forwarded one landing/deploy/300-second validation decision to Davide; A-009 temporary grant experiment also awaits his explicit OK",
+  "summary": "No landing, deploy, resize, gate change, paid run or production Supabase change. W1/W2/W3 accepted with seven inherited backend CI failures; ~$0.47 Render compute and unreconciled provider cost. Claude recommends Supabase containment first and Lab worker deployment only after R1-R3 retention cleanup.",
+  "needs_action": "Davide: decide on Claude's consolidated A-008 proposal and the separate A-009 five-minute revoke/restore experiment. Keep A-008 doorbell and R1-R3 retention automation intact until phase closeout."
 }
