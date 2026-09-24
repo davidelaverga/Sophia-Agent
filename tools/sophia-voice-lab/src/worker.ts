@@ -26,6 +26,7 @@ import { recoveryAttemptAuditHash } from "./retained-d02-recovery.js";
 import { D02BrowserContinuityProofSchema, assertFreshProductAdmissionProof, reserveAudioInput, toolInputSchemas, validateAudioInputLimit, type FixtureSummary } from "./service.js";
 import { transitionRun } from "./state-machine.js";
 import { createWorkerBootIdentity, createWorkerHeartbeatAttestation, type WorkerBootIdentity } from "./worker-heartbeat.js";
+import { assertActiveRunWorkerProfile, measureWorkerProfile } from "./worker-profile.js";
 
 interface ActiveLease { epoch: number; }
 interface D02WorkerShutdownArm {
@@ -754,7 +755,7 @@ export class VoiceLabWorker {
       browserReady: browser.ok && tts.ok && fixturesReady,
       observedAt,
       attestation: createWorkerHeartbeatAttestation(this.config, this.#workerBootIdentity, effectiveKillSwitchEngaged, heartbeatSequence),
-      detail: { browser: browser.detail, browser_engine: browser.engine ?? null, browser_version: browser.version ?? null, fixtures_ready: fixturesReady, fixture_count: this.audio.summaries().length, tts_ready: tts.ok, tts: tts.detail },
+      detail: { browser: browser.detail, browser_engine: browser.engine ?? null, browser_version: browser.version ?? null, fixtures_ready: fixturesReady, fixture_count: this.audio.summaries().length, tts_ready: tts.ok, tts: tts.detail, active_run_profile: measureWorkerProfile() },
     });
   }
 
@@ -802,6 +803,9 @@ export class VoiceLabWorker {
       run = await transitionRun(this.ledger, run, "validating_target");
       if (run.scenarioId === "V-S01" || run.scenarioId === "V-S02") return this.#executePreResourceScenario(run, operation.id);
       if (this.config.readinessTarget !== null || this.config.nodeEnv !== "test") assertFreshProductAdmissionProof(this.config, run.target, await this.targetIdentity());
+      const workerProfile = measureWorkerProfile();
+      assertActiveRunWorkerProfile(this.config.nodeEnv, workerProfile);
+      if (this.config.nodeEnv !== "test") await this.ledger.appendEvent(run.id, "harness.worker_profile_verified", "worker", { ...workerProfile }, `run:${run.id}:worker_profile`);
       // Admission at the MCP boundary prevents an accepted request from
       // allocating work beyond the rolling campaign budget. Replaying the
       // exact durable reservation here is the final provider-allocation fence:
@@ -2158,7 +2162,12 @@ export class VoiceLabWorker {
       screenshots: refs.filter((ref) => ref.kind.includes("screenshot")),
       video: { status: "unavailable", reason: "video_capture_disabled_or_not_implemented" },
       raw_audio: { status: "not_captured", reason: "privacy_default" },
-      metrics: deriveEvidenceMetrics(eventPage.events, operations),
+      metrics: {
+        ...deriveEvidenceMetrics(eventPage.events, operations),
+        worker_profile: eventPage.events.find((event) => event.kind === "harness.worker_profile_verified")?.payload ?? { status: "unavailable" },
+        input_delivery: operations.filter((operation) => operation.type === "speak" || operation.type === "barge_in")
+          .map((operation) => ({ operation_id: operation.id, ...classifyInputDelivery(eventPage.events, operation.id) })),
+      },
       c5_first_use_assessment: run.scenarioId === "V-O01" ? deriveC5FirstUseAssessment(run, eventPage.events, operations) : { schema: C5_FIRST_USE_ASSESSMENT_SCHEMA, status: "not_applicable", scenario_id: run.scenarioId },
       cleanup_audit: {
         browser_context_closed: browserContextClosed,
@@ -3364,7 +3373,7 @@ export function suiteCertificationProjection(children: RunRecord[]): {
     ? { status: "pending_lifecycle" as const, outcome: "lifecycle_or_cleanup_unconfirmed" }
     : runCertificationProjection(run.verdicts));
   const productCounts = { pass: 0, unavailable: 0, fail: 0, inconclusive: 0, pending: 0 };
-  for (const run of children) productCounts[run.verdicts.product] += 1;
+  for (const run of children) productCounts[run.verdicts.product as keyof typeof productCounts] += 1;
   const outcomeCounts: Record<string, number> = {};
   for (const projection of projections) outcomeCounts[projection.outcome] = (outcomeCounts[projection.outcome] ?? 0) + 1;
   const certifiedCount = projections.filter((projection) => projection.status === "certified").length;
@@ -3381,6 +3390,7 @@ export function suiteCertificationProjection(children: RunRecord[]): {
 export function certificationTerminalDecision(verdicts: Verdicts): { state: RunState; reason: string } {
   const state: RunState = verdicts.harness === "unavailable" || verdicts.evidence === "unavailable"
     ? "pending_external_evidence"
+    : verdicts.harness === "invalid_test" ? "invalid_test"
     : verdicts.harness === "fail" ? "failed_harness"
       : verdicts.auth === "fail" ? "authorization_failed"
         : verdicts.product === "fail" ? "product_failed"
@@ -3415,6 +3425,7 @@ export function deriveCompletedVerdicts(run: RunRecord, events: import("./domain
   const providerDegraded = eligibleEvents.some((event) => event.kind === "provider.connection_epoch" && (event.payload.receipt as Record<string, unknown> | undefined)?.phase === "degraded");
   const authClean = authCleanupPath(run, events) !== null;
   const injectedOperations = operations.filter((operation) => (operation.type === "speak" || operation.type === "barge_in") && operation.state === "succeeded");
+  const degradedInputDelivery = injectedOperations.some((operation) => classifyInputDelivery(events, operation.id).status === "degraded");
   const nonSilenceOperations = injectedOperations.filter((operation) => !String(operation.input.fixture_id ?? "").toLowerCase().includes("silence"));
   const inputTranscript = eligibleEvents.some((event) => event.kind.endsWith(".sophia.user_transcript") || event.kind === "transcript.input.final");
   const assistantAudio = kinds.has("audio.output.started");
@@ -3443,9 +3454,11 @@ export function deriveCompletedVerdicts(run: RunRecord, events: import("./domain
   const baseHarnessPass = preResource
     ? !failedHarness && preResourceCleanup
     : !failedHarness && injectionChains && deploymentVerified && joinsComplete && captureProven && cleanupProven;
-  const harness: Verdicts["harness"] = !baseHarnessPass || scenarioHasFailure ? "fail" : scenarioHasUnavailable ? "unavailable" : "pass";
+  const harness: Verdicts["harness"] = degradedInputDelivery ? "invalid_test" : !baseHarnessPass || scenarioHasFailure ? "fail" : scenarioHasUnavailable ? "unavailable" : "pass";
   const productStatuses = scenarioEvaluation.product.map((assertion) => assertion.status);
   const product: Verdicts["product"] = preResource
+    ? "unavailable"
+    : degradedInputDelivery
     ? "unavailable"
     : !finalized
     ? "fail"
@@ -3462,6 +3475,42 @@ export function deriveCompletedVerdicts(run: RunRecord, events: import("./domain
     evidence: harness === "pass" && (preResource ? preResourceCleanup : finalized && cleanupProven) ? "pass" : harness === "unavailable" ? "unavailable" : "fail",
   };
 }
+
+/** A provider observation is not product evidence when the harness played the
+ * waveform slower than real time. Frame receipts are already durable and
+ * content-free; compare their timestamps with their exact 16 kHz PCM bytes. */
+export const INPUT_DELIVERY_LIMITS = { max_speech_gap_ms: 150, max_lag_growth_ms: 100, max_context_wall_ratio_error: 0.05 } as const;
+export function classifyInputDelivery(events: import("./domain.js").LabEvent[], operationId: string): { status: "valid" | "degraded" | "unavailable"; delivery_valid: boolean | null; max_speech_gap_ms: number | null; lag_growth_ms: number | null; context_wall_ratio: number | null } {
+  const frames = events.filter((event) => event.kind === "harness.input_frame_forwarded" && event.source === "browser" && event.payload.operation_id === operationId)
+    .sort((a, b) => Number(a.payload.frame_seq) - Number(b.payload.frame_seq));
+  const unavailable = { status: "unavailable" as const, delivery_valid: null, max_speech_gap_ms: null, lag_growth_ms: null, context_wall_ratio: null };
+  if (frames.length < 2) return unavailable;
+  let maxSpeechGap = 0;
+  let audioMs = 0;
+  for (let index = 0; index < frames.length; index += 1) {
+    const bytes = Number(frames[index]!.payload.byte_length);
+    if (!Number.isSafeInteger(bytes) || bytes <= 0 || bytes % 2 !== 0) return unavailable;
+    if (index < frames.length - 1) audioMs += bytes / 32;
+    if (index > 0) {
+      const gap = frames[index]!.at.getTime() - frames[index - 1]!.at.getTime();
+      if (!Number.isFinite(gap) || gap < 0) return unavailable;
+      if (Number(frames[index]!.payload.nonzero_byte_count) > 0 || Number(frames[index - 1]!.payload.nonzero_byte_count) > 0) maxSpeechGap = Math.max(maxSpeechGap, gap);
+    }
+  }
+  const wallMs = frames.at(-1)!.at.getTime() - frames[0]!.at.getTime();
+  if (wallMs <= 0 || audioMs <= 0) return unavailable;
+  const started = events.find((event) => event.kind === "audio.input.started" && event.payload.operation_id === operationId);
+  const completed = events.find((event) => event.kind === "audio.input.completed" && event.payload.operation_id === operationId);
+  const contextMs = started && completed ? (Number(completed.payload.actual_context_time) - Number(started.payload.actual_context_time)) * 1000 : null;
+  const contextWallMs = started && completed ? completed.at.getTime() - started.at.getTime() : null;
+  const ratio = contextMs !== null && contextWallMs !== null && Number.isFinite(contextMs) && contextWallMs > 0 ? contextMs / contextWallMs : audioMs / wallMs;
+  const lagGrowth = wallMs - audioMs;
+  const degraded = maxSpeechGap > INPUT_DELIVERY_LIMITS.max_speech_gap_ms || lagGrowth > INPUT_DELIVERY_LIMITS.max_lag_growth_ms || Math.abs(ratio - 1) > INPUT_DELIVERY_LIMITS.max_context_wall_ratio_error;
+  return { status: degraded ? "degraded" : "valid", delivery_valid: !degraded, max_speech_gap_ms: maxSpeechGap, lag_growth_ms: lagGrowth, context_wall_ratio: ratio };
+}
+
+/** Render's runtime CPU count is derived from the effective deployed plan;
+ * this refuses Starter execution even if an unsynced Blueprint says Pro. */
 
 export type ScenarioAssertion = {
   id: string;

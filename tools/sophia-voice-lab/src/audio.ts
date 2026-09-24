@@ -15,7 +15,7 @@ const ManifestSchema = z.object({
     id: z.string().min(1),
     fixture_version: z.string().regex(/^\d+\.\d+\.\d+$/),
     family: z.string().min(1).max(64),
-    fixture_class: z.enum(["short_command", "long_brief", "silence", "trailing_pause", "noisy_command"]),
+    fixture_class: z.enum(["short_command", "long_brief", "silence", "trailing_pause", "noisy_command", "conversation_probe"]),
     file: z.string().regex(/^[A-Za-z0-9._-]+\.wav$/),
     sha256: z.string().regex(/^[a-f0-9]{64}$/),
     sample_rate: z.number().int().positive(),

@@ -64,7 +64,7 @@ export const OPERATION_STATES = [
 ] as const;
 export type OperationState = (typeof OPERATION_STATES)[number];
 
-export const VERDICTS = ["pending", "pass", "fail", "inconclusive", "unavailable"] as const;
+export const VERDICTS = ["pending", "pass", "fail", "invalid_test", "inconclusive", "unavailable"] as const;
 export type Verdict = (typeof VERDICTS)[number];
 
 export interface Verdicts {
