@@ -15,6 +15,7 @@ from deerflow.sophia.build_manifest import (
     BuildManifestConcurrentModification,
 )
 from deerflow.sophia.build_mutation import BuildMutationTransaction
+from deerflow.sophia.rpc_business_errors import store_error_status
 from deerflow.sophia.storage.supabase_artifact_store import (
     normalize_object_path,
     safe_object_path_segment,
@@ -272,7 +273,7 @@ class SupabaseBuildMutationStore:
                 and safe_error_code in _STALE_LEASE_CODES
             ):
                 raise BuildMutationPersistenceStaleLeaseError("build mutation lease is stale") from None
-            raise BuildMutationPersistenceRpcError(operation, status_code=response.status_code) from None
+            raise BuildMutationPersistenceRpcError(operation, status_code=store_error_status(response)) from None
         if not response.content:
             raise BuildMutationPersistenceProtocolError(f"build mutation persistence RPC returned no record operation={operation}")
         try:
