@@ -421,8 +421,8 @@ export interface GeminiSyntheticInteractionBinding {
   schema: 'sophia_gemini_interaction_binding_v1';
   synthetic: true;
   test_run_id: string;
-  scenario_id: string;
-  scenario_version: string;
+  scenario_id: string | null;
+  scenario_version: string | null;
   interaction_id: string;
   operation_id: string;
   utterance_id: string;
@@ -5571,6 +5571,7 @@ export function readGeminiSyntheticTestContext(
   ]);
   const optionalSafe = (candidate: unknown) => (
     candidate === undefined
+    || candidate === null
     || (typeof candidate === 'string' && GEMINI_SYNTHETIC_SAFE_ID.test(candidate))
   );
   const d02Ownership = [
@@ -5580,6 +5581,8 @@ export function readGeminiSyntheticTestContext(
     value.browser_context_id_sha256,
   ];
   const d02OwnershipCount = d02Ownership.filter((candidate) => candidate !== undefined).length;
+  const hasScenarioId = typeof value.scenario_id === 'string';
+  const hasScenarioVersion = typeof value.scenario_version === 'string';
   const d02OwnershipValid = value.scenario_id === 'V-D02'
     ? d02OwnershipCount === 4
       && GEMINI_SHA256.test(String(value.voice_lab_run_id_sha256 ?? ''))
@@ -5605,6 +5608,7 @@ export function readGeminiSyntheticTestContext(
     || !isCanonicalGeminiUtcMillis(value.provider_expires_at)
     || !optionalSafe(value.scenario_id)
     || !optionalSafe(value.scenario_version)
+    || hasScenarioId !== hasScenarioVersion
     || !d02OwnershipValid
   ) {
     throw new Error(`${label} synthetic_test was malformed.`);
@@ -7448,6 +7452,8 @@ function createGeminiSyntheticInteractionEvidenceTracker(options: {
   onReceipt?: (receipt: GeminiSyntheticInteractionReceipt) => void;
   onFaultReceipt?: (receipt: GeminiSyntheticInteractionFaultReceipt) => void;
 }): GeminiSyntheticInteractionEvidenceTracker {
+  const scenarioId = options.syntheticTest.scenario_id ?? null;
+  const scenarioVersion = options.syntheticTest.scenario_version ?? null;
   const statesByResponse = new Map<string, GeminiSyntheticInteractionEvidenceState>();
   const statesByInput = new Map<string, GeminiSyntheticInteractionEvidenceState>();
   const pendingToolsByInput = new Map<string, Map<string, GeminiBrowserLiveToolCallLedgerEntry>>();
@@ -7574,10 +7580,7 @@ function createGeminiSyntheticInteractionEvidenceTracker(options: {
   return {
     noteAcceptedPublicUserTurn: (binding, acceptedAt) => {
       if (stopped || faulted || binding.expected_silence === true) return;
-      if (
-        typeof options.syntheticTest.scenario_id !== 'string'
-        || typeof options.syntheticTest.scenario_version !== 'string'
-      ) {
+      if ((scenarioId === null) !== (scenarioVersion === null)) {
         fail('interaction_synthetic_binding_incomplete', {
           operationId: binding.operation_id,
           utteranceId: binding.utterance_id,
@@ -7675,8 +7678,8 @@ function createGeminiSyntheticInteractionEvidenceTracker(options: {
           schema: 'sophia_gemini_interaction_binding_v1',
           synthetic: true,
           test_run_id: options.syntheticTest.test_run_id,
-          scenario_id: options.syntheticTest.scenario_id as string,
-          scenario_version: options.syntheticTest.scenario_version as string,
+          scenario_id: scenarioId,
+          scenario_version: scenarioVersion,
           interaction_id: newInteractionId(),
           operation_id: pendingInput.binding.operation_id,
           utterance_id: pendingInput.binding.utterance_id,
