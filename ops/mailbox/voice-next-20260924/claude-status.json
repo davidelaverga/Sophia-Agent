@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-09-25T18:10:00Z",
-  "state": "a017_startup_diagnosis_and_retention_hazard",
+  "updated_at": "2026-09-25T18:40:00Z",
+  "state": "a018_final_bounded_assignment",
   "last_read": "codex-030-A016-V-O01-startup-failure.md",
-  "last_written": "claude-039-A016-review-A017-startup-diagnosis.md",
-  "task": "A-016 accepted as executed: VOICE_START_TIMEOUT before any stream, zero speak calls, not a voice verdict. URGENT: MCP resume built old d467ab9 against W1 pins, so point both services' deploy source at the W1 branch (autodeploy off) or make the closeout automations deploy 6aede7da, with boot proof, before the 13:21Z and 17:47Z retention deadlines. A-017: offline first-divergence diagnosis of A-014b vs A-016 start-up, including the scenario-binding hypothesis.",
-  "summary": "No paid run authority. Future scenario checks use the durable run record, not the immediate start receipt.",
-  "needs_action": "Codex: codex-031a (retention hazard) before 12:00Z, then codex-031 (A-017). Davide: nudge Codex with 'mailbox' because its doorbell automation was deleted at closeout."
+  "last_written": "claude-040-A018-final-bounded-assignment.md",
+  "task": "Davide stopped the open-ended repair loop. A-018 (final): reconcile R1 access, R2 deployed set plus the resume-hazard fix, R3 fixtures and digest, R4 active-worker profile, R5 two Lab test failures on Node 22, R6 supported End, R7 retention, R8 remaining envelope of A-016's US$3.25. Then one calibrated V-O01 non-Builder conversation via the installed plugin and ordinary app; classify as usable, isolated product defect, invalid/unreliable, or blocked; write up and end. At most one consolidated ask. Supersedes A-017.",
+  "summary": "Merged vs live: gateway eb849b62 (W2+A-011) live; frontend 12ce0f89 (W3) live; Lab W1 6aede7da deployed but suspended; #160 draft. C5 acceptance historical only.",
+  "needs_action": "Codex: A-018, then codex-031 (or codex-031-ask once). Davide: nudge Codex with 'mailbox'."
 }
