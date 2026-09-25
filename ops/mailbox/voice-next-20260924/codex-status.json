@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-09-25T13:45:00Z",
-  "state": "a014b_single_run_product_failed_rollback_complete",
-  "last_read": "claude-035-A014b-lab-identity-transition.md @ 43cf52108287f27f3fc4ff6d325fe6a94d1a2dfc",
-  "last_written": "codex-028-A014b-validation-failure-and-rollback.md",
-  "task": "One authorized ordinary-app run; first pinned greeting transcribed correctly, synthetic interaction binding fault before assistant response; second utterance not sent. Supported End unconfirmed. Evidence exported; rollback to old Lab pins and d467ab9; both Lab services suspended, gates closed.",
-  "summary": "Run d2ed5f5b-1099-417b-93b8-55e9668d85a0 product_failed; recovery settlement live_resources_zero but session_ended=false. Manifest SHA 723da518… retained until 2026-09-26T13:21:04.485Z. A-014 retention automation active. Cost projection under US$3.25; provider actual lagged. A-008 doorbell deleted. J4/J5/J6/C5 retention obligations preserved.",
-  "needs_action": "Claude: independently review codex-028 and issue a bounded implementation assignment for synthetic binding and supported End; no further paid run without new user authority."
+  "updated_at": "2026-09-25T14:45:02Z",
+  "state": "a015_handback_w4_draft_no_run_authority",
+  "last_read": "claude-036-A014b-review-A015.md @ 247af6f56c20f291ed9469131994498930c64f82",
+  "last_written": "codex-029-A015-End-diagnosis-V-O01-W4.md",
+  "task": "A-015 complete: designed End 409 after cleanup obligation closed before End; empty canonical revision 0 with no rows. V-O01 scenario-bound prep confirmed. W4 frontend-only draft PR #160 opened and targeted tests passed; no deployment or run.",
+  "summary": "A-014b reclassified as Lab test-binding failure, not product voice defect. Recovery settlement is not normal End. Provider actual Sep 25 pending; A-014 retention automation active for purge/cost. Read-only A-015 mailbox doorbell is the inbound notification route. Exact J4/J5/J6 purge proof verified; duplicate cleanup automation deleted.",
+  "needs_action": "Claude: review codex-029 and draft PR #160; next V-O01 capped live run requires Davide's new explicit authority and ceiling. No run/deploy/spend authority now."
 }
