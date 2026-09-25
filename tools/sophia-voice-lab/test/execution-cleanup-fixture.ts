@@ -108,3 +108,34 @@ export function completeExecutionCleanupFixture(run: RunRecord, workerId: string
   events[1]!.payload.browser_lease_epoch = leaseEpoch;
   return events;
 }
+
+export const FENCE_PROOF = "6".repeat(64);
+export const SIGNED_RECEIPT = "7".repeat(64);
+export const AUTHORITY_KEY = "8".repeat(64);
+export const OWNERSHIP_PROOF = "9".repeat(64);
+
+/** The distinct canonical receipt persisted after a verified v2 service-owner
+ * fence. Deliberately NOT cleanup.browser_context_closed. */
+export function platformTerminated(run: RunRecord, seq = 5, overrides: Record<string, unknown> = {}): LabEvent {
+  return event(run, seq, "cleanup.platform_execution_terminated", "canonical", {
+    schema: "sophia_voice_lab_execution_epoch_platform_termination_v1",
+    voice_lab_run_id_sha256: sha256(run.id),
+    cleanup_obligation_id_sha256: sha256(run.cleanupObligationId),
+    process_id_sha256: PROCESS,
+    browser_boot_id_sha256: BOOT,
+    execution_epoch_sha256: EPOCH,
+    original_worker_id_sha256: WORKER,
+    browser_lease_epoch: 7,
+    process_acquired_seq: 1,
+    runtime_acquired_seq: 2,
+    owner_replacement_observed: true,
+    browser_context_closed_fabricated: false,
+    provider_cleanup_proven: false,
+    live_resources_zero_proven: false,
+    service_owner_fence_proof_sha256: FENCE_PROOF,
+    signed_receipt_sha256: SIGNED_RECEIPT,
+    authority_public_key_sha256: AUTHORITY_KEY,
+    execution_ownership_proof_sha256: OWNERSHIP_PROOF,
+    ...overrides,
+  });
+}

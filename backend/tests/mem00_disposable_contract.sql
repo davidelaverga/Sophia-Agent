@@ -282,8 +282,8 @@ BEGIN
             'mem00.extract.v1', 'synthetic-model', 'synthetic-prompt'
         );
         RAISE EXCEPTION 'mismatched durable range unexpectedly finalized';
-    EXCEPTION WHEN serialization_failure THEN
-        NULL;
+    EXCEPTION WHEN raise_exception THEN
+        IF SQLERRM <> 'memory_extraction_range_conflict' THEN RAISE; END IF;
     END;
 END
 $test$;
@@ -352,8 +352,8 @@ BEGIN
             )), '{"scope_denied":1}'::jsonb, 'authorized', NULL, '{}'::jsonb
         );
         RAISE EXCEPTION 'wrong-scope prompt admission unexpectedly succeeded';
-    EXCEPTION WHEN serialization_failure THEN
-        NULL;
+    EXCEPTION WHEN raise_exception THEN
+        IF SQLERRM <> 'memory_prompt_admission_denied' THEN RAISE; END IF;
     END;
     SELECT * INTO STRICT second_lease FROM public.sophia_memory_claim_projection('projection-claimant-b', 120);
     second_completion := public.sophia_memory_complete_projection(
@@ -382,8 +382,8 @@ BEGIN
             )), '{}'::jsonb, 'authorized', NULL, '{}'::jsonb
         );
         RAISE EXCEPTION 'prompt admission accepted a held binding';
-    EXCEPTION WHEN serialization_failure THEN
-        NULL;
+    EXCEPTION WHEN raise_exception THEN
+        IF SQLERRM <> 'memory_prompt_admission_denied' THEN RAISE; END IF;
     END;
 
     DELETE FROM public.sophia_memory_projection_jobs;

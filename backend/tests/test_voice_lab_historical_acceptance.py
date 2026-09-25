@@ -45,7 +45,13 @@ def test_invalid_acceptance_refuses_without_exposing_configuration(mutation):
         parse_historical_acceptance(json.dumps({**policy(), **mutation}))
 
 
-@pytest.mark.parametrize("raw", ["", "private-secret", "null", "[]", "x" * 2_000_001])
+# Explicit ids: the default id of the oversized value is the value itself, a
+# 2,000,078-char nodeid that `pytest -v` writes as one ~2 MB log line.
+@pytest.mark.parametrize(
+    "raw",
+    ["", "private-secret", "null", "[]", "x" * 2_000_001],
+    ids=["empty", "non-json", "json-null", "json-array", "oversized-2000001"],
+)
 def test_malformed_input_refuses(raw):
     with pytest.raises(ValueError, match="^Historical acceptance configuration is invalid$"):
         parse_historical_acceptance(raw)

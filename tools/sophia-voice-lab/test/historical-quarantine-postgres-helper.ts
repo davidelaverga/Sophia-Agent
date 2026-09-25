@@ -12,7 +12,7 @@ import { readVoiceLabCatalog } from "../src/schema-attestation.js";
 import { PostgresVoiceLabLedger } from "../src/postgres-ledger.js";
 import { canonicalRequestHash, sha256 } from "../src/security.js";
 import { testRun } from "./helpers.js";
-import { serviceFenceInventory, upgradeServiceFenceSchema } from "../src/service-fence-upgrade.js";
+import { serviceFenceInventory, upgradeServiceFenceSchema, upgradeServiceFenceV2Schema } from "../src/service-fence-upgrade.js";
 import { SERVICE_FENCE_SOURCE_BUNDLE_SHA256 } from "../src/service-fence-migration.js";
 
 /** Called only by the dedicated disposable-database suite, never a live runner. */
@@ -73,8 +73,11 @@ async function proveQuarantineVariant(admin: pg.Client, databaseUrl: string, run
     const inventoryClient = await pool.connect();
     let fenceInventory: string;
     try { fenceInventory = await serviceFenceInventory(inventoryClient); } finally { inventoryClient.release(); }
-    await upgradeServiceFenceSchema(pool, { commit: "a".repeat(40), inventorySha256: fenceInventory },
-      base, extension, await readFile("migrations/005_service_owner_fence.sql"));
+    const fence = await readFile("migrations/005_service_owner_fence.sql");
+    await upgradeServiceFenceSchema(pool, { commit: "a".repeat(40), inventorySha256: fenceInventory }, base, extension, fence);
+    await expect(runMigration(databaseUrl)).rejects.toThrow(/pre-existing schema drift/);
+    await upgradeServiceFenceV2Schema(pool, { commit: "a".repeat(40), inventorySha256: fenceInventory },
+      base, extension, fence, await readFile("migrations/006_service_fence_v2.sql"));
     // Current startup can attest only after the explicit additive upgrade,
     // which must preserve both quarantine and per-identity exceptions.
     await runMigration(databaseUrl);

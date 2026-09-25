@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { request } from "node:http";
 import path from "node:path";
@@ -7,6 +8,7 @@ import { parse } from "yaml";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createHttpApp, listen } from "../src/http-server.js";
+import { BUNDLED_FIXTURE_MANIFEST_SHA256 } from "../src/config.js";
 import { MemoryVoiceLabLedger } from "../src/memory-ledger.js";
 import { VoiceLabService } from "../src/service.js";
 import { testConfig } from "./helpers.js";
@@ -179,6 +181,15 @@ describe("Voice Lab deployment health contract", () => {
     });
     expect(parsed.oauth).toMatchObject({ accessTokenTtlSeconds: 300, refreshTokenTtlSeconds: 604_800 });
     expect(parsed.startOperationSeconds).toBe(300);
+  });
+
+  it("pins the Blueprint fixture digest to the compiled release and bundled manifest", async () => {
+    const { blueprint } = await deploymentContract();
+    const manifest = await readFile(path.join(PACKAGE_ROOT, "fixtures/manifest.json"));
+    const observedDigest = createHash("sha256").update(manifest).digest("hex");
+
+    expect(requiredRuntimeValue(blueprint, "SOPHIA_VOICE_LAB_FIXTURE_MANIFEST_SHA256")).toBe(BUNDLED_FIXTURE_MANIFEST_SHA256);
+    expect(BUNDLED_FIXTURE_MANIFEST_SHA256).toBe(observedDigest);
   });
 
   it.each(["true", "false"])("keeps quarantined diagnostics live without claiming admission or zero runs (kill=%s)", async kill => {

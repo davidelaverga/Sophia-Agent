@@ -153,6 +153,11 @@ export async function runCli(argv: readonly string[], write: (line: string) => v
       if (flags.has("resume") && flags.get("resume") !== "true") throw new Error("--resume accepts only true.");
       const controller = z.object({ runId: z.string().uuid(), requestId: z.string().uuid(), workerServiceId: z.string().regex(/^srv-[0-9a-z]{20}$/),
         allocatedWorkerId: z.string().regex(/^srv-[0-9a-z]{20}-[A-Za-z0-9_-]{5,96}$/), voiceLabOrigin: z.string().url(),
+        // Absent means v1, so an existing v1 input file keeps its journal hash.
+        generation: z.enum(["v1", "v2"]).optional(),
+        // v2 only; absent means "present" so existing v2 inputs keep their hash.
+        // Original-owner-absent collection must be named here explicitly.
+        originalOwnerPreAction: z.enum(["present", "absent"]).optional(),
         expectedLabSha: z.string().regex(/^[a-f0-9]{40}$/), expectedLangGraphSha: z.string().regex(/^[a-f0-9]{40}$/), expectedRecoveryDeployment: RecoveryProductDeploymentSchema,
       }).strict().parse(await readSecureJson(requiredFlag(flags, "input")));
       const publicConfig = await loadPublicConfig(requiredFlag(flags, "public-config"));
@@ -663,7 +668,7 @@ function usage(): Record<string, string> {
     "d02-render-restart": "Submit exactly one Render restart after a signed command, settle deploy/instance/boot, replay MCP, and attach the final proof.",
     "d02-render-worker-loss": "Persist a signed command, restart exactly one Render background-worker service once, and use --resume true with the same hash-chained bundle after interruption; ambiguous Render dispatch is GET-only/manual-required.",
     "generic-render-worker-loss": "Observe closed exact releases, consume one durable generic owner claim, and persist signed owner-loss evidence; --resume true is observation-only after consumption. Does not prove resource cleanup.",
-    "collect-service-owner-fence": "Collect a signed service-wide restart receipt for an already-retired allocation using a private authenticated disk journal. Does not ingest recovery or prove cleanup; resume never repeats a consumed restart.",
+    "collect-service-owner-fence": "Collect a signed service-wide restart receipt using a private authenticated disk journal: v1 (default) for an already-retired allocation, input generation \"v2\" while the original owner is still present. Does not ingest recovery or prove cleanup; resume never repeats a consumed restart.",
     "publish-service-owner-fence": "Publish the exact receipt from a completed authenticated service-fence journal. No Render action or credential; lost acknowledgement uses inspection and never repeats a restart. Ingestion is not cleanup proof.",
     "verify-d02-local-receipt": "Verify the separate signed Render-controller request/accepted/settled receipt without printing its signature.",
     "verify-d02-worker-receipt": "Verify the source-specific signed Render browser-worker termination receipt; Gateway settlement remains a separate mandatory proof.",

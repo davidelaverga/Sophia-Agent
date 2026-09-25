@@ -17,6 +17,7 @@ from deerflow.sophia.deck_quality.persistence import (
     DeckQualityPersistenceRpcError,
 )
 from deerflow.sophia.deck_quality.schemas import QualityInstrumentLock
+from deerflow.sophia.rpc_business_errors import store_error_status
 from deerflow.sophia.storage.supabase_artifact_store import (
     normalize_object_path,
     safe_object_path_segment,
@@ -561,7 +562,7 @@ class SupabaseDeckQualityPublicationRpcClient:
         except httpx.HTTPError:
             raise DeckQualityPersistenceRpcError(operation) from None
         if response.status_code >= 400:
-            raise DeckQualityPersistenceRpcError(operation, status_code=response.status_code) from None
+            raise DeckQualityPersistenceRpcError(operation, status_code=store_error_status(response)) from None
         if not response.content:
             raise DeckQualityPersistenceProtocolError(f"deck quality publication RPC returned no record operation={operation}")
         try:

@@ -507,6 +507,20 @@ export async function probeTarget(config: VoiceLabConfig): Promise<Record<string
   }
 }
 
+/** Direct product and signed frontend proof used at both admission fences. */
+export async function probeEffectiveTarget(config: VoiceLabConfig): Promise<Record<string, unknown> & { ok: boolean }> {
+  const [product, frontend] = await Promise.all([probeTarget(config), probeTestAuth(config)]);
+  return {
+    ...product,
+    frontend_auth_readiness_status: frontend.status,
+    frontend_control_adapter_enabled: frontend.frontend_control_adapter_enabled,
+    frontend_voice_lab_enabled: frontend.frontend_voice_lab_enabled,
+    frontend_kill_switch_engaged: frontend.frontend_kill_switch_engaged,
+    ok: product.ok && frontend.ok && frontend.frontend_control_adapter_enabled === true
+      && frontend.frontend_voice_lab_enabled === true && frontend.frontend_kill_switch_engaged === false,
+  };
+}
+
 export async function probeTestAuth(config: VoiceLabConfig): Promise<Record<string, unknown> & { ok: boolean; status: string }> {
   const target = config.readinessTarget!;
   const testRunId = randomUUID();
@@ -539,7 +553,6 @@ export async function probeTestAuth(config: VoiceLabConfig): Promise<Record<stri
       && typeof payload.control_adapter_enabled === 'boolean'
       && typeof payload.kill_switch_engaged === 'boolean' && typeof payload.provisioning_enabled === 'boolean'
       && (config.killSwitch || payload.voice_lab_enabled === true)
-      && (config.killSwitch || payload.control_adapter_enabled === true)
       && Number.isInteger(payload.provider_account_count) && Number(payload.provider_account_count) >= 0
       && Number.isInteger(payload.active_session_count) && Number(payload.active_session_count) >= 0;
     const provisioned = commonBound && payload.ready === true && payload.provisioned === true
@@ -561,9 +574,10 @@ export async function probeTestAuth(config: VoiceLabConfig): Promise<Record<stri
       : null;
     const mutationGateOrderSafe = frontendKillSwitchEngaged !== null
       && (config.killSwitch || frontendKillSwitchEngaged === false);
-    const status = response.ok && provisioned ? 'verified' : response.ok && unprovisioned ? 'provisioning_required' : 'unverified';
+    const adapterDisabled = !config.killSwitch && response.ok && provisioned && payload.control_adapter_enabled === false;
+    const status = adapterDisabled ? 'control_adapter_disabled' : response.ok && provisioned ? 'verified' : response.ok && unprovisioned ? 'provisioning_required' : 'unverified';
     return {
-      ok: response.ok && provisioned,
+      ok: response.ok && provisioned && !adapterDisabled,
       status,
       http_status: response.status,
       principal_hash: sha256(config.principalId),

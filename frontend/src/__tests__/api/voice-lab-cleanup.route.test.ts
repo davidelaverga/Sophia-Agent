@@ -147,6 +147,7 @@ describe('/api/voice-lab/auth/cleanup POST', () => {
     expect(revokeVoiceLabSessionsMock).toHaveBeenCalledWith(
       'voice-lab-user-1',
       expect.objectContaining({ test_run_id: 'run-cleanup-001' }),
+      'raw-current-session-token',
     );
     const cookies = response.headers.getSetCookie().join('\n');
     expect(cookies).toContain('better-auth.session_token=;');
@@ -173,6 +174,7 @@ describe('/api/voice-lab/auth/cleanup POST', () => {
     expect(revokeVoiceLabSessionsMock).toHaveBeenCalledWith(
       'voice-lab-user-1',
       expect.objectContaining({ cleanup_obligation_id: cleanupObligationId }),
+      'raw-current-session-token',
     );
   });
 

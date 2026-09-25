@@ -18,15 +18,16 @@ class FakeSource {
 
 function harness() {
   const sources: FakeSource[] = [];
+  const nativeSends: unknown[] = [];
   const listeners = new Map<string, (event?: unknown) => void>();
   const productEvents: Array<{ type: string; detail: Record<string, unknown> }> = [];
   const pagePushes: Array<Record<string, unknown>> = [];
   const audio = { currentTime: 0, state: "running", resume: async () => { audio.state = "running"; }, createMediaStreamDestination: () => ({ stream: { getAudioTracks: () => [{}] } }), decodeAudioData: async () => ({ duration: 0.1 }), createBufferSource: () => { const source = new FakeSource(); sources.push(source); return source; } };
-  class FakeWebSocket { static CONNECTING=0; static OPEN=1; static CLOSING=2; static CLOSED=3; readyState=1; constructor(_url: string, _protocols?: unknown) {} close() { this.readyState=3; } }
+  class FakeWebSocket { static CONNECTING=0; static OPEN=1; static CLOSING=2; static CLOSED=3; readyState=1; constructor(_url: string, _protocols?: unknown) {} send(data: unknown) { if (data === "native-throw") throw new Error("native-send-failed"); nativeSends.push(data); } close() { this.readyState=3; } }
   class FakeAudioContext { constructor(_options?: unknown) { return audio; } }
   const storage = new Map<string, string>();
   const sandbox: any = {
-    console, crypto: webcrypto, atob, btoa, Uint8Array, TextEncoder, DOMException, URL, Date, Map, Set, Object, Array, Number, Math, Error,
+    console, crypto: webcrypto, atob, btoa, Uint8Array, ArrayBuffer, TextEncoder, DOMException, URL, Date, Map, Set, Object, Array, Number, Math, Error,
     setTimeout, clearTimeout,
     location: { href: "https://frontend.test/session", origin: "https://frontend.test" },
     localStorage: { setItem: (key: string, value: string) => storage.set(key, value) },
@@ -40,7 +41,7 @@ function harness() {
   sandbox.window = sandbox;
   sandbox.top = sandbox;
   vm.runInNewContext(buildVoiceLabInitScript({ pageOrigin: "https://frontend.test", websocketOrigins: ["wss://provider.test"], maxAudioBytes: 1024, testRunId: "00000000-0000-4000-8000-000000000001", cleanupObligationId: "00000000-0000-4000-8000-000000000002" }), sandbox);
-  return { sandbox, audio, sources, listeners, productEvents, pagePushes, storage };
+  return { sandbox, audio, sources, listeners, productEvents, pagePushes, storage, nativeSends };
 }
 
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -187,5 +188,159 @@ describe("page-owned dynamic WebAudio injection", () => {
     expect(socket.readyState).toBe(3);
     const kinds = sandbox.__sophiaVoiceLab.drain(0).events.map((event: any) => event.kind);
     expect(kinds.indexOf("harness.product_active_target_fenced")).toBeLessThan(kinds.indexOf("harness.socket_rotation_requested"));
+  });
+});
+
+describe("passive provider setup diagnostics", () => {
+  it("observes setup before input gating without retaining private envelope contents", () => {
+    const { sandbox, nativeSends } = harness();
+    const socket = new sandbox.WebSocket("wss://provider.test/socket?key=URL_SECRET");
+    const wire = JSON.stringify({ setup: {
+      model: "models/gemini-2.5-flash-native-audio-preview-12-2025",
+      generationConfig: { responseModalities: ["AUDIO"], speechConfig: { secret: "SPEECH_SECRET" } },
+      inputAudioTranscription: {}, outputAudioTranscription: {},
+      realtimeInputConfig: { automaticActivityDetection: { disabled: false } },
+      systemInstruction: { parts: [{ text: "SYSTEM_SECRET" }] }, tools: [{ declaration: "TOOLS_SECRET" }],
+      sessionResumption: { handle: "HANDLE_SECRET" }, auth: "AUTH_SECRET", arbitrary: "ARBITRARY_SECRET",
+    } });
+    socket.send(wire);
+    expect(nativeSends).toEqual([wire]);
+    const events = sandbox.__sophiaVoiceLab.drain(0).events;
+    expect(events.find((event: any) => event.kind === "harness.provider_setup_sent").payload).toEqual({
+      harness_socket_ordinal: 1, model: "models/gemini-2.5-flash-native-audio-preview-12-2025", response_modalities: ["AUDIO"],
+      input_audio_transcription_present: true, output_audio_transcription_present: true, automatic_activity_detection_disabled: false,
+    });
+    expect(JSON.stringify(events)).not.toMatch(/SECRET/);
+  });
+  it("records a content-free census of every outbound provider frame", () => {
+    const { sandbox, nativeSends } = harness();
+    const socket = new sandbox.WebSocket("wss://provider.test/socket");
+    const frames = [
+      JSON.stringify({ setup: { model: "models/x", systemInstruction: { parts: [{ text: "SYSTEM_SECRET" }] } } }),
+      JSON.stringify({ realtimeInput: { audio: { data: "QUJD", mimeType: "audio/pcm;rate=16000" } } }),
+      JSON.stringify({ realtimeInput: { text: "PRIVATE_TEXT_SECRET" } }),
+      JSON.stringify({ realtimeInput: { video: { data: "SECRET_FRAME_BYTES", mimeType: "image/jpeg" } } }),
+      JSON.stringify({ toolResponse: { functionResponses: [{ id: "call-1", response: { secret: "TOOL_SECRET" } }] } }),
+      "NOT_JSON_SECRET",
+    ];
+    for (const frame of frames) socket.send(frame);
+    expect(nativeSends).toEqual(frames);
+    const census = sandbox.__sophiaVoiceLab.drain(0).events
+      .filter((event: any) => event.kind === "harness.provider_frame_sent")
+      .map((event: any) => ({ kind: event.payload.frame_kind, realtime: event.payload.realtime_input_kind ?? null }));
+    expect(census).toEqual([
+      { kind: "setup", realtime: null },
+      { kind: "realtimeInput", realtime: "audio" },
+      { kind: "realtimeInput", realtime: "text" },
+      { kind: "realtimeInput", realtime: "video" },
+      { kind: "toolResponse", realtime: null },
+      { kind: "unparsed", realtime: null },
+    ]);
+    const drained = JSON.stringify(sandbox.__sophiaVoiceLab.drain(0));
+    expect(drained).toContain("harness.provider_frame_sent");
+    expect(drained).not.toMatch(/SECRET/);
+  });
+
+  it("never exports an arbitrary field name, only a count of unknown fields", () => {
+    const { sandbox, nativeSends } = harness();
+    const socket = new sandbox.WebSocket("wss://provider.test/socket");
+    // Caller-chosen property names are payload-derived content. A fixed
+    // allowlist must classify, and everything else may only be counted.
+    const wire = JSON.stringify({
+      PRIVATE_TOP_SECRET: 1,
+      anotherUndocumentedField_SECRET: 2,
+      realtimeInput: { audio: { data: "QUJD", mimeType: "audio/pcm;rate=16000" }, PRIVATE_INNER_SECRET: 3 },
+    });
+    socket.send(wire);
+    expect(nativeSends).toEqual([wire]);
+    const event = sandbox.__sophiaVoiceLab.drain(0).events
+      .find((entry: any) => entry.kind === "harness.provider_frame_sent");
+    expect(event.payload).toMatchObject({
+      harness_socket_ordinal: 1,
+      frame_kind: "realtimeInput",
+      realtime_input_kind: "audio",
+      unknown_top_level_field_count: 2,
+      unknown_realtime_input_field_count: 1,
+    });
+    expect(JSON.stringify(sandbox.__sophiaVoiceLab.drain(0))).not.toMatch(/SECRET/);
+  });
+
+  it("reports an unrecognized frame without naming its fields", () => {
+    const { sandbox } = harness();
+    const socket = new sandbox.WebSocket("wss://provider.test/socket");
+    socket.send(JSON.stringify({ WHOLLY_UNKNOWN_SECRET: { nested: "ALSO_SECRET" } }));
+    const event = sandbox.__sophiaVoiceLab.drain(0).events
+      .find((entry: any) => entry.kind === "harness.provider_frame_sent");
+    expect(event.payload).toMatchObject({ frame_kind: "unrecognized", realtime_input_kind: null, unknown_top_level_field_count: 1 });
+    expect(JSON.stringify(sandbox.__sophiaVoiceLab.drain(0))).not.toMatch(/SECRET/);
+  });
+
+  it("measures UTF-8 wire bytes, not UTF-16 code units", () => {
+    const { sandbox } = harness();
+    const socket = new sandbox.WebSocket("wss://provider.test/socket");
+    // "é" is 2 UTF-8 bytes; "😀" is 4 bytes but 2 UTF-16 code units.
+    const wire = JSON.stringify({ realtimeInput: { text: "é😀" } });
+    socket.send(wire);
+    const expected = new TextEncoder().encode(wire).length;
+    expect(expected).toBeGreaterThan(wire.length);
+    const event = sandbox.__sophiaVoiceLab.drain(0).events
+      .find((entry: any) => entry.kind === "harness.provider_frame_sent");
+    expect(event.payload.byte_length).toBe(expected);
+    expect(event.payload.byte_length).not.toBe(wire.length);
+  });
+
+  it("records binary frames by fixed kind and size without inspecting them", () => {
+    const { sandbox, nativeSends } = harness();
+    const socket = new sandbox.WebSocket("wss://provider.test/socket");
+    const buffer = new ArrayBuffer(11);
+    const view = new Uint8Array([1, 2, 3, 4, 5, 6, 7]);
+    const blobLike = { size: 42, type: "application/octet-stream" };
+    socket.send(buffer);
+    socket.send(view);
+    socket.send(blobLike);
+    expect(nativeSends).toEqual([buffer, view, blobLike]);
+    const census = sandbox.__sophiaVoiceLab.drain(0).events
+      .filter((entry: any) => entry.kind === "harness.provider_frame_sent")
+      .map((entry: any) => ({ kind: entry.payload.frame_kind, bytes: entry.payload.byte_length }));
+    expect(census).toEqual([
+      { kind: "binary", bytes: 11 },
+      { kind: "binary", bytes: 7 },
+      { kind: "binary", bytes: 42 },
+    ]);
+  });
+
+  it("counts native stream-end sends per allowed socket even without active injection", () => {
+    const { sandbox, nativeSends } = harness();
+    const first = new sandbox.WebSocket("wss://provider.test/socket");
+    const second = new sandbox.WebSocket("wss://provider.test/another");
+    const wire = JSON.stringify({ realtimeInput: { audioStreamEnd: true, text: "PRIVATE_TEXT" } });
+    first.send(wire); first.send(wire); second.send(wire);
+    expect(nativeSends).toEqual([wire, wire, wire]);
+    expect(sandbox.__sophiaVoiceLab.drain(0).events.filter((event: any) => event.kind === "harness.provider_audio_stream_end_sent").map((event: any) => event.payload)).toEqual([
+      { harness_socket_ordinal: 1, audio_stream_end_count: 1 }, { harness_socket_ordinal: 1, audio_stream_end_count: 2 }, { harness_socket_ordinal: 2, audio_stream_end_count: 1 },
+    ]);
+    expect(JSON.stringify(sandbox.__sophiaVoiceLab.drain(0))).not.toContain("PRIVATE_TEXT");
+  });
+  it("ignores foreign origins, non-JSON and unrecognized metadata without changing native sends", () => {
+    const { sandbox, nativeSends } = harness();
+    const foreign = new sandbox.WebSocket("wss://provider.test.evil/socket");
+    const allowed = new sandbox.WebSocket("wss://provider.test/socket");
+    foreign.send(JSON.stringify({ setup: { model: "models/gemini-secret" }, realtimeInput: { audioStreamEnd: true } }));
+    allowed.send("NOT_JSON_SECRET");
+    allowed.send(JSON.stringify({ setup: { model: "TOKEN_SECRET", generationConfig: { responseModalities: ["PRIVATE_SECRET"] } }, realtimeInput: { audioStreamEnd: "true" } }));
+    expect(nativeSends).toHaveLength(3);
+    const events = sandbox.__sophiaVoiceLab.drain(0).events;
+    expect(events.filter((event: any) => event.kind === "harness.provider_setup_sent").map((event: any) => event.payload)).toEqual([
+      { harness_socket_ordinal: 1, model: null, response_modalities: null, input_audio_transcription_present: false, output_audio_transcription_present: false, automatic_activity_detection_disabled: null },
+    ]);
+    expect(events.some((event: any) => event.kind === "harness.provider_audio_stream_end_sent")).toBe(false);
+    expect(JSON.stringify(events)).not.toMatch(/SECRET/);
+  });
+  it("preserves native send exceptions and produces no successful-send diagnostic", () => {
+    const { sandbox, nativeSends } = harness();
+    const socket = new sandbox.WebSocket("wss://provider.test/socket");
+    expect(() => socket.send("native-throw")).toThrow("native-send-failed");
+    expect(nativeSends).toEqual([]);
+    expect(sandbox.__sophiaVoiceLab.drain(0).events.some((event: any) => event.kind.startsWith("harness.provider_"))).toBe(false);
   });
 });

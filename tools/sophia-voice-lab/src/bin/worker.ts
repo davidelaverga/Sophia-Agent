@@ -1,6 +1,6 @@
 import { PlaywrightVoiceDriver } from "../browser-driver.js";
 import { loadConfig } from "../config.js";
-import { probeTarget } from "../http-server.js";
+import { probeEffectiveTarget } from "../http-server.js";
 import { createAudioResolver, createLedger } from "../runtime.js";
 import { CapabilityCodec } from "../security.js";
 import { VoiceLabWorker } from "../worker.js";
@@ -23,7 +23,7 @@ const worker = new VoiceLabWorker(
   new CapabilityCodec(config.capabilitySecret, config.capabilityIssuer, config.capabilityTtlSeconds),
   undefined,
   fetch,
-  async () => config.readinessTarget ? probeTarget(config) : ({ ok: false, status: "target_configuration_missing" }),
+  async () => config.readinessTarget ? probeEffectiveTarget(config) : ({ ok: false, status: "target_configuration_missing" }),
 );
 let shutdownPromise: Promise<void> | null = null;
 function shutdown(): Promise<void> {

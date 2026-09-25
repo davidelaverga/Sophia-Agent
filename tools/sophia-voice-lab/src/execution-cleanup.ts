@@ -10,10 +10,25 @@ export function parsePreservedExecutionCleanupProof(input: unknown): ExecutionEp
   const hash = z.string().regex(/^[a-f0-9]{64}$/);
   const seq = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
   return z.object({ required: z.literal(true), ready: z.literal(true),
-    reason: z.enum(["direct_cleanup_before_process_death", "authoritative_recovery_after_process_death"]),
+    reason: z.enum(["direct_cleanup_before_process_death", "authoritative_recovery_after_process_death", "authoritative_platform_fence_after_owner_loss"]),
     executionEpochSha256: hash, workerIdSha256: hash, browserLeaseEpoch: seq, proofSha256: hash,
-    eventSeqs: z.object({ processAcquired: seq, runtimeAcquired: seq, providerCleanup: seq.nullable(), authCleanup: seq.nullable(), processClosed: seq, recovery: seq.nullable() }).strict(),
+    eventSeqs: z.object({ processAcquired: seq, runtimeAcquired: seq, providerCleanup: seq.nullable(), authCleanup: seq.nullable(), processClosed: seq.nullable(), platformTerminated: seq.nullable().optional(), recovery: seq.nullable() }).strict()
+      .refine(value => value.processClosed !== null || (value.platformTerminated ?? null) !== null),
   }).strict().parse(input);
+}
+
+/** Immutable-proof identity. A proof preserved before the platform-fence path
+ * (deployed 7d4 and earlier) has no eventSeqs.platformTerminated key, while the
+ * current derivation emits null for the same close-path run; its proofSha256 is
+ * identical because the hashed core omits that ordinal off the fence path.
+ * Absent and null are therefore the same identity. Every other field, and a
+ * non-null fence ordinal, stays bound exactly. */
+export function sameExecutionCleanupProof(preserved: ExecutionEpochCleanupProof, derived: ExecutionEpochCleanupProof): boolean {
+  const identity = (proof: ExecutionEpochCleanupProof) => {
+    const { platformTerminated, ...seqs } = proof.eventSeqs;
+    return canonicalRequestHash({ ...proof, eventSeqs: platformTerminated == null ? seqs : { ...seqs, platformTerminated } });
+  };
+  return identity(preserved) === identity(derived);
 }
 
 export function recoveryComponentComplete(events: import("./domain.js").LabEvent[], component: "canonical_session" | "voice_provider" | "builder" | "auth_sessions"): boolean {
@@ -40,11 +55,92 @@ export function authoritativeLiveCleanupComplete(events: Array<{ kind: string; s
   });
 }
 
+/**
+ * C061: generic redaction masks every "cookie" key, including the typed
+ * cookies_cleared boolean. The driver authors session_revoked/cookies_cleared
+ * as literal `true` only after exact receipt validation; redaction at the
+ * durable boundary must not erase that typed evidence. Restore exactly the
+ * literal pair the pre-redaction canonical auth.session_cleanup payload held
+ * (top level, or the abort path's confirmed receipt). Nothing else is copied,
+ * and a pair that was not literally `true` is never manufactured.
+ */
+export function preserveAuthCleanupBooleans(
+  event: { kind: string; source: string; payload: Record<string, unknown> },
+  redacted: Record<string, unknown>,
+): Record<string, unknown> {
+  if (event.kind !== "auth.session_cleanup" || event.source !== "canonical") return redacted;
+  const preserved = { ...redacted };
+  if (event.payload.session_revoked === true && event.payload.cookies_cleared === true) Object.assign(preserved, { session_revoked: true, cookies_cleared: true });
+  const receipt = event.payload.receipt as Record<string, unknown> | undefined;
+  if (event.payload.confirmed === true && receipt?.session_revoked === true && receipt?.cookies_cleared === true
+    && preserved.receipt && typeof preserved.receipt === "object" && !Array.isArray(preserved.receipt)) {
+    preserved.receipt = { ...(preserved.receipt as Record<string, unknown>), session_revoked: true, cookies_cleared: true };
+  }
+  return preserved;
+}
+
 export function authCleanupConfirmed(event: { kind: string; payload: Record<string, unknown> }): boolean {
   if (event.kind !== "auth.session_cleanup") return false;
   if (event.payload.session_revoked === true && event.payload.cookies_cleared === true) return true;
   const receipt = event.payload.receipt as Record<string, unknown> | undefined;
   return event.payload.confirmed === true && receipt?.session_revoked === true && receipt?.cookies_cleared === true;
+}
+
+/** C059: schema of the canonical record of a direct auth-cleanup attempt that
+ * did not confirm AFTER bound normal finalization and the authenticated
+ * provider disconnect. It is never a revocation proof (authCleanupConfirmed is
+ * false for it); it only marks that session:recover must settle auth. */
+export const UNCONFIRMED_AUTH_CLEANUP_SCHEMA = "sophia_voice_lab_execution_epoch_auth_cleanup_unconfirmed_v1";
+
+/**
+ * How the dedicated auth session is proven revoked for a completed run.
+ * "direct": the frontend cleanup receipt (unchanged). "recovery": only the
+ * exact ordinary-End shape where the direct call did not confirm: a ready
+ * execution-epoch proof whose path is recovery-after-close, the provider
+ * cleanup and the unconfirmed direct attempt both inside that epoch and before
+ * the close, and the settling post-close canonical session:recover receipt
+ * reporting auth_sessions terminal for this run. D02 keeps its own protocol.
+ */
+export function authCleanupPath(
+  run: Pick<RunRecord, "id" | "testRunId" | "cleanupObligationId" | "scenarioId">,
+  events: import("./domain.js").LabEvent[],
+  proof: ExecutionEpochCleanupProof = deriveExecutionEpochCleanupProof(run, events),
+): "direct" | "recovery" | null {
+  if (events.some(authCleanupConfirmed)) return "direct";
+  if (run.scenarioId === "V-D02" || !proof.ready || proof.reason !== "authoritative_recovery_after_process_death") return null;
+  return unconfirmedAttemptInEpoch(run, events, proof) && settlingRecoveryProvesAuth(run, events, proof) ? "recovery" : null;
+}
+
+/** The unconfirmed direct attempt lies between the epoch's provider cleanup and its close. */
+function unconfirmedAttemptInEpoch(run: Pick<RunRecord, "id" | "cleanupObligationId">, events: import("./domain.js").LabEvent[], proof: ExecutionEpochCleanupProof): boolean {
+  const { providerCleanup, processClosed } = proof.eventSeqs;
+  const acquired = acquiredProcessIdentity(events, proof);
+  if (providerCleanup === null || processClosed === null || acquired === null) return false;
+  return events.some((event) => event.kind === "auth.session_cleanup" && event.source === "canonical"
+    && event.payload.process_id_sha256 === acquired.processIdSha256
+    && event.payload.browser_boot_id_sha256 === acquired.bootIdSha256
+    && event.seq > providerCleanup && event.seq < processClosed
+    && event.payload.cleanup_proof_schema === UNCONFIRMED_AUTH_CLEANUP_SCHEMA && event.payload.confirmed === false
+    && event.payload.voice_lab_run_id_sha256 === sha256(run.id)
+    && event.payload.cleanup_obligation_id_sha256 === sha256(run.cleanupObligationId)
+    && event.payload.execution_epoch_sha256 === proof.executionEpochSha256);
+}
+
+/** Process and boot of the acquisition the proof selected: the attempt binds to
+ * these, not to the epoch hash alone (the proof derivation excludes it). */
+function acquiredProcessIdentity(events: import("./domain.js").LabEvent[], proof: ExecutionEpochCleanupProof): { processIdSha256: string; bootIdSha256: string } | null {
+  const acquired = events.find((event) => event.seq === proof.eventSeqs.processAcquired && event.kind === "harness.browser_process_acquired");
+  const processIdSha256 = acquired?.payload.process_id_sha256;
+  const bootIdSha256 = acquired?.payload.browser_boot_id_sha256;
+  return isSha256(processIdSha256) && isSha256(bootIdSha256) ? { processIdSha256, bootIdSha256 } : null;
+}
+
+/** The proof's settling post-close recovery reports this run's auth sessions terminal. */
+function settlingRecoveryProvesAuth(run: Pick<RunRecord, "testRunId" | "cleanupObligationId">, events: import("./domain.js").LabEvent[], proof: ExecutionEpochCleanupProof): boolean {
+  const { processClosed, recovery } = proof.eventSeqs;
+  const settling = recovery === null ? undefined : events.find((event) => event.seq === recovery);
+  return settling !== undefined && processClosed !== null && settling.seq > processClosed
+    && authoritativeLiveCleanupComplete([settling], run) && recoveryComponentComplete([settling], "auth_sessions");
 }
 
 export type ExecutionEpochCleanupProof = {
@@ -61,6 +157,7 @@ export type ExecutionEpochCleanupProof = {
     providerCleanup: number | null;
     authCleanup: number | null;
     processClosed: number | null;
+    platformTerminated?: number | null | undefined;
     recovery: number | null;
   };
 };
@@ -75,7 +172,7 @@ export function deriveExecutionEpochCleanupProof(
   run: Pick<RunRecord, "id" | "testRunId" | "cleanupObligationId">,
   events: import("./domain.js").LabEvent[],
 ): ExecutionEpochCleanupProof {
-  const emptySeqs = { processAcquired: null, runtimeAcquired: null, providerCleanup: null, authCleanup: null, processClosed: null, recovery: null };
+  const emptySeqs = { processAcquired: null, runtimeAcquired: null, providerCleanup: null, authCleanup: null, processClosed: null, platformTerminated: null, recovery: null };
   const acquisitions = events.filter((event) => event.kind === "harness.browser_process_acquired" && event.source === "browser");
   const fail = (reason: string, partial: Partial<ExecutionEpochCleanupProof> = {}): ExecutionEpochCleanupProof => ({
     required: true,
@@ -126,8 +223,31 @@ export function deriveExecutionEpochCleanupProof(
     && sameEpoch(event.payload) && event.payload.close_resolved === true && event.payload.browser_registry_absent === true
     && event.payload.browser_process_close_resolved === true && event.payload.browser_process_disconnected === true
     && event.payload.raw_process_id_excluded === true);
-  if (closes.length !== 1) return fail("process_death_proof_invalid", { executionEpochSha256: epoch, workerIdSha256: workerId, browserLeaseEpoch: Number(leaseEpoch), eventSeqs: { ...emptySeqs, processAcquired: acquired.seq, runtimeAcquired: runtime.seq } });
-  const closed = closes[0]!;
+  // A browser-authored close is still the only direct proof. When the owning
+  // pod is gone the browser can never author one, so a SEPARATE canonical
+  // platform-termination receipt may stand in its place. It is never
+  // synthesised from, nor relabelled as, cleanup.browser_context_closed: it is
+  // persisted only after the server verifies a signed v2 service-owner-fence
+  // whose whole-service replacement removed the pod that owned this epoch.
+  const platformTerminations = closes.length === 0 ? events.filter((event) => event.kind === "cleanup.platform_execution_terminated"
+    && event.source === "canonical" && event.seq > runtime.seq
+    && event.payload.schema === "sophia_voice_lab_execution_epoch_platform_termination_v1"
+    && sameEpoch(event.payload)
+    && event.payload.original_worker_id_sha256 === workerId
+    && event.payload.browser_lease_epoch === leaseEpoch
+    && event.payload.process_acquired_seq === acquired.seq
+    && event.payload.runtime_acquired_seq === runtime.seq
+    && event.payload.owner_replacement_observed === true
+    && event.payload.browser_context_closed_fabricated === false
+    && event.payload.provider_cleanup_proven === false
+    && event.payload.live_resources_zero_proven === false
+    && isSha256(event.payload.service_owner_fence_proof_sha256)
+    && isSha256(event.payload.signed_receipt_sha256)
+    && isSha256(event.payload.authority_public_key_sha256)
+    && isSha256(event.payload.execution_ownership_proof_sha256)) : [];
+  if (closes.length !== 1 && platformTerminations.length !== 1) return fail("process_death_proof_invalid", { executionEpochSha256: epoch, workerIdSha256: workerId, browserLeaseEpoch: Number(leaseEpoch), eventSeqs: { ...emptySeqs, processAcquired: acquired.seq, runtimeAcquired: runtime.seq, platformTerminated: platformTerminations[0]?.seq ?? null } });
+  const terminated = platformTerminations[0] ?? null;
+  const closed = closes[0] ?? terminated!;
   const providers = events.filter((event) => event.kind === "cleanup.provider_transport_closed" && event.source === "canonical"
     && event.seq > runtime.seq && event.seq < closed.seq
     && event.payload.schema === "sophia_voice_lab_execution_epoch_provider_cleanup_v1" && sameEpoch(event.payload)
@@ -138,28 +258,52 @@ export function deriveExecutionEpochCleanupProof(
     && event.seq > runtime.seq && event.seq < closed.seq
     && event.payload.cleanup_proof_schema === "sophia_voice_lab_execution_epoch_auth_cleanup_v1"
     && sameEpoch(event.payload) && authCleanupConfirmed(event));
-  const direct = providers.length === 1 && auth.length === 1 && providers[0]!.seq < auth[0]!.seq;
+  // The direct path proves cleanup BEFORE process death; a platform fence only
+  // proves the owner died, so it can never satisfy it.
+  const direct = terminated === null && providers.length === 1 && auth.length === 1 && providers[0]!.seq < auth[0]!.seq;
   const recoveries = events.filter((event) => {
     if (event.kind !== "cleanup.recovery" || event.seq <= closed.seq) return false;
     const receipt = event.payload.receipt as Record<string, unknown> | undefined;
     return receipt?.test_run_id === run.testRunId && receipt.cleanup_obligation_id_sha256 === cleanupHash
       && authoritativeLiveCleanupComplete([event], run) && recoveryComponentComplete([event], "voice_provider") && recoveryComponentComplete([event], "auth_sessions");
   });
-  const recovered = recoveries.length === 1;
-  if (!direct && !recovered) return fail("provider_or_auth_cleanup_unconfirmed", {
+  // Recovery is repeatable (e.g. a later retention recovery), so any number of
+  // authoritative receipts after the close may exist. The EARLIEST one is the
+  // settlement anchor: a preserved proof is compared by digest at lease release
+  // and in manifests, so later receipts must never move it, and every proof
+  // that was ready with exactly one recovery keeps its identical digest.
+  const settlingRecovery = earliestBySeq(recoveries);
+  const closeSeqs = { processClosed: terminated ? null : closed.seq, platformTerminated: terminated ? terminated.seq : null };
+  if (!direct && !settlingRecovery) return fail("provider_or_auth_cleanup_unconfirmed", {
     executionEpochSha256: epoch,
     workerIdSha256: workerId,
     browserLeaseEpoch: Number(leaseEpoch),
-    eventSeqs: { ...emptySeqs, processAcquired: acquired.seq, runtimeAcquired: runtime.seq, providerCleanup: providers[0]?.seq ?? null, authCleanup: auth[0]?.seq ?? null, processClosed: closed.seq, recovery: recoveries[0]?.seq ?? null },
+    eventSeqs: { ...emptySeqs, processAcquired: acquired.seq, runtimeAcquired: runtime.seq, providerCleanup: providers[0]?.seq ?? null, authCleanup: auth[0]?.seq ?? null, ...closeSeqs, recovery: null },
   });
   const eventSeqs = {
     processAcquired: acquired.seq,
     runtimeAcquired: runtime.seq,
     providerCleanup: providers[0]?.seq ?? null,
     authCleanup: auth[0]?.seq ?? null,
-    processClosed: closed.seq,
-    recovery: recoveries[0]?.seq ?? null,
+    ...closeSeqs,
+    recovery: settlingRecovery?.seq ?? null,
   };
-  const proofCore = { run_id_sha256: runHash, cleanup_obligation_id_sha256: cleanupHash, process_id_sha256: processId, browser_boot_id_sha256: bootId, execution_epoch_sha256: epoch, worker_id_sha256: workerId, browser_lease_epoch: Number(leaseEpoch), cleanup_path: direct ? "direct" : "recovery", event_seqs: eventSeqs };
-  return { required: true, ready: true, reason: direct ? "direct_cleanup_before_process_death" : "authoritative_recovery_after_process_death", executionEpochSha256: epoch, workerIdSha256: workerId, browserLeaseEpoch: Number(leaseEpoch), proofSha256: canonicalRequestHash(proofCore), eventSeqs };
+  const cleanupPath = terminated ? "platform_fence" : direct ? "direct" : "recovery";
+  // Digest compatibility: a run settled by a browser close must hash exactly as
+  // it did before the platform-fence path existed, so the new ordinal is part
+  // of the hashed core ONLY on the fence path. Never widen this object for a
+  // path that could already have produced a preserved proof.
+  const hashedSeqs = terminated
+    ? eventSeqs
+    : { processAcquired: eventSeqs.processAcquired, runtimeAcquired: eventSeqs.runtimeAcquired,
+        providerCleanup: eventSeqs.providerCleanup, authCleanup: eventSeqs.authCleanup,
+        processClosed: eventSeqs.processClosed, recovery: eventSeqs.recovery };
+  const proofCore = { run_id_sha256: runHash, cleanup_obligation_id_sha256: cleanupHash, process_id_sha256: processId, browser_boot_id_sha256: bootId, execution_epoch_sha256: epoch, worker_id_sha256: workerId, browser_lease_epoch: Number(leaseEpoch), cleanup_path: cleanupPath, event_seqs: hashedSeqs };
+  const reason = terminated ? "authoritative_platform_fence_after_owner_loss" : direct ? "direct_cleanup_before_process_death" : "authoritative_recovery_after_process_death";
+  return { required: true, ready: true, reason, executionEpochSha256: epoch, workerIdSha256: workerId, browserLeaseEpoch: Number(leaseEpoch), proofSha256: canonicalRequestHash(proofCore), eventSeqs };
+}
+
+/** The lowest-sequence event, independent of array order. */
+function earliestBySeq<T extends { seq: number }>(events: readonly T[]): T | null {
+  return events.reduce<T | null>((earliest, event) => (earliest === null || event.seq < earliest.seq ? event : earliest), null);
 }

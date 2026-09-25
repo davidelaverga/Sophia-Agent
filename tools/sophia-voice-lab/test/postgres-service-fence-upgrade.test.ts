@@ -6,13 +6,13 @@ import path from "node:path";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { composeVoiceLabMigration } from "../src/migration-bundle.js";
-import { SERVICE_FENCE_SOURCE_BUNDLE_SHA256, SERVICE_FENCE_BUNDLE_SHA256 } from "../src/service-fence-migration.js";
-import { serviceFenceInventory, upgradeServiceFenceSchema } from "../src/service-fence-upgrade.js";
+import { SERVICE_FENCE_SOURCE_BUNDLE_SHA256, SERVICE_FENCE_BUNDLE_SHA256, SERVICE_FENCE_V2_BUNDLE_SHA256 } from "../src/service-fence-migration.js";
+import { serviceFenceInventory, upgradeServiceFenceSchema, upgradeServiceFenceV2Schema } from "../src/service-fence-upgrade.js";
 import { readVoiceLabCatalog } from "../src/schema-attestation.js";
-import { canonicalRequestHash } from "../src/security.js";
+import { canonicalRequestHash, sha256 } from "../src/security.js";
 import { projectRecoveryControlBinding } from "../src/recovery-control.js";
 import { testRun } from "./helpers.js";
-import { serviceOwnerFenceFixture } from "./service-owner-fence-fixture.js";
+import { serviceOwnerFenceFixture, serviceOwnerFenceV2Fixture } from "./service-owner-fence-fixture.js";
 import { PostgresRecoveryControls } from "../src/postgres-recovery-control.js";
 import { combinedRecoveryFixture } from "./retained-d02-recovery-helper.js";
 import { recoveryAttemptAuditHash } from "../src/retained-d02-recovery.js";
@@ -23,7 +23,7 @@ const url = process.env.SOPHIA_VOICE_LAB_FENCE_TEST_DATABASE_URL ?? "";
 const suite = url ? describe : describe.skip;
 suite("real PostgreSQL service-fence schema upgrade", () => {
   let pool: pg.Pool;
-  let base: Buffer, recovery: Buffer, fence: Buffer;
+  let base: Buffer, recovery: Buffer, fence: Buffer, fenceV2: Buffer;
   let sealDirectory: string;
   const execute = promisify(execFile);
   const migrate = () => execute(process.execPath, ["--import", "tsx", "src/bin/migrate.ts"], {
@@ -38,6 +38,7 @@ suite("real PostgreSQL service-fence schema upgrade", () => {
     base = await readFile(new URL("../../../backend/migrations/2026_08_23_sophia_voice_lab.sql", import.meta.url));
     recovery = await readFile(new URL("../migrations/004_recovery_controls.sql", import.meta.url));
     fence = await readFile(new URL("../migrations/005_service_owner_fence.sql", import.meta.url));
+    fenceV2 = await readFile(new URL("../migrations/006_service_fence_v2.sql", import.meta.url));
     await pool.query("drop schema if exists sophia_voice_lab cascade");
     await pool.query(composeVoiceLabMigration(base, recovery).toString("utf8"));
     const catalog = canonicalRequestHash(await readVoiceLabCatalog(pool));
@@ -97,21 +98,99 @@ suite("real PostgreSQL service-fence schema upgrade", () => {
     });
     expect(replay.stderr).toBe("");
     expect(JSON.parse(replay.stdout)).toEqual({ ...result, replay: true });
-    await migrate();
-    expect(JSON.parse(await readFile(path.join(sealDirectory, "sophia-voice-lab-schema-v5.attestation.json"), "utf8")))
-      .toEqual({ schema_version: 5, migration_sha256: SERVICE_FENCE_BUNDLE_SHA256, catalog_sha256: result.catalogSha256 });
+    // The v6 release startup must refuse a v5 schema: the explicit v5->v6
+    // upgrade runs first (C022 ordering), never an implicit startup DDL.
+    await expect(migrate()).rejects.toThrow(/pre-existing schema drift/);
     expect((await pool.query("select live_cleanup_complete,remote_purge_complete from sophia_voice_lab.recovery_controls")).rows[0]).toEqual({ live_cleanup_complete: false, remote_purge_complete: false });
   }, 30000);
-  it("creates and seals a fresh v5 schema through the actual startup executable", async () => {
+  it("C022: the v5 CHECK refuses a verified absent-mode v2 fence proof; the attested v5->v6 upgrade admits it", async () => {
+    const retainedBefore = (await pool.query("select row_to_json(t) as value from sophia_voice_lab.recovery_controls t")).rows;
+    const f = serviceOwnerFenceV2Fixture(new Date(Date.now() - 365000), "c022a");
+    const c = f.input.control;
+    const receipt = f.signed({ ...f.unsignedV2, originalOwnerPreAction: "absent",
+      before: { ...f.unsignedV2.before, instanceIdsSha256: [sha256("already-replacement")] } } as never);
+    await pool.query(`insert into sophia_voice_lab.recovery_controls
+      (run_id,test_run_id,cleanup_obligation_id,binding,version,browser_allocation_ever,browser_allocation_binding,
+       generic_owner_dispatch,execution_ownership,live_cleanup_complete,remote_purge_complete,content_purged_at)
+      values ($1,$2,$3,$4,$5,true,$6,$7,$8,false,false,$9)`,
+      [c.binding.runId,c.binding.testRunId,c.binding.cleanupObligationId,c.binding,c.version,
+        c.browserAllocationBinding,c.genericOwnerDispatch,f.ownership,c.contentPurgedAt]);
+    const { control, acceptedAt, ...verification } = f.inputV2;
+    const input = { ...verification, receipt, runId: c.binding.runId, expectedVersion: c.version };
+    const controls = new PostgresRecoveryControls(pool);
+    const refused = await controls.persistGenericOwnerLoss(input).then(() => null, (error: { code?: string; constraint?: string }) => error);
+    expect(refused).toMatchObject({ code: "23514", table: "recovery_controls" });
+    process.stdout.write(`[C022 fail-before] schema v5 persist verified-service-owner-fence.v2 -> ${refused!.code} ${refused!.constraint}\n`);
+    expect((await controls.get(c.binding.runId))!.genericOwnerLoss).toBeUndefined();
+    expect((await controls.get(c.binding.runId))!.version).toBe(c.version);
+
+    const client = await pool.connect();
+    let inventory: string;
+    try { inventory = await serviceFenceInventory(client); } finally { client.release(); }
+    const intent = { commit: "b".repeat(40), inventorySha256: inventory };
+    const cli = (env: Record<string, string>) => execute(process.execPath, ["--import", "tsx", "src/bin/upgrade-service-fence-v2.ts"], {
+      env: { ...process.env, DATABASE_URL: url, COMMIT_SHA: intent.commit, RENDER_GIT_COMMIT: intent.commit, SOPHIA_VOICE_LAB_KILL_SWITCH: "true", ...env }, timeout: 30_000 });
+    // A lingering v4->v5 approval never authorizes the v5->v6 step.
+    const wrongPrefix = await cli({ SOPHIA_VOICE_LAB_SERVICE_FENCE_UPGRADE_APPROVED: "YES",
+      SOPHIA_VOICE_LAB_SERVICE_FENCE_UPGRADE_EXPECTED_COMMIT: intent.commit, SOPHIA_VOICE_LAB_SERVICE_FENCE_UPGRADE_INVENTORY_SHA256: inventory }).then(() => null, error => error);
+    expect(wrongPrefix?.code).toBe(1);
+    const v2Env = { SOPHIA_VOICE_LAB_SERVICE_FENCE_V2_UPGRADE_APPROVED: "YES",
+      SOPHIA_VOICE_LAB_SERVICE_FENCE_V2_UPGRADE_EXPECTED_COMMIT: intent.commit, SOPHIA_VOICE_LAB_SERVICE_FENCE_V2_UPGRADE_INVENTORY_SHA256: inventory };
+    expect((await cli({ ...v2Env, SOPHIA_VOICE_LAB_KILL_SWITCH: "false" }).then(() => null, error => error))?.code).toBe(1);
+    // The v4->v5 step is an exact no-op replay on v5 and cannot author v6.
+    expect(await upgradeServiceFenceSchema(pool, intent, base, recovery, fence)).toMatchObject({ replay: true });
+    await pool.query("insert into sophia_voice_lab.worker_heartbeats (worker_id,service_version,browser_ready) values ('fence-v2-test-worker','test',false)");
+    await expect(upgradeServiceFenceV2Schema(pool, intent, base, recovery, fence, fenceV2)).rejects.toThrow(/NOT_QUIESCENT/);
+    await pool.query("delete from sophia_voice_lab.worker_heartbeats where worker_id='fence-v2-test-worker'");
+    await expect(upgradeServiceFenceV2Schema(pool, { ...intent, inventorySha256: "0".repeat(64) }, base, recovery, fence, fenceV2)).rejects.toThrow(/INVENTORY_DRIFT/);
+    await expect(upgradeServiceFenceV2Schema(pool, intent, base, recovery, fence, Buffer.concat([fenceV2, Buffer.from("\n")]))).rejects.toThrow(/CHECKSUM_INVALID/);
+    expect((await pool.query("select schema_version,migration_sha256 from sophia_voice_lab.schema_metadata")).rows[0]).toEqual({ schema_version: 5, migration_sha256: SERVICE_FENCE_BUNDLE_SHA256 });
+
+    const upgraded = await cli(v2Env);
+    expect(upgraded.stderr).toBe("");
+    const result = JSON.parse(upgraded.stdout);
+    expect(result).toMatchObject({ schema: "sophia.voice-lab.service-fence-v2-upgrade.v1", replay: false, inventorySha256: inventory,
+      retainedObligationsChanged: false, hostSealWritten: false, admissionAuthorized: false });
+    expect((await pool.query("select schema_version,migration_sha256,catalog_sha256 from sophia_voice_lab.schema_metadata")).rows[0])
+      .toEqual({ schema_version: 6, migration_sha256: SERVICE_FENCE_V2_BUNDLE_SHA256, catalog_sha256: result.catalogSha256 });
+    expect(canonicalRequestHash(await readVoiceLabCatalog(pool))).toBe(result.catalogSha256);
+    expect(JSON.parse((await cli(v2Env)).stdout)).toEqual({ ...result, replay: true });
+    await expect(upgradeServiceFenceSchema(pool, intent, base, recovery, fence)).rejects.toThrow(/SOURCE_INVALID/);
+
+    const persisted = await controls.persistGenericOwnerLoss(input);
+    expect(persisted).toMatchObject({ replay: false, version: c.version + 1, proof: { schema: "sophia.voice-lab.verified-service-owner-fence.v2",
+      originalOwnerPreAction: "absent", providerCleanupProven: false, liveResourcesZeroProven: false } });
+    process.stdout.write(`[C022 pass-after] schema v6 persist verified-service-owner-fence.v2 -> version ${persisted.version}, ${Buffer.byteLength(JSON.stringify(persisted.proof))} bytes\n`);
+    expect(await controls.persistGenericOwnerLoss(input)).toEqual({ ...persisted, replay: true });
+    await expect(controls.persistGenericOwnerLoss({ ...input, receipt: f.signed({ ...f.unsignedV2, originalOwnerPreAction: "absent",
+      actionAcceptedResponseSha256: "f".repeat(64), before: { ...f.unsignedV2.before, instanceIdsSha256: [sha256("already-replacement")] } } as never) })).rejects.toThrow(/IMMUTABLE/);
+    // The widened CHECK still refuses malformed v2 shapes and proofs on a
+    // retained obligation without a consumed dispatch.
+    const tampered: Array<[string, string]> = [["{originalOwnerPreAction}", '"present"'], ["{schema}", '"sophia.voice-lab.verified-service-owner-fence.v9"'],
+      ["{executionEpochSha256}", '"not-a-digest"'], ["{executionOwnershipProofSha256}", "null"], ["{providerCleanupProven}", "true"]];
+    for (const [pathText, value] of tampered) {
+      await expect(pool.query("update sophia_voice_lab.recovery_controls set generic_owner_loss=jsonb_set(generic_owner_loss,$2::text[],$3::jsonb) where run_id=$1",
+        [c.binding.runId, pathText, value])).rejects.toMatchObject({ code: "23514" });
+    }
+    await expect(pool.query("update sophia_voice_lab.recovery_controls set generic_owner_loss=$2 where run_id=$1",
+      [retainedBefore[0].value.run_id, persisted.proof])).rejects.toMatchObject({ code: "23514" });
+    expect((await pool.query("select row_to_json(t) as value from sophia_voice_lab.recovery_controls t where run_id=$1", [retainedBefore[0].value.run_id])).rows).toEqual(retainedBefore);
+
+    await migrate();
+    expect(JSON.parse(await readFile(path.join(sealDirectory, "sophia-voice-lab-schema-v6.attestation.json"), "utf8")))
+      .toEqual({ schema_version: 6, migration_sha256: SERVICE_FENCE_V2_BUNDLE_SHA256, catalog_sha256: result.catalogSha256 });
+    await migrate();
+  }, 60000);
+  it("creates and seals a fresh v6 schema through the actual startup executable", async () => {
     await pool.query("drop schema sophia_voice_lab cascade");
     await migrate();
     const metadata = (await pool.query("select schema_version,migration_sha256,catalog_sha256 from sophia_voice_lab.schema_metadata")).rows[0];
-    expect(metadata).toEqual({ schema_version: 5, migration_sha256: SERVICE_FENCE_BUNDLE_SHA256,
+    expect(metadata).toEqual({ schema_version: 6, migration_sha256: SERVICE_FENCE_V2_BUNDLE_SHA256,
       catalog_sha256: canonicalRequestHash(await readVoiceLabCatalog(pool)) });
     await migrate();
   }, 30000);
   it("durably ingests the new proof after content purge without declaring cleanup, and rejects changed receipts", async () => {
-    const f = serviceOwnerFenceFixture(new Date(Date.now() - 370000));
+    const f = serviceOwnerFenceFixture(new Date(Date.now() - 370000), "dur01");
     const c = f.input.control;
     await pool.query(`insert into sophia_voice_lab.recovery_controls
       (run_id,test_run_id,cleanup_obligation_id,binding,version,browser_allocation_ever,browser_allocation_binding,
@@ -186,7 +265,7 @@ suite("real PostgreSQL service-fence schema upgrade", () => {
     expect(await controls.persistGenericOwnerLoss(input)).toEqual({ ...result, replay: true, version: settled.version });
   });
   it("authenticates service-fence HTTP ingestion against the current repair release with real persistence", async () => {
-    const f = serviceOwnerFenceFixture(new Date(Date.now() - 370000));
+    const f = serviceOwnerFenceFixture(new Date(Date.now() - 370000), "http1");
     const c = f.input.control;
     await pool.query(`insert into sophia_voice_lab.recovery_controls
       (run_id,test_run_id,cleanup_obligation_id,binding,version,browser_allocation_ever,browser_allocation_binding,

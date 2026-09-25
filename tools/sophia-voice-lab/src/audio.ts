@@ -15,7 +15,7 @@ const ManifestSchema = z.object({
     id: z.string().min(1),
     fixture_version: z.string().regex(/^\d+\.\d+\.\d+$/),
     family: z.string().min(1).max(64),
-    fixture_class: z.enum(["short_command", "long_brief", "silence", "trailing_pause", "noisy_command"]),
+    fixture_class: z.enum(["short_command", "long_brief", "silence", "trailing_pause", "noisy_command", "conversation_probe"]),
     file: z.string().regex(/^[A-Za-z0-9._-]+\.wav$/),
     sha256: z.string().regex(/^[a-f0-9]{64}$/),
     sample_rate: z.number().int().positive(),
@@ -42,8 +42,16 @@ export interface ResolvedAudio {
   source: "fixture" | "tts";
   fixture?: FixtureSummary;
   sourceTextHash?: string;
-  synthesis: { engine: string; engine_version: string; voice: string; rate: string; speed?: number; format?: string };
+  synthesis: { engine: string; engine_version: string; voice: string; rate: string; speed?: number; format?: string; trailing_silence_ms?: number };
 }
+
+/** Fixed zero-PCM tail appended to every synthesized utterance. The product
+ * forwards synthetic input only while the operation is started and then sends
+ * audioStreamEnd at once, so without a tail the provider receives no
+ * post-speech silence (all three C5 runs: <= 279 ms). A human microphone keeps
+ * streaming after speech. Equals the committed a02_trailing_pause policy.
+ * Pinned fixtures are immutable and never padded. */
+export const TTS_TRAILING_SILENCE_MS = 1_500;
 
 export interface TtsEngineInfo {
   engine: "espeak-ng";
@@ -143,11 +151,11 @@ export class AudioResolver {
     if (input.text === undefined) throw new VoiceLabError(labError("AUDIO_INPUT_REQUIRED", "Text or fixture ID is required.", "validation"));
     if (!this.#ttsInfo.available || this.#ttsInfo.observedVersion === null) throw new VoiceLabError(labError("TTS_VERSION_UNVERIFIED", "Adaptive TTS is disabled because the deployed engine version was not verified at startup.", "harness", true, { status: this.#ttsInfo.status }));
     const cacheKey = `tts:${sha256(input.text)}`;
-    const bytes = await this.synthesize(input.text, signal);
+    const bytes = appendZeroPcmTail(await this.synthesize(input.text, signal), TTS_TRAILING_SILENCE_MS);
     assertAudioByteLimit(bytes.byteLength, this.config.maxAudioBytes);
     const metadata = parseWav(bytes);
     if (metadata.durationMs > this.config.maxAudioDurationMs) throw new VoiceLabError(labError("AUDIO_DURATION_LIMIT", "Synthesized audio exceeds the per-utterance duration limit.", "validation"));
-    const resolved: ResolvedAudio = { id: cacheKey, bytes, source: "tts", sourceTextHash: sha256(input.text), synthesis: { engine: "espeak-ng", engine_version: this.#ttsInfo.observedVersion, voice: "en-us", rate: "155-wpm", speed: 155, format: "pcm16-wav" }, sha256: sha256(bytes), ...metadata };
+    const resolved: ResolvedAudio = { id: cacheKey, bytes, source: "tts", sourceTextHash: sha256(input.text), synthesis: { engine: "espeak-ng", engine_version: this.#ttsInfo.observedVersion, voice: "en-us", rate: "155-wpm", speed: 155, format: "pcm16-wav", trailing_silence_ms: TTS_TRAILING_SILENCE_MS }, sha256: sha256(bytes), ...metadata };
     return cloneAudio(resolved);
   }
 
@@ -195,6 +203,28 @@ export function parseWav(bytes: Buffer): { sampleRate: number; channels: number;
   }
   if (!sampleRate || !byteRate || !dataBytes || channels < 1 || channels > 2) throw new VoiceLabError(labError("AUDIO_FORMAT_INVALID", "WAVE audio lacks valid PCM metadata.", "validation"));
   return { sampleRate, channels, durationMs: Math.round((dataBytes / byteRate) * 1_000) };
+}
+
+/** Rebuild a canonical PCM16 RIFF/WAVE (one fmt + one data chunk) whose data
+ * is the input PCM followed by an exact whole-frame zero tail. */
+export function appendZeroPcmTail(bytes: Buffer, tailMs: number): Buffer {
+  if (!Number.isSafeInteger(tailMs) || tailMs < 0 || tailMs > 60_000) throw new VoiceLabError(labError("AUDIO_FORMAT_INVALID", "Silence tail length is invalid.", "validation"));
+  const { sampleRate, channels } = parseWav(bytes);
+  const pcm: Buffer[] = [];
+  for (let offset = 12; offset + 8 <= bytes.length;) {
+    const size = bytes.readUInt32LE(offset + 4);
+    if (bytes.toString("ascii", offset, offset + 4) === "data") pcm.push(bytes.subarray(offset + 8, offset + 8 + size));
+    offset += 8 + size + (size % 2);
+  }
+  const blockAlign = channels * 2;
+  const data = Buffer.concat([...pcm, Buffer.alloc(Math.round(sampleRate * tailMs / 1_000) * blockAlign)]);
+  if (data.length % blockAlign !== 0) throw new VoiceLabError(labError("AUDIO_FORMAT_INVALID", "WAVE PCM is not whole-frame aligned.", "validation"));
+  const header = Buffer.alloc(44);
+  header.write("RIFF", 0, "ascii"); header.writeUInt32LE(36 + data.length, 4); header.write("WAVEfmt ", 8, "ascii");
+  header.writeUInt32LE(16, 16); header.writeUInt16LE(1, 20); header.writeUInt16LE(channels, 22); header.writeUInt32LE(sampleRate, 24);
+  header.writeUInt32LE(sampleRate * blockAlign, 28); header.writeUInt16LE(blockAlign, 32); header.writeUInt16LE(16, 34);
+  header.write("data", 36, "ascii"); header.writeUInt32LE(data.length, 40);
+  return Buffer.concat([header, data]);
 }
 
 export function assertAudioByteLimit(byteLength: number, maxBytes: number): void {

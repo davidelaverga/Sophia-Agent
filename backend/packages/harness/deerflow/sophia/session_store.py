@@ -533,7 +533,6 @@ def _validate_exact_finalization_messages(
         raise SessionEvidenceIntegrityError(
             "Synthetic finalization transcript sequence set drifted."
         )
-    message_ids: set[str] = set()
     storage_ids: set[str] = set()
     total_content_bytes = 0
     for message in ordered:
@@ -543,12 +542,9 @@ def _validate_exact_finalization_messages(
         if (
             message.session_id != session_id
             or message.role not in {"user", "assistant"}
-            or message.final is not True
             or not message.message_id
-            or message.message_id in message_ids
             or storage_id in storage_ids
             or not message.thread_id
-            or not message.content.strip()
             or content_bytes > 32 * 1024
             or _parse_canonical_utc_millis(message.created_at) is None
             or not isinstance(message.metadata, dict)
@@ -556,7 +552,6 @@ def _validate_exact_finalization_messages(
             raise SessionEvidenceIntegrityError(
                 "Synthetic finalization transcript row drifted."
             )
-        message_ids.add(message.message_id)
         storage_ids.add(storage_id)
     if total_content_bytes > 1024 * 1024:
         raise SessionEvidenceIntegrityError(
@@ -1532,6 +1527,7 @@ class SupabaseSessionTranscriptStore:
         params: dict[str, str] | None = None,
         json_body: object | None = None,
         prefer: str | None = None,
+        missing_column_is_integrity_error: bool = False,
     ) -> object:
         try:
             response = self._client.request(
@@ -1545,6 +1541,15 @@ class SupabaseSessionTranscriptStore:
             raise SessionStoreError(f"Supabase session store request failed: {exc}") from exc
 
         if response.status_code >= 400:
+            if missing_column_is_integrity_error and response.status_code == 400:
+                try:
+                    error = response.json()
+                except ValueError:
+                    error = None
+                if isinstance(error, dict) and error.get("code") in ("42703", "PGRST204"):
+                    raise SessionEvidenceIntegrityError(
+                        "Synthetic finalization transcript schema is missing a required column."
+                    )
             raise SessionStoreError(f"Supabase session store request failed status={response.status_code} body={response.text[:200]!r}")
 
         if not response.text:
@@ -2051,9 +2056,11 @@ class SupabaseSessionTranscriptStore:
                 "order": "sequence.asc,created_at.asc",
             },
         )
-        raw_message_rows = (
-            raw_message_result if isinstance(raw_message_result, list) else []
-        )
+        if not isinstance(raw_message_result, list):
+            raise SessionEvidenceIntegrityError(
+                "Synthetic finalization message read-back returned an invalid result."
+            )
+        raw_message_rows = raw_message_result
         final_message_metadata = {
             **message_metadata_base,
             "retention_hours": retention_hours,
@@ -2264,19 +2271,6 @@ class SupabaseSessionTranscriptStore:
         user_id: str,
         session_id: str,
     ) -> list[SessionMessageRecord]:
-        result = self._request(
-            "GET",
-            self._config.messages_table,
-            params={
-                "select": "*",
-                "session_id": f"eq.{session_id}",
-                "order": "sequence.asc,created_at.asc",
-            },
-        )
-        if not isinstance(result, list):
-            raise SessionEvidenceIntegrityError(
-                "Synthetic finalization transcript query returned an invalid result."
-            )
         expected_fields = {
             "id",
             "message_id",
@@ -2294,6 +2288,23 @@ class SupabaseSessionTranscriptStore:
             "created_at",
             "metadata",
         }
+        # Select exactly the transcript columns: additive columns on the table
+        # (the MEM00 memory_source_* witnesses) are not transcript evidence and
+        # must not make the exact raw-row check fail closed on every read.
+        result = self._request(
+            "GET",
+            self._config.messages_table,
+            params={
+                "select": ",".join(sorted(expected_fields)),
+                "session_id": f"eq.{session_id}",
+                "order": "sequence.asc,created_at.asc",
+            },
+            missing_column_is_integrity_error=True,
+        )
+        if not isinstance(result, list):
+            raise SessionEvidenceIntegrityError(
+                "Synthetic finalization transcript query returned an invalid result."
+            )
         messages: list[SessionMessageRecord] = []
         storage_ids: set[str] = set()
         for row in result:
@@ -2308,7 +2319,7 @@ class SupabaseSessionTranscriptStore:
                 or row.get("role") not in {"user", "assistant"}
                 or not isinstance(row.get("content"), str)
                 or not isinstance(row.get("source"), str)
-                or row.get("final") is not True
+                or type(row.get("final")) is not bool
                 or type(row.get("approximate")) is not bool
                 or type(row.get("sequence")) is not int
                 or not isinstance(row.get("metadata"), dict)

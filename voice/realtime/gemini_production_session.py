@@ -331,6 +331,46 @@ class GeminiProductionBrowserSessionManager:
             self._cleanup_closed_session_ids[session_id] = time.monotonic() + 600
             return await self.close_session(session_id)
 
+    async def settle_acknowledged_browser_cleanup(self, session_id: str) -> bool:
+        """Settle only an exact admission whose browser proof is already durable.
+
+        Retention authority alone never proves socket closure. The authenticated
+        Gateway callback joins the owned watch to its admission and reports the
+        persisted browser settlement; the completion callback must then accept
+        local teardown. Share the watcher's lock so duplicate DELETEs and the
+        background owner cannot race cleanup or replace its binding.
+        """
+        try:
+            async with asyncio.timeout(3.0):
+                async with self._cleanup_lock(session_id):
+                    watch = self._cleanup_watches.get(session_id)
+                    if watch is None:
+                        return False
+                    authorization = await self._post_cleanup_callback(
+                        watch, "authorize", phase="heartbeat"
+                    )
+                    if (
+                        authorization is None
+                        or isinstance(authorization.get("d02_freeze"), Mapping)
+                        or authorization.get("status")
+                        not in {"browser_closed", "activation_aborted"}
+                        or authorization.get("resource_expires_at")
+                        != watch.resource_expires_at
+                    ):
+                        return False
+                    self._cleanup_closed_session_ids[session_id] = time.monotonic() + 600
+                    await self.close_session(session_id)
+                    # close_session removes this watch only after local absence
+                    # AND the authenticated completion acknowledgement. A false
+                    # close return is safe on retry if local teardown already ran.
+                    return (
+                        not self._browser_sessions.session_exists(session_id)
+                        and session_id not in self._cleanup_watches
+                    )
+        except TimeoutError:
+            # Preserve the watch/locator for the existing owner recovery loop.
+            return False
+
     async def request_browser_cleanup(self, session_id: str) -> bool:
         """Ask the owning browser to close the spend-bearing provider socket."""
 

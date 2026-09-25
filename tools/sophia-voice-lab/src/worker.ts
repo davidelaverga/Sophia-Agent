@@ -5,7 +5,7 @@ import { gzip } from "node:zlib";
 import pino, { type Logger } from "pino";
 
 import { assertAudioByteLimit, parseWav, type AudioResolver } from "./audio.js";
-import { hasExactFinalizationEnvelope, type BrowserStartStage, type D02BrowserContextBinding, type D02ProductCleanupAcknowledgement, type DriverStartResult, type VoiceBrowserDriver } from "./browser-driver.js";
+import { DriverEndFailure, hasExactFinalizationEnvelope, type BrowserStartStage, type D02BrowserContextBinding, type D02ProductCleanupAcknowledgement, type DriverStartResult, type VoiceBrowserDriver } from "./browser-driver.js";
 import { BUNDLED_FIXTURE_MANIFEST_SHA256, type VoiceLabConfig } from "./config.js";
 import { D02GatewayContinuityObservationReceiptSchema, D02GatewaySettlementReceiptSchema } from "./d02-gateway.js";
 import { TERMINAL_RUN_STATES, VoiceLabError, initialVerdicts, labError, type EvidenceRef, type LabError, type RunRecord, type RunState, type SuiteRecord, type Verdicts } from "./domain.js";
@@ -15,7 +15,9 @@ import { productTurnId } from "./product-turn.js";
 import { deriveBrowserProcessTermination } from "./browser-process-termination.js";
 import { pkceS256 } from "./oauth.js";
 import { deriveRecoveryBrowserBinding, RecoveryControlBindingSchema, recoveryTransportBinding, validateRecoveryBrowserBinding, type RecoveryControlRecord } from "./recovery-control.js";
-import { authCleanupConfirmed, authoritativeLiveCleanupComplete, deriveExecutionEpochCleanupProof, recoveryComponentComplete, type ExecutionEpochCleanupProof } from "./execution-cleanup.js";
+import { CANONICAL_EVIDENCE_REFRESH_EVENT, CANONICAL_EVIDENCE_REFRESH_MAX_ATTEMPTS, canonicalEvidenceRefreshDue, localRetentionDeadline } from "./canonical-evidence-refresh.js";
+import { UNCONFIRMED_AUTH_CLEANUP_SCHEMA, authCleanupConfirmed, authCleanupPath, preserveAuthCleanupBooleans, authoritativeLiveCleanupComplete, deriveExecutionEpochCleanupProof, recoveryComponentComplete, type ExecutionEpochCleanupProof } from "./execution-cleanup.js";
+import { PLATFORM_EXECUTION_TERMINATION_KIND } from "./platform-execution-termination.js";
 export { deriveExecutionEpochCleanupProof, type ExecutionEpochCleanupProof } from "./execution-cleanup.js";
 import { CapabilityCodec, StaticBearerAuthenticator, assertNoSecret, canonicalRequestHash, redact, requireScope, sha256 } from "./security.js";
 import { validateAllowedOrigin } from "./security.js";
@@ -24,6 +26,7 @@ import { recoveryAttemptAuditHash } from "./retained-d02-recovery.js";
 import { D02BrowserContinuityProofSchema, assertFreshProductAdmissionProof, reserveAudioInput, toolInputSchemas, validateAudioInputLimit, type FixtureSummary } from "./service.js";
 import { transitionRun } from "./state-machine.js";
 import { createWorkerBootIdentity, createWorkerHeartbeatAttestation, type WorkerBootIdentity } from "./worker-heartbeat.js";
+import { assertActiveRunWorkerProfile, measureWorkerProfile } from "./worker-profile.js";
 
 interface ActiveLease { epoch: number; }
 interface D02WorkerShutdownArm {
@@ -316,11 +319,14 @@ export class VoiceLabWorker {
     }, leaseHeartbeatIntervalMs(this.config.operationLeaseSeconds, this.config.browserLeaseSeconds));
     heartbeat.unref();
     const deadlineSeconds = claimed.operation.type === "start" ? this.config.startOperationSeconds : claimed.operation.type === "end" ? this.config.endOperationSeconds : claimed.operation.type === "force_socket_rotation" ? this.config.faultOperationSeconds : this.config.maxOperationSeconds;
+    // Absolute operation deadline, shared with the driver so its internal waits
+    // are bounded by the real remaining budget, never a fresh window.
+    const deadlineAt = Date.now() + deadlineSeconds * 1_000;
     const deadline = setTimeout(() => controller.abort(new VoiceLabError(labError("OPERATION_TIMEOUT", "Operation exceeded its bounded execution deadline and was cancelled.", "harness", true, { operation_type: claimed.operation.type, deadline_seconds: deadlineSeconds }))), deadlineSeconds * 1_000);
     deadline.unref();
     let operationSettled = false;
     try {
-      const execution = this.#execute(claimed, controller.signal);
+      const execution = this.#execute(claimed, controller.signal, deadlineAt);
       const cancellation = new Promise<never>((_resolve, reject) => controller.signal.addEventListener("abort", () => {
         if (this.#d02ShutdownArms.has(claimed.run.id)) {
           reject(controller.signal.reason);
@@ -421,6 +427,18 @@ export class VoiceLabWorker {
         // retains only the keyed content-free tombstone.
         this.logger.error({ run_id: retained.id, error: safeError(error) }, "remote retention purge could not be confirmed before local hard deadline");
       }
+    }
+    // C077: bounded re-verification of retained canonical evidence that an
+    // earlier recovery left failed/pending (e.g. a since-fixed Gateway reader).
+    // Runs before the hard purge (C080: a pinned past deadline purges in this
+    // same pass) and before evidence publication (a real receipt republishes).
+    const evidenceRefresh = await this.ledger.listRunsCanonicalEvidenceRefreshDue(maintenanceNow, 5).catch(error => {
+      this.logger.error({ error: safeError(error) }, "canonical evidence refresh listing unavailable; other maintenance continues");
+      return [];
+    });
+    for (const retained of evidenceRefresh) {
+      try { await this.#refreshCanonicalEvidence(retained.id, maintenanceNow); }
+      catch (error) { this.logger.error({ run_id_sha256: sha256(retained.id), error: safeError(error) }, "canonical evidence refresh remains unconfirmed"); }
     }
     try { await this.ledger.purgeExpiredRetention(maintenanceNow, 20); }
     catch (error) { this.logger.error({ error: safeError(error) }, "local retention purge unconfirmed; independent resource recovery continues"); }
@@ -737,7 +755,7 @@ export class VoiceLabWorker {
       browserReady: browser.ok && tts.ok && fixturesReady,
       observedAt,
       attestation: createWorkerHeartbeatAttestation(this.config, this.#workerBootIdentity, effectiveKillSwitchEngaged, heartbeatSequence),
-      detail: { browser: browser.detail, browser_engine: browser.engine ?? null, browser_version: browser.version ?? null, fixtures_ready: fixturesReady, fixture_count: this.audio.summaries().length, tts_ready: tts.ok, tts: tts.detail },
+      detail: { browser: browser.detail, browser_engine: browser.engine ?? null, browser_version: browser.version ?? null, fixtures_ready: fixturesReady, fixture_count: this.audio.summaries().length, tts_ready: tts.ok, tts: tts.detail, active_run_profile: measureWorkerProfile() },
     });
   }
 
@@ -775,7 +793,7 @@ export class VoiceLabWorker {
     }
   }
 
-  async #execute(claimed: ClaimedOperation, signal: AbortSignal): Promise<Record<string, unknown>> {
+  async #execute(claimed: ClaimedOperation, signal: AbortSignal, deadlineAt?: number): Promise<Record<string, unknown>> {
     const { operation } = claimed;
     let run = await this.#freshRun(claimed.run.id);
     if (operation.type !== "end" && this.#killSwitchEngaged()) throw new VoiceLabError(labError("KILL_SWITCH_ENGAGED", `${operation.type} was rejected by the worker kill switch.`, "authorization", true));
@@ -785,6 +803,9 @@ export class VoiceLabWorker {
       run = await transitionRun(this.ledger, run, "validating_target");
       if (run.scenarioId === "V-S01" || run.scenarioId === "V-S02") return this.#executePreResourceScenario(run, operation.id);
       if (this.config.readinessTarget !== null || this.config.nodeEnv !== "test") assertFreshProductAdmissionProof(this.config, run.target, await this.targetIdentity());
+      const workerProfile = measureWorkerProfile();
+      assertActiveRunWorkerProfile(this.config.nodeEnv, workerProfile);
+      if (this.config.nodeEnv !== "test") await this.ledger.appendEvent(run.id, "harness.worker_profile_verified", "worker", { ...workerProfile }, `run:${run.id}:worker_profile`);
       // Admission at the MCP boundary prevents an accepted request from
       // allocating work beyond the rolling campaign budget. Replaying the
       // exact durable reservation here is the final provider-allocation fence:
@@ -943,12 +964,25 @@ export class VoiceLabWorker {
     const cleanupGrant = await this.#mintAndVerify(run, "sophia-voice-lab-frontend", ["session:cleanup"], "session:cleanup");
     if (run.state !== "ending") run = await transitionRun(this.ledger, run, "ending");
     await this.#fenceMutation(claimed, signal);
-    const ended = await this.driver.end(run, finalizeGrant.token, cleanupGrant.token);
+    const ended = await this.driver.end(run, finalizeGrant.token, cleanupGrant.token, deadlineAt).catch(async (error: unknown) => {
+      if (error instanceof DriverEndFailure) await this.#persistEvents(run.id, error.events);
+      throw error;
+    });
     await this.#persistEvents(run.id, ended.events);
     run = await this.#freshRun(run.id);
     const recoveredAfterEnd = await this.#recoverRun(run);
     await this.#persistEvents(run.id, recoveredAfterEnd.events);
     run = await this.#freshRun(run.id);
+    // C059: a direct cleanup recorded unconfirmed after proven normal End is
+    // settled only by the exact post-close session:recover path; otherwise End
+    // fails exactly as the direct failure did before.
+    if (ended.events.some((event) => event.kind === "auth.session_cleanup" && event.source === "canonical" && event.payload.cleanup_proof_schema === UNCONFIRMED_AUTH_CLEANUP_SCHEMA)) {
+      const settled = await this.#allEvents(run.id);
+      const finalized = settled.events.some((event) => isCanonicalFinalizationReceipt(run, event));
+      if (!finalized || authCleanupPath(run, settled.events) !== "recovery") {
+        throw new VoiceLabError(labError("AUTH_SESSION_CLEANUP_UNCONFIRMED", "Direct auth cleanup was unconfirmed and session:recover did not prove this run's auth sessions terminal after the browser close.", "authorization", true, { canonical_finalization: finalized, execution_cleanup_reason: deriveExecutionEpochCleanupProof(run, settled.events).reason }));
+      }
+    }
     run = await transitionRun(this.ledger, run, "finalizing");
     for (const artifact of ended.artifacts) {
       if (artifact.bytes.byteLength > 2_000_000) {
@@ -1045,7 +1079,7 @@ export class VoiceLabWorker {
     const browserLeaseReleased = await this.#releaseBrowserLeaseProof(run.id);
     eventPage = await this.#allEvents(run.id);
     const taskCleanup = deriveTaskCleanup(eventPage.events, run);
-    const providerDisconnected = eventPage.events.some((event) => isExactBoundProductEvent(run, event) && event.kind === "provider.stage" && ["closed", "ended"].includes(String(event.payload.stage))) || recoveryComponentComplete(eventPage.events, "voice_provider");
+    const providerDisconnected = executionEpochCleanup.ready || eventPage.events.some((event) => isExactBoundProductEvent(run, event) && event.kind === "provider.stage" && ["closed", "ended"].includes(String(event.payload.stage))) || recoveryComponentComplete(eventPage.events, "voice_provider");
     const authSessionRevoked = eventPage.events.some(authCleanupConfirmed) || recoveryComponentComplete(eventPage.events, "auth_sessions");
     const canonicalFinalized = eventPage.events.some((event) => isCanonicalFinalizationReceipt(run, event));
     const liveCleanupComplete = authoritativeLiveCleanupComplete(eventPage.events, run);
@@ -1703,16 +1737,26 @@ export class VoiceLabWorker {
     if (TERMINAL_RUN_STATES.has(run.state)) {
       const control = await this.ledger.getRecoveryControl(run.id);
       const priorEvents = await this.#allEvents(run.id);
-      const latestBrowserClose = priorEvents.events.reduce((seq, event) => event.kind === "cleanup.browser_context_closed" ? Math.max(seq, event.seq) : seq, 0);
+      // A canonical platform termination stands in for the browser close, so
+      // it anchors recovery freshness exactly as a close does.
+      const latestExecutionClose = priorEvents.events.reduce((seq, event) => event.kind === "cleanup.browser_context_closed"
+        || (event.kind === PLATFORM_EXECUTION_TERMINATION_KIND && event.source === "canonical") ? Math.max(seq, event.seq) : seq, 0);
       // Product settlement and browser settlement are independent obligations.
       // Reissuing an already complete product receipt while browser proof is
       // missing creates fresh audits/manifests on every maintenance tick. A new
-      // browser-close receipt still requires recovery after that event so the
-      // execution-epoch proof can establish ordering without guessing closure.
-      const productRecoveryCurrent = priorEvents.events.some(event => event.seq > latestBrowserClose && authoritativeLiveCleanupComplete([event], run));
+      // browser-close or platform-termination receipt still requires recovery
+      // after that event so the execution-epoch proof can establish ordering
+      // without guessing closure.
+      const productRecoveryCurrent = priorEvents.events.some(event => event.seq > latestExecutionClose && authoritativeLiveCleanupComplete([event], run));
+      let recoveredArtifacts: Array<{ id: string; kind: string; contentType: string; bytes: Buffer }> = [];
       if (!productRecoveryCurrent || this.driver.hasSession(run.id)) {
         const recovered = await this.#recoverRun(run);
         await this.#persistEvents(run.id, recovered.events);
+        // The recovery's own canonical receipt is durable evidence. Dropping it
+        // here published a manifest that omitted the artifact this terminal
+        // recovery was authored from; the equivalent retained path already
+        // saves it.
+        recoveredArtifacts = recovered.artifacts;
       }
       run = await this.#freshRun(run.id);
       const recoveryPage = await this.#allEvents(run.id);
@@ -1726,7 +1770,7 @@ export class VoiceLabWorker {
       }
       // Rebuild the deterministic failure manifest after every recovery
       // attempt so a pending receipt can become a durable complete receipt.
-      await this.#saveFailureEvidence(run, run.terminalError ?? error, []);
+      await this.#saveFailureEvidence(run, run.terminalError ?? error, recoveredArtifacts);
       return;
     }
     let ended: Awaited<ReturnType<VoiceBrowserDriver["abort"]>> = { events: [], artifacts: [] };
@@ -1748,6 +1792,49 @@ export class VoiceLabWorker {
     run = await this.ledger.updateRun(run.id, run.version, { state, verdicts, terminalError: error, cleanupComplete: liveCleanupComplete, ...retentionPatchFromEvents(ended.events) });
     await this.ledger.appendEvent(run.id, `run.${state}`, "worker", { error }, `run:${run.id}:${state}`);
     await this.#saveFailureEvidence(run, error, ended.artifacts);
+  }
+
+  /**
+   * C077: one bounded canonical-evidence refresh through the existing
+   * session:recover authority (Gateway HTTP only; no browser, provider or start
+   * reservation). Every durable write advances updated_at, and the local hard
+   * deadline falls back to updated_at, so the deadline is first pinned to the
+   * run's authenticated finalization receipt, never later than today's
+   * deadline. Without that proof nothing is written. Prior manifests and
+   * receipts are retained; only real new observations are appended.
+   */
+  async #refreshCanonicalEvidence(runId: string, now: Date): Promise<void> {
+    let run = await this.#freshRun(runId);
+    const page = await this.#allEvents(run.id);
+    const decision = canonicalEvidenceRefreshDue(run, page.events, now);
+    if (!decision.due) return;
+    const finalization = page.events.find((event) => isCanonicalFinalizationReceipt(run, event));
+    const signedRaw = (finalization?.payload.receipt as Record<string, unknown> | undefined)?.retention_expires_at;
+    const signed = typeof signedRaw === "string" ? new Date(signedRaw) : null;
+    if (!signed || Number.isNaN(signed.getTime()) || signed.toISOString() !== signedRaw) return;
+    if (run.retentionPurgeDueAt === null) {
+      if (signed > localRetentionDeadline(run)) return;
+      run = await this.ledger.updateRun(run.id, run.version, { retentionPurgeDueAt: signed });
+    }
+    // C080: an authenticated deadline that has already passed is now pinned,
+    // so the hard purge that follows in this maintenance pass removes the
+    // content. Nothing is recovered or allocated past the signed expiry.
+    if (signed <= now) return;
+    const pinned = run.retentionPurgeDueAt!;
+    await this.ledger.appendEvent(run.id, CANONICAL_EVIDENCE_REFRESH_EVENT, "worker", {
+      attempt: decision.attempt, max_attempts: CANONICAL_EVIDENCE_REFRESH_MAX_ATTEMPTS,
+      prior_canonical_evidence_status: decision.status, prior_canonical_evidence_code: decision.code,
+      local_deadline_at: pinned.toISOString(), test_run_id_sha256: sha256(run.testRunId), cleanup_obligation_id_sha256: sha256(run.cleanupObligationId),
+    }, `canonical-evidence-refresh:${run.id}:${decision.attempt}`);
+    const recovered = await this.#recoverRun(run);
+    await this.#persistEvents(run.id, recovered.events);
+    const patch = retentionPatchFromEvents(recovered.events);
+    if (Object.keys(patch).length === 0) return;
+    // Remote retention truth comes only from the validated recovery receipt,
+    // and it may never move the pinned local deadline later.
+    if (patch.retentionPurgeDueAt && patch.retentionPurgeDueAt > pinned) patch.retentionPurgeDueAt = pinned;
+    const fresh = await this.#freshRun(run.id);
+    await this.ledger.updateRun(fresh.id, fresh.version, patch);
   }
 
   async #recoverRetainedControl(control: RecoveryControlRecord): Promise<void> {
@@ -1967,7 +2054,7 @@ export class VoiceLabWorker {
     const browserLeaseReleased = eventPage.events.some((event) =>
       event.kind === "cleanup.browser_lease_released" && event.payload.cas_deleted === true
       || event.kind === "cleanup.browser_lease_absent" && event.payload.authoritative_ledger_read === true);
-    const providerDisconnected = productEvents.some((event) => event.kind === "provider.stage" && ["closed", "ended"].includes(String(event.payload.stage))) || recoveryComponentComplete(eventPage.events, "voice_provider");
+    const providerDisconnected = executionEpochCleanup.ready || productEvents.some((event) => event.kind === "provider.stage" && ["closed", "ended"].includes(String(event.payload.stage))) || recoveryComponentComplete(eventPage.events, "voice_provider");
     const authSessionRevoked = eventPage.events.some(authCleanupConfirmed) || recoveryComponentComplete(eventPage.events, "auth_sessions");
     const liveCleanupComplete = authoritativeLiveCleanupComplete(eventPage.events, run);
     const assertions = evaluateScenarioAssertions(run, eventPage.events, operations, authAudit);
@@ -2075,13 +2162,20 @@ export class VoiceLabWorker {
       screenshots: refs.filter((ref) => ref.kind.includes("screenshot")),
       video: { status: "unavailable", reason: "video_capture_disabled_or_not_implemented" },
       raw_audio: { status: "not_captured", reason: "privacy_default" },
-      metrics: deriveEvidenceMetrics(eventPage.events, operations),
+      metrics: {
+        ...deriveEvidenceMetrics(eventPage.events, operations),
+        worker_profile: eventPage.events.find((event) => event.kind === "harness.worker_profile_verified")?.payload ?? { status: "unavailable" },
+        input_delivery: operations.filter((operation) => operation.type === "speak" || operation.type === "barge_in")
+          .map((operation) => ({ operation_id: operation.id, ...classifyInputDelivery(eventPage.events, operation.id) })),
+      },
+      c5_first_use_assessment: run.scenarioId === "V-O01" ? deriveC5FirstUseAssessment(run, eventPage.events, operations) : { schema: C5_FIRST_USE_ASSESSMENT_SCHEMA, status: "not_applicable", scenario_id: run.scenarioId },
       cleanup_audit: {
         browser_context_closed: browserContextClosed,
         execution_epoch_cleanup: executionEpochCleanup,
         browser_lease_released: browserLeaseReleased,
         provider_disconnect: input.intentionallyUnallocated ? intentionallyUnavailable : providerDisconnected,
         auth_session_revoked: input.intentionallyUnallocated ? intentionallyUnavailable : authSessionRevoked,
+        auth_cleanup_path: input.intentionallyUnallocated ? intentionallyUnavailable : authCleanupPath(run, eventPage.events, executionEpochCleanup) ?? "unavailable",
         synthetic_tasks: taskCleanup,
         gateway_live_resources_zero: liveCleanupComplete,
         live_execution_resources_zero: liveCleanupComplete && browserContextClosed && browserLeaseReleased && taskCleanup.unresolved_count === 0,
@@ -3279,7 +3373,7 @@ export function suiteCertificationProjection(children: RunRecord[]): {
     ? { status: "pending_lifecycle" as const, outcome: "lifecycle_or_cleanup_unconfirmed" }
     : runCertificationProjection(run.verdicts));
   const productCounts = { pass: 0, unavailable: 0, fail: 0, inconclusive: 0, pending: 0 };
-  for (const run of children) productCounts[run.verdicts.product] += 1;
+  for (const run of children) productCounts[run.verdicts.product as keyof typeof productCounts] += 1;
   const outcomeCounts: Record<string, number> = {};
   for (const projection of projections) outcomeCounts[projection.outcome] = (outcomeCounts[projection.outcome] ?? 0) + 1;
   const certifiedCount = projections.filter((projection) => projection.status === "certified").length;
@@ -3296,6 +3390,7 @@ export function suiteCertificationProjection(children: RunRecord[]): {
 export function certificationTerminalDecision(verdicts: Verdicts): { state: RunState; reason: string } {
   const state: RunState = verdicts.harness === "unavailable" || verdicts.evidence === "unavailable"
     ? "pending_external_evidence"
+    : verdicts.harness === "invalid_test" ? "invalid_test"
     : verdicts.harness === "fail" ? "failed_harness"
       : verdicts.auth === "fail" ? "authorization_failed"
         : verdicts.product === "fail" ? "product_failed"
@@ -3325,11 +3420,12 @@ export function deriveCompletedVerdicts(run: RunRecord, events: import("./domain
   const failedHarness = events.some((event) => event.kind === "audio.input.rejected" || event.kind.includes("cursor_gap") || event.kind === "cleanup.capture_unavailable" || event.kind === "audio.input.interrupted");
   const taskCleanup = deriveTaskCleanup(events, run);
   const finalized = kinds.has("session.finalized");
-  const providerClosed = eligibleEvents.some((event) => event.kind === "provider.stage" && ["closed", "ended"].includes(String(event.payload.stage)));
+  const providerClosed = deriveExecutionEpochCleanupProof(run, events).ready || eligibleEvents.some((event) => event.kind === "provider.stage" && ["closed", "ended"].includes(String(event.payload.stage)));
   const providerObserved = kinds.has("provider.connection_epoch");
   const providerDegraded = eligibleEvents.some((event) => event.kind === "provider.connection_epoch" && (event.payload.receipt as Record<string, unknown> | undefined)?.phase === "degraded");
-  const authClean = events.some(authCleanupConfirmed);
+  const authClean = authCleanupPath(run, events) !== null;
   const injectedOperations = operations.filter((operation) => (operation.type === "speak" || operation.type === "barge_in") && operation.state === "succeeded");
+  const invalidInputDelivery = injectedOperations.some((operation) => classifyInputDelivery(events, operation.id).status !== "valid");
   const nonSilenceOperations = injectedOperations.filter((operation) => !String(operation.input.fixture_id ?? "").toLowerCase().includes("silence"));
   const inputTranscript = eligibleEvents.some((event) => event.kind.endsWith(".sophia.user_transcript") || event.kind === "transcript.input.final");
   const assistantAudio = kinds.has("audio.output.started");
@@ -3358,9 +3454,11 @@ export function deriveCompletedVerdicts(run: RunRecord, events: import("./domain
   const baseHarnessPass = preResource
     ? !failedHarness && preResourceCleanup
     : !failedHarness && injectionChains && deploymentVerified && joinsComplete && captureProven && cleanupProven;
-  const harness: Verdicts["harness"] = !baseHarnessPass || scenarioHasFailure ? "fail" : scenarioHasUnavailable ? "unavailable" : "pass";
+  const harness: Verdicts["harness"] = invalidInputDelivery ? "invalid_test" : !baseHarnessPass || scenarioHasFailure ? "fail" : scenarioHasUnavailable ? "unavailable" : "pass";
   const productStatuses = scenarioEvaluation.product.map((assertion) => assertion.status);
   const product: Verdicts["product"] = preResource
+    ? "unavailable"
+    : invalidInputDelivery
     ? "unavailable"
     : !finalized
     ? "fail"
@@ -3376,6 +3474,75 @@ export function deriveCompletedVerdicts(run: RunRecord, events: import("./domain
     auth: preResource ? (run.scenarioId === "V-S01" && harness === "pass" ? "pass" : "unavailable") : authClean ? "pass" : "fail",
     evidence: harness === "pass" && (preResource ? preResourceCleanup : finalized && cleanupProven) ? "pass" : harness === "unavailable" ? "unavailable" : "fail",
   };
+}
+
+/** A provider observation is not product evidence when the harness played the
+ * waveform slower than real time. Frame receipts are already durable and
+ * content-free; compare their timestamps with their exact 16 kHz PCM bytes. */
+export const INPUT_DELIVERY_LIMITS = { max_speech_gap_ms: 150, max_lag_growth_ms: 100, max_context_wall_ratio_error: 0.05 } as const;
+type InputDeliveryEvent = import("./domain.js").LabEvent;
+type InputDeliveryOptions = { allowLedgerTimestampFallback?: boolean };
+
+function inputObservedMs(event: InputDeliveryEvent, options: InputDeliveryOptions): number | null {
+  const provenance = event.payload._capture_provenance;
+  const observedAt = provenance && typeof provenance === "object" && !Array.isArray(provenance)
+    ? (provenance as Record<string, unknown>).observed_at : null;
+  if (typeof observedAt === "string") {
+    const parsed = Date.parse(observedAt);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return options.allowLedgerTimestampFallback === true ? event.at.getTime() : null;
+}
+
+function frameTiming(frames: InputDeliveryEvent[], options: InputDeliveryOptions): { audioMs: number; maxSpeechGap: number } | null {
+  let maxSpeechGap = 0;
+  let audioMs = 0;
+  for (let index = 0; index < frames.length; index += 1) {
+    const bytes = Number(frames[index]!.payload.byte_length);
+    if (!Number.isSafeInteger(bytes) || bytes <= 0 || bytes % 2 !== 0) return null;
+    if (index < frames.length - 1) audioMs += bytes / 32;
+    if (index === 0) continue;
+    const current = inputObservedMs(frames[index]!, options);
+    const previous = inputObservedMs(frames[index - 1]!, options);
+    if (current === null || previous === null) return null;
+    const gap = current - previous;
+    if (!Number.isFinite(gap) || gap < 0) return null;
+    if (Number(frames[index]!.payload.nonzero_byte_count) > 0 || Number(frames[index - 1]!.payload.nonzero_byte_count) > 0) {
+      maxSpeechGap = Math.max(maxSpeechGap, gap);
+    }
+  }
+  return { audioMs, maxSpeechGap };
+}
+
+function contextWallRatio(events: InputDeliveryEvent[], operationId: string, audioMs: number, wallMs: number, options: InputDeliveryOptions): number | null {
+  const started = events.find((event) => event.kind === "audio.input.started" && event.payload.operation_id === operationId);
+  const completed = events.find((event) => event.kind === "audio.input.completed" && event.payload.operation_id === operationId);
+  if (!started || !completed) return audioMs / wallMs;
+  const contextMs = (Number(completed.payload.actual_context_time) - Number(started.payload.actual_context_time)) * 1000;
+  const completedMs = inputObservedMs(completed, options);
+  const startedMs = inputObservedMs(started, options);
+  if (completedMs === null || startedMs === null) return null;
+  const contextWallMs = completedMs - startedMs;
+  return Number.isFinite(contextMs) && contextWallMs > 0 ? contextMs / contextWallMs : null;
+}
+
+export function classifyInputDelivery(events: import("./domain.js").LabEvent[], operationId: string, options: InputDeliveryOptions = {}): { status: "valid" | "degraded" | "unavailable"; delivery_valid: boolean | null; max_speech_gap_ms: number | null; lag_growth_ms: number | null; context_wall_ratio: number | null; timestamp_source: "browser_observed" | "ledger_fallback" | "unavailable" } {
+  const frames = events.filter((event) => event.kind === "harness.input_frame_forwarded" && event.source === "browser" && event.payload.operation_id === operationId)
+    .sort((a, b) => Number(a.payload.frame_seq) - Number(b.payload.frame_seq));
+  const unavailable = { status: "unavailable" as const, delivery_valid: null, max_speech_gap_ms: null, lag_growth_ms: null, context_wall_ratio: null, timestamp_source: "unavailable" as const };
+  if (frames.length < 2) return unavailable;
+  const timing = frameTiming(frames, options);
+  if (timing === null) return unavailable;
+  const firstMs = inputObservedMs(frames[0]!, options);
+  const lastMs = inputObservedMs(frames.at(-1)!, options);
+  if (firstMs === null || lastMs === null) return unavailable;
+  const wallMs = lastMs - firstMs;
+  if (wallMs <= 0 || timing.audioMs <= 0) return unavailable;
+  const ratio = contextWallRatio(events, operationId, timing.audioMs, wallMs, options);
+  if (ratio === null) return unavailable;
+  const lagGrowth = wallMs - timing.audioMs;
+  const degraded = timing.maxSpeechGap > INPUT_DELIVERY_LIMITS.max_speech_gap_ms || lagGrowth > INPUT_DELIVERY_LIMITS.max_lag_growth_ms || Math.abs(ratio - 1) > INPUT_DELIVERY_LIMITS.max_context_wall_ratio_error;
+  return { status: degraded ? "degraded" : "valid", delivery_valid: !degraded, max_speech_gap_ms: timing.maxSpeechGap, lag_growth_ms: lagGrowth, context_wall_ratio: ratio, timestamp_source: options.allowLedgerTimestampFallback ? "ledger_fallback" : "browser_observed" };
 }
 
 export type ScenarioAssertion = {
@@ -3432,6 +3599,246 @@ export function reconcileProductInputLeg(
     && leg.pcm_sha256_chain === computed
     && (silence ? nonzeroBytes === 0 && Number(leg.nonzero_sample_count) === 0 : nonzeroBytes > 0 && Number(leg.nonzero_sample_count) > 0);
   return { verified, reason: verified ? null : "harness_product_pcm_digest_or_metric_mismatch", frame_count: frames.length, byte_length: byteLength, nonzero_byte_count: nonzeroBytes, computed_pcm_sha256_chain: computed };
+}
+
+type OutputChainSources = { playback: import("./domain.js").LabEvent[]; received: import("./domain.js").LabEvent[]; providerChunks: import("./domain.js").LabEvent[]; interactions: ReturnType<typeof outputInteractionBindings> };
+type Receipt = Record<string, unknown> | undefined;
+const receiptOf = (event: import("./domain.js").LabEvent | undefined): Receipt => event?.payload.receipt as Receipt;
+const diagnosticOf = (event: import("./domain.js").LabEvent): Receipt => event.payload.diagnostic as Receipt;
+/** The provider receive join shared by the received aggregate and the chunk. */
+function sameProviderReceive(diagnostic: Receipt, terminal: Receipt): boolean {
+  return diagnostic?.providerReceiveSequence === terminal?.providerReceiveSequence && diagnostic?.providerConnectionEpoch === terminal?.providerConnectionEpoch
+    && diagnostic?.playbackGeneration === terminal?.playbackGeneration && diagnostic?.relayCorrelationId === terminal?.relayCorrelationId
+    && diagnostic?.providerRelaySequence === terminal?.providerRelaySequence && diagnostic?.providerReceivedAt === terminal?.providerReceivedAt;
+}
+function sameChunk(diagnostic: Receipt, terminal: Receipt): boolean {
+  return diagnostic?.chunkIndex === terminal?.chunkIndex && diagnostic?.chunksInEvent === terminal?.chunksInEvent
+    && diagnostic?.chunkHash === terminal?.chunkHash && diagnostic?.byteLength === terminal?.byteLength;
+}
+/** Scheduled, undropped, and carrying the native composite identity it claims. */
+function playableNativeChunk(diagnostic: Receipt, realizationId: string | null): boolean {
+  return diagnostic?.scheduled === true && diagnostic?.dropReason === null
+    && diagnostic?.realizationId === realizationId && nativeOutputRealizationId(diagnostic) === realizationId
+    && diagnostic?.providerChunkSequence === `${diagnostic?.providerConnectionEpoch}:${diagnostic?.providerReceiveSequence}:${diagnostic?.chunkIndex}`;
+}
+/** A verified, completed, non-silent, raw-free output leg with timing. */
+function audibleOutputLeg(leg: Receipt): boolean {
+  return leg?.schema === "sophia_gemini_output_leg_v1" && leg.status === "verified" && leg.completionPhase === "completed"
+    && /^[a-f0-9]{64}$/.test(String(leg.monitorDigestSha256)) && Number(leg.monitorFrameCount) > 0 && Number(leg.monitorNonSilentFrameCount) > 0 && leg.rawAudioExcluded === true
+    && typeof leg.scheduledAt === "string" && typeof leg.completedAt === "string" && Number(leg.monitorDurationMs) >= 0;
+}
+function orderedSeqs(...seqs: Array<number | undefined>): boolean {
+  return seqs.every((seq, index) => seq !== undefined && (index === 0 || seq > seqs[index - 1]!));
+}
+/** The leg, its terminal playback receipt and its utterance binding agree. */
+function legBoundToTerminal(leg: Receipt, terminal: Receipt, interactionEpoch: number | undefined): boolean {
+  return interactionEpoch !== undefined && interactionEpoch === leg?.providerConnectionEpoch
+    && leg?.providerChunkFingerprint === terminal?.chunkHash && leg?.providerConnectionEpoch === terminal?.providerConnectionEpoch
+    && leg?.playbackGeneration === terminal?.playbackGeneration;
+}
+function buildOutputChain(legEvent: import("./domain.js").LabEvent, sources: OutputChainSources) {
+  const leg = receiptOf(legEvent);
+  const realizationId = typeof leg?.realizationId === "string" ? leg.realizationId : null;
+  const receipts = sources.playback.filter((event) => receiptOf(event)?.realizationId === realizationId);
+  const phase = (name: string) => receipts.filter((event) => receiptOf(event)?.phase === name);
+  const scheduled = phase("scheduled"), started = phase("started"), completed = phase("completed");
+  const terminal = receiptOf(completed[0]);
+  const receivedEvent = sources.received.find((event) => sameProviderReceive(diagnosticOf(event), terminal)
+    && diagnosticOf(event)?.responseId === terminal?.responseId && diagnosticOf(event)?.providerEventId === terminal?.providerEventId);
+  const chunkEvent = sources.providerChunks.find((event) => sameProviderReceive(diagnosticOf(event), terminal) && sameChunk(diagnosticOf(event), terminal) && playableNativeChunk(diagnosticOf(event), realizationId));
+  const interaction = realizationId === null ? undefined : sources.interactions.byRealization.get(realizationId);
+  const exact = audibleOutputLeg(leg) && scheduled.length === 1 && started.length === 1 && completed.length === 1
+    && legBoundToTerminal(leg, terminal, interaction?.epoch)
+    && orderedSeqs(receivedEvent?.seq, chunkEvent?.seq, scheduled[0]?.seq, started[0]?.seq, completed[0]?.seq, legEvent.seq) && Number(terminal?.durationSeconds) > 0;
+  const identity = chunkEvent ? outputChunkIdentity(chunkEvent.payload.diagnostic as Record<string, unknown>) : null;
+  const durationSeconds = Number(terminal?.durationSeconds);
+  return { exact, realizationId, identity, durationSeconds: Number.isFinite(durationSeconds) ? durationSeconds : 0, operationId: interaction?.operationId ?? null, receivedSeq: receivedEvent?.seq ?? null, chunkSeq: chunkEvent?.seq ?? null, events: [...(receivedEvent ? [receivedEvent] : []), ...(chunkEvent ? [chunkEvent] : []), ...receipts, ...(interaction ? [interaction.event] : []), legEvent] };
+}
+
+/**
+ * The V-O01 output-chain join (C075), shared with the C5 first-use assessment.
+ * Every chain is one output leg with its playback receipts, provider chunk and
+ * received aggregate under the product's native composite identity, bound to
+ * at most one utterance interaction. Pure: it certifies nothing by itself.
+ */
+export function deriveOutputChains(run: RunRecord, productEvents: import("./domain.js").LabEvent[], operations: import("./domain.js").OperationRecord[]) {
+  const productByKind = (kind: string) => productEvents.filter((event) => event.kind === kind);
+  const utteranceOperations = operations.filter((operation) => operation.type === "speak" && operation.state === "succeeded" && !String(operation.input.fixture_id ?? "").toLowerCase().includes("silence"));
+  const interactions = outputInteractionBindings(run, productByKind("product.voice-session.gemini-synthetic-interaction-receipt"), utteranceOperations);
+  const received = productByKind("audio.output.received");
+  const providerChunks = productByKind("audio.output.provider_chunk");
+  const playback = ["audio.output.scheduled", "audio.output.started", "audio.output.completed"].flatMap(productByKind);
+  const legs = productByKind("audio.output.leg_receipt");
+  const chains = legs.map((legEvent) => buildOutputChain(legEvent, { playback, received, providerChunks, interactions }));
+  return { utteranceOperations, interactions, received, providerChunks, playback, legs, chains };
+}
+
+/**
+ * C075: the product's native output identity. chunkHash is its FNV-1a 32-bit
+ * (8 hex) consistency fingerprint (hashGeminiOutputAudioChunk), never identity
+ * or cryptographic proof. Identity is the composite the product derives from
+ * the provider receipt (gemini-output-{epoch}-{receiveSeq}-{chunkIndex}-
+ * {fingerprint}-{duplicateOrdinal}), recomputed here from the diagnostic's own
+ * fields, plus playback generation and relay correlation.
+ */
+export const PRODUCT_OUTPUT_FINGERPRINT_ALGORITHM = "fnv1a32-hex8";
+function nativeOutputRealizationId(diagnostic: Record<string, unknown> | undefined): string | null {
+  const epoch = diagnostic?.providerConnectionEpoch, sequence = diagnostic?.providerReceiveSequence, index = diagnostic?.chunkIndex;
+  const fingerprint = diagnostic?.chunkHash, ordinal = diagnostic?.duplicateOrdinal;
+  if (!Number.isSafeInteger(epoch) || Number(epoch) < 1 || !Number.isSafeInteger(sequence) || Number(sequence) < 0
+    || !Number.isSafeInteger(index) || Number(index) < 0 || typeof fingerprint !== "string" || !/^[a-f0-9]{8}$/.test(fingerprint)
+    || !Number.isSafeInteger(ordinal) || Number(ordinal) < 1) return null;
+  return `gemini-output-${epoch}-${sequence}-${index}-${fingerprint}-${ordinal}`;
+}
+function outputChunkIdentity(diagnostic: Record<string, unknown>): string | null {
+  const realization = nativeOutputRealizationId(diagnostic);
+  return realization === null || !Number.isSafeInteger(diagnostic.playbackGeneration) || typeof diagnostic.relayCorrelationId !== "string"
+    ? null : `${realization}|generation:${diagnostic.playbackGeneration}|relay:${diagnostic.relayCorrelationId}`;
+}
+
+/**
+ * C075: the product-authored per-utterance output binding
+ * (sophia_gemini_interaction_v1). The latest receipt per interaction lists the
+ * output realizations it owns. It carries the product's own synthetic
+ * response/turn id; no provider response id is inferred. Invalid, foreign,
+ * duplicate-per-utterance or overlapping bindings make the whole set invalid.
+ */
+function outputInteractionBindings(
+  run: RunRecord,
+  receiptEvents: import("./domain.js").LabEvent[],
+  utteranceOperations: import("./domain.js").OperationRecord[],
+): { valid: boolean; byRealization: Map<string, { operationId: string; epoch: number; event: import("./domain.js").LabEvent }> } {
+  const latest = new Map<string, import("./domain.js").LabEvent>();
+  let valid = true;
+  for (const event of receiptEvents) {
+    const receipt = event.payload.receipt as Record<string, unknown> | undefined;
+    const id = receipt?.interaction_id;
+    if (typeof id !== "string" || id.length === 0) { valid = false; continue; }
+    const prior = latest.get(id);
+    if (!prior || prior.seq < event.seq) latest.set(id, event);
+  }
+  const byRealization = new Map<string, { operationId: string; epoch: number; event: import("./domain.js").LabEvent }>();
+  const operationIds = new Set(utteranceOperations.map((operation) => operation.id));
+  const interactionByOperation = new Map<string, string>();
+  for (const [id, event] of latest) {
+    const receipt = event.payload.receipt as Record<string, unknown>;
+    const operationId = String(receipt.operation_id);
+    if (!validInteractionReceipt(run, receipt, operationIds)
+      || (interactionByOperation.has(operationId) && interactionByOperation.get(operationId) !== id)) { valid = false; continue; }
+    interactionByOperation.set(operationId, id);
+    const epoch = receipt.provider_connection_epoch;
+    for (const realization of receipt.output_realization_ids as unknown[]) {
+      if (typeof realization !== "string" || byRealization.has(realization)) { valid = false; continue; }
+      byRealization.set(realization, { operationId, epoch: Number(epoch), event });
+    }
+  }
+  return { valid, byRealization: valid ? byRealization : new Map() };
+}
+
+/** One interaction receipt is exactly this run's, for one of its utterances. */
+function validInteractionReceipt(run: RunRecord, receipt: Record<string, unknown>, operationIds: ReadonlySet<string>): boolean {
+  const nonEmpty = (value: unknown) => typeof value === "string" && value.length > 0;
+  return receipt.schema === "sophia_gemini_interaction_v1" && receipt.synthetic === true && receipt.test_run_id === run.testRunId
+    && receipt.scenario_id === run.scenarioId && receipt.scenario_version === run.scenarioVersion
+    && typeof receipt.operation_id === "string" && operationIds.has(receipt.operation_id)
+    && nonEmpty(receipt.response_id) && nonEmpty(receipt.assistant_turn_id)
+    && Number.isSafeInteger(receipt.provider_connection_epoch) && Number(receipt.provider_connection_epoch) >= 1
+    && Array.isArray(receipt.output_realization_ids);
+}
+
+type Event = import("./domain.js").LabEvent;
+type Operation = import("./domain.js").OperationRecord;
+/** One utterance: complete input with transcript receipts, >=1 exact audible chain, ordering after the prior reply. */
+function assessC5Utterance(operation: Operation, previous: Operation | null, eligible: Event[], chains: ReturnType<typeof deriveOutputChains>["chains"],
+  accepted: (operation: Operation) => Event | undefined, replyCompleted: (operation: Operation) => Event[]) {
+  const audible = chains.filter((chain) => chain.exact && chain.operationId === operation.id);
+  const acceptedEvent = accepted(operation);
+  const priorCompletion = previous ? replyCompleted(previous)[0] : undefined;
+  const ordering = previous === null ? "not_applicable_first_utterance" as const
+    : acceptedEvent !== undefined && priorCompletion !== undefined && acceptedEvent.seq > priorCompletion.seq ? "met" as const : "gap" as const;
+  return {
+    operation_id: operation.id,
+    input: exactProductInputChain(eligible, operation) ? "met" as const : "gap" as const,
+    audible_exact_chain_count: audible.length,
+    audible_seconds: Math.round(audible.reduce((total, chain) => total + chain.durationSeconds, 0) * 1000) / 1000,
+    output: audible.length > 0 ? "met" as const : "gap" as const,
+    adaptive_ordering: ordering,
+    evidence_seqs: [...(acceptedEvent ? [acceptedEvent.seq] : []), ...(priorCompletion ? [priorCompletion.seq] : []), ...audible.flatMap((chain) => chain.events.map((event) => event.seq))],
+  };
+}
+/** C082: completion witnesses of this run's durably succeeded supported End. */
+function c5EndCompletions(run: RunRecord, operations: Operation[], eligible: Event[]): Event[] {
+  return operations.filter((operation) => operation.type === "end" && operation.state === "succeeded" && operation.runId === run.id)
+    .flatMap((operation) => eligible.filter((event) => event.kind === "operation.succeeded" && event.source === "worker"
+      && event.payload.operation_id === operation.id && event.payload.operation_type === "end"));
+}
+/** Ordinary settlement: live zero, execution-epoch proof, auth path, lease release. */
+function c5Settled(run: RunRecord, events: Event[], eligible: Event[]): boolean {
+  const proof = deriveExecutionEpochCleanupProof(run, events);
+  return authoritativeLiveCleanupComplete(events, run) && proof.ready && authCleanupPath(run, events, proof) !== null
+    && eligible.some((event) => event.kind === "cleanup.browser_lease_released" || event.kind === "cleanup.browser_lease_absent");
+}
+
+export const C5_FIRST_USE_ASSESSMENT_SCHEMA = "sophia.voice-lab.c5-first-use-assessment.v1";
+type C5Criterion = { id: string; status: "met" | "gap"; evidence_seqs: number[]; detail?: Record<string, unknown> };
+
+/**
+ * C079: the restricted first-use assessment, reported beside (never instead
+ * of) the scenario verdicts, certification and terminal state. It asks only
+ * what the continuation mission asks: exact deployment, an authenticated
+ * synthetic session, at least two non-silent synthetic utterances each with
+ * complete input delivery plus provider/public transcript receipts and at
+ * least one exact audible output chain, second and later utterances accepted
+ * only after the prior reply completed, ordinary settlement, and canonical
+ * evidence. Recognition accuracy, semantic adaptivity, acoustic quality and
+ * all-chunk certification are not assessed here; semantic adaptivity needs
+ * coordinator review.
+ */
+export function deriveC5FirstUseAssessment(run: RunRecord, events: import("./domain.js").LabEvent[], operations: import("./domain.js").OperationRecord[]) {
+  const eligible = events.filter((event) => event.source !== "product" || isExactBoundProductEvent(run, event));
+  const productEvents = eligible.filter((event) => event.source === "product");
+  const seqsOf = (list: import("./domain.js").LabEvent[]) => list.map((event) => event.seq);
+  const criterion = (id: string, met: boolean, evidence: import("./domain.js").LabEvent[], detail?: Record<string, unknown>): C5Criterion => ({ id, status: met ? "met" : "gap", evidence_seqs: seqsOf(evidence), ...(detail ? { detail } : {}) });
+  const deployment = eligible.filter((event) => event.kind === "deployment.verified" || event.kind === "deployment.reverified");
+  const exactTuple = (event: import("./domain.js").LabEvent) => (["frontend", "backend", "voice"] as const).every((component) => (event.payload[component] as Record<string, unknown> | undefined)?.commit_sha === run.target.expectedDeployment[component])
+    && (event.payload.langgraph as Record<string, unknown> | undefined)?.commit_sha === run.target.expectedDependencies.langgraph;
+  const tupleMet = (["deployment.verified", "deployment.reverified"] as const).every((kind) => deployment.some((event) => event.kind === kind && exactTuple(event)));
+  const capture = eligible.filter((event) => ["harness.initialized", "harness.media_stream_issued", "session.microphone_stream_acquired"].includes(event.kind));
+  const sessionMet = run.canonicalSessionId !== null && ["harness.initialized", "harness.media_stream_issued", "session.microphone_stream_acquired"].every((kind) => capture.some((event) => event.kind === kind));
+  const { utteranceOperations, chains } = deriveOutputChains(run, productEvents, operations);
+  const accepted = (operation: import("./domain.js").OperationRecord) => eligible.find((event) => event.kind === "operation.speak.accepted" && event.payload.operation_id === operation.id);
+  const ordered = [...utteranceOperations].sort((left, right) => (accepted(left)?.seq ?? Number.MAX_SAFE_INTEGER) - (accepted(right)?.seq ?? Number.MAX_SAFE_INTEGER));
+  const replyCompleted = (operation: import("./domain.js").OperationRecord) => productEvents.filter((event) => event.kind === "product.voice-session.gemini-synthetic-interaction-receipt"
+    && (event.payload.receipt as Record<string, unknown> | undefined)?.operation_id === operation.id && (event.payload.receipt as Record<string, unknown> | undefined)?.phase === "assistant_response_completed");
+  const utterances = ordered.map((operation, index) => assessC5Utterance(operation, index > 0 ? ordered[index - 1]! : null, eligible, chains, accepted, replyCompleted));
+  const finalization = eligible.filter((event) => isCanonicalFinalizationReceipt(run, event));
+  // C082: this run's supported End must itself have succeeded, with its durable
+  // completion witness. Recovery after a failed or timed-out End is settlement,
+  // not an ordinary End. Full-scenario success is NOT required here.
+  const endCompletions = c5EndCompletions(run, operations, eligible);
+  const settled = endCompletions.length > 0 && finalization.length > 0 && c5Settled(run, events, eligible);
+  const recoveries = eligible.filter((event) => event.kind === "cleanup.recovery" && event.source === "canonical");
+  const canonicalEvidence = ((recoveries.at(-1)?.payload.receipt as Record<string, unknown> | undefined)?.components as Record<string, Record<string, unknown>> | undefined)?.canonical_evidence;
+  const criteria: C5Criterion[] = [
+    criterion("exact_deployment_tuple", tupleMet, deployment),
+    criterion("authenticated_synthetic_session_and_capture", sessionMet, capture),
+    criterion("two_or_more_non_silent_utterances", utterances.length >= 2, eligible.filter((event) => event.kind === "operation.speak.accepted")),
+    { id: "input_delivery_and_transcript_receipts_each_utterance", status: utterances.length > 0 && utterances.every((utterance) => utterance.input === "met") ? "met" : "gap", evidence_seqs: [] },
+    { id: "audible_exact_output_each_utterance", status: utterances.length > 0 && utterances.every((utterance) => utterance.output === "met") ? "met" : "gap", evidence_seqs: utterances.flatMap((utterance) => utterance.evidence_seqs) },
+    { id: "later_utterances_after_prior_reply", status: utterances.length >= 2 && utterances.every((utterance) => utterance.adaptive_ordering !== "gap") ? "met" : "gap", evidence_seqs: [] },
+    criterion("ordinary_end_and_settlement", settled, [...endCompletions, ...finalization, ...recoveries.slice(-1)]),
+    criterion("canonical_evidence_retained", ["retention_pending", "completed", "already_terminal"].includes(String(canonicalEvidence?.status)), recoveries.slice(-1), { canonical_evidence_status: canonicalEvidence?.status ?? null, code: canonicalEvidence?.code ?? null }),
+  ];
+  return {
+    schema: C5_FIRST_USE_ASSESSMENT_SCHEMA,
+    scope: "restricted_internal_use_first_use",
+    separate_from_scenario_verdicts: true,
+    status: criteria.every((item) => item.status === "met") ? "met" as const : "gap" as const,
+    criteria,
+    utterances,
+    semantic_adaptivity: "coordinator_assessment_required" as const,
+    not_assessed: ["recognition_accuracy", "semantic_adaptivity", "acoustic_quality", "all_chunk_output_certification"],
+  };
 }
 
 function exactProductInputChain(events: import("./domain.js").LabEvent[], operation: import("./domain.js").OperationRecord): boolean {
@@ -3624,53 +4031,7 @@ export function evaluateScenarioAssertions(run: RunRecord, events: import("./dom
       break;
     }
     case "V-O01": {
-      const received = productByKind("audio.output.received");
-      const providerChunks = productByKind("audio.output.provider_chunk");
-      const playback = ["audio.output.scheduled", "audio.output.started", "audio.output.completed"].flatMap(productByKind);
-      const legs = productByKind("audio.output.leg_receipt");
-      const chains = legs.map((legEvent) => {
-        const leg = legEvent.payload.receipt as Record<string, unknown> | undefined;
-        const realizationId = typeof leg?.realizationId === "string" ? leg.realizationId : null;
-        const receipts = playback.filter((event) => (event.payload.receipt as Record<string, unknown> | undefined)?.realizationId === realizationId);
-        const scheduled = receipts.filter((event) => (event.payload.receipt as Record<string, unknown> | undefined)?.phase === "scheduled");
-        const started = receipts.filter((event) => (event.payload.receipt as Record<string, unknown> | undefined)?.phase === "started");
-        const completed = receipts.filter((event) => (event.payload.receipt as Record<string, unknown> | undefined)?.phase === "completed");
-        const terminal = completed[0]?.payload.receipt as Record<string, unknown> | undefined;
-        const receivedEvent = received.find((event) => {
-          const diagnostic = event.payload.diagnostic as Record<string, unknown> | undefined;
-          return diagnostic?.providerReceiveSequence === terminal?.providerReceiveSequence
-            && diagnostic?.providerConnectionEpoch === terminal?.providerConnectionEpoch
-            && diagnostic?.playbackGeneration === terminal?.playbackGeneration
-            && diagnostic?.relayCorrelationId === terminal?.relayCorrelationId
-            && diagnostic?.providerRelaySequence === terminal?.providerRelaySequence
-            && diagnostic?.providerReceivedAt === terminal?.providerReceivedAt
-            && diagnostic?.responseId === terminal?.responseId
-            && diagnostic?.providerEventId === terminal?.providerEventId;
-        });
-        const chunkEvent = providerChunks.find((event) => {
-          const diagnostic = event.payload.diagnostic as Record<string, unknown> | undefined;
-          return diagnostic?.providerReceiveSequence === terminal?.providerReceiveSequence
-            && diagnostic?.providerConnectionEpoch === terminal?.providerConnectionEpoch
-            && diagnostic?.playbackGeneration === terminal?.playbackGeneration
-            && diagnostic?.relayCorrelationId === terminal?.relayCorrelationId
-            && diagnostic?.providerRelaySequence === terminal?.providerRelaySequence
-            && diagnostic?.providerReceivedAt === terminal?.providerReceivedAt
-            && diagnostic?.chunkIndex === terminal?.chunkIndex
-            && diagnostic?.chunksInEvent === terminal?.chunksInEvent
-            && diagnostic?.chunkHash === terminal?.chunkHash
-            && diagnostic?.byteLength === terminal?.byteLength
-            && diagnostic?.scheduled === true && diagnostic?.dropReason === null
-            && /^[a-f0-9]{64}$/.test(String(diagnostic?.chunkHash));
-        });
-        const exact = leg?.schema === "sophia_gemini_output_leg_v1" && leg.status === "verified" && leg.completionPhase === "completed"
-          && /^[a-f0-9]{64}$/.test(String(leg.monitorDigestSha256)) && Number(leg.monitorFrameCount) > 0 && Number(leg.monitorNonSilentFrameCount) > 0 && leg.rawAudioExcluded === true
-          && scheduled.length === 1 && started.length === 1 && completed.length === 1 && receivedEvent !== undefined && chunkEvent !== undefined
-          && typeof terminal?.responseId === "string" && terminal.responseId.length > 0
-          && leg.providerChunkFingerprint === terminal?.chunkHash && leg.providerConnectionEpoch === terminal?.providerConnectionEpoch && leg.playbackGeneration === terminal?.playbackGeneration
-          && receivedEvent.seq < chunkEvent.seq && chunkEvent.seq < scheduled[0]!.seq && scheduled[0]!.seq < started[0]!.seq && started[0]!.seq < completed[0]!.seq && completed[0]!.seq < legEvent.seq
-          && typeof leg.scheduledAt === "string" && typeof leg.completedAt === "string" && Number(leg.monitorDurationMs) >= 0 && Number(terminal?.durationSeconds) > 0;
-        return { exact, realizationId, fingerprint: leg?.providerChunkFingerprint, receivedSeq: receivedEvent?.seq ?? null, chunkSeq: chunkEvent?.seq ?? null, events: [...(receivedEvent ? [receivedEvent] : []), ...(chunkEvent ? [chunkEvent] : []), ...receipts, legEvent] };
-      });
+      const { utteranceOperations, interactions, received, providerChunks, playback, chains } = deriveOutputChains(run, productEvents, operations);
       const scheduledReceipts = playback.filter((event) => (event.payload.receipt as Record<string, unknown> | undefined)?.phase === "scheduled");
       const startedReceipts = playback.filter((event) => (event.payload.receipt as Record<string, unknown> | undefined)?.phase === "started");
       const completedReceipts = playback.filter((event) => (event.payload.receipt as Record<string, unknown> | undefined)?.phase === "completed");
@@ -3690,12 +4051,16 @@ export function evaluateScenarioAssertions(run: RunRecord, events: import("./dom
         const indexes = group.map((event) => Number((event.payload.diagnostic as Record<string, unknown> | undefined)?.chunkIndex)).sort((left, right) => left - right);
         return Number.isSafeInteger(count) && count > 0 && group.length === count
           && indexes.every((value, index) => value === index)
-          && typeof aggregate?.responseId === "string" && aggregate.responseId.length > 0;
+          && typeof aggregate?.relayCorrelationId === "string" && aggregate.relayCorrelationId.length > 0;
       });
+      // Every non-silent utterance must own exactly one interaction and at
+      // least one exact audible chain bound to it.
+      const utterancesCovered = interactions.valid && utteranceOperations.every((operation) => chains.some((chain) => chain.exact && chain.operationId === operation.id));
       const exactNaturalChains = chains.length > 0 && chains.every((chain) => chain.exact)
         && receivedCoverage && providerChunks.length === chains.length && scheduledReceipts.length === chains.length && startedReceipts.length === chains.length && completedReceipts.length === chains.length && playback.length === chains.length * 3
         && new Set(chains.map((chain) => chain.realizationId)).size === chains.length
-        && new Set(chains.map((chain) => chain.fingerprint)).size === chains.length
+        && utterancesCovered
+        && new Set(chains.map((chain) => chain.identity)).size === chains.length && chains.every((chain) => chain.identity !== null)
         && new Set(chains.map((chain) => chain.chunkSeq)).size === chains.length
         && completedRealizations.length === chains.length && new Set(completedRealizations).size === completedRealizations.length
         && new Set(scheduledReceipts.map((event) => (event.payload.receipt as Record<string, unknown> | undefined)?.realizationId)).size === chains.length
@@ -4595,12 +4960,12 @@ export function isExactBoundProductEvent(run: RunRecord, event: Pick<import("./d
     && record.provider_expires_at === run.expiresAt.toISOString()
     && record.cleanup_obligation_id_sha256 === sha256(run.cleanupObligationId);
 }
-function governedDriverEventPayload(run: RunRecord, event: { source: string; payload: Record<string, unknown> }): Record<string, unknown> {
+function governedDriverEventPayload(run: RunRecord, event: { kind: string; source: string; payload: Record<string, unknown> }): Record<string, unknown> {
   const appBinding = strictProductRunBinding(event.source, event.payload, run);
-  return redact({ ...event.payload,
+  return preserveAuthCleanupBooleans(event, redact({ ...event.payload,
     _runner_binding: { run_id: run.id, test_run_id_sha256: sha256(run.testRunId) },
     ...(appBinding === null ? {} : { _product_run_binding: appBinding }),
-  });
+  }));
 }
 
 function strictProductRunBinding(source: string, payload: Record<string, unknown>, expected: RunRecord): Record<string, unknown> | null {

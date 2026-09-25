@@ -9,7 +9,7 @@ const CONFIG_MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
 const VOICE_LAB_PACKAGE_ROOT = path.basename(path.dirname(CONFIG_MODULE_DIR)) === "dist" ? path.resolve(CONFIG_MODULE_DIR, "../..") : path.resolve(CONFIG_MODULE_DIR, "..");
 export const BUNDLED_FIXTURE_MANIFEST_PATH = path.join(VOICE_LAB_PACKAGE_ROOT, "fixtures/manifest.json");
 export const BUNDLED_FIXTURE_ROOT = path.join(VOICE_LAB_PACKAGE_ROOT, "fixtures/audio");
-export const BUNDLED_FIXTURE_MANIFEST_SHA256 = "574806ada0f6450c097bffe6aa50c469c03bcc55cd21c8f5c78e9c9ef72073b8";
+export const BUNDLED_FIXTURE_MANIFEST_SHA256 = "7f41be2da2587a556ec34c6daf1871019ec8b0ed7c7fae87d39353e7b897018d";
 
 // SemVer 2.0.0, including optional pre-release and build metadata. The
 // plugin-creator cachebuster uses the build form `<base>+codex.<token>`.

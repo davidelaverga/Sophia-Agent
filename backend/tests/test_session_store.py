@@ -17,6 +17,7 @@ from deerflow.sophia.session_store import (
     SessionStoreError,
     SupabaseSessionStoreConfig,
     SupabaseSessionTranscriptStore,
+    canonical_visible_messages,
 )
 
 
@@ -568,3 +569,124 @@ def test_excluded_witness_field_does_not_break_exact_transcript_read(tmp_path):
     with pytest.raises(SessionEvidenceIntegrityError):
         store.read_exact_session_messages("user-1", "session-1")
 
+
+
+class _ColumnProjectingPostgrest(FakeSupabasePostgrest):
+    """PostgREST projects ``select``; production rows carry MEM00 columns."""
+
+    MEM00_COLUMNS = {
+        "memory_source_accepted_version": None,
+        "memory_source_acceptance_epoch": 0,
+        "memory_source_version": "00000000-0000-4000-8000-000000000001",
+    }
+
+    def _handle_messages(self, request: httpx.Request, params: dict[str, str]) -> httpx.Response:
+        response = super()._handle_messages(request, params)
+        if request.method != "GET":
+            return response
+        rows = [{**row, **self.MEM00_COLUMNS} for row in response.json()]
+        select = params.get("select", "*")
+        if select != "*":
+            columns = select.split(",")
+            if any(column not in row for row in rows for column in columns):
+                return httpx.Response(400, json={"code": "42703", "message": "required column does not exist"})
+            rows = [{column: row[column] for column in columns} for row in rows]
+        return httpx.Response(200, json=rows)
+
+
+def test_supabase_exact_transcript_read_ignores_additive_mem00_columns():
+    """Regression (C074/J6): the 2026-09-09 MEM00 migrations added
+    memory_source_accepted_version / _acceptance_epoch / memory_source_version
+    to sophia_session_messages. The exact reader selected ``*`` and compared the
+    raw key set, so every synthetic canonical-evidence recovery failed with
+    canonical_evidence_raw_message_set_invalid.
+    """
+    fake = _ColumnProjectingPostgrest()
+    store = _supabase_store(fake)
+    store.upsert_session(SessionRecord(session_id="session-1", thread_id="thread-1", user_id="user-1"))
+    store.replace_messages_revisioned(
+        "user-1",
+        "session-1",
+        [SessionMessageRecord(message_id="msg-1", session_id="session-1", thread_id="thread-1",
+                              role="user", content="synthetic", sequence=1)],
+        expected_revision=0,
+    )
+
+    messages = store.read_exact_session_messages("user-1", "session-1")
+
+    assert [message.message_id for message in messages] == ["msg-1"]
+    assert all(not hasattr(message, "memory_source_accepted_version") for message in messages)
+
+    # Genuine drift of a required transcript column still fails closed.
+    for row in fake.messages.values():
+        row.pop("approximate", None)
+    with pytest.raises(SessionEvidenceIntegrityError):
+        store.read_exact_session_messages("user-1", "session-1")
+
+
+def test_supabase_exact_transcript_read_accepts_valid_nonfinal_and_duplicate_rows():
+    fake = _ColumnProjectingPostgrest()
+    store = _supabase_store(fake)
+    store.upsert_session(SessionRecord(session_id="session-1", thread_id="thread-1", user_id="user-1"))
+    first = SessionMessageRecord(
+        message_id="msg-1", session_id="session-1", thread_id="thread-1",
+        role="user", content="synthetic", sequence=1,
+        created_at="2026-09-24T19:00:00.000Z",
+    )
+    store.replace_messages_revisioned("user-1", "session-1", [first], expected_revision=0)
+    duplicate = first.model_copy(update={"message_id": "msg-duplicate", "sequence": 2})
+    nonfinal = first.model_copy(update={
+        "message_id": "msg-pending", "content": "unfinished", "sequence": 3, "final": False,
+    })
+    for message in (duplicate, nonfinal):
+        row = store._message_row_from_record("user-1", message)
+        fake.messages[row["id"]] = row
+
+    raw = store.read_exact_session_messages("user-1", "session-1")
+    assert len(raw) == 3
+    assert [item.message_id for item in canonical_visible_messages(raw)] == ["msg-duplicate"]
+
+
+def test_empty_exact_transcript_is_valid_but_malformed_or_unavailable_is_not():
+    store = _supabase_store(_ColumnProjectingPostgrest())
+    assert store.read_exact_session_messages("user-1", "session-1") == []
+
+    store._client = httpx.Client(transport=httpx.MockTransport(
+        lambda request: httpx.Response(200, json={"unexpected": "shape"})
+    ))
+    with pytest.raises(SessionEvidenceIntegrityError):
+        store.read_exact_session_messages("user-1", "session-1")
+
+    store._client = httpx.Client(transport=httpx.MockTransport(
+        lambda request: httpx.Response(503, json={"code": "unavailable"})
+    ))
+    with pytest.raises(SessionStoreError):
+        store.read_exact_session_messages("user-1", "session-1")
+
+
+@pytest.mark.parametrize("status,code,expected", [
+    (400, "42703", SessionEvidenceIntegrityError),
+    (400, "PGRST204", SessionEvidenceIntegrityError),
+    (400, "22P02", SessionStoreError),
+    (401, "PGRST301", SessionStoreError),
+    (503, "42703", SessionStoreError),
+])
+def test_exact_transcript_projection_classifies_postgrest_errors(status, code, expected):
+    fake = _ColumnProjectingPostgrest()
+    store = _supabase_store(fake)
+    store._client = httpx.Client(transport=httpx.MockTransport(
+        lambda request: httpx.Response(status, json={"code": code, "message": "query rejected"})
+    ))
+    with pytest.raises(expected) as exc:
+        store.read_exact_session_messages("user-1", "session-1")
+    assert type(exc.value) is expected
+
+
+def test_ordinary_session_request_preserves_missing_column_store_error():
+    store = _supabase_store(_ColumnProjectingPostgrest())
+    store._client = httpx.Client(transport=httpx.MockTransport(
+        lambda request: httpx.Response(400, json={"code": "42703"})
+    ))
+    with pytest.raises(SessionStoreError) as exc:
+        store._request("GET", "sophia_session_messages")
+    assert type(exc.value) is SessionStoreError

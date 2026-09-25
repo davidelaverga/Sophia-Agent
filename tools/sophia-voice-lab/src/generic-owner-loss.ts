@@ -62,8 +62,15 @@ const verifiedSchema = z.object({
 }).strict();
 export type VerifiedGenericOwnerLoss = z.infer<typeof verifiedSchema> | VerifiedServiceOwnerFence;
 
+/** Exactly the verified service-fence generations routed to their own parser. */
+const VERIFIED_SERVICE_FENCE_SCHEMAS: ReadonlySet<unknown> = new Set([
+  "sophia.voice-lab.verified-service-owner-fence.v1",
+  "sophia.voice-lab.verified-service-owner-fence.v2",
+]);
+
 export function parseVerifiedGenericOwnerLoss(raw: unknown, control?: RecoveryControlRecord): VerifiedGenericOwnerLoss {
-  if (raw && typeof raw === "object" && "schema" in raw && raw.schema === "sophia.voice-lab.verified-service-owner-fence.v1") return parseVerifiedServiceOwnerFence(raw, control);
+  if (raw && typeof raw === "object" && "schema" in raw
+    && VERIFIED_SERVICE_FENCE_SCHEMAS.has(raw.schema)) return parseVerifiedServiceOwnerFence(raw, control);
   const value = verifiedSchema.parse(raw);
   const { proofSha256, ...core } = value;
   if (canonicalRequestHash(core) !== proofSha256) throw new Error("GENERIC_OWNER_PROOF_INVALID");
@@ -111,7 +118,8 @@ export function verifyGenericOwnerLoss(input: {
   expectedRecoveryDeployment?: { frontend: string; backend: string; voice: string };
 }) {
   if (input.receipt && typeof input.receipt === "object" && "schema" in input.receipt
-    && input.receipt.schema === "sophia.voice-lab.service-owner-fence-receipt.v1") {
+    && (input.receipt.schema === "sophia.voice-lab.service-owner-fence-receipt.v1"
+      || input.receipt.schema === "sophia.voice-lab.service-owner-fence-receipt.v2")) {
     if (!input.expectedRecoveryDeployment) throw new Error("SERVICE_FENCE_RECOVERY_RELEASE_REQUIRED");
     return verifyServiceOwnerFence({ ...input, expectedRecoveryDeployment: input.expectedRecoveryDeployment });
   }

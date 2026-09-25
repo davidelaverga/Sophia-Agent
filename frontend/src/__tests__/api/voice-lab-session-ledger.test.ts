@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { VoiceLabCapabilityClaims } from '../../server/voice-lab/capability';
 
@@ -1808,7 +1808,7 @@ describe('dedicated Voice Lab Better Auth session ledger', () => {
     await rotateVoiceLabSession('voice-lab-user-1', grant, 'token-one', expiry);
     database.faults.suppressSessionDelete = true;
     await expect(
-      revokeVoiceLabSessions('voice-lab-user-1', grant),
+      revokeVoiceLabSessions('voice-lab-user-1', grant, 'token-one'),
     ).rejects.toMatchObject({
       code: 'voice_lab_auth_session_mutation_unconfirmed',
       status: 503,
@@ -1928,7 +1928,7 @@ describe('dedicated Voice Lab Better Auth session ledger', () => {
       session_token_sha256: 'a'.repeat(64),
       status: 'active',
     });
-    await expect(revokeVoiceLabSessions('voice-lab-user-1', claims())).rejects.toMatchObject({
+    await expect(revokeVoiceLabSessions('voice-lab-user-1', claims(), 'token-one')).rejects.toMatchObject({
       code: 'voice_lab_dedicated_principal_session_conflict',
       status: 409,
     });
@@ -1961,14 +1961,14 @@ describe('dedicated Voice Lab Better Auth session ledger', () => {
       'lab-token',
     ]);
 
-    await expect(revokeVoiceLabSessions('voice-lab-user-1', grant)).resolves.toBe(1);
+    await expect(revokeVoiceLabSessions('voice-lab-user-1', grant, 'lab-token')).resolves.toBe(1);
     expect(database.rows).toEqual([ordinary]);
   });
 
   it('revokes every lab-marked session for the exact dedicated principal', async () => {
     const expiry = new Date(Date.now() + 3_600_000);
     await rotateVoiceLabSession('voice-lab-user-1', claims(), 'token-one', expiry);
-    const revoked = await revokeVoiceLabSessions('voice-lab-user-1', claims());
+    const revoked = await revokeVoiceLabSessions('voice-lab-user-1', claims(), 'token-one');
 
     expect(revoked).toBe(1);
     expect(database.rows).toEqual([]);
@@ -1986,7 +1986,7 @@ describe('dedicated Voice Lab Better Auth session ledger', () => {
     const grant = claims();
     const expiry = new Date(Date.now() + 3_600_000);
     await rotateVoiceLabSession('voice-lab-user-1', grant, 'token-one', expiry);
-    await revokeVoiceLabSessions('voice-lab-user-1', grant);
+    await revokeVoiceLabSessions('voice-lab-user-1', grant, 'token-one');
 
     await expect(rotateVoiceLabSession(
       'voice-lab-user-1',
@@ -2011,7 +2011,7 @@ describe('dedicated Voice Lab Better Auth session ledger', () => {
     });
     const expiry = new Date(Date.now() + 3_600_000);
     await rotateVoiceLabSession('voice-lab-user-1', first, 'token-one', expiry);
-    await revokeVoiceLabSessions('voice-lab-user-1', first);
+    await revokeVoiceLabSessions('voice-lab-user-1', first, 'token-one');
     const rotated = await rotateVoiceLabSession(
       'voice-lab-user-1',
       second,
@@ -2037,14 +2037,130 @@ describe('dedicated Voice Lab Better Auth session ledger', () => {
     });
     const expiry = new Date(Date.now() + 3_600_000);
     await rotateVoiceLabSession('voice-lab-user-1', first, 'token-one', expiry);
-    await revokeVoiceLabSessions('voice-lab-user-1', first);
+    await revokeVoiceLabSessions('voice-lab-user-1', first, 'token-one');
     await rotateVoiceLabSession('voice-lab-user-1', second, 'token-two', expiry);
 
-    await expect(revokeVoiceLabSessions('voice-lab-user-1', first)).rejects.toMatchObject({
+    await expect(revokeVoiceLabSessions('voice-lab-user-1', first, 'token-one')).rejects.toMatchObject({
       code: 'voice_lab_auth_active_run_conflict',
       status: 409,
     });
     expect(database.rows.map((row) => row.token)).toEqual(['token-two']);
     expect(database.grants.find((row) => row.test_run_id === 'run-002')?.status).toBe('active');
   });
+
+  describe('C048 receiving auth lifecycle: enrol, continue, refresh, fresh cleanup', () => {
+    const BUILD = '41a9b127af780bbe9d88acf34566a6aaf443e6b0';
+    const GRANT_SECRET = 'grant-secret-that-is-at-least-thirty-two-bytes';
+    const originalEnv = { ...process.env };
+    let entropy = 0;
+    const grant = (ops: string[], overrides: Partial<VoiceLabCapabilityClaims> = {}) => {
+      const now = Math.floor(Date.now() / 1000);
+      entropy += 1;
+      return claims({ allowed_ops: ops as VoiceLabCapabilityClaims['allowed_ops'], iat: now, nbf: now, exp: now + 120,
+        jti: `jti-lifecycle-${entropy}`, nonce: `nonce-lifecycle-${entropy}`, expected_deployment: { frontend: BUILD, backend: BUILD, voice: BUILD }, ...overrides });
+    };
+    const post = (route: (request: never) => Promise<Response>, path: string, capability: VoiceLabCapabilityClaims, binding?: string) =>
+      route(new Request(`https://www.sophia-ei.com/api/voice-lab/auth/${path}`, { method: 'POST', headers: {
+        'X-Sophia-Voice-Lab-Capability': signVoiceLabCapability(capability, GRANT_SECRET),
+        ...(binding ? { Cookie: `better-auth.session_token=signed; ${VOICE_LAB_RUN_BINDING_COOKIE}=${binding}` } : {}),
+      } }) as never);
+    async function enrol(start: VoiceLabCapabilityClaims) {
+      const enrolled = await post(grantPOST, 'grant', start);
+      if (enrolled.status !== 200) throw new Error(`enrol ${enrolled.status} ${JSON.stringify(await enrolled.json())}`);
+      const binding = (enrolled as unknown as { cookies: { get: (name: string) => { value: string } | undefined } }).cookies.get(VOICE_LAB_RUN_BINDING_COOKIE)!.value;
+      const sessionToken = database.rows[database.rows.length - 1]!.token as string;
+      lifecycle.getSession.mockResolvedValue({ session: { token: sessionToken }, user: { id: 'voice-lab-user-1', email: 'voice-lab@example.com', name: 'Voice Lab' } });
+      return { binding, sessionToken };
+    }
+
+    beforeEach(() => {
+      // Admission is open during the run (J4); enrolment is refused under the kill switch.
+      Object.assign(process.env, { SOPHIA_VOICE_LAB_ENABLED: 'true', SOPHIA_VOICE_LAB_KILL_SWITCH: 'false', SOPHIA_VOICE_LAB_TEST_PRINCIPAL: 'voice-lab-user-1',
+        SOPHIA_VOICE_LAB_TEST_EMAIL: 'voice-lab@example.com', SOPHIA_VOICE_LAB_ENVIRONMENT: 'production', SOPHIA_VOICE_LAB_GRANT_SECRET: GRANT_SECRET,
+        VERCEL_GIT_COMMIT_SHA: BUILD });
+      lifecycle.findUserByEmail.mockResolvedValue({ user: { id: 'voice-lab-user-1', email: 'voice-lab@example.com' } });
+    });
+    afterEach(() => { process.env = { ...originalEnv }; });
+
+    it('revokes exactly the enrolled grant and session with a fresh cleanup capability', async () => {
+      const start = grant(['auth:session', 'session:create', 'session:read', 'voice:start', 'session:finalize']);
+      const { binding } = await enrol(start);
+      expect((await post(continuePOST, 'continue', grant(['session:continue', 'session:create', 'session:read', 'session:finalize']), binding)).status).toBe(200);
+      expect((await post(refreshPOST, 'refresh', grant(['session:finalize']), binding)).status).toBe(200);
+      expect(database.grants.filter((row) => row.status === 'active')).toHaveLength(1); // continue/refresh register nothing
+      const fresh = grant(['session:cleanup']);
+      expect(fresh.jti).not.toBe(start.jti);
+      const cleaned = await post(cleanupPOST, 'cleanup', fresh, binding);
+      expect(cleaned.status).toBe(200);
+      expect(await cleaned.json()).toMatchObject({ ok: true, session_revoked: true, revoked_session_count: 1 });
+      expect(database.rows).toEqual([]);
+      expect(database.grants.map((row) => row.status)).toEqual(['revoked']);
+      // C058: the cleanup deleted the Better Auth session, so a lost-response
+      // replay has NO live session. The route keeps requiring one: the replay
+      // is refused and changes nothing. Settlement after a lost response
+      // belongs to the Gateway session:recover receipt, not this route.
+      lifecycle.getSession.mockResolvedValue(null);
+      const settled = JSON.stringify({ rows: database.rows, grants: database.grants, obligations: database.obligations });
+      const replay = await post(cleanupPOST, 'cleanup', fresh, binding);
+      expect(replay.status).toBe(403);
+      expect(await replay.json()).toEqual({ ok: false, error: 'voice_lab_authenticated_principal_required' });
+      expect(JSON.stringify({ rows: database.rows, grants: database.grants, obligations: database.obligations })).toBe(settled);
+      // Enrolment replay stays refused.
+      const reenrol = await post(grantPOST, 'grant', start);
+      expect(reenrol.status).toBe(409);
+      expect(await reenrol.json()).toMatchObject({ error: 'voice_lab_grant_replayed_after_cleanup' });
+    });
+
+    it.each([
+      ['another run', { test_run_id: 'run-other' }, 409],
+      ['another cleanup obligation', { cleanup_obligation_id: '323e4567-e89b-42d3-a456-426614174000' }, 409],
+      ['another provider expiry', { provider_expires_at: '2033-05-18T04:03:21.000Z' }, 409],
+    ] as const)('refuses a fresh cleanup capability for %s and revokes nothing', async (_label, overrides, status) => {
+      const start = grant(['auth:session', 'session:create', 'session:read', 'voice:start', 'session:finalize']);
+      const { binding } = await enrol(start);
+      const refused = await post(cleanupPOST, 'cleanup', grant(['session:cleanup'], overrides), binding);
+      expect(refused.status).toBe(status);
+      expect(database.grants.map((row) => row.status)).toEqual(['active']);
+      expect(database.rows).toHaveLength(1);
+    });
+
+    it('refuses a fresh cleanup capability presented with a different authenticated session token', async () => {
+      const start = grant(['auth:session', 'session:create', 'session:read', 'voice:start', 'session:finalize']);
+      const { binding } = await enrol(start);
+      lifecycle.getSession.mockResolvedValue({ session: { token: 'another-session-token' }, user: { id: 'voice-lab-user-1', email: 'voice-lab@example.com', name: 'Voice Lab' } });
+      const refused = await post(cleanupPOST, 'cleanup', grant(['session:cleanup']), binding);
+      expect(refused.status).toBe(409);
+      expect(await refused.json()).toMatchObject({ error: 'voice_lab_run_binding_mismatch' });
+      expect(database.grants.map((row) => row.status)).toEqual(['active']);
+    });
+  });
 });
+
+// C048: the deployed receiving sequence through the real routes and the real
+// ledger (revoke NOT mocked). The worker enrols with a start grant, continues
+// and refreshes with their own grants, then cleans up with a FRESH
+// session:cleanup grant whose jti/nonce never equal the enrolment grant's.
+const lifecycle = vi.hoisted(() => ({ getSession: vi.fn(), findUserByEmail: vi.fn() }));
+vi.mock('../../server/better-auth/migrations', () => ({ ensureBetterAuthSchema: async () => undefined }));
+vi.mock('../../server/voice-lab/retention-admission', () => ({ assertVoiceLabRetentionAdmissionReady: async () => undefined }));
+vi.mock('../../server/better-auth/config', () => {
+  const attributes = { httpOnly: true, secure: true, sameSite: 'lax', path: '/' };
+  return { auth: {
+    api: { getSession: (...args: unknown[]) => lifecycle.getSession(...args) },
+    $context: Promise.resolve({
+      secret: 'better-auth-secret-at-least-thirty-two-bytes',
+      internalAdapter: { findUserByEmail: (...args: unknown[]) => lifecycle.findUserByEmail(...args) },
+      authCookies: {
+        sessionToken: { name: 'better-auth.session_token', attributes },
+        sessionData: { name: 'better-auth.session_data', attributes },
+        dontRememberToken: { name: 'better-auth.dont_remember', attributes },
+      },
+    }),
+  } };
+});
+import { POST as grantPOST } from '../../app/api/voice-lab/auth/grant/route';
+import { POST as continuePOST } from '../../app/api/voice-lab/auth/continue/route';
+import { POST as refreshPOST } from '../../app/api/voice-lab/auth/refresh/route';
+import { POST as cleanupPOST } from '../../app/api/voice-lab/auth/cleanup/route';
+import { signVoiceLabCapability, VOICE_LAB_RUN_BINDING_COOKIE } from '../../server/voice-lab/capability';
+

@@ -12,6 +12,7 @@ import { BrowserProcessTerminationSchema, type BrowserProcessTermination } from 
 import type { VoiceLabConfig } from "./config.js";
 import { VoiceLabError, labError, type DeploymentDependencies, type DeploymentIdentity, type LabEvent, type RunRecord } from "./domain.js";
 import { canonicalRequestHash, redact, sha256, validateAllowedOrigin } from "./security.js";
+import { UNCONFIRMED_AUTH_CLEANUP_SCHEMA } from "./execution-cleanup.js";
 import { isTerminalRecoveryComponentStatus } from "./recovery-control.js";
 
 export interface DriverStartResult {
@@ -46,6 +47,13 @@ export type D02ProductCleanupAcknowledgement = {
 };
 export interface DriverOperationResult { receipt: Record<string, unknown>; events: Omit<LabEvent, "runId" | "seq" | "at">[]; }
 export interface DriverEndResult { events: Omit<LabEvent, "runId" | "seq" | "at">[]; artifacts: { id: string; kind: string; contentType: string; bytes: Buffer }[]; }
+/** Carry already-drained evidence through a failed end without claiming cleanup. */
+export class DriverEndFailure extends VoiceLabError {
+  constructor(readonly original: unknown, readonly events: DriverEndResult["events"]) {
+    super(original instanceof VoiceLabError ? original.detail : labError("END_DRIVER_FAILED", "The browser end operation failed after evidence collection.", "harness", true));
+  }
+}
+
 export type ActiveProductTarget = Record<string, unknown>;
 
 const CONTROL_ADAPTER_RECEIPT_KEYS = [
@@ -477,7 +485,8 @@ export interface VoiceBrowserDriver {
   continueSession(run: RunRecord, frontendContinueCapability: string): Promise<Omit<LabEvent, "runId" | "seq" | "at">[]>;
   quiesceD02Provider(run: RunRecord, request: D02ProductCleanupRequest): Promise<D02ProductCleanupAcknowledgement>;
   drain(runId: string): Promise<Omit<LabEvent, "runId" | "seq" | "at">[]>;
-  end(run: RunRecord, frontendFinalizeCapability: string, frontendCleanupCapability: string): Promise<DriverEndResult>;
+  /** operationDeadlineAt: the worker's absolute end-operation deadline (epoch ms). */
+  end(run: RunRecord, frontendFinalizeCapability: string, frontendCleanupCapability: string, operationDeadlineAt?: number): Promise<DriverEndResult>;
   abort(run: RunRecord, reason: string, frontendFinalizeCapability?: string, frontendCleanupCapability?: string): Promise<DriverEndResult>;
   recover(run: RecoveryTransportBinding, recoveryCapability: string, processTermination?: BrowserProcessTermination): Promise<DriverEndResult>;
   cancel(runId: string, reason: string): Promise<void>;
@@ -496,6 +505,7 @@ interface BrowserSession {
   contextExpiresAt: number;
   expectedBinding: { testRunId: string; cleanupObligationId: string; principalId: string; scenarioId: string | null; scenarioVersion: string | null; environment: string; retentionHours: number; providerExpiresAt: string; browserContextBinding?: D02BrowserContextBinding };
   startupPush: StartupPushState;
+  providerActivationAcknowledgements: Array<Promise<Record<string, unknown> | null>>;
 }
 
 export type OwnedBrowserProcess = {
@@ -739,7 +749,14 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       await enterStage("frontend_home_navigation");
       let activePage = await context.newPage();
       page = activePage;
+      const providerActivationAcknowledgements: BrowserSession["providerActivationAcknowledgements"] = [];
       const attachPageDiagnostics = (targetPage: Page): void => {
+        // Continuation activation settles its prior socket before the final
+        // disconnect. Keep only validated receiving echoes, never credentials.
+        targetPage.on("response", (response) => {
+          if (providerActivationAcknowledgements.length >= 192 || !isExactProviderActivationResponse(response, frontendOrigin)) return;
+          providerActivationAcknowledgements.push(readProviderActivationAcknowledgement(response, frontendOrigin));
+        });
         targetPage.on("pageerror", (error) => {
           latestClientPageError = classifyClientPageError(error);
         });
@@ -788,7 +805,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
         });
       };
       attachPageDiagnostics(page);
-      const session: BrowserSession = { ownership, context, page: activePage, harnessCursor: 0, productCursor: null, latestProviderReceipt: null, contextExpiresAt: Number(grantReceipt.expires_at), expectedBinding: { testRunId: run.testRunId, cleanupObligationId: run.cleanupObligationId, principalId: run.principalId, scenarioId: run.scenarioId, scenarioVersion: run.scenarioVersion, environment: run.environment, retentionHours: run.capturePolicy.retentionHours, providerExpiresAt: run.expiresAt.toISOString(), ...(exactBrowserContextBinding === undefined ? {} : { browserContextBinding: exactBrowserContextBinding }) }, startupPush };
+      const session: BrowserSession = { ownership, context, page: activePage, harnessCursor: 0, productCursor: null, latestProviderReceipt: null, contextExpiresAt: Number(grantReceipt.expires_at), expectedBinding: { testRunId: run.testRunId, cleanupObligationId: run.cleanupObligationId, principalId: run.principalId, scenarioId: run.scenarioId, scenarioVersion: run.scenarioVersion, environment: run.environment, retentionHours: run.capturePolicy.retentionHours, providerExpiresAt: run.expiresAt.toISOString(), ...(exactBrowserContextBinding === undefined ? {} : { browserContextBinding: exactBrowserContextBinding }) }, startupPush, providerActivationAcknowledgements };
       this.#sessions.set(run.id, session);
       this.#pendingContexts.delete(run.id);
       this.#pendingProcesses.delete(run.id);
@@ -1074,55 +1091,70 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
     return events;
   }
 
-  async end(run: RunRecord, frontendFinalizeCapability: string, frontendCleanupCapability: string): Promise<DriverEndResult> {
+  async end(run: RunRecord, frontendFinalizeCapability: string, frontendCleanupCapability: string, operationDeadlineAt?: number): Promise<DriverEndResult> {
     const session = this.#requireSession(run.id);
     const artifacts: DriverEndResult["artifacts"] = [];
-    {
+    const events: DriverEndResult["events"] = [];
+    // Disposed in finally: an early failure must not leave its listener
+    // attached for the browser's recovery lifetime, nor let a repeated end
+    // stack listeners.
+    let disconnectObserver: ProviderDisconnectObserver | null = null;
+    const disconnectDeadline = providerDisconnectDeadlineAt(Date.now(), this.config.endOperationSeconds, operationDeadlineAt);
+    try {
       const refreshUrl = new URL(this.config.authRefreshPath, new URL(run.target.frontendUrl).origin).toString();
-      const { response: refreshed } = await requestBoundJson(session.context.request, "POST", refreshUrl, 15_000, frontendFinalizeCapability);
-      if (!refreshed.ok()) throw new VoiceLabError(labError("FINALIZATION_GRANT_REJECTED", `Frontend finalization grant refresh was rejected with HTTP ${refreshed.status()}.`, "authorization"));
+      const { response: refreshed, payload: refreshPayload } = await requestBoundJson(session.context.request, "POST", refreshUrl, 15_000, frontendFinalizeCapability);
+      if (!refreshed.ok()) throw new VoiceLabError(labError("FINALIZATION_GRANT_REJECTED", `Frontend finalization grant refresh was rejected with HTTP ${refreshed.status()}.`, "authorization", false, { status: refreshed.status(), product_error_code: productErrorCode(refreshPayload) }));
       const frontendOrigin = new URL(run.target.frontendUrl).origin;
       const finalizationResponse = session.page.waitForResponse((response) => isExactFinalizationResponse(response, frontendOrigin), { timeout: 20_000 }).catch(() => null);
+      // Register before the UI click: stop fences its callbacks, but the owned
+      // page still exposes the real authenticated receiving acknowledgement.
+      disconnectObserver = observeProviderDisconnect(session.page, frontendOrigin, Math.max(1, disconnectDeadline - Date.now()));
       await clickEndSessionThroughExitGuards(session.page);
       const response = await finalizationResponse;
-      if (!response || response.status() !== 202 || !isJsonResponse(response)) throw new VoiceLabError(labError("PRODUCT_FINALIZATION_UNCONFIRMED", "The ordinary UI did not produce an exact-origin JSON 202 product finalization receipt.", "product", true, { status: response?.status() ?? null }));
+      if (!response || response.status() !== 202 || !isJsonResponse(response)) {
+        const failureBody = response && isJsonResponse(response) ? await response.json().catch(() => null) : null;
+        throw new VoiceLabError(labError("PRODUCT_FINALIZATION_UNCONFIRMED", "The ordinary UI did not produce an exact-origin JSON 202 product finalization receipt.", "product", true, { status: response?.status() ?? null, product_error_code: productErrorCode(failureBody) }));
+      }
       const responseBody = await response.json().catch(() => null) as Record<string, unknown> | null;
       const evidenceReceipt = responseBody?.evidence_receipt as Record<string, unknown> | undefined;
       if (!hasExactFinalizationEnvelope(run, responseBody, true) || typeof evidenceReceipt?.sha256 !== "string") throw new VoiceLabError(labError("FINALIZATION_ISOLATION_UNCONFIRMED", "Finalization receipt did not prove the bound synthetic run, cleanup obligation, exact retention policy, durable evidence, and exact isolation exclusions.", "product", false));
-      const events: Omit<LabEvent, "runId" | "seq" | "at">[] = [];
-      const closeDeadline = Date.now() + 10_000;
-      let providerClosedEvent: Omit<LabEvent, "runId" | "seq" | "at"> | null = null;
-      while (Date.now() < closeDeadline) {
-        const batch = await this.drain(run.id);
-        events.push(...batch);
-        providerClosedEvent = batch.find((event) => event.kind === "provider.stage" && isValidatedAppBinding(event.payload._app_synthetic_binding, session.expectedBinding) && (event.payload.stage === "closed" || event.payload.stage === "ended")) ?? null;
-        if (providerClosedEvent) break;
-        await waitOnWorkerClock(100);
-      }
-      if (!providerClosedEvent) throw new VoiceLabError(labError("PROVIDER_CLEANUP_UNCONFIRMED", "Product finalization succeeded but provider transport closure was not observed.", "product", true));
+      events.push({ kind: "session.finalized", source: "canonical", payload: redact({ http_status: response.status(), receipt: responseBody }), dedupeKey: `canonical:${run.id}:finalized` });
+      const disconnect = await disconnectObserver.acknowledgement;
+      const rejectedDisconnects = disconnectObserver.rejected();
+      if (!disconnect && rejectedDisconnects.count > 0) throw new VoiceLabError(labError("PROVIDER_CLEANUP_UNCONFIRMED", "The ordinary UI did not yield an exact authenticated provider disconnect acknowledgement with all owned websocket epochs settled.", "product", true, { validation_stage: "network_receipt", receiving_http_status: rejectedDisconnects.lastStatus, rejected_attempt_count: rejectedDisconnects.count }));
+      // The run record only reflects epochs the worker has already drained. An
+      // automatic reconnect since then has a bound product epoch receipt that
+      // the receiving echo legitimately settles, so drain first and validate
+      // against the newest epoch those authenticated receipts established.
+      // Drained events are pushed at once: the cursors have advanced, so a
+      // validation failure must still carry them in the end-failure evidence.
+      events.push(...await this.drain(run.id));
+      const providerEpoch = effectiveProviderEpoch(run.providerEpoch, session.latestProviderReceipt);
+      const acknowledgement = await validateNormalProviderDisconnectResponse(disconnect, frontendOrigin, { ...run, providerEpoch }, (await Promise.all(session.providerActivationAcknowledgements)).filter((receipt): receipt is Record<string, unknown> => receipt !== null));
+      const providerClosedEvent: DriverEndResult["events"][number] = {
+        kind: "provider.disconnect_acknowledged", source: "canonical",
+        // Read live, as before the extraction: rejections that arrive during the
+        // drain and validation awaits above still count toward the evidence.
+        payload: { stage: "closed", ...acknowledgement, rejected_receiving_attempt_count: disconnectObserver.rejected().count },
+        dedupeKey: `canonical:${run.id}:provider-disconnect`,
+      };
+      events.push(...await this.drain(run.id), providerClosedEvent);
       events.push(this.#providerTransportClosedEvent(run, session, providerClosedEvent));
       const finalDeployment = await this.#verifyDeployment(run);
       events.push({ kind: "deployment.reverified", source: "canonical", payload: finalDeployment.components, dedupeKey: `deployment:${run.id}:final` });
       events.push(await this.#snapshotEvent(session, "finalization"));
-      events.push({ kind: "session.finalized", source: "canonical", payload: redact({ http_status: response.status(), receipt: responseBody }), dedupeKey: `canonical:${run.id}:finalized` });
       if (run.capturePolicy.screenshot) {
         const bytes = await session.page.screenshot({ type: "jpeg", quality: 60, fullPage: false });
         artifacts.push({ id: randomUUID(), kind: "final_screenshot", contentType: "image/jpeg", bytes });
       }
       const cleanupUrl = new URL(this.config.authCleanupPath, new URL(run.target.frontendUrl).origin).toString();
-      const { response: cleanup, payload: cleanupReceipt } = await requestBoundJson(session.context.request, "POST", cleanupUrl, 15_000, frontendCleanupCapability);
-      if (!cleanup.ok() || cleanupReceipt?.ok !== true || cleanupReceipt?.session_revoked !== true || cleanupReceipt?.cookies_cleared !== true || cleanupReceipt?.test_run_id !== run.testRunId || cleanupReceipt?.cleanup_obligation_id !== run.cleanupObligationId) throw new VoiceLabError(labError("AUTH_SESSION_CLEANUP_UNCONFIRMED", "Dedicated test auth session and cookie cleanup was not confirmed for this run.", "authorization", true, { status: cleanup.status() }));
-      events.push({ kind: "auth.session_cleanup", source: "canonical", payload: redact({
-        ...cleanupReceipt,
-        cleanup_proof_schema: "sophia_voice_lab_execution_epoch_auth_cleanup_v1",
-        voice_lab_run_id_sha256: sha256(run.id),
-        cleanup_obligation_id_sha256: sha256(run.cleanupObligationId),
-        process_id_sha256: session.ownership.processIdSha256,
-        browser_boot_id_sha256: session.ownership.bootIdSha256,
-        execution_epoch_sha256: session.ownership.executionEpochSha256,
-      }), dedupeKey: `canonical:${run.id}:auth-cleanup` });
+      events.push(await directAuthCleanupEvent(session, run, cleanupUrl, frontendCleanupCapability));
       events.push(await this.#closeContextEvent(run.id, session.context, "normal_end"));
       return { events, artifacts };
+    } catch (error) {
+      throw new DriverEndFailure(error, events);
+    } finally {
+      disconnectObserver?.dispose();
     }
   }
 
@@ -1172,17 +1204,17 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
         const cleanupResult = await requestBoundJson(session.context.request, "POST", cleanupUrl, 10_000, frontendCleanupCapability).catch(() => null);
         const cleanup = cleanupResult?.response ?? null;
         const receipt = cleanupResult?.payload ?? null;
-        events.push({ kind: "auth.session_cleanup", source: "canonical", payload: redact({
+        const confirmed = cleanup !== null && authCleanupReceiptConfirmed(cleanup.ok(), receipt, run);
+        events.push({ kind: "auth.session_cleanup", source: "canonical", payload: { ...redact({
           status: cleanup?.status() ?? null,
-          receipt,
-          confirmed: Boolean(cleanup?.ok() && (receipt as any)?.session_revoked === true && (receipt as any)?.cookies_cleared === true && (receipt as any)?.test_run_id === run.testRunId && (receipt as any)?.cleanup_obligation_id === run.cleanupObligationId),
+          confirmed,
           cleanup_proof_schema: "sophia_voice_lab_execution_epoch_auth_cleanup_v1",
           voice_lab_run_id_sha256: sha256(run.id),
           cleanup_obligation_id_sha256: sha256(run.cleanupObligationId),
           process_id_sha256: session.ownership.processIdSha256,
           browser_boot_id_sha256: session.ownership.bootIdSha256,
           execution_epoch_sha256: session.ownership.executionEpochSha256,
-        }), dedupeKey: `cleanup:${run.id}:auth` });
+        }), receipt: confirmed ? validatedAuthCleanupReceipt(receipt!) : unconfirmedAuthCleanupReceipt(receipt) }, dedupeKey: `cleanup:${run.id}:auth` });
       }
       events.push(await this.#closeContextEvent(run.id, session.context, reason));
       return { events, artifacts };
@@ -1402,6 +1434,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
         browser_boot_id_sha256: session.ownership.bootIdSha256,
         execution_epoch_sha256: session.ownership.executionEpochSha256,
         provider_stage: String(providerEvent.payload.stage),
+        proof_basis: providerEvent.kind === "provider.disconnect_acknowledged" ? "authenticated_receiving_disconnect_acknowledgement" : "bound_product_transport_event",
         provider_event_sha256: canonicalRequestHash({ kind: providerEvent.kind, payload: redact(providerEvent.payload) }),
         exact_product_binding_validated: true,
         raw_process_and_provider_identifiers_excluded: true,
@@ -1579,12 +1612,330 @@ export async function requestBoundJsonWithOneTransientRetry(
   return requestBoundJson(request, method, expectedUrl, timeoutMs, capability);
 }
 
+/** C046: a FINITE catalog, not a shape filter. Exactly the machine codes the
+ * frontend Voice Lab capability/ledger/auth routes and the gateway
+ * end-session/capability paths can return (extracted from b103 frontend and
+ * 7d0f gateway source). Any other string, however code-shaped, is omitted. */
+export const PRODUCT_ERROR_CODES: ReadonlySet<string> = new Set([
+  "voice_lab_auth_active_run_conflict", "voice_lab_auth_ledger_binding_mismatch", "voice_lab_auth_ledger_not_ready", "voice_lab_auth_run_not_found",
+  "voice_lab_auth_session_mutation_unconfirmed", "voice_lab_authenticated_principal_required", "voice_lab_canonical_transcript_invalid",
+  "voice_lab_capability_deployment_mismatch", "voice_lab_capability_expired_or_not_yet_valid", "voice_lab_capability_invalid_lifetime",
+  "voice_lab_capability_invalid_signature", "voice_lab_capability_malformed", "voice_lab_capability_missing",
+  "voice_lab_capability_operation_denied", "voice_lab_capability_wrong_audience", "voice_lab_capability_wrong_environment",
+  "voice_lab_capability_wrong_principal", "voice_lab_cleanup_failed", "voice_lab_cleanup_obligation_closed", "voice_lab_configuration_invalid",
+  "voice_lab_configuration_missing", "voice_lab_continue_failed", "voice_lab_control_adapter_disabled",
+  "voice_lab_dedicated_principal_session_conflict", "voice_lab_deployment_identity_unavailable", "voice_lab_disabled",
+  "voice_lab_expired_session_cleanup_unconfirmed", "voice_lab_finalization_evidence_invalid", "voice_lab_finalization_readback_conflict",
+  "voice_lab_finalization_receipt_readback_conflict", "voice_lab_finalization_started_at_invalid", "voice_lab_finalization_transaction_failed",
+  "voice_lab_finalization_transcript_conflict", "voice_lab_finalization_unavailable", "voice_lab_grant_failed", "voice_lab_grant_order_conflict",
+  "voice_lab_grant_replay_without_live_session", "voice_lab_grant_replayed_after_cleanup", "voice_lab_kill_switch_active",
+  "voice_lab_message_timestamp_invalid", "voice_lab_provisional_retention_binding_invalid", "voice_lab_provisional_retention_expired",
+  "voice_lab_provisioning_disabled", "voice_lab_provisioning_failed", "voice_lab_provisioning_kill_switch_required", "voice_lab_readiness_failed",
+  "voice_lab_recovery_internal_auth_required", "voice_lab_recovery_run_mismatch", "voice_lab_recovery_secret_not_distinct",
+  "voice_lab_refresh_failed", "voice_lab_request_body_not_allowed", "voice_lab_run_binding_expired", "voice_lab_run_binding_invalid_lifetime",
+  "voice_lab_run_binding_invalid_signature", "voice_lab_run_binding_malformed", "voice_lab_run_binding_mismatch", "voice_lab_run_binding_missing",
+  "voice_lab_session_binding_mismatch", "voice_lab_session_cleanup_binding_mismatch", "voice_lab_session_record_not_found",
+  "voice_lab_session_retention_missing", "voice_lab_session_thread_mismatch", "voice_lab_stale_grant_rejected",
+  "voice_lab_test_principal_not_provisioned", "voice_lab_transcript_base_revision_required", "voice_lab_transcript_revision_conflict",
+  "voice_lab_transcript_too_large",
+]);
+
+/** Content-free failure code from a product error body (C043-C046): only a
+ * catalogued code from `error`, `detail.code` or `code`. Free text, other
+ * fields and uncatalogued strings are never recorded. */
+export function productErrorCode(body: unknown): string | null {
+  const record = body !== null && typeof body === "object" && !Array.isArray(body) ? body as Record<string, unknown> : null;
+  if (!record) return null;
+  const detail = record.detail !== null && typeof record.detail === "object" && !Array.isArray(record.detail) ? record.detail as Record<string, unknown> : null;
+  for (const candidate of [record.error, detail?.code, record.code]) {
+    if (typeof candidate === "string" && PRODUCT_ERROR_CODES.has(candidate)) return candidate;
+  }
+  return null;
+}
+
 export function isExactFinalizationResponse(response: Pick<PlaywrightResponse, "url" | "request">, frontendOrigin: string): boolean {
   if (response.request().method() !== "POST") return false;
   try {
     const url = new URL(response.url());
     return url.origin === frontendOrigin && url.search === "" && url.hash === "" && (url.pathname === "/api/sophia/end-session" || url.pathname === "/api/sessions/end");
   } catch { return false; }
+}
+
+type ProviderDisconnectObserver = {
+  /** The first exact authenticated 202 disconnect response, or null on timeout. */
+  acknowledgement: Promise<PlaywrightResponse | null>;
+  /** Exact disconnect responses that were not accepted, for evidence only. */
+  rejected: () => { count: number; lastStatus: number | null };
+  dispose: () => void;
+};
+
+/** A synthetic product retries a non-accepted disconnect with backoff, so only
+ * an exact 202 can be the receiving acknowledgement; earlier rejected attempts
+ * are counted for evidence, never treated as the final answer. Both the waiter
+ * and the counting listener are registered at once, before the UI click. */
+export function observeProviderDisconnect(page: Pick<Page, "on" | "off" | "waitForResponse">, frontendOrigin: string, timeoutMs: number): ProviderDisconnectObserver {
+  let count = 0;
+  let lastStatus: number | null = null;
+  const onResponse = (candidate: PlaywrightResponse) => {
+    if (!isExactProviderDisconnectResponse(candidate, frontendOrigin) || candidate.status() === 202) return;
+    count += 1;
+    lastStatus = candidate.status();
+  };
+  page.on("response", onResponse);
+  const acknowledgement = page.waitForResponse((candidate) => isExactProviderDisconnectResponse(candidate, frontendOrigin) && candidate.status() === 202, { timeout: timeoutMs }).catch(() => null);
+  return { acknowledgement, rejected: () => ({ count, lastStatus }), dispose: () => { page.off("response", onResponse); } };
+}
+
+/** Part of the bounded end operation that must remain after the receiving
+ * acknowledgement: drain/validation, deployment re-verification (10 s bound),
+ * snapshot/screenshot, auth cleanup (15 s bound), context close, and the
+ * worker's own persistence/recovery after the driver returns. */
+export const END_POST_DISCONNECT_RESERVE_MS = 45_000;
+
+/** The product retries a rejected disconnect at about 0, 1, 3, 7, 15, 31, 61 s
+ * (1 s x 2^n, capped at 30 s). Wait for the exact 202 until the end budget
+ * less its reserve, measured from end entry, never below the prior fixed 20 s.
+ * Production (120 s) waits 75 s, covering the 31 s and 61 s attempts. */
+export function providerDisconnectWaitMs(endOperationSeconds: number): number {
+  return Math.max(20_000, endOperationSeconds * 1_000 - END_POST_DISCONNECT_RESERVE_MS);
+}
+
+/** Absolute deadline for the exact-202 wait. With the worker's real operation
+ * deadline it is that deadline less the reserve, so time already consumed by
+ * capability minting and fencing before driver entry is never re-granted and
+ * the operation deadline is never extended. Without it (direct driver use),
+ * the entry-relative window stands. The earlier of the two always wins. */
+export function providerDisconnectDeadlineAt(enteredAt: number, endOperationSeconds: number, operationDeadlineAt?: number): number {
+  const window = enteredAt + providerDisconnectWaitMs(endOperationSeconds);
+  return operationDeadlineAt === undefined || !Number.isFinite(operationDeadlineAt) ? window : Math.min(window, operationDeadlineAt - END_POST_DISCONNECT_RESERVE_MS);
+}
+
+/** The run record only reflects epochs the worker has already drained. The
+ * newest epoch from a bound product receipt wins when it is a valid positive
+ * integer ahead of the run's; otherwise the run's epoch stands. */
+function effectiveProviderEpoch(runEpoch: number | null, latestReceipt: Record<string, unknown> | null): number | null {
+  const observed = latestReceipt?.providerConnectionEpoch;
+  return typeof observed === "number" && Number.isSafeInteger(observed) && observed > 0
+    && (runEpoch === null || observed > runEpoch) ? observed : runEpoch;
+}
+
+/**
+ * C059: the direct auth cleanup of a normal End, called only after bound
+ * finalization and the authenticated provider disconnect are proven. A lost
+ * or refused direct call (the first may commit and delete the session its
+ * retry would need) becomes a canonical UNCONFIRMED record, never a revocation
+ * proof; the owned context still closes and the worker's session:recover must
+ * prove auth terminal. Target/redirect violations and D02 still throw.
+ */
+async function directAuthCleanupEvent(
+  session: { context: Pick<BrowserContext, "request">; ownership: { processIdSha256: string; bootIdSha256: string; executionEpochSha256: string } },
+  run: RunRecord,
+  cleanupUrl: string,
+  frontendCleanupCapability: string,
+): Promise<Omit<LabEvent, "runId" | "seq" | "at">> {
+  const epochBinding = {
+    voice_lab_run_id_sha256: sha256(run.id),
+    cleanup_obligation_id_sha256: sha256(run.cleanupObligationId),
+    process_id_sha256: session.ownership.processIdSha256,
+    browser_boot_id_sha256: session.ownership.bootIdSha256,
+    execution_epoch_sha256: session.ownership.executionEpochSha256,
+  };
+  const d02 = run.scenarioId === "V-D02";
+  const direct = await requestBoundJson(session.context.request, "POST", cleanupUrl, 15_000, frontendCleanupCapability)
+    .catch((error: unknown) => {
+      if (d02 || (error instanceof VoiceLabError && error.detail.code !== "PRIVILEGED_RECEIPT_INVALID")) throw error;
+      return { failure: error instanceof VoiceLabError ? "receipt_invalid" as const : isTimeoutError(error) ? "timeout" as const : "transport_error" as const };
+    });
+  if ("response" in direct && authCleanupReceiptConfirmed(direct.response.ok(), direct.payload, run)) {
+    return { kind: "auth.session_cleanup", source: "canonical", payload: {
+      ...validatedAuthCleanupReceipt(direct.payload!),
+      cleanup_proof_schema: "sophia_voice_lab_execution_epoch_auth_cleanup_v1",
+      ...epochBinding,
+    }, dedupeKey: `canonical:${run.id}:auth-cleanup` };
+  }
+  const details = "response" in direct
+    ? { status: direct.response.status(), product_error_code: productErrorCode(direct.payload) }
+    : { status: null, product_error_code: null, transport_failure: direct.failure };
+  if (d02) throw new VoiceLabError(labError("AUTH_SESSION_CLEANUP_UNCONFIRMED", "Dedicated test auth session and cookie cleanup was not confirmed for this run.", "authorization", true, details));
+  return { kind: "auth.session_cleanup", source: "canonical", payload: {
+    cleanup_proof_schema: UNCONFIRMED_AUTH_CLEANUP_SCHEMA, confirmed: false, recovery_required: true, ...details, ...epochBinding,
+  }, dedupeKey: `canonical:${run.id}:auth-cleanup` };
+}
+
+/** Bounded transport category only; the raw message is never retained. */
+function isTimeoutError(error: unknown): boolean {
+  return error instanceof Error && (error.name === "TimeoutError" || /\bTimeout \d+ms exceeded\b/.test(error.message));
+}
+
+/**
+ * C061: generic redaction masks every "cookie" key, so a validated receipt's
+ * cookies_cleared would read "[REDACTED]" and never satisfy
+ * authCleanupConfirmed. Only AFTER authCleanupReceiptConfirmed has passed are
+ * the two typed booleans re-authored as literals over the redacted receipt.
+ */
+function validatedAuthCleanupReceipt(receipt: Record<string, unknown>): Record<string, unknown> {
+  return { ...redact(receipt), session_revoked: true, cookies_cleared: true };
+}
+
+/** A receipt that did not pass the validator keeps only its catalogued code. */
+function unconfirmedAuthCleanupReceipt(receipt: Record<string, unknown> | null): Record<string, unknown> | null {
+  return receipt === null ? null : { product_error_code: productErrorCode(receipt) };
+}
+
+/** Dedicated test auth session and cookies are confirmed cleared for exactly this run. */
+function authCleanupReceiptConfirmed(responseOk: boolean, receipt: Record<string, unknown> | null | undefined, run: Pick<RunRecord, "testRunId" | "cleanupObligationId">): boolean {
+  return responseOk && receipt?.ok === true && receipt?.session_revoked === true && receipt?.cookies_cleared === true
+    && receipt?.test_run_id === run.testRunId && receipt?.cleanup_obligation_id === run.cleanupObligationId;
+}
+
+export function isExactProviderDisconnectResponse(response: Pick<PlaywrightResponse, "url" | "request">, frontendOrigin: string): boolean {
+  if (response.request().method() !== "POST") return false;
+  try {
+    const url = new URL(response.url());
+    return url.origin === frontendOrigin && url.pathname === "/api/sophia/voice/gemini/disconnect" && url.search === "" && url.hash === "";
+  } catch { return false; }
+}
+
+export function isExactProviderActivationResponse(response: Pick<PlaywrightResponse, "url" | "request">, frontendOrigin: string): boolean {
+  if (response.request().method() !== "POST") return false;
+  try {
+    const url = new URL(response.url());
+    return url.origin === frontendOrigin && url.pathname === "/api/sophia/voice/gemini/activate" && url.search === "" && url.hash === "";
+  } catch { return false; }
+}
+
+/** The receiving activation receipt's own exact shape: schema, identities,
+ * consecutive epochs (1..64) and observed open/close-observer facts. Joins to
+ * the response body and request echo remain with the caller. */
+function isProviderActivationReceiptShape(receipt: unknown): receipt is Record<string, unknown> & { activation_id: string; session_id: string } {
+  return hasExactObjectKeys(receipt, ["schema", "activation_id", "session_id", "previous_activated_epoch", "candidate_epoch", "websocket_open_observed", "close_observer_attached", "websocket_opened_at", "previous_socket_close_receipt"])
+    && receipt.schema === "sophia_gemini_browser_provider_activation_v1" && typeof receipt.activation_id === "string" && UUID_V4.test(receipt.activation_id)
+    && typeof receipt.session_id === "string" && PRODUCT_SAFE_ID.test(receipt.session_id)
+    && Number.isSafeInteger(receipt.previous_activated_epoch) && Number(receipt.previous_activated_epoch) >= 0
+    && Number.isSafeInteger(receipt.candidate_epoch) && Number(receipt.candidate_epoch) === Number(receipt.previous_activated_epoch) + 1 && Number(receipt.candidate_epoch) <= 64
+    && receipt.websocket_open_observed === true && receipt.close_observer_attached === true && Boolean(canonicalUtcMillis(receipt.websocket_opened_at));
+}
+
+export async function readProviderActivationAcknowledgement(response: Pick<PlaywrightResponse, "url" | "request" | "status" | "headers" | "json">, frontendOrigin: string): Promise<Record<string, unknown> | null> {
+  try {
+    if (!isExactProviderActivationResponse(response, frontendOrigin) || response.status() !== 202 || !isJsonResponse(response)) return null;
+    const request = response.request().postDataJSON();
+    const body = await response.json();
+    const receipt = body?.provider_activation_receipt;
+    if (!isProviderActivationReceiptShape(receipt)
+      || body.activated !== true || body.session_id !== receipt.session_id || body.provider_connection_epoch !== receipt.candidate_epoch
+      || canonicalRequestHash(request) !== canonicalRequestHash(receipt)) return null;
+    if (receipt.previous_activated_epoch === 0) {
+      if (receipt.previous_socket_close_receipt !== null) return null;
+    } else {
+      validateD02ProductCleanupEcho({ browser_provider_close_receipts: [receipt.previous_socket_close_receipt], browser_provider_activation_abort_receipts: [] }, receipt.session_id, [Number(receipt.previous_activated_epoch)]);
+    }
+    return receipt;
+  } catch { return null; }
+}
+
+/** Passive evidence only: never initiate disconnect or inspect/store credentials. */
+/** A continuation reserves exactly the next epoch, activatedEpoch + 1, and a
+ * failure before activation leaves it unsettled with an exact activation-abort
+ * receipt while every bound epoch receipt still names activatedEpoch. That one
+ * candidate joins the settled union only when the already validated,
+ * request-echoed acknowledgement carries its abort receipt; any other abort
+ * epoch is left to fail the exact union check. */
+function boundAbortedCandidateEpochs(accepted: D02ProductCleanupEcho, activatedEpoch: number): number[] {
+  const candidate = activatedEpoch + 1;
+  return accepted.browser_provider_activation_abort_receipts.some((receipt) => Number(receipt.candidate_epoch) === candidate) ? [candidate] : [];
+}
+
+/** Exact-origin JSON 202 disconnect acknowledgement for a run that has a bound
+ * provider session and 1..64 owned epochs. Returns that session id, or null. */
+function normalDisconnectSessionId(
+  response: Pick<PlaywrightResponse, "url" | "request" | "status" | "headers"> | null,
+  frontendOrigin: string,
+  run: Pick<RunRecord, "providerSessionId" | "providerEpoch">,
+): string | null {
+  if (!response || !isExactProviderDisconnectResponse(response, frontendOrigin) || response.status() !== 202 || !isJsonResponse(response)
+    || !run.providerSessionId || !Number.isSafeInteger(run.providerEpoch) || Number(run.providerEpoch) < 1 || Number(run.providerEpoch) > 64) return null;
+  return run.providerSessionId;
+}
+
+/** Joins the previous-socket close receipts carried by earlier positive
+ * receiving activation acknowledgements, keyed by epoch. Null means a foreign
+ * session, a candidate beyond the owned epoch, or two different receipts for
+ * one epoch. Only activations that carry a previous receipt are hashed. */
+function joinPriorActivationCloses(
+  activationAcknowledgements: Record<string, unknown>[], providerSessionId: string, providerEpoch: number,
+): { previouslyClosed: Map<number, Record<string, unknown>>; activationHashes: Set<string> } | null {
+  const previouslyClosed = new Map<number, Record<string, unknown>>();
+  const activationHashes = new Set<string>();
+  for (const activation of activationAcknowledgements) {
+    if (activation.session_id !== providerSessionId || Number(activation.candidate_epoch) > providerEpoch) return null;
+    const previous = activation.previous_socket_close_receipt as Record<string, unknown> | null;
+    if (!previous) continue;
+    const epoch = Number(previous.provider_connection_epoch);
+    const existing = previouslyClosed.get(epoch);
+    if (existing && canonicalRequestHash(existing) !== canonicalRequestHash(previous)) return null;
+    previouslyClosed.set(epoch, previous);
+    activationHashes.add(canonicalRequestHash(activation));
+  }
+  return { previouslyClosed, activationHashes };
+}
+
+export async function validateNormalProviderDisconnectResponse(
+  response: Pick<PlaywrightResponse, "url" | "request" | "status" | "headers" | "json"> | null,
+  frontendOrigin: string,
+  run: Pick<RunRecord, "id" | "testRunId" | "cleanupObligationId" | "providerSessionId" | "providerEpoch">,
+  activationAcknowledgements: Record<string, unknown>[] = [],
+): Promise<Record<string, unknown>> {
+  let validationStage = "network_receipt";
+  const reject = () => new VoiceLabError(labError("PROVIDER_CLEANUP_UNCONFIRMED", "The ordinary UI did not yield an exact authenticated provider disconnect acknowledgement with all owned websocket epochs settled.", "product", true, { validation_stage: validationStage, receiving_http_status: response?.status() ?? null }));
+  const providerSessionId = normalDisconnectSessionId(response, frontendOrigin, run);
+  if (!response || providerSessionId === null) throw reject();
+  try {
+    validationStage = "session_receipt_binding";
+    const request = response.request().postDataJSON() as Record<string, unknown> | null;
+    const body = await response.json() as Record<string, unknown> | null;
+    if (request?.session_id !== providerSessionId || body?.ok !== true || body?.closed !== true) throw reject();
+    const epochs = Array.from({ length: Number(run.providerEpoch) }, (_, index) => index + 1);
+    const project = (value: Record<string, unknown>) => ({ browser_provider_close_receipts: value.browser_provider_close_receipts, browser_provider_activation_abort_receipts: value.browser_provider_activation_abort_receipts });
+    validationStage = "prior_activation_binding";
+    const prior = joinPriorActivationCloses(activationAcknowledgements, providerSessionId, Number(run.providerEpoch));
+    if (!prior) throw reject();
+    const { previouslyClosed, activationHashes } = prior;
+    validationStage = "final_receipt_echo";
+    const submittedProjection = project(request);
+    const acceptedProjection = project(body);
+    if (canonicalRequestHash(submittedProjection) !== canonicalRequestHash(acceptedProjection)) throw reject();
+    // The final receiver may echo only still-unsettled epochs. Validate that
+    // echo strictly, then join earlier positive receiving acknowledgements.
+    if (!Array.isArray(acceptedProjection.browser_provider_close_receipts) || !Array.isArray(acceptedProjection.browser_provider_activation_abort_receipts)) throw reject();
+    const finalEpochs = [...acceptedProjection.browser_provider_close_receipts.map((receipt) => Number(receipt?.provider_connection_epoch)),
+      ...acceptedProjection.browser_provider_activation_abort_receipts.map((receipt) => Number(receipt?.candidate_epoch))].sort((a, b) => a - b);
+    const accepted = validateD02ProductCleanupEcho(acceptedProjection, providerSessionId, finalEpochs);
+    for (const receipt of accepted.browser_provider_close_receipts) {
+      const epoch = Number(receipt.provider_connection_epoch);
+      const existing = previouslyClosed.get(epoch);
+      if (existing && canonicalRequestHash(existing) !== canonicalRequestHash(receipt)) throw reject();
+      previouslyClosed.set(epoch, receipt);
+    }
+    validationStage = "settled_epoch_union";
+    const abortedCandidates = boundAbortedCandidateEpochs(accepted, Number(run.providerEpoch));
+    const joined = validateD02ProductCleanupEcho({ browser_provider_close_receipts: [...previouslyClosed.values()].sort((a, b) => Number(a.provider_connection_epoch) - Number(b.provider_connection_epoch)),
+      browser_provider_activation_abort_receipts: accepted.browser_provider_activation_abort_receipts }, providerSessionId, [...epochs, ...abortedCandidates]);
+    if (!accepted.browser_provider_close_receipts.some((receipt) => receipt.provider_connection_epoch === run.providerEpoch)) throw reject();
+    return {
+      schema: "sophia_voice_lab_normal_provider_disconnect_ack_v1",
+      voice_lab_run_id_sha256: sha256(run.id), test_run_id_sha256: sha256(run.testRunId),
+      cleanup_obligation_id_sha256: sha256(run.cleanupObligationId),
+      provider_session_id_sha256: sha256(providerSessionId), provider_connection_epochs: epochs,
+      ...(abortedCandidates.length > 0 ? { aborted_candidate_epochs: abortedCandidates } : {}),
+      receiving_http_status: 202, receiving_acknowledgement_sha256: canonicalRequestHash(accepted),
+      prior_activation_acknowledgement_sha256s: [...activationHashes].sort(),
+      settled_epoch_union_sha256: canonicalRequestHash(joined),
+      browser_provider_close_receipt_count: accepted.browser_provider_close_receipts.length,
+      browser_provider_activation_abort_receipt_count: accepted.browser_provider_activation_abort_receipts.length,
+      raw_provider_and_receipt_identifiers_excluded: true,
+    };
+  } catch { throw reject(); }
 }
 
 function isJsonResponse(response: Pick<APIResponse, "headers">): boolean {

@@ -3383,11 +3383,13 @@ export async function rotateVoiceLabSession(
 export async function revokeVoiceLabSessions(
   principalId: string,
   grant: VoiceLabCapabilityClaims,
+  sessionToken: string,
 ): Promise<number> {
   const pool = getBetterAuthDatabase();
   const client = await pool.connect();
   const marker = markerFor(grant);
   const fingerprints = fingerprintCandidates(marker);
+  const sessionTokenSha256 = sha256(sessionToken);
   const principalCandidates = [
     principalId,
     ...tombstonedIdentityCandidates('principal', principalId),
@@ -3437,10 +3439,21 @@ export async function revokeVoiceLabSessions(
         cleanupCandidates,
       ],
     );
+    // C048: select the ORIGINALLY ENROLLED grant by authoritative identity,
+    // never by the presented cleanup capability's own entropy: the worker's
+    // cleanup capability is deliberately fresh (new jti/nonce), so its
+    // fingerprint can never equal the enrollment grant's. An active row must
+    // carry the authenticated session's token (already bound to this exact run
+    // by the verified run-binding cookie) plus the exact run, cleanup,
+    // provider-expiry and retention identity. A revoked row is tombstoned (token
+    // redacted) and matches only by its tombstoned run/cleanup identity, so an
+    // exact cleanup replay stays idempotent.
     const exactGrantRows = grantRows.rows.filter(
-      (row) => fingerprints.includes(row.grant_fingerprint)
-        && runCandidates.includes(row.test_run_id)
-        && cleanupCandidates.includes(row.cleanup_obligation_id),
+      (row) => runCandidates.includes(row.test_run_id)
+        && cleanupCandidates.includes(row.cleanup_obligation_id)
+        && new Date(row.provider_expires_at).toISOString() === grant.provider_expires_at
+        && Number(row.retention_hours) === grant.retention_hours
+        && (row.status === 'active' ? row.session_token_sha256 === sessionTokenSha256 : row.status === 'revoked'),
     );
     const result = await client.query<SessionRow>(
       'SELECT "token", "expiresAt", "userAgent" FROM public."session" '
@@ -3467,7 +3480,7 @@ export async function revokeVoiceLabSessions(
     }
     if (
       grantRows.rows.some(
-        (row) => row.status === 'active' && !fingerprints.includes(row.grant_fingerprint),
+        (row) => row.status === 'active' && !exactGrantRows.includes(row),
       )
       || parsed.some(({ marker }) => marker?.principal_id !== principalId
       || marker?.test_run_id !== grant.test_run_id

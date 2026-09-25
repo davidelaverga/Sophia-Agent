@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -9,7 +11,8 @@ import { SCENARIO_IDS } from "../src/scenarios.js";
 import { CapabilityCodec, sha256 } from "../src/security.js";
 import { VoiceLabService, assertFreshProductAdmissionProof, targetAdmissionBinding } from "../src/service.js";
 import { assertTransition } from "../src/state-machine.js";
-import { VoiceLabWorker, assertResolvedAudioWithinAdmission, augmentOperationTimeoutWithInterruptedDriverError, certificationTerminalDecision, deriveCompletedVerdicts, evaluateScenarioAssertions, exactOutputLifecyclesAtEpoch, leaseHeartbeatIntervalMs, settleInterruptedExecution, suiteCertificationProjection, suiteCertificationState } from "../src/worker.js";
+import { VoiceLabWorker, assertResolvedAudioWithinAdmission, augmentOperationTimeoutWithInterruptedDriverError, certificationTerminalDecision, classifyInputDelivery, deriveCompletedVerdicts, evaluateScenarioAssertions, exactOutputLifecyclesAtEpoch, leaseHeartbeatIntervalMs, settleInterruptedExecution, suiteCertificationProjection, suiteCertificationState } from "../src/worker.js";
+import { assertActiveRunWorkerProfile, measureWorkerProfile } from "../src/worker-profile.js";
 import { caller, SHA, SHA_B, SHA_C, SHA_D, testConfig, testRun } from "./helpers.js";
 import { ownership, recovery as boundRecoveryFixture } from "./execution-cleanup-fixture.js";
 
@@ -23,6 +26,42 @@ const target = {
 };
 
 describe("service and durable memory-ledger contracts", () => {
+  it("marks timing-degraded waveform delivery invalid without a product verdict", () => {
+    const frames = (observed: number[], ingested: number[] = observed) => observed.map((ms, index) => ({
+      kind: "harness.input_frame_forwarded", source: "browser", at: new Date(1_000 + ingested[index]!),
+      payload: { operation_id: "input-1", frame_seq: index + 1, byte_length: 2972, nonzero_byte_count: 100,
+        _capture_provenance: { observed_at: new Date(1_000 + ms).toISOString() } },
+    })) as any;
+    expect(classifyInputDelivery(frames([0, 93, 186, 279]), "input-1").status).toBe("valid");
+    expect(classifyInputDelivery(frames([0, 93, 404, 497]), "input-1")).toMatchObject({ status: "degraded", delivery_valid: false, max_speech_gap_ms: 311 });
+    expect(classifyInputDelivery(frames([0, 93, 186, 279], [0, 300, 301, 302]), "input-1")).toMatchObject({ status: "valid", timestamp_source: "browser_observed" });
+    expect(classifyInputDelivery(frames([0, 93, 404, 497], [0, 93, 186, 279]), "input-1")).toMatchObject({ status: "degraded", max_speech_gap_ms: 311 });
+    expect(classifyInputDelivery([], "input-1").status).toBe("unavailable");
+  });
+  it("replays retained content-free J6, R1 and R3 frame timing", () => {
+    const replay = (name: string, turn: string) => readFileSync(path.join(import.meta.dirname, "fixtures/input-delivery", `${name}.csv`), "utf8")
+      .trim().split(/\r?\n/).slice(1).map((line) => line.split(","))
+      .filter((row) => row[0] === turn)
+      .map((row) => ({ kind: "harness.input_frame_forwarded", source: "browser", at: new Date(row[3]!), payload: {
+        operation_id: "archived-input", frame_seq: Number(row[1]), byte_length: Number(row[8]), nonzero_byte_count: Number(row[9]),
+        ...(name === "j6" ? {} : { _capture_provenance: { observed_at: row[3] } }),
+      } })) as any;
+    // R1/R3 Postgres read-only comparison found 71/71 browser provenance
+    // timestamps equal to each run_events.observed_at (0 ms max difference).
+    // J6 was purged before that comparison, so its archive remains fallback.
+    const historical = { allowLedgerTimestampFallback: true };
+    expect(classifyInputDelivery(replay("j6", "turn2"), "archived-input", historical)).toMatchObject({ status: "degraded", delivery_valid: false, timestamp_source: "ledger_fallback" });
+    expect(classifyInputDelivery(replay("r1", "R1-1"), "archived-input")).toMatchObject({ status: "valid", delivery_valid: true, timestamp_source: "browser_observed" });
+    expect(classifyInputDelivery(replay("r3", "R3-1"), "archived-input")).toMatchObject({ status: "valid", delivery_valid: true, timestamp_source: "browser_observed" });
+  });
+  it("refuses an effective Starter worker before active-run resources", () => {
+    const starter = measureWorkerProfile((path) => ({ '/sys/fs/cgroup/cpu.max': '50000 100000', '/sys/fs/cgroup/memory.max': String(512 * 1024 ** 2) } as Record<string, string>)[path] ?? null);
+    const pro = measureWorkerProfile((path) => ({ '/sys/fs/cgroup/cpu.max': '200000 100000', '/sys/fs/cgroup/memory.max': String(4 * 1024 ** 3) } as Record<string, string>)[path] ?? null);
+    expect(() => assertActiveRunWorkerProfile("production", starter)).toThrowError(
+      expect.objectContaining({ detail: expect.objectContaining({ code: "WORKER_PROFILE_INSUFFICIENT" }) }),
+    );
+    expect(() => assertActiveRunWorkerProfile("production", pro)).not.toThrow();
+  });
   let ledger: MemoryVoiceLabLedger;
   let audio: AudioResolver;
   let service: VoiceLabService;
@@ -342,7 +381,7 @@ describe("service and durable memory-ledger contracts", () => {
     expect(result.data.scenario_versions).toEqual(["vt00.scenarios.v1"]);
     expect((result.data.scenarios as unknown[])).toHaveLength(21);
     expect((result.data.scenarios as Array<{ id: string }>).map((item) => item.id)).toEqual(SCENARIO_IDS);
-    expect((result.data.fixtures as Array<{ fixtureClass: string }>).map((fixture) => fixture.fixtureClass).sort()).toEqual(["long_brief", "noisy_command", "short_command", "silence", "trailing_pause"]);
+    expect((result.data.fixtures as Array<{ fixtureClass: string }>).map((fixture) => fixture.fixtureClass).sort()).toEqual(["conversation_probe", "conversation_probe", "long_brief", "noisy_command", "short_command", "silence", "trailing_pause"]);
     expect(result.data.restricted_fault_capabilities).toEqual(["force_socket_rotation"]);
     expect(result.data.raw_audio).toBe("unavailable_until_isolated_storage");
     expect(result.data.versions).toEqual({ harness: "0.1.0", mcp: "0.1.0", plugin: "0.1.0+codex.test", evidence_schema: "sophia.voice-lab.evidence.v1", scenario_catalog: "vt00.scenarios.v1" });
@@ -440,6 +479,11 @@ describe("service and durable memory-ledger contracts", () => {
     closedProductMutationGates.product_mutation_gates_open = false;
     expect(() => assertFreshProductAdmissionProof(config, config.readinessTarget!, closedProductMutationGates)).toThrowError(
       expect.objectContaining({ detail: expect.objectContaining({ code: "PRODUCT_ADMISSION_NOT_READY" }) }),
+    );
+    const disabledServedAdapter = productAdmissionProof(config, true);
+    disabledServedAdapter.frontend_control_adapter_enabled = false;
+    expect(() => assertFreshProductAdmissionProof(config, config.readinessTarget!, disabledServedAdapter)).toThrowError(
+      expect.objectContaining({ detail: expect.objectContaining({ code: "FRONTEND_CONTROL_ADAPTER_DISABLED" }) }),
     );
     let admissionReady = false;
     const probe = async () => productAdmissionProof(config, admissionReady);
@@ -992,10 +1036,15 @@ describe("service and durable memory-ledger contracts", () => {
 
     const o01 = testRun({ scenarioId: "V-O01" });
     const receivedAt = new Date().toISOString();
-    const receipt = { realizationId: "realization-o01", responseId: "response-o01", providerEventId: "provider-event-o01", chunkHash: "f".repeat(64), byteLength: 320, chunkIndex: 0, chunksInEvent: 1, providerConnectionEpoch: 1, playbackGeneration: 2, providerReceiveSequence: 7, providerRelaySequence: 6, providerReceivedAt: receivedAt, relayCorrelationId: "relay-o01", durationSeconds: 0.2 };
-    const leg = { schema: "sophia_gemini_output_leg_v1", status: "verified", completionPhase: "completed", realizationId: "realization-o01", providerChunkFingerprint: "f".repeat(64), providerConnectionEpoch: 1, playbackGeneration: 2, monitorDigestSha256: "1".repeat(64), monitorFrameCount: 2, monitorNonSilentFrameCount: 1, rawAudioExcluded: true, scheduledAt: new Date().toISOString(), completedAt: new Date().toISOString(), monitorDurationMs: 200 };
-    const receivedDiagnostic = { timestamp: receivedAt, providerReceiveSequence: 7, providerRelaySequence: 6, providerConnectionEpoch: 1, providerReceivedAt: receivedAt, relayCorrelationId: "relay-o01", responseId: "response-o01", providerEventId: "provider-event-o01", chunksInEvent: 1, playbackGeneration: 2 };
-    const chunkDiagnostic = { ...receivedDiagnostic, responseId: undefined, providerEventId: undefined, chunkIndex: 0, chunkHash: "f".repeat(64), byteLength: 320, scheduled: true, dropReason: null };
+    // C075: the product's native receipt contract (8-hex FNV-1a fingerprint,
+    // composite realization id, no provider responseId) plus its interaction binding.
+    const realizationId = "gemini-output-1-7-0-0bf31dad-1";
+    const receipt = { realizationId, responseId: null, providerEventId: null, chunkHash: "0bf31dad", byteLength: 320, chunkIndex: 0, chunksInEvent: 1, providerConnectionEpoch: 1, playbackGeneration: 2, providerReceiveSequence: 7, providerRelaySequence: 6, providerReceivedAt: receivedAt, relayCorrelationId: "relay-o01", durationSeconds: 0.2 };
+    const leg = { schema: "sophia_gemini_output_leg_v1", status: "verified", completionPhase: "completed", realizationId, providerChunkFingerprint: "0bf31dad", providerConnectionEpoch: 1, playbackGeneration: 2, monitorDigestSha256: "1".repeat(64), monitorFrameCount: 2, monitorNonSilentFrameCount: 1, rawAudioExcluded: true, scheduledAt: new Date().toISOString(), completedAt: new Date().toISOString(), monitorDurationMs: 200 };
+    const receivedDiagnostic = { timestamp: receivedAt, providerReceiveSequence: 7, providerRelaySequence: 6, providerConnectionEpoch: 1, providerReceivedAt: receivedAt, relayCorrelationId: "relay-o01", responseId: null, providerEventId: null, chunksInEvent: 1, playbackGeneration: 2 };
+    const chunkDiagnostic = { ...receivedDiagnostic, chunkIndex: 0, chunkHash: "0bf31dad", byteLength: 320, scheduled: true, dropReason: null, realizationId, duplicateOrdinal: 1, providerChunkSequence: "1:7:0" };
+    const o01Speak = { id: randomUUID(), runId: o01.id, callerId: o01.callerId, type: "speak", idempotencyKey: "o01", requestHash: sha256("o01"), input: { text: "hello" }, state: "succeeded", result: {}, attemptCount: 1 } as any;
+    const o01Interaction = productEvent(o01, 9, "product.voice-session.gemini-synthetic-interaction-receipt", { receipt: { schema: "sophia_gemini_interaction_v1", synthetic: true, test_run_id: o01.testRunId, scenario_id: o01.scenarioId, scenario_version: o01.scenarioVersion, interaction_id: "interaction-o01", operation_id: o01Speak.id, response_id: "synthetic-response:1:7", assistant_turn_id: "synthetic-response:1:7", provider_connection_epoch: 1, output_realization_ids: [realizationId] } });
     const o01Events = [
       productEvent(o01, 1, "audio.output.received", { diagnostic: receivedDiagnostic }),
       productEvent(o01, 2, "audio.output.provider_chunk", { diagnostic: chunkDiagnostic }),
@@ -1004,16 +1053,17 @@ describe("service and durable memory-ledger contracts", () => {
       productEvent(o01, 5, "audio.output.completed", { receipt: { ...receipt, phase: "completed" } }),
       productEvent(o01, 6, "audio.output.leg_receipt", { receipt: leg }),
       productEvent(o01, 7, "audio.output.leg_receipt", { receipt: leg }),
+      o01Interaction,
     ];
-    expect(evaluateScenarioAssertions(o01, o01Events as any, []).harness).toContainEqual(expect.objectContaining({ id: "o01.provider_chunk_to_playback_to_output_leg_join", status: "fail" }));
-    const oneLeg = o01Events.slice(0, 6);
-    expect(evaluateScenarioAssertions(o01, oneLeg as any, []).harness).toContainEqual(expect.objectContaining({ id: "o01.provider_chunk_to_playback_to_output_leg_join", status: "pass" }));
+    expect(evaluateScenarioAssertions(o01, o01Events as any, [o01Speak]).harness).toContainEqual(expect.objectContaining({ id: "o01.provider_chunk_to_playback_to_output_leg_join", status: "fail" }));
+    const oneLeg = [...o01Events.slice(0, 6), o01Interaction];
+    expect(evaluateScenarioAssertions(o01, oneLeg as any, [o01Speak]).harness).toContainEqual(expect.objectContaining({ id: "o01.provider_chunk_to_playback_to_output_leg_join", status: "pass" }));
     const missingDiagnosticHash = oneLeg.filter((event) => event.kind !== "audio.output.provider_chunk");
-    expect(evaluateScenarioAssertions(o01, missingDiagnosticHash as any, []).harness).toContainEqual(expect.objectContaining({ id: "o01.provider_chunk_to_playback_to_output_leg_join", status: "fail" }));
-    const wrongDiagnosticHash = oneLeg.map((event) => event.kind === "audio.output.provider_chunk" ? productEvent(o01, 2, "audio.output.provider_chunk", { diagnostic: { ...chunkDiagnostic, chunkHash: "0".repeat(64) } }) : event);
-    expect(evaluateScenarioAssertions(o01, wrongDiagnosticHash as any, []).harness).toContainEqual(expect.objectContaining({ id: "o01.provider_chunk_to_playback_to_output_leg_join", status: "fail" }));
-    const orphanReceived = productEvent(o01, 8, "audio.output.received", { diagnostic: { ...receivedDiagnostic, providerReceiveSequence: 8, relayCorrelationId: "relay-orphan", responseId: "response-orphan" } });
-    expect(evaluateScenarioAssertions(o01, [...oneLeg, orphanReceived] as any, []).harness).toContainEqual(expect.objectContaining({ id: "o01.provider_chunk_to_playback_to_output_leg_join", status: "fail" }));
+    expect(evaluateScenarioAssertions(o01, missingDiagnosticHash as any, [o01Speak]).harness).toContainEqual(expect.objectContaining({ id: "o01.provider_chunk_to_playback_to_output_leg_join", status: "fail" }));
+    const wrongDiagnosticHash = oneLeg.map((event) => event.kind === "audio.output.provider_chunk" ? productEvent(o01, 2, "audio.output.provider_chunk", { diagnostic: { ...chunkDiagnostic, chunkHash: "00000000" } }) : event);
+    expect(evaluateScenarioAssertions(o01, wrongDiagnosticHash as any, [o01Speak]).harness).toContainEqual(expect.objectContaining({ id: "o01.provider_chunk_to_playback_to_output_leg_join", status: "fail" }));
+    const orphanReceived = productEvent(o01, 8, "audio.output.received", { diagnostic: { ...receivedDiagnostic, providerReceiveSequence: 8, relayCorrelationId: "relay-orphan", responseId: null } });
+    expect(evaluateScenarioAssertions(o01, [...oneLeg, orphanReceived] as any, [o01Speak]).harness).toContainEqual(expect.objectContaining({ id: "o01.provider_chunk_to_playback_to_output_leg_join", status: "fail" }));
 
     const a01 = testRun({ scenarioId: "V-A01" });
     const a01Events = Array.from({ length: 6 }, (_, index) => productEvent(a01, index + 10, "product.voice-sse.sophia.turn", { phase: "agent_ended" }));
@@ -1559,6 +1609,10 @@ function productAdmissionProof(config: ReturnType<typeof testConfig>, ready: boo
     probe_id: randomUUID(),
     observed_at: new Date().toISOString(),
     product_mutation_gates_open: ready,
+    frontend_auth_readiness_status: "verified",
+    frontend_control_adapter_enabled: true,
+    frontend_voice_lab_enabled: true,
+    frontend_kill_switch_engaged: false,
     builds: {
       frontend: component(configured.expectedDeployment.frontend),
       backend: component(configured.expectedDeployment.backend),

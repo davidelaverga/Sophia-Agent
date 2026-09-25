@@ -1453,6 +1453,17 @@ async def close_gemini_production_browser_session(
         voice_lab_claims is not None
         and "session:retention-reap" in voice_lab_claims.allowed_ops
     ):
+        # D02 has its separate frozen-epoch and signed owner receipt contract.
+        settled = False
+        if voice_lab_claims.scenario_id != "V-D02":
+            settled = await gemini_production_browser_sessions.settle_acknowledged_browser_cleanup(
+                session_id
+            )
+        if settled:
+            return JSONResponse(
+                {"ok": True, "closed": True},
+                status_code=status.HTTP_202_ACCEPTED,
+            )
         cleanup_requested = await gemini_production_browser_sessions.request_browser_cleanup(
             session_id
         )

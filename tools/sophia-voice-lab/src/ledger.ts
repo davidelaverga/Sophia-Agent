@@ -225,6 +225,8 @@ export interface VoiceLabLedger {
   listRunsPendingEvidence(limit: number): Promise<RunRecord[]>;
   listRunsCertificationDue(now: Date, limit: number): Promise<RunRecord[]>;
   listRunsRetentionDue(now: Date, limit: number): Promise<RunRecord[]>;
+  /** C077: terminal cleanup-complete runs whose latest canonical recovery left canonical evidence failed/pending, within the bounded retry window. */
+  listRunsCanonicalEvidenceRefreshDue(now: Date, limit: number): Promise<RunRecord[]>;
   reserveRollingAdmission(reservation: RollingAdmissionReservation, limits: RollingAdmissionLimits): Promise<RollingAdmissionResult>;
   createRunWithOperation(run: RunRecord, operation: NewOperation, limits: { global: number; caller: number }, rolling?: RollingAdmissionFence): Promise<{ run: RunRecord; operation: OperationRecord; replay: boolean; rollingAdmission?: RollingAdmissionResult }>;
   getRun(runId: string): Promise<RunRecord | null>;

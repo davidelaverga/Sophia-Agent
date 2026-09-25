@@ -47,15 +47,43 @@ export async function readGenericWorkerReplacementPreflight(input: GenericWorker
  * owner is already retired, so current closed readiness must join the exact
  * provider inventory, not be relabeled as the original owner. */
 export async function readServiceOwnerFencePreflight(input: GenericWorkerPreflightInput & { allocatedWorkerId: string }) {
+  assertServiceFenceAllocation(input);
+  const result = await readPreflight(input, undefined, true);
+  return { ...result, schema: "sophia.voice-lab.service-owner-fence-preflight.v1" as const };
+}
+/** v2 absent mode: the ORIGINAL allocated owner is already gone before the
+ * prospective action and every gate is closed. The retired-owner contract
+ * applies (the live heartbeat is not the original; the Render singleton joins
+ * the heartbeat's own projection), with that projection REQUIRED so the caller
+ * can compare the singleton against the original's projection. */
+export async function readServiceOwnerFenceV2AbsentPreflight(input: GenericWorkerPreflightInput & { allocatedWorkerId: string }) {
+  assertServiceFenceAllocation(input);
+  const result = await readPreflight(input, undefined, true, "required");
+  return { ...result, schema: "sophia.voice-lab.service-owner-fence-preflight.v2-absent" as const };
+}
+/** The allocated owner id must be this service's exact allocation, and the
+ * current recovery deployment must be pinned explicitly. */
+function assertServiceFenceAllocation(input: GenericWorkerPreflightInput & { allocatedWorkerId: string }): void {
   const allocation = validateRecoveryAllocationBinding(input.control.binding, input.control.browserAllocationBinding);
   if (!/^srv-[0-9a-z]{20}-[A-Za-z0-9_-]{5,96}$/.test(input.allocatedWorkerId)
     || input.allocatedWorkerId.slice(0, 24) !== input.workerServiceId
     || sha256(input.allocatedWorkerId) !== allocation.browser_worker_id_sha256) throw new Error("Service fence original owner does not match the exact service allocation.");
   if (!input.expectedRecoveryDeployment) throw new Error("Service fence requires explicit current recovery deployment pins.");
-  const result = await readPreflight(input, undefined, true);
-  return { ...result, schema: "sophia.voice-lab.service-owner-fence-preflight.v1" as const };
 }
-async function readPreflight(input: GenericWorkerPreflightInput, replacementHash?: string, retiredServiceOwner = false) {
+/** v2 service fence: the ORIGINAL allocated owner must still be the live
+ * singleton immediately before the prospective one-shot action. It therefore
+ * uses the original-owner comparison (heartbeat identity AND the Render
+ * inventory singleton must both be the allocation's own worker), which is the
+ * exact inversion of the v1 retired-owner contract above. */
+export async function readServiceOwnerFenceV2Preflight(input: GenericWorkerPreflightInput & { allocatedWorkerId: string }) {
+  assertServiceFenceAllocation(input);
+  // Original owner still current (heartbeat identity), but Render's inventory
+  // snapshot is compared through the supported projection, not the full hash.
+  const result = await readPreflight(input, undefined, false, "required");
+  return { ...result, schema: "sophia.voice-lab.service-owner-fence-preflight.v2" as const };
+}
+async function readPreflight(input: GenericWorkerPreflightInput, replacementHash?: string, retiredServiceOwner = false,
+  inventoryProjection: "off" | "optional" | "required" = retiredServiceOwner ? "optional" : "off") {
   const origin = genericRecoveryOrigin(input.voiceLabOrigin, input.allowHttpForTest);
   const fetchImpl = input.fetchImpl ?? fetch;
   const binding = RecoveryControlBindingSchema.parse(input.control.binding);
@@ -85,7 +113,11 @@ async function readPreflight(input: GenericWorkerPreflightInput, replacementHash
   const worker = await readRenderWorkerSnapshot({ render_api_origin: "https://api.render.com", render_worker_service_id: input.workerServiceId }, input.renderBearer, fetchImpl, null);
   // Only the retired-service fence uses the distinct inventory projection.
   // Original-owner contracts retain their exact historical owner comparison.
-  const inventoryHash = retiredServiceOwner && heartbeat.render_inventory_instance_id_sha256 != null
+  // v1's retired-owner contract may fall back when the worker predates the
+  // projection; the v2 original-owner contract must not, because the full
+  // ownership hash and the inventory hash are different strings for one pod.
+  if (inventoryProjection === "required" && heartbeat.render_inventory_instance_id_sha256 == null) throw new Error("Generic recovery requires the supported Render inventory identity projection.");
+  const inventoryHash = inventoryProjection !== "off" && heartbeat.render_inventory_instance_id_sha256 != null
     ? z.string().regex(/^[a-f0-9]{64}$/).parse(heartbeat.render_inventory_instance_id_sha256) : expectedOwnerHash;
   if (worker.deployStatus !== "live" || worker.deploySettledAt === null || worker.instanceIds.length !== 1
     || sha256(worker.instanceIds[0]!) !== inventoryHash) throw new Error("Generic recovery Render owner is not the exact singleton.");

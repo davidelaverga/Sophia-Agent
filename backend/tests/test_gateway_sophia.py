@@ -13,12 +13,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from mem00_owner_fixture import declare_memory_owners  # noqa: F401
 
 from deerflow.sophia.memory_governance.store import MemoryGovernanceConflict
-from deerflow.sophia.session_store import SessionMessageRecord, SessionRecord, SessionStore
+from deerflow.sophia.session_store import SessionEvidenceIntegrityError, SessionMessageRecord, SessionRecord, SessionStore, SessionStoreError
 
 
 @pytest.fixture(autouse=True)
@@ -166,7 +166,8 @@ def _synthetic_voice_lab_session_record(
     thread_id: str,
     *,
     test_run_id: str = "run-finalize-001",
-    scenario_id: str = "vt00-finalization-001",
+    scenario_id: str | None = "vt00-finalization-001",
+    scenario_version: str | None = "v1",
 ) -> SessionRecord:
     from deerflow.sophia.cleanup_fence import assert_cleanup_obligation_open
 
@@ -193,7 +194,7 @@ def _synthetic_voice_lab_session_record(
                 "cleanup_obligation_id": cleanup_obligation_id,
                 "environment": "production",
                 "scenario_id": scenario_id,
-                "scenario_version": "v1",
+                "scenario_version": scenario_version,
                 "retention_hours": 24,
                 "retention_anchor": "session_created_at_provisional",
                 "retention_expires_at": retention_expires_at,
@@ -2139,6 +2140,157 @@ class TestSessionEnd:
         assert stored_messages[0].metadata["offline_pipeline_excluded"] is True
         assert stored_messages[0].metadata["finalized_at"] == response_payload["finalized_at"]
         assert stored_messages[0].metadata["retention_expires_at"] == response_payload["retention_expires_at"]
+
+    def test_synthetic_finalization_accepts_valid_empty_transcript(
+        self,
+        client,
+        tmp_path,
+        monkeypatch,
+    ):
+        _configure_voice_lab_finalization(monkeypatch)
+        store = SessionStore(tmp_path / "session-store")
+        store.create(_synthetic_voice_lab_session_record("sess-empty", "thread-empty"))
+        payload = {
+            "session_id": "sess-empty",
+            "thread_id": "thread-empty",
+            "started_at": "2026-08-23T10:00:00+00:00",
+            "ended_at": "2026-08-23T10:02:00+00:00",
+            "turn_count": 0,
+            "base_revision": 0,
+            "messages": [],
+        }
+        with (
+            patch("app.gateway.routers.sophia.USERS_DIR", tmp_path),
+            patch("app.gateway.routers.sophia._session_store", store),
+            patch("app.gateway.inactivity_watcher.unregister_thread"),
+        ):
+            response = client.post(
+                "/api/sophia/voice-lab-user-1/end-session",
+                headers={"X-Sophia-Voice-Lab-Capability": _voice_lab_finalization_token()},
+                json=payload,
+            )
+            terminal_replay = client.post(
+                "/api/sophia/voice-lab-user-1/end-session",
+                headers={"X-Sophia-Voice-Lab-Capability": _voice_lab_finalization_token()},
+                json={**payload, "base_revision": 1},
+            )
+
+        assert response.status_code == 202, response.json()
+        canonical = response.json()["canonical_transcript"]
+        assert canonical["messages"] == []
+        assert canonical["turn_boundaries"] == []
+        assert canonical["message_count"] == 0
+        assert canonical["sha256"] == hashlib.sha256(b"[]").hexdigest()
+        assert terminal_replay.status_code == 202, terminal_replay.json()
+        assert terminal_replay.json()["canonical_transcript"] == canonical
+        assert store.get("voice-lab-user-1", "sess-empty").status == "ended"
+
+    def test_scenario_less_empty_end_reproduces_r3_shape_and_succeeds_after_fix(
+        self, client, tmp_path, monkeypatch,
+    ):
+        _configure_voice_lab_finalization(monkeypatch)
+        store = SessionStore(tmp_path / "session-store")
+        store.create(_synthetic_voice_lab_session_record(
+            "sess-r3", "thread-r3", scenario_id=None, scenario_version=None,
+        ))
+        with (
+            patch("app.gateway.routers.sophia.USERS_DIR", tmp_path),
+            patch("app.gateway.routers.sophia._session_store", store),
+            patch("app.gateway.inactivity_watcher.unregister_thread"),
+        ):
+            response = client.post(
+                "/api/sophia/voice-lab-user-1/end-session",
+                headers={"X-Sophia-Voice-Lab-Capability": _voice_lab_finalization_token(
+                    scenario_id=None, scenario_version=None,
+                )},
+                json={"session_id": "sess-r3", "thread_id": "thread-r3", "messages": [], "turn_count": 0},
+            )
+        assert response.status_code == 202, response.json()
+        canonical = response.json()["canonical_transcript"]
+        assert canonical["scenario_id"] is None
+        assert canonical["scenario_version"] is None
+        assert canonical["messages"] == []
+        assert canonical["sha256"] == hashlib.sha256(b"[]").hexdigest()
+        from app.gateway.routers.sophia import SyntheticCanonicalTranscript
+        with pytest.raises(Exception):
+            SyntheticCanonicalTranscript.model_validate({key: value for key, value in canonical.items() if key != "scenario_id"})
+        with pytest.raises(Exception):
+            SyntheticCanonicalTranscript.model_validate({**canonical, "scenario_version": ""})
+        assert store.get("voice-lab-user-1", "sess-r3").status == "ended"
+
+    @pytest.mark.parametrize("label,finalized_at,provider_expires_at,scenario_id,scenario_version", [
+        ("R1", "2026-09-24T01:17:38.050Z", "2026-09-24T01:28:48.587Z", "V-O01", "vt00.scenarios.v1"),
+        ("R3", "2026-09-24T11:18:39.559Z", "2026-09-24T11:31:29.843Z", None, None),
+    ])
+    def test_archived_empty_session_shapes_validate_without_provider(
+        self, label, finalized_at, provider_expires_at, scenario_id, scenario_version, caplog,
+    ):
+        from app.gateway.routers.sophia import SyntheticCanonicalTranscript, _synthetic_transcript_evidence
+        from app.gateway.voice_lab_capability import VoiceLabClaims
+
+        retention_expires_at = (datetime.fromisoformat(finalized_at.replace("Z", "+00:00")) + timedelta(hours=24)).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+        run_id = f"redacted-{label.lower()}"
+        record = SessionRecord(
+            session_id=f"redacted-session-{label.lower()}", thread_id=f"redacted-thread-{label.lower()}",
+            user_id="voice-lab-user-1", status="ended", message_count=0, message_revision=1,
+            metadata={"synthetic_voice_lab": {"finalized_at": finalized_at, "retention_hours": 24,
+                                              "retention_anchor": "finalized_at", "retention_expires_at": retention_expires_at}},
+        )
+        claims = VoiceLabClaims(
+            principal_id="voice-lab-user-1", test_run_id=run_id, scenario_id=scenario_id,
+            scenario_version=scenario_version, environment="production", retention_hours=24,
+            cleanup_obligation_id=_cleanup_id(run_id), provider_expires_at=provider_expires_at,
+            allowed_ops=("session:finalize",), expected_deployment={"frontend": VOICE_LAB_BUILD,
+            "backend": VOICE_LAB_BUILD, "voice": VOICE_LAB_BUILD}, issued_at=0, not_before=0,
+            expires_at=0, jti="redacted", nonce="redacted", raw={},
+        )
+        canonical = _synthetic_transcript_evidence(record, [], claims)
+        assert SyntheticCanonicalTranscript.model_validate(canonical).message_count == 0
+        assert canonical["scenario_id"] == scenario_id
+        assert canonical["scenario_version"] == scenario_version
+        assert canonical["sha256"] == hashlib.sha256(b"[]").hexdigest()
+
+        # The validator rejects actual missing/malformed evidence, including
+        # an absent thread and an expiry beyond the retention boundary.
+        with pytest.raises(Exception):
+            SyntheticCanonicalTranscript.model_validate({**canonical, "thread_id": ""})
+        with pytest.raises(Exception):
+            SyntheticCanonicalTranscript.model_validate({**canonical, "finalized_at": None})
+        with pytest.raises(Exception):
+            SyntheticCanonicalTranscript.model_validate({**canonical, "provider_expires_at": "2026-09-26T00:00:00.000Z"})
+
+        with pytest.raises(HTTPException) as failed:
+            _synthetic_transcript_evidence(record.model_copy(update={"thread_id": ""}), [], claims)
+        assert failed.value.status_code == 503
+        assert failed.value.detail["code"] == "voice_lab_canonical_transcript_invalid"
+        assert failed.value.detail["fields"] == ["thread_id"]
+        assert len(failed.value.detail["correlation_id"]) == 32
+        assert "thread_id" in caplog.text
+        assert "redacted-thread" not in caplog.text
+
+    @pytest.mark.parametrize("failure,code", [
+        (SessionEvidenceIntegrityError("bad row"), "voice_lab_canonical_transcript_invalid"),
+        (SessionStoreError("database unavailable"), "voice_lab_canonical_transcript_unavailable"),
+    ])
+    def test_synthetic_empty_end_refuses_missing_or_malformed_canonical_read_before_commit(
+        self, client, tmp_path, monkeypatch, failure, code,
+    ):
+        _configure_voice_lab_finalization(monkeypatch)
+        store = SessionStore(tmp_path / "session-store")
+        store.create(_synthetic_voice_lab_session_record("sess-empty", "thread-empty"))
+        with (
+            patch("app.gateway.routers.sophia.USERS_DIR", tmp_path),
+            patch("app.gateway.routers.sophia._session_store", store),
+            patch.object(store, "read_exact_session_messages", side_effect=failure),
+        ):
+            response = client.post(
+                "/api/sophia/voice-lab-user-1/end-session",
+                headers={"X-Sophia-Voice-Lab-Capability": _voice_lab_finalization_token()},
+                json={"session_id": "sess-empty", "thread_id": "thread-empty", "messages": [], "turn_count": 0},
+            )
+        assert response.status_code == 503
+        assert response.json()["detail"]["code"] == code
+        assert store.get("voice-lab-user-1", "sess-empty").status != "ended"
 
     def test_synthetic_finalization_rejects_elapsed_provisional_deadline_before_transcript_write(
         self,

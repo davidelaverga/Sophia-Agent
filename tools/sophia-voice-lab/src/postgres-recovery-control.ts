@@ -12,7 +12,7 @@ import type { RecoveryAttemptIdentity } from "./recovery-attempt.js";
 import { TERMINAL_RUN_STATES, VoiceLabError, labError } from "./domain.js";
 import { RecoveryControlBindingSchema, recoveryCapabilityAudit, recoveryInventoryCursor, recoverySettlementProof, validateRecoveryBrowserBinding, type RecoveryControlRecord } from "./recovery-control.js";
 import { canonicalRequestHash, sha256 } from "./security.js";
-import { deriveExecutionEpochCleanupProof, parsePreservedExecutionCleanupProof } from "./execution-cleanup.js";
+import { deriveExecutionEpochCleanupProof, parsePreservedExecutionCleanupProof, sameExecutionCleanupProof } from "./execution-cleanup.js";
 
 const TABLE = "sophia_voice_lab.recovery_controls";
 type Row = {
@@ -204,7 +204,7 @@ export class PostgresRecoveryControls {
       const lease = leases.rows[0];
       if (!proof.ready || !executionMatchesRecoveryAllocation(current, proof) || (lease && (proof.workerIdSha256 !== sha256(lease.worker_id) || proof.browserLeaseEpoch !== Number(lease.lease_epoch)))) throw conflict("RECOVERY_EXECUTION_PROOF_UNCONFIRMED");
       if (current.executionCleanupProof) {
-        if (canonicalRequestHash(current.executionCleanupProof) !== canonicalRequestHash(proof)) throw conflict("RECOVERY_EXECUTION_PROOF_CONFLICT");
+        if (!sameExecutionCleanupProof(current.executionCleanupProof, proof)) throw conflict("RECOVERY_EXECUTION_PROOF_CONFLICT");
         await client.query("commit");
         return current;
       }
@@ -231,7 +231,7 @@ export class PostgresRecoveryControls {
       const events = await client.query("select * from sophia_voice_lab.run_events where run_id=$1 order by seq", [runId]);
       const proof = deriveExecutionEpochCleanupProof({ id: run.id, testRunId: run.test_run_id, cleanupObligationId: run.cleanup_obligation_id }, events.rows.map(row => ({ runId, seq: Number(row.seq), kind: row.kind, source: row.source, payload: row.payload, at: row.observed_at, dedupeKey: row.dedupe_key })));
       if (current.contentPurgedAt !== null || !proof.ready || !current.executionCleanupProof
-        || canonicalRequestHash(current.executionCleanupProof) !== canonicalRequestHash(proof)
+        || !sameExecutionCleanupProof(current.executionCleanupProof, proof)
         || !executionMatchesRecoveryAllocation(current, proof)
         || proof.workerIdSha256 !== sha256(lease.worker_id) || proof.browserLeaseEpoch !== Number(lease.lease_epoch)) {
         await client.query("rollback"); return false;

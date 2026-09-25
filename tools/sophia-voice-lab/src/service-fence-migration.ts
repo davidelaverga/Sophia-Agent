@@ -15,3 +15,15 @@ export function composeServiceFenceMigration(base: Buffer, recovery: Buffer, fen
   if (!/\ncommit;\s*$/.test(historical)) throw new Error("SERVICE_FENCE_MIGRATION_ENVELOPE_INVALID");
   return Buffer.from(`${historical.replace(/\ncommit;\s*$/, "")}\n${fence.toString("utf8")}\ncommit;\n`);
 }
+
+export const SERVICE_FENCE_V2_MIGRATION_SHA256 = "08fa36efea28c22f26784933b2f36f03441153fa435bb676e55105fe8e20598f";
+export const SERVICE_FENCE_V2_SCHEMA_VERSION = 6;
+export const SERVICE_FENCE_V2_BUNDLE_SHA256 = "bc47d257ab1ebfced5708b0255a9e215085410337172632e62f97b422e798b67";
+
+/** v6 release bytes: the exact v5 bundle plus the additive v2 proof shape in
+ * the same transaction. The v5 source bundle (and 005) stays byte-identical. */
+export function composeServiceFenceV2Migration(base: Buffer, recovery: Buffer, fence: Buffer, fenceV2: Buffer): Buffer {
+  const v5 = composeServiceFenceMigration(base, recovery, fence).toString("utf8");
+  if (createHash("sha256").update(fenceV2).digest("hex") !== SERVICE_FENCE_V2_MIGRATION_SHA256) throw new Error("SERVICE_FENCE_V2_MIGRATION_CHECKSUM_INVALID");
+  return Buffer.from(`${v5.replace(/\ncommit;\s*$/, "")}\n${fenceV2.toString("utf8")}\ncommit;\n`);
+}

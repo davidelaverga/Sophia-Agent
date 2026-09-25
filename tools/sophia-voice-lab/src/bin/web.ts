@@ -1,5 +1,5 @@
 import { loadConfig } from "../config.js";
-import { createHttpApp, createWebBootIdentity, listen, probeTarget } from "../http-server.js";
+import { createHttpApp, createWebBootIdentity, listen, probeEffectiveTarget } from "../http-server.js";
 import { createAudioResolver, createLedger } from "../runtime.js";
 import { StaticAttestationAuthenticator, StaticBearerAuthenticator } from "../security.js";
 import { CompositeRequestAuthenticator } from "../security.js";
@@ -23,7 +23,7 @@ const audio = await createAudioResolver(config);
 logWebBootStage("audio_initialized");
 const service = new VoiceLabService(ledger, config, async () => audio.summaries(), async () => audio.ttsInfo(), async () => {
   if (!config.readinessTarget) return { ok: false, status: "unconfigured", builds: null, reason: "target_configuration_missing" };
-  return probeTarget(config);
+  return probeEffectiveTarget(config);
 });
 if (!config.oauth || !config.databaseUrl) throw new Error("OAuth and DATABASE_URL are required for the registered production MCP lane.");
 const oauthStore = new PostgresOAuthLedgerStore(config.databaseUrl, 5, config.oauth.admissionRetentionSeconds, config.callerPartitionKeys, config.oauth.operatorSubject);

@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from deerflow.sophia.deck_quality.canonical import canonical_sha256
 from deerflow.sophia.deck_quality.idempotency import derive_quality_run_id
 from deerflow.sophia.deck_quality.schemas import QualityInstrumentLock
+from deerflow.sophia.rpc_business_errors import store_error_status
 from deerflow.sophia.storage.supabase_artifact_store import safe_object_path_segment
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -820,7 +821,7 @@ class SupabaseDeckQualityRunRpcClient:
         except httpx.HTTPError:
             raise DeckQualityPersistenceRpcError(operation) from None
         if response.status_code >= 400:
-            raise DeckQualityPersistenceRpcError(operation, status_code=response.status_code) from None
+            raise DeckQualityPersistenceRpcError(operation, status_code=store_error_status(response)) from None
         if not response.content:
             raise DeckQualityPersistenceProtocolError(f"deck quality persistence RPC returned no record operation={operation}")
         try:
