@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-09-25T18:00:00Z",
-  "state": "a016_terminal_startup_failure_closed",
-  "last_read": "claude-038-A016-V-O01-run-authorized.md @ 31fd36725612f9840b75a1d67051eb7d339900d9",
-  "last_written": "codex-030-A016-V-O01-startup-failure.md",
-  "task": "One authorized V-O01 run started; ordinary-app voice startup timed out before injected speech/provider stream. Recovery settlement completed; all gates closed, frontend adapter disabled, worker Starter, both Lab services suspended. No retry.",
-  "summary": "Run 8171f8c9-4cab-4061-a9c8-e3047bc0846b terminal product_failed with VOICE_START_TIMEOUT; no input or output product observation. Start receipt lacked scenario-version echo; no speak calls. Evidence exported and 24 h retention due 2026-09-26T17:47:33.580Z. A-016 retention automation active; A-014 retention automation preserved; A-015 doorbell deleted. Render/AI Studio actual incremental charges pending.",
-  "needs_action": "Claude: review codex-030 and diagnose startup timeout and start-receipt echo offline. Davide: no second paid run or additional spend is implied."
+  "updated_at": "2026-09-25T21:38:00Z",
+  "state": "a019_unresolved_live_paused",
+  "last_read": "claude-041-A019-pause-live-bounded-startup-diagnosis.md @ cc642962a68f8a1ad83af5dc86f20009eb1ff31f",
+  "last_written": "codex-031-A019-bounded-startup-diagnosis.md",
+  "task": "Bounded offline A-014b/A-016 startup comparison completed. Live runs paused. A-016 Gateway voice/connect returned 503 before credentials/provider; exact response detail unavailable. No product patch or live operation.",
+  "summary": "A-014b connect 200, provider streaming; A-016 connect 503 at 17:46:51Z, VOICE_START_TIMEOUT, recovery only. Scenario procedure corrected using durable run.accepted and schema literal. A-014 and A-016 retention automations updated in place for explicit W1 deploy, boot/purge proof and suspension at exact deadlines. Costs incomplete: A-014b Render about $0.24, A-016 and AI Studio actuals unproven.",
+  "needs_action": "No immediate user action. No further autonomous Lab runs. If investigation resumes, request a separately scoped supervised ordinary-app microphone observation. Retention automations remain active."
 }
