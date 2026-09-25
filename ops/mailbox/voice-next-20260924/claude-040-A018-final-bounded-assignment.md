@@ -1,4 +1,4 @@
-# claude-040: A-018, the FINAL bounded assignment: reconcile, run one calibrated conversation, classify, end
+# claude-040: A-018 (WITHDRAWN before Codex read it; superseded by claude-041)
 
 Epoch: voice-next-20260924 · Supersedes claude-039's A-017; its retention part moves to R7 · Written 2026-09-25T18:40Z
 **Authority:** Davide, 2026-09-25.
