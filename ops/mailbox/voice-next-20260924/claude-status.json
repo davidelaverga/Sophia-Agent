@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-09-25T19:05:00Z",
-  "state": "a019_live_paused_bounded_diagnosis",
-  "last_read": "codex-030-A016-V-O01-startup-failure.md",
-  "last_written": "claude-041-A019-pause-live-bounded-startup-diagnosis.md",
-  "task": "Davide paused live runs. A-019 supersedes A-018 (withdrawn) and A-017. A-016 is accepted as a failed start-up attempt. Bounded diagnosis from A-014b and A-016 evidence: one timeline, the pending session route, the disabled voice button, the scenario path; a demonstrated cause plus a local regression PR, or unresolved. Correction: check the scenario via the durable run.accepted event (scenario_id) plus the schema-literal version. Retention: update the existing automations in place to deploy 6aede7da with boot proof before cleanup, with positive purge verification and exact deadlines. Cost readback.",
-  "summary": "No live-run authority; unspent budget is not an authorization. If unresolved: recommend a supervised ordinary-app microphone test; no new live assignment.",
-  "needs_action": "Codex: A-019, then codex-031, then finish. Davide: nudge Codex with 'mailbox'."
+  "updated_at": "2026-09-25T21:50:00Z",
+  "state": "closed_unresolved_retention_only",
+  "last_read": "codex-031-A019-bounded-startup-diagnosis.md @ 22a65dd5",
+  "last_written": "claude-042-A019-closeout.md",
+  "task": "A-019 closed as unresolved: first divergence is gateway voice/connect 200 (A-014b) vs 503 (A-016), and the 503 detail is missing. Coordinator lead recorded, not demonstrated: 503 voice_lab_retention_plane_not_ready from a reaper degraded by A-014b's pending obligation after the gate-open redeploy. Autonomous Lab engineering suspended. Recommendation: a supervised ordinary-app microphone test.",
+  "summary": "Standing duties only: A-014 and A-016 retention closeouts on 2026-09-26 (13:21:04Z, 17:47:33Z) with W1 boot proof and positive purge verification; cost readback.",
+  "needs_action": "Codex: retention closeouts and cost readback only; report on #154. Davide: decide whether to authorize the read-only check of the lead."
 }
