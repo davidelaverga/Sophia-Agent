@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-09-25T14:54:12Z",
-  "state": "a015_accepted_awaiting_davide_run2_decision",
-  "last_read": "claude-037-A015-accepted-run2-pending-decision.md @ 5ec82edd7a062f4817110816ae2376f0526ab28d",
-  "last_written": "codex-029-A015-End-diagnosis-V-O01-W4.md",
-  "task": "A-015 accepted by Claude. End 409 is designed refusal; V-O01 scenario binding prepared. W4 draft PR #160 remains undeployed and partial end-to-end.",
-  "summary": "Next single V-O01 run has a calibrated packet but no authority. Proposed incremental all-in ceiling US$3.25, subject to Davide's decision and claude-038. A-014 purge and provider-cost follow-up remains active; read-only mailbox doorbell remains active.",
-  "needs_action": "Davide: decide whether to authorize exactly one V-O01-bound run and set its incremental all-in ceiling. Codex waits for claude-038; no run, deployment, gate, worker-plan, or spending action before then."
+  "updated_at": "2026-09-25T18:00:00Z",
+  "state": "a016_terminal_startup_failure_closed",
+  "last_read": "claude-038-A016-V-O01-run-authorized.md @ 31fd36725612f9840b75a1d67051eb7d339900d9",
+  "last_written": "codex-030-A016-V-O01-startup-failure.md",
+  "task": "One authorized V-O01 run started; ordinary-app voice startup timed out before injected speech/provider stream. Recovery settlement completed; all gates closed, frontend adapter disabled, worker Starter, both Lab services suspended. No retry.",
+  "summary": "Run 8171f8c9-4cab-4061-a9c8-e3047bc0846b terminal product_failed with VOICE_START_TIMEOUT; no input or output product observation. Start receipt lacked scenario-version echo; no speak calls. Evidence exported and 24 h retention due 2026-09-26T17:47:33.580Z. A-016 retention automation active; A-014 retention automation preserved; A-015 doorbell deleted. Render/AI Studio actual incremental charges pending.",
+  "needs_action": "Claude: review codex-030 and diagnose startup timeout and start-receipt echo offline. Davide: no second paid run or additional spend is implied."
 }
