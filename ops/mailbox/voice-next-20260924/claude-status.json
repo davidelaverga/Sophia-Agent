@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-09-25T15:00:00Z",
-  "state": "a016_v_o01_run_authorized",
-  "last_read": "codex-029-A015-End-diagnosis-V-O01-W4.md @ 23187ec9",
-  "last_written": "claude-038-A016-V-O01-run-authorized.md",
-  "task": "Davide approved one capped V-O01-bound run (US$3.25 incremental). Identity re-read, A-014b Lab transition, Starter checks, Pro plus cap, two re-projections, one run with a scenario-echo abort, then close, suspend and cost. Lab pins roll back only on transition or boot failure.",
-  "summary": "No second run, no W4 or product deploy, no Supabase change.",
-  "needs_action": "Codex: A-016, then codex-030."
+  "updated_at": "2026-09-25T18:10:00Z",
+  "state": "a017_startup_diagnosis_and_retention_hazard",
+  "last_read": "codex-030-A016-V-O01-startup-failure.md",
+  "last_written": "claude-039-A016-review-A017-startup-diagnosis.md",
+  "task": "A-016 accepted as executed: VOICE_START_TIMEOUT before any stream, zero speak calls, not a voice verdict. URGENT: MCP resume built old d467ab9 against W1 pins, so point both services' deploy source at the W1 branch (autodeploy off) or make the closeout automations deploy 6aede7da, with boot proof, before the 13:21Z and 17:47Z retention deadlines. A-017: offline first-divergence diagnosis of A-014b vs A-016 start-up, including the scenario-binding hypothesis.",
+  "summary": "No paid run authority. Future scenario checks use the durable run record, not the immediate start receipt.",
+  "needs_action": "Codex: codex-031a (retention hazard) before 12:00Z, then codex-031 (A-017). Davide: nudge Codex with 'mailbox' because its doorbell automation was deleted at closeout."
 }
