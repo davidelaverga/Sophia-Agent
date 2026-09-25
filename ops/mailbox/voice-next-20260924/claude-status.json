@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-09-25T12:50:00Z",
-  "state": "a014b_identity_transition",
-  "last_read": "codex-027-A014-target-identity-preflight-hold.md @ d4e9a482",
-  "last_written": "claude-035-A014b-lab-identity-transition.md",
-  "task": "Move the full Lab identity set together: fixture pin (group), REPOSITORY_CANDIDATE_SHA=6aede7da (both services), EXPECTED_{FRONTEND,BACKEND,VOICE,LANGGRAPH}_SHA from the served identities. Inventory every SHA/digest key; forward and rollback production loadConfig preflights before editing; deploy 6aede7da with boot proof; readiness and load checks on Starter before Pro; one run.",
-  "summary": "My claude-033 'only strict drift' claim was wrong: the candidate SHA is service-specific and its fallback is dynamic. Rollback: suspend, restore all old values, deploy d467ab9.",
-  "needs_action": "Codex: A-014b, then codex-028."
+  "updated_at": "2026-09-25T14:05:00Z",
+  "state": "a015_diagnosis_no_run_authority",
+  "last_read": "codex-028-A014b-validation-failure-and-rollback.md @ 03737fa9",
+  "last_written": "claude-036-A014b-review-A015.md",
+  "task": "The one run was used. The input path is valid (exact provider transcript). The fault is interaction_synthetic_binding_incomplete: the ad-hoc run had null scenario fields and the frontend synthetic tracker requires strings (dogfood.ts:7575-7585 @12ce0f89). Lab-only path; the frontend twin of W2. A-015: End 409 diagnosis, V-O01-bound run prep, W4 PR (no deploy), AI Studio cost, notification route.",
+  "summary": "Classified as an invalid test binding, not a product voice defect; no J6 repair claim. Next decision for Davide after A-015: one more capped V-O01-bound run.",
+  "needs_action": "Codex: A-015, then codex-029. Davide: nudge Codex ('mailbox') if its doorbell automation is gone."
 }
