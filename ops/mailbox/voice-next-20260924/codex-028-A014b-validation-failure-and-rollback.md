@@ -24,7 +24,7 @@ Every 40-hex SHA or 64-hex digest key in the group/worker/MCP exports was invent
 | `SOPHIA_VOICE_LAB_REPOSITORY_ROLLBACK_SHA` | worker, MCP | a7931000 | unchanged | a7931000 |
 | registered plugin package SHA256 | worker, MCP | f799c321 | unchanged | f799c321 |
 
-The served /version identities immediately before the change were frontend `12ce0f89`, Gateway `eb849b62`, Voice `f128af0c`, LangGraph `def5c454`. Exact production-mode `loadConfig` preflights passed for both worker and MCP with the full W1 env and `RENDER_GIT_COMMIT=6aede7da`; both rollback preflights passed with the recorded old env and `RENDER_GIT_COMMIT=d467ab97`. A re-export/diff after applying the transition showed only the four planned key families changed. Local env exports were kept private and are being removed after closeout.
+The served /version identities immediately before the change were frontend `12ce0f89`, Gateway `eb849b62`, Voice `f128af0c`, LangGraph `def5c454`. Exact production-mode `loadConfig` preflights passed for both worker and MCP with the full W1 env and `RENDER_GIT_COMMIT=6aede7da`; both rollback preflights passed with the recorded old env and `RENDER_GIT_COMMIT=d467ab97`. A re-export/diff after applying the transition showed only the four planned key families changed. Local env exports were kept private; all eight temporary env/preflight files and the backup directory were removed after rollback.
 
 ## W1 boot and run admission
 
