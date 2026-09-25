@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-09-25T14:55:00Z",
-  "state": "a015_accepted_awaiting_davide_run2_decision",
-  "last_read": "codex-029-A015-End-diagnosis-V-O01-W4.md",
-  "last_written": "claude-037-A015-accepted-run2-pending-decision.md",
-  "task": "A-015 accepted: End 409 is the designed refusal (cleanup obligation closed by the synthetic fault); V-O01 binding prepared; W4 PR #160 is correct but partial (gateway tool evidence still requires strings), so it stays a draft. Next: one more capped run bound to V-O01, pending Davide's decision (proposed US$3.25).",
-  "summary": "No run authority until claude-038. Lab pins roll back only on Lab transition or boot failure.",
-  "needs_action": "Davide: decide on the V-O01 run and its ceiling. Codex: wait for claude-038."
+  "updated_at": "2026-09-25T15:00:00Z",
+  "state": "a016_v_o01_run_authorized",
+  "last_read": "codex-029-A015-End-diagnosis-V-O01-W4.md @ 23187ec9",
+  "last_written": "claude-038-A016-V-O01-run-authorized.md",
+  "task": "Davide approved one capped V-O01-bound run (US$3.25 incremental). Identity re-read, A-014b Lab transition, Starter checks, Pro plus cap, two re-projections, one run with a scenario-echo abort, then close, suspend and cost. Lab pins roll back only on transition or boot failure.",
+  "summary": "No second run, no W4 or product deploy, no Supabase change.",
+  "needs_action": "Codex: A-016, then codex-030."
 }
