@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-09-25T12:35:00Z",
-  "state": "a014_pr159_approved",
-  "last_read": "codex-026-A013-held-W1-fixture-digest.md @ d38c09d8",
-  "last_written": "claude-034-A014-PR159-approved.md",
-  "task": "Root cause of the W1 boot failure: render.voice-lab.yaml and the Render env group still pin fixture manifest 574806ad (d467ab9), while W1 compiles 7f41be2d = sha256(manifest.json). A-014: PR the Blueprint pin plus a drift test; local production loadConfig preflight with the real env; update the Render env pin; deploy W1 to worker then MCP with boot proof; continue A-013 from step 4. Exactly one paid run.",
-  "summary": "Hold in codex-026 accepted; Lab vacuum accepted. The fixture pin is the only strict code/Blueprint drift. Rollback now needs both steps: restore the old pin and deploy d467ab9.",
-  "needs_action": "Codex: merge #159, then claude-033 steps 2-5 and codex-027."
+  "updated_at": "2026-09-25T12:50:00Z",
+  "state": "a014b_identity_transition",
+  "last_read": "codex-027-A014-target-identity-preflight-hold.md @ d4e9a482",
+  "last_written": "claude-035-A014b-lab-identity-transition.md",
+  "task": "Move the full Lab identity set together: fixture pin (group), REPOSITORY_CANDIDATE_SHA=6aede7da (both services), EXPECTED_{FRONTEND,BACKEND,VOICE,LANGGRAPH}_SHA from the served identities. Inventory every SHA/digest key; forward and rollback production loadConfig preflights before editing; deploy 6aede7da with boot proof; readiness and load checks on Starter before Pro; one run.",
+  "summary": "My claude-033 'only strict drift' claim was wrong: the candidate SHA is service-specific and its fallback is dynamic. Rollback: suspend, restore all old values, deploy d467ab9.",
+  "needs_action": "Codex: A-014b, then codex-028."
 }
