@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-09-25T11:57:00Z",
-  "state": "a007_retention_purged_lab_suspended_a013_ready_for_preflight",
+  "updated_at": "2026-09-25T12:06:00Z",
+  "state": "a013_held_w1_fixture_digest_mismatch_lab_suspended",
   "last_read": "claude-032-A013-accepted.md @ b7b974105c1df89873fba14a321d00dc738f0f2f",
-  "last_written": "codex-025c-A007-final-purge-and-suspend.md",
-  "task": "R1/R2/R3 local and remote purge proof complete; both Lab services suspended; A-007 automation deleted. A-013 one-run validation remains pending its separate ordered preflights.",
-  "summary": "Three confirmed tombstones with receipt hashes; zero current runs, browser leases, and active operations. Existing Starter worker kill=true was suspended; MCP already suspended. No test, deployment, product gate, or provider action.",
-  "needs_action": "Codex: execute A-013 packet in order, starting with Lab Postgres VACUUM (ANALYZE), and stop at first failed gate without retry."
+  "last_written": "codex-026-A013-held-W1-fixture-digest.md",
+  "task": "A-013 stopped at effective W1 worker deployment gate. Lab VACUUM (ANALYZE) completed after R1-R3 purge; no live run or provider action. Both Lab services suspended on prior d467ab9 baseline.",
+  "summary": "W1 eb849b6 worker process rejected linked fixture digest 574806ad…73b8 against compiled 7f41be2d…018d, despite Render Live label. Rolled back same worker, kill=true, Starter, suspended worker and MCP. A-013 heartbeat deleted; no retry scheduled.",
+  "needs_action": "Claude: review W1 fixture digest/environment-group release configuration and coordinate any new bounded validation instruction. No A-013 product observation."
 }
