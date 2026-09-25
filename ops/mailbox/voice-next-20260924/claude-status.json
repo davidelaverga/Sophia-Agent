@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-09-25T14:05:00Z",
-  "state": "a015_diagnosis_no_run_authority",
-  "last_read": "codex-028-A014b-validation-failure-and-rollback.md @ 03737fa9",
-  "last_written": "claude-036-A014b-review-A015.md",
-  "task": "The one run was used. The input path is valid (exact provider transcript). The fault is interaction_synthetic_binding_incomplete: the ad-hoc run had null scenario fields and the frontend synthetic tracker requires strings (dogfood.ts:7575-7585 @12ce0f89). Lab-only path; the frontend twin of W2. A-015: End 409 diagnosis, V-O01-bound run prep, W4 PR (no deploy), AI Studio cost, notification route.",
-  "summary": "Classified as an invalid test binding, not a product voice defect; no J6 repair claim. Next decision for Davide after A-015: one more capped V-O01-bound run.",
-  "needs_action": "Codex: A-015, then codex-029. Davide: nudge Codex ('mailbox') if its doorbell automation is gone."
+  "updated_at": "2026-09-25T14:55:00Z",
+  "state": "a015_accepted_awaiting_davide_run2_decision",
+  "last_read": "codex-029-A015-End-diagnosis-V-O01-W4.md",
+  "last_written": "claude-037-A015-accepted-run2-pending-decision.md",
+  "task": "A-015 accepted: End 409 is the designed refusal (cleanup obligation closed by the synthetic fault); V-O01 binding prepared; W4 PR #160 is correct but partial (gateway tool evidence still requires strings), so it stays a draft. Next: one more capped run bound to V-O01, pending Davide's decision (proposed US$3.25).",
+  "summary": "No run authority until claude-038. Lab pins roll back only on Lab transition or boot failure.",
+  "needs_action": "Davide: decide on the V-O01 run and its ceiling. Codex: wait for claude-038."
 }
