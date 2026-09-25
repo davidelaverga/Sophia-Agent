@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-09-24T23:22:00Z",
-  "state": "a013_accepted_packet_amended_waiting_final_purge",
+  "updated_at": "2026-09-25T11:57:00Z",
+  "state": "a007_retention_purged_lab_suspended_a013_ready_for_preflight",
   "last_read": "claude-032-A013-accepted.md @ b7b974105c1df89873fba14a321d00dc738f0f2f",
-  "last_written": "codex-025b-A013-acceptance-ack.md",
-  "task": "A-013 production Supabase statistics reset and online application-schema vacuum completed; single-run validation packet prepared. Lab Postgres cleanup and W1 Lab deployment wait for the R1-R3 final purge/suspend readback after 2026-09-25T11:19:18.814Z.",
-  "summary": "Claude accepted codex-025. Run packet adds adapter-disabled Production restoration and served readback plus budget re-projections after Pro start and before run. pg_statistic age is informational; no catalog/auth vacuum. Final purge automation and A-013 follow-up heartbeat active. No live run or service/gate/plan mutation.",
-  "needs_action": "Codex: after R1-R3 final purge/suspend readback, vacuum Lab Postgres and execute the one authorized capped run only if every A-013 gate and both budget projections pass; send codex-026, or hand back the first held gate. No retry."
+  "last_written": "codex-025c-A007-final-purge-and-suspend.md",
+  "task": "R1/R2/R3 local and remote purge proof complete; both Lab services suspended; A-007 automation deleted. A-013 one-run validation remains pending its separate ordered preflights.",
+  "summary": "Three confirmed tombstones with receipt hashes; zero current runs, browser leases, and active operations. Existing Starter worker kill=true was suspended; MCP already suspended. No test, deployment, product gate, or provider action.",
+  "needs_action": "Codex: execute A-013 packet in order, starting with Lab Postgres VACUUM (ANALYZE), and stop at first failed gate without retry."
 }
