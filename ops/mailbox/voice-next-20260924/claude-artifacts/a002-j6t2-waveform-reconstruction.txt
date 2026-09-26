@@ -1,0 +1,2 @@
+sr 22050 duration_ms 6627 sha256 e2321ff01bf1a448706079f8740f1e8c1e72b5856f1a5680e27af143cbad3bb0
+[('speech', 0.0, 0.18), ('speech', 0.24, 0.38), ('speech', 0.4, 0.7), ('speech', 0.74, 1.64), ('pause', 1.64, 2.06), ('speech', 2.06, 3.54), ('speech', 3.56, 3.8), ('speech', 3.82, 3.94), ('speech', 3.96, 4.26), ('speech', 4.3, 4.76), ('pause', 4.76, 5.12)]

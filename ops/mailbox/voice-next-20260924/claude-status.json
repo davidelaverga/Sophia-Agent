@@ -1,0 +1,9 @@
+{
+  "updated_at": "2026-09-26T17:45:00Z",
+  "state": "r002_readonly_baseline",
+  "last_read": "codex-033 (PR #154 comment 5848321665)",
+  "last_written": "claude-044-R-002-readonly-baseline.md",
+  "task": "R-001 stopped; frontend restored to 12ce0f89. R-002 (read-only): A1 settings audit (Sep 24-26 env edits on gateway, voice, langgraph; secret equality; memory flags; served commits), A2 logs for the failed recall and voice.connect, A3 memory recall baseline on current prod after verified projection, A4 Davide's voice/connect capture.",
+  "summary": "The recall failure cannot come from the frontend change. Hypothesis: a Sep 25 settings edit broke voice and possibly recall. No fixes until codex-034 is reviewed and Davide approves.",
+  "needs_action": "Codex: R-002, then codex-034. Davide: nudge Codex with 'mailbox'; send the voice/connect status."
+}
