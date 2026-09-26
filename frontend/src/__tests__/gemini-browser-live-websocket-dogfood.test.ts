@@ -2954,7 +2954,10 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
     await connection.close();
   });
 
-  it('connects from a production bootstrap using production relay and disconnect aliases', async () => {
+  it.each([
+    ['absent', {}],
+    ['null', { provider_cleanup_token: null, provider_cleanup_expires_at: null }],
+  ])('connects an ordinary production bootstrap with %s cleanup fields and no cleanup authority', async (_label, cleanupFields) => {
     const fetchMock = vi
       .fn()
       .mockResolvedValue(new Response(JSON.stringify({ accepted: true }), { status: 202 }));
@@ -2972,6 +2975,8 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
         voice_runtime: 'gemini_live',
         production_route: true,
         session_id: 'gemini-prod-1',
+        synthetic_test: null,
+        ...cleanupFields,
         websocket_url: 'wss://gemini.example/live',
         ephemeral_token: { value: 'auth_tokens/prod-test', expireTime: '2033-05-18T04:03:20.000Z' },
         setup: { model: 'models/gemini-live', tools: [] },
@@ -3022,6 +3027,52 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
         keepalive: true,
       }),
     );
+  });
+
+  it.each([
+    ['token', { provider_cleanup_token: 'unexpected', provider_cleanup_expires_at: null }],
+    ['expiry', { provider_cleanup_token: null, provider_cleanup_expires_at: '2033-05-18T04:13:20.000Z' }],
+  ])('rejects ordinary cleanup authority when the %s is a string', async (_label, cleanupFields) => {
+    const getUserMedia = vi.fn();
+    const webSocketFactory = vi.fn();
+    await expect(connectGeminiBrowserLiveFromBootstrap({
+      userId: 'user-1',
+      bootstrap: syntheticProductionBootstrap('ordinary-invalid-cleanup', {
+        synthetic_test: null,
+        ...cleanupFields,
+      }),
+      getUserMedia,
+      webSocketFactory,
+    })).rejects.toThrow('exposed provider cleanup authority outside the synthetic lane');
+    expect(getUserMedia).not.toHaveBeenCalled();
+    expect(webSocketFactory).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['missing', undefined, undefined],
+    ['null', null, null],
+    ['missing token', undefined, '2033-05-18T04:13:20.000Z'],
+    ['null token', null, '2033-05-18T04:13:20.000Z'],
+    ['malformed token', 'invalid', '2033-05-18T04:13:20.000Z'],
+    ['missing expiry', 'valid-token', undefined],
+    ['null expiry', 'valid-token', null],
+    ['malformed expiry', 'valid-token', 'invalid'],
+  ])('rejects synthetic cleanup authority with %s fields', async (_label, token, expiry) => {
+    const bootstrap = syntheticProductionBootstrap('synthetic-invalid-cleanup');
+    const getUserMedia = vi.fn();
+    const webSocketFactory = vi.fn();
+    await expect(connectGeminiBrowserLiveFromBootstrap({
+      userId: 'voice-lab-user-1',
+      bootstrap: {
+        ...bootstrap,
+        provider_cleanup_token: token === 'valid-token' ? bootstrap.provider_cleanup_token : token,
+        provider_cleanup_expires_at: expiry,
+      },
+      getUserMedia,
+      webSocketFactory,
+    })).rejects.toThrow('provider cleanup authority was malformed');
+    expect(getUserMedia).not.toHaveBeenCalled();
+    expect(webSocketFactory).not.toHaveBeenCalled();
   });
 
   it('settles an initial credential as activation-aborted when microphone setup fails before socket creation', async () => {

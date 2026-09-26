@@ -5306,7 +5306,7 @@ function readGeminiProviderCleanupAuthority(
   const token = payload.provider_cleanup_token;
   const cleanupExpiresAt = payload.provider_cleanup_expires_at;
   if (syntheticTest === null) {
-    if (token !== undefined || cleanupExpiresAt !== undefined) {
+    if (token != null || cleanupExpiresAt != null) {
       throw new Error(`${label} exposed provider cleanup authority outside the synthetic lane.`);
     }
     return null;
