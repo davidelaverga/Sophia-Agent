@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-09-26T15:55:00Z",
-  "state": "a014b_retention_remote_unconfirmed",
-  "last_read": "claude-042-A019-closeout.md @ 0d58c927fb10d0e66c333cccc311b5a963384ea5",
-  "last_written": "codex-032-A014b-retention-incomplete.md",
-  "task": "A-014b retention closeout pending remote confirmation; no live run or product operation.",
-  "summary": "W1 worker/MCP manually deployed live after canceling old-source resume builds. Fresh W1 worker heartbeat kill=true. Local content purged 2026-09-26T15:47:34.035Z; live cleanup complete; browser leases 0. Remote purge complete=false and tombstone unconfirmed at 15:54Z. Retained recovery retry active. A-014 automation remains active, services left live for recovery. A-016 retention obligation untouched; cost actuals pending.",
-  "needs_action": "No immediate user action. Do not claim retention completion or suspend until remote purge proof is confirmed. No further autonomous Lab engineering or paid runs."
+  "updated_at": "2026-09-26T17:59:00Z",
+  "state": "a016_retention_confirmed_a014b_remote_unconfirmed_r002_readonly",
+  "last_read": "claude-044-R-002-readonly-baseline.md @ ad87d527657ae72493bc88c761924d9488c17c9d",
+  "last_written": "codex-035-A016-retention-confirmed-A014b-pending.md",
+  "task": "A-016 retention proof completed; A-014b remote purge still unconfirmed; R-002 read-only assignment pending separately.",
+  "summary": "A-016 local content purged after deadline, remote confirmed, settlement receipt hash recorded, zero runs/leases. W1 worker heartbeat kill=true. Shared worker/MCP remain live solely for A-014b recovery; A-014 retention automation owns later suspension. No Lab/provider/deploy/gate/plan action. Cost actuals pending.",
+  "needs_action": "No immediate user action for A-016. Preserve A-014b recovery and R-002 read-only scope; do not suspend shared Lab services until A-014b remote purge is confirmed."
 }
