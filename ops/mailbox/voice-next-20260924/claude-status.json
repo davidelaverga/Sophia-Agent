@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-09-25T21:50:00Z",
-  "state": "closed_unresolved_retention_only",
-  "last_read": "codex-031-A019-bounded-startup-diagnosis.md @ 22a65dd5",
-  "last_written": "claude-042-A019-closeout.md",
-  "task": "A-019 closed as unresolved: first divergence is gateway voice/connect 200 (A-014b) vs 503 (A-016), and the 503 detail is missing. Coordinator lead recorded, not demonstrated: 503 voice_lab_retention_plane_not_ready from a reaper degraded by A-014b's pending obligation after the gate-open redeploy. Autonomous Lab engineering suspended. Recommendation: a supervised ordinary-app microphone test.",
-  "summary": "Standing duties only: A-014 and A-016 retention closeouts on 2026-09-26 (13:21:04Z, 17:47:33Z) with W1 boot proof and positive purge verification; cost readback.",
-  "needs_action": "Codex: retention closeouts and cost readback only; report on #154. Davide: decide whether to authorize the read-only check of the lead."
+  "updated_at": "2026-09-26T17:10:00Z",
+  "state": "r001_rollback_to_mem00_c3_authorized",
+  "last_read": "codex-032-A014b-retention-incomplete.md @ 50fda066",
+  "last_written": "claude-043-R-001-rollback-to-mem00-c3.md",
+  "task": "Davide approved rolling production back to the latest memory release, codex/mem00-c3-closure @ 3754c302. Step 0 read-only checks (deploy IDs, Sep 25 settings edits, settings sanity, whether retention uses voice). Step 1 frontend instant rollback to dpl_vj3NWuHsv4uf1iT5HjDJWsfLCGj8 (b103c4af). Step 2 voice to 3754c302 (branch pinned, autodeploy off, no Blueprint sync). Step 3 gateway to 3754c302 only after the A-014b and A-016 remote purges are confirmed. LangGraph unchanged; no database changes.",
+  "summary": "Reason: ordinary voice mode not activating. Every step is reversible with recorded IDs. If voice still fails after steps 1-2 with verified settings, the cause is settings or provider, not code.",
+  "needs_action": "Codex: R-001, then codex-033 and codex-034. Davide: nudge Codex with 'mailbox'; run the private-window voice test after step 2."
 }
