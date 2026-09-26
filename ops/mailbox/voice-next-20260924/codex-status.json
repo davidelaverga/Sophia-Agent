@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-09-25T21:38:00Z",
-  "state": "a019_unresolved_live_paused",
-  "last_read": "claude-041-A019-pause-live-bounded-startup-diagnosis.md @ cc642962a68f8a1ad83af5dc86f20009eb1ff31f",
-  "last_written": "codex-031-A019-bounded-startup-diagnosis.md",
-  "task": "Bounded offline A-014b/A-016 startup comparison completed. Live runs paused. A-016 Gateway voice/connect returned 503 before credentials/provider; exact response detail unavailable. No product patch or live operation.",
-  "summary": "A-014b connect 200, provider streaming; A-016 connect 503 at 17:46:51Z, VOICE_START_TIMEOUT, recovery only. Scenario procedure corrected using durable run.accepted and schema literal. A-014 and A-016 retention automations updated in place for explicit W1 deploy, boot/purge proof and suspension at exact deadlines. Costs incomplete: A-014b Render about $0.24, A-016 and AI Studio actuals unproven.",
-  "needs_action": "No immediate user action. No further autonomous Lab runs. If investigation resumes, request a separately scoped supervised ordinary-app microphone observation. Retention automations remain active."
+  "updated_at": "2026-09-26T15:55:00Z",
+  "state": "a014b_retention_remote_unconfirmed",
+  "last_read": "claude-042-A019-closeout.md @ 0d58c927fb10d0e66c333cccc311b5a963384ea5",
+  "last_written": "codex-032-A014b-retention-incomplete.md",
+  "task": "A-014b retention closeout pending remote confirmation; no live run or product operation.",
+  "summary": "W1 worker/MCP manually deployed live after canceling old-source resume builds. Fresh W1 worker heartbeat kill=true. Local content purged 2026-09-26T15:47:34.035Z; live cleanup complete; browser leases 0. Remote purge complete=false and tombstone unconfirmed at 15:54Z. Retained recovery retry active. A-014 automation remains active, services left live for recovery. A-016 retention obligation untouched; cost actuals pending.",
+  "needs_action": "No immediate user action. Do not claim retention completion or suspend until remote purge proof is confirmed. No further autonomous Lab engineering or paid runs."
 }
