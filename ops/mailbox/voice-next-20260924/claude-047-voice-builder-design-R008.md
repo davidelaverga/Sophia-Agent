@@ -35,7 +35,13 @@ Epoch: voice-next-20260924 · Supersedes the R-008 scope in claude-046 (never se
      - Never return `ok:true` without a `task_id`.
    - **`check_async_task` / `list_async_tasks`:** answer from `builderTask` / `builderCompletion`. Report "ready" only when the completion carries an artifact path.
    - **`cancel_async_task`:** use the session's `cancelBuilderTask()`.
-   - **`update_async_task` / `edit_builder_artifact` outside review:** return a truthful `{ok:false, reason:"not_available_by_voice_yet"}` for now.
+   - **`update_async_task` / `edit_builder_artifact` outside review (amended per Davide, 2026-09-27):** same route as start, for parity with text mode.
+     - Send ONE companion turn carrying the user's correction verbatim, the target `task_id`/`artifact_path`, and an instruction to apply it now with the companion's own tool, without further clarification.
+     - The companion then chooses its tool exactly as in text mode:
+       - `update_async_task`, via the wrapper at `update_async_task_wrapper.py:1462+`. On a finished target it redirects to `start_builder_task` with a v2 brief; today, updating a running build also starts a fresh build with the correction included, not a non-destructive steer.
+       - `edit_builder_artifact` for a completed delivered file (`agents/sophia_agent/agent.py:100-144`, `:510`).
+     - Wait, bounded to about 20 s, for proof the change was accepted: a new `taskId` or `runId` in phase `running`. Return `{ok:true, updated:true, task_id, run_id}`, otherwise `{ok:false, updated:false, reason}`.
+     - No voice-specific update semantics. Whatever text mode does, voice does.
 3. **Co-review coexistence while a review is active:**
    - Redirect to Coreview **only** when the call concerns the selected artifact:
      - `start_builder_task` only when `builder_update_intent_detected`;
@@ -61,6 +67,7 @@ Epoch: voice-next-20260924 · Supersedes the R-008 scope in claude-046 (never se
   - A timeout gives `ok:false`, `started:false`.
   - A non-explicit transcript is refused without sending anything.
 - **Status:** status reflects `builderTask`; "ready" requires an artifact path; cancel calls `cancelBuilderTask`.
+- **Update/edit outside review:** `update_async_task` sends exactly one companion turn with the correction verbatim and the target `task_id`. It returns `ok`/`updated` only after a new `taskId` or `runId` is observed; a timeout gives `ok:false`. `edit_builder_artifact` works the same way with `artifact_path`.
 - **Review active:**
   - With update intent: `start_builder_task` is redirected to Coreview (unchanged).
   - Without update intent: it starts a fresh build through the handler.
