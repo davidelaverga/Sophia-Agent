@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 from voice.realtime.coreview import (
     COREVIEW_FEATURE_FLAG,
@@ -351,3 +354,14 @@ def test_review_tool_descriptions_are_scoped_to_an_active_review(monkeypatch) ->
 
     for name in review_tool_names:
         assert str(declarations[name]["description"]).startswith(REVIEW_ONLY_TOOL_SCOPE)
+
+
+def test_review_tool_scope_accepts_the_artifact_image_and_matches_the_web() -> None:
+    # Web bundles loaded before the explicit review message send only the
+    # artifact image, so the image alone must still start review.
+    assert "artifact image" in REVIEW_ONLY_TOOL_SCOPE
+
+    shared = Path(__file__).resolve().parents[2] / "frontend/src/app/lib/coreview-action-shared.ts"
+    if not shared.exists():
+        pytest.skip("frontend sources are not in this checkout")
+    assert json.dumps(REVIEW_ONLY_TOOL_SCOPE) in shared.read_text(encoding="utf-8")

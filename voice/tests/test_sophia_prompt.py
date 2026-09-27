@@ -126,6 +126,9 @@ def test_gemini_live_spoken_policy_grounds_session_mode() -> None:
     assert "Session mode:" in overlay
     assert "artifact review is not active and no file or artifact is open" in overlay
     assert 'App messages begin with "App context:"; use them silently and never answer them aloud.' in overlay
+    # Web bundles loaded before the explicit review message send only the
+    # artifact image, so the image alone must still start review.
+    assert "it sends you an artifact image or a message saying artifact review is active" in overlay
     assert "Your tool list is not evidence that a file, artifact, or review exists." in overlay
     assert "Never say a tool is broken, unavailable, or not working unless a tool result said so." in overlay
     assert "For a plain greeting, reply once with one short greeting or one neutral question, then stop." in overlay

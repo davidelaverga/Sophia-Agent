@@ -188,9 +188,11 @@ def detect_gemini_coreview_media_support(*, coreview_enabled: bool | None = None
 # Every review tool is declared for the whole Gemini session (tools are fixed
 # at setup), so each description scopes itself to an active review. Without
 # this, an ordinary greeting can read the review schemas as evidence of a file.
+# The artifact image counts as a start signal because web bundles loaded before
+# the explicit review message existed send only the image.
 REVIEW_ONLY_TOOL_SCOPE = (
-    "Only while the app has said artifact review is active; otherwise no artifact is open, "
-    "so do not call or mention this tool. "
+    "Only during artifact review (after the app sent an artifact image or said review is active); "
+    "otherwise no artifact is open, so do not call or mention this tool. "
 )
 
 
