@@ -3663,6 +3663,9 @@ export async function connectGeminiBrowserLiveDogfood(
           : null,
         recentUserUtterances: snapshotVoiceBuilderUserUtterances,
         getWebsocket: () => websocket,
+        isVoiceBuilderConnectionLive: () => (
+          !closed && (continuityState === 'active' || continuityState === 'rotation_pending')
+        ),
       }),
       onProviderEventReceived: (event) => ({
         ...buildGeminiProviderReceiveMetadata(
@@ -6226,6 +6229,7 @@ async function handleGeminiFrontendCoreviewToolEvent(options: {
   voiceBuilderRouting?: GeminiVoiceBuilderRouting | null;
   recentUserUtterances?: () => VoiceBuilderUserUtterance[];
   getWebsocket?: () => WebSocketLike | null;
+  isVoiceBuilderConnectionLive?: () => boolean;
 }): Promise<Record<string, unknown> | null> {
   const split = splitFrontendReviewToolCallsFromProviderEvent(
     options.event,
@@ -6367,9 +6371,25 @@ async function respondToGeminiVoiceBuilderCalls(
       recentUserUtterances = options.recentUserUtterances();
     }
   }
+  const connectionLive = () => options.isVoiceBuilderConnectionLive?.() !== false;
   const functionResponses: Record<string, unknown>[] = [];
   for (const call of calls) {
-    const response = await executeVoiceBuilderToolBridgeCall({ ...call, recentUserUtterances });
+    // These calls run detached from the provider-message chain, so fence each
+    // one immediately before its side effect: a cancelled call or a connection
+    // that ended while an earlier call was confirming must not start or change
+    // a build. The later send-time check only suppresses the response.
+    const cancelled = Boolean(call.id && options.toolCallLedger.get(call.id)?.cancelledAt);
+    const response = cancelled || !connectionLive()
+      ? {
+        ok: false,
+        started: false,
+        updated: false,
+        builder_task_started: false,
+        tool_name: call.name,
+        reason: cancelled ? 'tool_call_cancelled' : 'voice_connection_inactive',
+        result_summary: 'The Builder action was not executed.',
+      }
+      : await executeVoiceBuilderToolBridgeCall({ ...call, recentUserUtterances });
     functionResponses.push({
       ...(call.id ? { id: call.id } : {}),
       name: call.name,
@@ -6384,6 +6404,9 @@ async function respondToGeminiVoiceBuilderCalls(
       },
       options.onToolCallLedgerUpdate,
     );
+  }
+  if (!connectionLive()) {
+    return;
   }
   handleGeminiRelayClientActions({
     relayResponse: {

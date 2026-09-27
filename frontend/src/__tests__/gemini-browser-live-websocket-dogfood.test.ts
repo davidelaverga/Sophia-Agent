@@ -7239,6 +7239,83 @@ describe('Gemini voice Builder bridge routing', () => {
     await connection.close();
   });
 
+  it('does not execute a voice build call that Gemini cancels while it is waiting', async () => {
+    const bridgeCalls: VoiceBuilderToolCallInput[] = [];
+    registerVoiceBuilderToolBridge({
+      knownTaskIds: () => [],
+      execute: async (call) => {
+        bridgeCalls.push(call);
+        return { ok: true, started: true, builder_task_started: true, task_id: 'task-cancelled-1' };
+      },
+    });
+    const fetchMock = makeVoiceBuilderSessionFetch('browser-gemini-voice-builder-cancelled', ['start_builder_task']);
+    let websocket: FakeWebSocket | null = null;
+    const toolDiagnostics: GeminiBrowserLiveDogfoodToolLoopDiagnostic[] = [];
+
+    const connection = await connectGeminiBrowserLiveDogfood({
+      userId: 'user-1',
+      fetchFn: fetchMock as typeof fetch,
+      webSocketFactory: (url) => {
+        websocket = new FakeWebSocket(url);
+        return websocket;
+      },
+      getUserMedia: vi.fn(async () => ({ getTracks: () => [] } as unknown as MediaStream)),
+      audioContextFactory: () => new FakeAudioContext() as unknown as AudioContext,
+      onToolLoopDiagnostic: (diagnostic) => toolDiagnostics.push(diagnostic),
+    });
+
+    // No explicit request has been transcribed yet, so the call waits for a
+    // late transcription; Gemini cancels it during that wait.
+    websocket?.emitMessage({
+      toolCall: {
+        functionCalls: [{ id: 'cancelled-start-1', name: 'start_builder_task', args: { description: 'Solar brief.' } }],
+      },
+    });
+    websocket?.emitMessage({ toolCallCancellation: { ids: ['cancelled-start-1'] } });
+    websocket?.emitMessage({ serverContent: { inputTranscription: { text: 'please research solar subsidies in Italy' } } });
+
+    await vi.waitFor(() => expect(toolDiagnostics.map((diagnostic) => diagnostic.phase)).toContain('tool_response_send_suppressed'), { timeout: 3_000 });
+    expect(bridgeCalls).toHaveLength(0);
+    expect(sentFunctionResponse(websocket, 'cancelled-start-1')).toBeUndefined();
+
+    await connection.close();
+  });
+
+  it('does not execute a voice build call after its connection has closed', async () => {
+    const bridgeCalls: VoiceBuilderToolCallInput[] = [];
+    registerVoiceBuilderToolBridge({
+      knownTaskIds: () => [],
+      execute: async (call) => {
+        bridgeCalls.push(call);
+        return { ok: true, started: true, builder_task_started: true, task_id: 'task-closed-1' };
+      },
+    });
+    const fetchMock = makeVoiceBuilderSessionFetch('browser-gemini-voice-builder-closed', ['start_builder_task']);
+    let websocket: FakeWebSocket | null = null;
+
+    const connection = await connectGeminiBrowserLiveDogfood({
+      userId: 'user-1',
+      fetchFn: fetchMock as typeof fetch,
+      webSocketFactory: (url) => {
+        websocket = new FakeWebSocket(url);
+        return websocket;
+      },
+      getUserMedia: vi.fn(async () => ({ getTracks: () => [] } as unknown as MediaStream)),
+      audioContextFactory: () => new FakeAudioContext() as unknown as AudioContext,
+    });
+
+    websocket?.emitMessage({
+      toolCall: {
+        functionCalls: [{ id: 'closed-start-1', name: 'start_builder_task', args: { description: 'Solar brief.' } }],
+      },
+    });
+    await connection.close();
+    await new Promise((resolve) => { setTimeout(resolve, 1_800); });
+
+    expect(bridgeCalls).toHaveLength(0);
+    expect(sentFunctionResponse(websocket, 'closed-start-1')).toBeUndefined();
+  });
+
   it('lets an explicit fresh build and the session build through during review while selected-artifact calls stay with Coreview', async () => {
     const bridgeCalls: VoiceBuilderToolCallInput[] = [];
     registerVoiceBuilderToolBridge({
