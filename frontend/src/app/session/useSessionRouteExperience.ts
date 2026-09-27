@@ -12,6 +12,7 @@ import {
 } from '../lib/builder-workflow';
 import { debugLog } from '../lib/debug-logger';
 import { recordSophiaCaptureEvent } from '../lib/session-capture';
+import { createVoiceBuilderToolHandler, registerVoiceBuilderToolBridge } from '../lib/voice-builder-actions';
 import { useAuth } from '../providers';
 import type { BuilderArtifactV1 } from '../types/builder-artifact';
 import type { BuilderCanvasActivity, BuilderCanvasTaskSnapshotV1 } from '../types/builder-canvas';
@@ -80,7 +81,10 @@ function builderCanvasStatusFromCompletion(
         : 'failed';
 }
 
-const BUILDER_CANCEL_INTENT_RE = /\b(?:stop|cancel|abort|terminate|end|kill|delete|delate)\b(?:\s+(?:the|this|that|my|current))?\s+(?:build|builder|task|artifact|job|run)\b|\b(?:stop|cancel|abort|terminate|kill)\s+(?:it|this|that|everything)\b/i;
+// A bare "stop it" / "cancel that" only counts when it ends the utterance, so
+// a spoken correction such as "stop this section about pricing" reaches the
+// companion as a correction instead of cancelling the running build.
+const BUILDER_CANCEL_INTENT_RE = /\b(?:stop|cancel|abort|terminate|end|kill|delete|delate)\b(?:\s+(?:the|this|that|my|current))?\s+(?:build|builder|task|artifact|job|run)\b|\b(?:stop|cancel|abort|terminate|kill)\s+(?:it|this|that|everything)(?:\s+(?:please|now|right\s+now))?\s*[.!]*$/i;
 
 function isBuilderCancelIntent(text: string): boolean {
   return BUILDER_CANCEL_INTENT_RE.test(text.trim());
@@ -675,6 +679,43 @@ export function useSessionRouteExperience({
     },
     [],
   );
+
+  // Voice Builder actions travel through the governed text send path so the
+  // companion's own Builder tools start, update or edit the build exactly as a
+  // typed request would. The typed-message cancel shortcut is skipped on
+  // purpose: a spoken correction such as "stop this section" must reach the
+  // companion as a correction instead of cancelling the running build.
+  const sendVoiceBuilderMessage = useCallback(async (text: string) => {
+    const captured = captureSourceInput(text);
+    const appVersionFresh = await checkAppVersionFreshness({ reason: 'before-send' });
+    if (!appVersionFresh) {
+      throw new Error('memory_source_app_version_unavailable');
+    }
+    validateSourceInput(captured);
+    return rawSendMessage(captured);
+  }, [captureSourceInput, checkAppVersionFreshness, rawSendMessage, validateSourceInput]);
+
+  const voiceBuilderStateRef = useRef({
+    builderTask,
+    builderCompletion: effectiveBuilderCompletion,
+    cancelBuilderTask,
+    sendVoiceBuilderMessage,
+  });
+  useEffect(() => {
+    voiceBuilderStateRef.current = {
+      builderTask,
+      builderCompletion: effectiveBuilderCompletion,
+      cancelBuilderTask,
+      sendVoiceBuilderMessage,
+    };
+  }, [builderTask, cancelBuilderTask, effectiveBuilderCompletion, sendVoiceBuilderMessage]);
+
+  useEffect(() => registerVoiceBuilderToolBridge(createVoiceBuilderToolHandler({
+    sendCompanionMessage: (text) => voiceBuilderStateRef.current.sendVoiceBuilderMessage(text),
+    getBuilderTask: () => voiceBuilderStateRef.current.builderTask,
+    getBuilderCompletion: () => voiceBuilderStateRef.current.builderCompletion,
+    cancelBuilderTask: () => voiceBuilderStateRef.current.cancelBuilderTask(),
+  })), []);
 
   return {
     routeProfile,

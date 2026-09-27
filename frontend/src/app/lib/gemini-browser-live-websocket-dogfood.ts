@@ -23,6 +23,16 @@ import {
   type CoreviewBuilderToolCallInput,
 } from './coreview-builder-actions';
 import {
+  executeVoiceBuilderToolBridgeCall,
+  hasRecentExplicitVoiceBuilderRequest,
+  hasVoiceBuilderToolBridge,
+  isVoiceBuilderToolName,
+  voiceBuilderKnownTaskIds,
+  VOICE_BUILDER_START_TOOL_NAME,
+  type VoiceBuilderToolName,
+  type VoiceBuilderUserUtterance,
+} from './voice-builder-actions';
+import {
   isOpaqueVoiceLabProviderCleanupToken,
   VOICE_LAB_PROVIDER_CLEANUP_HEADER,
 } from './voice-lab-provider-cleanup';
@@ -1822,6 +1832,18 @@ type GeminiSuppressedGenericBuilderToolCallInput = {
   args: Record<string, unknown>;
   duplicateOfCoreviewUpdate?: boolean;
 };
+type GeminiVoiceBuilderToolCallInput = {
+  id: string | null;
+  name: VoiceBuilderToolName;
+  args: Record<string, unknown>;
+};
+// Generic Builder calls go to the session's voice Builder bridge (which runs
+// them through the text companion) only for ordinary sessions whose page has
+// registered that bridge. Otherwise they keep relaying to the voice backend.
+type GeminiVoiceBuilderRouting = {
+  knownTaskIds: string[];
+};
+const GEMINI_VOICE_BUILDER_TRANSCRIPT_GRACE_MS = 1_500;
 type GeminiCoreviewRoutedBuilderToolCallInput = {
   id: string | null;
   name: string;
@@ -2045,6 +2067,10 @@ export async function connectGeminiBrowserLiveDogfood(
   let artifactReviewUserIntent: GeminiArtifactReviewUserIntent = 'unknown';
   let artifactReviewBuilderUpdateIntentDetected = false;
   let artifactReviewUserIntentAt: string | null = null;
+  // Recent user utterances authorize voice Builder launches in the browser,
+  // mirroring the voice backend's explicit-request guard.
+  const voiceBuilderUserUtterances: VoiceBuilderUserUtterance[] = [];
+  let voiceBuilderUserTurnOpen = false;
   const artifactReviewSafeResponseIds = new Set<string>();
   const artifactReviewSuppressedResponseIds = new Set<string>();
   const pendingArtifactReviewAudio = new Map<string, Array<{
@@ -2221,6 +2247,35 @@ export async function connectGeminiBrowserLiveDogfood(
     artifactReviewBuilderUpdateIntentDetected = isArtifactReviewSelectedArtifactUpdateIntent(text);
     artifactReviewUserIntentAt = new Date().toISOString();
   };
+
+  const rememberVoiceBuilderUserUtterance = (text: string | null | undefined) => {
+    const fragment = typeof text === 'string' ? text : '';
+    if (!fragment.trim()) {
+      return;
+    }
+    const atMs = Date.now();
+    const current = voiceBuilderUserUtterances[voiceBuilderUserUtterances.length - 1];
+    if (voiceBuilderUserTurnOpen && current) {
+      // Input transcription is normally cumulative within a turn; otherwise
+      // append the new fragment to the same utterance.
+      if (fragment.startsWith(current.text)) {
+        current.text = fragment;
+      } else if (!current.text.startsWith(fragment)) {
+        current.text = /^\s/u.test(fragment) ? `${current.text}${fragment}` : `${current.text} ${fragment}`;
+      }
+      current.atMs = atMs;
+      return;
+    }
+    voiceBuilderUserUtterances.push({ text: fragment, atMs });
+    voiceBuilderUserTurnOpen = true;
+    while (voiceBuilderUserUtterances.length > 8) {
+      voiceBuilderUserUtterances.shift();
+    }
+  };
+
+  const snapshotVoiceBuilderUserUtterances = (): VoiceBuilderUserUtterance[] => (
+    voiceBuilderUserUtterances.map((utterance) => ({ ...utterance }))
+  );
 
   const dropPendingArtifactReviewAudio = (
     responseId: string | null,
@@ -3367,8 +3422,12 @@ export async function connectGeminiBrowserLiveDogfood(
       throw new Error('Synthetic provider activation was not acknowledged.');
     };
     const coreviewToolsEnabled = options.coreviewStillFrameEnabled ?? isCoReviewStillFrameEnabled();
+    // Gemini Live fixes its tools at setup for the whole session, so generic
+    // Builder tools stay declared even when Coreview is available. Review-time
+    // restrictions are enforced per call by the review router.
     const sessionSetup = withCoreviewGeminiToolDeclarations(browserSession.setup, coreviewToolsEnabled, {
       allowArtifactCreation: false,
+      allowGenericBuilderTools: true,
     });
     const bootstrapProviderContinuation = async (): Promise<{
       websocket: WebSocketLike;
@@ -3451,6 +3510,7 @@ export async function connectGeminiBrowserLiveDogfood(
       }
       const nextSetup = withCoreviewGeminiToolDeclarations(nextSession.setup, coreviewToolsEnabled, {
         allowArtifactCreation: false,
+        allowGenericBuilderTools: true,
       });
       const currentResumption = isRecord(nextSetup.sessionResumption)
         ? nextSetup.sessionResumption
@@ -3598,6 +3658,11 @@ export async function connectGeminiBrowserLiveDogfood(
         onToolCallLedgerUpdate: notifyToolCallLedgerUpdate,
         onToolLoopDiagnostic: options.onToolLoopDiagnostic,
         onToolResponseSent: noteToolResponseSent,
+        voiceBuilderRouting: browserSession.syntheticTest === null && hasVoiceBuilderToolBridge()
+          ? { knownTaskIds: voiceBuilderKnownTaskIds() }
+          : null,
+        recentUserUtterances: snapshotVoiceBuilderUserUtterances,
+        getWebsocket: () => websocket,
       }),
       onProviderEventReceived: (event) => ({
         ...buildGeminiProviderReceiveMetadata(
@@ -3838,7 +3903,14 @@ export async function connectGeminiBrowserLiveDogfood(
         const categories = classification.categories;
         markAssistantOutputStarted(event, categories, receiveMetadata);
         if (categories.includes('inputTranscription')) {
-          rememberArtifactReviewUserIntent(readTranscriptionText(event, 'inputTranscription', 'input_transcription'));
+          const inputTranscriptionText = readTranscriptionText(event, 'inputTranscription', 'input_transcription');
+          rememberArtifactReviewUserIntent(inputTranscriptionText);
+          rememberVoiceBuilderUserUtterance(inputTranscriptionText);
+        }
+        if (isAssistantOutputCategories(categories)) {
+          voiceBuilderUserTurnOpen = false;
+        }
+        if (categories.includes('inputTranscription')) {
           const confirmation = providerInputTranscriptionConfirmation(event, receiveMetadata);
           promoteBargeInInputTranscription(event, receiveMetadata, confirmation);
         }
@@ -4307,6 +4379,9 @@ export async function connectGeminiBrowserLiveDogfood(
           throw new Error('Gemini Live WebSocket is not open.');
         }
         rememberArtifactReviewUserIntent(text);
+        voiceBuilderUserTurnOpen = false;
+        rememberVoiceBuilderUserUtterance(text);
+        voiceBuilderUserTurnOpen = false;
         websocket.send(JSON.stringify({ realtimeInput: { text } }));
       },
       sendArtifactFrame: (
@@ -4451,7 +4526,8 @@ export function buildGeminiArtifactTextReaderHint(artifactId: string): Record<st
         'For simple visibility questions, answer from the fresh artifact frame or safe current-view metadata.',
         'Use exact-text sideband only when exact words, numbers, labels, or table values are needed.',
         'For highlight, mark, underline, annotate, note, comment, pin, flag, or callout requests, use coreview_add_annotation and wait for ok=true before saying it was added. Do not use coreview_refresh_view for annotation requests.',
-        'For selected artifact edit, update, revise, rebuild, restyle, change title, or new-version requests, call coreview_request_artifact_update. Do not call edit_builder_artifact, start_builder_task, update_async_task, or emit_artifact directly in review.',
+        'For selected artifact edit, update, revise, rebuild, restyle, change title, or new-version requests, call coreview_request_artifact_update. Do not call edit_builder_artifact, start_builder_task, update_async_task, or emit_artifact directly in review for the selected artifact.',
+        'If the user explicitly asks for a new, unrelated deliverable or research, start_builder_task is still allowed and runs as a normal background build.',
         'For zoom or focus on a title, selection, text, or area, use coreview_focus_anchor. Use coreview_refresh_view only when the user asks to refresh your view.',
         'Do not answer this context message.',
       ].join(' '),
@@ -6147,17 +6223,36 @@ async function handleGeminiFrontendCoreviewToolEvent(options: {
   onToolCallLedgerUpdate?: (entry: GeminiBrowserLiveToolCallLedgerEntry) => void;
   onToolLoopDiagnostic?: (diagnostic: GeminiBrowserLiveDogfoodToolLoopDiagnostic) => void;
   onToolResponseSent?: (functionResponse: Record<string, unknown>, timestamp: string) => void;
+  voiceBuilderRouting?: GeminiVoiceBuilderRouting | null;
+  recentUserUtterances?: () => VoiceBuilderUserUtterance[];
+  getWebsocket?: () => WebSocketLike | null;
 }): Promise<Record<string, unknown> | null> {
   const split = splitFrontendReviewToolCallsFromProviderEvent(
     options.event,
     options.artifactReviewContext ?? null,
+    options.voiceBuilderRouting ?? null,
   );
   if (
     split.frontendCalls.length === 0
     && split.suppressedEmitArtifactCalls.length === 0
     && split.suppressedGenericBuilderCalls.length === 0
+    && split.voiceBuilderCalls.length === 0
   ) {
     return options.event;
+  }
+
+  if (split.voiceBuilderCalls.length > 0) {
+    // Voice Builder calls wait for the companion to confirm a running build,
+    // which can take many seconds. Never hold the ordered provider-message
+    // chain for that: answer Gemini whenever the confirmation settles.
+    void respondToGeminiVoiceBuilderCalls(split.voiceBuilderCalls, options);
+  }
+  if (
+    split.frontendCalls.length === 0
+    && split.suppressedEmitArtifactCalls.length === 0
+    && split.suppressedGenericBuilderCalls.length === 0
+  ) {
+    return split.relayEvent;
   }
 
   const preparedAt = new Date().toISOString();
@@ -6253,6 +6348,73 @@ async function handleGeminiFrontendCoreviewToolEvent(options: {
   });
 
   return split.relayEvent;
+}
+
+async function respondToGeminiVoiceBuilderCalls(
+  calls: GeminiVoiceBuilderToolCallInput[],
+  options: Parameters<typeof handleGeminiFrontendCoreviewToolEvent>[0],
+): Promise<void> {
+  let recentUserUtterances = options.recentUserUtterances?.() ?? [];
+  if (options.recentUserUtterances && calls.some((call) => call.name === VOICE_BUILDER_START_TOOL_NAME)) {
+    // Gemini can deliver the user's input transcription just after its tool
+    // call; give the request a moment to land before judging it.
+    for (
+      let waitedMs = 0;
+      waitedMs < GEMINI_VOICE_BUILDER_TRANSCRIPT_GRACE_MS && !hasRecentExplicitVoiceBuilderRequest(recentUserUtterances);
+      waitedMs += 100
+    ) {
+      await new Promise<void>((resolve) => { setTimeout(resolve, 100); });
+      recentUserUtterances = options.recentUserUtterances();
+    }
+  }
+  const functionResponses: Record<string, unknown>[] = [];
+  for (const call of calls) {
+    const response = await executeVoiceBuilderToolBridgeCall({ ...call, recentUserUtterances });
+    functionResponses.push({
+      ...(call.id ? { id: call.id } : {}),
+      name: call.name,
+      response,
+    });
+    emitToolCallLedgerEntry(
+      options.toolCallLedger,
+      call.id,
+      {
+        toolName: call.name,
+        toolResponsePreparedAt: new Date().toISOString(),
+      },
+      options.onToolCallLedgerUpdate,
+    );
+  }
+  handleGeminiRelayClientActions({
+    relayResponse: {
+      accepted: true,
+      clientActions: [{
+        type: 'gemini_tool_response',
+        payload: {
+          toolResponse: {
+            functionResponses,
+          },
+        },
+        result_summary: functionResponses
+          .map((functionResponse) => responseSummaryFromFunctionResponse(functionResponse))
+          .filter((summary): summary is string => Boolean(summary))
+          .join(' '),
+      }],
+      toolDiagnostics: [],
+      statusCode: null,
+      statusText: null,
+      responseKind: 'client_actions',
+      backendDiagnostics: null,
+    },
+    // The provider socket may have rotated while the build was confirming.
+    websocket: options.getWebsocket?.() ?? options.websocket,
+    sessionId: options.sessionId,
+    threadId: options.threadId ?? null,
+    toolCallLedger: options.toolCallLedger,
+    onToolCallLedgerUpdate: options.onToolCallLedgerUpdate,
+    onToolLoopDiagnostic: options.onToolLoopDiagnostic,
+    onToolResponseSent: options.onToolResponseSent,
+  });
 }
 
 async function executeFrontendReviewToolCallWithTimeout(
@@ -6547,6 +6709,7 @@ type GeminiReviewToolCallSplitResult = {
   frontendCalls: GeminiFrontendReviewToolCallInput[];
   suppressedEmitArtifactCalls: GeminiSuppressedEmitArtifactToolCallInput[];
   suppressedGenericBuilderCalls: GeminiSuppressedGenericBuilderToolCallInput[];
+  voiceBuilderCalls: GeminiVoiceBuilderToolCallInput[];
   relayEvent: Record<string, unknown> | null;
 };
 
@@ -6554,6 +6717,7 @@ type GeminiRoutedReviewFunctionCalls = {
   frontendCalls: GeminiFrontendReviewToolCallInput[];
   suppressedEmitArtifactCalls: GeminiSuppressedEmitArtifactToolCallInput[];
   suppressedGenericBuilderCalls: GeminiSuppressedGenericBuilderToolCallInput[];
+  voiceBuilderCalls: GeminiVoiceBuilderToolCallInput[];
   relayFunctionCalls: unknown[];
 };
 
@@ -6561,7 +6725,8 @@ type GeminiReviewToolCallRoute =
   | { kind: 'relay' }
   | { kind: 'frontend'; call: GeminiFrontendReviewToolCallInput; markCoreviewRouted?: boolean }
   | { kind: 'suppressed_emit_artifact'; call: GeminiSuppressedEmitArtifactToolCallInput }
-  | { kind: 'suppressed_generic_builder'; call: GeminiSuppressedGenericBuilderToolCallInput };
+  | { kind: 'suppressed_generic_builder'; call: GeminiSuppressedGenericBuilderToolCallInput }
+  | { kind: 'voice_builder'; call: GeminiVoiceBuilderToolCallInput };
 
 type LocatedProviderFunctionCalls = {
   toolCallKey: 'toolCall' | 'tool_call';
@@ -6722,16 +6887,68 @@ function routeSuppressedGenericBuilderReviewCall(
   };
 }
 
+// While a selected artifact is under review, generic Builder calls normally
+// belong to Coreview. Two cases still reach the session's own voice Builder:
+// an explicit fresh build whose intent is known and is not a change to the
+// selected artifact, and a lifecycle call naming the session's real build.
+function routeVoiceBuilderDuringReviewCall(
+  functionCall: Record<string, unknown>,
+  name: string | null,
+  artifactReviewContext: GeminiArtifactReviewRelayContext | null,
+  coreviewUpdateAlreadyRoutedInBatch: boolean,
+  voiceBuilderRouting: GeminiVoiceBuilderRouting | null,
+): GeminiReviewToolCallRoute | null {
+  if (!voiceBuilderRouting || !artifactReviewContext?.active || !isVoiceBuilderToolName(name)) {
+    return null;
+  }
+  const args = readGeminiFunctionCallArgs(functionCall) ?? {};
+  const call = { id: stringFromAnyKey(functionCall, 'id'), name, args };
+  if (name === VOICE_BUILDER_START_TOOL_NAME) {
+    const freshBuildIntent = !coreviewUpdateAlreadyRoutedInBatch
+      && artifactReviewContext.user_intent !== 'unknown'
+      && artifactReviewContext.builder_update_intent_detected !== true;
+    return freshBuildIntent ? { kind: 'voice_builder', call } : null;
+  }
+  if (name === GEMINI_EDIT_BUILDER_ARTIFACT_TOOL_NAME) {
+    return null;
+  }
+  const taskId = stringFromAnyKey(args, 'task_id', 'taskId');
+  return taskId && voiceBuilderRouting.knownTaskIds.includes(taskId)
+    ? { kind: 'voice_builder', call }
+    : null;
+}
+
+function routeVoiceBuilderCall(
+  functionCall: Record<string, unknown>,
+  name: string | null,
+  voiceBuilderRouting: GeminiVoiceBuilderRouting | null,
+): GeminiReviewToolCallRoute | null {
+  if (!voiceBuilderRouting || !isVoiceBuilderToolName(name)) {
+    return null;
+  }
+  return {
+    kind: 'voice_builder',
+    call: {
+      id: stringFromAnyKey(functionCall, 'id'),
+      name,
+      args: readGeminiFunctionCallArgs(functionCall) ?? {},
+    },
+  };
+}
+
 function routeReviewFunctionCall(
   functionCall: Record<string, unknown>,
   artifactReviewContext: GeminiArtifactReviewRelayContext | null,
   coreviewUpdateAlreadyRoutedInBatch: boolean,
+  voiceBuilderRouting: GeminiVoiceBuilderRouting | null = null,
 ): GeminiReviewToolCallRoute {
   const name = stringFromAnyKey(functionCall, 'name');
   const routed = routeSuppressedEmitArtifactReviewCall(functionCall, name, artifactReviewContext)
+    ?? routeVoiceBuilderDuringReviewCall(functionCall, name, artifactReviewContext, coreviewUpdateAlreadyRoutedInBatch, voiceBuilderRouting)
     ?? routeDirectEditBuilderReviewCall(functionCall, name, artifactReviewContext, coreviewUpdateAlreadyRoutedInBatch)
     ?? routeGenericBuilderStatusReviewCall(functionCall, name, artifactReviewContext)
-    ?? routeSuppressedGenericBuilderReviewCall(functionCall, name, artifactReviewContext);
+    ?? routeSuppressedGenericBuilderReviewCall(functionCall, name, artifactReviewContext)
+    ?? routeVoiceBuilderCall(functionCall, name, voiceBuilderRouting);
   if (routed) {
     return routed;
   }
@@ -6751,19 +6968,26 @@ function routeReviewFunctionCall(
 function splitReviewFunctionCalls(
   functionCalls: unknown[],
   artifactReviewContext: GeminiArtifactReviewRelayContext | null,
+  voiceBuilderRouting: GeminiVoiceBuilderRouting | null,
 ): GeminiRoutedReviewFunctionCalls {
   let coreviewUpdateAlreadyRoutedInBatch = functionCalls.some(isCoreviewArtifactUpdateFunctionCall);
 
   const frontendCalls: GeminiFrontendReviewToolCallInput[] = [];
   const suppressedEmitArtifactCalls: GeminiSuppressedEmitArtifactToolCallInput[] = [];
   const suppressedGenericBuilderCalls: GeminiSuppressedGenericBuilderToolCallInput[] = [];
+  const voiceBuilderCalls: GeminiVoiceBuilderToolCallInput[] = [];
   const relayFunctionCalls: unknown[] = [];
   for (const functionCall of functionCalls) {
     if (!isRecord(functionCall)) {
       relayFunctionCalls.push(functionCall);
       continue;
     }
-    const route = routeReviewFunctionCall(functionCall, artifactReviewContext, coreviewUpdateAlreadyRoutedInBatch);
+    const route = routeReviewFunctionCall(
+      functionCall,
+      artifactReviewContext,
+      coreviewUpdateAlreadyRoutedInBatch,
+      voiceBuilderRouting,
+    );
     switch (route.kind) {
       case 'frontend':
         frontendCalls.push(route.call);
@@ -6775,12 +6999,15 @@ function splitReviewFunctionCalls(
       case 'suppressed_generic_builder':
         suppressedGenericBuilderCalls.push(route.call);
         break;
+      case 'voice_builder':
+        voiceBuilderCalls.push(route.call);
+        break;
       default:
         relayFunctionCalls.push(functionCall);
         break;
     }
   }
-  return { frontendCalls, suppressedEmitArtifactCalls, suppressedGenericBuilderCalls, relayFunctionCalls };
+  return { frontendCalls, suppressedEmitArtifactCalls, suppressedGenericBuilderCalls, voiceBuilderCalls, relayFunctionCalls };
 }
 
 function buildReviewToolCallSplitResult(
@@ -6788,9 +7015,14 @@ function buildReviewToolCallSplitResult(
   located: LocatedProviderFunctionCalls,
   routed: GeminiRoutedReviewFunctionCalls,
 ): GeminiReviewToolCallSplitResult {
-  const { frontendCalls, suppressedEmitArtifactCalls, suppressedGenericBuilderCalls, relayFunctionCalls } = routed;
-  if (frontendCalls.length === 0 && suppressedEmitArtifactCalls.length === 0 && suppressedGenericBuilderCalls.length === 0) {
-    return { frontendCalls, suppressedEmitArtifactCalls, suppressedGenericBuilderCalls, relayEvent: event };
+  const { frontendCalls, suppressedEmitArtifactCalls, suppressedGenericBuilderCalls, voiceBuilderCalls, relayFunctionCalls } = routed;
+  if (
+    frontendCalls.length === 0
+    && suppressedEmitArtifactCalls.length === 0
+    && suppressedGenericBuilderCalls.length === 0
+    && voiceBuilderCalls.length === 0
+  ) {
+    return { frontendCalls, suppressedEmitArtifactCalls, suppressedGenericBuilderCalls, voiceBuilderCalls, relayEvent: event };
   }
 
   if (relayFunctionCalls.length > 0) {
@@ -6798,6 +7030,7 @@ function buildReviewToolCallSplitResult(
       frontendCalls,
       suppressedEmitArtifactCalls,
       suppressedGenericBuilderCalls,
+      voiceBuilderCalls,
       relayEvent: {
         ...event,
         [located.toolCallKey]: {
@@ -6814,6 +7047,7 @@ function buildReviewToolCallSplitResult(
     frontendCalls,
     suppressedEmitArtifactCalls,
     suppressedGenericBuilderCalls,
+    voiceBuilderCalls,
     relayEvent: Object.keys(relayEvent).length > 0 ? relayEvent : null,
   };
 }
@@ -6821,12 +7055,19 @@ function buildReviewToolCallSplitResult(
 function splitFrontendReviewToolCallsFromProviderEvent(
   event: Record<string, unknown>,
   artifactReviewContext: GeminiArtifactReviewRelayContext | null = null,
+  voiceBuilderRouting: GeminiVoiceBuilderRouting | null = null,
 ): GeminiReviewToolCallSplitResult {
   const located = locateProviderFunctionCalls(event);
   if (!located) {
-    return { frontendCalls: [], suppressedEmitArtifactCalls: [], suppressedGenericBuilderCalls: [], relayEvent: event };
+    return {
+      frontendCalls: [],
+      suppressedEmitArtifactCalls: [],
+      suppressedGenericBuilderCalls: [],
+      voiceBuilderCalls: [],
+      relayEvent: event,
+    };
   }
-  const routed = splitReviewFunctionCalls(located.functionCalls, artifactReviewContext);
+  const routed = splitReviewFunctionCalls(located.functionCalls, artifactReviewContext, voiceBuilderRouting);
   return buildReviewToolCallSplitResult(event, located, routed);
 }
 
@@ -6986,7 +7227,8 @@ function suppressedGenericBuilderToolResponse(
       : 'Selected-artifact update redirected to Coreview builder action.',
     user_facing_message: isStatusCheck
       ? "I don't see an active artifact update right now."
-      : "I'll update the selected artifact from the review.",
+      : "That wasn't started. During review I can update the selected artifact.",
+    builder_task_started: false,
     artifact_review_active: artifactReviewContext?.active === true,
     artifact_review_user_intent: artifactReviewContext?.user_intent ?? null,
     coreview_builder_update_intent_detected: artifactReviewContext?.builder_update_intent_detected === true,

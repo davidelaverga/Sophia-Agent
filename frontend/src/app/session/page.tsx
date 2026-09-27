@@ -810,6 +810,18 @@ function SessionPageContent() {
     prompt: string;
     updateMode: CoreviewArtifactUpdateMode;
   }): Promise<CoreviewBuilderStartAdapterResult> => {
+    // Governed owners must send a recorded source intent, exactly like a typed
+    // message; a bare {text} payload is refused before it reaches the companion.
+    let captured: ReturnType<typeof captureSourceInput>;
+    try {
+      captured = captureSourceInput(prompt);
+    } catch {
+      return {
+        ok: false,
+        blockedReason: 'builder_start_failed',
+        userFacingMessage: 'Source verification is unavailable. The artifact update was not started.',
+      };
+    }
     suppressSessionLeaveGuardForCoreviewBuilderUpdate();
     setCoreviewArtifactUpdateSurfaceClaim({
       artifactPath: normalizeBuilderArtifactPath(context.artifactPath),
@@ -819,7 +831,7 @@ function SessionPageContent() {
       taskId: builderTask?.taskId ?? null,
       runId: builderTask?.runId ?? null,
     });
-    await sendMessage({ text: prompt });
+    await sendMessage(captured);
     return {
       ok: true,
       taskId: builderTask?.taskId ?? null,
@@ -828,7 +840,7 @@ function SessionPageContent() {
         ? `Sophia is preparing a new version of ${context.artifactTitle ?? 'this artifact'}.`
         : `Sophia is updating ${context.artifactTitle ?? 'this artifact'}.`,
     };
-  }, [builderTask?.runId, builderTask?.taskId, sendMessage]);
+  }, [builderTask?.runId, builderTask?.taskId, captureSourceInput, sendMessage]);
   const handleCoreviewBuilderCancelRequest = useCallback(async ({
     task,
   }: {

@@ -69,6 +69,11 @@ vi.mock('../../app/lib/builder-workflow', async () => {
   };
 });
 
+import {
+  executeVoiceBuilderToolBridgeCall,
+  hasVoiceBuilderToolBridge,
+  type VoiceBuilderToolResult,
+} from '../../app/lib/voice-builder-actions';
 import { useSessionRouteExperience } from '../../app/session/useSessionRouteExperience';
 
 describe('useSessionRouteExperience', () => {
@@ -404,6 +409,115 @@ describe('useSessionRouteExperience', () => {
     expect(showToast).toHaveBeenCalledWith(
       expect.objectContaining({ message: 'Builder cancelled.', variant: 'info' })
     );
+  });
+
+  it('does not cancel the running build for a spoken correction that mentions stop this', async () => {
+    const showToast = vi.fn();
+
+    renderHook(() =>
+      useSessionRouteExperience({
+        sessionId: 'session-1',
+        activeSessionId: 'session-1',
+        activeThreadId: 'thread-1',
+        chatRequestBody: { session_id: 'session-1', thread_id: 'thread-1', user_id: 'user-1' },
+        hasValidBackendSessionId: true,
+        backendSessionId: 'session-1',
+        userId: 'user-1',
+        artifacts: null,
+        storedBuilderArtifact: null,
+        storeArtifacts: vi.fn(),
+        storeBuilderArtifact: vi.fn(),
+        updateSession: vi.fn(),
+        showUsageLimitModal: vi.fn(),
+        recordConnectivityFailure: vi.fn(),
+        showToast,
+        setCurrentContext: vi.fn(),
+        setMessageMetadata: vi.fn(),
+        greetingAnchorId: 'greeting-1',
+        markOffline: vi.fn(),
+      })
+    );
+
+    const streamContractCall = useCompanionStreamContractMock.mock.calls[0][0] as {
+      setBuilderTask: (task: { phase: string; taskId?: string; runId?: string; detail?: string }) => void;
+    };
+    act(() => {
+      streamContractCall.setBuilderTask({ phase: 'running', taskId: 'task-builder-1', runId: 'run-builder-1' });
+    });
+
+    const { setOnUserTranscriptHandler } = useCompanionVoiceRuntimeMock.mock.results[0].value;
+    const calls = setOnUserTranscriptHandler.mock.calls;
+    const transcriptHandler = calls[calls.length - 1][0] as (text: string) => void;
+    await act(async () => {
+      transcriptHandler('stop this section about pricing and focus on Germany');
+      await Promise.resolve();
+    });
+    expect(cancelBuilderTaskMock).not.toHaveBeenCalled();
+
+    const latestHandler = setOnUserTranscriptHandler.mock.calls[setOnUserTranscriptHandler.mock.calls.length - 1][0] as (text: string) => void;
+    await act(async () => {
+      latestHandler('okay, stop it.');
+      await Promise.resolve();
+    });
+    expect(cancelBuilderTaskMock).toHaveBeenCalledWith('thread-1', 'task-builder-1', 'run-builder-1');
+  });
+
+  it('registers a voice builder bridge that sends corrections through the governed send path', async () => {
+    const rawSendMessage = vi.fn(async () => undefined);
+    useSessionOutboundSendMock.mockReturnValue(rawSendMessage);
+
+    const { result } = renderHook(() =>
+      useSessionRouteExperience({
+        sessionId: '11111111-1111-4111-8111-111111111111',
+        activeSessionId: '11111111-1111-4111-8111-111111111111',
+        activeThreadId: '22222222-2222-4222-8222-222222222222',
+        chatRequestBody: { session_id: '11111111-1111-4111-8111-111111111111', thread_id: '22222222-2222-4222-8222-222222222222', user_id: 'user-1' },
+        hasValidBackendSessionId: true,
+        backendSessionId: '11111111-1111-4111-8111-111111111111',
+        userId: 'user-1',
+        artifacts: null,
+        storedBuilderArtifact: null,
+        storeArtifacts: vi.fn(),
+        storeBuilderArtifact: vi.fn(),
+        updateSession: vi.fn(),
+        showUsageLimitModal: vi.fn(),
+        recordConnectivityFailure: vi.fn(),
+        showToast: vi.fn(),
+        setCurrentContext: vi.fn(),
+        setMessageMetadata: vi.fn(),
+        greetingAnchorId: 'greeting-1',
+        markOffline: vi.fn(),
+      })
+    );
+
+    const streamContractCall = useCompanionStreamContractMock.mock.calls[0][0] as {
+      setBuilderTask: (task: { phase: string; taskId?: string; runId?: string; detail?: string }) => void;
+    };
+    act(() => {
+      streamContractCall.setBuilderTask({ phase: 'running', taskId: 'task-builder-1', runId: 'run-builder-1' });
+    });
+    await waitFor(() => expect(result.current.sourceProfileReady).toBe(true));
+    expect(hasVoiceBuilderToolBridge()).toBe(true);
+
+    let pending!: Promise<VoiceBuilderToolResult>;
+    act(() => {
+      pending = executeVoiceBuilderToolBridgeCall({
+        id: 'voice-update-1',
+        name: 'update_async_task',
+        args: { task_id: 'task-builder-1', message: 'Stop this section about pricing.' },
+        recentUserUtterances: [],
+      });
+    });
+    await waitFor(() => expect(rawSendMessage).toHaveBeenCalledTimes(1));
+    expect(rawSendMessage).toHaveBeenCalledWith(expect.objectContaining({
+      text: expect.stringContaining('Correction: Stop this section about pricing.'),
+    }));
+    expect(cancelBuilderTaskMock).not.toHaveBeenCalled();
+
+    act(() => {
+      streamContractCall.setBuilderTask({ phase: 'running', taskId: 'task-builder-1', runId: 'run-builder-2' });
+    });
+    await expect(pending).resolves.toMatchObject({ ok: true, updated: true, task_id: 'task-builder-1', run_id: 'run-builder-2' });
   });
 
   it('passes active stream state through to voice runtime retry handling', () => {
