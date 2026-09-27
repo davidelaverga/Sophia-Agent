@@ -7546,6 +7546,116 @@ describe('Gemini voice session mode grounding', () => {
     await connection.close();
   });
 
+  describe('across a provider reconnect', () => {
+    const continuationUrl = '/api/sophia/voice/gemini/continue-review-mode';
+    const frame = {
+      artifactId: 'artifact-1',
+      data: 'base64-frame',
+      mimeType: 'image/jpeg',
+      byteLength: 12,
+      dimensions: { width: 640, height: 360 },
+      rawFrameExcluded: true as const,
+    };
+    const activeHint = JSON.stringify(buildGeminiArtifactTextReaderHint('artifact-1'));
+    const endedHint = JSON.stringify(buildGeminiArtifactReviewEndedHint());
+
+    const connectResumable = async () => {
+      const stages: GeminiBrowserLiveDogfoodStage[] = [];
+      const sockets: FakeWebSocket[] = [];
+      const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+        if (String(input) === continuationUrl) {
+          return new Response(JSON.stringify({
+            session_id: 'gemini-prod-review-reconnect',
+            websocket_url: 'wss://gemini.example/live-reconnected',
+            ephemeral_token: { value: 'auth_tokens/reconnected', expireTime: '2033-05-18T04:03:20.000Z' },
+            setup: { model: 'models/gemini-live', sessionResumption: {} },
+            stream_url: '/api/sophia/voice/gemini/events?session_id=gemini-prod-review-reconnect',
+            continuation_bootstrap_url: continuationUrl,
+            provider_connection_epoch: 2,
+          }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+        }
+        return new Response(JSON.stringify({ accepted: true }), {
+          status: 202,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      });
+      const connection = await connectGeminiBrowserLiveFromBootstrap({
+        userId: 'user-1',
+        bootstrap: {
+          runtime: 'gemini_live',
+          voice_runtime: 'gemini_live',
+          production_route: true,
+          session_id: 'gemini-prod-review-reconnect',
+          websocket_url: 'wss://gemini.example/live-initial',
+          ephemeral_token: { value: 'auth_tokens/initial', expireTime: '2033-05-18T04:03:20.000Z' },
+          setup: { model: 'models/gemini-live', sessionResumption: {} },
+          stream_url: '/api/sophia/voice/gemini/events?session_id=gemini-prod-review-reconnect',
+          continuation_bootstrap_url: continuationUrl,
+          provider_connection_epoch: 1,
+        },
+        fetchFn: fetchMock as typeof fetch,
+        webSocketFactory: (url) => {
+          const socket = new FakeWebSocket(url);
+          sockets.push(socket);
+          return socket;
+        },
+        getUserMedia: vi.fn(async () => ({ getTracks: () => [] } as unknown as MediaStream)),
+        audioContextFactory: () => new FakeAudioContext() as unknown as AudioContext,
+        onStage: (stage) => stages.push(stage),
+        coreviewStillFrameEnabled: true,
+      });
+      sockets[0]?.emitMessage({ sessionResumptionUpdate: { resumable: true, newHandle: 'safe-review-handle' } });
+      const reconnect = async (duringLoss?: () => void) => {
+        sockets[0]?.emitClose(1011, 'provider transport reset', false);
+        duringLoss?.();
+        await vi.waitFor(() => expect(sockets).toHaveLength(2));
+        await vi.waitFor(() => {
+          expect(stages.filter((stage) => stage === 'streaming_audio').length).toBeGreaterThanOrEqual(2);
+        });
+      };
+      // The resumed socket's first message must stay the setup.
+      const resumedAfterSetup = () => {
+        const sent = sockets[1]?.sent ?? [];
+        expect(JSON.parse(sent[0] ?? '{}')).toHaveProperty('setup');
+        return sent.slice(1);
+      };
+      return { connection, sockets, reconnect, resumedAfterSetup };
+    };
+
+    it('delivers a review end that happened while the provider was reconnecting', async () => {
+      const { connection, reconnect, resumedAfterSetup } = await connectResumable();
+      await connection.sendArtifactFrame(frame);
+
+      await reconnect(() => connection.endArtifactReview());
+
+      const resumed = resumedAfterSetup();
+      expect(resumed.filter((sent) => sent === endedHint)).toHaveLength(1);
+      expect(resumed).not.toContain(activeHint);
+      await connection.close();
+    });
+
+    it('re-announces an active review to the resumed session', async () => {
+      const { connection, reconnect, resumedAfterSetup } = await connectResumable();
+      await connection.sendArtifactFrame(frame);
+
+      await reconnect();
+
+      const resumed = resumedAfterSetup();
+      expect(resumed.filter((sent) => sent === activeHint)).toHaveLength(1);
+      expect(resumed).not.toContain(endedHint);
+      await connection.close();
+    });
+
+    it('sends no review context to the resumed session of an ordinary conversation', async () => {
+      const { connection, reconnect, resumedAfterSetup } = await connectResumable();
+
+      await reconnect();
+
+      expect(resumedAfterSetup().some((sent) => sent.includes('App context'))).toBe(false);
+      await connection.close();
+    });
+  });
+
   it('never sends review context in an ordinary session', async () => {
     const fetchMock = makeGeminiBrowserSessionFetch('browser-gemini-ordinary-mode');
     let websocket: FakeWebSocket | null = null;

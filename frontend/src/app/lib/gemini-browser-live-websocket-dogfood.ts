@@ -2091,6 +2091,13 @@ export async function connectGeminiBrowserLiveDogfood(
   // Looking bumps the generation so a frame still settling cannot reopen review.
   let artifactReviewStopGeneration = 0;
   let artifactFramesInFlight = 0;
+  // The review mode Gemini should currently know (null: review never used).
+  // A mode message can be lost around a provider reconnect, and a rotated
+  // socket must receive its setup first, so mode messages wait while a
+  // rotation is in progress and the current mode is re-announced once the
+  // resumed session is ready.
+  let artifactReviewModeAnnounced: 'active' | 'ended' | null = null;
+  let providerRotationInProgress = false;
   const artifactReviewSafeResponseIds = new Set<string>();
   const artifactReviewSuppressedResponseIds = new Set<string>();
   const pendingArtifactReviewAudio = new Map<string, Array<{
@@ -2316,13 +2323,21 @@ export async function connectGeminiBrowserLiveDogfood(
   const sendArtifactReviewModeContext = (message: Record<string, unknown>) => {
     // Sent straight to the provider socket: app context is not user input and
     // must not feed intent or Builder-request tracking.
-    if (closed || websocket?.readyState !== WEBSOCKET_OPEN) {
+    if (closed || providerRotationInProgress || websocket?.readyState !== WEBSOCKET_OPEN) {
       return;
     }
     try {
       websocket.send(JSON.stringify(message));
     } catch {
       // Best effort; review routing still gates on its own state.
+    }
+  };
+
+  const reannounceArtifactReviewMode = () => {
+    if (artifactReviewModeAnnounced === 'active' && artifactReviewArtifactId) {
+      sendArtifactReviewModeContext(buildGeminiArtifactTextReaderHint(artifactReviewArtifactId));
+    } else if (artifactReviewModeAnnounced !== null) {
+      sendArtifactReviewModeContext(buildGeminiArtifactReviewEndedHint());
     }
   };
 
@@ -2346,6 +2361,7 @@ export async function connectGeminiBrowserLiveDogfood(
     artifactReviewSafeResponseIds.clear();
     artifactReviewSuppressedResponseIds.clear();
     dropPendingArtifactReviewAudio(null, 'artifact_review_response_suppressed');
+    artifactReviewModeAnnounced = 'ended';
     sendArtifactReviewModeContext(buildGeminiArtifactReviewEndedHint());
   };
 
@@ -4336,6 +4352,7 @@ export async function connectGeminiBrowserLiveDogfood(
         return bootstrapProviderContinuation();
       },
       onProviderConnectionChanged: (nextSocket) => {
+        providerRotationInProgress = true;
         websocket = nextSocket;
         websocketRef.current = nextSocket;
       },
@@ -4375,6 +4392,8 @@ export async function connectGeminiBrowserLiveDogfood(
         notifyRelayStatus('active');
         notifyStage('connected');
         notifyStage('streaming_audio');
+        providerRotationInProgress = false;
+        reannounceArtifactReviewMode();
       },
       onProviderConnectionTerminated: () => {
         if (closed) {
@@ -4508,6 +4527,7 @@ export async function connectGeminiBrowserLiveDogfood(
             artifactReviewExpiresAtMs = monotonicNowMs() + ARTIFACT_REVIEW_RELAY_CONTEXT_TTL_MS;
             scheduleArtifactReviewExpiry();
             if (reviewStarted) {
+              artifactReviewModeAnnounced = 'active';
               sendArtifactReviewModeContext(buildGeminiArtifactTextReaderHint(result.artifactId));
             }
           }
@@ -4522,6 +4542,7 @@ export async function connectGeminiBrowserLiveDogfood(
           // Review never became active, but Gemini may already have the
           // settling frame, so say explicitly that review ended.
           clearArtifactReviewExpiryTimer();
+          artifactReviewModeAnnounced = 'ended';
           sendArtifactReviewModeContext(buildGeminiArtifactReviewEndedHint());
           return;
         }
