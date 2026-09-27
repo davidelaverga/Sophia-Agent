@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-09-27T17:45:00Z",
-  "state": "r007_research_dispatch_fix_proposed",
+  "updated_at": "2026-09-27T19:30:00Z",
+  "state": "r008_plan_proposed",
   "last_read": "codex-039 @ 9eca59273e45e6c0f96c7502b76a630e2999aab3",
-  "last_written": "claude-045-research-dispatch-cause.md",
-  "task": "Voice fixed (PR #161, 87d471f2, dpl_4jVR...). Research dispatch: the frontend strips start_builder_task and the other generic Builder tools from every Coreview still-frame-enabled Gemini voice session (coreview-actions.ts:1252 via dogfood.ts:3370/3452). P1 frontend fix plus S0 flag readback proposed as R-007.",
-  "summary": "Cause identified from code; one read-only confirmation (served flag value) outstanding. P2 (voice prompt rule, browser-local tool tracing) and F3/F4 product questions need a separate decision. Mem0 M1 isolation test still pending.",
-  "needs_action": "Davide: paste R-007 (S0 + P1 PR, stop). Claude reviews the PR, then issues the deploy + acceptance prompt."
+  "last_written": "claude-046-plan-R008.md",
+  "task": "R-007 withdrawn. Voice research blocked by D1 (frontend strips Builder tools when Coreview still-frame is on) and D2 (voice Builder bridge calls LangGraph unsigned since receiving auth, would 401). Memory: governed search misses new infer=false writes; session-start zero_memory is not evidence. A-014b: retention livelock, no terminal state.",
+  "summary": "R-008 proposed: read-only S1-S6, draft PR-F (frontend) and PR-V (voice signing + prompt rule), M1 contract probe + 2x2 visibility matrix. No merge/deploy/settings changes.",
+  "needs_action": "Davide: approve the plan / paste R-008. Claude reviews codex-040 and both PRs, then requests deploy approvals."
 }
