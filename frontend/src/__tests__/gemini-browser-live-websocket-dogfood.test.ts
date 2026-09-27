@@ -62,6 +62,12 @@ import {
   type GeminiSyntheticTestContext,
   type GeminiOutputAudioReceivedDiagnostic,
 } from '../app/lib/gemini-browser-live-websocket-dogfood';
+import {
+  clearVoiceBuilderToolBridgeForTests,
+  registerVoiceBuilderToolBridge,
+  type VoiceBuilderToolCallInput,
+  type VoiceBuilderToolResult,
+} from '../app/lib/voice-builder-actions';
 
 const emitArtifactArgs = {
   session_goal: 'Probe Gemini artifacts.',
@@ -4562,7 +4568,7 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
     await connection.close();
   });
 
-  it('exposes Coreview builder actions and suppresses generic builder tools for selected artifact updates', async () => {
+  it('keeps generic builder tools declared beside Coreview builder actions and suppresses them for selected artifact updates', async () => {
     const bridgeCalls: string[] = [];
     registerCoreviewBuilderToolBridge(async (call) => {
       bridgeCalls.push(call.name);
@@ -4690,9 +4696,9 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
       'coreview_get_builder_status',
     ]));
     expect(readGeminiConfiguredToolNames(connection.setup)).not.toContain('emit_artifact');
-    expect(readGeminiConfiguredToolNames(connection.setup)).not.toContain('start_builder_task');
-    expect(readGeminiConfiguredToolNames(connection.setup)).not.toContain('edit_builder_artifact');
-    expect(readGeminiConfiguredToolNames(connection.setup)).not.toContain('check_async_task');
+    expect(readGeminiConfiguredToolNames(connection.setup)).toContain('start_builder_task');
+    expect(readGeminiConfiguredToolNames(connection.setup)).toContain('edit_builder_artifact');
+    expect(readGeminiConfiguredToolNames(connection.setup)).toContain('check_async_task');
 
     await connection.sendArtifactFrame({
       artifactId: 'coreview-real-artifact-site-html',
@@ -4846,7 +4852,7 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
       coreviewStillFrameEnabled: true,
     });
 
-    expect(readGeminiConfiguredToolNames(connection.setup)).not.toContain('edit_builder_artifact');
+    expect(readGeminiConfiguredToolNames(connection.setup)).toContain('edit_builder_artifact');
     await connection.sendArtifactFrame({
       artifactId: 'coreview-real-artifact-site-html',
       visualSourceKind: 'html_preview_canvas',
@@ -5010,7 +5016,7 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
       onToolLoopDiagnostic: (diagnostic) => toolDiagnostics.push(diagnostic),
     });
 
-    expect(readGeminiConfiguredToolNames(connection.setup)).not.toContain('update_async_task');
+    expect(readGeminiConfiguredToolNames(connection.setup)).toContain('update_async_task');
     expect(readGeminiConfiguredToolNames(connection.setup)).toContain('coreview_request_artifact_update');
 
     await connection.sendArtifactFrame({
@@ -5143,7 +5149,7 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
     });
 
     expect(readGeminiConfiguredToolNames(connection.setup)).toContain('coreview_get_builder_status');
-    expect(readGeminiConfiguredToolNames(connection.setup)).not.toContain('check_async_task');
+    expect(readGeminiConfiguredToolNames(connection.setup)).toContain('check_async_task');
 
     await connection.sendArtifactFrame({
       artifactId: 'coreview-real-artifact-site-html',
@@ -7080,5 +7086,355 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
     expect(
       fetchMock.mock.calls.some(([url]) => url === '/api/sophia/voice/dogfood/gemini/relay'),
     ).toBe(false);
+  });
+});
+
+function makeVoiceBuilderSessionFetch(sessionId: string, toolNames: string[]) {
+  return vi
+    .fn()
+    .mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          session_id: sessionId,
+          websocket_url: 'wss://gemini.example/live',
+          ephemeral_token: { value: 'auth_tokens/gemini-browser-test', expireTime: '2033-05-18T04:03:20.000Z' },
+          setup: {
+            model: 'models/gemini-3.1-flash-live-preview',
+            inputAudioTranscription: {},
+            tools: [{ functionDeclarations: toolNames.map((name) => ({ name })) }],
+          },
+          stream_url: `/api/sophia/voice/dogfood/gemini/events?session_id=${sessionId}`,
+        }),
+        { status: 201, headers: { 'Content-Type': 'application/json' } },
+      ),
+    )
+    .mockResolvedValue(new Response(JSON.stringify({ accepted: true }), { status: 202 }));
+}
+
+function sentFunctionResponse(websocket: FakeWebSocket | null, id: string) {
+  return (websocket?.sent ?? [])
+    .flatMap((payload) => {
+      const parsed = JSON.parse(payload) as {
+        toolResponse?: { functionResponses?: Array<{ id?: string; name?: string; response?: Record<string, unknown> }> };
+      };
+      return parsed.toolResponse?.functionResponses ?? [];
+    })
+    .find((response) => response.id === id);
+}
+
+function relayedBodies(fetchMock: ReturnType<typeof vi.fn>): string[] {
+  return fetchMock.mock.calls
+    .map(([, init]) => (init as RequestInit | undefined)?.body)
+    .filter((body): body is string => typeof body === 'string');
+}
+
+describe('Gemini voice Builder bridge routing', () => {
+  afterEach(() => {
+    clearVoiceBuilderToolBridgeForTests();
+    clearCoreviewBuilderToolBridgeForTests();
+    clearCoreviewArtifactTextRegistryForTests();
+    clearCoreviewToolBridgeForTests();
+  });
+
+  it('runs ordinary-session builder calls through the session bridge without relaying them or blocking later events', async () => {
+    const bridgeCalls: VoiceBuilderToolCallInput[] = [];
+    let settleBridge: ((result: VoiceBuilderToolResult) => void) | null = null;
+    registerVoiceBuilderToolBridge({
+      knownTaskIds: () => [],
+      execute: (call) => {
+        bridgeCalls.push(call);
+        return new Promise<VoiceBuilderToolResult>((resolve) => { settleBridge = resolve; });
+      },
+    });
+    const fetchMock = makeVoiceBuilderSessionFetch('browser-gemini-voice-builder', ['start_builder_task', 'check_async_task']);
+    let websocket: FakeWebSocket | null = null;
+
+    const connection = await connectGeminiBrowserLiveDogfood({
+      userId: 'user-1',
+      fetchFn: fetchMock as typeof fetch,
+      webSocketFactory: (url) => {
+        websocket = new FakeWebSocket(url);
+        return websocket;
+      },
+      getUserMedia: vi.fn(async () => ({ getTracks: () => [] } as unknown as MediaStream)),
+      audioContextFactory: () => new FakeAudioContext() as unknown as AudioContext,
+    });
+
+    expect(readGeminiConfiguredToolNames(connection.setup)).toEqual(expect.arrayContaining(['start_builder_task', 'check_async_task']));
+
+    websocket?.emitMessage({
+      serverContent: { inputTranscription: { text: 'Can you research EV charging in Germany and write a Markdown report?' } },
+    });
+    websocket?.emitMessage({
+      toolCall: {
+        functionCalls: [{
+          id: 'voice-start-1',
+          name: 'start_builder_task',
+          args: { description: 'Research EV charging in Germany; Markdown report.', task_type: 'research' },
+        }],
+      },
+    });
+
+    await vi.waitFor(() => expect(bridgeCalls).toHaveLength(1));
+    expect(bridgeCalls[0]).toMatchObject({
+      id: 'voice-start-1',
+      name: 'start_builder_task',
+      args: { description: 'Research EV charging in Germany; Markdown report.', task_type: 'research' },
+    });
+    expect(bridgeCalls[0]?.recentUserUtterances.map((utterance) => utterance.text)).toEqual([
+      'Can you research EV charging in Germany and write a Markdown report?',
+    ]);
+
+    // The confirmation is still pending; later provider events keep flowing.
+    websocket?.emitMessage({ serverContent: { inputTranscription: { text: 'while you work on that' } } });
+    await vi.waitFor(() => expect(relayedBodies(fetchMock).some((body) => body.includes('while you work on that'))).toBe(true));
+    expect(sentFunctionResponse(websocket, 'voice-start-1')).toBeUndefined();
+
+    settleBridge?.({ ok: true, started: true, builder_task_started: true, task_id: 'task-voice-1', run_id: 'run-voice-1' });
+    await vi.waitFor(() => expect(sentFunctionResponse(websocket, 'voice-start-1')).toBeDefined());
+    expect(sentFunctionResponse(websocket, 'voice-start-1')).toMatchObject({
+      name: 'start_builder_task',
+      response: { ok: true, started: true, task_id: 'task-voice-1', run_id: 'run-voice-1' },
+    });
+    expect(relayedBodies(fetchMock).some((body) => body.includes('voice-start-1'))).toBe(false);
+
+    await connection.close();
+  });
+
+  it('waits briefly for a late input transcription before judging a voice build request', async () => {
+    const bridgeCalls: VoiceBuilderToolCallInput[] = [];
+    registerVoiceBuilderToolBridge({
+      knownTaskIds: () => [],
+      execute: async (call) => {
+        bridgeCalls.push(call);
+        return { ok: true, started: true, builder_task_started: true, task_id: 'task-late-1' };
+      },
+    });
+    const fetchMock = makeVoiceBuilderSessionFetch('browser-gemini-voice-builder-late-transcript', ['start_builder_task']);
+    let websocket: FakeWebSocket | null = null;
+
+    const connection = await connectGeminiBrowserLiveDogfood({
+      userId: 'user-1',
+      fetchFn: fetchMock as typeof fetch,
+      webSocketFactory: (url) => {
+        websocket = new FakeWebSocket(url);
+        return websocket;
+      },
+      getUserMedia: vi.fn(async () => ({ getTracks: () => [] } as unknown as MediaStream)),
+      audioContextFactory: () => new FakeAudioContext() as unknown as AudioContext,
+    });
+
+    websocket?.emitMessage({
+      toolCall: {
+        functionCalls: [{ id: 'late-start-1', name: 'start_builder_task', args: { description: 'Solar brief.' } }],
+      },
+    });
+    websocket?.emitMessage({ serverContent: { inputTranscription: { text: 'please research solar subsidies in Italy' } } });
+
+    await vi.waitFor(() => expect(sentFunctionResponse(websocket, 'late-start-1')).toBeDefined(), { timeout: 3_000 });
+    expect(bridgeCalls[0]?.recentUserUtterances.map((utterance) => utterance.text)).toEqual([
+      'please research solar subsidies in Italy',
+    ]);
+
+    await connection.close();
+  });
+
+  it('does not execute a voice build call that Gemini cancels while it is waiting', async () => {
+    const bridgeCalls: VoiceBuilderToolCallInput[] = [];
+    registerVoiceBuilderToolBridge({
+      knownTaskIds: () => [],
+      execute: async (call) => {
+        bridgeCalls.push(call);
+        return { ok: true, started: true, builder_task_started: true, task_id: 'task-cancelled-1' };
+      },
+    });
+    const fetchMock = makeVoiceBuilderSessionFetch('browser-gemini-voice-builder-cancelled', ['start_builder_task']);
+    let websocket: FakeWebSocket | null = null;
+    const toolDiagnostics: GeminiBrowserLiveDogfoodToolLoopDiagnostic[] = [];
+
+    const connection = await connectGeminiBrowserLiveDogfood({
+      userId: 'user-1',
+      fetchFn: fetchMock as typeof fetch,
+      webSocketFactory: (url) => {
+        websocket = new FakeWebSocket(url);
+        return websocket;
+      },
+      getUserMedia: vi.fn(async () => ({ getTracks: () => [] } as unknown as MediaStream)),
+      audioContextFactory: () => new FakeAudioContext() as unknown as AudioContext,
+      onToolLoopDiagnostic: (diagnostic) => toolDiagnostics.push(diagnostic),
+    });
+
+    // No explicit request has been transcribed yet, so the call waits for a
+    // late transcription; Gemini cancels it during that wait.
+    websocket?.emitMessage({
+      toolCall: {
+        functionCalls: [{ id: 'cancelled-start-1', name: 'start_builder_task', args: { description: 'Solar brief.' } }],
+      },
+    });
+    websocket?.emitMessage({ toolCallCancellation: { ids: ['cancelled-start-1'] } });
+    websocket?.emitMessage({ serverContent: { inputTranscription: { text: 'please research solar subsidies in Italy' } } });
+
+    await vi.waitFor(() => expect(toolDiagnostics.map((diagnostic) => diagnostic.phase)).toContain('tool_response_send_suppressed'), { timeout: 3_000 });
+    expect(bridgeCalls).toHaveLength(0);
+    expect(sentFunctionResponse(websocket, 'cancelled-start-1')).toBeUndefined();
+
+    await connection.close();
+  });
+
+  it('does not execute a voice build call after its connection has closed', async () => {
+    const bridgeCalls: VoiceBuilderToolCallInput[] = [];
+    registerVoiceBuilderToolBridge({
+      knownTaskIds: () => [],
+      execute: async (call) => {
+        bridgeCalls.push(call);
+        return { ok: true, started: true, builder_task_started: true, task_id: 'task-closed-1' };
+      },
+    });
+    const fetchMock = makeVoiceBuilderSessionFetch('browser-gemini-voice-builder-closed', ['start_builder_task']);
+    let websocket: FakeWebSocket | null = null;
+
+    const connection = await connectGeminiBrowserLiveDogfood({
+      userId: 'user-1',
+      fetchFn: fetchMock as typeof fetch,
+      webSocketFactory: (url) => {
+        websocket = new FakeWebSocket(url);
+        return websocket;
+      },
+      getUserMedia: vi.fn(async () => ({ getTracks: () => [] } as unknown as MediaStream)),
+      audioContextFactory: () => new FakeAudioContext() as unknown as AudioContext,
+    });
+
+    websocket?.emitMessage({
+      toolCall: {
+        functionCalls: [{ id: 'closed-start-1', name: 'start_builder_task', args: { description: 'Solar brief.' } }],
+      },
+    });
+    await connection.close();
+    await new Promise((resolve) => { setTimeout(resolve, 1_800); });
+
+    expect(bridgeCalls).toHaveLength(0);
+    expect(sentFunctionResponse(websocket, 'closed-start-1')).toBeUndefined();
+  });
+
+  it('lets an explicit fresh build and the session build through during review while selected-artifact calls stay with Coreview', async () => {
+    const bridgeCalls: VoiceBuilderToolCallInput[] = [];
+    registerVoiceBuilderToolBridge({
+      knownTaskIds: () => ['task-voice-1'],
+      execute: async (call) => {
+        bridgeCalls.push(call);
+        return call.name === 'start_builder_task'
+          ? { ok: true, started: true, builder_task_started: true, task_id: 'task-voice-2', run_id: 'run-voice-2' }
+          : { ok: true, task_id: 'task-voice-1', status: 'running' };
+      },
+    });
+    const fetchMock = makeVoiceBuilderSessionFetch(
+      'browser-gemini-voice-builder-review',
+      ['start_builder_task', 'check_async_task', 'update_async_task'],
+    );
+    let websocket: FakeWebSocket | null = null;
+
+    const connection = await connectGeminiBrowserLiveDogfood({
+      userId: 'user-1',
+      sessionId: 'browser-gemini-voice-builder-review',
+      fetchFn: fetchMock as typeof fetch,
+      webSocketFactory: (url) => {
+        websocket = new FakeWebSocket(url);
+        return websocket;
+      },
+      getUserMedia: vi.fn(async () => ({ getTracks: () => [] } as unknown as MediaStream)),
+      audioContextFactory: () => new FakeAudioContext() as unknown as AudioContext,
+      coreviewStillFrameEnabled: true,
+    });
+
+    await connection.sendArtifactFrame({
+      artifactId: 'coreview-real-artifact-site-html',
+      visualSourceKind: 'html_preview_canvas',
+      data: 'AA==',
+      mimeType: 'image/png',
+      byteLength: 1,
+      dimensions: { width: 1, height: 1 },
+      rawFrameExcluded: true,
+    });
+    connection.sendText('Can you research the EU AI Act and write me a report?');
+
+    websocket?.emitMessage({
+      toolCall: {
+        functionCalls: [
+          { id: 'review-fresh-start', name: 'start_builder_task', args: { description: 'EU AI Act report.' } },
+          { id: 'review-session-check', name: 'check_async_task', args: { task_id: 'task-voice-1' } },
+          { id: 'review-unknown-update', name: 'update_async_task', args: { task_id: 'missing-task', message: 'change the title' } },
+        ],
+      },
+    });
+
+    await vi.waitFor(() => expect(sentFunctionResponse(websocket, 'review-fresh-start')).toBeDefined());
+    await vi.waitFor(() => expect(sentFunctionResponse(websocket, 'review-unknown-update')).toBeDefined());
+    expect(bridgeCalls.map((call) => call.name)).toEqual(['start_builder_task', 'check_async_task']);
+    expect(sentFunctionResponse(websocket, 'review-fresh-start')).toMatchObject({
+      response: { ok: true, started: true, task_id: 'task-voice-2' },
+    });
+    expect(sentFunctionResponse(websocket, 'review-session-check')).toMatchObject({
+      response: { ok: true, task_id: 'task-voice-1', status: 'running' },
+    });
+    expect(sentFunctionResponse(websocket, 'review-unknown-update')).toMatchObject({
+      response: {
+        ok: false,
+        rejection_reason: 'artifact_review_generic_builder_tool_suppressed',
+        builder_task_started: false,
+      },
+    });
+
+    await connection.close();
+  });
+
+  it('keeps making the same selected-artifact decision when the user asks to change the reviewed artifact', async () => {
+    const bridgeCalls: VoiceBuilderToolCallInput[] = [];
+    registerVoiceBuilderToolBridge({
+      knownTaskIds: () => [],
+      execute: async (call) => {
+        bridgeCalls.push(call);
+        return { ok: true };
+      },
+    });
+    const fetchMock = makeVoiceBuilderSessionFetch('browser-gemini-voice-builder-update-intent', ['start_builder_task']);
+    let websocket: FakeWebSocket | null = null;
+
+    const connection = await connectGeminiBrowserLiveDogfood({
+      userId: 'user-1',
+      sessionId: 'browser-gemini-voice-builder-update-intent',
+      fetchFn: fetchMock as typeof fetch,
+      webSocketFactory: (url) => {
+        websocket = new FakeWebSocket(url);
+        return websocket;
+      },
+      getUserMedia: vi.fn(async () => ({ getTracks: () => [] } as unknown as MediaStream)),
+      audioContextFactory: () => new FakeAudioContext() as unknown as AudioContext,
+      coreviewStillFrameEnabled: true,
+    });
+
+    await connection.sendArtifactFrame({
+      artifactId: 'coreview-real-artifact-site-html',
+      visualSourceKind: 'html_preview_canvas',
+      data: 'AA==',
+      mimeType: 'image/png',
+      byteLength: 1,
+      dimensions: { width: 1, height: 1 },
+      rawFrameExcluded: true,
+    });
+    connection.sendText('make it darker');
+
+    websocket?.emitMessage({
+      toolCall: {
+        functionCalls: [{ id: 'review-update-start', name: 'start_builder_task', args: { description: 'Make it darker.' } }],
+      },
+    });
+
+    await vi.waitFor(() => expect(sentFunctionResponse(websocket, 'review-update-start')).toBeDefined());
+    expect(bridgeCalls).toHaveLength(0);
+    expect(sentFunctionResponse(websocket, 'review-update-start')).toMatchObject({
+      response: { ok: false, rejection_reason: 'artifact_review_generic_builder_tool_suppressed', builder_task_started: false },
+    });
+
+    await connection.close();
   });
 });
