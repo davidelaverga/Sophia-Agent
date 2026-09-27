@@ -7496,6 +7496,56 @@ describe('Gemini voice session mode grounding', () => {
     await connection.close();
   });
 
+  it('does not reopen review when Stop Looking lands while a frame is still settling', async () => {
+    const fetchMock = makeGeminiBrowserSessionFetch('browser-gemini-review-stop-race');
+    let websocket: FakeWebSocket | null = null;
+    const connection = await connectGeminiBrowserLiveDogfood({
+      userId: 'user-1',
+      fetchFn: fetchMock as typeof fetch,
+      webSocketFactory: (url) => {
+        websocket = new FakeWebSocket(url);
+        return websocket;
+      },
+      getUserMedia: vi.fn(async () => ({ getTracks: () => [] } as unknown as MediaStream)),
+      audioContextFactory: () => new FakeAudioContext() as unknown as AudioContext,
+      coreviewStillFrameEnabled: true,
+    });
+    const frame = {
+      artifactId: 'artifact-1',
+      data: 'base64-frame',
+      mimeType: 'image/jpeg',
+      byteLength: 12,
+      dimensions: { width: 640, height: 360 },
+      rawFrameExcluded: true as const,
+    };
+    const activeHint = JSON.stringify(buildGeminiArtifactTextReaderHint('artifact-1'));
+    const endedHint = JSON.stringify(buildGeminiArtifactReviewEndedHint());
+    const count = (payload: string) => (websocket?.sent ?? []).filter((sent) => sent === payload).length;
+
+    // First frame: Gemini already has it when the user stops, so review ends
+    // explicitly and the settled frame must not start it afterwards.
+    const firstFrame = connection.sendArtifactFrame(frame);
+    connection.endArtifactReview();
+    await expect(firstFrame).resolves.toMatchObject({ ok: true, websocketSendAccepted: true });
+    expect(count(activeHint)).toBe(0);
+    expect(count(endedHint)).toBe(1);
+
+    // Refresh frame during an active review: one end, no restart.
+    await connection.sendArtifactFrame(frame);
+    expect(count(activeHint)).toBe(1);
+    const refreshFrame = connection.sendArtifactFrame(frame);
+    connection.endArtifactReview();
+    await refreshFrame;
+    expect(count(activeHint)).toBe(1);
+    expect(count(endedHint)).toBe(2);
+
+    // A later Look starts review again.
+    await connection.sendArtifactFrame(frame);
+    expect(count(activeHint)).toBe(2);
+
+    await connection.close();
+  });
+
   it('never sends review context in an ordinary session', async () => {
     const fetchMock = makeGeminiBrowserSessionFetch('browser-gemini-ordinary-mode');
     let websocket: FakeWebSocket | null = null;

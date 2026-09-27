@@ -2087,6 +2087,10 @@ export async function connectGeminiBrowserLiveDogfood(
   const voiceBuilderUserUtterances: VoiceBuilderUserUtterance[] = [];
   let voiceBuilderUserTurnOpen = false;
   let artifactReviewExpiryTimer: ReturnType<typeof setTimeout> | null = null;
+  // A frame settles for ARTIFACT_FRAME_SEND_SETTLE_MS after it is sent. Stop
+  // Looking bumps the generation so a frame still settling cannot reopen review.
+  let artifactReviewStopGeneration = 0;
+  let artifactFramesInFlight = 0;
   const artifactReviewSafeResponseIds = new Set<string>();
   const artifactReviewSuppressedResponseIds = new Set<string>();
   const pendingArtifactReviewAudio = new Map<string, Array<{
@@ -4473,34 +4477,54 @@ export async function connectGeminiBrowserLiveDogfood(
       sendArtifactFrame: (
         frame: GeminiArtifactFramePayload,
         context?: GeminiArtifactFrameSendContext,
-      ) => sendGeminiArtifactFrameOverWebSocket({
-        websocket,
-        frame,
-        context,
-        enabled: coreviewToolsEnabled,
-        providerSnapshot: snapshotArtifactFrameProviderState,
-        transportSnapshot: snapshotArtifactFrameTransportStatus,
-      }).then((result) => {
-        if (result.ok && result.websocketSendAccepted && result.artifactId) {
-          const reviewStarted = artifactReviewArtifactId !== result.artifactId;
-          if (reviewStarted) {
-            artifactReviewUserIntent = 'unknown';
-            artifactReviewBuilderUpdateIntentDetected = false;
-            artifactReviewUserIntentAt = null;
-            artifactReviewSafeResponseIds.clear();
-            artifactReviewSuppressedResponseIds.clear();
-            dropPendingArtifactReviewAudio(null, 'artifact_review_response_suppressed');
+      ) => {
+        const stopGeneration = artifactReviewStopGeneration;
+        artifactFramesInFlight += 1;
+        return sendGeminiArtifactFrameOverWebSocket({
+          websocket,
+          frame,
+          context,
+          enabled: coreviewToolsEnabled,
+          providerSnapshot: snapshotArtifactFrameProviderState,
+          transportSnapshot: snapshotArtifactFrameTransportStatus,
+        }).then((result) => {
+          if (
+            result.ok
+            && result.websocketSendAccepted
+            && result.artifactId
+            && !closed
+            && stopGeneration === artifactReviewStopGeneration
+          ) {
+            const reviewStarted = artifactReviewArtifactId !== result.artifactId;
+            if (reviewStarted) {
+              artifactReviewUserIntent = 'unknown';
+              artifactReviewBuilderUpdateIntentDetected = false;
+              artifactReviewUserIntentAt = null;
+              artifactReviewSafeResponseIds.clear();
+              artifactReviewSuppressedResponseIds.clear();
+              dropPendingArtifactReviewAudio(null, 'artifact_review_response_suppressed');
+            }
+            artifactReviewArtifactId = result.artifactId;
+            artifactReviewExpiresAtMs = monotonicNowMs() + ARTIFACT_REVIEW_RELAY_CONTEXT_TTL_MS;
+            scheduleArtifactReviewExpiry();
+            if (reviewStarted) {
+              sendArtifactReviewModeContext(buildGeminiArtifactTextReaderHint(result.artifactId));
+            }
           }
-          artifactReviewArtifactId = result.artifactId;
-          artifactReviewExpiresAtMs = monotonicNowMs() + ARTIFACT_REVIEW_RELAY_CONTEXT_TTL_MS;
-          scheduleArtifactReviewExpiry();
-          if (reviewStarted) {
-            sendArtifactReviewModeContext(buildGeminiArtifactTextReaderHint(result.artifactId));
-          }
-        }
-        return result;
-      }),
+          return result;
+        }).finally(() => {
+          artifactFramesInFlight -= 1;
+        });
+      },
       endArtifactReview: () => {
+        artifactReviewStopGeneration += 1;
+        if (!artifactReviewArtifactId && artifactFramesInFlight > 0) {
+          // Review never became active, but Gemini may already have the
+          // settling frame, so say explicitly that review ended.
+          clearArtifactReviewExpiryTimer();
+          sendArtifactReviewModeContext(buildGeminiArtifactReviewEndedHint());
+          return;
+        }
         endArtifactReviewMode();
       },
       getArtifactFrameTransportStatus: snapshotArtifactFrameTransportStatus,
