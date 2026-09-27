@@ -47,9 +47,11 @@ If the detail names something other than project or permission scope (for exampl
 **Side effect:** voice traces land in the shared project. They stay separable by run name `gemini_live_conversation` and by the tags `voice` and `gemini_live`.
 
 ### R-012b: PR #163 deploy (only after Davide merges PR #163)
-**Order: web first, then voice.**
-- New web with old voice is safe: the old prompt receives the review start and end messages, which say "Do not answer this context message".
-- New voice with old web would degrade Review, because the new prompt waits for a "review is active" message that the old web never sends.
+**Order: web first, then voice.** Either order is safe:
+- the new prompt also accepts the artifact image as the review start signal, so old tabs keep Review;
+- the old prompt ignores the new messages, which say "Do not answer this context message".
+
+Web goes first so new tabs carry the review-end signal before the stricter prompt ships.
 
 **Steps:**
 1. **Web.** Run a fresh Production build of the PR #163 merge commit on `codex/frontend-prod-083d4cb0`, with the current environment.
