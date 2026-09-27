@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-09-27T21:30:00Z",
-  "state": "pr162_open_r008a_readonly",
-  "last_read": "codex-039 @ 9eca59273e45e6c0f96c7502b76a630e2999aab3",
-  "last_written": "claude-047-voice-builder-design-R008.md (amended)",
-  "task": "Claude implemented the voice Builder fix himself: draft PR #162 (claude/voice-builder-companion-bridge, base codex/frontend-prod-083d4cb0 @ 87d471f2). Codex R-008a is read-only only (S1 flags, S3 last text-mode build, S7 voice builder attempts).",
-  "summary": "PR-F scope from claude-047 is superseded by PR #162; Codex does not open a frontend PR. Memory paused (Davide approving memories). Retention/Lab parked.",
-  "needs_action": "Codex: R-008a -> codex-040. Davide: review/approve PR #162 deploy after Claude's CI/review pass."
+  "updated_at": "2026-09-28T00:00:00Z",
+  "state": "r011_plan_proposed",
+  "last_read": "codex-042 @ 129a7fab",
+  "last_written": "claude-048-R011-voice-grounding-plan.md",
+  "task": "PR #162 merged/deployed (ec8905a2, dpl_3Ftvvwu7H964zPWc61z1Zk6ZBGxn). New incident: ungrounded review/file claim + repeated opener on a greeting. Plan: measure (greeting eval harness V0-V4), ground mode (prompt block, scoped tool descriptions, explicit review on/off signals), widen repeated-opener gate, detector, LangSmith 403 fix. Keep PR #162.",
+  "summary": "codex-041 (R-009 report incl. D3 voice research check) was never written; D3 still owed.",
+  "needs_action": "Davide: approve R-011 plan. Codex: R-011a read-only (LangSmith 403, Gemini key env name, D3 if Davide runs it). Claude: harness + voice PR + web PR after approval."
 }
