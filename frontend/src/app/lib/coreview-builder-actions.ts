@@ -1,5 +1,5 @@
 import type { ArtifactRendererKind } from "./artifact-renderers"
-import type { CoreviewCurrentView } from "./coreview-action-shared"
+import { COREVIEW_REVIEW_ONLY_TOOL_SCOPE, type CoreviewCurrentView } from "./coreview-action-shared"
 import { buildCoreviewCapabilitySummary } from "./coreview-artifact-capabilities"
 import {
   classifyCoreviewHtmlQuickEdit,
@@ -966,7 +966,7 @@ export function coreviewBuilderGeminiFunctionDeclarations(): Record<string, unkn
   return [
     {
       name: COREVIEW_REQUEST_ARTIFACT_UPDATE_TOOL_NAME,
-      description: "Primary user-facing control-plane tool during Review with Sophia for user requests to update, revise, edit, change, rebuild, restyle, or make a new version of the currently selected artifact. Always use this instead of start_builder_task, update_async_task, edit_builder_artifact, or emit_artifact for selected-artifact updates. edit_builder_artifact is only an implementation primitive after Coreview has accepted the update. The browser will preserve the selected artifact path, renderer, stable identity, current view, source href, capability summary, annotations, and session/thread ids.",
+      description: COREVIEW_REVIEW_ONLY_TOOL_SCOPE + "Primary user-facing control-plane tool during Review with Sophia for user requests to update, revise, edit, change, rebuild, restyle, or make a new version of the currently selected artifact. Always use this instead of start_builder_task, update_async_task, edit_builder_artifact, or emit_artifact for selected-artifact updates. edit_builder_artifact is only an implementation primitive after Coreview has accepted the update. The browser will preserve the selected artifact path, renderer, stable identity, current view, source href, capability summary, annotations, and session/thread ids.",
       parameters: {
         type: "OBJECT",
         properties: {
@@ -982,7 +982,7 @@ export function coreviewBuilderGeminiFunctionDeclarations(): Record<string, unkn
     },
     {
       name: COREVIEW_CANCEL_BUILDER_TASK_TOOL_NAME,
-      description: "Cancel the active Coreview-native builder update for the selected artifact during Review with Sophia. Use this for requests like cancel the builder task, stop this update, or abort the build.",
+      description: COREVIEW_REVIEW_ONLY_TOOL_SCOPE + "Cancel the active Coreview-native builder update for the selected artifact during Review with Sophia. Use this for requests like cancel the builder task, stop this update, or abort the build.",
       parameters: {
         type: "OBJECT",
         properties: {
@@ -993,7 +993,7 @@ export function coreviewBuilderGeminiFunctionDeclarations(): Record<string, unkn
     },
     {
       name: COREVIEW_GET_BUILDER_STATUS_TOOL_NAME,
-      description: "Get safe status for the active Coreview-native builder update without raw artifact text or frames.",
+      description: COREVIEW_REVIEW_ONLY_TOOL_SCOPE + "Get safe status for the active Coreview-native builder update without raw artifact text or frames.",
       parameters: {
         type: "OBJECT",
         properties: {

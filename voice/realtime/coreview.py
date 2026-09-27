@@ -185,11 +185,21 @@ def detect_gemini_coreview_media_support(*, coreview_enabled: bool | None = None
     )
 
 
+# Every review tool is declared for the whole Gemini session (tools are fixed
+# at setup), so each description scopes itself to an active review. Without
+# this, an ordinary greeting can read the review schemas as evidence of a file.
+REVIEW_ONLY_TOOL_SCOPE = (
+    "Only while the app has said artifact review is active; otherwise no artifact is open, "
+    "so do not call or mention this tool. "
+)
+
+
 def gemini_read_artifact_text_function_declaration() -> dict[str, object]:
     return {
         "name": GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME,
         "description": (
-            "Trusted backend artifact text reader for co-review. Use only for exact words, numbers, "
+            REVIEW_ONLY_TOOL_SCOPE
+            + "Trusted backend artifact text reader for co-review. Use only for exact words, numbers, "
             "table values, labels, citations, or data from the active artifact. artifact_id is optional "
             "when the app already has an active review artifact. The response must not be written to telemetry."
         ),
@@ -219,7 +229,8 @@ def gemini_coreview_action_function_declarations() -> list[dict[str, object]]:
         {
             "name": GEMINI_COREVIEW_SET_VIEW_TOOL_NAME,
             "description": (
-                "Set the active Coreview artifact view during Review with Sophia. Use for page navigation "
+                REVIEW_ONLY_TOOL_SCOPE
+                + "Set the active Coreview artifact view during Review with Sophia. Use for page navigation "
                 "or zoom changes, then wait for the tool response before acknowledging."
             ),
             "parameters": {
@@ -260,7 +271,10 @@ def gemini_coreview_action_function_declarations() -> list[dict[str, object]]:
         },
         {
             "name": GEMINI_COREVIEW_REFRESH_VIEW_TOOL_NAME,
-            "description": "Refresh Sophia's still-frame view of the active Coreview artifact without changing artifact contents.",
+            "description": (
+                REVIEW_ONLY_TOOL_SCOPE
+                + "Refresh Sophia's still-frame view of the active Coreview artifact without changing artifact contents."
+            ),
             "parameters": {
                 "type": "OBJECT",
                 "properties": {
@@ -275,7 +289,8 @@ def gemini_coreview_action_function_declarations() -> list[dict[str, object]]:
         {
             "name": GEMINI_COREVIEW_GET_CURRENT_VIEW_TOOL_NAME,
             "description": (
-                "Get safe metadata about what Sophia can currently see in the active Coreview artifact. "
+                REVIEW_ONLY_TOOL_SCOPE
+                + "Get safe metadata about what Sophia can currently see in the active Coreview artifact. "
                 "Prefer this for simple visibility or current-page questions. Returns no raw artifact text or visual frame."
             ),
             "parameters": {

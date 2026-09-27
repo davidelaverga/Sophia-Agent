@@ -74,6 +74,8 @@ export interface ArtifactFrameSender {
     context?: ArtifactFrameSendContext,
   ): Promise<ArtifactFrameSendResult> | ArtifactFrameSendResult
   getStatus?(): ArtifactFrameSenderStatus
+  /** Tells the voice provider that review ended and no artifact is open. */
+  endArtifactReview?(): void
 }
 
 interface StillFrameSendOutcome {
@@ -215,6 +217,7 @@ export class GeminiStillFrameTransport implements CoReviewMediaTransport {
     this.stopped = true
     stopArtifactVisualSource(this.activeSource)
     this.activeSource = null
+    this.sender.endArtifactReview?.()
     const after = this.sender.getStatus?.()
     logCoreviewBreadcrumb("stopCompleted", {
       visualInputStatusAfter: "stopped",

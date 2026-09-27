@@ -120,6 +120,34 @@ def test_gemini_live_spoken_policy_requires_artifact_evidence_before_ready_claim
     assert "then verify that task with check_async_task before announcing readiness" in overlay
 
 
+def test_gemini_live_spoken_policy_grounds_session_mode() -> None:
+    overlay = build_gemini_live_spoken_turn_policy_overlay()
+
+    assert "Session mode:" in overlay
+    assert "artifact review is not active and no file or artifact is open" in overlay
+    assert 'App messages begin with "App context:"; use them silently and never answer them aloud.' in overlay
+    assert "Your tool list is not evidence that a file, artifact, or review exists." in overlay
+    assert "Never say a tool is broken, unavailable, or not working unless a tool result said so." in overlay
+    assert "For a plain greeting, reply once with one short greeting or one neutral question, then stop." in overlay
+    assert 'User: "Hey, Sophia."' in overlay
+
+
+def test_every_gemini_live_instruction_path_grounds_session_mode_once() -> None:
+    production_prompt, _context = build_gemini_live_realtime_instructions_with_memory_context(
+        user_id="user-1",
+        context_mode="life",
+    )
+    prompts = [
+        production_prompt,
+        build_gemini_live_realtime_instructions(),
+        build_gemini_live_realtime_setup_instructions(),
+    ]
+
+    for prompt in prompts:
+        assert prompt.count("Session mode:") == 1
+        assert prompt.count("Your tool list is not evidence that a file, artifact, or review exists.") == 1
+
+
 def test_base_sophia_realtime_prompt_does_not_include_gemini_overlay() -> None:
     prompt = build_sophia_realtime_instructions()
 

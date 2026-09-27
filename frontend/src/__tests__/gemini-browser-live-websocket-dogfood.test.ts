@@ -16,6 +16,7 @@ import {
 import {
   assembleGeminiOutputTranscription,
   buildGeminiArtifactFrameRealtimeInput,
+  buildGeminiArtifactReviewEndedHint,
   buildGeminiArtifactTextReaderHint,
   buildGeminiLiveWebSocketUrl,
   categorizeGeminiProviderEvent,
@@ -27,6 +28,7 @@ import {
   createGeminiOutputAudioPlaybackController,
   createGeminiOutputLegMonitor,
   detectGeminiSameResponseRepeatedIntent,
+  detectGeminiUngroundedModeClaim,
   isGeminiServerInterruptedEvent,
   isGeminiSetupCompleteMessage,
   isRelayableGeminiProviderEvent,
@@ -53,6 +55,7 @@ import {
   type GeminiOutputAudioPlaybackReceipt,
   type GeminiProviderConnectionEpochReceipt,
   type GeminiRepeatedIntentGateDiagnostic,
+  type GeminiUngroundedModeClaimDiagnostic,
   type GeminiStaleOutputSuppressionDiagnostic,
   type GeminiSyntheticInputFaultReceipt,
   type GeminiSyntheticInputLegReceipt,
@@ -1727,7 +1730,7 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
       mimeType: 'image/jpeg',
       rawFrameExcluded: true,
     }));
-    expect(websocket?.sent.at(-1)).toBe(JSON.stringify({
+    expect(websocket?.sent.at(-2)).toBe(JSON.stringify({
       realtimeInput: {
         video: {
           mimeType: 'image/jpeg',
@@ -1735,6 +1738,7 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
         },
       },
     }));
+    expect(websocket?.sent.at(-1)).toBe(JSON.stringify(buildGeminiArtifactTextReaderHint('artifact-1')));
 
     await connection.close();
   });
@@ -7436,5 +7440,148 @@ describe('Gemini voice Builder bridge routing', () => {
     });
 
     await connection.close();
+  });
+});
+
+const GREETING_INCIDENT_TRANSCRIPT = "Hey. What's up? Hello. I want to be upfront with you—the review tools aren't working right now, "
+  + "so I can't actually see the file you're referring to. But I'm here to listen and talk through whatever's on your mind. "
+  + "What did you want to get into? Hey. What's up?";
+
+describe('Gemini voice session mode grounding', () => {
+  afterEach(() => {
+    clearCoreviewArtifactTextRegistryForTests();
+    clearCoreviewToolBridgeForTests();
+    clearCoreviewBuilderToolBridgeForTests();
+  });
+
+  it('tells Gemini once when artifact review starts and once when it ends', async () => {
+    const fetchMock = makeGeminiBrowserSessionFetch('browser-gemini-review-mode');
+    let websocket: FakeWebSocket | null = null;
+    const connection = await connectGeminiBrowserLiveDogfood({
+      userId: 'user-1',
+      fetchFn: fetchMock as typeof fetch,
+      webSocketFactory: (url) => {
+        websocket = new FakeWebSocket(url);
+        return websocket;
+      },
+      getUserMedia: vi.fn(async () => ({ getTracks: () => [] } as unknown as MediaStream)),
+      audioContextFactory: () => new FakeAudioContext() as unknown as AudioContext,
+      coreviewStillFrameEnabled: true,
+    });
+    const frame = {
+      artifactId: 'artifact-1',
+      data: 'base64-frame',
+      mimeType: 'image/jpeg',
+      byteLength: 12,
+      dimensions: { width: 640, height: 360 },
+      rawFrameExcluded: true as const,
+    };
+    const activeHint = JSON.stringify(buildGeminiArtifactTextReaderHint('artifact-1'));
+    const endedHint = JSON.stringify(buildGeminiArtifactReviewEndedHint());
+    const count = (payload: string) => (websocket?.sent ?? []).filter((sent) => sent === payload).length;
+
+    expect(count(activeHint)).toBe(0);
+    await connection.sendArtifactFrame(frame);
+    await connection.sendArtifactFrame(frame);
+    expect(count(activeHint)).toBe(1);
+    expect(count(endedHint)).toBe(0);
+
+    connection.endArtifactReview();
+    connection.endArtifactReview();
+    expect(count(endedHint)).toBe(1);
+
+    await connection.sendArtifactFrame(frame);
+    expect(count(activeHint)).toBe(2);
+
+    await connection.close();
+  });
+
+  it('never sends review context in an ordinary session', async () => {
+    const fetchMock = makeGeminiBrowserSessionFetch('browser-gemini-ordinary-mode');
+    let websocket: FakeWebSocket | null = null;
+    const connection = await connectGeminiBrowserLiveDogfood({
+      userId: 'user-1',
+      fetchFn: fetchMock as typeof fetch,
+      webSocketFactory: (url) => {
+        websocket = new FakeWebSocket(url);
+        return websocket;
+      },
+      getUserMedia: vi.fn(async () => ({ getTracks: () => [] } as unknown as MediaStream)),
+      audioContextFactory: () => new FakeAudioContext() as unknown as AudioContext,
+      coreviewStillFrameEnabled: true,
+    });
+
+    connection.endArtifactReview();
+    websocket?.emitMessage({ serverContent: { inputTranscription: { text: 'Hey, Sophia.' } } });
+
+    expect((websocket?.sent ?? []).some((sent) => sent.includes('App context'))).toBe(false);
+
+    await connection.close();
+  });
+
+  it('flags a repeated opener that returns after an unrelated question', () => {
+    expect(detectGeminiSameResponseRepeatedIntent(GREETING_INCIDENT_TRANSCRIPT)).toMatchObject({
+      detected: true,
+      matchedSignals: expect.arrayContaining(['exact_question']),
+    });
+    expect(detectGeminiSameResponseRepeatedIntent("Hey. What's up? What did you want to get into?")).toMatchObject({
+      detected: false,
+    });
+  });
+
+  it('recognizes ungrounded review and file claims without flagging an ordinary greeting', () => {
+    expect(detectGeminiUngroundedModeClaim(GREETING_INCIDENT_TRANSCRIPT)).toEqual(expect.arrayContaining([
+      'review_tool_health_claim',
+      'unseen_file_claim',
+      'unintroduced_file_reference',
+    ]));
+    expect(detectGeminiUngroundedModeClaim("Hey. What's on your mind?")).toEqual([]);
+  });
+
+  it('reports an ungrounded review claim outside review once, and not when the user brought up a file', async () => {
+    const run = async (userText: string) => {
+      const diagnostics: GeminiUngroundedModeClaimDiagnostic[] = [];
+      const fetchMock = makeGeminiBrowserSessionFetch(`browser-gemini-ungrounded-${diagnostics.length}`);
+      let websocket: FakeWebSocket | null = null;
+      const connection = await connectGeminiBrowserLiveDogfood({
+        userId: 'user-1',
+        fetchFn: fetchMock as typeof fetch,
+        webSocketFactory: (url) => {
+          websocket = new FakeWebSocket(url);
+          return websocket;
+        },
+        getUserMedia: vi.fn(async () => ({ getTracks: () => [] } as unknown as MediaStream)),
+        audioContextFactory: () => new FakeAudioContext() as unknown as AudioContext,
+        transcriptRelayCadenceMs: 0,
+        onUngroundedModeClaim: (diagnostic) => diagnostics.push(diagnostic),
+      });
+      websocket?.emitMessage({ serverContent: { inputTranscription: { text: userText } } });
+      const responseId = 'gemini-response-greeting-incident';
+      for (const text of [
+        "Hey. What's up? Hello. I want to be upfront with you—",
+        "the review tools aren't working right now, so I can't actually see the file you're referring to.",
+        "What did you want to get into?",
+      ]) {
+        websocket?.emitMessage({ responseId, serverContent: { responseId, outputTranscription: { text } } });
+        await Promise.resolve();
+        await Promise.resolve();
+      }
+      await new Promise((resolve) => { setTimeout(resolve, 50); });
+      await connection.close();
+      return diagnostics;
+    };
+
+    const ordinary = await run('Hey, Sophia.');
+    expect(ordinary).toHaveLength(1);
+    expect(ordinary[0]).toMatchObject({
+      reason: 'ungrounded_mode_claim',
+      responseId: 'gemini-response-greeting-incident',
+      artifactReviewActive: false,
+      rawTranscriptExcluded: true,
+      matchedPatterns: expect.arrayContaining(['review_tool_health_claim']),
+    });
+    expect(JSON.stringify(ordinary[0])).not.toContain('referring');
+
+    expect(await run('Can you look at the file I uploaded?')).toHaveLength(0);
   });
 });

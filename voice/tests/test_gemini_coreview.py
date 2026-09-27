@@ -9,6 +9,7 @@ from voice.realtime.coreview import (
     GEMINI_COREVIEW_ACTION_TOOL_NAMES,
     GEMINI_COREVIEW_SET_VIEW_TOOL_NAME,
     GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME,
+    REVIEW_ONLY_TOOL_SCOPE,
     build_gemini_coreview_prompt_overlay,
     coreview_tool_parity_status,
     detect_gemini_coreview_media_support,
@@ -337,3 +338,16 @@ async def test_placeholder_check_async_task_returns_safe_rejected_response_witho
 def test_explicit_overlay_builder_is_empty_when_disabled() -> None:
     assert build_gemini_coreview_prompt_overlay(enabled=False) == ""
     assert "<gemini_coreview_artifact_policy>" in build_gemini_coreview_prompt_overlay(enabled=True)
+
+
+def test_review_tool_descriptions_are_scoped_to_an_active_review(monkeypatch) -> None:
+    monkeypatch.setenv(COREVIEW_FEATURE_FLAG, "true")
+
+    declarations = {
+        declaration["name"]: declaration
+        for declaration in gemini_sophia_function_declarations()
+    }
+    review_tool_names = [GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME, *GEMINI_COREVIEW_ACTION_TOOL_NAMES]
+
+    for name in review_tool_names:
+        assert str(declarations[name]["description"]).startswith(REVIEW_ONLY_TOOL_SCOPE)
