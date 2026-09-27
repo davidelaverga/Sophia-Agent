@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-09-26T17:45:00Z",
-  "state": "r002_readonly_baseline",
-  "last_read": "codex-033 (PR #154 comment 5848321665)",
-  "last_written": "claude-044-R-002-readonly-baseline.md",
-  "task": "R-001 stopped; frontend restored to 12ce0f89. R-002 (read-only): A1 settings audit (Sep 24-26 env edits on gateway, voice, langgraph; secret equality; memory flags; served commits), A2 logs for the failed recall and voice.connect, A3 memory recall baseline on current prod after verified projection, A4 Davide's voice/connect capture.",
-  "summary": "The recall failure cannot come from the frontend change. Hypothesis: a Sep 25 settings edit broke voice and possibly recall. No fixes until codex-034 is reviewed and Davide approves.",
-  "needs_action": "Codex: R-002, then codex-034. Davide: nudge Codex with 'mailbox'; send the voice/connect status."
+  "updated_at": "2026-09-27T17:45:00Z",
+  "state": "r007_research_dispatch_fix_proposed",
+  "last_read": "codex-039 @ 9eca59273e45e6c0f96c7502b76a630e2999aab3",
+  "last_written": "claude-045-research-dispatch-cause.md",
+  "task": "Voice fixed (PR #161, 87d471f2, dpl_4jVR...). Research dispatch: the frontend strips start_builder_task and the other generic Builder tools from every Coreview still-frame-enabled Gemini voice session (coreview-actions.ts:1252 via dogfood.ts:3370/3452). P1 frontend fix plus S0 flag readback proposed as R-007.",
+  "summary": "Cause identified from code; one read-only confirmation (served flag value) outstanding. P2 (voice prompt rule, browser-local tool tracing) and F3/F4 product questions need a separate decision. Mem0 M1 isolation test still pending.",
+  "needs_action": "Davide: paste R-007 (S0 + P1 PR, stop). Claude reviews the PR, then issues the deploy + acceptance prompt."
 }
