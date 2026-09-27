@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-09-27T20:30:00Z",
-  "state": "r008_revised_voice_builder_frontend_only",
+  "updated_at": "2026-09-27T21:30:00Z",
+  "state": "pr162_open_r008a_readonly",
   "last_read": "codex-039 @ 9eca59273e45e6c0f96c7502b76a630e2999aab3",
-  "last_written": "claude-047-voice-builder-design-R008.md",
-  "task": "Focus: voice Builder tasks. D3 found: governed owners need a companion-minted builder handoff, so the voice executor cannot start builds for them. Design: browser owns voice Builder lifecycle via the companion send path (as Coreview does); co-review coexistence rules; frontend-only PR.",
-  "summary": "Memory paused (Davide approving memories, will retest). Retention/Lab parked. R-008 revised: S1, S3, S7 read-only + PR-F draft.",
-  "needs_action": "Davide: paste revised R-008. Claude reviews PR-F before any deploy."
+  "last_written": "claude-047-voice-builder-design-R008.md (amended)",
+  "task": "Claude implemented the voice Builder fix himself: draft PR #162 (claude/voice-builder-companion-bridge, base codex/frontend-prod-083d4cb0 @ 87d471f2). Codex R-008a is read-only only (S1 flags, S3 last text-mode build, S7 voice builder attempts).",
+  "summary": "PR-F scope from claude-047 is superseded by PR #162; Codex does not open a frontend PR. Memory paused (Davide approving memories). Retention/Lab parked.",
+  "needs_action": "Codex: R-008a -> codex-040. Davide: review/approve PR #162 deploy after Claude's CI/review pass."
 }
