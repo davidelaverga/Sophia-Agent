@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-09-28T00:00:00Z",
-  "state": "r011_plan_proposed",
-  "last_read": "codex-042 @ 129a7fab",
-  "last_written": "claude-048-R011-voice-grounding-plan.md",
-  "task": "PR #162 merged/deployed (ec8905a2, dpl_3Ftvvwu7H964zPWc61z1Zk6ZBGxn). New incident: ungrounded review/file claim + repeated opener on a greeting. Plan: measure (greeting eval harness V0-V4), ground mode (prompt block, scoped tool descriptions, explicit review on/off signals), widen repeated-opener gate, detector, LangSmith 403 fix. Keep PR #162.",
-  "summary": "codex-041 (R-009 report incl. D3 voice research check) was never written; D3 still owed.",
-  "needs_action": "Davide: approve R-011 plan. Codex: R-011a read-only (LangSmith 403, Gemini key env name, D3 if Davide runs it). Claude: harness + voice PR + web PR after approval."
+  "updated_at": "2026-09-28T01:10:00Z",
+  "state": "r012_pr163_in_review_langsmith_fix_proposed",
+  "last_read": "codex-043 @ e95eb75b",
+  "last_written": "claude-049-R012-langsmith-fix-and-pr163-deploy.md",
+  "task": "PR #163 (voice mode grounding: prompt session-mode block, scoped review tool descriptions, review start/end App context, widened repeated-opener gate, redacted ungrounded-claim capture) open in draft, Codex review requested. Harness dropped per Davide. codex-043 accepted: LangSmith 403 is the voice-specific project override.",
+  "summary": "R-012a: isolated env-only fix on sophia-voice (SOPHIA_GEMINI_LIVE_LANGSMITH_PROJECT = its LANGSMITH_PROJECT), gated on a read-only check of the 403 detail. R-012b: after PR #163 merges, deploy web first then voice, supervised session including owed D3.",
+  "needs_action": "Davide: approve R-012a (paste prompt to Codex); merge PR #163 once review is clean, then approve R-012b. Codex: R-012a now, R-012b after merge. Claude: drive PR #163 review/CI."
 }
