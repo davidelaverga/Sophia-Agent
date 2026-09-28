@@ -557,8 +557,9 @@ function unconfirmedResult(
         ? "Tell the user it did not go through and offer to try again. Do not say it started or changed."
         : action === "start"
           ? "Tell the user it could not be started in this conversation, so no new build is running. Do not retry it yourself. Do not say it started."
-          // A refused correction never reached the build; the build itself is untouched.
-          : "Tell the user the correction could not be sent in this conversation and the existing build keeps running unchanged. Do not retry it yourself. Do not say it changed.",
+          // A refused correction never reached the companion. The existing work is
+          // untouched, whether it is still running or already finished.
+          : "Tell the user the correction could not be sent in this conversation, so the existing build or artifact was left unchanged. Do not retry it yourself. Do not say it changed.",
     })
   }
   return notStartedResult(toolName, {

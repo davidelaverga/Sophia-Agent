@@ -65,6 +65,59 @@ describe('TurnErrorReportingChatTransport', () => {
     expect(report).toHaveBeenCalledWith('source-message-2', '{"error":"memory_context_rotation_required"}');
   });
 
+  it('reports a response body that fails while it is read', async () => {
+    const encoder = new TextEncoder();
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: 'start' })}\n\n`));
+        controller.error(new Error('network reset'));
+      },
+    }), { status: 200, headers: { 'Content-Type': 'text/event-stream' } })));
+    const report = vi.fn();
+    const transport = new TurnErrorReportingChatTransport({ api: '/api/chat' }, report);
+
+    const stream = await transport.sendMessages({
+      chatId: 'chat-1', trigger: 'submit-message', messageId: undefined, abortSignal: undefined,
+      messages: [userMessage('source-message-4')],
+    });
+
+    await expect(drain(stream)).rejects.toThrow('network reset');
+    expect(report).toHaveBeenCalledWith('source-message-4', 'network reset');
+  });
+
+  it('reports an event that cannot be parsed', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('data: {not json}\n\n', {
+      status: 200, headers: { 'Content-Type': 'text/event-stream' },
+    })));
+    const report = vi.fn();
+    const transport = new TurnErrorReportingChatTransport({ api: '/api/chat' }, report);
+
+    const stream = await transport.sendMessages({
+      chatId: 'chat-1', trigger: 'submit-message', messageId: undefined, abortSignal: undefined,
+      messages: [userMessage('source-message-5')],
+    });
+
+    await expect(drain(stream)).rejects.toThrow();
+    expect(report).toHaveBeenCalledTimes(1);
+    expect(report.mock.calls[0][0]).toBe('source-message-5');
+  });
+
+  it('does not report a turn the user stopped', async () => {
+    const abort = new AbortController();
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      abort.abort();
+      throw new DOMException('The operation was aborted.', 'AbortError');
+    }));
+    const report = vi.fn();
+    const transport = new TurnErrorReportingChatTransport({ api: '/api/chat' }, report);
+
+    await expect(transport.sendMessages({
+      chatId: 'chat-1', trigger: 'submit-message', messageId: undefined, abortSignal: abort.signal,
+      messages: [userMessage('source-message-6')],
+    })).rejects.toThrow();
+    expect(report).not.toHaveBeenCalled();
+  });
+
   it('reports nothing for a turn that completes', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => sseResponse([{ type: 'start' }, { type: 'finish' }])));
     const report = vi.fn();

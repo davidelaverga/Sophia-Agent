@@ -254,9 +254,29 @@ describe("voice builder tool handler", () => {
       send_error: "memory_context_rotation_required",
     })
     const guidance = String(result.recovery_guidance)
-    expect(guidance).toContain("the existing build keeps running unchanged")
-    expect(guidance).not.toContain("no new build is running")
+    expect(guidance).toContain("the existing build or artifact was left unchanged")
+    expect(guidance).not.toMatch(/nothing is running|no new build is running|keeps running/)
     expect(session.cancelBuilderTask).not.toHaveBeenCalled()
+  })
+
+  it("keeps a completed artifact's status when an edit is refused", async () => {
+    const session = createSession({ completion: {
+      task_id: "task-1",
+      run_id: "run-1",
+      status: "success",
+      artifact_path: "mnt/user-data/outputs/report.md",
+      artifact_title: "report.md",
+    } as BuilderCompletionEventV1 })
+    session.onSend.reject = new Error("memory_context_rotation_required")
+
+    const result = await session.handler.execute(call(
+      "edit_builder_artifact",
+      { artifact_path: "mnt/user-data/outputs/report.md", instructions: "Shorten the intro." },
+    ))
+
+    expect(result).toMatchObject({ ok: false, reason: "builder_request_not_sent", send_error: "memory_context_rotation_required" })
+    expect(String(result.recovery_guidance)).toContain("left unchanged")
+    expect(String(result.recovery_guidance)).not.toMatch(/running/)
   })
 
   it("sends a voice correction to the companion and confirms it by a new run", async () => {

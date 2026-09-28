@@ -4,11 +4,20 @@ type SendMessagesOptions = Parameters<DefaultChatTransport<UIMessage>['sendMessa
 
 export type ReportTurnError = (messageId: string | null, errorText: string) => void;
 
+const errorText = (error: unknown) => (error instanceof Error ? error.message : '');
+
+// A user stop aborts the request; that is not a failed turn. Abort errors are
+// DOMExceptions, which are not Error instances in every runtime.
+const isAbort = (error: unknown) =>
+  typeof error === 'object' && error !== null && (error as { name?: unknown }).name === 'AbortError';
+
 /**
  * Reports each turn's terminal error together with the id of the message that
- * started it. The AI SDK resolves sendMessage even when a turn ends in error,
- * so a caller that must know whether its own turn failed looks it up by the
- * message id it sent. Chunks and errors still flow to the SDK unchanged.
+ * started it: a rejected request, an `error` chunk, or a failure while the
+ * response is read (a broken body or an unparseable event). The AI SDK resolves
+ * sendMessage in all of these cases, so a caller that must know whether its own
+ * turn failed looks it up by the message id it sent. Chunks and errors still
+ * reach the SDK unchanged.
  */
 export class TurnErrorReportingChatTransport extends DefaultChatTransport<UIMessage> {
   private readonly reportTurnError: ReportTurnError | undefined;
@@ -28,15 +37,31 @@ export class TurnErrorReportingChatTransport extends DefaultChatTransport<UIMess
     try {
       stream = await super.sendMessages(options);
     } catch (error) {
-      report?.(messageId, error instanceof Error ? error.message : '');
+      if (!isAbort(error)) report?.(messageId, errorText(error));
       throw error;
     }
     if (!report) return stream;
-    return stream.pipeThrough(new TransformStream<UIMessageChunk, UIMessageChunk>({
-      transform(chunk, controller) {
-        if (chunk.type === 'error') report(messageId, chunk.errorText);
-        controller.enqueue(chunk);
+    const reader = stream.getReader();
+    return new ReadableStream<UIMessageChunk>({
+      async pull(controller) {
+        let result: ReadableStreamReadResult<UIMessageChunk>;
+        try {
+          result = await reader.read();
+        } catch (error) {
+          if (!isAbort(error)) report(messageId, errorText(error));
+          controller.error(error);
+          return;
+        }
+        if (result.done) {
+          controller.close();
+          return;
+        }
+        if (result.value.type === 'error') report(messageId, result.value.errorText);
+        controller.enqueue(result.value);
       },
-    }));
+      cancel(reason) {
+        return reader.cancel(reason);
+      },
+    });
   }
 }
