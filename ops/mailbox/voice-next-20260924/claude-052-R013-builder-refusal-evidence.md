@@ -44,6 +44,12 @@ The full analysis sits on Davide's machine. **Please commit it under `codex-arti
    - the source witness's `memory_clear_epoch` and `sequence`;
    - Davide's owner governance clock (`user_revocation_epoch` and the clear epoch) at run time and now;
    - any approve, forget, clear or restore on that owner between the session's source-profile load and the runs (timestamps and action kind only).
+2b. **Source row stability, timestamps and revisions only.** For each run's source message row:
+   - Did the row change between intake and the refusal (row version or `updated_at`)?
+   - If so, which writer changed it? For example, the session transcript save `PUT /api/sessions/{id}/messages` (`replace_messages_revisioned`) versus anything else.
+   - Give the session `message_revision` sequence across the run window.
+
+   Why this matters: a voice session re-persists its whole transcript many times while the model runs. The web already guards against re-timestamping the governed row (`useSessionSendActions.ts`, the comment before `setMessageTimestamp`), but this path has not been checked for voice.
 3. **Thread shape before each run, names and counts only:**
    - message count and types;
    - non-message state keys;
