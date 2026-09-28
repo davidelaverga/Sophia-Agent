@@ -19,8 +19,11 @@ export type UseCompanionChatRuntimeParams = {
     variant: 'warning' | 'error' | 'info' | 'success';
     durationMs?: number;
   }) => void;
-  /** Every companion stream error, before any toast. sendMessage still resolves. */
-  onChatError?: (error: Error) => void;
+  /**
+   * A turn's terminal error, with the id of the message that started it.
+   * sendMessage still resolves; must be stable (it keys the transport).
+   */
+  onTurnError?: (messageId: string | null, errorText: string) => void;
 };
 
 export type UseCompanionStreamContractParams = {

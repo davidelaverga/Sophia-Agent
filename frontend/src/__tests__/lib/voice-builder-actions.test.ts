@@ -3,7 +3,8 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 import {
   clearVoiceBuilderToolBridgeForTests,
   COMPANION_TURN_FAILED,
-  createCompanionTurnErrorTracker,
+  companionTurnFailureCode,
+  createCompanionTurnFailures,
   createVoiceBuilderToolHandler,
   executeVoiceBuilderToolBridgeCall,
   hasRecentExplicitVoiceBuilderRequest,
@@ -62,20 +63,33 @@ function createSession(initial: { task?: BuilderTaskV1 | null; completion?: Buil
   return { state, sent, onSend, cancelBuilderTask, handler }
 }
 
-describe("companion turn error tracker", () => {
-  it("reports only errors recorded after the mark, as short fixed codes", () => {
-    const tracker = createCompanionTurnErrorTracker()
-    tracker.record(new Error("earlier unrelated failure"))
+describe("companion turn failures", () => {
+  it("attributes a failure only to the message that started the turn, once", () => {
+    const failures = createCompanionTurnFailures()
+    failures.record("message-a", "memory_context_rotation_required")
 
-    const mark = tracker.mark()
-    expect(tracker.failureSince(mark)).toBeNull()
+    expect(failures.take("message-b")).toBeNull()
+    expect(failures.take("message-a")).toBe("memory_context_rotation_required")
+    expect(failures.take("message-a")).toBeNull()
+  })
 
-    tracker.record(new Error("memory_context_rotation_required"))
-    expect(tracker.failureSince(mark)).toBe("memory_context_rotation_required")
+  it("maps backend text to fixed codes and ignores turns without an id", () => {
+    const failures = createCompanionTurnFailures()
+    failures.record(null, "memory_context_rotation_required")
+    failures.record("json-body", JSON.stringify({ error: "memory_context_rotation_required" }))
+    failures.record("other", "Upstream said: something with user text")
 
-    const next = tracker.mark()
-    tracker.record(new Error("Upstream said: something with user text"))
-    expect(tracker.failureSince(next)).toBe(COMPANION_TURN_FAILED)
+    expect(failures.take("json-body")).toBe("memory_context_rotation_required")
+    expect(failures.take("other")).toBe(COMPANION_TURN_FAILED)
+    expect(companionTurnFailureCode("")).toBe(COMPANION_TURN_FAILED)
+  })
+
+  it("keeps only a bounded number of unclaimed failures", () => {
+    const failures = createCompanionTurnFailures()
+    for (let index = 0; index < 40; index += 1) failures.record(`message-${index}`, "boom")
+
+    expect(failures.take("message-0")).toBeNull()
+    expect(failures.take("message-39")).toBe(COMPANION_TURN_FAILED)
   })
 })
 

@@ -70,35 +70,52 @@ export interface VoiceBuilderCancelResponse {
 }
 
 export const COMPANION_TURN_FAILED = "companion_turn_failed"
+const MAX_RECORDED_TURN_FAILURES = 32
 
-export interface CompanionTurnErrorTracker {
-  /** Record one companion chat stream error, as reported by the chat runtime. */
-  record: (error: unknown) => void
-  /** Mark the start of a send; pass the mark to failureSince afterwards. */
-  mark: () => number
-  /** A short error code if a chat error was recorded after the mark. */
-  failureSince: (mark: number) => string | null
+/** A short fixed code for a failed companion turn; backend text never passes. */
+export function companionTurnFailureCode(errorText: string): string {
+  if (isMemoryContextRecoveryError(errorText)) return MEMORY_CONTEXT_RECOVERY_REQUIRED
+  try {
+    if (isMemoryContextRecoveryError(JSON.parse(errorText))) return MEMORY_CONTEXT_RECOVERY_REQUIRED
+  } catch {
+    // Not a JSON error body.
+  }
+  return COMPANION_TURN_FAILED
+}
+
+export interface CompanionTurnFailures {
+  /** Record the terminal error of the turn started by messageId. */
+  record: (messageId: string | null, errorText: string) => void
+  /** Return and forget the failure code recorded for messageId, if any. */
+  take: (messageId: string) => string | null
 }
 
 /**
  * The AI SDK resolves sendMessage even when the companion turn ends in a
  * stream error; it reports the error through onError instead. Without this a
  * refused companion turn looked like a send still in flight, and the voice
- * bridge waited for its confirmation timeout. Chat sends are serialized, so an
- * error recorded while a send is awaited belongs to that send.
+ * bridge waited for its confirmation timeout. Failures are keyed by the id of
+ * the message that started the turn, so another send's error (a concurrent
+ * typed turn, another voice call, an earlier session) is never attributed to
+ * this one.
  */
-export function createCompanionTurnErrorTracker(): CompanionTurnErrorTracker {
-  let count = 0
-  let lastError: unknown = null
+export function createCompanionTurnFailures(): CompanionTurnFailures {
+  const failures = new Map<string, string>()
   return {
-    record: (error) => {
-      count += 1
-      lastError = error
+    record: (messageId, errorText) => {
+      if (!messageId) return
+      failures.delete(messageId)
+      failures.set(messageId, companionTurnFailureCode(errorText))
+      while (failures.size > MAX_RECORDED_TURN_FAILURES) {
+        const oldest = failures.keys().next().value
+        if (oldest === undefined) break
+        failures.delete(oldest)
+      }
     },
-    mark: () => count,
-    failureSince: (mark) => {
-      if (count === mark) return null
-      return isMemoryContextRecoveryError(lastError) ? MEMORY_CONTEXT_RECOVERY_REQUIRED : COMPANION_TURN_FAILED
+    take: (messageId) => {
+      const code = failures.get(messageId) ?? null
+      failures.delete(messageId)
+      return code
     },
   }
 }

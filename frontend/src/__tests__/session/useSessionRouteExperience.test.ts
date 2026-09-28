@@ -17,10 +17,20 @@ vi.mock('../../app/providers', () => ({ useAuth: () => ({ loading: false, user: 
 
 vi.mock('../../app/lib/memory-source-client', async () => {
   const actual = await vi.importActual<Record<string, unknown>>('../../app/lib/memory-source-client');
-  return { ...actual, loadSourceProfile: vi.fn(async (owner: string, session: string, thread: string) => ({
-    schema: 'mem00.source-profile.v1', owner_id: owner, session_id: session, thread_id: thread,
-    authority: 'legacy', observation_only: true, boundary: null,
-  })) };
+  // One dedicated session id gets a governed profile (canonical message ids);
+  // every other session stays legacy.
+  return { ...actual, loadSourceProfile: vi.fn(async (owner: string, session: string, thread: string) => (
+    session === '33333333-3333-4333-8333-333333333333'
+      ? {
+        schema: 'mem00.source-profile.v1', owner_id: owner, session_id: session, thread_id: thread,
+        authority: 'governed', observation_only: true, boundary: { schema: 'mem00.source-boundary.v1', owner_id: owner,
+          session_id: session, thread_id: thread, memory_clear_epoch: 1, transcript_revision: 0 },
+      }
+      : {
+        schema: 'mem00.source-profile.v1', owner_id: owner, session_id: session, thread_id: thread,
+        authority: 'legacy', observation_only: true, boundary: null,
+      }
+  )) };
 });
 
 vi.mock('../../app/companion-runtime/artifacts-runtime', () => ({
@@ -520,25 +530,18 @@ describe('useSessionRouteExperience', () => {
     await expect(pending).resolves.toMatchObject({ ok: true, updated: true, task_id: 'task-builder-1', run_id: 'run-builder-2' });
   });
 
-  it('ends a voice builder request at once when the companion turn is refused', async () => {
-    // The AI SDK resolves the send even when the turn ends in a stream error;
-    // the refusal only arrives through the chat runtime's error callback.
-    const rawSendMessage = vi.fn(async () => {
-      const runtime = useCompanionChatRuntimeMock.mock.calls[useCompanionChatRuntimeMock.mock.calls.length - 1][0] as {
-        onChatError?: (error: Error) => void;
-      };
-      runtime.onChatError?.(new Error('memory_context_rotation_required'));
-    });
-    useSessionOutboundSendMock.mockReturnValue(rawSendMessage);
+  describe('voice builder turn failures (governed session)', () => {
+    const governedSession = '33333333-3333-4333-8333-333333333333';
+    const governedThread = '44444444-4444-4444-8444-444444444444';
 
-    const { result } = renderHook(() =>
+    const renderGoverned = () => renderHook(() =>
       useSessionRouteExperience({
-        sessionId: '11111111-1111-4111-8111-111111111111',
-        activeSessionId: '11111111-1111-4111-8111-111111111111',
-        activeThreadId: '22222222-2222-4222-8222-222222222222',
-        chatRequestBody: { session_id: '11111111-1111-4111-8111-111111111111', thread_id: '22222222-2222-4222-8222-222222222222', user_id: 'user-1' },
+        sessionId: governedSession,
+        activeSessionId: governedSession,
+        activeThreadId: governedThread,
+        chatRequestBody: { session_id: governedSession, thread_id: governedThread, user_id: 'user-1' },
         hasValidBackendSessionId: true,
-        backendSessionId: '11111111-1111-4111-8111-111111111111',
+        backendSessionId: governedSession,
         userId: 'user-1',
         artifacts: null,
         storedBuilderArtifact: null,
@@ -554,29 +557,66 @@ describe('useSessionRouteExperience', () => {
         markOffline: vi.fn(),
       })
     );
-    await waitFor(() => expect(result.current.sourceProfileReady).toBe(true));
-    expect(hasVoiceBuilderToolBridge()).toBe(true);
+    // The AI SDK resolves the send even when the turn ends in a stream error;
+    // the transport reports the error with the id of the message it sent.
+    const reportTurnError = (messageId: string | null, errorText: string) => {
+      const runtime = useCompanionChatRuntimeMock.mock.calls[useCompanionChatRuntimeMock.mock.calls.length - 1][0] as {
+        onTurnError?: (messageId: string | null, errorText: string) => void;
+      };
+      runtime.onTurnError?.(messageId, errorText);
+    };
+    const startCall = (atMs: number) => executeVoiceBuilderToolBridgeCall({
+      id: 'voice-start-1',
+      name: 'start_builder_task',
+      args: { description: 'Research the EU AI Act and write a Markdown report.' },
+      recentUserUtterances: [{ text: 'please research the EU AI Act and write me a report', atMs }],
+    });
 
-    const startedAt = Date.now();
-    let pending!: Promise<VoiceBuilderToolResult>;
-    act(() => {
-      pending = executeVoiceBuilderToolBridgeCall({
-        id: 'voice-start-1',
-        name: 'start_builder_task',
-        args: { description: 'Research the EU AI Act and write a Markdown report.' },
-        recentUserUtterances: [{ text: 'please research the EU AI Act and write me a report', atMs: startedAt }],
+    it('ends the request at once when its own companion turn is refused', async () => {
+      const rawSendMessage = vi.fn(async (input: { sourceIntent?: { action: { message_id: string } } }) => {
+        reportTurnError(input.sourceIntent?.action.message_id ?? null, 'memory_context_rotation_required');
       });
+      useSessionOutboundSendMock.mockReturnValue(rawSendMessage);
+      const { result } = renderGoverned();
+      await waitFor(() => expect(result.current.sourceProfileReady).toBe(true));
+      expect(hasVoiceBuilderToolBridge()).toBe(true);
+
+      const startedAt = Date.now();
+      let pending!: Promise<VoiceBuilderToolResult>;
+      act(() => { pending = startCall(startedAt); });
+
+      await expect(pending).resolves.toMatchObject({
+        ok: false,
+        builder_task_started: false,
+        reason: 'builder_request_not_sent',
+        send_error: 'memory_context_rotation_required',
+      });
+      expect(rawSendMessage).toHaveBeenCalledTimes(1);
+      // Before the fix this waited for the 25 s confirmation timeout.
+      expect(Date.now() - startedAt).toBeLessThan(2_000);
     });
 
-    await expect(pending).resolves.toMatchObject({
-      ok: false,
-      builder_task_started: false,
-      reason: 'builder_request_not_sent',
-      send_error: 'memory_context_rotation_required',
+    it("never blames another message's failure on the voice request", async () => {
+      const rawSendMessage = vi.fn(async () => {
+        // A concurrent typed turn (or an earlier session) fails meanwhile.
+        reportTurnError('some-other-message-id', 'memory_context_rotation_required');
+      });
+      useSessionOutboundSendMock.mockReturnValue(rawSendMessage);
+      const { result } = renderGoverned();
+      await waitFor(() => expect(result.current.sourceProfileReady).toBe(true));
+      const streamContractCall = useCompanionStreamContractMock.mock.calls[0][0] as {
+        setBuilderTask: (task: { phase: string; taskId?: string; runId?: string }) => void;
+      };
+
+      let pending!: Promise<VoiceBuilderToolResult>;
+      act(() => { pending = startCall(Date.now()); });
+      await waitFor(() => expect(rawSendMessage).toHaveBeenCalledTimes(1));
+      act(() => {
+        streamContractCall.setBuilderTask({ phase: 'running', taskId: 'task-builder-9', runId: 'run-builder-9' });
+      });
+
+      await expect(pending).resolves.toMatchObject({ ok: true, builder_task_started: true, task_id: 'task-builder-9' });
     });
-    expect(rawSendMessage).toHaveBeenCalledTimes(1);
-    // Before the fix this waited for the 25 s confirmation timeout.
-    expect(Date.now() - startedAt).toBeLessThan(2_000);
   });
 
   it('passes active stream state through to voice runtime retry handling', () => {
