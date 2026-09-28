@@ -12,7 +12,11 @@ import {
 } from '../lib/builder-workflow';
 import { debugLog } from '../lib/debug-logger';
 import { recordSophiaCaptureEvent } from '../lib/session-capture';
-import { createVoiceBuilderToolHandler, registerVoiceBuilderToolBridge } from '../lib/voice-builder-actions';
+import {
+  createCompanionTurnErrorTracker,
+  createVoiceBuilderToolHandler,
+  registerVoiceBuilderToolBridge,
+} from '../lib/voice-builder-actions';
 import { useAuth } from '../providers';
 import type { BuilderArtifactV1 } from '../types/builder-artifact';
 import type { BuilderCanvasActivity, BuilderCanvasTaskSnapshotV1 } from '../types/builder-canvas';
@@ -404,6 +408,11 @@ export function useSessionRouteExperience({
     });
   }, [debugEnabled, routeProfile.id]);
 
+  const companionTurnErrorsRef = useRef(createCompanionTurnErrorTracker());
+  const recordCompanionTurnError = useCallback((error: Error) => {
+    companionTurnErrorsRef.current.record(error);
+  }, []);
+
   const {
     chatMessages,
     sendChatMessage,
@@ -418,6 +427,7 @@ export function useSessionRouteExperience({
     showUsageLimitModal,
     recordConnectivityFailure,
     showToast,
+    onChatError: recordCompanionTurnError,
   });
 
   const canReloadForFreshBuild = chatStatus !== 'streaming' && chatStatus !== 'submitted';
@@ -685,6 +695,9 @@ export function useSessionRouteExperience({
   // typed request would. The typed-message cancel shortcut is skipped on
   // purpose: a spoken correction such as "stop this section" must reach the
   // companion as a correction instead of cancelling the running build.
+  // The send resolves even when the companion turn ends in error, so a turn
+  // that failed (for example a memory governance refusal) is rethrown as a
+  // short code and the voice tool call ends at once instead of waiting.
   const sendVoiceBuilderMessage = useCallback(async (text: string) => {
     const captured = captureSourceInput(text);
     const appVersionFresh = await checkAppVersionFreshness({ reason: 'before-send' });
@@ -692,7 +705,12 @@ export function useSessionRouteExperience({
       throw new Error('memory_source_app_version_unavailable');
     }
     validateSourceInput(captured);
-    return rawSendMessage(captured);
+    const errorMark = companionTurnErrorsRef.current.mark();
+    await rawSendMessage(captured);
+    const failure = companionTurnErrorsRef.current.failureSince(errorMark);
+    if (failure) {
+      throw new Error(failure);
+    }
   }, [captureSourceInput, checkAppVersionFreshness, rawSendMessage, validateSourceInput]);
 
   const voiceBuilderStateRef = useRef({

@@ -15,6 +15,7 @@ export function useCompanionChatRuntime({
   showUsageLimitModal,
   recordConnectivityFailure,
   showToast,
+  onChatError,
 }: UseCompanionChatRuntimeParams) {
   const chatTransport = useMemo(() => {
     return new DefaultChatTransport({
@@ -36,6 +37,7 @@ export function useCompanionChatRuntime({
     onFinish: handleFinish,
     onError: (error) => {
       debugWarn('useChat', 'Error', { error });
+      onChatError?.(error);
 
       const parsedUsageLimit = parseUsageLimitFromError(error);
       if (parsedUsageLimit) {

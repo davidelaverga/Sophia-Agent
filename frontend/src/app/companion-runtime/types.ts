@@ -19,6 +19,8 @@ export type UseCompanionChatRuntimeParams = {
     variant: 'warning' | 'error' | 'info' | 'success';
     durationMs?: number;
   }) => void;
+  /** Every companion stream error, before any toast. sendMessage still resolves. */
+  onChatError?: (error: Error) => void;
 };
 
 export type UseCompanionStreamContractParams = {

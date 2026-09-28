@@ -2,6 +2,8 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 
 import {
   clearVoiceBuilderToolBridgeForTests,
+  COMPANION_TURN_FAILED,
+  createCompanionTurnErrorTracker,
   createVoiceBuilderToolHandler,
   executeVoiceBuilderToolBridgeCall,
   hasRecentExplicitVoiceBuilderRequest,
@@ -59,6 +61,23 @@ function createSession(initial: { task?: BuilderTaskV1 | null; completion?: Buil
   })
   return { state, sent, onSend, cancelBuilderTask, handler }
 }
+
+describe("companion turn error tracker", () => {
+  it("reports only errors recorded after the mark, as short fixed codes", () => {
+    const tracker = createCompanionTurnErrorTracker()
+    tracker.record(new Error("earlier unrelated failure"))
+
+    const mark = tracker.mark()
+    expect(tracker.failureSince(mark)).toBeNull()
+
+    tracker.record(new Error("memory_context_rotation_required"))
+    expect(tracker.failureSince(mark)).toBe("memory_context_rotation_required")
+
+    const next = tracker.mark()
+    tracker.record(new Error("Upstream said: something with user text"))
+    expect(tracker.failureSince(next)).toBe(COMPANION_TURN_FAILED)
+  })
+})
 
 describe("voice builder explicit-request guard", () => {
   it("matches the voice backend's explicit builder request rules", () => {
@@ -181,6 +200,28 @@ describe("voice builder tool handler", () => {
     ))
 
     expect(result).toMatchObject({ ok: false, reason: "builder_request_not_sent", send_error: "memory_source_dispatch_busy" })
+  })
+
+  it("reports a memory governance refusal as not started, without retrying", async () => {
+    const session = createSession()
+    session.onSend.reject = new Error("memory_context_rotation_required")
+
+    const result = await session.handler.execute(call(
+      "start_builder_task",
+      { description: "Research batteries." },
+      ["please research batteries"],
+    ))
+
+    expect(result).toMatchObject({
+      ok: false,
+      started: false,
+      builder_task_started: false,
+      reason: "builder_request_not_sent",
+      send_error: "memory_context_rotation_required",
+    })
+    expect(String(result.recovery_guidance)).toContain("could not be started in this conversation")
+    expect(String(result.recovery_guidance)).toContain("Do not retry it yourself")
+    expect(session.sent).toHaveLength(1)
   })
 
   it("sends a voice correction to the companion and confirms it by a new run", async () => {

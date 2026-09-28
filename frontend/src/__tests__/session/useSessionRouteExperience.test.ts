@@ -520,6 +520,65 @@ describe('useSessionRouteExperience', () => {
     await expect(pending).resolves.toMatchObject({ ok: true, updated: true, task_id: 'task-builder-1', run_id: 'run-builder-2' });
   });
 
+  it('ends a voice builder request at once when the companion turn is refused', async () => {
+    // The AI SDK resolves the send even when the turn ends in a stream error;
+    // the refusal only arrives through the chat runtime's error callback.
+    const rawSendMessage = vi.fn(async () => {
+      const runtime = useCompanionChatRuntimeMock.mock.calls[useCompanionChatRuntimeMock.mock.calls.length - 1][0] as {
+        onChatError?: (error: Error) => void;
+      };
+      runtime.onChatError?.(new Error('memory_context_rotation_required'));
+    });
+    useSessionOutboundSendMock.mockReturnValue(rawSendMessage);
+
+    const { result } = renderHook(() =>
+      useSessionRouteExperience({
+        sessionId: '11111111-1111-4111-8111-111111111111',
+        activeSessionId: '11111111-1111-4111-8111-111111111111',
+        activeThreadId: '22222222-2222-4222-8222-222222222222',
+        chatRequestBody: { session_id: '11111111-1111-4111-8111-111111111111', thread_id: '22222222-2222-4222-8222-222222222222', user_id: 'user-1' },
+        hasValidBackendSessionId: true,
+        backendSessionId: '11111111-1111-4111-8111-111111111111',
+        userId: 'user-1',
+        artifacts: null,
+        storedBuilderArtifact: null,
+        storeArtifacts: vi.fn(),
+        storeBuilderArtifact: vi.fn(),
+        updateSession: vi.fn(),
+        showUsageLimitModal: vi.fn(),
+        recordConnectivityFailure: vi.fn(),
+        showToast: vi.fn(),
+        setCurrentContext: vi.fn(),
+        setMessageMetadata: vi.fn(),
+        greetingAnchorId: 'greeting-1',
+        markOffline: vi.fn(),
+      })
+    );
+    await waitFor(() => expect(result.current.sourceProfileReady).toBe(true));
+    expect(hasVoiceBuilderToolBridge()).toBe(true);
+
+    const startedAt = Date.now();
+    let pending!: Promise<VoiceBuilderToolResult>;
+    act(() => {
+      pending = executeVoiceBuilderToolBridgeCall({
+        id: 'voice-start-1',
+        name: 'start_builder_task',
+        args: { description: 'Research the EU AI Act and write a Markdown report.' },
+        recentUserUtterances: [{ text: 'please research the EU AI Act and write me a report', atMs: startedAt }],
+      });
+    });
+
+    await expect(pending).resolves.toMatchObject({
+      ok: false,
+      builder_task_started: false,
+      reason: 'builder_request_not_sent',
+      send_error: 'memory_context_rotation_required',
+    });
+    expect(rawSendMessage).toHaveBeenCalledTimes(1);
+    // Before the fix this waited for the 25 s confirmation timeout.
+    expect(Date.now() - startedAt).toBeLessThan(2_000);
+  });
+
   it('passes active stream state through to voice runtime retry handling', () => {
     useCompanionChatRuntimeMock.mockReturnValue({
       chatMessages: [],

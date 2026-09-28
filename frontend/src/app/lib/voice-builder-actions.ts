@@ -1,6 +1,8 @@
 import type { BuilderCompletionEventV1 } from "../types/builder-completion"
 import type { BuilderTaskV1 } from "../types/builder-task"
 
+import { isMemoryContextRecoveryError, MEMORY_CONTEXT_RECOVERY_REQUIRED } from "./memory-context-error"
+
 /**
  * Voice Builder lifecycle, owned by the browser.
  *
@@ -67,8 +69,45 @@ export interface VoiceBuilderCancelResponse {
   detail?: string | null
 }
 
+export const COMPANION_TURN_FAILED = "companion_turn_failed"
+
+export interface CompanionTurnErrorTracker {
+  /** Record one companion chat stream error, as reported by the chat runtime. */
+  record: (error: unknown) => void
+  /** Mark the start of a send; pass the mark to failureSince afterwards. */
+  mark: () => number
+  /** A short error code if a chat error was recorded after the mark. */
+  failureSince: (mark: number) => string | null
+}
+
+/**
+ * The AI SDK resolves sendMessage even when the companion turn ends in a
+ * stream error; it reports the error through onError instead. Without this a
+ * refused companion turn looked like a send still in flight, and the voice
+ * bridge waited for its confirmation timeout. Chat sends are serialized, so an
+ * error recorded while a send is awaited belongs to that send.
+ */
+export function createCompanionTurnErrorTracker(): CompanionTurnErrorTracker {
+  let count = 0
+  let lastError: unknown = null
+  return {
+    record: (error) => {
+      count += 1
+      lastError = error
+    },
+    mark: () => count,
+    failureSince: (mark) => {
+      if (count === mark) return null
+      return isMemoryContextRecoveryError(lastError) ? MEMORY_CONTEXT_RECOVERY_REQUIRED : COMPANION_TURN_FAILED
+    },
+  }
+}
+
 export interface VoiceBuilderSessionAdapter {
-  /** Send one companion chat turn through the governed text send path. */
+  /**
+   * Send one companion chat turn through the governed text send path. Rejects
+   * with a short error code when the turn could not be sent or ended in error.
+   */
   sendCompanionMessage: (text: string) => Promise<unknown>
   getBuilderTask: () => BuilderTaskV1 | null
   getBuilderCompletion: () => BuilderCompletionEventV1 | null
@@ -490,13 +529,16 @@ function unconfirmedResult(
   action: "start" | "change",
 ): VoiceBuilderToolResult {
   if (outcome.kind === "send_failed") {
+    const refused = outcome.reason === MEMORY_CONTEXT_RECOVERY_REQUIRED
     return notStartedResult(toolName, {
       reason: "builder_request_not_sent",
       send_error: outcome.reason,
       result_summary: action === "start"
-        ? "The build request could not be sent."
-        : "The correction could not be sent.",
-      recovery_guidance: "Tell the user it did not go through and offer to try again. Do not say it started or changed.",
+        ? "The build request did not go through."
+        : "The correction did not go through.",
+      recovery_guidance: refused
+        ? "Tell the user it could not be started in this conversation and nothing is running. Do not retry it yourself. Do not say it started or changed."
+        : "Tell the user it did not go through and offer to try again. Do not say it started or changed.",
     })
   }
   return notStartedResult(toolName, {
