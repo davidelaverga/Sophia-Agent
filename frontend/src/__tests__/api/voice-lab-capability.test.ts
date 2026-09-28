@@ -139,6 +139,22 @@ describe('voice lab capability contract', () => {
     ).rejects.toMatchObject({ code: 'voice_lab_request_body_not_allowed' });
   });
 
+  it('accepts an ad-hoc grant and rejects half-bound scenario claims', () => {
+    const adHoc = claims();
+    delete adHoc.scenario_id;
+    delete adHoc.scenario_version;
+    expect(verifyFrontendGrant(signVoiceLabCapability(adHoc, GRANT_SECRET), NOW).scenario_id).toBeUndefined();
+    for (const malformed of [
+      claims({ scenario_id: undefined }),
+      claims({ scenario_version: undefined }),
+    ]) {
+      expectCode(
+        () => verifyFrontendGrant(signVoiceLabCapability(malformed, GRANT_SECRET), NOW),
+        'voice_lab_capability_malformed',
+      );
+    }
+  });
+
   it('accepts a valid short-lived grant and mints a narrower gateway token', () => {
     const grant = signVoiceLabCapability(claims(), GRANT_SECRET);
     const verified = verifyFrontendGrant(grant, NOW);
