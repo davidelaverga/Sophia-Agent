@@ -409,8 +409,8 @@ export function useSessionRouteExperience({
   }, [debugEnabled, routeProfile.id]);
 
   const companionTurnFailuresRef = useRef(createCompanionTurnFailures());
-  const recordCompanionTurnError = useCallback((messageId: string | null, errorText: string) => {
-    companionTurnFailuresRef.current.record(messageId, errorText);
+  const recordCompanionTurnError = useCallback((messageId: string | null, errorText: string, afterActivity: boolean) => {
+    companionTurnFailuresRef.current.record(messageId, errorText, afterActivity);
   }, []);
 
   const {
@@ -696,10 +696,11 @@ export function useSessionRouteExperience({
   // purpose: a spoken correction such as "stop this section" must reach the
   // companion as a correction instead of cancelling the running build.
   // The send resolves even when the companion turn ends in error, so a failed
-  // turn (for example a memory governance refusal) is looked up by this send's
-  // own message id and rethrown as a short code; the voice tool call then ends
-  // at once instead of waiting. A send without a canonical message id (legacy
-  // owner) keeps the confirmation wait.
+  // turn is looked up by this send's own message id and rethrown as a short
+  // code; the voice tool call then ends at once instead of waiting. Only a
+  // refusal before the turn acted reads as not sent; anything else reads as
+  // unconfirmed, since a build may already have started. A send without a
+  // canonical message id (legacy owner) keeps the confirmation wait.
   const sendVoiceBuilderMessage = useCallback(async (text: string) => {
     const captured = captureSourceInput(text);
     const appVersionFresh = await checkAppVersionFreshness({ reason: 'before-send' });

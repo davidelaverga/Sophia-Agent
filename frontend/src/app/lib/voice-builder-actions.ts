@@ -69,23 +69,36 @@ export interface VoiceBuilderCancelResponse {
   detail?: string | null
 }
 
-export const COMPANION_TURN_FAILED = "companion_turn_failed"
+/** The turn failed after it may already have acted; delivery is unknown. */
+export const COMPANION_TURN_UNCONFIRMED = "companion_turn_unconfirmed"
 const MAX_RECORDED_TURN_FAILURES = 32
 
-/** A short fixed code for a failed companion turn; backend text never passes. */
-export function companionTurnFailureCode(errorText: string): string {
-  if (isMemoryContextRecoveryError(errorText)) return MEMORY_CONTEXT_RECOVERY_REQUIRED
+function isMemoryContextRefusalText(errorText: string): boolean {
+  if (isMemoryContextRecoveryError(errorText)) return true
   try {
-    if (isMemoryContextRecoveryError(JSON.parse(errorText))) return MEMORY_CONTEXT_RECOVERY_REQUIRED
+    return isMemoryContextRecoveryError(JSON.parse(errorText))
   } catch {
-    // Not a JSON error body.
+    return false
   }
-  return COMPANION_TURN_FAILED
+}
+
+/**
+ * A short fixed code for a failed companion turn; backend text never passes.
+ * Only a memory governance refusal that arrived before the turn did anything
+ * is definitive: nothing ran, so it was not sent. Any other failure (a broken
+ * or unparseable stream, another error, or a refusal after the companion had
+ * started working) may come after a Builder was already launched, so it stays
+ * unconfirmed and must never invite a retry.
+ */
+export function companionTurnFailureCode(errorText: string, afterActivity: boolean): string {
+  return !afterActivity && isMemoryContextRefusalText(errorText)
+    ? MEMORY_CONTEXT_RECOVERY_REQUIRED
+    : COMPANION_TURN_UNCONFIRMED
 }
 
 export interface CompanionTurnFailures {
   /** Record the terminal error of the turn started by messageId. */
-  record: (messageId: string | null, errorText: string) => void
+  record: (messageId: string | null, errorText: string, afterActivity: boolean) => void
   /** Return and forget the failure code recorded for messageId, if any. */
   take: (messageId: string) => string | null
 }
@@ -102,10 +115,10 @@ export interface CompanionTurnFailures {
 export function createCompanionTurnFailures(): CompanionTurnFailures {
   const failures = new Map<string, string>()
   return {
-    record: (messageId, errorText) => {
+    record: (messageId, errorText, afterActivity) => {
       if (!messageId) return
       failures.delete(messageId)
-      failures.set(messageId, companionTurnFailureCode(errorText))
+      failures.set(messageId, companionTurnFailureCode(errorText, afterActivity))
       while (failures.size > MAX_RECORDED_TURN_FAILURES) {
         const oldest = failures.keys().next().value
         if (oldest === undefined) break
@@ -302,6 +315,11 @@ export function createVoiceBuilderToolHandler(
       const task = adapter.getBuilderTask()
       if (task?.phase === "running" && task.taskId && runKey(task) !== baseline) {
         return { kind: "confirmed", task }
+      }
+      if (send.error === COMPANION_TURN_UNCONFIRMED) {
+        // The turn may already have launched a build; report it as unconfirmed
+        // at once, never as not sent.
+        return { kind: "unconfirmed" }
       }
       if (send.error) {
         return { kind: "send_failed", reason: send.error }

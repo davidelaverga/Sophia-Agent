@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 
 import {
   clearVoiceBuilderToolBridgeForTests,
-  COMPANION_TURN_FAILED,
+  COMPANION_TURN_UNCONFIRMED,
   companionTurnFailureCode,
   createCompanionTurnFailures,
   createVoiceBuilderToolHandler,
@@ -66,30 +66,33 @@ function createSession(initial: { task?: BuilderTaskV1 | null; completion?: Buil
 describe("companion turn failures", () => {
   it("attributes a failure only to the message that started the turn, once", () => {
     const failures = createCompanionTurnFailures()
-    failures.record("message-a", "memory_context_rotation_required")
+    failures.record("message-a", "memory_context_rotation_required", false)
 
     expect(failures.take("message-b")).toBeNull()
     expect(failures.take("message-a")).toBe("memory_context_rotation_required")
     expect(failures.take("message-a")).toBeNull()
   })
 
-  it("maps backend text to fixed codes and ignores turns without an id", () => {
+  it("treats only a refusal before any activity as definitive", () => {
     const failures = createCompanionTurnFailures()
-    failures.record(null, "memory_context_rotation_required")
-    failures.record("json-body", JSON.stringify({ error: "memory_context_rotation_required" }))
-    failures.record("other", "Upstream said: something with user text")
+    failures.record(null, "memory_context_rotation_required", false)
+    failures.record("json-body", JSON.stringify({ error: "memory_context_rotation_required" }), false)
+    failures.record("refused-late", "memory_context_rotation_required", true)
+    failures.record("other", "Upstream said: something with user text", false)
 
     expect(failures.take("json-body")).toBe("memory_context_rotation_required")
-    expect(failures.take("other")).toBe(COMPANION_TURN_FAILED)
-    expect(companionTurnFailureCode("")).toBe(COMPANION_TURN_FAILED)
+    // A refusal after the companion started working may follow a launched build.
+    expect(failures.take("refused-late")).toBe(COMPANION_TURN_UNCONFIRMED)
+    expect(failures.take("other")).toBe(COMPANION_TURN_UNCONFIRMED)
+    expect(companionTurnFailureCode("", false)).toBe(COMPANION_TURN_UNCONFIRMED)
   })
 
   it("keeps only a bounded number of unclaimed failures", () => {
     const failures = createCompanionTurnFailures()
-    for (let index = 0; index < 40; index += 1) failures.record(`message-${index}`, "boom")
+    for (let index = 0; index < 40; index += 1) failures.record(`message-${index}`, "boom", true)
 
     expect(failures.take("message-0")).toBeNull()
-    expect(failures.take("message-39")).toBe(COMPANION_TURN_FAILED)
+    expect(failures.take("message-39")).toBe(COMPANION_TURN_UNCONFIRMED)
   })
 })
 
@@ -277,6 +280,27 @@ describe("voice builder tool handler", () => {
     expect(result).toMatchObject({ ok: false, reason: "builder_request_not_sent", send_error: "memory_context_rotation_required" })
     expect(String(result.recovery_guidance)).toContain("left unchanged")
     expect(String(result.recovery_guidance)).not.toMatch(/running/)
+  })
+
+  it("reports an ambiguous companion failure as unconfirmed at once, never as not sent", async () => {
+    const session = createSession()
+    session.onSend.reject = new Error(COMPANION_TURN_UNCONFIRMED)
+
+    const result = await session.handler.execute(call(
+      "start_builder_task",
+      { description: "Research batteries." },
+      ["please research batteries"],
+    ))
+
+    expect(result).toMatchObject({
+      ok: false,
+      builder_task_started: false,
+      reason: "builder_start_unconfirmed",
+      status: "unconfirmed",
+    })
+    expect(result).not.toHaveProperty("send_error")
+    expect(String(result.recovery_guidance)).not.toMatch(/try again|retry/i)
+    expect(session.sent).toHaveLength(1)
   })
 
   it("sends a voice correction to the companion and confirms it by a new run", async () => {

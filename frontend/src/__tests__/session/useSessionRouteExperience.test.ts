@@ -559,11 +559,11 @@ describe('useSessionRouteExperience', () => {
     );
     // The AI SDK resolves the send even when the turn ends in a stream error;
     // the transport reports the error with the id of the message it sent.
-    const reportTurnError = (messageId: string | null, errorText: string) => {
+    const reportTurnError = (messageId: string | null, errorText: string, afterActivity: boolean) => {
       const runtime = useCompanionChatRuntimeMock.mock.calls[useCompanionChatRuntimeMock.mock.calls.length - 1][0] as {
-        onTurnError?: (messageId: string | null, errorText: string) => void;
+        onTurnError?: (messageId: string | null, errorText: string, afterActivity: boolean) => void;
       };
-      runtime.onTurnError?.(messageId, errorText);
+      runtime.onTurnError?.(messageId, errorText, afterActivity);
     };
     const startCall = (atMs: number) => executeVoiceBuilderToolBridgeCall({
       id: 'voice-start-1',
@@ -574,7 +574,7 @@ describe('useSessionRouteExperience', () => {
 
     it('ends the request at once when its own companion turn is refused', async () => {
       const rawSendMessage = vi.fn(async (input: { sourceIntent?: { action: { message_id: string } } }) => {
-        reportTurnError(input.sourceIntent?.action.message_id ?? null, 'memory_context_rotation_required');
+        reportTurnError(input.sourceIntent?.action.message_id ?? null, 'memory_context_rotation_required', false);
       });
       useSessionOutboundSendMock.mockReturnValue(rawSendMessage);
       const { result } = renderGoverned();
@@ -596,10 +596,28 @@ describe('useSessionRouteExperience', () => {
       expect(Date.now() - startedAt).toBeLessThan(2_000);
     });
 
+    it('reports a refusal after the turn acted as unconfirmed, at once', async () => {
+      const rawSendMessage = vi.fn(async (input: { sourceIntent?: { action: { message_id: string } } }) => {
+        reportTurnError(input.sourceIntent?.action.message_id ?? null, 'memory_context_rotation_required', true);
+      });
+      useSessionOutboundSendMock.mockReturnValue(rawSendMessage);
+      const { result } = renderGoverned();
+      await waitFor(() => expect(result.current.sourceProfileReady).toBe(true));
+
+      const startedAt = Date.now();
+      let pending!: Promise<VoiceBuilderToolResult>;
+      act(() => { pending = startCall(startedAt); });
+
+      const outcome = await pending;
+      expect(outcome).toMatchObject({ ok: false, builder_task_started: false, reason: 'builder_start_unconfirmed', status: 'unconfirmed' });
+      expect(outcome).not.toHaveProperty('send_error');
+      expect(Date.now() - startedAt).toBeLessThan(2_000);
+    });
+
     it("never blames another message's failure on the voice request", async () => {
       const rawSendMessage = vi.fn(async () => {
         // A concurrent typed turn (or an earlier session) fails meanwhile.
-        reportTurnError('some-other-message-id', 'memory_context_rotation_required');
+        reportTurnError('some-other-message-id', 'memory_context_rotation_required', false);
       });
       useSessionOutboundSendMock.mockReturnValue(rawSendMessage);
       const { result } = renderGoverned();
