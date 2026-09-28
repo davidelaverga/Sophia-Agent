@@ -16,6 +16,7 @@ import {
 import {
   assembleGeminiOutputTranscription,
   buildGeminiArtifactFrameRealtimeInput,
+  buildGeminiArtifactReviewEndedHint,
   buildGeminiArtifactTextReaderHint,
   buildGeminiLiveWebSocketUrl,
   categorizeGeminiProviderEvent,
@@ -27,6 +28,7 @@ import {
   createGeminiOutputAudioPlaybackController,
   createGeminiOutputLegMonitor,
   detectGeminiSameResponseRepeatedIntent,
+  detectGeminiUngroundedModeClaim,
   isGeminiServerInterruptedEvent,
   isGeminiSetupCompleteMessage,
   isRelayableGeminiProviderEvent,
@@ -53,6 +55,7 @@ import {
   type GeminiOutputAudioPlaybackReceipt,
   type GeminiProviderConnectionEpochReceipt,
   type GeminiRepeatedIntentGateDiagnostic,
+  type GeminiUngroundedModeClaimDiagnostic,
   type GeminiStaleOutputSuppressionDiagnostic,
   type GeminiSyntheticInputFaultReceipt,
   type GeminiSyntheticInputLegReceipt,
@@ -238,12 +241,16 @@ class FakeWebSocket {
 
   constructor(
     readonly url: string,
-    private readonly options: { autoSetupComplete?: boolean; failToolResponseSend?: boolean } = {},
+    private readonly options: { autoSetupComplete?: boolean; failToolResponseSend?: boolean; manualOpen?: boolean } = {},
   ) {
-    queueMicrotask(() => {
-      this.readyState = 1;
-      this.onopen?.({} as Event);
-    });
+    if (!options.manualOpen) {
+      queueMicrotask(() => this.open());
+    }
+  }
+
+  open() {
+    this.readyState = 1;
+    this.onopen?.({} as Event);
   }
 
   send(data: string) {
@@ -1727,7 +1734,7 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
       mimeType: 'image/jpeg',
       rawFrameExcluded: true,
     }));
-    expect(websocket?.sent.at(-1)).toBe(JSON.stringify({
+    expect(websocket?.sent.at(-2)).toBe(JSON.stringify({
       realtimeInput: {
         video: {
           mimeType: 'image/jpeg',
@@ -1735,6 +1742,7 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
         },
       },
     }));
+    expect(websocket?.sent.at(-1)).toBe(JSON.stringify(buildGeminiArtifactTextReaderHint('artifact-1')));
 
     await connection.close();
   });
@@ -7436,5 +7444,344 @@ describe('Gemini voice Builder bridge routing', () => {
     });
 
     await connection.close();
+  });
+});
+
+const GREETING_INCIDENT_TRANSCRIPT = "Hey. What's up? Hello. I want to be upfront with you—the review tools aren't working right now, "
+  + "so I can't actually see the file you're referring to. But I'm here to listen and talk through whatever's on your mind. "
+  + "What did you want to get into? Hey. What's up?";
+
+describe('Gemini voice session mode grounding', () => {
+  afterEach(() => {
+    clearCoreviewArtifactTextRegistryForTests();
+    clearCoreviewToolBridgeForTests();
+    clearCoreviewBuilderToolBridgeForTests();
+  });
+
+  it('tells Gemini once when artifact review starts and once when it ends', async () => {
+    const fetchMock = makeGeminiBrowserSessionFetch('browser-gemini-review-mode');
+    let websocket: FakeWebSocket | null = null;
+    const connection = await connectGeminiBrowserLiveDogfood({
+      userId: 'user-1',
+      fetchFn: fetchMock as typeof fetch,
+      webSocketFactory: (url) => {
+        websocket = new FakeWebSocket(url);
+        return websocket;
+      },
+      getUserMedia: vi.fn(async () => ({ getTracks: () => [] } as unknown as MediaStream)),
+      audioContextFactory: () => new FakeAudioContext() as unknown as AudioContext,
+      coreviewStillFrameEnabled: true,
+    });
+    const frame = {
+      artifactId: 'artifact-1',
+      data: 'base64-frame',
+      mimeType: 'image/jpeg',
+      byteLength: 12,
+      dimensions: { width: 640, height: 360 },
+      rawFrameExcluded: true as const,
+    };
+    const activeHint = JSON.stringify(buildGeminiArtifactTextReaderHint('artifact-1'));
+    const endedHint = JSON.stringify(buildGeminiArtifactReviewEndedHint());
+    const count = (payload: string) => (websocket?.sent ?? []).filter((sent) => sent === payload).length;
+
+    expect(count(activeHint)).toBe(0);
+    await connection.sendArtifactFrame(frame);
+    await connection.sendArtifactFrame(frame);
+    expect(count(activeHint)).toBe(1);
+    expect(count(endedHint)).toBe(0);
+
+    connection.endArtifactReview();
+    connection.endArtifactReview();
+    expect(count(endedHint)).toBe(1);
+
+    await connection.sendArtifactFrame(frame);
+    expect(count(activeHint)).toBe(2);
+
+    await connection.close();
+  });
+
+  it('does not reopen review when Stop Looking lands while a frame is still settling', async () => {
+    const fetchMock = makeGeminiBrowserSessionFetch('browser-gemini-review-stop-race');
+    let websocket: FakeWebSocket | null = null;
+    const connection = await connectGeminiBrowserLiveDogfood({
+      userId: 'user-1',
+      fetchFn: fetchMock as typeof fetch,
+      webSocketFactory: (url) => {
+        websocket = new FakeWebSocket(url);
+        return websocket;
+      },
+      getUserMedia: vi.fn(async () => ({ getTracks: () => [] } as unknown as MediaStream)),
+      audioContextFactory: () => new FakeAudioContext() as unknown as AudioContext,
+      coreviewStillFrameEnabled: true,
+    });
+    const frame = {
+      artifactId: 'artifact-1',
+      data: 'base64-frame',
+      mimeType: 'image/jpeg',
+      byteLength: 12,
+      dimensions: { width: 640, height: 360 },
+      rawFrameExcluded: true as const,
+    };
+    const activeHint = JSON.stringify(buildGeminiArtifactTextReaderHint('artifact-1'));
+    const endedHint = JSON.stringify(buildGeminiArtifactReviewEndedHint());
+    const count = (payload: string) => (websocket?.sent ?? []).filter((sent) => sent === payload).length;
+
+    // First frame: Gemini already has it when the user stops, so review ends
+    // explicitly and the settled frame must not start it afterwards.
+    const firstFrame = connection.sendArtifactFrame(frame);
+    connection.endArtifactReview();
+    await expect(firstFrame).resolves.toMatchObject({ ok: true, websocketSendAccepted: true });
+    expect(count(activeHint)).toBe(0);
+    expect(count(endedHint)).toBe(1);
+
+    // Refresh frame during an active review: one end, no restart.
+    await connection.sendArtifactFrame(frame);
+    expect(count(activeHint)).toBe(1);
+    const refreshFrame = connection.sendArtifactFrame(frame);
+    connection.endArtifactReview();
+    await refreshFrame;
+    expect(count(activeHint)).toBe(1);
+    expect(count(endedHint)).toBe(2);
+
+    // A later Look starts review again.
+    await connection.sendArtifactFrame(frame);
+    expect(count(activeHint)).toBe(2);
+
+    await connection.close();
+  });
+
+  describe('across a provider reconnect', () => {
+    const continuationUrl = '/api/sophia/voice/gemini/continue-review-mode';
+    const frame = {
+      artifactId: 'artifact-1',
+      data: 'base64-frame',
+      mimeType: 'image/jpeg',
+      byteLength: 12,
+      dimensions: { width: 640, height: 360 },
+      rawFrameExcluded: true as const,
+    };
+    const activeHint = JSON.stringify(buildGeminiArtifactTextReaderHint('artifact-1'));
+    const endedHint = JSON.stringify(buildGeminiArtifactReviewEndedHint());
+    const frameInput = JSON.stringify(buildGeminiArtifactFrameRealtimeInput(frame));
+
+    const connectResumable = async ({ holdReplacementOpen = false } = {}) => {
+      const stages: GeminiBrowserLiveDogfoodStage[] = [];
+      const sockets: FakeWebSocket[] = [];
+      const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+        if (String(input) === continuationUrl) {
+          return new Response(JSON.stringify({
+            session_id: 'gemini-prod-review-reconnect',
+            websocket_url: 'wss://gemini.example/live-reconnected',
+            ephemeral_token: { value: 'auth_tokens/reconnected', expireTime: '2033-05-18T04:03:20.000Z' },
+            setup: { model: 'models/gemini-live', sessionResumption: {} },
+            stream_url: '/api/sophia/voice/gemini/events?session_id=gemini-prod-review-reconnect',
+            continuation_bootstrap_url: continuationUrl,
+            provider_connection_epoch: 2,
+          }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+        }
+        return new Response(JSON.stringify({ accepted: true }), {
+          status: 202,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      });
+      const connection = await connectGeminiBrowserLiveFromBootstrap({
+        userId: 'user-1',
+        bootstrap: {
+          runtime: 'gemini_live',
+          voice_runtime: 'gemini_live',
+          production_route: true,
+          session_id: 'gemini-prod-review-reconnect',
+          websocket_url: 'wss://gemini.example/live-initial',
+          ephemeral_token: { value: 'auth_tokens/initial', expireTime: '2033-05-18T04:03:20.000Z' },
+          setup: { model: 'models/gemini-live', sessionResumption: {} },
+          stream_url: '/api/sophia/voice/gemini/events?session_id=gemini-prod-review-reconnect',
+          continuation_bootstrap_url: continuationUrl,
+          provider_connection_epoch: 1,
+        },
+        fetchFn: fetchMock as typeof fetch,
+        webSocketFactory: (url) => {
+          const socket = new FakeWebSocket(url, { manualOpen: holdReplacementOpen && sockets.length > 0 });
+          sockets.push(socket);
+          return socket;
+        },
+        getUserMedia: vi.fn(async () => ({ getTracks: () => [] } as unknown as MediaStream)),
+        audioContextFactory: () => new FakeAudioContext() as unknown as AudioContext,
+        onStage: (stage) => stages.push(stage),
+        coreviewStillFrameEnabled: true,
+      });
+      sockets[0]?.emitMessage({ sessionResumptionUpdate: { resumable: true, newHandle: 'safe-review-handle' } });
+      const reconnect = async (duringLoss?: () => void) => {
+        sockets[0]?.emitClose(1011, 'provider transport reset', false);
+        duringLoss?.();
+        await vi.waitFor(() => expect(sockets).toHaveLength(2));
+        await vi.waitFor(() => {
+          expect(stages.filter((stage) => stage === 'streaming_audio').length).toBeGreaterThanOrEqual(2);
+        });
+      };
+      // The resumed socket's first message must stay the setup.
+      const resumedAfterSetup = () => {
+        const sent = sockets[1]?.sent ?? [];
+        expect(JSON.parse(sent[0] ?? '{}')).toHaveProperty('setup');
+        return sent.slice(1);
+      };
+      return { connection, sockets, reconnect, resumedAfterSetup };
+    };
+
+    it('delivers a review end that happened while the provider was reconnecting', async () => {
+      const { connection, reconnect, resumedAfterSetup } = await connectResumable();
+      await connection.sendArtifactFrame(frame);
+
+      await reconnect(() => connection.endArtifactReview());
+
+      const resumed = resumedAfterSetup();
+      expect(resumed.filter((sent) => sent === endedHint)).toHaveLength(1);
+      expect(resumed).not.toContain(activeHint);
+      await connection.close();
+    });
+
+    it('re-announces an active review to the resumed session with its artifact image', async () => {
+      const { connection, reconnect, resumedAfterSetup } = await connectResumable();
+      await connection.sendArtifactFrame(frame);
+
+      await reconnect();
+
+      // The resumption handle may predate the image, so it is replayed first.
+      expect(resumedAfterSetup()).toEqual([frameInput, activeHint]);
+      await connection.close();
+    });
+
+    it('replays the image when the provider rotates while a frame is still settling', async () => {
+      const { connection, sockets, resumedAfterSetup } = await connectResumable();
+
+      const settling = connection.sendArtifactFrame(frame);
+      expect(sockets[0]?.sent).toContain(frameInput);
+      sockets[0]?.emitMessage({ goAway: { timeLeft: '1s' } });
+      await vi.waitFor(() => expect(sockets).toHaveLength(2));
+      await settling;
+      await vi.waitFor(() => expect(resumedAfterSetup()).toContain(activeHint));
+
+      // The resumed session sees the image before it is told review is active.
+      const resumed = resumedAfterSetup();
+      expect(resumed.indexOf(frameInput)).toBeGreaterThanOrEqual(0);
+      expect(resumed.indexOf(frameInput)).toBeLessThan(resumed.indexOf(activeHint));
+      expect(resumed.filter((sent) => sent === activeHint)).toHaveLength(1);
+      await connection.close();
+    });
+
+    it('tells the resumed session review is not active when a Look fails during the rotation', async () => {
+      const { connection, sockets, resumedAfterSetup } = await connectResumable({ holdReplacementOpen: true });
+
+      const settling = connection.sendArtifactFrame(frame);
+      expect(sockets[0]?.sent).toContain(frameInput);
+      sockets[0]?.emitMessage({ goAway: { timeLeft: '1s' } });
+      await vi.waitFor(() => expect(sockets).toHaveLength(2));
+      // The replacement is still connecting when the frame settles, so the
+      // Look fails, although the image already left on the old socket.
+      await expect(settling).resolves.toMatchObject({ ok: false, websocketSendAccepted: true });
+
+      sockets[1]?.open();
+      await vi.waitFor(() => expect(resumedAfterSetup()).toContain(endedHint));
+
+      expect(resumedAfterSetup()).toEqual([endedHint]);
+      await connection.close();
+    });
+
+    it('sends no review context to the resumed session of an ordinary conversation', async () => {
+      const { connection, reconnect, resumedAfterSetup } = await connectResumable();
+
+      await reconnect();
+
+      expect(resumedAfterSetup().some((sent) => sent.includes('App context'))).toBe(false);
+      await connection.close();
+    });
+  });
+
+  it('never sends review context in an ordinary session', async () => {
+    const fetchMock = makeGeminiBrowserSessionFetch('browser-gemini-ordinary-mode');
+    let websocket: FakeWebSocket | null = null;
+    const connection = await connectGeminiBrowserLiveDogfood({
+      userId: 'user-1',
+      fetchFn: fetchMock as typeof fetch,
+      webSocketFactory: (url) => {
+        websocket = new FakeWebSocket(url);
+        return websocket;
+      },
+      getUserMedia: vi.fn(async () => ({ getTracks: () => [] } as unknown as MediaStream)),
+      audioContextFactory: () => new FakeAudioContext() as unknown as AudioContext,
+      coreviewStillFrameEnabled: true,
+    });
+
+    connection.endArtifactReview();
+    websocket?.emitMessage({ serverContent: { inputTranscription: { text: 'Hey, Sophia.' } } });
+
+    expect((websocket?.sent ?? []).some((sent) => sent.includes('App context'))).toBe(false);
+
+    await connection.close();
+  });
+
+  it('flags a repeated opener that returns after an unrelated question', () => {
+    expect(detectGeminiSameResponseRepeatedIntent(GREETING_INCIDENT_TRANSCRIPT)).toMatchObject({
+      detected: true,
+      matchedSignals: expect.arrayContaining(['exact_question']),
+    });
+    expect(detectGeminiSameResponseRepeatedIntent("Hey. What's up? What did you want to get into?")).toMatchObject({
+      detected: false,
+    });
+  });
+
+  it('recognizes ungrounded review and file claims without flagging an ordinary greeting', () => {
+    expect(detectGeminiUngroundedModeClaim(GREETING_INCIDENT_TRANSCRIPT)).toEqual(expect.arrayContaining([
+      'review_tool_health_claim',
+      'unseen_file_claim',
+      'unintroduced_file_reference',
+    ]));
+    expect(detectGeminiUngroundedModeClaim("Hey. What's on your mind?")).toEqual([]);
+  });
+
+  it('reports an ungrounded review claim outside review once, and not when the user brought up a file', async () => {
+    const run = async (userText: string) => {
+      const diagnostics: GeminiUngroundedModeClaimDiagnostic[] = [];
+      const fetchMock = makeGeminiBrowserSessionFetch(`browser-gemini-ungrounded-${diagnostics.length}`);
+      let websocket: FakeWebSocket | null = null;
+      const connection = await connectGeminiBrowserLiveDogfood({
+        userId: 'user-1',
+        fetchFn: fetchMock as typeof fetch,
+        webSocketFactory: (url) => {
+          websocket = new FakeWebSocket(url);
+          return websocket;
+        },
+        getUserMedia: vi.fn(async () => ({ getTracks: () => [] } as unknown as MediaStream)),
+        audioContextFactory: () => new FakeAudioContext() as unknown as AudioContext,
+        transcriptRelayCadenceMs: 0,
+        onUngroundedModeClaim: (diagnostic) => diagnostics.push(diagnostic),
+      });
+      websocket?.emitMessage({ serverContent: { inputTranscription: { text: userText } } });
+      const responseId = 'gemini-response-greeting-incident';
+      for (const text of [
+        "Hey. What's up? Hello. I want to be upfront with you—",
+        "the review tools aren't working right now, so I can't actually see the file you're referring to.",
+        "What did you want to get into?",
+      ]) {
+        websocket?.emitMessage({ responseId, serverContent: { responseId, outputTranscription: { text } } });
+        await Promise.resolve();
+        await Promise.resolve();
+      }
+      await new Promise((resolve) => { setTimeout(resolve, 50); });
+      await connection.close();
+      return diagnostics;
+    };
+
+    const ordinary = await run('Hey, Sophia.');
+    expect(ordinary).toHaveLength(1);
+    expect(ordinary[0]).toMatchObject({
+      reason: 'ungrounded_mode_claim',
+      responseId: 'gemini-response-greeting-incident',
+      artifactReviewActive: false,
+      rawTranscriptExcluded: true,
+      matchedPatterns: expect.arrayContaining(['review_tool_health_claim']),
+    });
+    expect(JSON.stringify(ordinary[0])).not.toContain('referring');
+
+    expect(await run('Can you look at the file I uploaded?')).toHaveLength(0);
   });
 });

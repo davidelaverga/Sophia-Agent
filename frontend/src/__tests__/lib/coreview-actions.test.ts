@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest"
 import {
   buildArtifactViewSignature,
 } from "../../app/lib/artifact-renderers"
+import { COREVIEW_REVIEW_ONLY_TOOL_SCOPE } from "../../app/lib/coreview-action-shared"
 import {
   COREVIEW_ADD_ANNOTATION_TOOL_NAME,
   createCoreviewActionBus,
@@ -586,6 +587,21 @@ describe("Coreview action bus", () => {
     expect(declarationNames).toContain("coreview_cancel_builder_task")
     expect(declarationNames).toContain("coreview_get_builder_status")
     expect(declarationNames).not.toContain("emit_artifact")
+  })
+
+  it("scopes every browser-declared review tool to an active review", () => {
+    const setup = withCoreviewGeminiToolDeclarations({ tools: [] }, true, { allowGenericBuilderTools: true })
+    const declarations = (setup.tools as Array<{ functionDeclarations?: Array<{ name?: string, description?: string }> }>)
+      .flatMap((tool) => tool.functionDeclarations ?? [])
+
+    expect(declarations.map((declaration) => declaration.name)).toEqual(expect.arrayContaining([
+      "coreview_request_artifact_update",
+      "coreview_get_builder_status",
+      COREVIEW_ADD_ANNOTATION_TOOL_NAME,
+    ]))
+    for (const declaration of declarations) {
+      expect(declaration.description?.startsWith(COREVIEW_REVIEW_ONLY_TOOL_SCOPE)).toBe(true)
+    }
   })
 
   it("filters generic builder tools when Coreview builder actions are exposed for review", () => {

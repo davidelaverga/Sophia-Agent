@@ -727,8 +727,9 @@ function SessionPageContent() {
     () => new GeminiStillFrameTransport({
       sendArtifactFrame: voiceState.sendArtifactFrame,
       getStatus: voiceState.getArtifactFrameTransportStatus,
+      endArtifactReview: voiceState.endArtifactReview,
     }),
-    [voiceState.getArtifactFrameTransportStatus, voiceState.sendArtifactFrame],
+    [voiceState.endArtifactReview, voiceState.getArtifactFrameTransportStatus, voiceState.sendArtifactFrame],
   );
   const artifactReviewVoiceCommandRouterRef = useRef<ArtifactReviewVoiceCommandRouter | null>(null);
   const coreviewActionFeedbackDedupeRef = useRef(new Set<string>());

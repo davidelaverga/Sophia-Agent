@@ -97,6 +97,17 @@ export interface GeminiRepeatedIntentGateDiagnostic {
   rawProviderOutputTranscriptionUsed: true;
 }
 
+export interface GeminiUngroundedModeClaimDiagnostic {
+  timestamp: string;
+  reason: 'ungrounded_mode_claim';
+  responseId: string | null;
+  providerReceiveSequence: number;
+  providerReceivedAt: string;
+  matchedPatterns: string[];
+  artifactReviewActive: false;
+  rawTranscriptExcluded: true;
+}
+
 export interface GeminiMicrophoneAudioSettingsDiagnostic {
   timestamp: string;
   requested: {
@@ -936,6 +947,7 @@ export interface GeminiBrowserLiveDogfoodConnectOptions {
   onAudioContextDiagnostics?: (diagnostic: GeminiAudioContextDiagnostic) => void;
   onMicrophoneAudioSettings?: (diagnostic: GeminiMicrophoneAudioSettingsDiagnostic) => void;
   onRepeatedIntentGate?: (diagnostic: GeminiRepeatedIntentGateDiagnostic) => void;
+  onUngroundedModeClaim?: (diagnostic: GeminiUngroundedModeClaimDiagnostic) => void;
   onRelayStatus?: (status: GeminiBrowserLiveDogfoodRelayStatus) => void;
   onRelayError?: (error: unknown) => void;
   onRelayDiagnostic?: (diagnostic: GeminiBrowserLiveDogfoodRelayDiagnostic) => void;
@@ -993,6 +1005,8 @@ export interface GeminiBrowserLiveDogfoodConnection {
     frame: GeminiArtifactFramePayload,
     context?: GeminiArtifactFrameSendContext,
   ) => Promise<GeminiArtifactFrameSendResult>;
+  /** Ends artifact review and tells the provider no artifact is open. */
+  endArtifactReview: () => void;
   getArtifactFrameTransportStatus: () => GeminiArtifactFrameTransportStatusSnapshot;
   setMicrophoneMuted: (muted: boolean) => void;
   acknowledgeSyntheticPublicUserTurn: (input: {
@@ -2007,6 +2021,7 @@ export async function connectGeminiBrowserLiveDogfood(
     text: string;
     lastFragment: string | null;
     gated: boolean;
+    ungroundedClaimReported?: boolean;
   }>();
   const repeatedIntentSuppressedResponseKeys = new Set<string>();
   const assembledOutputTranscriptRelayEvents = new WeakSet<Record<string, unknown>>();
@@ -2071,6 +2086,21 @@ export async function connectGeminiBrowserLiveDogfood(
   // mirroring the voice backend's explicit-request guard.
   const voiceBuilderUserUtterances: VoiceBuilderUserUtterance[] = [];
   let voiceBuilderUserTurnOpen = false;
+  let artifactReviewExpiryTimer: ReturnType<typeof setTimeout> | null = null;
+  // A frame settles for ARTIFACT_FRAME_SEND_SETTLE_MS after it is sent. Stop
+  // Looking bumps the generation so a frame still settling cannot reopen review.
+  let artifactReviewStopGeneration = 0;
+  let artifactFramesInFlight = 0;
+  // The review mode Gemini should currently know (null: review never used).
+  // A mode message can be lost around a provider reconnect, and a rotated
+  // socket must receive its setup first, so mode messages wait while a
+  // rotation is in progress and the current mode is re-announced once the
+  // resumed session is ready.
+  let artifactReviewModeAnnounced: 'active' | 'ended' | null = null;
+  let providerRotationInProgress = false;
+  // A resumed session continues from its last resumption handle, which may
+  // predate the image, so an active review is re-announced with its image.
+  let lastArtifactReviewFrame: GeminiArtifactFramePayload | null = null;
   const artifactReviewSafeResponseIds = new Set<string>();
   const artifactReviewSuppressedResponseIds = new Set<string>();
   const pendingArtifactReviewAudio = new Map<string, Array<{
@@ -2290,19 +2320,74 @@ export async function connectGeminiBrowserLiveDogfood(
     });
   };
 
+  // Gemini tools are fixed for the whole session, so the model only knows
+  // whether a review is active from these explicit app messages: one when a
+  // frame for a new artifact is accepted, one when review stops or expires.
+  const sendArtifactReviewModeContext = (message: Record<string, unknown>) => {
+    // Sent straight to the provider socket: app context is not user input and
+    // must not feed intent or Builder-request tracking.
+    if (closed || providerRotationInProgress || websocket?.readyState !== WEBSOCKET_OPEN) {
+      return;
+    }
+    try {
+      websocket.send(JSON.stringify(message));
+    } catch {
+      // Best effort; review routing still gates on its own state.
+    }
+  };
+
+  const reannounceArtifactReviewMode = () => {
+    if (artifactReviewModeAnnounced === 'active' && artifactReviewArtifactId) {
+      if (lastArtifactReviewFrame?.artifactId === artifactReviewArtifactId) {
+        sendArtifactReviewModeContext(buildGeminiArtifactFrameRealtimeInput(lastArtifactReviewFrame));
+      }
+      sendArtifactReviewModeContext(buildGeminiArtifactTextReaderHint(artifactReviewArtifactId));
+    } else if (artifactReviewModeAnnounced !== null) {
+      sendArtifactReviewModeContext(buildGeminiArtifactReviewEndedHint());
+    }
+  };
+
+  const clearArtifactReviewExpiryTimer = () => {
+    if (artifactReviewExpiryTimer !== null) {
+      clearTimeout(artifactReviewExpiryTimer);
+      artifactReviewExpiryTimer = null;
+    }
+  };
+
+  const endArtifactReviewMode = () => {
+    clearArtifactReviewExpiryTimer();
+    if (!artifactReviewArtifactId) {
+      return;
+    }
+    artifactReviewArtifactId = null;
+    artifactReviewExpiresAtMs = null;
+    artifactReviewUserIntent = 'unknown';
+    artifactReviewBuilderUpdateIntentDetected = false;
+    artifactReviewUserIntentAt = null;
+    artifactReviewSafeResponseIds.clear();
+    artifactReviewSuppressedResponseIds.clear();
+    dropPendingArtifactReviewAudio(null, 'artifact_review_response_suppressed');
+    artifactReviewModeAnnounced = 'ended';
+    lastArtifactReviewFrame = null;
+    sendArtifactReviewModeContext(buildGeminiArtifactReviewEndedHint());
+  };
+
+  const scheduleArtifactReviewExpiry = () => {
+    clearArtifactReviewExpiryTimer();
+    artifactReviewExpiryTimer = setTimeout(() => {
+      artifactReviewExpiryTimer = null;
+      if (artifactReviewExpiresAtMs !== null && monotonicNowMs() >= artifactReviewExpiresAtMs) {
+        endArtifactReviewMode();
+      }
+    }, ARTIFACT_REVIEW_RELAY_CONTEXT_TTL_MS + 50);
+  };
+
   const snapshotArtifactReviewRelayContext = (): GeminiArtifactReviewRelayContext | null => {
     if (!artifactReviewArtifactId || artifactReviewExpiresAtMs === null) {
       return null;
     }
     if (monotonicNowMs() > artifactReviewExpiresAtMs) {
-      artifactReviewArtifactId = null;
-      artifactReviewExpiresAtMs = null;
-      artifactReviewUserIntent = 'unknown';
-      artifactReviewBuilderUpdateIntentDetected = false;
-      artifactReviewUserIntentAt = null;
-      artifactReviewSafeResponseIds.clear();
-      artifactReviewSuppressedResponseIds.clear();
-      dropPendingArtifactReviewAudio(null, 'artifact_review_response_suppressed');
+      endArtifactReviewMode();
       return null;
     }
 
@@ -3837,6 +3922,31 @@ export async function connectGeminiBrowserLiveDogfood(
                 }
               }
 
+              // Outside review, flag talk of files or broken review tools that
+              // neither the user nor any tool result introduced. Diagnostic
+              // only: the audio is already streaming by the time it is heard.
+              if (
+                !responseState.ungroundedClaimReported
+                && responseAssembly.changed
+                && snapshotArtifactReviewRelayContext() === null
+                && !recentUserUtterancesMentionArtifacts(voiceBuilderUserUtterances)
+              ) {
+                const matchedPatterns = detectGeminiUngroundedModeClaim(responseState.text);
+                if (matchedPatterns.length > 0) {
+                  responseState.ungroundedClaimReported = true;
+                  options.onUngroundedModeClaim?.({
+                    timestamp: new Date().toISOString(),
+                    reason: 'ungrounded_mode_claim',
+                    responseId,
+                    providerReceiveSequence: receiveMetadata.providerReceiveSequence,
+                    providerReceivedAt: receiveMetadata.providerReceivedAt,
+                    matchedPatterns,
+                    artifactReviewActive: false,
+                    rawTranscriptExcluded: true,
+                  });
+                }
+              }
+
               const segmentAssembly = assembleGeminiOutputTranscription(
                 activeOutputTranscriptSegment.text,
                 rawOutputText,
@@ -4249,6 +4359,7 @@ export async function connectGeminiBrowserLiveDogfood(
         return bootstrapProviderContinuation();
       },
       onProviderConnectionChanged: (nextSocket) => {
+        providerRotationInProgress = true;
         websocket = nextSocket;
         websocketRef.current = nextSocket;
       },
@@ -4288,6 +4399,8 @@ export async function connectGeminiBrowserLiveDogfood(
         notifyRelayStatus('active');
         notifyStage('connected');
         notifyStage('streaming_audio');
+        providerRotationInProgress = false;
+        reannounceArtifactReviewMode();
       },
       onProviderConnectionTerminated: () => {
         if (closed) {
@@ -4390,28 +4503,78 @@ export async function connectGeminiBrowserLiveDogfood(
       sendArtifactFrame: (
         frame: GeminiArtifactFramePayload,
         context?: GeminiArtifactFrameSendContext,
-      ) => sendGeminiArtifactFrameOverWebSocket({
-        websocket,
-        frame,
-        context,
-        enabled: coreviewToolsEnabled,
-        providerSnapshot: snapshotArtifactFrameProviderState,
-        transportSnapshot: snapshotArtifactFrameTransportStatus,
-      }).then((result) => {
-        if (result.ok && result.websocketSendAccepted && result.artifactId) {
-          if (artifactReviewArtifactId !== result.artifactId) {
-            artifactReviewUserIntent = 'unknown';
-            artifactReviewBuilderUpdateIntentDetected = false;
-            artifactReviewUserIntentAt = null;
-            artifactReviewSafeResponseIds.clear();
-            artifactReviewSuppressedResponseIds.clear();
-            dropPendingArtifactReviewAudio(null, 'artifact_review_response_suppressed');
+      ) => {
+        const stopGeneration = artifactReviewStopGeneration;
+        const frameSocket = websocket;
+        artifactFramesInFlight += 1;
+        return sendGeminiArtifactFrameOverWebSocket({
+          websocket,
+          frame,
+          context,
+          enabled: coreviewToolsEnabled,
+          providerSnapshot: snapshotArtifactFrameProviderState,
+          transportSnapshot: snapshotArtifactFrameTransportStatus,
+        }).then((result) => {
+          if (
+            result.ok
+            && result.websocketSendAccepted
+            && result.artifactId
+            && !closed
+            && stopGeneration === artifactReviewStopGeneration
+          ) {
+            const reviewStarted = artifactReviewArtifactId !== result.artifactId;
+            if (reviewStarted) {
+              artifactReviewUserIntent = 'unknown';
+              artifactReviewBuilderUpdateIntentDetected = false;
+              artifactReviewUserIntentAt = null;
+              artifactReviewSafeResponseIds.clear();
+              artifactReviewSuppressedResponseIds.clear();
+              dropPendingArtifactReviewAudio(null, 'artifact_review_response_suppressed');
+            }
+            artifactReviewArtifactId = result.artifactId;
+            artifactReviewExpiresAtMs = monotonicNowMs() + ARTIFACT_REVIEW_RELAY_CONTEXT_TTL_MS;
+            scheduleArtifactReviewExpiry();
+            artifactReviewModeAnnounced = 'active';
+            lastArtifactReviewFrame = frame;
+            if (websocket !== frameSocket) {
+              // The provider rotated while this frame settled, so the resumed
+              // session may not have it: replay it with the review state.
+              reannounceArtifactReviewMode();
+            } else if (reviewStarted) {
+              sendArtifactReviewModeContext(buildGeminiArtifactTextReaderHint(result.artifactId));
+            }
+          } else if (
+            !result.ok
+            && result.websocketSendAccepted
+            && !artifactReviewArtifactId
+            && !closed
+            && stopGeneration === artifactReviewStopGeneration
+          ) {
+            // The Look failed (its socket closed or was replaced before the
+            // frame settled), but the image already left, and a resumed
+            // session may still hold it. Say review is not active, matching
+            // the failed Look; a reconnect re-announces this after setup.
+            artifactReviewModeAnnounced = 'ended';
+            lastArtifactReviewFrame = null;
+            sendArtifactReviewModeContext(buildGeminiArtifactReviewEndedHint());
           }
-          artifactReviewArtifactId = result.artifactId;
-          artifactReviewExpiresAtMs = monotonicNowMs() + ARTIFACT_REVIEW_RELAY_CONTEXT_TTL_MS;
+          return result;
+        }).finally(() => {
+          artifactFramesInFlight -= 1;
+        });
+      },
+      endArtifactReview: () => {
+        artifactReviewStopGeneration += 1;
+        if (!artifactReviewArtifactId && artifactFramesInFlight > 0) {
+          // Review never became active, but Gemini may already have the
+          // settling frame, so say explicitly that review ended.
+          clearArtifactReviewExpiryTimer();
+          artifactReviewModeAnnounced = 'ended';
+          sendArtifactReviewModeContext(buildGeminiArtifactReviewEndedHint());
+          return;
         }
-        return result;
-      }),
+        endArtifactReviewMode();
+      },
       getArtifactFrameTransportStatus: snapshotArtifactFrameTransportStatus,
       setMicrophoneMuted: (muted: boolean) => {
         localStream?.getAudioTracks().forEach((track) => {
@@ -4430,6 +4593,7 @@ export async function connectGeminiBrowserLiveDogfood(
         return outputAudioPlayer?.snapshot() ?? defaultPlaybackState();
       },
       close: async (control) => {
+        clearArtifactReviewExpiryTimer();
         if (control) {
           const requestedEpochs = Array.from(new Set(control.providerConnectionEpochs))
             .sort((left, right) => left - right);
@@ -4516,6 +4680,19 @@ export function buildGeminiArtifactFrameRealtimeInput(
         mimeType: frame.mimeType,
         data: frame.data,
       },
+    },
+  };
+}
+
+export function buildGeminiArtifactReviewEndedHint(): Record<string, unknown> {
+  return {
+    realtimeInput: {
+      text: [
+        'App context: artifact review has ended.',
+        'No artifact or file is open now.',
+        'Do not mention files, artifacts, review, or review tools unless the user brings them up.',
+        'Do not answer this context message.',
+      ].join(' '),
     },
   };
 }
@@ -4864,8 +5041,58 @@ export function detectGeminiSameResponseRepeatedIntent(
     };
   }
 
-  const firstQuestion = questions.at(-2) ?? '';
+  // Compare the newest question with every earlier one in the same response,
+  // nearest first: a repeated opener can come back after an unrelated
+  // question ("What's up? ... What did you want to get into? ... What's up?").
   const secondQuestion = questions.at(-1) ?? '';
+  const earlierQuestions = questions.slice(0, -1).reverse();
+  const pairs = earlierQuestions.map((firstQuestion) => ({
+    firstQuestion,
+    comparison: compareGeminiQuestionPair(firstQuestion, secondQuestion),
+  }));
+  const chosen = pairs.find((pair) => pair.comparison.detected) ?? pairs[0];
+
+  return {
+    detected: chosen.comparison.detected,
+    questionCount: questions.length,
+    firstQuestionFingerprint: telemetryTextFingerprint(chosen.firstQuestion),
+    secondQuestionFingerprint: telemetryTextFingerprint(secondQuestion),
+    similarityScore: Math.round(chosen.comparison.similarityScore * 1_000) / 1_000,
+    matchedSignals: chosen.comparison.matchedSignals,
+  };
+}
+
+const GEMINI_UNGROUNDED_MODE_CLAIM_RULES: ReadonlyArray<readonly [RegExp, string]> = [
+  [/\b(?:co-?review|coreview|review)\s+(?:tools?|mode|feature)s?\b[^.?!]{0,40}\b(?:not working|aren'?t working|isn'?t working|unavailable|down|broken|offline)\b/u, 'review_tool_health_claim'],
+  [/\b(?:tools?)\s+(?:aren'?t|isn'?t|are not|is not)\s+(?:working|available)\b/u, 'tool_health_claim'],
+  [/\b(?:can'?t|cannot|can not|unable to)\s+(?:actually\s+)?(?:see|view|open|access|read)\s+(?:the|your|that)\s+(?:file|document|artifact|doc)\b/u, 'unseen_file_claim'],
+  [/\bthe\s+(?:file|document|artifact)\s+you(?:'re| are)\s+(?:referring|talking)\s+(?:to|about)\b/u, 'unintroduced_file_reference'],
+];
+
+export function detectGeminiUngroundedModeClaim(text: string): string[] {
+  const normalized = text.replace(/[’‘]/gu, "'").replace(/\s+/gu, ' ').toLowerCase();
+  return GEMINI_UNGROUNDED_MODE_CLAIM_RULES
+    .filter(([pattern]) => pattern.test(normalized))
+    .map(([, name]) => name);
+}
+
+const USER_ARTIFACT_MENTION_RE = /\b(?:file|files|document|documents|doc|docs|artifact|artifacts|review|screen|page|pdf|deck|slides?|report)\b/iu;
+const USER_ARTIFACT_MENTION_WINDOW_MS = 3 * 60 * 1000;
+
+function recentUserUtterancesMentionArtifacts(
+  utterances: ReadonlyArray<VoiceBuilderUserUtterance>,
+  nowMs: number = Date.now(),
+): boolean {
+  return utterances.some((utterance) => (
+    nowMs - utterance.atMs <= USER_ARTIFACT_MENTION_WINDOW_MS
+    && USER_ARTIFACT_MENTION_RE.test(utterance.text)
+  ));
+}
+
+function compareGeminiQuestionPair(
+  firstQuestion: string,
+  secondQuestion: string,
+): { detected: boolean; similarityScore: number; matchedSignals: string[] } {
   const firstTokens = canonicalGeminiQuestionTokens(firstQuestion);
   const secondTokens = canonicalGeminiQuestionTokens(secondQuestion);
   const firstSet = new Set(firstTokens);
@@ -4904,14 +5131,7 @@ export function detectGeminiSameResponseRepeatedIntent(
     containment >= 0.5 ? 'token_containment' : null,
   ].filter((signal): signal is string => Boolean(signal));
 
-  return {
-    detected,
-    questionCount: questions.length,
-    firstQuestionFingerprint: telemetryTextFingerprint(firstQuestion),
-    secondQuestionFingerprint: telemetryTextFingerprint(secondQuestion),
-    similarityScore: Math.round(similarityScore * 1_000) / 1_000,
-    matchedSignals,
-  };
+  return { detected, similarityScore, matchedSignals };
 }
 
 function normalizeGeminiTranscriptText(value: string | null | undefined): string {

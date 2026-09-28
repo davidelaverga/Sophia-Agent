@@ -529,4 +529,36 @@ describe("co-review dual-path state machine", () => {
     expect(state.state).toBe("normal_voice_restored")
     expect(state.refreshFrameResult).toBe("blocked")
   })
+
+  it("Stop Looking tells the voice provider that review ended", async () => {
+    mockCanvasEncoding()
+    const endArtifactReview = vi.fn()
+    const transport = new GeminiStillFrameTransport({
+      sendArtifactFrame: vi.fn((frame) => ({
+        ok: true,
+        supported: true,
+        providerAcceptedFrame: false,
+        websocketSendAccepted: true,
+        frameBytes: frame.byteLength,
+        frameDimensions: frame.dimensions,
+        frameSendLatencyMs: 3,
+        estimatedVisualCost: null,
+        error: null,
+        rawFrameExcluded: true as const,
+      })),
+      endArtifactReview,
+    })
+    const machine = new CoReviewSessionMachine({ transport })
+
+    await machine.startCoReview({
+      normalSessionId: "normal-1",
+      sessionId: "session-1",
+      threadId: "thread-1",
+      artifactId: "artifact-1",
+      visualSource: readyCanvasSource(),
+    })
+    expect(endArtifactReview).not.toHaveBeenCalled()
+    await machine.stopCoReview()
+    expect(endArtifactReview).toHaveBeenCalledTimes(1)
+  })
 })
