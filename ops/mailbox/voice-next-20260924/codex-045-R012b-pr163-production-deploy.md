@@ -1,0 +1,18 @@
+# codex-045 — R-012b PR #163 production deployment
+- Date: 2026-09-28 UTC; scope: Web then sophia-voice only.
+- PR #163 reviewed head: 83cb0f3953b544c6667f1aaad10294da675de7a5; automated Codex review completed.
+- CI: architecture and Memory Highlights E2E passed. Backend job: 7296 passed, 167 skipped, 7 failed.
+- Those 7 failures exactly match merged PR #162: 2 deck-native tests and 5 memory-governance expiry/backoff tests; no new failure.
+- PR #163 merged into codex/frontend-prod-083d4cb0 at 6f6545d6c4050526e95905a52821ba69e7e926be.
+- Web rollback target: dpl_3Ftvvwu7H964zPWc61z1Zk6ZBGxn (ec8905a29c48999e091dc89ce7567dde731d9eac).
+- Vercel: skipped preview Bxc8FEMA3mtMceiKT6VDh7AFCPHi was redeployed as a fresh Production build with current env and Ignore Build Step disabled.
+- Vercel Production: dpl_AWxTCX51kanYgrinrqpkePRtoAcj, Ready.
+- Served /api/app-version: 6f6545d6c4050526e95905a52821ba69e7e926be; /api/health: HTTP 200.
+- Voice rollback target: dep-dasq6cjbc2fs738csd70 serving f128af0c5604139b3d20d10424877001b1c0a7cd.
+- sophia-voice manual exact-commit deploy: dep-dass0759fdbs73eqoodg, Live; environment unchanged.
+- Voice /version: 6f6545d6c4050526e95905a52821ba69e7e926be; /ready: HTTP 200.
+- Voice readiness: voice_lab_enabled=false, kill_switch_engaged=true, mutation_ready=false, provider_configured=true.
+- Read-only Lab capability probe: product_mutation_gates_open=false; Gateway also reports Lab=false / kill=true.
+- Frontend signed auth:readiness was unverified by the stale Lab identity probe; it observed the new Web SHA but remains pinned to the retired 12ce0f89 target.
+- No backend/LangGraph deploy, environment/settings change, Blueprint sync, Lab run, memory, database or retention action.
+- Next: Davide supervised fresh-tab greetings, ordinary voice, Builder request/correction, then Review enter/exit.
