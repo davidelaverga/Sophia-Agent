@@ -2,6 +2,9 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 
 import {
   clearVoiceBuilderToolBridgeForTests,
+  COMPANION_TURN_UNCONFIRMED,
+  companionTurnFailureCode,
+  createCompanionTurnFailures,
   createVoiceBuilderToolHandler,
   executeVoiceBuilderToolBridgeCall,
   hasRecentExplicitVoiceBuilderRequest,
@@ -59,6 +62,39 @@ function createSession(initial: { task?: BuilderTaskV1 | null; completion?: Buil
   })
   return { state, sent, onSend, cancelBuilderTask, handler }
 }
+
+describe("companion turn failures", () => {
+  it("attributes a failure only to the message that started the turn, once", () => {
+    const failures = createCompanionTurnFailures()
+    failures.record("message-a", "memory_context_rotation_required", false)
+
+    expect(failures.take("message-b")).toBeNull()
+    expect(failures.take("message-a")).toBe("memory_context_rotation_required")
+    expect(failures.take("message-a")).toBeNull()
+  })
+
+  it("treats only a refusal before any activity as definitive", () => {
+    const failures = createCompanionTurnFailures()
+    failures.record(null, "memory_context_rotation_required", false)
+    failures.record("json-body", JSON.stringify({ error: "memory_context_rotation_required" }), false)
+    failures.record("refused-late", "memory_context_rotation_required", true)
+    failures.record("other", "Upstream said: something with user text", false)
+
+    expect(failures.take("json-body")).toBe("memory_context_rotation_required")
+    // A refusal after the companion started working may follow a launched build.
+    expect(failures.take("refused-late")).toBe(COMPANION_TURN_UNCONFIRMED)
+    expect(failures.take("other")).toBe(COMPANION_TURN_UNCONFIRMED)
+    expect(companionTurnFailureCode("", false)).toBe(COMPANION_TURN_UNCONFIRMED)
+  })
+
+  it("keeps only a bounded number of unclaimed failures", () => {
+    const failures = createCompanionTurnFailures()
+    for (let index = 0; index < 40; index += 1) failures.record(`message-${index}`, "boom", true)
+
+    expect(failures.take("message-0")).toBeNull()
+    expect(failures.take("message-39")).toBe(COMPANION_TURN_UNCONFIRMED)
+  })
+})
 
 describe("voice builder explicit-request guard", () => {
   it("matches the voice backend's explicit builder request rules", () => {
@@ -181,6 +217,107 @@ describe("voice builder tool handler", () => {
     ))
 
     expect(result).toMatchObject({ ok: false, reason: "builder_request_not_sent", send_error: "memory_source_dispatch_busy" })
+  })
+
+  it("reports a memory governance refusal as not started, without retrying", async () => {
+    const session = createSession()
+    session.onSend.reject = new Error("memory_context_rotation_required")
+
+    const result = await session.handler.execute(call(
+      "start_builder_task",
+      { description: "Research batteries." },
+      ["please research batteries"],
+    ))
+
+    expect(result).toMatchObject({
+      ok: false,
+      started: false,
+      builder_task_started: false,
+      reason: "builder_request_not_sent",
+      send_error: "memory_context_rotation_required",
+    })
+    expect(String(result.recovery_guidance)).toContain("could not be started in this conversation")
+    expect(String(result.recovery_guidance)).toContain("Do not retry it yourself")
+    expect(session.sent).toHaveLength(1)
+  })
+
+  it("keeps a running build's status when a correction is refused", async () => {
+    const session = createSession({ task: { phase: "running", taskId: "task-1", runId: "run-1" } })
+    session.onSend.reject = new Error("memory_context_rotation_required")
+
+    const result = await session.handler.execute(call(
+      "update_async_task",
+      { task_id: "task-1", message: "Focus on Germany." },
+    ))
+
+    expect(result).toMatchObject({
+      ok: false,
+      updated: false,
+      reason: "builder_request_not_sent",
+      send_error: "memory_context_rotation_required",
+    })
+    const guidance = String(result.recovery_guidance)
+    expect(guidance).toContain("the existing build or artifact was left unchanged")
+    expect(guidance).not.toMatch(/nothing is running|no new build is running|keeps running/)
+    expect(session.cancelBuilderTask).not.toHaveBeenCalled()
+  })
+
+  it("keeps a completed artifact's status when an edit is refused", async () => {
+    const session = createSession({ completion: {
+      task_id: "task-1",
+      run_id: "run-1",
+      status: "success",
+      artifact_path: "mnt/user-data/outputs/report.md",
+      artifact_title: "report.md",
+    } as BuilderCompletionEventV1 })
+    session.onSend.reject = new Error("memory_context_rotation_required")
+
+    const result = await session.handler.execute(call(
+      "edit_builder_artifact",
+      { artifact_path: "mnt/user-data/outputs/report.md", instructions: "Shorten the intro." },
+    ))
+
+    expect(result).toMatchObject({ ok: false, reason: "builder_request_not_sent", send_error: "memory_context_rotation_required" })
+    expect(String(result.recovery_guidance)).toContain("left unchanged")
+    expect(String(result.recovery_guidance)).not.toMatch(/running/)
+  })
+
+  it("reports an ambiguous companion failure as unconfirmed at once, never as not sent", async () => {
+    const session = createSession()
+    session.onSend.reject = new Error(COMPANION_TURN_UNCONFIRMED)
+
+    const result = await session.handler.execute(call(
+      "start_builder_task",
+      { description: "Research batteries." },
+      ["please research batteries"],
+    ))
+
+    expect(result).toMatchObject({
+      ok: false,
+      builder_task_started: false,
+      reason: "builder_start_unconfirmed",
+      status: "unconfirmed",
+    })
+    expect(result).not.toHaveProperty("send_error")
+    expect(String(result.recovery_guidance)).not.toMatch(/try again|retry/i)
+    // Delivery is unknown (it may have failed before dispatch), so never claim it was sent.
+    expect(result).toMatchObject({ delivery: "unknown" })
+    expect(String(result.result_summary)).not.toMatch(/was sent/)
+    expect(session.sent).toHaveLength(1)
+  })
+
+  it("still says a request was sent when only the confirmation timed out", async () => {
+    const session = createSession()
+
+    const result = await session.handler.execute(call(
+      "start_builder_task",
+      { description: "Research batteries." },
+      ["please research batteries"],
+    ))
+
+    expect(result).toMatchObject({ reason: "builder_start_unconfirmed", status: "unconfirmed" })
+    expect(result).not.toHaveProperty("delivery")
+    expect(String(result.result_summary)).toContain("The request was sent")
   })
 
   it("sends a voice correction to the companion and confirms it by a new run", async () => {

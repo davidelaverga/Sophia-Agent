@@ -1,6 +1,8 @@
 import type { BuilderCompletionEventV1 } from "../types/builder-completion"
 import type { BuilderTaskV1 } from "../types/builder-task"
 
+import { isMemoryContextRecoveryError, MEMORY_CONTEXT_RECOVERY_REQUIRED } from "./memory-context-error"
+
 /**
  * Voice Builder lifecycle, owned by the browser.
  *
@@ -67,8 +69,75 @@ export interface VoiceBuilderCancelResponse {
   detail?: string | null
 }
 
+/** The turn failed after it may already have acted; delivery is unknown. */
+export const COMPANION_TURN_UNCONFIRMED = "companion_turn_unconfirmed"
+const MAX_RECORDED_TURN_FAILURES = 32
+
+function isMemoryContextRefusalText(errorText: string): boolean {
+  if (isMemoryContextRecoveryError(errorText)) return true
+  try {
+    return isMemoryContextRecoveryError(JSON.parse(errorText))
+  } catch {
+    return false
+  }
+}
+
+/**
+ * A short fixed code for a failed companion turn; backend text never passes.
+ * Only a memory governance refusal that arrived before the turn did anything
+ * is definitive: nothing ran, so it was not sent. Any other failure (a broken
+ * or unparseable stream, another error, or a refusal after the companion had
+ * started working) may come after a Builder was already launched, so it stays
+ * unconfirmed and must never invite a retry.
+ */
+export function companionTurnFailureCode(errorText: string, afterActivity: boolean): string {
+  return !afterActivity && isMemoryContextRefusalText(errorText)
+    ? MEMORY_CONTEXT_RECOVERY_REQUIRED
+    : COMPANION_TURN_UNCONFIRMED
+}
+
+export interface CompanionTurnFailures {
+  /** Record the terminal error of the turn started by messageId. */
+  record: (messageId: string | null, errorText: string, afterActivity: boolean) => void
+  /** Return and forget the failure code recorded for messageId, if any. */
+  take: (messageId: string) => string | null
+}
+
+/**
+ * The AI SDK resolves sendMessage even when the companion turn ends in a
+ * stream error; it reports the error through onError instead. Without this a
+ * refused companion turn looked like a send still in flight, and the voice
+ * bridge waited for its confirmation timeout. Failures are keyed by the id of
+ * the message that started the turn, so another send's error (a concurrent
+ * typed turn, another voice call, an earlier session) is never attributed to
+ * this one.
+ */
+export function createCompanionTurnFailures(): CompanionTurnFailures {
+  const failures = new Map<string, string>()
+  return {
+    record: (messageId, errorText, afterActivity) => {
+      if (!messageId) return
+      failures.delete(messageId)
+      failures.set(messageId, companionTurnFailureCode(errorText, afterActivity))
+      while (failures.size > MAX_RECORDED_TURN_FAILURES) {
+        const oldest = failures.keys().next().value
+        if (oldest === undefined) break
+        failures.delete(oldest)
+      }
+    },
+    take: (messageId) => {
+      const code = failures.get(messageId) ?? null
+      failures.delete(messageId)
+      return code
+    },
+  }
+}
+
 export interface VoiceBuilderSessionAdapter {
-  /** Send one companion chat turn through the governed text send path. */
+  /**
+   * Send one companion chat turn through the governed text send path. Rejects
+   * with a short error code when the turn could not be sent or ended in error.
+   */
   sendCompanionMessage: (text: string) => Promise<unknown>
   getBuilderTask: () => BuilderTaskV1 | null
   getBuilderCompletion: () => BuilderCompletionEventV1 | null
@@ -230,7 +299,7 @@ export function createVoiceBuilderToolHandler(
   const sendAndConfirm = async (text: string): Promise<
     | { kind: "confirmed"; task: BuilderTaskV1 }
     | { kind: "send_failed"; reason: string }
-    | { kind: "unconfirmed" }
+    | { kind: "unconfirmed"; deliveryUnknown?: boolean }
   > => {
     const baseline = runKey(adapter.getBuilderTask())
     const send: { error: string | null } = { error: null }
@@ -246,6 +315,11 @@ export function createVoiceBuilderToolHandler(
       const task = adapter.getBuilderTask()
       if (task?.phase === "running" && task.taskId && runKey(task) !== baseline) {
         return { kind: "confirmed", task }
+      }
+      if (send.error === COMPANION_TURN_UNCONFIRMED) {
+        // The turn may already have launched a build, or may never have been
+        // delivered; report it as unconfirmed at once, never as sent or not sent.
+        return { kind: "unconfirmed", deliveryUnknown: true }
       }
       if (send.error) {
         return { kind: "send_failed", reason: send.error }
@@ -486,17 +560,35 @@ function describeCompletion(completion: BuilderCompletionEventV1): Record<string
 
 function unconfirmedResult(
   toolName: VoiceBuilderToolName,
-  outcome: { kind: "send_failed"; reason: string } | { kind: "unconfirmed" },
+  outcome: { kind: "send_failed"; reason: string } | { kind: "unconfirmed"; deliveryUnknown?: boolean },
   action: "start" | "change",
 ): VoiceBuilderToolResult {
   if (outcome.kind === "send_failed") {
+    const refused = outcome.reason === MEMORY_CONTEXT_RECOVERY_REQUIRED
     return notStartedResult(toolName, {
       reason: "builder_request_not_sent",
       send_error: outcome.reason,
       result_summary: action === "start"
-        ? "The build request could not be sent."
-        : "The correction could not be sent.",
-      recovery_guidance: "Tell the user it did not go through and offer to try again. Do not say it started or changed.",
+        ? "The build request did not go through."
+        : "The correction did not go through.",
+      recovery_guidance: !refused
+        ? "Tell the user it did not go through and offer to try again. Do not say it started or changed."
+        : action === "start"
+          ? "Tell the user it could not be started in this conversation, so no new build is running. Do not retry it yourself. Do not say it started."
+          // A refused correction never reached the companion. The existing work is
+          // untouched, whether it is still running or already finished.
+          : "Tell the user the correction could not be sent in this conversation, so the existing build or artifact was left unchanged. Do not retry it yourself. Do not say it changed.",
+    })
+  }
+  if (outcome.deliveryUnknown) {
+    return notStartedResult(toolName, {
+      reason: action === "start" ? "builder_start_unconfirmed" : "builder_update_unconfirmed",
+      status: "unconfirmed",
+      delivery: "unknown",
+      result_summary: action === "start"
+        ? "It is not known whether the request reached Sophia, and no running build was confirmed."
+        : "It is not known whether the correction reached Sophia, and no updated build was confirmed.",
+      recovery_guidance: "Tell the user it is not confirmed and may still appear in the progress panel. Do not say it started or changed.",
     })
   }
   return notStartedResult(toolName, {

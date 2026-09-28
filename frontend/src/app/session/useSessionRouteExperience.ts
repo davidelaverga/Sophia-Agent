@@ -12,7 +12,11 @@ import {
 } from '../lib/builder-workflow';
 import { debugLog } from '../lib/debug-logger';
 import { recordSophiaCaptureEvent } from '../lib/session-capture';
-import { createVoiceBuilderToolHandler, registerVoiceBuilderToolBridge } from '../lib/voice-builder-actions';
+import {
+  createCompanionTurnFailures,
+  createVoiceBuilderToolHandler,
+  registerVoiceBuilderToolBridge,
+} from '../lib/voice-builder-actions';
 import { useAuth } from '../providers';
 import type { BuilderArtifactV1 } from '../types/builder-artifact';
 import type { BuilderCanvasActivity, BuilderCanvasTaskSnapshotV1 } from '../types/builder-canvas';
@@ -404,6 +408,11 @@ export function useSessionRouteExperience({
     });
   }, [debugEnabled, routeProfile.id]);
 
+  const companionTurnFailuresRef = useRef(createCompanionTurnFailures());
+  const recordCompanionTurnError = useCallback((messageId: string | null, errorText: string, afterActivity: boolean) => {
+    companionTurnFailuresRef.current.record(messageId, errorText, afterActivity);
+  }, []);
+
   const {
     chatMessages,
     sendChatMessage,
@@ -418,6 +427,7 @@ export function useSessionRouteExperience({
     showUsageLimitModal,
     recordConnectivityFailure,
     showToast,
+    onTurnError: recordCompanionTurnError,
   });
 
   const canReloadForFreshBuild = chatStatus !== 'streaming' && chatStatus !== 'submitted';
@@ -685,6 +695,12 @@ export function useSessionRouteExperience({
   // typed request would. The typed-message cancel shortcut is skipped on
   // purpose: a spoken correction such as "stop this section" must reach the
   // companion as a correction instead of cancelling the running build.
+  // The send resolves even when the companion turn ends in error, so a failed
+  // turn is looked up by this send's own message id and rethrown as a short
+  // code; the voice tool call then ends at once instead of waiting. Only a
+  // refusal before the turn acted reads as not sent; anything else reads as
+  // unconfirmed, since a build may already have started. A send without a
+  // canonical message id (legacy owner) keeps the confirmation wait.
   const sendVoiceBuilderMessage = useCallback(async (text: string) => {
     const captured = captureSourceInput(text);
     const appVersionFresh = await checkAppVersionFreshness({ reason: 'before-send' });
@@ -692,7 +708,12 @@ export function useSessionRouteExperience({
       throw new Error('memory_source_app_version_unavailable');
     }
     validateSourceInput(captured);
-    return rawSendMessage(captured);
+    const messageId = captured.sourceIntent?.action.message_id ?? null;
+    await rawSendMessage(captured);
+    const failure = messageId ? companionTurnFailuresRef.current.take(messageId) : null;
+    if (failure) {
+      throw new Error(failure);
+    }
   }, [captureSourceInput, checkAppVersionFreshness, rawSendMessage, validateSourceInput]);
 
   const voiceBuilderStateRef = useRef({
