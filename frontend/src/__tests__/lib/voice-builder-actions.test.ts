@@ -238,6 +238,27 @@ describe("voice builder tool handler", () => {
     expect(session.sent).toHaveLength(1)
   })
 
+  it("keeps a running build's status when a correction is refused", async () => {
+    const session = createSession({ task: { phase: "running", taskId: "task-1", runId: "run-1" } })
+    session.onSend.reject = new Error("memory_context_rotation_required")
+
+    const result = await session.handler.execute(call(
+      "update_async_task",
+      { task_id: "task-1", message: "Focus on Germany." },
+    ))
+
+    expect(result).toMatchObject({
+      ok: false,
+      updated: false,
+      reason: "builder_request_not_sent",
+      send_error: "memory_context_rotation_required",
+    })
+    const guidance = String(result.recovery_guidance)
+    expect(guidance).toContain("the existing build keeps running unchanged")
+    expect(guidance).not.toContain("no new build is running")
+    expect(session.cancelBuilderTask).not.toHaveBeenCalled()
+  })
+
   it("sends a voice correction to the companion and confirms it by a new run", async () => {
     const session = createSession({ task: { phase: "running", taskId: "task-1", runId: "run-1" } })
     session.onSend.next = () => {
