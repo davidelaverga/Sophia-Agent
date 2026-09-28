@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-09-28T23:00:00Z",
-  "state": "r013_builder_refusal_evidence_requested",
+  "updated_at": "2026-09-28T23:40:00Z",
+  "state": "r013_pr164_merged_evidence_pending",
   "last_read": "Davide incident summary (runs 01a0e866-77b0..., 01a0e866-b0c7...)",
   "last_written": "claude-052-R013-builder-refusal-evidence.md",
-  "task": "Voice Builder refused at memory governance (MemoryContextUnavailable) on runs 01a0e866-77b0... and 01a0e866-b0c7...; root cause pending codex-046. PR #164 (web): a refused/failed companion turn now ends the voice Builder call at once, attributed per message id via TurnErrorReportingChatTransport; Codex review clean at efee90ae; web 2500 passed (espeak pre-existing).",
+  "task": "PR #164 merged as e601de54 on codex/frontend-prod-083d4cb0 (tree = reviewed head 45948201; frontend only). A governance refusal before any turn activity now ends the voice Builder call at once as not sent; ambiguous failures return unconfirmed with delivery unknown and no retry. Root cause of the refusal still pending codex-046 (R-013a).",
   "summary": "R-013a: read-only evidence (entry_denied denied_at_line/error_type per run, epochs, thread shape, text baseline, rest of session) + R-012a rollback and multipart comparison. Claude: web PR to surface the refused companion turn immediately.",
-  "needs_action": "Davide: paste R-013a (+2b) to Codex; commit the local incident analysis into codex-artifacts/; mark PR #164 ready and merge when convenient. Codex: codex-046. Claude: size the root-cause fix from codex-046."
+  "needs_action": "Davide: paste R-013b (web-only deploy of e601de54) and R-013a (+2b) to Codex. Codex: codex-046 evidence, then R-013b deploy. Claude: size the root-cause fix from codex-046."
 }
