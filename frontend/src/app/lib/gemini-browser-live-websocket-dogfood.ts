@@ -2098,6 +2098,9 @@ export async function connectGeminiBrowserLiveDogfood(
   // resumed session is ready.
   let artifactReviewModeAnnounced: 'active' | 'ended' | null = null;
   let providerRotationInProgress = false;
+  // A resumed session continues from its last resumption handle, which may
+  // predate the image, so an active review is re-announced with its image.
+  let lastArtifactReviewFrame: GeminiArtifactFramePayload | null = null;
   const artifactReviewSafeResponseIds = new Set<string>();
   const artifactReviewSuppressedResponseIds = new Set<string>();
   const pendingArtifactReviewAudio = new Map<string, Array<{
@@ -2335,6 +2338,9 @@ export async function connectGeminiBrowserLiveDogfood(
 
   const reannounceArtifactReviewMode = () => {
     if (artifactReviewModeAnnounced === 'active' && artifactReviewArtifactId) {
+      if (lastArtifactReviewFrame?.artifactId === artifactReviewArtifactId) {
+        sendArtifactReviewModeContext(buildGeminiArtifactFrameRealtimeInput(lastArtifactReviewFrame));
+      }
       sendArtifactReviewModeContext(buildGeminiArtifactTextReaderHint(artifactReviewArtifactId));
     } else if (artifactReviewModeAnnounced !== null) {
       sendArtifactReviewModeContext(buildGeminiArtifactReviewEndedHint());
@@ -2362,6 +2368,7 @@ export async function connectGeminiBrowserLiveDogfood(
     artifactReviewSuppressedResponseIds.clear();
     dropPendingArtifactReviewAudio(null, 'artifact_review_response_suppressed');
     artifactReviewModeAnnounced = 'ended';
+    lastArtifactReviewFrame = null;
     sendArtifactReviewModeContext(buildGeminiArtifactReviewEndedHint());
   };
 
@@ -4498,6 +4505,7 @@ export async function connectGeminiBrowserLiveDogfood(
         context?: GeminiArtifactFrameSendContext,
       ) => {
         const stopGeneration = artifactReviewStopGeneration;
+        const frameSocket = websocket;
         artifactFramesInFlight += 1;
         return sendGeminiArtifactFrameOverWebSocket({
           websocket,
@@ -4526,8 +4534,13 @@ export async function connectGeminiBrowserLiveDogfood(
             artifactReviewArtifactId = result.artifactId;
             artifactReviewExpiresAtMs = monotonicNowMs() + ARTIFACT_REVIEW_RELAY_CONTEXT_TTL_MS;
             scheduleArtifactReviewExpiry();
-            if (reviewStarted) {
-              artifactReviewModeAnnounced = 'active';
+            artifactReviewModeAnnounced = 'active';
+            lastArtifactReviewFrame = frame;
+            if (websocket !== frameSocket) {
+              // The provider rotated while this frame settled, so the resumed
+              // session may not have it: replay it with the review state.
+              reannounceArtifactReviewMode();
+            } else if (reviewStarted) {
               sendArtifactReviewModeContext(buildGeminiArtifactTextReaderHint(result.artifactId));
             }
           }

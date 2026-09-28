@@ -7558,6 +7558,7 @@ describe('Gemini voice session mode grounding', () => {
     };
     const activeHint = JSON.stringify(buildGeminiArtifactTextReaderHint('artifact-1'));
     const endedHint = JSON.stringify(buildGeminiArtifactReviewEndedHint());
+    const frameInput = JSON.stringify(buildGeminiArtifactFrameRealtimeInput(frame));
 
     const connectResumable = async () => {
       const stages: GeminiBrowserLiveDogfoodStage[] = [];
@@ -7634,15 +7635,32 @@ describe('Gemini voice session mode grounding', () => {
       await connection.close();
     });
 
-    it('re-announces an active review to the resumed session', async () => {
+    it('re-announces an active review to the resumed session with its artifact image', async () => {
       const { connection, reconnect, resumedAfterSetup } = await connectResumable();
       await connection.sendArtifactFrame(frame);
 
       await reconnect();
 
+      // The resumption handle may predate the image, so it is replayed first.
+      expect(resumedAfterSetup()).toEqual([frameInput, activeHint]);
+      await connection.close();
+    });
+
+    it('replays the image when the provider rotates while a frame is still settling', async () => {
+      const { connection, sockets, resumedAfterSetup } = await connectResumable();
+
+      const settling = connection.sendArtifactFrame(frame);
+      expect(sockets[0]?.sent).toContain(frameInput);
+      sockets[0]?.emitMessage({ goAway: { timeLeft: '1s' } });
+      await vi.waitFor(() => expect(sockets).toHaveLength(2));
+      await settling;
+      await vi.waitFor(() => expect(resumedAfterSetup()).toContain(activeHint));
+
+      // The resumed session sees the image before it is told review is active.
       const resumed = resumedAfterSetup();
+      expect(resumed.indexOf(frameInput)).toBeGreaterThanOrEqual(0);
+      expect(resumed.indexOf(frameInput)).toBeLessThan(resumed.indexOf(activeHint));
       expect(resumed.filter((sent) => sent === activeHint)).toHaveLength(1);
-      expect(resumed).not.toContain(endedHint);
       await connection.close();
     });
 
