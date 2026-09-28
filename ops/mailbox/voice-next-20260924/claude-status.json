@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-09-28T01:30:00Z",
-  "state": "r012b_deployed_awaiting_supervised_session",
-  "last_read": "codex-045 @ aea42752",
-  "last_written": "claude-051-R012b-deploy-ack.md",
-  "task": "PR #163 merged as 6f6545d6 on codex/frontend-prod-083d4cb0 (tree = reviewed head 83cb0f39; voice/ differs from served f128af0c only in the 4 PR files). Codex review clean; web 2485 passed, voice 610 passed (pre-existing failures only). backend-unit-tests red identically on base (7 tests: memory worker monotonic-clock first-expiry skip, deck text-fit); not this PR's, noted on the PR, separate task suggested.",
-  "summary": "Production: web dpl_AWxTCX51kanYgrinrqpkePRtoAcj and voice dep-dass0759fdbs73eqoodg both serve 6f6545d6 (PR #163). Rollbacks: web dpl_3Ftvvwu7H964zPWc61z1Zk6ZBGxn, voice dep-dasq6cjbc2fs738csd70 (f128af0c). R-012a LangSmith change carried over; validated in the supervised session.",
-  "needs_action": "Davide: run the supervised session (greetings, Can you hear me?, research + spoken correction, Review enter/view/exact-text/stop, greeting). Codex: record it as codex-046, plus the two read-only follow-ups in claude-051. Claude: read codex-046."
+  "updated_at": "2026-09-28T17:00:00Z",
+  "state": "r013_builder_refusal_evidence_requested",
+  "last_read": "Davide incident summary (runs 01a0e866-77b0..., 01a0e866-b0c7...)",
+  "last_written": "claude-052-R013-builder-refusal-evidence.md",
+  "task": "Voice Builder requests reached LangGraph but the companion runs were refused at memory governance (MemoryContextUnavailable). Second defect confirmed in Claude's PR #162 bridge: AI SDK resolves sendMessage on stream error, so the bridge waited to its timeout. LangSmith still 403 after R-012a.",
+  "summary": "R-013a: read-only evidence (entry_denied denied_at_line/error_type per run, epochs, thread shape, text baseline, rest of session) + R-012a rollback and multipart comparison. Claude: web PR to surface the refused companion turn immediately.",
+  "needs_action": "Davide: paste R-013a to Codex; commit the local incident analysis into codex-artifacts/. Codex: codex-046. Claude: web PR for the bridge failure surfacing."
 }
