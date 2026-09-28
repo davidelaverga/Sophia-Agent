@@ -4543,6 +4543,20 @@ export async function connectGeminiBrowserLiveDogfood(
             } else if (reviewStarted) {
               sendArtifactReviewModeContext(buildGeminiArtifactTextReaderHint(result.artifactId));
             }
+          } else if (
+            !result.ok
+            && result.websocketSendAccepted
+            && !artifactReviewArtifactId
+            && !closed
+            && stopGeneration === artifactReviewStopGeneration
+          ) {
+            // The Look failed (its socket closed or was replaced before the
+            // frame settled), but the image already left, and a resumed
+            // session may still hold it. Say review is not active, matching
+            // the failed Look; a reconnect re-announces this after setup.
+            artifactReviewModeAnnounced = 'ended';
+            lastArtifactReviewFrame = null;
+            sendArtifactReviewModeContext(buildGeminiArtifactReviewEndedHint());
           }
           return result;
         }).finally(() => {

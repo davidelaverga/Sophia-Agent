@@ -241,12 +241,16 @@ class FakeWebSocket {
 
   constructor(
     readonly url: string,
-    private readonly options: { autoSetupComplete?: boolean; failToolResponseSend?: boolean } = {},
+    private readonly options: { autoSetupComplete?: boolean; failToolResponseSend?: boolean; manualOpen?: boolean } = {},
   ) {
-    queueMicrotask(() => {
-      this.readyState = 1;
-      this.onopen?.({} as Event);
-    });
+    if (!options.manualOpen) {
+      queueMicrotask(() => this.open());
+    }
+  }
+
+  open() {
+    this.readyState = 1;
+    this.onopen?.({} as Event);
   }
 
   send(data: string) {
@@ -7560,7 +7564,7 @@ describe('Gemini voice session mode grounding', () => {
     const endedHint = JSON.stringify(buildGeminiArtifactReviewEndedHint());
     const frameInput = JSON.stringify(buildGeminiArtifactFrameRealtimeInput(frame));
 
-    const connectResumable = async () => {
+    const connectResumable = async ({ holdReplacementOpen = false } = {}) => {
       const stages: GeminiBrowserLiveDogfoodStage[] = [];
       const sockets: FakeWebSocket[] = [];
       const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
@@ -7596,7 +7600,7 @@ describe('Gemini voice session mode grounding', () => {
         },
         fetchFn: fetchMock as typeof fetch,
         webSocketFactory: (url) => {
-          const socket = new FakeWebSocket(url);
+          const socket = new FakeWebSocket(url, { manualOpen: holdReplacementOpen && sockets.length > 0 });
           sockets.push(socket);
           return socket;
         },
@@ -7661,6 +7665,24 @@ describe('Gemini voice session mode grounding', () => {
       expect(resumed.indexOf(frameInput)).toBeGreaterThanOrEqual(0);
       expect(resumed.indexOf(frameInput)).toBeLessThan(resumed.indexOf(activeHint));
       expect(resumed.filter((sent) => sent === activeHint)).toHaveLength(1);
+      await connection.close();
+    });
+
+    it('tells the resumed session review is not active when a Look fails during the rotation', async () => {
+      const { connection, sockets, resumedAfterSetup } = await connectResumable({ holdReplacementOpen: true });
+
+      const settling = connection.sendArtifactFrame(frame);
+      expect(sockets[0]?.sent).toContain(frameInput);
+      sockets[0]?.emitMessage({ goAway: { timeLeft: '1s' } });
+      await vi.waitFor(() => expect(sockets).toHaveLength(2));
+      // The replacement is still connecting when the frame settles, so the
+      // Look fails, although the image already left on the old socket.
+      await expect(settling).resolves.toMatchObject({ ok: false, websocketSendAccepted: true });
+
+      sockets[1]?.open();
+      await vi.waitFor(() => expect(resumedAfterSetup()).toContain(endedHint));
+
+      expect(resumedAfterSetup()).toEqual([endedHint]);
       await connection.close();
     });
 
