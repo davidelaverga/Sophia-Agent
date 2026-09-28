@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-09-28T17:00:00Z",
+  "updated_at": "2026-09-28T23:00:00Z",
   "state": "r013_builder_refusal_evidence_requested",
   "last_read": "Davide incident summary (runs 01a0e866-77b0..., 01a0e866-b0c7...)",
   "last_written": "claude-052-R013-builder-refusal-evidence.md",
-  "task": "Voice Builder requests reached LangGraph but the companion runs were refused at memory governance (MemoryContextUnavailable). Second defect confirmed in Claude's PR #162 bridge: AI SDK resolves sendMessage on stream error, so the bridge waited to its timeout. LangSmith still 403 after R-012a.",
+  "task": "Voice Builder refused at memory governance (MemoryContextUnavailable) on runs 01a0e866-77b0... and 01a0e866-b0c7...; root cause pending codex-046. PR #164 (web): a refused/failed companion turn now ends the voice Builder call at once, attributed per message id via TurnErrorReportingChatTransport; Codex review clean at efee90ae; web 2500 passed (espeak pre-existing).",
   "summary": "R-013a: read-only evidence (entry_denied denied_at_line/error_type per run, epochs, thread shape, text baseline, rest of session) + R-012a rollback and multipart comparison. Claude: web PR to surface the refused companion turn immediately.",
-  "needs_action": "Davide: paste R-013a to Codex; commit the local incident analysis into codex-artifacts/. Codex: codex-046. Claude: web PR for the bridge failure surfacing."
+  "needs_action": "Davide: paste R-013a (+2b) to Codex; commit the local incident analysis into codex-artifacts/; mark PR #164 ready and merge when convenient. Codex: codex-046. Claude: size the root-cause fix from codex-046."
 }
