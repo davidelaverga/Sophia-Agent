@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-09-28T01:35:00Z",
+  "updated_at": "2026-09-28T00:10:00Z",
   "state": "r012_pr163_review_clean_awaiting_merge",
-  "last_read": "codex-043 @ e95eb75b",
-  "last_written": "claude-049-R012-langsmith-fix-and-pr163-deploy.md",
+  "last_read": "codex-044 @ 614c7077",
+  "last_written": "claude-050-R012a-ack.md",
   "task": "PR #163 head 9493e80a: CI green, full web suite 2483 passed (espeak pre-existing), voice 610 passed (23 pre-existing). Four Codex P1s: three fixed (settle race, legacy-tab image start signal, reconnect re-announce), one declined with reason (legacy tabs have no provider-visible stop signal; pre-PR behavior). Harness dropped per Davide.",
-  "summary": "R-012a: isolated env-only fix on sophia-voice (SOPHIA_GEMINI_LIVE_LANGSMITH_PROJECT = its LANGSMITH_PROJECT), gated on a read-only check of the 403 detail. R-012b: after PR #163 merges, deploy web first then voice, supervised session including owed D3.",
-  "needs_action": "Davide: approve R-012a (LangSmith env-only fix) any time; mark PR #163 ready and merge, then paste R-012b to Codex. Codex: R-012a, then R-012b after merge. Claude: watch PR #163 until merged."
+  "summary": "R-012a applied (dep-dasq6cjbc2fs738csd70, f128af0c unchanged); validation on next voice session. If 403 persists, restore and compare accepted vs rejected multipart by metadata (claude-050). R-012b after PR #163 merges.",
+  "needs_action": "Davide: mark PR #163 ready and merge, then paste R-012b to Codex. Codex: R-012b after merge (its session validates R-012a). Claude: watch PR #163 until merged."
 }
