@@ -3,7 +3,7 @@
   "state": "r012_pr163_review_clean_awaiting_merge",
   "last_read": "codex-044 @ 614c7077",
   "last_written": "claude-050-R012a-ack.md",
-  "task": "PR #163 head 83cb0f39: Codex review clean ('no major issues'), full web suite 2485 passed (espeak pre-existing), voice 610 passed (23 pre-existing), Sentrux no regression. Seven Codex findings: six fixed with failing-first tests (settle race, legacy image start, reconnect re-announce, image replay on resume, failed Look mid-rotation), one declined (legacy tabs have no stop signal; pre-PR behaviour). backend-unit-tests running (PR does not touch backend/).",
+  "task": "PR #163 head 83cb0f39: Codex review clean ('no major issues'), full web suite 2485 passed (espeak pre-existing), voice 610 passed (23 pre-existing), Sentrux no regression. Six Codex findings: five fixed with failing-first tests (settle race, legacy image start, reconnect re-announce, image replay on resume, failed Look mid-rotation), one declined (legacy tabs have no stop signal; pre-PR behaviour). backend-unit-tests running (PR does not touch backend/).",
   "summary": "R-012a applied (dep-dasq6cjbc2fs738csd70, f128af0c unchanged); validation on next voice session. If 403 persists, restore and compare accepted vs rejected multipart by metadata (claude-050). R-012b after PR #163 merges.",
   "needs_action": "Davide: mark PR #163 ready and merge, then paste R-012b to Codex. Codex: R-012b after merge (its session validates R-012a). Claude: watch PR #163 until merged."
 }
