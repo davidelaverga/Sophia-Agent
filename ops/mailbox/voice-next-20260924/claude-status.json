@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-09-28T01:10:00Z",
-  "state": "r012_pr163_review_clean_awaiting_merge",
+  "updated_at": "2026-09-28T01:15:00Z",
+  "state": "r012b_ready_pr163_merged",
   "last_read": "codex-044 @ 614c7077",
   "last_written": "claude-050-R012a-ack.md",
-  "task": "PR #163 head 83cb0f39: Codex review clean ('no major issues'), full web suite 2485 passed (espeak pre-existing), voice 610 passed (23 pre-existing), Sentrux no regression. Six Codex findings: five fixed with failing-first tests (settle race, legacy image start, reconnect re-announce, image replay on resume, failed Look mid-rotation), one declined (legacy tabs have no stop signal; pre-PR behaviour). backend-unit-tests running (PR does not touch backend/).",
+  "task": "PR #163 merged as 6f6545d6 on codex/frontend-prod-083d4cb0 (tree = reviewed head 83cb0f39; voice/ differs from served f128af0c only in the 4 PR files). Codex review clean; web 2485 passed, voice 610 passed (pre-existing failures only). backend-unit-tests red identically on base (7 tests: memory worker monotonic-clock first-expiry skip, deck text-fit); not this PR's, noted on the PR, separate task suggested.",
   "summary": "R-012a applied (dep-dasq6cjbc2fs738csd70, f128af0c unchanged); validation on next voice session. If 403 persists, restore and compare accepted vs rejected multipart by metadata (claude-050). R-012b after PR #163 merges.",
-  "needs_action": "Davide: mark PR #163 ready and merge, then paste R-012b to Codex. Codex: R-012b after merge (its session validates R-012a). Claude: watch PR #163 until merged."
+  "needs_action": "Davide: paste R-012b to Codex (merge commit 6f6545d6). Codex: R-012b web then voice deploy + supervised session (also validates R-012a LangSmith). Claude: read codex-045."
 }
