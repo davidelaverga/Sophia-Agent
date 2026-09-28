@@ -300,7 +300,24 @@ describe("voice builder tool handler", () => {
     })
     expect(result).not.toHaveProperty("send_error")
     expect(String(result.recovery_guidance)).not.toMatch(/try again|retry/i)
+    // Delivery is unknown (it may have failed before dispatch), so never claim it was sent.
+    expect(result).toMatchObject({ delivery: "unknown" })
+    expect(String(result.result_summary)).not.toMatch(/was sent/)
     expect(session.sent).toHaveLength(1)
+  })
+
+  it("still says a request was sent when only the confirmation timed out", async () => {
+    const session = createSession()
+
+    const result = await session.handler.execute(call(
+      "start_builder_task",
+      { description: "Research batteries." },
+      ["please research batteries"],
+    ))
+
+    expect(result).toMatchObject({ reason: "builder_start_unconfirmed", status: "unconfirmed" })
+    expect(result).not.toHaveProperty("delivery")
+    expect(String(result.result_summary)).toContain("The request was sent")
   })
 
   it("sends a voice correction to the companion and confirms it by a new run", async () => {

@@ -299,7 +299,7 @@ export function createVoiceBuilderToolHandler(
   const sendAndConfirm = async (text: string): Promise<
     | { kind: "confirmed"; task: BuilderTaskV1 }
     | { kind: "send_failed"; reason: string }
-    | { kind: "unconfirmed" }
+    | { kind: "unconfirmed"; deliveryUnknown?: boolean }
   > => {
     const baseline = runKey(adapter.getBuilderTask())
     const send: { error: string | null } = { error: null }
@@ -317,9 +317,9 @@ export function createVoiceBuilderToolHandler(
         return { kind: "confirmed", task }
       }
       if (send.error === COMPANION_TURN_UNCONFIRMED) {
-        // The turn may already have launched a build; report it as unconfirmed
-        // at once, never as not sent.
-        return { kind: "unconfirmed" }
+        // The turn may already have launched a build, or may never have been
+        // delivered; report it as unconfirmed at once, never as sent or not sent.
+        return { kind: "unconfirmed", deliveryUnknown: true }
       }
       if (send.error) {
         return { kind: "send_failed", reason: send.error }
@@ -560,7 +560,7 @@ function describeCompletion(completion: BuilderCompletionEventV1): Record<string
 
 function unconfirmedResult(
   toolName: VoiceBuilderToolName,
-  outcome: { kind: "send_failed"; reason: string } | { kind: "unconfirmed" },
+  outcome: { kind: "send_failed"; reason: string } | { kind: "unconfirmed"; deliveryUnknown?: boolean },
   action: "start" | "change",
 ): VoiceBuilderToolResult {
   if (outcome.kind === "send_failed") {
@@ -578,6 +578,17 @@ function unconfirmedResult(
           // A refused correction never reached the companion. The existing work is
           // untouched, whether it is still running or already finished.
           : "Tell the user the correction could not be sent in this conversation, so the existing build or artifact was left unchanged. Do not retry it yourself. Do not say it changed.",
+    })
+  }
+  if (outcome.deliveryUnknown) {
+    return notStartedResult(toolName, {
+      reason: action === "start" ? "builder_start_unconfirmed" : "builder_update_unconfirmed",
+      status: "unconfirmed",
+      delivery: "unknown",
+      result_summary: action === "start"
+        ? "It is not known whether the request reached Sophia, and no running build was confirmed."
+        : "It is not known whether the correction reached Sophia, and no updated build was confirmed.",
+      recovery_guidance: "Tell the user it is not confirmed and may still appear in the progress panel. Do not say it started or changed.",
     })
   }
   return notStartedResult(toolName, {
