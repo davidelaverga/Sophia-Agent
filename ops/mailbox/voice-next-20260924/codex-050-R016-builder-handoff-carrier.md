@@ -19,7 +19,14 @@
 - Review-clear scoped deployment resumed after confirming the CI failures predate this change; this is not a claim that full CI is green.
 - Web, gateway, voice, schema/data, environment/settings, Lab, memory and A-014b retention actions: unchanged by this task.
 - Optional Step 0 historical denial-marker search: not performed.
-- Davide's fresh desktop voice validation: pending; no agent research request, correction, typed control or synthetic Lab run initiated.
-- After his test: record receipt/handoff/child-binding/build/artifact counts and Q1; stop at first refusal and report only safe stage/denial_reason/error_type/denied_at_line.
-- Verdict: reviewed LangGraph deployment verified; hosted Builder completion remains unverified until Davide's fresh session.
+- Davide's fresh desktop test failed: session `3c948919-e1ff-4e5d-9d1c-0c582f0ef389`, thread `01a0ef34-6202-73a0-8c7f-cff4a96fdeb5`; 2026-09-29T22:06–22:08Z (September 30, 00:06–00:08 Rome).
+- Counts: source receipts=1; handoffs=0; child bindings=0; build registry=0; Builder artifacts=0; all artifact-registry records=0. Public companion artifact=1 is a separate transient/state surface.
+- Q1: row/version/sequence/created-at/epoch/thread/metadata all equal; exactly one matching source row, final=true, source=text, 11 later transcript revisions.
+- Companion `01a0ef34-c3e0-7f30-805d-1f96481f1c40` succeeded at 22:07:31.674Z; this is not Builder success. Browser: 4 tool calls, 3 responses, 1 rejection, no unresolved calls; Builder inactive.
+- BuilderCommand logs: 22:07:03 skipped (no explicit document command); 22:07:20 skipped (latest message is not user input). Artifact captured at 22:07:30 without Builder handoff.
+- Denial searches: memory_admission_denied / memory.admission.denied / memory.context.entry_denied empty in Last hour. stage/denial_reason/error_type/denied_at_line=not observed; child admission was not exercised.
+- Local synthetic parser check: plain direct report command routes; both frontend-shaped Voice-build envelopes (research and direct-document briefs) do not. No actual brief/content was inspected.
+- LangSmith EU voice/companion projects remain stale (latest September 27 01:14:54 Rome); voice multipart ingest still 403 Forbidden. Existing telemetry JSON export unavailable.
+- Verdict: SOURCE_ANCHOR_VERIFIED; BUILDER_NOT_LAUNCHED_BEFORE_HANDOFF. Strongest next cause: voice envelope / companion routing contract; exact model decision and rejected browser call remain unobserved.
+- Detailed evidence, code mapping and proposed guarded fix/rollback: [R016 validation](codex-artifacts/r016-browser-validation-2026-09-30.md). No fixes, rollback, repeat request, correction or typed control applied after failure.
 - [Current CI](https://github.com/davidelaverga/Sophia-Agent/actions/runs/36633541441/job/109628448547); [historical same-failure CI](https://github.com/davidelaverga/Sophia-Agent/actions/runs/36497854088/job/109181571619).
