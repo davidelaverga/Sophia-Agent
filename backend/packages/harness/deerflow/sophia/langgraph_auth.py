@@ -507,11 +507,13 @@ async def create_run(ctx, value):
     source_action, source_session = configurable.get(SOURCE_ACTION_KEY), configurable.get(SOURCE_SESSION_KEY)
     handoff_key, handoff_run_key = "sophia_builder_handoff_v1", "sophia_builder_handoff_run_v1"
     handoff = configurable.get(handoff_key)
-    # langgraph-api copies configurable into an empty context (and the reverse)
-    # and refuses a request that sets both, so a dispatched handoff always
-    # arrives as two equal copies and neither surface shows where the caller put
-    # it. The sealed, durably registered handoff that bind_builder_run verifies
-    # below is the authority; the copies must only agree.
+    # langgraph-api mirrors either raw carrier into the other and rejects two
+    # nonempty carriers, so this hook cannot recover which one the caller used.
+    # A handoff sent through configurable or context has the same contract:
+    # bind_builder_run must verify its seal, durable receipt, authenticated owner,
+    # exact child/payload, current source authority and single-run binding.
+    # Matching copies are only consistency, not authority; conflicting copies
+    # are refused before any binding, and both transport copies are cleared below.
     if context.get(handoff_key) is not None and context.get(handoff_key) != handoff:
         _deny_run("handoff_carrier_conflict", value=value, owner=owner)
     disabled_requests = ("sophia_builder_completion_request_v1",

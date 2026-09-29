@@ -6,6 +6,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 
 def test_installed_thread_operations_enforce_owner_filters(tmp_path):
     source = r'''
@@ -241,7 +243,29 @@ asyncio.run(main())
     assert receipt["fresh_proof_only"] and receipt["wrong_owner_zero_runs"] and receipt["network_calls"] == 0
 
 
-def test_installed_builder_dispatch_binds_through_api_normalization(tmp_path):
+@pytest.mark.parametrize(
+    "case,expected_status,denial_reason",
+    [
+        ("valid_config", 200, None),
+        ("valid_context", 200, None),
+        ("replay", 403, "memory_builder_run_binding_unavailable"),
+        ("forged_config", 403, "ValueError"),
+        ("forged_context", 403, "ValueError"),
+        ("missing_field", 403, "ValueError"),
+        ("string_proof", 403, "ValueError"),
+        ("list_proof", 403, "ValueError"),
+        ("null_seal", 403, "ValueError"),
+        ("wrong_owner", 403, "ValueError"),
+        ("wrong_child", 403, "ValueError"),
+        ("changed_payload", 403, "ValueError"),
+        ("changed_source_version", 403, "memory_builder_run_binding_unavailable"),
+        ("source_clear_revocation", 403, "memory_builder_run_binding_unavailable"),
+        ("missing_registered_handoff", 403, "memory_builder_run_binding_unavailable"),
+        ("both_equal", 400, None),
+        ("both_conflicting", 400, None),
+    ],
+)
+def test_installed_builder_dispatch_binds_through_api_normalization(tmp_path, case, expected_status, denial_reason):
     """The Builder handoff must survive the installed API's carrier mirroring.
 
     2026-09-29 production: the companion registered a valid handoff, then the
@@ -252,6 +276,7 @@ def test_installed_builder_dispatch_binds_through_api_normalization(tmp_path):
     """
     source = r'''
 import asyncio, io, json, logging, socket, sys, os
+from copy import deepcopy
 from types import SimpleNamespace
 from uuid import UUID, uuid4
 def forbidden_network(*args, **kwargs):
@@ -307,7 +332,8 @@ async def main():
     from langgraph_api.asyncio import set_event_loop
     set_event_loop(asyncio.get_running_loop())
     parent_thread, parent_run = str(uuid4()), str(uuid4())
-    session, action = store.record("owner-a", parent_thread, "Build a simple synthetic table")
+    source_text = "Build a simple synthetic table PRIVATE_SYNTHETIC_SOURCE"
+    session, action = store.record("owner-a", parent_thread, source_text)
     recorded, input_proof = issue_recorded_authenticated_input(owner_id="owner-a", session_id=session, thread_id=parent_thread,
         run_id=parent_run, wire_input={"messages": [{"role": "user", "content": action["content"]}]}, source_action=action, store=store)
     guard = SimpleNamespace(enabled=True, context_id=parent_thread, owner="owner-a", scope="life", admission=object(), check=lambda: None,
@@ -317,65 +343,127 @@ async def main():
     messages = [HumanMessage(**recorded["messages"][0])]
     client = get_client(url=None)
     try:
-        async def dispatch(child, proof, wire):
+        async def dispatch(child, proof, wire, *, carrier="config", owner="owner-a"):
             # The request dispatch_independent_builder sends. Production names
             # the graph; without a graph registry the same assistant id is used.
+            carried = {"user_id": owner, "thread_id": child, HANDOFF_KEY: proof}
+            kwargs = {"config": {"configurable": carried}} if carrier == "config" else {"context": carried}
+            if carrier.startswith("both_"):
+                context = deepcopy(carried)
+                if carrier == "both_conflicting":
+                    context[HANDOFF_KEY]["seal"] = "conflicting-synthetic-seal"
+                kwargs = {"config": {"configurable": carried}, "context": context}
             return await client.runs.create(thread_id=child, assistant_id=str(BUILDER_ASSISTANT_ID), input=wire,
-                config={"configurable": {"user_id": "owner-a", "thread_id": child, HANDOFF_KEY: proof}}, stream_resumable=True)
+                stream_resumable=True, **kwargs)
         child = str(uuid4())
         wire, proof = issue_builder_handoff(guard=guard, owner_id="owner-a", parent_thread_id=parent_thread,
             child_thread_id=child, source_messages=messages)
-        [row async for row in await Threads.put(conn, UUID(child), metadata={}, if_exists="raise")]
-        result = await dispatch(child, proof, wire)
-        run = conn.store["runs"][-1]
-        cfg, carried = run["kwargs"]["config"]["configurable"], run["kwargs"]["context"]
-        assert cfg[HANDOFF_KEY] is None and carried.get(HANDOFF_KEY) is None, "HANDOFF_SURVIVED_ADMISSION"
-        assert verify_builder_run(owner_id="owner-a", child_thread_id=child, run_id=result["run_id"],
-            state=run["kwargs"]["input"], proof=cfg[HANDOFF_RUN_KEY]) is not None
-        assert cfg[INPUT_RUN_KEY] == result["run_id"] and len(store.builder_bindings) == 1
-        # The same handoff can bind exactly one run.
-        try:
-            await dispatch(child, proof, wire)
-            raise AssertionError("HANDOFF_REPLAY_SUCCEEDED")
-        except AssertionError:
-            raise
-        except Exception as exc:
-            assert status_of(exc) == 403
-        # A handoff whose seal does not verify is refused, whichever carrier holds it.
-        other = str(uuid4())
-        [row async for row in await Threads.put(conn, UUID(other), metadata={}, if_exists="raise")]
-        forged = {**proof, "seal": "hmac-sha256:builder-handoff-seal:" + "0" * 64}
-        for carrier in ("config", "context"):
-            body = {"configurable": {"user_id": "owner-a", "thread_id": other, HANDOFF_KEY: forged}}
-            kwargs = {"config": body} if carrier == "config" else {"context": body["configurable"]}
+        # Each parameter starts in a fresh subprocess with a registered, valid,
+        # unbound handoff for this exact child/payload. Mutate only one property;
+        # wrong-child or replay failures must not mask a broken seal check.
+        assert len(store.builder_handoffs) == 1 and not store.builder_bindings and not conn.store["runs"]
+        case = os.environ["MEM00_BUILDER_CASE"]
+        target, owner, carrier = child, "owner-a", "config"
+        if case == "valid_context" or case == "forged_context":
+            carrier = "context"
+        elif case.startswith("both_"):
+            carrier = case
+        elif case == "wrong_child":
+            target = str(uuid4())
+        elif case == "wrong_owner":
+            # Align authenticated/config/thread ownership to isolate the proof's
+            # owner mismatch rather than an earlier request/thread owner check.
+            owner = "owner-b"
+            set_auth_ctx(normalize_user({"identity": owner}), ["sophia:user"])
+        [row async for row in await Threads.put(conn, UUID(target), metadata={}, if_exists="raise")]
+
+        async def admitted():
+            result = await dispatch(target, proof, wire, carrier=carrier, owner=owner)
+            run = conn.store["runs"][-1]
+            cfg, carried = run["kwargs"]["config"]["configurable"], run["kwargs"]["context"]
+            assert cfg[HANDOFF_KEY] is None and carried.get(HANDOFF_KEY) is None, "HANDOFF_SURVIVED_ADMISSION"
+            assert verify_builder_run(owner_id=owner, child_thread_id=target, run_id=result["run_id"],
+                state=run["kwargs"]["input"], proof=cfg[HANDOFF_RUN_KEY]) is not None
+            assert cfg[INPUT_RUN_KEY] == result["run_id"]
+            assert len(conn.store["runs"]) == 1 and len(store.builder_bindings) == 1
+
+        if case == "replay":
+            await admitted()
+        elif case.startswith("forged_"):
+            proof = {**proof, "seal": "hmac-sha256:builder-handoff-seal:" + "0" * 64}
+        elif case == "missing_field":
+            proof = {key: value for key, value in proof.items() if key != "manifest"}
+        elif case == "string_proof":
+            proof = "malformed-synthetic-handoff"
+        elif case == "list_proof":
+            proof = []
+        elif case == "null_seal":
+            proof = {**proof, "seal": None}
+        elif case == "changed_payload":
+            wire = deepcopy(wire)
+            wire["messages"][0]["content"] = "ALTERED_SYNTHETIC_SOURCE"
+        elif case == "changed_source_version":
+            store.versions[action["message_id"]] = str(uuid4())
+        elif case == "source_clear_revocation":
+            store.clear_epoch += 1
+        elif case == "missing_registered_handoff":
+            store.builder_handoffs.clear()
+
+        before = (len(conn.store["runs"]), len(store.builder_bindings))
+        expected_status = int(os.environ["MEM00_BUILDER_EXPECTED_STATUS"])
+        if expected_status == 200:
+            await admitted()
+            assert before == (0, 0)
+        else:
             try:
-                await client.runs.create(thread_id=other, assistant_id=str(BUILDER_ASSISTANT_ID), input=wire, **kwargs)
-                raise AssertionError("FORGED_HANDOFF_SUCCEEDED")
+                await dispatch(target, proof, wire, carrier=carrier, owner=owner)
+                raise AssertionError("INVALID_HANDOFF_SUCCEEDED")
             except AssertionError:
                 raise
             except Exception as exc:
-                assert status_of(exc) == 403
-        assert len(conn.store["runs"]) == 1 and len(store.builder_bindings) == 1
+                assert status_of(exc) == expected_status
+            assert (len(conn.store["runs"]), len(store.builder_bindings)) == before, "DENIAL_CREATED_AUTHORITY"
     finally:
         await client.aclose()
         AuthContext.set(None)
     lines = [line for line in denials.getvalue().splitlines() if "memory_admission_denied " in line]
     logged = [json.loads(line.split("memory_admission_denied ", 1)[1]) for line in lines]
-    assert [event["stage"] for event in logged] == ["admission", "admission", "admission"], logged
-    assert not any(raw in line for line in lines for raw in (child, other, "owner-a")), "RAW_ID_LOGGED"
-    print(json.dumps({"builder_bound_through_api": True, "replay_refused": True, "forged_refused": 2, "network_calls": 0}))
+    expected_reason = os.environ["MEM00_BUILDER_DENIAL_REASON"]
+    if expected_reason:
+        assert len(logged) == 1 and logged[0]["stage"] == "admission"
+        assert logged[0]["denial_reason"] == expected_reason
+        assert logged[0]["error_type"] == ("ValueError" if expected_reason == "ValueError" else "MemoryGovernanceUnavailable")
+    else:
+        # Both raw carriers are refused by the API before Sophia's auth hook.
+        assert not logged
+    forbidden = (child, target, parent_thread, parent_run, action["message_id"], session,
+        "owner-a", "owner-b", source_text, "ALTERED_SYNTHETIC_SOURCE", os.environ["SOPHIA_MEMORY_REFERENCE_HMAC_SECRET"])
+    assert not any(raw in line for line in lines for raw in forbidden), "PRIVATE_VALUE_LOGGED"
+    assert all(set(event) == {"event_name", "stage", "owner_ref", "context_ref", "run_ref", "error_type", "denial_reason"}
+        for event in logged), "UNEXPECTED_DENIAL_FIELD"
+    assert all(event["event_name"] == "memory.admission.denied" for event in logged)
+    for event in logged:
+        for domain in ("owner", "context", "run"):
+            ref = event[domain + "_ref"]
+            prefix = "hmac-sha256:" + domain + ":"
+            assert isinstance(ref, str) and ref.startswith(prefix), "UNKEYED_DENIAL_REFERENCE"
+            digest = ref[len(prefix):]
+            assert len(digest) == 64 and set(digest) <= set("0123456789abcdef"), "INVALID_DENIAL_REFERENCE"
+    print(json.dumps({"case": case, "status": expected_status, "network_calls": 0}))
 asyncio.run(main())
 '''
     policy = Path(__file__).resolve().parents[1] / "packages/harness/deerflow/sophia/langgraph_auth.py"
     env = {**os.environ, "DATABASE_URI": ":memory:", "REDIS_URI": "redis://127.0.0.1:1",
            "LANGGRAPH_AUTH_TYPE": "noop", "LANGGRAPH_AUTH": json.dumps({"path": str(policy) + ":auth", "disable_studio_auth": True}),
            "SOPHIA_MEMORY_REFERENCE_HMAC_SECRET": "synthetic-framework-key-" * 3,
-           "SOPHIA_MEMORY_COHORT_PRINCIPALS": "owner-a", "SOPHIA_VOICE_LAB_TEST_PRINCIPAL": "voice-lab-test",
+           "SOPHIA_MEMORY_COHORT_PRINCIPALS": "owner-a,owner-b", "SOPHIA_VOICE_LAB_TEST_PRINCIPAL": "voice-lab-test",
            "LANGSMITH_API_KEY": "MUST_NOT_FORWARD", "LANGGRAPH_RUNTIME_EDITION": "inmem",
-           "MEM00_RECORDED_INPUT_TEST_DIR": str(Path(__file__).resolve().parent)}
+           "MEM00_RECORDED_INPUT_TEST_DIR": str(Path(__file__).resolve().parent),
+           "MEM00_BUILDER_CASE": case, "MEM00_BUILDER_EXPECTED_STATUS": str(expected_status),
+           "MEM00_BUILDER_DENIAL_REASON": denial_reason or ""}
     for name in ("CANDIDATE_LEDGER_WRITE", "CANDIDATE_LEDGER_READ", "CANONICAL_POOL_READ", "PROVIDER_PROJECTION", "GOVERNED_RUNTIME_READ"):
         env["SOPHIA_MEMORY_" + name] = "true"
     result = subprocess.run([sys.executable, "-c", source], cwd=tmp_path, env=env, capture_output=True, text=True, timeout=60)
     assert result.returncode == 0, (result.stdout + result.stderr)[-6000:]
     receipt = json.loads(result.stdout.splitlines()[-1])
-    assert receipt == {"builder_bound_through_api": True, "replay_refused": True, "forged_refused": 2, "network_calls": 0}
+    assert receipt == {"case": case, "status": expected_status, "network_calls": 0}

@@ -258,10 +258,11 @@ def test_recorded_source_anchor_contract_on_postgres():
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("carried", ["different", "context_only"])
+@pytest.mark.parametrize("carried", ["different", "missing_configurable_copy"])
 async def test_disagreeing_handoff_copies_are_refused_before_binding(admission, caplog, carried):
-    # The installed API mirrors one carrier into the other; copies that differ
-    # (or a context copy with no configurable one) are never a dispatch.
+    # This calls the hook directly with inconsistent normalized copies. It does
+    # not model a raw context-only request: the API would mirror that request
+    # into configurable before calling the hook, then verify its authority.
     cfg = admission.value["kwargs"]["config"]["configurable"]
     cfg.pop(SOURCE_ACTION_KEY)
     cfg.pop(SOURCE_SESSION_KEY)
