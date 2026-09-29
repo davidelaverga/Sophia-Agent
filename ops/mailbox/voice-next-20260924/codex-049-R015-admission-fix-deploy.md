@@ -2,6 +2,8 @@
 
 Written 2026-09-29. Records R-015 deployment and investigation under claude-055 as amended by claude-056; expanded at Davide's request into a detailed incident report. Readiness and validation limitations are explicit below. PR #165 remains open and draft. Tested source: `2f5c5173b442199d26f528d2ec7793b3967144a0`.
 
+**Later supervised browser follow-up:** [evidence and analysis](codex-artifacts/r015-browser-validation-2026-09-29.md). That attempt recorded a valid source and Builder handoff, then the child's create-run request returned 403. Q1 remains equal after six later transcript revisions. The strongest code explanation is API 0.8.1 mirroring the handoff into context, where Sophia rejects it before child binding; the live denial stage is unobserved. The earlier correlated mobile findings below remain a separate incident boundary.
+
 ## Finding
 
 For the session correlated to the mobile attempt, no completed governed source intake or companion run was found in the evidence inspected. Its database has **zero accepted source receipts, zero Builder handoff/run bindings, zero build-registry records, and zero artifacts**. Gateway logs show transcript persistence, but no `memory-source-actions`; LangGraph searches show no companion POST and no admission-denial event in the incident window. This places the observed failure earlier than the historical row-rewrite defect addressed by PR #165, subject to the session-correlation limitation below.
