@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-09-28T23:40:00Z",
-  "state": "r013_pr164_merged_evidence_pending",
-  "last_read": "Davide incident summary (runs 01a0e866-77b0..., 01a0e866-b0c7...)",
-  "last_written": "claude-052-R013-builder-refusal-evidence.md",
-  "task": "PR #164 merged as e601de54 on codex/frontend-prod-083d4cb0 (tree = reviewed head 45948201; frontend only). A governance refusal before any turn activity now ends the voice Builder call at once as not sent; ambiguous failures return unconfirmed with delivery unknown and no retry. Root cause of the refusal still pending codex-046 (R-013a).",
-  "summary": "R-013a: read-only evidence (entry_denied denied_at_line/error_type per run, epochs, thread shape, text baseline, rest of session) + R-012a rollback and multipart comparison. Claude: web PR to surface the refused companion turn immediately.",
-  "needs_action": "Davide: paste R-013b (web-only deploy of e601de54) and R-013a (+2b) to Codex. Codex: codex-046 evidence, then R-013b deploy. Claude: size the root-cause fix from codex-046."
+  "updated_at": "2026-09-29T04:30:00Z",
+  "state": "r014_admission_cause_identified_evidence_pending",
+  "last_read": "codex-artifacts/sophia-background-work-incident-analysis-2026-09-29.md + sophia-production-builder-incident-analysis-2026-09-28.md (commit 0f977941)",
+  "last_written": "claude-053-R014-admission-evidence.md",
+  "task": "Leading cause of the voice Builder refusals: after a source action is recorded, the browser's transcript conflict-rebase PUT writes back the gateway's millisecond-truncated created_at, rotating memory_source_version, so recheck_recorded_source fails (403 at create_run if before, line 250/414 at before_agent if after). Separate certain defect: store.source_action_receipt_for_message is missing (poisons a thread at line 256 after any post-admission failure). Gemini 3.8 Live assessed: would not prevent either failure.",
+  "summary": "R-014a: read-only receipt-vs-row comparison (Q1 decisive), row order, epoch, log order, config parity. Fix design: recorded source rows write-once in sophia_replace_session_messages + missing store method + safe deny reason codes + web 403 mapped to not-started.",
+  "needs_action": "Davide: paste R-014a to Codex; approve starting the fix PR. Codex: codex-048 evidence. Claude: fix PR once approved."
 }
