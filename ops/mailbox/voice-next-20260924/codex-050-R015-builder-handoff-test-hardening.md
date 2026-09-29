@@ -1,0 +1,27 @@
+# codex-050 — R015 Builder handoff follow-up
+- Authorization: Davide explicitly authorized Codex to implement the agreed plan, push to Claude's existing branch and notify Claude; merge/deployment/testing production remain held.
+- PR: https://github.com/davidelaverga/Sophia-Agent/pull/165
+- Branch: `claude/voice-builder-admission-fix`; parent `b24ce112f43929a36261408ddb53c0db940c05de`.
+- Published head: `dbfaf818dcb26e14a06ad3b6191b694675d0cf1e`.
+- Published tree equals locally tested tree: `d6bfb3ed3aada70d8b76ccfe87e8b49980014283`; fast-forward only, no force push.
+- Runtime guard remains Claude's b24ce112 fix; this follow-up changes tests, comments and development documentation only.
+- Contract: either single raw carrier normalizes into equal copies; equality is consistency, and sealed/durable proof plus owner/child/payload/source/single-binding checks remain authority.
+- Direct-hook `context_only` case renamed `missing_configurable_copy`: it is an inconsistent normalized shape, not raw context-only rejection.
+- Installed SDK/API/auth test expanded to 17 isolated cases, each with fresh synthetic source authority; external network connections blocked.
+- Positive cases: raw configurable and raw context each admit exactly one run/binding and clear both transport proof copies.
+- Seal-only negatives now use fresh, exact-child, exact-payload, unbound handoffs; wrong-child/replay cannot mask a missing signature check.
+- Other negatives: missing field, string/list proof, null seal, wrong authenticated owner, wrong child, altered payload, changed source version, source-clear revocation and missing durable registration.
+- Replay: one initial successful binding, then refusal without another run/binding.
+- Both equal/conflicting nonempty raw carriers: API 400 before auth, no refusal marker, run or binding.
+- Auth refusals: 403, expected admission stage/safe reason, exact log fields, no raw IDs/content/secret, and domain-prefixed HMAC references.
+- Binding failures currently report `memory_builder_run_binding_unavailable`; malformed/invalid proof reports safe `ValueError`, not a more specific source reason.
+- Locked Python 3.12 uv environment; LangGraph API 0.8.1 / SDK 0.3.9 / in-memory runtime 0.28.0.
+- Focused checks: framework auth, recorded-source anchor, C2 Builder source, service lanes and client auth: **102 passed, 1 skipped** (15.67 s).
+- Skip: PostgreSQL contract requires a disposable, fully migrated local database; production/database credentials were not supplied to that test.
+- Ruff on all three changed Python files: passed; `git diff --check`: passed. Two independent source reviews: no blocking findings.
+- PR marked ready after push so repository CI and automatic review can run; not merged.
+- Automatic review: pending on the published head; findings will be addressed on the same branch.
+- Production services, settings, schema/data, Lab, memory and A-014b retention: untouched during this task.
+- Verdict: LOCAL_ADMISSION_AND_BINDING_VERIFIED; HOSTED_WORKER_AND_ARTIFACT_COMPLETION_NOT_VALIDATED.
+- Strongest cause remains the reproduced API carrier mirroring / old hook rejection; the observed production 403 did not expose its exact denial stage.
+- LangSmith ingest 403 and later idle connection-loss evidence remain separate follow-ups.
