@@ -2394,15 +2394,19 @@ Late in this wave, several commits landed over a red suite or with edits that si
 - Migration `2026_09_29_mem00_recorded_source_anchor.sql`: `sophia_replace_session_messages` never updates or deletes a row that has an intake receipt, ignores snapshot items reusing a recorded `message_id`, and keeps other rows off recorded sequences. Adds `sophia_memory_lookup_source_action_by_message`.
 - LangGraph: implemented the missing `store.source_action_receipt_for_message` (pending-input recovery). `create_run` refusals log `memory_admission_denied` (stage, safe reason, keyed refs); the source recheck and pending recovery carry exact reasons; `memory.context.entry_denied` gains `denial_reason`.
 - Web: a governed 403 becomes `memory_source_send_refused`, and the voice bridge reports "did not start, do not retry".
+- LangGraph: the Builder handoff carrier check accepts the mirrored copy langgraph-api 0.8.1 makes (`configurable` ↔ `context`); copies must agree, and the sealed durable handoff stays the authority.
+- LangGraph: `BuilderCommandMiddleware` routes the voice bridge's `[Voice build request]` message straight to `start_builder_task` (brief + canonical task type) instead of leaving the second launch decision to the companion model.
 
 ### What We Learned
 - Every voice Builder request since the bridge shipped (2026-09-27) was refused. The browser's conflict-rebase PUT wrote the GET's millisecond `created_at` (and a position-based `sequence`) back onto the just-recorded row, rotating its version. Voice is hit because transcript rows keep arriving; a quiet typed session rebases nothing.
 - The same class of bug hit text on 2026-09-22 and was fixed only on the display-timestamp path. The durable fix belongs in the one server-side writer, not in each client.
 - One opaque 403 hid a dozen distinct refusals; the missing store method went unnoticed because no test fixture called it. A contract test now checks every reachable `store.<name>(` call exists on the real store.
+- A voice build crossed three decision points: Gemini chose its tool, the browser checked the request was explicit, then the companion model had to choose `start_builder_task` again. In R-016 it answered without launching. The voice bridge message is now a routed command like a typed "write a document about X".
 - Gemini 3.8 Live native async tool calling was assessed and rejected as a fix: tools still run in the browser and every request crosses the same governed admission (`ops/mailbox/voice-next-20260924/claude-artifacts/r014-gemini-38-live-assessment.md`).
 
 ### CLAUDE.md Updates
 - Root `CLAUDE.md` (Jorge pitfalls): recorded source rows are write-once; read `memory_admission_denied` before guessing at a 403.
+- Root `CLAUDE.md` (Luis pitfalls): the `[Voice build request]` header, `Task type:` line and `Brief:` prefix are a backend routing contract.
 
 ### Skills Created / Modified
 - None.

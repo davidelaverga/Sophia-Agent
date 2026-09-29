@@ -158,8 +158,12 @@ describe("voice builder tool handler", () => {
     })
     expect(session.sent).toHaveLength(1)
     expect(session.sent[0]).toContain("start_builder_task")
-    expect(session.sent[0]).toContain("Task type: research")
-    expect(session.sent[0]).toContain("Research EV charging in Germany; deliver Markdown.")
+    // BuilderCommandMiddleware (backend) routes on this exact header, task
+    // type line and Brief prefix; changing them stops the voice build route.
+    const lines = session.sent[0].split("\n")
+    expect(lines[0]).toBe("[Voice build request]")
+    expect(lines).toContain("Task type: research")
+    expect(lines[lines.length - 1]).toBe("Brief: Research EV charging in Germany; deliver Markdown.")
   })
 
   it("never reports a start without an observed task", async () => {

@@ -452,3 +452,96 @@ def test_missing_guard_gives_an_undeclared_owner_no_memory_only_its_own_turn(mon
     assert not isinstance(result, str) or "No launch was attempted" not in result
     assert "SYNTHETIC MEMORY MUST NOT ENTER" not in str(captured)
     assert owner_is_definitely_undeclared("owner") is True
+
+
+# The web voice bridge's message (buildVoiceBuilderStartMessage in
+# frontend/src/app/lib/voice-builder-actions.ts), recorded as the turn's source.
+VOICE_BUILD_REQUEST = "\n".join([
+    "[Voice build request]",
+    "I asked for this by voice and already answered any clarifying questions there.",
+    "Start it now with start_builder_task using the brief below. Do not ask me further questions first.",
+    "Task type: research",
+    "Brief: Research a synthetic topic and write a short Markdown report.",
+])
+
+
+@pytest.mark.parametrize("source", [VOICE_BUILD_REQUEST], indirect=True)
+def test_routed_voice_build_request_launches_one_builder_from_the_recorded_source(source, monkeypatch):
+    """R-016: the companion model answered a voice build request without
+    launching. The deterministic route must produce a call the governed launch
+    accepts, bound to the recorded source, and must not route twice in a run."""
+    import asyncio
+    import importlib
+    from types import SimpleNamespace
+    from uuid import UUID, uuid5
+
+    from langgraph.types import Command
+
+    from deerflow.agents.sophia_agent.middlewares.builder_command import BuilderCommandMiddleware
+    from deerflow.sophia.memory_governance.builder_provenance import HANDOFF_KEY, bind_builder_run
+    from deerflow.sophia.memory_governance.input_provenance import INPUT_PROOF_KEY, INPUT_RUN_KEY
+    from deerflow.sophia.memory_governance.retained_admission import RetainedAdmission
+    from deerflow.sophia.memory_governance.retained_context import ContextTransition
+
+    guard = SimpleNamespace(enabled=True, owner="owner", context_id=source["thread_id"], scope="life",
+        check=lambda: None, config={INPUT_PROOF_KEY: source["input_proof"], INPUT_RUN_KEY: source["run_id"]},
+        _readmit=lambda context: RetainedAdmission(ContextTransition("continue", "empty", 0), context, (), uuid4()))
+    monkeypatch.setattr("deerflow.agents.sophia_agent.middlewares.memory_context.active_builder_parent_guard", lambda *_: guard)
+    monkeypatch.setattr("deerflow.agents.sophia_agent.middlewares.memory_context.active_governed_tool_guard", lambda: guard)
+    monkeypatch.setattr("deerflow.sophia.memory_governance.store.configured_memory_store", lambda: source["store"])
+    source["store"].get_user_governance = lambda owner: SimpleNamespace(user_id=owner, user_revocation_epoch=0, user_catalog_generation=3)
+    requests, runs = [], {}
+
+    async def create_thread(**kwargs):
+        return {"thread_id": kwargs["thread_id"]}
+
+    async def create_run(**kwargs):
+        requests.append(kwargs)
+        child, run = kwargs["thread_id"], str(uuid4())
+        bind_builder_run(owner_id="owner", child_thread_id=child, run_id=run, wire_input=kwargs["input"],
+            proof=kwargs["config"]["configurable"][HANDOFF_KEY])
+        runs[(child, run)] = {"thread_id": child, "run_id": run, "status": "running"}
+        return runs[(child, run)]
+
+    async def get_run(child, run):
+        return runs[(child, run)]
+
+    client = SimpleNamespace(threads=SimpleNamespace(create=create_thread), runs=SimpleNamespace(create=create_run, get=get_run))
+    monkeypatch.setattr("deerflow.sophia.langgraph_client_auth.get_client", lambda **kwargs: client)
+    launch = importlib.import_module("deerflow.sophia.tools.start_builder_task")
+
+    def forbidden_inheritance(*args, **kwargs):
+        pytest.fail("governed launch reached legacy enrichment or file inheritance")
+    for name in ("_resolve_companion_artifact", "_resolve_dispatch_digest", "_build_enriched_description", "_copy_parent_uploaded_images"):
+        monkeypatch.setattr(launch, name, forbidden_inheritance)
+
+    middleware = BuilderCommandMiddleware()
+    state = {"messages": list(source["messages"])}
+    routed = middleware.wrap_model_call(SimpleNamespace(messages=state["messages"], state=state),
+        lambda _request: pytest.fail("the companion model must not decide a routed voice build request"))
+    [call] = routed.tool_calls
+    assert call["name"] == "start_builder_task" and call["args"]["task_type"] == "research"
+
+    state["messages"].append(routed)
+    runtime = SimpleNamespace(state=state, tool_call_id=call["id"], context={"thread_id": source["thread_id"]},
+        config={"configurable": {"thread_id": source["thread_id"], "user_id": "owner"}})
+    result = asyncio.run(launch._start_builder_task_impl(call["args"]["description"], call["args"]["task_type"], runtime,
+        configured_user_id="owner"))
+
+    assert isinstance(result, Command)
+    [request] = requests
+    child = str(uuid5(UUID(source["run_id"]), "mem00-c2-builder:" + call["id"]))
+    assert request["thread_id"] == child
+    # The Builder receives the recorded source itself, never a middleware copy.
+    assert request["input"]["messages"][0]["content"] == VOICE_BUILD_REQUEST
+    assert result.update["async_tasks"][child]["status"] == "running"
+    [tool_message] = result.update["messages"]
+    assert tool_message.tool_call_id == call["id"] and tool_message.content.startswith("Builder run confirmed.")
+
+    # The next model call in the same run sees the tool result and is not routed.
+    state["messages"].append(tool_message)
+    state.update({"async_tasks": result.update["async_tasks"]})
+    acknowledged = AIMessage(content="Starting the build now.")
+    assert middleware.wrap_model_call(SimpleNamespace(messages=state["messages"], state=state),
+        lambda _request: acknowledged) is acknowledged
+    assert len(requests) == 1

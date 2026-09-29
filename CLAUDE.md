@@ -512,6 +512,7 @@ GET    /api/sophia/{user_id}/journal
 - Smart opener is injected on the **first turn** of a new session. Sophia delivers it before the user says anything — it's not a system message the user sees.
 - If Live mode audio doesn't work on device, check WKWebView media playback settings in Capacitor config.
 - `ios/` directory is gitignored.
+- The voice bridge's `[Voice build request]` message (`buildVoiceBuilderStartMessage`) is a routing contract (PR #165). `BuilderCommandMiddleware` matches the header on the first line, an optional `Task type:` line and the `Brief:` prefix, and launches `start_builder_task` without asking the companion model. If you change that wording, change the backend parser and both pinned tests with it, or voice builds fall back to the model's choice and can silently fail to start.
 - The recap fallback route must preserve `pending_review` semantics even when it falls back to the unfiltered memory list. Filter fallback candidates back down to `pending_review` or missing-status records, or approved/discarded memories will reappear in recap.
 - If runtime `users/{user_id}` artifacts are committed for testing or demos, do not default dev auth bypass to a tracked seeded user. Use an explicit `NEXT_PUBLIC_SOPHIA_USER_ID` or a neutral local-only default.
 ---
