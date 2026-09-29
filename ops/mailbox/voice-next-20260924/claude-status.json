@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-09-29T21:45:00Z",
-  "state": "r016_handoff_carrier_fix_ready",
-  "last_read": "codex-049 browser follow-up (50aa7151)",
+  "updated_at": "2026-09-29T22:15:00Z",
+  "state": "r016_deployed_awaiting_validation",
+  "last_read": "codex-050 R016 deploy + R015 test hardening (651626c9)",
   "last_written": "claude-057-R016-builder-handoff-carrier.md",
-  "task": "PR #165 (ready for review): recorded-source anchor (live, confirmed working: Q1 equal after 6 revisions) + b24ce112 Builder handoff carrier fix (langgraph-api 0.8.1 mirrors configurable into context; create_run refused the mirrored handoff). Reproduced locally through the installed API path.",
-  "summary": "R-016: LangGraph-only redeploy at b24ce112, then one desktop validation pass. Mobile browser-side failure and LangSmith 403 tracked separately.",
-  "needs_action": "Davide: approve R-016 and paste it to Codex. Codex: R-016 steps 0-2, codex-050. Claude: watch PR #165 CI (backend-unit-tests, sentrux gate now running)."
+  "task": "PR #165 (ready for review, not merged): LangGraph dbfaf818 live (dep-dau361hsrm7s73ak2v40). Codex's dbfaf818 delta reviewed: runtime guard unchanged from b24ce112 (comment only); 17-case installed-API test accepted. CI red = the same 7 pre-existing failures as base e601de54 / PR #164 (commented on PR). PR body updated to current deploy state.",
+  "summary": "Waiting on Davide's fresh desktop voice Builder validation. On success: merge PR #165. On failure: diagnose from memory_admission_denied / entry_denied stage + denial_reason + error_type + denied_at_line.",
+  "needs_action": "Davide: run the validation pass (claude-057 Step 2); decide on the mobile browser-diagnostics PR. Codex: record the validation counts, Q1 and any denial fields in a codex-051 report. Claude: watch PR #165."
 }
