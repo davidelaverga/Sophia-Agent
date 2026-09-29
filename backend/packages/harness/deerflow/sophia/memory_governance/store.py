@@ -567,6 +567,14 @@ class SupabaseMemoryGovernanceStore:
     def source_action_status(self, *, user_id: str, command_key: str):
         return self._rpc("sophia_memory_lookup_source_action", {"p_user_id": user_id, "p_idempotency_key": command_key})
 
+    def source_action_receipt_for_message(self, *, user_id: str, session_id: str, message_id: str):
+        """Immutable intake receipt for one checkpointed message; read evidence only."""
+        receipt = self._rpc("sophia_memory_lookup_source_action_by_message",
+            {"p_user_id": user_id, "p_session_id": session_id, "p_message_id": message_id})
+        if receipt is None:
+            raise MemoryGovernanceUnavailable("memory_source_receipt_not_found")
+        return receipt
+
     def source_snapshot(self, *, user_id: str, session_id: str, thread_id: str):
         return self._rpc("sophia_memory_source_snapshot", {"p_user_id": user_id, "p_session_id": session_id, "p_thread_id": thread_id})
 

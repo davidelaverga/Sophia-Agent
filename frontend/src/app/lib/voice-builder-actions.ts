@@ -71,6 +71,8 @@ export interface VoiceBuilderCancelResponse {
 
 /** The turn failed after it may already have acted; delivery is unknown. */
 export const COMPANION_TURN_UNCONFIRMED = "companion_turn_unconfirmed"
+/** The chat route's code for LangGraph refusing to create the run at all. */
+export const MEMORY_SOURCE_SEND_REFUSED = "memory_source_send_refused"
 const MAX_RECORDED_TURN_FAILURES = 32
 
 function isMemoryContextRefusalText(errorText: string): boolean {
@@ -82,18 +84,31 @@ function isMemoryContextRefusalText(errorText: string): boolean {
   }
 }
 
+function isRunRefusalText(errorText: string): boolean {
+  if (errorText === MEMORY_SOURCE_SEND_REFUSED) return true
+  try {
+    const parsed: unknown = JSON.parse(errorText)
+    return typeof parsed === "object" && parsed !== null
+      && (parsed as { error?: unknown }).error === MEMORY_SOURCE_SEND_REFUSED
+  } catch {
+    return false
+  }
+}
+
 /**
  * A short fixed code for a failed companion turn; backend text never passes.
- * Only a memory governance refusal that arrived before the turn did anything
- * is definitive: nothing ran, so it was not sent. Any other failure (a broken
- * or unparseable stream, another error, or a refusal after the companion had
- * started working) may come after a Builder was already launched, so it stays
+ * Only a refusal that arrived before the turn did anything is definitive:
+ * LangGraph refusing to create the run, or memory governance refusing entry.
+ * Nothing ran, so it was not sent. Any other failure (a broken or unparseable
+ * stream, another error, or a refusal after the companion had started
+ * working) may come after a Builder was already launched, so it stays
  * unconfirmed and must never invite a retry.
  */
 export function companionTurnFailureCode(errorText: string, afterActivity: boolean): string {
-  return !afterActivity && isMemoryContextRefusalText(errorText)
-    ? MEMORY_CONTEXT_RECOVERY_REQUIRED
-    : COMPANION_TURN_UNCONFIRMED
+  if (afterActivity) return COMPANION_TURN_UNCONFIRMED
+  if (isMemoryContextRefusalText(errorText)) return MEMORY_CONTEXT_RECOVERY_REQUIRED
+  if (isRunRefusalText(errorText)) return MEMORY_SOURCE_SEND_REFUSED
+  return COMPANION_TURN_UNCONFIRMED
 }
 
 export interface CompanionTurnFailures {
@@ -564,7 +579,11 @@ function unconfirmedResult(
   action: "start" | "change",
 ): VoiceBuilderToolResult {
   if (outcome.kind === "send_failed") {
+    // A rotation refusal holds for this conversation. A run-creation refusal
+    // is certain for this attempt only, so it claims no permanence.
+    const scope = outcome.reason === MEMORY_CONTEXT_RECOVERY_REQUIRED ? " in this conversation" : ""
     const refused = outcome.reason === MEMORY_CONTEXT_RECOVERY_REQUIRED
+      || outcome.reason === MEMORY_SOURCE_SEND_REFUSED
     return notStartedResult(toolName, {
       reason: "builder_request_not_sent",
       send_error: outcome.reason,
@@ -574,10 +593,10 @@ function unconfirmedResult(
       recovery_guidance: !refused
         ? "Tell the user it did not go through and offer to try again. Do not say it started or changed."
         : action === "start"
-          ? "Tell the user it could not be started in this conversation, so no new build is running. Do not retry it yourself. Do not say it started."
+          ? `Tell the user it could not be started${scope}, so no new build is running. Do not retry it yourself. Do not say it started.`
           // A refused correction never reached the companion. The existing work is
           // untouched, whether it is still running or already finished.
-          : "Tell the user the correction could not be sent in this conversation, so the existing build or artifact was left unchanged. Do not retry it yourself. Do not say it changed.",
+          : `Tell the user the correction could not be sent${scope}, so the existing build or artifact was left unchanged. Do not retry it yourself. Do not say it changed.`,
     })
   }
   if (outcome.deliveryUnknown) {

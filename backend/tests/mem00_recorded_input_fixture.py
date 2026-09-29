@@ -81,6 +81,16 @@ class RecordedInputFixture:
         return {"schema": "mem00.source-action-status.v1", "owner_id": user_id, "command_key": command_key,
             "historical_result_only": True, "status": "committed" if receipt else "not_found", "receipt": deepcopy(receipt)}
 
+    def source_action_receipt_for_message(self, *, user_id, session_id, message_id):
+        if self.unavailable:
+            raise RuntimeError("SYNTHETIC SOURCE OUTAGE")
+        for (owner, _command), receipt in self.receipts.items():
+            if (owner, receipt["session_id"], receipt["message_id"]) == (user_id, session_id, message_id):
+                return deepcopy(receipt)
+        from deerflow.sophia.memory_governance.store import MemoryGovernanceUnavailable
+
+        raise MemoryGovernanceUnavailable("memory_source_receipt_not_found")
+
     def source_snapshot(self, *, user_id, session_id, thread_id):
         if self.unavailable:
             raise RuntimeError("SYNTHETIC SOURCE OUTAGE")

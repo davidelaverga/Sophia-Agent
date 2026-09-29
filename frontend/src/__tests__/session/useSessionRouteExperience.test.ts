@@ -596,6 +596,30 @@ describe('useSessionRouteExperience', () => {
       expect(Date.now() - startedAt).toBeLessThan(2_000);
     });
 
+    it('reports a run-creation refusal (HTTP 403) as not started, not unconfirmed', async () => {
+      // 2026-09-28: all three voice requests were refused this way and the
+      // model was told they were unconfirmed, so it kept retrying.
+      const rawSendMessage = vi.fn(async (input: { sourceIntent?: { action: { message_id: string } } }) => {
+        reportTurnError(input.sourceIntent?.action.message_id ?? null, '{"error":"memory_source_send_refused"}', false);
+      });
+      useSessionOutboundSendMock.mockReturnValue(rawSendMessage);
+      const { result } = renderGoverned();
+      await waitFor(() => expect(result.current.sourceProfileReady).toBe(true));
+
+      let pending!: Promise<VoiceBuilderToolResult>;
+      act(() => { pending = startCall(Date.now()); });
+
+      const refused = await pending;
+      expect(refused).toMatchObject({
+        ok: false,
+        builder_task_started: false,
+        reason: 'builder_request_not_sent',
+        send_error: 'memory_source_send_refused',
+      });
+      expect(String(refused.recovery_guidance)).toContain('Do not retry it yourself');
+      expect(rawSendMessage).toHaveBeenCalledTimes(1);
+    });
+
     it('reports a refusal after the turn acted as unconfirmed, at once', async () => {
       const rawSendMessage = vi.fn(async (input: { sourceIntent?: { action: { message_id: string } } }) => {
         reportTurnError(input.sourceIntent?.action.message_id ?? null, 'memory_context_rotation_required', true);

@@ -149,6 +149,25 @@ describe('handleChatPost auth hardening', () => {
     expect(fetchBackendStreamWithBootstrapMock.mock.calls[0][2]).toBe(abort.signal);
   });
 
+  it.each([
+    [403, 'memory_source_send_refused'],
+    [409, 'memory_source_send_unconfirmed'],
+    [502, 'memory_source_send_unconfirmed'],
+  ])('names only a governed run-creation refusal (%s) as refused', async (status, code) => {
+    const parsed = parseAndValidateChatPayloadMock.getMockImplementation()?.();
+    parseAndValidateChatPayloadMock.mockReturnValue({ ...parsed, data: { ...parsed.data,
+      sourceAction: { command_key: 'original-source-command', message_id: 'original-source-message',
+        thread_id: 'thread-1', content: 'Hello Sophia', expected_clear_epoch: 1 } } });
+    fetchBackendStreamWithBootstrapMock.mockResolvedValue({
+      upstream: new Response(JSON.stringify({ detail: 'SYNTHETIC UPSTREAM DIAGNOSTIC' }), {
+        status, headers: { 'Content-Type': 'application/json' } }), threadId: 'thread-1',
+    });
+    const response = await handleChatPost({ json: async () => ({ message: 'Hello' }) } as never);
+    expect(response.status).toBe(status);
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    await expect(response.json()).resolves.toEqual({ error: code });
+  });
+
   it.each([503, 200])('never substitutes a simulated success for a governed source nonstream response: %s', async status => {
     const parsed = parseAndValidateChatPayloadMock.getMockImplementation()?.();
     parseAndValidateChatPayloadMock.mockReturnValue({ ...parsed, data: { ...parsed.data,

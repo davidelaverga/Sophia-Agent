@@ -9,6 +9,7 @@ import {
   executeVoiceBuilderToolBridgeCall,
   hasRecentExplicitVoiceBuilderRequest,
   isExplicitVoiceBuilderRequest,
+  MEMORY_SOURCE_SEND_REFUSED,
   registerVoiceBuilderToolBridge,
   voiceBuilderKnownTaskIds,
   type VoiceBuilderSessionAdapter,
@@ -85,6 +86,18 @@ describe("companion turn failures", () => {
     expect(failures.take("refused-late")).toBe(COMPANION_TURN_UNCONFIRMED)
     expect(failures.take("other")).toBe(COMPANION_TURN_UNCONFIRMED)
     expect(companionTurnFailureCode("", false)).toBe(COMPANION_TURN_UNCONFIRMED)
+  })
+
+  it("treats a run-creation refusal before any activity as definitive", () => {
+    const failures = createCompanionTurnFailures()
+    failures.record("refused-run", JSON.stringify({ error: MEMORY_SOURCE_SEND_REFUSED }), false)
+    failures.record("refused-run-late", JSON.stringify({ error: MEMORY_SOURCE_SEND_REFUSED }), true)
+    failures.record("unconfirmed-run", JSON.stringify({ error: "memory_source_send_unconfirmed" }), false)
+
+    expect(failures.take("refused-run")).toBe(MEMORY_SOURCE_SEND_REFUSED)
+    expect(failures.take("refused-run-late")).toBe(COMPANION_TURN_UNCONFIRMED)
+    expect(failures.take("unconfirmed-run")).toBe(COMPANION_TURN_UNCONFIRMED)
+    expect(companionTurnFailureCode(MEMORY_SOURCE_SEND_REFUSED, false)).toBe(MEMORY_SOURCE_SEND_REFUSED)
   })
 
   it("keeps only a bounded number of unclaimed failures", () => {
@@ -237,6 +250,29 @@ describe("voice builder tool handler", () => {
       send_error: "memory_context_rotation_required",
     })
     expect(String(result.recovery_guidance)).toContain("could not be started in this conversation")
+    expect(String(result.recovery_guidance)).toContain("Do not retry it yourself")
+    expect(session.sent).toHaveLength(1)
+  })
+
+  it("reports a run-creation refusal as not started, without retrying", async () => {
+    const session = createSession()
+    session.onSend.reject = new Error(MEMORY_SOURCE_SEND_REFUSED)
+
+    const result = await session.handler.execute(call(
+      "start_builder_task",
+      { description: "Research batteries." },
+      ["please research batteries"],
+    ))
+
+    expect(result).toMatchObject({
+      ok: false,
+      started: false,
+      builder_task_started: false,
+      reason: "builder_request_not_sent",
+      send_error: MEMORY_SOURCE_SEND_REFUSED,
+    })
+    expect(result).not.toHaveProperty("delivery")
+    expect(String(result.recovery_guidance)).toContain("could not be started, so no new build is running")
     expect(String(result.recovery_guidance)).toContain("Do not retry it yourself")
     expect(session.sent).toHaveLength(1)
   })

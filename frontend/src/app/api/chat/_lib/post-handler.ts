@@ -293,7 +293,12 @@ export async function handleChatPost(req: NextRequest): Promise<Response> {
           // An unsuccessful original run is not a completed mock turn. Do
           // not read/log/provider-forward an untrusted diagnostic body.
           await upstream.body?.cancel().catch(() => undefined);
-          return new Response(JSON.stringify({ error: 'memory_source_send_unconfirmed' }), {
+          // A 403 is LangGraph's run-creation policy refusal: no run exists,
+          // so the turn definitely did not start. Any other status may have
+          // come after a run was created and stays unconfirmed.
+          const refused = upstream.status === 403;
+          secureLog('[/api/chat] governed upstream refused', { status: upstream.status });
+          return new Response(JSON.stringify({ error: refused ? 'memory_source_send_refused' : 'memory_source_send_unconfirmed' }), {
             status: upstream.status, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
           });
         }
