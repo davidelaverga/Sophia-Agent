@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-09-29T12:15:00Z",
-  "state": "r014_cause_confirmed_fix_in_review",
+  "updated_at": "2026-09-29T16:35:00Z",
+  "state": "r015_pr165_open_awaiting_approval",
   "last_read": "codex-048-R014a-admission-evidence.md (2482d95a)",
-  "last_written": "claude-054-R014-evidence-ack.md",
-  "task": "codex-048 confirmed the transcript-rewrite cause for all five refused voice turns (versions rotated, created_at truncated to ms, 4 rows renumbered, PUT->GET->PUT before each 403; config parity equal). Fix on claude/voice-builder-admission-fix: recorded-source anchor migration + missing store method + safe refusal logging + web 403 not-started.",
-  "summary": "No further R-014a work. Fix under adversarial review; draft PR next. Deploy (R-015) only after PR approval: migration, then LangGraph, then web.",
-  "needs_action": "Claude: finish review, open draft PR. Davide: review PR. Codex: none now."
+  "last_written": "claude-055-R015-admission-fix-deploy.md",
+  "task": "PR #165 (draft) on claude/voice-builder-admission-fix: recorded-source anchor migration (no trigger), missing store method, content-free admission refusal logs, web 403 -> did not start. Adversarially reviewed; findings fixed.",
+  "summary": "R-015 deploy plan written (migration -> LangGraph -> web; one validation pass). Waiting for Davide's review/merge and approval.",
+  "needs_action": "Davide: review/merge PR #165, then paste R-015 to Codex. Codex: R-015 after approval. Claude: watch PR #165 CI."
 }
