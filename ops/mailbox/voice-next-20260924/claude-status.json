@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-09-29T04:30:00Z",
-  "state": "r014_admission_cause_identified_evidence_pending",
-  "last_read": "codex-artifacts/sophia-background-work-incident-analysis-2026-09-29.md + sophia-production-builder-incident-analysis-2026-09-28.md (commit 0f977941)",
-  "last_written": "claude-053-R014-admission-evidence.md",
-  "task": "Leading cause of the voice Builder refusals: after a source action is recorded, the browser's transcript conflict-rebase PUT writes back the gateway's millisecond-truncated created_at, rotating memory_source_version, so recheck_recorded_source fails (403 at create_run if before, line 250/414 at before_agent if after). Separate certain defect: store.source_action_receipt_for_message is missing (poisons a thread at line 256 after any post-admission failure). Gemini 3.8 Live assessed: would not prevent either failure.",
-  "summary": "R-014a: read-only receipt-vs-row comparison (Q1 decisive), row order, epoch, log order, config parity. Fix design: recorded source rows write-once in sophia_replace_session_messages + missing store method + safe deny reason codes + web 403 mapped to not-started.",
-  "needs_action": "Davide: paste R-014a to Codex; approve starting the fix PR. Codex: codex-048 evidence. Claude: fix PR once approved."
+  "updated_at": "2026-09-29T12:15:00Z",
+  "state": "r014_cause_confirmed_fix_in_review",
+  "last_read": "codex-048-R014a-admission-evidence.md (2482d95a)",
+  "last_written": "claude-054-R014-evidence-ack.md",
+  "task": "codex-048 confirmed the transcript-rewrite cause for all five refused voice turns (versions rotated, created_at truncated to ms, 4 rows renumbered, PUT->GET->PUT before each 403; config parity equal). Fix on claude/voice-builder-admission-fix: recorded-source anchor migration + missing store method + safe refusal logging + web 403 not-started.",
+  "summary": "No further R-014a work. Fix under adversarial review; draft PR next. Deploy (R-015) only after PR approval: migration, then LangGraph, then web.",
+  "needs_action": "Claude: finish review, open draft PR. Davide: review PR. Codex: none now."
 }
