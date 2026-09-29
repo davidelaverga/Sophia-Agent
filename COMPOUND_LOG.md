@@ -2386,3 +2386,26 @@ Late in this wave, several commits landed over a red suite or with edits that si
 
 ### Known Follow-up
 - Inline artifact card on a failed→restart run (issue #4): root cause is frontend run-tracking in `useBuilderCanvas`/`PresenceArtifactPanel`; gateway is correct within the 15-min TTL. Deferred — needs browser E2E verification.
+
+## 2026-09-29 · [mem00-recorded-source-anchor] · PR #165
+**Author:** Claude · **Track:** backend + web · **Spec:** `docs/specs/03_memory_system.md`; incident mailbox `ops/mailbox/voice-next-20260924/` (claude-053, codex-048)
+
+### What Changed
+- Migration `2026_09_29_mem00_recorded_source_anchor.sql`: `sophia_replace_session_messages` never updates or deletes a row that has an intake receipt, ignores snapshot items reusing a recorded `message_id`, and keeps other rows off recorded sequences. Adds `sophia_memory_lookup_source_action_by_message`.
+- LangGraph: implemented the missing `store.source_action_receipt_for_message` (pending-input recovery). `create_run` refusals log `memory_admission_denied` (stage, safe reason, keyed refs); the source recheck and pending recovery carry exact reasons; `memory.context.entry_denied` gains `denial_reason`.
+- Web: a governed 403 becomes `memory_source_send_refused`, and the voice bridge reports "did not start, do not retry".
+
+### What We Learned
+- Every voice Builder request since the bridge shipped (2026-09-27) was refused. The browser's conflict-rebase PUT wrote the GET's millisecond `created_at` (and a position-based `sequence`) back onto the just-recorded row, rotating its version. Voice is hit because transcript rows keep arriving; a quiet typed session rebases nothing.
+- The same class of bug hit text on 2026-09-22 and was fixed only on the display-timestamp path. The durable fix belongs in the one server-side writer, not in each client.
+- One opaque 403 hid a dozen distinct refusals; the missing store method went unnoticed because no test fixture called it. A contract test now checks every reachable `store.<name>(` call exists on the real store.
+- Gemini 3.8 Live native async tool calling was assessed and rejected as a fix: tools still run in the browser and every request crosses the same governed admission (`ops/mailbox/voice-next-20260924/claude-artifacts/r014-gemini-38-live-assessment.md`).
+
+### CLAUDE.md Updates
+- Root `CLAUDE.md` (Jorge pitfalls): recorded source rows are write-once; read `memory_admission_denied` before guessing at a 403.
+
+### Skills Created / Modified
+- None.
+
+### GEPA Log Entry
+- No prompt file changed. The voice bridge's tool-result guidance string changed (refused build: "could not be started, do not retry"). tone_delta: N/A. Trace pair: none (LangSmith ingest is still failing).
