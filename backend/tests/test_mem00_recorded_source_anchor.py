@@ -255,3 +255,21 @@ def test_recorded_source_anchor_contract_on_postgres():
             db.execute(CONTRACT.read_text())
         finally:
             db.rollback()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("carried", ["different", "context_only"])
+async def test_disagreeing_handoff_copies_are_refused_before_binding(admission, caplog, carried):
+    # The installed API mirrors one carrier into the other; copies that differ
+    # (or a context copy with no configurable one) are never a dispatch.
+    cfg = admission.value["kwargs"]["config"]["configurable"]
+    cfg.pop(SOURCE_ACTION_KEY)
+    cfg.pop(SOURCE_SESSION_KEY)
+    admission.value["assistant_id"] = policy.BUILDER_ASSISTANT_ID
+    if carried == "different":
+        cfg["sophia_builder_handoff_v1"] = {"copy": "configurable"}
+    admission.value["kwargs"]["context"]["sophia_builder_handoff_v1"] = {"copy": "context"}
+    with caplog.at_level(logging.WARNING, logger=policy.logger.name), pytest.raises(Auth.exceptions.HTTPException):
+        await policy.create_run(admission.ctx, admission.value)
+    [event] = _denials(caplog)
+    assert event["stage"] == "handoff_carrier_conflict"

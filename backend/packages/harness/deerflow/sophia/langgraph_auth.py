@@ -507,8 +507,13 @@ async def create_run(ctx, value):
     source_action, source_session = configurable.get(SOURCE_ACTION_KEY), configurable.get(SOURCE_SESSION_KEY)
     handoff_key, handoff_run_key = "sophia_builder_handoff_v1", "sophia_builder_handoff_run_v1"
     handoff = configurable.get(handoff_key)
-    if context.get(handoff_key) is not None:
-        _deny_run("handoff_in_context", value=value, owner=owner)
+    # langgraph-api copies configurable into an empty context (and the reverse)
+    # and refuses a request that sets both, so a dispatched handoff always
+    # arrives as two equal copies and neither surface shows where the caller put
+    # it. The sealed, durably registered handoff that bind_builder_run verifies
+    # below is the authority; the copies must only agree.
+    if context.get(handoff_key) is not None and context.get(handoff_key) != handoff:
+        _deny_run("handoff_carrier_conflict", value=value, owner=owner)
     disabled_requests = ("sophia_builder_completion_request_v1",
         "sophia_builder_resume_request_v1", "memory_source_attachment_keys")
     # C2 does not activate old signed personal-memory transitions. Null out

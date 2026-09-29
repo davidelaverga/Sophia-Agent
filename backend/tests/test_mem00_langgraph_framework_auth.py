@@ -239,3 +239,143 @@ asyncio.run(main())
     assert result.returncode == 0, (result.stdout + result.stderr)[-6000:]
     receipt = json.loads(result.stdout.splitlines()[-1])
     assert receipt["fresh_proof_only"] and receipt["wrong_owner_zero_runs"] and receipt["network_calls"] == 0
+
+
+def test_installed_builder_dispatch_binds_through_api_normalization(tmp_path):
+    """The Builder handoff must survive the installed API's carrier mirroring.
+
+    2026-09-29 production: the companion registered a valid handoff, then the
+    child create-run returned 403 in 2 ms. langgraph-api copies configurable
+    into an empty context, and the hook refused any handoff in context. Earlier
+    tests called the hook directly with an empty context, a shape the API never
+    produces. This drives the real SDK loopback, create_valid_run and auth hook.
+    """
+    source = r'''
+import asyncio, io, json, logging, socket, sys, os
+from types import SimpleNamespace
+from uuid import UUID, uuid4
+def forbidden_network(*args, **kwargs):
+    raise AssertionError("NETWORK_NOT_ALLOWED")
+socket.socket.connect = forbidden_network
+denials = io.StringIO()
+handler = logging.StreamHandler(denials)
+logging.getLogger().addHandler(handler)
+logging.getLogger().setLevel(logging.INFO)
+from langgraph_api.auth.custom import normalize_user
+from langgraph_api.auth.middleware import ConditionalAuthenticationMiddleware
+from langgraph_api.models.run import create_valid_run
+from langgraph_api.route import ApiRoute
+from langgraph_api.utils import AuthContext, set_auth_ctx
+from langgraph_runtime_inmem.ops import Threads
+from starlette.applications import Starlette
+from starlette.responses import JSONResponse
+from langchain_core.messages import HumanMessage
+from deerflow.sophia.langgraph_auth import BUILDER_ASSISTANT_ID
+from deerflow.sophia.langgraph_client_auth import get_client
+sys.path.insert(0, os.environ["MEM00_RECORDED_INPUT_TEST_DIR"])
+from mem00_recorded_input_fixture import RecordedInputFixture
+import deerflow.agents.sophia_agent.middlewares.memory_context as memory_context
+from deerflow.sophia.memory_governance import owner_authority
+from deerflow.sophia.memory_governance import store as governance_store
+from deerflow.sophia.memory_governance.builder_provenance import HANDOFF_KEY, HANDOFF_RUN_KEY, issue_builder_handoff, verify_builder_run
+from deerflow.sophia.memory_governance.input_provenance import INPUT_PROOF_KEY, INPUT_RUN_KEY, issue_recorded_authenticated_input
+from deerflow.sophia.memory_governance.retained_admission import RetainedAdmission
+from deerflow.sophia.memory_governance.retained_context import ContextTransition
+# Explicit synthetic authority seams; SDK transport, create_valid_run carrier
+# normalization, the installed auth callback and handoff binding stay real.
+owner_authority.resolve_owner_authority = lambda owner: SimpleNamespace(user_id=owner, authority_state="governed")
+store = RecordedInputFixture()
+store.get_user_governance = lambda owner: SimpleNamespace(user_id=owner, user_revocation_epoch=0, user_catalog_generation=3)
+governance_store.configured_memory_store = lambda: store
+
+conn = SimpleNamespace(store={"threads": [], "runs": [], "assistants": [{"assistant_id": BUILDER_ASSISTANT_ID,
+    "graph_id": "sophia_builder", "config": {}, "context": {}, "metadata": {"created_by": "system"}}]})
+async def endpoint(request):
+    run = await create_valid_run(conn, request.path_params["tid"], await request.json(), {})
+    return JSONResponse({"run_id": str(run["run_id"]), "thread_id": str(run["thread_id"])})
+class MustNotReauthenticate:
+    async def authenticate(self, request):
+        raise AssertionError("LOOPBACK_MUST_PRESERVE_PARENT_AUTH")
+app = ConditionalAuthenticationMiddleware(Starlette(routes=[ApiRoute("/threads/{tid}/runs", endpoint, methods=["POST"])]), backend=MustNotReauthenticate())
+sys.modules["langgraph_api.server"] = SimpleNamespace(app=app)
+
+def status_of(exc):
+    return getattr(getattr(exc, "response", None), "status_code", None)
+
+async def main():
+    set_auth_ctx(normalize_user({"identity": "owner-a"}), ["sophia:user"])
+    from langgraph_api.asyncio import set_event_loop
+    set_event_loop(asyncio.get_running_loop())
+    parent_thread, parent_run = str(uuid4()), str(uuid4())
+    session, action = store.record("owner-a", parent_thread, "Build a simple synthetic table")
+    recorded, input_proof = issue_recorded_authenticated_input(owner_id="owner-a", session_id=session, thread_id=parent_thread,
+        run_id=parent_run, wire_input={"messages": [{"role": "user", "content": action["content"]}]}, source_action=action, store=store)
+    guard = SimpleNamespace(enabled=True, context_id=parent_thread, owner="owner-a", scope="life", admission=object(), check=lambda: None,
+        _readmit=lambda context: RetainedAdmission(ContextTransition("continue", "empty", 0), context, (), uuid4()),
+        config={INPUT_PROOF_KEY: input_proof, INPUT_RUN_KEY: parent_run})
+    memory_context.active_builder_parent_guard = lambda *_: guard
+    messages = [HumanMessage(**recorded["messages"][0])]
+    client = get_client(url=None)
+    try:
+        async def dispatch(child, proof, wire):
+            # The request dispatch_independent_builder sends. Production names
+            # the graph; without a graph registry the same assistant id is used.
+            return await client.runs.create(thread_id=child, assistant_id=str(BUILDER_ASSISTANT_ID), input=wire,
+                config={"configurable": {"user_id": "owner-a", "thread_id": child, HANDOFF_KEY: proof}}, stream_resumable=True)
+        child = str(uuid4())
+        wire, proof = issue_builder_handoff(guard=guard, owner_id="owner-a", parent_thread_id=parent_thread,
+            child_thread_id=child, source_messages=messages)
+        [row async for row in await Threads.put(conn, UUID(child), metadata={}, if_exists="raise")]
+        result = await dispatch(child, proof, wire)
+        run = conn.store["runs"][-1]
+        cfg, carried = run["kwargs"]["config"]["configurable"], run["kwargs"]["context"]
+        assert cfg[HANDOFF_KEY] is None and carried.get(HANDOFF_KEY) is None, "HANDOFF_SURVIVED_ADMISSION"
+        assert verify_builder_run(owner_id="owner-a", child_thread_id=child, run_id=result["run_id"],
+            state=run["kwargs"]["input"], proof=cfg[HANDOFF_RUN_KEY]) is not None
+        assert cfg[INPUT_RUN_KEY] == result["run_id"] and len(store.builder_bindings) == 1
+        # The same handoff can bind exactly one run.
+        try:
+            await dispatch(child, proof, wire)
+            raise AssertionError("HANDOFF_REPLAY_SUCCEEDED")
+        except AssertionError:
+            raise
+        except Exception as exc:
+            assert status_of(exc) == 403
+        # A handoff whose seal does not verify is refused, whichever carrier holds it.
+        other = str(uuid4())
+        [row async for row in await Threads.put(conn, UUID(other), metadata={}, if_exists="raise")]
+        forged = {**proof, "seal": "hmac-sha256:builder-handoff-seal:" + "0" * 64}
+        for carrier in ("config", "context"):
+            body = {"configurable": {"user_id": "owner-a", "thread_id": other, HANDOFF_KEY: forged}}
+            kwargs = {"config": body} if carrier == "config" else {"context": body["configurable"]}
+            try:
+                await client.runs.create(thread_id=other, assistant_id=str(BUILDER_ASSISTANT_ID), input=wire, **kwargs)
+                raise AssertionError("FORGED_HANDOFF_SUCCEEDED")
+            except AssertionError:
+                raise
+            except Exception as exc:
+                assert status_of(exc) == 403
+        assert len(conn.store["runs"]) == 1 and len(store.builder_bindings) == 1
+    finally:
+        await client.aclose()
+        AuthContext.set(None)
+    lines = [line for line in denials.getvalue().splitlines() if "memory_admission_denied " in line]
+    logged = [json.loads(line.split("memory_admission_denied ", 1)[1]) for line in lines]
+    assert [event["stage"] for event in logged] == ["admission", "admission", "admission"], logged
+    assert not any(raw in line for line in lines for raw in (child, other, "owner-a")), "RAW_ID_LOGGED"
+    print(json.dumps({"builder_bound_through_api": True, "replay_refused": True, "forged_refused": 2, "network_calls": 0}))
+asyncio.run(main())
+'''
+    policy = Path(__file__).resolve().parents[1] / "packages/harness/deerflow/sophia/langgraph_auth.py"
+    env = {**os.environ, "DATABASE_URI": ":memory:", "REDIS_URI": "redis://127.0.0.1:1",
+           "LANGGRAPH_AUTH_TYPE": "noop", "LANGGRAPH_AUTH": json.dumps({"path": str(policy) + ":auth", "disable_studio_auth": True}),
+           "SOPHIA_MEMORY_REFERENCE_HMAC_SECRET": "synthetic-framework-key-" * 3,
+           "SOPHIA_MEMORY_COHORT_PRINCIPALS": "owner-a", "SOPHIA_VOICE_LAB_TEST_PRINCIPAL": "voice-lab-test",
+           "LANGSMITH_API_KEY": "MUST_NOT_FORWARD", "LANGGRAPH_RUNTIME_EDITION": "inmem",
+           "MEM00_RECORDED_INPUT_TEST_DIR": str(Path(__file__).resolve().parent)}
+    for name in ("CANDIDATE_LEDGER_WRITE", "CANDIDATE_LEDGER_READ", "CANONICAL_POOL_READ", "PROVIDER_PROJECTION", "GOVERNED_RUNTIME_READ"):
+        env["SOPHIA_MEMORY_" + name] = "true"
+    result = subprocess.run([sys.executable, "-c", source], cwd=tmp_path, env=env, capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, (result.stdout + result.stderr)[-6000:]
+    receipt = json.loads(result.stdout.splitlines()[-1])
+    assert receipt == {"builder_bound_through_api": True, "replay_refused": True, "forged_refused": 2, "network_calls": 0}
