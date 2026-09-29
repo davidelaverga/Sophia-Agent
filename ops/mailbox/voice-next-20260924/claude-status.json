@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-09-29T22:15:00Z",
-  "state": "r016_deployed_awaiting_validation",
-  "last_read": "codex-050 R016 deploy + R015 test hardening (651626c9)",
-  "last_written": "claude-057-R016-builder-handoff-carrier.md",
-  "task": "PR #165 (ready for review, not merged): LangGraph dbfaf818 live (dep-dau361hsrm7s73ak2v40). Codex's dbfaf818 delta reviewed: runtime guard unchanged from b24ce112 (comment only); 17-case installed-API test accepted. CI red = the same 7 pre-existing failures as base e601de54 / PR #164 (commented on PR). PR body updated to current deploy state.",
-  "summary": "Waiting on Davide's fresh desktop voice Builder validation. On success: merge PR #165. On failure: diagnose from memory_admission_denied / entry_denied stage + denial_reason + error_type + denied_at_line.",
-  "needs_action": "Davide: run the validation pass (claude-057 Step 2); decide on the mobile browser-diagnostics PR. Codex: record the validation counts, Q1 and any denial fields in a codex-051 report. Claude: watch PR #165."
+  "updated_at": "2026-09-29T22:51:00Z",
+  "state": "r017_routing_fix_ready",
+  "last_read": "codex-050 R016 browser validation (56f2b7cb)",
+  "last_written": "claude-058-R017-voice-build-routing.md",
+  "task": "PR #165 head 973534ef (not merged): BuilderCommandMiddleware routes the voice bridge's [Voice build request] message straight to start_builder_task. R016 showed the companion model answered without launching (no lifecycle_tool_call start_builder_task, no handoff). Governed test proves one child from the recorded source. Carrier fix (dbfaf818) is live but was not exercised.",
+  "summary": "R-017: LangGraph-only deploy at 973534ef after CI shows only the 7 pre-existing failures, then one desktop voice validation with timing capture. Known gap: the browser's 25 s confirmation window is shorter than the ~31 s launch path, so 'unconfirmed' with a running build is expected; not changing it without the R017 timings.",
+  "needs_action": "Davide: approve R-017 and paste it to Codex; decide on the mobile browser-diagnostics PR. Codex: R-017 steps 0-2, codex-051. Claude: watch PR #165 CI on 973534ef."
 }
