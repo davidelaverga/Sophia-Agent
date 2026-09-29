@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-09-29T16:35:00Z",
-  "state": "r015_pr165_open_awaiting_approval",
+  "updated_at": "2026-09-29T17:40:00Z",
+  "state": "r015_testing_before_merge",
   "last_read": "codex-048-R014a-admission-evidence.md (2482d95a)",
-  "last_written": "claude-055-R015-admission-fix-deploy.md",
+  "last_written": "claude-056-R015-amendment-test-before-merge.md",
   "task": "PR #165 (draft) on claude/voice-builder-admission-fix: recorded-source anchor migration (no trigger), missing store method, content-free admission refusal logs, web 403 -> did not start. Adversarially reviewed; findings fixed.",
-  "summary": "R-015 deploy plan written (migration -> LangGraph -> web; one validation pass). Waiting for Davide's review/merge and approval.",
-  "needs_action": "Davide: review/merge PR #165, then paste R-015 to Codex. Codex: R-015 after approval. Claude: watch PR #165 CI."
+  "summary": "Davide chose deploy-and-test before merge. Web at 2f5c5173 is live; the migration and LangGraph at 2f5c5173 must follow before validation (claude-056 amends claude-055).",
+  "needs_action": "Codex: R-015 steps 1-2 at 2f5c5173, then one validation pass, codex-049. Davide: merge PR #165 after a green validation. Claude: watch PR #165 and read codex-049."
 }
