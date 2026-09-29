@@ -1,0 +1,25 @@
+# codex-050 — R016 reviewed LangGraph deployment
+- Davide authorized checking Codex automatic review, fixing findings if present, and deploying the latest clear commit for his next test.
+- PR #165 remains unmerged; latest source is `dbfaf818dcb26e14a06ad3b6191b694675d0cf1e` on `claude/voice-builder-admission-fix`.
+- Automatic Codex review on this exact head completed 2026-09-29T21:32:30Z, no findings, bot +1, no unresolved threads; no code fix was needed.
+- Delta from previously served `2f5c5173`: backend handoff carrier guard plus tests/comments/docs only; migration and web are already in place.
+- Scope: sophia-langgraph only, specific-commit deploy; configured branch remains `codex/sophia-observability-v1`, autodeploy off, no Blueprint sync or settings changes.
+- Original rollback deployment: `dep-datv1pgu01pc73akueu0`, source `2f5c5173b442199d26f528d2ec7793b3967144a0`; preflight /ok=200 and /version matched.
+- First attempt `dep-dau30m893c1s73ch9um0` at 21:40:41Z was canceled after full CI failure surfaced; Render status Canceled (1m36s).
+- Public endpoints subsequently returned 502 during the transition. A transient /version read also reported the new commit before recovery.
+- Recovery specific-commit deployment `dep-dau338h7lnhs73f7ujpg` at 21:46:11Z succeeded (3m17s); /ok=200 and /version=2f5c5173 verified before resuming.
+- Final deployment `dep-dau361hsrm7s73ak2v40`, started 2026-09-29T21:52:06Z, succeeded/Live (2m25s); /ok=200 and /version=200 with exact `dbfaf818dcb26e14a06ad3b6191b694675d0cf1e` read back.
+- CI run `36633541441`: 7 failed, 7330 passed, 168 skipped; architecture gate, Memory Highlights E2E and backend lint passed.
+- Exact-head CI passed all 20 framework tests (17 isolated Builder cases plus 3 existing); recorded-source anchor: 17 passed, 1 local PostgreSQL contract skipped.
+- The same seven failures, including identical deck assertions, are present in historical PR #164 CI run `36497854088`, job `109181571619`, head `45948201`.
+- Failing worker/deck tests, implementations, vendor substrate, dependency lock and shared fixtures are unchanged through 45948201/e601de54/2f5c5173/dbfaf818.
+- Five worker failures reproduced locally by giving only the worker module a synthetic monotonic clock of 100: 5 failed/8 passed; normal clock: 13 passed.
+- Existing timing dependency: initial expiry stamp is zero, but expiry requires a monotonic difference >=3600; fresh CI hosts can skip initial expiry. Production retention code was not changed.
+- Two deck cases pass locally (2 passed); one fixture installs its font only in the macOS path that Linux does not search. The second precise font/geometry cause remains unresolved.
+- Review-clear scoped deployment resumed after confirming the CI failures predate this change; this is not a claim that full CI is green.
+- Web, gateway, voice, schema/data, environment/settings, Lab, memory and A-014b retention actions: unchanged by this task.
+- Optional Step 0 historical denial-marker search: not performed.
+- Davide's fresh desktop voice validation: pending; no agent research request, correction, typed control or synthetic Lab run initiated.
+- After his test: record receipt/handoff/child-binding/build/artifact counts and Q1; stop at first refusal and report only safe stage/denial_reason/error_type/denied_at_line.
+- Verdict: reviewed LangGraph deployment verified; hosted Builder completion remains unverified until Davide's fresh session.
+- [Current CI](https://github.com/davidelaverga/Sophia-Agent/actions/runs/36633541441/job/109628448547); [historical same-failure CI](https://github.com/davidelaverga/Sophia-Agent/actions/runs/36497854088/job/109181571619).
