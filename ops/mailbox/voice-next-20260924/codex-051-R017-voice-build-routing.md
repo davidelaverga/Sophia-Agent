@@ -1,0 +1,21 @@
+# codex-051 — R017 voice build routing
+- Scope approved by Davide: claude-058, LangGraph only at `973534efa3ec48a00d919501c6e0088d84e3593a`; specific-commit deployment, no merge or Blueprint sync.
+- Step 0 optional R016 tool-name search: not performed. No inference about which substitute tool ran is added here.
+- PR #165 head confirmed exactly `973534ef`, open/unmerged. Automatic Codex review completed 2026-09-29T22:57:47Z; no unresolved review threads.
+- Exact-head CI run `36641922846`, backend job `109655932625`: completed, 7 failed / 7345 passed / 168 skipped; the failed test-name set is exactly the seven known baseline failures, no extras.
+- Baseline failures: five memory-governance worker timing tests and two deck-native lint/font tests, identical names and assertions to R016 CI. Architecture gate, Memory Highlights E2E and backend lint passed.
+- Gate met before deployment: full CI is not green, but the explicitly approved exact-known-seven condition is satisfied.
+- Preflight: /ok=200; /version=200, exact `dbfaf818dcb26e14a06ad3b6191b694675d0cf1e`; live rollback target `dep-dau361hsrm7s73ak2v40`.
+- Branch configuration read back: `codex/sophia-observability-v1`; Auto-Deploy Off. Neither setting was edited.
+- One approved deployment started 2026-10-01T21:48:04Z (23:48:04 Rome): `dep-davda567bikc73dk7a0g`, source `973534ef`; succeeded/Live, duration 3m41s.
+- Readback at 2026-10-01T21:52:11Z: /ok=200; /version=200, exact `973534efa3ec48a00d919501c6e0088d84e3593a`. No rollback or second deployment attempt.
+- Rollback, only on failure/abandonment: specific-commit LangGraph deployment at exact dbfaf818; no older commit and no deployment retry.
+- Gateway, voice, web, migration, settings, Lab, memory and retention actions: unchanged by R017.
+- Step 2: awaiting Davide's one fresh desktop voice session; no agent request, repeat attempt, correction or typed control initiated.
+- Counts pending: accepted source receipt / routed log / lifecycle start_builder_task / handoff / child binding / build registry / Markdown Builder artifact / UI progress.
+- Q1 pending on the new thread: row, version, sequence, created-at, epoch, thread and metadata equality; do not reuse the previous session's pass.
+- Timing pending: source-actions POST; routed BuilderCommand; handoff accepted_at; child POST /runs; first internal/builder-progress; browser confirmation if observable.
+- An unconfirmed voice response at 25s followed by an actual running build is expected by the runbook; no timeout change is authorized.
+- Stop at first failure. Report only safe stage/denial_reason/error_type/denied_at_line or ToolMessage status/safe code. The user's no-content rule overrides the runbook's request for a first sentence; no ToolMessage sentence will be printed.
+- Verdict: CI_GATE_AND_DEPLOYMENT_VERIFIED; SUPERVISED_VALIDATION_PENDING. This is not a hosted Builder/artifact completion claim.
+- [Exact-head CI](https://github.com/davidelaverga/Sophia-Agent/actions/runs/36641922846/job/109655932625); [deployment](https://dashboard.render.com/web/srv-d7be5s9r0fns7397l4fg/deploys/dep-davda567bikc73dk7a0g).
