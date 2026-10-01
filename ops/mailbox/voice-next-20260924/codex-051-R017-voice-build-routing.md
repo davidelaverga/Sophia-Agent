@@ -7,8 +7,8 @@
 - Gate met before deployment: full CI is not green, but the explicitly approved exact-known-seven condition is satisfied.
 - Preflight: /ok=200; /version=200, exact `dbfaf818dcb26e14a06ad3b6191b694675d0cf1e`; live rollback target `dep-dau361hsrm7s73ak2v40`.
 - Branch configuration read back: `codex/sophia-observability-v1`; Auto-Deploy Off. Neither setting was edited.
-- One approved deployment started 2026-10-01T21:48:04Z (23:48:04 Rome): `dep-davda567bikc73dk7a0g`, source `973534ef`; succeeded/Live, duration 3m41s.
-- Readback at 2026-10-01T21:52:11Z: /ok=200; /version=200, exact `973534efa3ec48a00d919501c6e0088d84e3593a`. No rollback or second deployment attempt.
+- Original R017 deployment started 2026-10-01T21:48:04Z (23:48:04 Rome): `dep-davda567bikc73dk7a0g`, source `973534ef`; succeeded/Live, duration 3m41s.
+- Readback at 2026-10-01T21:52:11Z: /ok=200; /version=200, exact `973534efa3ec48a00d919501c6e0088d84e3593a`. No rollback or second attempt in the original R017 deployment.
 - Rollback, only on failure/abandonment: specific-commit LangGraph deployment at exact dbfaf818; no older commit and no deployment retry.
 - Gateway, voice, web, migration, settings, Lab, memory and retention actions: unchanged by R017.
 - Step 2: awaiting Davide's one fresh desktop voice session; no agent request, repeat attempt, correction or typed control initiated.
@@ -19,3 +19,9 @@
 - Stop at first failure. Report only safe stage/denial_reason/error_type/denied_at_line or ToolMessage status/safe code. The user's no-content rule overrides the runbook's request for a first sentence; no ToolMessage sentence will be printed.
 - Verdict: CI_GATE_AND_DEPLOYMENT_VERIFIED; SUPERVISED_VALIDATION_PENDING. This is not a hosted Builder/artifact completion claim.
 - [Exact-head CI](https://github.com/davidelaverga/Sophia-Agent/actions/runs/36641922846/job/109655932625); [deployment](https://dashboard.render.com/web/srv-d7be5s9r0fns7397l4fg/deploys/dep-davda567bikc73dk7a0g).
+- Follow-up: Davide explicitly requested a fresh deployment without merging; LangGraph only, same reviewed commit, on 2026-10-02 Rome time.
+- Review/CI rechecked before action: exact PR #165 head 973534ef; review completed, zero unresolved threads; exact same 7 failed / 7345 passed / 168 skipped, no new failures.
+- Fresh specific-commit deploy: dep-dave5v3bc2fs73chvgc0, started 2026-10-01T22:47:24Z (Oct 2 00:47:24 Rome); succeeded/Live, duration 58.9s. No retry or rollback.
+- Fresh health readback 2026-10-01T22:49:36Z–22:49:37Z: /ok=200, ok=true; /version=200, exact 973534efa3ec48a00d919501c6e0088d84e3593a.
+- Previous live deployment recorded: dep-davda567bikc73dk7a0g at the same SHA; R017 code rollback remains dbfaf818. Configured branch and Auto-Deploy Off preserved; no Blueprint sync.
+- PR #165 remains unmerged; gateway, voice, web, migration, settings, Lab, memory and retention untouched. Supervised validation remains pending; no product research task initiated.
