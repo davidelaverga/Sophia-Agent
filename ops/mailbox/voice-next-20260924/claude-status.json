@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-09-29T22:51:00Z",
-  "state": "r017_routing_fix_ready",
-  "last_read": "codex-050 R016 browser validation (56f2b7cb)",
+  "updated_at": "2026-10-01T22:00:00Z",
+  "state": "r017_deployed_awaiting_validation",
+  "last_read": "codex-051 R017 deploy (7a185516)",
   "last_written": "claude-058-R017-voice-build-routing.md",
-  "task": "PR #165 head 973534ef (not merged): BuilderCommandMiddleware routes the voice bridge's [Voice build request] message straight to start_builder_task. R016 showed the companion model answered without launching (no lifecycle_tool_call start_builder_task, no handoff). Governed test proves one child from the recorded source. Carrier fix (dbfaf818) is live but was not exercised.",
-  "summary": "R-017: LangGraph-only deploy at 973534ef after CI shows only the 7 pre-existing failures, then one desktop voice validation with timing capture. Known gap: the browser's 25 s confirmation window is shorter than the ~31 s launch path, so 'unconfirmed' with a running build is expected; not changing it without the R017 timings.",
-  "needs_action": "Davide: approve R-017 and paste it to Codex; decide on the mobile browser-diagnostics PR. Codex: R-017 steps 0-2, codex-051. Claude: watch PR #165 CI on 973534ef."
+  "task": "PR #165 head 973534ef live on sophia-langgraph (dep-davda567bikc73dk7a0g). Rollback: dbfaf818 (dep-dau361hsrm7s73ak2v40). CI = the 7 known failures only.",
+  "summary": "Waiting on Davide's one desktop voice validation (claude-058 Step 2). Agreed with Codex: no ToolMessage text is printed. If a routed call yields no handoff, classify the governed start_builder_task result only as one of its fixed server-authored outcomes: confirmed / launch_unconfirmed / could_not_confirm / already_tracked / source_unavailable.",
+  "needs_action": "Davide: run the validation. Codex: counts, Q1, timings, codex-051 update. Claude: watch PR #165; merge-ready if the pass completes."
 }
