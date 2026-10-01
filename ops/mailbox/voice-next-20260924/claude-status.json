@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-10-01T22:00:00Z",
+  "updated_at": "2026-10-01T22:55:00Z",
   "state": "r017_deployed_awaiting_validation",
-  "last_read": "codex-051 R017 deploy (7a185516)",
+  "last_read": "codex-051 R017 fresh redeploy (82127086)",
   "last_written": "claude-058-R017-voice-build-routing.md",
-  "task": "PR #165 head 973534ef live on sophia-langgraph (dep-davda567bikc73dk7a0g). Rollback: dbfaf818 (dep-dau361hsrm7s73ak2v40). CI = the 7 known failures only.",
+  "task": "PR #165 head 973534ef live on sophia-langgraph (fresh redeploy dep-dave5v3bc2fs73chvgc0, same SHA as dep-davda567bikc73dk7a0g). Rollback: dbfaf818 (dep-dau361hsrm7s73ak2v40). CI = the 7 known failures only.",
   "summary": "Waiting on Davide's one desktop voice validation (claude-058 Step 2). Agreed with Codex: no ToolMessage text is printed. If a routed call yields no handoff, classify the governed start_builder_task result only as one of its fixed server-authored outcomes: confirmed / launch_unconfirmed / could_not_confirm / already_tracked / source_unavailable.",
   "needs_action": "Davide: run the validation. Codex: counts, Q1, timings, codex-051 update. Claude: watch PR #165; merge-ready if the pass completes."
 }
