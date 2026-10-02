@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-10-02T22:55:00Z",
+  "updated_at": "2026-10-02T23:05:00Z",
   "state": "r018_correction_guard_ready",
   "last_read": "codex-051 R017 desktop validation (f340a4d8)",
   "last_written": "claude-059-R018-voice-correction-guard.md",
-  "task": "PR #165 head 8dd99150 (not merged). Web: correction guard + diagnostics (603e6136..adfad44f, four Codex-review fixes). DB: new forward migration 2026_10_02_mem00_recorded_source_chronology.sql (Codex P1: chronology around recorded rows). LangGraph unchanged at 973534ef.",
-  "summary": "R-018: Step 0 apply the chronology migration (MD5 before/after, rollback = 2026_09_29 function block); Step 1 CI gate (only the 7 known failures) then fresh web build of 8dd99150; Step 2 one desktop validation with outcome and context-state lines.",
-  "needs_action": "Davide: approve R-018 (migration + web) and paste it to Codex; decide on the mobile browser-diagnostics PR. Codex: R-018, codex-052. Claude: watch PR #165 CI on 8dd99150 (memory-highlights was re-run once on adfad44f after a dev-server font failure)."
+  "task": "PR #165 head bd5f1bb4 (not merged). Web: correction guard + diagnostics (603e6136..adfad44f, four Codex-review fixes). DB: new forward migration 2026_10_02_mem00_recorded_source_chronology.sql (two Codex P1s: chronology around recorded rows, for stored and new rows). LangGraph unchanged at 973534ef.",
+  "summary": "R-018: Step 0 apply the chronology migration (MD5 before/after, rollback = 2026_09_29 function block); Step 1 CI gate (only the 7 known failures) then fresh web build of bd5f1bb4; Step 2 one desktop validation with outcome and context-state lines.",
+  "needs_action": "Davide: approve R-018 (migration + web) and paste it to Codex; decide on the mobile browser-diagnostics PR. Codex: R-018, codex-052. Claude: watch PR #165 CI on bd5f1bb4 (memory-highlights was re-run once on adfad44f after a dev-server font failure)."
 }
