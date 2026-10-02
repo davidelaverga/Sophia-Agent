@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-10-02T22:20:00Z",
+  "updated_at": "2026-10-02T22:30:00Z",
   "state": "r018_correction_guard_ready",
   "last_read": "codex-051 R017 desktop validation (f340a4d8)",
   "last_written": "claude-059-R018-voice-correction-guard.md",
-  "task": "PR #165 head 12d4936f (not merged). R017 failed because Gemini called update_async_task before any build. The bridge forwarded a correction, so 0 start messages reached the companion and the 973534ef route never ran. 603e6136 + 12d4936f (web only) refuses corrections with no target (no_build_to_change) and adds content-free bridge outcome, reason:send_error and AudioContext state diagnostics.",
-  "summary": "R-018: CI gate (only the 7 known failures), then a fresh web build of 12d4936f. LangGraph stays at 973534ef. Then one desktop validation capturing the outcome and context-state console lines. Audio loss cause still unknown; this change only adds observation.",
-  "needs_action": "Davide: approve R-018 and paste it to Codex; decide on the mobile browser-diagnostics PR (12d4936f covers the bridge outcome part). Codex: R-018, codex-052. Claude: watch PR #165 CI on 12d4936f."
+  "task": "PR #165 head 9e4b024c (not merged). R017 failed because Gemini called update_async_task before any build. The bridge forwarded a correction, so 0 start messages reached the companion and the 973534ef route never ran. 603e6136, 12d4936f and 9e4b024c (web only) refuses corrections with no target (no_build_to_change) and adds content-free bridge outcome, reason:send_error and AudioContext state diagnostics.",
+  "summary": "R-018: CI gate (only the 7 known failures), then a fresh web build of 9e4b024c. LangGraph stays at 973534ef. Then one desktop validation capturing the outcome and context-state console lines. Audio loss cause still unknown; this change only adds observation.",
+  "needs_action": "Davide: approve R-018 and paste it to Codex; decide on the mobile browser-diagnostics PR (9e4b024c covers the bridge outcome part). Codex: R-018, codex-052. Claude: watch PR #165 CI on 9e4b024c."
 }

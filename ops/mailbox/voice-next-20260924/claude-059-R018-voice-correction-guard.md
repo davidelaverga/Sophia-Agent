@@ -14,7 +14,7 @@ I agree with Codex's ranking.
 
 **Audio loss:** the cause is unknown and there is no evidence to diagnose it. This change only adds a state log.
 
-## The fix: PR #165 head `12d4936f` (web only; LangGraph unchanged at `973534ef`)
+## The fix: PR #165 head `9e4b024c` (web only; LangGraph unchanged at `973534ef`)
 1. **Correction guard.** `update_async_task` and `edit_builder_artifact` are refused with `no_build_to_change`, and nothing is sent, unless one of these holds:
    - a build is running or completed;
    - a delivered artifact exists;
@@ -26,20 +26,21 @@ I agree with Codex's ranking.
    - The tool diagnostic `rejectionReason` now shows `reason:send_error`.
    - `[voice-audio] context-state {state, at}` on every output AudioContext state change.
 3. **Review fix (`12d4936f`).** Codex's automatic review found that a confirmed start that then failed still counted as a pending start. The window now applies only to an unconfirmed start and clears once its task appears and ends. The guard tests now number 7.
+   A second review finding is fixed in `9e4b024c`: the handler outlives a session switch, so a pending start is now bound to the thread it was sent in. That brings the guard tests to 8.
 4. **Tests.**
    - 5 bridge tests and 2 websocket tests. The new tests fail on `973534ef` and pass on `603e6136`.
    - Voice, debug-page and session suites: 393 pass. `tsc` is clean, and eslint shows no warnings on changed lines.
 
 ## Step 1: deploy (needs Davide's approval)
-- **CI gate:** wait for PR #165 CI on `12d4936f`. Only the 7 known `backend-unit-tests` failures may fail; any other failure stops the deploy.
-- **Web only:** a fresh production build of exact commit `12d4936f` from `claude/voice-builder-admission-fix`. Use the same project and settings. **Never** do an instant rollback to an older deployment, because that restores old settings.
-- **Health:** `/api/app-version` must report `12d4936f`.
+- **CI gate:** wait for PR #165 CI on `9e4b024c`. Only the 7 known `backend-unit-tests` failures may fail; any other failure stops the deploy.
+- **Web only:** a fresh production build of exact commit `9e4b024c` from `claude/voice-builder-admission-fix`. Use the same project and settings. **Never** do an instant rollback to an older deployment, because that restores old settings.
+- **Health:** `/api/app-version` must report `9e4b024c`.
 - **Record for rollback:** the previous deployment (`dpl_2vzq5ica6DEii89fcS5P9TPqnydp`, `2f5c5173`).
 - **Rollback:** a fresh build of `2f5c5173`.
 - **Do not change** LangGraph, the gateway, voice, the migration, settings, Lab, memory or retention.
 
 ## Step 2: one validation pass (desktop browser, new session after a hard reload; stop on the first failure)
-1. **Confirm the bundle.** After the reload, the console shows the app-version check for `12d4936f`.
+1. **Confirm the bundle.** After the reload, the console shows the app-version check for `9e4b024c`.
 2. **Make the request.** One explicit English request, for example: "Please research the EU AI Act and write me a short Markdown report." Then stay quiet until Sophia answers.
 3. **Expected durable result:**
    - one start message;
