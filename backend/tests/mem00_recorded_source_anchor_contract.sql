@@ -97,6 +97,43 @@ BEGIN
             (SELECT jsonb_object_agg(id, sequence) FROM public.sophia_session_messages WHERE session_id = 'anchor-session');
     END IF;
 
+    -- 3b. A new row keeps its side of an omitted recorded row by creation time:
+    --     one created after it follows it. (A missing created_at means now(),
+    --     which is after every earlier intake; this file runs in one
+    --     transaction, so it passes an explicit later time instead.)
+    SELECT message_revision INTO revision FROM public.sophia_sessions WHERE id = 'anchor-session';
+    result := public.sophia_replace_session_messages('anchor-owner', 'anchor-session', revision, jsonb_build_array(
+        jsonb_build_object('id', 'anchor-v1', 'message_id', 'voice-user-1', 'thread_id', thread_a, 'role', 'user',
+            'content', 'Research batteries.', 'source', 'voice', 'sequence', 1, 'created_at', '2026-09-28T23:49:30.123Z'),
+        jsonb_build_object('id', 'anchor-v5', 'message_id', 'voice-late-5', 'thread_id', thread_a, 'role', 'assistant',
+            'content', 'On it.', 'source', 'voice', 'sequence', 4,
+            'created_at', to_char(clock_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))));
+    -- Nothing stored after the recorded row precedes anchor-v5 here, so only
+    -- its creation time can keep it after the recorded row (it would be 2).
+    IF NOT ((SELECT sequence FROM public.sophia_session_messages WHERE id = 'anchor-v1') < 3
+            AND (SELECT sequence FROM public.sophia_session_messages WHERE id = 'anchor-v5') > 3) THEN
+        RAISE EXCEPTION 'new or stored rows crossed an omitted recorded row: %',
+            (SELECT jsonb_object_agg(id, sequence) FROM public.sophia_session_messages WHERE session_id = 'anchor-session');
+    END IF;
+
+    -- 3c. A recorded row the snapshot lists orders it itself: a new row listed
+    --     before it stays before it, whatever its creation time.
+    SELECT message_revision INTO revision FROM public.sophia_sessions WHERE id = 'anchor-session';
+    result := public.sophia_replace_session_messages('anchor-owner', 'anchor-session', revision, jsonb_build_array(
+        jsonb_build_object('id', 'anchor-v1', 'message_id', 'voice-user-1', 'thread_id', thread_a, 'role', 'user',
+            'content', 'Research batteries.', 'source', 'voice', 'sequence', 1, 'created_at', '2026-09-28T23:49:30.123Z'),
+        jsonb_build_object('id', 'anchor-v6', 'message_id', 'voice-listed-6', 'thread_id', thread_a, 'role', 'user',
+            'content', 'Listed first.', 'source', 'voice', 'sequence', 2),
+        jsonb_build_object('id', '33333333-3333-4333-8333-333333333333', 'message_id', 'anchor-source-0001', 'thread_id', thread_a,
+            'role', 'user', 'content', 'ignored', 'sequence', 3),
+        jsonb_build_object('id', 'anchor-v3', 'message_id', 'voice-user-3', 'thread_id', thread_a, 'role', 'user',
+            'content', 'As a PDF.', 'source', 'voice', 'sequence', 4, 'created_at', '2026-09-28T23:49:40.001Z')));
+    IF (SELECT sequence FROM public.sophia_session_messages WHERE id = 'anchor-v6') >= 3
+       OR (SELECT sequence FROM public.sophia_session_messages WHERE id = 'anchor-v3') <= 3 THEN
+        RAISE EXCEPTION 'listed recorded row did not order the snapshot: %',
+            (SELECT jsonb_object_agg(id, sequence) FROM public.sophia_session_messages WHERE session_id = 'anchor-session');
+    END IF;
+
     -- 4. Voice rows ordered before the recorded row never take its sequence,
     --    and a reused message_id under another row id is ignored.
     SELECT message_revision INTO revision FROM public.sophia_sessions WHERE id = 'anchor-session';

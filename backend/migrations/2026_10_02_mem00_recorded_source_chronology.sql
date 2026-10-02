@@ -12,10 +12,13 @@
 -- extraction sort by.
 --
 -- Contract (in addition to 2026_09_29):
---   * A snapshot row that already exists in this session after a recorded
---     anchor is never renumbered before that anchor.
---   * Rows keep snapshot order among themselves; new rows follow the row before
---     them in the snapshot.
+--   * A recorded row present in the snapshot is an anchor for snapshot order,
+--     exactly as before: rows listed after it are placed after it.
+--   * For a recorded row the snapshot omits, every other row keeps its side:
+--     a row already stored after it stays after it (by stored sequence), and a
+--     new row created at or after it (created_at, defaulting to now()) goes
+--     after it.
+--   * Rows keep snapshot order among themselves.
 --   * Sessions without recorded rows are processed exactly as before.
 -- No row, receipt, trigger or version is modified by this migration.
 
@@ -51,6 +54,9 @@ DECLARE
     existing_sequences INTEGER[];
     existing_index INTEGER;
     anchor_floor INTEGER;
+    recorded_created_ats TIMESTAMPTZ[];
+    recorded_present BOOLEAN[];
+    item_created_at TIMESTAMPTZ;
 BEGIN
     SELECT message_revision
       INTO current_revision
@@ -78,8 +84,9 @@ BEGIN
     -- for the rest of the call.
     SELECT coalesce(array_agg(m.id ORDER BY m.sequence, m.id), '{}'),
            coalesce(array_agg(m.message_id ORDER BY m.sequence, m.id), '{}'),
-           coalesce(array_agg(m.sequence ORDER BY m.sequence, m.id), '{}')
-      INTO recorded_ids, recorded_message_ids, recorded_sequences
+           coalesce(array_agg(m.sequence ORDER BY m.sequence, m.id), '{}'),
+           coalesce(array_agg(m.created_at ORDER BY m.sequence, m.id), '{}')
+      INTO recorded_ids, recorded_message_ids, recorded_sequences, recorded_created_ats
       FROM public.sophia_session_messages m
      WHERE m.session_id = p_session_id
        AND m.user_id = p_user_id
@@ -103,6 +110,18 @@ BEGIN
          WHERE m.session_id = p_session_id
            AND m.user_id = p_user_id
            AND NOT (m.id = ANY(recorded_ids));
+        -- Recorded rows the snapshot lists order it themselves; only omitted
+        -- ones need the side rule below.
+        recorded_present := array_fill(FALSE, ARRAY[cardinality(recorded_ids)]);
+        FOR snapshot_item IN SELECT value FROM jsonb_array_elements(COALESCE(p_messages, '[]'::JSONB)) LOOP
+            recorded_index := coalesce(
+                array_position(recorded_ids, snapshot_item->>'id'),
+                array_position(recorded_message_ids, snapshot_item->>'message_id')
+            );
+            IF recorded_index IS NOT NULL THEN
+                recorded_present[recorded_index] := TRUE;
+            END IF;
+        END LOOP;
         FOR snapshot_item IN SELECT value FROM jsonb_array_elements(COALESCE(p_messages, '[]'::JSONB)) LOOP
             recorded_index := coalesce(
                 array_position(recorded_ids, snapshot_item->>'id'),
@@ -112,14 +131,18 @@ BEGIN
                 cursor_sequence := GREATEST(cursor_sequence, recorded_sequences[recorded_index]);
                 CONTINUE;
             END IF;
-            -- A row that already followed a recorded anchor stays after it.
+            -- Keep this row on its side of every omitted recorded row: a stored
+            -- row by its stored sequence, a new row by its creation time.
             existing_index := array_position(existing_ids, snapshot_item->>'id');
-            IF existing_index IS NOT NULL THEN
-                SELECT max(anchor) INTO anchor_floor
-                  FROM unnest(recorded_sequences) AS anchor
-                 WHERE anchor < existing_sequences[existing_index];
-                cursor_sequence := GREATEST(cursor_sequence, coalesce(anchor_floor, 0));
-            END IF;
+            item_created_at := COALESCE((snapshot_item->>'created_at')::TIMESTAMPTZ, now());
+            SELECT max(anchor.seq) INTO anchor_floor
+              FROM unnest(recorded_sequences, recorded_created_ats, recorded_present) AS anchor(seq, created, present)
+             WHERE NOT anchor.present
+               AND CASE WHEN existing_index IS NOT NULL
+                        THEN anchor.seq < existing_sequences[existing_index]
+                        ELSE anchor.created <= item_created_at
+                   END;
+            cursor_sequence := GREATEST(cursor_sequence, coalesce(anchor_floor, 0));
             candidate := cursor_sequence + 1;
             WHILE candidate = ANY(recorded_sequences) LOOP
                 candidate := candidate + 1;
