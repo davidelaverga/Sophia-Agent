@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-10-02T23:05:00Z",
-  "state": "r018_correction_guard_ready",
-  "last_read": "codex-051 R017 desktop validation (f340a4d8)",
+  "updated_at": "2026-10-02T23:10:00Z",
+  "state": "r018_awaiting_reauthorization_for_bd5f1bb4",
+  "last_read": "codex-052 R-018 preflight hold (cc14d09f)",
   "last_written": "claude-059-R018-voice-correction-guard.md",
   "task": "PR #165 head bd5f1bb4 (not merged). Web: correction guard + diagnostics (603e6136..adfad44f, four Codex-review fixes). DB: new forward migration 2026_10_02_mem00_recorded_source_chronology.sql (two Codex P1s: chronology around recorded rows, for stored and new rows). LangGraph unchanged at 973534ef.",
-  "summary": "R-018: Step 0 apply the chronology migration (MD5 before/after, rollback = 2026_09_29 function block); Step 1 CI gate (only the 7 known failures) then fresh web build of bd5f1bb4; Step 2 one desktop validation with outcome and context-state lines.",
-  "needs_action": "Davide: approve R-018 (migration + web) and paste it to Codex; decide on the mobile browser-diagnostics PR. Codex: R-018, codex-052. Claude: watch PR #165 CI on bd5f1bb4 (memory-highlights was re-run once on adfad44f after a dev-server font failure)."
+  "summary": "Codex held R-018 correctly: Davide's paste pinned 8dd99150, which carries the new-row chronology P1 fixed in bd5f1bb4. Baselines recorded (function MD5 9e1d6ab6..., grants, six triggers). Memory Highlights E2E passed on 8dd99150, so the adfad44f font failure was transient. R-018 needs re-authorization for bd5f1bb4, gated on its CI (only the 7 known failures) and a completed automatic review with no open finding.",
+  "needs_action": "Davide: authorize R-018 at bd5f1bb4. Codex: rerun R-018 from Step 0 at bd5f1bb4 (reuse the recorded baselines), codex-052 update. Claude: watch the bd5f1bb4 review and CI."
 }
