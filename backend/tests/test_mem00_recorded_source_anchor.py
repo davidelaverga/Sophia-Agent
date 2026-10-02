@@ -37,6 +37,7 @@ from deerflow.sophia.memory_governance.store import MemoryGovernanceConflict, Me
 
 ROOT = Path(__file__).parents[1]
 MIGRATION = ROOT / "migrations/2026_09_29_mem00_recorded_source_anchor.sql"
+CHRONOLOGY_MIGRATION = ROOT / "migrations/2026_10_02_mem00_recorded_source_chronology.sql"
 CONTRACT = Path(__file__).parent / "mem00_recorded_source_anchor_contract.sql"
 HARNESS = ROOT / "packages/harness/deerflow"
 SECRET_CONTENT = "SYNTHETIC SECRET BRIEF 7f3c"
@@ -241,6 +242,35 @@ def test_migration_keeps_the_snapshot_rpc_contract_and_adds_only_service_role_gr
     for forbidden in ("create trigger", "drop trigger", "drop function", "disable trigger", "alter table",
                       "update public.sophia_session_messages", "delete from public.sophia_memory"):
         assert forbidden not in lowered
+
+
+def test_chronology_migration_only_replaces_the_snapshot_rpc():
+    """2026_10_02 keeps rows that followed a recorded anchor after it.
+
+    It must stay a drop-in replacement for the 2026_09_29 function: same
+    signature, owner, search_path and grants, no new grant and no trigger.
+    """
+    sql = CHRONOLOGY_MIGRATION.read_text()
+    previous = MIGRATION.read_text()
+    assert sql.lstrip().startswith("--") and "\nBEGIN;\n" in sql and sql.rstrip().endswith("COMMIT;")
+    signature = "CREATE OR REPLACE FUNCTION public.sophia_replace_session_messages(\n    p_user_id TEXT,\n    p_session_id TEXT,\n    p_expected_revision BIGINT,\n    p_messages JSONB\n)"
+    assert sql.count("CREATE OR REPLACE FUNCTION") == 1 and signature in sql
+    assert "SECURITY DEFINER\nSET search_path = public" in sql
+    assert sql.count("GRANT EXECUTE") == 1
+    assert "GRANT EXECUTE ON FUNCTION public.sophia_replace_session_messages(TEXT, TEXT, BIGINT, JSONB)\n    TO service_role;" in sql
+    assert "REVOKE ALL ON FUNCTION public.sophia_replace_session_messages(TEXT, TEXT, BIGINT, JSONB)\n    FROM PUBLIC, anon, authenticated;" in sql
+    lowered = sql.lower()
+    for forbidden in ("create trigger", "drop trigger", "drop function", "disable trigger", "alter table",
+                      "update public.sophia_session_messages", "delete from public.sophia_memory"):
+        assert forbidden not in lowered
+    # Only the planning of sessions with recorded rows changes: the write and
+    # revision statements are copied verbatim from 2026_09_29.
+    def body_from(text, marker):
+        return text[text.index(marker):text.index("$$;", text.index(marker))]
+
+    for unchanged in ("INSERT INTO public.sophia_session_messages (", "ON CONFLICT (id) DO UPDATE SET",
+                      "DELETE FROM public.sophia_session_messages existing", "next_revision := current_revision + 1;"):
+        assert body_from(sql, unchanged) == body_from(previous, unchanged)
 
 
 @pytest.mark.skipif(not os.getenv("SOPHIA_MEM00_TEST_DATABASE_URL"), reason="requires a disposable, fully migrated local PostgreSQL")

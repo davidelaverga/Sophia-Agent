@@ -2392,6 +2392,7 @@ Late in this wave, several commits landed over a red suite or with edits that si
 
 ### What Changed
 - Migration `2026_09_29_mem00_recorded_source_anchor.sql`: `sophia_replace_session_messages` never updates or deletes a row that has an intake receipt, ignores snapshot items reusing a recorded `message_id`, and keeps other rows off recorded sequences. Adds `sophia_memory_lookup_source_action_by_message`.
+- Migration `2026_10_02_mem00_recorded_source_chronology.sql` (follow-up, from Codex's automatic review): a row that already followed a recorded anchor stays after it even when a snapshot omits the anchor. Before this, the anchor at sequence 3 and a later row at 4 could become 3 and 2, reversing the order that transcript reads and memory extraction sort by.
 - LangGraph: implemented the missing `store.source_action_receipt_for_message` (pending-input recovery). `create_run` refusals log `memory_admission_denied` (stage, safe reason, keyed refs); the source recheck and pending recovery carry exact reasons; `memory.context.entry_denied` gains `denial_reason`.
 - Web: a governed 403 becomes `memory_source_send_refused`, and the voice bridge reports "did not start, do not retry".
 - LangGraph: the Builder handoff carrier check accepts the mirrored copy langgraph-api 0.8.1 makes (`configurable` ↔ `context`); copies must agree, and the sealed durable handoff stays the authority.

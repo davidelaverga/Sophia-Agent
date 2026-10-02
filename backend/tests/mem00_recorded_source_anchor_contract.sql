@@ -1,6 +1,7 @@
 -- Recorded source rows survive browser transcript snapshots (disposable PostgreSQL only).
 -- The harness installs every production migration, including
--- 2026_09_29_mem00_recorded_source_anchor.sql, runs this file inside a
+-- 2026_09_29_mem00_recorded_source_anchor.sql and
+-- 2026_10_02_mem00_recorded_source_chronology.sql, runs this file inside a
 -- transaction and rolls it back. No statement targets production.
 
 DO $test$
@@ -87,9 +88,13 @@ BEGIN
        OR (result->>'deleted_count')::int <> 1 THEN
         RAISE EXCEPTION 'omission handling wrong: %', result;
     END IF;
-    -- Unrecorded rows take their sequence from snapshot order.
-    IF (SELECT sequence FROM public.sophia_session_messages WHERE id = 'anchor-v3') <> 2 THEN
-        RAISE EXCEPTION 'unrecorded row sequence not taken from snapshot order';
+    -- Chronology survives the omission: anchor-v3 followed the recorded row
+    -- (sequence 4) and stays after it, even though the snapshot dropped both
+    -- the anchor and the row before it. anchor-v1 stays before it.
+    IF (SELECT sequence FROM public.sophia_session_messages WHERE id = 'anchor-v3') <= 3
+       OR (SELECT sequence FROM public.sophia_session_messages WHERE id = 'anchor-v1') >= 3 THEN
+        RAISE EXCEPTION 'chronology around the recorded row reversed: %',
+            (SELECT jsonb_object_agg(id, sequence) FROM public.sophia_session_messages WHERE session_id = 'anchor-session');
     END IF;
 
     -- 4. Voice rows ordered before the recorded row never take its sequence,
@@ -105,6 +110,8 @@ BEGIN
         jsonb_build_object('id', 'anchor-duplicate', 'message_id', 'anchor-source-0001', 'thread_id', thread_a, 'role', 'user',
             'content', 'shadow copy', 'source', 'text', 'sequence', 4, 'created_at', '2026-09-28T23:49:42.001Z')));
     IF (SELECT sequence FROM public.sophia_session_messages WHERE id = 'anchor-v4') = 3
+       OR (SELECT sequence FROM public.sophia_session_messages WHERE id = 'anchor-v4')
+          <= (SELECT sequence FROM public.sophia_session_messages WHERE id = 'anchor-v3')
        OR EXISTS (SELECT 1 FROM public.sophia_session_messages WHERE id = 'anchor-duplicate')
        OR (SELECT count(*) FROM public.sophia_session_messages WHERE session_id = 'anchor-session' AND message_id = 'anchor-source-0001') <> 1 THEN
         RAISE EXCEPTION 'sequence or message identity collided with the recorded row';
