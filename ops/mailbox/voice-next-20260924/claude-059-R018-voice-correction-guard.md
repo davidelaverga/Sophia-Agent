@@ -14,7 +14,7 @@ I agree with Codex's ranking.
 
 **Audio loss:** the cause is unknown and there is no evidence to diagnose it. This change only adds a state log.
 
-## The fix: PR #165 head `adfad44f` (web only; LangGraph unchanged at `973534ef`)
+## The fix: PR #165 head `8dd99150` (web plus one migration; LangGraph unchanged at `973534ef`)
 1. **Correction guard.** `update_async_task` and `edit_builder_artifact` are refused with `no_build_to_change`, and nothing is sent, unless one of these holds:
    - a build is running;
    - a delivered artifact exists;
@@ -32,16 +32,35 @@ I agree with Codex's ranking.
    - 5 bridge tests and 2 websocket tests. The new tests fail on `973534ef` and pass on `603e6136`.
    - Voice, debug-page and session suites: 393 pass. `tsc` is clean, and eslint shows no warnings on changed lines.
 
+## Step 0: transcript chronology migration (needs Davide's approval; independent of the web change)
+Codex's automatic review (P1) found that `2026_09_29` could reorder rows around a recorded source row. It happens when a snapshot omits that row together with an earlier row: anchor 3 and later row 4 become 3 and 2. The fix is the forward migration `backend/migrations/2026_10_02_mem00_recorded_source_chronology.sql`, in `8dd99150`. It replaces `sophia_replace_session_messages` only, with the same signature, owner, search_path and grants, and adds no trigger.
+
+**Local verification:**
+- the PostgreSQL contract passes;
+- 4×120 random snapshots keep every recorded row byte-identical and keep order around each anchor;
+- the previous function fails both checks;
+- rewriting 2,000 rows takes 318 ms, against 288 ms before.
+
+**Steps:**
+1. Record the current function definition's MD5. It should be the `9e1d6ab6…` value recorded in R-015.
+2. Apply the file once.
+3. Read back the new MD5, and the signature, SECURITY DEFINER, search_path and grants (`service_role` only).
+4. Confirm the trigger set on `sophia_session_messages` is unchanged.
+
+**Rollback:** re-apply only the `sophia_replace_session_messages` block and its REVOKE/GRANT from `2026_09_29_mem00_recorded_source_anchor.sql`.
+
+**Do not touch:** no row, receipt or version is modified.
+
 ## Step 1: deploy (needs Davide's approval)
-- **CI gate:** wait for PR #165 CI on `adfad44f`. Only the 7 known `backend-unit-tests` failures may fail; any other failure stops the deploy.
-- **Web only:** a fresh production build of exact commit `adfad44f` from `claude/voice-builder-admission-fix`. Use the same project and settings. **Never** do an instant rollback to an older deployment, because that restores old settings.
-- **Health:** `/api/app-version` must report `adfad44f`.
+- **CI gate:** wait for PR #165 CI on `8dd99150`. Only the 7 known `backend-unit-tests` failures may fail; any other failure stops the deploy.
+- **Web only:** a fresh production build of exact commit `8dd99150` from `claude/voice-builder-admission-fix`. Use the same project and settings. **Never** do an instant rollback to an older deployment, because that restores old settings.
+- **Health:** `/api/app-version` must report `8dd99150`.
 - **Record for rollback:** the previous deployment (`dpl_2vzq5ica6DEii89fcS5P9TPqnydp`, `2f5c5173`).
 - **Rollback:** a fresh build of `2f5c5173`.
 - **Do not change** LangGraph, the gateway, voice, the migration, settings, Lab, memory or retention.
 
 ## Step 2: one validation pass (desktop browser, new session after a hard reload; stop on the first failure)
-1. **Confirm the bundle.** After the reload, the console shows the app-version check for `adfad44f`.
+1. **Confirm the bundle.** After the reload, the console shows the app-version check for `8dd99150`.
 2. **Make the request.** One explicit English request, for example: "Please research the EU AI Act and write me a short Markdown report." Then stay quiet until Sophia answers.
 3. **Expected durable result:**
    - one start message;
