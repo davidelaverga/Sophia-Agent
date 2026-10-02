@@ -81,9 +81,17 @@ Output-audio events prove receipt of provider audio at some point in the session
 
 The 48 captured console warnings were predominantly routine diagnostic logging: hook-start=2; snapshot-response=12; snapshot-hydrated=12; empty passive snapshot=12; sse-open=2; sse-error=1; sse-timeout-reconnect=1; app-version freshness checks=6. No error-level console entry or named WebAudio exception was captured. Freshness-check object fields were collapsed; no stale-client-detected/check-failed message was seen. Do not turn warning-level instrumentation into 48 application failures.
 
-## LangSmith limitation
+## LangSmith follow-up after sign-in
 
-The EU LangSmith tab showed a login screen after refresh. Sign-in was requested. No current trace inputs/outputs, spans or multipart-ingest result were inspected. Previous incidents' LangSmith403 must not be carried forward as a confirmed result of this session.
+Initial inspection reached an expired browser login; Davide signed in again. Follow-up completed early Oct 3 Rome time, for the same Oct 2 UTC session. No further product test was run.
+
+- In the EU workspace, both Sophia and Sophia-Gemini-Live-Voice showed no runs in a last-three-hours window containing the test, including the individual Runs view. The project list still showed their most recent runs six days earlier. The additional project named with literal quotation marks around Sophia had no recent runs (most recent three months earlier).
+- Voice seven-day view contained older gemini_live_conversation traces only: newest 9/27/2026 01:14:54 displayed time; other visible entries 9/26 23:28:58, 17:46:06 and 17:45:47. No current trace payload could be inspected. One old input cell rendered text but its actual payload presence was not verified; output cell was empty/placeholder. Do not reinterpret old payloads as this test's data.
+- Current-session Render log correlation: trace_id 01a0fe86-adaf-7bb0-a295-c1f9ded2f70d, trace_started at 2026-10-02T21:30:34.288121986Z, trace_completed at 21:35:12.736306232Z, tool_count=0. Browser telemetry's four calls concern the browser tool bridge and are not proven to share the backend export counter's semantics.
+- Current voice service logs explicitly contain 403 Forbidden for EU https://eu.api.smith.langchain.com/runs/multipart during this test. The rendered sample contained 47 such error lines between 21:31:22.135509021Z and 21:35:12.735952933Z, including finalization. This is a bounded/virtualized lower-bound sample of log lines, not a unique HTTP-request count or exhaustive total.
+- At voice commit 6f6545d6, voice/realtime/gemini_langsmith_tracing.py logs trace_started after RunTree.post (around775–782). Its close path patches/flushes then logs trace_completed (around1216–1227). The same-session multipart403 plus absent current UI runs establish that the completed marker is not proof of ingestion acceptance.
+
+Confirmed tracing problem: EU multipart ingestion rejection. Wrong US endpoint is not supported by the observed EU URL. The response establishes HTTP403; it does not identify which key/project/workspace permission is wrong. No endpoint, project, key, settings or access changes applied. This blocks current-trace inspection; it does not identify the missing start-envelope or audio-playback cause by itself.
 
 ## Code mapping and ranked explanation
 

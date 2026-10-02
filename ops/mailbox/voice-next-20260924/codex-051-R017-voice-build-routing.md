@@ -21,7 +21,9 @@
 - Davide reported audio loss at approximately 21:34:17Z: input still heard, Sophia inaudible. Test stopped; session subsequently ended and browser returned home.
 - At that observation: WSS setup complete; relay active, failures 0, queue 0; provider events 369, output-audio events 228; playback generation 3; no WS close. Receipt/playback/context-state evidence missing.
 - Browser warnings: 12 empty Canvas snapshots; SSE error/reconnect at 21:34:54.997–998Z, reopened 21:35:13.742Z (~18.745s). Freshness checks logged, no stale-client or check-failed message; payloads collapsed.
-- LangSmith EU browser session expired (login screen); sign-in requested, no new trace inspected. No claim that tracing/ingestion succeeded or failed on this pass.
+- LangSmith follow-up after Davide signed in (Oct 3 Rome): Sophia and Sophia-Gemini-Live-Voice show no runs in the last-3-hours test window, including Runs view; project list most-recent runs remain six days old.
+- Voice export trace_id 01a0fe86-adaf-7bb0-a295-c1f9ded2f70d: trace_started 21:30:34.288121986Z, trace_completed 21:35:12.736306232Z, tool_count=0; these are local markers, not ingestion acknowledgment.
+- Same-window voice Render logs: EU /runs/multipart returned 403 Forbidden; 47 rendered error lines (not unique-request count), 21:31:22.135509021Z–21:35:12.735952933Z. Exact rejected key/project/workspace scope remains unproven; no settings edited.
 - Ranked Builder cause: correction-before-start / bridge lifecycle mismatch; later start not forwarded, exact rejection/delivery reason unknown. Source-anchor mismatch and child HTTP403 unsupported for this pass.
 - Proposed follow-up only: guard correction/edit against missing real task/artifact, preserve explicit start authority, expose safe bridge result codes; separately capture playback receipts/AudioContext state around audio loss. No auth bypass or implicit replacement build.
 - Verdict: VOICE_BUILDER_FLOW_FAILED_BEFORE_START_ROUTE; R017_START_ROUTE_NOT_EXERCISED; AUDIO_OUTPUT_FAILURE_REPORTED_CAUSE_UNRESOLVED. No retry, correction or typed control initiated by Codex; no merge/deploy/fix during investigation.
