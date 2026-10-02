@@ -2396,12 +2396,14 @@ Late in this wave, several commits landed over a red suite or with edits that si
 - Web: a governed 403 becomes `memory_source_send_refused`, and the voice bridge reports "did not start, do not retry".
 - LangGraph: the Builder handoff carrier check accepts the mirrored copy langgraph-api 0.8.1 makes (`configurable` ↔ `context`); copies must agree, and the sealed durable handoff stays the authority.
 - LangGraph: `BuilderCommandMiddleware` routes the voice bridge's `[Voice build request]` message straight to `start_builder_task` (brief + canonical task type) instead of leaving the second launch decision to the companion model.
+- Web: the voice bridge refuses an update/edit when the session has no running build, delivered artifact or recently sent start (`no_build_to_change`), instead of forwarding a correction with nothing to correct. Each bridge call logs one content-free `[voice-builder] outcome` console line; tool diagnostics show `reason:send_error`; the output AudioContext logs its state changes (`[voice-audio] context-state`).
 
 ### What We Learned
 - Every voice Builder request since the bridge shipped (2026-09-27) was refused. The browser's conflict-rebase PUT wrote the GET's millisecond `created_at` (and a position-based `sequence`) back onto the just-recorded row, rotating its version. Voice is hit because transcript rows keep arriving; a quiet typed session rebases nothing.
 - The same class of bug hit text on 2026-09-22 and was fixed only on the display-timestamp path. The durable fix belongs in the one server-side writer, not in each client.
 - One opaque 403 hid a dozen distinct refusals; the missing store method went unnoticed because no test fixture called it. A contract test now checks every reachable `store.<name>(` call exists on the real store.
 - A voice build crossed three decision points: Gemini chose its tool, the browser checked the request was explicit, then the companion model had to choose `start_builder_task` again. In R-016 it answered without launching. The voice bridge message is now a routed command like a typed "write a document about X".
+- In R-017, Gemini called `update_async_task` before any build existed. The bridge forwarded it as a correction, which took the turn's one recorded source and kept the chat busy, so the later start never became a start message. Lifecycle tools need the same target check in the browser that the companion's tools apply on the server.
 - Gemini 3.8 Live native async tool calling was assessed and rejected as a fix: tools still run in the browser and every request crosses the same governed admission (`ops/mailbox/voice-next-20260924/claude-artifacts/r014-gemini-38-live-assessment.md`).
 
 ### CLAUDE.md Updates

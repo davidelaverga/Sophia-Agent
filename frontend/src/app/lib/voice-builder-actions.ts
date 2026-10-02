@@ -42,6 +42,10 @@ const VOICE_BUILDER_POLL_INTERVAL_MS = 250
 // Sophia has asked her clarifying questions.
 const EXPLICIT_REQUEST_WINDOW_MS = 3 * 60 * 1000
 const EXPLICIT_REQUEST_MAX_UTTERANCES = 4
+// A start the browser has not yet seen running (the confirmation window is
+// shorter than a governed launch) still gives a correction something to change:
+// the companion tracks that build in its own state.
+const PENDING_START_CORRECTION_WINDOW_MS = 5 * 60 * 1000
 
 export interface VoiceBuilderUserUtterance {
   text: string
@@ -164,6 +168,28 @@ export interface VoiceBuilderHandlerOptions {
   pollIntervalMs?: number
   nowMs?: () => number
   sleep?: (ms: number) => Promise<void>
+  /** Receives one content-free outcome record per tool call. */
+  logOutcome?: (outcome: VoiceBuilderOutcomeLog) => void
+}
+
+/** Fixed codes, statuses and a short task id only; never briefs or corrections. */
+export interface VoiceBuilderOutcomeLog {
+  tool: string
+  ok: boolean
+  reason: string | null
+  send_error: string | null
+  status: string | null
+  task_id: string | null
+  waited_ms: number
+}
+
+function logVoiceBuilderOutcome(outcome: VoiceBuilderOutcomeLog): void {
+  console.warn("[voice-builder]", "outcome", outcome)
+}
+
+function outcomeCode(result: VoiceBuilderToolResult, key: string): string | null {
+  const value = result[key]
+  return typeof value === "string" && /^[a-z0-9_]{1,64}$/u.test(value) ? value : null
 }
 
 let activeVoiceBuilderBridge: VoiceBuilderToolBridge | null = null
@@ -303,6 +329,8 @@ export function createVoiceBuilderToolHandler(
   const pollIntervalMs = options.pollIntervalMs ?? VOICE_BUILDER_POLL_INTERVAL_MS
   const nowMs = options.nowMs ?? (() => Date.now())
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => { setTimeout(resolve, ms) }))
+  const logOutcome = options.logOutcome ?? logVoiceBuilderOutcome
+  let startSentAtMs: number | null = null
 
   const knownTaskIds = () => uniqueStrings([
     adapter.getBuilderTask()?.taskId,
@@ -379,6 +407,9 @@ export function createVoiceBuilderToolHandler(
       description,
       taskType: stringArg(call.args, "task_type", "taskType"),
     }))
+    if (outcome.kind !== "send_failed") {
+      startSentAtMs = nowMs()
+    }
     if (outcome.kind === "confirmed") {
       return {
         ok: true,
@@ -403,6 +434,17 @@ export function createVoiceBuilderToolHandler(
         recovery_guidance: "Ask the user what they want changed, then call the tool again with the correction.",
       })
     }
+    // A correction needs something to change. Forwarding one with no build
+    // would spend a companion turn, and its recorded source, on a request it
+    // cannot act on, and would keep the chat busy when the real start arrives.
+    if (!hasChangeTarget()) {
+      return notStartedResult(call.name, {
+        reason: "no_build_to_change",
+        error_type: "no_build_to_change",
+        result_summary: "There is no build or delivered artifact in this session to change. Nothing was sent.",
+        recovery_guidance: "Do not say anything was changed. If the user asked for something new to be built or researched, call start_builder_task with the complete brief.",
+      })
+    }
     const outcome = await sendAndConfirm(buildVoiceBuilderChangeMessage({
       toolName,
       message,
@@ -421,6 +463,17 @@ export function createVoiceBuilderToolHandler(
       }
     }
     return unconfirmedResult(call.name, outcome, "change")
+  }
+
+  const hasChangeTarget = (): boolean => {
+    const task = adapter.getBuilderTask()
+    if (task?.taskId && (task.phase === "running" || task.phase === "completed")) {
+      return true
+    }
+    if (adapter.getBuilderCompletion()?.artifact_path) {
+      return true
+    }
+    return startSentAtMs !== null && nowMs() - startSentAtMs <= PENDING_START_CORRECTION_WINDOW_MS
   }
 
   const describeTasks = (): Record<string, unknown>[] => {
@@ -511,24 +564,44 @@ export function createVoiceBuilderToolHandler(
     }
   }
 
+  const dispatch = async (call: VoiceBuilderToolCallInput): Promise<VoiceBuilderToolResult> => {
+    switch (call.name) {
+      case VOICE_BUILDER_START_TOOL_NAME:
+        return start(call)
+      case VOICE_BUILDER_UPDATE_TOOL_NAME:
+      case VOICE_BUILDER_EDIT_TOOL_NAME:
+        return change(call)
+      case VOICE_BUILDER_CHECK_TOOL_NAME:
+        return check(call)
+      case VOICE_BUILDER_LIST_TOOL_NAME:
+        return list()
+      case VOICE_BUILDER_CANCEL_TOOL_NAME:
+        return cancel(call)
+      default:
+        return notStartedResult(call.name, { reason: "unsupported_voice_builder_tool" })
+    }
+  }
+
   return {
     knownTaskIds,
     execute: async (call) => {
-      switch (call.name) {
-        case VOICE_BUILDER_START_TOOL_NAME:
-          return start(call)
-        case VOICE_BUILDER_UPDATE_TOOL_NAME:
-        case VOICE_BUILDER_EDIT_TOOL_NAME:
-          return change(call)
-        case VOICE_BUILDER_CHECK_TOOL_NAME:
-          return check(call)
-        case VOICE_BUILDER_LIST_TOOL_NAME:
-          return list()
-        case VOICE_BUILDER_CANCEL_TOOL_NAME:
-          return cancel(call)
-        default:
-          return notStartedResult(call.name, { reason: "unsupported_voice_builder_tool" })
+      const startedAtMs = nowMs()
+      const result = await dispatch(call)
+      try {
+        const taskId = typeof result.task_id === "string" ? result.task_id.slice(0, 12) : null
+        logOutcome({
+          tool: call.name,
+          ok: result.ok,
+          reason: outcomeCode(result, "reason") ?? outcomeCode(result, "error_type"),
+          send_error: outcomeCode(result, "send_error"),
+          status: outcomeCode(result, "status"),
+          task_id: taskId,
+          waited_ms: Math.max(0, nowMs() - startedAtMs),
+        })
+      } catch {
+        // Diagnostics never change a tool result.
       }
+      return result
     },
   }
 }

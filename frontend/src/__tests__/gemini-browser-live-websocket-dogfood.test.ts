@@ -7209,6 +7209,89 @@ describe('Gemini voice Builder bridge routing', () => {
     await connection.close();
   });
 
+  it('surfaces a bridge refusal reason and send error code in the tool diagnostics', async () => {
+    registerVoiceBuilderToolBridge({
+      knownTaskIds: () => [],
+      execute: async () => ({
+        ok: false,
+        started: false,
+        builder_task_started: false,
+        reason: 'builder_request_not_sent',
+        send_error: 'memory_source_dispatch_busy',
+        result_summary: 'The build request did not go through.',
+      }),
+    });
+    const fetchMock = makeVoiceBuilderSessionFetch('browser-gemini-voice-builder', ['start_builder_task']);
+    let websocket: FakeWebSocket | null = null;
+    const toolDiagnostics: GeminiBrowserLiveDogfoodToolLoopDiagnostic[] = [];
+
+    const connection = await connectGeminiBrowserLiveDogfood({
+      userId: 'user-1',
+      fetchFn: fetchMock as typeof fetch,
+      webSocketFactory: (url) => {
+        websocket = new FakeWebSocket(url);
+        return websocket;
+      },
+      getUserMedia: vi.fn(async () => ({ getTracks: () => [] } as unknown as MediaStream)),
+      audioContextFactory: () => new FakeAudioContext() as unknown as AudioContext,
+      onToolLoopDiagnostic: (diagnostic) => toolDiagnostics.push(diagnostic),
+    });
+
+    websocket?.emitMessage({
+      serverContent: { inputTranscription: { text: 'Can you research EV charging in Germany and write a Markdown report?' } },
+    });
+    websocket?.emitMessage({
+      toolCall: {
+        functionCalls: [{
+          id: 'voice-start-busy',
+          name: 'start_builder_task',
+          args: { description: 'Research EV charging in Germany; Markdown report.', task_type: 'research' },
+        }],
+      },
+    });
+
+    await vi.waitFor(() => expect(sentFunctionResponse(websocket, 'voice-start-busy')).toBeDefined());
+    const sent = toolDiagnostics.find((diagnostic) => diagnostic.phase === 'tool_response_sent');
+    expect(sent).toMatchObject({
+      success: false,
+      rejectionReason: 'builder_request_not_sent:memory_source_dispatch_busy',
+    });
+
+    await connection.close();
+  });
+
+  it('logs output audio context state changes without content', async () => {
+    class ObservedAudioContext extends FakeAudioContext {
+      readonly listeners = new Map<string, () => void>();
+      addEventListener(type: string, listener: () => void) {
+        this.listeners.set(type, listener);
+      }
+    }
+    const audioContext = new ObservedAudioContext();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const fetchMock = makeVoiceBuilderSessionFetch('browser-gemini-voice-builder', ['start_builder_task']);
+
+    const connection = await connectGeminiBrowserLiveDogfood({
+      userId: 'user-1',
+      fetchFn: fetchMock as typeof fetch,
+      webSocketFactory: (url) => new FakeWebSocket(url),
+      getUserMedia: vi.fn(async () => ({ getTracks: () => [] } as unknown as MediaStream)),
+      audioContextFactory: () => audioContext as unknown as AudioContext,
+    });
+
+    audioContext.state = 'suspended';
+    audioContext.listeners.get('statechange')?.();
+
+    const logged = warn.mock.calls.filter(([tag]) => tag === '[voice-audio]');
+    expect(logged).toHaveLength(1);
+    expect(logged[0]?.[1]).toBe('context-state');
+    expect(Object.keys(logged[0]?.[2] as Record<string, unknown>).sort()).toEqual(['at', 'state']);
+    expect(logged[0]?.[2]).toMatchObject({ state: 'suspended' });
+
+    warn.mockRestore();
+    await connection.close();
+  });
+
   it('waits briefly for a late input transcription before judging a voice build request', async () => {
     const bridgeCalls: VoiceBuilderToolCallInput[] = [];
     registerVoiceBuilderToolBridge({
