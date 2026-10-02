@@ -161,6 +161,12 @@ export interface VoiceBuilderSessionAdapter {
   getBuilderTask: () => BuilderTaskV1 | null
   getBuilderCompletion: () => BuilderCompletionEventV1 | null
   cancelBuilderTask: () => Promise<VoiceBuilderCancelResponse | null>
+  /**
+   * The active conversation (thread) this adapter currently serves. One
+   * handler can outlive a session switch, so a pending start is kept only for
+   * the conversation it was sent in.
+   */
+  getSessionKey?: () => string | null
 }
 
 export interface VoiceBuilderHandlerOptions {
@@ -330,8 +336,10 @@ export function createVoiceBuilderToolHandler(
   const nowMs = options.nowMs ?? (() => Date.now())
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => { setTimeout(resolve, ms) }))
   const logOutcome = options.logOutcome ?? logVoiceBuilderOutcome
-  // A start that was sent but never seen running, and the run present before it.
-  let pendingStart: { atMs: number; baseline: string | null } | null = null
+  // A start that was sent but never seen running, the run present before it,
+  // and the conversation it was sent in.
+  let pendingStart: { atMs: number; baseline: string | null; sessionKey: string | null } | null = null
+  const sessionKey = () => adapter.getSessionKey?.() ?? null
 
   const knownTaskIds = () => uniqueStrings([
     adapter.getBuilderTask()?.taskId,
@@ -405,13 +413,14 @@ export function createVoiceBuilderToolHandler(
       })
     }
     const baseline = runKey(adapter.getBuilderTask())
+    const startSessionKey = sessionKey()
     const outcome = await sendAndConfirm(buildVoiceBuilderStartMessage({
       description,
       taskType: stringArg(call.args, "task_type", "taskType"),
     }))
     // A confirmed start is visible as a task from now on; only an unconfirmed
     // one needs the pending window.
-    pendingStart = outcome.kind === "unconfirmed" ? { atMs: nowMs(), baseline } : null
+    pendingStart = outcome.kind === "unconfirmed" ? { atMs: nowMs(), baseline, sessionKey: startSessionKey } : null
     if (outcome.kind === "confirmed") {
       return {
         ok: true,
@@ -475,9 +484,9 @@ export function createVoiceBuilderToolHandler(
     if (adapter.getBuilderCompletion()?.artifact_path) {
       return true
     }
-    if (pendingStart && runKey(task) !== pendingStart.baseline) {
-      // The pending start has materialized and already ended without an
-      // artifact; it is no longer something to correct.
+    if (pendingStart && (pendingStart.sessionKey !== sessionKey() || runKey(task) !== pendingStart.baseline)) {
+      // Another conversation is active, or the pending start has materialized
+      // and already ended without an artifact: nothing here to correct.
       pendingStart = null
     }
     return pendingStart !== null && nowMs() - pendingStart.atMs <= PENDING_START_CORRECTION_WINDOW_MS

@@ -36,9 +36,10 @@ function call(
 }
 
 function createSession(initial: { task?: BuilderTaskV1 | null; completion?: BuilderCompletionEventV1 | null } = {}) {
-  const state = {
+  const state: { task: BuilderTaskV1 | null; completion: BuilderCompletionEventV1 | null; sessionKey: string | null } = {
     task: initial.task ?? null,
     completion: initial.completion ?? null,
+    sessionKey: "thread-a",
   }
   const sent: string[] = []
   const onSend: { next: (() => void) | null; reject: Error | null } = { next: null, reject: null }
@@ -54,6 +55,7 @@ function createSession(initial: { task?: BuilderTaskV1 | null; completion?: Buil
     getBuilderTask: () => state.task,
     getBuilderCompletion: () => state.completion,
     cancelBuilderTask,
+    getSessionKey: () => state.sessionKey,
   }
   let clock = NOW
   const logs: VoiceBuilderOutcomeLog[] = []
@@ -470,6 +472,25 @@ describe("voice builder tool handler", () => {
     const correction = await session.handler.execute(call("update_async_task", { message: "Also cover Austria." }))
 
     expect(correction).toMatchObject({ ok: false, reason: "no_build_to_change" })
+    expect(session.sent).toHaveLength(1)
+  })
+
+  it("does not carry a pending start into another conversation", async () => {
+    const session = createSession()
+    await session.handler.execute(call(
+      "start_builder_task",
+      { description: "Research EV charging in Germany; deliver Markdown.", task_type: "research" },
+      ["Can you research EV charging in Germany?"],
+    ))
+
+    session.state.sessionKey = "thread-b"
+    const elsewhere = await session.handler.execute(call("update_async_task", { message: "Also cover Austria." }))
+    expect(elsewhere).toMatchObject({ ok: false, reason: "no_build_to_change" })
+
+    // Returning to the first conversation does not revive it either.
+    session.state.sessionKey = "thread-a"
+    const back = await session.handler.execute(call("update_async_task", { message: "Also cover Austria." }))
+    expect(back).toMatchObject({ ok: false, reason: "no_build_to_change" })
     expect(session.sent).toHaveLength(1)
   })
 
