@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-10-02T23:10:00Z",
-  "state": "r018_awaiting_reauthorization_for_bd5f1bb4",
+  "updated_at": "2026-10-02T23:15:00Z",
+  "state": "r018_awaiting_authorization_for_14394316",
   "last_read": "codex-052 R-018 preflight hold (cc14d09f)",
   "last_written": "claude-059-R018-voice-correction-guard.md",
-  "task": "PR #165 head bd5f1bb4 (not merged). Web: correction guard + diagnostics (603e6136..adfad44f, four Codex-review fixes). DB: new forward migration 2026_10_02_mem00_recorded_source_chronology.sql (two Codex P1s: chronology around recorded rows, for stored and new rows). LangGraph unchanged at 973534ef.",
-  "summary": "Codex held R-018 correctly: Davide's paste pinned 8dd99150, which carries the new-row chronology P1 fixed in bd5f1bb4. Baselines recorded (function MD5 9e1d6ab6..., grants, six triggers). Memory Highlights E2E passed on 8dd99150, so the adfad44f font failure was transient. R-018 needs re-authorization for bd5f1bb4, gated on its CI (only the 7 known failures) and a completed automatic review with no open finding.",
-  "needs_action": "Davide: authorize R-018 at bd5f1bb4. Codex: rerun R-018 from Step 0 at bd5f1bb4 (reuse the recorded baselines), codex-052 update. Claude: watch the bd5f1bb4 review and CI."
+  "task": "PR #165 head 14394316 (not merged). Web: correction guard + diagnostics. DB: forward migration 2026_10_02_mem00_recorded_source_chronology.sql, after three Codex P1 rounds: stored rows by stored sequence, new rows by created_at, message_id copies are not anchors. LangGraph unchanged at 973534ef.",
+  "summary": "Codex held R-018 at 8dd99150 (correct). Three migration review rounds are fixed (8dd99150 -> bd5f1bb4 -> 14394316). Codex's recorded baselines (function MD5 9e1d6ab6..., grants, six triggers) are reusable. Deploy only after 14394316 has CI with only the 7 known failures and a completed automatic review with no open finding.",
+  "needs_action": "Davide: authorize R-018 at 14394316, once its automatic review is clean. Codex: rerun R-018 at 14394316. Claude: watch the 14394316 review and CI."
 }
