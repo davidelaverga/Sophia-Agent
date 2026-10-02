@@ -1,27 +1,28 @@
-# codex-051 — R017 voice build routing
-- Scope approved by Davide: claude-058, LangGraph only at `973534efa3ec48a00d919501c6e0088d84e3593a`; specific-commit deployment, no merge or Blueprint sync.
-- Step 0 optional R016 tool-name search: not performed. No inference about which substitute tool ran is added here.
-- PR #165 head confirmed exactly `973534ef`, open/unmerged. Automatic Codex review completed 2026-09-29T22:57:47Z; no unresolved review threads.
-- Exact-head CI run `36641922846`, backend job `109655932625`: completed, 7 failed / 7345 passed / 168 skipped; the failed test-name set is exactly the seven known baseline failures, no extras.
-- Baseline failures: five memory-governance worker timing tests and two deck-native lint/font tests, identical names and assertions to R016 CI. Architecture gate, Memory Highlights E2E and backend lint passed.
-- Gate met before deployment: full CI is not green, but the explicitly approved exact-known-seven condition is satisfied.
-- Preflight: /ok=200; /version=200, exact `dbfaf818dcb26e14a06ad3b6191b694675d0cf1e`; live rollback target `dep-dau361hsrm7s73ak2v40`.
-- Branch configuration read back: `codex/sophia-observability-v1`; Auto-Deploy Off. Neither setting was edited.
-- Original R017 deployment started 2026-10-01T21:48:04Z (23:48:04 Rome): `dep-davda567bikc73dk7a0g`, source `973534ef`; succeeded/Live, duration 3m41s.
-- Readback at 2026-10-01T21:52:11Z: /ok=200; /version=200, exact `973534efa3ec48a00d919501c6e0088d84e3593a`. No rollback or second attempt in the original R017 deployment.
-- Rollback, only on failure/abandonment: specific-commit LangGraph deployment at exact dbfaf818; no older commit and no deployment retry.
-- Gateway, voice, web, migration, settings, Lab, memory and retention actions: unchanged by R017.
-- Step 2: awaiting Davide's one fresh desktop voice session; no agent request, repeat attempt, correction or typed control initiated.
-- Counts pending: accepted source receipt / routed log / lifecycle start_builder_task / handoff / child binding / build registry / Markdown Builder artifact / UI progress.
-- Q1 pending on the new thread: row, version, sequence, created-at, epoch, thread and metadata equality; do not reuse the previous session's pass.
-- Timing pending: source-actions POST; routed BuilderCommand; handoff accepted_at; child POST /runs; first internal/builder-progress; browser confirmation if observable.
-- An unconfirmed voice response at 25s followed by an actual running build is expected by the runbook; no timeout change is authorized.
-- Stop at first failure. Report only safe stage/denial_reason/error_type/denied_at_line or ToolMessage status/safe code. The user's no-content rule overrides the runbook's request for a first sentence; no ToolMessage sentence will be printed.
-- Verdict: CI_GATE_AND_DEPLOYMENT_VERIFIED; SUPERVISED_VALIDATION_PENDING. This is not a hosted Builder/artifact completion claim.
-- [Exact-head CI](https://github.com/davidelaverga/Sophia-Agent/actions/runs/36641922846/job/109655932625); [deployment](https://dashboard.render.com/web/srv-d7be5s9r0fns7397l4fg/deploys/dep-davda567bikc73dk7a0g).
-- Follow-up: Davide explicitly requested a fresh deployment without merging; LangGraph only, same reviewed commit, on 2026-10-02 Rome time.
-- Review/CI rechecked before action: exact PR #165 head 973534ef; review completed, zero unresolved threads; exact same 7 failed / 7345 passed / 168 skipped, no new failures.
-- Fresh specific-commit deploy: dep-dave5v3bc2fs73chvgc0, started 2026-10-01T22:47:24Z (Oct 2 00:47:24 Rome); succeeded/Live, duration 58.9s. No retry or rollback.
-- Fresh health readback 2026-10-01T22:49:36Z–22:49:37Z: /ok=200, ok=true; /version=200, exact 973534efa3ec48a00d919501c6e0088d84e3593a.
-- Previous live deployment recorded: dep-davda567bikc73dk7a0g at the same SHA; R017 code rollback remains dbfaf818. Configured branch and Auto-Deploy Off preserved; no Blueprint sync.
-- PR #165 remains unmerged; gateway, voice, web, migration, settings, Lab, memory and retention untouched. Supervised validation remains pending; no product research task initiated.
+# codex-051 — R017 deployment and stopped desktop validation
+- Scope: Davide approved LangGraph-only specific-commit deploy at 973534efa3ec48a00d919501c6e0088d84e3593a; PR #165 remains unmerged.
+- Step 0 optional R016 tool-name search was not performed.
+- Exact-head automatic Codex review completed 2026-09-29T22:57:47Z; no unresolved review threads.
+- CI run 36641922846 / job 109655932625: exactly 7 known baseline failures, 7345 passed, 168 skipped; architecture/E2E/lint passed. Gate rechecked before fresh deployment.
+- Original deploy dep-davda567bikc73dk7a0g: 2026-10-01T21:48:04Z, Live after 3m41s; /ok and exact /version verified.
+- Davide-authorized fresh deploy dep-dave5v3bc2fs73chvgc0: 2026-10-01T22:47:24Z (Oct 2 00:47:24 Rome), Live after 58.9s; /ok=200, exact /version=200.
+- Configured branch codex/sophia-observability-v1, Auto-Deploy Off preserved; no Blueprint sync. Code rollback remains dbfaf818dcb26e14a06ad3b6191b694675d0cf1e.
+- On Oct 2 validation, LangGraph /ok=200 and /version still exact 973534ef. No other service, settings, migration, Lab, memory or retention changes.
+- Fresh desktop session c94bfbdb-0a7b-4fa6-9d56-bd923caa67c3; thread 01a0fe86-0ee1-7070-b8b2-749d2c12061b, created 2026-10-02T21:29:53.564Z.
+- Observed test start 21:30:10Z (23:30:10 Rome); provider session gemini-prod-e7f2c087b6d9477e8042b9d59e8709ae.
+- Companion run 01a0fe88-561e-7823-b3a1-a96b067bcdac; request 17b76d93-27d6-46eb-a300-611717368c45.
+- Final read-only counts: source receipts 1; handoffs 0; child bindings 0; build registry 0; Builder artifacts 0. UI Builder inactive, progress absent.
+- Q1: row/version/sequence/exact created-at/epoch/metadata/thread all equal; one matching message row, final=true; four revisions since intake at Q1 readback.
+- Receipt timestamp 21:32:20.39371Z. Structural checks only: accepted source is a correction envelope; session start envelopes 0, correction envelopes 1. No message content selected or printed.
+- At 21:32:34.389248Z, same-run BuilderCommand logged skipped (no explicit document command); voice-start routed log not observed. This is consistent with corrections deliberately bypassing R017's start fast path.
+- Handoff accepted_at, child POST /runs and child internal/builder-progress timestamps: absent/not applicable; no child exists in durable evidence.
+- UI telemetry: 4 tool calls, 3 responses, 0 rejections, 0 unresolved; last tool start_builder_task, phase tool_response_sent. Earlier observed tool update_async_task.
+- The later provider start call produced no recorded start envelope. Exact bridge result/guard reason and companion ToolMessage outcome remain unobserved; counters do not prove successful launch.
+- No matching memory.admission.denied or memory.context.entry_denied surfaced in available Render searches; stage/denial_reason/error_type/denied_at_line unobserved, not invented.
+- Davide reported audio loss at approximately 21:34:17Z: input still heard, Sophia inaudible. Test stopped; session subsequently ended and browser returned home.
+- At that observation: WSS setup complete; relay active, failures 0, queue 0; provider events 369, output-audio events 228; playback generation 3; no WS close. Receipt/playback/context-state evidence missing.
+- Browser warnings: 12 empty Canvas snapshots; SSE error/reconnect at 21:34:54.997–998Z, reopened 21:35:13.742Z (~18.745s). Freshness checks logged, no stale-client or check-failed message; payloads collapsed.
+- LangSmith EU browser session expired (login screen); sign-in requested, no new trace inspected. No claim that tracing/ingestion succeeded or failed on this pass.
+- Ranked Builder cause: correction-before-start / bridge lifecycle mismatch; later start not forwarded, exact rejection/delivery reason unknown. Source-anchor mismatch and child HTTP403 unsupported for this pass.
+- Proposed follow-up only: guard correction/edit against missing real task/artifact, preserve explicit start authority, expose safe bridge result codes; separately capture playback receipts/AudioContext state around audio loss. No auth bypass or implicit replacement build.
+- Verdict: VOICE_BUILDER_FLOW_FAILED_BEFORE_START_ROUTE; R017_START_ROUTE_NOT_EXERCISED; AUDIO_OUTPUT_FAILURE_REPORTED_CAUSE_UNRESOLVED. No retry, correction or typed control initiated by Codex; no merge/deploy/fix during investigation.
+- Detailed evidence/limits/code mapping: codex-artifacts/r017-desktop-validation-2026-10-02.md. Hold further production testing/changes for review.
