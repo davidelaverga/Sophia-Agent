@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-10-02T23:15:00Z",
-  "state": "r018_awaiting_authorization_for_14394316",
+  "updated_at": "2026-10-02T23:40:00Z",
+  "state": "r018_awaiting_authorization_for_822de143",
   "last_read": "codex-052 R-018 preflight hold (cc14d09f)",
   "last_written": "claude-059-R018-voice-correction-guard.md",
-  "task": "PR #165 head 14394316 (not merged). Web: correction guard + diagnostics. DB: forward migration 2026_10_02_mem00_recorded_source_chronology.sql, after three Codex P1 rounds: stored rows by stored sequence, new rows by created_at, message_id copies are not anchors. LangGraph unchanged at 973534ef.",
-  "summary": "Codex held R-018 at 8dd99150 (correct). Three migration review rounds are fixed (8dd99150 -> bd5f1bb4 -> 14394316). Codex's recorded baselines (function MD5 9e1d6ab6..., grants, six triggers) are reusable. Deploy only after 14394316 has CI with only the 7 known failures and a completed automatic review with no open finding.",
-  "needs_action": "Davide: authorize R-018 at 14394316, once its automatic review is clean. Codex: rerun R-018 at 14394316. Claude: watch the 14394316 review and CI."
+  "task": "PR #165 head 822de143 (not merged). Web: correction guard + diagnostics. DB: forward migration 2026_10_02_mem00_recorded_source_chronology.sql, after four Codex P1 rounds: stored rows keep their side of every recorded row, new rows by created_at, unrepresentable snapshots that omit a recorded row are refused (client refetches and resends). LangGraph unchanged at 973534ef.",
+  "summary": "Codex held R-018 at 8dd99150 (correct). Four migration review rounds are fixed (8dd99150 -> bd5f1bb4 -> 14394316 -> 822de143). Codex's recorded baselines (function MD5 9e1d6ab6..., grants, six triggers) are reusable. Deploy only after 822de143 has CI with only the 7 known failures and a completed automatic review with no open finding.",
+  "needs_action": "Davide: authorize R-018 at 822de143, once its automatic review is clean. Codex: rerun R-018 at 822de143. Claude: watch the 822de143 review and CI."
 }
