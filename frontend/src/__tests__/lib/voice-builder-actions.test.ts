@@ -36,10 +36,16 @@ function call(
 }
 
 function createSession(initial: { task?: BuilderTaskV1 | null; completion?: BuilderCompletionEventV1 | null } = {}) {
-  const state: { task: BuilderTaskV1 | null; completion: BuilderCompletionEventV1 | null; sessionKey: string | null } = {
+  const state: {
+    task: BuilderTaskV1 | null
+    completion: BuilderCompletionEventV1 | null
+    sessionKey: string | null
+    artifactPath: string | null
+  } = {
     task: initial.task ?? null,
     completion: initial.completion ?? null,
     sessionKey: "thread-a",
+    artifactPath: null,
   }
   const sent: string[] = []
   const onSend: { next: (() => void) | null; reject: Error | null } = { next: null, reject: null }
@@ -56,6 +62,7 @@ function createSession(initial: { task?: BuilderTaskV1 | null; completion?: Buil
     getBuilderCompletion: () => state.completion,
     cancelBuilderTask,
     getSessionKey: () => state.sessionKey,
+    getBuilderArtifactPath: () => state.artifactPath,
   }
   let clock = NOW
   const logs: VoiceBuilderOutcomeLog[] = []
@@ -385,6 +392,7 @@ describe("voice builder tool handler", () => {
 
   it("confirms an edit of a delivered artifact by the new build it starts", async () => {
     const session = createSession({ task: { phase: "completed", taskId: "task-1", runId: "run-1" } })
+    session.state.artifactPath = "mnt/user-data/outputs/report.md"
     session.onSend.next = () => {
       session.state.task = { phase: "running", taskId: "task-2", runId: "run-3" }
     }
@@ -409,6 +417,15 @@ describe("voice builder tool handler", () => {
       expect(result).toMatchObject({ ok: false, updated: false, reason: "no_build_to_change", error_type: "no_build_to_change" })
       expect(String(result.recovery_guidance)).toContain("start_builder_task")
     }
+    expect(session.sent).toHaveLength(0)
+  })
+
+  it("refuses a correction after a build that completed without an artifact", async () => {
+    const session = createSession({ task: { phase: "completed", taskId: "task-1", runId: "run-1" } })
+
+    const result = await session.handler.execute(call("edit_builder_artifact", { message: "Add a summary table." }))
+
+    expect(result).toMatchObject({ ok: false, reason: "no_build_to_change" })
     expect(session.sent).toHaveLength(0)
   })
 

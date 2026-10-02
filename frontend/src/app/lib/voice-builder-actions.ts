@@ -167,6 +167,8 @@ export interface VoiceBuilderSessionAdapter {
    * the conversation it was sent in.
    */
   getSessionKey?: () => string | null
+  /** The path of the delivered Builder artifact shown in this session, if any. */
+  getBuilderArtifactPath?: () => string | null
 }
 
 export interface VoiceBuilderHandlerOptions {
@@ -478,15 +480,17 @@ export function createVoiceBuilderToolHandler(
 
   const hasChangeTarget = (): boolean => {
     const task = adapter.getBuilderTask()
-    if (task?.taskId && (task.phase === "running" || task.phase === "completed")) {
+    if (task?.taskId && task.phase === "running") {
       return true
     }
-    if (adapter.getBuilderCompletion()?.artifact_path) {
+    // A finished build is only correctable through its delivered artifact; a
+    // completed task without one has nothing to change.
+    if (adapter.getBuilderCompletion()?.artifact_path || adapter.getBuilderArtifactPath?.()) {
       return true
     }
     if (pendingStart && (pendingStart.sessionKey !== sessionKey() || runKey(task) !== pendingStart.baseline)) {
       // Another conversation is active, or the pending start has materialized
-      // and already ended without an artifact: nothing here to correct.
+      // and is no longer running without an artifact: nothing here to correct.
       pendingStart = null
     }
     return pendingStart !== null && nowMs() - pendingStart.atMs <= PENDING_START_CORRECTION_WINDOW_MS

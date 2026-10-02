@@ -722,6 +722,7 @@ export function useSessionRouteExperience({
     cancelBuilderTask,
     sendVoiceBuilderMessage,
     sessionKey: activeThreadId ?? null,
+    builderArtifactPath: builderArtifact?.artifactPath ?? null,
   });
   useEffect(() => {
     voiceBuilderStateRef.current = {
@@ -730,8 +731,9 @@ export function useSessionRouteExperience({
       cancelBuilderTask,
       sendVoiceBuilderMessage,
       sessionKey: activeThreadId ?? null,
+      builderArtifactPath: builderArtifact?.artifactPath ?? null,
     };
-  }, [activeThreadId, builderTask, cancelBuilderTask, effectiveBuilderCompletion, sendVoiceBuilderMessage]);
+  }, [activeThreadId, builderArtifact, builderTask, cancelBuilderTask, effectiveBuilderCompletion, sendVoiceBuilderMessage]);
 
   useEffect(() => registerVoiceBuilderToolBridge(createVoiceBuilderToolHandler({
     sendCompanionMessage: (text) => voiceBuilderStateRef.current.sendVoiceBuilderMessage(text),
@@ -739,6 +741,7 @@ export function useSessionRouteExperience({
     getBuilderCompletion: () => voiceBuilderStateRef.current.builderCompletion,
     cancelBuilderTask: () => voiceBuilderStateRef.current.cancelBuilderTask(),
     getSessionKey: () => voiceBuilderStateRef.current.sessionKey,
+    getBuilderArtifactPath: () => voiceBuilderStateRef.current.builderArtifactPath,
   })), []);
 
   return {
