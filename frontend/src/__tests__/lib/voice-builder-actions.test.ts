@@ -439,6 +439,40 @@ describe("voice builder tool handler", () => {
     expect(session.sent).toHaveLength(2)
   })
 
+  it("does not keep a confirmed start that then failed as something to correct", async () => {
+    const session = createSession()
+    session.onSend.next = () => {
+      session.state.task = { phase: "running", taskId: "task-new", runId: "run-new" }
+    }
+    const started = await session.handler.execute(call(
+      "start_builder_task",
+      { description: "Research EV charging in Germany; deliver Markdown.", task_type: "research" },
+      ["Can you research EV charging in Germany?"],
+    ))
+    expect(started).toMatchObject({ ok: true, started: true })
+
+    session.state.task = { phase: "failed", taskId: "task-new", runId: "run-new" }
+    const correction = await session.handler.execute(call("update_async_task", { message: "Also cover Austria." }))
+
+    expect(correction).toMatchObject({ ok: false, reason: "no_build_to_change" })
+    expect(session.sent).toHaveLength(1)
+  })
+
+  it("drops a pending start once its task appears and ends without an artifact", async () => {
+    const session = createSession()
+    await session.handler.execute(call(
+      "start_builder_task",
+      { description: "Research EV charging in Germany; deliver Markdown.", task_type: "research" },
+      ["Can you research EV charging in Germany?"],
+    ))
+    session.state.task = { phase: "cancelled", taskId: "task-late", runId: "run-late" }
+
+    const correction = await session.handler.execute(call("update_async_task", { message: "Also cover Austria." }))
+
+    expect(correction).toMatchObject({ ok: false, reason: "no_build_to_change" })
+    expect(session.sent).toHaveLength(1)
+  })
+
   it("does not treat a start that was never sent as something to correct", async () => {
     const session = createSession()
     session.onSend.reject = new Error("memory_source_dispatch_busy")

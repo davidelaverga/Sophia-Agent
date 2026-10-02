@@ -330,7 +330,8 @@ export function createVoiceBuilderToolHandler(
   const nowMs = options.nowMs ?? (() => Date.now())
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => { setTimeout(resolve, ms) }))
   const logOutcome = options.logOutcome ?? logVoiceBuilderOutcome
-  let startSentAtMs: number | null = null
+  // A start that was sent but never seen running, and the run present before it.
+  let pendingStart: { atMs: number; baseline: string | null } | null = null
 
   const knownTaskIds = () => uniqueStrings([
     adapter.getBuilderTask()?.taskId,
@@ -403,13 +404,14 @@ export function createVoiceBuilderToolHandler(
         recovery_guidance: "Tell the user a build is already running. Offer to wait, update it with update_async_task, or cancel it.",
       })
     }
+    const baseline = runKey(adapter.getBuilderTask())
     const outcome = await sendAndConfirm(buildVoiceBuilderStartMessage({
       description,
       taskType: stringArg(call.args, "task_type", "taskType"),
     }))
-    if (outcome.kind !== "send_failed") {
-      startSentAtMs = nowMs()
-    }
+    // A confirmed start is visible as a task from now on; only an unconfirmed
+    // one needs the pending window.
+    pendingStart = outcome.kind === "unconfirmed" ? { atMs: nowMs(), baseline } : null
     if (outcome.kind === "confirmed") {
       return {
         ok: true,
@@ -473,7 +475,12 @@ export function createVoiceBuilderToolHandler(
     if (adapter.getBuilderCompletion()?.artifact_path) {
       return true
     }
-    return startSentAtMs !== null && nowMs() - startSentAtMs <= PENDING_START_CORRECTION_WINDOW_MS
+    if (pendingStart && runKey(task) !== pendingStart.baseline) {
+      // The pending start has materialized and already ended without an
+      // artifact; it is no longer something to correct.
+      pendingStart = null
+    }
+    return pendingStart !== null && nowMs() - pendingStart.atMs <= PENDING_START_CORRECTION_WINDOW_MS
   }
 
   const describeTasks = (): Record<string, unknown>[] => {
