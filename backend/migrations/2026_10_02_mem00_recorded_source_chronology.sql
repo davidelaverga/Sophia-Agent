@@ -12,14 +12,23 @@
 -- extraction sort by.
 --
 -- Contract (in addition to 2026_09_29):
---   * A row already stored after a recorded row stays after it, whether or not
---     the snapshot lists the recorded row.
---   * A recorded row the snapshot lists (by its row id) orders the snapshot as
---     before: rows listed after it are placed after it. A row that only reuses
---     a recorded message_id is still ignored, and is not the anchor's position.
---   * A new row keeps its side of a recorded row the snapshot omits by
---     creation time (created_at, defaulting to now()): created at or after it
---     means after it.
+--   * A recorded row the snapshot lists, by its row id or by a copy reusing its
+--     message_id, orders the snapshot as in 2026_09_29: rows listed after it go
+--     after it, and the copy itself is ignored.
+--   * A row already stored after a recorded row stays after it, whatever the
+--     snapshot lists.
+--   * A new row created at or after a recorded row (created_at, defaulting to
+--     now()) goes after it unless the snapshot lists that recorded row by its
+--     exact row id, whose position then decides (client clocks may be skewed).
+--   * If the snapshot lists neither the recorded row nor a copy of it, and a
+--     row belongs before it (stored before it, or new and created before it)
+--     but no free sequence is left there, the whole snapshot is refused with
+--     rejection_reason 'recorded_source_order_unrepresentable' and nothing is
+--     written. The web client then refetches the transcript, which lists the
+--     recorded row, and resends its new rows; that is never refused. Snapshots
+--     that list the recorded row or a copy of it are never refused for
+--     ordering, so server-side appends (which always list it) never lose a
+--     message.
 --   * Rows keep snapshot order among themselves.
 --   * Sessions without recorded rows are processed exactly as before.
 -- No row, receipt, trigger or version is modified by this migration.
@@ -58,7 +67,9 @@ DECLARE
     anchor_floor INTEGER;
     recorded_created_ats TIMESTAMPTZ[];
     recorded_present BOOLEAN[];
+    recorded_copied BOOLEAN[];
     item_created_at TIMESTAMPTZ;
+    anchor_ceiling INTEGER;
 BEGIN
     SELECT message_revision
       INTO current_revision
@@ -112,28 +123,35 @@ BEGIN
          WHERE m.session_id = p_session_id
            AND m.user_id = p_user_id
            AND NOT (m.id = ANY(recorded_ids));
-        -- Recorded rows the snapshot lists (by row id) order new rows themselves;
-        -- for new rows only omitted ones need the creation-time rule below.
+        -- Which recorded rows the snapshot lists by exact row id, and which only
+        -- through a copy reusing their message_id.
         recorded_present := array_fill(FALSE, ARRAY[cardinality(recorded_ids)]);
+        recorded_copied := array_fill(FALSE, ARRAY[cardinality(recorded_ids)]);
         FOR snapshot_item IN SELECT value FROM jsonb_array_elements(COALESCE(p_messages, '[]'::JSONB)) LOOP
             recorded_index := array_position(recorded_ids, snapshot_item->>'id');
             IF recorded_index IS NOT NULL THEN
                 recorded_present[recorded_index] := TRUE;
+            ELSE
+                recorded_index := array_position(recorded_message_ids, snapshot_item->>'message_id');
+                IF recorded_index IS NOT NULL THEN
+                    recorded_copied[recorded_index] := TRUE;
+                END IF;
             END IF;
         END LOOP;
         FOR snapshot_item IN SELECT value FROM jsonb_array_elements(COALESCE(p_messages, '[]'::JSONB)) LOOP
-            recorded_index := array_position(recorded_ids, snapshot_item->>'id');
+            recorded_index := coalesce(
+                array_position(recorded_ids, snapshot_item->>'id'),
+                array_position(recorded_message_ids, snapshot_item->>'message_id')
+            );
             IF recorded_index IS NOT NULL THEN
+                -- The recorded row (or the client's copy of it): its position
+                -- orders the snapshot; the copy itself is never written.
                 cursor_sequence := GREATEST(cursor_sequence, recorded_sequences[recorded_index]);
                 CONTINUE;
             END IF;
-            -- A copy that reuses a recorded message_id under another row id is
-            -- ignored and is not the anchor's position.
-            IF array_position(recorded_message_ids, snapshot_item->>'message_id') IS NOT NULL THEN
-                CONTINUE;
-            END IF;
             -- A stored row stays after every recorded row it followed; a new row
-            -- stays after every omitted recorded row created before it.
+            -- stays after every recorded row created before it that the
+            -- snapshot does not list by exact id.
             existing_index := array_position(existing_ids, snapshot_item->>'id');
             item_created_at := COALESCE((snapshot_item->>'created_at')::TIMESTAMPTZ, now());
             SELECT max(anchor.seq) INTO anchor_floor
@@ -147,6 +165,27 @@ BEGIN
             WHILE candidate = ANY(recorded_sequences) LOOP
                 candidate := candidate + 1;
             END LOOP;
+            -- The next recorded row this row must precede among those the
+            -- snapshot does not list at all (neither by id nor by copy).
+            SELECT min(anchor.seq) INTO anchor_ceiling
+              FROM unnest(recorded_sequences, recorded_created_ats, recorded_present, recorded_copied)
+                   AS anchor(seq, created, present, copied)
+             WHERE NOT anchor.present AND NOT anchor.copied
+               AND CASE WHEN existing_index IS NOT NULL
+                        THEN anchor.seq > existing_sequences[existing_index]
+                        ELSE anchor.created > item_created_at
+                   END;
+            IF anchor_ceiling IS NOT NULL AND candidate > anchor_ceiling THEN
+                RETURN jsonb_build_object(
+                    'accepted', FALSE,
+                    'duplicate', FALSE,
+                    'conflict', FALSE,
+                    'rejection_reason', 'recorded_source_order_unrepresentable',
+                    'previous_revision', current_revision,
+                    'current_revision', current_revision,
+                    'deleted_count', 0
+                );
+            END IF;
             cursor_sequence := candidate;
             planned_items := array_append(planned_items, snapshot_item || jsonb_build_object('sequence', candidate));
         END LOOP;

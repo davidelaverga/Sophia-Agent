@@ -147,10 +147,12 @@ BEGIN
         jsonb_build_object('id', 'anchor-v3', 'message_id', 'voice-user-3', 'thread_id', thread_a, 'role', 'user',
             'content', 'As a PDF.', 'source', 'voice', 'sequence', 2, 'created_at', '2026-09-28T23:49:40.001Z'),
         jsonb_build_object('id', 'anchor-v4', 'message_id', 'voice-assistant-4', 'thread_id', thread_a, 'role', 'assistant',
-            'content', 'Got it.', 'source', 'voice', 'sequence', 3, 'created_at', '2026-09-28T23:49:41.001Z'),
+            'content', 'Got it.', 'source', 'voice', 'sequence', 3,
+            'created_at', to_char(clock_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')),
         jsonb_build_object('id', 'anchor-duplicate', 'message_id', 'anchor-source-0001', 'thread_id', thread_a, 'role', 'user',
             'content', 'shadow copy', 'source', 'text', 'sequence', 4, 'created_at', '2026-09-28T23:49:42.001Z')));
-    IF (SELECT sequence FROM public.sophia_session_messages WHERE id = 'anchor-v4') = 3
+    IF (result->>'accepted')::boolean IS NOT TRUE
+       OR (SELECT sequence FROM public.sophia_session_messages WHERE id = 'anchor-v4') = 3
        OR (SELECT sequence FROM public.sophia_session_messages WHERE id = 'anchor-v4')
           <= (SELECT sequence FROM public.sophia_session_messages WHERE id = 'anchor-v3')
        OR EXISTS (SELECT 1 FROM public.sophia_session_messages WHERE id = 'anchor-duplicate')
@@ -158,19 +160,56 @@ BEGIN
         RAISE EXCEPTION 'sequence or message identity collided with the recorded row';
     END IF;
 
-    -- 4b. A copy that only reuses the recorded message_id is not the anchor's
-    --     position: a stored row that followed the recorded row stays after it
-    --     even when the copy is listed after that row.
+    -- 4b. A stored row that followed the recorded row stays after it even when
+    --     a copy reusing the recorded message_id is listed after that row.
     SELECT message_revision INTO revision FROM public.sophia_sessions WHERE id = 'anchor-session';
     result := public.sophia_replace_session_messages('anchor-owner', 'anchor-session', revision, jsonb_build_array(
         jsonb_build_object('id', 'anchor-v4', 'message_id', 'voice-assistant-4', 'thread_id', thread_a, 'role', 'assistant',
-            'content', 'Got it.', 'source', 'voice', 'sequence', 1, 'created_at', '2026-09-28T23:49:41.001Z'),
+            'content', 'Got it.', 'source', 'voice', 'sequence', 1,
+            'created_at', to_char(clock_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')),
         jsonb_build_object('id', 'anchor-duplicate-2', 'message_id', 'anchor-source-0001', 'thread_id', thread_a, 'role', 'user',
             'content', 'shadow copy', 'source', 'text', 'sequence', 2, 'created_at', '2026-09-28T23:49:42.001Z')));
     IF (SELECT sequence FROM public.sophia_session_messages WHERE id = 'anchor-v4') <= 3
        OR EXISTS (SELECT 1 FROM public.sophia_session_messages WHERE id = 'anchor-duplicate-2') THEN
-        RAISE EXCEPTION 'a message_id copy repositioned the recorded row: %',
+        RAISE EXCEPTION 'a stored row crossed the recorded row around a message_id copy: %',
             (SELECT jsonb_object_agg(id, sequence) FROM public.sophia_session_messages WHERE session_id = 'anchor-session');
+    END IF;
+
+    -- 4c. No room before an omitted recorded row: rows created before the
+    --     recorded row at 3 need sequences 1, 2 and 3, but 3 is taken. The
+    --     snapshot is refused and nothing is written; the client then refetches
+    --     and resends with the recorded row listed.
+    SELECT message_revision INTO revision FROM public.sophia_sessions WHERE id = 'anchor-session';
+    result := public.sophia_replace_session_messages('anchor-owner', 'anchor-session', revision, jsonb_build_array(
+        jsonb_build_object('id', 'anchor-p1', 'message_id', 'voice-early-p1', 'thread_id', thread_a, 'role', 'user',
+            'content', 'One.', 'source', 'voice', 'sequence', 1, 'created_at', '2026-09-28T23:49:30.001Z'),
+        jsonb_build_object('id', 'anchor-p2', 'message_id', 'voice-early-p2', 'thread_id', thread_a, 'role', 'assistant',
+            'content', 'Two.', 'source', 'voice', 'sequence', 2, 'created_at', '2026-09-28T23:49:30.002Z'),
+        jsonb_build_object('id', 'anchor-p3', 'message_id', 'voice-early-p3', 'thread_id', thread_a, 'role', 'user',
+            'content', 'Three.', 'source', 'voice', 'sequence', 3, 'created_at', '2026-09-28T23:49:30.003Z'),
+        jsonb_build_object('id', 'anchor-v4', 'message_id', 'voice-assistant-4', 'thread_id', thread_a, 'role', 'assistant',
+            'content', 'Got it.', 'source', 'voice', 'sequence', 4)));
+    IF (result->>'accepted')::boolean IS NOT FALSE
+       OR (result->>'conflict')::boolean IS NOT FALSE
+       OR result->>'rejection_reason' <> 'recorded_source_order_unrepresentable'
+       OR (result->>'current_revision')::bigint <> revision
+       OR (SELECT message_revision FROM public.sophia_sessions WHERE id = 'anchor-session') <> revision
+       OR EXISTS (SELECT 1 FROM public.sophia_session_messages WHERE id IN ('anchor-p1', 'anchor-p2', 'anchor-p3')) THEN
+        RAISE EXCEPTION 'unrepresentable order was not refused cleanly: %', result;
+    END IF;
+    -- The same rows resent with the recorded row listed (the client's refetch
+    -- and rebase) are accepted: client order around a listed row is kept.
+    result := public.sophia_replace_session_messages('anchor-owner', 'anchor-session', revision, jsonb_build_array(
+        jsonb_build_object('id', '33333333-3333-4333-8333-333333333333', 'message_id', 'anchor-source-0001', 'thread_id', thread_a,
+            'role', 'user', 'content', 'ignored', 'sequence', 3),
+        jsonb_build_object('id', 'anchor-v4', 'message_id', 'voice-assistant-4', 'thread_id', thread_a, 'role', 'assistant',
+            'content', 'Got it.', 'source', 'voice', 'sequence', 4),
+        jsonb_build_object('id', 'anchor-p1', 'message_id', 'voice-early-p1', 'thread_id', thread_a, 'role', 'user',
+            'content', 'One.', 'source', 'voice', 'sequence', 5, 'created_at', '2026-09-28T23:49:30.001Z')));
+    IF (result->>'accepted')::boolean IS NOT TRUE
+       OR (SELECT sequence FROM public.sophia_session_messages WHERE id = 'anchor-p1')
+          <= (SELECT sequence FROM public.sophia_session_messages WHERE id = 'anchor-v4') THEN
+        RAISE EXCEPTION 'rebased snapshot with the recorded row listed was not accepted: %', result;
     END IF;
 
     -- 5. The source snapshot accepts the partition and reports the row eligible
