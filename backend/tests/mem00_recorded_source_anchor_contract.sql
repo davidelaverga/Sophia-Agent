@@ -116,19 +116,23 @@ BEGIN
             (SELECT jsonb_object_agg(id, sequence) FROM public.sophia_session_messages WHERE session_id = 'anchor-session');
     END IF;
 
-    -- 3c. A recorded row the snapshot lists orders it itself: a new row listed
-    --     before it stays before it, whatever its creation time.
+    -- 3c. A recorded row the snapshot lists orders new rows itself: a new row
+    --     listed before it stays before it, whatever its creation time. A
+    --     stored row that followed it stays after it even when listed before it.
     SELECT message_revision INTO revision FROM public.sophia_sessions WHERE id = 'anchor-session';
     result := public.sophia_replace_session_messages('anchor-owner', 'anchor-session', revision, jsonb_build_array(
         jsonb_build_object('id', 'anchor-v1', 'message_id', 'voice-user-1', 'thread_id', thread_a, 'role', 'user',
             'content', 'Research batteries.', 'source', 'voice', 'sequence', 1, 'created_at', '2026-09-28T23:49:30.123Z'),
         jsonb_build_object('id', 'anchor-v6', 'message_id', 'voice-listed-6', 'thread_id', thread_a, 'role', 'user',
             'content', 'Listed first.', 'source', 'voice', 'sequence', 2),
+        jsonb_build_object('id', 'anchor-v5', 'message_id', 'voice-late-5', 'thread_id', thread_a, 'role', 'assistant',
+            'content', 'On it.', 'source', 'voice', 'sequence', 3),
         jsonb_build_object('id', '33333333-3333-4333-8333-333333333333', 'message_id', 'anchor-source-0001', 'thread_id', thread_a,
-            'role', 'user', 'content', 'ignored', 'sequence', 3),
+            'role', 'user', 'content', 'ignored', 'sequence', 4),
         jsonb_build_object('id', 'anchor-v3', 'message_id', 'voice-user-3', 'thread_id', thread_a, 'role', 'user',
-            'content', 'As a PDF.', 'source', 'voice', 'sequence', 4, 'created_at', '2026-09-28T23:49:40.001Z')));
+            'content', 'As a PDF.', 'source', 'voice', 'sequence', 5, 'created_at', '2026-09-28T23:49:40.001Z')));
     IF (SELECT sequence FROM public.sophia_session_messages WHERE id = 'anchor-v6') >= 3
+       OR (SELECT sequence FROM public.sophia_session_messages WHERE id = 'anchor-v5') <= 3
        OR (SELECT sequence FROM public.sophia_session_messages WHERE id = 'anchor-v3') <= 3 THEN
         RAISE EXCEPTION 'listed recorded row did not order the snapshot: %',
             (SELECT jsonb_object_agg(id, sequence) FROM public.sophia_session_messages WHERE session_id = 'anchor-session');
@@ -152,6 +156,21 @@ BEGIN
        OR EXISTS (SELECT 1 FROM public.sophia_session_messages WHERE id = 'anchor-duplicate')
        OR (SELECT count(*) FROM public.sophia_session_messages WHERE session_id = 'anchor-session' AND message_id = 'anchor-source-0001') <> 1 THEN
         RAISE EXCEPTION 'sequence or message identity collided with the recorded row';
+    END IF;
+
+    -- 4b. A copy that only reuses the recorded message_id is not the anchor's
+    --     position: a stored row that followed the recorded row stays after it
+    --     even when the copy is listed after that row.
+    SELECT message_revision INTO revision FROM public.sophia_sessions WHERE id = 'anchor-session';
+    result := public.sophia_replace_session_messages('anchor-owner', 'anchor-session', revision, jsonb_build_array(
+        jsonb_build_object('id', 'anchor-v4', 'message_id', 'voice-assistant-4', 'thread_id', thread_a, 'role', 'assistant',
+            'content', 'Got it.', 'source', 'voice', 'sequence', 1, 'created_at', '2026-09-28T23:49:41.001Z'),
+        jsonb_build_object('id', 'anchor-duplicate-2', 'message_id', 'anchor-source-0001', 'thread_id', thread_a, 'role', 'user',
+            'content', 'shadow copy', 'source', 'text', 'sequence', 2, 'created_at', '2026-09-28T23:49:42.001Z')));
+    IF (SELECT sequence FROM public.sophia_session_messages WHERE id = 'anchor-v4') <= 3
+       OR EXISTS (SELECT 1 FROM public.sophia_session_messages WHERE id = 'anchor-duplicate-2') THEN
+        RAISE EXCEPTION 'a message_id copy repositioned the recorded row: %',
+            (SELECT jsonb_object_agg(id, sequence) FROM public.sophia_session_messages WHERE session_id = 'anchor-session');
     END IF;
 
     -- 5. The source snapshot accepts the partition and reports the row eligible

@@ -12,12 +12,14 @@
 -- extraction sort by.
 --
 -- Contract (in addition to 2026_09_29):
---   * A recorded row present in the snapshot is an anchor for snapshot order,
---     exactly as before: rows listed after it are placed after it.
---   * For a recorded row the snapshot omits, every other row keeps its side:
---     a row already stored after it stays after it (by stored sequence), and a
---     new row created at or after it (created_at, defaulting to now()) goes
---     after it.
+--   * A row already stored after a recorded row stays after it, whether or not
+--     the snapshot lists the recorded row.
+--   * A recorded row the snapshot lists (by its row id) orders the snapshot as
+--     before: rows listed after it are placed after it. A row that only reuses
+--     a recorded message_id is still ignored, and is not the anchor's position.
+--   * A new row keeps its side of a recorded row the snapshot omits by
+--     creation time (created_at, defaulting to now()): created at or after it
+--     means after it.
 --   * Rows keep snapshot order among themselves.
 --   * Sessions without recorded rows are processed exactly as before.
 -- No row, receipt, trigger or version is modified by this migration.
@@ -110,37 +112,35 @@ BEGIN
          WHERE m.session_id = p_session_id
            AND m.user_id = p_user_id
            AND NOT (m.id = ANY(recorded_ids));
-        -- Recorded rows the snapshot lists order it themselves; only omitted
-        -- ones need the side rule below.
+        -- Recorded rows the snapshot lists (by row id) order new rows themselves;
+        -- for new rows only omitted ones need the creation-time rule below.
         recorded_present := array_fill(FALSE, ARRAY[cardinality(recorded_ids)]);
         FOR snapshot_item IN SELECT value FROM jsonb_array_elements(COALESCE(p_messages, '[]'::JSONB)) LOOP
-            recorded_index := coalesce(
-                array_position(recorded_ids, snapshot_item->>'id'),
-                array_position(recorded_message_ids, snapshot_item->>'message_id')
-            );
+            recorded_index := array_position(recorded_ids, snapshot_item->>'id');
             IF recorded_index IS NOT NULL THEN
                 recorded_present[recorded_index] := TRUE;
             END IF;
         END LOOP;
         FOR snapshot_item IN SELECT value FROM jsonb_array_elements(COALESCE(p_messages, '[]'::JSONB)) LOOP
-            recorded_index := coalesce(
-                array_position(recorded_ids, snapshot_item->>'id'),
-                array_position(recorded_message_ids, snapshot_item->>'message_id')
-            );
+            recorded_index := array_position(recorded_ids, snapshot_item->>'id');
             IF recorded_index IS NOT NULL THEN
                 cursor_sequence := GREATEST(cursor_sequence, recorded_sequences[recorded_index]);
                 CONTINUE;
             END IF;
-            -- Keep this row on its side of every omitted recorded row: a stored
-            -- row by its stored sequence, a new row by its creation time.
+            -- A copy that reuses a recorded message_id under another row id is
+            -- ignored and is not the anchor's position.
+            IF array_position(recorded_message_ids, snapshot_item->>'message_id') IS NOT NULL THEN
+                CONTINUE;
+            END IF;
+            -- A stored row stays after every recorded row it followed; a new row
+            -- stays after every omitted recorded row created before it.
             existing_index := array_position(existing_ids, snapshot_item->>'id');
             item_created_at := COALESCE((snapshot_item->>'created_at')::TIMESTAMPTZ, now());
             SELECT max(anchor.seq) INTO anchor_floor
               FROM unnest(recorded_sequences, recorded_created_ats, recorded_present) AS anchor(seq, created, present)
-             WHERE NOT anchor.present
-               AND CASE WHEN existing_index IS NOT NULL
+             WHERE CASE WHEN existing_index IS NOT NULL
                         THEN anchor.seq < existing_sequences[existing_index]
-                        ELSE anchor.created <= item_created_at
+                        ELSE NOT anchor.present AND anchor.created <= item_created_at
                    END;
             cursor_sequence := GREATEST(cursor_sequence, coalesce(anchor_floor, 0));
             candidate := cursor_sequence + 1;
