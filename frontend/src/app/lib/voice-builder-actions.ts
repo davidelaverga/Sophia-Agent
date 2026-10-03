@@ -338,9 +338,15 @@ export function createVoiceBuilderToolHandler(
   const nowMs = options.nowMs ?? (() => Date.now())
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => { setTimeout(resolve, ms) }))
   const logOutcome = options.logOutcome ?? logVoiceBuilderOutcome
-  // A start being sent or sent but not yet seen running, the run present before it,
-  // and the conversation it was sent in.
-  let pendingStart: { atMs: number; baseline: string | null; sessionKey: string | null } | null = null
+  // A start being sent or sent but not yet seen running, the run and delivery
+  // present before it, and the conversation it was sent in.
+  let pendingStart: {
+    atMs: number
+    baseline: string | null
+    baselineTaskId: string | null
+    delivery: string | null
+    sessionKey: string | null
+  } | null = null
   const sessionKey = () => adapter.getSessionKey?.() ?? null
 
   const knownTaskIds = () => uniqueStrings([
@@ -428,7 +434,13 @@ export function createVoiceBuilderToolHandler(
     }
     // Pending from before the send, so an overlapping call sees it while this
     // one waits for confirmation.
-    const pending = { atMs: nowMs(), baseline: runKey(adapter.getBuilderTask()), sessionKey: sessionKey() }
+    const pending = {
+      atMs: nowMs(),
+      baseline: runKey(adapter.getBuilderTask()),
+      baselineTaskId: adapter.getBuilderTask()?.taskId ?? null,
+      delivery: deliveryKey(),
+      sessionKey: sessionKey(),
+    }
     pendingStart = pending
     const outcome = await sendAndConfirm(buildVoiceBuilderStartMessage({
       description,
@@ -530,14 +542,33 @@ export function createVoiceBuilderToolHandler(
 
   // An unconfirmed start in the active conversation that may still appear.
   const pendingStartActive = (): boolean => {
-    const current = runKey(adapter.getBuilderTask())
-    if (pendingStart && (pendingStart.sessionKey !== sessionKey() || (current !== null && current !== pendingStart.baseline))) {
-      // Another conversation is active, or a new run has appeared: the start
-      // is no longer pending. The earlier card merely being cleared (for
-      // example dismissed) proves nothing, so that keeps it pending.
-      pendingStart = null
+    if (pendingStart) {
+      const current = runKey(adapter.getBuilderTask())
+      const delivered = deliveryKey()
+      const newRun = current !== null && current !== pendingStart.baseline
+      // A completion or artifact that was not there before the start, and is
+      // not the earlier task's, means the start materialized even if its card
+      // is gone.
+      const newDelivery = delivered !== null && delivered !== pendingStart.delivery
+        && (adapter.getBuilderCompletion()?.task_id ?? null) !== pendingStart.baselineTaskId
+      // Another conversation is active, or the start has materialized: it is
+      // no longer pending. The earlier card merely being cleared (for example
+      // dismissed) proves nothing, so that keeps it pending.
+      if (pendingStart.sessionKey !== sessionKey() || newRun || newDelivery) {
+        pendingStart = null
+      }
     }
     return pendingStart !== null && nowMs() - pendingStart.atMs <= PENDING_START_CORRECTION_WINDOW_MS
+  }
+
+  // What the session has delivered: the completion event and its artifact.
+  const deliveryKey = (): string | null => {
+    const completion = adapter.getBuilderCompletion()
+    const artifactPath = adapter.getBuilderArtifactPath?.() ?? null
+    if (!completion?.task_id && !artifactPath) {
+      return null
+    }
+    return `${completion?.task_id ?? ""}::${completion?.artifact_path ?? ""}::${artifactPath ?? ""}`
   }
 
   const describeTasks = (): Record<string, unknown>[] => {

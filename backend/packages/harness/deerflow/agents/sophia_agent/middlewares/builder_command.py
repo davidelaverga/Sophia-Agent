@@ -188,6 +188,20 @@ def parse_voice_build_request(user_text: str) -> tuple[str, str] | None:
     Everything after ``Brief:`` is the brief, including later lines. A missing
     or unknown task type falls back to ``document``.
     """
+    envelope = _parse_voice_build_envelope(user_text)
+    if envelope is None:
+        return None
+    brief, task_type = envelope
+    return brief, task_type or "document"
+
+
+def voice_build_task_type(user_text: str) -> str | None:
+    """Return the canonical task type a valid voice build request states, if any."""
+    envelope = _parse_voice_build_envelope(user_text)
+    return envelope[1] if envelope is not None else None
+
+
+def _parse_voice_build_envelope(user_text: str) -> tuple[str, str | None] | None:
     lines = (user_text or "").strip().split("\n")
     if lines[0].strip() != _VOICE_BUILD_REQUEST_HEADER:
         return None
@@ -201,7 +215,7 @@ def parse_voice_build_request(user_text: str) -> tuple[str, str] | None:
         return None
     if not brief:
         return None
-    task_type = "document"
+    task_type = None
     for line in preamble:
         match = _VOICE_BUILD_TASK_TYPE_RE.match(line)
         if match and match.group("task_type").lower() in _VOICE_BUILD_TASK_TYPES:

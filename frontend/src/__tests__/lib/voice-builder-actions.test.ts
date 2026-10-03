@@ -646,6 +646,48 @@ describe("voice builder tool handler", () => {
     expect(session.sent).toHaveLength(1)
   })
 
+  it("ends a pending start when its completion arrives, even after its card is dismissed", async () => {
+    const session = createSession()
+    const request = call(
+      "start_builder_task",
+      { description: "Research EV charging in Germany; deliver Markdown.", task_type: "research" },
+      ["Can you research EV charging in Germany?"],
+    )
+    await session.handler.execute(request)
+
+    session.state.completion = {
+      task_id: "task-late",
+      run_id: "run-late",
+      status: "success",
+      artifact_path: "mnt/user-data/outputs/report.md",
+    } as BuilderCompletionEventV1
+    session.state.task = null
+    session.onSend.next = () => {
+      session.state.task = { phase: "running", taskId: "task-late", runId: "run-edit" }
+    }
+    const correction = await session.handler.execute(call("edit_builder_artifact", { message: "Add a summary." }))
+    expect(correction).toMatchObject({ ok: true, updated: true })
+  })
+
+  it("does not take an earlier delivered artifact as the pending start's", async () => {
+    const session = createSession({ completion: {
+      task_id: "task-old",
+      run_id: "run-old",
+      status: "success",
+      artifact_path: "mnt/user-data/outputs/old.md",
+    } as BuilderCompletionEventV1 })
+    const request = call(
+      "start_builder_task",
+      { description: "Research EV charging in Germany; deliver Markdown.", task_type: "research" },
+      ["Can you research EV charging in Germany?"],
+    )
+    await session.handler.execute(request)
+
+    const again = await session.handler.execute(request)
+    expect(again).toMatchObject({ ok: false, reason: "builder_start_pending" })
+    expect(session.sent).toHaveLength(1)
+  })
+
   it("logs one content-free outcome per call", async () => {
     const session = createSession()
     session.onSend.reject = new Error("memory_source_dispatch_busy")

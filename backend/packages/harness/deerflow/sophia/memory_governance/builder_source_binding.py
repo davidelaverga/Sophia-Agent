@@ -141,7 +141,7 @@ def independent_builder_runtime_seed(*, binding, wire_input):
     from langchain_core.messages import HumanMessage, convert_to_messages
 
     from deerflow.agents.sophia_agent.middlewares.builder_budget import builder_budget_for_task
-    from deerflow.agents.sophia_agent.middlewares.builder_command import parse_voice_build_request
+    from deerflow.agents.sophia_agent.middlewares.builder_command import voice_build_task_type
     from deerflow.sophia.tools.start_builder_task import (
         _canonical_task_type_for_target,
         _resolve_target_format,
@@ -161,8 +161,7 @@ def independent_builder_runtime_seed(*, binding, wire_input):
         if len(messages) != 1 or not isinstance(messages[0], HumanMessage) or not isinstance(messages[0].content, str):
             raise ValueError("source")
         text = messages[0].content
-        voice_request = parse_voice_build_request(text)
-        voice_type = voice_request[1] if voice_request is not None and voice_request[1] != "document" else None
+        voice_type = voice_build_task_type(text)
         resolution = _resolve_target_format(current_user_text=text, description=None, task_type=voice_type or "document")
         if voice_type is not None:
             # As in the direct launch: the stated type holds unless the target is a deck.

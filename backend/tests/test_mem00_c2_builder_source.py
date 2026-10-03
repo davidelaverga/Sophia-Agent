@@ -128,6 +128,8 @@ VOICE_VISUAL_REPORT_REQUEST = "\n".join([
     # A voice request's recorded task type reaches the child (PR #165 review).
     ("\n".join(["[Voice build request]", "Task type: research", "Brief: Research a synthetic topic."]), "research", ".md"),
     (VOICE_VISUAL_REPORT_REQUEST, "visual_report", ".pdf"),
+    # An explicit document type holds for a PDF target, as in the direct launch.
+    ("\n".join(["[Voice build request]", "Task type: document", "Brief: A synthetic summary as a PDF."]), "document", ".pdf"),
 ], indirect=["source"])
 def test_source_only_transport_binds_actual_child_run_and_rejects_old_contract(source, monkeypatch, tmp_path, expected_type, expected_ext):
     from copy import deepcopy
@@ -278,7 +280,13 @@ def test_source_only_transport_binds_actual_child_run_and_rejects_old_contract(s
         except ModelBoundaryReached:
             terminal = None
         assert terminal is None, {key: terminal.get(key) for key in ("builder_terminal_halt_reason", "builder_result", "builder_budget", "builder_deadline_epoch_ms")}
-        assert source["messages"][0].content in str(seen)
+        def contents(value):
+            if isinstance(value, (list, tuple)):
+                for item in value:
+                    yield from contents(item)
+            else:
+                yield str(getattr(value, "content", value))
+        assert any(recorded in text for text in contents(seen))
         assert "<tone_guidance>" not in str(seen) and "<memories>" not in str(seen)
         assert len(model_turns) == 2
         from langchain_core.messages import ToolMessage
