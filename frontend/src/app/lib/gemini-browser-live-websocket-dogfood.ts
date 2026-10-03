@@ -1682,6 +1682,21 @@ export function createGeminiConversationAudioRecorder(
   };
 }
 
+// When provider audio keeps arriving but nothing is heard, the output
+// context's state is the first thing to read. One content-free console line
+// per transition (running, suspended, interrupted, closed).
+function observeGeminiAudioContextState(audioContext: AudioContext): void {
+  if (typeof audioContext.addEventListener !== 'function') {
+    return;
+  }
+  audioContext.addEventListener('statechange', () => {
+    console.warn('[voice-audio]', 'context-state', {
+      state: typeof audioContext.state === 'string' ? audioContext.state : null,
+      at: new Date().toISOString(),
+    });
+  });
+}
+
 async function resumeGeminiAudioContext(
   audioContext: AudioContext,
 ): Promise<GeminiAudioContextDiagnostic> {
@@ -3628,6 +3643,7 @@ export async function connectGeminiBrowserLiveDogfood(
     };
 
     audioContext = audioContextFactory();
+    observeGeminiAudioContextState(audioContext);
     // The evidence monitor is part of the protected synthetic test plane only.
     // Ordinary Sophia sessions preserve the pre-VT00 source -> output wiring.
     outputLegMonitor = browserSession.syntheticTest
@@ -6392,7 +6408,7 @@ function handleGeminiRelayClientActions(options: {
           taskId: taskIdFromResponseRecord(backendResponse),
           taskStatus: taskStatusFromResponseRecord(backendResponse),
           trackedTaskIds: trackedTaskIdsFromResponseRecord(backendResponse),
-          rejectionReason: stringFromAnyKey(backendResponse, 'error_type', 'errorType', 'rejection_reason', 'rejectionReason', 'safe_reason', 'safeReason'),
+          rejectionReason: toolResponseRejectionReason(backendResponse),
           recoveryGuidance: stringFromAnyKey(backendResponse, 'recovery_guidance', 'recoveryGuidance'),
           backendResponse,
           errorText: null,
@@ -10724,6 +10740,22 @@ function redactToolCallArgsForTelemetry(
     return args;
   }
   return redactRetrieveMemoriesArgsForTelemetry(args);
+}
+
+// The voice Builder bridge reports a not-started call as `reason` plus, for a
+// failed send, a short `send_error` code. Both are fixed codes, never content;
+// without them every bridge refusal looked identical in the telemetry panel.
+function toolResponseRejectionReason(response: Record<string, unknown> | null): string | null {
+  const isCode = (value: string | null): value is string => value !== null && /^[a-z0-9_]{1,64}$/u.test(value);
+  const explicit = stringFromAnyKey(
+    response,
+    'error_type', 'errorType', 'rejection_reason', 'rejectionReason', 'safe_reason', 'safeReason',
+  );
+  // Other tools may put prose in `reason`; only a bare code is surfaced.
+  const bridgeReason = stringFromAnyKey(response, 'reason');
+  const reason = explicit ?? (isCode(bridgeReason) ? bridgeReason : null);
+  const sendError = stringFromAnyKey(response, 'send_error', 'sendError');
+  return reason && isCode(sendError) ? `${reason}:${sendError}` : reason;
 }
 
 function redactBackendResponseForToolTelemetry(

@@ -19,6 +19,8 @@ type BuilderCanvasState = {
   retiredRuns: Set<string>;
   runOrder: Map<string, number>;
   nextRunOrder: number;
+  /** A valid snapshot for this thread has been applied (failed requests never count). */
+  snapshotLoaded?: boolean;
 };
 
 const EMPTY_STATE: BuilderCanvasState = {
@@ -406,7 +408,7 @@ async function applyBuilderCanvasSnapshotResponse(
     if (emptyPassiveSnapshot) {
       recordEmptyPassiveSnapshotTelemetry(context, current, activeArtifactReview);
     }
-    return next;
+    return { ...next, snapshotLoaded: true };
   });
 }
 
@@ -434,7 +436,12 @@ function handleBuilderCanvasSseMessage(context: BuilderCanvasFeedContext, messag
       kind: event.kind,
       status: event.status,
     });
-    context.setState((current) => applyEvent(current, event));
+    context.setState((current) => {
+      const next = applyEvent(current, event);
+      return next === current || next.snapshotLoaded === current.snapshotLoaded
+        ? next
+        : { ...next, snapshotLoaded: current.snapshotLoaded };
+    });
   } catch {
     // Ignore malformed server data and leave the last truthful state visible.
     logCanvasClient('event-malformed', {

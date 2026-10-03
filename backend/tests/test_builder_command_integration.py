@@ -279,3 +279,126 @@ def test_unrelated_negation_does_not_hide_explicit_pdf_target():
     result = middleware.wrap_model_call(request, lambda _request: expected)
 
     assert result is expected
+
+
+# The exact message the web voice bridge sends (buildVoiceBuilderStartMessage
+# in frontend/src/app/lib/voice-builder-actions.ts).
+def _voice_build_request(brief: str, task_type: str | None = "research") -> str:
+    lines = [
+        "[Voice build request]",
+        "I asked for this by voice and already answered any clarifying questions there.",
+        "Start it now with start_builder_task using the brief below. Do not ask me further questions first.",
+    ]
+    if task_type is not None:
+        lines.append(f"Task type: {task_type}")
+    lines.append(f"Brief: {brief}")
+    return "\n".join(lines)
+
+
+def _route(content, state: dict | None = None, messages: list | None = None):
+    middleware = BuilderCommandMiddleware()
+    messages = messages if messages is not None else [HumanMessage(content=content)]
+    called = {"model": False}
+    expected = AIMessage(content="Model response")
+
+    def _handler(_request):
+        called["model"] = True
+        return expected
+
+    result = middleware.wrap_model_call(_make_request(messages, state), _handler)
+    return result, called["model"], expected
+
+
+def test_voice_build_request_routes_brief_to_start_builder_task():
+    brief = "Research the EU AI Act and write me a short Markdown report.\nKeep it to one page; cite sources."
+    result, model_called, _ = _route(_voice_build_request(brief))
+
+    assert model_called is False
+    assert isinstance(result, AIMessage) and len(result.tool_calls) == 1
+    tool_call = result.tool_calls[0]
+    assert tool_call["name"] == "start_builder_task"
+    assert tool_call["id"].startswith("builder-direct-")
+    assert tool_call["args"] == {"description": brief, "task_type": "research"}
+
+
+@pytest.mark.anyio
+async def test_voice_build_request_routes_on_the_async_path():
+    middleware = BuilderCommandMiddleware()
+    request = _make_request([HumanMessage(content=_voice_build_request("Build a pricing page.", "frontend"))])
+
+    async def _handler(_request):
+        raise AssertionError("model should not run")
+
+    result = await middleware.awrap_model_call(request, _handler)
+
+    assert result.tool_calls[0]["args"] == {"description": "Build a pricing page.", "task_type": "frontend"}
+
+
+@pytest.mark.parametrize(
+    "task_type,expected",
+    [(None, "document"), ("report", "document"), ("Research", "research"), ("visual_report", "visual_report")],
+)
+def test_voice_build_request_task_type_is_always_canonical(task_type, expected):
+    result, model_called, _ = _route(_voice_build_request("A brief.", task_type))
+
+    assert model_called is False
+    assert result.tool_calls[0]["args"]["task_type"] == expected
+
+
+def test_voice_build_task_types_match_the_tool_contract():
+    from deerflow.agents.sophia_agent.middlewares.builder_command import _VOICE_BUILD_TASK_TYPES
+    from deerflow.sophia.tools.start_builder_task import make_start_builder_task_tool
+    from deerflow.sophia.tools.update_async_task_wrapper import _CANONICAL_TASK_TYPES
+
+    tool_enum = frozenset(make_start_builder_task_tool("owner").args["task_type"]["enum"])
+    assert _VOICE_BUILD_TASK_TYPES == _CANONICAL_TASK_TYPES == tool_enum
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        # Corrections stay with the model, which picks the update or edit tool.
+        "[Voice build correction]\nI gave this correction by voice.\nBuild task: task-1\nCorrection: shorter.",
+        # The header must open the message; quoting it is not a request.
+        "What does this mean?\n" + _voice_build_request("A brief."),
+        _voice_build_request(""),
+        "[Voice build request]\nTask type: research\nNo brief here.",
+        "[Voice build request]",
+        # A sentence inside a correction or a malformed request is never a new
+        # direct document command (PR #165 review).
+        "[Voice build correction]\nI gave this correction by voice.\nBuild task: task-1\n"
+        "Correction: Add a summary. Create a one-page document about pricing.",
+        "[Voice build request]\nTask type: document\nNo brief. Create a one-page document about pricing.",
+    ],
+)
+def test_malformed_or_other_voice_messages_stay_with_the_model(content):
+    result, model_called, expected = _route(content)
+
+    assert model_called is True
+    assert result is expected
+
+
+def test_voice_build_request_is_not_routed_again_after_the_tool_result():
+    from langchain_core.messages import ToolMessage
+
+    first, _, _ = _route(_voice_build_request("A brief."))
+    tool_call = first.tool_calls[0]
+    messages = [
+        HumanMessage(content=_voice_build_request("A brief.")),
+        first,
+        ToolMessage(content="Builder run confirmed.", tool_call_id=tool_call["id"], name="start_builder_task"),
+    ]
+
+    result, model_called, expected = _route(None, messages=messages)
+
+    assert model_called is True
+    assert result is expected
+
+
+def test_voice_build_request_is_not_routed_on_the_crisis_path():
+    content = _voice_build_request("A brief.")
+    messages = [HumanMessage(content=content)]
+    result, model_called, expected = _route(None, state={"messages": messages, "skip_expensive": True}, messages=messages)
+
+    assert model_called is True
+    assert result is expected

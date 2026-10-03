@@ -119,6 +119,17 @@ recovery; source, payload, owner, parent/run, child, scope and epochs must match
 Do not apply this exception to generic `register` or treat it as a model permit.
 Native run-create ambiguity still needs its own exact-child recovery path.
 
+The installed LangGraph API mirrors a single raw Builder handoff carrier from
+`config.configurable` into `context`, or in the reverse direction. Either raw
+carrier therefore uses the same sealed, durably registered authority contract:
+owner, child, payload, current source and one-run binding must all verify. Equal
+copies establish consistency only, never authorization, and both are cleared
+after admission. The API refuses requests with both raw carriers populated;
+the hook separately refuses inconsistent copies. Regression coverage in
+`test_mem00_langgraph_framework_auth.py` uses the installed SDK/API/auth path,
+fresh isolated negative proofs, synthetic authority and blocked network. It
+qualifies admission and binding, not worker execution or artifact delivery.
+
 The staged `dispatch_independent_builder` adapter now supplies that exact-child
 observation path: duplicate or uncertain allocation cannot dispatch again, and
 confirmation requires both the owner-bound ledger association and native run

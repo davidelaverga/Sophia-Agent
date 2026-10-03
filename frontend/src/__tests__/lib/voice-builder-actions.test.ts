@@ -9,8 +9,10 @@ import {
   executeVoiceBuilderToolBridgeCall,
   hasRecentExplicitVoiceBuilderRequest,
   isExplicitVoiceBuilderRequest,
+  MEMORY_SOURCE_SEND_REFUSED,
   registerVoiceBuilderToolBridge,
   voiceBuilderKnownTaskIds,
+  type VoiceBuilderOutcomeLog,
   type VoiceBuilderSessionAdapter,
   type VoiceBuilderToolCallInput,
   type VoiceBuilderToolName,
@@ -34,16 +36,28 @@ function call(
 }
 
 function createSession(initial: { task?: BuilderTaskV1 | null; completion?: BuilderCompletionEventV1 | null } = {}) {
-  const state = {
+  const state: {
+    task: BuilderTaskV1 | null
+    completion: BuilderCompletionEventV1 | null
+    sessionKey: string | null
+    artifactPath: string | null
+    ready: boolean
+  } = {
     task: initial.task ?? null,
     completion: initial.completion ?? null,
+    sessionKey: "thread-a",
+    artifactPath: null,
+    ready: true,
   }
   const sent: string[] = []
-  const onSend: { next: (() => void) | null; reject: Error | null } = { next: null, reject: null }
+  const onSend: { next: (() => void) | null; reject: Error | null; hold: Promise<void> | null } = { next: null, reject: null, hold: null }
   const cancelBuilderTask = vi.fn(async () => ({ status: "cancelled", task_id: state.task?.taskId ?? null, run_id: state.task?.runId ?? null }))
   const adapter: VoiceBuilderSessionAdapter = {
     sendCompanionMessage: async (text) => {
       sent.push(text)
+      if (onSend.hold !== null) {
+        await onSend.hold
+      }
       if (onSend.reject) {
         throw onSend.reject
       }
@@ -52,15 +66,20 @@ function createSession(initial: { task?: BuilderTaskV1 | null; completion?: Buil
     getBuilderTask: () => state.task,
     getBuilderCompletion: () => state.completion,
     cancelBuilderTask,
+    getSessionKey: () => state.sessionKey,
+    getBuilderArtifactPath: () => state.artifactPath,
+    isBuilderStateReady: () => state.ready,
   }
   let clock = NOW
+  const logs: VoiceBuilderOutcomeLog[] = []
   const handler = createVoiceBuilderToolHandler(adapter, {
     confirmationTimeoutMs: 1_000,
     pollIntervalMs: 100,
     nowMs: () => clock,
     sleep: async (ms) => { clock += ms },
+    logOutcome: (outcome) => { logs.push(outcome) },
   })
-  return { state, sent, onSend, cancelBuilderTask, handler }
+  return { state, sent, onSend, cancelBuilderTask, handler, logs, advance: (ms: number) => { clock += ms } }
 }
 
 describe("companion turn failures", () => {
@@ -85,6 +104,18 @@ describe("companion turn failures", () => {
     expect(failures.take("refused-late")).toBe(COMPANION_TURN_UNCONFIRMED)
     expect(failures.take("other")).toBe(COMPANION_TURN_UNCONFIRMED)
     expect(companionTurnFailureCode("", false)).toBe(COMPANION_TURN_UNCONFIRMED)
+  })
+
+  it("treats a run-creation refusal before any activity as definitive", () => {
+    const failures = createCompanionTurnFailures()
+    failures.record("refused-run", JSON.stringify({ error: MEMORY_SOURCE_SEND_REFUSED }), false)
+    failures.record("refused-run-late", JSON.stringify({ error: MEMORY_SOURCE_SEND_REFUSED }), true)
+    failures.record("unconfirmed-run", JSON.stringify({ error: "memory_source_send_unconfirmed" }), false)
+
+    expect(failures.take("refused-run")).toBe(MEMORY_SOURCE_SEND_REFUSED)
+    expect(failures.take("refused-run-late")).toBe(COMPANION_TURN_UNCONFIRMED)
+    expect(failures.take("unconfirmed-run")).toBe(COMPANION_TURN_UNCONFIRMED)
+    expect(companionTurnFailureCode(MEMORY_SOURCE_SEND_REFUSED, false)).toBe(MEMORY_SOURCE_SEND_REFUSED)
   })
 
   it("keeps only a bounded number of unclaimed failures", () => {
@@ -145,8 +176,12 @@ describe("voice builder tool handler", () => {
     })
     expect(session.sent).toHaveLength(1)
     expect(session.sent[0]).toContain("start_builder_task")
-    expect(session.sent[0]).toContain("Task type: research")
-    expect(session.sent[0]).toContain("Research EV charging in Germany; deliver Markdown.")
+    // BuilderCommandMiddleware (backend) routes on this exact header, task
+    // type line and Brief prefix; changing them stops the voice build route.
+    const lines = session.sent[0].split("\n")
+    expect(lines[0]).toBe("[Voice build request]")
+    expect(lines).toContain("Task type: research")
+    expect(lines[lines.length - 1]).toBe("Brief: Research EV charging in Germany; deliver Markdown.")
   })
 
   it("never reports a start without an observed task", async () => {
@@ -237,6 +272,29 @@ describe("voice builder tool handler", () => {
       send_error: "memory_context_rotation_required",
     })
     expect(String(result.recovery_guidance)).toContain("could not be started in this conversation")
+    expect(String(result.recovery_guidance)).toContain("Do not retry it yourself")
+    expect(session.sent).toHaveLength(1)
+  })
+
+  it("reports a run-creation refusal as not started, without retrying", async () => {
+    const session = createSession()
+    session.onSend.reject = new Error(MEMORY_SOURCE_SEND_REFUSED)
+
+    const result = await session.handler.execute(call(
+      "start_builder_task",
+      { description: "Research batteries." },
+      ["please research batteries"],
+    ))
+
+    expect(result).toMatchObject({
+      ok: false,
+      started: false,
+      builder_task_started: false,
+      reason: "builder_request_not_sent",
+      send_error: MEMORY_SOURCE_SEND_REFUSED,
+    })
+    expect(result).not.toHaveProperty("delivery")
+    expect(String(result.recovery_guidance)).toContain("could not be started, so no new build is running")
     expect(String(result.recovery_guidance)).toContain("Do not retry it yourself")
     expect(session.sent).toHaveLength(1)
   })
@@ -340,6 +398,7 @@ describe("voice builder tool handler", () => {
 
   it("confirms an edit of a delivered artifact by the new build it starts", async () => {
     const session = createSession({ task: { phase: "completed", taskId: "task-1", runId: "run-1" } })
+    session.state.artifactPath = "mnt/user-data/outputs/report.md"
     session.onSend.next = () => {
       session.state.task = { phase: "running", taskId: "task-2", runId: "run-3" }
     }
@@ -351,6 +410,423 @@ describe("voice builder tool handler", () => {
 
     expect(result).toMatchObject({ ok: true, updated: true, task_id: "task-2" })
     expect(session.sent[0]).toContain("Artifact: mnt/user-data/outputs/report.md")
+  })
+
+  it("refuses a correction when the session has no build, and sends nothing", async () => {
+    // R017: a correction forwarded before any start spent the turn and its
+    // recorded source, and kept the chat busy when the real start arrived.
+    const session = createSession()
+
+    for (const name of ["update_async_task", "edit_builder_artifact"] as const) {
+      const result = await session.handler.execute(call(name, { message: "Make it shorter." }))
+
+      expect(result).toMatchObject({ ok: false, updated: false, reason: "no_build_to_change", error_type: "no_build_to_change" })
+      expect(String(result.recovery_guidance)).toContain("start_builder_task")
+    }
+    expect(session.sent).toHaveLength(0)
+  })
+
+  it("refuses a correction after a build that completed without an artifact", async () => {
+    const session = createSession({ task: { phase: "completed", taskId: "task-1", runId: "run-1" } })
+
+    const result = await session.handler.execute(call("edit_builder_artifact", { message: "Add a summary table." }))
+
+    expect(result).toMatchObject({ ok: false, reason: "no_build_to_change" })
+    expect(session.sent).toHaveLength(0)
+  })
+
+  it("refuses a correction after a build that failed without an artifact", async () => {
+    const session = createSession({ task: { phase: "failed", taskId: "task-1", runId: "run-1" } })
+
+    const result = await session.handler.execute(call("update_async_task", { task_id: "task-1", message: "Shorter." }))
+
+    expect(result).toMatchObject({ ok: false, reason: "no_build_to_change" })
+    expect(session.sent).toHaveLength(0)
+  })
+
+  it("forwards a correction to a start the browser has not seen running yet, but not a stale one", async () => {
+    const session = createSession()
+    const started = await session.handler.execute(call(
+      "start_builder_task",
+      { description: "Research EV charging in Germany; deliver Markdown.", task_type: "research" },
+      ["Can you research EV charging in Germany?"],
+    ))
+    expect(started).toMatchObject({ ok: false, reason: "builder_start_unconfirmed" })
+
+    // The companion tracks that build even though no running task is visible here.
+    await session.handler.execute(call("update_async_task", { message: "Also cover Austria." }))
+    expect(session.sent).toHaveLength(2)
+    expect(session.sent[1]).toContain("Correction: Also cover Austria.")
+
+    session.advance(6 * 60 * 1000)
+    const stale = await session.handler.execute(call("update_async_task", { message: "And Switzerland." }))
+    expect(stale).toMatchObject({ ok: false, reason: "no_build_to_change" })
+    expect(session.sent).toHaveLength(2)
+  })
+
+  it("does not keep a confirmed start that then failed as something to correct", async () => {
+    const session = createSession()
+    session.onSend.next = () => {
+      session.state.task = { phase: "running", taskId: "task-new", runId: "run-new" }
+    }
+    const started = await session.handler.execute(call(
+      "start_builder_task",
+      { description: "Research EV charging in Germany; deliver Markdown.", task_type: "research" },
+      ["Can you research EV charging in Germany?"],
+    ))
+    expect(started).toMatchObject({ ok: true, started: true })
+
+    session.state.task = { phase: "failed", taskId: "task-new", runId: "run-new" }
+    const correction = await session.handler.execute(call("update_async_task", { message: "Also cover Austria." }))
+
+    expect(correction).toMatchObject({ ok: false, reason: "no_build_to_change" })
+    expect(session.sent).toHaveLength(1)
+  })
+
+  it("drops a pending start once its task appears and ends without an artifact", async () => {
+    const session = createSession()
+    await session.handler.execute(call(
+      "start_builder_task",
+      { description: "Research EV charging in Germany; deliver Markdown.", task_type: "research" },
+      ["Can you research EV charging in Germany?"],
+    ))
+    // The session observes every state change, so the run is seen running first.
+    session.state.task = { phase: "running", taskId: "task-late", runId: "run-late" }
+    session.handler.observe?.()
+    session.state.task = { phase: "cancelled", taskId: "task-late", runId: "run-late" }
+
+    const correction = await session.handler.execute(call("update_async_task", { message: "Also cover Austria." }))
+
+    expect(correction).toMatchObject({ ok: false, reason: "no_build_to_change" })
+    expect(session.sent).toHaveLength(1)
+  })
+
+  it("does not carry a pending start into another conversation", async () => {
+    const session = createSession()
+    await session.handler.execute(call(
+      "start_builder_task",
+      { description: "Research EV charging in Germany; deliver Markdown.", task_type: "research" },
+      ["Can you research EV charging in Germany?"],
+    ))
+
+    session.state.sessionKey = "thread-b"
+    const elsewhere = await session.handler.execute(call("update_async_task", { message: "Also cover Austria." }))
+    expect(elsewhere).toMatchObject({ ok: false, reason: "no_build_to_change" })
+
+    // Returning to the first conversation does not revive it either.
+    session.state.sessionKey = "thread-a"
+    const back = await session.handler.execute(call("update_async_task", { message: "Also cover Austria." }))
+    expect(back).toMatchObject({ ok: false, reason: "no_build_to_change" })
+    expect(session.sent).toHaveLength(1)
+  })
+
+  it("does not treat a start that was never sent as something to correct", async () => {
+    const session = createSession()
+    session.onSend.reject = new Error("memory_source_dispatch_busy")
+
+    const started = await session.handler.execute(call(
+      "start_builder_task",
+      { description: "Research EV charging in Germany; deliver Markdown.", task_type: "research" },
+      ["Can you research EV charging in Germany?"],
+    ))
+    expect(started).toMatchObject({ ok: false, reason: "builder_request_not_sent", send_error: "memory_source_dispatch_busy" })
+
+    session.onSend.reject = null
+    const correction = await session.handler.execute(call("update_async_task", { message: "Also cover Austria." }))
+    expect(correction).toMatchObject({ ok: false, reason: "no_build_to_change" })
+    expect(session.sent).toHaveLength(1)
+  })
+
+  it.each([MEMORY_SOURCE_SEND_REFUSED, "memory_context_rotation_required"])(
+    "drops a pending start whose send is refused after the wait (%s)",
+    async (code) => {
+      const session = createSession()
+      let release: (error: Error) => void = () => {}
+      session.onSend.hold = new Promise<void>((_resolve, reject) => { release = reject })
+      const started = await session.handler.execute(call(
+        "start_builder_task",
+        { description: "Research EV charging in Germany; deliver Markdown.", task_type: "research" },
+        ["Can you research EV charging in Germany?"],
+      ))
+      expect(started).toMatchObject({ ok: false, reason: "builder_start_unconfirmed" })
+
+      release(new Error(code))
+      await new Promise((resolve) => { setTimeout(resolve, 0) })
+      const correction = await session.handler.execute(call("update_async_task", { message: "Also cover Austria." }))
+
+      expect(correction).toMatchObject({ ok: false, reason: "no_build_to_change" })
+      expect(session.sent).toHaveLength(1)
+    },
+  )
+
+  it.each([COMPANION_TURN_UNCONFIRMED, "Failed to fetch: network connection lost"])(
+    "keeps a pending start whose send ends ambiguously after the wait (%s)",
+    async (failure) => {
+      const session = createSession()
+      let release: (error: Error) => void = () => {}
+      session.onSend.hold = new Promise<void>((_resolve, reject) => { release = reject })
+      await session.handler.execute(call(
+        "start_builder_task",
+        { description: "Research EV charging in Germany; deliver Markdown.", task_type: "research" },
+        ["Can you research EV charging in Germany?"],
+      ))
+
+      // The send may have been accepted and launched the build (an unconfirmed
+      // turn, or a network error after the request left), so it stays correctable.
+      session.onSend.hold = null
+      release(new Error(failure))
+      await new Promise((resolve) => { setTimeout(resolve, 0) })
+      await session.handler.execute(call("update_async_task", { message: "Also cover Austria." }))
+
+      expect(session.sent).toHaveLength(2)
+      expect(session.sent[1]).toContain("Correction: Also cover Austria.")
+    },
+  )
+
+  it("does not let a pending start's first run confirm a correction", async () => {
+    const session = createSession()
+    await session.handler.execute(call(
+      "start_builder_task",
+      { description: "Research EV charging in Germany; deliver Markdown.", task_type: "research" },
+      ["Can you research EV charging in Germany?"],
+    ))
+    // The original build becomes visible while the correction waits.
+    session.onSend.next = () => {
+      session.state.task = { phase: "running", taskId: "task-late", runId: "run-late" }
+    }
+
+    const correction = await session.handler.execute(call("update_async_task", { message: "Also cover Austria." }))
+
+    expect(correction).toMatchObject({ ok: false, reason: "builder_update_unconfirmed", status: "unconfirmed" })
+    expect(session.sent).toHaveLength(2)
+  })
+
+  it("refuses a second start while the first may still appear, and allows one after it ends", async () => {
+    const session = createSession()
+    const request = call(
+      "start_builder_task",
+      { description: "Research EV charging in Germany; deliver Markdown.", task_type: "research" },
+      ["Can you research EV charging in Germany?"],
+    )
+    await session.handler.execute(request)
+
+    const again = await session.handler.execute(request)
+    expect(again).toMatchObject({ ok: false, reason: "builder_start_pending", duplicate_guard: true })
+    expect(session.sent).toHaveLength(1)
+
+    session.state.task = { phase: "running", taskId: "task-late", runId: "run-late" }
+    session.handler.observe?.()
+    session.state.task = { phase: "failed", taskId: "task-late", runId: "run-late" }
+    const retry = await session.handler.execute(request)
+    expect(retry).toMatchObject({ ok: false, reason: "builder_start_unconfirmed" })
+    expect(session.sent).toHaveLength(2)
+  })
+
+  it("keeps a pending start when the earlier Builder card is dismissed", async () => {
+    const session = createSession({ task: { phase: "failed", taskId: "task-old", runId: "run-old" } })
+    const request = call(
+      "start_builder_task",
+      { description: "Research EV charging in Germany; deliver Markdown.", task_type: "research" },
+      ["Can you research EV charging in Germany?"],
+    )
+    await session.handler.execute(request)
+
+    session.state.task = null
+    const again = await session.handler.execute(request)
+    expect(again).toMatchObject({ ok: false, reason: "builder_start_pending" })
+    await session.handler.execute(call("update_async_task", { message: "Also cover Austria." }))
+    expect(session.sent).toHaveLength(2)
+    expect(session.sent[1]).toContain("Correction: Also cover Austria.")
+  })
+
+  it("refuses a start that overlaps one still waiting for confirmation", async () => {
+    const session = createSession()
+    const request = call(
+      "start_builder_task",
+      { description: "Research EV charging in Germany; deliver Markdown.", task_type: "research" },
+      ["Can you research EV charging in Germany?"],
+    )
+
+    const [first, second] = await Promise.all([session.handler.execute(request), session.handler.execute(request)])
+
+    expect(first).toMatchObject({ ok: false, reason: "builder_start_unconfirmed" })
+    expect(second).toMatchObject({ ok: false, reason: "builder_start_pending" })
+    expect(session.sent).toHaveLength(1)
+  })
+
+  it("ends a pending start seen running, even after its card is dismissed", async () => {
+    const session = createSession()
+    const request = call(
+      "start_builder_task",
+      { description: "Research EV charging in Germany; deliver Markdown.", task_type: "research" },
+      ["Can you research EV charging in Germany?"],
+    )
+    await session.handler.execute(request)
+
+    session.state.task = { phase: "running", taskId: "task-late", runId: "run-late" }
+    session.handler.observe?.()
+    session.state.completion = {
+      task_id: "task-late",
+      run_id: "run-late",
+      status: "success",
+      artifact_path: "mnt/user-data/outputs/report.md",
+    } as BuilderCompletionEventV1
+    session.state.task = null
+    session.onSend.next = () => {
+      session.state.task = { phase: "running", taskId: "task-late", runId: "run-edit" }
+    }
+    const correction = await session.handler.execute(call("edit_builder_artifact", { message: "Add a summary." }))
+    expect(correction).toMatchObject({ ok: true, updated: true })
+  })
+
+  it("does not take an earlier delivered artifact as the pending start's", async () => {
+    const session = createSession({ completion: {
+      task_id: "task-old",
+      run_id: "run-old",
+      status: "success",
+      artifact_path: "mnt/user-data/outputs/old.md",
+    } as BuilderCompletionEventV1 })
+    const request = call(
+      "start_builder_task",
+      { description: "Research EV charging in Germany; deliver Markdown.", task_type: "research" },
+      ["Can you research EV charging in Germany?"],
+    )
+    await session.handler.execute(request)
+
+    const again = await session.handler.execute(request)
+    expect(again).toMatchObject({ ok: false, reason: "builder_start_pending" })
+
+    // The earlier artifact's view changing (hydrated, replaced or cleared) is
+    // still the earlier delivery.
+    session.state.artifactPath = "mnt/user-data/outputs/old-hydrated.md"
+    session.state.completion = { ...session.state.completion, artifact_path: null } as BuilderCompletionEventV1
+    const afterViewChange = await session.handler.execute(request)
+    expect(afterViewChange).toMatchObject({ ok: false, reason: "builder_start_pending" })
+    expect(session.sent).toHaveLength(1)
+  })
+
+  it("never confirms a start with a task from a conversation opened during the wait", async () => {
+    const session = createSession()
+    session.onSend.next = () => {
+      session.state.sessionKey = "thread-b"
+      session.state.task = { phase: "running", taskId: "task-b", runId: "run-b" }
+    }
+
+    const started = await session.handler.execute(call(
+      "start_builder_task",
+      { description: "Research EV charging in Germany; deliver Markdown.", task_type: "research" },
+      ["Can you research EV charging in Germany?"],
+    ))
+
+    expect(started).toMatchObject({ ok: false, reason: "builder_start_unconfirmed" })
+    expect(started).not.toHaveProperty("task_id", "task-b")
+  })
+
+  it("sends no correction while the start's turn is still being sent", async () => {
+    const session = createSession()
+    let release: () => void = () => {}
+    session.onSend.hold = new Promise<void>((resolve) => { release = resolve })
+    await session.handler.execute(call(
+      "start_builder_task",
+      { description: "Research EV charging in Germany; deliver Markdown.", task_type: "research" },
+      ["Can you research EV charging in Germany?"],
+    ))
+
+    const early = await session.handler.execute(call("update_async_task", { message: "Also cover Austria." }))
+    expect(early).toMatchObject({ ok: false, reason: "companion_turn_in_progress" })
+    expect(session.sent).toHaveLength(1)
+
+    // Once that send settles without proof either way, the start stays correctable.
+    session.onSend.hold = null
+    release()
+    await new Promise((resolve) => { setTimeout(resolve, 0) })
+    await session.handler.execute(call("update_async_task", { message: "Also cover Austria." }))
+    expect(session.sent).toHaveLength(2)
+  })
+
+  it.each(["bridge", "ui"])("settles a pending start whose build is cancelled (%s)", async (via) => {
+    const session = createSession()
+    const request = call(
+      "start_builder_task",
+      { description: "Research EV charging in Germany; deliver Markdown.", task_type: "research" },
+      ["Can you research EV charging in Germany?"],
+    )
+    await session.handler.execute(request)
+
+    session.state.task = { phase: "running", taskId: "task-late", runId: "run-late" }
+    if (via === "bridge") {
+      expect(await session.handler.execute(call("cancel_async_task", {}))).toMatchObject({ ok: true })
+    } else {
+      session.handler.observe?.()
+    }
+    // The UI then dismisses the cancelled card and filters its completion.
+    session.state.task = null
+
+    const retry = await session.handler.execute(request)
+    expect(retry).toMatchObject({ ok: false, reason: "builder_start_unconfirmed" })
+    expect(session.sent).toHaveLength(2)
+  })
+
+  it("keeps a pending start when a late snapshot replays an older build", async () => {
+    const session = createSession()
+    const request = call(
+      "start_builder_task",
+      { description: "Research EV charging in Germany; deliver Markdown.", task_type: "research" },
+      ["Can you research EV charging in Germany?"],
+    )
+    await session.handler.execute(request)
+
+    // The canvas hydrates after the send with an earlier, finished build.
+    session.state.task = { phase: "completed", taskId: "task-old", runId: "run-old" }
+    session.state.completion = {
+      task_id: "task-old",
+      run_id: "run-old",
+      status: "success",
+      artifact_path: "mnt/user-data/outputs/old.md",
+    } as BuilderCompletionEventV1
+    session.handler.observe?.()
+
+    const again = await session.handler.execute(request)
+    expect(again).toMatchObject({ ok: false, reason: "builder_start_pending" })
+    expect(session.sent).toHaveLength(1)
+  })
+
+  it("sends no start until the session's Builder state has loaded", async () => {
+    const session = createSession()
+    session.state.ready = false
+    const request = call(
+      "start_builder_task",
+      { description: "Research EV charging in Germany; deliver Markdown.", task_type: "research" },
+      ["Can you research EV charging in Germany?"],
+    )
+
+    expect(await session.handler.execute(request)).toMatchObject({ ok: false, reason: "builder_state_loading" })
+    expect(session.sent).toHaveLength(0)
+
+    session.state.ready = true
+    expect(await session.handler.execute(request)).toMatchObject({ ok: false, reason: "builder_start_unconfirmed" })
+    expect(session.sent).toHaveLength(1)
+  })
+
+  it("logs one content-free outcome per call", async () => {
+    const session = createSession()
+    session.onSend.reject = new Error("memory_source_dispatch_busy")
+
+    await session.handler.execute(call(
+      "start_builder_task",
+      { description: "PRIVATE_SYNTHETIC_BRIEF about EV charging", task_type: "research" },
+      ["Can you research PRIVATE_SYNTHETIC_UTTERANCE?"],
+    ))
+    await session.handler.execute(call("update_async_task", { message: "PRIVATE_SYNTHETIC_CORRECTION" }))
+
+    expect(session.logs).toEqual([
+      expect.objectContaining({ tool: "start_builder_task", ok: false, reason: "builder_request_not_sent", send_error: "memory_source_dispatch_busy" }),
+      expect.objectContaining({ tool: "update_async_task", ok: false, reason: "no_build_to_change", send_error: null }),
+    ])
+    expect(JSON.stringify(session.logs)).not.toMatch(/PRIVATE_SYNTHETIC/)
+    for (const entry of session.logs) {
+      expect(Object.keys(entry).sort()).toEqual(["ok", "reason", "send_error", "status", "task_id", "tool", "waited_ms"])
+    }
   })
 
   it("reports an unconfirmed correction truthfully", async () => {
