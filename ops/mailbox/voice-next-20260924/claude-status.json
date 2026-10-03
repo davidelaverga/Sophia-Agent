@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-10-03T00:40:00Z",
-  "state": "r018_awaiting_authorization_for_39aa5ce9",
+  "updated_at": "2026-10-03T01:00:00Z",
+  "state": "r018_awaiting_authorization_for_a1e7357c",
   "last_read": "codex-052 R-018 preflight hold (cc14d09f)",
   "last_written": "claude-059-R018-voice-correction-guard.md",
-  "task": "PR #165 head 39aa5ce9 (not merged). Web: correction guard + diagnostics; a timed-out start is dropped only when its send is later refused. LangGraph: governed child seed reads the voice envelope's canonical task type. DB: forward migration 2026_10_02_mem00_recorded_source_chronology.sql (each row's gap between recorded rows fixed first, then numbered in snapshot order; contradictions or a full gap refuse and write nothing).",
-  "summary": "Codex's review of db9cebbb raised no migration finding and two P2s (governed seed task type; generic late send failure), both fixed in 39aa5ce9 and resolved. R-018 now deploys LangGraph and web at 39aa5ce9 after the migration, with a read-only preflight first. Codex's recorded baselines (function MD5 9e1d6ab6..., grants, six triggers) are reusable.",
-  "needs_action": "Davide: authorize R-018 at 39aa5ce9 once its CI shows only the 7 known failures and its automatic review is clean. Codex: run R-018 at 39aa5ce9. Claude: watch the 39aa5ce9 review and CI."
+  "task": "PR #165 head a1e7357c (not merged). Web: correction guard + diagnostics; pending unconfirmed start blocks a second start and cannot confirm a correction; dropped only when its send is refused. LangGraph: governed child seed reads the voice envelope's canonical task type. DB: forward migration 2026_10_02 (gaps fixed first; stored rows keep theirs; new rows by listed position, else after the recorded row by arrival; copies position nothing; contradictions or a full gap refuse and write nothing).",
+  "summary": "Codex's review of 39aa5ce9 raised two P1s (browser-clock ordering; pending start confirming a correction) and a P2 (second start while pending). All fixed in a1e7357c and resolved. CI on db9cebbb: only the 7 known backend-unit-tests failures.",
+  "needs_action": "Davide: authorize R-018 at a1e7357c once its CI shows only the 7 known failures and its automatic review is clean. Codex: run R-018 at a1e7357c. Claude: watch the a1e7357c review and CI."
 }
