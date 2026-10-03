@@ -78,6 +78,23 @@ describe('useBuilderCanvas', () => {
     expect(FakeEventSource.instances[0].url).toContain('/canvas/events');
   });
 
+  it('reports a loaded snapshot, and never counts a failed one', async () => {
+    const loaded = renderHook(() => useBuilderCanvas('thread-1'));
+    expect(loaded.result.current.snapshotLoaded).toBeFalsy();
+    await waitFor(() => expect(loaded.result.current.snapshotLoaded).toBe(true));
+    loaded.unmount();
+
+    const fetchMock = globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
+    fetchMock.mockResolvedValueOnce(new Response('unavailable', { status: 503 }));
+    const failed = renderHook(() => useBuilderCanvas('thread-2'));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
+      '/api/sophia/builder/threads/thread-2/canvas/snapshot',
+      { cache: 'no-store' },
+    ));
+    await act(async () => { await Promise.resolve(); });
+    expect(failed.result.current.snapshotLoaded).toBeFalsy();
+  });
+
   it('clears stale state immediately when switching parent threads', async () => {
     mockFetchSnapshots(
       {

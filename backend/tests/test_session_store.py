@@ -135,6 +135,7 @@ class FakeSupabasePostgrest:
     def __init__(self) -> None:
         self.sessions: dict[str, dict] = {}
         self.messages: dict[str, dict] = {}
+        self.refusal_reason: str | None = None
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/rpc/sophia_replace_session_messages"):
@@ -165,6 +166,20 @@ class FakeSupabasePostgrest:
                     "duplicate": False,
                     "conflict": True,
                     "rejection_reason": "revision_conflict",
+                    "previous_revision": current_revision,
+                    "current_revision": current_revision,
+                    "deleted_count": 0,
+                },
+            )
+
+        if self.refusal_reason is not None:
+            return httpx.Response(
+                200,
+                json={
+                    "accepted": False,
+                    "duplicate": False,
+                    "conflict": False,
+                    "rejection_reason": self.refusal_reason,
                     "previous_revision": current_revision,
                     "current_revision": current_revision,
                     "deleted_count": 0,
@@ -365,6 +380,25 @@ def test_supabase_store_append_and_retry_are_idempotent():
     assert len(messages) == 1
     assert messages[0].content == "final"
     assert fake.sessions["session-1"]["transcript_available"] is True
+
+
+def test_supabase_store_append_and_replace_raise_when_the_snapshot_is_refused():
+    fake = FakeSupabasePostgrest()
+    store = _supabase_store(fake)
+    store.upsert_session(SessionRecord(session_id="session-1", thread_id="thread-1", user_id="user-1"))
+    kept = SessionMessageRecord(
+        message_id="client-msg-1", session_id="session-1", thread_id="thread-1",
+        role="user", content="kept", sequence=1,
+    )
+    store.append_or_upsert_messages("user-1", "session-1", [kept])
+    fake.refusal_reason = "recorded_source_order_unrepresentable"
+    late = kept.model_copy(update={"message_id": "client-msg-2", "content": "late"})
+
+    with pytest.raises(SessionStoreError, match="recorded_source_order_unrepresentable"):
+        store.append_or_upsert_messages("user-1", "session-1", [late])
+    with pytest.raises(SessionStoreError, match="recorded_source_order_unrepresentable"):
+        store.replace_messages("user-1", "session-1", [kept, late])
+    assert [message.content for message in store.list_messages("user-1", "session-1")] == ["kept"]
 
 
 def test_supabase_retry_prefers_incoming_for_equal_timestamp_spellings():

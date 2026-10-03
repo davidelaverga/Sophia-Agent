@@ -96,6 +96,7 @@ describe('useSessionRouteExperience', () => {
       recentEvents: [],
       completion: null,
       reconnecting: false,
+      snapshotLoaded: true,
     });
 
     useCompanionArtifactsRuntimeMock.mockReturnValue({
@@ -572,6 +573,26 @@ describe('useSessionRouteExperience', () => {
       recentUserUtterances: [{ text: 'please research the EU AI Act and write me a report', atMs }],
     });
 
+    it("sends no build request until the thread's Builder state has loaded", async () => {
+      useBuilderCanvasMock.mockReturnValue({
+        activeTask: null,
+        recentEvents: [],
+        completion: null,
+        reconnecting: false,
+        snapshotLoaded: false,
+      });
+      const rawSendMessage = vi.fn(async () => undefined);
+      useSessionOutboundSendMock.mockReturnValue(rawSendMessage);
+      const { result } = renderGoverned();
+      await waitFor(() => expect(result.current.sourceProfileReady).toBe(true));
+
+      let pending!: Promise<VoiceBuilderToolResult>;
+      act(() => { pending = startCall(Date.now()); });
+
+      await expect(pending).resolves.toMatchObject({ ok: false, reason: 'builder_state_loading' });
+      expect(rawSendMessage).not.toHaveBeenCalled();
+    });
+
     it('ends the request at once when its own companion turn is refused', async () => {
       const rawSendMessage = vi.fn(async (input: { sourceIntent?: { action: { message_id: string } } }) => {
         reportTurnError(input.sourceIntent?.action.message_id ?? null, 'memory_context_rotation_required', false);
@@ -594,6 +615,30 @@ describe('useSessionRouteExperience', () => {
       expect(rawSendMessage).toHaveBeenCalledTimes(1);
       // Before the fix this waited for the 25 s confirmation timeout.
       expect(Date.now() - startedAt).toBeLessThan(2_000);
+    });
+
+    it('reports a run-creation refusal (HTTP 403) as not started, not unconfirmed', async () => {
+      // 2026-09-28: all three voice requests were refused this way and the
+      // model was told they were unconfirmed, so it kept retrying.
+      const rawSendMessage = vi.fn(async (input: { sourceIntent?: { action: { message_id: string } } }) => {
+        reportTurnError(input.sourceIntent?.action.message_id ?? null, '{"error":"memory_source_send_refused"}', false);
+      });
+      useSessionOutboundSendMock.mockReturnValue(rawSendMessage);
+      const { result } = renderGoverned();
+      await waitFor(() => expect(result.current.sourceProfileReady).toBe(true));
+
+      let pending!: Promise<VoiceBuilderToolResult>;
+      act(() => { pending = startCall(Date.now()); });
+
+      const refused = await pending;
+      expect(refused).toMatchObject({
+        ok: false,
+        builder_task_started: false,
+        reason: 'builder_request_not_sent',
+        send_error: 'memory_source_send_refused',
+      });
+      expect(String(refused.recovery_guidance)).toContain('Do not retry it yourself');
+      expect(rawSendMessage).toHaveBeenCalledTimes(1);
     });
 
     it('reports a refusal after the turn acted as unconfirmed, at once', async () => {

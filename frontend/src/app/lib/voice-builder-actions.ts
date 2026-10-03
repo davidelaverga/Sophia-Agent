@@ -42,6 +42,10 @@ const VOICE_BUILDER_POLL_INTERVAL_MS = 250
 // Sophia has asked her clarifying questions.
 const EXPLICIT_REQUEST_WINDOW_MS = 3 * 60 * 1000
 const EXPLICIT_REQUEST_MAX_UTTERANCES = 4
+// A start the browser has not yet seen running (the confirmation window is
+// shorter than a governed launch) still gives a correction something to change:
+// the companion tracks that build in its own state.
+const PENDING_START_CORRECTION_WINDOW_MS = 5 * 60 * 1000
 
 export interface VoiceBuilderUserUtterance {
   text: string
@@ -60,6 +64,8 @@ export type VoiceBuilderToolResult = Record<string, unknown> & { ok: boolean }
 export interface VoiceBuilderToolBridge {
   execute: (call: VoiceBuilderToolCallInput) => Promise<VoiceBuilderToolResult>
   knownTaskIds: () => string[]
+  /** Look at the session's Builder state now (called on every change). */
+  observe?: () => void
 }
 
 export interface VoiceBuilderCancelResponse {
@@ -71,6 +77,8 @@ export interface VoiceBuilderCancelResponse {
 
 /** The turn failed after it may already have acted; delivery is unknown. */
 export const COMPANION_TURN_UNCONFIRMED = "companion_turn_unconfirmed"
+/** The chat route's code for LangGraph refusing to create the run at all. */
+export const MEMORY_SOURCE_SEND_REFUSED = "memory_source_send_refused"
 const MAX_RECORDED_TURN_FAILURES = 32
 
 function isMemoryContextRefusalText(errorText: string): boolean {
@@ -82,18 +90,31 @@ function isMemoryContextRefusalText(errorText: string): boolean {
   }
 }
 
+function isRunRefusalText(errorText: string): boolean {
+  if (errorText === MEMORY_SOURCE_SEND_REFUSED) return true
+  try {
+    const parsed: unknown = JSON.parse(errorText)
+    return typeof parsed === "object" && parsed !== null
+      && (parsed as { error?: unknown }).error === MEMORY_SOURCE_SEND_REFUSED
+  } catch {
+    return false
+  }
+}
+
 /**
  * A short fixed code for a failed companion turn; backend text never passes.
- * Only a memory governance refusal that arrived before the turn did anything
- * is definitive: nothing ran, so it was not sent. Any other failure (a broken
- * or unparseable stream, another error, or a refusal after the companion had
- * started working) may come after a Builder was already launched, so it stays
+ * Only a refusal that arrived before the turn did anything is definitive:
+ * LangGraph refusing to create the run, or memory governance refusing entry.
+ * Nothing ran, so it was not sent. Any other failure (a broken or unparseable
+ * stream, another error, or a refusal after the companion had started
+ * working) may come after a Builder was already launched, so it stays
  * unconfirmed and must never invite a retry.
  */
 export function companionTurnFailureCode(errorText: string, afterActivity: boolean): string {
-  return !afterActivity && isMemoryContextRefusalText(errorText)
-    ? MEMORY_CONTEXT_RECOVERY_REQUIRED
-    : COMPANION_TURN_UNCONFIRMED
+  if (afterActivity) return COMPANION_TURN_UNCONFIRMED
+  if (isMemoryContextRefusalText(errorText)) return MEMORY_CONTEXT_RECOVERY_REQUIRED
+  if (isRunRefusalText(errorText)) return MEMORY_SOURCE_SEND_REFUSED
+  return COMPANION_TURN_UNCONFIRMED
 }
 
 export interface CompanionTurnFailures {
@@ -142,6 +163,16 @@ export interface VoiceBuilderSessionAdapter {
   getBuilderTask: () => BuilderTaskV1 | null
   getBuilderCompletion: () => BuilderCompletionEventV1 | null
   cancelBuilderTask: () => Promise<VoiceBuilderCancelResponse | null>
+  /**
+   * The active conversation (thread) this adapter currently serves. One
+   * handler can outlive a session switch, so a pending start is kept only for
+   * the conversation it was sent in.
+   */
+  getSessionKey?: () => string | null
+  /** The path of the delivered Builder artifact shown in this session, if any. */
+  getBuilderArtifactPath?: () => string | null
+  /** False while the session's Builder state is still loading or reconnecting. */
+  isBuilderStateReady?: () => boolean
 }
 
 export interface VoiceBuilderHandlerOptions {
@@ -149,6 +180,28 @@ export interface VoiceBuilderHandlerOptions {
   pollIntervalMs?: number
   nowMs?: () => number
   sleep?: (ms: number) => Promise<void>
+  /** Receives one content-free outcome record per tool call. */
+  logOutcome?: (outcome: VoiceBuilderOutcomeLog) => void
+}
+
+/** Fixed codes, statuses and a short task id only; never briefs or corrections. */
+export interface VoiceBuilderOutcomeLog {
+  tool: string
+  ok: boolean
+  reason: string | null
+  send_error: string | null
+  status: string | null
+  task_id: string | null
+  waited_ms: number
+}
+
+function logVoiceBuilderOutcome(outcome: VoiceBuilderOutcomeLog): void {
+  console.warn("[voice-builder]", "outcome", outcome)
+}
+
+function outcomeCode(result: VoiceBuilderToolResult, key: string): string | null {
+  const value = result[key]
+  return typeof value === "string" && /^[a-z0-9_]{1,64}$/u.test(value) ? value : null
 }
 
 let activeVoiceBuilderBridge: VoiceBuilderToolBridge | null = null
@@ -288,6 +341,23 @@ export function createVoiceBuilderToolHandler(
   const pollIntervalMs = options.pollIntervalMs ?? VOICE_BUILDER_POLL_INTERVAL_MS
   const nowMs = options.nowMs ?? (() => Date.now())
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => { setTimeout(resolve, ms) }))
+  const logOutcome = options.logOutcome ?? logVoiceBuilderOutcome
+  // A start being sent or sent but not yet seen running, the run visible
+  // before it, and the conversation it was sent in.
+  let pendingStart: { atMs: number; baseline: string | null; sessionKey: string | null } | null = null
+  const sessionKey = () => adapter.getSessionKey?.() ?? null
+  // Companion turns this handler sent whose send has not settled yet. One turn
+  // at a time: a second send while one is still active would share the chat's
+  // single response state.
+  let sendsInFlight = 0
+  const turnInProgressResult = (toolName: VoiceBuilderToolName, action: "start" | "change"): VoiceBuilderToolResult =>
+    notStartedResult(toolName, {
+      reason: "companion_turn_in_progress",
+      result_summary: action === "start"
+        ? "Sophia is still handling an earlier request, so the build request was not sent."
+        : "Sophia is still handling an earlier request, so the correction was not sent.",
+      recovery_guidance: "Tell the user Sophia is still on the earlier request and to ask again in a moment. Do not say anything started or changed.",
+    })
 
   const knownTaskIds = () => uniqueStrings([
     adapter.getBuilderTask()?.taskId,
@@ -296,22 +366,35 @@ export function createVoiceBuilderToolHandler(
 
   // Send one companion turn, then wait for a running task or run that differs
   // from the one present before the send. A rejected send ends the wait early.
+  // If the wait times out first, `settled` reports how the send ended later.
+  // A conversation switch ends the wait unconfirmed: another conversation's
+  // task can never confirm this send.
   const sendAndConfirm = async (text: string): Promise<
     | { kind: "confirmed"; task: BuilderTaskV1 }
     | { kind: "send_failed"; reason: string }
-    | { kind: "unconfirmed"; deliveryUnknown?: boolean }
+    | { kind: "unconfirmed"; deliveryUnknown?: boolean; settled?: Promise<string | null> }
   > => {
     const baseline = runKey(adapter.getBuilderTask())
+    const origin = sessionKey()
     const send: { error: string | null } = { error: null }
-    void Promise.resolve()
+    sendsInFlight += 1
+    const settled = Promise.resolve()
       .then(() => adapter.sendCompanionMessage(text))
-      .catch((error: unknown) => {
+      .then(() => null, (error: unknown) => {
         // Only short error codes reach the model; never raw validation text.
         const message = error instanceof Error ? error.message : ""
         send.error = /^[a-z0-9_]{1,64}$/u.test(message) ? message : "send_failed"
+        return send.error
+      })
+      .then((error) => {
+        sendsInFlight -= 1
+        return error
       })
     const deadline = nowMs() + confirmationTimeoutMs
     for (;;) {
+      if (sessionKey() !== origin) {
+        return { kind: "unconfirmed", settled }
+      }
       const task = adapter.getBuilderTask()
       if (task?.phase === "running" && task.taskId && runKey(task) !== baseline) {
         return { kind: "confirmed", task }
@@ -325,7 +408,7 @@ export function createVoiceBuilderToolHandler(
         return { kind: "send_failed", reason: send.error }
       }
       if (nowMs() >= deadline) {
-        return { kind: "unconfirmed" }
+        return { kind: "unconfirmed", settled }
       }
       await sleep(pollIntervalMs)
     }
@@ -348,6 +431,16 @@ export function createVoiceBuilderToolHandler(
         recovery_guidance: "Ask one short question to confirm exactly what the user wants built or researched. Do not say anything started.",
       })
     }
+    if (adapter.isBuilderStateReady?.() === false) {
+      // Until the session's Builder state is known, neither the duplicate guard
+      // nor the confirmation baseline can be trusted: an earlier build loading
+      // late would look new.
+      return notStartedResult(call.name, {
+        reason: "builder_state_loading",
+        result_summary: "The session's build state is still loading, so the request was not sent.",
+        recovery_guidance: "Tell the user you are getting ready and ask them to repeat the request in a moment. Do not say anything started.",
+      })
+    }
     const active = adapter.getBuilderTask()
     if (active?.phase === "running" && active.taskId) {
       return notStartedResult(call.name, {
@@ -360,10 +453,51 @@ export function createVoiceBuilderToolHandler(
         recovery_guidance: "Tell the user a build is already running. Offer to wait, update it with update_async_task, or cancel it.",
       })
     }
+    if (pendingStartActive()) {
+      // The earlier request may still launch; a second one could run two builds.
+      return notStartedResult(call.name, {
+        reason: "builder_start_pending",
+        duplicate_guard: true,
+        status: "unconfirmed",
+        result_summary: "A build request was already sent in this conversation and may still appear. Nothing new was sent.",
+        recovery_guidance: "Tell the user the earlier request may still appear in the progress panel, so nothing new was started. Offer to wait, or to change it with update_async_task. Do not say anything started.",
+      })
+    }
+    if (sendsInFlight > 0) {
+      return turnInProgressResult(call.name, "start")
+    }
+    // Pending from before the send, so an overlapping call sees it while this
+    // one waits for confirmation.
+    const pending = {
+      atMs: nowMs(),
+      baseline: runKey(adapter.getBuilderTask()),
+      sessionKey: sessionKey(),
+    }
+    pendingStart = pending
     const outcome = await sendAndConfirm(buildVoiceBuilderStartMessage({
       description,
       taskType: stringArg(call.args, "task_type", "taskType"),
     }))
+    // A confirmed start is visible as a task from now on, and a refused one
+    // never ran; only an unconfirmed one keeps the window, from now.
+    if (pendingStart === pending) {
+      if (outcome.kind === "unconfirmed") {
+        pending.atMs = nowMs()
+      } else {
+        pendingStart = null
+      }
+    }
+    if (outcome.kind === "unconfirmed") {
+      // The send can still fail after the wait. Only a refusal before the run
+      // was created proves nothing started; any other late failure (a network
+      // error included) may follow an accepted send, so the window stays.
+      void outcome.settled?.then((error) => {
+        const refused = error === MEMORY_SOURCE_SEND_REFUSED || error === MEMORY_CONTEXT_RECOVERY_REQUIRED
+        if (refused && pendingStart === pending) {
+          pendingStart = null
+        }
+      })
+    }
     if (outcome.kind === "confirmed") {
       return {
         ok: true,
@@ -388,12 +522,34 @@ export function createVoiceBuilderToolHandler(
         recovery_guidance: "Ask the user what they want changed, then call the tool again with the correction.",
       })
     }
+    // A correction needs something to change. Forwarding one with no build
+    // would spend a companion turn, and its recorded source, on a request it
+    // cannot act on, and would keep the chat busy when the real start arrives.
+    if (!hasChangeTarget()) {
+      return notStartedResult(call.name, {
+        reason: "no_build_to_change",
+        error_type: "no_build_to_change",
+        result_summary: "There is no build or delivered artifact in this session to change. Nothing was sent.",
+        recovery_guidance: "Do not say anything was changed. If the user asked for something new to be built or researched, call start_builder_task with the complete brief.",
+      })
+    }
+    if (sendsInFlight > 0) {
+      // A start whose wait timed out may still be sending; the pending window
+      // applies once that send has settled.
+      return turnInProgressResult(call.name, "change")
+    }
+    // While an unconfirmed start may still appear, a new run seen during this
+    // wait may be that start's own first run, so it cannot confirm the change.
+    const startMayAppear = pendingStartActive()
     const outcome = await sendAndConfirm(buildVoiceBuilderChangeMessage({
       toolName,
       message,
       taskId: stringArg(call.args, "task_id", "taskId"),
       artifactPath: stringArg(call.args, "artifact_path", "artifactPath"),
     }))
+    if (outcome.kind === "confirmed" && startMayAppear) {
+      return unconfirmedResult(call.name, { kind: "unconfirmed" }, "change")
+    }
     if (outcome.kind === "confirmed") {
       return {
         ok: true,
@@ -406,6 +562,39 @@ export function createVoiceBuilderToolHandler(
       }
     }
     return unconfirmedResult(call.name, outcome, "change")
+  }
+
+  const hasChangeTarget = (): boolean => {
+    const task = adapter.getBuilderTask()
+    if (task?.taskId && task.phase === "running") {
+      return true
+    }
+    // A finished build is only correctable through its delivered artifact; a
+    // completed task without one has nothing to change.
+    if (adapter.getBuilderCompletion()?.artifact_path || adapter.getBuilderArtifactPath?.()) {
+      return true
+    }
+    return pendingStartActive()
+  }
+
+  // An unconfirmed start in the active conversation that may still appear.
+  const pendingStartActive = (): boolean => {
+    if (pendingStart) {
+      // Only a running run other than the one visible at send time proves the
+      // start materialized. A terminal task, a completion or an artifact can be
+      // an older build replayed by a late or repeated snapshot, and a cleared
+      // card proves nothing, so none of them ends the window: it lasts until
+      // expiry, a definitive refusal or a conversation switch. Blocking a retry
+      // for at most the window is preferred to launching a second build.
+      // observe() runs on every Builder state change, so a run is normally
+      // seen while it is running.
+      const task = adapter.getBuilderTask()
+      const newRun = task?.phase === "running" && runKey(task) !== pendingStart.baseline
+      if (pendingStart.sessionKey !== sessionKey() || newRun) {
+        pendingStart = null
+      }
+    }
+    return pendingStart !== null && nowMs() - pendingStart.atMs <= PENDING_START_CORRECTION_WINDOW_MS
   }
 
   const describeTasks = (): Record<string, unknown>[] => {
@@ -468,6 +657,9 @@ export function createVoiceBuilderToolHandler(
         result_summary: "There is no running build to cancel.",
       }
     }
+    // Settle a pending start that this visible run belongs to before the
+    // cancellation clears the run from view.
+    pendingStartActive()
     if (requestedTaskId && requestedTaskId !== task.taskId) {
       return {
         ok: false,
@@ -496,24 +688,50 @@ export function createVoiceBuilderToolHandler(
     }
   }
 
+  const dispatch = async (call: VoiceBuilderToolCallInput): Promise<VoiceBuilderToolResult> => {
+    switch (call.name) {
+      case VOICE_BUILDER_START_TOOL_NAME:
+        return start(call)
+      case VOICE_BUILDER_UPDATE_TOOL_NAME:
+      case VOICE_BUILDER_EDIT_TOOL_NAME:
+        return change(call)
+      case VOICE_BUILDER_CHECK_TOOL_NAME:
+        return check(call)
+      case VOICE_BUILDER_LIST_TOOL_NAME:
+        return list()
+      case VOICE_BUILDER_CANCEL_TOOL_NAME:
+        return cancel(call)
+      default:
+        return notStartedResult(call.name, { reason: "unsupported_voice_builder_tool" })
+    }
+  }
+
   return {
     knownTaskIds,
+    // The session calls this on every Builder state change, so a start whose
+    // run appears and is then cancelled or dismissed in the UI is settled
+    // while that run is still visible.
+    observe: () => {
+      pendingStartActive()
+    },
     execute: async (call) => {
-      switch (call.name) {
-        case VOICE_BUILDER_START_TOOL_NAME:
-          return start(call)
-        case VOICE_BUILDER_UPDATE_TOOL_NAME:
-        case VOICE_BUILDER_EDIT_TOOL_NAME:
-          return change(call)
-        case VOICE_BUILDER_CHECK_TOOL_NAME:
-          return check(call)
-        case VOICE_BUILDER_LIST_TOOL_NAME:
-          return list()
-        case VOICE_BUILDER_CANCEL_TOOL_NAME:
-          return cancel(call)
-        default:
-          return notStartedResult(call.name, { reason: "unsupported_voice_builder_tool" })
+      const startedAtMs = nowMs()
+      const result = await dispatch(call)
+      try {
+        const taskId = typeof result.task_id === "string" ? result.task_id.slice(0, 12) : null
+        logOutcome({
+          tool: call.name,
+          ok: result.ok,
+          reason: outcomeCode(result, "reason") ?? outcomeCode(result, "error_type"),
+          send_error: outcomeCode(result, "send_error"),
+          status: outcomeCode(result, "status"),
+          task_id: taskId,
+          waited_ms: Math.max(0, nowMs() - startedAtMs),
+        })
+      } catch {
+        // Diagnostics never change a tool result.
       }
+      return result
     },
   }
 }
@@ -564,7 +782,11 @@ function unconfirmedResult(
   action: "start" | "change",
 ): VoiceBuilderToolResult {
   if (outcome.kind === "send_failed") {
+    // A rotation refusal holds for this conversation. A run-creation refusal
+    // is certain for this attempt only, so it claims no permanence.
+    const scope = outcome.reason === MEMORY_CONTEXT_RECOVERY_REQUIRED ? " in this conversation" : ""
     const refused = outcome.reason === MEMORY_CONTEXT_RECOVERY_REQUIRED
+      || outcome.reason === MEMORY_SOURCE_SEND_REFUSED
     return notStartedResult(toolName, {
       reason: "builder_request_not_sent",
       send_error: outcome.reason,
@@ -574,10 +796,10 @@ function unconfirmedResult(
       recovery_guidance: !refused
         ? "Tell the user it did not go through and offer to try again. Do not say it started or changed."
         : action === "start"
-          ? "Tell the user it could not be started in this conversation, so no new build is running. Do not retry it yourself. Do not say it started."
+          ? `Tell the user it could not be started${scope}, so no new build is running. Do not retry it yourself. Do not say it started.`
           // A refused correction never reached the companion. The existing work is
           // untouched, whether it is still running or already finished.
-          : "Tell the user the correction could not be sent in this conversation, so the existing build or artifact was left unchanged. Do not retry it yourself. Do not say it changed.",
+          : `Tell the user the correction could not be sent${scope}, so the existing build or artifact was left unchanged. Do not retry it yourself. Do not say it changed.`,
     })
   }
   if (outcome.deliveryUnknown) {

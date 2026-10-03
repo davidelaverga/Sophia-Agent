@@ -394,7 +394,9 @@ export interface SessionMessagesResponse {
   duplicate?: boolean;
   conflict?: boolean;
   deleted_count?: number;
-  rejection_reason?: 'base_revision_required' | 'revision_conflict' | null;
+  // recorded_source_order_unrepresentable: the snapshot left out a recorded
+  // source row and could not keep order around it; refetch and resend.
+  rejection_reason?: 'base_revision_required' | 'revision_conflict' | 'recorded_source_order_unrepresentable' | null;
 }
 
 /**

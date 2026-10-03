@@ -2386,3 +2386,33 @@ Late in this wave, several commits landed over a red suite or with edits that si
 
 ### Known Follow-up
 - Inline artifact card on a failed→restart run (issue #4): root cause is frontend run-tracking in `useBuilderCanvas`/`PresenceArtifactPanel`; gateway is correct within the 15-min TTL. Deferred — needs browser E2E verification.
+
+## 2026-09-29 · [mem00-recorded-source-anchor] · PR #165
+**Author:** Claude · **Track:** backend + web · **Spec:** `docs/specs/03_memory_system.md`; incident mailbox `ops/mailbox/voice-next-20260924/` (claude-053, codex-048)
+
+### What Changed
+- Migration `2026_09_29_mem00_recorded_source_anchor.sql`: `sophia_replace_session_messages` never updates or deletes a row that has an intake receipt, ignores snapshot items reusing a recorded `message_id`, and keeps other rows off recorded sequences. Adds `sophia_memory_lookup_source_action_by_message`.
+- Migration `2026_10_02_mem00_recorded_source_chronology.sql` (follow-up, from Codex's automatic review): a row that already followed a recorded anchor stays after it even when a snapshot omits the anchor. Before this, the anchor at sequence 3 and a later row at 4 could become 3 and 2, reversing the order that transcript reads and memory extraction sort by. After five review rounds the planner decides each row's gap between recorded rows first, then numbers each gap in snapshot order: a stored row keeps its gap; a new row follows a recorded row listed by exact id if listed after it, and always follows one the snapshot does not list (arrival order: a seventh review showed client created_at comes from the browser clock); a copy reusing a recorded message_id is discarded and positions nothing. Contradictory places or a full gap refuse the snapshot (`recorded_source_order_unrepresentable`, nothing written). The web client refetches and resends, which is never refused while no two rows of a session share a sequence (deploy preflight). The Supabase store's append/replace now raise on a refusal instead of dropping it. The voice bridge also drops a timed-out start's pending window when its send is later refused, refuses a second start while that window is open, and never lets a new run confirm a correction while a pending start could supply it. Lesson: patching one counterexample at a time took five rounds; a reference model of the planner plus property tests closed it.
+- LangGraph: implemented the missing `store.source_action_receipt_for_message` (pending-input recovery). `create_run` refusals log `memory_admission_denied` (stage, safe reason, keyed refs); the source recheck and pending recovery carry exact reasons; `memory.context.entry_denied` gains `denial_reason`.
+- Web: a governed 403 becomes `memory_source_send_refused`, and the voice bridge reports "did not start, do not retry".
+- LangGraph: the Builder handoff carrier check accepts the mirrored copy langgraph-api 0.8.1 makes (`configurable` ↔ `context`); copies must agree, and the sealed durable handoff stays the authority.
+- LangGraph: `BuilderCommandMiddleware` routes the voice bridge's `[Voice build request]` message straight to `start_builder_task` (brief + canonical task type) instead of leaving the second launch decision to the companion model. For governed owners the child Builder is seeded from the recorded source only, so `independent_builder_runtime_seed` now reads the envelope's canonical task type too; before, it always started from `document`, so research got the smaller web budget and a visual report became Markdown (Codex review on `db9cebbb`).
+- Web: the voice bridge refuses an update/edit when the session has no running build, delivered artifact or recently sent start (`no_build_to_change`), instead of forwarding a correction with nothing to correct. Each bridge call logs one content-free `[voice-builder] outcome` console line; tool diagnostics show `reason:send_error`; the output AudioContext logs its state changes (`[voice-audio] context-state`).
+
+### What We Learned
+- Every voice Builder request since the bridge shipped (2026-09-27) was refused. The browser's conflict-rebase PUT wrote the GET's millisecond `created_at` (and a position-based `sequence`) back onto the just-recorded row, rotating its version. Voice is hit because transcript rows keep arriving; a quiet typed session rebases nothing.
+- The same class of bug hit text on 2026-09-22 and was fixed only on the display-timestamp path. The durable fix belongs in the one server-side writer, not in each client.
+- One opaque 403 hid a dozen distinct refusals; the missing store method went unnoticed because no test fixture called it. A contract test now checks every reachable `store.<name>(` call exists on the real store.
+- A voice build crossed three decision points: Gemini chose its tool, the browser checked the request was explicit, then the companion model had to choose `start_builder_task` again. In R-016 it answered without launching. The voice bridge message is now a routed command like a typed "write a document about X".
+- In R-017, Gemini called `update_async_task` before any build existed. The bridge forwarded it as a correction, which took the turn's one recorded source and kept the chat busy, so the later start never became a start message. Lifecycle tools need the same target check in the browser that the companion's tools apply on the server.
+- Gemini 3.8 Live native async tool calling was assessed and rejected as a fix: tools still run in the browser and every request crosses the same governed admission (`ops/mailbox/voice-next-20260924/claude-artifacts/r014-gemini-38-live-assessment.md`).
+
+### CLAUDE.md Updates
+- Root `CLAUDE.md` (Jorge pitfalls): recorded source rows are write-once; read `memory_admission_denied` before guessing at a 403.
+- Root `CLAUDE.md` (Luis pitfalls): the `[Voice build request]` header, `Task type:` line and `Brief:` prefix are a backend routing contract.
+
+### Skills Created / Modified
+- None.
+
+### GEPA Log Entry
+- No prompt file changed. The voice bridge's tool-result guidance string changed (refused build: "could not be started, do not retry"). tone_delta: N/A. Trace pair: none (LangSmith ingest is still failing).

@@ -332,6 +332,11 @@ class MemoryRunGuard:
             # tells those refusals apart. Exception text stays excluded.
             diagnosis: dict[str, object] = {"error_type": type(exc).__name__}
             try:
+                from deerflow.sophia.memory_governance.source_input_provenance import safe_reason_code
+                diagnosis["denial_reason"] = safe_reason_code(exc)
+            except Exception:
+                diagnosis.pop("denial_reason", None)
+            try:
                 frame = exc.__traceback__
                 while frame is not None:
                     if frame.tb_frame.f_code.co_filename == __file__:
