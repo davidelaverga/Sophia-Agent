@@ -78,6 +78,19 @@ describe('useBuilderCanvas', () => {
     expect(FakeEventSource.instances[0].url).toContain('/canvas/events');
   });
 
+  it('reports when the first snapshot has settled, loaded or failed', async () => {
+    const loaded = renderHook(() => useBuilderCanvas('thread-1'));
+    expect(loaded.result.current.snapshotSettled).toBeFalsy();
+    await waitFor(() => expect(loaded.result.current.snapshotSettled).toBe(true));
+    loaded.unmount();
+
+    const fetchMock = globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
+    fetchMock.mockResolvedValueOnce(new Response('unavailable', { status: 503 }));
+    const failed = renderHook(() => useBuilderCanvas('thread-2'));
+    await waitFor(() => expect(failed.result.current.snapshotSettled).toBe(true));
+    expect(failed.result.current.activeTask).toBeNull();
+  });
+
   it('clears stale state immediately when switching parent threads', async () => {
     mockFetchSnapshots(
       {

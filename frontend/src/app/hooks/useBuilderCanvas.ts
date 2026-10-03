@@ -19,6 +19,8 @@ type BuilderCanvasState = {
   retiredRuns: Set<string>;
   runOrder: Map<string, number>;
   nextRunOrder: number;
+  /** The first snapshot request for this thread has settled (loaded or failed). */
+  snapshotSettled?: boolean;
 };
 
 const EMPTY_STATE: BuilderCanvasState = {
@@ -384,7 +386,11 @@ async function applyBuilderCanvasSnapshotResponse(
     status: response.status,
     ok: response.ok,
   });
-  if (!response.ok || context.isCancelled()) return;
+  if (context.isCancelled()) return;
+  if (!response.ok) {
+    markSnapshotSettled(context);
+    return;
+  }
   const snapshot = await response.json() as BuilderCanvasSnapshotV1;
   logCanvasClient('snapshot-hydrated', {
     parent_thread_id: shortId(context.parentThreadId),
@@ -406,8 +412,12 @@ async function applyBuilderCanvasSnapshotResponse(
     if (emptyPassiveSnapshot) {
       recordEmptyPassiveSnapshotTelemetry(context, current, activeArtifactReview);
     }
-    return next;
+    return { ...next, snapshotSettled: true };
   });
+}
+
+function markSnapshotSettled(context: BuilderCanvasFeedContext): void {
+  context.setState((current) => (current.snapshotSettled ? current : { ...current, snapshotSettled: true }));
 }
 
 function hydrateBuilderCanvasSnapshot(context: BuilderCanvasFeedContext): Promise<void> {
@@ -418,6 +428,9 @@ function hydrateBuilderCanvasSnapshot(context: BuilderCanvasFeedContext): Promis
         parent_thread_id: shortId(context.parentThreadId),
         error: error instanceof Error ? error.name : 'unknown',
       });
+      if (!context.isCancelled()) {
+        markSnapshotSettled(context);
+      }
     });
 }
 
@@ -434,7 +447,12 @@ function handleBuilderCanvasSseMessage(context: BuilderCanvasFeedContext, messag
       kind: event.kind,
       status: event.status,
     });
-    context.setState((current) => applyEvent(current, event));
+    context.setState((current) => {
+      const next = applyEvent(current, event);
+      return next === current || next.snapshotSettled === current.snapshotSettled
+        ? next
+        : { ...next, snapshotSettled: current.snapshotSettled };
+    });
   } catch {
     // Ignore malformed server data and leave the last truthful state visible.
     logCanvasClient('event-malformed', {

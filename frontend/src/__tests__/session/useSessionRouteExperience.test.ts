@@ -96,6 +96,7 @@ describe('useSessionRouteExperience', () => {
       recentEvents: [],
       completion: null,
       reconnecting: false,
+      snapshotSettled: true,
     });
 
     useCompanionArtifactsRuntimeMock.mockReturnValue({
@@ -570,6 +571,26 @@ describe('useSessionRouteExperience', () => {
       name: 'start_builder_task',
       args: { description: 'Research the EU AI Act and write a Markdown report.' },
       recentUserUtterances: [{ text: 'please research the EU AI Act and write me a report', atMs }],
+    });
+
+    it("sends no build request until the thread's Builder state has loaded", async () => {
+      useBuilderCanvasMock.mockReturnValue({
+        activeTask: null,
+        recentEvents: [],
+        completion: null,
+        reconnecting: false,
+        snapshotSettled: false,
+      });
+      const rawSendMessage = vi.fn(async () => undefined);
+      useSessionOutboundSendMock.mockReturnValue(rawSendMessage);
+      const { result } = renderGoverned();
+      await waitFor(() => expect(result.current.sourceProfileReady).toBe(true));
+
+      let pending!: Promise<VoiceBuilderToolResult>;
+      act(() => { pending = startCall(Date.now()); });
+
+      await expect(pending).resolves.toMatchObject({ ok: false, reason: 'builder_state_loading' });
+      expect(rawSendMessage).not.toHaveBeenCalled();
     });
 
     it('ends the request at once when its own companion turn is refused', async () => {

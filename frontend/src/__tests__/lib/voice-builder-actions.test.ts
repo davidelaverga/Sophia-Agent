@@ -41,11 +41,13 @@ function createSession(initial: { task?: BuilderTaskV1 | null; completion?: Buil
     completion: BuilderCompletionEventV1 | null
     sessionKey: string | null
     artifactPath: string | null
+    ready: boolean
   } = {
     task: initial.task ?? null,
     completion: initial.completion ?? null,
     sessionKey: "thread-a",
     artifactPath: null,
+    ready: true,
   }
   const sent: string[] = []
   const onSend: { next: (() => void) | null; reject: Error | null; hold: Promise<void> | null } = { next: null, reject: null, hold: null }
@@ -66,6 +68,7 @@ function createSession(initial: { task?: BuilderTaskV1 | null; completion?: Buil
     cancelBuilderTask,
     getSessionKey: () => state.sessionKey,
     getBuilderArtifactPath: () => state.artifactPath,
+    isBuilderStateReady: () => state.ready,
   }
   let clock = NOW
   const logs: VoiceBuilderOutcomeLog[] = []
@@ -785,6 +788,23 @@ describe("voice builder tool handler", () => {
 
     const again = await session.handler.execute(request)
     expect(again).toMatchObject({ ok: false, reason: "builder_start_pending" })
+    expect(session.sent).toHaveLength(1)
+  })
+
+  it("sends no start until the session's Builder state has loaded", async () => {
+    const session = createSession()
+    session.state.ready = false
+    const request = call(
+      "start_builder_task",
+      { description: "Research EV charging in Germany; deliver Markdown.", task_type: "research" },
+      ["Can you research EV charging in Germany?"],
+    )
+
+    expect(await session.handler.execute(request)).toMatchObject({ ok: false, reason: "builder_state_loading" })
+    expect(session.sent).toHaveLength(0)
+
+    session.state.ready = true
+    expect(await session.handler.execute(request)).toMatchObject({ ok: false, reason: "builder_start_unconfirmed" })
     expect(session.sent).toHaveLength(1)
   })
 

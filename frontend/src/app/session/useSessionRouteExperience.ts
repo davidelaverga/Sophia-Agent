@@ -717,6 +717,9 @@ export function useSessionRouteExperience({
     }
   }, [captureSourceInput, checkAppVersionFreshness, rawSendMessage, validateSourceInput]);
 
+  // A thread's Builder state is known once its first canvas snapshot settled
+  // and no reconnect is pending; a session without a thread has none yet.
+  const builderStateReady = !activeThreadId || (builderCanvas.snapshotSettled === true && !builderCanvas.reconnecting);
   const voiceBuilderStateRef = useRef({
     builderTask,
     builderCompletion: effectiveBuilderCompletion,
@@ -724,6 +727,7 @@ export function useSessionRouteExperience({
     sendVoiceBuilderMessage,
     sessionKey: activeThreadId ?? null,
     builderArtifactPath: builderArtifact?.artifactPath ?? null,
+    builderStateReady,
   });
   const voiceBuilderBridgeRef = useRef<VoiceBuilderToolBridge | null>(null);
   useEffect(() => {
@@ -734,11 +738,12 @@ export function useSessionRouteExperience({
       sendVoiceBuilderMessage,
       sessionKey: activeThreadId ?? null,
       builderArtifactPath: builderArtifact?.artifactPath ?? null,
+      builderStateReady,
     };
     // Let the bridge see every Builder state change, including a run that is
     // cancelled or dismissed before any voice tool call.
     voiceBuilderBridgeRef.current?.observe?.();
-  }, [activeThreadId, builderArtifact, builderTask, cancelBuilderTask, effectiveBuilderCompletion, sendVoiceBuilderMessage]);
+  }, [activeThreadId, builderArtifact, builderStateReady, builderTask, cancelBuilderTask, effectiveBuilderCompletion, sendVoiceBuilderMessage]);
 
   useEffect(() => {
     const bridge = createVoiceBuilderToolHandler({
@@ -748,6 +753,7 @@ export function useSessionRouteExperience({
       cancelBuilderTask: () => voiceBuilderStateRef.current.cancelBuilderTask(),
       getSessionKey: () => voiceBuilderStateRef.current.sessionKey,
       getBuilderArtifactPath: () => voiceBuilderStateRef.current.builderArtifactPath,
+      isBuilderStateReady: () => voiceBuilderStateRef.current.builderStateReady,
     });
     voiceBuilderBridgeRef.current = bridge;
     const unregister = registerVoiceBuilderToolBridge(bridge);

@@ -171,6 +171,8 @@ export interface VoiceBuilderSessionAdapter {
   getSessionKey?: () => string | null
   /** The path of the delivered Builder artifact shown in this session, if any. */
   getBuilderArtifactPath?: () => string | null
+  /** False while the session's Builder state is still loading or reconnecting. */
+  isBuilderStateReady?: () => boolean
 }
 
 export interface VoiceBuilderHandlerOptions {
@@ -427,6 +429,16 @@ export function createVoiceBuilderToolHandler(
         error_type: "explicit_builder_request_required",
         result_summary: "The user has not explicitly asked for a build or research task.",
         recovery_guidance: "Ask one short question to confirm exactly what the user wants built or researched. Do not say anything started.",
+      })
+    }
+    if (adapter.isBuilderStateReady?.() === false) {
+      // Until the session's Builder state is known, neither the duplicate guard
+      // nor the confirmation baseline can be trusted: an earlier build loading
+      // late would look new.
+      return notStartedResult(call.name, {
+        reason: "builder_state_loading",
+        result_summary: "The session's build state is still loading, so the request was not sent.",
+        recovery_guidance: "Tell the user you are getting ready and ask them to repeat the request in a moment. Do not say anything started.",
       })
     }
     const active = adapter.getBuilderTask()
