@@ -717,9 +717,10 @@ export function useSessionRouteExperience({
     }
   }, [captureSourceInput, checkAppVersionFreshness, rawSendMessage, validateSourceInput]);
 
-  // A thread's Builder state is known once its first canvas snapshot settled
-  // and no reconnect is pending; a session without a thread has none yet.
-  const builderStateReady = !activeThreadId || (builderCanvas.snapshotSettled === true && !builderCanvas.reconnecting);
+  // A thread's Builder state is known once a valid canvas snapshot has loaded
+  // (the canvas retries every 30 s and on reconnect) and no reconnect is
+  // pending; a session without a thread has none yet.
+  const builderStateReady = !activeThreadId || (builderCanvas.snapshotLoaded === true && !builderCanvas.reconnecting);
   const voiceBuilderStateRef = useRef({
     builderTask,
     builderCompletion: effectiveBuilderCompletion,

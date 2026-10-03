@@ -96,7 +96,7 @@ describe('useSessionRouteExperience', () => {
       recentEvents: [],
       completion: null,
       reconnecting: false,
-      snapshotSettled: true,
+      snapshotLoaded: true,
     });
 
     useCompanionArtifactsRuntimeMock.mockReturnValue({
@@ -579,7 +579,7 @@ describe('useSessionRouteExperience', () => {
         recentEvents: [],
         completion: null,
         reconnecting: false,
-        snapshotSettled: false,
+        snapshotLoaded: false,
       });
       const rawSendMessage = vi.fn(async () => undefined);
       useSessionOutboundSendMock.mockReturnValue(rawSendMessage);

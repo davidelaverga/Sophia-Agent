@@ -19,8 +19,8 @@ type BuilderCanvasState = {
   retiredRuns: Set<string>;
   runOrder: Map<string, number>;
   nextRunOrder: number;
-  /** The first snapshot request for this thread has settled (loaded or failed). */
-  snapshotSettled?: boolean;
+  /** A valid snapshot for this thread has been applied (failed requests never count). */
+  snapshotLoaded?: boolean;
 };
 
 const EMPTY_STATE: BuilderCanvasState = {
@@ -386,11 +386,7 @@ async function applyBuilderCanvasSnapshotResponse(
     status: response.status,
     ok: response.ok,
   });
-  if (context.isCancelled()) return;
-  if (!response.ok) {
-    markSnapshotSettled(context);
-    return;
-  }
+  if (!response.ok || context.isCancelled()) return;
   const snapshot = await response.json() as BuilderCanvasSnapshotV1;
   logCanvasClient('snapshot-hydrated', {
     parent_thread_id: shortId(context.parentThreadId),
@@ -412,12 +408,8 @@ async function applyBuilderCanvasSnapshotResponse(
     if (emptyPassiveSnapshot) {
       recordEmptyPassiveSnapshotTelemetry(context, current, activeArtifactReview);
     }
-    return { ...next, snapshotSettled: true };
+    return { ...next, snapshotLoaded: true };
   });
-}
-
-function markSnapshotSettled(context: BuilderCanvasFeedContext): void {
-  context.setState((current) => (current.snapshotSettled ? current : { ...current, snapshotSettled: true }));
 }
 
 function hydrateBuilderCanvasSnapshot(context: BuilderCanvasFeedContext): Promise<void> {
@@ -428,9 +420,6 @@ function hydrateBuilderCanvasSnapshot(context: BuilderCanvasFeedContext): Promis
         parent_thread_id: shortId(context.parentThreadId),
         error: error instanceof Error ? error.name : 'unknown',
       });
-      if (!context.isCancelled()) {
-        markSnapshotSettled(context);
-      }
     });
 }
 
@@ -449,9 +438,9 @@ function handleBuilderCanvasSseMessage(context: BuilderCanvasFeedContext, messag
     });
     context.setState((current) => {
       const next = applyEvent(current, event);
-      return next === current || next.snapshotSettled === current.snapshotSettled
+      return next === current || next.snapshotLoaded === current.snapshotLoaded
         ? next
-        : { ...next, snapshotSettled: current.snapshotSettled };
+        : { ...next, snapshotLoaded: current.snapshotLoaded };
     });
   } catch {
     // Ignore malformed server data and leave the last truthful state visible.
