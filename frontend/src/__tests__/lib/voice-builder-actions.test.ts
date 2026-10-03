@@ -712,6 +712,28 @@ describe("voice builder tool handler", () => {
     expect(started).not.toHaveProperty("task_id", "task-b")
   })
 
+  it("sends no correction while the start's turn is still being sent", async () => {
+    const session = createSession()
+    let release: () => void = () => {}
+    session.onSend.hold = new Promise<void>((resolve) => { release = resolve })
+    await session.handler.execute(call(
+      "start_builder_task",
+      { description: "Research EV charging in Germany; deliver Markdown.", task_type: "research" },
+      ["Can you research EV charging in Germany?"],
+    ))
+
+    const early = await session.handler.execute(call("update_async_task", { message: "Also cover Austria." }))
+    expect(early).toMatchObject({ ok: false, reason: "companion_turn_in_progress" })
+    expect(session.sent).toHaveLength(1)
+
+    // Once that send settles without proof either way, the start stays correctable.
+    session.onSend.hold = null
+    release()
+    await new Promise((resolve) => { setTimeout(resolve, 0) })
+    await session.handler.execute(call("update_async_task", { message: "Also cover Austria." }))
+    expect(session.sent).toHaveLength(2)
+  })
+
   it("logs one content-free outcome per call", async () => {
     const session = createSession()
     session.onSend.reject = new Error("memory_source_dispatch_busy")

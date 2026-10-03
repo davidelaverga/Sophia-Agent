@@ -348,6 +348,18 @@ export function createVoiceBuilderToolHandler(
     sessionKey: string | null
   } | null = null
   const sessionKey = () => adapter.getSessionKey?.() ?? null
+  // Companion turns this handler sent whose send has not settled yet. One turn
+  // at a time: a second send while one is still active would share the chat's
+  // single response state.
+  let sendsInFlight = 0
+  const turnInProgressResult = (toolName: VoiceBuilderToolName, action: "start" | "change"): VoiceBuilderToolResult =>
+    notStartedResult(toolName, {
+      reason: "companion_turn_in_progress",
+      result_summary: action === "start"
+        ? "Sophia is still handling an earlier request, so the build request was not sent."
+        : "Sophia is still handling an earlier request, so the correction was not sent.",
+      recovery_guidance: "Tell the user Sophia is still on the earlier request and to ask again in a moment. Do not say anything started or changed.",
+    })
 
   const knownTaskIds = () => uniqueStrings([
     adapter.getBuilderTask()?.taskId,
@@ -367,6 +379,7 @@ export function createVoiceBuilderToolHandler(
     const baseline = runKey(adapter.getBuilderTask())
     const origin = sessionKey()
     const send: { error: string | null } = { error: null }
+    sendsInFlight += 1
     const settled = Promise.resolve()
       .then(() => adapter.sendCompanionMessage(text))
       .then(() => null, (error: unknown) => {
@@ -374,6 +387,10 @@ export function createVoiceBuilderToolHandler(
         const message = error instanceof Error ? error.message : ""
         send.error = /^[a-z0-9_]{1,64}$/u.test(message) ? message : "send_failed"
         return send.error
+      })
+      .then((error) => {
+        sendsInFlight -= 1
+        return error
       })
     const deadline = nowMs() + confirmationTimeoutMs
     for (;;) {
@@ -437,6 +454,9 @@ export function createVoiceBuilderToolHandler(
         result_summary: "A build request was already sent in this conversation and may still appear. Nothing new was sent.",
         recovery_guidance: "Tell the user the earlier request may still appear in the progress panel, so nothing new was started. Offer to wait, or to change it with update_async_task. Do not say anything started.",
       })
+    }
+    if (sendsInFlight > 0) {
+      return turnInProgressResult(call.name, "start")
     }
     // Pending from before the send, so an overlapping call sees it while this
     // one waits for confirmation.
@@ -506,6 +526,11 @@ export function createVoiceBuilderToolHandler(
         result_summary: "There is no build or delivered artifact in this session to change. Nothing was sent.",
         recovery_guidance: "Do not say anything was changed. If the user asked for something new to be built or researched, call start_builder_task with the complete brief.",
       })
+    }
+    if (sendsInFlight > 0) {
+      // A start whose wait timed out may still be sending; the pending window
+      // applies once that send has settled.
+      return turnInProgressResult(call.name, "change")
     }
     // While an unconfirmed start may still appear, a new run seen during this
     // wait may be that start's own first run, so it cannot confirm the change.

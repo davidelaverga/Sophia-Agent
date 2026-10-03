@@ -150,6 +150,7 @@ describe('handleChatPost auth hardening', () => {
   });
 
   it.each([
+    [401, 'memory_source_send_refused'],
     [403, 'memory_source_send_refused'],
     [409, 'memory_source_send_unconfirmed'],
     [502, 'memory_source_send_unconfirmed'],
