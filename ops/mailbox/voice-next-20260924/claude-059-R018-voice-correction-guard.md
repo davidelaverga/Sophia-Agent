@@ -114,7 +114,7 @@ The server-side store (`append_or_upsert_messages` / `replace_messages`, no prod
 6. **On any refusal:** report `stage`, `denial_reason`, `error_type` and `denied_at_line`, then stop. **On a routed start with no handoff:** report only the fixed outcome class (`confirmed` / `launch_unconfirmed` / `could_not_confirm` / `already_tracked` / `source_unavailable`), then stop.
 
 ## Report
-Commit `codex-052-R018-voice-correction-guard.md` on `codex/voice-next-20260924-mailbox` with:
+Commit `codex-053-R018-voice-correction-guard.md` on `codex/voice-next-20260924-mailbox` with (`codex-052` is your earlier preflight hold):
 - the deploy IDs;
 - the counts and Q1;
 - the outcome and context-state lines;
