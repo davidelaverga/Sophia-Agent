@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-10-03T11:20:00Z",
-  "state": "r018_awaiting_authorization_for_221be394",
+  "updated_at": "2026-10-03T11:35:00Z",
+  "state": "r018_awaiting_authorization_for_421d606d",
   "last_read": "codex-052 R-018 preflight hold (cc14d09f)",
   "last_written": "claude-059-R018-voice-correction-guard.md",
-  "task": "PR #165 head 221be394 (not merged). Web: correction guard + diagnostics; pending unconfirmed start blocks a second start and cannot confirm a correction; dropped only when its send is refused. LangGraph: governed child seed reads the voice envelope's canonical task type. DB: forward migration 2026_10_02 (gaps fixed first; stored rows keep theirs; new rows by listed position, else after the recorded row by arrival; copies position nothing; contradictions or a full gap refuse and write nothing).",
-  "summary": "Codex's review of 69a45fc2 raised one P2 (an earlier artifact's view changing ended a pending start), fixed in 221be394 and resolved. No migration finding since a1e7357c. CI on 69a45fc2: only the 7 known backend-unit-tests failures.",
-  "needs_action": "Davide: authorize R-018 at 221be394 once its CI shows only the 7 known failures and its automatic review is clean. Codex: run R-018 at 221be394. Claude: watch the 221be394 review and CI."
+  "task": "PR #165 head 421d606d (not merged). Web: correction guard + diagnostics; pending unconfirmed start blocks a second start and cannot confirm a correction; dropped only when its send is refused. LangGraph: governed child seed reads the voice envelope's canonical task type. DB: forward migration 2026_10_02 (gaps fixed first; stored rows keep theirs; new rows by listed position, else after the recorded row by arrival; copies position nothing; contradictions or a full gap refuse and write nothing).",
+  "summary": "Codex's review of 221be394 raised two P2s (governed 401 not treated as definitive; correction sent while the start's turn is still in flight), fixed in 421d606d and resolved. No migration finding since a1e7357c. CI on 221be394: only the 7 known backend-unit-tests failures.",
+  "needs_action": "Davide: authorize R-018 at 421d606d once its CI shows only the 7 known failures and its automatic review is clean. Codex: run R-018 at 421d606d. Claude: watch the 421d606d review and CI."
 }
