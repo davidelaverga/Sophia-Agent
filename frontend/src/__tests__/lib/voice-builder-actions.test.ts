@@ -614,6 +614,23 @@ describe("voice builder tool handler", () => {
     expect(session.sent).toHaveLength(2)
   })
 
+  it("keeps a pending start when the earlier Builder card is dismissed", async () => {
+    const session = createSession({ task: { phase: "failed", taskId: "task-old", runId: "run-old" } })
+    const request = call(
+      "start_builder_task",
+      { description: "Research EV charging in Germany; deliver Markdown.", task_type: "research" },
+      ["Can you research EV charging in Germany?"],
+    )
+    await session.handler.execute(request)
+
+    session.state.task = null
+    const again = await session.handler.execute(request)
+    expect(again).toMatchObject({ ok: false, reason: "builder_start_pending" })
+    await session.handler.execute(call("update_async_task", { message: "Also cover Austria." }))
+    expect(session.sent).toHaveLength(2)
+    expect(session.sent[1]).toContain("Correction: Also cover Austria.")
+  })
+
   it("logs one content-free outcome per call", async () => {
     const session = createSession()
     session.onSend.reject = new Error("memory_source_dispatch_busy")

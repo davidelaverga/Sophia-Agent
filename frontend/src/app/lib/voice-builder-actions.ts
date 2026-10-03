@@ -523,9 +523,11 @@ export function createVoiceBuilderToolHandler(
 
   // An unconfirmed start in the active conversation that may still appear.
   const pendingStartActive = (): boolean => {
-    if (pendingStart && (pendingStart.sessionKey !== sessionKey() || runKey(adapter.getBuilderTask()) !== pendingStart.baseline)) {
-      // Another conversation is active, or the pending start has materialized
-      // as a task: it is no longer pending.
+    const current = runKey(adapter.getBuilderTask())
+    if (pendingStart && (pendingStart.sessionKey !== sessionKey() || (current !== null && current !== pendingStart.baseline))) {
+      // Another conversation is active, or a new run has appeared: the start
+      // is no longer pending. The earlier card merely being cleared (for
+      // example dismissed) proves nothing, so that keeps it pending.
       pendingStart = null
     }
     return pendingStart !== null && nowMs() - pendingStart.atMs <= PENDING_START_CORRECTION_WINDOW_MS
