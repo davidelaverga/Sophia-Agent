@@ -350,19 +350,21 @@ export function createVoiceBuilderToolHandler(
 
   // Send one companion turn, then wait for a running task or run that differs
   // from the one present before the send. A rejected send ends the wait early.
+  // If the wait times out first, `settled` reports how the send ended later.
   const sendAndConfirm = async (text: string): Promise<
     | { kind: "confirmed"; task: BuilderTaskV1 }
     | { kind: "send_failed"; reason: string }
-    | { kind: "unconfirmed"; deliveryUnknown?: boolean }
+    | { kind: "unconfirmed"; deliveryUnknown?: boolean; settled?: Promise<string | null> }
   > => {
     const baseline = runKey(adapter.getBuilderTask())
     const send: { error: string | null } = { error: null }
-    void Promise.resolve()
+    const settled = Promise.resolve()
       .then(() => adapter.sendCompanionMessage(text))
-      .catch((error: unknown) => {
+      .then(() => null, (error: unknown) => {
         // Only short error codes reach the model; never raw validation text.
         const message = error instanceof Error ? error.message : ""
         send.error = /^[a-z0-9_]{1,64}$/u.test(message) ? message : "send_failed"
+        return send.error
       })
     const deadline = nowMs() + confirmationTimeoutMs
     for (;;) {
@@ -379,7 +381,7 @@ export function createVoiceBuilderToolHandler(
         return { kind: "send_failed", reason: send.error }
       }
       if (nowMs() >= deadline) {
-        return { kind: "unconfirmed" }
+        return { kind: "unconfirmed", settled }
       }
       await sleep(pollIntervalMs)
     }
@@ -422,7 +424,18 @@ export function createVoiceBuilderToolHandler(
     }))
     // A confirmed start is visible as a task from now on; only an unconfirmed
     // one needs the pending window.
-    pendingStart = outcome.kind === "unconfirmed" ? { atMs: nowMs(), baseline, sessionKey: startSessionKey } : null
+    const pending = outcome.kind === "unconfirmed" ? { atMs: nowMs(), baseline, sessionKey: startSessionKey } : null
+    pendingStart = pending
+    if (pending && outcome.kind === "unconfirmed") {
+      // The send can still fail after the wait. A failure that means it was not
+      // sent (any code but COMPANION_TURN_UNCONFIRMED, as during the wait)
+      // leaves nothing to correct.
+      void outcome.settled?.then((error) => {
+        if (error && error !== COMPANION_TURN_UNCONFIRMED && pendingStart === pending) {
+          pendingStart = null
+        }
+      })
+    }
     if (outcome.kind === "confirmed") {
       return {
         ok: true,

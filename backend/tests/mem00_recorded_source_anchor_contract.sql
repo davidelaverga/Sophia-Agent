@@ -212,6 +212,31 @@ BEGIN
         RAISE EXCEPTION 'rebased snapshot with the recorded row listed was not accepted: %', result;
     END IF;
 
+    -- 4d. A copy reusing the recorded message_id positions nothing: a stored row
+    --     before the recorded row stays before it when listed after the copy.
+    SELECT message_revision INTO revision FROM public.sophia_sessions WHERE id = 'anchor-session';
+    result := public.sophia_replace_session_messages('anchor-owner', 'anchor-session', revision, jsonb_build_array(
+        jsonb_build_object('id', 'anchor-v0', 'message_id', 'voice-first-0', 'thread_id', thread_a, 'role', 'user',
+            'content', 'Before.', 'source', 'voice', 'sequence', 1),
+        jsonb_build_object('id', '33333333-3333-4333-8333-333333333333', 'message_id', 'anchor-source-0001', 'thread_id', thread_a,
+            'role', 'user', 'content', 'ignored', 'sequence', 2)));
+    IF (result->>'accepted')::boolean IS NOT TRUE
+       OR (SELECT sequence FROM public.sophia_session_messages WHERE id = 'anchor-v0') <> 1 THEN
+        RAISE EXCEPTION 'row listed before the recorded row was not placed before it: %', result;
+    END IF;
+    SELECT message_revision INTO revision FROM public.sophia_sessions WHERE id = 'anchor-session';
+    result := public.sophia_replace_session_messages('anchor-owner', 'anchor-session', revision, jsonb_build_array(
+        jsonb_build_object('id', 'anchor-duplicate-3', 'message_id', 'anchor-source-0001', 'thread_id', thread_a, 'role', 'user',
+            'content', 'shadow copy', 'source', 'text', 'sequence', 1),
+        jsonb_build_object('id', 'anchor-v0', 'message_id', 'voice-first-0', 'thread_id', thread_a, 'role', 'user',
+            'content', 'Before.', 'source', 'voice', 'sequence', 2)));
+    IF (result->>'accepted')::boolean IS NOT TRUE
+       OR (SELECT sequence FROM public.sophia_session_messages WHERE id = 'anchor-v0') >= 3
+       OR EXISTS (SELECT 1 FROM public.sophia_session_messages WHERE id = 'anchor-duplicate-3') THEN
+        RAISE EXCEPTION 'a message_id copy moved a stored row across the recorded row: %',
+            (SELECT jsonb_object_agg(id, sequence) FROM public.sophia_session_messages WHERE session_id = 'anchor-session');
+    END IF;
+
     -- 5. The source snapshot accepts the partition and reports the row eligible
     --    with the receipt's exact version and sequence.
     snapshot := public.sophia_memory_source_snapshot('anchor-owner', 'anchor-session', thread_a);

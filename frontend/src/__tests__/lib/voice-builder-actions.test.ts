@@ -48,11 +48,14 @@ function createSession(initial: { task?: BuilderTaskV1 | null; completion?: Buil
     artifactPath: null,
   }
   const sent: string[] = []
-  const onSend: { next: (() => void) | null; reject: Error | null } = { next: null, reject: null }
+  const onSend: { next: (() => void) | null; reject: Error | null; hold: Promise<void> | null } = { next: null, reject: null, hold: null }
   const cancelBuilderTask = vi.fn(async () => ({ status: "cancelled", task_id: state.task?.taskId ?? null, run_id: state.task?.runId ?? null }))
   const adapter: VoiceBuilderSessionAdapter = {
     sendCompanionMessage: async (text) => {
       sent.push(text)
+      if (onSend.hold !== null) {
+        await onSend.hold
+      }
       if (onSend.reject) {
         throw onSend.reject
       }
@@ -526,6 +529,48 @@ describe("voice builder tool handler", () => {
     const correction = await session.handler.execute(call("update_async_task", { message: "Also cover Austria." }))
     expect(correction).toMatchObject({ ok: false, reason: "no_build_to_change" })
     expect(session.sent).toHaveLength(1)
+  })
+
+  it.each([MEMORY_SOURCE_SEND_REFUSED, "memory_context_rotation_required"])(
+    "drops a pending start whose send is refused after the wait (%s)",
+    async (code) => {
+      const session = createSession()
+      let release: (error: Error) => void = () => {}
+      session.onSend.hold = new Promise<void>((_resolve, reject) => { release = reject })
+      const started = await session.handler.execute(call(
+        "start_builder_task",
+        { description: "Research EV charging in Germany; deliver Markdown.", task_type: "research" },
+        ["Can you research EV charging in Germany?"],
+      ))
+      expect(started).toMatchObject({ ok: false, reason: "builder_start_unconfirmed" })
+
+      release(new Error(code))
+      await new Promise((resolve) => { setTimeout(resolve, 0) })
+      const correction = await session.handler.execute(call("update_async_task", { message: "Also cover Austria." }))
+
+      expect(correction).toMatchObject({ ok: false, reason: "no_build_to_change" })
+      expect(session.sent).toHaveLength(1)
+    },
+  )
+
+  it("keeps a pending start whose send ends ambiguously after the wait", async () => {
+    const session = createSession()
+    let release: (error: Error) => void = () => {}
+    session.onSend.hold = new Promise<void>((_resolve, reject) => { release = reject })
+    await session.handler.execute(call(
+      "start_builder_task",
+      { description: "Research EV charging in Germany; deliver Markdown.", task_type: "research" },
+      ["Can you research EV charging in Germany?"],
+    ))
+
+    // The turn may already have launched the build, so it stays correctable.
+    session.onSend.hold = null
+    release(new Error(COMPANION_TURN_UNCONFIRMED))
+    await new Promise((resolve) => { setTimeout(resolve, 0) })
+    await session.handler.execute(call("update_async_task", { message: "Also cover Austria." }))
+
+    expect(session.sent).toHaveLength(2)
+    expect(session.sent[1]).toContain("Correction: Also cover Austria.")
   })
 
   it("logs one content-free outcome per call", async () => {

@@ -12,24 +12,28 @@
 -- extraction sort by.
 --
 -- Contract (in addition to 2026_09_29):
---   * A recorded row the snapshot lists, by its row id or by a copy reusing its
---     message_id, orders the snapshot as in 2026_09_29: rows listed after it go
---     after it, and the copy itself is ignored.
---   * A row already stored after a recorded row stays after it, whatever the
---     snapshot lists.
---   * A new row created at or after a recorded row (created_at, defaulting to
---     now()) goes after it unless the snapshot lists that recorded row by its
---     exact row id, whose position then decides (client clocks may be skewed).
---   * If the snapshot lists neither the recorded row nor a copy of it, and a
---     row belongs before it (stored before it, or new and created before it)
---     but no free sequence is left there, the whole snapshot is refused with
---     rejection_reason 'recorded_source_order_unrepresentable' and nothing is
---     written. The web client then refetches the transcript, which lists the
---     recorded row, and resends its new rows; that is never refused. Snapshots
---     that list the recorded row or a copy of it are never refused for
---     ordering, so server-side appends (which always list it) never lose a
---     message.
---   * Rows keep snapshot order among themselves.
+--   * Each other row's place among the recorded rows (the gap it sits in) is
+--     decided before any sequence is assigned:
+--       - a stored row stays in the gap it is stored in, whatever the snapshot
+--         lists or how it orders it. A row the snapshot re-keys under a new id
+--         is recognised by its message_id;
+--       - a new row follows a recorded row the snapshot lists by its exact row
+--         id if it is listed after it, and follows a recorded row the snapshot
+--         does not list by exact id if it was created at or after it
+--         (created_at, defaulting to now()).
+--   * A row reusing a recorded row's message_id under another id is a copy: it
+--     is never written and positions nothing.
+--   * Rows in the same gap keep snapshot order and take the free sequences
+--     there, counting up from the recorded row below them.
+--   * If a new row's places contradict each other, or more rows belong in a
+--     gap below a recorded row than it has free sequences, the whole snapshot
+--     is refused with rejection_reason 'recorded_source_order_unrepresentable'
+--     and nothing is written. The web client then refetches the transcript,
+--     which lists every recorded row in sequence order, and resends its new
+--     rows after it. That resend is never refused: new rows go after the last
+--     recorded row, and stored rows already fit their gaps because no two of
+--     a session's rows share a sequence (every writer assigns distinct ones;
+--     the deploy preflight checks this).
 --   * Sessions without recorded rows are processed exactly as before.
 -- No row, receipt, trigger or version is modified by this migration.
 
@@ -55,21 +59,23 @@ DECLARE
     recorded_ids TEXT[];
     recorded_message_ids TEXT[];
     recorded_sequences INTEGER[];
+    recorded_created_ats TIMESTAMPTZ[];
+    recorded_positions INTEGER[];
     planned JSONB;
-    planned_items JSONB[] := '{}';
     snapshot_item JSONB;
+    item_ordinal INTEGER;
+    item_created_at TIMESTAMPTZ;
     recorded_index INTEGER;
-    cursor_sequence INTEGER := 0;
-    candidate INTEGER;
     existing_ids TEXT[];
+    existing_message_ids TEXT[];
     existing_sequences INTEGER[];
     existing_index INTEGER;
-    anchor_floor INTEGER;
-    recorded_created_ats TIMESTAMPTZ[];
-    recorded_present BOOLEAN[];
-    recorded_copied BOOLEAN[];
-    item_created_at TIMESTAMPTZ;
-    anchor_ceiling INTEGER;
+    lowest_gap INTEGER;
+    highest_gap INTEGER;
+    plan_items JSONB[] := '{}';
+    plan_gaps INTEGER[] := '{}';
+    plan_ordinals INTEGER[] := '{}';
+    over_capacity BOOLEAN;
 BEGIN
     SELECT message_revision
       INTO current_revision
@@ -114,82 +120,102 @@ BEGIN
     IF cardinality(recorded_ids) = 0 THEN
         planned := COALESCE(p_messages, '[]'::JSONB);
     ELSE
-        -- Current sequences of this session's other rows: they tell which side
-        -- of each recorded anchor a row was on, even when the snapshot omits
-        -- the anchor itself.
-        SELECT coalesce(array_agg(m.id), '{}'), coalesce(array_agg(m.sequence), '{}')
-          INTO existing_ids, existing_sequences
+        -- Gaps are numbered by how many recorded rows (in sequence order) lie
+        -- below them: gap 0 is before the first recorded row, gap n is between
+        -- recorded rows n and n + 1.
+        SELECT coalesce(array_agg(m.id ORDER BY m.sequence, m.id), '{}'),
+               coalesce(array_agg(m.message_id ORDER BY m.sequence, m.id), '{}'),
+               coalesce(array_agg(m.sequence ORDER BY m.sequence, m.id), '{}')
+          INTO existing_ids, existing_message_ids, existing_sequences
           FROM public.sophia_session_messages m
          WHERE m.session_id = p_session_id
            AND m.user_id = p_user_id
            AND NOT (m.id = ANY(recorded_ids));
-        -- Which recorded rows the snapshot lists by exact row id, and which only
-        -- through a copy reusing their message_id.
-        recorded_present := array_fill(FALSE, ARRAY[cardinality(recorded_ids)]);
-        recorded_copied := array_fill(FALSE, ARRAY[cardinality(recorded_ids)]);
-        FOR snapshot_item IN SELECT value FROM jsonb_array_elements(COALESCE(p_messages, '[]'::JSONB)) LOOP
+        -- Where the snapshot lists each recorded row by its exact row id.
+        recorded_positions := array_fill(NULL::INTEGER, ARRAY[cardinality(recorded_ids)]);
+        FOR snapshot_item, item_ordinal IN
+            SELECT e.value, e.ordinality::INTEGER
+              FROM jsonb_array_elements(COALESCE(p_messages, '[]'::JSONB)) WITH ORDINALITY AS e(value, ordinality)
+        LOOP
             recorded_index := array_position(recorded_ids, snapshot_item->>'id');
-            IF recorded_index IS NOT NULL THEN
-                recorded_present[recorded_index] := TRUE;
-            ELSE
-                recorded_index := array_position(recorded_message_ids, snapshot_item->>'message_id');
-                IF recorded_index IS NOT NULL THEN
-                    recorded_copied[recorded_index] := TRUE;
-                END IF;
+            IF recorded_index IS NOT NULL AND recorded_positions[recorded_index] IS NULL THEN
+                recorded_positions[recorded_index] := item_ordinal;
             END IF;
         END LOOP;
-        FOR snapshot_item IN SELECT value FROM jsonb_array_elements(COALESCE(p_messages, '[]'::JSONB)) LOOP
-            recorded_index := coalesce(
-                array_position(recorded_ids, snapshot_item->>'id'),
-                array_position(recorded_message_ids, snapshot_item->>'message_id')
-            );
-            IF recorded_index IS NOT NULL THEN
-                -- The recorded row (or the client's copy of it): its position
-                -- orders the snapshot; the copy itself is never written.
-                cursor_sequence := GREATEST(cursor_sequence, recorded_sequences[recorded_index]);
+        FOR snapshot_item, item_ordinal IN
+            SELECT e.value, e.ordinality::INTEGER
+              FROM jsonb_array_elements(COALESCE(p_messages, '[]'::JSONB)) WITH ORDINALITY AS e(value, ordinality)
+        LOOP
+            -- Recorded rows are never rewritten, and a copy reusing a recorded
+            -- row's message_id is discarded without positioning anything.
+            IF snapshot_item->>'id' = ANY(recorded_ids)
+               OR snapshot_item->>'message_id' = ANY(recorded_message_ids) THEN
                 CONTINUE;
             END IF;
-            -- A stored row stays after every recorded row it followed; a new row
-            -- stays after every recorded row created before it that the
-            -- snapshot does not list by exact id.
-            existing_index := array_position(existing_ids, snapshot_item->>'id');
-            item_created_at := COALESCE((snapshot_item->>'created_at')::TIMESTAMPTZ, now());
-            SELECT max(anchor.seq) INTO anchor_floor
-              FROM unnest(recorded_sequences, recorded_created_ats, recorded_present) AS anchor(seq, created, present)
-             WHERE CASE WHEN existing_index IS NOT NULL
-                        THEN anchor.seq < existing_sequences[existing_index]
-                        ELSE NOT anchor.present AND anchor.created <= item_created_at
-                   END;
-            cursor_sequence := GREATEST(cursor_sequence, coalesce(anchor_floor, 0));
-            candidate := cursor_sequence + 1;
-            WHILE candidate = ANY(recorded_sequences) LOOP
-                candidate := candidate + 1;
-            END LOOP;
-            -- The next recorded row this row must precede among those the
-            -- snapshot does not list at all (neither by id nor by copy).
-            SELECT min(anchor.seq) INTO anchor_ceiling
-              FROM unnest(recorded_sequences, recorded_created_ats, recorded_present, recorded_copied)
-                   AS anchor(seq, created, present, copied)
-             WHERE NOT anchor.present AND NOT anchor.copied
-               AND CASE WHEN existing_index IS NOT NULL
-                        THEN anchor.seq > existing_sequences[existing_index]
-                        ELSE anchor.created > item_created_at
-                   END;
-            IF anchor_ceiling IS NOT NULL AND candidate > anchor_ceiling THEN
-                RETURN jsonb_build_object(
-                    'accepted', FALSE,
-                    'duplicate', FALSE,
-                    'conflict', FALSE,
-                    'rejection_reason', 'recorded_source_order_unrepresentable',
-                    'previous_revision', current_revision,
-                    'current_revision', current_revision,
-                    'deleted_count', 0
-                );
+            existing_index := coalesce(
+                array_position(existing_ids, snapshot_item->>'id'),
+                CASE WHEN snapshot_item->>'message_id' IS NOT NULL
+                     THEN array_position(existing_message_ids, snapshot_item->>'message_id')
+                END
+            );
+            IF existing_index IS NOT NULL THEN
+                -- A stored row stays in the gap it is stored in.
+                SELECT count(*)::INTEGER INTO lowest_gap
+                  FROM unnest(recorded_sequences) AS anchor(seq)
+                 WHERE anchor.seq < existing_sequences[existing_index];
+            ELSE
+                -- A new row follows a listed recorded row it is listed after,
+                -- and an unlisted one created at or before it.
+                item_created_at := COALESCE((snapshot_item->>'created_at')::TIMESTAMPTZ, now());
+                SELECT coalesce(max(anchor.n) FILTER (WHERE anchor.follows), 0)::INTEGER,
+                       coalesce(min(anchor.n) FILTER (WHERE NOT anchor.follows) - 1, cardinality(recorded_ids))::INTEGER
+                  INTO lowest_gap, highest_gap
+                  FROM (
+                      SELECT a.n,
+                             CASE WHEN a.listed_at IS NOT NULL THEN a.listed_at < item_ordinal
+                                  ELSE a.created <= item_created_at
+                             END AS follows
+                        FROM unnest(recorded_positions, recorded_created_ats) WITH ORDINALITY AS a(listed_at, created, n)
+                  ) anchor;
+                IF lowest_gap > highest_gap THEN
+                    RETURN jsonb_build_object(
+                        'accepted', FALSE,
+                        'duplicate', FALSE,
+                        'conflict', FALSE,
+                        'rejection_reason', 'recorded_source_order_unrepresentable',
+                        'previous_revision', current_revision,
+                        'current_revision', current_revision,
+                        'deleted_count', 0
+                    );
+                END IF;
             END IF;
-            cursor_sequence := candidate;
-            planned_items := array_append(planned_items, snapshot_item || jsonb_build_object('sequence', candidate));
+            plan_items := array_append(plan_items, snapshot_item);
+            plan_gaps := array_append(plan_gaps, lowest_gap);
+            plan_ordinals := array_append(plan_ordinals, item_ordinal);
         END LOOP;
-        planned := to_jsonb(planned_items);
+        -- Each gap's rows, in snapshot order, take the sequences above the
+        -- recorded row below the gap; a gap below a recorded row must not
+        -- reach that row's sequence.
+        SELECT coalesce(jsonb_agg(p.item || jsonb_build_object('sequence', p.seq) ORDER BY p.seq), '[]'::JSONB),
+               coalesce(bool_or(p.gap < cardinality(recorded_ids) AND p.seq >= recorded_sequences[p.gap + 1]), FALSE)
+          INTO planned, over_capacity
+          FROM (
+              SELECT g.item, g.gap,
+                     (CASE WHEN g.gap = 0 THEN 0 ELSE recorded_sequences[g.gap] END
+                      + row_number() OVER (PARTITION BY g.gap ORDER BY g.ordinal))::INTEGER AS seq
+                FROM unnest(plan_items, plan_gaps, plan_ordinals) AS g(item, gap, ordinal)
+          ) p;
+        IF over_capacity THEN
+            RETURN jsonb_build_object(
+                'accepted', FALSE,
+                'duplicate', FALSE,
+                'conflict', FALSE,
+                'rejection_reason', 'recorded_source_order_unrepresentable',
+                'previous_revision', current_revision,
+                'current_revision', current_revision,
+                'deleted_count', 0
+            );
+        END IF;
     END IF;
 
     INSERT INTO public.sophia_session_messages (
