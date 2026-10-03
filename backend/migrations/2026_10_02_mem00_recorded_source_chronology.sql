@@ -18,9 +18,10 @@
 --         lists or how it orders it. A row the snapshot re-keys under a new id
 --         is recognised by its message_id;
 --       - a new row follows a recorded row the snapshot lists by its exact row
---         id if it is listed after it, and follows a recorded row the snapshot
---         does not list by exact id if it was created at or after it
---         (created_at, defaulting to now()).
+--         id if it is listed after it, and always follows a recorded row the
+--         snapshot does not list by exact id: the server first sees the new row
+--         now, after that row was recorded. Client created_at values are never
+--         used for ordering (browser clocks may be skewed).
 --   * A row reusing a recorded row's message_id under another id is a copy: it
 --     is never written and positions nothing.
 --   * Rows in the same gap keep snapshot order and take the free sequences
@@ -59,12 +60,10 @@ DECLARE
     recorded_ids TEXT[];
     recorded_message_ids TEXT[];
     recorded_sequences INTEGER[];
-    recorded_created_ats TIMESTAMPTZ[];
     recorded_positions INTEGER[];
     planned JSONB;
     snapshot_item JSONB;
     item_ordinal INTEGER;
-    item_created_at TIMESTAMPTZ;
     recorded_index INTEGER;
     existing_ids TEXT[];
     existing_message_ids TEXT[];
@@ -103,9 +102,8 @@ BEGIN
     -- for the rest of the call.
     SELECT coalesce(array_agg(m.id ORDER BY m.sequence, m.id), '{}'),
            coalesce(array_agg(m.message_id ORDER BY m.sequence, m.id), '{}'),
-           coalesce(array_agg(m.sequence ORDER BY m.sequence, m.id), '{}'),
-           coalesce(array_agg(m.created_at ORDER BY m.sequence, m.id), '{}')
-      INTO recorded_ids, recorded_message_ids, recorded_sequences, recorded_created_ats
+           coalesce(array_agg(m.sequence ORDER BY m.sequence, m.id), '{}')
+      INTO recorded_ids, recorded_message_ids, recorded_sequences
       FROM public.sophia_session_messages m
      WHERE m.session_id = p_session_id
        AND m.user_id = p_user_id
@@ -164,18 +162,14 @@ BEGIN
                   FROM unnest(recorded_sequences) AS anchor(seq)
                  WHERE anchor.seq < existing_sequences[existing_index];
             ELSE
-                -- A new row follows a listed recorded row it is listed after,
-                -- and an unlisted one created at or before it.
-                item_created_at := COALESCE((snapshot_item->>'created_at')::TIMESTAMPTZ, now());
+                -- A new row follows a listed recorded row it is listed after, and
+                -- every recorded row the snapshot does not list by exact id.
                 SELECT coalesce(max(anchor.n) FILTER (WHERE anchor.follows), 0)::INTEGER,
                        coalesce(min(anchor.n) FILTER (WHERE NOT anchor.follows) - 1, cardinality(recorded_ids))::INTEGER
                   INTO lowest_gap, highest_gap
                   FROM (
-                      SELECT a.n,
-                             CASE WHEN a.listed_at IS NOT NULL THEN a.listed_at < item_ordinal
-                                  ELSE a.created <= item_created_at
-                             END AS follows
-                        FROM unnest(recorded_positions, recorded_created_ats) WITH ORDINALITY AS a(listed_at, created, n)
+                      SELECT a.n, a.listed_at IS NULL OR a.listed_at < item_ordinal AS follows
+                        FROM unnest(recorded_positions) WITH ORDINALITY AS a(listed_at, n)
                   ) anchor;
                 IF lowest_gap > highest_gap THEN
                     RETURN jsonb_build_object(

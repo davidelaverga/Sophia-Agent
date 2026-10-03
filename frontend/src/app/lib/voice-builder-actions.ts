@@ -416,6 +416,16 @@ export function createVoiceBuilderToolHandler(
         recovery_guidance: "Tell the user a build is already running. Offer to wait, update it with update_async_task, or cancel it.",
       })
     }
+    if (pendingStartActive()) {
+      // The earlier request may still launch; a second one could run two builds.
+      return notStartedResult(call.name, {
+        reason: "builder_start_pending",
+        duplicate_guard: true,
+        status: "unconfirmed",
+        result_summary: "A build request was already sent in this conversation and may still appear. Nothing new was sent.",
+        recovery_guidance: "Tell the user the earlier request may still appear in the progress panel, so nothing new was started. Offer to wait, or to change it with update_async_task. Do not say anything started.",
+      })
+    }
     const baseline = runKey(adapter.getBuilderTask())
     const startSessionKey = sessionKey()
     const outcome = await sendAndConfirm(buildVoiceBuilderStartMessage({
@@ -472,12 +482,18 @@ export function createVoiceBuilderToolHandler(
         recovery_guidance: "Do not say anything was changed. If the user asked for something new to be built or researched, call start_builder_task with the complete brief.",
       })
     }
+    // While an unconfirmed start may still appear, a new run seen during this
+    // wait may be that start's own first run, so it cannot confirm the change.
+    const startMayAppear = pendingStartActive()
     const outcome = await sendAndConfirm(buildVoiceBuilderChangeMessage({
       toolName,
       message,
       taskId: stringArg(call.args, "task_id", "taskId"),
       artifactPath: stringArg(call.args, "artifact_path", "artifactPath"),
     }))
+    if (outcome.kind === "confirmed" && startMayAppear) {
+      return unconfirmedResult(call.name, { kind: "unconfirmed" }, "change")
+    }
     if (outcome.kind === "confirmed") {
       return {
         ok: true,
@@ -502,9 +518,14 @@ export function createVoiceBuilderToolHandler(
     if (adapter.getBuilderCompletion()?.artifact_path || adapter.getBuilderArtifactPath?.()) {
       return true
     }
-    if (pendingStart && (pendingStart.sessionKey !== sessionKey() || runKey(task) !== pendingStart.baseline)) {
+    return pendingStartActive()
+  }
+
+  // An unconfirmed start in the active conversation that may still appear.
+  const pendingStartActive = (): boolean => {
+    if (pendingStart && (pendingStart.sessionKey !== sessionKey() || runKey(adapter.getBuilderTask()) !== pendingStart.baseline)) {
       // Another conversation is active, or the pending start has materialized
-      // and is no longer running without an artifact: nothing here to correct.
+      // as a task: it is no longer pending.
       pendingStart = null
     }
     return pendingStart !== null && nowMs() - pendingStart.atMs <= PENDING_START_CORRECTION_WINDOW_MS

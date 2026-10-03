@@ -577,6 +577,43 @@ describe("voice builder tool handler", () => {
     },
   )
 
+  it("does not let a pending start's first run confirm a correction", async () => {
+    const session = createSession()
+    await session.handler.execute(call(
+      "start_builder_task",
+      { description: "Research EV charging in Germany; deliver Markdown.", task_type: "research" },
+      ["Can you research EV charging in Germany?"],
+    ))
+    // The original build becomes visible while the correction waits.
+    session.onSend.next = () => {
+      session.state.task = { phase: "running", taskId: "task-late", runId: "run-late" }
+    }
+
+    const correction = await session.handler.execute(call("update_async_task", { message: "Also cover Austria." }))
+
+    expect(correction).toMatchObject({ ok: false, reason: "builder_update_unconfirmed", status: "unconfirmed" })
+    expect(session.sent).toHaveLength(2)
+  })
+
+  it("refuses a second start while the first may still appear, and allows one after it ends", async () => {
+    const session = createSession()
+    const request = call(
+      "start_builder_task",
+      { description: "Research EV charging in Germany; deliver Markdown.", task_type: "research" },
+      ["Can you research EV charging in Germany?"],
+    )
+    await session.handler.execute(request)
+
+    const again = await session.handler.execute(request)
+    expect(again).toMatchObject({ ok: false, reason: "builder_start_pending", duplicate_guard: true })
+    expect(session.sent).toHaveLength(1)
+
+    session.state.task = { phase: "failed", taskId: "task-late", runId: "run-late" }
+    const retry = await session.handler.execute(request)
+    expect(retry).toMatchObject({ ok: false, reason: "builder_start_unconfirmed" })
+    expect(session.sent).toHaveLength(2)
+  })
+
   it("logs one content-free outcome per call", async () => {
     const session = createSession()
     session.onSend.reject = new Error("memory_source_dispatch_busy")

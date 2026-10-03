@@ -97,19 +97,17 @@ BEGIN
             (SELECT jsonb_object_agg(id, sequence) FROM public.sophia_session_messages WHERE session_id = 'anchor-session');
     END IF;
 
-    -- 3b. A new row keeps its side of an omitted recorded row by creation time:
-    --     one created after it follows it. (A missing created_at means now(),
-    --     which is after every earlier intake; this file runs in one
-    --     transaction, so it passes an explicit later time instead.)
+    -- 3b. A new row always follows a recorded row the snapshot does not list:
+    --     the server first sees it now. Its client created_at (here a browser
+    --     clock that reads earlier than the recording) never orders it.
     SELECT message_revision INTO revision FROM public.sophia_sessions WHERE id = 'anchor-session';
     result := public.sophia_replace_session_messages('anchor-owner', 'anchor-session', revision, jsonb_build_array(
         jsonb_build_object('id', 'anchor-v1', 'message_id', 'voice-user-1', 'thread_id', thread_a, 'role', 'user',
             'content', 'Research batteries.', 'source', 'voice', 'sequence', 1, 'created_at', '2026-09-28T23:49:30.123Z'),
         jsonb_build_object('id', 'anchor-v5', 'message_id', 'voice-late-5', 'thread_id', thread_a, 'role', 'assistant',
-            'content', 'On it.', 'source', 'voice', 'sequence', 4,
-            'created_at', to_char(clock_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))));
-    -- Nothing stored after the recorded row precedes anchor-v5 here, so only
-    -- its creation time can keep it after the recorded row (it would be 2).
+            'content', 'On it.', 'source', 'voice', 'sequence', 4, 'created_at', '2026-09-28T23:49:31.000Z')));
+    -- Sequence 2 is free below the recorded row, so ordering by the client
+    -- clock would put anchor-v5 there.
     IF NOT ((SELECT sequence FROM public.sophia_session_messages WHERE id = 'anchor-v1') < 3
             AND (SELECT sequence FROM public.sophia_session_messages WHERE id = 'anchor-v5') > 3) THEN
         RAISE EXCEPTION 'new or stored rows crossed an omitted recorded row: %',
@@ -175,20 +173,22 @@ BEGIN
             (SELECT jsonb_object_agg(id, sequence) FROM public.sophia_session_messages WHERE session_id = 'anchor-session');
     END IF;
 
-    -- 4c. No room before an omitted recorded row: rows created before the
-    --     recorded row at 3 need sequences 1, 2 and 3, but 3 is taken. The
-    --     snapshot is refused and nothing is written; the client then refetches
-    --     and resends with the recorded row listed.
+    -- 4c. No room below a recorded row: the snapshot lists three new rows
+    --     before the recorded row at 3, but only sequences 1 and 2 are free.
+    --     The snapshot is refused and nothing is written; the client then
+    --     refetches and resends its new rows after the recorded row.
     SELECT message_revision INTO revision FROM public.sophia_sessions WHERE id = 'anchor-session';
     result := public.sophia_replace_session_messages('anchor-owner', 'anchor-session', revision, jsonb_build_array(
         jsonb_build_object('id', 'anchor-p1', 'message_id', 'voice-early-p1', 'thread_id', thread_a, 'role', 'user',
-            'content', 'One.', 'source', 'voice', 'sequence', 1, 'created_at', '2026-09-28T23:49:30.001Z'),
+            'content', 'One.', 'source', 'voice', 'sequence', 1),
         jsonb_build_object('id', 'anchor-p2', 'message_id', 'voice-early-p2', 'thread_id', thread_a, 'role', 'assistant',
-            'content', 'Two.', 'source', 'voice', 'sequence', 2, 'created_at', '2026-09-28T23:49:30.002Z'),
+            'content', 'Two.', 'source', 'voice', 'sequence', 2),
         jsonb_build_object('id', 'anchor-p3', 'message_id', 'voice-early-p3', 'thread_id', thread_a, 'role', 'user',
-            'content', 'Three.', 'source', 'voice', 'sequence', 3, 'created_at', '2026-09-28T23:49:30.003Z'),
+            'content', 'Three.', 'source', 'voice', 'sequence', 3),
+        jsonb_build_object('id', '33333333-3333-4333-8333-333333333333', 'message_id', 'anchor-source-0001', 'thread_id', thread_a,
+            'role', 'user', 'content', 'ignored', 'sequence', 4),
         jsonb_build_object('id', 'anchor-v4', 'message_id', 'voice-assistant-4', 'thread_id', thread_a, 'role', 'assistant',
-            'content', 'Got it.', 'source', 'voice', 'sequence', 4)));
+            'content', 'Got it.', 'source', 'voice', 'sequence', 5)));
     IF (result->>'accepted')::boolean IS NOT FALSE
        OR (result->>'conflict')::boolean IS NOT FALSE
        OR result->>'rejection_reason' <> 'recorded_source_order_unrepresentable'
