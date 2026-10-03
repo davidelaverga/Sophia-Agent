@@ -87,6 +87,7 @@ _OUTPUT_CLAUSE_NEGATION_RE = re.compile(
 # frontend/src/app/lib/voice-builder-actions.ts. Corrections use a different
 # header and stay with the model, which picks the update or edit tool.
 _VOICE_BUILD_REQUEST_HEADER = "[Voice build request]"
+_VOICE_BUILD_CORRECTION_HEADER = "[Voice build correction]"
 _VOICE_BUILD_BRIEF_PREFIX = "Brief:"
 _VOICE_BUILD_TASK_TYPE_RE = re.compile(r"^\s*Task type:\s*(?P<task_type>\S+)\s*$", re.IGNORECASE)
 # Same set as start_builder_task's task_type Literal (Hard Constraint 13).
@@ -120,6 +121,12 @@ class BuilderCommandMiddleware(AgentMiddleware[AgentState]):
             brief, task_type = voice_request
             log_middleware("BuilderCommand", f"voice build request routed to Builder (task_type={task_type})", _t0)
             return _start_builder_task_call(brief, task_type)
+
+        if _opens_with_voice_envelope(user_text):
+            # A correction, or a malformed request: the model picks the update,
+            # edit or start tool. A sentence inside it is never a new command.
+            log_middleware("BuilderCommand", "skipped (voice correction or malformed voice request)", _t0)
+            return None
 
         direct_task = _build_direct_document_task(user_text)
         if direct_task is None:
@@ -167,6 +174,11 @@ def _start_builder_task_call(description: str, task_type: str) -> AIMessage:
             }
         ],
     )
+
+
+def _opens_with_voice_envelope(user_text: str) -> bool:
+    first_line = (user_text or "").strip().split("\n", 1)[0].strip()
+    return first_line in {_VOICE_BUILD_REQUEST_HEADER, _VOICE_BUILD_CORRECTION_HEADER}
 
 
 def parse_voice_build_request(user_text: str) -> tuple[str, str] | None:

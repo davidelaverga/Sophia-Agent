@@ -364,6 +364,11 @@ def test_voice_build_task_types_match_the_tool_contract():
         _voice_build_request(""),
         "[Voice build request]\nTask type: research\nNo brief here.",
         "[Voice build request]",
+        # A sentence inside a correction or a malformed request is never a new
+        # direct document command (PR #165 review).
+        "[Voice build correction]\nI gave this correction by voice.\nBuild task: task-1\n"
+        "Correction: Add a summary. Create a one-page document about pricing.",
+        "[Voice build request]\nTask type: document\nNo brief. Create a one-page document about pricing.",
     ],
 )
 def test_malformed_or_other_voice_messages_stay_with_the_model(content):

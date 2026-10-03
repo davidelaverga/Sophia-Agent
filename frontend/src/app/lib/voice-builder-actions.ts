@@ -338,7 +338,7 @@ export function createVoiceBuilderToolHandler(
   const nowMs = options.nowMs ?? (() => Date.now())
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => { setTimeout(resolve, ms) }))
   const logOutcome = options.logOutcome ?? logVoiceBuilderOutcome
-  // A start that was sent but never seen running, the run present before it,
+  // A start being sent or sent but not yet seen running, the run present before it,
   // and the conversation it was sent in.
   let pendingStart: { atMs: number; baseline: string | null; sessionKey: string | null } | null = null
   const sessionKey = () => adapter.getSessionKey?.() ?? null
@@ -426,17 +426,24 @@ export function createVoiceBuilderToolHandler(
         recovery_guidance: "Tell the user the earlier request may still appear in the progress panel, so nothing new was started. Offer to wait, or to change it with update_async_task. Do not say anything started.",
       })
     }
-    const baseline = runKey(adapter.getBuilderTask())
-    const startSessionKey = sessionKey()
+    // Pending from before the send, so an overlapping call sees it while this
+    // one waits for confirmation.
+    const pending = { atMs: nowMs(), baseline: runKey(adapter.getBuilderTask()), sessionKey: sessionKey() }
+    pendingStart = pending
     const outcome = await sendAndConfirm(buildVoiceBuilderStartMessage({
       description,
       taskType: stringArg(call.args, "task_type", "taskType"),
     }))
-    // A confirmed start is visible as a task from now on; only an unconfirmed
-    // one needs the pending window.
-    const pending = outcome.kind === "unconfirmed" ? { atMs: nowMs(), baseline, sessionKey: startSessionKey } : null
-    pendingStart = pending
-    if (pending && outcome.kind === "unconfirmed") {
+    // A confirmed start is visible as a task from now on, and a refused one
+    // never ran; only an unconfirmed one keeps the window, from now.
+    if (pendingStart === pending) {
+      if (outcome.kind === "unconfirmed") {
+        pending.atMs = nowMs()
+      } else {
+        pendingStart = null
+      }
+    }
+    if (outcome.kind === "unconfirmed") {
       // The send can still fail after the wait. Only a refusal before the run
       // was created proves nothing started; any other late failure (a network
       // error included) may follow an accepted send, so the window stays.
