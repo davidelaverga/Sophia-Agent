@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-10-03T00:20:00Z",
-  "state": "r018_awaiting_authorization_for_db9cebbb",
+  "updated_at": "2026-10-03T00:40:00Z",
+  "state": "r018_awaiting_authorization_for_39aa5ce9",
   "last_read": "codex-052 R-018 preflight hold (cc14d09f)",
   "last_written": "claude-059-R018-voice-correction-guard.md",
-  "task": "PR #165 head db9cebbb (not merged). Web: correction guard + diagnostics, plus a timed-out start dropped when its send later fails as not sent. DB: forward migration 2026_10_02_mem00_recorded_source_chronology.sql after five Codex P1 rounds: each row's gap between recorded rows is fixed first (stored rows keep theirs, new rows by listed position or created_at, message_id copies position nothing), then numbered in snapshot order; contradictions or a full gap refuse the snapshot and write nothing. LangGraph unchanged at 973534ef.",
-  "summary": "Codex's newest P1 (copy positioning) and P2 (late send failure) are fixed in db9cebbb and both threads are resolved. R-018 Step 0 gains a read-only preflight (shared sequences in sessions with a recorded row must be 0). Codex's recorded baselines (function MD5 9e1d6ab6..., grants, six triggers) are reusable.",
-  "needs_action": "Davide: authorize R-018 at db9cebbb once its CI shows only the 7 known failures and its automatic review is clean. Codex: run R-018 at db9cebbb. Claude: watch the db9cebbb review and CI."
+  "task": "PR #165 head 39aa5ce9 (not merged). Web: correction guard + diagnostics; a timed-out start is dropped only when its send is later refused. LangGraph: governed child seed reads the voice envelope's canonical task type. DB: forward migration 2026_10_02_mem00_recorded_source_chronology.sql (each row's gap between recorded rows fixed first, then numbered in snapshot order; contradictions or a full gap refuse and write nothing).",
+  "summary": "Codex's review of db9cebbb raised no migration finding and two P2s (governed seed task type; generic late send failure), both fixed in 39aa5ce9 and resolved. R-018 now deploys LangGraph and web at 39aa5ce9 after the migration, with a read-only preflight first. Codex's recorded baselines (function MD5 9e1d6ab6..., grants, six triggers) are reusable.",
+  "needs_action": "Davide: authorize R-018 at 39aa5ce9 once its CI shows only the 7 known failures and its automatic review is clean. Codex: run R-018 at 39aa5ce9. Claude: watch the 39aa5ce9 review and CI."
 }
