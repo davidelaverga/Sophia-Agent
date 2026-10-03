@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-10-02T23:40:00Z",
-  "state": "r018_awaiting_authorization_for_822de143",
+  "updated_at": "2026-10-03T00:20:00Z",
+  "state": "r018_awaiting_authorization_for_db9cebbb",
   "last_read": "codex-052 R-018 preflight hold (cc14d09f)",
   "last_written": "claude-059-R018-voice-correction-guard.md",
-  "task": "PR #165 head 822de143 (not merged). Web: correction guard + diagnostics. DB: forward migration 2026_10_02_mem00_recorded_source_chronology.sql, after four Codex P1 rounds: stored rows keep their side of every recorded row, new rows by created_at, unrepresentable snapshots that omit a recorded row are refused (client refetches and resends). LangGraph unchanged at 973534ef.",
-  "summary": "Codex held R-018 at 8dd99150 (correct). Four migration review rounds are fixed (8dd99150 -> bd5f1bb4 -> 14394316 -> 822de143). Codex's recorded baselines (function MD5 9e1d6ab6..., grants, six triggers) are reusable. Deploy only after 822de143 has CI with only the 7 known failures and a completed automatic review with no open finding.",
-  "needs_action": "Davide: authorize R-018 at 822de143, once its automatic review is clean. Codex: rerun R-018 at 822de143. Claude: watch the 822de143 review and CI."
+  "task": "PR #165 head db9cebbb (not merged). Web: correction guard + diagnostics, plus a timed-out start dropped when its send later fails as not sent. DB: forward migration 2026_10_02_mem00_recorded_source_chronology.sql after five Codex P1 rounds: each row's gap between recorded rows is fixed first (stored rows keep theirs, new rows by listed position or created_at, message_id copies position nothing), then numbered in snapshot order; contradictions or a full gap refuse the snapshot and write nothing. LangGraph unchanged at 973534ef.",
+  "summary": "Codex's newest P1 (copy positioning) and P2 (late send failure) are fixed in db9cebbb and both threads are resolved. R-018 Step 0 gains a read-only preflight (shared sequences in sessions with a recorded row must be 0). Codex's recorded baselines (function MD5 9e1d6ab6..., grants, six triggers) are reusable.",
+  "needs_action": "Davide: authorize R-018 at db9cebbb once its CI shows only the 7 known failures and its automatic review is clean. Codex: run R-018 at db9cebbb. Claude: watch the db9cebbb review and CI."
 }

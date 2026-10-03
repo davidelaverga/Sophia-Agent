@@ -14,7 +14,7 @@ I agree with Codex's ranking.
 
 **Audio loss:** the cause is unknown and there is no evidence to diagnose it. This change only adds a state log.
 
-## The fix: PR #165 head `822de143` (web plus one migration; LangGraph unchanged at `973534ef`)
+## The fix: PR #165 head `db9cebbb` (web plus one migration; LangGraph unchanged at `973534ef`)
 1. **Correction guard.** `update_async_task` and `edit_builder_artifact` are refused with `no_build_to_change`, and nothing is sent, unless one of these holds:
    - a build is running;
    - a delivered artifact exists;
@@ -28,41 +28,65 @@ I agree with Codex's ranking.
 3. **Review fix (`12d4936f`).** Codex's automatic review found that a confirmed start that then failed still counted as a pending start. The window now applies only to an unconfirmed start and clears once its task appears and ends. The guard tests now number 7.
    A second review finding is fixed in `9e4b024c`: the handler outlives a session switch, so a pending start is now bound to the thread it was sent in. That brings the guard tests to 8.
    A third review finding is fixed in `adfad44f`: a finished build counts only when its completion or the session's delivered artifact has a path. That brings the guard tests to 9.
+   A fourth review finding is fixed in `db9cebbb`. If a start's send fails as "not sent" after the 25 s wait has already timed out, the pending start is dropped. A late `companion_turn_unconfirmed` keeps it, because that turn may have launched the build. That brings the guard tests to 12.
 4. **Tests.**
    - 5 bridge tests and 2 websocket tests. The new tests fail on `973534ef` and pass on `603e6136`.
-   - Voice, debug-page and session suites: 393 pass. `tsc` is clean, and eslint shows no warnings on changed lines.
+   - Voice, session, debug and hooks suites: 1,134 pass. `tsc` is clean, and eslint shows no warnings on changed files.
 
 ## Step 0: transcript chronology migration (needs Davide's approval; independent of the web change)
-Codex's automatic review (P1) found that `2026_09_29` could reorder rows around a recorded source row. It happens when a snapshot omits that row together with an earlier row: anchor 3 and later row 4 become 3 and 2. The fix is the forward migration `backend/migrations/2026_10_02_mem00_recorded_source_chronology.sql`, in `822de143`. It replaces `sophia_replace_session_messages` only, with the same signature, owner, search_path and grants, and adds no trigger.
+Codex's automatic review (P1) found that `2026_09_29` could reorder rows around a recorded source row. It happens when a snapshot omits that row together with an earlier row: anchor 3 and later row 4 become 3 and 2. The fix is the forward migration `backend/migrations/2026_10_02_mem00_recorded_source_chronology.sql`, in `db9cebbb`. It replaces `sophia_replace_session_messages` only, with the same signature, owner, search_path and grants, and adds no trigger.
 
-**Local verification:**
-- the PostgreSQL contract passes;
-- 4×120 random snapshots keep every recorded row byte-identical and keep order around each anchor;
-- the previous function fails both checks;
-- rewriting 2,000 rows takes 329 ms, against 288 ms before.
-- two more review findings are fixed: in `bd5f1bb4`, new rows (not yet stored) keep their side of an omitted recorded row by `created_at`; in `822de143`, only the recorded row's own id positions it, so a `message_id` copy cannot, and a stored row keeps its side of every recorded row.
-- a fourth finding is fixed in `822de143`. If a snapshot leaves a recorded row out entirely and a row that belongs before it has no free sequence, the snapshot is refused (`recorded_source_order_unrepresentable`) and nothing is written. The web client refetches and resends with the recorded row listed, which is never refused. Copies reusing a recorded row's `message_id` mark its position again, as in `2026_09_29`.
+**How it orders rows (after five review rounds).** For each snapshot row, it first decides which gap between recorded rows the row belongs in, then numbers each gap in snapshot order:
+- a stored row keeps the gap it is stored in;
+- a new row follows a recorded row the snapshot lists by its exact id if it is listed after it, and otherwise goes by `created_at`;
+- a copy reusing a recorded row's `message_id` is discarded and positions nothing.
+
+If a new row's places contradict each other, or a gap below a recorded row is full, the snapshot is refused (`recorded_source_order_unrepresentable`) and nothing is written. The web client then refetches and resends with every recorded row listed. That resend is never refused, provided no two rows of a session share a sequence; the preflight in step 1 checks this.
+
+The server-side store (`append_or_upsert_messages` / `replace_messages`, no production caller today) now raises on a refusal instead of returning as if it wrote.
+
+**Local verification (PostgreSQL 16):**
+- the contract passes. Each earlier version fails the scenario for its own review finding: `2026_09_29` fails 3, `8dd99150` 3b, `bd5f1bb4` 4b, `14394316` 4c and `db9cebbb` 4d;
+- 9 seeds × 120 adversarial random snapshots match a reference model of the planner exactly. Recorded rows stay byte-identical, no copy is written, and a refusal writes nothing;
+- snapshots shaped like the web client's: 0 refusals over 5 × 120;
+- rewriting 2,000 rows takes 223 ms, against 173 ms on `2026_09_29`.
 
 **Steps:**
-1. Record the current function definition's MD5. It should be the `9e1d6ab6…` value recorded in R-015.
-2. Apply the file once.
-3. Read back the new MD5, and the signature, SECURITY DEFINER, search_path and grants (`service_role` only).
-4. Confirm the trigger set on `sophia_session_messages` is unchanged.
+1. **Read-only preflight.** Run the query below and report the number only. It must be `0`; otherwise stop and report.
+   ```sql
+   SELECT count(*) AS shared_sequences
+     FROM (
+       SELECT m.user_id, m.session_id, m.sequence
+         FROM public.sophia_session_messages m
+        WHERE EXISTS (
+            SELECT 1
+              FROM public.sophia_session_messages r
+              JOIN public.sophia_memory_governance_events e
+                ON e.source_intake_receipt->>'source_row_id' = r.id AND e.user_id = r.user_id
+             WHERE r.session_id = m.session_id AND r.user_id = m.user_id)
+        GROUP BY m.user_id, m.session_id, m.sequence
+       HAVING count(*) > 1
+     ) shared;
+   ```
+2. Record the current function definition's MD5. It should be the `9e1d6ab6…` value recorded in R-015.
+3. Apply the file once, from commit `db9cebbb`.
+4. Read back the new MD5, and the signature, SECURITY DEFINER, search_path and grants (`service_role` only).
+5. Confirm the trigger set on `sophia_session_messages` is unchanged.
 
 **Rollback:** re-apply only the `sophia_replace_session_messages` block and its REVOKE/GRANT from `2026_09_29_mem00_recorded_source_anchor.sql`.
 
 **Do not touch:** no row, receipt or version is modified.
 
 ## Step 1: deploy (needs Davide's approval)
-- **CI gate:** wait for PR #165 CI on `822de143`. Only the 7 known `backend-unit-tests` failures may fail; any other failure stops the deploy.
-- **Web only:** a fresh production build of exact commit `822de143` from `claude/voice-builder-admission-fix`. Use the same project and settings. **Never** do an instant rollback to an older deployment, because that restores old settings.
-- **Health:** `/api/app-version` must report `822de143`.
+- **CI gate:** wait for PR #165 CI on `db9cebbb`. Only the 7 known `backend-unit-tests` failures may fail; any other failure stops the deploy. Codex's automatic review of `db9cebbb` must also have finished with no open finding; a new finding stops the deploy, including Step 0.
+- **Web only:** a fresh production build of exact commit `db9cebbb` from `claude/voice-builder-admission-fix`. Use the same project and settings. **Never** do an instant rollback to an older deployment, because that restores old settings.
+- **Health:** `/api/app-version` must report `db9cebbb`.
 - **Record for rollback:** the previous deployment (`dpl_2vzq5ica6DEii89fcS5P9TPqnydp`, `2f5c5173`).
 - **Rollback:** a fresh build of `2f5c5173`.
 - **Do not change** LangGraph, the gateway, voice, the migration, settings, Lab, memory or retention.
 
 ## Step 2: one validation pass (desktop browser, new session after a hard reload; stop on the first failure)
-1. **Confirm the bundle.** After the reload, the console shows the app-version check for `822de143`.
+1. **Confirm the bundle.** After the reload, the console shows the app-version check for `db9cebbb`.
 2. **Make the request.** One explicit English request, for example: "Please research the EU AI Act and write me a short Markdown report." Then stay quiet until Sophia answers.
 3. **Expected durable result:**
    - one start message;
