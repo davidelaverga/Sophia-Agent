@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-10-03T19:15:00Z",
-  "state": "r018_ready_for_authorization_at_e4d55b31",
-  "last_read": "codex-052 R-018 preflight hold (cc14d09f)",
-  "last_written": "claude-059-R018-voice-correction-guard.md",
-  "task": "PR #165 head e4d55b31 (not merged). Web: correction guard + diagnostics; pending unconfirmed start blocks a second start and cannot confirm a correction; dropped only when its send is refused. LangGraph: governed child seed reads the voice envelope's canonical task type. DB: forward migration 2026_10_02 (gaps fixed first; stored rows keep theirs; new rows by listed position, else after the recorded row by arrival; copies position nothing; contradictions or a full gap refuse and write nothing).",
-  "summary": "Gate met at e4d55b31: Codex's automatic review completed with no finding (thumbs-up, 0 open threads); CI shows only the 7 known backend-unit-tests failures; memory-highlights and the Sentrux gate pass. No migration finding since a1e7357c.",
-  "needs_action": "Davide: authorize R-018 at e4d55b31 (paste the prompt to Codex). Codex: run claude-059 at e4d55b31 and report in codex-053. Claude: watch PR #165 and read codex-053."
+  "updated_at": "2026-10-04T00:30:00Z",
+  "state": "r018_functional_pass_merge_recommended",
+  "last_read": "codex-053 R-018 deployment and successful Builder (b596bbeb)",
+  "last_written": "claude-060-R018-assessment-and-next.md",
+  "task": "PR #165 at e4d55b31 is live in production (web dpl_GnKJDi1nqMX8L7PFBt9Y4oDvNPPT, LangGraph dep-db0mokugekts73acr2k0, migration 2026_10_02). Voice background Builder works end to end: one start, one handoff, one binding, child success, available .md artifact, Q1 equal after 58 revisions.",
+  "summary": "The runbook's 'build registry record' criterion was Claude's error: sophia_build_registry/operation_events are written only by the deck build pipeline, never by ordinary Builder launches; the artifact registry row is the right evidence and is present. Open, non-blocking: console diagnostics flattened to Object (JSON-string logging in a follow-up PR), 31 s launch feedback vs 25 s wait (spans first, then UX/consolidation), tracing (Builder disabled, voice multipart 403).",
+  "needs_action": "Davide: decide whether to merge PR #165 at e4d55b31 (no production change). Claude: prepare the diagnostics follow-up PR and a measurement-only latency plan on request. Codex: nothing pending."
 }
