@@ -14,7 +14,7 @@ I agree with Codex's ranking.
 
 **Audio loss:** the cause is unknown and there is no evidence to diagnose it. This change only adds a state log.
 
-## The fix: PR #165 head `37865b5a` (web, LangGraph and one migration)
+## The fix: PR #165 head `7e902620` (web, LangGraph and one migration)
 1. **Correction guard.** `update_async_task` and `edit_builder_artifact` are refused with `no_build_to_change`, and nothing is sent, unless one of these holds:
    - a build is running;
    - a delivered artifact exists;
@@ -29,10 +29,10 @@ I agree with Codex's ranking.
    A second review finding is fixed in `9e4b024c`: the handler outlives a session switch, so a pending start is now bound to the thread it was sent in. That brings the guard tests to 8.
    A third review finding is fixed in `adfad44f`: a finished build counts only when its completion or the session's delivered artifact has a path. That brings the guard tests to 9.
    A fourth review finding is fixed in `db9cebbb` and narrowed in `39aa5ce9`. If a start's send is refused after the 25 s wait has already timed out (`memory_source_send_refused` or `memory_context_rotation_required`), the pending start is dropped. Any other late failure keeps it, because the send may already have been accepted: `companion_turn_unconfirmed`, or a network error after the request left.
-   Two more are fixed in `a1e7357c`. While such a start may still appear, a second `start_builder_task` is refused (`builder_start_pending`) instead of sending another build. A correction is also never reported as confirmed, because the run it sees may be that start's own first run. A dismissed earlier Builder card no longer ends a pending start; only a new, different run does (`37865b5a`). That brings the guard tests to 16.
+   Two more are fixed in `a1e7357c`. While such a start may still appear, a second `start_builder_task` is refused (`builder_start_pending`) instead of sending another build. A correction is also never reported as confirmed, because the run it sees may be that start's own first run. A dismissed earlier Builder card no longer ends a pending start; only a new, different run does (`37865b5a`). A start is now marked pending before its 25 s wait, so an overlapping start is refused as well (`7e902620`). That brings the guard tests to 17.
 4. **Tests.**
    - 5 bridge tests and 2 websocket tests. The new tests fail on `973534ef` and pass on `603e6136`.
-   - Voice, session, debug and hooks suites: 1,138 pass. `tsc` is clean, and eslint shows no warnings on changed files.
+   - Voice, session, debug and hooks suites: 1,139 pass. `tsc` is clean, and eslint shows no warnings on changed files.
 5. **LangGraph: governed child keeps the voice task type (`39aa5ce9`, from Codex's automatic review).** For a governed owner, the child Builder is seeded from the recorded source alone, and that seed always started from `document`. A voice `Task type: research` therefore got the smaller document web budget, and a `visual_report` without "PDF" in the brief became Markdown. The seed now reads the canonical `Task type:` from the recorded `[Voice build request]` with the same parser `BuilderCommand` uses. A deck target still makes it a presentation, and every other source is unchanged. Two new governed tests fail on `db9cebbb` and pass now.
 
 ## Step 0: transcript chronology migration (needs Davide's approval; independent of the web change)
@@ -71,7 +71,7 @@ The server-side store (`append_or_upsert_messages` / `replace_messages`, no prod
      ) shared;
    ```
 2. Record the current function definition's MD5. It should be the `9e1d6ab6…` value recorded in R-015.
-3. Apply the file once, from commit `37865b5a`.
+3. Apply the file once, from commit `7e902620`.
 4. Read back the new MD5, and the signature, SECURITY DEFINER, search_path and grants (`service_role` only).
 5. Confirm the trigger set on `sophia_session_messages` is unchanged.
 
@@ -80,15 +80,15 @@ The server-side store (`append_or_upsert_messages` / `replace_messages`, no prod
 **Do not touch:** no row, receipt or version is modified.
 
 ## Step 1: deploy (needs Davide's approval)
-- **CI gate:** wait for PR #165 CI on `37865b5a`. Only the 7 known `backend-unit-tests` failures may fail; any other failure stops the deploy. Codex's automatic review of `37865b5a` must also have finished with no open finding; a new finding stops the deploy, including Step 0.
-- **LangGraph first:** deploy `sophia-langgraph` at exact commit `37865b5a` from `claude/voice-builder-admission-fix`. Use the specific-commit deploy with the same branch settings, autodeploy off and no Blueprint sync. Health: `/ok` returns 200 and `/version` reports `37865b5a`. The diff since the live `973534ef` touches only the governed child seed, the voice envelope parser's name and two unused store methods.
-- **Then web:** a fresh production build of exact commit `37865b5a` from `claude/voice-builder-admission-fix`. Use the same project and settings. **Never** do an instant rollback to an older deployment, because that restores old settings. Health: `/api/app-version` must report `37865b5a`.
+- **CI gate:** wait for PR #165 CI on `7e902620`. Only the 7 known `backend-unit-tests` failures may fail; any other failure stops the deploy. Codex's automatic review of `7e902620` must also have finished with no open finding; a new finding stops the deploy, including Step 0.
+- **LangGraph first:** deploy `sophia-langgraph` at exact commit `7e902620` from `claude/voice-builder-admission-fix`. Use the specific-commit deploy with the same branch settings, autodeploy off and no Blueprint sync. Health: `/ok` returns 200 and `/version` reports `7e902620`. The diff since the live `973534ef` touches only the governed child seed, the voice envelope parser (its name, and voice corrections or malformed requests no longer reaching the direct document fast path, `7e902620`) and two unused store methods.
+- **Then web:** a fresh production build of exact commit `7e902620` from `claude/voice-builder-admission-fix`. Use the same project and settings. **Never** do an instant rollback to an older deployment, because that restores old settings. Health: `/api/app-version` must report `7e902620`.
 - **Record for rollback:** LangGraph `dep-dave5v3bc2fs73chvgc0` (`973534ef`) and web `dpl_2vzq5ica6DEii89fcS5P9TPqnydp` (`2f5c5173`).
 - **Rollback:** LangGraph: redeploy `973534ef`. Web: a fresh build of `2f5c5173`. If a deploy attempt is abandoned, go straight back to these, not to an older commit.
 - **Do not change** the gateway, voice, settings, Lab, memory or retention.
 
 ## Step 2: one validation pass (desktop browser, new session after a hard reload; stop on the first failure)
-1. **Confirm the bundle.** After the reload, the console shows the app-version check for `37865b5a`.
+1. **Confirm the bundle.** After the reload, the console shows the app-version check for `7e902620`.
 2. **Make the request.** One explicit English request, for example: "Please research the EU AI Act and write me a short Markdown report." Then stay quiet until Sophia answers.
 3. **Expected durable result:**
    - one start message;

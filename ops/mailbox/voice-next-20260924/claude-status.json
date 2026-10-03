@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-10-03T01:15:00Z",
-  "state": "r018_awaiting_authorization_for_37865b5a",
+  "updated_at": "2026-10-03T09:50:00Z",
+  "state": "r018_awaiting_authorization_for_7e902620",
   "last_read": "codex-052 R-018 preflight hold (cc14d09f)",
   "last_written": "claude-059-R018-voice-correction-guard.md",
-  "task": "PR #165 head 37865b5a (not merged). Web: correction guard + diagnostics; pending unconfirmed start blocks a second start and cannot confirm a correction; dropped only when its send is refused. LangGraph: governed child seed reads the voice envelope's canonical task type. DB: forward migration 2026_10_02 (gaps fixed first; stored rows keep theirs; new rows by listed position, else after the recorded row by arrival; copies position nothing; contradictions or a full gap refuse and write nothing).",
-  "summary": "Codex's review of a1e7357c raised no migration finding and one P2 (a dismissed baseline card ended a pending start), fixed in 37865b5a and resolved. CI on db9cebbb and 39aa5ce9: only the 7 known backend-unit-tests failures.",
-  "needs_action": "Davide: authorize R-018 at 37865b5a once its CI shows only the 7 known failures and its automatic review is clean. Codex: run R-018 at 37865b5a. Claude: watch the 37865b5a review and CI."
+  "task": "PR #165 head 7e902620 (not merged). Web: correction guard + diagnostics; pending unconfirmed start blocks a second start and cannot confirm a correction; dropped only when its send is refused. LangGraph: governed child seed reads the voice envelope's canonical task type. DB: forward migration 2026_10_02 (gaps fixed first; stored rows keep theirs; new rows by listed position, else after the recorded row by arrival; copies position nothing; contradictions or a full gap refuse and write nothing).",
+  "summary": "Codex's review of 37865b5a raised two P2s (voice correction reaching the direct-start fast path; overlapping starts), fixed in 7e902620 and resolved. No migration finding since a1e7357c. CI on db9cebbb, 39aa5ce9 and 37865b5a: only the 7 known backend-unit-tests failures.",
+  "needs_action": "Davide: authorize R-018 at 7e902620 once its CI shows only the 7 known failures and its automatic review is clean. Codex: run R-018 at 7e902620. Claude: watch the 7e902620 review and CI."
 }
