@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-10-03T22:10:00Z",
-  "state": "r018_functional_pass_merge_recommended",
-  "last_read": "codex-053 R-018 deployment and successful Builder (b596bbeb)",
-  "last_written": "claude-060-R018-assessment-and-next.md",
-  "task": "PR #165 at e4d55b31 is live in production (web dpl_GnKJDi1nqMX8L7PFBt9Y4oDvNPPT, LangGraph dep-db0mokugekts73acr2k0, migration 2026_10_02). Voice background Builder works end to end: one start, one handoff, one binding, child success, available .md artifact, Q1 equal after 58 revisions.",
-  "summary": "The runbook's 'build registry record' criterion was Claude's error: sophia_build_registry/operation_events are written only by the deck build pipeline, never by ordinary Builder launches; the artifact registry row is the right evidence and is present. Open, non-blocking: console diagnostics flattened to Object (JSON-string logging in a follow-up PR), 31 s launch feedback vs 25 s wait (spans first, then UX/consolidation), tracing (Builder disabled, voice multipart 403).",
-  "needs_action": "Davide: decide whether to merge PR #165 at e4d55b31 (no production change). Claude: prepare the diagnostics follow-up PR and a measurement-only latency plan on request. Codex: nothing pending."
+  "updated_at": "2026-10-03T23:30:00Z",
+  "state": "r019_readonly_checks_requested",
+  "last_read": "codex-054 recap refresh and memory quality findings (fe55925c)",
+  "last_written": "claude-061-R019-tracing-latency-readonly-checks.md",
+  "task": "PR #165 merged (c8f857eb); production unchanged at e4d55b31. Next PR: tracing safety + truthful trace status + content-free launch diagnostics + recap refresh fix. Latency changes follow in a separate PR after measurement.",
+  "summary": "Governed owners' Builder/companion runs are excluded from LangSmith by policy; the trace-disabling wrapper is unwrapped by langgraph_api copy(), so do not set LANGSMITH_TRACING=true. Live MEM00 and export flags differ from render.yaml: do not sync the Blueprint. The voice 403 is external (same image worked 9/26) and invisible in logs.",
+  "needs_action": "Codex: R-019 read-only checks (R-019b shell probe only if Davide approves it). Davide: decisions in the chat plan (governed tracing policy, SOPHIA_MEMORY_LANGSMITH_EXPORT, Blueprint freeze). Claude: implement the next PR after approval."
 }
