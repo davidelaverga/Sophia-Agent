@@ -340,15 +340,9 @@ export function createVoiceBuilderToolHandler(
   const nowMs = options.nowMs ?? (() => Date.now())
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => { setTimeout(resolve, ms) }))
   const logOutcome = options.logOutcome ?? logVoiceBuilderOutcome
-  // A start being sent or sent but not yet seen running, the run and the
-  // completion present before it, and the conversation it was sent in.
-  let pendingStart: {
-    atMs: number
-    baseline: string | null
-    baselineTaskId: string | null
-    completionTaskId: string | null
-    sessionKey: string | null
-  } | null = null
+  // A start being sent or sent but not yet seen running, the run visible
+  // before it, and the conversation it was sent in.
+  let pendingStart: { atMs: number; baseline: string | null; sessionKey: string | null } | null = null
   const sessionKey = () => adapter.getSessionKey?.() ?? null
   // Companion turns this handler sent whose send has not settled yet. One turn
   // at a time: a second send while one is still active would share the chat's
@@ -465,8 +459,6 @@ export function createVoiceBuilderToolHandler(
     const pending = {
       atMs: nowMs(),
       baseline: runKey(adapter.getBuilderTask()),
-      baselineTaskId: adapter.getBuilderTask()?.taskId ?? null,
-      completionTaskId: adapter.getBuilderCompletion()?.task_id ?? null,
       sessionKey: sessionKey(),
     }
     pendingStart = pending
@@ -576,19 +568,17 @@ export function createVoiceBuilderToolHandler(
   // An unconfirmed start in the active conversation that may still appear.
   const pendingStartActive = (): boolean => {
     if (pendingStart) {
-      const current = runKey(adapter.getBuilderTask())
-      const newRun = current !== null && current !== pendingStart.baseline
-      // A completion for a task other than the earlier run's or the earlier
-      // completion's means the start materialized even if its card is gone.
-      // Changes to an earlier artifact's view prove nothing.
-      const completionTaskId = adapter.getBuilderCompletion()?.task_id ?? null
-      const newDelivery = completionTaskId !== null
-        && completionTaskId !== pendingStart.completionTaskId
-        && completionTaskId !== pendingStart.baselineTaskId
-      // Another conversation is active, or the start has materialized: it is
-      // no longer pending. The earlier card merely being cleared (for example
-      // dismissed) proves nothing, so that keeps it pending.
-      if (pendingStart.sessionKey !== sessionKey() || newRun || newDelivery) {
+      // Only a running run other than the one visible at send time proves the
+      // start materialized. A terminal task, a completion or an artifact can be
+      // an older build replayed by a late or repeated snapshot, and a cleared
+      // card proves nothing, so none of them ends the window: it lasts until
+      // expiry, a definitive refusal or a conversation switch. Blocking a retry
+      // for at most the window is preferred to launching a second build.
+      // observe() runs on every Builder state change, so a run is normally
+      // seen while it is running.
+      const task = adapter.getBuilderTask()
+      const newRun = task?.phase === "running" && runKey(task) !== pendingStart.baseline
+      if (pendingStart.sessionKey !== sessionKey() || newRun) {
         pendingStart = null
       }
     }

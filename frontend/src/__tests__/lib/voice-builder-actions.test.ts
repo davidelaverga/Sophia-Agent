@@ -487,6 +487,9 @@ describe("voice builder tool handler", () => {
       { description: "Research EV charging in Germany; deliver Markdown.", task_type: "research" },
       ["Can you research EV charging in Germany?"],
     ))
+    // The session observes every state change, so the run is seen running first.
+    session.state.task = { phase: "running", taskId: "task-late", runId: "run-late" }
+    session.handler.observe?.()
     session.state.task = { phase: "cancelled", taskId: "task-late", runId: "run-late" }
 
     const correction = await session.handler.execute(call("update_async_task", { message: "Also cover Austria." }))
@@ -608,6 +611,8 @@ describe("voice builder tool handler", () => {
     expect(again).toMatchObject({ ok: false, reason: "builder_start_pending", duplicate_guard: true })
     expect(session.sent).toHaveLength(1)
 
+    session.state.task = { phase: "running", taskId: "task-late", runId: "run-late" }
+    session.handler.observe?.()
     session.state.task = { phase: "failed", taskId: "task-late", runId: "run-late" }
     const retry = await session.handler.execute(request)
     expect(retry).toMatchObject({ ok: false, reason: "builder_start_unconfirmed" })
@@ -646,7 +651,7 @@ describe("voice builder tool handler", () => {
     expect(session.sent).toHaveLength(1)
   })
 
-  it("ends a pending start when its completion arrives, even after its card is dismissed", async () => {
+  it("ends a pending start seen running, even after its card is dismissed", async () => {
     const session = createSession()
     const request = call(
       "start_builder_task",
@@ -655,6 +660,8 @@ describe("voice builder tool handler", () => {
     )
     await session.handler.execute(request)
 
+    session.state.task = { phase: "running", taskId: "task-late", runId: "run-late" }
+    session.handler.observe?.()
     session.state.completion = {
       task_id: "task-late",
       run_id: "run-late",
@@ -755,6 +762,30 @@ describe("voice builder tool handler", () => {
     const retry = await session.handler.execute(request)
     expect(retry).toMatchObject({ ok: false, reason: "builder_start_unconfirmed" })
     expect(session.sent).toHaveLength(2)
+  })
+
+  it("keeps a pending start when a late snapshot replays an older build", async () => {
+    const session = createSession()
+    const request = call(
+      "start_builder_task",
+      { description: "Research EV charging in Germany; deliver Markdown.", task_type: "research" },
+      ["Can you research EV charging in Germany?"],
+    )
+    await session.handler.execute(request)
+
+    // The canvas hydrates after the send with an earlier, finished build.
+    session.state.task = { phase: "completed", taskId: "task-old", runId: "run-old" }
+    session.state.completion = {
+      task_id: "task-old",
+      run_id: "run-old",
+      status: "success",
+      artifact_path: "mnt/user-data/outputs/old.md",
+    } as BuilderCompletionEventV1
+    session.handler.observe?.()
+
+    const again = await session.handler.execute(request)
+    expect(again).toMatchObject({ ok: false, reason: "builder_start_pending" })
+    expect(session.sent).toHaveLength(1)
   })
 
   it("logs one content-free outcome per call", async () => {
