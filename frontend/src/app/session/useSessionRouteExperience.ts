@@ -16,6 +16,7 @@ import {
   createCompanionTurnFailures,
   createVoiceBuilderToolHandler,
   registerVoiceBuilderToolBridge,
+  type VoiceBuilderToolBridge,
 } from '../lib/voice-builder-actions';
 import { useAuth } from '../providers';
 import type { BuilderArtifactV1 } from '../types/builder-artifact';
@@ -724,6 +725,7 @@ export function useSessionRouteExperience({
     sessionKey: activeThreadId ?? null,
     builderArtifactPath: builderArtifact?.artifactPath ?? null,
   });
+  const voiceBuilderBridgeRef = useRef<VoiceBuilderToolBridge | null>(null);
   useEffect(() => {
     voiceBuilderStateRef.current = {
       builderTask,
@@ -733,16 +735,27 @@ export function useSessionRouteExperience({
       sessionKey: activeThreadId ?? null,
       builderArtifactPath: builderArtifact?.artifactPath ?? null,
     };
+    // Let the bridge see every Builder state change, including a run that is
+    // cancelled or dismissed before any voice tool call.
+    voiceBuilderBridgeRef.current?.observe?.();
   }, [activeThreadId, builderArtifact, builderTask, cancelBuilderTask, effectiveBuilderCompletion, sendVoiceBuilderMessage]);
 
-  useEffect(() => registerVoiceBuilderToolBridge(createVoiceBuilderToolHandler({
-    sendCompanionMessage: (text) => voiceBuilderStateRef.current.sendVoiceBuilderMessage(text),
-    getBuilderTask: () => voiceBuilderStateRef.current.builderTask,
-    getBuilderCompletion: () => voiceBuilderStateRef.current.builderCompletion,
-    cancelBuilderTask: () => voiceBuilderStateRef.current.cancelBuilderTask(),
-    getSessionKey: () => voiceBuilderStateRef.current.sessionKey,
-    getBuilderArtifactPath: () => voiceBuilderStateRef.current.builderArtifactPath,
-  })), []);
+  useEffect(() => {
+    const bridge = createVoiceBuilderToolHandler({
+      sendCompanionMessage: (text) => voiceBuilderStateRef.current.sendVoiceBuilderMessage(text),
+      getBuilderTask: () => voiceBuilderStateRef.current.builderTask,
+      getBuilderCompletion: () => voiceBuilderStateRef.current.builderCompletion,
+      cancelBuilderTask: () => voiceBuilderStateRef.current.cancelBuilderTask(),
+      getSessionKey: () => voiceBuilderStateRef.current.sessionKey,
+      getBuilderArtifactPath: () => voiceBuilderStateRef.current.builderArtifactPath,
+    });
+    voiceBuilderBridgeRef.current = bridge;
+    const unregister = registerVoiceBuilderToolBridge(bridge);
+    return () => {
+      voiceBuilderBridgeRef.current = null;
+      unregister();
+    };
+  }, []);
 
   return {
     routeProfile,

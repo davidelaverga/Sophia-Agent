@@ -64,6 +64,8 @@ export type VoiceBuilderToolResult = Record<string, unknown> & { ok: boolean }
 export interface VoiceBuilderToolBridge {
   execute: (call: VoiceBuilderToolCallInput) => Promise<VoiceBuilderToolResult>
   knownTaskIds: () => string[]
+  /** Look at the session's Builder state now (called on every change). */
+  observe?: () => void
 }
 
 export interface VoiceBuilderCancelResponse {
@@ -653,6 +655,9 @@ export function createVoiceBuilderToolHandler(
         result_summary: "There is no running build to cancel.",
       }
     }
+    // Settle a pending start that this visible run belongs to before the
+    // cancellation clears the run from view.
+    pendingStartActive()
     if (requestedTaskId && requestedTaskId !== task.taskId) {
       return {
         ok: false,
@@ -701,6 +706,12 @@ export function createVoiceBuilderToolHandler(
 
   return {
     knownTaskIds,
+    // The session calls this on every Builder state change, so a start whose
+    // run appears and is then cancelled or dismissed in the UI is settled
+    // while that run is still visible.
+    observe: () => {
+      pendingStartActive()
+    },
     execute: async (call) => {
       const startedAtMs = nowMs()
       const result = await dispatch(call)

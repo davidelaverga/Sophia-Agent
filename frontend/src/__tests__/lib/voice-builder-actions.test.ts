@@ -734,6 +734,29 @@ describe("voice builder tool handler", () => {
     expect(session.sent).toHaveLength(2)
   })
 
+  it.each(["bridge", "ui"])("settles a pending start whose build is cancelled (%s)", async (via) => {
+    const session = createSession()
+    const request = call(
+      "start_builder_task",
+      { description: "Research EV charging in Germany; deliver Markdown.", task_type: "research" },
+      ["Can you research EV charging in Germany?"],
+    )
+    await session.handler.execute(request)
+
+    session.state.task = { phase: "running", taskId: "task-late", runId: "run-late" }
+    if (via === "bridge") {
+      expect(await session.handler.execute(call("cancel_async_task", {}))).toMatchObject({ ok: true })
+    } else {
+      session.handler.observe?.()
+    }
+    // The UI then dismisses the cancelled card and filters its completion.
+    session.state.task = null
+
+    const retry = await session.handler.execute(request)
+    expect(retry).toMatchObject({ ok: false, reason: "builder_start_unconfirmed" })
+    expect(session.sent).toHaveLength(2)
+  })
+
   it("logs one content-free outcome per call", async () => {
     const session = createSession()
     session.onSend.reject = new Error("memory_source_dispatch_busy")
