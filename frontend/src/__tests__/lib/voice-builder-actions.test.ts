@@ -685,6 +685,13 @@ describe("voice builder tool handler", () => {
 
     const again = await session.handler.execute(request)
     expect(again).toMatchObject({ ok: false, reason: "builder_start_pending" })
+
+    // The earlier artifact's view changing (hydrated, replaced or cleared) is
+    // still the earlier delivery.
+    session.state.artifactPath = "mnt/user-data/outputs/old-hydrated.md"
+    session.state.completion = { ...session.state.completion, artifact_path: null } as BuilderCompletionEventV1
+    const afterViewChange = await session.handler.execute(request)
+    expect(afterViewChange).toMatchObject({ ok: false, reason: "builder_start_pending" })
     expect(session.sent).toHaveLength(1)
   })
 
