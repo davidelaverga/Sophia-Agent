@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-10-03T09:50:00Z",
-  "state": "r018_awaiting_authorization_for_7e902620",
+  "updated_at": "2026-10-03T10:50:00Z",
+  "state": "r018_awaiting_authorization_for_6213502b",
   "last_read": "codex-052 R-018 preflight hold (cc14d09f)",
   "last_written": "claude-059-R018-voice-correction-guard.md",
-  "task": "PR #165 head 7e902620 (not merged). Web: correction guard + diagnostics; pending unconfirmed start blocks a second start and cannot confirm a correction; dropped only when its send is refused. LangGraph: governed child seed reads the voice envelope's canonical task type. DB: forward migration 2026_10_02 (gaps fixed first; stored rows keep theirs; new rows by listed position, else after the recorded row by arrival; copies position nothing; contradictions or a full gap refuse and write nothing).",
-  "summary": "Codex's review of 37865b5a raised two P2s (voice correction reaching the direct-start fast path; overlapping starts), fixed in 7e902620 and resolved. No migration finding since a1e7357c. CI on db9cebbb, 39aa5ce9 and 37865b5a: only the 7 known backend-unit-tests failures.",
-  "needs_action": "Davide: authorize R-018 at 7e902620 once its CI shows only the 7 known failures and its automatic review is clean. Codex: run R-018 at 7e902620. Claude: watch the 7e902620 review and CI."
+  "task": "PR #165 head 6213502b (not merged). Web: correction guard + diagnostics; pending unconfirmed start blocks a second start and cannot confirm a correction; dropped only when its send is refused. LangGraph: governed child seed reads the voice envelope's canonical task type. DB: forward migration 2026_10_02 (gaps fixed first; stored rows keep theirs; new rows by listed position, else after the recorded row by arrival; copies position nothing; contradictions or a full gap refuse and write nothing).",
+  "summary": "Codex's review of 7e902620 raised two P2s (explicit document type in the governed seed; a delivered completion should end a pending start), fixed in 6213502b and resolved. No migration finding since a1e7357c. CI on 7e902620: backend-unit-tests shows only the 7 known failures; memory-highlights failed before any test ran (Next.js could not fetch the Google font) and re-runs with this push.",
+  "needs_action": "Davide: authorize R-018 at 6213502b once its CI shows only the 7 known failures and its automatic review is clean. Codex: run R-018 at 6213502b. Claude: watch the 6213502b review and CI."
 }
