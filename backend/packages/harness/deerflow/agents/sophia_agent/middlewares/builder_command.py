@@ -115,7 +115,7 @@ class BuilderCommandMiddleware(AgentMiddleware[AgentState]):
             return None
 
         user_text = extract_last_message_text(request.messages)
-        voice_request = _parse_voice_build_request(user_text)
+        voice_request = parse_voice_build_request(user_text)
         if voice_request is not None:
             brief, task_type = voice_request
             log_middleware("BuilderCommand", f"voice build request routed to Builder (task_type={task_type})", _t0)
@@ -169,7 +169,7 @@ def _start_builder_task_call(description: str, task_type: str) -> AIMessage:
     )
 
 
-def _parse_voice_build_request(user_text: str) -> tuple[str, str] | None:
+def parse_voice_build_request(user_text: str) -> tuple[str, str] | None:
     """Return ``(brief, task_type)`` for a voice bridge build request.
 
     The header must be the first line and a non-empty ``Brief:`` must follow.

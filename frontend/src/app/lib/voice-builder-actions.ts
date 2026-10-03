@@ -427,11 +427,12 @@ export function createVoiceBuilderToolHandler(
     const pending = outcome.kind === "unconfirmed" ? { atMs: nowMs(), baseline, sessionKey: startSessionKey } : null
     pendingStart = pending
     if (pending && outcome.kind === "unconfirmed") {
-      // The send can still fail after the wait. A failure that means it was not
-      // sent (any code but COMPANION_TURN_UNCONFIRMED, as during the wait)
-      // leaves nothing to correct.
+      // The send can still fail after the wait. Only a refusal before the run
+      // was created proves nothing started; any other late failure (a network
+      // error included) may follow an accepted send, so the window stays.
       void outcome.settled?.then((error) => {
-        if (error && error !== COMPANION_TURN_UNCONFIRMED && pendingStart === pending) {
+        const refused = error === MEMORY_SOURCE_SEND_REFUSED || error === MEMORY_CONTEXT_RECOVERY_REQUIRED
+        if (refused && pendingStart === pending) {
           pendingStart = null
         }
       })

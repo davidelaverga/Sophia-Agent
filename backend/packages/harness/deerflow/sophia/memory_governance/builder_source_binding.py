@@ -132,14 +132,18 @@ def independent_builder_runtime_seed(*, binding, wire_input):
 
     This deterministic transformation is not authorization. The entry guard
     verifies the binding, current source and zero-memory admission first. No
-    caller-supplied task type, budget, artifact, file or parent state is used.
+    caller-supplied task type, budget, artifact, file or parent state is used;
+    the only task type read is the canonical one a recorded voice build request
+    states in the source text itself.
     """
     from datetime import datetime
 
     from langchain_core.messages import HumanMessage, convert_to_messages
 
     from deerflow.agents.sophia_agent.middlewares.builder_budget import builder_budget_for_task
+    from deerflow.agents.sophia_agent.middlewares.builder_command import parse_voice_build_request
     from deerflow.sophia.tools.start_builder_task import (
+        _canonical_task_type_for_target,
         _resolve_target_format,
         _suggest_artifact_target_path,
         extract_explicit_user_urls,
@@ -157,8 +161,14 @@ def independent_builder_runtime_seed(*, binding, wire_input):
         if len(messages) != 1 or not isinstance(messages[0], HumanMessage) or not isinstance(messages[0].content, str):
             raise ValueError("source")
         text = messages[0].content
-        resolution = _resolve_target_format(current_user_text=text, description=None, task_type="document")
-        task_type = {"pptx": "presentation", "html": "frontend", "pdf": "visual_report"}.get(resolution.final_ext, "document")
+        voice_request = parse_voice_build_request(text)
+        voice_type = voice_request[1] if voice_request is not None and voice_request[1] != "document" else None
+        resolution = _resolve_target_format(current_user_text=text, description=None, task_type=voice_type or "document")
+        if voice_type is not None:
+            # As in the direct launch: the stated type holds unless the target is a deck.
+            task_type = _canonical_task_type_for_target(voice_type, resolution.final_ext)
+        else:
+            task_type = {"pptx": "presentation", "html": "frontend", "pdf": "visual_report"}.get(resolution.final_ext, "document")
         target = _suggest_artifact_target_path(task_type, text, ext_override=resolution.final_ext)
         allow_web = should_allow_builder_web_research(task_type, text)
         urls = extract_explicit_user_urls(text)

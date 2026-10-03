@@ -553,25 +553,29 @@ describe("voice builder tool handler", () => {
     },
   )
 
-  it("keeps a pending start whose send ends ambiguously after the wait", async () => {
-    const session = createSession()
-    let release: (error: Error) => void = () => {}
-    session.onSend.hold = new Promise<void>((_resolve, reject) => { release = reject })
-    await session.handler.execute(call(
-      "start_builder_task",
-      { description: "Research EV charging in Germany; deliver Markdown.", task_type: "research" },
-      ["Can you research EV charging in Germany?"],
-    ))
+  it.each([COMPANION_TURN_UNCONFIRMED, "Failed to fetch: network connection lost"])(
+    "keeps a pending start whose send ends ambiguously after the wait (%s)",
+    async (failure) => {
+      const session = createSession()
+      let release: (error: Error) => void = () => {}
+      session.onSend.hold = new Promise<void>((_resolve, reject) => { release = reject })
+      await session.handler.execute(call(
+        "start_builder_task",
+        { description: "Research EV charging in Germany; deliver Markdown.", task_type: "research" },
+        ["Can you research EV charging in Germany?"],
+      ))
 
-    // The turn may already have launched the build, so it stays correctable.
-    session.onSend.hold = null
-    release(new Error(COMPANION_TURN_UNCONFIRMED))
-    await new Promise((resolve) => { setTimeout(resolve, 0) })
-    await session.handler.execute(call("update_async_task", { message: "Also cover Austria." }))
+      // The send may have been accepted and launched the build (an unconfirmed
+      // turn, or a network error after the request left), so it stays correctable.
+      session.onSend.hold = null
+      release(new Error(failure))
+      await new Promise((resolve) => { setTimeout(resolve, 0) })
+      await session.handler.execute(call("update_async_task", { message: "Also cover Austria." }))
 
-    expect(session.sent).toHaveLength(2)
-    expect(session.sent[1]).toContain("Correction: Also cover Austria.")
-  })
+      expect(session.sent).toHaveLength(2)
+      expect(session.sent[1]).toContain("Correction: Also cover Austria.")
+    },
+  )
 
   it("logs one content-free outcome per call", async () => {
     const session = createSession()

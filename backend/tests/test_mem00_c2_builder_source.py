@@ -114,10 +114,20 @@ def test_independent_child_registration_does_not_inherit_parent_admission(source
     assert guard.admission is parent_admission
 
 
+VOICE_VISUAL_REPORT_REQUEST = "\n".join([
+    "[Voice build request]",
+    "Task type: visual_report",
+    "Brief: A synthetic report on garden planning.",
+])
+
+
 @pytest.mark.parametrize("source,expected_type,expected_ext", [
     ("Build a simple synthetic table", "document", ".md"),
     ("Create a PowerPoint presentation about synthetic planets", "presentation", ".pptx"),
     ("Build an HTML website for a synthetic garden", "frontend", ".html"),
+    # A voice request's recorded task type reaches the child (PR #165 review).
+    ("\n".join(["[Voice build request]", "Task type: research", "Brief: Research a synthetic topic."]), "research", ".md"),
+    (VOICE_VISUAL_REPORT_REQUEST, "visual_report", ".pdf"),
 ], indirect=["source"])
 def test_source_only_transport_binds_actual_child_run_and_rejects_old_contract(source, monkeypatch, tmp_path, expected_type, expected_ext):
     from copy import deepcopy
@@ -189,8 +199,10 @@ def test_source_only_transport_binds_actual_child_run_and_rejects_old_contract(s
     assert seeded["builder_budget"]["max_non_artifact_turns"] > 0
     if expected_type == "presentation":
         assert seeded["builder_deadline_epoch_ms"] > seeded["builder_task_kickoff_ms"]
-    else:
+    elif expected_type in {"document", "research", "frontend"}:
         assert seeded["builder_deadline_epoch_ms"] == 0  # Existing simple tier has cost/turn caps.
+    if expected_type == "research":
+        assert seeded["builder_web_budget"]["search_limit"] == 5
     from deerflow.sophia.memory_governance.builder_source_binding import independent_builder_runtime_seed
     assert independent_builder_runtime_seed(binding=child_guard.builder_binding, wire_input=bound) == {
         key: value for key, value in seeded.items() if key != "memory_context_proof"}
@@ -205,7 +217,8 @@ def test_source_only_transport_binds_actual_child_run_and_rejects_old_contract(s
     briefing = BuilderTaskMiddleware(user_id="owner").before_agent(
         {**bound, **seeded}, SimpleNamespace(config={"configurable": cfg}, context={"thread_id": child}))
     rendered = "\n".join(briefing["system_prompt_blocks"])
-    assert source["messages"][0].content in str(bound["messages"]) + rendered
+    recorded = source["messages"][0].content
+    assert recorded in rendered or any(message["content"] == recorded for message in bound["messages"])
     assert "<memories>" not in rendered and "<session_recall>" not in rendered
     assert "<tone_guidance>" not in rendered
     if expected_type == "document":
