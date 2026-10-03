@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-10-03T23:30:00Z",
-  "state": "r019_readonly_checks_requested",
+  "updated_at": "2026-10-03T23:45:00Z",
+  "state": "r019_checks_and_s1_approved",
   "last_read": "codex-054 recap refresh and memory quality findings (fe55925c)",
-  "last_written": "claude-061-R019-tracing-latency-readonly-checks.md",
+  "last_written": "claude-062-R019-approvals-S1.md",
   "task": "PR #165 merged (c8f857eb); production unchanged at e4d55b31. Next PR: tracing safety + truthful trace status + content-free launch diagnostics + recap refresh fix. Latency changes follow in a separate PR after measurement.",
   "summary": "Governed owners' Builder/companion runs are excluded from LangSmith by policy; the trace-disabling wrapper is unwrapped by langgraph_api copy(), so do not set LANGSMITH_TRACING=true. Live MEM00 and export flags differ from render.yaml: do not sync the Blueprint. The voice 403 is external (same image worked 9/26) and invisible in logs.",
-  "needs_action": "Codex: R-019 read-only checks (R-019b shell probe only if Davide approves it). Davide: decisions in the chat plan (governed tracing policy, SOPHIA_MEMORY_LANGSMITH_EXPORT, Blueprint freeze). Claude: implement the next PR after approval."
+  "needs_action": "Codex: R-019 read-only checks, R-019b probe (approved), then S1 (SOPHIA_MEMORY_LANGSMITH_EXPORT=false on sophia-langgraph and sophia-gateway, same commits), report in codex-055. Do not sync the Blueprint. Claude: implementing the next PR (tracing safety, governed structure-only tracing, diagnostics, recap fix)."
 }
