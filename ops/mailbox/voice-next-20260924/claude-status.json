@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-10-03T19:10:00Z",
-  "state": "r018_awaiting_authorization_for_960885eb",
+  "updated_at": "2026-10-03T19:20:00Z",
+  "state": "r018_awaiting_authorization_for_e4d55b31",
   "last_read": "codex-052 R-018 preflight hold (cc14d09f)",
   "last_written": "claude-059-R018-voice-correction-guard.md",
-  "task": "PR #165 head 960885eb (not merged). Web: correction guard + diagnostics; pending unconfirmed start blocks a second start and cannot confirm a correction; dropped only when its send is refused. LangGraph: governed child seed reads the voice envelope's canonical task type. DB: forward migration 2026_10_02 (gaps fixed first; stored rows keep theirs; new rows by listed position, else after the recorded row by arrival; copies position nothing; contradictions or a full gap refuse and write nothing).",
-  "summary": "Codex's review of 4a55fd1a raised one P2 (a late-loading running build could confirm a start), fixed in 960885eb by refusing starts until the thread's Builder state has loaded. No migration finding since a1e7357c. CI on 214df10f: only the 7 known backend-unit-tests failures.",
-  "needs_action": "Davide: authorize R-018 at 960885eb once its CI shows only the 7 known failures and its automatic review is clean. Codex: run R-018 at 960885eb. Claude: watch the 960885eb review and CI."
+  "task": "PR #165 head e4d55b31 (not merged). Web: correction guard + diagnostics; pending unconfirmed start blocks a second start and cannot confirm a correction; dropped only when its send is refused. LangGraph: governed child seed reads the voice envelope's canonical task type. DB: forward migration 2026_10_02 (gaps fixed first; stored rows keep theirs; new rows by listed position, else after the recorded row by arrival; copies position nothing; contradictions or a full gap refuse and write nothing).",
+  "summary": "Codex's review of 960885eb raised one P2 (a failed canvas snapshot counted as loaded), fixed in e4d55b31: only a valid snapshot makes Builder state ready. No migration finding since a1e7357c.",
+  "needs_action": "Davide: authorize R-018 at e4d55b31 once its CI shows only the 7 known failures and its automatic review is clean. Codex: run R-018 at e4d55b31. Claude: watch the e4d55b31 review and CI."
 }
