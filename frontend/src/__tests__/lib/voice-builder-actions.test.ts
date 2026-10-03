@@ -688,6 +688,23 @@ describe("voice builder tool handler", () => {
     expect(session.sent).toHaveLength(1)
   })
 
+  it("never confirms a start with a task from a conversation opened during the wait", async () => {
+    const session = createSession()
+    session.onSend.next = () => {
+      session.state.sessionKey = "thread-b"
+      session.state.task = { phase: "running", taskId: "task-b", runId: "run-b" }
+    }
+
+    const started = await session.handler.execute(call(
+      "start_builder_task",
+      { description: "Research EV charging in Germany; deliver Markdown.", task_type: "research" },
+      ["Can you research EV charging in Germany?"],
+    ))
+
+    expect(started).toMatchObject({ ok: false, reason: "builder_start_unconfirmed" })
+    expect(started).not.toHaveProperty("task_id", "task-b")
+  })
+
   it("logs one content-free outcome per call", async () => {
     const session = createSession()
     session.onSend.reject = new Error("memory_source_dispatch_busy")

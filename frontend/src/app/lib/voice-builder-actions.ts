@@ -357,12 +357,15 @@ export function createVoiceBuilderToolHandler(
   // Send one companion turn, then wait for a running task or run that differs
   // from the one present before the send. A rejected send ends the wait early.
   // If the wait times out first, `settled` reports how the send ended later.
+  // A conversation switch ends the wait unconfirmed: another conversation's
+  // task can never confirm this send.
   const sendAndConfirm = async (text: string): Promise<
     | { kind: "confirmed"; task: BuilderTaskV1 }
     | { kind: "send_failed"; reason: string }
     | { kind: "unconfirmed"; deliveryUnknown?: boolean; settled?: Promise<string | null> }
   > => {
     const baseline = runKey(adapter.getBuilderTask())
+    const origin = sessionKey()
     const send: { error: string | null } = { error: null }
     const settled = Promise.resolve()
       .then(() => adapter.sendCompanionMessage(text))
@@ -374,6 +377,9 @@ export function createVoiceBuilderToolHandler(
       })
     const deadline = nowMs() + confirmationTimeoutMs
     for (;;) {
+      if (sessionKey() !== origin) {
+        return { kind: "unconfirmed", settled }
+      }
       const task = adapter.getBuilderTask()
       if (task?.phase === "running" && task.taskId && runKey(task) !== baseline) {
         return { kind: "confirmed", task }
