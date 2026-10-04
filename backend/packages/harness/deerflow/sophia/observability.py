@@ -327,15 +327,23 @@ def langsmith_builder_tracing_context(
         return nullcontext()
 
 
-class LangSmithTraceDisabledRunnable(Runnable[Any, Any]):
-    """Proxy a runnable while suppressing LangSmith around its own execution."""
+class _TraceScopedRunnable(Runnable[Any, Any]):
+    """Proxy a runnable and run every execution entry point inside one trace scope.
+
+    LangGraph API never runs the registered object directly: ``get_graph``
+    yields ``graph.copy(update=...)`` and the worker then calls ``astream`` or
+    ``astream_events`` (``langgraph_api/graph.py`` and ``stream.py``). Any
+    method that returns a new runnable therefore re-wraps its result, and any
+    method that executes the graph enters the scope. Attribute reads that do
+    not execute anything fall through to the wrapped object.
+    """
 
     def __init__(self, runnable: Any) -> None:
         object.__setattr__(self, "_runnable", runnable)
 
     @property
     def __class__(self) -> type[Any]:  # type: ignore[override]
-        """Expose the wrapped type to middleware that checks model classes."""
+        """Expose the wrapped type to middleware and LangGraph type checks."""
 
         return self._runnable.__class__
 
@@ -343,41 +351,115 @@ class LangSmithTraceDisabledRunnable(Runnable[Any, Any]):
         return getattr(self._runnable, name)
 
     def __setattr__(self, name: str, value: Any) -> None:
-        if name == "_runnable":
+        if name.startswith("_trace_") or name == "_runnable":
             object.__setattr__(self, name, value)
             return
         setattr(self._runnable, name, value)
 
+    def _trace_scope(self) -> Any:
+        raise NotImplementedError
+
+    def _rewrap(self, runnable: Any) -> _TraceScopedRunnable:
+        raise NotImplementedError
+
     def invoke(self, *args: Any, **kwargs: Any) -> Any:
-        with langsmith_tracing_disabled():
+        with self._trace_scope():
             return self._runnable.invoke(*args, **kwargs)
 
     async def ainvoke(self, *args: Any, **kwargs: Any) -> Any:
-        with langsmith_tracing_disabled():
+        with self._trace_scope():
             return await self._runnable.ainvoke(*args, **kwargs)
 
     def batch(self, *args: Any, **kwargs: Any) -> Any:
-        with langsmith_tracing_disabled():
+        with self._trace_scope():
             return self._runnable.batch(*args, **kwargs)
 
     async def abatch(self, *args: Any, **kwargs: Any) -> Any:
-        with langsmith_tracing_disabled():
+        with self._trace_scope():
             return await self._runnable.abatch(*args, **kwargs)
 
     def stream(self, *args: Any, **kwargs: Any) -> Any:
-        with langsmith_tracing_disabled():
+        with self._trace_scope():
             yield from self._runnable.stream(*args, **kwargs)
 
     async def astream(self, *args: Any, **kwargs: Any) -> Any:
-        with langsmith_tracing_disabled():
+        with self._trace_scope():
             async for item in self._runnable.astream(*args, **kwargs):
                 yield item
 
-    def bind(self, *args: Any, **kwargs: Any) -> LangSmithTraceDisabledRunnable:
-        return LangSmithTraceDisabledRunnable(self._runnable.bind(*args, **kwargs))
+    def astream_events(
+        self,
+        input: Any,
+        config: Any = None,
+        *,
+        version: str = "v2",
+        **kwargs: Any,
+    ) -> Any:
+        # v3 returns a lazily driven stream object whose pump would run outside
+        # this scope, so it is refused rather than silently escaping.
+        if version not in {"v1", "v2"}:
+            raise NotImplementedError("trace-scoped runnables support astream_events v1/v2 only")
+        return self._scoped_astream_events(input, config, version=version, **kwargs)
 
-    def bind_tools(self, *args: Any, **kwargs: Any) -> LangSmithTraceDisabledRunnable:
-        return LangSmithTraceDisabledRunnable(self._runnable.bind_tools(*args, **kwargs))
+    async def _scoped_astream_events(self, input: Any, config: Any, **kwargs: Any) -> Any:
+        with self._trace_scope():
+            async for event in self._runnable.astream_events(input, config, **kwargs):
+                yield event
+
+    def stream_events(
+        self,
+        input: Any,
+        config: Any = None,
+        *,
+        version: str = "v2",
+        **kwargs: Any,
+    ) -> Any:
+        if version not in {"v1", "v2"}:
+            raise NotImplementedError("trace-scoped runnables support stream_events v1/v2 only")
+        return self._scoped_stream_events(input, config, version=version, **kwargs)
+
+    def _scoped_stream_events(self, input: Any, config: Any, **kwargs: Any) -> Any:
+        with self._trace_scope():
+            yield from self._runnable.stream_events(input, config, **kwargs)
+
+    # State writes run the node writers as runnables, so they can create runs.
+    def update_state(self, *args: Any, **kwargs: Any) -> Any:
+        with self._trace_scope():
+            return self._runnable.update_state(*args, **kwargs)
+
+    async def aupdate_state(self, *args: Any, **kwargs: Any) -> Any:
+        with self._trace_scope():
+            return await self._runnable.aupdate_state(*args, **kwargs)
+
+    def bulk_update_state(self, *args: Any, **kwargs: Any) -> Any:
+        with self._trace_scope():
+            return self._runnable.bulk_update_state(*args, **kwargs)
+
+    async def abulk_update_state(self, *args: Any, **kwargs: Any) -> Any:
+        with self._trace_scope():
+            return await self._runnable.abulk_update_state(*args, **kwargs)
+
+    def copy(self, *args: Any, **kwargs: Any) -> _TraceScopedRunnable:
+        return self._rewrap(self._runnable.copy(*args, **kwargs))
+
+    def with_config(self, config: Any = None, **kwargs: Any) -> _TraceScopedRunnable:
+        return self._rewrap(self._runnable.with_config(config, **kwargs))
+
+    def bind(self, *args: Any, **kwargs: Any) -> _TraceScopedRunnable:
+        return self._rewrap(self._runnable.bind(*args, **kwargs))
+
+    def bind_tools(self, *args: Any, **kwargs: Any) -> _TraceScopedRunnable:
+        return self._rewrap(self._runnable.bind_tools(*args, **kwargs))
+
+
+class LangSmithTraceDisabledRunnable(_TraceScopedRunnable):
+    """Proxy a runnable while suppressing LangSmith around its own execution."""
+
+    def _trace_scope(self) -> Any:
+        return langsmith_tracing_disabled()
+
+    def _rewrap(self, runnable: Any) -> LangSmithTraceDisabledRunnable:
+        return LangSmithTraceDisabledRunnable(runnable)
 
 
 def disable_langsmith_tracing_for_runnable(runnable: Any) -> LangSmithTraceDisabledRunnable:
@@ -557,9 +639,27 @@ def _run_metadata(run: Any) -> dict[str, Any]:
     return _as_dict(_as_dict(getattr(run, "extra", None)).get("metadata"))
 
 
-def _active_pregel_run_tree(state: dict[str, Any], artifact: dict[str, Any]) -> Any | None:
-    """Find the concrete active root captured by Pregel's LangChain tracer."""
+# Keys that name one Builder run. ``parent_thread_id`` is shared by every build
+# launched from the same companion thread, so it can rank candidates but can
+# never select one on its own.
+_RUN_SPECIFIC_IDENTITY_KEYS = frozenset({"thread_id", "task_id", "run_id", "build_id", "operation_id"})
 
+
+def _identity_match(metadata: dict[str, Any], identity: dict[str, str]) -> set[str]:
+    return {key for key, value in identity.items() if str(metadata.get(key) or "") == value}
+
+
+def _active_pregel_run_tree(state: dict[str, Any], artifact: dict[str, Any]) -> Any | None:
+    """Find the concrete active root captured by Pregel's LangChain tracer.
+
+    The tracer registry is process-wide, so a root is only returned when its
+    own metadata names this Builder run. A lone candidate with no positive
+    match belongs to some other run (possibly another owner's) and is ignored.
+    """
+
+    identity = _completion_identity(state, artifact)
+    if not identity:
+        return None
     candidates: list[Any] = []
     for tracer in list(_ACTIVE_BUILDER_TRACERS):
         try:
@@ -568,23 +668,16 @@ def _active_pregel_run_tree(state: dict[str, Any], artifact: dict[str, Any]) -> 
             continue
         run_ids = {str(getattr(run, "id", "")) for run in runs}
         candidates.extend(run for run in runs if not getattr(run, "parent_run_id", None) or str(getattr(run, "parent_run_id", "")) not in run_ids)
-    if not candidates:
+    scored = []
+    for run in candidates:
+        matched = _identity_match(_run_metadata(run), identity)
+        if matched & _RUN_SPECIFIC_IDENTITY_KEYS:
+            scored.append((len(matched), run))
+    if not scored:
         return None
-
-    identity = _completion_identity(state, artifact)
-    if identity:
-        scored = [
-            (
-                sum(_run_metadata(run).get(key) == value for key, value in identity.items()),
-                run,
-            )
-            for run in candidates
-        ]
-        best_score = max(score for score, _run in scored)
-        best = [run for score, run in scored if score == best_score and score > 0]
-        if len(best) == 1:
-            return best[0]
-    return candidates[0] if len(candidates) == 1 else None
+    best_score = max(score for score, _run in scored)
+    best = [run for score, run in scored if score == best_score]
+    return best[0] if len(best) == 1 else None
 
 
 def _feedback_client() -> Any:
@@ -1405,7 +1498,13 @@ def _local_root_run_tree(run_tree: Any) -> Any:
 
 
 def _completion_run_tree(state: dict[str, Any], artifact: dict[str, Any]) -> Any | None:
-    """Prefer the run tree whose chain carries this builder's identity."""
+    """Return the run tree whose chain positively carries this builder's identity.
+
+    Neither the current span nor an active Pregel root is used without a
+    positive match on a run-specific key: annotating or adding feedback to a
+    run that cannot be shown to be this Builder run could write one run's
+    completion into another run (possibly another owner's) in this process.
+    """
 
     current = _current_run_tree()
     active = _active_pregel_run_tree(state, artifact)
@@ -1418,21 +1517,25 @@ def _completion_run_tree(state: dict[str, Any], artifact: dict[str, Any]) -> Any
     if best_score > 0:
         # Active Pregel is listed first and wins a tie over a detached current span.
         return min((item for item in scored if item[0] == best_score), key=lambda item: item[1])[2]
-    return current or active
+    return None
 
 
 def _run_chain_identity_score(run_tree: Any, identity: dict[str, str]) -> int:
+    """Best match count along the in-process chain, 0 without a run-specific match."""
+
     if not identity:
         return 0
     score = 0
+    run_specific = False
     current = run_tree
     seen: set[int] = set()
     while current is not None and id(current) not in seen:
         seen.add(id(current))
-        metadata = _run_metadata(current)
-        score = max(score, sum(str(metadata.get(key) or "") == value for key, value in identity.items()))
+        matched = _identity_match(_run_metadata(current), identity)
+        run_specific = run_specific or bool(matched & _RUN_SPECIFIC_IDENTITY_KEYS)
+        score = max(score, len(matched))
         current = getattr(current, "parent_run", None)
-    return score
+    return score if run_specific else 0
 
 
 def _patch_run_tree(run_tree: Any) -> None:
