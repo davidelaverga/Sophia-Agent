@@ -61,6 +61,8 @@ from deerflow.sophia.builder_web_policy import (
     make_builder_web_budget,
     should_allow_builder_web_research,
 )
+from deerflow.sophia.diag import code_or_none, diag_event, run_timing, safe_ref
+from deerflow.sophia.diag import elapsed_ms as diag_elapsed_ms
 from deerflow.sophia.synthetic_builder import (
     SyntheticBuilderContextError,
     normalize_synthetic_builder_context,
@@ -2486,18 +2488,39 @@ def _build_async_task_record(
 async def _start_independent_builder_task(*, guard, runtime, state, tool_name, edit_context, configured_user_id):
     """C2 source-only launch; no model-authored description or parent copy."""
     from deerflow.sophia.memory_governance.builder_provenance import dispatch_independent_builder
+    started = time.perf_counter()
+    tool_call_id = getattr(runtime, "tool_call_id", None)
+    diag_event("builder.launch", phase="begin", parent_thread_id=guard.context_id, tool_call_id=tool_call_id, **run_timing())
+
+    def launch_end(outcome_code, **fields):
+        diag_event("builder.launch", phase="end", outcome=outcome_code, parent_thread_id=guard.context_id,
+            tool_call_id=tool_call_id, total_ms=diag_elapsed_ms(started), **fields)
+
     if (edit_context is not None or tool_name != "start_builder_task"
             or configured_user_id not in (None, guard.owner)
             or _resolve_thread_id(runtime) != guard.context_id):
+        launch_end("ineligible")
         return "Builder request unavailable: an independent current task source is required."
-    guard.check()
+    checked = time.perf_counter()
+    try:
+        guard.check()
+    except Exception as exc:
+        launch_end("guard_unavailable", error_type=type(exc).__name__, guard_check_ms=diag_elapsed_ms(checked))
+        raise
+    guard_check_ms = diag_elapsed_ms(checked)
     if existing := _has_active_builder_task(state):
+        launch_end("already_tracked", guard_check_ms=guard_check_ms)
         return f"A Builder task is already tracked: {existing}. Check its status before requesting another launch."
     try:
         outcome = await dispatch_independent_builder(guard=guard, owner_id=guard.owner,
             parent_thread_id=guard.context_id, source_messages=state.get("messages", []), tool_call_id=runtime.tool_call_id)
-    except Exception:
+    except Exception as exc:
+        # The tool result stays exactly as before; only the class name is logged.
+        launch_end("dispatch_error", error_type=type(exc).__name__, guard_check_ms=guard_check_ms)
         return "Builder launch could not be confirmed. Do not assume no background work exists or automatically launch a replacement."
+    observed = outcome if isinstance(outcome, dict) else {}
+    launch_end("confirmed" if observed.get("confirmed") else "unconfirmed", guard_check_ms=guard_check_ms,
+        task_id=observed.get("thread_id"), child_run_id=observed.get("run_id"), native_status=code_or_none(observed.get("status")))
     child = outcome["thread_id"]
     now = _utcnow_iso()
     record = {"task_id": child, "agent_name": _ASYNC_BUILDER_AGENT_NAME, "thread_id": child,
@@ -2774,7 +2797,7 @@ async def _start_builder_task_impl(
 
     logger.info(
         "[Builder] start_builder_task dispatching: task_type=%s allow_web_research=%s "
-        "demo=%s tone=%s ritual=%s parent_thread=%s parent_model=%s user_id=%s "
+        "demo=%s tone=%s ritual=%s parent_thread=%s parent_model=%s user_ref=%s "
         "user_id_source=%s artifact_source=%s explicit_url_count=%s search_limit=%s "
         "fetch_limit=%s target_ext=%s target_ext_source=%s "
         "format_resolution_source=%s user_requested_ext=%s context_inferred_ext=%s "
@@ -2787,7 +2810,8 @@ async def _start_builder_task_impl(
         active_ritual,
         parent_thread_id,
         parent_model,
-        user_id,
+        # Keyed reference only; raw owner identifiers stay out of logs.
+        safe_ref("owner", user_id) or "unavailable",
         user_id_source,
         artifact_source,
         len(explicit_user_urls),

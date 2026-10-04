@@ -37,6 +37,7 @@ from langchain.agents.middleware.types import ModelCallResult, ModelRequest, Mod
 from langchain_core.messages import AIMessage
 
 from deerflow.agents.sophia_agent.utils import extract_last_message_text, log_middleware
+from deerflow.sophia.diag import diag_event, run_timing
 
 _WAKE_WORD_RE = re.compile(r"^\s*sophia[\s,:-]*", re.IGNORECASE)
 _DIRECT_DOCUMENT_COMMAND_RE = re.compile(
@@ -119,8 +120,13 @@ class BuilderCommandMiddleware(AgentMiddleware[AgentState]):
         voice_request = parse_voice_build_request(user_text)
         if voice_request is not None:
             brief, task_type = voice_request
-            log_middleware("BuilderCommand", f"voice build request routed to Builder (task_type={task_type})", _t0)
-            return _start_builder_task_call(brief, task_type)
+            call = _start_builder_task_call(brief, task_type)
+            tool_call_id = call.tool_calls[0]["id"]
+            timing = run_timing()
+            log_middleware("BuilderCommand", f"voice build request routed to Builder (task_type={task_type} tool_call_id={tool_call_id} "
+                f"since_run_start_ms={timing.get('since_run_start_ms')})", _t0)
+            diag_event("builder.command.routed", route="voice", task_type=task_type, tool_call_id=tool_call_id, **timing)
+            return call
 
         if _opens_with_voice_envelope(user_text):
             # A correction, or a malformed request: the model picks the update,
@@ -133,8 +139,13 @@ class BuilderCommandMiddleware(AgentMiddleware[AgentState]):
             log_middleware("BuilderCommand", "skipped (no explicit document command)", _t0)
             return None
 
-        log_middleware("BuilderCommand", "direct document command routed to Builder", _t0)
-        return _start_builder_task_call(direct_task, "document")
+        call = _start_builder_task_call(direct_task, "document")
+        tool_call_id = call.tool_calls[0]["id"]
+        timing = run_timing()
+        log_middleware("BuilderCommand", f"direct document command routed to Builder (tool_call_id={tool_call_id} "
+            f"since_run_start_ms={timing.get('since_run_start_ms')})", _t0)
+        diag_event("builder.command.routed", route="direct", task_type="document", tool_call_id=tool_call_id, **timing)
+        return call
 
     @override
     def wrap_model_call(

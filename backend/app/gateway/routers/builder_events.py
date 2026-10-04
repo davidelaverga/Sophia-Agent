@@ -2388,7 +2388,41 @@ async def receive_builder_progress(event: BuilderProgressEvent, request: Request
         # Channel-only test fixtures and older app factories need not mount
         # the browser worker.
         pass
+    _log_builder_progress_received(event, applied=applied, web_delivered=web_delivered, synthetic=synthetic)
     return {"applied": applied, "web_delivered": web_delivered} if event.parent_thread_id else {"applied": applied}
+
+
+def _log_builder_progress_received(event: BuilderProgressEvent, *, applied: bool, web_delivered: int, synthetic: bool) -> None:
+    """One content-free ``builder.progress.received`` line. Never raises.
+
+    ``lag_ms`` is producer ``occurred_at`` to gateway receipt; tool arguments
+    and other payload data are never logged.
+    """
+    try:
+        from deerflow.sophia.diag import code_or_none, diag_event
+
+        lag_ms = None
+        if event.occurred_at:
+            occurred = datetime.fromisoformat(event.occurred_at.replace("Z", "+00:00"))
+            if occurred.tzinfo is not None:
+                lag_ms = int((datetime.now(UTC) - occurred).total_seconds() * 1000)
+        data = event.data if isinstance(event.data, dict) else {}
+        phase = data.get("phase") if event.event_name == "custom" and data.get("name") == "phase" else None
+        diag_event(
+            "builder.progress.received",
+            task_id=event.task_id,
+            run_id=event.run_id,
+            parent_thread_id=event.parent_thread_id,
+            seq=event.sequence,
+            event=code_or_none(event.event_name),
+            phase=code_or_none(phase),
+            lag_ms=lag_ms,
+            applied=bool(applied),
+            web_delivered=web_delivered if isinstance(web_delivered, int) else None,
+            synthetic=bool(synthetic),
+        )
+    except Exception:  # noqa: BLE001 - diagnostics never change the relay response.
+        pass
 
 
 def _format_sse_event(payload: dict[str, Any]) -> bytes:
