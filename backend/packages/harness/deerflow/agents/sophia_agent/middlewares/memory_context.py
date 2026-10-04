@@ -243,7 +243,10 @@ class MemoryRunGuard:
         self._last_model_result_receipts = ()
         # Adopt the run accumulator the factory installed (if any) while it is
         # still current, then report the owner-authority lookups above.
-        _guard_run_diag(self)
+        try:
+            _guard_run_diag(self)
+        except Exception:
+            pass
         diag.factory_segment_add("guard_init", (time.perf_counter() - init_started) * 1000)
 
     def dependency_update_lock(self):
