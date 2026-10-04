@@ -9,12 +9,15 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 from collections.abc import Iterable
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 import httpx
+
+from deerflow.sophia.diag import record_store_request
 
 if TYPE_CHECKING:
     from deerflow.sophia.session_store import SessionRecord
@@ -111,6 +114,10 @@ class SupabaseMemoryGovernanceStore:
         json_body: object | None = None,
         prefer: str | None = None,
     ) -> Any:
+        # Per-run launch diagnostics count requests by fixed resource name and
+        # duration only; never parameters, bodies or owner identifiers.
+        started = time.perf_counter()
+        status_code = None
         try:
             response = self._client.request(
                 method,
@@ -119,8 +126,11 @@ class SupabaseMemoryGovernanceStore:
                 params=params,
                 json=json_body,
             )
+            status_code = getattr(response, "status_code", None)
         except httpx.HTTPError as exc:
             raise MemoryGovernanceUnavailable("governance_transport_error") from exc
+        finally:
+            record_store_request(resource, started, status_code)
         if response.status_code in {409, 412}:
             raise MemoryGovernanceConflict("governance_revision_conflict")
         if response.status_code >= 400:

@@ -4,12 +4,15 @@ SQL RPC grants remain closed until source/UI/planner integration is qualified.
 No raw validation inputs or source text are returned in errors or receipts.
 """
 
+import time
+
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
 from pydantic import TypeAdapter
 
 from app.gateway.auth import require_authenticated_user
+from deerflow.sophia.diag import diag_event, elapsed_ms, safe_ref
 from deerflow.sophia.memory_governance.source_intake import ActionKey, SourceActionRequest, SourceIntakeService, UuidText
 from deerflow.sophia.memory_governance.store import MemoryGovernanceConflict, configured_memory_store
 
@@ -85,8 +88,41 @@ def source_profile(session_id: str, request: Request, owner: str = Depends(requi
 
 @router.post("/{session_id}/memory-source-actions")
 def accept_source_action(session_id: str, action: SourceActionRequest = Depends(_action), owner: str = Depends(require_authenticated_user)):
-    session = _validated(UuidText, session_id)
-    return _execute(owner, lambda service: service.accept(session_id=session, action=action))
+    started = time.perf_counter()
+    receipts = []
+    outcome = "error"
+
+    def accept(service):
+        receipt = service.accept(session_id=session, action=action)
+        receipts.append(receipt)
+        return receipt
+
+    try:
+        session = _validated(UuidText, session_id)
+        response = _execute(owner, accept)
+        outcome = "replayed" if receipts and getattr(receipts[0], "idempotent_replay", False) is True else "recorded"
+        return response
+    except HTTPException as error:
+        outcome = {400: "invalid", 409: "conflict", 503: "unavailable"}.get(error.status_code, "error")
+        raise
+    finally:
+        _log_source_action(session_id, action, receipts, outcome, started)
+
+
+def _log_source_action(session_id, action, receipts, outcome, started):
+    """One content-free ``source_action`` line. Never raises.
+
+    The owner and the source text are never logged. The session appears only
+    as a keyed reference; the message and thread ids are the browser-minted
+    join keys for the launch timeline.
+    """
+    try:
+        receipt = receipts[0] if receipts else None
+        diag_event(
+            "source_action", outcome=outcome, message_id=action.message_id, thread_id=action.thread_id, session_ref=safe_ref("session", session_id), seq=receipt.sequence if receipt is not None else None, duration_ms=elapsed_ms(started)
+        )
+    except Exception:  # noqa: BLE001 - diagnostics never change the response.
+        pass
 
 
 @router.get("/memory-source-actions/{command_key}")
