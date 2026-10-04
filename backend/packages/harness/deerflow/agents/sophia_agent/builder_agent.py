@@ -28,6 +28,7 @@ from deerflow.agents.sophia_agent.builder_middlewares import (
     builder_distributed_trace_context,
     log_builder_tracing_startup_status,
     wrap_builder_agent_for_observability,
+    wrap_governed_builder_agent_for_observability,
 )
 from deerflow.agents.sophia_agent.builder_tools import (
     assert_deck_tool_contract,
@@ -40,7 +41,6 @@ from deerflow.config.app_config import get_app_config
 from deerflow.sophia.build_runtime.startup import audit_build_foundation
 from deerflow.sophia.diag import factory_mark, factory_segment, timed_graph_factory
 from deerflow.sophia.memory_governance.model_clients import GovernedChatAnthropic as ChatAnthropic
-from deerflow.sophia.observability import disable_langsmith_tracing_for_runnable
 
 logger = logging.getLogger(__name__)
 DEFAULT_BUILDER_MODEL = "claude-sonnet-5"
@@ -331,12 +331,16 @@ def _create_builder_agent(
     # switch_to_builder -> SubagentExecutor.config.max_turns.
     agent.recursion_limit = 80
     if memory_guard.enabled:
-        # Protect the full state-bearing chain, not only the model callback.
-        # Structural memory events use their separate explicit exporter.
-        return disable_langsmith_tracing_for_runnable(agent.with_config({
-            "run_name": "Sophia Builder", "tags": ["sophia_builder"],
-            "metadata": {"sophia_component": "builder", "builder_model_name": resolved_model, "builder_model_source": model_source},
-        }))
+        # Protect the full state-bearing chain, not only the model callback:
+        # excluded from LangSmith by default, structure-only redacted tracing
+        # when SOPHIA_GOVERNED_STRUCTURAL_TRACING opts in. Never the ordinary
+        # Builder tracer. Structural memory events use their separate exporter.
+        return wrap_governed_builder_agent_for_observability(
+            agent,
+            model_name=resolved_model,
+            model_source=model_source,
+            trace_config=trace_config,
+        )
     if external_trace_context:
         return agent
     return wrap_builder_agent_for_observability(

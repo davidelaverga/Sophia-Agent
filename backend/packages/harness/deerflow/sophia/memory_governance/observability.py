@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import threading
+import time
 from collections import Counter
 from collections.abc import Mapping
 from datetime import UTC, datetime
@@ -33,6 +35,13 @@ _PROCESS_REF = "process:" + str(uuid4())
 _PROCESS_STARTED_AT = datetime.now(UTC).isoformat()
 _EVENT_COUNTS: Counter[str] = Counter()
 _EXPORT_COUNTS: Counter[str] = Counter()
+# Export failures by HTTP status ("403", "401", ... or "none"): a 403 must be
+# distinguishable from a timeout without reading any response body.
+_EXPORT_FAILURE_STATUS_COUNTS: Counter[str] = Counter()
+_EXPORT_FAILURES_LOGGED_FIRST = 5
+_EXPORT_FAILURES_LOG_EVERY = 50
+_export_failure_total = 0
+_SAFE_EVENT_NAME = re.compile(r"^[a-z0-9_.]{1,64}$")
 _METRIC_EVENT_NAMES = frozenset({
     "memory.session.finalized", "memory.session.recap_cleanup",
     "memory.clear.command", "memory.clear.recovery",
@@ -118,6 +127,43 @@ def build_memory_langsmith_run_payload(envelope: Mapping[str, object]) -> dict[s
     }
 
 
+def _export_endpoint() -> str:
+    return os.getenv("LANGSMITH_ENDPOINT") or os.getenv("LANGCHAIN_ENDPOINT") or "https://api.smith.langchain.com"
+
+
+def _log_export_failure(envelope: Mapping[str, object], error: BaseException, *, elapsed_ms: int) -> None:
+    """Content-free failure detail: class, status, allowlisted code, host, booleans."""
+
+    global _export_failure_total
+    try:
+        from deerflow.sophia.langsmith_health import endpoint_host, error_code, error_http_status
+
+        status = error_http_status(error)
+        code = error_code(error)
+        host = endpoint_host(_export_endpoint())
+    except Exception:  # noqa: BLE001 - failure detail is best effort.
+        status, code, host = None, None, "unknown"
+    raw_event_name = str(envelope.get("event_name") or "")
+    event_name = raw_event_name if _SAFE_EVENT_NAME.match(raw_event_name) else "other"
+    with _LOCK:
+        _EXPORT_FAILURE_STATUS_COUNTS[str(status) if status is not None else "none"] += 1
+        _export_failure_total += 1
+        count = _export_failure_total
+    if count > _EXPORT_FAILURES_LOGGED_FIRST and count % _EXPORT_FAILURES_LOG_EVERY:
+        return
+    logger.warning(
+        "memory_langsmith_export status=unavailable contentExcluded=true error_class=%s http_status=%s error_code=%s endpoint_host=%s workspace_header_present=%s elapsed_ms=%d event_name=%s failure_count=%d",
+        type(error).__name__,
+        status,
+        code,
+        host,
+        bool((os.getenv("LANGSMITH_WORKSPACE_ID") or "").strip()),
+        elapsed_ms,
+        event_name,
+        count,
+    )
+
+
 def _export_langsmith(
     envelope: Mapping[str, object],
     *,
@@ -136,6 +182,7 @@ def _export_langsmith(
         return _LAST_EXPORT_STATUS
     owned_client = None
     owned_session = None
+    started = time.monotonic()
     try:
         payload = build_memory_langsmith_run_payload(envelope)
         if client is None:
@@ -153,7 +200,7 @@ def _export_langsmith(
                 # ownership of the SDK's process-global prompt cache.
                 "disable_prompt_cache": True,
                 "session": owned_session,
-                "api_url": (os.getenv("LANGSMITH_ENDPOINT") or os.getenv("LANGCHAIN_ENDPOINT") or "https://api.smith.langchain.com"),
+                "api_url": _export_endpoint(),
                 "api_key": (os.getenv("LANGSMITH_API_KEY") or os.getenv("LANGCHAIN_API_KEY") or ""),
             }
             workspace_id = (os.getenv("LANGSMITH_WORKSPACE_ID") or "").strip()
@@ -164,9 +211,9 @@ def _export_langsmith(
         create_run = getattr(client, "create_run")
         create_run(**payload)
         _LAST_EXPORT_STATUS = "exported"
-    except Exception:  # noqa: BLE001 - observability cannot weaken product safety.
+    except Exception as exc:  # noqa: BLE001 - observability cannot weaken product safety.
         _LAST_EXPORT_STATUS = "unavailable"
-        logger.warning("memory_langsmith_export status=unavailable contentExcluded=true", exc_info=False)
+        _log_export_failure(envelope, exc, elapsed_ms=int((time.monotonic() - started) * 1000))
     finally:
         if owned_client is not None:
             try:
@@ -202,6 +249,12 @@ def _environment() -> str:
 
 def _consume_langsmith_fault(owner_id: str | None) -> bool:
     if not owner_id:
+        return False
+    # Behaviour-identical short cut: the controller only authorises a fault
+    # when the owner-scoped flags carry memory_fault_injection, and those come
+    # from this same env var (flags.MemoryFeatureFlags.from_environ). Without
+    # it every event would pay the durable authority lookup for nothing.
+    if not _truthy(os.getenv("SOPHIA_MEMORY_FAULT_INJECTION")):
         return False
     try:
         from .faults import MemoryFaultController
@@ -287,6 +340,7 @@ def runtime_metric_snapshot() -> dict[str, object]:
     with _LOCK:
         events = dict(_EVENT_COUNTS)
         exports = dict(_EXPORT_COUNTS)
+        export_failures = dict(_EXPORT_FAILURE_STATUS_COUNTS)
         zeros = {name: _COUNTERS.get(name, 0) for name in sorted(ZERO_TOLERANCE_COUNTERS)}
         evidence_gaps = _COUNTERS.get("memory_observation_gap_total", 0)
     return {
@@ -302,6 +356,7 @@ def runtime_metric_snapshot() -> dict[str, object]:
         "evidence_gap_count": evidence_gaps,
         "events_by_name": events,
         "exports_by_status": exports,
+        "export_failures_by_http_status": export_failures,
         "last_export_status": langsmith_export_status(),
         "zero_tolerance_counters": zeros,
         # A default zero is not evidence that a violation detector ran. These
@@ -338,11 +393,13 @@ def record_raw_provider_write_refusal(owner_id: str) -> None:
 
 
 def reset_counters_for_test() -> None:
-    global _LAST_EXPORT_STATUS
+    global _LAST_EXPORT_STATUS, _export_failure_total
     with _LOCK:
         _COUNTERS.clear()
         _EVENT_COUNTS.clear()
         _EXPORT_COUNTS.clear()
+        _EXPORT_FAILURE_STATUS_COUNTS.clear()
+        _export_failure_total = 0
     _LAST_EXPORT_STATUS = "not_attempted"
 
 

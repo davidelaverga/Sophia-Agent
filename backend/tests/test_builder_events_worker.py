@@ -684,3 +684,47 @@ async def test_sse_format_helper_emits_data_line():
     assert encoded.endswith(b"\n\n")
     body = encoded[len(b"data: ") :].split(b"\n\n")[0]
     assert json.loads(body) == payload
+
+
+
+def test_gateway_contracts_accept_memory_governance_trace_reason():
+    """The typed trace-unavailable reason gains ``memory_governance_policy``.
+
+    Model-level contracts only: the internal endpoint still strips/rejects
+    trace-status fields on non-synthetic payloads before these models see
+    them, and the Builder does not send them for ordinary runs today.
+    """
+
+    from pydantic import ValidationError
+
+    from app.gateway.artifact_registry import ArtifactRecord, ArtifactUpsertRequest
+
+    reason = {"langsmith_trace_status": "trace_unavailable", "langsmith_trace_unavailable_reason": "memory_governance_policy"}
+    completion = routes.BuilderCompletionEvent(thread_id="thread-1", task_id="task-1", status="success", **reason)
+    progress = routes.BuilderProgressEvent(task_id="task-1", run_id="run-1", event_name="custom", **reason)
+    upsert = ArtifactUpsertRequest(thread_id="thread-1", title="Deck", local_path="mnt/user-data/outputs/deck.pptx", **reason)
+    record = ArtifactRecord(
+        artifact_id="artifact-1",
+        user_id="user-1",
+        thread_id="thread-1",
+        logical_artifact_id="artifact-1",
+        version_id="version-1",
+        title="Deck",
+        filename="deck.pptx",
+        artifact_type="presentation",
+        renderer_kind="pptx",
+        source="builder",
+        local_path="mnt/user-data/outputs/deck.pptx",
+        created_at="2026-10-04T00:00:00+00:00",
+        updated_at="2026-10-04T00:00:00+00:00",
+        **reason,
+    )
+    for model in (completion, progress, upsert, record):
+        assert model.langsmith_trace_unavailable_reason == "memory_governance_policy"
+    for build in (
+        lambda: routes.BuilderCompletionEvent(thread_id="t", task_id="t", status="success", langsmith_trace_unavailable_reason="unlisted_reason"),
+        lambda: routes.BuilderProgressEvent(task_id="t", run_id="r", event_name="custom", langsmith_trace_unavailable_reason="unlisted_reason"),
+        lambda: ArtifactUpsertRequest(thread_id="t", title="t", local_path="mnt/user-data/outputs/a.md", langsmith_trace_unavailable_reason="unlisted_reason"),
+    ):
+        with pytest.raises(ValidationError):
+            build()
