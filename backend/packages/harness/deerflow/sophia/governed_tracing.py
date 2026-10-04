@@ -33,6 +33,10 @@ from typing import Any
 GOVERNED_STRUCTURAL_TRACING_ENV = "SOPHIA_GOVERNED_STRUCTURAL_TRACING"
 GOVERNED_STRUCTURAL_TRACE_MODE = "governed_structural"
 TRACE_MODE_METADATA_KEY = "sophia_trace_mode"
+# Excluded governed runs carry this constant marker in their run metadata and
+# report it as the typed ``langsmith_trace_unavailable_reason``.
+MEMORY_GOVERNANCE_EXCLUSION_REASON = "memory_governance_policy"
+TRACE_EXCLUSION_METADATA_KEY = "sophia_trace_exclusion"
 
 # Set by the governed Builder wrapper for the duration of each run, so code
 # inside the run (completion annotation) knows which trace policy applies.
@@ -161,9 +165,11 @@ def trace_policy_scope(policy: str) -> Iterator[None]:
 def active_trace_policy() -> str | None:
     """Trace policy of the governed Builder run executing in this context, if any.
 
-    The wrapper's context variable is authoritative; the constant marker that
-    the graph carries in its run metadata (which survives ``copy()``) is the
-    fallback when the variable did not propagate.
+    The wrapper's context variable is authoritative. The constant marker the
+    graph carries in its ``with_config`` metadata survives ``copy()``, but
+    LangGraph's ``ensure_config`` replaces that metadata whenever the run
+    passes its own (LangGraph API always does), so it is only a fallback for
+    direct invocations where the variable did not propagate.
     """
 
     policy = _ACTIVE_TRACE_POLICY.get()
@@ -176,7 +182,11 @@ def active_trace_policy() -> str | None:
     except Exception:  # noqa: BLE001 - optional dependency / SDK version guard.
         return None
     metadata = config.get("metadata") if isinstance(config, Mapping) else None
-    if isinstance(metadata, Mapping) and metadata.get(TRACE_MODE_METADATA_KEY) == GOVERNED_STRUCTURAL_TRACE_MODE:
+    if not isinstance(metadata, Mapping):
+        return None
+    if metadata.get(TRACE_EXCLUSION_METADATA_KEY) == MEMORY_GOVERNANCE_EXCLUSION_REASON:
+        return MEMORY_GOVERNANCE_EXCLUSION_REASON
+    if metadata.get(TRACE_MODE_METADATA_KEY) == GOVERNED_STRUCTURAL_TRACE_MODE:
         return GOVERNED_STRUCTURAL_TRACE_MODE
     return None
 

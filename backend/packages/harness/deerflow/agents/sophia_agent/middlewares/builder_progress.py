@@ -146,7 +146,7 @@ class _ProgressPost(TypedDict, total=False):
     deck_quality_publication_excluded: bool
     langsmith_export_excluded: bool
     langsmith_trace_status: Literal["trace_unavailable"]
-    langsmith_trace_unavailable_reason: Literal["synthetic_isolation_policy"]
+    langsmith_trace_unavailable_reason: Literal["synthetic_isolation_policy", "memory_governance_policy"]
 
 
 def _classify_tool(tool_name: str) -> str | None:
@@ -259,7 +259,7 @@ async def _post_progress_event(
     deck_quality_publication_excluded: bool | None = None,
     langsmith_export_excluded: bool | None = None,
     langsmith_trace_status: Literal["trace_unavailable"] | None = None,
-    langsmith_trace_unavailable_reason: Literal["synthetic_isolation_policy"] | None = None,
+    langsmith_trace_unavailable_reason: Literal["synthetic_isolation_policy", "memory_governance_policy"] | None = None,
     synthetic_builder_join: dict[str, Any] | None = None,
 ) -> None:
     """Fire one progress event at the gateway.

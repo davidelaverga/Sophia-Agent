@@ -826,8 +826,14 @@ def test_builder_tracing_startup_status_logs_resolved_config(monkeypatch, caplog
     monkeypatch.setenv("LANGSMITH_PROJECT", "Sophia")
     monkeypatch.setenv("LANGSMITH_ENDPOINT", "https://eu.api.smith.langchain.com")
     monkeypatch.delenv("SOPHIA_BUILDER_LANGSMITH_TRACING", raising=False)
+    monkeypatch.delenv("LANGCHAIN_API_KEY", raising=False)
+    monkeypatch.delenv("LANGSMITH_WORKSPACE_ID", raising=False)
+    monkeypatch.delenv("SOPHIA_MEMORY_LANGSMITH_EXPORT", raising=False)
+    monkeypatch.delenv("SOPHIA_GOVERNED_STRUCTURAL_TRACING", raising=False)
     _reset_tracing_cache()
     monkeypatch.setattr(observability, "_startup_status_logged", False)
+    preflights: list[dict[str, Any]] = []
+    monkeypatch.setattr(observability, "start_langsmith_preflight", lambda **kwargs: preflights.append(kwargs) or True)
     caplog.set_level(logging.INFO, logger=observability.__name__)
 
     observability.log_builder_tracing_startup_status()
@@ -836,6 +842,42 @@ def test_builder_tracing_startup_status_logs_resolved_config(monkeypatch, caplog
     assert "langsmith_tracing_enabled=True" in caplog.text
     assert "project=Sophia" in caplog.text
     assert "api_key_present=True" in caplog.text
+    assert "endpoint_host=eu.api.smith.langchain.com " in caplog.text
+    assert "key_kind=other" in caplog.text
+    assert "langchain_key_present=False keys_equal=False" in caplog.text
+    assert "workspace_id_present=False project_uuid_present=False" in caplog.text
+    assert "memory_export_enabled=False governed_structural_tracing=False" in caplog.text
+    assert "sdk_version=" in caplog.text
+    assert "https://" not in caplog.text
+    assert "lsv2_key" not in caplog.text
+    assert [call["endpoint"] for call in preflights] == ["https://eu.api.smith.langchain.com"]
+
+
+def test_builder_tracing_startup_status_never_logs_key_material(monkeypatch, caplog) -> None:
+    secret = "lsv2_sk_0123456789abcdefSECRET"
+    monkeypatch.setenv("LANGSMITH_TRACING", "false")
+    monkeypatch.setenv("SOPHIA_BUILDER_LANGSMITH_TRACING", "false")
+    monkeypatch.setenv("LANGSMITH_API_KEY", secret)
+    monkeypatch.setenv("LANGCHAIN_API_KEY", f'"{secret}"')
+    monkeypatch.setenv("LANGSMITH_WORKSPACE_ID", "workspace-uuid")
+    monkeypatch.setenv("SOPHIA_MEMORY_LANGSMITH_EXPORT", "false")
+    monkeypatch.setenv("SOPHIA_GOVERNED_STRUCTURAL_TRACING", "true")
+    _reset_tracing_cache()
+    monkeypatch.setattr(observability, "_startup_status_logged", False)
+    preflights: list[dict[str, Any]] = []
+    monkeypatch.setattr(observability, "start_langsmith_preflight", lambda **kwargs: preflights.append(kwargs) or True)
+    caplog.set_level(logging.DEBUG)
+
+    observability.log_builder_tracing_startup_status()
+
+    assert "key_kind=service" in caplog.text
+    assert "langchain_key_present=True keys_equal=True" in caplog.text
+    assert "workspace_id_present=True" in caplog.text
+    assert "governed_structural_tracing=True" in caplog.text
+    for fragment in ("lsv2", "_sk_", "SECRET", "0123456789", "workspace-uuid"):
+        assert fragment not in caplog.text
+    # Neither Builder tracing nor the memory export is on: no preflight.
+    assert preflights == []
 
 
 def test_builder_trace_runnable_requires_api_key(monkeypatch) -> None:
@@ -1361,3 +1403,265 @@ def test_completion_ignores_current_span_without_positive_identity(monkeypatch) 
     )
     assert foreign_span.patch_calls == 0
     assert feedback_client.feedback == []
+
+
+# --- Truthful governed status, ingest rejections and preflight ---------------
+
+
+def _governed_annotating_graph(captured: dict[str, Any]) -> Any:
+    from typing import TypedDict
+
+    from langgraph.graph import END, START, StateGraph
+
+    class _State(TypedDict, total=False):
+        thread_id: str
+        done: bool
+
+    def complete(state: _State) -> dict[str, Any]:
+        artifact = {
+            "artifact_path": "/mnt/user-data/outputs/deck.pptx",
+            "terminal_status": "completed",
+            "builder_trace_root_run_id": "model-supplied-root",
+        }
+        captured["annotated"] = observability.annotate_builder_completion(dict(state), artifact)
+        captured["artifact"] = artifact
+        return {"done": True}
+
+    graph = StateGraph(_State)
+    graph.add_node("complete", complete)
+    graph.add_edge(START, "complete")
+    graph.add_edge("complete", END)
+    return graph.compile()
+
+
+def _builder_tracing_env(monkeypatch) -> None:
+    monkeypatch.setenv("LANGSMITH_TRACING", "false")
+    monkeypatch.setenv("LANGSMITH_API_KEY", "lsv2_key")
+    monkeypatch.setenv("LANGSMITH_PROJECT", "Sophia")
+    monkeypatch.setenv("SOPHIA_BUILDER_LANGSMITH_TRACING", "true")
+    monkeypatch.delenv("SOPHIA_GOVERNED_STRUCTURAL_TRACING", raising=False)
+    _reset_tracing_cache()
+
+
+def test_governed_builder_completion_is_typed_unavailable_not_a_warning(monkeypatch, caplog) -> None:
+    from langsmith.run_helpers import tracing_context
+
+    _builder_tracing_env(monkeypatch)
+    monkeypatch.setattr(observability, "_feedback_client", lambda: pytest.fail("governed completion reached LangSmith"))
+    captured: dict[str, Any] = {}
+    client = _RecordingLangSmithClient()
+    caplog.set_level(logging.INFO, logger=observability.__name__)
+
+    governed = observability.wrap_governed_builder_runnable(
+        _governed_annotating_graph(captured),
+        model_name="builder-model",
+        model_source="env",
+        trace_config={"configurable": {"thread_id": "builder-thread-1"}},
+    ).copy(update={})
+    with tracing_context(enabled=True, client=client):
+        governed.invoke({"thread_id": "builder-thread-1"})
+
+    assert governed.config["metadata"]["sophia_trace_exclusion"] == "memory_governance_policy"
+    assert captured["annotated"] is False
+    assert captured["artifact"]["langsmith_trace_status"] == "trace_unavailable"
+    assert captured["artifact"]["langsmith_trace_unavailable_reason"] == "memory_governance_policy"
+    assert captured["artifact"]["langsmith_export_excluded"] is True
+    assert "builder_trace_root_run_id" not in captured["artifact"]
+    assert "reason=memory_governance_policy" in caplog.text
+    assert "no active run tree" not in caplog.text
+    assert not [record for record in caplog.records if record.levelno >= logging.WARNING]
+    assert client.calls == []
+
+
+def test_governed_exclusion_marker_in_run_metadata_is_enough_without_wrapper_context() -> None:
+    from deerflow.sophia import governed_tracing
+
+    seen: dict[str, Any] = {}
+    graph = _governed_annotating_graph(seen).with_config({"metadata": {"sophia_trace_exclusion": "memory_governance_policy"}})
+
+    graph.invoke({"thread_id": "builder-thread-1"})
+
+    assert governed_tracing.active_trace_policy() is None
+    assert seen["artifact"]["langsmith_trace_unavailable_reason"] == "memory_governance_policy"
+
+
+def test_governed_exclusion_is_logged_once_per_process(monkeypatch, caplog) -> None:
+    _builder_tracing_env(monkeypatch)
+    monkeypatch.setattr(observability, "_governed_exclusion_logged", False)
+    caplog.set_level(logging.INFO, logger=observability.__name__)
+
+    for _ in range(3):
+        observability.wrap_governed_builder_runnable(_toy_graph(), model_name="m", model_source="env")
+
+    assert caplog.text.count("builder_langsmith_excluded reason=memory_governance_policy") == 1
+
+
+def _synthetic_forbidden_error(status: int, body: str) -> Exception:
+    """Shape a failure the way langsmith.Client.request_with_retries raises it."""
+
+    import requests
+    from langsmith import utils as ls_utils
+
+    response = requests.Response()
+    response.status_code = status
+    response._content = body.encode()
+    response.url = "https://eu.api.smith.langchain.com/runs/multipart?secret=query"
+    try:
+        try:
+            response.raise_for_status()
+        except requests.HTTPError as original:
+            raise requests.HTTPError(str(original), body) from original
+    except requests.HTTPError as wrapped:
+        try:
+            raise ls_utils.LangSmithError(f"Failed to POST /runs/multipart in LangSmith API. {wrapped!r}")
+        except ls_utils.LangSmithError as error:
+            return error
+    raise AssertionError("unreachable")
+
+
+def test_ingest_rejection_callback_logs_status_once_then_rate_limits(caplog) -> None:
+    from deerflow.sophia import langsmith_health
+
+    langsmith_health.reset_ingest_rejections_for_test()
+    caplog.set_level(logging.WARNING, logger=langsmith_health.__name__)
+    callback = langsmith_health.make_ingest_error_callback(
+        client_kind="builder",
+        endpoint="https://eu.api.smith.langchain.com/api/v1?token=abc",
+        workspace_header=True,
+    )
+    forbidden = _synthetic_forbidden_error(403, '{"error":"Forbidden","detail":"SENTINEL_BODY"}')
+
+    for _ in range(99):
+        callback(forbidden)
+    first_window = caplog.text
+    callback(forbidden)
+
+    assert first_window.count("langsmith_ingest_rejected") == 1
+    assert caplog.text.count("langsmith_ingest_rejected") == 2
+    assert "client=builder http_status=403 error_code=None error_class=LangSmithError" in caplog.text
+    assert "endpoint_host=eu.api.smith.langchain.com workspace_header=True count=1" in caplog.text
+    assert "count=100" in caplog.text
+    for fragment in ("SENTINEL_BODY", "Forbidden", "/runs/multipart", "secret=query", "token=abc"):
+        assert fragment not in caplog.text
+
+
+def test_ingest_rejection_callback_extracts_allowlisted_codes_only(caplog) -> None:
+    from langsmith import utils as ls_utils
+
+    from deerflow.sophia import langsmith_health
+
+    langsmith_health.reset_ingest_rejections_for_test()
+    caplog.set_level(logging.WARNING, logger=langsmith_health.__name__)
+    callback = langsmith_health.make_ingest_error_callback(client_kind="memory", endpoint="https://api.smith.langchain.com", workspace_header=False)
+
+    callback(ls_utils.LangSmithAuthError("Authentication failed for /runs. HTTPError('401 Client Error')"))
+    callback(_synthetic_forbidden_error(403, '{"error":"invalid_tenant_scope"}'))
+    callback(ls_utils.LangSmithUserError("This API key is org-scoped and requires workspace specification."))
+    callback(ls_utils.LangSmithExceptionGroup(exceptions=[ls_utils.LangSmithRateLimitError("Rate limit exceeded for /runs/batch.")]))
+
+    assert "http_status=401 error_code=None error_class=LangSmithAuthError" in caplog.text
+    assert "http_status=403 error_code=invalid_tenant_scope" in caplog.text
+    assert "error_code=org_scoped_key_requires_workspace error_class=LangSmithUserError" in caplog.text
+    assert "http_status=429 error_code=None error_class=LangSmithExceptionGroup" in caplog.text
+    assert "requires workspace specification" not in caplog.text
+
+
+def test_builder_tracer_and_feedback_share_one_client_with_ingest_callback(monkeypatch) -> None:
+    _builder_tracing_env(monkeypatch)
+    monkeypatch.setenv("LANGSMITH_ENDPOINT", "https://trace.invalid")
+    _reset_tracing_cache()
+    observability._CLIENT_CACHE.clear()
+    try:
+        first = observability._langsmith_client()
+        assert observability._langsmith_client() is first
+        assert observability._feedback_client() is first
+        assert first._tracing_error_callback is not None
+        structural = observability._governed_structural_client()
+        assert structural is not first
+        assert structural._tracing_error_callback is not None
+    finally:
+        observability._CLIENT_CACHE.clear()
+
+
+def _preflight_transport(project_status_with_tenant: int, project_status_without_tenant: int = 200, *, timeout: bool = False) -> Any:
+    import httpx
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if timeout:
+            raise httpx.ReadTimeout("SENTINEL_TIMEOUT_DETAIL", request=request)
+        if request.url.path == "/info":
+            return httpx.Response(200, json={"version": "SENTINEL_INFO_BODY"})
+        status = project_status_with_tenant if "x-tenant-id" in request.headers else project_status_without_tenant
+        if status == 200:
+            return httpx.Response(200, json=[{"name": "Sophia", "tenant_id": "other-workspace", "description": "SENTINEL_PROJECT_BODY"}])
+        return httpx.Response(status, json={"error": "Forbidden", "detail": "SENTINEL_ERROR_BODY"})
+
+    return httpx.MockTransport(handler)
+
+
+@pytest.mark.parametrize(
+    ("transport_args", "expected"),
+    [
+        ((200,), {"info_status": 200, "project_status": 200, "project_status_without_tenant": None, "project_found": True, "tenant_match": False}),
+        ((401, 401), {"info_status": 200, "project_status": 401, "project_status_without_tenant": 401, "project_found": None, "tenant_match": None}),
+        ((403, 200), {"info_status": 200, "project_status": 403, "project_status_without_tenant": 200, "project_found": True, "tenant_match": False}),
+    ],
+)
+def test_preflight_reports_codes_and_booleans_only(caplog, transport_args, expected) -> None:
+    from deerflow.sophia import langsmith_health
+
+    caplog.set_level(logging.DEBUG)
+    result = langsmith_health.run_langsmith_preflight(
+        endpoint="https://eu.api.smith.langchain.com",
+        api_key="lsv2_sk_preflightSECRET",
+        workspace_id="workspace-uuid",
+        project="Sophia",
+        transport=_preflight_transport(*transport_args),
+    )
+
+    assert result == expected
+    assert "langsmith_preflight" in caplog.text
+    assert f"project_status={expected['project_status']} " in caplog.text
+    for fragment in ("SENTINEL", "lsv2", "SECRET", "workspace-uuid", "/sessions", "name=Sophia"):
+        assert fragment not in caplog.text
+
+
+def test_preflight_timeout_fails_open_without_detail(caplog) -> None:
+    from deerflow.sophia import langsmith_health
+
+    caplog.set_level(logging.DEBUG)
+    result = langsmith_health.run_langsmith_preflight(
+        endpoint="https://eu.api.smith.langchain.com",
+        api_key="lsv2_sk_preflightSECRET",
+        workspace_id="workspace-uuid",
+        project="Sophia",
+        transport=_preflight_transport(200, timeout=True),
+    )
+
+    assert result["info_status"] == "timeout"
+    assert result["project_status"] == "timeout"
+    assert "error_class=ReadTimeout" in caplog.text
+    assert "SENTINEL" not in caplog.text and "SECRET" not in caplog.text
+
+
+def test_preflight_runs_once_per_process_on_a_daemon_thread(monkeypatch) -> None:
+    import threading
+
+    from deerflow.sophia import langsmith_health
+
+    started: list[threading.Thread] = []
+    ran = threading.Event()
+    monkeypatch.setattr(langsmith_health, "_preflight_started", False)
+    monkeypatch.setattr(langsmith_health, "run_langsmith_preflight", lambda **_kwargs: ran.set())
+    original_start = threading.Thread.start
+
+    def record_start(self: threading.Thread) -> None:
+        started.append(self)
+        original_start(self)
+
+    monkeypatch.setattr(threading.Thread, "start", record_start)
+
+    assert langsmith_health.start_langsmith_preflight(endpoint="https://x.invalid", api_key="k", workspace_id=None, project="p") is True
+    assert langsmith_health.start_langsmith_preflight(endpoint="https://x.invalid", api_key="k", workspace_id=None, project="p") is False
+    assert ran.wait(5)
+    assert len(started) == 1 and started[0].daemon is True

@@ -639,7 +639,7 @@ class ArtifactRecord(BaseModel):
     deck_quality_publication_excluded: bool = False
     langsmith_export_excluded: bool = False
     langsmith_trace_status: Literal["trace_unavailable"] | None = None
-    langsmith_trace_unavailable_reason: Literal["synthetic_isolation_policy"] | None = None
+    langsmith_trace_unavailable_reason: Literal["synthetic_isolation_policy", "memory_governance_policy"] | None = None
 
     @field_validator("local_path")
     @classmethod
@@ -819,7 +819,7 @@ class ArtifactUpsertRequest(BaseModel):
     deck_quality_publication_excluded: bool | None = None
     langsmith_export_excluded: bool | None = None
     langsmith_trace_status: Literal["trace_unavailable"] | None = None
-    langsmith_trace_unavailable_reason: Literal["synthetic_isolation_policy"] | None = None
+    langsmith_trace_unavailable_reason: Literal["synthetic_isolation_policy", "memory_governance_policy"] | None = None
 
     @model_validator(mode="before")
     @classmethod

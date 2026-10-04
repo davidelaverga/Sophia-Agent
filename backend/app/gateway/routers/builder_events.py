@@ -998,7 +998,7 @@ class BuilderCompletionEvent(BaseModel):
     deck_quality_publication_excluded: bool | None = None
     langsmith_export_excluded: bool | None = None
     langsmith_trace_status: Literal["trace_unavailable"] | None = None
-    langsmith_trace_unavailable_reason: Literal["synthetic_isolation_policy"] | None = None
+    langsmith_trace_unavailable_reason: Literal["synthetic_isolation_policy", "memory_governance_policy"] | None = None
     synthetic_builder_join: dict[str, Any] | None = None
     deck_quality_publication_intent: dict[str, Any] | None = Field(
         default=None,
@@ -1057,7 +1057,7 @@ class BuilderProgressEvent(BaseModel):
     deck_quality_publication_excluded: bool | None = None
     langsmith_export_excluded: bool | None = None
     langsmith_trace_status: Literal["trace_unavailable"] | None = None
-    langsmith_trace_unavailable_reason: Literal["synthetic_isolation_policy"] | None = None
+    langsmith_trace_unavailable_reason: Literal["synthetic_isolation_policy", "memory_governance_policy"] | None = None
     synthetic_builder_join: dict[str, Any] | None = None
 
 

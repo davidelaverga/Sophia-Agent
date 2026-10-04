@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import logging
 import os
@@ -19,6 +20,8 @@ from langchain_core.runnables import Runnable
 from deerflow.config.tracing_config import get_tracing_config
 from deerflow.sophia.governed_tracing import (
     GOVERNED_STRUCTURAL_TRACE_MODE,
+    MEMORY_GOVERNANCE_EXCLUSION_REASON,
+    TRACE_EXCLUSION_METADATA_KEY,
     TRACE_MODE_METADATA_KEY,
     active_trace_policy,
     build_structural_client,
@@ -27,6 +30,12 @@ from deerflow.sophia.governed_tracing import (
     structural_metadata,
     structural_tags,
     trace_policy_scope,
+)
+from deerflow.sophia.langsmith_health import (
+    api_key_kind,
+    endpoint_host,
+    make_ingest_error_callback,
+    start_langsmith_preflight,
 )
 from deerflow.sophia.synthetic_builder import (
     declares_synthetic_builder_run,
@@ -46,6 +55,22 @@ _SYNTHETIC_TRACE_STATUS = {
     "langsmith_trace_status": "trace_unavailable",
     "langsmith_trace_unavailable_reason": "synthetic_isolation_policy",
 }
+_GOVERNED_TRACE_STATUS = {
+    "langsmith_export_excluded": True,
+    "langsmith_trace_status": "trace_unavailable",
+    "langsmith_trace_unavailable_reason": MEMORY_GOVERNANCE_EXCLUSION_REASON,
+}
+_UNTRUSTED_TRACE_IDENTITY_KEYS = (
+    "builder_trace_run_id",
+    "builder_trace_id",
+    "builder_parent_run_id",
+    "builder_local_root_run_id",
+    "builder_trace_root_run_id",
+    "builder_langsmith_project",
+)
+_MEMORY_EXPORT_ENV = "SOPHIA_MEMORY_LANGSMITH_EXPORT"
+_governed_exclusion_logged = False
+_governed_exclusion_lock = threading.Lock()
 
 
 def _synthetic_langsmith_excluded(*sources: object) -> bool:
@@ -158,8 +183,30 @@ def _langsmith_log_context() -> dict[str, Any]:
     }
 
 
+def _env_secret(name: str) -> str:
+    return (os.getenv(name) or "").strip().strip('"').strip("'").strip()
+
+
+def _langsmith_sdk_version() -> str:
+    try:
+        from importlib.metadata import version
+
+        return version("langsmith")
+    except Exception:  # noqa: BLE001 - optional dependency / metadata guard.
+        return "unknown"
+
+
+def _memory_export_enabled() -> bool:
+    return _env_flag_value(_MEMORY_EXPORT_ENV) is True
+
+
 def log_builder_tracing_startup_status() -> None:
-    """Emit the resolved builder tracing state once per worker process."""
+    """Emit the resolved builder tracing state once per worker process.
+
+    Keys are described by presence, kind (by prefix) and equality only; their
+    value, and any part of it, is never logged. Starts the one-shot LangSmith
+    preflight when Builder tracing or the structural memory export is on.
+    """
 
     global _startup_status_logged
     if _startup_status_logged:
@@ -167,29 +214,61 @@ def log_builder_tracing_startup_status() -> None:
     _startup_status_logged = True
     try:
         config = get_tracing_config()
+        langsmith_key = _env_secret("LANGSMITH_API_KEY")
+        langchain_key = _env_secret("LANGCHAIN_API_KEY")
         logger.info(
-            "[tracing] builder_tracing_flag=%s langsmith_tracing_enabled=%s project=%s endpoint=%s api_key_present=%s",
+            "[tracing] builder_tracing_flag=%s langsmith_tracing_enabled=%s project=%s endpoint_host=%s "
+            "api_key_present=%s key_kind=%s langchain_key_present=%s keys_equal=%s workspace_id_present=%s "
+            "project_uuid_present=%s memory_export_enabled=%s governed_structural_tracing=%s sdk_version=%s",
             langsmith_builder_tracing_requested(),
             config.enabled,
-            config.project,
-            config.endpoint,
+            _safe_metadata_value(config.project),
+            endpoint_host(config.endpoint),
             bool(config.api_key),
+            api_key_kind(config.api_key),
+            bool(langchain_key),
+            bool(langsmith_key) and bool(langchain_key) and hmac.compare_digest(langsmith_key, langchain_key),
+            bool(config.workspace_id),
+            bool(config.project_uuid),
+            _memory_export_enabled(),
+            governed_structural_tracing_enabled(),
+            _langsmith_sdk_version(),
         )
-    except Exception:  # noqa: BLE001 - startup logging must never block graph import.
-        logger.warning("[tracing] builder tracing startup status unavailable", exc_info=True)
+        if config.api_key and (langsmith_builder_tracing_enabled() or _memory_export_enabled()):
+            start_langsmith_preflight(
+                endpoint=config.endpoint,
+                api_key=config.api_key,
+                workspace_id=config.workspace_id,
+                project=config.project,
+            )
+    except Exception as exc:  # noqa: BLE001 - startup logging must never block graph import.
+        logger.warning("[tracing] builder tracing startup status unavailable error_class=%s", exc.__class__.__name__)
+
+
+def _ingest_callback(kind: str, tracing_config: Any) -> Any:
+    return make_ingest_error_callback(
+        client_kind=kind,
+        endpoint=tracing_config.endpoint,
+        workspace_header=bool(tracing_config.workspace_id),
+    )
 
 
 def _langsmith_client(config: Any | None = None) -> Any:
-    from langsmith import Client
+    """The process-wide Builder tracer/feedback client (one, not one per build)."""
 
-    tracing_config = config or get_tracing_config()
-    kwargs: dict[str, Any] = {
-        "api_url": tracing_config.endpoint,
-        "api_key": tracing_config.api_key,
-    }
-    if tracing_config.workspace_id:
-        kwargs["workspace_id"] = tracing_config.workspace_id
-    return Client(**kwargs)
+    def build(tracing_config: Any) -> Any:
+        from langsmith import Client
+
+        kwargs: dict[str, Any] = {
+            "api_url": tracing_config.endpoint,
+            "api_key": tracing_config.api_key,
+            "tracing_error_callback": _ingest_callback("builder", tracing_config),
+        }
+        if tracing_config.workspace_id:
+            kwargs["workspace_id"] = tracing_config.workspace_id
+        return Client(**kwargs)
+
+    return _cached_langsmith_client("builder", build, config or get_tracing_config())
 
 
 def builder_trace_metadata(
@@ -465,14 +544,26 @@ class _TraceScopedRunnable(Runnable[Any, Any]):
         return self._rewrap(self._runnable.bind_tools(*args, **kwargs))
 
 
+@contextmanager
+def _excluded_policy_scope(policy: str) -> Any:
+    with trace_policy_scope(policy), langsmith_tracing_disabled():
+        yield
+
+
 class LangSmithTraceDisabledRunnable(_TraceScopedRunnable):
     """Proxy a runnable while suppressing LangSmith around its own execution."""
 
+    def __init__(self, runnable: Any, *, policy: str | None = None) -> None:
+        super().__init__(runnable)
+        object.__setattr__(self, "_trace_policy", policy)
+
     def _trace_scope(self) -> Any:
-        return langsmith_tracing_disabled()
+        if self._trace_policy is None:
+            return langsmith_tracing_disabled()
+        return _excluded_policy_scope(self._trace_policy)
 
     def _rewrap(self, runnable: Any) -> LangSmithTraceDisabledRunnable:
-        return LangSmithTraceDisabledRunnable(runnable)
+        return LangSmithTraceDisabledRunnable(runnable, policy=self._trace_policy)
 
 
 def disable_langsmith_tracing_for_runnable(runnable: Any) -> LangSmithTraceDisabledRunnable:
@@ -609,6 +700,7 @@ def _governed_structural_client(config: Any | None = None) -> Any:
             endpoint=tracing_config.endpoint,
             api_key=tracing_config.api_key,
             workspace_id=tracing_config.workspace_id,
+            tracing_error_callback=_ingest_callback("governed_structural", tracing_config),
         )
 
     return _cached_langsmith_client("governed_structural", build, config or get_tracing_config())
@@ -695,9 +787,27 @@ def wrap_governed_builder_runnable(
         )
         if structural is not None:
             return structural
-    configured = agent.with_config(base_config)
+    configured = agent.with_config(
+        {
+            **base_config,
+            # Constant marker: survives LangGraph API's copy() and states why
+            # there is no run. At execution the run's own metadata replaces
+            # it, so the wrapper's policy scope is what the annotation reads.
+            "metadata": {**base_config["metadata"], TRACE_EXCLUSION_METADATA_KEY: MEMORY_GOVERNANCE_EXCLUSION_REASON},
+        }
+    )
     _copy_recursion_limit(agent, configured)
-    return LangSmithTraceDisabledRunnable(configured)
+    _log_governed_exclusion_once()
+    return LangSmithTraceDisabledRunnable(configured, policy=MEMORY_GOVERNANCE_EXCLUSION_REASON)
+
+
+def _log_governed_exclusion_once() -> None:
+    global _governed_exclusion_logged
+    with _governed_exclusion_lock:
+        if _governed_exclusion_logged:
+            return
+        _governed_exclusion_logged = True
+    logger.info("builder_langsmith_excluded reason=%s", MEMORY_GOVERNANCE_EXCLUSION_REASON)
 
 
 def _is_langgraph_pregel(runnable: Any) -> bool:
@@ -1934,20 +2044,24 @@ def annotate_builder_completion(state: dict[str, Any], artifact: dict[str, Any])
         # Never trust model/state-supplied trace identifiers for a protected
         # run.  The canonical Builder/session planes retain exact provenance;
         # supplemental LangSmith evidence is explicitly unavailable.
-        for key in (
-            "builder_trace_run_id",
-            "builder_trace_id",
-            "builder_parent_run_id",
-            "builder_local_root_run_id",
-            "builder_trace_root_run_id",
-            "builder_langsmith_project",
-        ):
+        for key in _UNTRUSTED_TRACE_IDENTITY_KEYS:
             artifact.pop(key, None)
         artifact.update(_SYNTHETIC_TRACE_STATUS)
         artifact["ordinary_analytics_excluded"] = True
         return False
 
     policy = active_trace_policy()
+    if policy == MEMORY_GOVERNANCE_EXCLUSION_REASON:
+        # Expected, not a fault: a governed owner's Builder is excluded from
+        # LangSmith by policy, so there is no run tree to look for.
+        for key in _UNTRUSTED_TRACE_IDENTITY_KEYS:
+            artifact.pop(key, None)
+        artifact.update(_GOVERNED_TRACE_STATUS)
+        logger.info(
+            "Sophia builder LangSmith completion annotation skipped: reason=%s",
+            MEMORY_GOVERNANCE_EXCLUSION_REASON,
+        )
+        return False
     identity = _completion_identity(state, artifact)
     run_tree = _completion_run_tree(state, artifact)
     if run_tree is None:
