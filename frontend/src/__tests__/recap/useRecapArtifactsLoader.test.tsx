@@ -707,6 +707,28 @@ describe('useRecapArtifactsLoader canonical processing polling', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it.each([
+    ['a network error', () => Promise.reject(new TypeError('network'))],
+    ['a server error', () => Promise.resolve(jsonResponse({ detail: 'busy' }, 503))],
+  ])('keeps polling after %s on a re-read instead of ending unavailable', async (_label, failOnce) => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(canonicalRecap('processing')))
+      .mockImplementationOnce(failOnce)
+      .mockResolvedValueOnce(jsonResponse(canonicalRecap('complete', { candidates: [canonicalCandidate(1)] })));
+    global.fetch = fetchMock as unknown as typeof fetch;
+    const { result } = renderHook(() => useRecapArtifactsLoader({ sessionId: POLL_SESSION, artifacts: null, setArtifacts: stablePublish }));
+    await settle();
+
+    await advance(1500);
+    expect(recapGets(fetchMock)).toHaveLength(2);
+    expect(result.current.status).toBe('processing');
+    expect(result.current.autoRefreshing).toBe(true);
+
+    await advance(1500);
+    expect(recapGets(fetchMock)).toHaveLength(3);
+    expect(result.current.status).toBe('ready');
+  });
+
   it('keeps the processing view on screen while a re-read is in flight', async () => {
     let finishPoll!: (response: Response) => void;
     const fetchMock = vi.fn()

@@ -954,6 +954,13 @@ export function useRecapArtifactsLoader({
         });
       }
 
+      // A failed re-read while polling a processing recap is not a verdict:
+      // keep the processing view and spend the remaining budget.
+      if (poll && scheduleCanonicalPoll()) {
+        setObservedStatus('processing', true);
+        return;
+      }
+
       if (process.env.NODE_ENV === 'development') {
         logger.debug('Recap', 'Using mock data for development');
         await new Promise((resolve) => setTimeout(resolve, 500));
