@@ -582,7 +582,8 @@ export type GeminiLangSmithTraceUnavailableReason =
   | 'not_provided'
   | 'invalid'
   | 'governed_synthetic_fault'
-  | 'synthetic_isolation_policy';
+  | 'synthetic_isolation_policy'
+  | 'langsmith_ingest_rejected';
 
 export interface GeminiLangSmithTraceContext {
   langsmithTraceId: string | null;
@@ -6099,6 +6100,7 @@ export function readGeminiLangSmithTraceContext(
     if (
       payload.langsmith_trace_unavailable_reason === 'synthetic_isolation_policy'
       || payload.langsmith_trace_unavailable_reason === 'governed_synthetic_fault'
+      || payload.langsmith_trace_unavailable_reason === 'langsmith_ingest_rejected'
     ) {
       return {
         langsmithTraceId: null,

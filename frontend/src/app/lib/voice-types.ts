@@ -73,7 +73,7 @@ export type GeminiRuntimeTelemetry = {
   providerConnectionEpoch: number
   langsmithTraceId: string | null
   langsmithTraceStatus: "available" | "trace_unavailable"
-  langsmithTraceUnavailableReason: "not_provided" | "invalid" | "governed_synthetic_fault" | "synthetic_isolation_policy" | null
+  langsmithTraceUnavailableReason: "not_provided" | "invalid" | "governed_synthetic_fault" | "synthetic_isolation_policy" | "langsmith_ingest_rejected" | null
   providerEventCount: number
   lastProviderEventAt: string | null
   lastProviderEventType: string | null

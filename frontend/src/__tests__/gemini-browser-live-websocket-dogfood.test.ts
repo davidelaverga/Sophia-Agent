@@ -423,6 +423,15 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
       langsmithTraceStatus: 'trace_unavailable',
       langsmithTraceUnavailableReason: 'synthetic_isolation_policy',
     });
+    // Voice reports a LangSmith key/workspace rejection instead of a trace id.
+    expect(readGeminiLangSmithTraceContext({
+      langsmith_trace_id: null,
+      langsmith_trace_unavailable_reason: 'langsmith_ingest_rejected',
+    })).toEqual({
+      langsmithTraceId: null,
+      langsmithTraceStatus: 'trace_unavailable',
+      langsmithTraceUnavailableReason: 'langsmith_ingest_rejected',
+    });
     expect(() => readGeminiLangSmithTraceContext({
       langsmith_trace_id: 'trace-must-not-coexist',
       langsmith_trace_unavailable_reason: 'synthetic_isolation_policy',
