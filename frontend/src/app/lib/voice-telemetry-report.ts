@@ -1,3 +1,4 @@
+import type { SophiaDiagnosticsRingExport } from './diag-log';
 import type { SophiaCaptureBundle, SophiaCaptureSnapshot } from './session-capture';
 import { buildTurnCaptureDiagnostics, type TurnCaptureDiagnostics } from './turn-capture-diagnostics';
 import {
@@ -608,6 +609,12 @@ function buildScopedTelemetryCaptureBundle(
     eventCount: events.length,
     events,
     snapshot,
+    // Ring drop counters, and the dedicated diagnostics ring, which provider
+    // and audio events never evict.
+    ...(captureBundle.capture ? { capture: captureBundle.capture } : {}),
+    ...(captureBundle.diagnostics
+      ? { diagnostics: sanitizeTelemetryValue(captureBundle.diagnostics) as SophiaDiagnosticsRingExport }
+      : {}),
     scope: {
       mode: 'current-run',
       strategy: selected.strategy,

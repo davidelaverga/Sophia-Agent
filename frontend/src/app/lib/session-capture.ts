@@ -7,6 +7,11 @@ import { useSessionStore } from '../stores/session-store';
 import { useVoiceStore } from '../stores/voice-store';
 
 import { getDebugSnapshot, type DebugSnapshot } from './debug-tools';
+import {
+  clearDiagnosticsRing,
+  readDiagnosticsRing,
+  type SophiaDiagnosticsRingExport,
+} from './diag-log';
 import type { GeminiSyntheticTestContext } from './gemini-browser-live-websocket-dogfood';
 import {
   getSyntheticIsolationPolicy,
@@ -14,6 +19,8 @@ import {
 } from './synthetic-isolation-policy';
 
 const CAPTURE_FLAG_STORAGE_KEY = 'sophia.capture.enabled';
+// Provider, audio and UI capture events. Single-line diagnostics (diag-log)
+// live in their own 200-entry ring, so this traffic can never evict them.
 const MAX_CAPTURE_EVENTS = 500;
 const CAPTURED_STORAGE_KEYS = [
   'sophia-session-store',
@@ -219,6 +226,8 @@ export type SophiaCaptureBundle = {
   eventCount: number;
   events: SophiaCaptureEvent[];
   capture?: SophiaCaptureDrainMetadata;
+  /** The dedicated diagnostics ring, with its own drop counters. */
+  diagnostics?: SophiaDiagnosticsRingExport;
   snapshot: SophiaCaptureSnapshot;
 };
 
@@ -230,6 +239,7 @@ type SophiaCaptureApi = {
   snapshot: () => SophiaCaptureSnapshot;
   export: () => SophiaCaptureBundle;
   getEvents: () => SophiaCaptureEvent[];
+  getDiagnostics: () => SophiaDiagnosticsRingExport;
   readAfter: (cursor?: SophiaCaptureCursor | null, limit?: number) => SophiaCaptureReadResult;
 };
 
@@ -345,6 +355,7 @@ function clearCaptureState(): void {
   state.events = [];
   state.syntheticTest = null;
   state.microphone = createEmptyMicrophoneSummary(window.__sophiaCaptureMicProbeInstalled__ === true);
+  clearDiagnosticsRing();
 }
 
 function clonePayload(payload: unknown): unknown {
@@ -1061,6 +1072,7 @@ export function exportSophiaCaptureBundle(): SophiaCaptureBundle {
     eventCount: state?.events.length ?? 0,
     events: [...(state?.events ?? [])],
     capture,
+    diagnostics: readDiagnosticsRing(),
     snapshot: buildSophiaCaptureSnapshot(),
   };
 }
@@ -1080,6 +1092,7 @@ export function registerSophiaCaptureBridge(): void {
     snapshot: () => buildSophiaCaptureSnapshot(),
     export: () => exportSophiaCaptureBundle(),
     getEvents: () => [...(getCaptureState()?.events ?? [])],
+    getDiagnostics: () => readDiagnosticsRing(),
     readAfter: (cursor, limit) => readSophiaCaptureEventsAfter(cursor, limit),
   };
 }

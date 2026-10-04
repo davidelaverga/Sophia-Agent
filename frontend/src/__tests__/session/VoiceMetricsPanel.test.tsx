@@ -1,9 +1,12 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { VoiceMetricsPanel } from '../../app/components/session/VoiceMetricsPanel';
+import { diagLog } from '../../app/lib/diag-log';
+import { DOWNLOAD_URL_REVOKE_DELAY_MS } from '../../app/lib/download-file';
 import type { SophiaCaptureBundle, SophiaCaptureSnapshot } from '../../app/lib/session-capture';
 import type { VoiceRuntimeTelemetry, VoiceStateProps } from '../../app/lib/voice-types';
+import { useUiStore } from '../../app/stores/ui-store';
 
 type TestCaptureBridge = {
   enable: () => void;
@@ -591,5 +594,105 @@ describe('VoiceMetricsPanel', () => {
     fireEvent.click(screen.getByRole('button', { name: /export json/i }));
 
     expect(await screen.findByRole('alert')).toHaveTextContent('Could not export session JSON.');
+  });
+  describe('copy and export delivery', () => {
+    let warn: ReturnType<typeof vi.spyOn>;
+
+    beforeEach(() => {
+      useUiStore.setState({ toast: null });
+      delete window.__sophiaDiagnosticsRing;
+      warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    });
+
+    afterEach(() => {
+      warn.mockRestore();
+      vi.useRealTimers();
+      vi.restoreAllMocks();
+    });
+
+    const renderInline = () => render(
+      <VoiceMetricsPanel
+        voiceState={buildVoiceState(geminiTelemetry)}
+        defaultExpanded
+        layout="inline"
+      />
+    );
+
+    it('shows the JSON pre-selected in a read-only textarea when the clipboard rejects', async () => {
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: { writeText: vi.fn().mockRejectedValue(new Error('denied')) },
+      });
+      Object.defineProperty(document, 'execCommand', { configurable: true, value: vi.fn(() => false) });
+
+      renderInline();
+      fireEvent.click(screen.getByRole('button', { name: /copy json/i }));
+
+      const textarea = await screen.findByRole<HTMLTextAreaElement>('textbox', { name: /session json for manual copy/i });
+      expect(textarea).toHaveAttribute('readonly');
+      expect(JSON.parse(textarea.value)).toMatchObject({ reportType: 'voice-telemetry-report' });
+      expect(document.activeElement).toBe(textarea);
+      expect(textarea.selectionStart).toBe(0);
+      expect(textarea.selectionEnd).toBe(textarea.value.length);
+      expect(useUiStore.getState().toast).toMatchObject({ variant: 'warning' });
+      expect(useUiStore.getState().toast?.message).toMatch(/copy it manually/i);
+
+      fireEvent.click(screen.getByRole('button', { name: 'Done' }));
+      expect(screen.queryByRole('textbox', { name: /session json for manual copy/i })).not.toBeInTheDocument();
+    });
+
+    it('exports through an attached link, revokes the URL later and reports bytes and counts', () => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      const revokeObjectURL = vi.fn();
+      Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: vi.fn(() => 'blob:voice-report') });
+      Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: revokeObjectURL });
+      const clicked: Array<{ attached: boolean; download: string }> = [];
+      vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (this: HTMLAnchorElement) {
+        clicked.push({ attached: document.body.contains(this), download: this.download });
+      });
+
+      renderInline();
+      fireEvent.click(screen.getByRole('button', { name: /export json/i }));
+
+      expect(clicked).toHaveLength(1);
+      expect(clicked[0]?.attached).toBe(true);
+      expect(clicked[0]?.download).toMatch(/^sophia-voice-telemetry-report-.*\.json$/);
+      expect(document.querySelector('a[download]')).toBeNull();
+      expect(revokeObjectURL).not.toHaveBeenCalled();
+      expect(useUiStore.getState().toast).toMatchObject({ variant: 'success' });
+      expect(useUiStore.getState().toast?.message).toMatch(/exported \(\d+(\.\d)? K?B, \d+ events?, \d+ diagnostics/);
+
+      vi.advanceTimersByTime(DOWNLOAD_URL_REVOKE_DELAY_MS);
+      expect(revokeObjectURL).toHaveBeenCalledWith('blob:voice-report');
+    });
+
+    it('shows an error instead of success when the browser cannot download', async () => {
+      Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: undefined });
+
+      renderInline();
+      fireEvent.click(screen.getByRole('button', { name: /export json/i }));
+
+      expect(await screen.findByRole('alert')).toHaveTextContent('Could not export session JSON.');
+      expect(useUiStore.getState().toast).toMatchObject({ variant: 'error' });
+      expect(useUiStore.getState().toast?.message).not.toMatch(/exported/i);
+    });
+
+    it('copies the diagnostics ring as NDJSON', async () => {
+      const writeText = vi.fn().mockResolvedValue(undefined);
+      Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
+      diagLog('voice_builder.call', { call: 'call-1', tool: 'start_builder_task' });
+      diagLog('voice_builder.outcome', { call: 'call-1', outcome: 'builder_start_unconfirmed' });
+
+      renderInline();
+      fireEvent.click(screen.getByRole('button', { name: /copy diagnostics/i }));
+
+      await waitFor(() => expect(writeText).toHaveBeenCalledTimes(1));
+      const lines = (writeText.mock.calls[0][0] as string).trimEnd().split('\n');
+      expect(lines.map((line) => (JSON.parse(line) as { ev: string }).ev)).toEqual([
+        'voice_builder.call',
+        'voice_builder.outcome',
+      ]);
+      await waitFor(() => expect(useUiStore.getState().toast?.message).toBe('Diagnostics copied (2 lines)'));
+    });
   });
 });
