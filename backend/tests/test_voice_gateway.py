@@ -521,6 +521,53 @@ class TestVoiceConnect:
         )
         context_payload.assert_awaited_once()
 
+    @pytest.mark.parametrize(
+        "reason",
+        ["synthetic_isolation_policy", "governed_synthetic_fault", "langsmith_ingest_rejected"],
+    )
+    def test_gemini_bootstrap_passes_typed_langsmith_unavailable_reason(self, monkeypatch, reason):
+        monkeypatch.setenv("SOPHIA_VOICE_RUNTIME_MODE", "gemini_live")
+        monkeypatch.setenv("SOPHIA_VOICE_GEMINI_PRODUCTION_ROUTE_ENABLED", "true")
+        runtime_payload = {
+            "runtime": "gemini_live",
+            "voice_runtime": "gemini_live",
+            "production_route": True,
+            "session_id": "gemini-prod-session-ingest",
+            "stream_url": "/production/realtime/gemini/sessions/gemini-prod-session-ingest/events",
+            "event_stream_url": "/production/realtime/gemini/sessions/gemini-prod-session-ingest/events",
+            "provider_event_relay_url": (
+                "/production/realtime/gemini/browser-sessions/gemini-prod-session-ingest/provider-events"
+            ),
+            "disconnect_url": "/production/realtime/gemini/browser-sessions/gemini-prod-session-ingest",
+            "browser_audio": "gemini_live_websocket_production_candidate",
+            "transport": "gemini_browser_websocket_ephemeral_token_with_backend_relay",
+            "websocket_url": "wss://gemini.example/live",
+            "websocket_auth": "ephemeral_access_token",
+            "ephemeral_token": {"value": "auth_tokens/test"},
+            "setup": {"model": "models/gemini-live"},
+            "langsmith_trace_id": None,
+            "langsmith_trace_unavailable_reason": reason,
+        }
+
+        with patch(
+            "app.gateway.routers.voice._proxy_voice_runtime_json",
+            new_callable=AsyncMock,
+            return_value=runtime_payload,
+        ), patch(
+            "app.gateway.routers.voice._build_gemini_realtime_context_payload",
+            new_callable=AsyncMock,
+            return_value={"diagnostics": {"schema": "sophia_realtime_context_v1"}},
+        ):
+            resp = client.post(
+                "/api/sophia/user_123/voice/connect",
+                json={"platform": "voice", "context_mode": "life"},
+            )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["langsmith_trace_id"] is None
+        assert data["langsmith_trace_unavailable_reason"] == reason
+
     def test_gemini_runtime_context_fetch_failure_degrades_safely(self, monkeypatch):
         monkeypatch.setenv("SOPHIA_VOICE_RUNTIME_MODE", "gemini_live")
         monkeypatch.setenv("SOPHIA_VOICE_GEMINI_PRODUCTION_ROUTE_ENABLED", "true")
