@@ -283,6 +283,22 @@ class GeminiReliabilityDiagnostics:
     unsafe_handle_updates: int = 0
     go_away_count: int = 0
     trace_export_failures: int = 0
+    # Background LangSmith ingest failures happen on the SDK thread, after
+    # RunTree.post() returned; the recorder's IngestHealth counts them.
+    trace_ingest_failure_probe: Callable[[], int] | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
+
+    def trace_export_failure_total(self) -> int:
+        ingest_failures = 0
+        if self.trace_ingest_failure_probe is not None:
+            try:
+                ingest_failures = max(int(self.trace_ingest_failure_probe()), 0)
+            except Exception:
+                ingest_failures = 0
+        return self.trace_export_failures + ingest_failures
 
     def as_public_payload(self) -> dict[str, Any]:
         recent_function_calls = dict(list(self.function_calls_extracted.items())[-10:])
@@ -326,7 +342,7 @@ class GeminiReliabilityDiagnostics:
             "safe_handle_updates": self.safe_handle_updates,
             "unsafe_handle_updates": self.unsafe_handle_updates,
             "go_away_count": self.go_away_count,
-            "trace_export_failures": self.trace_export_failures,
+            "trace_export_failures": self.trace_export_failure_total(),
         }
 
     def record_provider_metric(self, name: str, **values: Any) -> None:
@@ -730,12 +746,12 @@ class GeminiBrowserDogfoodSessionManager:
         diagnostics = self._diagnostics_by_session.get(session_id)
         if diagnostics is not None:
             diagnostics.record_trace_export_failure()
+        # Class name only: tracing exception messages can carry response bodies.
         logger.warning(
             "gemini.langsmith.fail_open session_id=%s operation=%s error_type=%s",
             session_id,
             operation,
             exc.__class__.__name__,
-            exc_info=True,
         )
 
     def _trace_operation(
@@ -758,6 +774,21 @@ class GeminiBrowserDogfoodSessionManager:
             self._traces_by_session.pop(session_id, None)
             self._record_trace_failure(session_id, operation, exc)
             return default
+
+    @staticmethod
+    def _trace_bootstrap_fields(
+        trace: GeminiLiveTraceRecorder | None,
+    ) -> tuple[str | None, str | None]:
+        """Return (trace_id, unavailable_reason); never both."""
+
+        if trace is None:
+            return None, None
+        reason = getattr(trace, "ingest_unavailable_reason", None)
+        if isinstance(reason, str) and reason:
+            # LangSmith is rejecting ingest: an id would point at a run that
+            # was never accepted, so report the typed reason instead.
+            return None, reason
+        return trace.trace_id, None
 
     def _create_trace_recorder(
         self,
@@ -793,6 +824,9 @@ class GeminiBrowserDogfoodSessionManager:
         if not bool(getattr(trace, "enabled", False)):
             return None
         self._traces_by_session[session_id] = trace
+        diagnostics = self._diagnostics_by_session.get(session_id)
+        if diagnostics is not None and hasattr(trace, "ingest_failure_count"):
+            diagnostics.trace_ingest_failure_probe = lambda: trace.ingest_failure_count
         return trace
 
     async def start_browser_session(
@@ -922,14 +956,17 @@ class GeminiBrowserDogfoodSessionManager:
             dogfood_session.session_id,
             preconnect_ttl_seconds,
         )
+        trace_id, ingest_unavailable_reason = self._trace_bootstrap_fields(trace)
 
         result = GeminiBrowserDogfoodSession(
             dogfood_session=dogfood_session,
             ephemeral_token=ephemeral_token,
             setup=setup,
             memory_context_diagnostics=dict(memory_context_diagnostics or {}),
-            langsmith_trace_id=trace.trace_id if trace is not None else None,
-            langsmith_trace_unavailable_reason=synthetic_trace_unavailable_reason,
+            langsmith_trace_id=trace_id,
+            langsmith_trace_unavailable_reason=(
+                synthetic_trace_unavailable_reason or ingest_unavailable_reason
+            ),
             audio_capture_enabled=trace.audio_capture_enabled if trace is not None else False,
             provider_connection_epoch=1,
             continuation_bootstrap_url=continuation_bootstrap_url,
@@ -1035,19 +1072,20 @@ class GeminiBrowserDogfoodSessionManager:
             if trace is not None and not bool(getattr(trace, "enabled", False)):
                 self._traces_by_session.pop(dogfood_session_id, None)
                 trace = None
+            trace_id, ingest_unavailable_reason = self._trace_bootstrap_fields(trace)
             result = GeminiBrowserDogfoodSession(
                 dogfood_session=dogfood_session,
                 ephemeral_token=token,
                 setup=setup,
                 memory_context_diagnostics={},
-                langsmith_trace_id=trace.trace_id if trace is not None else None,
+                langsmith_trace_id=trace_id,
                 langsmith_trace_unavailable_reason=(
                     "governed_synthetic_fault"
                     if self.trace_fault_for_session(dogfood_session_id) is not None
                     else (
                         "synthetic_isolation_policy"
                         if dogfood_session_id in self._synthetic_context_by_session
-                        else None
+                        else ingest_unavailable_reason
                     )
                 ),
                 audio_capture_enabled=trace.audio_capture_enabled if trace is not None else False,
@@ -1465,17 +1503,25 @@ class GeminiBrowserDogfoodSessionManager:
                     summary = str(
                         diagnostic.get("result_summary") or "Tool call was not executed."
                     )
+                    rejection_code = (
+                        "duplicate_suppressed"
+                        if diagnostic.get("duplicate_suppressed")
+                        else "cancelled"
+                        if diagnostic.get("cancelled")
+                        else "not_executed"
+                    )
                     self._trace_operation(
                         dogfood_session.session_id,
                         trace,
                         "record_rejected_tool_call",
-                        lambda recorder, call_id=call_id, tool_name=tool_name, summary=summary: recorder.record_tool_call(
+                        lambda recorder, call_id=call_id, tool_name=tool_name, summary=summary, rejection_code=rejection_code: recorder.record_tool_call(
                             tool_call_id=call_id,
                             tool_name=tool_name,
                             arguments={},
                             success=False,
                             result_summary=summary,
                             error=summary,
+                            error_type=rejection_code,
                         ),
                     )
 
@@ -1819,12 +1865,13 @@ class GeminiBrowserDogfoodSessionManager:
                         dogfood_session.session_id,
                         trace,
                         "finish_rejected_tool_call",
-                        lambda recorder, error_text=error_text: recorder.finish_tool_call(
+                        lambda recorder, error_text=error_text, error_type=exc.__class__.__name__: recorder.finish_tool_call(
                             tool_span,
                             tool_name=function_call.name,
                             success=False,
                             result_summary="Tool execution rejected before a response was available.",
                             error=error_text,
+                            error_type=error_type,
                         ),
                     )
                 if function_call.name in _BUILDER_LIFECYCLE_TOOL_NAMES:
@@ -1843,12 +1890,13 @@ class GeminiBrowserDogfoodSessionManager:
                         dogfood_session.session_id,
                         trace,
                         "finish_failed_tool_call",
-                        lambda recorder, error_text=error_text: recorder.finish_tool_call(
+                        lambda recorder, error_text=error_text, error_type=exc.__class__.__name__: recorder.finish_tool_call(
                             tool_span,
                             tool_name=function_call.name,
                             success=False,
                             result_summary="Tool execution failed before a response was available.",
                             error=error_text,
+                            error_type=error_type,
                         ),
                     )
                 raise
