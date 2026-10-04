@@ -49,6 +49,7 @@ from deerflow.agents.sophia_agent.builder_chain_support import (
     create_builder_todo_middleware,
     log_builder_tracing_startup_status,
     wrap_builder_agent_for_observability,
+    wrap_governed_builder_agent_for_observability,
 )
 from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
 from deerflow.agents.sophia_agent.middlewares.builder_provider_fallback import BuilderProviderFallbackMiddleware
@@ -68,6 +69,7 @@ __all__ = [
     "builder_distributed_trace_context",
     "log_builder_tracing_startup_status",
     "wrap_builder_agent_for_observability",
+    "wrap_governed_builder_agent_for_observability",
 ]
 
 

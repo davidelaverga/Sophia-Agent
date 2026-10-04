@@ -129,6 +129,13 @@ services:
         value: https://eu.api.smith.langchain.com
       - key: SOPHIA_BUILDER_LANGSMITH_TRACING
         value: "true"
+      # Memory-governed (MEM00) owners' Builder runs are excluded from
+      # LangSmith. "true" opts them into structure-only tracing through a
+      # redacting client: run names, types, timings, status and token counts;
+      # never inputs, outputs, error text, prompts or tool content. Read with
+      # os.getenv (not config.production.yaml); the companion stays untraced.
+      - key: SOPHIA_GOVERNED_STRUCTURAL_TRACING
+        value: "false"
       - key: LANGSMITH_PROJECT
         value: Sophia
       - key: LANGSMITH_API_KEY

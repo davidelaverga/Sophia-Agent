@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
+import threading
 from collections import Counter
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from typing import Any
 from urllib.parse import urlparse
 from uuid import NAMESPACE_URL, uuid5
@@ -15,6 +17,17 @@ from weakref import WeakSet
 from langchain_core.runnables import Runnable
 
 from deerflow.config.tracing_config import get_tracing_config
+from deerflow.sophia.governed_tracing import (
+    GOVERNED_STRUCTURAL_TRACE_MODE,
+    TRACE_MODE_METADATA_KEY,
+    active_trace_policy,
+    build_structural_client,
+    build_structural_tracer,
+    governed_structural_tracing_enabled,
+    structural_metadata,
+    structural_tags,
+    trace_policy_scope,
+)
 from deerflow.sophia.synthetic_builder import (
     declares_synthetic_builder_run,
     normalize_synthetic_builder_context,
@@ -464,6 +477,227 @@ class LangSmithTraceDisabledRunnable(_TraceScopedRunnable):
 
 def disable_langsmith_tracing_for_runnable(runnable: Any) -> LangSmithTraceDisabledRunnable:
     return LangSmithTraceDisabledRunnable(runnable)
+
+
+@contextmanager
+def _governed_structural_scope(client: Any, project_name: str | None) -> Any:
+    """Tracing context for one governed Builder execution: structural tracer only.
+
+    LangSmith is *disabled* for the whole execution, so no tracer is created
+    implicitly (``LANGSMITH_TRACING=true``, an outer ``tracing_v2_enabled``) and
+    every tracer that does run - including one attached explicitly to a model on
+    the default client (``deerflow.models.factory``) - marks its runs
+    ``__disabled``. The graph's ``StructuralLangChainTracer`` is the single
+    exception and it only ever holds the redacting client. The context also
+    replaces, rather than inherits, any enclosing parent (the distributed
+    ``langsmith-trace`` voice parent), client, metadata, tags and write replicas.
+    """
+
+    from langchain_core.tracers.context import tracing_v2_callback_var
+
+    tracing_context = _tracing_context_factory()
+    previous_v2_tracer = tracing_v2_callback_var.get()
+    tracing_v2_callback_var.set(None)
+    try:
+        with trace_policy_scope(GOVERNED_STRUCTURAL_TRACE_MODE):
+            if tracing_context is None:
+                yield
+                return
+            with tracing_context(
+                enabled=False,
+                project_name=project_name,
+                client=client,
+                parent=False,
+                replicas=[],
+                metadata={TRACE_MODE_METADATA_KEY: GOVERNED_STRUCTURAL_TRACE_MODE},
+                tags=[_BUILDER_BASE_TAG],
+            ):
+                yield
+    finally:
+        tracing_v2_callback_var.set(previous_v2_tracer)
+
+
+class GovernedStructuralTraceRunnable(_TraceScopedRunnable):
+    """Run a governed Builder graph under structure-only, redacted LangSmith tracing.
+
+    LangGraph's ``ensure_config(self.config, config)`` replaces (does not merge)
+    ``callbacks`` when the caller passes any, as ``astream_events`` always does
+    for its event streamer. The structural tracer is therefore re-added to an
+    explicitly passed config, so it is not silently dropped.
+    """
+
+    def __init__(self, runnable: Any, *, client: Any, project_name: str | None, tracer: Any) -> None:
+        super().__init__(runnable)
+        object.__setattr__(self, "_trace_client", client)
+        object.__setattr__(self, "_trace_project", project_name)
+        object.__setattr__(self, "_trace_tracer", tracer)
+
+    def _trace_scope(self) -> Any:
+        return _governed_structural_scope(self._trace_client, self._trace_project)
+
+    def _rewrap(self, runnable: Any) -> GovernedStructuralTraceRunnable:
+        return GovernedStructuralTraceRunnable(
+            runnable,
+            client=self._trace_client,
+            project_name=self._trace_project,
+            tracer=self._trace_tracer,
+        )
+
+    def _config_with_tracer(self, config: Any, *, force: bool = False) -> Any:
+        callbacks = config.get("callbacks") if isinstance(config, dict) else None
+        if callbacks is None and not force:
+            return config
+        merged = dict(config) if isinstance(config, dict) else {}
+        tracer = self._trace_tracer
+        if callbacks is None:
+            merged["callbacks"] = [tracer]
+        elif isinstance(callbacks, list):
+            merged["callbacks"] = callbacks if any(item is tracer for item in callbacks) else [tracer, *callbacks]
+        elif not any(item is tracer for item in getattr(callbacks, "handlers", [])):
+            manager = callbacks.copy()
+            manager.add_handler(tracer, inherit=True)
+            merged["callbacks"] = manager
+        return merged
+
+    def invoke(self, input: Any, config: Any = None, **kwargs: Any) -> Any:
+        return super().invoke(input, self._config_with_tracer(config), **kwargs)
+
+    async def ainvoke(self, input: Any, config: Any = None, **kwargs: Any) -> Any:
+        return await super().ainvoke(input, self._config_with_tracer(config), **kwargs)
+
+    def stream(self, input: Any, config: Any = None, **kwargs: Any) -> Any:
+        return super().stream(input, self._config_with_tracer(config), **kwargs)
+
+    def astream(self, input: Any, config: Any = None, **kwargs: Any) -> Any:
+        return super().astream(input, self._config_with_tracer(config), **kwargs)
+
+    def astream_events(self, input: Any, config: Any = None, *, version: str = "v2", **kwargs: Any) -> Any:
+        return super().astream_events(input, self._config_with_tracer(config, force=True), version=version, **kwargs)
+
+    def stream_events(self, input: Any, config: Any = None, *, version: str = "v2", **kwargs: Any) -> Any:
+        return super().stream_events(input, self._config_with_tracer(config, force=True), version=version, **kwargs)
+
+
+_CLIENT_CACHE_LOCK = threading.Lock()
+_CLIENT_CACHE: dict[tuple[str, str, str, str], Any] = {}
+
+
+def _api_key_fingerprint(api_key: str | None) -> str:
+    return hashlib.sha256((api_key or "").encode("utf-8")).hexdigest()[:16]
+
+
+def _cached_langsmith_client(kind: str, factory: Any, tracing_config: Any) -> Any:
+    """One process-wide client per (kind, endpoint, key fingerprint, workspace)."""
+
+    key = (
+        kind,
+        str(tracing_config.endpoint),
+        _api_key_fingerprint(tracing_config.api_key),
+        str(tracing_config.workspace_id or ""),
+    )
+    with _CLIENT_CACHE_LOCK:
+        client = _CLIENT_CACHE.get(key)
+        if client is None:
+            client = factory(tracing_config)
+            _CLIENT_CACHE[key] = client
+    return client
+
+
+def _governed_structural_client(config: Any | None = None) -> Any:
+    def build(tracing_config: Any) -> Any:
+        return build_structural_client(
+            endpoint=tracing_config.endpoint,
+            api_key=tracing_config.api_key,
+            workspace_id=tracing_config.workspace_id,
+        )
+
+    return _cached_langsmith_client("governed_structural", build, config or get_tracing_config())
+
+
+def _governed_structural_runnable(
+    agent: Any,
+    *,
+    base_config: dict[str, Any],
+    model_name: str | None,
+    model_source: str | None,
+    trace_config: dict[str, Any] | None,
+) -> Any | None:
+    try:
+        trace_metadata = builder_trace_metadata(model_name=model_name, model_source=model_source, config=trace_config)
+        if _synthetic_langsmith_excluded(trace_metadata):
+            return None
+        tracing_config = get_tracing_config()
+        client = _governed_structural_client(tracing_config)
+        # The tracer metadata stays on the in-process run objects (identity
+        # matching for completion annotation); the client strips it on export.
+        tracer = build_structural_tracer(
+            project_name=tracing_config.project,
+            client=client,
+            tags=[_BUILDER_BASE_TAG],
+            metadata={**trace_metadata, TRACE_MODE_METADATA_KEY: GOVERNED_STRUCTURAL_TRACE_MODE},
+        )
+    except Exception as exc:  # noqa: BLE001 - never fall back to an unredacted client.
+        logger.warning(
+            "builder_langsmith_governed_structural status=unavailable error_class=%s",
+            exc.__class__.__name__,
+        )
+        return None
+    _ACTIVE_BUILDER_TRACERS.add(tracer)
+    configured = agent.with_config(
+        {
+            **base_config,
+            "callbacks": [tracer],
+            "metadata": {**base_config["metadata"], TRACE_MODE_METADATA_KEY: GOVERNED_STRUCTURAL_TRACE_MODE},
+        }
+    )
+    _copy_recursion_limit(agent, configured)
+    logger.info("builder_langsmith_governed_structural status=attached mode=%s", GOVERNED_STRUCTURAL_TRACE_MODE)
+    return GovernedStructuralTraceRunnable(configured, client=client, project_name=tracing_config.project, tracer=tracer)
+
+
+def _copy_recursion_limit(source: Any, target: Any) -> None:
+    if hasattr(source, "recursion_limit"):
+        target.recursion_limit = source.recursion_limit
+
+
+def wrap_governed_builder_runnable(
+    agent: Any,
+    *,
+    model_name: str | None = None,
+    model_source: str | None = None,
+    trace_config: dict[str, Any] | None = None,
+) -> Any:
+    """Observability for a memory-governed (MEM00) Builder graph.
+
+    Default: fully excluded from LangSmith (copy-safe trace-disabled wrapper).
+    With ``SOPHIA_GOVERNED_STRUCTURAL_TRACING`` on and Builder tracing
+    configured: structure-only tracing through the redacting client. The
+    ordinary Builder tracer is never attached to a governed graph, and a
+    synthetic run stays excluded whatever the toggle says.
+    """
+
+    base_config: dict[str, Any] = {
+        "run_name": _BUILDER_RUN_NAME,
+        "tags": [_BUILDER_BASE_TAG],
+        "metadata": {
+            "sophia_component": "builder",
+            "builder_model_name": model_name,
+            "builder_model_source": model_source,
+        },
+    }
+    if governed_structural_tracing_enabled() and langsmith_builder_tracing_enabled() and not _synthetic_langsmith_excluded(trace_config):
+        structural = _governed_structural_runnable(
+            agent,
+            base_config=base_config,
+            model_name=model_name,
+            model_source=model_source,
+            trace_config=trace_config,
+        )
+        if structural is not None:
+            return structural
+    configured = agent.with_config(base_config)
+    _copy_recursion_limit(agent, configured)
+    return LangSmithTraceDisabledRunnable(configured)
 
 
 def _is_langgraph_pregel(runnable: Any) -> bool:
@@ -1618,7 +1852,7 @@ def _create_qc_feedback(run_tree: Any, qc_results: list[dict[str, Any]]) -> None
         logger.debug("LangSmith QC feedback creation failed", exc_info=True)
 
 
-def _create_terminal_feedback(run_tree: Any, artifact: dict[str, Any]) -> None:
+def _create_terminal_feedback(run_tree: Any, artifact: dict[str, Any], *, structural: bool = False) -> None:
     terminal_status = str(artifact.get("terminal_status") or artifact.get("status") or "").strip()
     if terminal_status not in {"completed", "failed", "timed_out"}:
         return
@@ -1630,22 +1864,67 @@ def _create_terminal_feedback(run_tree: Any, artifact: dict[str, Any]) -> None:
         NAMESPACE_URL,
         f"sophia-builder-terminal:{run_id}:{terminal_reason}",
     )
-    try:
-        _feedback_client().create_feedback(
-            run_id=run_id,
-            key="builder_terminal_success",
-            feedback_id=feedback_id,
-            score=1.0 if terminal_status == "completed" else 0.0,
-            comment=json.dumps(
-                {
-                    "terminal_status": terminal_status,
-                    "terminal_reason": terminal_reason,
-                },
-                ensure_ascii=False,
-            ),
+    feedback: dict[str, Any] = {
+        "run_id": run_id,
+        "key": "builder_terminal_success",
+        "feedback_id": feedback_id,
+        "score": 1.0 if terminal_status == "completed" else 0.0,
+    }
+    if not structural:
+        feedback["comment"] = json.dumps(
+            {
+                "terminal_status": terminal_status,
+                "terminal_reason": terminal_reason,
+            },
+            ensure_ascii=False,
         )
+    try:
+        client = _governed_structural_client() if structural else _feedback_client()
+        client.create_feedback(**feedback)
     except Exception:  # noqa: BLE001
         logger.debug("LangSmith terminal feedback creation failed", exc_info=True)
+
+
+def _annotate_governed_structural_completion(
+    state: dict[str, Any],
+    artifact: dict[str, Any],
+    run_tree: Any,
+) -> bool:
+    """Content-free completion fields only: allowlisted codes, counts and ids.
+
+    No QC feedback (its reasons are model text) and no feedback comment. The
+    redacting client would strip the rest anyway; filtering here keeps the
+    in-process run objects equally clean.
+    """
+
+    raw_metadata, raw_tags, _qc_results = builder_observability_payload(state, artifact)
+    metadata = structural_metadata(raw_metadata)
+    tags = structural_tags(raw_tags)
+    local_root_run = _local_root_run_tree(run_tree)
+    for target in (run_tree, local_root_run) if local_root_run is not run_tree else (run_tree,):
+        _add_run_metadata(target, metadata)
+        _add_run_tags(target, tags)
+    _close_open_builder_model_runs(local_root_run, artifact)
+    _patch_run_tree(local_root_run)
+    _create_terminal_feedback(local_root_run, artifact, structural=True)
+    trace_run_id = str(getattr(run_tree, "id", "") or "") or None
+    local_root_run_id = str(getattr(local_root_run, "id", "") or "") or None
+    artifact["builder_trace_run_id"] = trace_run_id
+    artifact["builder_trace_id"] = str(getattr(run_tree, "trace_id", "") or "") or None
+    artifact["builder_parent_run_id"] = str(getattr(run_tree, "parent_run_id", "") or "") or None
+    artifact["builder_local_root_run_id"] = local_root_run_id
+    artifact["builder_trace_root_run_id"] = local_root_run_id
+    # Governed structural runs are standalone roots: the distributed voice
+    # parent is deliberately not inherited.
+    artifact["builder_distributed_parent_applied"] = None
+    artifact["builder_langsmith_project"] = _safe_metadata_value(get_tracing_config().project)
+    logger.info(
+        "Sophia builder LangSmith completion annotation attached: mode=%s run_id=%s local_root_run_id=%s",
+        GOVERNED_STRUCTURAL_TRACE_MODE,
+        trace_run_id,
+        local_root_run_id,
+    )
+    return True
 
 
 def annotate_builder_completion(state: dict[str, Any], artifact: dict[str, Any]) -> bool:
@@ -1668,15 +1947,23 @@ def annotate_builder_completion(state: dict[str, Any], artifact: dict[str, Any])
         artifact["ordinary_analytics_excluded"] = True
         return False
 
+    policy = active_trace_policy()
     identity = _completion_identity(state, artifact)
     run_tree = _completion_run_tree(state, artifact)
     if run_tree is None:
-        if langsmith_builder_tracing_enabled():
+        if policy == GOVERNED_STRUCTURAL_TRACE_MODE:
+            logger.info(
+                "Sophia builder LangSmith completion annotation skipped: mode=%s reason=no_matching_run_tree",
+                GOVERNED_STRUCTURAL_TRACE_MODE,
+            )
+        elif langsmith_builder_tracing_enabled():
             logger.warning(
                 "Sophia builder LangSmith completion annotation skipped; no active run tree: %s",
                 _langsmith_log_context(),
             )
         return False
+    if policy == GOVERNED_STRUCTURAL_TRACE_MODE:
+        return _annotate_governed_structural_completion(state, artifact, run_tree)
     builder_run_id = identity.get("run_id")
     if builder_run_id:
         artifact.setdefault("builder_run_id", builder_run_id)
