@@ -1365,6 +1365,7 @@ class GeminiVoiceConnectResponse(BaseModel):
     langsmith_trace_unavailable_reason: Literal[
         "synthetic_isolation_policy",
         "governed_synthetic_fault",
+        "langsmith_ingest_rejected",
     ] | None = None
     trace_fault: dict[str, Any] | None = None
     audio_capture_enabled: bool = False

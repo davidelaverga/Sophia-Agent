@@ -46,6 +46,10 @@ from voice.realtime.gemini_browser_dogfood import (
     GeminiEphemeralTokenMintError,
     GeminiRelaySourceMetadata,
 )
+from voice.realtime.gemini_langsmith_tracing import (
+    flush_shared_ingest_clients,
+    log_gemini_live_langsmith_startup_status,
+)
 from voice.realtime.gemini_production_session import GeminiProductionBrowserSessionManager
 from voice.realtime.openai_browser_dogfood import (
     OpenAIBrowserDogfoodSessionManager,
@@ -96,9 +100,21 @@ VOICE_LAB_TRACE_FAULT_SCHEMA = "sophia_voice_lab_trace_fault_v1"
 async def _sophia_voice_lifespan(app: FastAPI):  # noqa: ANN201
     async with runner_http_lifespan(app):
         try:
+            log_gemini_live_langsmith_startup_status()
+        except Exception:
+            logger.warning("gemini.langsmith.startup status=unavailable")
+        try:
             yield
         finally:
-            await gemini_production_browser_sessions.close_all()
+            try:
+                await gemini_production_browser_sessions.close_all()
+            finally:
+                # Session close only queues the root patch; drain the shared
+                # LangSmith clients here with the same bounded cap.
+                try:
+                    await asyncio.to_thread(flush_shared_ingest_clients)
+                except Exception:
+                    logger.warning("gemini.langsmith.shutdown_flush status=failed")
 
 
 def _voice_event_cursor(request: Request) -> int | None:
