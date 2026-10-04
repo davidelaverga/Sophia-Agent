@@ -12,6 +12,8 @@ import {
   useRecapArtifactsLoader,
 } from '../../app/recap/[sessionId]/useRecapArtifactsLoader';
 
+import { canonicalCandidate, canonicalRecap as canonicalRecapFor, type CanonicalFixtureState } from './canonical-recap-fixture';
+
 const markRecapViewedMock = vi.fn();
 const getSessionHistoryEntryMock = vi.fn();
 
@@ -629,5 +631,259 @@ describe('useRecapArtifactsLoader', () => {
     });
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+const POLL_SESSION = 'poll-session';
+const POLL_RECAP_URL = `/api/sophia/sessions/${POLL_SESSION}/recap`;
+const canonicalRecap = (state: CanonicalFixtureState, options?: Parameters<typeof canonicalRecapFor>[2]) =>
+  canonicalRecapFor(POLL_SESSION, state, options);
+
+async function settle() {
+  await act(async () => {
+    for (let i = 0; i < 20; i += 1) await Promise.resolve();
+  });
+}
+
+async function advance(ms: number) {
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(ms);
+  });
+  await settle();
+}
+
+function recapGets(fetchMock: ReturnType<typeof vi.fn>, url = POLL_RECAP_URL) {
+  return fetchMock.mock.calls.filter(([input]) => String(input) === url);
+}
+
+describe('useRecapArtifactsLoader canonical processing polling', () => {
+  // A fresh function per render would re-run the loader effect every render.
+  let stablePublish = vi.fn();
+
+  beforeEach(() => {
+    stablePublish = vi.fn();
+    localStorage.clear();
+    clearRecentSessionEndHint();
+    vi.clearAllMocks();
+    getSessionHistoryEntryMock.mockReturnValue(undefined);
+    vi.useFakeTimers();
+    vi.spyOn(AbortSignal, 'timeout').mockImplementation(() => new AbortController().signal);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it('re-reads a canonical processing recap and shows the review without a manual retry (codex-054)', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(canonicalRecap('processing')))
+      .mockResolvedValueOnce(jsonResponse(canonicalRecap('complete', { candidates: [canonicalCandidate(1), canonicalCandidate(2)] })));
+    global.fetch = fetchMock as unknown as typeof fetch;
+    const setArtifacts = vi.fn();
+    const { result } = renderHook(() => useRecapArtifactsLoader({ sessionId: POLL_SESSION, artifacts: null, setArtifacts }));
+    await settle();
+
+    expect(result.current.status).toBe('processing');
+    expect(result.current.autoRefreshing).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    await advance(1500);
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    for (const [, init] of fetchMock.mock.calls) expect(init).toMatchObject({ method: 'GET', cache: 'no-store' });
+    expect(result.current.status).toBe('ready');
+    expect(result.current.autoRefreshing).toBe(false);
+    expect(setArtifacts).toHaveBeenLastCalledWith(POLL_SESSION, expect.objectContaining({
+      status: 'ready',
+      memoryCandidates: [
+        expect.objectContaining({ id: canonicalCandidate(1).candidate_id, candidateRevision: 1, reviewState: 'pending_review' }),
+        expect.objectContaining({ id: canonicalCandidate(2).candidate_id }),
+      ],
+    }));
+    expect(markRecapViewedMock).toHaveBeenCalledWith(POLL_SESSION);
+
+    await advance(120_000);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps the processing view on screen while a re-read is in flight', async () => {
+    let finishPoll!: (response: Response) => void;
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(canonicalRecap('processing')))
+      .mockImplementationOnce(() => new Promise<Response>((resolve) => { finishPoll = resolve; }));
+    global.fetch = fetchMock as unknown as typeof fetch;
+    const { result } = renderHook(() => useRecapArtifactsLoader({ sessionId: POLL_SESSION, artifacts: null, setArtifacts: stablePublish }));
+    await settle();
+    await advance(1500);
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result.current.status).toBe('processing');
+
+    await act(async () => { finishPoll(jsonResponse(canonicalRecap('complete', { candidates: [canonicalCandidate(1)] }))); });
+    await settle();
+    expect(result.current.status).toBe('ready');
+  });
+
+  it.each([
+    ['nothing was produced', {}, 'ready'],
+    ['produced candidates are no longer eligible', { produced: 2, approved: 1, invalidated: 1 }, 'no_pending'],
+    ['every produced candidate was already decided', { produced: 2, approved: 1, rejected: 1 }, 'reviewed'],
+  ] as const)('ends polling in the truthful empty state when complete and %s', async (_label, summary, expected) => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(canonicalRecap('processing')))
+      .mockResolvedValueOnce(jsonResponse(canonicalRecap('complete', { summary })));
+    global.fetch = fetchMock as unknown as typeof fetch;
+    const setArtifacts = vi.fn();
+    const { result } = renderHook(() => useRecapArtifactsLoader({ sessionId: POLL_SESSION, artifacts: null, setArtifacts }));
+    await settle();
+    await advance(1500);
+
+    expect(result.current.status).toBe(expected);
+    expect(result.current.autoRefreshing).toBe(false);
+    expect(setArtifacts).toHaveBeenLastCalledWith(POLL_SESSION, expect.objectContaining({ status: 'ready', memoryCandidates: [] }));
+    await advance(120_000);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('stops after the bounded budget and reports still processing, not an error', async () => {
+    const fetchMock = vi.fn().mockImplementation(() => Promise.resolve(jsonResponse(canonicalRecap('processing'))));
+    global.fetch = fetchMock as unknown as typeof fetch;
+    const { result } = renderHook(() => useRecapArtifactsLoader({ sessionId: POLL_SESSION, artifacts: null, setArtifacts: stablePublish }));
+    await settle();
+
+    await advance(60_000);
+    expect(result.current.status).toBe('processing');
+    expect(result.current.autoRefreshing).toBe(true);
+
+    await advance(60_000);
+    // Initial read plus 11 re-reads (1.5 s backing off to 15 s, ~70 s of waiting).
+    expect(fetchMock).toHaveBeenCalledTimes(12);
+    expect(recapGets(fetchMock)).toHaveLength(12);
+    expect(result.current.status).toBe('processing');
+    expect(result.current.autoRefreshing).toBe(false);
+    expect(result.current.telemetry.recap.errorCode).toBeNull();
+
+    await advance(300_000);
+    expect(fetchMock).toHaveBeenCalledTimes(12);
+  });
+
+  it('restarts a fresh budget on manual refresh after exhaustion', async () => {
+    const fetchMock = vi.fn().mockImplementation(() => Promise.resolve(jsonResponse(canonicalRecap('processing'))));
+    global.fetch = fetchMock as unknown as typeof fetch;
+    const { result } = renderHook(() => useRecapArtifactsLoader({ sessionId: POLL_SESSION, artifacts: null, setArtifacts: stablePublish }));
+    await settle();
+    await advance(120_000);
+    expect(fetchMock).toHaveBeenCalledTimes(12);
+    expect(result.current.autoRefreshing).toBe(false);
+
+    fetchMock.mockImplementationOnce(() => Promise.resolve(jsonResponse(canonicalRecap('processing'))))
+      .mockImplementationOnce(() => Promise.resolve(jsonResponse(canonicalRecap('complete', { candidates: [canonicalCandidate(3)] }))));
+    act(() => { result.current.refresh(); });
+    await settle();
+    expect(fetchMock).toHaveBeenCalledTimes(13);
+    expect(result.current.status).toBe('processing');
+    expect(result.current.autoRefreshing).toBe(true);
+
+    await advance(1500);
+    expect(fetchMock).toHaveBeenCalledTimes(14);
+    expect(result.current.status).toBe('ready');
+  });
+
+  it('treats awaiting_finalization like processing', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(canonicalRecap('awaiting_finalization')))
+      .mockResolvedValueOnce(jsonResponse(canonicalRecap('awaiting_finalization')))
+      .mockResolvedValueOnce(jsonResponse(canonicalRecap('complete', { candidates: [canonicalCandidate(1)] })));
+    global.fetch = fetchMock as unknown as typeof fetch;
+    const { result } = renderHook(() => useRecapArtifactsLoader({ sessionId: POLL_SESSION, artifacts: null, setArtifacts: stablePublish }));
+    await settle();
+    expect(result.current.status).toBe('processing');
+    expect(result.current.autoRefreshing).toBe(true);
+
+    await advance(1500);
+    expect(result.current.status).toBe('processing');
+    await advance(1500);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(result.current.status).toBe('ready');
+  });
+
+  it('stops polling on unmount', async () => {
+    const fetchMock = vi.fn().mockImplementation(() => Promise.resolve(jsonResponse(canonicalRecap('processing'))));
+    global.fetch = fetchMock as unknown as typeof fetch;
+    const { unmount } = renderHook(() => useRecapArtifactsLoader({ sessionId: POLL_SESSION, artifacts: null, setArtifacts: stablePublish }));
+    await settle();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    unmount();
+    await advance(120_000);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('stops polling the old session when the session changes', async () => {
+    const fetchMock = vi.fn().mockImplementation((input: string) => Promise.resolve(input === POLL_RECAP_URL
+      ? jsonResponse(canonicalRecap('processing'))
+      : jsonResponse({ detail: 'Not found' }, 404)));
+    global.fetch = fetchMock as unknown as typeof fetch;
+    const { result, rerender } = renderHook(({ sessionId }) => useRecapArtifactsLoader({ sessionId, artifacts: null, setArtifacts: stablePublish }), {
+      initialProps: { sessionId: POLL_SESSION },
+    });
+    await settle();
+    rerender({ sessionId: 'other-session' });
+    await settle();
+    await advance(120_000);
+
+    expect(recapGets(fetchMock)).toHaveLength(1);
+    expect(recapGets(fetchMock, '/api/sophia/sessions/other-session/recap')).toHaveLength(1);
+    expect(result.current.status).toBe('not_found');
+  });
+
+  it('drops an in-flight re-read that resolves after the session changed', async () => {
+    let finishPoll!: (response: Response) => void;
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(canonicalRecap('processing')))
+      .mockImplementationOnce(() => new Promise<Response>((resolve) => { finishPoll = resolve; }))
+      .mockResolvedValue(jsonResponse({ detail: 'Not found' }, 404));
+    global.fetch = fetchMock as unknown as typeof fetch;
+    const setArtifacts = vi.fn();
+    const { result, rerender } = renderHook(({ sessionId }) => useRecapArtifactsLoader({ sessionId, artifacts: null, setArtifacts }), {
+      initialProps: { sessionId: POLL_SESSION },
+    });
+    await settle();
+    await advance(1500);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    rerender({ sessionId: 'other-session' });
+    await settle();
+    await act(async () => { finishPoll(jsonResponse(canonicalRecap('complete', { candidates: [canonicalCandidate(1, 'STALE CANDIDATE')] }))); });
+    await settle();
+
+    expect(JSON.stringify(setArtifacts.mock.calls)).not.toContain('STALE CANDIDATE');
+    expect(result.current.status).toBe('not_found');
+  });
+
+  it('cancels the previous owner polling and gives the new owner its own budget', async () => {
+    const fetchMock = vi.fn().mockImplementation(() => Promise.resolve(jsonResponse(canonicalRecap('processing'))));
+    global.fetch = fetchMock as unknown as typeof fetch;
+    const { result, rerender } = renderHook(({ ownerId }: { ownerId: string | null }) => useRecapArtifactsLoader({
+      sessionId: POLL_SESSION, ownerId, artifacts: null, setArtifacts: stablePublish,
+    }), { initialProps: { ownerId: 'owner-a' as string | null } });
+    await settle();
+    await advance(500);
+    rerender({ ownerId: 'owner-b' });
+    await settle();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    // owner-a's re-read would have fired at 1.5 s; owner-b's fires at 2.0 s.
+    await advance(1100);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    await advance(400);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+
+    rerender({ ownerId: null });
+    await settle();
+    await advance(120_000);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(result.current.status).toBe('loading');
+    expect(result.current.autoRefreshing).toBe(false);
   });
 });

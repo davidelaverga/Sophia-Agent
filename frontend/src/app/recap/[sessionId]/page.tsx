@@ -82,7 +82,7 @@ export default function RecapPage() {
     return map;
   }, [decisions]);
 
-  const { status, reload, telemetry } = useRecapArtifactsLoader({
+  const { status, autoRefreshing, reload, refresh, telemetry } = useRecapArtifactsLoader({
     sessionId,
     ownerId,
     artifacts,
@@ -200,9 +200,10 @@ export default function RecapPage() {
         />
         
         <main className="min-h-screen flex items-center justify-center px-4">
-          <RecapEmptyState 
+          <RecapEmptyState
             status={status === 'ready' ? 'unavailable' : status}
-            onRetry={handleRetry}
+            autoRefreshing={autoRefreshing}
+            onRetry={status === 'processing' ? refresh : handleRetry}
             onDismiss={() => router.push('/journal')}
           />
         </main>

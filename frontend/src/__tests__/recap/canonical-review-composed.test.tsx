@@ -13,6 +13,8 @@ import { GET as recentGET } from '../../app/api/memory/recent/route';
 import { GET } from '../../app/api/sophia/sessions/[sessionId]/recap/route';
 import { useRecapArtifactsLoader } from '../../app/recap/[sessionId]/useRecapArtifactsLoader';
 
+import { canonicalCandidate, canonicalRecap } from './canonical-recap-fixture';
+
 describe.skipIf(!process.env.MEM00_REVIEW_COMPOSED_FIXTURE)('actual SQL -> Gateway -> Next -> recap', () => {
   it('preserves the same complete snapshot through the scoped recent proxy, ignoring competing copies', async () => {
     const fixturePath = process.env.MEM00_REVIEW_COMPOSED_FIXTURE;
@@ -84,6 +86,53 @@ describe.skipIf(!process.env.MEM00_REVIEW_COMPOSED_FIXTURE)('actual SQL -> Gatew
     } finally {
       await act(async () => hook.unmount());
       vi.unstubAllGlobals();
+    }
+  });
+});
+
+describe('Gateway -> Next -> recap while canonical extraction is processing', () => {
+  it('re-reads through the real Next route until the review is complete (codex-054)', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(AbortSignal, 'timeout').mockImplementation(() => new AbortController().signal);
+    const envelopes = [
+      canonicalRecap('review-session', 'processing', { ownerId: 'review-owner' }).memory_review,
+      canonicalRecap('review-session', 'complete', { ownerId: 'review-owner', candidates: [canonicalCandidate(1)] }).memory_review,
+    ];
+    upstream.mockReset();
+    upstream.mockImplementation(async (url: string, init: RequestInit) => {
+      expect(new URL(url, 'https://synthetic.invalid').pathname).toBe('/api/sophia/review-owner/sessions/review-session/recap');
+      expect(init).toMatchObject({ method: 'GET', cache: 'no-store' });
+      return new Response(JSON.stringify({ memory_review: envelopes.shift() }));
+    });
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      expect(init?.method).toBe('GET');
+      const result = await GET({ nextUrl: new URL(url, 'http://synthetic.invalid') } as NextRequest, { params: Promise.resolve({ sessionId: 'review-session' }) });
+      expect(result.headers.get('cache-control')).toBe('no-store');
+      return result;
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const setArtifacts = vi.fn();
+    const hook = renderHook(() => useRecapArtifactsLoader({ sessionId: 'review-session', artifacts: null, setArtifacts }));
+    const settle = () => act(async () => { for (let i = 0; i < 20; i += 1) await Promise.resolve(); });
+    try {
+      await settle();
+      expect(hook.result.current.status).toBe('processing');
+      expect(hook.result.current.autoRefreshing).toBe(true);
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(1500); });
+      await settle();
+
+      expect(hook.result.current.status).toBe('ready');
+      expect(upstream).toHaveBeenCalledTimes(2);
+      expect(setArtifacts).toHaveBeenLastCalledWith('review-session', expect.objectContaining({
+        memoryCandidates: [expect.objectContaining({ id: canonicalCandidate(1).candidate_id, candidateRevision: 1 })],
+      }));
+    } finally {
+      await act(async () => hook.unmount());
+      vi.unstubAllGlobals();
+      vi.restoreAllMocks();
+      vi.useRealTimers();
+      upstream.mockReset();
     }
   });
 });
