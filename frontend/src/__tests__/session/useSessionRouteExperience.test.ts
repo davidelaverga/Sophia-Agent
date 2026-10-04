@@ -641,6 +641,45 @@ describe('useSessionRouteExperience', () => {
       expect(rawSendMessage).toHaveBeenCalledTimes(1);
     });
 
+    it('threads the voice call id, message id and source record wait into the diagnostics lines', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      let sentMessageId: string | null = null;
+      const rawSendMessage = vi.fn(async (input: { sourceIntent?: { action: { message_id: string } } }) => {
+        sentMessageId = input.sourceIntent?.action.message_id ?? null;
+        const params = useSessionOutboundSendMock.mock.calls[useSessionOutboundSendMock.mock.calls.length - 1][0] as {
+          onSourceRecorded?: (messageId: string, sourceRecordMs: number) => void;
+        };
+        if (sentMessageId) params.onSourceRecorded?.(sentMessageId, 42);
+        reportTurnError(sentMessageId, '{"error":"memory_source_send_refused"}', false);
+      });
+      useSessionOutboundSendMock.mockReturnValue(rawSendMessage);
+      const { result } = renderGoverned();
+      await waitFor(() => expect(result.current.sourceProfileReady).toBe(true));
+
+      let pending!: Promise<VoiceBuilderToolResult>;
+      act(() => { pending = startCall(Date.now()); });
+      await expect(pending).resolves.toMatchObject({ ok: false, reason: 'builder_request_not_sent' });
+
+      const records = warn.mock.calls
+        .filter(([line]) => typeof line === 'string' && line.startsWith('[sophia-diag] ') && line.includes('"ev":"voice_builder.'))
+        .map(([line]) => JSON.parse((line as string).slice('[sophia-diag] '.length)) as Record<string, unknown>);
+      const sendLine = records.find((record) => record.ev === 'voice_builder.send');
+      const outcomeLine = records.find((record) => record.ev === 'voice_builder.outcome');
+      expect(sentMessageId).toEqual(expect.any(String));
+      expect(sendLine).toMatchObject({ message_id: sentMessageId, thread_id: governedThread, outcome: 'recorded', source_record_ms: 42 });
+      expect(typeof sendLine?.app_version_ms).toBe('number');
+      expect(outcomeLine).toMatchObject({
+        call: sendLine?.call,
+        message_id: sentMessageId,
+        thread_id: governedThread,
+        outcome: 'builder_request_not_sent',
+        send_error: 'memory_source_send_refused',
+        source_record_ms: 42,
+      });
+      expect(warn.mock.calls.flat().map(String).join('\n')).not.toContain('EU AI Act');
+      warn.mockRestore();
+    });
+
     it('reports a refusal after the turn acted as unconfirmed, at once', async () => {
       const rawSendMessage = vi.fn(async (input: { sourceIntent?: { action: { message_id: string } } }) => {
         reportTurnError(input.sourceIntent?.action.message_id ?? null, 'memory_context_rotation_required', true);

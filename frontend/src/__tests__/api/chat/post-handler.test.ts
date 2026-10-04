@@ -645,3 +645,117 @@ describe('handleChatPost long-message spill (instead of truncation)', () => {
     expect(payload.message).toBe('short and sweet');
   });
 });
+
+describe('handleChatPost governed send diagnostics line', () => {
+  const SENTINEL = 'PRIVATE_SYNTHETIC_SENTINEL_CONTENT';
+  const MESSAGE_ID = '0190f2a3-0000-7000-8000-00000000a001';
+  const THREAD_ID = '0190f2a3-0000-7000-8000-00000000d001';
+  let warn: ReturnType<typeof vi.spyOn>;
+
+  const governedPayload = (sourceAction: Record<string, unknown> | null) => ({
+    kind: 'valid',
+    data: {
+      userMessage: SENTINEL,
+      sessionId: '123e4567-e89b-12d3-a456-426614174000',
+      threadId: THREAD_ID,
+      sessionType: 'chat',
+      contextMode: 'life',
+      platform: 'voice',
+      rawMessageLength: SENTINEL.length,
+      attachedFiles: [],
+      ...(sourceAction ? { sourceAction } : {}),
+    },
+  });
+  const sourceAction = {
+    command_key: 'original-source-command',
+    message_id: MESSAGE_ID,
+    thread_id: THREAD_ID,
+    content: SENTINEL,
+    expected_clear_epoch: 1,
+  };
+
+  const diagLines = () => warn.mock.calls
+    .filter(([line]) => typeof line === 'string' && line.startsWith('[sophia-diag] ') && line.includes('"chat.governed_send"'));
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    getAuthenticatedUserIdMock.mockResolvedValue('session-user-secret-id');
+    getUserScopedAuthTokenMock.mockResolvedValue('secret-bearer-token');
+    userOwnsThreadMock.mockResolvedValue(true);
+    getPrimaryGatewayUrlMock.mockReturnValue('https://gateway.test');
+    parseAndValidateChatPayloadMock.mockReturnValue(governedPayload(sourceAction));
+    fetchBackendStreamWithBootstrapMock.mockResolvedValue({
+      upstream: new Response('event: message\ndata: ok\n\n', {
+        status: 200,
+        headers: { 'Content-Type': 'text/event-stream' },
+      }),
+      threadId: THREAD_ID,
+    });
+  });
+
+  afterEach(() => {
+    warn.mockRestore();
+  });
+
+  it('emits one single-string timing line with ids and no content, user id or token', async () => {
+    const response = await handleChatPost({ json: async () => ({ message: SENTINEL }) } as never);
+    expect(response.status).toBe(200);
+
+    const lines = diagLines();
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toHaveLength(1);
+    const line = lines[0][0] as string;
+    const record = JSON.parse(line.slice('[sophia-diag] '.length)) as Record<string, unknown>;
+    expect(record).toMatchObject({
+      v: 1,
+      ev: 'chat.governed_send',
+      message_id: MESSAGE_ID,
+      thread_id: THREAD_ID,
+      upstream_status: 200,
+      outcome: 'stream_started',
+    });
+    for (const key of ['boundary_ms', 'session_ms', 'token_ms', 'authority_ms', 'ownership_ms', 'upstream_headers_ms', 'total_ms']) {
+      expect(typeof record[key]).toBe('number');
+    }
+    const allLogged = warn.mock.calls.map((args) => args.map(String).join(' ')).join('\n');
+    expect(allLogged).not.toContain(SENTINEL);
+    expect(allLogged).not.toContain('session-user-secret-id');
+    expect(allLogged).not.toContain('secret-bearer-token');
+    expect(allLogged).not.toContain('original-source-command');
+  });
+
+  it('records a refused governed upstream as refused with its status', async () => {
+    fetchBackendStreamWithBootstrapMock.mockResolvedValue({
+      upstream: new Response(JSON.stringify({ detail: SENTINEL }), {
+        status: 403, headers: { 'Content-Type': 'application/json' } }),
+      threadId: THREAD_ID,
+    });
+
+    const response = await handleChatPost({ json: async () => ({ message: SENTINEL }) } as never);
+    expect(response.status).toBe(403);
+
+    const record = JSON.parse((diagLines()[0][0] as string).slice('[sophia-diag] '.length)) as Record<string, unknown>;
+    expect(record).toMatchObject({ outcome: 'upstream_refused', upstream_status: 403, message_id: MESSAGE_ID });
+    expect(warn.mock.calls.flat().map(String).join('\n')).not.toContain(SENTINEL);
+  });
+
+  it('records an early governed refusal without upstream timing', async () => {
+    getAuthenticatedUserIdMock.mockResolvedValue(null);
+
+    const response = await handleChatPost({ json: async () => ({ message: SENTINEL }) } as never);
+    expect(response.status).toBe(401);
+
+    const record = JSON.parse((diagLines()[0][0] as string).slice('[sophia-diag] '.length)) as Record<string, unknown>;
+    expect(record).toMatchObject({ outcome: 'not_authenticated', upstream_headers_ms: null, upstream_status: null });
+    expect(fetchBackendStreamWithBootstrapMock).not.toHaveBeenCalled();
+  });
+
+  it('emits no governed line for a legacy send', async () => {
+    parseAndValidateChatPayloadMock.mockReturnValue(governedPayload(null));
+
+    const response = await handleChatPost({ json: async () => ({ message: SENTINEL }) } as never);
+    expect(response.status).toBe(200);
+    expect(diagLines()).toHaveLength(0);
+  });
+});

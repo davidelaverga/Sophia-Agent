@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState, type Dispatch, type SetStateAction } from 'react';
 
+import { diagErrorType, diagLog } from '../lib/diag-log';
 import { recordSophiaCaptureEvent } from '../lib/session-capture';
 import { recordSyntheticBuilderCanvasProjection } from '../lib/synthetic-builder-evidence';
 import type {
@@ -40,12 +41,15 @@ const TERMINAL_STATUSES = new Set<BuilderCanvasTaskSnapshotV1['status']>([
   'cancelled',
 ]);
 
-function shortId(value: string | null | undefined): string | null {
-  return value ? value.slice(0, 12) : null;
+// One single-line, content-free diagnostics event (`builder_canvas.<event>`).
+function logCanvasClient(event: string, payload: Record<string, unknown>) {
+  diagLog(`builder_canvas.${event}`, payload);
 }
 
-function logCanvasClient(event: string, payload: Record<string, unknown>) {
-  console.warn('[builder-canvas]', event, payload);
+// Server receive-to-browser lag for one canvas event; null when unparseable.
+function canvasEventLagMs(occurredAt: string | undefined, receivedAtMs: number): number | null {
+  const occurredAtMs = typeof occurredAt === 'string' ? Date.parse(occurredAt) : Number.NaN;
+  return Number.isFinite(occurredAtMs) ? receivedAtMs - occurredAtMs : null;
 }
 
 function runKey(taskId: string, runId: string): string {
@@ -353,8 +357,8 @@ function recordEmptyPassiveSnapshotTelemetry(
   }
   context.snapshotTelemetrySignatureRef.current = signature;
   if (activeArtifactReview) {
-    logCanvasClient('builderSnapshotIgnoredForActiveArtifact', {
-      parent_thread_id: shortId(context.parentThreadId),
+    logCanvasClient('snapshot_ignored_for_active_artifact', {
+      parent_thread_id: context.parentThreadId,
       protected_existing_state: protectedExistingState,
     });
   }
@@ -381,25 +385,26 @@ async function applyBuilderCanvasSnapshotResponse(
   context: BuilderCanvasFeedContext,
   response: Response,
 ): Promise<void> {
-  logCanvasClient('snapshot-response', {
-    parent_thread_id: shortId(context.parentThreadId),
-    status: response.status,
+  logCanvasClient('snapshot_response', {
+    parent_thread_id: context.parentThreadId,
+    http_status: response.status,
     ok: response.ok,
   });
   if (!response.ok || context.isCancelled()) return;
   const snapshot = await response.json() as BuilderCanvasSnapshotV1;
-  logCanvasClient('snapshot-hydrated', {
-    parent_thread_id: shortId(context.parentThreadId),
-    active_task_id: shortId(snapshot.active_task?.task_id),
-    active_run_id: shortId(snapshot.active_task?.run_id),
+  logCanvasClient('snapshot_hydrated', {
+    parent_thread_id: context.parentThreadId,
+    active_task_id: snapshot.active_task?.task_id ?? null,
+    active_run_id: snapshot.active_task?.run_id ?? null,
     active_status: snapshot.active_task?.status ?? null,
     recent_events: snapshot.recent_events.length,
+    received_at: new Date().toISOString(),
   });
   const emptyPassiveSnapshot = isEmptyPassiveSnapshot(snapshot);
   const activeArtifactReview = context.artifactReviewActiveRef.current;
   if (emptyPassiveSnapshot) {
-    logCanvasClient('builderSnapshotEmptyPassive', {
-      parent_thread_id: shortId(context.parentThreadId),
+    logCanvasClient('snapshot_empty_passive', {
+      parent_thread_id: context.parentThreadId,
       active_artifact_review: activeArtifactReview,
     });
   }
@@ -416,9 +421,9 @@ function hydrateBuilderCanvasSnapshot(context: BuilderCanvasFeedContext): Promis
   return fetch(`${context.basePath}/snapshot`, { cache: 'no-store' })
     .then((response) => applyBuilderCanvasSnapshotResponse(context, response))
     .catch((error) => {
-      logCanvasClient('snapshot-error', {
-        parent_thread_id: shortId(context.parentThreadId),
-        error: error instanceof Error ? error.name : 'unknown',
+      logCanvasClient('snapshot_error', {
+        parent_thread_id: context.parentThreadId,
+        error_type: diagErrorType(error),
       });
     });
 }
@@ -426,15 +431,18 @@ function hydrateBuilderCanvasSnapshot(context: BuilderCanvasFeedContext): Promis
 function handleBuilderCanvasSseMessage(context: BuilderCanvasFeedContext, message: MessageEvent): void {
   if (context.isCancelled()) return;
   try {
+    const receivedAtMs = Date.now();
     const event = JSON.parse(message.data) as BuilderCanvasEventV1;
     logCanvasClient('event', {
-      parent_thread_id: shortId(context.parentThreadId),
-      event_id: shortId(event.event_id),
-      task_id: shortId(event.task_id),
-      run_id: shortId(event.run_id),
+      parent_thread_id: context.parentThreadId,
+      task_id: event.task_id,
+      run_id: event.run_id,
       sequence: event.sequence,
       kind: event.kind,
       status: event.status,
+      occurred_at: event.occurred_at,
+      received_at: new Date(receivedAtMs).toISOString(),
+      lag_ms: canvasEventLagMs(event.occurred_at, receivedAtMs),
     });
     context.setState((current) => {
       const next = applyEvent(current, event);
@@ -444,19 +452,19 @@ function handleBuilderCanvasSseMessage(context: BuilderCanvasFeedContext, messag
     });
   } catch {
     // Ignore malformed server data and leave the last truthful state visible.
-    logCanvasClient('event-malformed', {
-      parent_thread_id: shortId(context.parentThreadId),
+    logCanvasClient('event_malformed', {
+      parent_thread_id: context.parentThreadId,
     });
   }
 }
 
 function handleBuilderCanvasSseError(context: BuilderCanvasFeedContext): void {
   if (context.isCancelled()) return;
-  logCanvasClient('sse-error', {
-    parent_thread_id: shortId(context.parentThreadId),
+  logCanvasClient('sse_error', {
+    parent_thread_id: context.parentThreadId,
   });
-  logCanvasClient('sse-timeout-reconnect', {
-    parent_thread_id: shortId(context.parentThreadId),
+  logCanvasClient('sse_timeout_reconnect', {
+    parent_thread_id: context.parentThreadId,
   });
   context.setState((current) => ({ ...current, reconnecting: true }));
   void hydrateBuilderCanvasSnapshot(context);
@@ -464,8 +472,8 @@ function handleBuilderCanvasSseError(context: BuilderCanvasFeedContext): void {
 
 function handleBuilderCanvasSseOpen(context: BuilderCanvasFeedContext): void {
   if (context.isCancelled()) return;
-  logCanvasClient('sse-open', {
-    parent_thread_id: shortId(context.parentThreadId),
+  logCanvasClient('sse_open', {
+    parent_thread_id: context.parentThreadId,
   });
   context.setState((current) => ({ ...current, reconnecting: false }));
 }
@@ -496,9 +504,9 @@ export function useBuilderCanvas(
   useEffect(() => {
     committedProjectionEventsRef.current = new Set();
     setState(EMPTY_STATE);
-    logCanvasClient('hook-start', {
+    logCanvasClient('hook_start', {
       enabled,
-      parent_thread_id: shortId(parentThreadId),
+      parent_thread_id: parentThreadId ?? null,
     });
     if (!enabled || !parentThreadId) {
       return;

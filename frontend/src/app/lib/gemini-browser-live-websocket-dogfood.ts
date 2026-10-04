@@ -22,6 +22,7 @@ import {
   isCoreviewBuilderToolName,
   type CoreviewBuilderToolCallInput,
 } from './coreview-builder-actions';
+import { diagLog } from './diag-log';
 import {
   executeVoiceBuilderToolBridgeCall,
   hasRecentExplicitVoiceBuilderRequest,
@@ -1690,9 +1691,8 @@ function observeGeminiAudioContextState(audioContext: AudioContext): void {
     return;
   }
   audioContext.addEventListener('statechange', () => {
-    console.warn('[voice-audio]', 'context-state', {
+    diagLog('voice_audio.context_state', {
       state: typeof audioContext.state === 'string' ? audioContext.state : null,
-      at: new Date().toISOString(),
     });
   });
 }

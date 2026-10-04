@@ -21,6 +21,7 @@ import {
   USE_MOCK,
   secureLog,
 } from './config';
+import { createGovernedSendDiag, type GovernedSendDiag } from './governed-send-diag';
 import { maybeSpillLongMessage } from './message-spill';
 import { getMockResponse } from './mock';
 import {
@@ -99,7 +100,17 @@ function serviceUnavailableResponse(error: unknown, request: NextRequest): Respo
 }
 
 export async function handleChatPost(req: NextRequest): Promise<Response> {
-  const voiceLabDenied = await voiceLabOrdinaryProductBoundaryResponse();
+  // A governed send emits one content-free timing line however it ends.
+  const diag = createGovernedSendDiag();
+  try {
+    return await handleChatPostTimed(req, diag);
+  } finally {
+    diag.emit();
+  }
+}
+
+async function handleChatPostTimed(req: NextRequest, diag: GovernedSendDiag): Promise<Response> {
+  const voiceLabDenied = await diag.time('boundary', () => voiceLabOrdinaryProductBoundaryResponse());
   if (voiceLabDenied) return voiceLabDenied;
 
   if (!apiLimiters.chat.checkSync()) {
@@ -133,6 +144,9 @@ export async function handleChatPost(req: NextRequest): Promise<Response> {
       platform,
       sourceAction,
     } = parsed.data;
+    if (sourceAction) {
+      diag.markGoverned({ messageId: sourceAction.message_id, threadId: sourceAction.thread_id });
+    }
 
     // Defensive coalesce: parseAndValidateChatPayload guarantees this
     // field is an array, but tests that mock the validator might omit
@@ -142,14 +156,16 @@ export async function handleChatPost(req: NextRequest): Promise<Response> {
     // its own attachment to this list.)
     const attachedFiles = parsed.data.attachedFiles ?? [];
 
-    const userId = await getAuthenticatedUserId();
+    const userId = await diag.time('session', () => getAuthenticatedUserId());
     if (!userId) {
+      diag.setOutcome('not_authenticated');
       return new Response(
         JSON.stringify({ error: 'Not authenticated' }),
         { status: 401, headers: { 'Content-Type': 'application/json' } },
       );
     }
     if (!isValidSophiaUserId(userId)) {
+      diag.setOutcome('invalid_user');
       return new Response(
         JSON.stringify({ error: 'Invalid user_id format' }),
         { status: 400, headers: { 'Content-Type': 'application/json' } },
@@ -157,12 +173,16 @@ export async function handleChatPost(req: NextRequest): Promise<Response> {
     }
 
     const gatewayUrl = getPrimaryGatewayUrl();
-    const apiKey = await getUserScopedAuthToken();
+    const apiKey = await diag.time('token', () => getUserScopedAuthToken());
     let authority: 'legacy' | 'governed';
-    try { authority = await readChatMemoryAuthority(userId, apiKey, gatewayUrl, req.signal); }
-    catch { return new Response(JSON.stringify({ error: 'memory_authority_unavailable' }),
-      { status: 503, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } }); }
+    try { authority = await diag.time('authority', () => readChatMemoryAuthority(userId, apiKey, gatewayUrl, req.signal)); }
+    catch {
+      diag.setOutcome('authority_unavailable');
+      return new Response(JSON.stringify({ error: 'memory_authority_unavailable' }),
+        { status: 503, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } });
+    }
     if ((authority === 'governed') !== Boolean(sourceAction)) {
+      diag.setOutcome('authority_mismatch');
       return new Response(JSON.stringify({ error: 'memory_source_action_required_or_incompatible' }),
         { status: 409, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } });
     }
@@ -177,8 +197,11 @@ export async function handleChatPost(req: NextRequest): Promise<Response> {
     // over the ownership check — there's no backend thread to verify
     // against in the first place.
     if (USE_MOCK) {
-      if (sourceAction) return new Response(JSON.stringify({ error: 'Governed source runtime unavailable' }),
-        { status: 503, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } });
+      if (sourceAction) {
+        diag.setOutcome('runtime_unavailable');
+        return new Response(JSON.stringify({ error: 'Governed source runtime unavailable' }),
+          { status: 503, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } });
+      }
       secureLog('[/api/chat] Using mock streaming response');
       return mockResponse(sessionId, sessionType || undefined);
     }
@@ -211,8 +234,9 @@ export async function handleChatPost(req: NextRequest): Promise<Response> {
     // 404s on cross-user reads) would close this gap globally and
     // remove the recent-100 fallback ceiling. Separate backend ticket.
     if (typeof threadId === 'string' && threadId) {
-      const owns = await userOwnsThread(threadId, userId, apiKey, gatewayUrl);
+      const owns = await diag.time('ownership', () => userOwnsThread(threadId, userId, apiKey, gatewayUrl));
       if (!owns) {
+        diag.setOutcome('ownership_rejected');
         return new Response(
           JSON.stringify({
             error: 'Thread not owned by current user',
@@ -284,7 +308,9 @@ export async function handleChatPost(req: NextRequest): Promise<Response> {
     secureLog('[/api/chat] Forwarding to SSE backend');
 
     try {
-      const backendFetch = await fetchBackendStreamWithBootstrap(backendUrl, backendPayload, ...(req.signal ? [req.signal] : []));
+      const backendFetch = await diag.time('upstream_headers', () => (
+        fetchBackendStreamWithBootstrap(backendUrl, backendPayload, ...(req.signal ? [req.signal] : []))
+      ));
       const upstream = backendFetch.upstream;
       const responseThreadId = backendFetch.threadId;
 
@@ -299,6 +325,7 @@ export async function handleChatPost(req: NextRequest): Promise<Response> {
           // did not start. Any other status may have come after a run was
           // created and stays unconfirmed.
           const refused = upstream.status === 401 || upstream.status === 403;
+          diag.setOutcome(refused ? 'upstream_refused' : 'upstream_unconfirmed', upstream.status);
           secureLog('[/api/chat] governed upstream refused', { status: upstream.status });
           return new Response(JSON.stringify({ error: refused ? 'memory_source_send_refused' : 'memory_source_send_unconfirmed' }), {
             status: upstream.status, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
@@ -376,6 +403,7 @@ export async function handleChatPost(req: NextRequest): Promise<Response> {
       if (sourceAction && (!contentType.includes('text/event-stream') || !upstream.body)) {
         // The governed run contract is a stream. A JSON/body fallback is not
         // evidence that the original source turn completed.
+        diag.setOutcome('upstream_not_stream', upstream.status);
         await upstream.body?.cancel().catch(() => undefined);
         return new Response(JSON.stringify({ error: 'memory_source_send_unconfirmed' }), {
           status: 503, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
@@ -384,6 +412,7 @@ export async function handleChatPost(req: NextRequest): Promise<Response> {
 
       if (contentType.includes('text/event-stream') && upstream.body) {
         secureLog('[/api/chat] Proxying SSE stream');
+        diag.setOutcome('stream_started', upstream.status);
 
         const transformStream = createSSEToUIMessageStream(upstream.body, {
           thread_id: responseThreadId,
@@ -444,9 +473,11 @@ export async function handleChatPost(req: NextRequest): Promise<Response> {
         },
       });
     } catch (fetchError) {
+      diag.setOutcome('backend_unavailable');
       return backendUnavailableResponse(fetchError, req);
     }
   } catch (error) {
+    diag.setOutcome('service_unavailable');
     return serviceUnavailableResponse(error, req);
   }
 }

@@ -72,6 +72,25 @@ it('actual outbound hook records first and sends the canonical source ID through
     { body: { user_id: 'owner', session_id: session, thread_id: thread, memory_source_action: intent.action } });
   expect(fetchMock).toHaveBeenCalledTimes(1); // No unguarded session touch upsert.
 });
+it('reports the source record wait for diagnostics, and an observer failure never blocks the send', async () => {
+  const intent = createSourceSendIntent(profile, 'SYNTHETIC TIMED');
+  fetchMock.mockResolvedValue(new Response(JSON.stringify(actionReceipt(intent))));
+  const order: string[] = [];
+  const onSourceRecorded = vi.fn((messageId: string, sourceRecordMs: number) => {
+    order.push(`recorded:${messageId}:${typeof sourceRecordMs}`);
+    throw new Error('SYNTHETIC OBSERVER FAILURE');
+  });
+  const sendChatMessage = vi.fn(async () => { order.push('dispatched'); });
+  const { result } = renderHook(() => useSessionOutboundSend({ setMessageTimestamp: vi.fn(), chatStatus: 'ready', sendChatMessage,
+    hasValidBackendSessionId: true, chatRequestBody: { user_id: 'owner', session_id: session, thread_id: thread },
+    debugEnabled: false, markStreamTurnStarted: vi.fn(), showToast: vi.fn(), onSourceRecorded }));
+  await act(async () => result.current({ text: intent.action.content, sourceIntent: intent }));
+  expect(order).toEqual([`recorded:${intent.action.message_id}:number`, 'dispatched']);
+  fetchMock.mockRejectedValueOnce(new Error('SYNTHETIC OUTAGE'));
+  const retry = createSourceSendIntent(profile, 'SYNTHETIC TIMED OUTAGE');
+  await act(async () => { await expect(result.current({ text: retry.action.content, sourceIntent: retry })).rejects.toThrow('memory_source_action_unavailable'); });
+  expect(onSourceRecorded).toHaveBeenCalledTimes(1);
+});
 it.each(['submitted', 'streaming', 'initializing'] as const)('a governed %s no-op cannot resolve as successful delivery', async status => {
   const intent = createSourceSendIntent(profile, 'SYNTHETIC HELD');
   const sendChatMessage = vi.fn(async () => undefined);

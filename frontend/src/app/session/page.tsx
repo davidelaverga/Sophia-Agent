@@ -100,6 +100,7 @@ import {
 } from '../lib/session-artifact-index';
 import { recordSophiaCaptureEvent } from '../lib/session-capture';
 import { useVoiceLabControlAdapter } from '../hooks/useVoiceLabControlAdapter';
+import { diagLog } from '../lib/diag-log';
 import { cn } from '../lib/utils';
 import { useUiStore } from '../stores/ui-store';
 import type { BuilderCompletionEventV1 } from '../types/builder-completion';
@@ -1536,10 +1537,11 @@ function SessionPageContent() {
     }
     if (!builderCompletionRecoveryFile?.path) {
       if (builderCompletion.status === 'success') {
-        console.warn('[builder-artifacts] success completion downgraded because no action is available', {
-          thread_id: (builderCompletion.thread_id || resolvedThreadId || '').slice(0, 12),
-          task_id: builderCompletion.task_id.slice(0, 12),
-          run_id: builderCompletion.run_id?.slice(0, 12) ?? null,
+        // A success completion is downgraded because no action is available.
+        diagLog('builder_artifacts.completion_downgraded', {
+          thread_id: builderCompletion.thread_id || resolvedThreadId || null,
+          task_id: builderCompletion.task_id,
+          run_id: builderCompletion.run_id ?? null,
         });
         return {
           ...builderCompletion,
@@ -1564,10 +1566,10 @@ function SessionPageContent() {
       error_message: null,
       source: 'artifact_library_recovery',
     };
-    console.warn('[builder-artifacts] completion action recovered from library', {
-      thread_id: resolvedThreadId?.slice(0, 12) ?? null,
-      task_id: builderCompletion.task_id.slice(0, 12),
-      run_id: builderCompletion.run_id?.slice(0, 12) ?? null,
+    diagLog('builder_artifacts.completion_recovered', {
+      thread_id: resolvedThreadId ?? null,
+      task_id: builderCompletion.task_id,
+      run_id: builderCompletion.run_id ?? null,
       artifact_path_present: true,
     });
     return recovered;
@@ -1576,10 +1578,10 @@ function SessionPageContent() {
   useEffect(() => {
     if (builderCompletionForDisplay?.status !== 'success') return;
     if (builderCompletionForDisplay.artifact_path || builderCompletionForDisplay.artifact_url) return;
-    console.warn('[builder-artifacts] terminal completion has no action href', {
-      thread_id: builderCompletionForDisplay.thread_id.slice(0, 12),
-      task_id: builderCompletionForDisplay.task_id.slice(0, 12),
-      run_id: builderCompletionForDisplay.run_id?.slice(0, 12) ?? null,
+    diagLog('builder_artifacts.completion_without_action', {
+      thread_id: builderCompletionForDisplay.thread_id || null,
+      task_id: builderCompletionForDisplay.task_id,
+      run_id: builderCompletionForDisplay.run_id ?? null,
     });
   }, [builderCompletionForDisplay]);
   const builderCompletionFallbackLabel = useMemo(
