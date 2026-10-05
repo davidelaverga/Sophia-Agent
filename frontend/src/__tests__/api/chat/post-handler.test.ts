@@ -55,7 +55,8 @@ vi.mock('../../../app/api/chat/_lib/backend-client', () => ({
   isValidSophiaUserId: (userId: string) => userId !== 'user..bad',
 }));
 
-vi.mock('../../../app/api/chat/_lib/chat-request', () => ({
+vi.mock('../../../app/api/chat/_lib/chat-request', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../../app/api/chat/_lib/chat-request')>(),
   parseAndValidateChatPayload: (...args: unknown[]) => parseAndValidateChatPayloadMock(...args),
 }));
 

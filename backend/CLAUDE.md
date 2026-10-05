@@ -829,6 +829,7 @@ Every browser-facing voice SSE proxy preserves the session cursor end to end. Ne
 - **Ordinary-owner Builder:** fully traced.
 - **Memory-governed (MEM00) Builder:** excluded by default. With `SOPHIA_GOVERNED_STRUCTURAL_TRACING=true` (sophia-langgraph, `os.getenv`, not in `config.production.yaml`) it is structure-only through the redacting client in `deerflow/sophia/governed_tracing.py`.
 - **Voice:** structure-only for every session, because it is never told an owner's governance state. Content needs `SOPHIA_GEMINI_LIVE_LANGSMITH_CONTENT=true` plus an authoritative non-governed owner.
+- Arbitrary tool/provider payload booleans are content too: structural traces retain only their type, including in nested objects and arrays. Program-owned success/status flags remain observable.
 - Full table: `docs/ops/langsmith-traces.md`.
 
 **Invariants:**
@@ -837,6 +838,7 @@ Every browser-facing voice SSE proxy preserves the session cursor end to end. Ne
 3. **Completion annotation needs a positive identity match** (thread, task, run, build or operation id). A sole zero-score candidate once let a governed completion annotate another user's run in the same process.
 4. **Do not set `LANGSMITH_TRACING=true` to "enable traces".**
 5. **LangSmith failures are visible.** One process-wide client per service has a `tracing_error_callback`. It logs `langsmith_ingest_rejected` on langgraph and `gemini.langsmith.ingest_rejected` on voice, and `langsmith_preflight` runs once per process. Logs carry codes, statuses and booleans only, never key prefixes or bodies.
+6. The redacting-client mixin owns ingest serialization; `structural_client_class()` only supplies its lazily imported SDK base. Diagnostics validators and seam-specific tests must preserve the same allowlists, limits and rejection behavior when reorganized.
 
 **Content-free launch timeline:**
 - **Backend:** `deerflow/sophia/diag.py` `diag_event()` logs `sophia_diag {json}`. Keys come from an allowlist plus the MEM00 denied-key validator. Values are ints, ms, bools, codes, UUIDs or keyed refs, and the helper never raises. Events:

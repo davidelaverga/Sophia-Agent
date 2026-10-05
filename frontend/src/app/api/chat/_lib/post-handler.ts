@@ -7,11 +7,10 @@ import { getAuthenticatedUserId, getUserScopedAuthToken } from '../../../lib/aut
 import { normalizeBuilderArtifactPayload } from '../../../lib/builder-artifacts';
 import { logger } from '../../../lib/error-logger';
 import { apiLimiters } from '../../../lib/rate-limiter';
-import { buildAttachmentPrompt } from '../../../stores/attachment-prompt';
 import { getPrimaryGatewayUrl } from '../../_lib/gateway-url';
 
 import { fetchBackendStreamWithBootstrap, isValidSophiaUserId } from './backend-client';
-import { parseAndValidateChatPayload } from './chat-request';
+import { formatChatPrompt, parseAndValidateChatPayload } from './chat-request';
 import { readChatMemoryAuthority } from './memory-authority';
 import {
   AI_SDK_STREAM_HEADER,
@@ -270,7 +269,7 @@ async function handleChatPostTimed(req: NextRequest, diag: GovernedSendDiag): Pr
     // turn. Without this hint, Sophia would call `ls` (extra tool turn)
     // or guess that uploads exist.
     const userMessage = effectiveAttachedFiles.length > 0
-      ? `${buildAttachmentPrompt(effectiveAttachedFiles)}\n\n${spill.primaryMessage}`
+      ? formatChatPrompt(spill.primaryMessage, effectiveAttachedFiles)
       : spill.primaryMessage;
 
     const backendPayload = {

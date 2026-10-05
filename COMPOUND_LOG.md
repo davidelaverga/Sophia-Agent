@@ -2466,3 +2466,10 @@ Late in this wave, several commits landed over a red suite or with edits that si
 
 ### GEPA Log Entry
 - N/A (no prompt file changed).
+
+## 2026-10-05 — PR #166 automatic review: redact boolean tool content
+
+- Codex's P1 review found that structural voice payloads retained boolean values, which can reveal sensitive yes/no facts.
+- Claude's `6200e925` retains only the boolean type. Codex added recorder-path tests for both values and nested objects/arrays; program-owned success flags remain available.
+- Fixed the architecture regression without changing runtime decisions: split diagnostic integration tests by seam, separate diagnostic value validators, move redacting-client methods into a mixin while preserving lazy SDK import, and keep frontend formatting/diagnostic ingestion with their existing owners. God files and complex-function counts return to the PR-base counts (27 and 720).
+- No settings or content-policy authority changed. Updated `backend/CLAUDE.md`; verification counts are recorded in the mailbox after integration.

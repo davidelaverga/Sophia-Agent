@@ -175,35 +175,51 @@ def _safe_value(key: str, value: object, depth: int = 0) -> tuple[bool, object]:
     if isinstance(value, float):
         return (True, round(value, 1)) if math.isfinite(value) else (False, None)
     if isinstance(value, str):
-        pattern = _KEY_VALUE_PATTERNS.get(key)
-        if pattern is not None:
-            return (True, value) if pattern.fullmatch(value) else (False, None)
-        if _UUID.fullmatch(value):
-            return True, value.lower()
-        if _KEYED_REF.fullmatch(value) or _CODE.fullmatch(value):
-            return True, value
-        return False, None
-    if isinstance(value, Mapping) and depth < _MAX_NESTED_DEPTH and len(value) <= _MAX_COLLECTION:
-        result: dict[str, object] = {}
-        for nested_key, nested in value.items():
-            if not isinstance(nested_key, str) or not _CODE.fullmatch(nested_key):
-                return False, None
-            ok, safe = _safe_value(nested_key, nested, depth + 1)
-            if not ok:
-                return False, None
-            result[nested_key] = safe
-        return True, result
-    if isinstance(value, (list, tuple)) and depth < _MAX_NESTED_DEPTH and len(value) <= _MAX_COLLECTION:
-        items = []
-        for nested in value:
-            if isinstance(nested, (Mapping, list, tuple)):
-                return False, None
-            ok, safe = _safe_value(key, nested, depth + 1)
-            if not ok:
-                return False, None
-            items.append(safe)
-        return True, items
+        return _safe_string(key, value)
+    if isinstance(value, Mapping):
+        return _safe_mapping(value, depth)
+    if isinstance(value, (list, tuple)):
+        return _safe_sequence(key, value, depth)
     return False, None
+
+
+def _safe_string(key: str, value: str) -> tuple[bool, object]:
+    pattern = _KEY_VALUE_PATTERNS.get(key)
+    if pattern is not None:
+        return (True, value) if pattern.fullmatch(value) else (False, None)
+    if _UUID.fullmatch(value):
+        return True, value.lower()
+    if _KEYED_REF.fullmatch(value) or _CODE.fullmatch(value):
+        return True, value
+    return False, None
+
+
+def _safe_mapping(value: Mapping, depth: int) -> tuple[bool, object]:
+    if depth >= _MAX_NESTED_DEPTH or len(value) > _MAX_COLLECTION:
+        return False, None
+    result: dict[str, object] = {}
+    for nested_key, nested in value.items():
+        if not isinstance(nested_key, str) or not _CODE.fullmatch(nested_key):
+            return False, None
+        ok, safe = _safe_value(nested_key, nested, depth + 1)
+        if not ok:
+            return False, None
+        result[nested_key] = safe
+    return True, result
+
+
+def _safe_sequence(key: str, value: list | tuple, depth: int) -> tuple[bool, object]:
+    if depth >= _MAX_NESTED_DEPTH or len(value) > _MAX_COLLECTION:
+        return False, None
+    items = []
+    for nested in value:
+        if isinstance(nested, (Mapping, list, tuple)):
+            return False, None
+        ok, safe = _safe_value(key, nested, depth + 1)
+        if not ok:
+            return False, None
+        items.append(safe)
+    return True, items
 
 
 def validated_fields(fields: Mapping[str, object]) -> tuple[dict[str, object], int]:

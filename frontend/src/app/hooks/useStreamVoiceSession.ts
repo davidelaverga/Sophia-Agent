@@ -20,7 +20,6 @@ import {
   type ArtifactReviewVoiceCommand,
 } from "../lib/artifact-review-voice-commands"
 import { coreviewFlagDiagnostics } from "../lib/co-review-flags"
-import { diagLog } from "../lib/diag-log"
 import { logger } from "../lib/error-logger"
 import {
   connectGeminiBrowserLiveFromBootstrap,
@@ -68,6 +67,7 @@ import {
   type StreamVoiceCredentials,
 } from "./useStreamVoice"
 import {
+  logUngroundedModeClaim,
   applyAssistantTranscriptUpdate,
   applyPacedAssistantTranscriptUpdate,
   createAssistantTranscriptStaleGuardState,
@@ -4020,11 +4020,7 @@ export function useStreamVoiceSession(
           onUngroundedModeClaim: (diagnostic) => {
             if (!ownsController()) return
             // Gemini mentioned files or review tools outside review.
-            diagLog("voice.ungrounded_mode_claim", {
-              response_id: diagnostic.responseId,
-              patterns: diagnostic.matchedPatterns.join(":"),
-              pattern_count: diagnostic.matchedPatterns.length,
-            })
+            logUngroundedModeClaim(diagnostic)
             recordSophiaCaptureEvent({
               category: "voice-session",
               name: "gemini-ungrounded-mode-claim",

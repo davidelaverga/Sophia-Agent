@@ -378,84 +378,86 @@ def redact_run_dict(run: Any, *, update: bool = False) -> dict[str, Any]:
     return payload
 
 
+class _StructuralRedactingClientMixin:
+    """LangSmith client that can only ever send structure-only runs."""
+
+    def create_run(
+        self,
+        name: str,
+        inputs: dict[str, Any],
+        run_type: Any,
+        *,
+        project_name: str | None = None,
+        revision_id: Any = None,
+        dangerously_allow_filesystem: bool = False,
+        api_key: str | None = None,
+        api_url: str | None = None,
+        **kwargs: Any,
+    ) -> None:
+        payload = _redacted_fields(kwargs, run_type=run_type)
+        payload.update({key: kwargs[key] for key in _AUTH_PASSTHROUGH_KEYS if kwargs.get(key) is not None})
+        if kwargs.get("is_run_ops_buffer_flush"):
+            payload["is_run_ops_buffer_flush"] = True
+        return super().create_run(
+            structural_run_name(name),
+            {},
+            structural_run_type(run_type),
+            project_name=project_name,
+            api_key=api_key,
+            api_url=api_url,
+            **payload,
+        )
+
+    def update_run(self, run_id: Any, **kwargs: Any) -> None:
+        run_type = kwargs.get("run_type")
+        payload = _redacted_fields(kwargs, run_type=run_type)
+        payload.pop("id", None)
+        if kwargs.get("name") is not None:
+            payload["name"] = structural_run_name(kwargs["name"])
+        if run_type is not None:
+            payload["run_type"] = structural_run_type(run_type)
+        for key in ("api_key", "api_url", *_AUTH_PASSTHROUGH_KEYS):
+            if kwargs.get(key) is not None:
+                payload[key] = kwargs[key]
+        if kwargs.get("is_run_ops_buffer_flush"):
+            payload["is_run_ops_buffer_flush"] = True
+        return super().update_run(run_id, **payload)
+
+    # Attachments never survive redaction, so the filesystem opt-in and any
+    # other ingest option is dropped rather than forwarded.
+    def batch_ingest_runs(self, create: Any = None, update: Any = None, **_kwargs: Any) -> None:
+        return super().batch_ingest_runs(
+            create=[redact_run_dict(run) for run in create or []] or None,
+            update=[redact_run_dict(run, update=True) for run in update or []] or None,
+        )
+
+    def multipart_ingest(self, create: Any = None, update: Any = None, **_kwargs: Any) -> None:
+        return super().multipart_ingest(
+            create=[redact_run_dict(run) for run in create or []] or None,
+            update=[redact_run_dict(run, update=True) for run in update or []] or None,
+        )
+
+    def create_feedback(self, run_id: Any = None, key: str = "unnamed", **kwargs: Any) -> Any:
+        score = kwargs.get("score")
+        safe_kwargs: dict[str, Any] = {
+            "score": score if score is None or _finite_number(score) is not None else None,
+        }
+        for name in ("trace_id", "feedback_id", "stop_after_attempt"):
+            if kwargs.get(name) is not None:
+                safe_kwargs[name] = kwargs[name]
+        safe_key = key if isinstance(key, str) and _FEEDBACK_KEY_RE.match(key) else "structural"
+        return super().create_feedback(run_id, safe_key, **safe_kwargs)
+
 @lru_cache(maxsize=1)
 def structural_client_class() -> type:
     """Build the redacting ``langsmith.Client`` subclass (imported lazily)."""
 
     from langsmith import Client
 
-    class StructuralRedactingClient(Client):
-        """LangSmith client that can only ever send structure-only runs."""
-
-        def create_run(
-            self,
-            name: str,
-            inputs: dict[str, Any],
-            run_type: Any,
-            *,
-            project_name: str | None = None,
-            revision_id: Any = None,
-            dangerously_allow_filesystem: bool = False,
-            api_key: str | None = None,
-            api_url: str | None = None,
-            **kwargs: Any,
-        ) -> None:
-            payload = _redacted_fields(kwargs, run_type=run_type)
-            payload.update({key: kwargs[key] for key in _AUTH_PASSTHROUGH_KEYS if kwargs.get(key) is not None})
-            if kwargs.get("is_run_ops_buffer_flush"):
-                payload["is_run_ops_buffer_flush"] = True
-            return super().create_run(
-                structural_run_name(name),
-                {},
-                structural_run_type(run_type),
-                project_name=project_name,
-                api_key=api_key,
-                api_url=api_url,
-                **payload,
-            )
-
-        def update_run(self, run_id: Any, **kwargs: Any) -> None:
-            run_type = kwargs.get("run_type")
-            payload = _redacted_fields(kwargs, run_type=run_type)
-            payload.pop("id", None)
-            if kwargs.get("name") is not None:
-                payload["name"] = structural_run_name(kwargs["name"])
-            if run_type is not None:
-                payload["run_type"] = structural_run_type(run_type)
-            for key in ("api_key", "api_url", *_AUTH_PASSTHROUGH_KEYS):
-                if kwargs.get(key) is not None:
-                    payload[key] = kwargs[key]
-            if kwargs.get("is_run_ops_buffer_flush"):
-                payload["is_run_ops_buffer_flush"] = True
-            return super().update_run(run_id, **payload)
-
-        # Attachments never survive redaction, so the filesystem opt-in and any
-        # other ingest option is dropped rather than forwarded.
-        def batch_ingest_runs(self, create: Any = None, update: Any = None, **_kwargs: Any) -> None:
-            return super().batch_ingest_runs(
-                create=[redact_run_dict(run) for run in create or []] or None,
-                update=[redact_run_dict(run, update=True) for run in update or []] or None,
-            )
-
-        def multipart_ingest(self, create: Any = None, update: Any = None, **_kwargs: Any) -> None:
-            return super().multipart_ingest(
-                create=[redact_run_dict(run) for run in create or []] or None,
-                update=[redact_run_dict(run, update=True) for run in update or []] or None,
-            )
-
-        def create_feedback(self, run_id: Any = None, key: str = "unnamed", **kwargs: Any) -> Any:
-            score = kwargs.get("score")
-            safe_kwargs: dict[str, Any] = {
-                "score": score if score is None or _finite_number(score) is not None else None,
-            }
-            for name in ("trace_id", "feedback_id", "stop_after_attempt"):
-                if kwargs.get(name) is not None:
-                    safe_kwargs[name] = kwargs[name]
-            safe_key = key if isinstance(key, str) and _FEEDBACK_KEY_RE.match(key) else "structural"
-            return super().create_feedback(run_id, safe_key, **safe_kwargs)
+    class StructuralRedactingClient(_StructuralRedactingClientMixin, Client):
+        pass
 
     return StructuralRedactingClient
-
 
 @lru_cache(maxsize=1)
 def structural_tracer_class() -> type:
