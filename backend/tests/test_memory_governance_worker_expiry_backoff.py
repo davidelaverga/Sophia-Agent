@@ -15,10 +15,12 @@ Two compounding causes, both fixed here and both present on the shared branch:
 """
 
 import asyncio
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
 
+from app.gateway.workers import memory_governance
 from app.gateway.workers.memory_governance import MemoryGovernanceWorker
 
 
@@ -72,6 +74,30 @@ def test_expiry_runs_again_once_the_interval_has_elapsed():
     # Patching time.monotonic leaks across tests -- it made an unrelated Voice
     # Lab lease-expiry test fail under pytest-randomly's ordering.
     worker._last_expiry_at -= 3601
+    asyncio.run(worker.run_once())
+    assert extraction.governance_store.expire_candidates.call_count == 2
+
+
+def test_first_expiry_runs_on_a_host_booted_under_an_hour_ago(monkeypatch):
+    """time.monotonic() counts from boot on Linux.
+
+    With a 0.0 initial stamp, a fresh CI runner or a just-rebooted host skipped
+    the first expiry until uptime passed the interval. Replace only this
+    module's ``time`` name -- the global clock stays untouched (see above).
+    """
+    clock = SimpleNamespace(monotonic=lambda: 5.0)
+    monkeypatch.setattr(memory_governance, "time", clock)
+    extraction = _Extraction(expire_return=0)
+    worker = _worker(extraction)
+
+    asyncio.run(worker.run_once())
+    assert extraction.governance_store.expire_candidates.call_count == 1
+
+    # The stamp still throttles to once per interval after that first run.
+    asyncio.run(worker.run_once())
+    assert extraction.governance_store.expire_candidates.call_count == 1
+
+    clock.monotonic = lambda: 5.0 + 3600
     asyncio.run(worker.run_once())
     assert extraction.governance_store.expire_candidates.call_count == 2
 

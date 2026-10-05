@@ -2473,3 +2473,23 @@ Late in this wave, several commits landed over a red suite or with edits that si
 - Claude's `6200e925` retains only the boolean type. Codex added recorder-path tests for both values and nested objects/arrays; program-owned success flags remain available.
 - Fixed the architecture regression without changing runtime decisions: split diagnostic integration tests by seam, separate diagnostic value validators, move redacting-client methods into a mixin while preserving lazy SDK import, and keep frontend formatting/diagnostic ingestion with their existing owners. God files and complex-function counts return to the PR-base counts (27 and 720).
 - No settings or content-policy authority changed. Updated `backend/CLAUDE.md`; verification counts are recorded in the mailbox after integration.
+
+## 2026-10-05 · [mem00-governance-worker · first retention expiry] · PR #167
+**Author:** Claude · **Track:** backend · **Spec:** `docs/specs/03_memory_system.md` (retention)
+
+### What Changed
+- `MemoryGovernanceWorker._last_expiry_at` starts as `None` ("never attempted") instead of `0.0`; expiry runs when it is `None` or an hour has passed. The stamp is still written before the attempt, so a failing expiry backs off per interval, not per poll. No other retention behaviour changed.
+- New regression `test_first_expiry_runs_on_a_host_booted_under_an_hour_ago` replaces only the worker module's `time` name, so it fails on any host, not just a fresh one.
+
+### What We Learned
+- `time.monotonic()` counts from boot on Linux, so `0.0` is not "long ago". On a host up for less than an hour (a fresh CI runner, or production right after a reboot) the first expiry was skipped until uptime passed an hour. `backend-unit-tests` failed 5 expiry-backoff tests this way on PRs #162 and #163; they pass on any machine that has been up longer.
+- Never use `0.0` as a "never ran" sentinel for a monotonic clock; use `None`.
+
+### CLAUDE.md Updates
+- `backend/CLAUDE.md` (Memory System): new "MEM00 retention expiry cadence" entry. Expiry runs on the first cycle, then at most hourly; the `None` sentinel; stamp-before-attempt containment. Added after Codex's automatic review flagged the missing doc.
+
+### Skills Created / Modified
+- None.
+
+### GEPA Log Entry
+- N/A

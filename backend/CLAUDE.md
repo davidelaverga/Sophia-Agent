@@ -979,6 +979,16 @@ aborts installation. See `tests/test_mem00_delete_order_migration.py` and the
 disposable `tools/mem00_session_delete_contract.mjs` proof. Production approval
 is required; a source-invalidation receipt alone is not successful deletion.
 
+**MEM00 retention expiry cadence**: `MemoryGovernanceWorker`
+(`app/gateway/workers/memory_governance.py`) runs `expire_candidates` on its
+first cycle, then at most once per hour. `_last_expiry_at` starts as `None`
+("never attempted"); never use `0.0`, because `time.monotonic()` counts from
+boot on Linux and a host up for under an hour (fresh CI runner, rebooted
+service) would skip the first expiry. The stamp is written before the attempt
+and a failure is logged and contained, so a failing expiry retries once per
+interval, not once per one-second poll, and never blocks extraction or
+projection. Regression: `tests/test_memory_governance_worker_expiry_backoff.py`.
+
 **Components**:
 - `updater.py` - LLM-based memory updates with fact extraction, whitespace-normalized fact deduplication (trims leading/trailing whitespace before comparing), atomic file I/O, and timezone-aware UTC timestamp serialization (`...Z`) for memory metadata.
 - `queue.py` - Debounced update queue (per-thread deduplication, configurable wait time)
