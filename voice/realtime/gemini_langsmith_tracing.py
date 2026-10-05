@@ -1161,6 +1161,8 @@ class GeminiLiveTraceRecorder:
                 and Attachment is not None
             )
             hmac_secret = os.getenv("SOPHIA_VOICE_OBSERVABILITY_HMAC_SECRET", "").encode()
+            # The recording is content: only an effective non-structural
+            # content mode may attach it.
             self.audio_capture_enabled = bool(
                 self.enabled
                 and self.content_allowed
