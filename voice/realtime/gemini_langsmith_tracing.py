@@ -1164,6 +1164,7 @@ class GeminiLiveTraceRecorder:
             self.audio_capture_enabled = bool(
                 self.enabled
                 and self.content_allowed
+                and self.content_mode != "structural"
                 and not self._synthetic_context
                 and (
                     _env_bool("SOPHIA_GEMINI_LIVE_AUDIO_CAPTURE_ENABLED", False)

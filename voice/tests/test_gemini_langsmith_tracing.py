@@ -456,6 +456,7 @@ def test_close_patches_root_with_inline_audio_and_flushes_when_content_allowed(
 ) -> None:
     _enable_fake_sdk(monkeypatch)
     monkeypatch.setenv(CONTENT_ENV, "true")
+    monkeypatch.setenv("SOPHIA_GEMINI_LIVE_TRACE_CONTENT_MODE", "full")
     client = FakeClient()
     recorder = tracing.GeminiLiveTraceRecorder(
         session_id="gemini-prod-test",
@@ -1426,6 +1427,7 @@ def test_sentinel_content_never_reaches_the_transport_in_structure_only_mode(
         monkeypatch.setenv(CONTENT_ENV, "true")
     elif legacy_switches == "structural_opt_in":
         monkeypatch.setenv(CONTENT_ENV, "true")
+        monkeypatch.setenv("SOPHIA_GEMINI_LIVE_AUDIO_CAPTURE_ENABLED", "true")
         monkeypatch.setenv("SOPHIA_GEMINI_LIVE_TRACE_CONTENT_MODE", "structural")
     else:
         monkeypatch.delenv("SOPHIA_GEMINI_LIVE_AUDIO_CAPTURE_ENABLED", raising=False)

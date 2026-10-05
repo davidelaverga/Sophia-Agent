@@ -2502,3 +2502,7 @@ Late in this wave, several commits landed over a red suite or with edits that si
 ### Codex follow-up: structural errors and session diagnostic scope
 
 Automatic review of combined head 0d8c5633 found two further P2 privacy gaps. Error serialization and Builder lifecycle summaries now honor the effective structural mode even with the content gate open. A recorder regression and the real SDK multipart sentinel test cover that combination, including root and tool errors; full-mode content remains the positive control. Session JSON filters diagnostic joins by the latest session/microphone start, keeps current diagnostics despite provider-ring churn, and omits joins if no boundary is known. Three regression cases exclude earlier-owner IDs. These failures reproduced before the changes. Production settings and tracing credentials are unchanged.
+
+### Codex follow-up: structural mode never attaches audio
+
+The review of 08215b7c found that an explicit audio-capture opt-in could still attach a raw recording despite the effective structural mode. Audio capture now also requires a non-structural mode. The real SDK multipart sentinel regression enables both legacy content and audio flags for a known non-governed owner while structural mode remains selected; it failed before the fix. Full mode with both flags remains the positive control. No runtime configuration was changed.
