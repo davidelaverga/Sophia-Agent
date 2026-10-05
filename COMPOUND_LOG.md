@@ -2416,3 +2416,23 @@ Late in this wave, several commits landed over a red suite or with edits that si
 
 ### GEPA Log Entry
 - No prompt file changed. The voice bridge's tool-result guidance string changed (refused build: "could not be started, do not retry"). tone_delta: N/A. Trace pair: none (LangSmith ingest is still failing).
+
+## 2026-10-05 · [mem00-governance-worker · first retention expiry] · PR #167
+**Author:** Claude · **Track:** backend · **Spec:** `docs/specs/03_memory_system.md` (retention)
+
+### What Changed
+- `MemoryGovernanceWorker._last_expiry_at` starts as `None` ("never attempted") instead of `0.0`; expiry runs when it is `None` or an hour has passed. The stamp is still written before the attempt, so a failing expiry backs off per interval, not per poll. No other retention behaviour changed.
+- New regression `test_first_expiry_runs_on_a_host_booted_under_an_hour_ago` replaces only the worker module's `time` name, so it fails on any host, not just a fresh one.
+
+### What We Learned
+- `time.monotonic()` counts from boot on Linux, so `0.0` is not "long ago". On a host up for less than an hour (a fresh CI runner, or production right after a reboot) the first expiry was skipped until uptime passed an hour. `backend-unit-tests` failed 5 expiry-backoff tests this way on PRs #162 and #163; they pass on any machine that has been up longer.
+- Never use `0.0` as a "never ran" sentinel for a monotonic clock; use `None`.
+
+### CLAUDE.md Updates
+- `backend/CLAUDE.md` (Memory System): new "MEM00 retention expiry cadence" entry. Expiry runs on the first cycle, then at most hourly; the `None` sentinel; stamp-before-attempt containment. Added after Codex's automatic review flagged the missing doc.
+
+### Skills Created / Modified
+- None.
+
+### GEPA Log Entry
+- N/A
