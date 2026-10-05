@@ -2429,7 +2429,7 @@ Late in this wave, several commits landed over a red suite or with edits that si
 - Never use `0.0` as a "never ran" sentinel for a monotonic clock; use `None`.
 
 ### CLAUDE.md Updates
-- None.
+- `backend/CLAUDE.md` (Memory System): new "MEM00 retention expiry cadence" entry. Expiry runs on the first cycle, then at most hourly; the `None` sentinel; stamp-before-attempt containment. Added after Codex's automatic review flagged the missing doc.
 
 ### Skills Created / Modified
 - None.
