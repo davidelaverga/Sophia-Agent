@@ -1,5 +1,11 @@
 import { diagElapsedMs, diagLog, diagNow } from '../../../lib/diag-log';
 
+const UUID_JOIN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function uuidJoin(value: string | null): string | null {
+  return typeof value === 'string' && UUID_JOIN.test(value) ? value.toLowerCase() : null;
+}
+
 /**
  * One production line per governed chat send: `chat.governed_send`.
  *
@@ -44,7 +50,7 @@ export type GovernedSendDiag = {
 export function createGovernedSendDiag(): GovernedSendDiag {
   const startedAt = diagNow();
   const stageMs: Partial<Record<GovernedSendStage, number>> = {};
-  let ids: { messageId: string; threadId: string | null } | null = null;
+  let ids: { messageId: string | null; threadId: string | null } | null = null;
   let outcome: GovernedSendOutcome | null = null;
   let upstreamStatus: number | null = null;
   let emitted = false;
@@ -59,7 +65,9 @@ export function createGovernedSendDiag(): GovernedSendDiag {
       }
     },
     markGoverned: (nextIds) => {
-      ids = nextIds;
+      // The source contract also accepts arbitrary action keys. They are
+      // legitimate request metadata, but never safe diagnostic join values.
+      ids = { messageId: uuidJoin(nextIds.messageId), threadId: uuidJoin(nextIds.threadId) };
     },
     setOutcome: (nextOutcome, nextUpstreamStatus) => {
       outcome = nextOutcome;

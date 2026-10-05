@@ -39,3 +39,31 @@ def test_recorder_redacts_boolean_tool_arguments_and_function_responses(
     assert calls[1].kwargs["outputs"]["response"]["fields"]["attribute"] == {"kind": "boolean"}
     # Program status remains observable; only arbitrary payload booleans are redacted.
     assert calls[1].kwargs["outputs"]["success"] is True
+
+
+@pytest.mark.parametrize("mode", ["structural", "full"])
+def test_trace_error_honors_effective_content_mode(
+    monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    monkeypatch.setenv(tracing.CONTENT_TRACING_ENV, "true")
+    monkeypatch.setenv("SOPHIA_GEMINI_LIVE_TRACE_CONTENT_MODE", mode)
+    monkeypatch.setattr(tracing, "RunTree", Mock())
+    recorder = tracing.GeminiLiveTraceRecorder(
+        session_id="privacy-test", user_id="synthetic-owner", model="test", client=Mock(),
+        enabled=True, owner_memory_governance="non_governed",
+    )
+    assert recorder.content_allowed is True
+    assert recorder.content_mode == mode
+    sentinel = "private exception content"
+    recorder.record_tool_call(
+        tool_call_id="test-call", tool_name="retrieve_memories", arguments={},
+        success=False, error=sentinel, response={"error_type": "provider_error"},
+    )
+    child = recorder.root.create_child.return_value
+    assert child.end.call_args.kwargs["error"] == (
+        sentinel if mode == "full" else "provider_error"
+    )
+    recorder.close(error=sentinel)
+    assert recorder.root.end.call_args.kwargs["error"] == (
+        sentinel if mode == "full" else "session_error"
+    )

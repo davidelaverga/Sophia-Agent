@@ -1402,13 +1402,19 @@ def _record_every_content_bearing_input(recorder: tracing.GeminiLiveTraceRecorde
 
 
 @pytest.mark.parametrize(
-    ("legacy_switches", "content_allowed"),
-    [("defaults", False), ("all_on", False), ("all_on", True)],
+    ("legacy_switches", "owner_governance", "content_allowed"),
+    [
+        ("defaults", None, False),
+        ("all_on", None, False),
+        ("all_on", "non_governed", True),
+        ("structural_opt_in", "non_governed", False),
+    ],
 )
 def test_sentinel_content_never_reaches_the_transport_in_structure_only_mode(
     monkeypatch: Any,
     caplog: Any,
     legacy_switches: str,
+    owner_governance: str | None,
     content_allowed: bool,
 ) -> None:
     caplog.set_level(logging.INFO)
@@ -1418,6 +1424,9 @@ def test_sentinel_content_never_reaches_the_transport_in_structure_only_mode(
         monkeypatch.setenv("SOPHIA_GEMINI_LIVE_AUDIO_CAPTURE_ENABLED", "true")
         monkeypatch.setenv("SOPHIA_GEMINI_LIVE_TRACE_CONTENT_MODE", "full")
         monkeypatch.setenv(CONTENT_ENV, "true")
+    elif legacy_switches == "structural_opt_in":
+        monkeypatch.setenv(CONTENT_ENV, "true")
+        monkeypatch.setenv("SOPHIA_GEMINI_LIVE_TRACE_CONTENT_MODE", "structural")
     else:
         monkeypatch.delenv("SOPHIA_GEMINI_LIVE_AUDIO_CAPTURE_ENABLED", raising=False)
         monkeypatch.delenv("SOPHIA_GEMINI_LIVE_TRACE_CONTENT_MODE", raising=False)
@@ -1429,7 +1438,7 @@ def test_sentinel_content_never_reaches_the_transport_in_structure_only_mode(
         user_id=f"owner-{SENTINEL}",
         thread_id=f"thread-{SENTINEL}",
         model="gemini-live-test",
-        **({"owner_memory_governance": "non_governed"} if content_allowed else {}),
+        owner_memory_governance=owner_governance,
     )
     assert recorder.enabled is True
     _record_every_content_bearing_input(recorder)

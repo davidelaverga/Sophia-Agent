@@ -741,15 +741,41 @@ describe('handleChatPost governed send diagnostics line', () => {
     expect(warn.mock.calls.flat().map(String).join('\n')).not.toContain(SENTINEL);
   });
 
-  it('records an early governed refusal without upstream timing', async () => {
+  it('does not record caller identifiers on an unauthenticated refusal', async () => {
     getAuthenticatedUserIdMock.mockResolvedValue(null);
 
     const response = await handleChatPost({ json: async () => ({ message: SENTINEL }) } as never);
     expect(response.status).toBe(401);
 
-    const record = JSON.parse((diagLines()[0][0] as string).slice('[sophia-diag] '.length)) as Record<string, unknown>;
-    expect(record).toMatchObject({ outcome: 'not_authenticated', upstream_headers_ms: null, upstream_status: null });
+    expect(diagLines()).toHaveLength(0);
     expect(fetchBackendStreamWithBootstrapMock).not.toHaveBeenCalled();
+  });
+
+  it('does not record caller identifiers before authority validation', async () => {
+    readAuthorityMock.mockResolvedValueOnce('legacy');
+    const response = await handleChatPost({ json: async () => ({}) } as never);
+    expect(response.status).toBe(409);
+    expect(diagLines()).toHaveLength(0);
+    expect(fetchBackendStreamWithBootstrapMock).not.toHaveBeenCalled();
+  });
+
+  it('does not record caller identifiers for an unowned source thread', async () => {
+    userOwnsThreadMock.mockResolvedValueOnce(false);
+    const response = await handleChatPost({ json: async () => ({}) } as never);
+    expect(response.status).toBe(403);
+    expect(diagLines()).toHaveLength(0);
+    expect(fetchBackendStreamWithBootstrapMock).not.toHaveBeenCalled();
+  });
+
+  it('never exports code-shaped content as a diagnostic message identifier', async () => {
+    const untrusted = 'secret_token_like_action_identifier';
+    parseAndValidateChatPayloadMock.mockReturnValue(governedPayload({ ...sourceAction, message_id: untrusted }));
+    const response = await handleChatPost({ json: async () => ({}) } as never);
+    expect(response.status).toBe(200);
+    const record = JSON.parse((diagLines()[0][0] as string).slice('[sophia-diag] '.length));
+    expect(record).toMatchObject({ message_id: null, thread_id: THREAD_ID, outcome: 'stream_started' });
+    expect(warn.mock.calls.flat().map(String).join('\n')).not.toContain(untrusted);
+    expect(fetchBackendStreamWithBootstrapMock.mock.calls[0][1].memory_source_action.message_id).toBe(untrusted);
   });
 
   it('emits no governed line for a legacy send', async () => {

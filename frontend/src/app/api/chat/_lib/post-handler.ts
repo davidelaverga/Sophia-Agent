@@ -143,9 +143,6 @@ async function handleChatPostTimed(req: NextRequest, diag: GovernedSendDiag): Pr
       platform,
       sourceAction,
     } = parsed.data;
-    if (sourceAction) {
-      diag.markGoverned({ messageId: sourceAction.message_id, threadId: sourceAction.thread_id });
-    }
 
     // Defensive coalesce: parseAndValidateChatPayload guarantees this
     // field is an array, but tests that mock the validator might omit
@@ -244,6 +241,12 @@ async function handleChatPostTimed(req: NextRequest, diag: GovernedSendDiag): Pr
           { status: 403, headers: { 'Content-Type': 'application/json' } },
         );
       }
+    }
+
+    // Caller identifiers become diagnostic joins only after authentication,
+    // governed authority and source-thread ownership have been checked.
+    if (sourceAction) {
+      diag.markGoverned({ messageId: sourceAction.message_id, threadId: sourceAction.thread_id });
     }
 
     // Spill an over-long chat message to a document attachment instead of

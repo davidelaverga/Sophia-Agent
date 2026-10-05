@@ -1318,7 +1318,7 @@ class GeminiLiveTraceRecorder:
 
         if error is None and error_type is None:
             return None
-        if self.content_allowed:
+        if self.content_allowed and self.content_mode != "structural":
             return error if error is not None else error_type
         response_code = response.get("error_type") if isinstance(response, Mapping) else None
         for candidate in (response_code, error_type):
@@ -1497,7 +1497,7 @@ class GeminiLiveTraceRecorder:
         if tool_name in _BUILDER_LIFECYCLE_TOOLS:
             outputs["builder_lifecycle"] = _builder_trace_summary(
                 response,
-                content_allowed=self.content_allowed,
+                content_allowed=self.content_allowed and self.content_mode != "structural",
             )
         child.end(
             outputs=outputs,

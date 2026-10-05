@@ -609,11 +609,11 @@ function buildScopedTelemetryCaptureBundle(
     eventCount: events.length,
     events,
     snapshot,
-    // Ring drop counters, and the dedicated diagnostics ring, which provider
-    // and audio events never evict.
+    // Ring drop counters remain lifetime totals. Diagnostic records are scoped
+    // independently: provider/audio churn must not evict current-run joins.
     ...(captureBundle.capture ? { capture: captureBundle.capture } : {}),
     ...(captureBundle.diagnostics
-      ? { diagnostics: sanitizeTelemetryValue(captureBundle.diagnostics) as SophiaDiagnosticsRingExport }
+      ? { diagnostics: scopeDiagnostics(captureBundle, exportedAt) }
       : {}),
     scope: {
       mode: 'current-run',
@@ -625,6 +625,29 @@ function buildScopedTelemetryCaptureBundle(
       scopedFromSeq: typeof events[0]?.seq === 'number' ? events[0].seq : null,
     },
   };
+}
+
+function scopeDiagnostics(
+  bundle: SophiaCaptureBundle,
+  exportedAt: string,
+): SophiaDiagnosticsRingExport {
+  const lastStartIndex = findLastIndex(bundle.events, (event) => (
+    event.category === 'voice-session' && event.name === 'start-talking-requested'
+  ));
+  const boundaries = [
+    bundle.snapshot.session?.startedAt,
+    lastStartIndex >= 0 ? bundle.events[lastStartIndex].recordedAt : null,
+  ].map((at) => typeof at === 'string' ? Date.parse(at) : NaN).filter(Number.isFinite);
+  // The capture ring's lifetime start cannot establish an owner/session boundary.
+  // Without a trustworthy session boundary, omit all diagnostic join records.
+  const startedAt = boundaries.length > 0 ? Math.max(...boundaries) : Infinity;
+  const endedAt = Date.parse(exportedAt);
+  const ring = bundle.diagnostics!;
+  const events = ring.events.filter((event) => {
+    const at = Date.parse(event.at);
+    return at >= startedAt && at <= endedAt;
+  });
+  return sanitizeTelemetryValue({ ...ring, events }) as SophiaDiagnosticsRingExport;
 }
 
 function selectCurrentRunEvents(
