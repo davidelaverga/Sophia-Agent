@@ -11,11 +11,13 @@ import {
   cancelBuilderTask as requestBuilderTaskCancellation,
 } from '../lib/builder-workflow';
 import { debugLog } from '../lib/debug-logger';
+import { diagElapsedMs, diagNow } from '../lib/diag-log';
 import { recordSophiaCaptureEvent } from '../lib/session-capture';
 import {
   createCompanionTurnFailures,
   createVoiceBuilderToolHandler,
   registerVoiceBuilderToolBridge,
+  type VoiceBuilderSendContext,
   type VoiceBuilderToolBridge,
 } from '../lib/voice-builder-actions';
 import { useAuth } from '../providers';
@@ -531,6 +533,14 @@ export function useSessionRouteExperience({
     typeof chatRequestBody?.session_id === 'string' ? chatRequestBody.session_id : '',
     typeof chatRequestBody?.thread_id === 'string' ? chatRequestBody.thread_id : '',
   );
+  // Diagnostics only: a voice Builder send registers here by message id to
+  // learn how long its source record took.
+  const sourceRecordObserversRef = useRef(new Map<string, (sourceRecordMs: number) => void>());
+  const handleSourceRecorded = useCallback((messageId: string, sourceRecordMs: number) => {
+    const observer = sourceRecordObserversRef.current.get(messageId);
+    sourceRecordObserversRef.current.delete(messageId);
+    observer?.(sourceRecordMs);
+  }, []);
   const rawSendMessage = useSessionOutboundSend({
     setMessageTimestamp,
     chatStatus,
@@ -540,6 +550,7 @@ export function useSessionRouteExperience({
     debugEnabled,
     markStreamTurnStarted,
     showToast,
+    onSourceRecorded: handleSourceRecorded,
   });
 
   const sendMessage: typeof rawSendMessage = useCallback(
@@ -702,15 +713,29 @@ export function useSessionRouteExperience({
   // refusal before the turn acted reads as not sent; anything else reads as
   // unconfirmed, since a build may already have started. A send without a
   // canonical message id (legacy owner) keeps the confirmation wait.
-  const sendVoiceBuilderMessage = useCallback(async (text: string) => {
+  // The send context only collects content-free ids and timings for the
+  // voice tool call's diagnostics lines.
+  const sendVoiceBuilderMessage = useCallback(async (text: string, context?: VoiceBuilderSendContext) => {
     const captured = captureSourceInput(text);
+    const messageId = captured.sourceIntent?.action.message_id ?? null;
+    context?.note({ messageId });
+    const appVersionStartedAt = diagNow();
     const appVersionFresh = await checkAppVersionFreshness({ reason: 'before-send' });
+    context?.note({ appVersionMs: diagElapsedMs(appVersionStartedAt) });
     if (!appVersionFresh) {
       throw new Error('memory_source_app_version_unavailable');
     }
     validateSourceInput(captured);
-    const messageId = captured.sourceIntent?.action.message_id ?? null;
-    await rawSendMessage(captured);
+    if (messageId && context) {
+      sourceRecordObserversRef.current.set(messageId, (sourceRecordMs) => {
+        context.note({ sourceRecordMs, sourceRecorded: true });
+      });
+    }
+    try {
+      await rawSendMessage(captured);
+    } finally {
+      if (messageId) sourceRecordObserversRef.current.delete(messageId);
+    }
     const failure = messageId ? companionTurnFailuresRef.current.take(messageId) : null;
     if (failure) {
       throw new Error(failure);
@@ -748,7 +773,7 @@ export function useSessionRouteExperience({
 
   useEffect(() => {
     const bridge = createVoiceBuilderToolHandler({
-      sendCompanionMessage: (text) => voiceBuilderStateRef.current.sendVoiceBuilderMessage(text),
+      sendCompanionMessage: (text, context) => voiceBuilderStateRef.current.sendVoiceBuilderMessage(text, context),
       getBuilderTask: () => voiceBuilderStateRef.current.builderTask,
       getBuilderCompletion: () => voiceBuilderStateRef.current.builderCompletion,
       cancelBuilderTask: () => voiceBuilderStateRef.current.cancelBuilderTask(),

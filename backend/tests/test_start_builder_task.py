@@ -231,9 +231,12 @@ def test_dispatch_runtime_completion_carries_exact_annotated_builder_trace_root(
             self.id = "builder-langsmith-root-exact"
             self.parent_run = None
             self.parent_run_id = None
+            # The dispatched run metadata carries the build id, which is the
+            # positive identity completion annotation requires.
             self.metadata = {
                 "thread_id": "builder-thread-exact",
                 "run_id": "builder-langsmith-root-exact",
+                "build_id": builder_state["builder_build_id"],
             }
 
         def add_metadata(self, metadata):

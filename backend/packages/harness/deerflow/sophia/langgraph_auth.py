@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from uuid import UUID, uuid5
 
 import httpx
@@ -19,6 +20,8 @@ from langgraph_sdk import Auth
 from starlette.exceptions import HTTPException
 
 from deerflow.agents.sophia_agent.utils import validate_user_id
+from deerflow.sophia.diag import code_or_none, diag_event
+from deerflow.sophia.diag import elapsed_ms as diag_elapsed_ms
 from deerflow.sophia.langgraph_voice_lab_auth import BINDING_KEY
 from deerflow.sophia.langgraph_voice_lab_auth import PERMISSION as VOICE_LAB_THREAD_PERMISSION
 from deerflow.sophia.memory_governance.refs import keyed_ref
@@ -528,6 +531,9 @@ async def create_run(ctx, value):
             source[key] = None
     if disabled:
         _deny_run("disabled_carrier", value=value, owner=owner)
+    # Content-free launch timeline. Only fixed codes, durations and the
+    # existing join identifiers are logged, and only after admission succeeds.
+    admission = {"started": time.perf_counter(), "branch": "ungoverned"}
     try:
         try:
             authority_state = resolve_owner_authority(owner).authority_state
@@ -543,6 +549,7 @@ async def create_run(ctx, value):
             # same as a declared legacy owner. A store or transport failure still
             # reaches `except Exception: _deny()` and fails closed.
             authority_state = "unknown"
+        admission["owner_authority_ms"] = diag_elapsed_ms(admission["started"])
         if authority_state == "governed":
             from deerflow.agents.sophia_agent.middlewares.memory_context import active_governed_tool_owner
             from deerflow.sophia.memory_governance.input_provenance import issue_recorded_authenticated_input
@@ -555,27 +562,34 @@ async def create_run(ctx, value):
                         or active_governed_tool_owner() not in (None, owner)):
                     _deny_run("builder_scope", value=value, owner=owner)
                 from deerflow.sophia.memory_governance.builder_provenance import bind_builder_run
+                bind_started = time.perf_counter()
                 wire_input, proof = bind_builder_run(owner_id=owner, child_thread_id=value.get("thread_id"),
                     run_id=value.get("run_id"), wire_input=kwargs.get("input"), proof=handoff)
+                admission.update(branch="builder_bind", bind_ms=diag_elapsed_ms(bind_started))
                 kwargs["input"] = wire_input
                 configurable[handoff_run_key] = proof
                 # Select tools from the independent source, never the parent
                 # model's task-type/target hints. Entry rechecks source consent
                 # before admitting this deterministic machinery into state.
                 from deerflow.sophia.memory_governance.builder_source_binding import independent_builder_runtime_seed
+                seed_started = time.perf_counter()
                 seed = independent_builder_runtime_seed(binding=proof["binding"], wire_input=wire_input)
+                admission["seed_ms"] = diag_elapsed_ms(seed_started)
                 configurable["task_type"] = seed["delegation_context"]["task_type"]
                 from pathlib import PurePosixPath
                 configurable["artifact_target_ext"] = PurePosixPath(seed["builder_artifact_target_path"]).suffix
                 configurable["parent_thread_id"] = seed["delegation_context"]["parent_thread_id"]
                 configurable["build_id"] = seed["builder_build_id"]
                 configurable["operation_id"] = seed["builder_operation_id"]
+                admission["proof"] = proof
             else:
                 if active_governed_tool_owner() is not None or str(value.get("assistant_id")) != str(COMPANION_ASSISTANT_ID):
                     _deny_run("companion_scope", value=value, owner=owner)
+                issue_started = time.perf_counter()
                 wire_input, proof = issue_recorded_authenticated_input(owner_id=owner, session_id=source_session,
                     thread_id=value.get("thread_id"), run_id=value.get("run_id"),
                     wire_input=kwargs.get("input"), source_action=source_action, store=configured_memory_store())
+                admission.update(branch="companion", issue_ms=diag_elapsed_ms(issue_started))
                 kwargs["input"] = wire_input
                 configurable[INPUT_PROOF_KEY] = proof
         elif handoff is not None:
@@ -587,7 +601,24 @@ async def create_run(ctx, value):
         _deny_run("admission", value=value, owner=owner, exc=exc)
     owner_filter = _filter(ctx, synthetic=synthetic_owner)
     value.setdefault("metadata", {}).update(owner_filter)
+    _log_run_admission(value, admission, authority_state, source_action)
     return owner_filter
+
+
+def _log_run_admission(value, admission, authority_state, source_action):
+    """One content-free ``run.admission`` line per admitted run. Never raises."""
+    try:
+        binding = (admission.get("proof") or {}).get("binding") or {}
+        handoff_receipt = ((admission.get("proof") or {}).get("handoff") or {}).get("binding_receipt") or {}
+        diag_event("run.admission", branch=admission["branch"], authority=code_or_none(authority_state),
+            thread_id=value.get("thread_id"), run_id=value.get("run_id"),
+            source_message_id=source_action.get("message_id") if isinstance(source_action, dict) else None,
+            handoff_event_id=handoff_receipt.get("event_id"), binding_event_id=binding.get("binding_event_id"),
+            parent_thread_id=binding.get("parent_thread_id"),
+            owner_authority_ms=admission.get("owner_authority_ms"), issue_ms=admission.get("issue_ms"),
+            bind_ms=admission.get("bind_ms"), seed_ms=admission.get("seed_ms"), total_ms=diag_elapsed_ms(admission["started"]))
+    except Exception:
+        pass
 
 
 @auth.on.assistants.read

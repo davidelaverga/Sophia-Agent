@@ -2417,6 +2417,63 @@ Late in this wave, several commits landed over a red suite or with edits that si
 ### GEPA Log Entry
 - No prompt file changed. The voice bridge's tool-result guidance string changed (refused build: "could not be started, do not retry"). tone_delta: N/A. Trace pair: none (LangSmith ingest is still failing).
 
+## 2026-10-04 · [langsmith-policy · launch-diagnostics · recap-refresh] · PR #TBD
+**Author:** Claude · **Track:** backend + voice + web · **Spec:** `docs/specs/04_backend_integration.md`; mailbox `ops/mailbox/voice-next-20260924/` (claude-060, claude-061, codex-053, codex-054)
+
+### What Changed
+- **Tracing safety:**
+  - `LangSmithTraceDisabledRunnable` (and the governed wrapper) now survive `copy()`, `with_config` and `astream_events`.
+  - Completion annotation requires a positive run-identity match.
+- **Governed structure-only tracing:** new `SOPHIA_GOVERNED_STRUCTURAL_TRACING` (default off) for governed Builder runs, via a redacting LangSmith client (`deerflow/sophia/governed_tracing.py`). An excluded governed Builder stamps `trace_unavailable / memory_governance_policy` instead of the misleading "no active run tree" warning.
+- **LangSmith visibility:**
+  - one process-wide Builder client with a `tracing_error_callback` (`langsmith_ingest_rejected`);
+  - a once-per-process `langsmith_preflight`;
+  - a startup `[tracing]` line with presence and equality booleans;
+  - the memory exporter logs its failure class and HTTP status, and its fault check exits early when injection is off.
+- **Voice:**
+  - every session is structure-only (content needs `SOPHIA_GEMINI_LIVE_LANGSMITH_CONTENT` plus an authoritative non-governed owner);
+  - background ingest failures feed an `IngestHealth` record (`gemini.langsmith.ingest_rejected`, root-only while rejected, `trace_export_failures` counted);
+  - SDK ingest log spam is sampled;
+  - close no longer waits on the flush.
+- **Diagnostics:**
+  - backend `sophia_diag` events across the whole voice→Builder launch, plus per-run `memory_guard.summary`;
+  - gateway `source_action`, `builder.progress.received` and `builder.canvas.delivered`, with millisecond timestamps;
+  - browser `[sophia-diag]` single-string events with a dedicated diagnostics ring;
+  - working Copy/Export JSON;
+  - `/api/chat` `chat.governed_send` stage timings.
+- **Recap:**
+  - bounded GET polling while a canonical recap is processing (a failed re-read keeps polling);
+  - truthful processing copy;
+  - debug export from every state;
+  - a neutral heading when no takeaway exists.
+
+### What We Learned
+- **The governed LangSmith exclusion only held because no tracer was attached.** `langgraph_api` runs `graph.copy(update=...)`, and the wrapper's `__getattr__` handed back the bare graph. Setting `LANGSMITH_TRACING=true` would have traced governed conversations with full content.
+- **"Builder tracing resolves to disabled" was a misreading.** The flag and key were on; governed owners take a branch that never attaches the tracer. The pilot account is governed, so its missing traces were policy.
+- **Voice traces were not content-free in the default mode.** Error text, free-text Builder status fields and keys built from conversation data reached LangSmith. Other modes sent transcripts, tool payloads (including memory text) and the recording. The voice service cannot know governance, so structure-only is the only safe default.
+- **The voice 403 was invisible by construction.** Multipart ingest runs on the SDK's background thread, so `_safe_post` never saw it, and `trace_export_failures` stayed 0 while LangSmith rejected every batch.
+- **The recap stuck on "processing" for a simple reason.** The canonical branch never scheduled another GET; only legacy/404 paths had retry timers.
+- **Multi-argument `console.warn(tag, label, object)` is unreadable in captures.** One JSON string per line is the contract.
+
+### CLAUDE.md Updates
+- Root `CLAUDE.md` (Jorge): a missing governed trace is policy, never set `LANGSMITH_TRACING=true`, wrappers must survive `copy()`, diagnostics are observation-only.
+- Root `CLAUDE.md` (Luis): `diagLog()` single-string contract; recap processing polling.
+- `backend/CLAUDE.md`: new "Launch observability and LangSmith policy" section.
+- `docs/ops/langsmith-traces.md`: content policy table and a missing-trace runbook.
+
+### Skills Created / Modified
+- None.
+
+### GEPA Log Entry
+- N/A (no prompt file changed).
+
+## 2026-10-05 — PR #166 automatic review: redact boolean tool content
+
+- Codex's P1 review found that structural voice payloads retained boolean values, which can reveal sensitive yes/no facts.
+- Claude's `6200e925` retains only the boolean type. Codex added recorder-path tests for both values and nested objects/arrays; program-owned success flags remain available.
+- Fixed the architecture regression without changing runtime decisions: split diagnostic integration tests by seam, separate diagnostic value validators, move redacting-client methods into a mixin while preserving lazy SDK import, and keep frontend formatting/diagnostic ingestion with their existing owners. God files and complex-function counts return to the PR-base counts (27 and 720).
+- No settings or content-policy authority changed. Updated `backend/CLAUDE.md`; verification counts are recorded in the mailbox after integration.
+
 ## 2026-10-05 · [mem00-governance-worker · first retention expiry] · PR #167
 **Author:** Claude · **Track:** backend · **Spec:** `docs/specs/03_memory_system.md` (retention)
 
@@ -2436,3 +2493,16 @@ Late in this wave, several commits landed over a red suite or with edits that si
 
 ### GEPA Log Entry
 - N/A
+
+## 2026-10-05 — PR #166 automatic review: authenticate diagnostic joins
+
+- Codex P2 found client-controlled action IDs were logged before authentication. Governed chat diagnostics now acquire IDs after authentication, authority and thread ownership checks, and retain UUID joins only; arbitrary action keys stay in the unchanged request contract, never in logs.
+- Causal regressions cover unauthenticated, incompatible-authority and foreign-thread refusals, plus code-shaped secret-like action keys. No admission decision or settings change. Updated `backend/CLAUDE.md` and request-diagnostic tests.
+
+### Codex follow-up: structural errors and session diagnostic scope
+
+Automatic review of combined head 0d8c5633 found two further P2 privacy gaps. Error serialization and Builder lifecycle summaries now honor the effective structural mode even with the content gate open. A recorder regression and the real SDK multipart sentinel test cover that combination, including root and tool errors; full-mode content remains the positive control. Session JSON filters diagnostic joins by the latest session/microphone start, keeps current diagnostics despite provider-ring churn, and omits joins if no boundary is known. Three regression cases exclude earlier-owner IDs. These failures reproduced before the changes. Production settings and tracing credentials are unchanged.
+
+### Codex follow-up: structural mode never attaches audio
+
+The review of 08215b7c found that an explicit audio-capture opt-in could still attach a raw recording despite the effective structural mode. Audio capture now also requires a non-structural mode. The real SDK multipart sentinel regression enables both legacy content and audio flags for a known non-governed owner while structural mode remains selected; it failed before the fix. Full mode with both flags remains the positive control. No runtime configuration was changed.

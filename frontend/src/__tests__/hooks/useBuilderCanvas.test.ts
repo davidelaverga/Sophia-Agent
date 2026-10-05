@@ -170,6 +170,44 @@ describe('useBuilderCanvas', () => {
     expect(result.current.completion?.status).toBe('success');
   });
 
+  it('logs each stream event as one diagnostics line with receive time and lag, without activity text', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    renderHook(() => useBuilderCanvas('thread-1'));
+    await waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
+    const occurredAt = new Date(Date.now() - 1_500).toISOString();
+    act(() => {
+      FakeEventSource.instances[0].emit({
+        version: 1,
+        event_id: 'task-1:run-1:2',
+        sequence: 2,
+        parent_thread_id: 'thread-1',
+        task_id: 'task-1',
+        run_id: 'run-1',
+        occurred_at: occurredAt,
+        kind: 'progress',
+        status: 'running',
+        activity: { kind: 'phase', phase: 'drafting', label: 'PRIVATE_SYNTHETIC_LABEL', detail: 'PRIVATE_SYNTHETIC_DETAIL' },
+      });
+    });
+
+    const lines = warn.mock.calls.filter(([line]) => typeof line === 'string' && line.includes('"ev":"builder_canvas.event"'));
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toHaveLength(1);
+    const record = JSON.parse((lines[0][0] as string).slice('[sophia-diag] '.length)) as Record<string, unknown>;
+    expect(record).toMatchObject({
+      parent_thread_id: 'thread-1',
+      task_id: 'task-1',
+      run_id: 'run-1',
+      sequence: 2,
+      kind: 'progress',
+      status: 'running',
+      occurred_at: occurredAt,
+    });
+    expect(typeof record.received_at).toBe('string');
+    expect(record.lag_ms as number).toBeGreaterThanOrEqual(1_500);
+    expect(warn.mock.calls.flat().map(String).join('\n')).not.toContain('PRIVATE_SYNTHETIC');
+  });
+
   it('accepts terminal updates that reuse the latest active-run sequence', async () => {
     const { result } = renderHook(() => useBuilderCanvas('thread-1'));
     await waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));

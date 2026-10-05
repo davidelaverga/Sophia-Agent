@@ -19,6 +19,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from deerflow.sophia.builder_failure_diagnostics import merge_builder_failure_diagnostics
+from deerflow.sophia.diag import code_or_none, diag_event
 
 logger = logging.getLogger(__name__)
 
@@ -649,6 +650,17 @@ class BuilderCanvasWorker:
                 delivered += 1
             except asyncio.QueueFull:
                 logger.warning("Builder canvas: slow subscriber dropped event thread_id=%s", parent_thread_id)
+        diag_event(
+            "builder.canvas.delivered",
+            parent_thread_id=parent_thread_id,
+            task_id=event.get("task_id"),
+            run_id=event.get("run_id"),
+            seq=sequence,
+            kind=code_or_none(event.get("kind")),
+            subscribers=len(queues),
+            delivered=delivered,
+            dropped=len(queues) - delivered,
+        )
         return delivered
 
     async def publish_progress(self, payload: dict[str, Any]) -> int:

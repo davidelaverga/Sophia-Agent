@@ -107,15 +107,17 @@ export function MemoryCandidatesPanel({
 
 interface RecapEmptyStateProps {
   status: 'processing' | 'reviewed' | 'no_pending' | 'source_excluded' | 'unavailable' | 'not_found';
+  autoRefreshing?: boolean;
   onRetry?: () => void;
   onDismiss?: () => void;
   className?: string;
 }
 
-export function RecapEmptyState({ status, onRetry, onDismiss, className }: RecapEmptyStateProps) {
+export function RecapEmptyState({ status, autoRefreshing, onRetry, onDismiss, className }: RecapEmptyStateProps) {
   return (
     <RecapEmptyStateViews
       status={status}
+      autoRefreshing={autoRefreshing}
       onRetry={onRetry}
       onDismiss={onDismiss}
       className={className}

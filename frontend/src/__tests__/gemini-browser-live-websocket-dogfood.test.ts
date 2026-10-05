@@ -423,6 +423,15 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
       langsmithTraceStatus: 'trace_unavailable',
       langsmithTraceUnavailableReason: 'synthetic_isolation_policy',
     });
+    // Voice reports a LangSmith key/workspace rejection instead of a trace id.
+    expect(readGeminiLangSmithTraceContext({
+      langsmith_trace_id: null,
+      langsmith_trace_unavailable_reason: 'langsmith_ingest_rejected',
+    })).toEqual({
+      langsmithTraceId: null,
+      langsmithTraceStatus: 'trace_unavailable',
+      langsmithTraceUnavailableReason: 'langsmith_ingest_rejected',
+    });
     expect(() => readGeminiLangSmithTraceContext({
       langsmith_trace_id: 'trace-must-not-coexist',
       langsmith_trace_unavailable_reason: 'synthetic_isolation_policy',
@@ -7282,11 +7291,15 @@ describe('Gemini voice Builder bridge routing', () => {
     audioContext.state = 'suspended';
     audioContext.listeners.get('statechange')?.();
 
-    const logged = warn.mock.calls.filter(([tag]) => tag === '[voice-audio]');
+    // One single-string diagnostics line, so log readers never flatten it.
+    const logged = warn.mock.calls.filter(([line]) => (
+      typeof line === 'string' && line.startsWith('[sophia-diag] ') && line.includes('"voice_audio.context_state"')
+    ));
     expect(logged).toHaveLength(1);
-    expect(logged[0]?.[1]).toBe('context-state');
-    expect(Object.keys(logged[0]?.[2] as Record<string, unknown>).sort()).toEqual(['at', 'state']);
-    expect(logged[0]?.[2]).toMatchObject({ state: 'suspended' });
+    expect(logged[0]).toHaveLength(1);
+    const record = JSON.parse((logged[0]?.[0] as string).slice('[sophia-diag] '.length)) as Record<string, unknown>;
+    expect(Object.keys(record).sort()).toEqual(['at', 'ev', 'mono', 'state', 'v']);
+    expect(record).toMatchObject({ v: 1, ev: 'voice_audio.context_state', state: 'suspended' });
 
     warn.mockRestore();
     await connection.close();

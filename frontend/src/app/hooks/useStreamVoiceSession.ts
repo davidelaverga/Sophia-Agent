@@ -67,6 +67,7 @@ import {
   type StreamVoiceCredentials,
 } from "./useStreamVoice"
 import {
+  logUngroundedModeClaim,
   applyAssistantTranscriptUpdate,
   applyPacedAssistantTranscriptUpdate,
   createAssistantTranscriptStaleGuardState,
@@ -4018,10 +4019,8 @@ export function useStreamVoiceSession(
           },
           onUngroundedModeClaim: (diagnostic) => {
             if (!ownsController()) return
-            console.warn("[voice] Gemini mentioned files or review tools outside review", {
-              responseId: diagnostic.responseId,
-              matchedPatterns: diagnostic.matchedPatterns,
-            })
+            // Gemini mentioned files or review tools outside review.
+            logUngroundedModeClaim(diagnostic)
             recordSophiaCaptureEvent({
               category: "voice-session",
               name: "gemini-ungrounded-mode-claim",

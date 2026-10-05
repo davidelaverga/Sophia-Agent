@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import {
   clearVoiceBuilderToolBridgeForTests,
@@ -50,11 +50,21 @@ function createSession(initial: { task?: BuilderTaskV1 | null; completion?: Buil
     ready: true,
   }
   const sent: string[] = []
-  const onSend: { next: (() => void) | null; reject: Error | null; hold: Promise<void> | null } = { next: null, reject: null, hold: null }
+  const onSend: {
+    next: (() => void) | null
+    reject: Error | null
+    hold: Promise<void> | null
+    // Diagnostics facts the session reports for the send, when set.
+    messageId: string | null
+  } = { next: null, reject: null, hold: null, messageId: null }
   const cancelBuilderTask = vi.fn(async () => ({ status: "cancelled", task_id: state.task?.taskId ?? null, run_id: state.task?.runId ?? null }))
   const adapter: VoiceBuilderSessionAdapter = {
-    sendCompanionMessage: async (text) => {
+    sendCompanionMessage: async (text, context) => {
       sent.push(text)
+      if (onSend.messageId !== null) {
+        context?.note({ messageId: onSend.messageId, appVersionMs: 7 })
+        context?.note({ sourceRecordMs: 11, sourceRecorded: true })
+      }
       if (onSend.hold !== null) {
         await onSend.hold
       }
@@ -827,6 +837,109 @@ describe("voice builder tool handler", () => {
     for (const entry of session.logs) {
       expect(Object.keys(entry).sort()).toEqual(["ok", "reason", "send_error", "status", "task_id", "tool", "waited_ms"])
     }
+  })
+
+  describe("single-line diagnostics", () => {
+    const MESSAGE_ID = "0190f2a3-0000-7000-8000-00000000a001"
+    const TASK_ID = "0190f2a3-0000-7000-8000-00000000b001"
+    const RUN_ID = "0190f2a3-0000-7000-8000-00000000c001"
+    let warn: ReturnType<typeof vi.spyOn>
+
+    beforeEach(() => {
+      warn = vi.spyOn(console, "warn").mockImplementation(() => undefined)
+    })
+
+    afterEach(() => {
+      warn.mockRestore()
+    })
+
+    const diagRecords = () => warn.mock.calls.map((args) => {
+      // One string argument per line, so log readers never flatten it.
+      expect(args).toHaveLength(1)
+      expect(typeof args[0]).toBe("string")
+      const line = args[0] as string
+      expect(line.startsWith("[sophia-diag] ")).toBe(true)
+      return JSON.parse(line.slice("[sophia-diag] ".length)) as Record<string, unknown>
+    })
+
+    it("emits call, send and outcome lines that share the call id and carry ids, not content", async () => {
+      const session = createSession()
+      session.onSend.messageId = MESSAGE_ID
+      session.onSend.next = () => {
+        session.state.task = { phase: "running", taskId: TASK_ID, runId: RUN_ID }
+      }
+
+      const result = await session.handler.execute(call(
+        "start_builder_task",
+        { description: "PRIVATE_SYNTHETIC_BRIEF about EV charging", task_type: "research" },
+        ["Can you research PRIVATE_SYNTHETIC_UTTERANCE?"],
+      ))
+      expect(result).toMatchObject({ ok: true, started: true, task_id: TASK_ID, run_id: RUN_ID })
+
+      const records = diagRecords()
+      expect(records.map((record) => record.ev)).toEqual(["voice_builder.call", "voice_builder.send", "voice_builder.outcome"])
+      const [callLine, sendLine, outcomeLine] = records
+      expect(typeof callLine.call).toBe("string")
+      expect(sendLine.call).toBe(callLine.call)
+      expect(outcomeLine.call).toBe(callLine.call)
+      expect(callLine).toMatchObject({ tool: "start_builder_task", tool_call_id: "start_builder_task-1", thread_id: "thread-a" })
+      expect(sendLine).toMatchObject({
+        message_id: MESSAGE_ID,
+        thread_id: "thread-a",
+        outcome: "recorded",
+        app_version_ms: 7,
+        source_record_ms: 11,
+      })
+      expect(outcomeLine).toMatchObject({
+        v: 1,
+        tool: "start_builder_task",
+        thread_id: "thread-a",
+        message_id: MESSAGE_ID,
+        task_id: TASK_ID,
+        run_id: RUN_ID,
+        ok: true,
+        outcome: "started",
+        app_version_ms: 7,
+        source_record_ms: 11,
+        // The companion turn is still streaming when its run is confirmed.
+        send_pending: true,
+      })
+      expect(typeof outcomeLine.at).toBe("string")
+      expect(typeof outcomeLine.waited_ms).toBe("number")
+      expect(typeof outcomeLine.confirm_wait_ms).toBe("number")
+      expect(typeof outcomeLine.pre_send_ms).toBe("number")
+
+      const serialized = warn.mock.calls.map((args) => String(args[0])).join("\n")
+      expect(serialized).not.toMatch(/PRIVATE_SYNTHETIC|EV charging|Voice build request|Brief:/)
+    })
+
+    it("reports a send that settles after an unconfirmed result, and a run that appears later, as late lines", async () => {
+      const session = createSession()
+      session.onSend.messageId = MESSAGE_ID
+      let release!: () => void
+      session.onSend.hold = new Promise<void>((resolve) => { release = resolve })
+
+      const result = await session.handler.execute(call(
+        "start_builder_task",
+        { description: "Research EV charging.", task_type: "research" },
+        ["please research EV charging"],
+      ))
+      expect(result).toMatchObject({ ok: false, reason: "builder_start_unconfirmed", status: "unconfirmed" })
+      const outcomeLine = diagRecords().find((record) => record.ev === "voice_builder.outcome")
+      expect(outcomeLine).toMatchObject({ ok: false, outcome: "builder_start_unconfirmed", send_pending: true, send_settle_ms: null })
+
+      release()
+      await new Promise((resolve) => { setTimeout(resolve, 0) })
+      const settledLine = diagRecords().find((record) => record.ev === "voice_builder.late" && record.kind === "send_settled")
+      expect(settledLine).toMatchObject({ call: outcomeLine?.call, message_id: MESSAGE_ID, outcome: "sent", send_error: null })
+      expect(typeof settledLine?.late_ms).toBe("number")
+
+      session.advance(2_000)
+      session.state.task = { phase: "running", taskId: TASK_ID, runId: RUN_ID }
+      session.handler.observe?.()
+      const runLine = diagRecords().find((record) => record.ev === "voice_builder.late" && record.kind === "run_observed")
+      expect(runLine).toMatchObject({ call: outcomeLine?.call, task_id: TASK_ID, run_id: RUN_ID, late_ms: 2_000 })
+    })
   })
 
   it("reports an unconfirmed correction truthfully", async () => {

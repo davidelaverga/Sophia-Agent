@@ -1,6 +1,7 @@
 import type { BuilderCompletionEventV1 } from "../types/builder-completion"
 import type { BuilderTaskV1 } from "../types/builder-task"
 
+import { diagLog, type DiagFields } from "./diag-log"
 import { isMemoryContextRecoveryError, MEMORY_CONTEXT_RECOVERY_REQUIRED } from "./memory-context-error"
 
 /**
@@ -154,12 +155,30 @@ export function createCompanionTurnFailures(): CompanionTurnFailures {
   }
 }
 
+/** Content-free facts the session reports about one send, for diagnostics only. */
+export interface VoiceBuilderSendNote {
+  /** The canonical id of the chat message this send creates. */
+  messageId?: string | null
+  appVersionMs?: number | null
+  sourceRecordMs?: number | null
+  /** The send's source record was accepted. */
+  sourceRecorded?: boolean
+}
+
+/** Passed with each companion send so its diagnostics join the voice tool call. */
+export interface VoiceBuilderSendContext {
+  /** Bridge-local id shared by every diagnostics line of one tool call. */
+  callId: string
+  /** Never throws and never changes the send. */
+  note: (fields: VoiceBuilderSendNote) => void
+}
+
 export interface VoiceBuilderSessionAdapter {
   /**
    * Send one companion chat turn through the governed text send path. Rejects
    * with a short error code when the turn could not be sent or ended in error.
    */
-  sendCompanionMessage: (text: string) => Promise<unknown>
+  sendCompanionMessage: (text: string, context?: VoiceBuilderSendContext) => Promise<unknown>
   getBuilderTask: () => BuilderTaskV1 | null
   getBuilderCompletion: () => BuilderCompletionEventV1 | null
   cancelBuilderTask: () => Promise<VoiceBuilderCancelResponse | null>
@@ -180,7 +199,10 @@ export interface VoiceBuilderHandlerOptions {
   pollIntervalMs?: number
   nowMs?: () => number
   sleep?: (ms: number) => Promise<void>
-  /** Receives one content-free outcome record per tool call. */
+  /**
+   * Receives one content-free outcome record per tool call. The single-line
+   * `voice_builder.outcome` diagnostics event is emitted either way.
+   */
   logOutcome?: (outcome: VoiceBuilderOutcomeLog) => void
 }
 
@@ -195,13 +217,57 @@ export interface VoiceBuilderOutcomeLog {
   waited_ms: number
 }
 
-function logVoiceBuilderOutcome(outcome: VoiceBuilderOutcomeLog): void {
-  console.warn("[voice-builder]", "outcome", outcome)
-}
-
 function outcomeCode(result: VoiceBuilderToolResult, key: string): string | null {
   const value = result[key]
   return typeof value === "string" && /^[a-z0-9_]{1,64}$/u.test(value) ? value : null
+}
+
+/**
+ * Ids and timings of one tool call, collected for its diagnostics lines.
+ * Times are on the handler clock (nowMs), except the session-reported waits.
+ */
+interface VoiceBuilderCallTrace {
+  callId: string
+  tool: string
+  toolCallId: string | null
+  threadId: string | null
+  startedAtMs: number
+  messageId: string | null
+  appVersionMs: number | null
+  sourceRecordMs: number | null
+  sendStartedAtMs: number | null
+  sendSettledAtMs: number | null
+  confirmEndedAtMs: number | null
+  /** When the outcome line was emitted. */
+  reportedAtMs: number | null
+  /** The result did not confirm, so later news about the send is reported as late. */
+  reportedUnconfirmed: boolean
+  sendLogged: boolean
+}
+
+let fallbackCallCounter = 0
+
+function newVoiceBuilderCallId(): string {
+  try {
+    const id = globalThis.crypto?.randomUUID?.()
+    if (id) return id
+  } catch {
+    // Fall back to a local code below.
+  }
+  fallbackCallCounter += 1
+  return `vbc-${Date.now().toString(36)}-${fallbackCallCounter.toString(36)}`
+}
+
+function emitVoiceBuilderDiag(ev: string, fields: DiagFields): void {
+  try {
+    diagLog(ev, fields)
+  } catch {
+    // Diagnostics never change a tool result.
+  }
+}
+
+function msBetween(from: number | null, to: number | null): number | null {
+  return from === null || to === null ? null : Math.max(0, to - from)
 }
 
 let activeVoiceBuilderBridge: VoiceBuilderToolBridge | null = null
@@ -341,11 +407,152 @@ export function createVoiceBuilderToolHandler(
   const pollIntervalMs = options.pollIntervalMs ?? VOICE_BUILDER_POLL_INTERVAL_MS
   const nowMs = options.nowMs ?? (() => Date.now())
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => { setTimeout(resolve, ms) }))
-  const logOutcome = options.logOutcome ?? logVoiceBuilderOutcome
+  const logOutcome = options.logOutcome
   // A start being sent or sent but not yet seen running, the run visible
-  // before it, and the conversation it was sent in.
-  let pendingStart: { atMs: number; baseline: string | null; sessionKey: string | null } | null = null
+  // before it, and the conversation it was sent in. The trace is diagnostics
+  // only.
+  let pendingStart: {
+    atMs: number
+    baseline: string | null
+    sessionKey: string | null
+    trace: VoiceBuilderCallTrace | null
+  } | null = null
   const sessionKey = () => adapter.getSessionKey?.() ?? null
+
+  const callFields = (trace: VoiceBuilderCallTrace): DiagFields => ({
+    call: trace.callId,
+    tool: trace.tool,
+    thread_id: trace.threadId,
+    message_id: trace.messageId,
+  })
+
+  const startTrace = (call: VoiceBuilderToolCallInput): VoiceBuilderCallTrace => {
+    let threadId: string | null = null
+    try {
+      threadId = sessionKey()
+    } catch {
+      threadId = null
+    }
+    const trace: VoiceBuilderCallTrace = {
+      callId: newVoiceBuilderCallId(),
+      tool: call.name,
+      toolCallId: call.id,
+      threadId,
+      startedAtMs: nowMs(),
+      messageId: null,
+      appVersionMs: null,
+      sourceRecordMs: null,
+      sendStartedAtMs: null,
+      sendSettledAtMs: null,
+      confirmEndedAtMs: null,
+      reportedAtMs: null,
+      reportedUnconfirmed: false,
+      sendLogged: false,
+    }
+    emitVoiceBuilderDiag("voice_builder.call", {
+      call: trace.callId,
+      tool: trace.tool,
+      tool_call_id: trace.toolCallId,
+      thread_id: trace.threadId,
+    })
+    return trace
+  }
+
+  // One voice_builder.send line per send: when its source record is accepted,
+  // or when the send settles without one (a legacy send, or a failure).
+  const logSend = (trace: VoiceBuilderCallTrace, outcome: string): void => {
+    if (trace.sendLogged) return
+    trace.sendLogged = true
+    emitVoiceBuilderDiag("voice_builder.send", {
+      ...callFields(trace),
+      outcome,
+      app_version_ms: trace.appVersionMs,
+      source_record_ms: trace.sourceRecordMs,
+      pre_send_ms: msBetween(trace.startedAtMs, trace.sendStartedAtMs),
+    })
+  }
+
+  const sendContext = (trace: VoiceBuilderCallTrace): VoiceBuilderSendContext => ({
+    callId: trace.callId,
+    note: (fields) => {
+      try {
+        if (fields.messageId !== undefined) trace.messageId = fields.messageId
+        if (typeof fields.appVersionMs === "number") trace.appVersionMs = fields.appVersionMs
+        if (typeof fields.sourceRecordMs === "number") trace.sourceRecordMs = fields.sourceRecordMs
+        if (fields.sourceRecorded) logSend(trace, "recorded")
+      } catch {
+        // Diagnostics never change a send.
+      }
+    },
+  })
+
+  const noteSendSettled = (trace: VoiceBuilderCallTrace, error: string | null): void => {
+    try {
+      trace.sendSettledAtMs = nowMs()
+      logSend(trace, error ?? "sent")
+      if (trace.reportedUnconfirmed) {
+        // The tool result already said not confirmed; record how the send ended.
+        emitVoiceBuilderDiag("voice_builder.late", {
+          ...callFields(trace),
+          kind: "send_settled",
+          outcome: error ?? "sent",
+          send_error: error,
+          late_ms: msBetween(trace.reportedAtMs, trace.sendSettledAtMs),
+          send_settle_ms: msBetween(trace.sendStartedAtMs, trace.sendSettledAtMs),
+        })
+      }
+    } catch {
+      // Diagnostics never change a send.
+    }
+  }
+
+  const logOutcomeDiag = (trace: VoiceBuilderCallTrace, result: VoiceBuilderToolResult): void => {
+    try {
+      const reportedAtMs = nowMs()
+      trace.reportedAtMs = reportedAtMs
+      trace.reportedUnconfirmed = !result.ok
+      const reason = outcomeCode(result, "reason") ?? outcomeCode(result, "error_type")
+      const outcome = result.ok
+        ? (result.started === true ? "started" : result.updated === true ? "updated" : "ok")
+        : (reason ?? "failed")
+      emitVoiceBuilderDiag("voice_builder.outcome", {
+        ...callFields(trace),
+        tool_call_id: trace.toolCallId,
+        task_id: typeof result.task_id === "string" ? result.task_id : null,
+        run_id: typeof result.run_id === "string" ? result.run_id : null,
+        ok: result.ok,
+        outcome,
+        reason,
+        send_error: outcomeCode(result, "send_error"),
+        status: outcomeCode(result, "status"),
+        send_pending: trace.sendStartedAtMs !== null && trace.sendSettledAtMs === null,
+        waited_ms: Math.max(0, reportedAtMs - trace.startedAtMs),
+        pre_send_ms: msBetween(trace.startedAtMs, trace.sendStartedAtMs),
+        app_version_ms: trace.appVersionMs,
+        source_record_ms: trace.sourceRecordMs,
+        send_settle_ms: msBetween(trace.sendStartedAtMs, trace.sendSettledAtMs),
+        confirm_wait_ms: msBetween(trace.sendStartedAtMs, trace.confirmEndedAtMs),
+      })
+    } catch {
+      // Diagnostics never change a tool result.
+    }
+  }
+
+  // A start whose result said unconfirmed later appeared as a running run.
+  const logLateRun = (trace: VoiceBuilderCallTrace | null, task: BuilderTaskV1 | null): void => {
+    if (!trace?.reportedUnconfirmed || trace.reportedAtMs === null) return
+    try {
+      emitVoiceBuilderDiag("voice_builder.late", {
+        ...callFields(trace),
+        kind: "run_observed",
+        task_id: task?.taskId ?? null,
+        run_id: task?.runId ?? null,
+        late_ms: Math.max(0, nowMs() - trace.reportedAtMs),
+      })
+    } catch {
+      // Diagnostics never change a tool result.
+    }
+  }
   // Companion turns this handler sent whose send has not settled yet. One turn
   // at a time: a second send while one is still active would share the chat's
   // single response state.
@@ -369,17 +576,19 @@ export function createVoiceBuilderToolHandler(
   // If the wait times out first, `settled` reports how the send ended later.
   // A conversation switch ends the wait unconfirmed: another conversation's
   // task can never confirm this send.
-  const sendAndConfirm = async (text: string): Promise<
+  type SendOutcome =
     | { kind: "confirmed"; task: BuilderTaskV1 }
     | { kind: "send_failed"; reason: string }
     | { kind: "unconfirmed"; deliveryUnknown?: boolean; settled?: Promise<string | null> }
-  > => {
+  const sendAndConfirm = async (text: string, trace: VoiceBuilderCallTrace): Promise<SendOutcome> => {
     const baseline = runKey(adapter.getBuilderTask())
     const origin = sessionKey()
     const send: { error: string | null } = { error: null }
     sendsInFlight += 1
+    trace.sendStartedAtMs = nowMs()
+    const context = sendContext(trace)
     const settled = Promise.resolve()
-      .then(() => adapter.sendCompanionMessage(text))
+      .then(() => adapter.sendCompanionMessage(text, context))
       .then(() => null, (error: unknown) => {
         // Only short error codes reach the model; never raw validation text.
         const message = error instanceof Error ? error.message : ""
@@ -388,33 +597,38 @@ export function createVoiceBuilderToolHandler(
       })
       .then((error) => {
         sendsInFlight -= 1
+        noteSendSettled(trace, error)
         return error
       })
     const deadline = nowMs() + confirmationTimeoutMs
+    const ended = (outcome: SendOutcome): SendOutcome => {
+      trace.confirmEndedAtMs = nowMs()
+      return outcome
+    }
     for (;;) {
       if (sessionKey() !== origin) {
-        return { kind: "unconfirmed", settled }
+        return ended({ kind: "unconfirmed", settled })
       }
       const task = adapter.getBuilderTask()
       if (task?.phase === "running" && task.taskId && runKey(task) !== baseline) {
-        return { kind: "confirmed", task }
+        return ended({ kind: "confirmed", task })
       }
       if (send.error === COMPANION_TURN_UNCONFIRMED) {
         // The turn may already have launched a build, or may never have been
         // delivered; report it as unconfirmed at once, never as sent or not sent.
-        return { kind: "unconfirmed", deliveryUnknown: true }
+        return ended({ kind: "unconfirmed", deliveryUnknown: true })
       }
       if (send.error) {
-        return { kind: "send_failed", reason: send.error }
+        return ended({ kind: "send_failed", reason: send.error })
       }
       if (nowMs() >= deadline) {
-        return { kind: "unconfirmed", settled }
+        return ended({ kind: "unconfirmed", settled })
       }
       await sleep(pollIntervalMs)
     }
   }
 
-  const start = async (call: VoiceBuilderToolCallInput): Promise<VoiceBuilderToolResult> => {
+  const start = async (call: VoiceBuilderToolCallInput, trace: VoiceBuilderCallTrace): Promise<VoiceBuilderToolResult> => {
     const description = stringArg(call.args, "description", "task", "brief", "request")
     if (!description) {
       return notStartedResult(call.name, {
@@ -472,12 +686,13 @@ export function createVoiceBuilderToolHandler(
       atMs: nowMs(),
       baseline: runKey(adapter.getBuilderTask()),
       sessionKey: sessionKey(),
+      trace,
     }
     pendingStart = pending
     const outcome = await sendAndConfirm(buildVoiceBuilderStartMessage({
       description,
       taskType: stringArg(call.args, "task_type", "taskType"),
-    }))
+    }), trace)
     // A confirmed start is visible as a task from now on, and a refused one
     // never ran; only an unconfirmed one keeps the window, from now.
     if (pendingStart === pending) {
@@ -512,7 +727,7 @@ export function createVoiceBuilderToolHandler(
     return unconfirmedResult(call.name, outcome, "start")
   }
 
-  const change = async (call: VoiceBuilderToolCallInput): Promise<VoiceBuilderToolResult> => {
+  const change = async (call: VoiceBuilderToolCallInput, trace: VoiceBuilderCallTrace): Promise<VoiceBuilderToolResult> => {
     const toolName = call.name === VOICE_BUILDER_EDIT_TOOL_NAME ? VOICE_BUILDER_EDIT_TOOL_NAME : VOICE_BUILDER_UPDATE_TOOL_NAME
     const message = stringArg(call.args, "message", "user_update_request", "correction", "description", "instructions")
     if (!message) {
@@ -546,7 +761,7 @@ export function createVoiceBuilderToolHandler(
       message,
       taskId: stringArg(call.args, "task_id", "taskId"),
       artifactPath: stringArg(call.args, "artifact_path", "artifactPath"),
-    }))
+    }), trace)
     if (outcome.kind === "confirmed" && startMayAppear) {
       return unconfirmedResult(call.name, { kind: "unconfirmed" }, "change")
     }
@@ -591,6 +806,7 @@ export function createVoiceBuilderToolHandler(
       const task = adapter.getBuilderTask()
       const newRun = task?.phase === "running" && runKey(task) !== pendingStart.baseline
       if (pendingStart.sessionKey !== sessionKey() || newRun) {
+        if (newRun) logLateRun(pendingStart.trace, task)
         pendingStart = null
       }
     }
@@ -688,13 +904,13 @@ export function createVoiceBuilderToolHandler(
     }
   }
 
-  const dispatch = async (call: VoiceBuilderToolCallInput): Promise<VoiceBuilderToolResult> => {
+  const dispatch = async (call: VoiceBuilderToolCallInput, trace: VoiceBuilderCallTrace): Promise<VoiceBuilderToolResult> => {
     switch (call.name) {
       case VOICE_BUILDER_START_TOOL_NAME:
-        return start(call)
+        return start(call, trace)
       case VOICE_BUILDER_UPDATE_TOOL_NAME:
       case VOICE_BUILDER_EDIT_TOOL_NAME:
-        return change(call)
+        return change(call, trace)
       case VOICE_BUILDER_CHECK_TOOL_NAME:
         return check(call)
       case VOICE_BUILDER_LIST_TOOL_NAME:
@@ -715,18 +931,19 @@ export function createVoiceBuilderToolHandler(
       pendingStartActive()
     },
     execute: async (call) => {
-      const startedAtMs = nowMs()
-      const result = await dispatch(call)
+      const trace = startTrace(call)
+      const result = await dispatch(call, trace)
+      logOutcomeDiag(trace, result)
       try {
         const taskId = typeof result.task_id === "string" ? result.task_id.slice(0, 12) : null
-        logOutcome({
+        logOutcome?.({
           tool: call.name,
           ok: result.ok,
           reason: outcomeCode(result, "reason") ?? outcomeCode(result, "error_type"),
           send_error: outcomeCode(result, "send_error"),
           status: outcomeCode(result, "status"),
           task_id: taskId,
-          waited_ms: Math.max(0, nowMs() - startedAtMs),
+          waited_ms: Math.max(0, nowMs() - trace.startedAtMs),
         })
       } catch {
         // Diagnostics never change a tool result.

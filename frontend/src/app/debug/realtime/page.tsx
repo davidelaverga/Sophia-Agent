@@ -17,6 +17,7 @@ import {
 import Link from 'next/link'
 import { useEffect, useMemo, useState } from 'react'
 
+import { copyTextToClipboard, downloadTextFile } from '@/app/lib/download-file'
 import { cn } from '@/app/lib/utils'
 
 import {
@@ -145,14 +146,15 @@ export default function RealtimeDogfoodPage() {
 
     try {
       const payload = buildRunRecordPayload(draft)
-      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' })
-      const href = URL.createObjectURL(blob)
-      const anchor = document.createElement('a')
-
-      anchor.href = href
-      anchor.download = createRunRecordDownloadFilename(draft)
-      anchor.click()
-      URL.revokeObjectURL(href)
+      const download = downloadTextFile({
+        text: JSON.stringify(payload, null, 2),
+        filename: createRunRecordDownloadFilename(draft),
+        mimeType: 'application/json',
+      })
+      if (!download.ok) {
+        setFeedback({ tone: 'danger', message: 'The JSON export helper is unavailable in this environment.' })
+        return
+      }
       setFeedback({ tone: 'success', message: 'Run record JSON exported.' })
     } catch {
       setFeedback({ tone: 'danger', message: 'The JSON export failed before the run record could be downloaded.' })
@@ -160,16 +162,18 @@ export default function RealtimeDogfoodPage() {
   }
 
   const handleCopySummary = async () => {
-    if (typeof navigator === 'undefined' || typeof navigator.clipboard?.writeText !== 'function') {
-      setFeedback({ tone: 'danger', message: 'Clipboard access is unavailable. Use the JSON export instead.' })
+    let summary: string
+    try {
+      summary = buildRunRecordMarkdownSummary(draft)
+    } catch {
+      setFeedback({ tone: 'danger', message: 'The summary could not be copied to the clipboard.' })
       return
     }
 
-    try {
-      await navigator.clipboard.writeText(buildRunRecordMarkdownSummary(draft))
+    if (await copyTextToClipboard(summary)) {
       setFeedback({ tone: 'success', message: 'Markdown summary copied.' })
-    } catch {
-      setFeedback({ tone: 'danger', message: 'The summary could not be copied to the clipboard.' })
+    } else {
+      setFeedback({ tone: 'danger', message: 'Clipboard access is unavailable. Use the JSON export instead.' })
     }
   }
 

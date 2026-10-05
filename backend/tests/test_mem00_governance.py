@@ -804,3 +804,36 @@ def test_observability_rejects_nested_content_bearing_fields() -> None:
             nested={"canonical_content": "must never serialize"},
         )
     assert counter_snapshot()["memory_redaction_failure_total"] == 1
+
+
+def test_certification_principal_with_fault_injection_off_makes_no_store_calls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import deerflow.sophia.memory_governance.observability as observability
+    from deerflow.sophia.memory_governance import faults, owner_authority
+
+    monkeypatch.setenv("SOPHIA_MEMORY_CERTIFICATION_PRINCIPAL", "mem00-cert-owner")
+    monkeypatch.delenv("SOPHIA_MEMORY_FAULT_INJECTION", raising=False)
+    calls: list[str] = []
+
+    class CountingStore:
+        def __getattr__(self, name: str):
+            def call(*_args, **_kwargs):
+                calls.append(name)
+                raise RuntimeError("synthetic store unavailable")
+
+            return call
+
+    monkeypatch.setattr(faults, "configured_memory_store", lambda: CountingStore())
+    monkeypatch.setattr(owner_authority, "configured_memory_store", lambda: CountingStore())
+
+    assert observability._consume_langsmith_fault("mem00-cert-owner") is False
+    monkeypatch.setenv("SOPHIA_MEMORY_FAULT_INJECTION", "false")
+    assert observability._consume_langsmith_fault("mem00-cert-owner") is False
+    assert calls == []
+
+    # With injection on, the durable authorisation path still runs (and fails
+    # closed to "no fault" when the store is unavailable).
+    monkeypatch.setenv("SOPHIA_MEMORY_FAULT_INJECTION", "true")
+    assert observability._consume_langsmith_fault("mem00-cert-owner") is False
+    assert calls

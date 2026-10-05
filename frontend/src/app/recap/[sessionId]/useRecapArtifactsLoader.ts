@@ -29,6 +29,14 @@ const RECENT_END_RETRY_DELAY_MS = 1500;
 const RECENT_END_MAX_RETRIES = 6;
 const RECENT_END_CONTEXT_WINDOW_MS = 2 * 60 * 1000;
 const RECENT_MEMORIES_FETCH_TIMEOUT_MS = 15000;
+// A canonical `processing` / `awaiting_finalization` envelope with nothing to
+// review yet is re-read with GET only. Extraction normally commits seconds
+// after the session ends (codex-054: ~9 s), so check quickly first and then
+// back off: 11 re-reads over ~70 s of waiting, never past 90 s from the first
+// request of this page/refresh. After that the page says the recap is still
+// being prepared and offers a manual refresh instead of polling forever.
+const CANONICAL_POLL_DELAYS_MS: readonly number[] = [1500, 1500, 3000, 3000, 5000, 5000, 8000, 8000, 10000, 10000, 15000];
+const CANONICAL_POLL_MAX_ELAPSED_MS = 90_000;
 
 type RecentMemoryStatus = 'pending_review' | 'approved';
 
@@ -44,7 +52,15 @@ interface UseRecapArtifactsLoaderParams {
 
 interface UseRecapArtifactsLoaderResult {
   status: RecapPageStatus;
+  /**
+   * True only while `status === 'processing'` and another GET is already
+   * scheduled. False once the bounded budget is spent: the recap is still
+   * being prepared and only a manual `refresh` checks again.
+   */
+  autoRefreshing: boolean;
   reload: () => void;
+  /** Re-read the recap in place with a fresh polling budget. */
+  refresh: () => void;
   telemetry: RecapTelemetryState;
 }
 
@@ -548,7 +564,12 @@ export function useRecapArtifactsLoader({
   currentScope.current = scope;
   const [status, setStatus] = useState<RecapPageStatus>('loading');
   const [statusSessionId, setStatusSessionId] = useState(scope);
+  const [autoRefreshing, setAutoRefreshing] = useState(false);
   const [retryCount, setRetryCount] = useState(0);
+  const [refreshToken, setRefreshToken] = useState(0);
+  // Survives effect re-runs caused by the legacy `retryCount` so the canonical
+  // budget stays bounded; resets on owner/session change or manual refresh.
+  const canonicalPollBudget = useRef({ key: '', attempts: 0, startedMs: 0 });
   const [telemetry, setTelemetry] = useState<RecapTelemetryState>(() =>
     createInitialRecapTelemetryState({ sessionId })
   );
@@ -561,9 +582,10 @@ export function useRecapArtifactsLoader({
     setTelemetry((current) => applyMemoryRecentNotRequestedReason(current, reason));
   }, []);
 
-  const setPageStatus = useCallback((nextStatus: RecapPageStatus) => {
+  const setPageStatus = useCallback((nextStatus: RecapPageStatus, nextCheckScheduled = false) => {
     setStatusSessionId(scope);
     setStatus(nextStatus);
+    setAutoRefreshing(nextCheckScheduled);
     setTelemetry((current) => applyRecapPageStatus(current, nextStatus));
   }, [scope]);
 
@@ -584,10 +606,18 @@ export function useRecapArtifactsLoader({
 
     const recordTelemetry: RecapTelemetryRecorder = (observation) => { if (active()) recordObservation(observation); };
     const recordMemoryRecentSkipped: MemoryRecentSkipRecorder = (reason) => { if (active()) recordSkippedObservation(reason); };
-    const setObservedStatus = (value: RecapPageStatus) => { if (active()) setPageStatus(value); };
+    const setObservedStatus = (value: RecapPageStatus, nextCheckScheduled = false) => {
+      if (active()) setPageStatus(value, nextCheckScheduled);
+    };
+    const pollKey = JSON.stringify([scope, refreshToken]);
+    if (canonicalPollBudget.current.key !== pollKey) {
+      canonicalPollBudget.current = { key: pollKey, attempts: 0, startedMs: Date.now() };
+    }
 
-    const loadArtifacts = async () => {
-      setObservedStatus('loading');
+    // `poll` re-reads keep the current page state on screen until the new
+    // response is verified; only the first read of an effect shows loading.
+    const loadArtifacts = async ({ poll = false }: { poll?: boolean } = {}) => {
+      if (!poll) setObservedStatus('loading');
 
       const recentEndHint = getRecentSessionEndHint();
       const hasRecentEndHint = recentEndHint?.sessionId === sessionId;
@@ -603,7 +633,7 @@ export function useRecapArtifactsLoader({
           return false;
         }
 
-        setObservedStatus('processing');
+        setObservedStatus('processing', true);
         retryTimer = setTimeout(() => {
           if (active()) setRetryCount((current) => current + 1);
         }, RECENT_END_RETRY_DELAY_MS);
@@ -621,10 +651,28 @@ export function useRecapArtifactsLoader({
           return true;
         }
 
-        setObservedStatus('processing');
+        setObservedStatus('processing', true);
         retryTimer = setTimeout(() => {
           if (active()) setRetryCount((current) => current + 1);
         }, RECENT_END_RETRY_DELAY_MS);
+        return true;
+      };
+
+      // Canonical extraction still running with nothing published yet. GET
+      // only; the timer is cleared on unmount, owner/session change and
+      // manual refresh, and a late response is dropped by `active()`.
+      const scheduleCanonicalPoll = () => {
+        const budget = canonicalPollBudget.current;
+        const delay = CANONICAL_POLL_DELAYS_MS[budget.attempts];
+        if (!active() || budget.key !== pollKey || delay === undefined
+          || Date.now() + delay - budget.startedMs > CANONICAL_POLL_MAX_ELAPSED_MS) {
+          return false;
+        }
+        budget.attempts += 1;
+        retryTimer = setTimeout(() => {
+          retryTimer = null;
+          if (active()) void loadArtifacts({ poll: true });
+        }, delay);
         return true;
       };
 
@@ -692,12 +740,14 @@ export function useRecapArtifactsLoader({
                 produced: review.summary.produced, pending: review.summary.pending, approved: review.summary.approved,
                 rejected: review.summary.rejected, invalidated: review.summary.invalidated, enumerationComplete: review.enumeration_complete },
             });
+            // Polling stops here once anything is reviewable: re-publishing
+            // under a user mid-review could resurrect a discarded candidate.
             if (review.candidates.length > 0) setObservedStatus('ready'); // published review page, not target completion
             else if (complete) setObservedStatus(review.summary.produced === 0 ? 'ready'
               : review.summary.approved + review.summary.rejected === review.summary.produced ? 'reviewed' : 'no_pending');
             else if (excluded) setObservedStatus('source_excluded');
             else if (failed) setObservedStatus('unavailable');
-            else setObservedStatus('processing');
+            else setObservedStatus('processing', scheduleCanonicalPoll()); // processing | awaiting_finalization
             if (complete) { clearCurrentEndHint(); markViewed(); }
             return; // No derivative, recent/provider hydration or approved fallback.
           }
@@ -904,6 +954,13 @@ export function useRecapArtifactsLoader({
         });
       }
 
+      // A failed re-read while polling a processing recap is not a verdict:
+      // keep the processing view and spend the remaining budget.
+      if (poll && scheduleCanonicalPoll()) {
+        setObservedStatus('processing', true);
+        return;
+      }
+
       if (process.env.NODE_ENV === 'development') {
         logger.debug('Recap', 'Using mock data for development');
         await new Promise((resolve) => setTimeout(resolve, 500));
@@ -926,16 +983,24 @@ export function useRecapArtifactsLoader({
         clearTimeout(retryTimer);
       }
     };
-  }, [sessionId, ownerId, scope, publishArtifacts, invalidateArtifacts, retryCount, recordObservation, recordSkippedObservation, setPageStatus]);
+  }, [sessionId, ownerId, scope, publishArtifacts, invalidateArtifacts, retryCount, refreshToken, recordObservation, recordSkippedObservation, setPageStatus]);
 
   const reload = useCallback(() => {
     setStatus('loading');
     window.location.reload();
   }, []);
 
+  const refresh = useCallback(() => {
+    setRetryCount(0);
+    setRefreshToken((current) => current + 1);
+  }, []);
+
+  const currentStatus = ownerId !== null && statusSessionId === scope ? status : 'loading';
   return {
-    status: ownerId !== null && statusSessionId === scope ? status : 'loading',
+    status: currentStatus,
+    autoRefreshing: currentStatus === 'processing' && autoRefreshing,
     reload,
+    refresh,
     telemetry,
   };
 }

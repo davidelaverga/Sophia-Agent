@@ -1,7 +1,9 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { diagLog } from '../../app/lib/diag-log';
 import {
   bindSophiaCaptureSyntheticTestContext,
+  exportSophiaCaptureBundle,
   readSophiaCaptureEventsAfter,
   recordSophiaCaptureEvent,
   registerSophiaCaptureBridge,
@@ -14,6 +16,7 @@ describe('session capture cursor drain', () => {
     window.__SOPHIA_CAPTURE_ENABLED__ = true;
     delete window.__sophiaCapture;
     delete window.__sophiaCaptureState;
+    delete window.__sophiaDiagnosticsRing;
   });
 
   it('drains more than the 500-event ring capacity without a cursor gap or duplicate', () => {
@@ -79,6 +82,33 @@ describe('session capture cursor drain', () => {
       gapReason: 'generation_mismatch',
     });
     expect(afterClear?.events.map((event) => event.name)).toEqual(['new-generation-event']);
+  });
+
+  it('keeps single-line diagnostics in their own ring that 500+ provider events cannot evict', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    diagLog('voice_builder.call', { call: 'call-1', tool: 'start_builder_task' });
+    diagLog('voice_builder.outcome', { call: 'call-1', outcome: 'builder_start_unconfirmed' });
+    diagLog('builder_canvas.event', { sequence: 1, kind: 'progress' });
+
+    for (let index = 1; index <= 650; index += 1) {
+      recordSophiaCaptureEvent({ category: 'voice-session', name: 'gemini-provider-event', payload: { index } });
+    }
+
+    const bundle = exportSophiaCaptureBundle();
+    expect(bundle.events).toHaveLength(500);
+    expect(bundle.capture).toMatchObject({ capacity: 500, totalProduced: 650, droppedCount: 150 });
+    expect(bundle.diagnostics).toMatchObject({ capacity: 200, totalProduced: 3, droppedCount: 0 });
+    expect(bundle.diagnostics?.events.map((event) => event.ev)).toEqual([
+      'voice_builder.call',
+      'voice_builder.outcome',
+      'builder_canvas.event',
+    ]);
+
+    registerSophiaCaptureBridge();
+    expect(window.__sophiaCapture?.getDiagnostics().events).toHaveLength(3);
+    window.__sophiaCapture?.clear();
+    expect(window.__sophiaCapture?.getDiagnostics()).toMatchObject({ totalProduced: 0, droppedCount: 0, events: [] });
+    warn.mockRestore();
   });
 
   it('attaches product-authored exact-run provenance to every later capture event and snapshot', () => {

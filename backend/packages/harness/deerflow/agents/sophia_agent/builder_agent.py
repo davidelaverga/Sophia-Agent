@@ -28,6 +28,7 @@ from deerflow.agents.sophia_agent.builder_middlewares import (
     builder_distributed_trace_context,
     log_builder_tracing_startup_status,
     wrap_builder_agent_for_observability,
+    wrap_governed_builder_agent_for_observability,
 )
 from deerflow.agents.sophia_agent.builder_tools import (
     assert_deck_tool_contract,
@@ -38,8 +39,8 @@ from deerflow.agents.sophia_agent.utils import validate_user_id
 from deerflow.agents.sophia_agent.vision_gate import supports_vision
 from deerflow.config.app_config import get_app_config
 from deerflow.sophia.build_runtime.startup import audit_build_foundation
+from deerflow.sophia.diag import factory_mark, factory_segment, timed_graph_factory
 from deerflow.sophia.memory_governance.model_clients import GovernedChatAnthropic as ChatAnthropic
-from deerflow.sophia.observability import disable_langsmith_tracing_for_runnable
 
 logger = logging.getLogger(__name__)
 DEFAULT_BUILDER_MODEL = "claude-sonnet-5"
@@ -47,6 +48,7 @@ DEFAULT_BUILDER_MODEL = "claude-sonnet-5"
 log_builder_tracing_startup_status()
 
 
+@timed_graph_factory("sophia_builder")
 def make_sophia_builder(config: RunnableConfig):
     """LangGraph entry point for sophia_builder graph registration.
 
@@ -74,6 +76,7 @@ def make_sophia_builder(config: RunnableConfig):
     )
 
 
+@timed_graph_factory("sophia_builder")
 @asynccontextmanager
 async def make_sophia_builder_with_distributed_tracing(config: RunnableConfig):
     """LangGraph entry point that restores a voice caller's trace parent.
@@ -271,7 +274,9 @@ def _create_builder_agent(
         logger.debug("Skipping build-foundation startup audit for isolated agent construction", exc_info=True)
     else:
         if hasattr(app_config, "build_foundation"):
-            audit_build_foundation(tools=tools, config=app_config)
+            with factory_segment("foundation_probe"):
+                audit_build_foundation(tools=tools, config=app_config)
+    factory_mark("pre_compile")
     if deck_tool_contract:
         log_payload = {
             key: deck_tool_contract.get(key)
@@ -326,12 +331,16 @@ def _create_builder_agent(
     # switch_to_builder -> SubagentExecutor.config.max_turns.
     agent.recursion_limit = 80
     if memory_guard.enabled:
-        # Protect the full state-bearing chain, not only the model callback.
-        # Structural memory events use their separate explicit exporter.
-        return disable_langsmith_tracing_for_runnable(agent.with_config({
-            "run_name": "Sophia Builder", "tags": ["sophia_builder"],
-            "metadata": {"sophia_component": "builder", "builder_model_name": resolved_model, "builder_model_source": model_source},
-        }))
+        # Protect the full state-bearing chain, not only the model callback:
+        # excluded from LangSmith by default, structure-only redacted tracing
+        # when SOPHIA_GOVERNED_STRUCTURAL_TRACING opts in. Never the ordinary
+        # Builder tracer. Structural memory events use their separate exporter.
+        return wrap_governed_builder_agent_for_observability(
+            agent,
+            model_name=resolved_model,
+            model_source=model_source,
+            trace_config=trace_config,
+        )
     if external_trace_context:
         return agent
     return wrap_builder_agent_for_observability(

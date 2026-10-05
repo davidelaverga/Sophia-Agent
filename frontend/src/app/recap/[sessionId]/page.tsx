@@ -24,13 +24,13 @@ import {
 import { BuilderDeliverableCard } from '../../components/session/ArtifactsPanel';
 import { haptic } from '../../hooks/useHaptics';
 import { readMemoryObservation } from '../../lib/memory-observability';
-import { buildRecapTelemetryReport } from '../../lib/recap-telemetry-report';
 import type { MemoryDecision } from '../../lib/recap-types';
 import { useRecapStore } from '../../stores/recap-store';
 import { useSessionHistoryStore } from '../../stores/session-history-store';
 import { useUiStore } from '../../stores/ui-store';
 import { useAuth } from '../../providers';
 
+import { buildRecapDebugExport, downloadRecapDebugExport } from './recap-debug-export';
 import {
   RecapBottomActionBar,
   RecapPageFloatingHeader,
@@ -82,7 +82,7 @@ export default function RecapPage() {
     return map;
   }, [decisions]);
 
-  const { status, reload, telemetry } = useRecapArtifactsLoader({
+  const { status, autoRefreshing, reload, refresh, telemetry } = useRecapArtifactsLoader({
     sessionId,
     ownerId,
     artifacts,
@@ -124,39 +124,44 @@ export default function RecapPage() {
     reload();
   }, [reload]);
 
+  // Available in every state that shows the button: the report is content
+  // free, and processing/failure states are exactly when it is needed.
   const handleExportDebug = useCallback(async () => {
-    if (!ownerId || status !== 'ready') return;
+    const showExportFailed = () => {
+      showToast({ message: 'Could not export recap debug report.', variant: 'error', durationMs: 2200 });
+    };
+    if (!ownerId) {
+      showExportFailed();
+      return;
+    }
     try {
       const memoryObservation = await readMemoryObservation();
       if (ownerRef.current !== ownerId) return;
-      const exportedAt = new Date().toISOString();
-      const report = buildRecapTelemetryReport({
+      const report = buildRecapDebugExport({
         memoryObservation,
         sessionId,
         route: typeof window === 'undefined' ? `/recap/${sessionId}` : window.location.pathname,
         pageStatus: status,
+        autoRefreshing,
         telemetry,
         artifacts,
         decisions,
         memoryCommitStatus: getCommitStatus(sessionId),
         historyEntry,
-        exportedAt,
+        exportedAt: new Date().toISOString(),
       });
-      const blob = new Blob([JSON.stringify(report, null, 2)], { type: 'application/json' });
-      const href = URL.createObjectURL(blob);
-      const anchor = document.createElement('a');
-      const stamp = exportedAt.replace(/[:.]/g, '-');
-      anchor.href = href;
-      anchor.download = `sophia-recap-telemetry-report-${sessionId}-${stamp}.json`;
-      anchor.click();
-      URL.revokeObjectURL(href);
+      if (!downloadRecapDebugExport(report)) {
+        showExportFailed();
+        return;
+      }
       showToast({ message: 'Recap debug report exported.', variant: 'success', durationMs: 1800 });
     } catch {
-      showToast({ message: 'Could not export recap debug report.', variant: 'error', durationMs: 2200 });
+      showExportFailed();
     }
   }, [
     ownerId,
     artifacts,
+    autoRefreshing,
     decisions,
     getCommitStatus,
     historyEntry,
@@ -200,9 +205,10 @@ export default function RecapPage() {
         />
         
         <main className="min-h-screen flex items-center justify-center px-4">
-          <RecapEmptyState 
+          <RecapEmptyState
             status={status === 'ready' ? 'unavailable' : status}
-            onRetry={handleRetry}
+            autoRefreshing={autoRefreshing}
+            onRetry={status === 'processing' ? refresh : handleRetry}
             onDismiss={() => router.push('/journal')}
           />
         </main>

@@ -68,7 +68,8 @@ from deerflow.sophia.deck_quality.publication_persistence import (
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    # Millisecond timestamps: launch-timeline hops are often < 1 s apart.
+    format="%(asctime)s.%(msecs)03d - %(name)s - %(levelname)s - %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 install_gateway_logging_safety()

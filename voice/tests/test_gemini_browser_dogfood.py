@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import threading
+import time
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -9,6 +12,7 @@ from typing import Any
 import httpx
 import pytest
 import voice.realtime.gemini_browser_dogfood as gemini_browser_dogfood
+import voice.realtime.gemini_langsmith_tracing as gemini_langsmith_tracing
 import voice.realtime.gemini_production_session as gemini_production_session
 import voice.realtime.gemini_tool_loop as gemini_tool_loop
 import voice.realtime.sophia_backend_tools as sophia_backend_tools
@@ -33,6 +37,7 @@ from voice.realtime.sophia_prompt import (
     gemini_live_realtime_instruction_sources,
 )
 from voice.tests.conftest import make_settings
+from voice.tests.test_gemini_langsmith_tracing import _sdk_shaped_http_error
 
 ARTIFACT_FIELD_NAMES = {
     "session_goal",
@@ -1337,6 +1342,134 @@ async def test_trace_tool_span_failure_does_not_suppress_tool_or_public_delivery
     payloads = await browser_session.dogfood_session.wait_for_public_payloads(3)
     assert any(payload["type"] == "sophia.artifact" for payload in payloads)
     await manager.close_session(session_id)
+
+
+class _FakeSharedLangSmithClient:
+    """Stands in for the process-wide SDK client; the real RunTree drives it."""
+
+    instances: list[_FakeSharedLangSmithClient] = []
+
+    def __init__(self, **kwargs: Any) -> None:
+        self.kwargs = kwargs
+        self.created: list[dict[str, Any]] = []
+        self.updated: list[dict[str, Any]] = []
+        self.flush_calls: list[float] = []
+        self.flush_gate: threading.Event | None = None
+        type(self).instances.append(self)
+
+    def create_run(self, **kwargs: Any) -> None:
+        self.created.append(kwargs)
+
+    def update_run(self, **kwargs: Any) -> None:
+        self.updated.append(kwargs)
+
+    def flush(self, *, timeout: float) -> None:
+        self.flush_calls.append(timeout)
+        if self.flush_gate is not None:
+            self.flush_gate.wait(5.0)
+
+
+@pytest.fixture
+def shared_langsmith_client(monkeypatch: pytest.MonkeyPatch) -> Any:
+    monkeypatch.setenv("SOPHIA_GEMINI_LIVE_LANGSMITH_TRACING", "true")
+    monkeypatch.setenv("LANGSMITH_API_KEY", "lsv2_sk_" + "k" * 32)
+    monkeypatch.setenv("SOPHIA_VOICE_OBSERVABILITY_HMAC_SECRET", "h" * 32)
+    monkeypatch.delenv("SOPHIA_GEMINI_LIVE_LANGSMITH_CONTENT", raising=False)
+    monkeypatch.setattr(gemini_langsmith_tracing, "Client", _FakeSharedLangSmithClient)
+    _FakeSharedLangSmithClient.instances = []
+    reset = getattr(gemini_langsmith_tracing, "_reset_shared_ingest_clients", lambda: None)
+    reset()
+    yield _FakeSharedLangSmithClient
+    reset()
+
+
+@pytest.mark.anyio
+async def test_background_ingest_rejection_reaches_diagnostics_and_bootstrap(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    shared_langsmith_client: Any,
+) -> None:
+    caplog.set_level(logging.INFO)
+    _set_gemini_env(monkeypatch)
+    manager = GeminiBrowserDogfoodSessionManager(
+        RealtimeDogfoodSessionManager(),
+        token_minter=FakeGeminiTokenMinter(),  # type: ignore[arg-type]
+    )
+    first = await manager.start_browser_session(
+        _gemini_settings(),
+        user_id="user-1",
+        session_id="browser-gemini-ingest-1",
+    )
+    assert first.langsmith_trace_id is not None
+    assert "langsmith_trace_unavailable_reason" not in first.as_public_payload()
+    [client] = shared_langsmith_client.instances
+    callback = client.kwargs["tracing_error_callback"]
+
+    # The SDK invokes the callback on its own worker thread after the batch
+    # POST was rejected; RunTree.post() returned long before.
+    worker = threading.Thread(
+        target=callback,
+        args=(_sdk_shaped_http_error(403, b'{"error":"Forbidden"}'),),
+    )
+    worker.start()
+    worker.join(timeout=5)
+    created_before = len(client.created)
+
+    response = await manager.ingest_browser_provider_event(
+        _gemini_settings(),
+        dogfood_session_id=first.dogfood_session.session_id,
+        event={"serverContent": {"turnComplete": True}},
+    )
+
+    assert response["diagnostics"]["trace_export_failures"] == 1
+    assert len(client.created) == created_before  # Child skipped while rejected.
+    second = await manager.start_browser_session(
+        _gemini_settings(),
+        user_id="user-1",
+        session_id="browser-gemini-ingest-2",
+    )
+    assert second.langsmith_trace_id is None
+    assert second.langsmith_trace_unavailable_reason == "langsmith_ingest_rejected"
+    assert len(shared_langsmith_client.instances) == 1
+    rejected_logs = [
+        record.getMessage()
+        for record in caplog.records
+        if record.getMessage().startswith("gemini.langsmith.ingest_rejected")
+    ]
+    assert len(rejected_logs) == 1
+    assert "status=403" in rejected_logs[0]
+    await manager.close_session(first.dogfood_session.session_id)
+    await manager.close_session(second.dogfood_session.session_id)
+
+
+@pytest.mark.anyio
+async def test_close_session_does_not_wait_for_langsmith_flush(
+    monkeypatch: pytest.MonkeyPatch,
+    shared_langsmith_client: Any,
+) -> None:
+    _set_gemini_env(monkeypatch)
+    manager = GeminiBrowserDogfoodSessionManager(
+        RealtimeDogfoodSessionManager(),
+        token_minter=FakeGeminiTokenMinter(),  # type: ignore[arg-type]
+    )
+    browser_session = await manager.start_browser_session(
+        _gemini_settings(),
+        user_id="user-1",
+        session_id="browser-gemini-slow-flush",
+    )
+    [client] = shared_langsmith_client.instances
+    client.flush_gate = threading.Event()
+
+    started = time.monotonic()
+    try:
+        closed = await manager.close_session(browser_session.dogfood_session.session_id)
+        elapsed = time.monotonic() - started
+    finally:
+        client.flush_gate.set()
+
+    assert closed is True
+    assert elapsed < 0.5
+    assert len(client.updated) == 1  # The root patch was queued before returning.
 
 
 @pytest.mark.anyio

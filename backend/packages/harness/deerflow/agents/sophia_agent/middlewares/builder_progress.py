@@ -52,6 +52,7 @@ from deerflow.sophia.builder_event_auth import (
     encode_builder_event_body,
     signed_builder_event_headers,
 )
+from deerflow.sophia.diag import code_or_none, diag_event
 from deerflow.sophia.synthetic_builder import (
     normalize_synthetic_builder_context,
     synthetic_builder_projection,
@@ -146,7 +147,7 @@ class _ProgressPost(TypedDict, total=False):
     deck_quality_publication_excluded: bool
     langsmith_export_excluded: bool
     langsmith_trace_status: Literal["trace_unavailable"]
-    langsmith_trace_unavailable_reason: Literal["synthetic_isolation_policy"]
+    langsmith_trace_unavailable_reason: Literal["synthetic_isolation_policy", "memory_governance_policy"]
 
 
 def _classify_tool(tool_name: str) -> str | None:
@@ -259,7 +260,7 @@ async def _post_progress_event(
     deck_quality_publication_excluded: bool | None = None,
     langsmith_export_excluded: bool | None = None,
     langsmith_trace_status: Literal["trace_unavailable"] | None = None,
-    langsmith_trace_unavailable_reason: Literal["synthetic_isolation_policy"] | None = None,
+    langsmith_trace_unavailable_reason: Literal["synthetic_isolation_policy", "memory_governance_policy"] | None = None,
     synthetic_builder_join: dict[str, Any] | None = None,
 ) -> None:
     """Fire one progress event at the gateway.
@@ -309,26 +310,74 @@ async def _post_progress_event(
         value = locals().get(key)
         if value is not None:
             payload[key] = value
+    started = time.perf_counter()
+    http_status: int | None = None
+    error_type: str | None = None
     try:
         body = encode_builder_event_body(payload)
         headers = signed_builder_event_headers(body)
         async with httpx.AsyncClient(timeout=_WEBHOOK_TIMEOUT_SECONDS) as client:
             response = await client.post(url, content=body, headers=headers)
-            if response.status_code >= 400:
-                logger.warning(
-                    "BuilderProgress: webhook rejected status=%s task_id=%s event=%s body=%s",
-                    response.status_code,
-                    task_id,
-                    event_name,
-                    response.text[:200],
-                )
-    except Exception:
-        logger.debug(
-            "BuilderProgress: webhook delivery failed task_id=%s event=%s",
-            task_id,
-            event_name,
-            exc_info=True,
+            http_status = response.status_code
+    except Exception as exc:
+        error_type = type(exc).__name__
+    _log_progress_post(
+        task_id=task_id,
+        run_id=run_id,
+        parent_thread_id=parent_thread_id,
+        sequence=sequence,
+        event_name=event_name,
+        data=data,
+        post_ms=int((time.perf_counter() - started) * 1000),
+        http_status=http_status,
+        error_type=error_type,
+    )
+
+
+def _log_progress_post(
+    *,
+    task_id: str,
+    run_id: str,
+    parent_thread_id: str | None,
+    sequence: int | None,
+    event_name: str,
+    data: Any,
+    post_ms: int,
+    http_status: int | None,
+    error_type: str | None,
+) -> None:
+    """One content-free ``builder.progress.post`` line per webhook POST.
+
+    Failures (transport error or HTTP >= 400) log at WARNING; the run's first
+    and terminal phases at INFO; ordinary activity updates at DEBUG. Response
+    bodies and exception messages are never logged.
+    """
+    try:
+        phase = data.get("phase") if event_name == "custom" and isinstance(data, dict) and data.get("name") == "phase" else None
+        status = http_status if isinstance(http_status, int) and not isinstance(http_status, bool) else None
+        failed = error_type is not None or status is None or status >= 400
+        if failed:
+            level = logging.WARNING
+        elif phase in {_PHASE_STARTING, _PHASE_DONE}:
+            level = logging.INFO
+        else:
+            level = logging.DEBUG
+        diag_event(
+            "builder.progress.post",
+            _level=level,
+            task_id=task_id,
+            run_id=run_id,
+            parent_thread_id=parent_thread_id,
+            seq=sequence,
+            event=code_or_none(event_name),
+            phase=code_or_none(phase),
+            outcome="failed" if error_type is not None else "rejected" if failed else "delivered",
+            http_status=status,
+            error_type=error_type,
+            post_ms=post_ms,
         )
+    except Exception:  # noqa: BLE001 - progress logging never affects the builder.
+        pass
 
 
 def _schedule_post(
@@ -601,8 +650,8 @@ class BuilderProgressMiddleware(AgentMiddleware[BuilderProgressState]):
     sharing the same phase.
 
     Defensive: missing task_id/run_id (execution_info not populated)
-    short-circuits to a debug log. Webhook failures are logged at
-    debug and swallowed.
+    short-circuits to a debug log. Webhook failures are logged as a
+    content-free ``builder.progress.post`` WARNING and swallowed.
     """
 
     state_schema = BuilderProgressState
