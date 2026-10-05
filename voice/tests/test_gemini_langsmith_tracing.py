@@ -176,6 +176,41 @@ def test_structural_trace_mode_excludes_transcript_and_tool_content(monkeypatch:
     assert "PRIVATE RESULT" not in serialized
 
 
+def test_structural_trace_mode_reports_booleans_by_type_only(monkeypatch: Any) -> None:
+    # A yes/no answer in a tool payload (e.g. a health attribute) is content,
+    # not shape: True and False must produce identical structural traces.
+    _enable_fake_sdk(monkeypatch)
+    monkeypatch.setenv("SOPHIA_GEMINI_LIVE_TRACE_CONTENT_MODE", "structural")
+
+    def traced(flag: bool) -> str:
+        recorder = tracing.GeminiLiveTraceRecorder(
+            session_id="gemini-prod-test",
+            user_id="user-1",
+            model="gemini-live-test",
+            client=FakeClient(),
+        )
+        recorder.record_provider_event(
+            {"toolCall": {"functionCalls": [{"args": {"is_pregnant": flag}}]}},
+            categories=["toolCall"],
+        )
+        recorder.record_tool_call(
+            tool_call_id="call-1",
+            tool_name="lookup_profile",
+            arguments={"is_pregnant": flag, "answers": [flag, not flag]},
+            success=True,
+            response={"consented": flag},
+        )
+        assert recorder.root is not None
+        return json.dumps(
+            [child.inputs for child in recorder.root.children]
+            + [child.outputs for child in recorder.root.children],
+            sort_keys=True,
+        )
+
+    assert traced(True) == traced(False)
+    assert '"kind": "boolean"' in traced(True)
+
+
 def test_synthetic_trace_is_policy_disabled_before_client_or_project_allocation(
     monkeypatch: Any,
 ) -> None:

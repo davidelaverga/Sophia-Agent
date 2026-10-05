@@ -661,7 +661,8 @@ def _structural_payload(value: Any, *, depth: int = 0) -> Any:
     if value is None:
         return {"kind": "null"}
     if isinstance(value, bool):
-        return {"kind": "boolean", "value": value}
+        # A yes/no answer is content, like a number: report the type only.
+        return {"kind": "boolean"}
     if isinstance(value, (int, float)):
         return {"kind": "number"}
     if isinstance(value, Mapping):
