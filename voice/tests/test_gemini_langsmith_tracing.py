@@ -456,6 +456,8 @@ def test_close_patches_root_with_inline_audio_and_flushes_when_content_allowed(
 ) -> None:
     _enable_fake_sdk(monkeypatch)
     monkeypatch.setenv(CONTENT_ENV, "true")
+    # The recording is content: only a non-structural mode may attach it.
+    monkeypatch.setenv("SOPHIA_GEMINI_LIVE_TRACE_CONTENT_MODE", "full")
     client = FakeClient()
     recorder = tracing.GeminiLiveTraceRecorder(
         session_id="gemini-prod-test",
@@ -522,6 +524,36 @@ def test_structure_only_default_never_attaches_conversation_audio(
     assert recorder.content_allowed is False
     assert recorder.content_mode == "structural"
     assert recorder.root.extra["metadata"]["trace_content_policy"] == "structure_only"
+
+
+@pytest.mark.parametrize(("content_mode", "attached"), [("structural", False), ("full", True)])
+def test_structural_content_mode_never_attaches_audio_even_when_content_is_permitted(
+    monkeypatch: Any,
+    content_mode: str,
+    attached: bool,
+) -> None:
+    # Content opt-in + an authoritative non-governed owner + audio capture on:
+    # the recording is still content, so an effective structural mode must
+    # never attach it. A non-structural mode is the positive control.
+    _enable_fake_sdk(monkeypatch)
+    monkeypatch.setenv(CONTENT_ENV, "true")
+    monkeypatch.setenv("SOPHIA_GEMINI_LIVE_AUDIO_CAPTURE_ENABLED", "true")
+    monkeypatch.setenv("SOPHIA_GEMINI_LIVE_TRACE_CONTENT_MODE", content_mode)
+    recorder = tracing.GeminiLiveTraceRecorder(
+        session_id="gemini-prod-test",
+        user_id="user-1",
+        model="gemini-live-test",
+        client=FakeClient(),
+        owner_memory_governance=tracing.OWNER_NON_GOVERNED,
+    )
+    recorder.close(conversation_audio=b"RIFF-PRIVATE-AUDIO")
+    _join_background_flush(recorder)
+
+    assert recorder.root is not None
+    assert recorder.content_allowed is True
+    assert recorder.audio_capture_enabled is attached
+    assert ("conversation_audio" in recorder.root.attachments) is attached
+    assert recorder.root.outputs["conversation_audio_attached"] is attached
 
 
 def test_close_reports_audio_skipped_when_attachment_is_too_large(monkeypatch: Any) -> None:
