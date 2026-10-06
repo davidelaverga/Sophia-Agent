@@ -890,6 +890,19 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
       ...context,
       attacker_selected: true,
     })).toThrow('synthetic_test was malformed');
+    expect(readGeminiSyntheticTestContext({
+      ...context,
+      scenario_id: null,
+      scenario_version: null,
+    })).toMatchObject({ test_run_id: 'run-001' });
+    for (const malformed of [
+      { ...context, scenario_id: null },
+      { ...context, scenario_version: null },
+      { ...context, scenario_id: undefined },
+      { ...context, scenario_version: undefined },
+    ]) {
+      expect(() => readGeminiSyntheticTestContext(malformed)).toThrow('synthetic_test was malformed');
+    }
   });
 
   it('requires exact positive-epoch V-D02 browser ownership and includes it in continuation equality', () => {
@@ -4127,7 +4140,11 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
     await connection.close();
   });
 
-  it('binds one accepted synthetic input to its exact assistant response, output chunks, and playback', async () => {
+  it.each([
+    ['V-A01', 'vt00.scenarios.v1'],
+    ['V-O01', 'vt00.scenarios.v1'],
+    [null, null],
+  ])('binds one accepted synthetic input through playback with scenario %s', async (scenarioId, scenarioVersion) => {
     const fakeAudioContext = new FakeAudioContext();
     const interactionReceipts: GeminiSyntheticInteractionReceipt[] = [];
     const interactionFaults: GeminiSyntheticInteractionFaultReceipt[] = [];
@@ -4135,12 +4152,12 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
     const outputReceived: GeminiOutputAudioReceivedDiagnostic[] = [];
     const playbackReceipts: GeminiOutputAudioPlaybackReceipt[] = [];
     let websocket: FakeWebSocket | null = null;
-    const syntheticTest = {
+    const syntheticTest: GeminiSyntheticTestContext = {
       synthetic: true as const,
       principal_id: 'voice-lab-user-1',
       test_run_id: 'run-interaction-A',
-      scenario_id: 'V-A01',
-      scenario_version: 'vt00.scenarios.v1',
+      ...(scenarioId === null ? {} : { scenario_id: scenarioId }),
+      ...(scenarioVersion === null ? {} : { scenario_version: scenarioVersion }),
       environment: 'production',
       retention_hours: 24,
       cleanup_obligation_id: '123e4567-e89b-42d3-a456-426614174000',
@@ -4223,7 +4240,8 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
     expect(assigned).toMatchObject({
       schema: 'sophia_gemini_interaction_v1',
       test_run_id: syntheticTest.test_run_id,
-      scenario_id: 'V-A01',
+      scenario_id: scenarioId,
+      scenario_version: scenarioVersion,
       operation_id: 'operation-a01-001',
       utterance_id: 'utterance-a01-001',
       public_utterance_id: 'public-a01-001',

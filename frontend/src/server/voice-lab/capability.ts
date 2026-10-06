@@ -358,6 +358,7 @@ function parseClaims(value: unknown): VoiceLabCapabilityClaims {
     || !assertSafeId(claims.test_run_id)
     || !validScenario
     || !validScenarioVersion
+    || (claims.scenario_id === undefined) !== (claims.scenario_version === undefined)
     || !hasValidD02OwnershipClaims(claims)
     || claims.synthetic !== true
     || Object.keys(claims).some((key) => !allowedClaimKeys.has(key))
@@ -425,6 +426,7 @@ function parseRunBindingClaims(value: unknown): VoiceLabRunBindingClaims {
     || !assertSafeId(claims.test_run_id)
     || (claims.scenario_id !== undefined && !assertSafeId(claims.scenario_id))
     || (claims.scenario_version !== undefined && !assertSafeId(claims.scenario_version))
+    || (claims.scenario_id === undefined) !== (claims.scenario_version === undefined)
     || !hasValidD02OwnershipClaims(claims)
     || !assertSafeId(claims.environment)
     || !Number.isInteger(claims.retention_hours)
