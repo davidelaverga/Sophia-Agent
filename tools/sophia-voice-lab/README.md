@@ -205,7 +205,15 @@ guard receipts are read with the principal's JWT from
 `/api/v1/exchanges/{id}/qualification-evidence` in the 0046 shape (one `grant`,
 rows `{source, seq, kind, receivedAt, receipt}`). Both are parsed strictly
 (unknown keys and free text rejected) and bound by grant id and run binding, and
-are ordered and de-duplicated by `(source, seq)`. Input is reconciled by window
+are ordered and de-duplicated by `(source, seq)`. Refused member reads are typed
+by the product's own convention (A15): a missing object, or one the principal
+may not read, answers 422 `{code: "not_found"}` (typed
+`not_answered_to_principal` for the evidence, `not_found_for_principal` for
+other member reads); a 404 means the route itself is absent (the API runs
+without `SOPHIA_VOICE_QUALIFICATION=on`) and is typed `endpoint_not_served`:
+unavailable, never "not yours", and never proof of ownership or of an end, so a
+run against such a product never requests End. Any other refusal is
+`endpoint_unavailable` (401/403: `auth_rejected`). Input is reconciled by window
 ordinal and envelope only; the Lab never compares its PCM chain with the
 bridge's. WebRTC sender stats are corroboration only. Neither side retains a
 transcript or audio: the Lab records counts, envelopes, ids, states and hashes,

@@ -22,7 +22,7 @@ Every scenario has separate `harness_verdict` and `product_verdict`. The harness
 
 ## Studio LiveKit G7 (`sophia.voice-qualification.v1`)
 
-- Bridge and guard receipts come from the product's qualification evidence (migration 0046 shape) and page receipts from the Studio room; both are bound by grant id and run binding, and a receipt bound to another run or grant fails the harness.
+- Bridge and guard receipts come from the product's qualification evidence (migration 0046 shape) and page receipts from the Studio room; both are bound by grant id and run binding, and a receipt bound to another run or grant fails the harness. An evidence read refused with 422 `not_found` is `not_answered_to_principal` (not the grant's principal, or no grant covers the exchange); a 404 is `endpoint_not_served` (the route is absent: the product runs without voice qualification), typed unavailable and never read as "not yours" or as proof of ownership or of an end.
 - Input is reconciled by window ordinal and envelope only (`pcm_reconciliation: envelope_only`); the Lab's and the bridge's PCM chains are never compared.
 - No transcript and no audio is retained, by the Lab or by the product contract: transcript content, output transcription and output audio are `not_supported_by_product_privacy_model`.
 - Outcomes of the Lab's own member-API requests (section revision, stale edit, withdrawal) and downloaded artifact bytes (SHA-256 against the declared digests) are canonical. A voice step's effect on a native task is `uncertain`: the product exposes no exchange binding on native tasks, so the join is by actor and time window. A complete run therefore reports harness `pass` and product `inconclusive`.
