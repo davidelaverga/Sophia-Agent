@@ -1513,6 +1513,9 @@ describe("labrev6 P3-1: a count-preserving extra-plus-missing window pair never 
     expect(midRun(false)).toEqual({ create: "pass:null", handedOverCreate: RESEARCH_TASK });
     // Once the session closed, the steer's turn must be there: without it the join is refused.
     expect(midRun(false, true).create).toBe("uncertain:step_input_epoch_unknown");
+    // Even when no drop is detected (seqs contiguous, session_closed's counts matching), a window without its turn is checked after session_closed.
+    const noGap = evaluate(rebridge(g7Episode({ researchTask: RUN_TASK, calls: { byStep: happyCalls() } }), (rows) => closedCounts(rows.filter((row) => !(row.kind === "input_turn" && Number(row.receipt.windowSeq) === 2)))));
+    expect(stepsOf(noGap)["g7.create"]).toBe("uncertain:step_input_epoch_unknown");
   });
 });
 
