@@ -392,6 +392,182 @@ const STOP_TASK = "d0000000-0000-4000-8000-000000000004";
 const NOTE_SOURCE = "c0000000-0000-4000-8000-000000000051";
 
 /**
+ * A G7 episode while it is built: its run, log and operations, the bridge's
+ * next seq, the voice steps taken so far, and the product's record of the
+ * exchange's calls on a logical clock (when each call's recording began and
+ * when it committed).
+ */
+interface EpisodeBuild {
+  readonly run: RunRecord;
+  readonly log: EventLog;
+  readonly options: G7Options;
+  readonly skip: Set<string>;
+  /** The run's own note's source S. */
+  readonly S: string;
+  readonly operations: Operation[];
+  seq: number;
+  readonly recorded: Array<{ call: Record<string, unknown>; began: number; committed: number }>;
+  clock: number;
+  ordinal: number;
+  readonly researchInputs: string[] | null;
+  readonly goalOf: { goal_id: string };
+}
+
+type CallsTransform = (calls: Array<Record<string, unknown>>) => Array<Record<string, unknown>>;
+
+function newEpisodeBuild(options: G7Options): EpisodeBuild {
+  const run = studioRun(config);
+  return {
+    run,
+    log: new EventLog(run.id),
+    options,
+    skip: new Set(options.skip ?? []),
+    S: options.noteSource ?? NOTE_SOURCE,
+    operations: [],
+    seq: 0,
+    recorded: [],
+    clock: 0,
+    ordinal: 0,
+    researchInputs: options.researchInputs === undefined ? [] : options.researchInputs,
+    goalOf: { goal_id: (options.researchTask?.goal_id as string | undefined) ?? GOAL_A },
+  };
+}
+
+const episodeReadAt = (tick: number) => new Date(T0 + 10_000_000 + tick * 1_000).toISOString();
+
+/** One read of the exchange's calls: those committed by now, and recorded after `after` when given. */
+function episodeCallsRead(b: EpisodeBuild, purpose: "baseline" | "after", operationId: string, stepId: string, after: number | null, transform: CallsTransform = (calls) => calls): number | null {
+  if (!b.options.calls) return null;
+  b.clock += 1;
+  const clock = b.clock;
+  const base = { schema: "sophia_voice_lab_studio_exchange_calls_v1", purpose, operation_id: operationId, step_id: stepId, exchange_id: EXCHANGE_UUID, after: after === null ? null : episodeReadAt(after), read_id: randomUUID() };
+  const refusal = b.options.calls.unavailable;
+  if (refusal) { b.log.add("studio.exchange.calls_read", "canonical", { ...base, status: "unavailable", reason: refusal.reason, http_status: refusal.http_status, read_at: null, settled: false, attempts: 0, max_seq: null, calls: [] }); return clock; }
+  const listed = transform(b.recorded.filter((item) => item.committed <= clock && (after === null || item.began > after)).map((item) => item.call).sort((left, right) => Number(left.seq) - Number(right.seq)));
+  b.log.add("studio.exchange.calls_read", "canonical", { ...base, status: "available", reason: null, http_status: 200, read_at: episodeReadAt(clock), settled: listed.every((call) => call.answered_at !== null), attempts: 1, max_seq: Number(listed.at(-1)?.seq ?? 0), calls: listed });
+  return clock;
+}
+
+function episodeRecord(b: EpisodeBuild, calls: Array<Record<string, unknown>>, began: number, committed: number): void {
+  for (const call of calls) b.recorded.push({ call, began, committed });
+}
+
+function episodeResearch(b: EpisodeBuild, extra: Record<string, unknown> = {}): Record<string, unknown> {
+  return task(RESEARCH_TASK, "research", { input_source_ids: b.researchInputs, withdrawn_source_ids: [], ...(b.options.researchTask ?? {}), state: "running", phase: "result_ready", research: { html_state: "designing", design_task_id: DESIGN_TASK }, ...extra });
+}
+
+function episodeDesignD(b: EpisodeBuild, state: string, phase = "running"): Record<string, unknown> {
+  return task(DESIGN_TASK, "design", { ...b.goalOf, state: state === "published" ? "succeeded" : "running", phase: state === "published" ? "result_ready" : phase, withdrawn_source_ids: [], design: { state, mode: "create", artifact_id: ARTIFACT, published_version_id: state === "published" ? VERSION_2 : null, research_task_id: RESEARCH_TASK } });
+}
+
+function episodeEditX(b: EpisodeBuild, extra: Record<string, unknown> = {}): Record<string, unknown> {
+  return task(EDIT_TASK, "design", { ...b.goalOf, state: "running", phase: "running", withdrawn_source_ids: [], design: { state: "designing", mode: "edit", artifact_id: ARTIFACT, published_version_id: null, research_task_id: RESEARCH_TASK }, ...extra });
+}
+
+function episodeStopTask(extra: Record<string, unknown>): Record<string, unknown> {
+  return task(STOP_TASK, "research", { exchange_id: EXCHANGE_UUID, goal_id: GOAL_B, input_source_ids: [], withdrawn_source_ids: [], ...extra });
+}
+
+function episodeObserve(b: EpisodeBuild, forStep: string, at: number, tasks: Array<Record<string, unknown>>, artifacts: Array<Record<string, unknown>> = []): void {
+  const observeOp = op(b.run, "studio_action", at, { action: "observe", for_step: forStep }, { performed: false, status: "observed" });
+  b.operations.push(observeOp);
+  b.log.add("studio.outcome.observed", "canonical", { purpose: `g7.${forStep}`, operation_id: observeOp.id, join: { status: "uncertain" }, tasks, artifacts });
+}
+
+/** As soon as a step settles: its own after-read (re-read until every call is answered), then any late or vanishing re-read. */
+function episodeStepAfterReads(b: EpisodeBuild, calls: CallsScript, speakId: string, stepId: string, baseline: number): void {
+  const own = calls.byStep[stepId] ?? [];
+  episodeRecord(b, own, baseline + 0.1, baseline + 0.2);
+  if (calls.unansweredFirst?.includes(stepId) || calls.unansweredOnly?.includes(stepId)) {
+    episodeCallsRead(b, "after", speakId, stepId, baseline, (listed) => listed.map((call) => ({ ...call, answered_at: null, outcome: null, command: null })));
+  }
+  if (!calls.unansweredOnly?.includes(stepId)) episodeCallsRead(b, "after", speakId, stepId, baseline);
+  const late = calls.lateAfterRead?.[stepId];
+  if (late) { episodeRecord(b, late, b.clock + 0.1, b.clock + 0.2); episodeCallsRead(b, "after", speakId, stepId, baseline); }
+  if (calls.vanishing?.includes(stepId)) episodeCallsRead(b, "after", speakId, stepId, baseline, (listed) => listed.filter((call) => call.command === null));
+}
+
+function episodeVoiceStep(b: EpisodeBuild, step: string, after: () => void = () => undefined): void {
+  if (b.skip.has(`g7.${step}`)) return;
+  const { run, log, options } = b;
+  const index = b.ordinal++;
+  const speak = op(run, "speak", T0 + 100 + index * 100, { fixture_id: "conversation_greeting_probe", _g7_step: `g7.${step}` }, { schedule_receipt: { product: {} } });
+  b.operations.push(speak);
+  const stepId = `g7.${step}`;
+  const calls = options.calls;
+  // Already on its way at the baseline: recording began before it, committed after it.
+  if (calls) episodeRecord(b, calls.inFlightAtBaseline?.[stepId] ?? [], b.clock + 0.5, b.clock + 1.5);
+  const baseline = episodeCallsRead(b, "baseline", speak.id, stepId, null);
+  labUtterance(log, speak.id, T0 + 1_000 + index * 10_000, 1_500);
+  log.bridge("input_window", inputWindow(run, b.seq++, index + 1, 1_500, options.windowEpochs?.[stepId] === undefined ? {} : { inputEpoch: options.windowEpochs[stepId] }));
+  if (calls && baseline !== null) episodeStepAfterReads(b, calls, speak.id, stepId, baseline);
+  // The provider showed the step's own calls while its window was open (as a normal turn does).
+  log.bridge("input_turn", inputTurn(run, b.seq++, index + 1, { toolCallCount: options.toolCallCounts?.[stepId] ?? calls?.byStep[stepId]?.length ?? 0 }));
+  if (index === 0) log.page(pageReceipt(run, "sophia_playback", T0 + 2_900, { phase: "playing" }));
+  log.bridge("output_reply", outputReply(run, b.seq++, index + 1, T0 + 3_000 + index * 10_000));
+  after();
+}
+
+/** 1. The run's own note N, through the principal's own route: its receipt names S. */
+function episodeRecordNote(b: EpisodeBuild): void {
+  if (b.skip.has("g7.record_note")) return;
+  const note = op(b.run, "studio_action", T0 + 50, { action: "record_note" }, { performed: true, status: "committed" });
+  b.operations.push(note);
+  b.log.add("studio.action.record_note", "canonical", { operation_id: note.id, requested: true, status: "committed", http_status: 202, code: null, entry_id: NOTE, source_id: b.S, receipt_operation: "record_note", text_sha256: sha256("note") });
+}
+
+/** 4. Leave and return: the lab track unpublished, then republished. */
+function episodeLeaveAndReturn(b: EpisodeBuild): void {
+  if (b.skip.has("g7.leave_return")) return;
+  const { run, log } = b;
+  const leave = op(run, "studio_action", T0 + 200, { action: "leave_and_return" }, { performed: true, status: "returned" });
+  b.operations.push(leave);
+  log.add("studio.room.left", "browser", { basis: "ui_leave", operation_id: leave.id });
+  log.page(pageReceipt(run, "mic_unpublished", T0 + 60_000));
+  log.page(pageReceipt(run, "mic_published", T0 + 61_000));
+  log.add("studio.room.rejoined", "browser", { lab_track_republished: true, operation_id: leave.id });
+}
+
+/** 7. Once D published its page (version 2): the revision, an edit X under way. */
+function episodeSectionRevision(b: EpisodeBuild): void {
+  if (b.skip.has("g7.section_revision")) return;
+  const edit = op(b.run, "studio_action", T0 + 500, { action: "section_revision", instruction: "x" }, { performed: true, status: "admitted" });
+  b.operations.push(edit);
+  b.log.add("studio.action.html_edit", "canonical", { purpose: "section_revision", operation_id: edit.id, target_join: "canonical_chain", requested: true, status: "admitted", http_status: 202, code: null, task_id: EDIT_TASK, artifact_id: ARTIFACT, version_id: VERSION_2 });
+  b.log.add("studio.outcome.observed", "canonical", { purpose: "g7.section_revision", operation_id: edit.id, join: { status: "uncertain" }, tasks: [episodeEditX(b), episodeDesignD(b, "published"), episodeResearch(b)], artifacts: [artifact(DESIGN_TASK, VERSION_2, PAGE_SHA, b.options.artifactStatus)] });
+}
+
+/** 8. The stale probe: version 1, superseded by D's version 2. */
+function episodeStaleEdit(b: EpisodeBuild): void {
+  if (b.skip.has("g7.stale_edit")) return;
+  const { options } = b;
+  const stale = op(b.run, "studio_action", T0 + 600, { action: "stale_edit" }, { performed: true, status: options.staleStatus === 202 ? "admitted" : "refused" });
+  b.operations.push(stale);
+  b.log.add("studio.action.html_edit", "canonical", { purpose: "stale_edit", operation_id: stale.id, target_join: "canonical_chain", artifact_id: ARTIFACT, requested: true, status: options.staleStatus === 202 ? "admitted" : "refused", http_status: options.staleStatus ?? 409, code: options.staleCode ?? "stale_revision", version_id: VERSION_1, superseded_by_version_id: VERSION_2 });
+}
+
+/** X's sighting in the withdrawal's before-observation, in the given design state. */
+function episodeEditBefore(b: EpisodeBuild, before: string): Record<string, unknown> {
+  return episodeEditX(b, { ...(before === "designing" ? {} : { state: before === "published" ? "succeeded" : before === "failed" ? "failed" : "running", design: { state: before, mode: "edit", artifact_id: ARTIFACT, published_version_id: before === "published" ? randomUUID() : null, research_task_id: RESEARCH_TASK } }), ...(b.options.editBeforeTask ?? {}) });
+}
+
+/** 9. The withdrawal of N while X is live. */
+function episodeWithdrawal(b: EpisodeBuild): void {
+  if (b.skip.has("g7.withdrawal")) return;
+  const { log, options, S } = b;
+  const withdraw = op(b.run, "studio_action", T0 + 700, { action: "withdrawal" }, { performed: true, status: "committed" });
+  b.operations.push(withdraw);
+  const committed = options.withdrawalCommitted ?? true;
+  if (options.editBefore !== null) {
+    const before = options.editBefore ?? "designing";
+    log.add("studio.outcome.observed", "canonical", { purpose: "g7.withdrawal:before", operation_id: withdraw.id, join: { status: "uncertain" }, tasks: [episodeEditBefore(b, before), episodeDesignD(b, "published"), episodeResearch(b)], artifacts: [] });
+  }
+  log.add("studio.action.withdrawal", "canonical", { operation_id: withdraw.id, requested: true, status: committed ? "committed" : "refused", own_create_task_id: RESEARCH_TASK, design_task_id: DESIGN_TASK, own_live_task_ids: [EDIT_TASK], entry_id: options.withdrawnEntry ?? NOTE, entry_bound_exchange_id: null, own_note_entry_id: NOTE, own_note_source_id: S, entry_source_id: S, http_status: committed ? 202 : 409, code: committed ? null : "stale_revision", receipt_operation: committed ? "withdraw_note" : null, receipt_source_id: committed ? (options.receiptSource === undefined ? S : options.receiptSource) : null });
+  const xAfter = episodeEditX(b, { state: "failed", phase: "failed", reason_class: "revoked_source_withdrawn", withdrawn_source_ids: [S], design: { state: "failed", mode: "edit", artifact_id: ARTIFACT, published_version_id: null, research_task_id: RESEARCH_TASK, reason_class: "revoked_source_withdrawn" }, ...(options.editAfter ?? {}) });
+  log.add("studio.outcome.observed", "canonical", { purpose: "g7.withdrawal", operation_id: options.withdrawalAfterOperation ?? withdraw.id, join: { status: "uncertain" }, tasks: [xAfter, episodeDesignD(b, "published"), episodeResearch(b, { withdrawn_source_ids: [S] })], artifacts: [] });
+}
+
+/**
  * A complete G7 episode in the order the product's lifecycle supports: the
  * run's own note N (source S) recorded first; create (research R drawing on
  * S, its design D under way); steer; leave and return; hold and resume while
@@ -401,10 +577,8 @@ const NOTE_SOURCE = "c0000000-0000-4000-8000-000000000051";
  * sub-episode: a second create (STOP_TASK on its own goal) and Stop on it.
  */
 function g7Episode(options: G7Options = {}): Episode {
-  const run = studioRun(config);
-  const log = new EventLog(run.id);
-  const skip = new Set(options.skip ?? []);
-  const S = options.noteSource ?? NOTE_SOURCE;
+  const b = newEpisodeBuild(options);
+  const { run, log, operations, S } = b;
   identityEvent(log, "startup");
   log.add("studio.auth.session_established", "canonical", { principal_bound: true });
   log.add("harness.media_stream_issued", "browser", { replacement_active: true, track_id_sha256s: [sha256(LAB_TRACK_ID)] });
@@ -414,120 +588,26 @@ function g7Episode(options: G7Options = {}): Episode {
   log.add("studio.exchange.opened", "canonical", { exchange_id: EXCHANGE_UUID, grant_id: GRANT_UUID, opened_at_lab_ms: T0 });
   log.add("studio.exchange.ownership", "canonical", { exchange_id: EXCHANGE_UUID, status: options.ownership ?? "proven", reason: options.ownership === "mismatch" ? "evidence_bound_to_another_run" : null });
   log.grant(evidenceGrant(run));
-  const operations: Operation[] = [];
-  let seq = 0;
-  log.bridge("provider", providerReceipt(run, seq++, "ready"));
-  // The product's record on a logical clock: when each call's recording began and when it committed.
-  const recorded: Array<{ call: Record<string, unknown>; began: number; committed: number }> = [];
-  let clock = 0;
-  const readAt = (tick: number) => new Date(T0 + 10_000_000 + tick * 1_000).toISOString();
-  const callsRead = (purpose: "baseline" | "after", operationId: string, stepId: string, after: number | null, transform: (calls: Array<Record<string, unknown>>) => Array<Record<string, unknown>> = (calls) => calls) => {
-    if (!options.calls) return null;
-    clock += 1;
-    const base = { schema: "sophia_voice_lab_studio_exchange_calls_v1", purpose, operation_id: operationId, step_id: stepId, exchange_id: EXCHANGE_UUID, after: after === null ? null : readAt(after), read_id: randomUUID() };
-    const refusal = options.calls.unavailable;
-    if (refusal) { log.add("studio.exchange.calls_read", "canonical", { ...base, status: "unavailable", reason: refusal.reason, http_status: refusal.http_status, read_at: null, settled: false, attempts: 0, max_seq: null, calls: [] }); return clock; }
-    const listed = transform(recorded.filter((item) => item.committed <= clock && (after === null || item.began > after)).map((item) => item.call).sort((left, right) => Number(left.seq) - Number(right.seq)));
-    log.add("studio.exchange.calls_read", "canonical", { ...base, status: "available", reason: null, http_status: 200, read_at: readAt(clock), settled: listed.every((call) => call.answered_at !== null), attempts: 1, max_seq: Number(listed.at(-1)?.seq ?? 0), calls: listed });
-    return clock;
-  };
-  const record = (calls: Array<Record<string, unknown>>, began: number, committed: number) => { for (const call of calls) recorded.push({ call, began, committed }); };
-  const researchInputs = options.researchInputs === undefined ? [] : options.researchInputs;
-  const research = (extra: Record<string, unknown> = {}) => task(RESEARCH_TASK, "research", { input_source_ids: researchInputs, withdrawn_source_ids: [], ...(options.researchTask ?? {}), state: "running", phase: "result_ready", research: { html_state: "designing", design_task_id: DESIGN_TASK }, ...extra });
-  const goalOf = { goal_id: (options.researchTask?.goal_id as string | undefined) ?? GOAL_A };
-  const designD = (state: string, phase = "running") => task(DESIGN_TASK, "design", { ...goalOf, state: state === "published" ? "succeeded" : "running", phase: state === "published" ? "result_ready" : phase, withdrawn_source_ids: [], design: { state, mode: "create", artifact_id: ARTIFACT, published_version_id: state === "published" ? VERSION_2 : null, research_task_id: RESEARCH_TASK } });
-  const editX = (extra: Record<string, unknown> = {}) => task(EDIT_TASK, "design", { ...goalOf, state: "running", phase: "running", withdrawn_source_ids: [], design: { state: "designing", mode: "edit", artifact_id: ARTIFACT, published_version_id: null, research_task_id: RESEARCH_TASK }, ...extra });
-  const stopTask = (extra: Record<string, unknown>) => task(STOP_TASK, "research", { exchange_id: EXCHANGE_UUID, goal_id: GOAL_B, input_source_ids: [], withdrawn_source_ids: [], ...extra });
-  const observe = (forStep: string, at: number, tasks: Array<Record<string, unknown>>, artifacts: Array<Record<string, unknown>> = []) => {
-    const observeOp = op(run, "studio_action", at, { action: "observe", for_step: forStep }, { performed: false, status: "observed" });
-    operations.push(observeOp);
-    log.add("studio.outcome.observed", "canonical", { purpose: `g7.${forStep}`, operation_id: observeOp.id, join: { status: "uncertain" }, tasks, artifacts });
-  };
-  let ordinal = 0;
-  const voiceStep = (step: string, after: () => void = () => undefined) => {
-    if (skip.has(`g7.${step}`)) return;
-    const index = ordinal++;
-    const speak = op(run, "speak", T0 + 100 + index * 100, { fixture_id: "conversation_greeting_probe", _g7_step: `g7.${step}` }, { schedule_receipt: { product: {} } });
-    operations.push(speak);
-    const stepId = `g7.${step}`;
-    const calls = options.calls;
-    // Already on its way at the baseline: recording began before it, committed after it.
-    if (calls) record(calls.inFlightAtBaseline?.[stepId] ?? [], clock + 0.5, clock + 1.5);
-    const baseline = callsRead("baseline", speak.id, stepId, null);
-    labUtterance(log, speak.id, T0 + 1_000 + index * 10_000, 1_500);
-    log.bridge("input_window", inputWindow(run, seq++, index + 1, 1_500, options.windowEpochs?.[stepId] === undefined ? {} : { inputEpoch: options.windowEpochs[stepId] }));
-    if (calls && baseline !== null) {
-      const own = calls.byStep[stepId] ?? [];
-      record(own, baseline + 0.1, baseline + 0.2);
-      // As soon as the step settles: its own after-read (re-read until every call is answered).
-      if (calls.unansweredFirst?.includes(stepId) || calls.unansweredOnly?.includes(stepId)) {
-        callsRead("after", speak.id, stepId, baseline, (listed) => listed.map((call) => ({ ...call, answered_at: null, outcome: null, command: null })));
-      }
-      if (!calls.unansweredOnly?.includes(stepId)) callsRead("after", speak.id, stepId, baseline);
-      const late = calls.lateAfterRead?.[stepId];
-      if (late) { record(late, clock + 0.1, clock + 0.2); callsRead("after", speak.id, stepId, baseline); }
-      if (calls.vanishing?.includes(stepId)) callsRead("after", speak.id, stepId, baseline, (listed) => listed.filter((call) => call.command === null));
-    }
-    // The provider showed the step's own calls while its window was open (as a normal turn does).
-    log.bridge("input_turn", inputTurn(run, seq++, index + 1, { toolCallCount: options.toolCallCounts?.[stepId] ?? calls?.byStep[stepId]?.length ?? 0 }));
-    if (index === 0) log.page(pageReceipt(run, "sophia_playback", T0 + 2_900, { phase: "playing" }));
-    log.bridge("output_reply", outputReply(run, seq++, index + 1, T0 + 3_000 + index * 10_000));
-    after();
-  };
-  // 1. The run's own note N, through the principal's own route: its receipt names S.
-  if (!skip.has("g7.record_note")) {
-    const note = op(run, "studio_action", T0 + 50, { action: "record_note" }, { performed: true, status: "committed" });
-    operations.push(note);
-    log.add("studio.action.record_note", "canonical", { operation_id: note.id, requested: true, status: "committed", http_status: 202, code: null, entry_id: NOTE, source_id: S, receipt_operation: "record_note", text_sha256: sha256("note") });
-  }
+  log.bridge("provider", providerReceipt(run, b.seq++, "ready"));
+  episodeRecordNote(b);
   // 2-3. Create (R draws on S; its design D under way), steer.
-  voiceStep("create", () => observe("create", T0 + 110, [research(), designD("designing")]));
-  voiceStep("steer");
-  if (!skip.has("g7.leave_return")) {
-    const leave = op(run, "studio_action", T0 + 200, { action: "leave_and_return" }, { performed: true, status: "returned" });
-    operations.push(leave);
-    log.add("studio.room.left", "browser", { basis: "ui_leave", operation_id: leave.id });
-    log.page(pageReceipt(run, "mic_unpublished", T0 + 60_000));
-    log.page(pageReceipt(run, "mic_published", T0 + 61_000));
-    log.add("studio.room.rejoined", "browser", { lab_track_republished: true, operation_id: leave.id });
-  }
+  episodeVoiceStep(b, "create", () => episodeObserve(b, "create", T0 + 110, [episodeResearch(b), episodeDesignD(b, "designing")]));
+  episodeVoiceStep(b, "steer");
+  episodeLeaveAndReturn(b);
   // 5-6. Hold and resume while D is live (the research reads result_ready; D is held, then running).
-  voiceStep("hold", () => observe("hold", T0 + 310, [research(), designD("designing", "held")]));
-  voiceStep("resume", () => observe("resume", T0 + 410, [research(), designD("designing", "running")]));
-  // 7. Once D published its page (version 2): the revision, an edit X under way.
-  if (!skip.has("g7.section_revision")) {
-    const edit = op(run, "studio_action", T0 + 500, { action: "section_revision", instruction: "x" }, { performed: true, status: "admitted" });
-    operations.push(edit);
-    log.add("studio.action.html_edit", "canonical", { purpose: "section_revision", operation_id: edit.id, target_join: "canonical_chain", requested: true, status: "admitted", http_status: 202, code: null, task_id: EDIT_TASK, artifact_id: ARTIFACT, version_id: VERSION_2 });
-    log.add("studio.outcome.observed", "canonical", { purpose: "g7.section_revision", operation_id: edit.id, join: { status: "uncertain" }, tasks: [editX(), designD("published"), research()], artifacts: [artifact(DESIGN_TASK, VERSION_2, PAGE_SHA, options.artifactStatus)] });
-  }
-  // 8. The stale probe: version 1, superseded by D's version 2.
-  if (!skip.has("g7.stale_edit")) {
-    const stale = op(run, "studio_action", T0 + 600, { action: "stale_edit" }, { performed: true, status: options.staleStatus === 202 ? "admitted" : "refused" });
-    operations.push(stale);
-    log.add("studio.action.html_edit", "canonical", { purpose: "stale_edit", operation_id: stale.id, target_join: "canonical_chain", artifact_id: ARTIFACT, requested: true, status: options.staleStatus === 202 ? "admitted" : "refused", http_status: options.staleStatus ?? 409, code: options.staleCode ?? "stale_revision", version_id: VERSION_1, superseded_by_version_id: VERSION_2 });
-  }
-  // 9. The withdrawal of N while X is live.
-  if (!skip.has("g7.withdrawal")) {
-    const withdraw = op(run, "studio_action", T0 + 700, { action: "withdrawal" }, { performed: true, status: "committed" });
-    operations.push(withdraw);
-    const committed = options.withdrawalCommitted ?? true;
-    if (options.editBefore !== null) {
-      const before = options.editBefore ?? "designing";
-      log.add("studio.outcome.observed", "canonical", { purpose: "g7.withdrawal:before", operation_id: withdraw.id, join: { status: "uncertain" }, tasks: [editX({ ...(before === "designing" ? {} : { state: before === "published" ? "succeeded" : before === "failed" ? "failed" : "running", design: { state: before, mode: "edit", artifact_id: ARTIFACT, published_version_id: before === "published" ? randomUUID() : null, research_task_id: RESEARCH_TASK } }), ...(options.editBeforeTask ?? {}) }), designD("published"), research()], artifacts: [] });
-    }
-    log.add("studio.action.withdrawal", "canonical", { operation_id: withdraw.id, requested: true, status: committed ? "committed" : "refused", own_create_task_id: RESEARCH_TASK, design_task_id: DESIGN_TASK, own_live_task_ids: [EDIT_TASK], entry_id: options.withdrawnEntry ?? NOTE, entry_bound_exchange_id: null, own_note_entry_id: NOTE, own_note_source_id: S, entry_source_id: S, http_status: committed ? 202 : 409, code: committed ? null : "stale_revision", receipt_operation: committed ? "withdraw_note" : null, receipt_source_id: committed ? (options.receiptSource === undefined ? S : options.receiptSource) : null });
-    const xAfter = editX({ state: "failed", phase: "failed", reason_class: "revoked_source_withdrawn", withdrawn_source_ids: [S], design: { state: "failed", mode: "edit", artifact_id: ARTIFACT, published_version_id: null, research_task_id: RESEARCH_TASK, reason_class: "revoked_source_withdrawn" }, ...(options.editAfter ?? {}) });
-    log.add("studio.outcome.observed", "canonical", { purpose: "g7.withdrawal", operation_id: options.withdrawalAfterOperation ?? withdraw.id, join: { status: "uncertain" }, tasks: [xAfter, designD("published"), research({ withdrawn_source_ids: [S] })], artifacts: [] });
-  }
+  episodeVoiceStep(b, "hold", () => episodeObserve(b, "hold", T0 + 310, [episodeResearch(b), episodeDesignD(b, "designing", "held")]));
+  episodeVoiceStep(b, "resume", () => episodeObserve(b, "resume", T0 + 410, [episodeResearch(b), episodeDesignD(b, "designing", "running")]));
+  episodeSectionRevision(b);
+  episodeStaleEdit(b);
+  episodeWithdrawal(b);
   // 10-11. The Stop sub-episode: its own create (STOP_TASK on its own goal), then Stop on it.
-  voiceStep("create_stop_target", () => observe("create_stop_target", T0 + 810, options.stopTargetObserved === false ? [] : [stopTask({ state: "pending", phase: "queued", ...(options.stopTargetBefore ?? {}) })]));
-  voiceStep("stop", () => observe("stop", T0 + 910, [stopTask({ state: "cancelled", phase: "stopped", reason_class: "stopped", ...(options.stopEffect ?? {}) })]));
-  log.add("studio.outcome.observed", "canonical", { purpose: "final", operation_id: "end", join: { status: "uncertain" }, tasks: [designD("published"), research({ withdrawn_source_ids: [S] }), editX({ state: "failed", phase: "failed", reason_class: "revoked_source_withdrawn", withdrawn_source_ids: [S], design: { state: "failed", mode: "edit", artifact_id: ARTIFACT, published_version_id: null, research_task_id: RESEARCH_TASK, reason_class: "revoked_source_withdrawn" } })], artifacts: [artifact(DESIGN_TASK, VERSION_2, PAGE_SHA, options.artifactStatus)] });
-  log.bridge("provider", providerReceipt(run, seq++, "closed"));
-  log.bridge("session_closed", sessionClosed(run, seq++, { windows: ordinal, turns: ordinal, replies: ordinal }));
+  episodeVoiceStep(b, "create_stop_target", () => episodeObserve(b, "create_stop_target", T0 + 810, options.stopTargetObserved === false ? [] : [episodeStopTask({ state: "pending", phase: "queued", ...(options.stopTargetBefore ?? {}) })]));
+  episodeVoiceStep(b, "stop", () => episodeObserve(b, "stop", T0 + 910, [episodeStopTask({ state: "cancelled", phase: "stopped", reason_class: "stopped", ...(options.stopEffect ?? {}) })]));
+  log.add("studio.outcome.observed", "canonical", { purpose: "final", operation_id: "end", join: { status: "uncertain" }, tasks: [episodeDesignD(b, "published"), episodeResearch(b, { withdrawn_source_ids: [S] }), episodeEditX(b, { state: "failed", phase: "failed", reason_class: "revoked_source_withdrawn", withdrawn_source_ids: [S], design: { state: "failed", mode: "edit", artifact_id: ARTIFACT, published_version_id: null, research_task_id: RESEARCH_TASK, reason_class: "revoked_source_withdrawn" } })], artifacts: [artifact(DESIGN_TASK, VERSION_2, PAGE_SHA, options.artifactStatus)] });
+  log.bridge("provider", providerReceipt(run, b.seq++, "closed"));
+  log.bridge("session_closed", sessionClosed(run, b.seq++, { windows: b.ordinal, turns: b.ordinal, replies: b.ordinal }));
   // End's post-quiescence audit of every call: after the exchange ended and session_closed, before the sign-out.
-  cleanupEvents(log, () => { if (!options.noEndAudit) callsRead("baseline", "end", "final", null); });
+  cleanupEvents(log, () => { if (!options.noEndAudit) episodeCallsRead(b, "baseline", "end", "final", null); });
   identityEvent(log, "final");
   if (!options.noEnd) operations.push(op(run, "end", T0 + 990, {}, {}));
   return { run, log, operations };
