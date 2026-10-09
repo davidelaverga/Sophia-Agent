@@ -120,8 +120,10 @@ describe("Studio G7 contract strictness", () => {
     expect(byChannel.output_leg_audio_artifact!.status).toBe("not_supported_by_product_privacy_model");
     expect(byChannel.webrtc_sender_stats!.status).toBe("corroboration_only");
     expect(byChannel.downstream_pcm_window_envelope!.sources).toEqual(["input_window"]);
-    // The task join is typed uncertain (no exchange binding on native tasks), and the loopback limitation is explicit.
-    expect(byChannel.builder_task_and_artifact_join).toMatchObject({ status: "uncertain", reason: "native_task_has_no_exchange_binding" });
+    // The task join is the product's NativeTask.exchangeId (A15), room presence a fresh report only, and the loopback limitation is explicit.
+    expect(byChannel.builder_task_and_artifact_join).toMatchObject({ status: "product_receipt", reason: "bound_only_by_exchange_id_requires_voice_qualification" });
+    expect(byChannel.builder_task_and_artifact_join!.sources).toContain("NativeTask.exchangeId (A15)");
+    expect(byChannel.orphan_browser_room_presence).toMatchObject({ status: "product_receipt", reason: "fresh_report_only_else_unobservable" });
     expect(byChannel.webrtc_packet_flow_on_loopback_peer).toMatchObject({ status: "unsupported", reason: "fake_studio_loopback_peer_has_no_livekit_sfu" });
     // Each plan-vs-migration difference is data, and the adapter follows the migration.
     expect(STUDIO_G7_CONTRACT_DIFFERENCES.map((entry) => entry.field)).toEqual(expect.arrayContaining(["evidence.grant", "evidence.receipts[].source", "guard.reason", "grant.max_usage_tokens", "receipt.kind"]));

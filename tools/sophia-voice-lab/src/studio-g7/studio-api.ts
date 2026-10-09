@@ -41,7 +41,33 @@ export interface ProjectedTask {
   createdAt: string | null;
   artifactId: string | null;
   resultSourceId: string | null;
+  /**
+   * The exchange whose voice tool call created the task (A15
+   * `NativeTask.exchangeId`), recorded by the service as it bound the call to
+   * its speaker; null for every other task, and for one created while the
+   * API's voice qualification was off.
+   */
+  exchangeId: string | null;
 }
+
+/**
+ * The room as the media bridge last saw it, for the principal (A15
+ * `RoomLivePresence`): only whether the caller is in it, and counts.
+ */
+export interface ProjectedRoomPresence {
+  roomId: string;
+  observed: boolean;
+  fresh: boolean;
+  selfPresent: boolean;
+  participants: number;
+  guests: number;
+  voice: "connecting" | "ready" | "recovering" | "unavailable" | null;
+  exchangeId: string | null;
+  reportedAt: string | null;
+}
+
+/** What one live-presence read is evidence of. */
+export interface RoomPresenceObservation { status: "present" | "absent" | "unobservable"; reason: string | null }
 
 export interface StudioRoomSnapshot {
   roomIdPresent: boolean;
@@ -134,7 +160,39 @@ export function projectTask(raw: unknown): ProjectedTask | null {
   const state = wordOrNull(task.state);
   const phase = wordOrNull(task.phase);
   if (!id || !actorId || (kind !== "draft_brief" && kind !== "research" && kind !== "design") || !state || !phase) return null;
-  return { id, kind, state, phase, actorId, commandId: uuidOrNull(task.commandId), createdAt: isoOrNull(task.createdAt), artifactId: uuidOrNull(task.artifactId), resultSourceId: uuidOrNull(task.resultSourceId) };
+  return { id, kind, state, phase, actorId, commandId: uuidOrNull(task.commandId), createdAt: isoOrNull(task.createdAt), artifactId: uuidOrNull(task.artifactId), resultSourceId: uuidOrNull(task.resultSourceId), exchangeId: uuidOrNull(task.exchangeId) };
+}
+
+const ROOM_VOICE_STATES: ReadonlySet<string> = new Set(["connecting", "ready", "recovering", "unavailable"]);
+
+export function projectRoomPresence(raw: unknown): ProjectedRoomPresence | null {
+  const body = record(raw);
+  const roomId = uuidOrNull(body?.roomId);
+  if (!body || !roomId || typeof body.observed !== "boolean" || typeof body.fresh !== "boolean" || typeof body.selfPresent !== "boolean") return null;
+  const participants = intOrNull(body.participants);
+  const guests = intOrNull(body.guests);
+  if (participants === null || guests === null) return null;
+  if (body.voice !== null && !(typeof body.voice === "string" && ROOM_VOICE_STATES.has(body.voice))) return null;
+  return {
+    roomId, observed: body.observed, fresh: body.fresh, selfPresent: body.selfPresent, participants, guests,
+    voice: body.voice as ProjectedRoomPresence["voice"], exchangeId: uuidOrNull(body.exchangeId), reportedAt: isoOrNull(body.reportedAt),
+  };
+}
+
+/**
+ * What a live-presence read proves about the principal's browser in the
+ * room. Only an observed, fresh report (the product's own `fresh`: younger
+ * than 15 s; no clock of the Lab's is compared) is evidence, either way:
+ * `selfPresent` true is present, false is absent. No report, a stale one, a
+ * refusal (422 `not_found`), an absent route (404, voice qualification off)
+ * or a malformed answer proves nothing and is typed `unobservable`.
+ */
+export function classifyRoomPresence(read: MemberRead<ProjectedRoomPresence>, roomId: string): RoomPresenceObservation {
+  if (read.status !== "available") return { status: "unobservable", reason: read.reason };
+  if (read.value.roomId !== roomId.toLowerCase()) return { status: "unobservable", reason: "room_mismatch" };
+  if (!read.value.observed) return { status: "unobservable", reason: "not_observed" };
+  if (!read.value.fresh) return { status: "unobservable", reason: "report_stale" };
+  return read.value.selfPresent ? { status: "present", reason: null } : { status: "absent", reason: null };
 }
 
 export function projectTaskDetail(raw: unknown): ProjectedTaskDetail | null {
@@ -299,6 +357,12 @@ export class StudioApiClient {
     } catch {
       return { accepted: false, http_status: null };
     }
+  }
+
+  /** `GET /api/v1/rooms/{r}/live-presence` (A15): the caller's own presence and counts only. */
+  async livePresence(roomId: string, accessToken: string): Promise<MemberRead<ProjectedRoomPresence>> {
+    if (!UUID.test(roomId)) return { status: "unavailable", reason: "id_invalid", http_status: null };
+    return this.#read(`/api/v1/rooms/${encodeURIComponent(roomId)}/live-presence`, accessToken, projectRoomPresence);
   }
 
   /** `GET /api/v1/projects/{p}/native-tasks/{t}`: instruction and result Markdown are dropped. */

@@ -224,10 +224,21 @@ principal: snapshot work → native task (ids, kinds, states, phases; instructio
 and Markdown dropped) → the design's published version → its HTML rendition's
 source → the downloaded bytes' SHA-256, compared with the declared source,
 rendition and version digests. A section revision, a stale edit and a withdrawal
-are the Lab's own requests, so their outcomes are canonical. The join of a voice
-step to a native task is not: `NativeTask` carries no exchange binding, so that
-join is by actor and time window and typed `uncertain`, never a pass; a complete
-run therefore certifies the harness and reports the product `inconclusive`.
+are the Lab's own requests, so their outcomes are canonical. A voice step is
+joined to a native task only through the product's own record (A15
+`NativeTask.exchangeId`: the exchange whose voice tool call created the task,
+recorded as the service bound the call to its speaker) equal to the run's
+joined, ownership-proven exchange, and then through the product's link from such
+a research task to its design (`html.designTaskId`). The actor and a time window
+only choose which tasks to read; they never attribute one. A task of another
+exchange, or with no exchange id (any other creation, or one made while the
+API's voice qualification was off), is never the run's: without a bound task the
+step is `unavailable` (`native_task_exchange_id_absent`,
+`no_task_bound_to_run_exchange` or `run_exchange_ownership_unproven`). With one,
+`create` passes on its design's verified bytes and `hold`, `resume` and `stop`
+pass on the intended phase of the bound task; `steer` stays `uncertain` (its
+effect is not exposed by the member API), so a complete run certifies the
+harness and reports the product `inconclusive`.
 
 **Completion.** A run ends `completed` once its harness assertions and cleanup are
 proven. Receipts that arrive after End (the bridge's `session_closed`, the last
@@ -314,8 +325,15 @@ apart. Then either:
   raised to any longer `expires_in` the product issued to the run (made durable
   before the browser is seeded with the session), so a wrong setting never
   shortens the wait; a lifetime above the 24 h bound is refused at the grant and
-  never becomes the wait. The orphan browser's close is typed `unobservable`,
-  not proven.
+  never becomes the wait. That verification also reads the room as the media
+  bridge last saw it (A15 `GET /api/v1/rooms/{id}/live-presence`, the
+  principal's own `selfPresent` and counts, nobody's identity): a fresh report
+  placing the principal in the room keeps the lease
+  (`principal_present_in_room`); a fresh report without the principal is
+  recorded as `absent`. No report, a stale one (the product's own `fresh`, older
+  than 15 s), a 422 `not_found` or an absent route (404) proves nothing either
+  way: it is recorded `unobservable` and the other gates decide alone. The
+  orphan browser process's close is typed `unobservable`, not proven.
 The PostgreSQL ledger stamps the sign-out and verification events with the
 database clock (the clock of the lease expiry), whatever the worker's clock says.
 
@@ -328,7 +346,11 @@ credential is used. A published identity that differs from its pin is not ready.
 loopback `RTCPeerConnection` stands in for LiveKit: it proves the Lab-issued
 track is the published sender track, not packet flow to any SFU or the bridge.
 No transcript and no audio is retained by the Lab or the product contract. An
-orphan browser's LiveKit room presence is not observable through the member API.
+orphan browser's room presence is evidence only from a fresh bridge report (the
+bridge reports only while it is in the room), and absence at that report does
+not prove the process closed. The task join needs the API's voice qualification
+on; tasks created otherwise, and the steer effect, stay unattributed or
+`uncertain`.
 
 ## Running and container commands
 

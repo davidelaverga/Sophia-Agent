@@ -54,7 +54,8 @@ export class ScriptedStudioDriver {
   }
 
   #outcome(purpose: string, tasks: Array<Record<string, unknown>>, artifacts: Array<Record<string, unknown>> = []): DriverEvent {
-    const payload = { purpose, operation_id: purpose, join: { basis: "actor_and_time_window", status: "uncertain", missing_product_field: "NativeTask.exchangeId" }, tasks, artifacts };
+    // As the real driver records it: these scripted tasks carry no exchange id, so none is bound to the run.
+    const payload = { purpose, operation_id: purpose, join: { basis: "native_task_exchange_id", run_exchange_id: EXCHANGE_UUID, bound_task_ids: [], other_exchange_task_count: 0, unbound_task_count: tasks.length }, tasks: tasks.map((task) => ({ exchange_id: null, ...task })), artifacts };
     return { kind: "studio.outcome.observed", source: "canonical", payload, dedupeKey: key(`studio-outcome:${this.run.id}`, payload) };
   }
 

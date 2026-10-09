@@ -175,6 +175,49 @@ selected("real PostgreSQL Studio G7 worker branches (schema v7)", () => {
     expect((await second.startStudioG7Run(caller, { ...START, idempotency_key: newIdempotencyKey("pg-after-release") })).status).toBe("accepted");
   }, 120_000);
 
+  it("keeps a dead owner's lease on PostgreSQL while a fresh report places the principal in the room, and never counts a stale one as gone (A15 live presence)", async () => {
+    const a = await harness("pg-worker-a-present");
+    await a.worker.runOnce();
+    await voice(a, "create");
+    const config = studioTestConfig(undefined, { SOPHIA_VOICE_LAB_MAX_CONCURRENT_RUNS: "1" });
+    const audio = new AudioResolver(config);
+    await audio.initialize();
+    const driverB = new ScriptedStudioDriver((await ledger.getRun(a.runId))!);
+    let presence: { status: string; reason: string | null } = { status: "present", reason: null };
+    let read = 0;
+    driverB.recoverResult = (runId) => {
+      read += 1;
+      return [
+        { kind: "studio.cleanup.exchange_ended", source: "canonical", payload: { confirmed: true, status: "confirmed", basis: "run_exchange_not_live", exchange_id: EXCHANGE_UUID, join: "durable", ownership: "not_required", verified_by: "member_snapshot", speak_requested_before_observation: true }, dedupeKey: `pg-presence-ended:${runId}` },
+        { kind: "studio.room.live_presence", source: "canonical", payload: { schema: "sophia_voice_lab_studio_room_presence_v1", purpose: "recover", status: presence.status, reason: presence.reason, http_status: 200, observation_id: `pg-presence-${read}`, identities_excluded: true }, dedupeKey: `pg-presence:${runId}:${read}` },
+        { kind: "studio.cleanup.signed_out", source: "canonical", payload: { schema: "sophia_voice_lab_studio_sign_out_v1", scope: "global", confirmed: true, http_status: 204, basis: "global_logout_accepted", session_basis: "fresh_grant", sign_out_id: `pg-presence-${read}` }, dedupeKey: `pg-presence-signed-out:${runId}:${read}` },
+      ];
+    };
+    const workerB = new VoiceLabWorker("pg-worker-b-presence", ledger, config, audio, driverB as unknown as VoiceBrowserDriver, new CapabilityCodec(config.capabilitySecret, config.capabilityIssuer, config.capabilityTtlSeconds), pino({ level: "silent" }));
+    await ledger.pool.query("update sophia_voice_lab.browser_leases set expires_at=clock_timestamp()-interval '3 hours' where run_id=$1", [a.runId]);
+    await workerB.maintainSessions();
+    await workerB.maintainSessions();
+    expect(await ledger.getRun(a.runId)).toMatchObject({ state: "aborted_driver_restart", cleanupComplete: false });
+    await ledger.pool.query("update sophia_voice_lab.worker_heartbeats set observed_at=clock_timestamp()-interval '10 minutes' where worker_id='pg-worker-a-present'");
+    // Past the JWT lifetime (database clock) and the recovery backoff.
+    const age = async () => {
+      await ledger.pool.query("update sophia_voice_lab.run_events set observed_at=observed_at-interval '2 hours' where run_id=$1 and kind in ('studio.cleanup.signed_out','studio.cleanup.recovery_attempt')", [a.runId]);
+    };
+    await age();
+    await workerB.maintainSessions();
+    // A fresh report places the principal in the room: the database transaction keeps the lease.
+    expect(await ledger.getBrowserLease(a.runId)).not.toBeNull();
+    const pendingReasons = (await ledger.pool.query("select payload->>'dead_owner_release' as reason from sophia_voice_lab.run_events where run_id=$1 and kind='cleanup.browser_lease_unconfirmed'", [a.runId])).rows.map((row) => row.reason);
+    expect(pendingReasons).toContain("principal_present_in_room");
+    // A stale report is not evidence of absence: the other gates release it, presence typed unobservable.
+    presence = { status: "unobservable", reason: "report_stale" };
+    await age();
+    await workerB.maintainSessions();
+    expect(await ledger.getBrowserLease(a.runId)).toBeNull();
+    const released = (await ledger.pool.query("select payload from sophia_voice_lab.run_events where run_id=$1 and kind='cleanup.browser_lease_released'", [a.runId])).rows[0].payload;
+    expect(released).toMatchObject({ dead_owner_quiesced: true, room_presence: "unobservable", room_presence_reason: "report_stale" });
+  }, 120_000);
+
   it("releases by compare-and-delete the lease of a dead owner whose own cleanup for that lease epoch is durable (P2-1)", async () => {
     const a = await harness("pg-worker-a-cleaned");
     await a.worker.runOnce();

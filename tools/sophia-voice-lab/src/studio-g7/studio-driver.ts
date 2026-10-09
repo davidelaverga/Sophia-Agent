@@ -47,7 +47,8 @@ import type { StudioG7Config } from "./config.js";
 import { buildStudioObserverScript } from "./page-scripts.js";
 import { probeStudioReadiness } from "./readiness.js";
 import { STUDIO_G7_ACTIONS, STUDIO_G7_VOICE_STEPS, isStudioG7ScenarioVersion, STUDIO_G7_SCENARIO_ID_SET, studioG7StepId, type StudioG7Action, type StudioG7VoiceStep } from "./scenarios.js";
-import { StudioApiClient, type IdentityObservation, type ProjectedArtifactVersion, type ProjectedTaskDetail, type StudioRoomSnapshot } from "./studio-api.js";
+import { StudioApiClient, classifyRoomPresence, type IdentityObservation, type ProjectedArtifactVersion, type ProjectedTaskDetail, type StudioRoomSnapshot } from "./studio-api.js";
+import { STUDIO_ROOM_PRESENCE_KIND, STUDIO_ROOM_PRESENCE_SCHEMA } from "./lease-release.js";
 import { buildStudioSessionSeedScript, globalSignOut, passwordGrant, signOut, supabaseStorageKey, type FetchLike, type SignOutReceipt, type StudioUserSession } from "./supabase-session.js";
 
 type DriverEvent = Omit<LabEvent, "runId" | "seq" | "at">;
@@ -1157,11 +1158,16 @@ export class StudioG7Driver implements VoiceBrowserDriver, StudioDriverExtension
     const record = this.#exchanges.get(run.id) ?? null;
     const windowStartMs = (record?.exchangeOpenedAtMs ?? run.createdAt.getTime()) - OUTCOME_WINDOW_TOLERANCE_MS;
     const principal = run.principalId.toLowerCase();
+    // Discovery only (which tasks to read): the tasks the run's exchange
+    // created (A15 NativeTask.exchangeId), then the principal's recent ones.
+    // Attribution to a step never uses this window (evaluate.ts).
+    const runExchange = record?.exchangeId ?? null;
+    const bound = runExchange === null ? [] : snapshot.work.filter((task) => task.exchangeId === runExchange).map((task) => task.id);
     const inWindow = snapshot.work
       .filter((task) => task.actorId === principal && task.createdAt !== null && Date.parse(task.createdAt) >= windowStartMs)
       .sort((left, right) => (right.createdAt ?? "").localeCompare(left.createdAt ?? ""))
       .map((task) => task.id);
-    const ids = [...new Set([...focus, ...inWindow])].slice(0, MAX_OBSERVED_TASKS);
+    const ids = [...new Set([...focus, ...bound, ...inWindow])].slice(0, MAX_OBSERVED_TASKS);
     const details: ProjectedTaskDetail[] = [];
     const unavailable: Array<{ task_id: string; reason: string }> = [];
     for (const id of ids) {
@@ -1195,13 +1201,24 @@ export class StudioG7Driver implements VoiceBrowserDriver, StudioDriverExtension
       verified.add(design.publishedVersionId);
       artifacts.push(await this.#verifyArtifact(tokens, design.artifactId, design.publishedVersionId, detail.task.id));
     }
+    const runExchange = this.#exchanges.get(run.id)?.exchangeId ?? null;
+    const exchangeOf = (detail: ProjectedTaskDetail) => detail.task.exchangeId;
     const payload = {
       purpose, operation_id: operationId,
-      join: { basis: "actor_and_time_window", status: "uncertain", missing_product_field: "NativeTask.exchangeId", window_start: new Date(observed.windowStartMs).toISOString(), principal_actor_only: true },
+      // A task is the run's only through the exchange id the service
+      // recorded for the voice tool call that created it (A15); the window
+      // only chose which tasks to read.
+      join: {
+        basis: "native_task_exchange_id", run_exchange_id: runExchange,
+        bound_task_ids: runExchange === null ? [] : observed.details.filter((detail) => exchangeOf(detail) === runExchange).map((detail) => detail.task.id),
+        other_exchange_task_count: observed.details.filter((detail) => exchangeOf(detail) !== null && exchangeOf(detail) !== runExchange).length,
+        unbound_task_count: observed.details.filter((detail) => exchangeOf(detail) === null).length,
+        discovery_window_start: new Date(observed.windowStartMs).toISOString(), principal_actor_only: true,
+      },
       focus_task_ids: this.#focusTasks(run.id),
       live_exchange_present: observed.snapshot.exchangeId !== null,
       tasks: observed.details.map((detail) => ({
-        task_id: detail.task.id, kind: detail.task.kind, state: detail.task.state, phase: detail.task.phase, created_at: detail.task.createdAt,
+        task_id: detail.task.id, kind: detail.task.kind, state: detail.task.state, phase: detail.task.phase, created_at: detail.task.createdAt, exchange_id: detail.task.exchangeId,
         focus: this.#focusTasks(run.id).includes(detail.task.id),
         research: detail.research ? { html_state: detail.research.htmlState, design_task_id: detail.research.designTaskId, amends_task_id: detail.research.amendsTaskId } : null,
         design: detail.design ? { state: detail.design.state, mode: detail.design.mode, artifact_id: detail.design.artifactId, base_version_id: detail.design.baseVersionId, published_version_id: detail.design.publishedVersionId, research_task_id: detail.design.researchTaskId, revisions: detail.design.revisions, section_count: detail.design.sections.length } : null,
@@ -1326,6 +1343,11 @@ export class StudioG7Driver implements VoiceBrowserDriver, StudioDriverExtension
     // The joined exchange's late receipts are read with the same session.
     const exchangeId = this.#exchanges.get(runId)?.exchangeId ?? null;
     if (exchangeId !== null && tokens.held() !== null) events.push(...await this.#readBridge(runId, exchangeId, tokens, new Map()).catch(() => []));
+    // A recovery (possibly of a dead owner's orphan browser) also reads the
+    // room as the bridge last saw it, with the session it already holds and
+    // before the sign-out ends it. It never signs in for this alone (a run
+    // that never allocated a browser stays network-free).
+    if (purpose === "recover" && tokens.held() !== null) events.push(await this.#readRoomPresence(runId, tokens, purpose));
     events.push(await this.#signOut(runId, tokens));
     const known = this.#exchanges.get(runId);
     if (known !== undefined && known.join === "retained" && !known.browserLaunched) {
@@ -1336,6 +1358,32 @@ export class StudioG7Driver implements VoiceBrowserDriver, StudioDriverExtension
     }
     if (settled.confirmed) this.#clearWatchdog(runId);
     return events;
+  }
+
+  /**
+   * One read of the room as the media bridge last saw it (A15 live
+   * presence), as the principal: whether the principal is in it, and counts;
+   * nobody's identity. classifyRoomPresence says what it proves: only a
+   * fresh, observed report is evidence (present or absent); anything else is
+   * typed unobservable with its reason.
+   */
+  async #readRoomPresence(runId: string, tokens: TokenSource, purpose: string): Promise<DriverEvent> {
+    const emit = (status: "present" | "absent" | "unobservable", reason: string | null, httpStatus: number | null, report: Record<string, unknown> = {}): DriverEvent => {
+      const payload = { schema: STUDIO_ROOM_PRESENCE_SCHEMA, purpose, status, reason, http_status: httpStatus, observation_id: randomUUID(), observed_at_lab_ms: this.#now(), identities_excluded: true, ...report };
+      return { kind: STUDIO_ROOM_PRESENCE_KIND, source: "canonical", payload, dedupeKey: contentKey("studio-room-presence", runId, payload) };
+    };
+    let roomId: string | null;
+    try { roomId = (await this.#api.snapshot(this.studio.projectId, await tokens.token())).roomId; }
+    catch (error) { return emit("unobservable", "snapshot_unavailable", null, { error_code: error instanceof VoiceLabError ? error.detail.code : null }); }
+    if (roomId === null || !UUID.test(roomId)) return emit("unobservable", "room_id_unavailable", null);
+    let read;
+    try { read = await this.#api.livePresence(roomId, await tokens.token()); }
+    catch { return emit("unobservable", "presence_read_failed", null); }
+    const observation = classifyRoomPresence(read, roomId);
+    return emit(observation.status, observation.reason, read.http_status, read.status === "available" ? {
+      observed: read.value.observed, fresh: read.value.fresh, self_present: read.value.selfPresent, participants: read.value.participants, guests: read.value.guests,
+      voice: read.value.voice, live_exchange_id: read.value.exchangeId, reported_at: read.value.reportedAt,
+    } : {});
   }
 
   #state(runId: string): ExchangeRecord {

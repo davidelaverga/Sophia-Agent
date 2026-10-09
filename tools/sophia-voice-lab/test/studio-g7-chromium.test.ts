@@ -102,7 +102,10 @@ describe.skipIf(executablePath === null)("Studio G7 driver against a local fake 
     onEvidence: null as (() => void) | null, openDelayMs: 0, ended: [] as string[], openTimer: null as ReturnType<typeof setTimeout> | null,
     work: [] as Array<Record<string, unknown>>, tasks: new Map<string, Record<string, unknown>>(), versions: new Map<string, Array<Record<string, unknown>>>(),
     contents: new Map<string, Buffer>(), mission: [] as Array<Record<string, unknown>>, edits: new Map<string, { status: number; body: unknown }>(), withdrawals: [] as unknown[],
+    /** The room as the bridge last saw it (A15 RoomLivePresence, without roomId); null: no report yet. */
+    presence: null as Record<string, unknown> | null,
   };
+  const ROOM_UUID = "70000000-0000-4000-8000-0000000000a7";
   const tokens = { issued: new Set<string>(), revoked: new Set<string>(), expiresIn: 3_600, failLocal: 0, logouts: [] as string[] };
   let origins = { studio: "", api: "", supabase: "", store: "" };
 
@@ -116,9 +119,14 @@ describe.skipIf(executablePath === null)("Studio G7 driver against a local fake 
   function version(id: string, htmlSource: string, html: Buffer, parentId: string | null): Record<string, unknown> {
     return { id, artifactId: ids.artifact, projectId: PROJECT_UUID, parentId, sourceId: ids.md, sourceHash: sha256("markdown"), state: "stable", previewId: null, format: "markdown", exportEditability: "source_editable", title: "River otters report", versionNumber: parentId ? 2 : 1, limitations: ["free text limitation"], renditions: [{ format: "html", sourceId: htmlSource, sha256: createHash("sha256").update(html).digest("hex"), byteLength: html.byteLength, mime: "text/html", pageCount: null }] };
   }
-  /** The product's reaction to the create utterance: a research task handing its HTML to a published design. */
+  /**
+   * The product's reaction to the create utterance: a research task handing
+   * its HTML to a published design. The research task was created by the
+   * exchange's voice tool call, so it names the exchange (A15); the design
+   * task, created by the service from the handoff, does not.
+   */
   function createReport(): void {
-    const research = nativeTask(ids.research, "research");
+    const research = nativeTask(ids.research, "research", { exchangeId: EXCHANGE_UUID });
     const design = nativeTask(ids.design, "design", { state: "succeeded", phase: "result_ready", artifactId: ids.artifact });
     api.work = [research, design];
     api.tasks.set(ids.research, { task: research, instruction: FREE_TEXT[0], result: { markdown: FREE_TEXT[1], sourceId: ids.md, sha256: sha256("markdown"), outputs: [] }, research: { question: FREE_TEXT[0], specialist: "x", outputs: [], rootTaskId: ids.research, capUsd: 1, committedUsd: 0, spentUsd: 0, searches: {}, reads: {}, html: { state: "published", designTaskId: ids.design } } });
@@ -194,7 +202,7 @@ describe.skipIf(executablePath === null)("Studio G7 driver against a local fake 
         return;
       }
       if (request.method === "GET" && path === `/api/v1/projects/${PROJECT_UUID}/snapshot`) {
-        json(200, { projectId: PROJECT_UUID, title: "Synthetic", room: { id: "room-g7-test", revision: 1, inputActorId: api.exchangeId ? api.inputActorId : null, mode: "invoked", sophia: { exchangeId: api.exchangeId, exchange: api.exchangeId ? "open" : "none", inputEpoch: 1, inputActorId: api.exchangeId ? api.inputActorId : null } }, work: api.work });
+        json(200, { projectId: PROJECT_UUID, title: "Synthetic", room: { id: ROOM_UUID, revision: 1, inputActorId: api.exchangeId ? api.inputActorId : null, mode: "invoked", sophia: { exchangeId: api.exchangeId, exchange: api.exchangeId ? "open" : "none", inputEpoch: 1, inputActorId: api.exchangeId ? api.inputActorId : null } }, work: api.work });
         return;
       }
       if (request.method === "GET" && path === `/api/v1/exchanges/${EXCHANGE_UUID}/qualification-evidence`) {
@@ -206,6 +214,13 @@ describe.skipIf(executablePath === null)("Studio G7 driver against a local fake 
         json(200, { exchangeId: EXCHANGE_UUID, state: api.exchangeId === EXCHANGE_UUID ? "open" : "ended", grant, receipts: api.evidenceMode === "foreign" ? [] : [...api.receipts].sort((left, right) => left.source === right.source ? left.seq - right.seq : left.source < right.source ? -1 : 1) });
         // Product changes that land right after this answer (e.g. the guard ends the exchange).
         api.onEvidence?.();
+        return;
+      }
+      const presenceMatch = /^\/api\/v1\/rooms\/([0-9a-f-]{36})\/live-presence$/.exec(path);
+      if (request.method === "GET" && presenceMatch) {
+        if (api.evidenceMode === "route_absent") { routeNotFound(); return; }
+        if (presenceMatch[1] !== ROOM_UUID) { productError(422, "not_found", "Room not found"); return; }
+        json(200, { roomId: ROOM_UUID, ...(api.presence ?? { observed: false, reportedAt: null, fresh: false, voice: null, exchangeId: null, selfPresent: false, participants: 0, guests: 0, emptySince: null }) });
         return;
       }
       const endMatch = /^\/api\/v1\/exchanges\/([0-9a-f-]{36})\/end$/.exec(path);
@@ -365,6 +380,7 @@ else {
     api.mission = [];
     api.edits.clear();
     api.withdrawals.length = 0;
+    api.presence = null;
     return { config, driver, run };
   }
 
@@ -413,6 +429,15 @@ else {
 
     await speakStep("create");
     createReport();
+    // Decoys in the time window, by the principal: one created by another
+    // exchange's voice call, one with no exchange (a typed command, or voice
+    // qualification off). Both mirror every step's phase; neither is ever bound.
+    const decoys = { other: randomUUID(), none: randomUUID() };
+    for (const [id, exchangeId] of [[decoys.other, OTHER_EXCHANGE], [decoys.none, null]] as const) {
+      const decoy = nativeTask(id, "research", exchangeId === null ? {} : { exchangeId });
+      api.work = [...api.work, decoy];
+      api.tasks.set(id, { task: decoy, instruction: FREE_TEXT[0], result: null, research: { question: FREE_TEXT[0], specialist: "x", outputs: [], rootTaskId: id, capUsd: 1, committedUsd: 0, spentUsd: 0, searches: {}, reads: {}, html: { state: "none", designTaskId: null } } });
+    }
     await speakStep("steer");
     const left = await act({ action: "leave_and_return" });
     expect(left.receipt).toMatchObject({ performed: true, status: "returned" });
@@ -422,7 +447,7 @@ else {
     expect(stale.receipt).toMatchObject({ performed: true, status: "refused", http_status: 409, code: "stale_revision" });
     for (const [step, phase, state] of [["hold", "held", "running"], ["resume", "running", "running"], ["stop", "stopped", "cancelled"]] as const) {
       await speakStep(step);
-      setPhase(ids.research, phase, state);
+      for (const id of [ids.research, decoys.other, decoys.none]) setPhase(id, phase, state);
       expect((await act({ action: "observe", for_step: step })).receipt).toMatchObject({ performed: false, status: "observed" });
     }
     const withdrawn = await act({ action: "withdrawal" });
@@ -454,7 +479,11 @@ else {
       [ids.v1, "verified", createHash("sha256").update(html1).digest("hex")],
       [ids.v2, "verified", createHash("sha256").update(html2).digest("hex")],
     ]));
-    expect(finalOutcome.payload.join).toMatchObject({ status: "uncertain", missing_product_field: "NativeTask.exchangeId" });
+    // Bound only by the exchange id the product recorded for the voice call that created the task.
+    expect(finalOutcome.payload.join).toMatchObject({ basis: "native_task_exchange_id", run_exchange_id: EXCHANGE_UUID, bound_task_ids: [ids.research], other_exchange_task_count: 1 });
+    const finalTasks = finalOutcome.payload.tasks as Array<Record<string, unknown>>;
+    expect(finalTasks.find((item) => item.task_id === decoys.other)).toMatchObject({ exchange_id: OTHER_EXCHANGE });
+    expect(finalTasks.find((item) => item.task_id === decoys.none)).toMatchObject({ exchange_id: null });
 
     // Nothing secret or free-text is durable: no password, JWT, refresh token, preview proof, signed URL, instruction, Markdown, title or note words.
     const serialized = JSON.stringify(collected);
@@ -469,9 +498,10 @@ else {
     const withheld = evaluation.harness.filter((assertion) => assertion.status !== "pass").map((assertion) => `${assertion.id}:${assertion.status}:${assertion.reason}`);
     expect(withheld).toEqual([]);
     expect(Object.fromEntries(evaluation.steps.map((step) => [step.step_id, `${step.executed}/${step.outcome}`]))).toEqual({
-      "g7.create": "pass/uncertain", "g7.steer": "pass/uncertain", "g7.leave_return": "pass/pass", "g7.section_revision": "pass/pass", "g7.stale_edit": "pass/pass",
-      "g7.hold": "pass/uncertain", "g7.resume": "pass/uncertain", "g7.stop": "pass/uncertain", "g7.withdrawal": "pass/pass",
+      "g7.create": "pass/pass", "g7.steer": "pass/uncertain", "g7.leave_return": "pass/pass", "g7.section_revision": "pass/pass", "g7.stale_edit": "pass/pass",
+      "g7.hold": "pass/pass", "g7.resume": "pass/pass", "g7.stop": "pass/pass", "g7.withdrawal": "pass/pass",
     });
+    expect(evaluation.outcome).toMatchObject({ join: "native_task_exchange_id", bound_tasks: 2 });
     expect(deriveStudioG7Verdicts(evaluation, { sessionEstablished: true })).toEqual({ harness: "pass", product: "inconclusive", provider: "pass", auth: "pass", evidence: "pass" });
   }, 180_000);
 
@@ -546,6 +576,10 @@ else {
     expect(studioG7CleanupProof(events).exchangeEnded).toBe(true);
     expect(api.calls.filter((call) => call.startsWith("POST") && call.endsWith("/end"))).toHaveLength(0);
     expect(api.ended).toHaveLength(0);
+    // The live-presence route is absent too: room presence is unobservable, never "gone".
+    const presence = events.filter((event) => event.kind === "studio.room.live_presence");
+    expect(presence.length).toBeGreaterThan(0);
+    expect(presence.every((event) => event.payload.status === "unobservable" && event.payload.reason === "endpoint_not_served" && event.payload.http_status === 404)).toBe(true);
   }, 120_000);
 
   it("withdraws only a note bound to the run's own, ownership-proven exchange", async () => {

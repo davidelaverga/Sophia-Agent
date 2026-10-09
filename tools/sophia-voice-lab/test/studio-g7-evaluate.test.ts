@@ -391,7 +391,7 @@ function g7Episode(options: G7Options = {}): Episode {
 }
 
 describe("Studio G7 episode: every step is an operation, outcomes are canonical or typed uncertain", () => {
-  it("certifies the harness of a complete episode; voice outcomes stay uncertain so the product is inconclusive", () => {
+  it("certifies the harness of a complete episode; without the product's task exchange ids no voice outcome is attributed, so the product is inconclusive", () => {
     const item = g7Episode();
     const evaluation = evaluate(item);
     const failing = [...evaluation.harness].filter((assertion) => assertion.status !== "pass");
@@ -400,20 +400,21 @@ describe("Studio G7 episode: every step is an operation, outcomes are canonical 
     expect(evaluation.bridge.first_seq).toBe(0);
     expect(evaluation.bridge.missing_seqs).toEqual([]);
     const steps = Object.fromEntries(evaluation.steps.map((step) => [step.step_id, `${step.executed}/${step.outcome}:${step.reason}`]));
+    // The tasks carry no exchange id (a product without voice qualification): never attributed by timing.
     expect(steps).toEqual({
-      "g7.create": "pass/uncertain:published_html_bytes_verified_join_uncertain",
-      "g7.steer": "pass/uncertain:steer_effect_not_exposed_by_member_api",
+      "g7.create": "pass/unavailable:native_task_exchange_id_absent",
+      "g7.steer": "pass/unavailable:native_task_exchange_id_absent",
       "g7.leave_return": "pass/pass:null",
       "g7.section_revision": "pass/pass:null",
       "g7.stale_edit": "pass/pass:null",
-      "g7.hold": "pass/uncertain:intended_phase_observed_join_uncertain",
-      "g7.resume": "pass/uncertain:intended_phase_observed_join_uncertain",
-      "g7.stop": "pass/uncertain:intended_phase_observed_join_uncertain",
+      "g7.hold": "pass/unavailable:native_task_exchange_id_absent",
+      "g7.resume": "pass/unavailable:native_task_exchange_id_absent",
+      "g7.stop": "pass/unavailable:native_task_exchange_id_absent",
       "g7.withdrawal": "pass/pass:null",
     });
-    expect(statusOf(evaluation, "step.g7.withdrawal.design_ended")).toMatchObject({ status: "uncertain", reason: "design_end_observed_join_uncertain" });
+    expect(statusOf(evaluation, "step.g7.withdrawal.design_ended")).toMatchObject({ status: "unavailable", reason: "native_task_exchange_id_absent" });
     expect(statusOf(evaluation, "outcome.artifact_bytes_integrity")).toMatchObject({ status: "pass" });
-    expect(evaluation.outcome).toMatchObject({ join: "uncertain", missing_product_field: "NativeTask.exchangeId", artifacts_verified: 2, artifacts_mismatched: 0 });
+    expect(evaluation.outcome).toMatchObject({ join: "uncertain", bound_tasks: 0, missing_product_field: "NativeTask.exchangeId", artifacts_verified: 2, artifacts_mismatched: 0 });
     const verdicts = deriveStudioG7Verdicts(evaluation, { sessionEstablished: true });
     expect(verdicts).toEqual({ harness: "pass", product: "inconclusive", provider: "pass", auth: "pass", evidence: "pass" });
   });
@@ -565,5 +566,93 @@ describe("Studio G7 cleanup proof: a no-join end needs the principal gone (third
     log.add("studio.cleanup.signed_out", "canonical", { schema: "sophia_voice_lab_studio_sign_out_v1", scope: "global", confirmed: true, http_status: 204 });
     log.add("cleanup.browser_context_closed", "browser", { close_resolved: true, browser_registry_absent: true, browser_process_close_resolved: true });
     expect(studioG7CleanupProof(log.events).exchangeEnded).toBe(true);
+  });
+});
+
+const OTHER_EXCHANGE_ID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+const DECOY_TASK = "d0000000-0000-4000-8000-0000000000de";
+
+/** Set each observed task's `exchange_id` as the product reported it (A15 NativeTask.exchangeId); absent keys stay unset. */
+function withTaskExchangeIds(item: Episode, ids: Record<string, string | null>): Episode {
+  for (const event of item.log.events.filter((candidate) => candidate.kind === "studio.outcome.observed")) {
+    event.payload = { ...event.payload, tasks: (event.payload.tasks as Array<Record<string, unknown>>).map((task) => String(task.task_id) in ids ? { ...task, exchange_id: ids[String(task.task_id)] } : task) };
+  }
+  return item;
+}
+const stepsOf = (evaluation: StudioG7Evaluation) => Object.fromEntries(evaluation.steps.map((step) => [step.step_id, `${step.executed}/${step.outcome}:${step.reason}`]));
+
+describe("Studio G7 voice outcomes are bound only by the product's task exchange id (A15)", () => {
+  it("binds a voice step to the task its exchange created, and through the product's own link to the design's verified page", () => {
+    const evaluation = evaluate(withTaskExchangeIds(g7Episode(), { [RESEARCH_TASK]: EXCHANGE_UUID }));
+    expect(stepsOf(evaluation)).toMatchObject({
+      "g7.create": "pass/pass:null",
+      "g7.steer": "pass/uncertain:steer_effect_not_exposed_by_member_api",
+      "g7.hold": "pass/pass:null",
+      "g7.resume": "pass/pass:null",
+      "g7.stop": "pass/pass:null",
+    });
+    expect(statusOf(evaluation, "step.g7.withdrawal.design_ended")).toMatchObject({ status: "pass", reason: null });
+    expect(evaluation.outcome).toMatchObject({ join: "native_task_exchange_id", bound_tasks: 2, missing_product_field: null });
+    // The steer effect is still not exposed by the member API: the product stays inconclusive.
+    expect(evaluation.verdicts).toEqual({ harness: "pass", product: "inconclusive", provider: "pass" });
+    expect(evaluation.limitations).toEqual(expect.arrayContaining(["native_task_join_only_by_exchange_id_requires_voice_qualification", "steer_effect_not_exposed_by_member_api"]));
+  });
+
+  it("never attributes a task of another exchange, or one with no exchange id, even inside the time window", () => {
+    for (const ids of [{ [RESEARCH_TASK]: OTHER_EXCHANGE_ID, [DESIGN_TASK]: OTHER_EXCHANGE_ID }, { [RESEARCH_TASK]: null, [DESIGN_TASK]: OTHER_EXCHANGE_ID }]) {
+      const evaluation = evaluate(withTaskExchangeIds(g7Episode(), ids));
+      expect(stepsOf(evaluation), JSON.stringify(ids)).toMatchObject({
+        "g7.create": "pass/unavailable:no_task_bound_to_run_exchange",
+        "g7.steer": "pass/unavailable:no_task_bound_to_run_exchange",
+        "g7.hold": "pass/unavailable:no_task_bound_to_run_exchange",
+        "g7.resume": "pass/unavailable:no_task_bound_to_run_exchange",
+        "g7.stop": "pass/unavailable:no_task_bound_to_run_exchange",
+      });
+      expect(statusOf(evaluation, "step.g7.withdrawal.design_ended")).toMatchObject({ status: "unavailable", reason: "no_task_bound_to_run_exchange" });
+      expect(evaluation.outcome).toMatchObject({ join: "uncertain", bound_tasks: 0, missing_product_field: null });
+    }
+  });
+
+  it("never attributes another exchange's task that shows the step's effect while the run's own task does not", () => {
+    const item = withTaskExchangeIds(g7Episode(), { [RESEARCH_TASK]: EXCHANGE_UUID });
+    const hold = item.log.events.find((event) => event.kind === "studio.outcome.observed" && event.payload.purpose === "g7.hold")!;
+    hold.payload = { ...hold.payload, tasks: [
+      { ...(hold.payload.tasks as Array<Record<string, unknown>>)[0], phase: "running" },
+      task(DECOY_TASK, "research", { phase: "held", exchange_id: OTHER_EXCHANGE_ID }),
+    ] };
+    expect(stepsOf(evaluate(item))["g7.hold"]).toBe("pass/uncertain:intended_phase_not_observed_on_bound_task");
+  });
+
+  it("binds nothing while the run's exchange ownership is unproven", () => {
+    for (const ownership of ["unavailable", "mismatch"] as const) {
+      const evaluation = evaluate(withTaskExchangeIds(g7Episode({ ownership }), { [RESEARCH_TASK]: EXCHANGE_UUID }));
+      expect(stepsOf(evaluation)["g7.create"], ownership).toBe("pass/unavailable:run_exchange_ownership_unproven");
+      expect(stepsOf(evaluation)["g7.hold"], ownership).toBe("pass/unavailable:run_exchange_ownership_unproven");
+      expect(evaluation.outcome.join).toBe("uncertain");
+    }
+  });
+});
+
+describe("Studio G7 orphan browser room presence (A15 live presence)", () => {
+  const quiesced = (presence: Record<string, unknown>) => {
+    const run = studioRun(config);
+    const log = new EventLog(run.id);
+    log.add("harness.browser_process_acquired", "browser", {});
+    log.add("studio.cleanup.exchange_ended", "canonical", { confirmed: true, status: "confirmed", basis: "no_live_exchange_in_room" });
+    log.add("studio.cleanup.signed_out", "canonical", { confirmed: true, scope: "global" });
+    log.add("cleanup.browser_lease_released", "worker", { schema: "sophia_voice_lab_studio_g7_dead_owner_lease_release_v1", cas_deleted: true, dead_owner_quiesced: true, ...presence });
+    return evaluateStudioG7Run(run, log.events, [], { expected });
+  };
+
+  it("counts a fresh report without the principal as gone; a stale or missing one, or an absent route, proves nothing", () => {
+    const absent = quiesced({ room_presence: "absent", room_presence_reason: null });
+    expect(statusOf(absent, "cleanup.orphan_room_presence")).toMatchObject({ status: "pass", reason: null });
+    expect(absent.cleanup.room_presence).toBe("absent");
+    // The browser process's close itself stays unobservable.
+    expect(statusOf(absent, "cleanup.browser_closed")).toMatchObject({ status: "unavailable", reason: "dead_owner_quiesced_close_unobservable" });
+    for (const reason of ["report_stale", "not_observed", "endpoint_not_served", "not_found_for_principal"]) {
+      const unobservable = quiesced({ room_presence: "unobservable", room_presence_reason: reason });
+      expect(statusOf(unobservable, "cleanup.orphan_room_presence"), reason).toMatchObject({ status: "unavailable", reason: `room_presence_unobservable_${reason}` });
+    }
   });
 });

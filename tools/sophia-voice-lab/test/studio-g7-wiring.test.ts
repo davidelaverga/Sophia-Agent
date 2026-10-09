@@ -38,6 +38,9 @@ describe("target-kind wiring in the service", () => {
     const studio = await new VoiceLabService(new MemoryVoiceLabLedger("test"), studioTestConfig(), async () => []).getCapabilities(caller, {});
     expect(studio.data.tools).toEqual(expect.arrayContaining([...STUDIO_G7_TOOL_NAMES]));
     expect(studio.data.studio_g7).toMatchObject({ tools: [...STUDIO_G7_TOOL_NAMES], lab_schema: { version: 7, studio_action_requires_upgrade_from_v6: true }, limitations: expect.arrayContaining(["no_transcript_retained", "no_audio_retained", "fake_studio_loopback_peer_has_no_packet_flow_proof"]) });
+    // The published limitations are exactly the evaluator's.
+    const { STUDIO_G7_LIMITATIONS } = await import("../src/studio-g7/evaluate.js");
+    expect((studio.data.studio_g7 as { limitations: string[] }).limitations).toEqual([...STUDIO_G7_LIMITATIONS]);
   });
 
   it("registers the Studio tools as MCP tools with strict schemas and an audited, idempotent start", async () => {
@@ -339,7 +342,7 @@ describe("dead foreign worker: Studio lease recovery", () => {
     expect(await ledger.getBrowserLease(runId)).toBeNull();
     const events = (await ledger.listEvents(runId, 0, 1_000)).events;
     const released = events.find((event) => event.kind === "cleanup.browser_lease_released");
-    expect(released?.payload).toMatchObject({ schema: STUDIO_DEAD_OWNER_LEASE_RELEASE_SCHEMA, dead_owner_quiesced: true, cas_deleted: true, browser_close: "unobservable_owner_dead", room_presence: "unobservable_via_member_api" });
+    expect(released?.payload).toMatchObject({ schema: STUDIO_DEAD_OWNER_LEASE_RELEASE_SCHEMA, dead_owner_quiesced: true, cas_deleted: true, browser_close: "unobservable_owner_dead", room_presence: "unobservable", room_presence_reason: "presence_not_read" });
     expect(events.some((event) => event.kind === "studio.cleanup.dead_owner_verified")).toBe(true);
     await workerB.worker.maintainSessions();
     expect(await ledger.getRun(runId)).toMatchObject({ state: "aborted_driver_restart", cleanupComplete: true });
@@ -737,4 +740,50 @@ describe("adversarial fourth review: the fence marker is cleared on every path a
     expect(h.driver.calls).toContain("recover");
     expect(await h.ledger.getRun(h.runId)).toMatchObject({ state: "completed", cleanupComplete: true });
   }, 60_000);
+});
+
+/** One live-presence read as the real driver records it (A15): status present / absent / unobservable. */
+function presenceEvent(runId: string, status: "present" | "absent" | "unobservable", reason: string | null, n: number) {
+  return { kind: "studio.room.live_presence", source: "canonical" as const, payload: { schema: "sophia_voice_lab_studio_room_presence_v1", purpose: "recover", status, reason, http_status: reason === "endpoint_not_served" ? 404 : 200, observation_id: `presence-${n}`, identities_excluded: true, ...(reason === null ? { observed: true, fresh: true, self_present: status === "present" } : {}) }, dedupeKey: `presence:${runId}:${n}` };
+}
+
+describe("dead foreign worker: the orphan browser's room presence (A15 live presence)", () => {
+  it("keeps the lease while a fresh report places the principal in the room, and records a fresh absence when it releases", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date());
+    const ledger = new MemoryVoiceLabLedger("test");
+    const advance = async (ms: number) => { vi.setSystemTime(new Date(Date.now() + ms)); };
+    const { runId, workerB } = await deadOwnerRecovery(ledger, advance);
+    await advance(61 * 60_000);
+    workerB.driver.recoverResult = (id) => [...recoveryEvents(id), presenceEvent(id, "present", null, 1)];
+    await workerB.worker.maintainSessions();
+    expect(await ledger.getBrowserLease(runId)).not.toBeNull();
+    let events = (await ledger.listEvents(runId, 0, 1_000)).events;
+    expect(events.filter((event) => event.kind === "cleanup.browser_lease_unconfirmed").map((event) => event.payload.dead_owner_release)).toContain("principal_present_in_room");
+    expect(events.find((event) => event.kind === "studio.cleanup.dead_owner_verified")?.payload).toMatchObject({ room_presence: "present" });
+    // A later fresh report without the principal: released, the absence recorded.
+    await advance(31_000);
+    workerB.driver.recoverResult = (id) => [...recoveryEvents(id), presenceEvent(id, "absent", null, 2)];
+    await workerB.worker.maintainSessions();
+    expect(await ledger.getBrowserLease(runId)).toBeNull();
+    events = (await ledger.listEvents(runId, 0, 1_000)).events;
+    expect(events.find((event) => event.kind === "cleanup.browser_lease_released")?.payload).toMatchObject({ dead_owner_quiesced: true, browser_close: "unobservable_owner_dead", room_presence: "absent", room_presence_reason: null });
+  }, 60_000);
+
+  it("never counts a stale or missing report, or an absent route, as gone: the other gates decide and presence stays unobservable", async () => {
+    for (const reason of ["report_stale", "not_observed", "endpoint_not_served"]) {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(new Date());
+      const ledger = new MemoryVoiceLabLedger("test");
+      const advance = async (ms: number) => { vi.setSystemTime(new Date(Date.now() + ms)); };
+      const { runId, workerB } = await deadOwnerRecovery(ledger, advance);
+      await advance(61 * 60_000);
+      workerB.driver.recoverResult = (id) => [...recoveryEvents(id), presenceEvent(id, "unobservable", reason, 3)];
+      await workerB.worker.maintainSessions();
+      expect(await ledger.getBrowserLease(runId), reason).toBeNull();
+      const released = (await ledger.listEvents(runId, 0, 1_000)).events.find((event) => event.kind === "cleanup.browser_lease_released");
+      expect(released?.payload, reason).toMatchObject({ dead_owner_quiesced: true, room_presence: "unobservable", room_presence_reason: reason });
+      vi.useRealTimers();
+    }
+  }, 120_000);
 });

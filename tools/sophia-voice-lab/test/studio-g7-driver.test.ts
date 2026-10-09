@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { VoiceBrowserDriver } from "../src/browser-driver.js";
 import { VoiceLabError } from "../src/domain.js";
-import { StudioApiClient } from "../src/studio-g7/studio-api.js";
+import { StudioApiClient, classifyRoomPresence } from "../src/studio-g7/studio-api.js";
 import { StudioG7Driver } from "../src/studio-g7/studio-driver.js";
 import { canonicalJson } from "../src/studio-g7/contract.js";
 import { recoveryTransportBinding } from "../src/recovery-control.js";
@@ -14,6 +14,7 @@ import {
 import type { RunRecord } from "../src/domain.js";
 
 const OTHER_EXCHANGE = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+const ROOM_UUID = "70000000-0000-4000-8000-0000000000a7";
 const OTHER_PRINCIPAL = "12345678-1234-4234-8234-123456789abc";
 
 /** A deterministic stand-in for Supabase Auth and the Studio member API. */
@@ -33,6 +34,8 @@ class FakeStudioBackend {
   voiceQualificationOn = true;
   /** A raw refusal of the evidence read (negative controls: other 422 codes, 401, 403). */
   evidenceRefusal: { status: number; body: unknown } | null = null;
+  /** The room as the bridge last saw it (A15 RoomLivePresence); the default is no report. */
+  presence: Record<string, unknown> = { observed: false, reportedAt: null, fresh: false, voice: null, exchangeId: null, selfPresent: false, participants: 0, guests: 0, emptySince: null };
   grantUser = PRINCIPAL_UUID;
   /** A raw 200 snapshot body that replaces the well-formed one (malformed-answer tests). */
   snapshotBody: unknown = undefined;
@@ -76,13 +79,19 @@ class FakeStudioBackend {
       if (this.apiDown) return json({ error: "unavailable" }, 503);
       if (!authorization?.startsWith("Bearer fake-access-token-")) return json({ error: "unauthorized" }, 401);
       if (url.pathname === `/api/v1/projects/${PROJECT_UUID}/snapshot` && this.snapshotBody !== undefined) return typeof this.snapshotBody === "string" ? new Response(this.snapshotBody, { status: 200, headers: { "content-type": "application/json" } }) : json(this.snapshotBody);
-      if (url.pathname === `/api/v1/projects/${PROJECT_UUID}/snapshot`) return json({ room: { id: "room-g7", sophia: { exchangeId: this.exchangeId, exchange: this.exchangeId ? "open" : "none", inputEpoch: 2, inputActorId: this.exchangeId ? this.inputActorId : null } }, work: [] });
+      if (url.pathname === `/api/v1/projects/${PROJECT_UUID}/snapshot`) return json({ room: { id: ROOM_UUID, sophia: { exchangeId: this.exchangeId, exchange: this.exchangeId ? "open" : "none", inputEpoch: 2, inputActorId: this.exchangeId ? this.inputActorId : null } }, work: [] });
       const evidence = /^\/api\/v1\/exchanges\/([0-9a-f-]{36})\/qualification-evidence$/.exec(url.pathname);
       if (evidence) {
         if (!this.voiceQualificationOn) return routeNotFound();
         if (this.evidenceRefusal) return json(this.evidenceRefusal.body, this.evidenceRefusal.status);
         const body = this.evidence?.(evidence[1]!) ?? null;
         return body === null ? productError(422, "not_found", "Qualification evidence not found") : json(body);
+      }
+      const presence = /^\/api\/v1\/rooms\/([0-9a-f-]{36})\/live-presence$/.exec(url.pathname);
+      if (presence) {
+        if (!this.voiceQualificationOn) return routeNotFound();
+        if (presence[1] !== ROOM_UUID) return productError(422, "not_found", "Room not found");
+        return json({ roomId: ROOM_UUID, ...this.presence });
       }
       const end = /^\/api\/v1\/exchanges\/([0-9a-f-]{36})\/end$/.exec(url.pathname);
       if (method === "POST" && end) { if (this.exchangeId === end[1]) this.exchangeId = null; return new Response(null, { status: 204 }); }
@@ -503,5 +512,56 @@ describe("member-read refusals follow the product's convention (A15)", () => {
     if (status === 401 || status === 403) return;
     const snapshot = await client(status, body).snapshot(PROJECT_UUID, "fake-access-token-1-xxxxxxxx").catch((error: unknown) => error) as VoiceLabError;
     expect(snapshot.detail).toMatchObject({ code: "STUDIO_SNAPSHOT_UNAVAILABLE", details: { http_status: status, reason: member } });
+  });
+});
+
+describe("a recovery reads the room as the bridge last saw it (A15 live presence)", () => {
+  const fresh = (selfPresent: boolean) => ({ observed: true, reportedAt: new Date().toISOString(), fresh: true, voice: "ready", exchangeId: null, selfPresent, participants: selfPresent ? 1 : 0, guests: 0, emptySince: null });
+  async function presenceAfterRecover(configure: (backend: FakeStudioBackend) => void) {
+    const backend = new FakeStudioBackend();
+    backend.exchangeId = null;
+    configure(backend);
+    const { config, driver } = driverFor(backend);
+    const run = studioRun(config);
+    adopt(driver, run);
+    const recovered = await driver.recover(binding(run), "unused");
+    const events = ofKind(recovered.events, "studio.room.live_presence");
+    expect(events).toHaveLength(1);
+    // Read with the recovery's own session, before its global sign-out.
+    const order = recovered.events.map((event) => event.kind);
+    expect(order.indexOf("studio.room.live_presence")).toBeLessThan(order.indexOf("studio.cleanup.signed_out"));
+    expect(backend.issued).toBe(1);
+    return { payload: events[0]!.payload, serialized: JSON.stringify(recovered.events) };
+  }
+
+  it("a fresh report is evidence either way: the principal present, or gone", async () => {
+    const present = await presenceAfterRecover((backend) => { backend.presence = fresh(true); });
+    expect(present.payload).toMatchObject({ schema: "sophia_voice_lab_studio_room_presence_v1", status: "present", reason: null, http_status: 200, observed: true, fresh: true, self_present: true, participants: 1, guests: 0, identities_excluded: true });
+    const absent = await presenceAfterRecover((backend) => { backend.presence = fresh(false); });
+    expect(absent.payload).toMatchObject({ status: "absent", reason: null, self_present: false });
+    // Only the principal's own presence and counts are kept: no room id, no identities.
+    expect(absent.serialized).not.toContain(ROOM_UUID);
+  });
+
+  it("a stale or missing report, a refusal or an absent route proves nothing and is never typed gone", async () => {
+    const cases: Array<{ name: string; configure: (backend: FakeStudioBackend) => void; reason: string; http: number | null }> = [
+      { name: "stale (selfPresent false)", configure: (backend) => { backend.presence = { ...fresh(false), fresh: false }; }, reason: "report_stale", http: 200 },
+      { name: "stale (selfPresent true)", configure: (backend) => { backend.presence = { ...fresh(true), fresh: false }; }, reason: "report_stale", http: 200 },
+      { name: "no report", configure: () => undefined, reason: "not_observed", http: 200 },
+      { name: "route absent (404)", configure: (backend) => { backend.voiceQualificationOn = false; }, reason: "endpoint_not_served", http: 404 },
+      { name: "malformed answer", configure: (backend) => { backend.presence = { observed: "yes" }; }, reason: "answer_malformed", http: 200 },
+    ];
+    for (const item of cases) {
+      const { payload } = await presenceAfterRecover(item.configure);
+      expect(payload, item.name).toMatchObject({ status: "unobservable", reason: item.reason, http_status: item.http });
+    }
+  });
+
+  it("types a 422 not_found room as not found for the principal, never as gone", async () => {
+    const api = new StudioApiClient(studioTestConfig().studioG7!.apiOrigin, studioTestConfig().studioG7!.studioOrigin, studioTestConfig().allowedOrigins, (async () => new Response(JSON.stringify({ code: "not_found", message: "Room not found", retry: "never", requestId: "req-fake-0200" }), { status: 422, headers: { "content-type": "application/json" } })) as never, 5_000, []);
+    const read = await api.livePresence(ROOM_UUID, "fake-access-token-1-xxxxxxxx");
+    expect(read).toEqual({ status: "unavailable", reason: "not_found_for_principal", http_status: 422 });
+    expect(classifyRoomPresence(read, ROOM_UUID)).toEqual({ status: "unobservable", reason: "not_found_for_principal" });
+    expect(classifyRoomPresence({ status: "available", value: { roomId: OTHER_EXCHANGE, observed: true, fresh: true, selfPresent: false, participants: 0, guests: 0, voice: null, exchangeId: null, reportedAt: null }, http_status: 200 }, ROOM_UUID)).toEqual({ status: "unobservable", reason: "room_mismatch" });
   });
 });

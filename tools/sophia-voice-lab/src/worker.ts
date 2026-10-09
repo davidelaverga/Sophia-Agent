@@ -32,7 +32,7 @@ import { isStudioG7ScenarioVersion } from "./studio-g7/scenarios.js";
 import { STUDIO_G7_TARGET_KIND, computeRunBindingSha256 } from "./studio-g7/contract.js";
 import { hasStudioExtensions } from "./studio-g7/studio-driver.js";
 import { STUDIO_STEP_EXECUTING_STATES, studioStepConflict, studioStepOf } from "./studio-g7/step-guard.js";
-import { STUDIO_DEAD_OWNER_HEARTBEAT_STALE_MS, STUDIO_DEAD_OWNER_LEASE_RELEASE_SCHEMA, STUDIO_DEAD_OWNER_VERIFIED_KIND, studioEffectiveTokenLifetimeMs } from "./studio-g7/lease-release.js";
+import { STUDIO_DEAD_OWNER_HEARTBEAT_STALE_MS, STUDIO_DEAD_OWNER_LEASE_RELEASE_SCHEMA, STUDIO_DEAD_OWNER_VERIFIED_KIND, STUDIO_ROOM_PRESENCE_KIND, studioEffectiveTokenLifetimeMs } from "./studio-g7/lease-release.js";
 
 interface ActiveLease { epoch: number; }
 interface D02WorkerShutdownArm {
@@ -3087,15 +3087,14 @@ export class VoiceLabWorker {
       await this.ledger.appendEvent(runId, "cleanup.browser_lease_unconfirmed", "worker", { worker_id_hash: ownerHash, lease_epoch: lease.leaseEpoch, expires_at: lease.expiresAt.toISOString(), dead_owner_release: reason }, `cleanup:${runId}:browser-lease-unconfirmed:${ownerHash}:${lease.leaseEpoch}:${reason}`);
       return false;
     };
-    const released = async (result: { released: boolean; reason: string }, verificationId: string | null) => {
+    const released = async (result: { released: boolean; reason: string }, verificationId: string | null, presence: { status: string; reason: string | null } | null = null) => {
       if (!result.released) return pending(result.reason);
       const ownerCleanup = result.reason === "dead_owner_cleanup_complete";
       await this.ledger.appendEvent(runId, "cleanup.browser_lease_released", "worker", {
         schema: STUDIO_DEAD_OWNER_LEASE_RELEASE_SCHEMA, worker_id_hash: ownerHash, lease_epoch: lease.leaseEpoch, cas_deleted: true,
         ...(ownerCleanup
-          ? { dead_owner_cleanup_complete: true, browser_close: "proven_by_owner_epoch", basis: "owner_cleanup_complete" }
-          : { dead_owner_quiesced: true, browser_close: "unobservable_owner_dead", basis: "quiesced", verification_id: verificationId }),
-        room_presence: "unobservable_via_member_api",
+          ? { dead_owner_cleanup_complete: true, browser_close: "proven_by_owner_epoch", basis: "owner_cleanup_complete", room_presence: "not_required_owner_browser_closed", room_presence_reason: null }
+          : { dead_owner_quiesced: true, browser_close: "unobservable_owner_dead", basis: "quiesced", verification_id: verificationId, room_presence: presence ? presence.status : "unobservable", room_presence_reason: presence ? presence.reason : "presence_not_read" }),
       }, `cleanup:${runId}:browser-lease`);
       return true;
     };
@@ -3121,9 +3120,16 @@ export class VoiceLabWorker {
     const signedOut = recovered.events.some((event) => event.kind === "studio.cleanup.signed_out" && event.payload.confirmed === true && event.payload.scope === "global");
     if (!before) return pending(signedOut ? "access_token_lifetime_pending" : "global_sign_out_unconfirmed");
     if (!exchangeNotLive || !signedOut) return pending(!signedOut ? "global_sign_out_unconfirmed" : "exchange_not_verified_not_live");
+    // The room as the bridge last saw it, read by this same recovery: only a
+    // fresh report is evidence (present keeps the lease, absent is recorded);
+    // anything else is unobservable and the other gates decide alone.
+    const presenceEvent = [...recovered.events].reverse().find((event) => event.kind === STUDIO_ROOM_PRESENCE_KIND && event.source === "canonical");
+    const presence = presenceEvent?.payload.status === "present" || presenceEvent?.payload.status === "absent"
+      ? { status: presenceEvent.payload.status, reason: null }
+      : { status: "unobservable", reason: typeof presenceEvent?.payload.reason === "string" ? presenceEvent.payload.reason : "presence_not_read" };
     const verificationId = randomUUID();
-    await this.ledger.appendEvent(runId, STUDIO_DEAD_OWNER_VERIFIED_KIND, "worker", { verification_id: verificationId, worker_id_sha256: ownerHash, lease_epoch: lease.leaseEpoch, exchange_not_live: true, signed_out: true, access_token_max_lifetime_ms: lifetimeMs }, `studio-dead-owner-verified:${runId}:${verificationId}`);
-    return released(await this.ledger.releaseDeadOwnerStudioBrowserLease(runId, { verificationId, ...proof }), verificationId);
+    await this.ledger.appendEvent(runId, STUDIO_DEAD_OWNER_VERIFIED_KIND, "worker", { verification_id: verificationId, worker_id_sha256: ownerHash, lease_epoch: lease.leaseEpoch, exchange_not_live: true, signed_out: true, access_token_max_lifetime_ms: lifetimeMs, room_presence: presence.status, room_presence_reason: presence.reason }, `studio-dead-owner-verified:${runId}:${verificationId}`);
+    return released(await this.ledger.releaseDeadOwnerStudioBrowserLease(runId, { verificationId, ...proof }), verificationId, presence);
   }
 
   /**

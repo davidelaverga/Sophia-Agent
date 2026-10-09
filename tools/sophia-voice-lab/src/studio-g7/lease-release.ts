@@ -31,9 +31,15 @@ import { STUDIO_ACCESS_TOKEN_LIFETIME_BOUND_S } from "./supabase-session.js";
  *      configured maximum, raised to any longer `expires_in` the product
  *      actually issued to this run, so a wrong setting never shortens it;
  *    - after that, a fresh worker verification found the run's exchange not
- *      live (ended through proven ownership, or observed not live).
- *    The orphan's LiveKit room presence is not observable through the member
- *    API and stays a named gap; the close itself is typed `unobservable`.
+ *      live (ended through proven ownership, or observed not live), and did
+ *      not find the principal in the room. That verification reads the room
+ *      as the media bridge last saw it (A15 live presence): a fresh report
+ *      with `selfPresent` true is evidence the orphan browser is still in the
+ *      room and keeps the lease; a fresh `selfPresent` false is evidence it
+ *      is gone and is recorded as `absent`. No report, a stale one, a 422
+ *      `not_found` or an absent route (404) proves nothing either way: it is
+ *      recorded `unobservable` and the other gates decide alone. The browser
+ *      process's close itself stays typed `unobservable`.
  *
  * Ordering-critical timestamps (the sign-out and the verification events) are
  * stamped on the PostgreSQL clock by the PostgreSQL ledger, the same clock as
@@ -42,6 +48,9 @@ import { STUDIO_ACCESS_TOKEN_LIFETIME_BOUND_S } from "./supabase-session.js";
  */
 export const STUDIO_DEAD_OWNER_LEASE_RELEASE_SCHEMA = "sophia_voice_lab_studio_g7_dead_owner_lease_release_v1" as const;
 export const STUDIO_DEAD_OWNER_VERIFIED_KIND = "studio.cleanup.dead_owner_verified" as const;
+/** One live-presence read of the run's room (A15), made by an API-only recovery. */
+export const STUDIO_ROOM_PRESENCE_KIND = "studio.room.live_presence" as const;
+export const STUDIO_ROOM_PRESENCE_SCHEMA = "sophia_voice_lab_studio_room_presence_v1" as const;
 export const STUDIO_DEAD_OWNER_HEARTBEAT_STALE_MS = 30_000;
 /** Allowance for a worker clock running behind the ledger's clock (heartbeats are worker-stamped). */
 export const STUDIO_DEAD_OWNER_CLOCK_SKEW_MARGIN_MS = 60_000;
@@ -205,5 +214,7 @@ export function decideStudioDeadOwnerRelease(input: StudioDeadOwnerReleaseInput)
     && event.payload.worker_id_sha256 === sha256(input.lease.workerId) && event.payload.lease_epoch === input.lease.leaseEpoch
     && event.at.getTime() >= quietAt);
   if (!verification) return { release: false, reason: "fresh_exchange_verification_missing" };
+  // A fresh report placing the principal in the room: the orphan may still act there.
+  if (verification.payload.room_presence === "present") return { release: false, reason: "principal_present_in_room" };
   return { release: true, basis: "quiesced", signOutAt: signOut.at, signOutSeq: signOut.seq, verificationSeq: verification.seq };
 }

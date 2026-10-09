@@ -419,11 +419,17 @@ export const STUDIO_G7_RECEIPT_COVERAGE: readonly CoverageEntry[] = Object.freez
   { channel: "playback_realization", status: "product_receipt", sources: ["output_reply", "page:sophia_playback"], reason: null },
   { channel: "output_leg_audio_artifact", status: "not_supported_by_product_privacy_model", sources: [], reason: "no_audio_retained" },
   { channel: "tool_calls_and_counts", status: "product_receipt", sources: ["input_turn", "session_closed"], reason: "counts_only" },
-  // Task -> artifact version -> downloaded bytes is canonical (member API, as
-  // the principal). Exchange/run -> task is not: NativeTask carries no
-  // exchange or command-key binding, so that edge is joined by actor and
-  // time window and typed `uncertain`, never pass.
-  { channel: "builder_task_and_artifact_join", status: "uncertain", sources: ["GET /api/v1/projects/{p}/snapshot work", "GET /api/v1/projects/{p}/native-tasks/{t}", "GET /api/v1/artifacts/{a}/versions", "GET /api/v1/sources/{s}/content", "downloaded_bytes_sha256"], reason: "native_task_has_no_exchange_binding" },
+  // Exchange -> task is the product's own record (A15 NativeTask.exchangeId:
+  // the exchange whose voice tool call created the task), equal to the run's
+  // ownership-proven exchange; task -> design (research html.designTaskId) ->
+  // artifact version -> downloaded bytes is canonical (member API, as the
+  // principal). Never joined by actor or time. A task with no exchange id
+  // (another kind of creation, or voice qualification off) is never the run's.
+  { channel: "builder_task_and_artifact_join", status: "product_receipt", sources: ["NativeTask.exchangeId (A15)", "GET /api/v1/projects/{p}/snapshot work", "GET /api/v1/projects/{p}/native-tasks/{t}", "GET /api/v1/artifacts/{a}/versions", "GET /api/v1/sources/{s}/content", "downloaded_bytes_sha256"], reason: "bound_only_by_exchange_id_requires_voice_qualification" },
+  // A dead owner's orphan browser: the room as the media bridge last saw it
+  // (A15 live presence, the principal's own presence and counts only). A
+  // fresh report is evidence either way; none, or a stale one, proves nothing.
+  { channel: "orphan_browser_room_presence", status: "product_receipt", sources: ["GET /api/v1/rooms/{r}/live-presence selfPresent", "studio.room.live_presence"], reason: "fresh_report_only_else_unobservable" },
   { channel: "canonical_transcript_with_content", status: "not_supported_by_product_privacy_model", sources: [], reason: "no_speech_text_retained" },
   { channel: "session_lifecycle", status: "product_receipt", sources: ["session_closed", "guard"], reason: null },
   { channel: "exchange_end_and_cleanup", status: "lab_owned", sources: ["studio.exchange.ownership", "studio.cleanup.exchange_ended", "studio.cleanup.signed_out", "cleanup.browser_context_closed"], reason: "ended_only_when_ownership_proven_else_observed_not_live" },

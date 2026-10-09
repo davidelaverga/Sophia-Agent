@@ -33,8 +33,10 @@ export interface StudioG7Step {
   /**
    * How the step's product outcome joins to this run. `canonical`: the Lab's
    * own member-API request returned the task or receipt id. `uncertain`: the
-   * product exposes no exchange binding on native tasks, so the outcome is
-   * joined by actor and time window only and is never a pass.
+   * join depends on the product: only `NativeTask.exchangeId` (A15, with the
+   * API's voice qualification on) equal to the run's ownership-proven
+   * exchange binds a task, never actor or time; without such a task the
+   * outcome is unavailable (evaluate.ts).
    */
   outcome_join: "canonical" | "uncertain" | "lab_owned";
   /** Receipts the step's assertions are drawn from. */
