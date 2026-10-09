@@ -511,7 +511,17 @@ recovers only when the ledger says a post-expiry sign-out or the fresh
 verification is what is missing, never on its own clock. Only this path
 recovers a run whose lease a foreign worker holds, and every Studio API-only
 recovery (a password grant and a global sign-out) is spaced at least 30 s
-apart. Then either:
+apart. The owner is the process boot that acquired the lease, not only its
+worker id: a worker id is stable across restarts (a platform instance id), so
+before a Studio lease exists its worker records its own random per-process
+boot id (`harness.browser_lease_owner_boot`, hashes only). A worker restarted
+under the same id never takes that lease for its own (nor gates it on its own
+close proof, which can never arrive), and a heartbeat under the id that names
+another boot does not keep the owner alive: the earlier boot's lease goes
+through this same release, every gate included, and the release records
+`owner_earlier_boot_of_this_worker`. A lease with no boot record, or a
+heartbeat that names no boot, proves no restart: the heartbeat stands. Then
+either:
 - the owner's own cleanup for that lease epoch is durable (the browser acquired
   under it proven closed, a confirmed global sign-out, the exchange confirmed
   ended after its join), and the lease is released at once; or

@@ -34,7 +34,7 @@ import { hasStudioExtensions } from "./studio-g7/studio-driver.js";
 import { STUDIO_CALLS_END_STEP, STUDIO_CALLS_READ_KIND } from "./studio-g7/calls-certification.js";
 import { studioWorkerIdSha256 } from "./studio-g7/sign-out-fence.js";
 import { STUDIO_STEP_EXECUTING_STATES, studioStepConflict, studioStepOf } from "./studio-g7/step-guard.js";
-import { STUDIO_DEAD_OWNER_HEARTBEAT_STALE_MS, STUDIO_DEAD_OWNER_LEASE_RELEASE_SCHEMA, STUDIO_DEAD_OWNER_VERIFIED_KIND, STUDIO_PRESENCE_STUCK_CAP_MS, STUDIO_PRESENCE_VETO_BOUND_MS, STUDIO_ROOM_PRESENCE_KIND, studioEffectiveTokenLifetimeMs } from "./studio-g7/lease-release.js";
+import { STUDIO_DEAD_OWNER_HEARTBEAT_STALE_MS, STUDIO_DEAD_OWNER_LEASE_RELEASE_SCHEMA, STUDIO_DEAD_OWNER_VERIFIED_KIND, STUDIO_LEASE_OWNER_BOOT_KIND, STUDIO_LEASE_OWNER_BOOT_SCHEMA, STUDIO_PRESENCE_STUCK_CAP_MS, STUDIO_PRESENCE_VETO_BOUND_MS, STUDIO_ROOM_PRESENCE_KIND, studioEffectiveTokenLifetimeMs, studioLeaseOwnerBootIdSha256 } from "./studio-g7/lease-release.js";
 
 interface ActiveLease { epoch: number; }
 interface D02WorkerShutdownArm {
@@ -855,6 +855,10 @@ export class VoiceLabWorker {
       // same transactionally enforced counter before a browser/provider exists.
       await this.#fenceProviderAdmission(run, operation);
       run = await transitionRun(this.ledger, run, "browser_queued");
+      // Studio: this process boot is recorded as the lease's owner before the
+      // lease exists, so a restart under the same worker id is never mistaken
+      // for the owner (studio-g7/lease-release.ts).
+      if (isStudioG7Run(run)) await this.#recordStudioLeaseOwnerBoot(run.id, operation.id);
       const browserLease = await this.ledger.upsertBrowserLease(run.id, this.workerId, this.config.browserLeaseSeconds);
       this.#activeLeases.set(run.id, { epoch: browserLease.leaseEpoch });
       run = await transitionRun(this.ledger, run, "browser_leased");
@@ -3152,11 +3156,33 @@ export class VoiceLabWorker {
     return false;
   }
 
-  /** Another worker holds this run's browser lease (it may still be alive). */
+  /** Another worker, or another boot of this worker id, holds this run's browser lease (it may still be alive). */
   async #studioForeignLeaseHeld(run: RunRecord): Promise<boolean> {
     if (this.driver.hasSession(run.id) || this.#activeLeases.has(run.id)) return false;
     const lease = await this.ledger.getBrowserLease(run.id);
-    return lease !== null && lease.workerId !== this.workerId;
+    return lease !== null && !await this.#studioLeaseOfThisBoot(run.id, lease);
+  }
+
+  /** Write-ahead: this process boot will acquire the run's browser lease. */
+  async #recordStudioLeaseOwnerBoot(runId: string, operationId: string): Promise<void> {
+    await this.ledger.appendEvent(runId, STUDIO_LEASE_OWNER_BOOT_KIND, "worker", {
+      schema: STUDIO_LEASE_OWNER_BOOT_SCHEMA, worker_id_sha256: sha256(this.workerId), worker_boot_id_sha256: this.#workerBootIdentity.bootIdSha256,
+      operation_id: operationId, raw_worker_identifier_excluded: true,
+    }, `studio-lease-owner-boot:${runId}`);
+  }
+
+  /**
+   * A Studio lease is this process's own when it holds it now, or when it is
+   * held under this worker id and its owner-boot record names this boot (or
+   * no record names any, a lease acquired before the record existed). A lease
+   * under this worker id acquired by an earlier boot is not: that process
+   * died, and its lease is released through the dead-owner path.
+   */
+  async #studioLeaseOfThisBoot(runId: string, lease: { workerId: string }): Promise<boolean> {
+    if (lease.workerId !== this.workerId) return false;
+    if (this.#activeLeases.has(runId)) return true;
+    const ownerBoot = studioLeaseOwnerBootIdSha256((await this.#allEvents(runId)).events, lease.workerId);
+    return ownerBoot === null || ownerBoot === this.#workerBootIdentity.bootIdSha256;
   }
 
   /**
@@ -3229,7 +3255,8 @@ export class VoiceLabWorker {
   }
 
   /**
-   * A dead foreign worker's Studio lease (studio-g7/lease-release.ts).
+   * A dead foreign worker's Studio lease, or one an earlier boot of this
+   * worker id left (studio-g7/lease-release.ts).
    *
    * When the owner's own cleanup for that lease epoch is durable (its browser
    * proven closed, a global sign-out, the exchange confirmed ended after its
@@ -3256,6 +3283,8 @@ export class VoiceLabWorker {
       const ownerCleanup = result.reason === "dead_owner_cleanup_complete";
       await this.ledger.appendEvent(runId, "cleanup.browser_lease_released", "worker", {
         schema: STUDIO_DEAD_OWNER_LEASE_RELEASE_SCHEMA, worker_id_hash: ownerHash, lease_epoch: lease.leaseEpoch, cas_deleted: true,
+        // Audit: the dead owner was an earlier boot of this same worker id.
+        ...(lease.workerId === this.workerId ? { owner_earlier_boot_of_this_worker: true } : {}),
         ...(ownerCleanup
           ? { dead_owner_cleanup_complete: true, browser_close: "proven_by_owner_epoch", basis: "owner_cleanup_complete", room_presence: "not_required_owner_browser_closed", room_presence_reason: null }
           : { dead_owner_quiesced: true, browser_close: "unobservable_owner_dead", basis: "quiesced", verification_id: verificationId, room_presence: presence ? presence.status : "unobservable", room_presence_reason: presence ? presence.reason : "presence_not_read",
@@ -3304,16 +3333,18 @@ export class VoiceLabWorker {
    * Studio lease release. The legacy execution-epoch proof requires a
    * browser-held provider socket and Better Auth cleanup that this target does
    * not have, so the release is gated on the Studio driver's own close proof
-   * (and an absent session). A foreign, dead worker's lease is not released
-   * here: that needs the legacy preserved proof and stays unconfirmed.
+   * (and an absent session). The lease of another worker, or of an earlier
+   * boot of this worker id (#studioLeaseOfThisBoot), is never this process's
+   * to release by its own close proof: it goes through the dead-owner release.
    */
   async #releaseStudioG7BrowserLease(runId: string): Promise<boolean> {
     const active = this.#activeLeases.get(runId);
     let current = await this.ledger.getBrowserLease(runId);
-    if (current && current.workerId !== this.workerId && !active && !this.driver.hasSession(runId)) {
+    const own = current !== null && await this.#studioLeaseOfThisBoot(runId, current);
+    if (current && !own && !active && !this.driver.hasSession(runId)) {
       if (await this.#releaseDeadOwnerStudioLease(runId, current)) current = null;
     }
-    const epoch = active?.epoch ?? (current?.workerId === this.workerId ? current.leaseEpoch : null);
+    const epoch = active?.epoch ?? (current && own ? current.leaseEpoch : null);
     if (epoch !== null) {
       const proof = studioG7CleanupProof((await this.#allEvents(runId)).events);
       if (!proof.browserClosed || this.driver.hasSession(runId)) {

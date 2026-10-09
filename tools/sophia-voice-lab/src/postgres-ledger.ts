@@ -1,6 +1,6 @@
 import { decideStudioDeadOwnerRelease, STUDIO_DATABASE_CLOCK_EVENT_KINDS, STUDIO_DEAD_OWNER_DECISION_EVENT_KINDS } from "./studio-g7/lease-release.js";
 import { studioStepConflict, studioStepOf } from "./studio-g7/step-guard.js";
-import { STUDIO_GLOBAL_SIGNOUT_CLEARED_KIND, STUDIO_GLOBAL_SIGNOUT_OWNER_STALE_MS, STUDIO_GLOBAL_SIGNOUT_PENDING_CODE, STUDIO_GLOBAL_SIGNOUT_PENDING_KIND, studioWorkerIdSha256, type StudioSignOutClearOutcome } from "./studio-g7/sign-out-fence.js";
+import { STUDIO_GLOBAL_SIGNOUT_CLEARED_KIND, STUDIO_GLOBAL_SIGNOUT_OWNER_STALE_MS, STUDIO_GLOBAL_SIGNOUT_PENDING_CODE, STUDIO_GLOBAL_SIGNOUT_PENDING_KIND, studioHeartbeatBootIdSha256, studioWorkerIdSha256, type StudioSignOutClearOutcome } from "./studio-g7/sign-out-fence.js";
 import pg from "pg";
 import { CANONICAL_EVIDENCE_REFRESH_BASE_BACKOFF_MS, CANONICAL_EVIDENCE_REFRESH_EVENT, CANONICAL_EVIDENCE_REFRESH_MAX_ATTEMPTS } from "./canonical-evidence-refresh.js";
 import { retentionHmac } from "./retention-identity.js";
@@ -850,12 +850,13 @@ export class PostgresVoiceLabLedger implements VoiceLabLedger {
       const leases = await client.query(`select worker_id,lease_epoch,expires_at,clock_timestamp() as now from ${SCHEMA}.browser_leases where run_id=$1 for update`, [runId]);
       const run = runs.rows[0], lease = leases.rows[0];
       if (!run || !lease) { await client.query("rollback"); return { released: false, reason: !run ? "run_missing" : "lease_absent" }; }
-      const heartbeat = await client.query(`select observed_at from ${SCHEMA}.worker_heartbeats where worker_id=$1`, [lease.worker_id]);
+      const heartbeat = await client.query(`select observed_at,detail->'heartbeat_attestation' as attestation from ${SCHEMA}.worker_heartbeats where worker_id=$1`, [lease.worker_id]);
       const events = await client.query(`select * from ${SCHEMA}.run_events where run_id=$1 and kind = any($2::text[]) order by seq`, [runId, STUDIO_DEAD_OWNER_DECISION_EVENT_KINDS]);
       const decision = decideStudioDeadOwnerRelease({
         run: { state: run.state, scenarioVersion: run.scenario_version },
         lease: { workerId: lease.worker_id, leaseEpoch: Number(lease.lease_epoch), expiresAt: new Date(lease.expires_at) },
         ownerLastHeartbeatAt: heartbeat.rows[0] ? new Date(heartbeat.rows[0].observed_at) : null,
+        ownerHeartbeatBootIdSha256: studioHeartbeatBootIdSha256(heartbeat.rows[0]?.attestation ?? null),
         events: events.rows.map(mapEvent), now: new Date(lease.now), ...proof,
       });
       if (!decision.release) { await client.query("rollback"); return { released: false, reason: decision.reason }; }

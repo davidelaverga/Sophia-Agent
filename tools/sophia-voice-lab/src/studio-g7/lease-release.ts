@@ -13,6 +13,16 @@ import { STUDIO_ACCESS_TOKEN_LIFETIME_BOUND_S } from "./supabase-session.js";
  * are stamped by each worker's own clock, so a live owner whose clock runs
  * behind must never look dead).
  *
+ * The owner is the process boot that acquired the lease, not only its worker
+ * id: a worker id is stable across restarts (a platform instance id), so a
+ * restarted worker heartbeats under the same id. Before it acquires a lease,
+ * a worker records its boot (STUDIO_LEASE_OWNER_BOOT_KIND, write-ahead, so no
+ * lease exists without it). A fresh heartbeat under the owner's id that names
+ * another boot is not the owner's: that boot died with its process, and its
+ * lease goes through this same dead-owner release. Only a proven different
+ * boot counts: with no boot record for the lease (a lease acquired before the
+ * record existed) or a heartbeat naming no boot, the heartbeat stands.
+ *
  * Then one of two bases:
  *
  * 1. `owner_cleanup_complete`: the owner's own cleanup for THIS lease epoch
@@ -82,11 +92,19 @@ export const STUDIO_PRESENCE_GONE_REASONS: ReadonlySet<string> = new Set(["not_o
 export const STUDIO_PRESENCE_STUCK_CAP_MS = 120 * 60_000;
 /** Event kinds the PostgreSQL ledger stamps with clock_timestamp(), whatever time the worker passes. */
 export const STUDIO_DATABASE_CLOCK_EVENT_KINDS: readonly string[] = ["studio.cleanup.signed_out", STUDIO_DEAD_OWNER_VERIFIED_KIND];
+/**
+ * The process boot that acquires a Studio run's browser lease, recorded by
+ * that worker before the lease exists (one per run: a run allocates its
+ * browser once). Hashes only: no raw worker or boot identifier.
+ */
+export const STUDIO_LEASE_OWNER_BOOT_KIND = "harness.browser_lease_owner_boot" as const;
+export const STUDIO_LEASE_OWNER_BOOT_SCHEMA = "sophia_voice_lab_studio_g7_lease_owner_boot_v1" as const;
 /** Every event kind the release decision reads. */
 export const STUDIO_DEAD_OWNER_DECISION_EVENT_KINDS: readonly string[] = [
   "studio.cleanup.signed_out", STUDIO_DEAD_OWNER_VERIFIED_KIND, "studio.auth.session_established",
   "harness.browser_process_acquired", "harness.browser_runtime_acquired", "cleanup.browser_context_closed",
   "studio.cleanup.exchange_ended", "studio.exchange.opened", "studio.exchange.speak_requested", "cleanup.browser_lease_released",
+  STUDIO_LEASE_OWNER_BOOT_KIND,
 ];
 
 type DecisionEvent = Pick<LabEvent, "kind" | "source" | "payload" | "at" | "seq">;
@@ -95,6 +113,8 @@ export interface StudioDeadOwnerReleaseInput {
   run: { state: RunState; scenarioVersion: string | null };
   lease: { workerId: string; leaseEpoch: number; expiresAt: Date };
   ownerLastHeartbeatAt: Date | null;
+  /** The process boot that latest heartbeat names (its attestation), or null. */
+  ownerHeartbeatBootIdSha256: string | null;
   events: DecisionEvent[];
   now: Date;
   /** The fresh not-live verification of basis 2; null when only basis 1 is being tried. */
@@ -110,6 +130,34 @@ export type StudioDeadOwnerReleaseDecision =
 
 function sha256(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
+}
+
+const SHA256_HEX = /^[a-f0-9]{64}$/;
+
+/**
+ * The process boot that acquired the lease held under `workerId`: the one
+ * boot its write-ahead records name, or null when none does (or, never
+ * expected, when they disagree: then no boot is proven).
+ */
+export function studioLeaseOwnerBootIdSha256(events: ReadonlyArray<DecisionEvent>, workerId: string): string | null {
+  const workerHash = sha256(workerId);
+  const boots = new Set(events
+    .filter((event) => event.kind === STUDIO_LEASE_OWNER_BOOT_KIND && event.source === "worker" && event.payload.schema === STUDIO_LEASE_OWNER_BOOT_SCHEMA
+      && event.payload.worker_id_sha256 === workerHash && typeof event.payload.worker_boot_id_sha256 === "string" && SHA256_HEX.test(event.payload.worker_boot_id_sha256))
+    .map((event) => event.payload.worker_boot_id_sha256 as string));
+  return boots.size === 1 ? [...boots][0]! : null;
+}
+
+/**
+ * Whether the lease's owner is alive: a heartbeat under its worker id fresh
+ * within `heartbeatStaleMs` plus the clock-skew margin, from the boot that
+ * acquired the lease. A heartbeat proven to come from another boot (both
+ * known, and different) is a restarted process, not the owner.
+ */
+export function studioLeaseOwnerHeartbeatLive(input: Pick<StudioDeadOwnerReleaseInput, "events" | "lease" | "ownerLastHeartbeatAt" | "ownerHeartbeatBootIdSha256" | "now" | "heartbeatStaleMs">): boolean {
+  if (input.ownerLastHeartbeatAt === null || input.ownerLastHeartbeatAt.getTime() <= input.now.getTime() - input.heartbeatStaleMs - STUDIO_DEAD_OWNER_CLOCK_SKEW_MARGIN_MS) return false;
+  const leaseBoot = studioLeaseOwnerBootIdSha256(input.events, input.lease.workerId);
+  return leaseBoot === null || input.ownerHeartbeatBootIdSha256 === null || input.ownerHeartbeatBootIdSha256 === leaseBoot;
 }
 
 /** Earliest confirmed global sign-out strictly after `after`. */
@@ -226,7 +274,7 @@ export function decideStudioDeadOwnerRelease(input: StudioDeadOwnerReleaseInput)
   if (input.run.scenarioVersion !== STUDIO_G7_SCENARIO_VERSION) return { release: false, reason: "not_studio_run" };
   if (!TERMINAL_RUN_STATES.has(input.run.state)) return { release: false, reason: "run_not_terminal" };
   if (input.lease.expiresAt.getTime() > input.now.getTime()) return { release: false, reason: "lease_not_expired" };
-  if (input.ownerLastHeartbeatAt !== null && input.ownerLastHeartbeatAt.getTime() > input.now.getTime() - input.heartbeatStaleMs - STUDIO_DEAD_OWNER_CLOCK_SKEW_MARGIN_MS) return { release: false, reason: "owner_heartbeat_live" };
+  if (studioLeaseOwnerHeartbeatLive(input)) return { release: false, reason: "owner_heartbeat_live" };
   const owner = ownerCleanupForLease(input.events, input.lease);
   if (owner.complete) return { release: true, basis: "owner_cleanup_complete", closedSeq: owner.closedSeq };
   if (!Number.isSafeInteger(input.tokenMaxLifetimeMs) || input.tokenMaxLifetimeMs < 60_000) return { release: false, reason: "token_lifetime_invalid" };

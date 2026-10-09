@@ -772,4 +772,69 @@ selected("real PostgreSQL Studio G7 worker branches (schema v7)", () => {
     const released = (await ledger.pool.query("select payload from sophia_voice_lab.run_events where run_id=$1 and kind='cleanup.browser_lease_released'", [a.runId])).rows[0].payload;
     expect(released).toMatchObject({ dead_owner_quiesced: true, presence_veto_expired: true, presence_veto_bound_ms: 15 * 60_000, room_presence: "unobservable" });
   }, 120_000);
+
+  /** Codex P1 (r4233383200): a run whose worker restarted under the same stable worker id (a new boot, a fresh driver), its lease expired on the database clock. */
+  async function pgRestartedUnderSameId(id: string) {
+    const first = await harness(id);
+    await first.worker.runOnce();
+    await voice(first, "create");
+    const lease = (await ledger.getBrowserLease(first.runId))!;
+    expect(lease).toMatchObject({ workerId: id });
+    const restarted = await pgRecoveryWorker(first, id, ledger);
+    expect(restarted.worker.workerBootIdSha256).not.toBe(first.worker.workerBootIdSha256);
+    await ledger.pool.query("update sophia_voice_lab.browser_leases set expires_at=clock_timestamp()-interval '3 hours' where run_id=$1", [first.runId]);
+    return { first, restarted, lease };
+  }
+
+  it("Codex P1 on PostgreSQL: a worker restarted under the same stable worker id recovers its earlier boot's lease through the dead-owner release, then the admission slot is freed", async () => {
+    const id = "srv-pg-studio-instance-restarts";
+    const { first, restarted, lease } = await pgRestartedUnderSameId(id);
+    // The restarted process heartbeats under the same id (its own boot) throughout.
+    await restarted.worker.maintainSessions();
+    await pgBootBeat(id, restarted.worker);
+    await restarted.worker.maintainSessions();
+    expect(await ledger.getRun(first.runId)).toMatchObject({ state: "aborted_driver_restart", cleanupComplete: false });
+    // While the earlier boot's access JWTs could still be valid: the lease and the slot stay held.
+    expect(await ledger.getBrowserLease(first.runId)).not.toBeNull();
+    expect(await pgTryStart(first, "pg-lease-boot-blocked")).not.toBe("accepted");
+    // Past the JWT lifetime and the recovery backoff (database clock): released; before the fix it stayed held for good.
+    await ledger.pool.query("update sophia_voice_lab.run_events set observed_at=observed_at-interval '2 hours' where run_id=$1 and kind in ('studio.cleanup.signed_out','studio.cleanup.recovery_attempt')", [first.runId]);
+    await pgBootBeat(id, restarted.worker);
+    await restarted.worker.maintainSessions();
+    expect(await ledger.getBrowserLease(first.runId)).toBeNull();
+    const rows = async (kind: string) => (await ledger.pool.query("select payload from sophia_voice_lab.run_events where run_id=$1 and kind=$2 order by seq", [first.runId, kind])).rows.map((row) => row.payload as Record<string, unknown>);
+    const released = await rows("cleanup.browser_lease_released");
+    expect(released).toHaveLength(1);
+    expect(released[0]).toMatchObject({ schema: STUDIO_DEAD_OWNER_LEASE_RELEASE_SCHEMA, worker_id_hash: sha256(id), lease_epoch: lease.leaseEpoch, cas_deleted: true, dead_owner_quiesced: true, browser_close: "unobservable_owner_dead", owner_earlier_boot_of_this_worker: true });
+    expect(await rows("studio.cleanup.dead_owner_verified")).toHaveLength(1);
+    expect(await rows("cleanup.execution_epoch_unconfirmed")).toEqual([]);
+    expect(await rows("harness.browser_lease_owner_boot")).toEqual([expect.objectContaining({ worker_id_sha256: sha256(id), worker_boot_id_sha256: first.worker.workerBootIdSha256 })]);
+    await restarted.worker.maintainSessions();
+    expect(await ledger.getRun(first.runId)).toMatchObject({ state: "aborted_driver_restart", cleanupComplete: true });
+    expect(await pgTryStart(first, "pg-lease-boot-after")).toBe("accepted");
+    // Fencing: the earlier boot can never renew or release that lease again, and its late maintenance changes nothing.
+    expect(await ledger.heartbeatBrowserLease(first.runId, id, lease.leaseEpoch, 30)).toBe(false);
+    expect(await ledger.releaseBrowserLease(first.runId, id, lease.leaseEpoch)).toBe(false);
+    await first.worker.maintainSessions();
+    expect(await rows("cleanup.browser_lease_released")).toHaveLength(1);
+  }, 120_000);
+
+  it("Codex P1 on PostgreSQL: the release transaction keeps a lease whose own boot heartbeats, and not one whose worker id heartbeats from a later boot", async () => {
+    const id = "srv-pg-studio-instance-ledger";
+    const { first, restarted } = await pgRestartedUnderSameId(id);
+    await restarted.worker.maintainSessions();
+    await pgBootBeat(id, restarted.worker);
+    await restarted.worker.maintainSessions();
+    const proof = { verificationId: randomUUID(), tokenMaxLifetimeMs: 3_600_000, heartbeatStaleMs: 30_000 };
+    // The lease's own boot heartbeats: its owner is alive (hung, not dead).
+    await pgBootBeat(id, first.worker);
+    expect(await ledger.releaseDeadOwnerStudioBrowserLease(first.runId, proof)).toEqual({ released: false, reason: "owner_heartbeat_live" });
+    // A heartbeat naming no boot proves nothing either way: it still stands.
+    await ledger.heartbeatWorker({ workerId: id, serviceVersion: "test", browserReady: true, attestation: null, detail: {}, observedAt: new Date() });
+    expect(await ledger.releaseDeadOwnerStudioBrowserLease(first.runId, proof)).toEqual({ released: false, reason: "owner_heartbeat_live" });
+    // A later boot heartbeats under the same id: the owner's boot is gone, and the next gate decides.
+    await pgBootBeat(id, restarted.worker);
+    expect(await ledger.releaseDeadOwnerStudioBrowserLease(first.runId, proof)).toEqual({ released: false, reason: "access_token_lifetime_pending" });
+    expect(await ledger.getBrowserLease(first.runId)).not.toBeNull();
+  }, 120_000);
 });

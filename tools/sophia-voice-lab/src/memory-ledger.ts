@@ -781,6 +781,7 @@ export class MemoryVoiceLabLedger implements VoiceLabLedger {
     if (!run || !lease) return { released: false, reason: !run ? "run_missing" : "lease_absent" };
     const decision = decideStudioDeadOwnerRelease({
       run, lease, ownerLastHeartbeatAt: this.#workerHeartbeats.get(lease.workerId)?.observedAt ?? null,
+      ownerHeartbeatBootIdSha256: studioHeartbeatBootIdSha256(this.#workerHeartbeats.get(lease.workerId)?.attestation ?? null),
       events: this.#events.get(runId) ?? [], now: new Date(), ...proof,
     });
     if (!decision.release) return { released: false, reason: decision.reason };
