@@ -26,6 +26,44 @@ Every merged PR appends an entry here. This file is the team's accumulating inst
 ## Log
 <!-- Append new entries below this line -->
 
+## 2026-10-09 · [voice-lab · root's scoped acceptances of the four r12 commits] · PR #168
+**Author:** Claude · **Track:** voice · **Spec:** records for the r12 entry below (commit d822756, left as written); root's reviews on PR #168
+
+### What Changed
+- No code, test or plugin change: this entry records root's scoped reviews of the four r12 commits. Each accepts its commit within its own scope only.
+- **d8d0b4e, the catalogue fix:** accepted ([PR #168 comment](https://github.com/davidelaverga/Sophia-Agent/pull/168#issuecomment-6090134075)).
+- **cc9f732, security setup and tests:** accepted ([PR #168 comment](https://github.com/davidelaverga/Sophia-Agent/pull/168#issuecomment-6090248261)), as already recorded in the r12 entry. Root's security comment also discloses that root corrected its initial two-part test-token redactor before sharing.
+- **348be3f, the three-file P01 fixture and test repair:** accepted ([PR #168 comment](https://github.com/davidelaverga/Sophia-Agent/pull/168#issuecomment-6090363946)). Root ran it on its own PostgreSQL 17.6 cluster, recreating an exactly named `voice_lab_test` database for each run:
+  - **Before:** the exact parent's fixtures reproduced 18 pass and 2 fail: first the original order drift, then CONCURRENCY_LIMIT.
+  - **After:** the candidate passes 20/20, and the three related worker files 13/13.
+  - **Fixture mutants:** restoring either fixture leak on its own makes both P01 tests fail their explicit precondition.
+  - **Worker mutants:** removing the terminal cancellation, or the reserved-state guard, kills the matching new worker test.
+  - **Install and typecheck:** a frozen install and the typecheck pass.
+  - **Cleanup:** all source restored, the candidate clean, the database dropped, and root's own PostgreSQL stopped and verified.
+  - **Setup disclosure:** root's first `initdb` attempts failed before any server or test ran, because older tooling lacked template and timezone resources. The successful run used a complete existing PostgreSQL 17.6 native tree, copied read-only into new root scratch. No shared cluster was affected.
+- **41ced42, recovery.md, docs only:** accepted ([PR #168 comment](https://github.com/davidelaverga/Sophia-Agent/pull/168#issuecomment-6090341790)). The new plugin hash `dcb2919326a1a5e719f59db0e7f0aae8f0e94f3206590bc94a0d5cc004de4d15` passes its check, the old one fails, and nothing was activated.
+
+### What We Learned
+- **Information, not a gate.**
+  - Root's strict whole-stack comparison from the original to the final b31d7b8 ([PR #168 comment](https://github.com/davidelaverga/Sophia-Agent/pull/168#issuecomment-6090086080)) found 218 evaluator outputs and 223 certification outputs equal. Root states it is not a CI gate.
+  - Root has seen d822756 and the author's full-env at 41ced42 (1 373/1 373 on the substitute Chromium).
+- **The author's checks at d822756:**
+  - CI-exact Sentrux gate exit 0 (no degradation; god files 27 → 27, cycles 7 → 7, quality 4272 → 4280, coupling 0.04 → 0.03);
+  - typecheck exit 0;
+  - full-env exit 0, 1 373/1 373 in 112 files, on the substitute chromium-1194 through the scratch shim.
+
+  The final gates run again at this entry's commit, which is the final head.
+- **Pending, explicitly:** the final packet; the consolidated security review and labrev10; the independent final and published-head gates; publication, merge and production. The original Lab PR threads stay open until a reviewed publication.
+
+### CLAUDE.md Updates
+- None
+
+### Skills Created / Modified
+- None
+
+### GEPA Log Entry
+- N/A
+
 ## 2026-10-09 · [voice-lab · the four full-env failures repaired, and the plugin's recovery notes] · PR #168
 **Author:** Claude · **Track:** voice · **Spec:** root's final review of b31d7b8 on PR #168 ([comment](https://github.com/davidelaverga/Sophia-Agent/pull/168#issuecomment-6089907815)): diagnose and repair the 4 full-env failures in additive commits; update the plugin's recovery.md (docs only). Commits d8d0b4e (the catalogue: one code in `src/browser-driver.ts`, one test assertion), cc9f732 (a test and the README), 348be3f (tests only), 41ced42 (recovery.md only)
 
