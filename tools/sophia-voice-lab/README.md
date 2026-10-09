@@ -237,18 +237,23 @@ waiting for it.
 
 **Global sign-out fence.** Every Studio API-only recovery ends in a global
 sign-out of the one synthetic principal. The ledger grants it in one critical
-section that admission also takes (the PostgreSQL run-quota advisory lock),
-and only when no other run can hold a live principal session: a run that is
-not terminal, or still holds a browser lease. A terminal run whose browser is
+section that admission also takes (the PostgreSQL run-quota advisory lock), and
+only when no other run can hold a live principal session: a run that is not
+terminal, or still holds a browser lease. A terminal run whose browser is
 closed is never waited on; there is nothing of it a sign-out could revoke, and
 waiting on it could deadlock. While the sign-out is pending the run holds
 admission and a durable marker makes admission refuse with
 `STUDIO_GLOBAL_SIGNOUT_PENDING`; the marker is cleared when the sign-out is
-confirmed or abandoned. No wait cycle remains: a deferral waits only on a run
-that is live (not terminal, or leased), at most one run is live at a time
-(admission admits one run, and a run never leaves a terminal state or regains a
-lease), and a live run's own recovery never waits on a terminal, lease-free
-run.
+confirmed or abandoned, on every path after a granted fence (a throw included).
+An abandoned sign-out leaves the run's cleanup incomplete until terminal
+recovery retries it. A run that was awaiting external evidence still is: it
+never gets a failure-shaped manifest from that recovery or from the generic
+evidence revision, and only the Studio evidence path finalizes it from the
+ledger once its cleanup is proven again. No wait cycle remains: a deferral
+waits only on a run that is live (not terminal, or leased), at most one run is
+live at a time (admission admits one run, and a run never leaves a terminal
+state or regains a lease), and a live run's own recovery never waits on a
+terminal, lease-free run.
 
 **Cleanup.** The Lab never requests End for an exchange it cannot prove is the
 run's own: the exchange joined to this run after its Speak, whose evidence names
