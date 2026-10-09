@@ -789,39 +789,57 @@ describe("dead foreign worker: the orphan browser's room presence (A15 live pres
 });
 
 describe("a G7 voice step's calls baseline is durable before the step's write-ahead (A15 getExchangeCalls)", () => {
-  it("reads the exchange's calls before each voice step acts, persists that baseline first, and keeps the first one", async () => {
+  it("reads each voice step's baseline before its write-ahead, and the step's own calls (after = that readAt, verbatim) before the next operation acts", async () => {
     const h = await harness("calls-baseline-worker");
-    let recorded = 0;
-    h.driver.callsAnswer = () => ({ status: "available", calls: Array.from({ length: recorded }, (_, index) => ({ seq: index + 1, recorded_at: new Date().toISOString(), input_epoch: 1, tool: "project_status", task_id: null, command: null })) });
+    // The product on a logical clock: readAt per read; after lists calls whose recording began after that read.
+    let tick = 0;
+    const stamps = new Map<string, number>();
+    const recorded: Array<{ began: number; call: Record<string, unknown> }> = [];
+    h.driver.callsAnswer = (_run, _purpose, after) => {
+      tick += 1;
+      const readAt = `2026-10-09T12:00:${String(tick).padStart(2, "0")}.000001Z`;
+      stamps.set(readAt, tick);
+      const since = after === null ? null : stamps.get(after)!;
+      return { status: "available", read_at: readAt, calls: recorded.filter((item) => since === null || item.began > since).map((item) => item.call) };
+    };
+    const recordCall = (seq: number) => recorded.push({ began: tick + 0.5, call: { seq, recorded_at: new Date().toISOString(), input_epoch: 1, tool: "project_status", task_id: null, answered_at: new Date().toISOString(), outcome: "ok", command: null } });
     await h.worker.runOnce();
-    for (const step of ["create", "steer"]) {
-      expect((await voice(h, step)).status).toBe("completed");
-      recorded += 1;
-    }
+    expect((await voice(h, "create")).status).toBe("completed");
+    recordCall(1);
+    expect((await voice(h, "steer")).status).toBe("completed");
+    recordCall(2);
+    expect((await action(h, { action: "observe", for_step: "steer" })).data).toMatchObject({ performed: false });
     const events = (await h.ledger.listEvents(h.runId, 0, 1_000)).events;
-    const speaks = (await h.ledger.listOperations(h.runId)).filter((operation) => operation.type === "speak");
+    const reads = events.filter((event) => event.kind === "studio.exchange.calls_read");
+    const speaks = (await h.ledger.listOperations(h.runId)).filter((operation) => operation.type === "speak").sort((left, right) => left.createdAt.getTime() - right.createdAt.getTime());
     expect(speaks).toHaveLength(2);
     for (const [index, operation] of speaks.entries()) {
-      const baseline = events.filter((event) => event.kind === "studio.exchange.calls_read" && event.payload.purpose === "baseline" && event.payload.operation_id === operation.id);
+      const baseline = reads.filter((event) => event.payload.purpose === "baseline" && event.payload.operation_id === operation.id);
+      const own = reads.filter((event) => event.payload.purpose === "after" && event.payload.operation_id === operation.id);
       const resolved = events.find((event) => event.kind === "utterance.resolved" && event.payload.operation_id === operation.id)!;
       expect(baseline).toHaveLength(1);
-      expect(baseline[0]!.payload).toMatchObject({ status: "available", max_seq: index, step_id: operation.input._g7_step });
-      // Durable before the step's write-ahead, and read before the driver scheduled the step.
+      // Durable before the step's write-ahead.
       expect(baseline[0]!.seq).toBeLessThan(resolved.seq);
-      expect(h.driver.calls.indexOf(`schedule:${operation.id}`)).toBeGreaterThan(-1);
+      // The step's own read: after = its baseline's readAt verbatim, listing only the step's own call.
+      expect(own).toHaveLength(1);
+      expect(own[0]!.payload).toMatchObject({ after: baseline[0]!.payload.read_at, settled: true, step_id: operation.input._g7_step });
+      expect((own[0]!.payload.calls as Array<Record<string, unknown>>).map((entry) => entry.seq)).toEqual([index + 1]);
     }
-    expect(h.driver.calls.filter((item) => item.startsWith("calls:") || item.startsWith("schedule:")).map((item) => item.split(":")[0])).toEqual(["calls", "schedule", "calls", "schedule"]);
+    // Order: baseline, step, the step's own calls before the next operation acts.
+    expect(h.driver.calls.filter((item) => item.startsWith("calls:") || item.startsWith("schedule:") || item.startsWith("action:")).map((item) => item.split(":").slice(0, 2).join(":").replace(/^schedule:.*/, "schedule"))).toEqual([
+      "calls:baseline", "schedule", "calls:after", "calls:baseline", "schedule", "calls:after", "action:observe",
+    ]);
   }, 60_000);
 
   it("a re-executed voice step keeps its first durable baseline and never reads a later one", async () => {
     const h = await harness("calls-baseline-retry");
-    h.driver.callsAnswer = () => ({ status: "available", calls: [{ seq: 1, recorded_at: new Date().toISOString(), input_epoch: 1, tool: "start_research", task_id: null, command: null }] });
+    h.driver.callsAnswer = () => ({ status: "available", read_at: "2026-10-09T12:00:09.000001Z", calls: [{ seq: 1, recorded_at: new Date().toISOString(), input_epoch: 1, tool: "start_research", task_id: null, answered_at: new Date().toISOString(), outcome: "ok", command: null }] });
     await h.worker.runOnce();
     // The step's operation is queued; a previous execution already made its baseline durable, then crashed.
     const pending = h.service.studioG7VoiceStep(caller, { run_id: h.runId, step: "create", fixture_id: "a02_short_command", idempotency_key: newIdempotencyKey("voice-retry") });
     let queued = null as Awaited<ReturnType<typeof h.ledger.listOperations>>[number] | null;
     while (!(queued = (await h.ledger.listOperations(h.runId)).find((operation) => operation.type === "speak") ?? null)) await delay(5);
-    const first = { kind: "studio.exchange.calls_read", source: "canonical" as const, payload: { schema: "sophia_voice_lab_studio_exchange_calls_v1", purpose: "baseline", operation_id: queued.id, step_id: "g7.create", exchange_id: EXCHANGE_UUID, read_id: "first-read", status: "available", reason: null, http_status: 200, max_seq: 0, calls: [] }, dedupeKey: `studio-calls-baseline:${h.runId}:${queued.id}` };
+    const first = { kind: "studio.exchange.calls_read", source: "canonical" as const, payload: { schema: "sophia_voice_lab_studio_exchange_calls_v1", purpose: "baseline", operation_id: queued.id, step_id: "g7.create", exchange_id: EXCHANGE_UUID, after: null, read_id: "first-read", status: "available", reason: null, http_status: 200, read_at: "2026-10-09T12:00:00.000001Z", settled: true, attempts: 1, max_seq: 0, calls: [] }, dedupeKey: `studio-calls-baseline:${h.runId}:${queued.id}` };
     await h.ledger.appendEvents(h.runId, [first]);
     expect((await drive(h, pending)).status).toBe("completed");
     const baselines = (await h.ledger.listEvents(h.runId, 0, 1_000)).events.filter((event) => event.kind === "studio.exchange.calls_read" && event.payload.purpose === "baseline" && event.payload.operation_id === queued!.id);

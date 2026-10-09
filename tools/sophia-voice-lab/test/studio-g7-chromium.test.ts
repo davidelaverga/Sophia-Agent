@@ -104,8 +104,10 @@ describe.skipIf(executablePath === null)("Studio G7 driver against a local fake 
     contents: new Map<string, Buffer>(), mission: [] as Array<Record<string, unknown>>, edits: new Map<string, { status: number; body: unknown }>(), withdrawals: [] as unknown[],
     /** The room as the bridge last saw it (A15 RoomLivePresence, without roomId); null: no report yet. */
     presence: null as Record<string, unknown> | null,
-    /** The principal's own voice calls in the exchange, as the service recorded them (A15 ExchangeCalls). */
+    /** The principal's own voice calls in the exchange, as the service recorded them (A15 ExchangeCalls); _began is when recording began on the read clock. */
     exchangeCalls: [] as Array<Record<string, unknown>>,
+    callsClock: 0,
+    callsStamps: new Map<string, number>(),
   };
   const ROOM_UUID = "70000000-0000-4000-8000-0000000000a7";
   const tokens = { issued: new Set<string>(), revoked: new Set<string>(), expiresIn: 3_600, failLocal: 0, logouts: [] as string[] };
@@ -222,7 +224,13 @@ describe.skipIf(executablePath === null)("Studio G7 driver against a local fake 
       if (request.method === "GET" && callsMatch) {
         if (api.evidenceMode === "route_absent") { routeNotFound(); return; }
         if (callsMatch[1] !== EXCHANGE_UUID) { productError(422, "not_found", "Exchange not found"); return; }
-        json(200, { exchangeId: EXCHANGE_UUID, calls: api.exchangeCalls });
+        // readAt on a logical read clock; after lists only calls whose recording began after that read.
+        api.callsClock += 1;
+        const readAt = new Date(Date.UTC(2026, 9, 9, 12, 0, 0) + api.callsClock * 1_000).toISOString();
+        api.callsStamps.set(readAt, api.callsClock);
+        const after = url.searchParams.get("after");
+        const since = after === null ? null : api.callsStamps.get(after) ?? Number.POSITIVE_INFINITY;
+        json(200, { exchangeId: EXCHANGE_UUID, readAt, calls: api.exchangeCalls.filter((entry) => since === null || Number(entry._began) > since).map(({ _began: _ignored, ...entry }) => entry) });
         return;
       }
       const presenceMatch = /^\/api\/v1\/rooms\/([0-9a-f-]{36})\/live-presence$/.exec(path);
@@ -391,6 +399,8 @@ else {
     api.withdrawals.length = 0;
     api.presence = null;
     api.exchangeCalls = [];
+    api.callsClock = 0;
+    api.callsStamps.clear();
     return { config, driver, run };
   }
 
@@ -419,15 +429,17 @@ else {
     const recordCall = (tool: string, kind: string | null, taskId: string | null = null) => {
       const callSeq = api.exchangeCalls.length + 1;
       const at = new Date().toISOString();
-      api.exchangeCalls.push({ seq: callSeq, recordedAt: at, inputEpoch: 1, tool, taskId, command: kind === null ? null : { commandId: randomUUID(), kind, goalId: ids.goal, authorityEpoch: callSeq, goalRevision: 1, state: "acknowledged", createdAt: at } });
+      api.exchangeCalls.push({ _began: api.callsClock + 0.5, seq: callSeq, recordedAt: at, inputEpoch: 1, tool, answeredAt: at, outcome: kind === null ? "ok" : kind === "native_task" ? "admitted" : "ok", taskId, command: kind === null ? null : { commandId: randomUUID(), kind, goalId: ids.goal, authorityEpoch: callSeq, goalRevision: 1, state: "acknowledged", createdAt: at } });
     };
     const speakStep = async (step: string, calls: () => void = () => undefined) => {
       const operation = speakOperation(run, new Date(Date.now() + operations.length), { input: { fixture_id: "sine", _g7_step: `g7.${step}` } });
       operations.push(operation);
-      // As the worker does: the step's calls baseline before it acts.
-      collected.push(await driver.readStudioCalls(run, "baseline", operation.id, `g7.${step}`));
+      // As the worker does: the step's calls baseline before it acts, then its own calls (after = that readAt) once it settled.
+      const baseline = await driver.readStudioCalls(run, "baseline", operation.id, `g7.${step}`);
+      collected.push(baseline);
       collected.push(...(await driver.schedule(run, operation.id, randomUUID(), audioOf(wav), 0)).events);
       calls();
+      const ownCalls = () => driver.readStudioCalls(run, "after", operation.id, `g7.${step}`, String(baseline.payload.read_at));
       const deadline = Date.now() + 15_000;
       while (!collected.some((event) => event.kind === "audio.input.completed" && event.payload.operation_id === operation.id) && Date.now() < deadline) {
         await new Promise((resolve) => setTimeout(resolve, 150));
@@ -437,6 +449,7 @@ else {
       push("input_window", inputWindow(run, seq++, ordinal, 800));
       push("input_turn", inputTurn(run, seq++, ordinal));
       push("output_reply", outputReply(run, seq++, ordinal, Date.now()));
+      collected.push(await ownCalls());
     };
     const act = async (input: Record<string, unknown>) => {
       const operation: OperationRecord = { ...speakOperation(run, new Date(Date.now() + operations.length)), type: "studio_action", input, result: null };

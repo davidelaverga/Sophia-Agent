@@ -321,15 +321,32 @@ function artifact(taskId: string, versionId: string, digest: string, status = "v
 }
 
 /**
- * The exchange's calls as the product records them (A15 getExchangeCalls):
- * `byStep` lists the calls recorded while each voice step runs. Each step's
- * baseline read precedes it; the step's after-read follows it (or is the next
- * step's baseline), and a final read follows the last observation.
- * `unavailable` answers every read with that typed refusal instead.
+ * The exchange's calls as the product records them (A15 getExchangeCalls),
+ * on a logical clock: each read has `readAt`; `?after=<readAt>` lists only
+ * calls whose recording began after that read. For each voice step the
+ * worker reads its baseline (all calls listed so far), the step's calls are
+ * recorded, then the step's own after-read is taken as soon as it settles.
+ * - `byStep`: calls whose recording begins during the step;
+ * - `inFlightAtBaseline`: calls already on their way at the step's baseline
+ *   (recording began before it, committed after): never in its after-read;
+ * - `unansweredFirst`: the step's first after-read still lists its call
+ *   unanswered (a second read has it answered), or `unansweredOnly` never;
+ * - `lateAfterRead`: calls recorded after the step's own settled after-read,
+ *   listed by a second after-read;
+ * - `vanishing`: a second after-read no longer lists the step's command;
+ * - `unavailable`: every read refused instead.
  */
-interface CallsScript { byStep: Record<string, Array<Record<string, unknown>>>; unavailable?: { reason: string; http_status: number } }
+interface CallsScript {
+  byStep: Record<string, Array<Record<string, unknown>>>;
+  inFlightAtBaseline?: Record<string, Array<Record<string, unknown>>>;
+  unansweredFirst?: string[];
+  unansweredOnly?: string[];
+  lateAfterRead?: Record<string, Array<Record<string, unknown>>>;
+  vanishing?: string[];
+  unavailable?: { reason: string; http_status: number };
+}
 
-interface G7Options { skip?: string[]; staleCode?: string; staleStatus?: number; artifactStatus?: string; ownership?: "proven" | "mismatch" | "unavailable"; withdrawalCommitted?: boolean; noEnd?: boolean; calls?: CallsScript; researchTask?: Record<string, unknown> }
+interface G7Options { skip?: string[]; staleCode?: string; staleStatus?: number; artifactStatus?: string; ownership?: "proven" | "mismatch" | "unavailable"; withdrawalCommitted?: boolean; noEnd?: boolean; calls?: CallsScript; researchTask?: Record<string, unknown>; windowEpochs?: Record<string, number> }
 
 /** A complete G7 episode: five voice steps, four actions, observations, ownership, cleanup. */
 function g7Episode(options: G7Options = {}): Episode {
@@ -349,23 +366,44 @@ function g7Episode(options: G7Options = {}): Episode {
   const voice = ["create", "steer", "hold", "resume", "stop"].filter((step) => !skip.has(`g7.${step}`));
   let seq = 0;
   log.bridge("provider", providerReceipt(run, seq++, "ready"));
-  const recorded: Array<Record<string, unknown>> = [];
-  const callsRead = (purpose: string, operationId: string | null, stepId: string | null) => {
-    if (!options.calls) return;
-    const base = { schema: "sophia_voice_lab_studio_exchange_calls_v1", purpose, operation_id: operationId, step_id: stepId, exchange_id: EXCHANGE_UUID, read_id: randomUUID() };
+  // The product's record on a logical clock: when each call's recording began and when it committed.
+  const recorded: Array<{ call: Record<string, unknown>; began: number; committed: number }> = [];
+  let clock = 0;
+  const readAt = (tick: number) => new Date(T0 + 10_000_000 + tick * 1_000).toISOString();
+  const callsRead = (purpose: "baseline" | "after", operationId: string, stepId: string, after: number | null, transform: (calls: Array<Record<string, unknown>>) => Array<Record<string, unknown>> = (calls) => calls) => {
+    if (!options.calls) return null;
+    clock += 1;
+    const base = { schema: "sophia_voice_lab_studio_exchange_calls_v1", purpose, operation_id: operationId, step_id: stepId, exchange_id: EXCHANGE_UUID, after: after === null ? null : readAt(after), read_id: randomUUID() };
     const refusal = options.calls.unavailable;
-    log.add("studio.exchange.calls_read", "canonical", refusal
-      ? { ...base, status: "unavailable", reason: refusal.reason, http_status: refusal.http_status, max_seq: null, calls: [] }
-      : { ...base, status: "available", reason: null, http_status: 200, max_seq: recorded.reduce((max, call) => Math.max(max, Number(call.seq)), 0), calls: [...recorded].sort((left, right) => Number(left.seq) - Number(right.seq)) });
+    if (refusal) { log.add("studio.exchange.calls_read", "canonical", { ...base, status: "unavailable", reason: refusal.reason, http_status: refusal.http_status, read_at: null, settled: false, attempts: 0, max_seq: null, calls: [] }); return clock; }
+    const listed = transform(recorded.filter((item) => item.committed <= clock && (after === null || item.began > after)).map((item) => item.call).sort((left, right) => Number(left.seq) - Number(right.seq)));
+    log.add("studio.exchange.calls_read", "canonical", { ...base, status: "available", reason: null, http_status: 200, read_at: readAt(clock), settled: listed.every((call) => call.answered_at !== null), attempts: 1, max_seq: Number(listed.at(-1)?.seq ?? 0), calls: listed });
+    return clock;
   };
+  const record = (calls: Array<Record<string, unknown>>, began: number, committed: number) => { for (const call of calls) recorded.push({ call, began, committed }); };
   const research = (extra: Record<string, unknown>) => task(RESEARCH_TASK, "research", { ...(options.researchTask ?? {}), ...extra });
   voice.forEach((step, index) => {
     const speak = op(run, "speak", T0 + 100 + index, { fixture_id: "conversation_greeting_probe", _g7_step: `g7.${step}` }, { schedule_receipt: { product: {} } });
     operations.push(speak);
-    callsRead("baseline", speak.id, `g7.${step}`);
-    recorded.push(...(options.calls?.byStep[`g7.${step}`] ?? []));
+    const stepId = `g7.${step}`;
+    const calls = options.calls;
+    // Already on its way at the baseline: recording began before it, committed after it.
+    if (calls) record(calls.inFlightAtBaseline?.[stepId] ?? [], clock + 0.5, clock + 1.5);
+    const baseline = callsRead("baseline", speak.id, stepId, null);
     labUtterance(log, speak.id, T0 + 1_000 + index * 10_000, 1_500);
-    log.bridge("input_window", inputWindow(run, seq++, index + 1, 1_500));
+    log.bridge("input_window", inputWindow(run, seq++, index + 1, 1_500, options.windowEpochs?.[stepId] === undefined ? {} : { inputEpoch: options.windowEpochs[stepId] }));
+    if (calls && baseline !== null) {
+      const own = calls.byStep[stepId] ?? [];
+      record(own, baseline + 0.1, baseline + 0.2);
+      // As soon as the step settles: its own after-read (re-read until every call is answered).
+      if (calls.unansweredFirst?.includes(stepId) || calls.unansweredOnly?.includes(stepId)) {
+        callsRead("after", speak.id, stepId, baseline, (listed) => listed.map((call) => ({ ...call, answered_at: null, outcome: null, command: null })));
+      }
+      if (!calls.unansweredOnly?.includes(stepId)) callsRead("after", speak.id, stepId, baseline);
+      const late = calls.lateAfterRead?.[stepId];
+      if (late) { record(late, clock + 0.1, clock + 0.2); callsRead("after", speak.id, stepId, baseline); }
+      if (calls.vanishing?.includes(stepId)) callsRead("after", speak.id, stepId, baseline, (listed) => listed.filter((call) => call.command === null));
+    }
     log.bridge("input_turn", inputTurn(run, seq++, index + 1));
     if (index === 0) log.page(pageReceipt(run, "sophia_playback", T0 + 2_900, { phase: "playing" }));
     log.bridge("output_reply", outputReply(run, seq++, index + 1, T0 + 3_000 + index * 10_000));
@@ -374,7 +412,6 @@ function g7Episode(options: G7Options = {}): Episode {
       const observe = op(run, "studio_action", T0 + 150 + index, { action: "observe", for_step: step }, { performed: false, status: "observed" });
       operations.push(observe);
       log.add("studio.outcome.observed", "canonical", { purpose: `g7.${step}`, operation_id: observe.id, join: { status: "uncertain" }, tasks: [research({ phase, state: step === "stop" ? "cancelled" : "running" })], artifacts: [] });
-      callsRead(`g7.${step}`, observe.id, `g7.${step}`);
     }
   });
   if (!skip.has("g7.leave_return")) {
@@ -404,7 +441,6 @@ function g7Episode(options: G7Options = {}): Episode {
     log.add("studio.outcome.observed", "canonical", { purpose: "g7.withdrawal", operation_id: withdraw.id, join: { status: "uncertain" }, tasks: [task(DESIGN_TASK, "design", { design: { state: "cancelled", mode: "create", artifact_id: ARTIFACT, published_version_id: VERSION_1 } })], artifacts: [] });
   }
   log.add("studio.outcome.observed", "canonical", { purpose: "final", operation_id: "end", join: { status: "uncertain" }, tasks: [task(DESIGN_TASK, "design", { state: "succeeded", design: { state: "published", mode: "create", artifact_id: ARTIFACT, published_version_id: VERSION_1 } }), research({ research: { html_state: "published", design_task_id: DESIGN_TASK } })], artifacts: [artifact(DESIGN_TASK, VERSION_1, PAGE_SHA, options.artifactStatus)] });
-  callsRead("final", "end", null);
   log.bridge("provider", providerReceipt(run, seq++, "closed"));
   log.bridge("session_closed", sessionClosed(run, seq++, { windows: voice.length, turns: voice.length, replies: voice.length }));
   cleanupEvents(log);
@@ -597,10 +633,14 @@ const GOAL = "e0000000-0000-4000-8000-0000000000a1";
 const OTHER_GOAL = "e0000000-0000-4000-8000-0000000000a2";
 const commandId = (n: number) => `f0000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 
-/** One recorded voice call (A15 ExchangeCalls entry, as the driver records it). */
-function call(seq: number, tool: string, command: { kind: string; goal?: string | null; epoch?: number | null; state?: string; id?: string } | null, taskId: string | null = null): Record<string, unknown> {
+/** One recorded voice call (A15 ExchangeCalls entry, as the driver records it): answered, with the outcome its kind implies unless given. */
+function call(seq: number, tool: string, command: { kind: string; goal?: string | null; epoch?: number | null; state?: string; id?: string } | null, taskId: string | null = null, extra: { outcome?: string | null; answered?: boolean; inputEpoch?: number } = {}): Record<string, unknown> {
   const at = new Date(T0 + seq * 1_000).toISOString();
-  return { seq, recorded_at: at, input_epoch: 1, tool, task_id: taskId, command: command === null ? null : { command_id: command.id ?? commandId(seq), kind: command.kind, goal_id: command.goal === undefined ? GOAL : command.goal, authority_epoch: command.epoch === undefined ? seq : command.epoch, goal_revision: 1, state: command.state ?? "checked", created_at: at } };
+  const outcome = extra.outcome !== undefined ? extra.outcome : command === null ? (tool === "project_status" ? "ok" : "refused") : command.kind === "native_task" ? "admitted" : "ok";
+  return {
+    seq, recorded_at: at, input_epoch: extra.inputEpoch ?? 1, tool, task_id: taskId, answered_at: extra.answered === false ? null : at, outcome: extra.answered === false ? null : outcome,
+    command: command === null ? null : { command_id: command.id ?? commandId(seq), kind: command.kind, goal_id: command.goal === undefined ? GOAL : command.goal, authority_epoch: command.epoch === undefined ? seq : command.epoch, goal_revision: 1, state: command.state ?? "checked", created_at: at },
+  };
 }
 
 /** Each voice step's own call, admitting exactly its command on the created task's goal. */
@@ -616,17 +656,18 @@ function happyCalls(): CallsScript["byStep"] {
 }
 const RUN_TASK = { exchange_id: EXCHANGE_UUID, goal_id: GOAL };
 const stepsOf = (evaluation: StudioG7Evaluation) => Object.fromEntries(evaluation.steps.map((step) => [step.step_id, `${step.outcome}:${step.reason}`]));
-const certify = (byStep: CallsScript["byStep"], options: G7Options = {}) => stepsOf(evaluate(g7Episode({ researchTask: RUN_TASK, ...options, calls: { byStep } })));
+const certify = (byStep: CallsScript["byStep"], options: G7Options = {}, script: Omit<CallsScript, "byStep"> = {}) => stepsOf(evaluate(g7Episode({ researchTask: RUN_TASK, ...options, calls: { byStep, ...script } })));
 
 describe("Studio G7 voice steps are certified only from the exchange's calls (A15 getExchangeCalls)", () => {
   it("certifies each of the five voice steps from the one command its own call admitted (positive controls)", () => {
     const evaluation = evaluate(g7Episode({ researchTask: RUN_TASK, calls: { byStep: happyCalls() } }));
     expect(stepsOf(evaluation)).toMatchObject({ "g7.create": "pass:null", "g7.steer": "pass:null", "g7.hold": "pass:null", "g7.resume": "pass:null", "g7.stop": "pass:null" });
     expect(evaluation.outcome).toMatchObject({ join: "exchange_calls", bound_tasks: 2, missing_product_field: null });
-    expect(evaluation.outcome.voice_steps.map((step) => [step.step_id, step.command_kind, step.baseline_seq, step.candidate_seqs])).toEqual([
-      ["g7.create", "native_task", 0, [1]], ["g7.steer", "steer", 1, [2, 3]], ["g7.hold", "hold", 3, [4]], ["g7.resume", "resume", 4, [5]], ["g7.stop", "stop", 5, [6]],
+    expect(evaluation.outcome.voice_steps.map((step) => [step.step_id, step.command_kind, step.call_outcome, step.candidate_seqs])).toEqual([
+      ["g7.create", "native_task", "admitted", [1]], ["g7.steer", "steer", "ok", [2, 3]], ["g7.hold", "hold", "ok", [4]], ["g7.resume", "resume", "ok", [5]], ["g7.stop", "stop", "ok", [6]],
     ]);
-    // The withdrawal ended the design the certified create's research task handed its page to.
+    // The baseline is the read's readAt, kept as the exact string the product sent.
+    expect(evaluation.outcome.voice_steps.every((step) => typeof step.baseline_read_at === "string" && /T.*Z$/.test(step.baseline_read_at))).toBe(true);
     expect(statusOf(evaluation, "step.g7.withdrawal.design_ended")).toMatchObject({ status: "pass", reason: null });
     expect(evaluation.verdicts.harness).toBe("pass");
   });
@@ -636,11 +677,9 @@ describe("Studio G7 voice steps are certified only from the exchange's calls (A1
   });
 
   it("(b) never certifies from another exchange's task or calls", () => {
-    // The created task carries another exchange's id in the snapshot.
     const foreignTask = certify(happyCalls(), { researchTask: { exchange_id: OTHER_EXCHANGE_ID, goal_id: GOAL } });
     expect(foreignTask["g7.create"]).toBe("fail:created_task_bound_to_another_exchange");
     expect(foreignTask["g7.hold"]).toBe("uncertain:create_step_not_certified");
-    // The matching command exists only in another exchange's calls: this exchange recorded none.
     const elsewhere = certify({ ...happyCalls(), "g7.create": [] });
     expect(elsewhere["g7.create"]).toBe("uncertain:no_call_after_baseline");
     expect(elsewhere["g7.stop"]).toBe("uncertain:create_step_not_certified");
@@ -653,16 +692,18 @@ describe("Studio G7 voice steps are certified only from the exchange's calls (A1
   });
 
   it("(d) never certifies a duplicate or replayed entry", () => {
-    // The same command id the Hold step already certified.
     expect(certify({ ...happyCalls(), "g7.stop": [call(6, "control_work", { kind: "stop", id: commandId(4) })] })["g7.stop"]).toBe("uncertain:command_already_certified");
-    // A replayed call stays its one entry at its original seq: nothing new for this step.
     expect(certify({ ...happyCalls(), "g7.stop": [] })["g7.stop"]).toBe("uncertain:no_call_after_baseline");
   });
 
-  it("(e) never counts a call at or below the step's baseline (out of order)", () => {
-    const steps = certify({ ...happyCalls(), "g7.steer": [call(2, "project_status", null), call(5, "control_work", { kind: "steer", epoch: 3 })], "g7.hold": [call(4, "control_work", { kind: "hold" })], "g7.resume": [call(6, "control_work", { kind: "resume" })], "g7.stop": [call(7, "control_work", { kind: "stop" })] });
-    expect(steps["g7.steer"]).toBe("pass:null");
-    expect(steps["g7.hold"]).toBe("uncertain:no_call_after_baseline");
+  it("(e) never certifies a call already in flight at the step's baseline: listed without after, never with it", () => {
+    const item = g7Episode({ researchTask: RUN_TASK, calls: { byStep: { ...happyCalls(), "g7.hold": [] }, inFlightAtBaseline: { "g7.hold": [call(4, "control_work", { kind: "hold" })] } } });
+    expect(stepsOf(evaluate(item))["g7.hold"]).toBe("uncertain:no_call_after_baseline");
+    // A later read without after (the next step's baseline) does list it: only after excludes it.
+    const reads = item.log.events.filter((event) => event.kind === "studio.exchange.calls_read");
+    const resumeBaseline = reads.find((event) => event.payload.purpose === "baseline" && event.payload.step_id === "g7.resume")!;
+    expect((resumeBaseline.payload.calls as Array<Record<string, unknown>>).map((entry) => entry.seq)).toContain(4);
+    expect(reads.filter((event) => event.payload.purpose === "after" && event.payload.step_id === "g7.hold").flatMap((event) => (event.payload.calls as Array<Record<string, unknown>>).map((entry) => entry.seq))).not.toContain(4);
   });
 
   it("(f) never certifies when two calls after the baseline carry commands", () => {
@@ -675,15 +716,40 @@ describe("Studio G7 voice steps are certified only from the exchange's calls (A1
     expect(steps["g7.steer"]).toBe("uncertain:create_step_not_certified");
   });
 
-  it("checks each control's effect: its command's state, a rising authority epoch and the goal's status", () => {
+  it("a call not answered yet blocks certification until a later read has it answered", () => {
+    expect(certify(happyCalls(), {}, { unansweredOnly: ["g7.hold"] })["g7.hold"]).toBe("uncertain:call_unanswered");
+    expect(certify(happyCalls(), {}, { unansweredFirst: ["g7.hold"] })["g7.hold"]).toBe("pass:null");
+  });
+
+  it("never certifies a command its call was answered with another outcome", () => {
+    for (const [outcome, typed] of [["refused", "fail"], ["error", "fail"], ["unknown", "uncertain"], ["committed", "uncertain"]] as const) {
+      expect(certify({ ...happyCalls(), "g7.hold": [call(4, "control_work", { kind: "hold" }, null, { outcome })] })["g7.hold"], outcome).toBe(`${typed}:call_outcome_${outcome}`);
+    }
+    // Create must be answered admitted; ok is not enough.
+    expect(certify({ ...happyCalls(), "g7.create": [call(1, "start_research", { kind: "native_task" }, RESEARCH_TASK, { outcome: "ok" })] })["g7.create"]).toBe("uncertain:call_outcome_ok");
+  });
+
+  it("checks each control's effect; only hold, resume and stop take a rising authority epoch (a steer takes none)", () => {
     expect(certify({ ...happyCalls(), "g7.hold": [call(4, "control_work", { kind: "hold", state: "denied" })] })["g7.hold"]).toBe("fail:command_denied");
     for (const state of ["superseded", "outcome_unknown"]) expect(certify({ ...happyCalls(), "g7.hold": [call(4, "control_work", { kind: "hold", state })] })["g7.hold"], state).toBe(`uncertain:command_${state}`);
     expect(certify({ ...happyCalls(), "g7.resume": [call(5, "control_work", { kind: "resume", epoch: 4 })] })["g7.resume"]).toBe("fail:authority_epoch_not_increasing");
-    // The Hold was admitted, but the snapshot never shows the goal holding.
+    // A steer's epoch (high, or none) never gates the next hold.
+    const steerHigh = certify({ ...happyCalls(), "g7.steer": [call(2, "project_status", null), call(3, "control_work", { kind: "steer", epoch: 100 })] });
+    expect([steerHigh["g7.steer"], steerHigh["g7.hold"]]).toEqual(["pass:null", "pass:null"]);
+    expect(certify({ ...happyCalls(), "g7.steer": [call(3, "control_work", { kind: "steer", epoch: null })] })["g7.steer"]).toBe("pass:null");
     const item = g7Episode({ researchTask: RUN_TASK, calls: { byStep: happyCalls() } });
     const hold = item.log.events.find((event) => event.kind === "studio.outcome.observed" && event.payload.purpose === "g7.hold")!;
     hold.payload = { ...hold.payload, tasks: [{ ...(hold.payload.tasks as Array<Record<string, unknown>>)[0], phase: "running" }] };
     expect(stepsOf(evaluate(item))["g7.hold"]).toBe("uncertain:goal_status_not_matching_step");
+  });
+
+  it("(P3-1) the window is the step's own: every call at the input epoch the principal held, no later call counts", () => {
+    // The step's own call (epoch 8) refused; a hold command at another epoch (7) is not the step's.
+    expect(certify({ ...happyCalls(), "g7.hold": [call(4, "control_work", { kind: "hold" }, null, { inputEpoch: 7 }), call(5, "control_work", null, null, { inputEpoch: 8 })], "g7.resume": [call(6, "control_work", { kind: "resume" }, null, { inputEpoch: 1 })], "g7.stop": [call(7, "control_work", { kind: "stop" })] }, { windowEpochs: { "g7.hold": 8 } })["g7.hold"]).toBe("uncertain:call_input_epoch_mismatch");
+    // A command recorded after the step's own settled after-read (e.g. during the next actions) never counts.
+    expect(certify({ ...happyCalls(), "g7.hold": [call(4, "control_work", null)], "g7.resume": [call(6, "control_work", { kind: "resume" })], "g7.stop": [call(7, "control_work", { kind: "stop" })] }, {}, { lateAfterRead: { "g7.hold": [call(5, "control_work", { kind: "hold" })] } })["g7.hold"]).toBe("uncertain:call_admitted_no_command");
+    // A command-bearing call one read listed and a later read of the window no longer lists: a conflict.
+    expect(certify(happyCalls(), {}, { vanishing: ["g7.hold"] })["g7.hold"]).toBe("uncertain:calls_entry_conflict");
   });
 
   it("types a product that does not serve the calls (404) or refuses them (422 not_found) as unavailable, never a pass", () => {

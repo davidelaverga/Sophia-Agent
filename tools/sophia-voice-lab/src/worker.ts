@@ -974,14 +974,19 @@ export class VoiceLabWorker {
       if (operation.type === "barge_in") assertBargeWindow(bargeTarget);
       const delayMs = operation.type === "barge_in" ? (Number.isNaN(targetAt) ? Number(operation.input.delay_ms ?? 0) : Math.max(0, targetAt - Date.now())) : Number(timing.delay_ms ?? 0);
       if (isStudioG7Run(run) && hasStudioExtensions(this.driver)) {
-        // A G7 voice step is certified only from the exchange's calls recorded
-        // after this baseline (calls-certification.ts). The baseline is made
-        // durable before the step's write-ahead. A re-executed operation keeps
-        // its first baseline and never reads a later one (which could already
-        // include the step's own call).
+        // A G7 voice step is certified only from the exchange's calls whose
+        // recording began after this baseline (calls-certification.ts). The
+        // prior step has settled (its reply ended, above); its own calls are
+        // read now (?after= its baseline, until all are answered), then this
+        // step's baseline, durable before the step's write-ahead. A
+        // re-executed operation keeps its first baseline and never reads a
+        // later one.
         const stepId = typeof operation.input._g7_step === "string" ? operation.input._g7_step : null;
-        const prior = (await this.#allEvents(run.id)).events.some((event) => event.kind === STUDIO_CALLS_READ_KIND && event.payload.purpose === "baseline" && event.payload.operation_id === operation.id);
-        if (!prior) await this.#persistEvents(run.id, [await this.driver.readStudioCalls(run, "baseline", operation.id, stepId)]);
+        const prior = (await this.#allEvents(run.id)).events.some((event) => event.kind === STUDIO_CALLS_READ_KIND && event.source === "canonical" && event.payload.purpose === "baseline" && event.payload.operation_id === operation.id);
+        if (!prior) {
+          await this.#readStudioCallsAfterPriorStep(run, operation.id);
+          await this.#persistEvents(run.id, [await this.driver.readStudioCalls(run, "baseline", operation.id, stepId)]);
+        }
       }
       await this.ledger.appendEvent(run.id, "utterance.resolved", "worker", { utterance_id: utteranceId, operation_id: operation.id, idempotency_key_hash: sha256(operation.idempotencyKey), test_run_id: run.testRunId, scenario_id: run.scenarioId, scenario_version: run.scenarioVersion, source: audio.source, fixture: audio.fixture ?? null, source_text_hash: audio.sourceTextHash ?? null, synthesis: audio.synthesis ?? null, barge_target: bargeTarget ?? null, scheduled_delay_ms: delayMs, wav: { sha256: audio.sha256, sample_rate: audio.sampleRate, channels: audio.channels, duration_ms: audio.durationMs, byte_length: audio.bytes.byteLength } }, `utterance:${utteranceId}:resolved`);
       if (operation.type === "barge_in" && operation.input._tool_target) await this.#revalidateActiveTarget(run, operation.id, operation.input._tool_target as Record<string, unknown>);
@@ -996,6 +1001,8 @@ export class VoiceLabWorker {
       if (!isStudioG7Run(run) || !hasStudioExtensions(this.driver)) throw new VoiceLabError(labError("STUDIO_OPERATION_UNSUPPORTED", "Studio G7 actions run only on the Studio LiveKit target.", "validation", false, { status: "unsupported_for_target" }));
       // A non-voice step must not cut the prior utterance's input window.
       await this.#awaitPriorInputSettlement(run, operation.id, signal);
+      // The prior voice step has settled: its own calls are read now, before this action acts.
+      await this.#readStudioCallsAfterPriorStep(run, null);
       await this.#fenceMutation(claimed, signal);
       const settleBudgetMs = deadlineAt === undefined ? undefined : Math.max(0, deadlineAt - Date.now() - 15_000);
       const acted = await this.driver.studioAction(run, operation.id, { ...operation.input, ...(settleBudgetMs === undefined ? {} : { _settle_budget_ms: settleBudgetMs }) });
@@ -1036,6 +1043,8 @@ export class VoiceLabWorker {
     const cleanupGrant = await this.#mintAndVerify(run, "sophia-voice-lab-frontend", ["session:cleanup"], "session:cleanup");
     if (run.state !== "ending") run = await transitionRun(this.ledger, run, "ending");
     await this.#fenceMutation(claimed, signal);
+    // The last G7 voice step's calls, read before End signs the principal out.
+    if (isStudioG7Run(run) && hasStudioExtensions(this.driver)) await this.#readStudioCallsAfterPriorStep(run, null);
     const ended = await this.driver.end(run, finalizeGrant.token, cleanupGrant.token, deadlineAt).catch(async (error: unknown) => {
       if (error instanceof DriverEndFailure) await this.#persistEvents(run.id, error.events);
       throw error;
@@ -1703,6 +1712,22 @@ export class VoiceLabWorker {
     const browserOwned = await this.ledger.heartbeatBrowserLease(claimed.run.id, this.workerId, lease.epoch, this.config.browserLeaseSeconds);
     if (!browserOwned) throw new VoiceLabError(labError("BROWSER_LEASE_LOST", "Browser lease was lost before page mutation.", "conflict", true));
     throwIfCancelled(signal);
+  }
+
+  /**
+   * The latest G7 voice step's own calls (other than `exceptOperationId`):
+   * `?after=` its durable baseline's readAt, passed back verbatim, re-read
+   * until every listed call is answered (calls-certification.ts).
+   */
+  async #readStudioCallsAfterPriorStep(run: RunRecord, exceptOperationId: string | null): Promise<void> {
+    if (!hasStudioExtensions(this.driver)) return;
+    const reads = (await this.#allEvents(run.id)).events.filter((event) => event.kind === STUDIO_CALLS_READ_KIND && event.source === "canonical");
+    const baseline = reads.filter((event) => event.payload.purpose === "baseline" && event.payload.operation_id !== exceptOperationId).at(-1);
+    if (!baseline || baseline.payload.status !== "available" || typeof baseline.payload.read_at !== "string") return;
+    // Read once: the step's window ends at its first settled read, taken as soon as the step settled.
+    if (reads.some((event) => event.payload.purpose === "after" && event.payload.operation_id === baseline.payload.operation_id && event.payload.settled === true)) return;
+    const stepId = typeof baseline.payload.step_id === "string" ? baseline.payload.step_id : null;
+    await this.#persistEvents(run.id, [await this.driver.readStudioCalls(run, "after", String(baseline.payload.operation_id), stepId, baseline.payload.read_at)]);
   }
 
   async #awaitPriorInputSettlement(run: RunRecord, operationId: string, signal: AbortSignal): Promise<void> {

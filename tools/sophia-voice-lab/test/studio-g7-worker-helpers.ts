@@ -47,11 +47,11 @@ export class ScriptedStudioDriver {
   refreshRevokeConfirmed = true;
   /**
    * The exchange's calls as the product would answer them (A15
-   * getExchangeCalls), per read; the default is a product without voice
-   * qualification (the route is absent: 404).
+   * getExchangeCalls), per read (`after` is the earlier readAt, verbatim);
+   * the default is a product without voice qualification (404).
    */
-  callsAnswer: (runId: string, purpose: string) => { status: "available"; calls: Array<Record<string, unknown>> } | { status: "unavailable"; reason: string; http_status: number | null } = () => ({ status: "unavailable", reason: "endpoint_not_served", http_status: 404 });
-  readonly callsReads: Array<{ purpose: string; operationId: string | null }> = [];
+  callsAnswer: (runId: string, purpose: string, after: string | null) => { status: "available"; read_at: string; calls: Array<Record<string, unknown>> } | { status: "unavailable"; reason: string; http_status: number | null } = () => ({ status: "unavailable", reason: "endpoint_not_served", http_status: 404 });
+  readonly callsReads: Array<{ purpose: string; operationId: string | null; after: string | null }> = [];
   /** The sign-out fence's holder checks, as the real driver consults them right before a global logout. */
   readonly signOutGates = new Map<string, () => Promise<boolean>>();
   /** Global logouts this driver actually sent, and those it withheld because its marker was no longer held. */
@@ -75,15 +75,15 @@ export class ScriptedStudioDriver {
 
   hasSession(runId: string): boolean { return this.sessions.has(runId); }
 
-  async readStudioCalls(run: RunRecord, purpose: string, operationId: string | null, stepId: string | null): Promise<DriverEvent> {
+  async readStudioCalls(run: RunRecord, purpose: "baseline" | "after", operationId: string, stepId: string | null, after: string | null = null): Promise<DriverEvent> {
     this.calls.push(`calls:${purpose}`);
-    this.callsReads.push({ purpose, operationId });
-    const answer = this.callsAnswer(run.id, purpose);
-    const base = { schema: "sophia_voice_lab_studio_exchange_calls_v1", purpose, operation_id: operationId, step_id: stepId, exchange_id: EXCHANGE_UUID, read_id: randomUUID() };
+    this.callsReads.push({ purpose, operationId, after });
+    const answer = this.callsAnswer(run.id, purpose, after);
+    const base = { schema: "sophia_voice_lab_studio_exchange_calls_v1", purpose, operation_id: operationId, step_id: stepId, exchange_id: EXCHANGE_UUID, after, read_id: randomUUID() };
     const payload = answer.status === "available"
-      ? { ...base, status: "available", reason: null, http_status: 200, max_seq: Number(answer.calls.at(-1)?.seq ?? 0), calls: answer.calls }
-      : { ...base, status: "unavailable", reason: answer.reason, http_status: answer.http_status, max_seq: null, calls: [] };
-    return { kind: "studio.exchange.calls_read", source: "canonical", payload, dedupeKey: purpose === "baseline" && operationId !== null ? `studio-calls-baseline:${run.id}:${operationId}` : `studio-calls-read:${run.id}:${payload.read_id}` };
+      ? { ...base, status: "available", reason: null, http_status: 200, read_at: answer.read_at, settled: answer.calls.every((call) => call.answered_at !== null), attempts: 1, max_seq: Number(answer.calls.at(-1)?.seq ?? 0), calls: answer.calls }
+      : { ...base, status: "unavailable", reason: answer.reason, http_status: answer.http_status, read_at: null, settled: false, attempts: 0, max_seq: null, calls: [] };
+    return { kind: "studio.exchange.calls_read", source: "canonical", payload, dedupeKey: purpose === "baseline" ? `studio-calls-baseline:${run.id}:${operationId}` : `studio-calls-read:${run.id}:${payload.read_id}` };
   }
   async readiness() { return { ok: true, detail: "fixture", engine: "chromium", version: "fixture" }; }
   async verifyTarget(): Promise<DriverStartResult> { return { observedDeployment: { frontend: STUDIO_SHA, backend: API_SHA } as never, events: [] }; }

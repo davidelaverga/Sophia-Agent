@@ -499,6 +499,11 @@ export function evaluateStudioG7Run(run: RunRecord, events: Event[], operations:
     steps: voiceOperations.map((operation) => ({ operationId: operation.id, stepId: String(operation.input._g7_step) })),
     runExchangeId,
     ownershipProven: ownershipProven.length > 0 && ownershipMismatch.length === 0,
+    // The input epoch each step's voice was heard at: its input window's bridge receipt (joined by ordinal above).
+    stepInputEpochs: new Map(utterances.map((utterance) => {
+      const window = utterance.bridge_window as { input_epoch?: unknown } | null | undefined;
+      return [String(utterance.operation_id), typeof window?.input_epoch === "number" ? window.input_epoch : null];
+    })),
   });
   const certifiedSteps = new Map(certification.steps.map((item) => [item.operation_id, item]));
   // The run's own tasks: the one its certified create command made, then the

@@ -175,8 +175,13 @@ export interface StudioDriverExtensions {
    * the recovery's own session is signed out (scope=local). null removes it.
    */
   setStudioSignOutGate(runId: string, gate: (() => Promise<boolean>) | null): void;
-  /** One read of the run's exchange's calls (A15 getExchangeCalls), as the principal: a voice step's write-ahead baseline. */
-  readStudioCalls(run: RunRecord, purpose: string, operationId: string | null, stepId: string | null): Promise<DriverEvent>;
+  /**
+   * One settled read of the run's exchange's calls (A15 getExchangeCalls), as
+   * the principal: re-read (bounded) until every listed call is answered.
+   * `baseline` (no `after`) is a voice step's write-ahead baseline; `after`
+   * (`after` = that baseline's `readAt`, verbatim) lists the step's calls.
+   */
+  readStudioCalls(run: RunRecord, purpose: "baseline" | "after", operationId: string, stepId: string | null, after?: string | null): Promise<DriverEvent>;
   refreshStudioEvidence(run: RunRecord, join: DurableStudioJoin): Promise<DriverEvent[]>;
   adoptStudioJoin(runId: string, join: DurableStudioJoin): void;
   studioReadiness(): Promise<Record<string, unknown>>;
@@ -189,6 +194,9 @@ export function hasStudioExtensions(driver: VoiceBrowserDriver): driver is Voice
 
 /** More calls than this in one exchange: the read is typed unavailable rather than truncated. */
 const MAX_RECORDED_CALLS = 1_000;
+/** Reads of the calls until every listed call is answered (A15 answeredAt); then the read is typed unsettled. */
+export const STUDIO_CALLS_SETTLE_ATTEMPTS = 10;
+export const STUDIO_CALLS_SETTLE_WAIT_MS = 1_000;
 
 function sha256(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
@@ -489,8 +497,6 @@ export class StudioG7Driver implements VoiceBrowserDriver, StudioDriverExtension
       const events: DriverEvent[] = [...await this.drain(run.id, true)];
       const observed = await this.#observeOutcome(run, tokens, stepId, [], operationId);
       events.push(observed.event);
-      // The calls read after the step, with the same session (calls-certification.ts).
-      events.push(await this.#readCalls(run.id, tokens, stepId, operationId, stepId));
       return { receipt: { action, step_id: stepId, performed: false, status: "observed", outcome_observation_sha256: sha256(canonicalJson(observed.event.payload)), execution_epoch_sha256: session.ownership.executionEpochSha256 }, events };
     }
     if (typeof action !== "string" || !(STUDIO_G7_ACTIONS as readonly string[]).includes(action)) throw studioError("STUDIO_ACTION_INVALID", "Unknown Studio G7 action.", "validation");
@@ -529,7 +535,6 @@ export class StudioG7Driver implements VoiceBrowserDriver, StudioDriverExtension
       // after the last voice steps), happen while the principal session
       // still exists.
       events.push((await this.#observeOutcome(run, tokens, "final", this.#focusTasks(run.id), "end").catch((error: unknown) => ({ event: this.#outcomeUnavailable(run.id, "final", error) }))).event);
-      events.push(await this.#readCalls(run.id, tokens, "final", "end", null));
       const settled = await this.#settleExchange(run.id, tokens);
       events.push(...settled.events);
       const left = await this.#clickIfVisible(session, /^Leave the room$/);
@@ -1424,8 +1429,8 @@ export class StudioG7Driver implements VoiceBrowserDriver, StudioDriverExtension
     return { kind: "studio.cleanup.signed_out", source: "canonical", payload, dedupeKey: contentKey("studio-signed-out", runId, payload) };
   }
 
-  async readStudioCalls(run: RunRecord, purpose: string, operationId: string | null, stepId: string | null): Promise<DriverEvent> {
-    return this.#readCalls(run.id, this.#tokenSource(this.#sessions.get(run.id) ?? null), purpose, operationId, stepId);
+  async readStudioCalls(run: RunRecord, purpose: "baseline" | "after", operationId: string, stepId: string | null, after: string | null = null): Promise<DriverEvent> {
+    return this.#readCalls(run.id, this.#tokenSource(this.#sessions.get(run.id) ?? null), purpose, operationId, stepId, after);
   }
 
   /**
@@ -1436,23 +1441,33 @@ export class StudioG7Driver implements VoiceBrowserDriver, StudioDriverExtension
    * convention: 422 not_found (not the principal's exchange) or 404 (the
    * route is absent: voice qualification off); neither is ever a baseline.
    */
-  async #readCalls(runId: string, tokens: TokenSource, purpose: string, operationId: string | null, stepId: string | null): Promise<DriverEvent> {
+  async #readCalls(runId: string, tokens: TokenSource, purpose: "baseline" | "after", operationId: string, stepId: string | null, after: string | null): Promise<DriverEvent> {
     const exchangeId = this.#exchanges.get(runId)?.exchangeId ?? null;
     const emit = (body: Record<string, unknown>): DriverEvent => {
-      const payload = { schema: STUDIO_CALLS_READ_SCHEMA, purpose, operation_id: operationId, step_id: stepId, exchange_id: exchangeId, read_id: randomUUID(), observed_at_lab_ms: this.#now(), ...body };
-      return { kind: STUDIO_CALLS_READ_KIND, source: "canonical", payload, dedupeKey: purpose === "baseline" && operationId !== null ? `studio-calls-baseline:${runId}:${operationId}` : contentKey("studio-calls-read", runId, payload) };
+      const payload = { schema: STUDIO_CALLS_READ_SCHEMA, purpose, operation_id: operationId, step_id: stepId, exchange_id: exchangeId, after, read_id: randomUUID(), observed_at_lab_ms: this.#now(), ...body };
+      return { kind: STUDIO_CALLS_READ_KIND, source: "canonical", payload, dedupeKey: purpose === "baseline" ? `studio-calls-baseline:${runId}:${operationId}` : contentKey("studio-calls-read", runId, payload) };
     };
-    if (exchangeId === null) return emit({ status: "unavailable", reason: "no_exchange_join", http_status: null, max_seq: null, calls: [] });
-    let read;
-    try { read = await this.#api.exchangeCalls(exchangeId, await tokens.token()); }
-    catch (error) { return emit({ status: "unavailable", reason: error instanceof VoiceLabError ? error.detail.code : "calls_read_failed", http_status: null, max_seq: null, calls: [] }); }
-    if (read.status !== "available") return emit({ status: "unavailable", reason: read.reason, http_status: read.http_status, max_seq: null, calls: [] });
-    if (read.value.calls.length > MAX_RECORDED_CALLS) return emit({ status: "unavailable", reason: "calls_over_bound", http_status: read.http_status, max_seq: null, calls: [] });
-    const calls = read.value.calls.map((call) => ({
-      seq: call.seq, recorded_at: call.recordedAt, input_epoch: call.inputEpoch, tool: call.tool, task_id: call.taskId,
-      command: call.command === null ? null : { command_id: call.command.commandId, kind: call.command.kind, goal_id: call.command.goalId, authority_epoch: call.command.authorityEpoch, goal_revision: call.command.goalRevision, state: call.command.state, created_at: call.command.createdAt },
-    }));
-    return emit({ status: "available", reason: null, http_status: read.http_status, max_seq: calls.at(-1)?.seq ?? 0, calls });
+    const refused = (reason: string, httpStatus: number | null) => emit({ status: "unavailable", reason, http_status: httpStatus, read_at: null, settled: false, attempts: 0, max_seq: null, calls: [] });
+    if (exchangeId === null) return refused("no_exchange_join", null);
+    let attempts = 0;
+    for (;;) {
+      attempts += 1;
+      let read;
+      try { read = await this.#api.exchangeCalls(exchangeId, await tokens.token(), after); }
+      catch (error) { return refused(error instanceof VoiceLabError ? error.detail.code : "calls_read_failed", null); }
+      if (read.status !== "available") return refused(read.reason, read.http_status);
+      if (read.value.calls.length > MAX_RECORDED_CALLS) return refused("calls_over_bound", read.http_status);
+      // Whatever an unanswered call admits may not have committed yet: re-read until every listed call is answered.
+      const settled = read.value.calls.every((call) => call.answeredAt !== null);
+      if (settled || attempts >= STUDIO_CALLS_SETTLE_ATTEMPTS) {
+        const calls = read.value.calls.map((call) => ({
+          seq: call.seq, recorded_at: call.recordedAt, input_epoch: call.inputEpoch, tool: call.tool, task_id: call.taskId, answered_at: call.answeredAt, outcome: call.outcome,
+          command: call.command === null ? null : { command_id: call.command.commandId, kind: call.command.kind, goal_id: call.command.goalId, authority_epoch: call.command.authorityEpoch, goal_revision: call.command.goalRevision, state: call.command.state, created_at: call.command.createdAt },
+        }));
+        return emit({ status: "available", reason: null, http_status: read.http_status, read_at: read.value.readAt, settled, attempts, max_seq: calls.at(-1)?.seq ?? 0, calls });
+      }
+      await this.#wait(STUDIO_CALLS_SETTLE_WAIT_MS);
+    }
   }
 
   #state(runId: string): ExchangeRecord {

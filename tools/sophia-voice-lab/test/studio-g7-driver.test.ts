@@ -36,6 +36,10 @@ class FakeStudioBackend {
   evidenceRefusal: { status: number; body: unknown } | null = null;
   /** The exchange's calls (A15 ExchangeCalls body, without exchangeId); null: not an exchange of the caller's (422 not_found). */
   callsBody: Record<string, unknown> | null = { calls: [] };
+  /** Answers for successive reads (re-reads until answered); when empty, callsBody answers. */
+  callsQueue: Array<Record<string, unknown>> = [];
+  /** The readAt each answer carries (opaque to the Lab). */
+  readAt = "2026-10-09T12:00:00.123456Z";
   /** The room as the bridge last saw it (A15 RoomLivePresence); the default is no report. */
   presence: Record<string, unknown> = { observed: false, reportedAt: null, fresh: false, voice: null, exchangeId: null, selfPresent: false, participants: 0, guests: 0, emptySince: null };
   grantUser = PRINCIPAL_UUID;
@@ -89,11 +93,14 @@ class FakeStudioBackend {
         const body = this.evidence?.(evidence[1]!) ?? null;
         return body === null ? productError(422, "not_found", "Qualification evidence not found") : json(body);
       }
-      const calls = /^\/api\/v1\/exchanges\/([0-9a-f-]{36})\/calls$/.exec(url.pathname);
+      const calls = /^\/api\/v1\/exchanges\/([0-9A-Fa-f-]{36})\/calls$/.exec(url.pathname);
       if (calls) {
         if (!this.voiceQualificationOn) return routeNotFound();
+        // Path ids must be lowercase canonical UUIDs (A15).
+        if (calls[1] !== calls[1]!.toLowerCase()) return productError(422, "invalid_request", "params/exchangeId must match pattern");
         if (this.callsBody === null || calls[1] !== EXCHANGE_UUID) return productError(422, "not_found", "Exchange not found");
-        return json({ exchangeId: EXCHANGE_UUID, ...this.callsBody });
+        const body = this.callsQueue.shift() ?? this.callsBody;
+        return json({ exchangeId: EXCHANGE_UUID, readAt: this.readAt, ...body });
       }
       const presence = /^\/api\/v1\/rooms\/([0-9a-f-]{36})\/live-presence$/.exec(url.pathname);
       if (presence) {
@@ -575,37 +582,65 @@ describe("a recovery reads the room as the bridge last saw it (A15 live presence
 });
 
 describe("the exchange's calls are read as the principal and typed by the product's convention (A15 getExchangeCalls)", () => {
-  const productCall = (seq: number, command: Record<string, unknown> | null, taskId: string | null = null) => ({ seq, recordedAt: new Date(1_800_000_000_000 + seq).toISOString(), inputEpoch: 1, tool: command ? "control_work" : "project_status", command, taskId });
+  const productCall = (seq: number, command: Record<string, unknown> | null, taskId: string | null = null, answered = true) => ({ seq, recordedAt: new Date(1_800_000_000_000 + seq).toISOString(), inputEpoch: 1, tool: command ? "control_work" : "project_status", answeredAt: answered ? new Date(1_800_000_000_500 + seq).toISOString() : null, outcome: answered ? "ok" : null, command: answered ? command : null, taskId });
   const hold = (seq: number) => ({ commandId: `f0000000-0000-4000-8000-${String(seq).padStart(12, "0")}`, kind: "hold", goalId: "e0000000-0000-4000-8000-0000000000a1", authorityEpoch: seq, goalRevision: 1, state: "checked", createdAt: new Date(1_800_000_000_000).toISOString() });
-  async function read(configure: (backend: FakeStudioBackend) => void) {
+  async function read(configure: (backend: FakeStudioBackend) => void, purpose: "baseline" | "after" = "baseline", after: string | null = null) {
     const backend = new FakeStudioBackend();
     configure(backend);
     const { config, driver } = driverFor(backend);
     const run = studioRun(config);
     adopt(driver, run);
-    const event = await driver.readStudioCalls(run, "baseline", "op-1", "g7.hold");
-    expect(event).toMatchObject({ kind: "studio.exchange.calls_read", source: "canonical", dedupeKey: `studio-calls-baseline:${run.id}:op-1` });
-    return event.payload;
+    const event = await driver.readStudioCalls(run, purpose, "op-1", "g7.hold", after);
+    if (purpose === "baseline") expect(event).toMatchObject({ kind: "studio.exchange.calls_read", source: "canonical", dedupeKey: `studio-calls-baseline:${run.id}:op-1` });
+    return { payload: event.payload, requests: backend.calls.filter((item) => item.path.includes("/calls")).map((item) => item.path) };
   }
 
-  it("records each call's seq, tool, command and task, and the highest seq as the baseline", async () => {
-    const payload = await read((backend) => { backend.callsBody = { calls: [productCall(3, null), productCall(7, hold(7))] }; });
-    expect(payload).toMatchObject({ schema: "sophia_voice_lab_studio_exchange_calls_v1", status: "available", exchange_id: EXCHANGE_UUID, max_seq: 7, operation_id: "op-1", step_id: "g7.hold" });
+  it("records readAt exactly as sent, each call's seq, tool, answer, outcome, command and task", async () => {
+    const { payload } = await read((backend) => { backend.callsBody = { calls: [productCall(3, null), productCall(7, hold(7))] }; });
+    expect(payload).toMatchObject({ schema: "sophia_voice_lab_studio_exchange_calls_v1", status: "available", exchange_id: EXCHANGE_UUID, read_at: "2026-10-09T12:00:00.123456Z", after: null, settled: true, attempts: 1, operation_id: "op-1", step_id: "g7.hold" });
     expect(payload.calls).toEqual([
-      expect.objectContaining({ seq: 3, tool: "project_status", command: null, task_id: null }),
-      expect.objectContaining({ seq: 7, command: expect.objectContaining({ kind: "hold", authority_epoch: 7, state: "checked", goal_id: "e0000000-0000-4000-8000-0000000000a1" }) }),
+      expect.objectContaining({ seq: 3, tool: "project_status", command: null, task_id: null, outcome: "ok" }),
+      expect.objectContaining({ seq: 7, outcome: "ok", answered_at: expect.any(String), command: expect.objectContaining({ kind: "hold", authority_epoch: 7, state: "checked", goal_id: "e0000000-0000-4000-8000-0000000000a1" }) }),
     ]);
-    expect((await read(() => undefined)).max_seq).toBe(0);
   });
 
-  it("never takes a refused, absent or malformed answer as a baseline", async () => {
-    expect(await read((backend) => { backend.voiceQualificationOn = false; })).toMatchObject({ status: "unavailable", reason: "endpoint_not_served", http_status: 404, max_seq: null });
-    expect(await read((backend) => { backend.callsBody = null; })).toMatchObject({ status: "unavailable", reason: "not_found_for_principal", http_status: 422, max_seq: null });
-    // seq not strictly increasing (the recording order), or an unknown command state: the whole answer is refused.
-    expect(await read((backend) => { backend.callsBody = { calls: [productCall(5, null), productCall(5, hold(5))] }; })).toMatchObject({ status: "unavailable", reason: "answer_malformed" });
-    expect(await read((backend) => { backend.callsBody = { calls: [productCall(5, { ...hold(5), state: "done" })] }; })).toMatchObject({ status: "unavailable", reason: "answer_malformed" });
-    // An answer about another exchange.
-    expect(await read((backend) => { backend.callsBody = { exchangeId: OTHER_EXCHANGE, calls: [] }; })).toMatchObject({ status: "unavailable", reason: "exchange_mismatch" });
+  it("passes after back verbatim (never as a parsed time) and records it", async () => {
+    const readAt = "2026-10-09T12:00:00.123456+02:00";
+    const { payload, requests } = await read(() => undefined, "after", readAt);
+    expect(requests).toEqual([expect.stringContaining(`/calls?after=${encodeURIComponent(readAt)}`)]);
+    expect(payload).toMatchObject({ purpose: "after", after: readAt, status: "available" });
+    // Anything but an RFC 3339 readAt is never sent.
+    const bad = await read(() => undefined, "after", "yesterday");
+    expect(bad.payload).toMatchObject({ status: "unavailable", reason: "after_invalid" });
+    expect(bad.requests).toEqual([]);
+  });
+
+  it("re-reads until every listed call is answered, and types a read that never settles", async () => {
+    const settled = await read((backend) => { backend.callsQueue = [{ calls: [productCall(4, hold(4), null, false)] }, { calls: [productCall(4, hold(4))] }]; });
+    expect(settled.payload).toMatchObject({ settled: true, attempts: 2 });
+    expect(settled.requests).toHaveLength(2);
+    const never = await read((backend) => { backend.callsBody = { calls: [productCall(4, hold(4), null, false)] }; });
+    expect(never.payload).toMatchObject({ settled: false, attempts: 10 });
+    expect((never.payload.calls as Array<Record<string, unknown>>)[0]).toMatchObject({ answered_at: null, outcome: null, command: null });
+  });
+
+  it("never takes a refused, absent or malformed answer as a read", async () => {
+    expect((await read((backend) => { backend.voiceQualificationOn = false; })).payload).toMatchObject({ status: "unavailable", reason: "endpoint_not_served", http_status: 404, read_at: null });
+    expect((await read((backend) => { backend.callsBody = null; })).payload).toMatchObject({ status: "unavailable", reason: "not_found_for_principal", http_status: 422 });
+    expect((await read((backend) => { backend.callsBody = { calls: [productCall(5, null), productCall(5, hold(5))] }; })).payload).toMatchObject({ status: "unavailable", reason: "answer_malformed" });
+    expect((await read((backend) => { backend.callsBody = { calls: [productCall(5, { ...hold(5), state: "done" })] }; })).payload).toMatchObject({ status: "unavailable", reason: "answer_malformed" });
+    expect((await read((backend) => { backend.callsBody = { calls: [{ ...productCall(5, hold(5)), outcome: "maybe" }] }; })).payload).toMatchObject({ status: "unavailable", reason: "answer_malformed" });
+    expect((await read((backend) => { backend.readAt = "not a time"; })).payload).toMatchObject({ status: "unavailable", reason: "answer_malformed" });
+    expect((await read((backend) => { backend.callsBody = { exchangeId: OTHER_EXCHANGE, calls: [] }; })).payload).toMatchObject({ status: "unavailable", reason: "exchange_mismatch" });
+  });
+
+  it("sends path ids as lowercase canonical UUIDs (anything else is the product's 422 invalid_request)", async () => {
+    const backend = new FakeStudioBackend();
+    const studio = studioTestConfig().studioG7!;
+    const client = new StudioApiClient(studio.apiOrigin, studio.studioOrigin, studioTestConfig().allowedOrigins, backend.fetch as never, 5_000, []);
+    const read = await client.exchangeCalls(EXCHANGE_UUID.toUpperCase(), "fake-access-token-1-xxxxxxxx");
+    expect(read.status).toBe("available");
+    expect(backend.calls.at(-1)!.path).toContain(`/api/v1/exchanges/${EXCHANGE_UUID}/calls`);
   });
 });
 

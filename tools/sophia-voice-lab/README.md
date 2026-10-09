@@ -226,27 +226,35 @@ source → the downloaded bytes' SHA-256, compared with the declared source,
 rendition and version digests. A section revision, a stale edit and a withdrawal
 are the Lab's own requests, so their outcomes are canonical. A voice step is
 certified only from the exchange's calls (A15 `GET
-/api/v1/exchanges/{id}/calls`: the principal's own voice tool calls in the
-exchange, in recording order `seq`, each with the command the transaction
-inserted for that call, or none). Before each voice step's write-ahead the
-worker reads the calls and makes the highest `seq` durable as the step's
-baseline (a re-executed step keeps its first baseline). After the step, only
-calls above that baseline and no later than the next voice step's baseline
-count, and the step passes only if exactly one of them carries a command:
-`native_task` with its task for create (the task naming the run's
-ownership-proven exchange in the snapshot, `NativeTask.exchangeId`), and
-`steer`, `hold`, `resume` or `stop` on the created task's goal. The command must
-not be denied, superseded or of unknown outcome, never certified by an earlier
-step, a control's authority epoch must rise, and hold, resume and stop must see
-the created task's status match in that step's own observation
-(`holding`/`held`, `running`, `stopping`/`stopped`). No new call, a call with no
-command (a refusal, e.g. a Hold on work already held), another kind or goal, two
-command-bearing calls, a call at or below the baseline, or a task or command
-seen only elsewhere (another exchange, or the principal's own HTTP request)
-never passes; a product that does not serve the calls (404) or refuses them (422
-`not_found`) leaves the steps `unavailable`. A complete run whose five voice
-steps are certified can report the product `pass`; otherwise it stays
-`inconclusive` (or `fail` where a step's own command contradicts it).
+/api/v1/exchanges/{id}/calls`: the grant principal's own voice tool calls in an
+exchange opened under the grant, each with the command the transaction inserted
+for that call, `answeredAt` once the API finished it and anything it admitted
+committed, and its `outcome`; each read carries `readAt`, and `?after=<readAt>`
+lists only calls whose recording began after that read, so a call already in
+flight at it never is). Once the previous step settled (its reply ended and its
+own calls answered), the worker reads the calls until every listed one is
+answered and makes that read's `readAt` the step's baseline, durable before the
+step's write-ahead (a re-executed step keeps its first; `readAt` is passed back
+verbatim, never parsed). As soon as the step settles, before the next operation
+acts (or at End), it reads `?after=<baseline>` until every listed call is
+answered: that read is the step's window. The step passes only if every call in
+the window is answered and was made at the input epoch the principal held for
+the step (its input window's bridge receipt), and exactly one carries a command:
+`native_task` with its task, answered `admitted`, for create (the task naming
+the run's ownership-proven exchange in the snapshot, `NativeTask.exchangeId`);
+`steer`, `hold`, `resume` or `stop` on the created task's goal, answered `ok`.
+The command must not be denied, superseded or of unknown outcome, never
+certified by an earlier step; hold, resume and stop (which take a new authority
+epoch; a steer does not) must carry an epoch above the previous of those, and
+see the created task's status match in the step's own observation
+(`holding`/`held`, `running`, `stopping`/`stopped`). An unsettled read, no new
+call, an unanswered call, no command or more than one, another kind, goal, epoch
+or outcome, a command a later read no longer lists, or a task or command seen
+only elsewhere (another exchange, or the principal's own HTTP request) never
+passes; a product that does not serve the calls (404) or refuses them (422)
+leaves the steps `unavailable`. A complete run whose five voice steps are
+certified can report the product `pass`; otherwise it stays `inconclusive` (or
+`fail` where a step's own command contradicts it).
 
 **Completion.** A run ends `completed` once its harness assertions and cleanup are
 proven. Receipts that arrive after End (the bridge's `session_closed`, the last

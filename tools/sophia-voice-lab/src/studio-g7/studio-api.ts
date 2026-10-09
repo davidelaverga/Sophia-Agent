@@ -55,18 +55,28 @@ export interface ProjectedTask {
 /** States a voice call's command can be in (A15 ExchangeCalls). */
 export const EXCHANGE_CALL_COMMAND_STATES: ReadonlySet<string> = new Set(["admitted", "dispatching", "acknowledged", "checked", "denied", "outcome_unknown", "superseded"]);
 
+/** How the API answered a voice call (A15 ExchangeCalls `outcome`). */
+export const EXCHANGE_CALL_OUTCOMES: ReadonlySet<string> = new Set(["ok", "admitted", "refused", "clarify", "error", "committed", "proposed", "conflict", "denied", "unknown"]);
+
 /** One of the principal's own voice tool calls in an exchange, as the service recorded it (A15 ExchangeCalls). */
 export interface ProjectedExchangeCall {
   seq: number;
   recordedAt: string;
   inputEpoch: number;
   tool: string;
+  /** Set only once the API finished the call, after anything it admitted committed; null: not answered yet. */
+  answeredAt: string | null;
+  outcome: string | null;
   /** null: the call admitted nothing (a read, a clarification, a refusal, or a repeat answered with the existing task). */
   command: { commandId: string; kind: string; goalId: string | null; authorityEpoch: number | null; goalRevision: number | null; state: string; createdAt: string } | null;
   taskId: string | null;
 }
 
-export interface ProjectedExchangeCalls { exchangeId: string; calls: ProjectedExchangeCall[] }
+/** `readAt` is opaque: it is only ever passed back verbatim as `after`, never parsed into a time. */
+export interface ProjectedExchangeCalls { exchangeId: string; readAt: string; calls: ProjectedExchangeCall[] }
+
+/** An RFC 3339 date-time as the API writes `readAt` (kept as the exact string it sent). */
+const READ_AT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?(Z|[+-]\d{2}:\d{2})$/;
 
 /**
  * The room as the media bridge last saw it, for the principal (A15
@@ -197,7 +207,8 @@ function nullableInt(value: unknown): number | null | undefined { return value =
 export function projectExchangeCalls(raw: unknown): ProjectedExchangeCalls | null {
   const body = record(raw);
   const exchangeId = uuidOrNull(body?.exchangeId);
-  if (!body || !exchangeId || !Array.isArray(body.calls) || body.calls.length > 10_000) return null;
+  const readAt = typeof body?.readAt === "string" && body.readAt.length <= 64 && READ_AT.test(body.readAt) ? body.readAt : null;
+  if (!body || !exchangeId || readAt === null || !Array.isArray(body.calls) || body.calls.length > 10_000) return null;
   const calls: ProjectedExchangeCall[] = [];
   for (const value of body.calls as unknown[]) {
     const call = record(value);
@@ -208,6 +219,10 @@ export function projectExchangeCalls(raw: unknown): ProjectedExchangeCalls | nul
     if (!call || seq === null || inputEpoch === null || recordedAt === null || tool === null) return null;
     if (calls.length > 0 && seq <= calls.at(-1)!.seq) return null;
     if (call.taskId !== null && uuidOrNull(call.taskId) === null) return null;
+    const answeredAt = call.answeredAt === null ? null : isoOrNull(call.answeredAt);
+    if (call.answeredAt !== null && answeredAt === null) return null;
+    const outcome = call.outcome === null ? null : typeof call.outcome === "string" && EXCHANGE_CALL_OUTCOMES.has(call.outcome) ? call.outcome : undefined;
+    if (outcome === undefined) return null;
     let command: ProjectedExchangeCall["command"] = null;
     if (call.command !== null) {
       const raw = record(call.command);
@@ -220,9 +235,9 @@ export function projectExchangeCalls(raw: unknown): ProjectedExchangeCalls | nul
       if (!raw || !commandId || !kind || !state || !createdAt || authorityEpoch === undefined || goalRevision === undefined || (raw.goalId !== null && uuidOrNull(raw.goalId) === null)) return null;
       command = { commandId, kind, goalId: uuidOrNull(raw.goalId), authorityEpoch, goalRevision, state, createdAt };
     }
-    calls.push({ seq, recordedAt, inputEpoch, tool, command, taskId: uuidOrNull(call.taskId) });
+    calls.push({ seq, recordedAt, inputEpoch, tool, answeredAt, outcome, command, taskId: uuidOrNull(call.taskId) });
   }
-  return { exchangeId, calls };
+  return { exchangeId, readAt, calls };
 }
 
 const ROOM_VOICE_STATES: ReadonlySet<string> = new Set(["connecting", "ready", "recovering", "unavailable"]);
@@ -421,10 +436,17 @@ export class StudioApiClient {
     }
   }
 
-  /** `GET /api/v1/exchanges/{e}/calls` (A15 getExchangeCalls): the principal's own voice tool calls in the exchange. */
-  async exchangeCalls(exchangeId: string, accessToken: string): Promise<MemberRead<ProjectedExchangeCalls>> {
+  /**
+   * `GET /api/v1/exchanges/{e}/calls` (A15 getExchangeCalls): the principal's
+   * own voice tool calls in the exchange. With `after` (an earlier read's
+   * `readAt`, passed back verbatim), only calls whose recording began after
+   * that read. The path id is sent as a lowercase canonical UUID.
+   */
+  async exchangeCalls(exchangeId: string, accessToken: string, after: string | null = null): Promise<MemberRead<ProjectedExchangeCalls>> {
     if (!UUID.test(exchangeId)) return { status: "unavailable", reason: "id_invalid", http_status: null };
-    const read = await this.#read(`/api/v1/exchanges/${encodeURIComponent(exchangeId)}/calls`, accessToken, projectExchangeCalls);
+    if (after !== null && !(after.length <= 64 && READ_AT.test(after))) return { status: "unavailable", reason: "after_invalid", http_status: null };
+    const query = after === null ? "" : `?after=${encodeURIComponent(after)}`;
+    const read = await this.#read(`/api/v1/exchanges/${exchangeId.toLowerCase()}/calls${query}`, accessToken, projectExchangeCalls);
     // The answer must be about the exchange asked for.
     if (read.status === "available" && read.value.exchangeId !== exchangeId.toLowerCase()) return { status: "unavailable", reason: "exchange_mismatch", http_status: read.http_status };
     return read;
