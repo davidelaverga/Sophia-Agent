@@ -59,6 +59,20 @@ Every merged PR appends an entry here. This file is the team's accumulating inst
 ### GEPA Log Entry
 - N/A
 
+### Correction (records, added after 63afe00)
+- **The claim above that "three of five conditions here were covered only after the mutants showed they survived" is overstated.** Only m9e's survival was observed, and it survives only as a summary line.
+  - **m9e (the hand-over evaluated without `midRun`).** It survived one run: cdba228's sources, with the wiring tests as committed in cdba228.
+    - The only record is a summary line: line 13 of `mutants-summary.txt` in `lab-author-logs-r9` (`vitest exit 0; Tests 1 passed | 58 skipped`). The session transcript repeats that line.
+    - Its raw log, `mutant-m9e_handover_not_mid_run.log`, was overwritten (the runner opens it with mode "w"). It now holds only the later run that kills it at 1ba1ab3's tests.
+  - **m9a (highest windowSeq only) and m9d (before `session_closed`).** These were never run against cdba228's committed tests, so no survival was ever observed.
+    - Reading those tests, I judged no existing test would kill them. I wrote the two tests that do (later committed in 1ba1ab3) before running any mutant.
+    - Their survival is my unverified account; no record of it exists. Their only runs are the killing ones (summary lines 1 and 10).
+- **The kills of all five are recorded** in `lab-author-logs-r9`:
+  - raw logs `mutant-m9a…m9e`, where m9e's log is its killing run;
+  - summary lines 1 (m9a), 4 (m9b), 7 (m9c), 10 (m9d) and 15 (m9e).
+- **No original survival output is retained anywhere.** Nothing was re-run to recreate it.
+- The mutant runner lives in the log directories, outside the repository's tools, so it is unchanged.
+
 ## 2026-10-09 · [voice-lab · Studio G7 labrev7 nits] · PR #TBD
 **Author:** Claude · **Track:** voice · **Spec:** pack 03 G7; independent review of 5d4463d (labrev7: the four labrev6 findings confirmed fixed, no P1/P2/P3, five nits); fixes in 2b8dbd8 and 6cf354b (tests only)
 
