@@ -26,6 +26,42 @@ Every merged PR appends an entry here. This file is the team's accumulating inst
 ## Log
 <!-- Append new entries below this line -->
 
+## 2026-10-09 · [voice-lab · Studio G7 labrev6 fixes, and a correction to the entry below] · PR #TBD
+**Author:** Claude · **Track:** voice · **Spec:** pack 03 G7; independent review of 1df8d1b..7f23015 (labrev6); fixes in 5d4463d
+
+### What Changed
+- **P2-1 (5d4463d):** `design_ended` no longer requires S in R's `NativeTask.inputSourceIds`. It rests only on fields the product serves:
+  - the `withdraw_note` receipt's `sourceId` naming S;
+  - X, the Lab's own admitted edit of the run's own research on the run's own artifact, live and not yet listing S before the withdrawal;
+  - X failed for the revoke reason with S in its own `withdrawnSourceIds` after it.
+  - The fake member API now lists only contribution sources in `inputSourceIds`, and an env-gated real-PostgreSQL test runs the product's own SQL (46 migrations).
+- **P3-1:** the ordinal epoch join is cross-checked. Every input window must have ended `turn_complete`. Each window's turn must show no more tool calls than the step's own calls read lists, and at least one when that read holds a command.
+- **Nit-1:** Stop without the sub-episode's certified create is `stop_target_not_certified`.
+- **Nit-2:** `record_note` takes no caller text; the Lab's fixed synthetic note is sent and only its hash is recorded.
+- Plugin 0.2.16+codex.20261009161454.
+- **Toolchain:** this round ran under Node v22.22.0 and pnpm 10.26.2 (corepack), as the package's engines and packageManager require. The earlier rounds' receipts used Node 24.21.0.
+
+### What We Learned
+- **Correction to the entry below (7f23015).**
+  - It says `design_ended` "is proven only on S, through R2's `inputSourceIds` and `withdrawnSourceIds`". That is wrong. `inputSourceIds` is the A05 `NativeTask` field, and the product builds it from discussion contributions only (`native_task_view`, migration 0022). A mission note's source is never listed there. Against the real product, no run could pass `design_ended` that way.
+  - Since 5d4463d it is proven through the `withdraw_note` receipt's `sourceId` and X's own `withdrawnSourceIds` (A15/0046), plus the own-chain checks.
+- **Correction, continued.** The entry below also says "every earlier round's findings are fixed, each with a regression test that fails at the prior head and mutants that are killed". That is broader than was independently verified.
+  - Each round's commit message records the author's own fail-before and mutant results at the time.
+  - The labrev6 review re-ran only the earlier probes in its table, mutant m6j and the two C5 mutants.
+- A fake member API can serve a field the product never fills. That made a gate pass in Chromium and fail on every real run. Check the product's SQL for any field a verdict joins on; an env-gated test on the product's own migrations now does this for `inputSourceIds`.
+- **Count rules miss compensating anomalies.** An extra window before a step plus a missing one after it keeps the count, so join-by-count needs a per-item cross-check. Bounds are safe for a normal run; exact equality is not, because a tool continuation after the turn completes is not in the window's count.
+- **Residual:** a fragment turn completed with exactly the step's call count, together with a later utterance that gets no window, still shifts the join.
+- **Review state:** labrev6 findings are fixed in 5d4463d, which is not reviewed yet.
+
+### CLAUDE.md Updates
+- None
+
+### Skills Created / Modified
+- `plugins/sophia-voice-lab/skills/autonomous-voice-dogfood/references/` (`evidence-interpretation.md`, `scenario-catalog.md`, `tool-contracts.md`): the design_ended joins, the fixed note, plugin 0.2.16.
+
+### GEPA Log Entry
+- N/A
+
 ## 2026-10-09 · [voice-lab · Studio/LiveKit G7 adapter (V-G07)] · PR #TBD
 **Author:** Claude · **Track:** voice · **Spec:** pack 03 G7 (`docs/plans/voice-qualification-g7.md` in the product, migration 0046 authoritative); branch `voice-lab/studio-livekit-g7`, 1dbec89..e8f4c46 on 6aede7d
 
