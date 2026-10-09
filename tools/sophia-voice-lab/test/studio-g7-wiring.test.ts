@@ -1032,3 +1032,46 @@ describe("root P2: overlapping same-run recovery never reopens admission while a
     expect(await tryStart(h, "single-after")).toBe("accepted");
   }, 60_000);
 });
+
+describe("(P3-2) a fresh 'present' keeps a dead owner's lease until a later fresh 'absent', across recoveries", () => {
+  it("present, then stale or missing, stays held (also while a second worker's recovery overlaps); a later fresh absent releases (memory ledger)", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date());
+    const ledger = new MemoryVoiceLabLedger("test");
+    const advance = async (ms: number) => { vi.setSystemTime(new Date(Date.now() + ms)); };
+    const { runId, workerB } = await deadOwnerRecovery(ledger, advance);
+    const workerC = await workerBFor(ledger, workerB, "worker-c-overlaps");
+    await advance(61 * 60_000);
+    const unconfirmed = async () => (await ledger.listEvents(runId, 0, 2_000)).events.filter((event) => event.kind === "cleanup.browser_lease_unconfirmed").map((event) => event.payload.dead_owner_release);
+    // V1: a fresh report places the principal in the room.
+    workerB.driver.recoverResult = (id) => [...recoveryEvents(id), presenceEvent(id, "present", null, 11)];
+    await workerB.worker.maintainSessions();
+    expect(await ledger.getBrowserLease(runId)).not.toBeNull();
+    expect(await unconfirmed()).toContain("principal_present_in_room");
+    // V2 by worker B is stale (unobservable). Meanwhile worker C's recovery overlaps it: its begin is refused, it verifies nothing.
+    await advance(31_000);
+    const held = deferred();
+    const inFlight = deferred();
+    workerB.driver.recoverHook = async () => { inFlight.resolve(); await held.promise; };
+    workerB.driver.recoverResult = (id) => [...recoveryEvents(id), presenceEvent(id, "unobservable", "report_stale", 12)];
+    workerC.driver.recoverResult = (id) => [...recoveryEvents(id), presenceEvent(id, "absent", null, 13)];
+    const bPass = workerB.worker.maintainSessions();
+    await inFlight.promise;
+    await workerC.worker.maintainSessions();
+    expect(workerC.driver.calls).not.toContain("recover");
+    held.resolve();
+    await bPass;
+    // The latest decisive verification still says present: an unobservable one never releases.
+    expect(await ledger.getBrowserLease(runId)).not.toBeNull();
+    const verifications = (await ledger.listEvents(runId, 0, 2_000)).events.filter((event) => event.kind === "studio.cleanup.dead_owner_verified").map((event) => event.payload.room_presence);
+    expect(verifications).toEqual(["present", "unobservable"]);
+    // V3: a later fresh absent releases it.
+    await advance(31_000);
+    workerB.driver.recoverHook = null;
+    workerB.driver.recoverResult = (id) => [...recoveryEvents(id), presenceEvent(id, "absent", null, 14)];
+    await workerB.worker.maintainSessions();
+    expect(await ledger.getBrowserLease(runId)).toBeNull();
+    const released = (await ledger.listEvents(runId, 0, 2_000)).events.find((event) => event.kind === "cleanup.browser_lease_released");
+    expect(released?.payload).toMatchObject({ dead_owner_quiesced: true, room_presence: "absent", room_presence_reason: null });
+  }, 60_000);
+});

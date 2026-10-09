@@ -587,12 +587,25 @@ export function evaluateStudioG7Run(run: RunRecord, events: Event[], operations:
       result.outcome = committed ? "pass" : "fail";
       result.reason = committed ? null : `withdrawal_refused_${String(withdrawal.payload.code ?? withdrawal.payload.http_status ?? "unknown")}`;
       steps.push(result);
-      const after = observations.filter((event) => event.seq > withdrawal.seq);
-      const boundDesigns = after.flatMap(boundTasksOf).filter((task) => record(task.design) !== null);
-      const designEnded = boundDesigns.some((task) => ["cancelled", "failed", "superseded"].includes(String(record(task.design)?.state)));
-      if (after.length === 0) P("step.g7.withdrawal.design_ended", "unavailable", "no_observation_after_withdrawal", after);
-      else if (boundDesigns.length === 0) P("step.g7.withdrawal.design_ended", "unavailable", certification.createdTaskId === null ? "create_step_not_certified" : "no_bound_design_observed_after_withdrawal", after);
-      else P("step.g7.withdrawal.design_ended", designEnded ? "pass" : "uncertain", designEnded ? null : "design_end_not_observed_on_bound_task", after);
+      // The withdrawal ended the run's design only if that design was live in
+      // the withdrawal's own observation before it, and cancelled in the
+      // withdrawal's own observation after it (both tied to this operation).
+      // An end it did not cause (already ended, or failed) is never its effect.
+      const own = (purpose: string) => observations.filter((event) => event.payload.purpose === purpose && event.payload.operation_id === operation!.id).at(-1) ?? null;
+      const before = own("g7.withdrawal:before");
+      const afterOwn = own("g7.withdrawal");
+      const boundDesigns = (event: Event) => boundTasksOf(event).filter((task) => record(task.design) !== null);
+      const designState = (task: Record<string, unknown>) => String(record(task.design)?.state);
+      const ENDED_DESIGN_STATES = ["cancelled", "failed", "superseded"];
+      const id = "step.g7.withdrawal.design_ended";
+      if (certification.createdTaskId === null) P(id, "unavailable", "create_step_not_certified", []);
+      else if (before === null || before.seq > withdrawal.seq) P(id, "uncertain", "no_observation_before_withdrawal", []);
+      else if (boundDesigns(before).length === 0) P(id, "uncertain", "bound_design_not_observed_before_withdrawal", [before]);
+      else if (boundDesigns(before).some((task) => ENDED_DESIGN_STATES.includes(designState(task)))) P(id, "uncertain", "design_already_ended_before_withdrawal", [before]);
+      else if (afterOwn === null || afterOwn.seq < withdrawal.seq) P(id, "uncertain", "no_observation_after_withdrawal", [before]);
+      else if (boundDesigns(afterOwn).length === 0) P(id, "uncertain", "bound_design_not_observed_after_withdrawal", [before, afterOwn]);
+      else if (boundDesigns(afterOwn).every((task) => designState(task) === "cancelled")) P(id, "pass", null, [before, withdrawal, afterOwn]);
+      else P(id, "uncertain", "design_not_cancelled_by_withdrawal", [before, afterOwn]);
     }
     for (const step of steps) {
       H(`step.${step.step_id}.executed`, step.executed, step.executed === "pass" ? null : step.reason);

@@ -108,6 +108,7 @@ describe.skipIf(executablePath === null)("Studio G7 driver against a local fake 
     exchangeCalls: [] as Array<Record<string, unknown>>,
     callsClock: 0,
     callsStamps: new Map<string, number>(),
+    onCallsRead: null as (() => void) | null,
   };
   const ROOM_UUID = "70000000-0000-4000-8000-0000000000a7";
   const tokens = { issued: new Set<string>(), revoked: new Set<string>(), expiresIn: 3_600, failLocal: 0, logouts: [] as string[] };
@@ -225,6 +226,7 @@ describe.skipIf(executablePath === null)("Studio G7 driver against a local fake 
         if (api.evidenceMode === "route_absent") { routeNotFound(); return; }
         if (callsMatch[1] !== EXCHANGE_UUID) { productError(422, "not_found", "Exchange not found"); return; }
         // readAt on a logical read clock; after lists only calls whose recording began after that read.
+        api.onCallsRead?.();
         api.callsClock += 1;
         const readAt = new Date(Date.UTC(2026, 9, 9, 12, 0, 0) + api.callsClock * 1_000).toISOString();
         api.callsStamps.set(readAt, api.callsClock);
@@ -369,7 +371,7 @@ else {
         browserServers.push(server);
         return server;
       },
-      timeouts: { micArrivalGraceMs: 3_000, exchangeEndMs: 8_000, sessionClosedMs: 5_000, uiActionMs: 3_000, designSettleMs: 5_000, ...timeouts },
+      timeouts: { micArrivalGraceMs: 3_000, exchangeEndMs: 8_000, sessionClosedMs: 5_000, uiActionMs: 3_000, designSettleMs: 5_000, callsSettleWaitMs: 10, ...timeouts },
     });
     const run = studioRun(config);
     page.micDelayMs = 0;
@@ -401,6 +403,7 @@ else {
     api.exchangeCalls = [];
     api.callsClock = 0;
     api.callsStamps.clear();
+    api.onCallsRead = null;
     return { config, driver, run };
   }
 
@@ -616,6 +619,25 @@ else {
     const presence = events.filter((event) => event.kind === "studio.room.live_presence");
     expect(presence.length).toBeGreaterThan(0);
     expect(presence.every((event) => event.payload.status === "unobservable" && event.payload.reason === "endpoint_not_served" && event.payload.http_status === 404)).toBe(true);
+  }, 120_000);
+
+  it("re-reads the exchange's calls with the run's session until every listed call is answered, and types a read that never settles", async () => {
+    const { driver, run } = harness();
+    await driver.start(run, "unused");
+    const at = new Date().toISOString();
+    const unanswered = { _began: 0.5, seq: 1, recordedAt: at, inputEpoch: 1, tool: "control_work", answeredAt: null, outcome: null, taskId: null, command: null };
+    api.exchangeCalls = [unanswered];
+    let reads = 0;
+    api.onCallsRead = () => { reads += 1; if (reads === 2) api.exchangeCalls = [{ ...unanswered, answeredAt: at, outcome: "refused" }]; };
+    const settled = await driver.readStudioCalls(run, "baseline", "op-settle", "g7.hold");
+    expect(settled.payload).toMatchObject({ status: "available", settled: true, attempts: 2, read_at: expect.any(String) });
+    expect((settled.payload.calls as Array<Record<string, unknown>>)[0]).toMatchObject({ answered_at: at, outcome: "refused", command: null });
+    // A call recorded after the baseline that is never answered: the step's read stays unsettled after the bounded re-reads.
+    api.onCallsRead = null;
+    api.exchangeCalls = [{ ...unanswered, _began: api.callsClock + 0.5, seq: 2 }];
+    const never = await driver.readStudioCalls(run, "after", "op-settle", "g7.hold", String(settled.payload.read_at));
+    expect(never.payload).toMatchObject({ status: "available", settled: false, attempts: 10, after: settled.payload.read_at });
+    await driver.end(run, "unused", "unused");
   }, 120_000);
 
   it("withdraws only a note bound to the run's own, ownership-proven exchange", async () => {

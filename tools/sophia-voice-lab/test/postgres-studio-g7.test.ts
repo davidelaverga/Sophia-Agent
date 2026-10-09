@@ -234,7 +234,7 @@ selected("real PostgreSQL Studio G7 worker branches (schema v7)", () => {
     expect((await second.startStudioG7Run(caller, { ...START, idempotency_key: newIdempotencyKey("pg-after-release") })).status).toBe("accepted");
   }, 120_000);
 
-  it("keeps a dead owner's lease on PostgreSQL while a fresh report places the principal in the room, and never counts a stale one as gone (A15 live presence)", async () => {
+  it("keeps a dead owner's lease on PostgreSQL while a fresh report places the principal in the room, and a later stale one (even with an overlapping recovery) never releases it: only a later fresh absent does (A15 live presence, P3-2)", async () => {
     const a = await harness("pg-worker-a-present");
     await a.worker.runOnce();
     await voice(a, "create");
@@ -268,13 +268,32 @@ selected("real PostgreSQL Studio G7 worker branches (schema v7)", () => {
     expect(await ledger.getBrowserLease(a.runId)).not.toBeNull();
     const pendingReasons = (await ledger.pool.query("select payload->>'dead_owner_release' as reason from sophia_voice_lab.run_events where run_id=$1 and kind='cleanup.browser_lease_unconfirmed'", [a.runId])).rows.map((row) => row.reason);
     expect(pendingReasons).toContain("principal_present_in_room");
-    // A stale report is not evidence of absence: the other gates release it, presence typed unobservable.
+    // A later stale report is not evidence of absence, and after a present it never releases: the latest
+    // decisive verification still says present. A second worker's recovery overlapping it is refused.
     presence = { status: "unobservable", reason: "report_stale" };
+    await age();
+    const held = pgDeferred();
+    const inFlight = pgDeferred();
+    driverB.recoverHook = async () => { inFlight.resolve(); await held.promise; };
+    const driverC = new ScriptedStudioDriver((await ledger.getRun(a.runId))!);
+    driverC.recoverResult = driverB.recoverResult;
+    const workerC = new VoiceLabWorker("pg-worker-c-presence", ledger, config, audio, driverC as unknown as VoiceBrowserDriver, new CapabilityCodec(config.capabilitySecret, config.capabilityIssuer, config.capabilityTtlSeconds), pino({ level: "silent" }));
+    const bPass = workerB.maintainSessions();
+    await inFlight.promise;
+    await workerC.maintainSessions();
+    expect(driverC.calls).not.toContain("recover");
+    held.resolve();
+    await bPass;
+    expect(await ledger.getBrowserLease(a.runId)).not.toBeNull();
+    expect((await ledger.pool.query("select payload->>'room_presence' as presence from sophia_voice_lab.run_events where run_id=$1 and kind='studio.cleanup.dead_owner_verified' order by seq", [a.runId])).rows.map((row) => row.presence)).toEqual(["present", "unobservable"]);
+    // A later fresh absent releases it.
+    presence = { status: "absent", reason: null };
+    driverB.recoverHook = null;
     await age();
     await workerB.maintainSessions();
     expect(await ledger.getBrowserLease(a.runId)).toBeNull();
     const released = (await ledger.pool.query("select payload from sophia_voice_lab.run_events where run_id=$1 and kind='cleanup.browser_lease_released'", [a.runId])).rows[0].payload;
-    expect(released).toMatchObject({ dead_owner_quiesced: true, room_presence: "unobservable", room_presence_reason: "report_stale" });
+    expect(released).toMatchObject({ dead_owner_quiesced: true, room_presence: "absent", room_presence_reason: null });
   }, 120_000);
 
   it("releases by compare-and-delete the lease of a dead owner whose own cleanup for that lease epoch is durable (P2-1)", async () => {

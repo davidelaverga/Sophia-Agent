@@ -252,9 +252,15 @@ call, an unanswered call, no command or more than one, another kind, goal, epoch
 or outcome, a command a later read no longer lists, or a task or command seen
 only elsewhere (another exchange, or the principal's own HTTP request) never
 passes; a product that does not serve the calls (404) or refuses them (422)
-leaves the steps `unavailable`. A complete run whose five voice steps are
-certified can report the product `pass`; otherwise it stays `inconclusive` (or
-`fail` where a step's own command contradicts it).
+leaves the steps `unavailable`. The withdrawal ended the run's design only if
+that design (the one the certified create's research task handed its page to)
+was live in the withdrawal's own observation before it and is `cancelled` in its
+own observation after it; an end it did not cause (already ended, or `failed`)
+is never its effect. The calls are read only with the run's own browser session:
+without one a read is typed `no_browser_session`, never made by signing in. A
+complete run whose five voice steps are certified can report the product `pass`;
+otherwise it stays `inconclusive` (or `fail` where a step's own command
+contradicts it).
 
 **Completion.** A run ends `completed` once its harness assertions and cleanup are
 proven. Receipts that arrive after End (the bridge's `session_closed`, the last
@@ -358,8 +364,12 @@ apart. Then either:
   (`principal_present_in_room`); a fresh report without the principal is
   recorded as `absent`. No report, a stale one (the product's own `fresh`, older
   than 15 s), a 422 `not_found` or an absent route (404) proves nothing either
-  way: it is recorded `unobservable` and the other gates decide alone. The
-  orphan browser process's close is typed `unobservable`, not proven.
+  way: it is recorded `unobservable`. The latest decisive verification (present
+  or absent) of that owner and lease epoch decides: after a present, a later
+  unobservable one never releases; only a later fresh absent does, or an
+  operator. The trade-off: the lease, and admission with it, may stay held until
+  a fresh absent arrives. The orphan browser process's close is typed
+  `unobservable`, not proven.
 The PostgreSQL ledger stamps the sign-out and verification events with the
 database clock (the clock of the lease expiry), whatever the worker's clock says.
 

@@ -584,63 +584,60 @@ describe("a recovery reads the room as the bridge last saw it (A15 live presence
 describe("the exchange's calls are read as the principal and typed by the product's convention (A15 getExchangeCalls)", () => {
   const productCall = (seq: number, command: Record<string, unknown> | null, taskId: string | null = null, answered = true) => ({ seq, recordedAt: new Date(1_800_000_000_000 + seq).toISOString(), inputEpoch: 1, tool: command ? "control_work" : "project_status", answeredAt: answered ? new Date(1_800_000_000_500 + seq).toISOString() : null, outcome: answered ? "ok" : null, command: answered ? command : null, taskId });
   const hold = (seq: number) => ({ commandId: `f0000000-0000-4000-8000-${String(seq).padStart(12, "0")}`, kind: "hold", goalId: "e0000000-0000-4000-8000-0000000000a1", authorityEpoch: seq, goalRevision: 1, state: "checked", createdAt: new Date(1_800_000_000_000).toISOString() });
-  async function read(configure: (backend: FakeStudioBackend) => void, purpose: "baseline" | "after" = "baseline", after: string | null = null) {
+  async function read(configure: (backend: FakeStudioBackend) => void, after: string | null = null, exchangeId = EXCHANGE_UUID) {
     const backend = new FakeStudioBackend();
     configure(backend);
-    const { config, driver } = driverFor(backend);
-    const run = studioRun(config);
-    adopt(driver, run);
-    const event = await driver.readStudioCalls(run, purpose, "op-1", "g7.hold", after);
-    if (purpose === "baseline") expect(event).toMatchObject({ kind: "studio.exchange.calls_read", source: "canonical", dedupeKey: `studio-calls-baseline:${run.id}:op-1` });
-    return { payload: event.payload, requests: backend.calls.filter((item) => item.path.includes("/calls")).map((item) => item.path) };
+    const studio = studioTestConfig().studioG7!;
+    const client = new StudioApiClient(studio.apiOrigin, studio.studioOrigin, studioTestConfig().allowedOrigins, backend.fetch as never, 5_000, []);
+    const answer = await client.exchangeCalls(exchangeId, "fake-access-token-1-xxxxxxxx", after);
+    return { answer, requests: backend.calls.filter((item) => item.path.includes("/calls")).map((item) => item.path) };
   }
 
-  it("records readAt exactly as sent, each call's seq, tool, answer, outcome, command and task", async () => {
-    const { payload } = await read((backend) => { backend.callsBody = { calls: [productCall(3, null), productCall(7, hold(7))] }; });
-    expect(payload).toMatchObject({ schema: "sophia_voice_lab_studio_exchange_calls_v1", status: "available", exchange_id: EXCHANGE_UUID, read_at: "2026-10-09T12:00:00.123456Z", after: null, settled: true, attempts: 1, operation_id: "op-1", step_id: "g7.hold" });
-    expect(payload.calls).toEqual([
-      expect.objectContaining({ seq: 3, tool: "project_status", command: null, task_id: null, outcome: "ok" }),
-      expect.objectContaining({ seq: 7, outcome: "ok", answered_at: expect.any(String), command: expect.objectContaining({ kind: "hold", authority_epoch: 7, state: "checked", goal_id: "e0000000-0000-4000-8000-0000000000a1" }) }),
+  it("projects readAt exactly as sent, each call's seq, tool, answer, outcome, command and task", async () => {
+    const { answer } = await read((backend) => { backend.callsBody = { calls: [productCall(3, null), productCall(7, hold(7))] }; });
+    expect(answer).toMatchObject({ status: "available", value: { exchangeId: EXCHANGE_UUID, readAt: "2026-10-09T12:00:00.123456Z" } });
+    expect(answer.status === "available" && answer.value.calls).toEqual([
+      expect.objectContaining({ seq: 3, tool: "project_status", command: null, taskId: null, outcome: "ok" }),
+      expect.objectContaining({ seq: 7, outcome: "ok", answeredAt: expect.any(String), command: expect.objectContaining({ kind: "hold", authorityEpoch: 7, state: "checked" }) }),
     ]);
   });
 
-  it("passes after back verbatim (never as a parsed time) and records it", async () => {
+  it("passes after back verbatim (never as a parsed time), and never sends anything but an RFC 3339 readAt", async () => {
     const readAt = "2026-10-09T12:00:00.123456+02:00";
-    const { payload, requests } = await read(() => undefined, "after", readAt);
+    const { requests } = await read(() => undefined, readAt);
     expect(requests).toEqual([expect.stringContaining(`/calls?after=${encodeURIComponent(readAt)}`)]);
-    expect(payload).toMatchObject({ purpose: "after", after: readAt, status: "available" });
-    // Anything but an RFC 3339 readAt is never sent.
-    const bad = await read(() => undefined, "after", "yesterday");
-    expect(bad.payload).toMatchObject({ status: "unavailable", reason: "after_invalid" });
+    const bad = await read(() => undefined, "yesterday");
+    expect(bad.answer).toMatchObject({ status: "unavailable", reason: "after_invalid" });
     expect(bad.requests).toEqual([]);
   });
 
-  it("re-reads until every listed call is answered, and types a read that never settles", async () => {
-    const settled = await read((backend) => { backend.callsQueue = [{ calls: [productCall(4, hold(4), null, false)] }, { calls: [productCall(4, hold(4))] }]; });
-    expect(settled.payload).toMatchObject({ settled: true, attempts: 2 });
-    expect(settled.requests).toHaveLength(2);
-    const never = await read((backend) => { backend.callsBody = { calls: [productCall(4, hold(4), null, false)] }; });
-    expect(never.payload).toMatchObject({ settled: false, attempts: 10 });
-    expect((never.payload.calls as Array<Record<string, unknown>>)[0]).toMatchObject({ answered_at: null, outcome: null, command: null });
-  });
-
-  it("never takes a refused, absent or malformed answer as a read", async () => {
-    expect((await read((backend) => { backend.voiceQualificationOn = false; })).payload).toMatchObject({ status: "unavailable", reason: "endpoint_not_served", http_status: 404, read_at: null });
-    expect((await read((backend) => { backend.callsBody = null; })).payload).toMatchObject({ status: "unavailable", reason: "not_found_for_principal", http_status: 422 });
-    expect((await read((backend) => { backend.callsBody = { calls: [productCall(5, null), productCall(5, hold(5))] }; })).payload).toMatchObject({ status: "unavailable", reason: "answer_malformed" });
-    expect((await read((backend) => { backend.callsBody = { calls: [productCall(5, { ...hold(5), state: "done" })] }; })).payload).toMatchObject({ status: "unavailable", reason: "answer_malformed" });
-    expect((await read((backend) => { backend.callsBody = { calls: [{ ...productCall(5, hold(5)), outcome: "maybe" }] }; })).payload).toMatchObject({ status: "unavailable", reason: "answer_malformed" });
-    expect((await read((backend) => { backend.readAt = "not a time"; })).payload).toMatchObject({ status: "unavailable", reason: "answer_malformed" });
-    expect((await read((backend) => { backend.callsBody = { exchangeId: OTHER_EXCHANGE, calls: [] }; })).payload).toMatchObject({ status: "unavailable", reason: "exchange_mismatch" });
+  it("never takes a refused, absent or malformed answer", async () => {
+    expect((await read((backend) => { backend.voiceQualificationOn = false; })).answer).toMatchObject({ status: "unavailable", reason: "endpoint_not_served", http_status: 404 });
+    expect((await read((backend) => { backend.callsBody = null; })).answer).toMatchObject({ status: "unavailable", reason: "not_found_for_principal", http_status: 422 });
+    expect((await read((backend) => { backend.callsBody = { calls: [productCall(5, null), productCall(5, hold(5))] }; })).answer).toMatchObject({ status: "unavailable", reason: "answer_malformed" });
+    expect((await read((backend) => { backend.callsBody = { calls: [productCall(5, { ...hold(5), state: "done" })] }; })).answer).toMatchObject({ status: "unavailable", reason: "answer_malformed" });
+    expect((await read((backend) => { backend.callsBody = { calls: [{ ...productCall(5, hold(5)), outcome: "maybe" }] }; })).answer).toMatchObject({ status: "unavailable", reason: "answer_malformed" });
+    expect((await read((backend) => { backend.readAt = "not a time"; })).answer).toMatchObject({ status: "unavailable", reason: "answer_malformed" });
+    expect((await read((backend) => { backend.callsBody = { exchangeId: OTHER_EXCHANGE, calls: [] }; })).answer).toMatchObject({ status: "unavailable", reason: "exchange_mismatch" });
   });
 
   it("sends path ids as lowercase canonical UUIDs (anything else is the product's 422 invalid_request)", async () => {
+    const { answer, requests } = await read(() => undefined, null, EXCHANGE_UUID.toUpperCase());
+    expect(answer.status).toBe("available");
+    expect(requests.at(-1)).toContain(`/api/v1/exchanges/${EXCHANGE_UUID}/calls`);
+  });
+
+  it("(P3-3) never signs in for a read: without the run's browser session the read is typed unavailable", async () => {
     const backend = new FakeStudioBackend();
-    const studio = studioTestConfig().studioG7!;
-    const client = new StudioApiClient(studio.apiOrigin, studio.studioOrigin, studioTestConfig().allowedOrigins, backend.fetch as never, 5_000, []);
-    const read = await client.exchangeCalls(EXCHANGE_UUID.toUpperCase(), "fake-access-token-1-xxxxxxxx");
-    expect(read.status).toBe("available");
-    expect(backend.calls.at(-1)!.path).toContain(`/api/v1/exchanges/${EXCHANGE_UUID}/calls`);
+    const { config, driver } = driverFor(backend);
+    const run = studioRun(config);
+    adopt(driver, run);
+    const event = await driver.readStudioCalls(run, "baseline", "op-1", "g7.hold");
+    expect(event).toMatchObject({ kind: "studio.exchange.calls_read", dedupeKey: `studio-calls-baseline:${run.id}:op-1`, payload: { status: "unavailable", reason: "no_browser_session", read_at: null } });
+    // No password grant, no member-API read, so no session left to sign out.
+    expect(backend.issued).toBe(0);
+    expect(backend.calls.filter((item) => item.path.includes("/auth/v1/token") || item.path.includes("/calls"))).toEqual([]);
+    expect(backend.logoutScopes()).toEqual([]);
   });
 });
 

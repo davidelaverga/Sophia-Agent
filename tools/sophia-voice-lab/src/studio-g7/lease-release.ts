@@ -38,8 +38,10 @@ import { STUDIO_ACCESS_TOKEN_LIFETIME_BOUND_S } from "./supabase-session.js";
  *      room and keeps the lease; a fresh `selfPresent` false is evidence it
  *      is gone and is recorded as `absent`. No report, a stale one, a 422
  *      `not_found` or an absent route (404) proves nothing either way: it is
- *      recorded `unobservable` and the other gates decide alone. The browser
- *      process's close itself stays typed `unobservable`.
+ *      recorded `unobservable`. The latest decisive verification (present or
+ *      absent) decides: after a present, an unobservable one never releases;
+ *      a later fresh absent does. The browser process's close itself stays
+ *      typed `unobservable`.
  *
  * Ordering-critical timestamps (the sign-out and the verification events) are
  * stamped on the PostgreSQL clock by the PostgreSQL ledger, the same clock as
@@ -214,7 +216,18 @@ export function decideStudioDeadOwnerRelease(input: StudioDeadOwnerReleaseInput)
     && event.payload.worker_id_sha256 === sha256(input.lease.workerId) && event.payload.lease_epoch === input.lease.leaseEpoch
     && event.at.getTime() >= quietAt);
   if (!verification) return { release: false, reason: "fresh_exchange_verification_missing" };
-  // A fresh report placing the principal in the room: the orphan may still act there.
-  if (verification.payload.room_presence === "present") return { release: false, reason: "principal_present_in_room" };
+  // Presence is decided by the LATEST decisive verification (a fresh report:
+  // present or absent) of this owner and lease epoch after the quiet point,
+  // never by the current one alone: once a fresh report placed the principal
+  // in the room, a later stale or missing report (unobservable) does not
+  // release; only a later fresh absent does (or an operator). The trade-off:
+  // the lease, and admission with it, may stay held until a fresh absent.
+  const decisive = input.events
+    .filter((event) => event.kind === STUDIO_DEAD_OWNER_VERIFIED_KIND && event.source === "worker"
+      && event.payload.worker_id_sha256 === sha256(input.lease.workerId) && event.payload.lease_epoch === input.lease.leaseEpoch
+      && event.at.getTime() >= quietAt && (event.payload.room_presence === "present" || event.payload.room_presence === "absent"))
+    .sort((left, right) => left.seq - right.seq)
+    .at(-1);
+  if (decisive?.payload.room_presence === "present") return { release: false, reason: "principal_present_in_room" };
   return { release: true, basis: "quiesced", signOutAt: signOut.at, signOutSeq: signOut.seq, verificationSeq: verification.seq };
 }

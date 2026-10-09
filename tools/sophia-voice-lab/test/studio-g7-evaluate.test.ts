@@ -346,7 +346,7 @@ interface CallsScript {
   unavailable?: { reason: string; http_status: number };
 }
 
-interface G7Options { skip?: string[]; staleCode?: string; staleStatus?: number; artifactStatus?: string; ownership?: "proven" | "mismatch" | "unavailable"; withdrawalCommitted?: boolean; noEnd?: boolean; calls?: CallsScript; researchTask?: Record<string, unknown>; windowEpochs?: Record<string, number> }
+interface G7Options { skip?: string[]; staleCode?: string; staleStatus?: number; artifactStatus?: string; ownership?: "proven" | "mismatch" | "unavailable"; withdrawalCommitted?: boolean; noEnd?: boolean; calls?: CallsScript; researchTask?: Record<string, unknown>; windowEpochs?: Record<string, number>; designBefore?: string | null; designAfter?: string; designEverywhere?: string; withdrawalAfterOperation?: string }
 
 /** A complete G7 episode: five voice steps, four actions, observations, ownership, cleanup. */
 function g7Episode(options: G7Options = {}): Episode {
@@ -437,10 +437,13 @@ function g7Episode(options: G7Options = {}): Episode {
     const withdraw = op(run, "studio_action", T0 + 500, { action: "withdrawal" }, { performed: true, status: "committed" });
     operations.push(withdraw);
     const committed = options.withdrawalCommitted ?? true;
+    const design = (state: string) => task(DESIGN_TASK, "design", { design: { state: options.designEverywhere ?? state, mode: "create", artifact_id: ARTIFACT, published_version_id: VERSION_1 } });
+    // The withdrawal's own observation before it (the driver records it as leave_and_return does).
+    if (options.designBefore !== null) log.add("studio.outcome.observed", "canonical", { purpose: "g7.withdrawal:before", operation_id: withdraw.id, join: { status: "uncertain" }, tasks: [design(options.designBefore ?? "published")], artifacts: [] });
     log.add("studio.action.withdrawal", "canonical", { operation_id: withdraw.id, requested: true, status: committed ? "committed" : "refused", entry_id: NOTE, entry_bound_exchange_id: EXCHANGE_UUID, http_status: committed ? 202 : 409, code: committed ? null : "stale_revision", receipt_operation: committed ? "withdraw_note" : null });
-    log.add("studio.outcome.observed", "canonical", { purpose: "g7.withdrawal", operation_id: withdraw.id, join: { status: "uncertain" }, tasks: [task(DESIGN_TASK, "design", { design: { state: "cancelled", mode: "create", artifact_id: ARTIFACT, published_version_id: VERSION_1 } })], artifacts: [] });
+    log.add("studio.outcome.observed", "canonical", { purpose: "g7.withdrawal", operation_id: options.withdrawalAfterOperation ?? withdraw.id, join: { status: "uncertain" }, tasks: [design(options.designAfter ?? "cancelled")], artifacts: [] });
   }
-  log.add("studio.outcome.observed", "canonical", { purpose: "final", operation_id: "end", join: { status: "uncertain" }, tasks: [task(DESIGN_TASK, "design", { state: "succeeded", design: { state: "published", mode: "create", artifact_id: ARTIFACT, published_version_id: VERSION_1 } }), research({ research: { html_state: "published", design_task_id: DESIGN_TASK } })], artifacts: [artifact(DESIGN_TASK, VERSION_1, PAGE_SHA, options.artifactStatus)] });
+  log.add("studio.outcome.observed", "canonical", { purpose: "final", operation_id: "end", join: { status: "uncertain" }, tasks: [task(DESIGN_TASK, "design", { state: "succeeded", design: { state: options.designEverywhere ?? "published", mode: "create", artifact_id: ARTIFACT, published_version_id: VERSION_1 } }), research({ research: { html_state: "published", design_task_id: DESIGN_TASK } })], artifacts: [artifact(DESIGN_TASK, VERSION_1, PAGE_SHA, options.artifactStatus)] });
   log.bridge("provider", providerReceipt(run, seq++, "closed"));
   log.bridge("session_closed", sessionClosed(run, seq++, { windows: voice.length, turns: voice.length, replies: voice.length }));
   cleanupEvents(log);
@@ -764,6 +767,32 @@ describe("Studio G7 voice steps are certified only from the exchange's calls (A1
     for (const ownership of ["unavailable", "mismatch"] as const) {
       expect(certify(happyCalls(), { ownership })["g7.create"], ownership).toBe("unavailable:run_exchange_ownership_unproven");
     }
+  });
+});
+
+describe("(P2-1) the withdrawal ended the design only if it was live before and the withdrawal's own observation shows it cancelled", () => {
+  const designEnded = (options: G7Options) => {
+    const evaluation = evaluate(g7Episode({ researchTask: RUN_TASK, calls: { byStep: happyCalls() }, ...options }));
+    return { assertion: statusOf(evaluation, "step.g7.withdrawal.design_ended"), product: evaluation.verdicts.product };
+  };
+
+  it("never passes a design that had already failed before the withdrawal (the reviewer's repro)", () => {
+    const { assertion, product } = designEnded({ designEverywhere: "failed" });
+    expect(assertion).toMatchObject({ status: "uncertain", reason: "design_already_ended_before_withdrawal" });
+    expect(product).not.toBe("pass");
+  });
+
+  it("never passes an end the withdrawal did not cause, or one not tied to the withdrawal", () => {
+    expect(designEnded({ designBefore: "cancelled" }).assertion).toMatchObject({ status: "uncertain", reason: "design_already_ended_before_withdrawal" });
+    expect(designEnded({ designAfter: "failed" }).assertion).toMatchObject({ status: "uncertain", reason: "design_not_cancelled_by_withdrawal" });
+    expect(designEnded({ designAfter: "superseded" }).assertion).toMatchObject({ status: "uncertain", reason: "design_not_cancelled_by_withdrawal" });
+    expect(designEnded({ designBefore: null }).assertion).toMatchObject({ status: "uncertain", reason: "no_observation_before_withdrawal" });
+    // An observation showing it cancelled that is not the withdrawal's own.
+    expect(designEnded({ withdrawalAfterOperation: "another-operation" }).assertion).toMatchObject({ status: "uncertain", reason: "no_observation_after_withdrawal" });
+  });
+
+  it("passes only a design live before and cancelled in the withdrawal's own observation after", () => {
+    expect(designEnded({}).assertion).toMatchObject({ status: "pass", reason: null });
   });
 });
 

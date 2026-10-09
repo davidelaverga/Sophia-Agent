@@ -92,6 +92,8 @@ const DEFAULT_TIMEOUTS = {
   sessionClosedMs: 10_000,
   uiActionMs: 5_000,
   designSettleMs: 120_000,
+  /** Between re-reads of the exchange's calls until every listed call is answered. */
+  callsSettleWaitMs: 1_000,
 };
 
 interface PushItem { arrival: number; payload: unknown }
@@ -196,7 +198,6 @@ export function hasStudioExtensions(driver: VoiceBrowserDriver): driver is Voice
 const MAX_RECORDED_CALLS = 1_000;
 /** Reads of the calls until every listed call is answered (A15 answeredAt); then the read is typed unsettled. */
 export const STUDIO_CALLS_SETTLE_ATTEMPTS = 10;
-export const STUDIO_CALLS_SETTLE_WAIT_MS = 1_000;
 
 function sha256(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
@@ -515,6 +516,10 @@ export class StudioG7Driver implements VoiceBrowserDriver, StudioDriverExtension
       if (result.taskId) focus.push(result.taskId);
       receipt = { action, step_id: stepId, ...result.receipt };
     } else {
+      // The design's state before the withdrawal: an end the withdrawal did
+      // not cause (already cancelled, failed) is never its effect.
+      const before = await this.#observeOutcome(run, tokens, `${stepId}:before`, [], operationId);
+      events.push(before.event);
       const result = await this.#withdrawalAction(run, tokens, operationId, input);
       events.push(...result.events);
       receipt = { action, step_id: stepId, ...result.receipt };
@@ -1430,7 +1435,16 @@ export class StudioG7Driver implements VoiceBrowserDriver, StudioDriverExtension
   }
 
   async readStudioCalls(run: RunRecord, purpose: "baseline" | "after", operationId: string, stepId: string | null, after: string | null = null): Promise<DriverEvent> {
-    return this.#readCalls(run.id, this.#tokenSource(this.#sessions.get(run.id) ?? null), purpose, operationId, stepId, after);
+    // Read only with the run's own browser session: never sign in for a read
+    // (a password grant here would be a session nobody signs out or records).
+    const session = this.#sessions.get(run.id) ?? null;
+    if (session === null) return this.#callsReadRefused(run.id, purpose, operationId, stepId, after, "no_browser_session");
+    return this.#readCalls(run.id, this.#tokenSource(session), purpose, operationId, stepId, after);
+  }
+
+  #callsReadRefused(runId: string, purpose: "baseline" | "after", operationId: string, stepId: string | null, after: string | null, reason: string): DriverEvent {
+    const payload = { schema: STUDIO_CALLS_READ_SCHEMA, purpose, operation_id: operationId, step_id: stepId, exchange_id: this.#exchanges.get(runId)?.exchangeId ?? null, after, read_id: randomUUID(), observed_at_lab_ms: this.#now(), status: "unavailable", reason, http_status: null, read_at: null, settled: false, attempts: 0, max_seq: null, calls: [] };
+    return { kind: STUDIO_CALLS_READ_KIND, source: "canonical", payload, dedupeKey: purpose === "baseline" ? `studio-calls-baseline:${runId}:${operationId}` : contentKey("studio-calls-read", runId, payload) };
   }
 
   /**
@@ -1466,7 +1480,7 @@ export class StudioG7Driver implements VoiceBrowserDriver, StudioDriverExtension
         }));
         return emit({ status: "available", reason: null, http_status: read.http_status, read_at: read.value.readAt, settled, attempts, max_seq: calls.at(-1)?.seq ?? 0, calls });
       }
-      await this.#wait(STUDIO_CALLS_SETTLE_WAIT_MS);
+      await this.#wait(this.#timeouts.callsSettleWaitMs);
     }
   }
 
