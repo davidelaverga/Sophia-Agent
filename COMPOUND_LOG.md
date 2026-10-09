@@ -26,6 +26,41 @@ Every merged PR appends an entry here. This file is the team's accumulating inst
 ## Log
 <!-- Append new entries below this line -->
 
+## 2026-10-09 · [voice-lab · Studio G7 labrev9 nit, and observations] · PR #TBD
+**Author:** Claude · **Track:** voice · **Spec:** pack 03 G7; independent review of cdba228..1ba1ab3 (labrev9: no P1/P2/P3, one nit); fix in 3ea24cf (tests and README only)
+
+### What Changed
+- **The settlement gate's turn wait is pinned from both sides.** Its `STUDIO_INPUT_TURN_WAIT_MS` constant is pinned to 5 000 ms.
+  - Each action after a lost turn is timed: at least the bound, and under 12 s. That leaves 7 s of margin for a loaded runner and stays 3 s under the gate's 15 s settlement deadline.
+  - Before this, the worker test asserted only a lower bound, so a wait raised to the deadline passed.
+  - Mutants m10a (the wait raised to 60 000 ms) and m10b (its own bound ignored) were each run twice: they survive at 7bbbf09 and are killed at 3ea24cf. All four raw logs are kept (`lab-author-logs-r10`); the runner now never overwrites.
+- **README:** the gate waits for an in-flight turn before an action or a voice step. End has no gate.
+- No source or plugin change. Toolchain: Node v22.22.0 and pnpm 10.26.2.
+
+### What We Learned
+- **A test that names a bound must assert both sides of it.** A lower bound alone lets the bound grow until a surrounding deadline catches it.
+- **Observations from the review, recorded without code changes:**
+  - **Output-only stream.** After the latest window's turn is lost, a later `output_reply` (or other output-only receipt) does not end the turn's "in flight" state. It ends only at the next input receipt or `session_closed`.
+    - Until then each hand-over keeps the certified create while that window's count stays unknown, and each action pays the 5 s gate.
+    - The run's own evaluation refuses the join.
+    - A tighter rule (any higher bridge seq ends "in flight") would need the scripted driver's late-turn order to match the product's: the turn sent before the reply.
+  - **The later-input clause is pinned only by an ordering the product cannot produce** (a turn delivered after a later window). With the product's in-order sender, it is effectively redundant: harmless, defensive code.
+  - **Before End there is no settlement gate.** The README now says so. The run's own evaluation checks every window anyway.
+  - **Replaced sessions.**
+    - A session replaced on the exchange after its room is lost restarts `windowSeq` at 1 while the seq continues. The hand-over then never certifies the create, `bridge.window_ordinals_unique` fails, and the product verdict is `fail`.
+    - A bridge process restart (the seq restarts too) was not probed.
+- **Records:** the labrev7 entry (a42067c) describes 2b8dbd8's broad mid-run rule, which cdba228 narrowed. The labrev8 entry describes the narrowed rule.
+- **Review state:** 3ea24cf is not yet reviewed.
+
+### CLAUDE.md Updates
+- None
+
+### Skills Created / Modified
+- None
+
+### GEPA Log Entry
+- N/A
+
 ## 2026-10-09 · [voice-lab · Studio G7 labrev8 nit, and a correction to the labrev6 entry] · PR #TBD
 **Author:** Claude · **Track:** voice · **Spec:** pack 03 G7; independent review of 148f8fc..6cf354b (labrev8: the five labrev7 nits confirmed resolved, no P1/P2/P3, one nit, a step-level regression from 2b8dbd8); fix in cdba228, tests in 1ba1ab3
 
