@@ -26,6 +26,65 @@ Every merged PR appends an entry here. This file is the team's accumulating inst
 ## Log
 <!-- Append new entries below this line -->
 
+## 2026-10-09 · [voice-lab · security P1: a Studio withdrawal owns a decision only at its exact revision] · PR #168
+**Author:** Claude · **Track:** voice · **Spec:** root's independent security P1 at 0955ee8 on PR #168 ([comment](https://github.com/davidelaverga/Sophia-Agent/pull/168#issuecomment-6090735518)); root's full packet, test and refactor acceptance ([comment](https://github.com/davidelaverga/Sophia-Agent/pull/168#issuecomment-6090730638)). Commits 36f2f3e (fix and tests) and 35b7feb (README)
+
+### What Changed
+- **The defect.** The Studio driver's withdrawal action read the mission to decide which previewed decisions were the run's own, but kept only their ids. Root's reproduction (real pinned Chromium 1234, the actual driver, a local fixture):
+  - The principal's own undecided voice proposal D is at revision 1 when the mission is read.
+  - Before the preview, another member accepts D. The product gives it revision 2, decided by OTHER (0020).
+  - The preview names D@2, the id still matched, and the driver posted the signed, current preview. The product rightly commits a valid current preview (0018), so the other member's accepted decision was erased.
+  - The product's staleness check guards only changes after the preview, never the earlier ownership read.
+- **The fix (36f2f3e, `src/studio-g7/studio-driver.ts`).** The signed-preview semantics and the own-decision rule itself are unchanged, and nothing else is relaxed.
+  - A decision is the run's own only at its exact `{id, revision}`. `studioWithdrawalOwnScope` keeps each own decision's revision, and `studioWithdrawalForeign` counts a previewed decision as foreign unless it is own at exactly that revision.
+  - If a previewed decision the read held as own carries another revision (`studioWithdrawalRevisionChanges`), one bounded fresh mission read decides. The withdrawal is sent only if that read shows the decision is the run's own at exactly the previewed revision. Otherwise nothing is sent (`withdrawal_cascade_not_own`); an unavailable fresh read sends nothing either (`recheck_mission_<reason>`).
+- **Tests (`test/studio-g7-chromium.test.ts`).** They run the actual driver against the local fake Studio, in the **substitute** Chromium 1194 through a shim, because the pinned 1234 is absent here.
+  - The fake Studio gains three hooks: on the preview GET before its cascade is computed, on the withdrawal POST before the staleness check, and on each mission read, with a counter.
+  - **The race (root's sequence):** at the preview GET, another member accepts D. Result: no POST, D intact, the note current, and exactly one fresh read.
+  - **Positive control:** the own undecided D at the read revision is still withdrawn, with no fresh read.
+  - **Own acceptance between read and preview:** the principal's own acceptance in between is confirmed by the fresh read, and D is withdrawn at that exact revision.
+  - **Another revision on the fresh read:** a fresh read that finds yet another revision (D@3, own again) sends nothing.
+  - **Change after the preview:** still refused by the product's staleness check (409 `stale_revision`).
+  - **Foreign cascades:** the six existing foreign-cascade controls are unchanged and pass.
+- **README:** the withdrawal paragraph now states the exact-revision rule and the one bounded fresh read. The plugin's `tool-contracts.md` states the rule without revisions; it is untouched and still accurate.
+
+### What We Learned
+- **An ownership read and a signed preview describe two different moments.** Any identity check that bridges them must carry the version, not just the id. The product's staleness check covers only what happens after the preview.
+- **Evidence (`lab-author-logs-r13`; Node v22.22.0, pnpm 10.26.2, checked per run; one file per invocation, each with its own timeout):**
+  - Fail-before: the new tests against 0955ee8's source fail 3 of 40, and the race commits.
+  - After: 40/40. driver 46/46, wiring 54/54, evaluate 76/76 (product shape included), contract 17/17, typecheck exit 0.
+  - Mutants, each killed:
+    - mA, ownership by id only: killed by the race, own-acceptance and another-revision tests;
+    - mB, the fresh check skipped: killed by the own-acceptance test, and by the fresh-read count in the race and another-revision tests;
+    - mC, the revision ignored in the fresh check: killed by the another-revision test.
+  - CI-exact Sentrux gate at 36f2f3e: exit 0, no degradation.
+  - full-env at 36f2f3e: exit 0, 1 378/1 378 in 112 files (the 1 373 before plus the 5 new tests). The gates run again at this entry's commit, the final head.
+- **Databases:** only this writer's exactly named databases on 55434. The product-shape test creates and drops its own. Roles and every other object were read only.
+- **Root's scoped acceptance of the repair** at the exact, unpublished 36f2f3e ([PR #168 comment](https://github.com/davidelaverga/Sophia-Agent/pull/168#issuecomment-6091065339)). It accepts **only** root's finding 6090735518, at 36f2f3e. Root checked, on the actual pinned Chromium 1234:
+  - Root's original withdrawal-race fixture, unchanged except for the source prefix, now passes 2 of 2. At 0955ee8 it was 1 pass and 1 fail.
+  - Four extra root cases pass: exact own; a fresh read at a different revision; the fresh read unavailable; mixed owners.
+  - Root's candidate run: Chromium 40, driver 46, wiring 54 and contract 17, a total of 157 pass, 0 fail, 0 skip, in 235.07 s. Typecheck exit 0.
+  - Two independent mutants were killed (expected POST count 0, got 1) in a separate checkout, which was then restored; the candidate is clean.
+  - The packet's 26 hashes and both bundles verified.
+- **Chromium:** the author's runs used the **substitute** chromium-1194 (141.0.7390.37) through a scratch shim, because the pinned 1234 is absent here. Root's runs used the actual pinned 1234.
+- **Correction for the records:** labrev10 is **not** pending. Root's labrev10 extraction review already accepted its scoped source delta ([PR #168 comment](https://github.com/davidelaverga/Sophia-Agent/pull/168#issuecomment-6090730638)), and that verdict stands. The r12 entries below list labrev10 as pending; that wording is stale and is left as written.
+- **The earlier full-env pass:** the 1 373/1 373 full-env is evidence for 0955ee8, not for 36f2f3e.
+- **Pending, explicitly:**
+  - the final records, full-env and CI-exact gates at the final head;
+  - the consolidated security review;
+  - base 151;
+  - the acceptance gates;
+  - publication, merge and production.
+
+### CLAUDE.md Updates
+- None
+
+### Skills Created / Modified
+- None
+
+### GEPA Log Entry
+- N/A
+
 ## 2026-10-09 · [voice-lab · root's scoped acceptances of the four r12 commits] · PR #168
 **Author:** Claude · **Track:** voice · **Spec:** records for the r12 entry below (commit d822756, left as written); root's reviews on PR #168
 
