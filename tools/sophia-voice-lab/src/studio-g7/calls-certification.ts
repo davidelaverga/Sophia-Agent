@@ -185,7 +185,7 @@ export function studioStepOwnCalls(events: ReadonlyArray<Event>, steps: Readonly
   }));
 }
 
-export function certifyStudioVoiceSteps(input: {
+type CertificationInput = {
   events: ReadonlyArray<Event>;
   /** The run's voice-step operations: id and G7 step id. */
   steps: ReadonlyArray<{ operationId: string; stepId: string }>;
@@ -194,14 +194,75 @@ export function certifyStudioVoiceSteps(input: {
   ownershipProven: boolean;
   /** The input epoch the principal held for each step (its input window's bridge receipt); null when unknown. */
   stepInputEpochs: ReadonlyMap<string, number | null>;
-}): StudioCallsCertification {
+};
+
+/** The run-wide state certification reads and the chain it builds, step by step in baseline order. */
+interface CertificationContext {
+  input: CertificationInput;
+  runExchange: string | null;
+  reads: Event[];
+  answeredReads: Event[];
+  observations: Event[];
+  /** Answered entries two reads show differently (apart from a command's state). */
+  conflicting: Set<number>;
+  certifiedCommands: Set<string>;
+  /** Authority epochs rise per goal (the sub-episode's goal has its own). */
+  lastControlEpoch: Map<string, number>;
+  /** Every call each step's window read listed. */
+  windowSeqs: Set<number>;
+  createdTaskId: string | null;
+  createdGoalId: string | null;
+  stopTargetTaskId: string | null;
+  stopTargetGoalId: string | null;
+}
+
+type Settled = { outcome: StudioStepCertification["outcome"]; reason: string | null };
+const settled = (outcome: Settled["outcome"], reason: string | null): Settled => ({ outcome, reason });
+type TaskSighting = { event: Event; task: Record<string, unknown> };
+
+export function certifyStudioVoiceSteps(input: CertificationInput): StudioCallsCertification {
   const ordered = [...input.events].sort((left, right) => left.seq - right.seq);
   const runExchange = input.runExchangeId?.toLowerCase() ?? null;
   const reads = ordered.filter((event) => event.kind === STUDIO_CALLS_READ_KIND && event.source === "canonical");
   const answeredReads = reads.filter((event) => event.payload.status === "available" && typeof event.payload.exchange_id === "string" && event.payload.exchange_id.toLowerCase() === runExchange);
-  const observations = ordered.filter((event) => event.kind === "studio.outcome.observed" && event.source === "canonical");
-  // A recorded entry that two reads show differently (apart from its
-  // command's progressing state) is not one stable call: it certifies nothing.
+  const ctx: CertificationContext = {
+    input, runExchange, reads, answeredReads,
+    observations: ordered.filter((event) => event.kind === "studio.outcome.observed" && event.source === "canonical"),
+    conflicting: conflictingCallSeqs(answeredReads),
+    certifiedCommands: new Set<string>(), lastControlEpoch: new Map<string, number>(), windowSeqs: new Set<number>(),
+    createdTaskId: null, createdGoalId: null, stopTargetTaskId: null, stopTargetGoalId: null,
+  };
+  // Each step's baseline: its FIRST baseline read (a re-executed operation keeps it).
+  const baselines = input.steps.map((step) => ({ step, baseline: reads.find((event) => event.payload.purpose === "baseline" && event.payload.operation_id === step.operationId) ?? null }));
+  const ordering = [...baselines].sort((left, right) => (left.baseline?.seq ?? Number.MAX_SAFE_INTEGER) - (right.baseline?.seq ?? Number.MAX_SAFE_INTEGER));
+  const results = new Map<string, StudioStepCertification>();
+  for (const { step, baseline } of ordering) {
+    const result: StudioStepCertification = { step_id: step.stepId, operation_id: step.operationId, outcome: "unavailable", reason: null, baseline_read_at: null, candidate_seqs: [], call_outcome: null, command_id: null, command_kind: null, goal_id: null, authority_epoch: null, task_id: null, evidence_seqs: [] };
+    results.set(step.operationId, result);
+    const verdict = certifyVoiceStep(ctx, step, baseline, result);
+    result.outcome = verdict.outcome;
+    result.reason = verdict.reason;
+  }
+  // A command-bearing call a later read listed (a baseline, or the End read)
+  // that no step's window holds was never examined by any step.
+  const bearing = new Set(answeredReads.flatMap(callsOf).filter((call) => call.command !== null).map((call) => call.seq));
+  const unattributed = [...bearing].filter((seq) => !ctx.windowSeqs.has(seq)).sort((left, right) => left - right);
+  return {
+    steps: input.steps.map((step) => results.get(step.operationId)!),
+    unattributed_seqs: unattributed,
+    createdTaskId: ctx.createdTaskId,
+    createdGoalId: ctx.createdGoalId,
+    stopTargetTaskId: ctx.stopTargetTaskId,
+    stopTargetGoalId: ctx.stopTargetGoalId,
+    answered: answeredReads.length > 0,
+  };
+}
+
+/**
+ * A recorded entry that two reads show differently (apart from its
+ * command's progressing state) is not one stable call: it certifies nothing.
+ */
+function conflictingCallSeqs(answeredReads: ReadonlyArray<Event>): Set<number> {
   const identities = new Map<number, string>();
   const conflicting = new Set<number>();
   for (const read of answeredReads) for (const call of callsOf(read)) {
@@ -211,186 +272,233 @@ export function certifyStudioVoiceSteps(input: {
     if (prior !== undefined && prior !== identity) conflicting.add(call.seq);
     identities.set(call.seq, identity);
   }
-  // Each step's baseline: its FIRST baseline read (a re-executed operation keeps it).
-  const baselines = input.steps.map((step) => ({ step, baseline: reads.find((event) => event.payload.purpose === "baseline" && event.payload.operation_id === step.operationId) ?? null }));
-  const ordering = [...baselines].sort((left, right) => (left.baseline?.seq ?? Number.MAX_SAFE_INTEGER) - (right.baseline?.seq ?? Number.MAX_SAFE_INTEGER));
-  const certifiedCommands = new Set<string>();
-  let createdTaskId: string | null = null;
-  let createdGoalId: string | null = null;
-  let stopTargetTaskId: string | null = null;
-  let stopTargetGoalId: string | null = null;
-  // Authority epochs rise per goal (the sub-episode's goal has its own).
-  const lastControlEpoch = new Map<string, number>();
-  const results = new Map<string, StudioStepCertification>();
+  return conflicting;
+}
 
-  // Every call each step's window read listed (attributed to that step's window, whatever its outcome).
-  const windowSeqs = new Set<number>();
-  ordering.forEach(({ step, baseline }, index) => {
-    const result: StudioStepCertification = { step_id: step.stepId, operation_id: step.operationId, outcome: "unavailable", reason: null, baseline_read_at: null, candidate_seqs: [], call_outcome: null, command_id: null, command_kind: null, goal_id: null, authority_epoch: null, task_id: null, evidence_seqs: [] };
-    results.set(step.operationId, result);
-    const settle = (outcome: StudioStepCertification["outcome"], reason: string | null) => { result.outcome = outcome; result.reason = reason; };
-    const expectedKind = STUDIO_VOICE_STEP_COMMAND_KIND[step.stepId];
-    if (!expectedKind) return settle("unavailable", "not_a_voice_step");
-    if (runExchange === null) return settle("unavailable", "no_exchange_joined_to_run");
-    if (!input.ownershipProven) return settle("unavailable", "run_exchange_ownership_unproven");
-    if (!baseline) return settle("unavailable", "no_calls_baseline");
-    result.evidence_seqs.push(baseline.seq);
-    if (baseline.payload.status !== "available") return settle("unavailable", `calls_baseline_${String(baseline.payload.reason ?? "unavailable")}`);
-    if (typeof baseline.payload.exchange_id !== "string" || baseline.payload.exchange_id.toLowerCase() !== runExchange) return settle("unavailable", "calls_baseline_not_of_run_exchange");
-    const readAt = typeof baseline.payload.read_at === "string" ? baseline.payload.read_at : null;
-    if (readAt === null) return settle("unavailable", "calls_baseline_malformed");
-    result.baseline_read_at = readAt;
-    // The baseline is taken only once every call listed so far was answered.
-    if (baseline.payload.settled !== true) return settle("uncertain", "calls_baseline_unsettled");
-    // The step's own window: its own settled read with after = this
-    // baseline's readAt (verbatim), taken before any later voice step's
-    // baseline (of any operation, performed or not). That read's readAt bounds
-    // the window; the next step's baseline never does.
-    const upper = reads.find((event) => event.payload.purpose === "baseline" && event.seq > baseline.seq)?.seq ?? Number.MAX_SAFE_INTEGER;
-    const { stepReads, after, window } = ownWindow(reads, baseline, step.operationId, readAt, runExchange);
-    if (after.length === 0) {
-      const refused = stepReads.at(-1);
-      return settle("unavailable", refused ? `calls_after_${String(refused.payload.reason ?? "unavailable")}` : "no_calls_read_after_step");
-    }
-    if (window === null) return settle("uncertain", "call_unanswered");
-    result.evidence_seqs.push(window.seq);
-    for (const call of callsOf(window)) windowSeqs.add(call.seq);
-    // A command-bearing call one read listed and a later read of the same window no longer lists: not one stable record.
-    for (const [position, earlier] of after.entries()) {
-      for (const later of after.slice(position + 1)) {
-        const listed = new Set(callsOf(later).map((call) => call.seq));
-        if (callsOf(earlier).some((call) => call.command !== null && !listed.has(call.seq))) return settle("uncertain", "calls_entry_conflict");
-      }
-    }
-    const candidates = callsOf(window);
-    // Defensive: an entry the baseline already listed is never the step's.
-    const listedAtBaseline = new Set(callsOf(baseline).map((call) => call.seq));
-    if (candidates.some((call) => listedAtBaseline.has(call.seq))) return settle("uncertain", "call_listed_at_baseline");
-    result.candidate_seqs = candidates.map((call) => call.seq);
-    if (candidates.some((call) => conflicting.has(call.seq))) return settle("uncertain", "calls_entry_conflict");
-    if (candidates.length === 0) return settle("uncertain", "no_call_after_baseline");
-    // Every call in the window answered; one still unanswered is never a pass.
-    if (candidates.some((call) => call.answered_at === null)) return settle("uncertain", "call_unanswered");
-    // Every call in the window made at the input epoch the principal held for this step.
-    const stepEpoch = input.stepInputEpochs.get(step.operationId) ?? null;
-    if (stepEpoch === null) return settle("uncertain", "step_input_epoch_unknown");
-    if (candidates.some((call) => call.input_epoch !== stepEpoch)) return settle("uncertain", "call_input_epoch_mismatch");
-    const bearing = candidates.filter((call) => call.command !== null);
-    if (bearing.length === 0) return settle("uncertain", "call_admitted_no_command");
-    if (bearing.length > 1) return settle("uncertain", "multiple_command_bearing_calls");
-    const call = bearing[0]!;
-    const command = call.command!;
-    Object.assign(result, { command_id: command.command_id, command_kind: command.kind, goal_id: command.goal_id, authority_epoch: command.authority_epoch, task_id: call.task_id, call_outcome: call.outcome });
-    if (command.kind !== expectedKind) return settle("fail", "command_kind_mismatch");
-    const expectedOutcome = STUDIO_VOICE_STEP_OUTCOME[step.stepId]!;
-    if (call.outcome !== expectedOutcome) return settle(call.outcome !== null && FAILING_OUTCOMES.has(call.outcome) ? "fail" : "uncertain", `call_outcome_${String(call.outcome)}`);
-    if (certifiedCommands.has(command.command_id)) return settle("uncertain", "command_already_certified");
-    if (command.state === "denied") return settle("fail", "command_denied");
-    if (UNCERTIFIABLE_STATES.has(command.state)) return settle("uncertain", `command_${command.state}`);
-    // The command's state as every LATER answered read shows it: denied, or of
-    // unknown outcome, after the window is never a pass.
-    const laterStates = new Set(answeredReads.filter((event) => event.seq > window.seq).flatMap(callsOf)
-      .filter((later) => later.command !== null && later.command.command_id === command.command_id).map((later) => later.command!.state));
-    if (laterStates.has("denied")) return settle("fail", "command_denied_later");
-    if (laterStates.has("outcome_unknown")) return settle("uncertain", "command_outcome_unknown_later");
-    // The snapshot's view of the run's task, seen after this step's baseline and before the next step.
-    const stepObservations = observations.filter((event) => event.seq > baseline.seq && event.seq <= upper);
-    const taskSeen = (taskId: string) => [...stepObservations, ...observations.filter((event) => event.seq > upper)].reverse()
-      .flatMap((event) => (Array.isArray(event.payload.tasks) ? event.payload.tasks as unknown[] : []).map((value) => ({ event, task: record(value) ?? {} })))
-      .find((item) => item.task.task_id === taskId) ?? null;
-    if (CREATE_STEPS.has(step.stepId)) {
-      if (call.task_id === null) return settle("uncertain", "create_command_without_task");
-      const seen = taskSeen(call.task_id);
-      if (seen === null || typeof seen.task.exchange_id !== "string") return settle("uncertain", "created_task_exchange_unconfirmed");
-      result.evidence_seqs.push(seen.event.seq);
-      if (seen.task.exchange_id.toLowerCase() !== runExchange) return settle("fail", "created_task_bound_to_another_exchange");
-      const taskGoal = typeof seen.task.goal_id === "string" ? seen.task.goal_id : null;
-      if (taskGoal !== null && command.goal_id !== null && taskGoal !== command.goal_id) return settle("fail", "create_goal_mismatch");
-      const goal = taskGoal ?? command.goal_id;
-      if (goal === null) return settle("uncertain", "created_task_goal_unknown");
-      if (step.stepId === STUDIO_STOP_TARGET_STEP) {
-        // Explicit, distinct joins: the sub-episode's own task and goal, never the episode's.
-        if (createdTaskId === null) return settle("uncertain", "create_step_not_certified");
-        if (call.task_id === createdTaskId || goal === createdGoalId) return settle("uncertain", "stop_target_not_distinct");
-        certifiedCommands.add(command.command_id);
-        stopTargetTaskId = call.task_id;
-        stopTargetGoalId = goal;
-        return settle("pass", null);
-      }
-      certifiedCommands.add(command.command_id);
-      createdTaskId = call.task_id;
-      createdGoalId = goal;
-      return settle("pass", null);
-    }
-    if (createdGoalId === null || createdTaskId === null) return settle("uncertain", "create_step_not_certified");
-    // Stop acts only on the Stop sub-episode's own task, certified by its own
-    // create before Stop; without one, Stop is never credited on the
-    // episode's created task (labrev6 Nit-1). Every other control acts on the
-    // episode's created task.
-    if (step.stepId === "g7.stop" && (stopTargetTaskId === null || stopTargetGoalId === null)) return settle("uncertain", "stop_target_not_certified");
-    const stopsSubEpisode = step.stepId === "g7.stop";
-    const targetTaskId = stopsSubEpisode ? stopTargetTaskId! : createdTaskId;
-    const targetGoalId = stopsSubEpisode ? stopTargetGoalId! : createdGoalId;
-    if (command.goal_id !== targetGoalId) return settle("fail", "command_goal_mismatch");
-    // Hold, resume and stop take a new authority epoch on their goal; a steer does not.
-    const takesEpoch = EPOCH_STEPS.has(step.stepId);
-    const priorEpoch = lastControlEpoch.get(targetGoalId) ?? null;
-    if (takesEpoch && command.authority_epoch === null) return settle("uncertain", "authority_epoch_missing");
-    if (takesEpoch && priorEpoch !== null && command.authority_epoch! <= priorEpoch) return settle("fail", "authority_epoch_not_increasing");
-    const sightingsOf = (events: Event[]) => events.flatMap((event) => (Array.isArray(event.payload.tasks) ? event.payload.tasks as unknown[] : []).map((value) => ({ event, task: record(value) ?? {} })))
-      .filter((item) => item.task.task_id === targetTaskId);
-    if (step.stepId === "g7.stop") {
-      // Stop is credited only on work still live just before it: the target's
-      // latest sighting before Stop's baseline. Never on work already ended.
-      const before = sightingsOf(observations.filter((event) => event.seq < baseline.seq)).at(-1) ?? null;
-      if (before === null) return settle("uncertain", "stop_target_not_observed_before_stop");
-      result.evidence_seqs.push(before.event.seq);
-      if (ENDED_TASK_STATES.has(String(before.task.state)) || ENDED_TASK_PHASES.has(String(before.task.phase))) return settle("uncertain", "stop_target_already_ended");
-    }
-    const statuses = STUDIO_VOICE_STEP_GOAL_STATUS[step.stepId];
-    if (statuses) {
-      // The step's own observation (its `observe` action) decides; else the
-      // first one after the step. A much later observation (e.g. the final
-      // read after End) is never this step's effect. Hold and resume act on
-      // the goal's live work (the product holds the design under way while
-      // the research reads result_ready): a task of the run's goal shows it.
-      // Stop is read on its target task.
-      const onGoal = (events: Event[]) => events.flatMap((event) => (Array.isArray(event.payload.tasks) ? event.payload.tasks as unknown[] : []).map((value) => ({ event, task: record(value) ?? {} })))
-        .filter((item) => item.task.goal_id === targetGoalId);
-      const own = (items: Array<{ event: Event; task: Record<string, unknown> }>) => items.filter((item) => item.event.payload.purpose === step.stepId);
-      const isStop = step.stepId === "g7.stop";
-      const sightings = isStop ? sightingsOf(stepObservations) : onGoal(stepObservations);
-      const matching = sightings.filter((item) => statuses.includes(String(item.task.phase)));
-      const seen = own(matching).at(-1) ?? own(sightings).at(-1) ?? matching[0] ?? sightings[0] ?? null;
-      if (seen === null) return settle("uncertain", "goal_status_not_observed");
-      result.evidence_seqs.push(seen.event.seq);
-      if (!statuses.includes(String(seen.task.phase))) return settle("uncertain", "goal_status_not_matching_step");
-      if (isStop) {
-        // Ended by Stop's command, not by anything else: never by a withdrawal of a source it drew on.
-        const withdrawn = Array.isArray(seen.task.withdrawn_source_ids) ? seen.task.withdrawn_source_ids.length : 0;
-        if (withdrawn > 0 || seen.task.reason_class === "revoked_source_withdrawn") return settle("uncertain", "stop_target_ended_by_withdrawal");
-        // And its job cancelled for the stop (reason `stopped`), in this or a later observation.
-        const cancelled = sightingsOf(observations.filter((event) => event.seq >= seen.event.seq)).find((item) => item.task.state === "cancelled" && item.task.reason_class === "stopped") ?? null;
-        if (cancelled === null) return settle("uncertain", "stop_effect_not_settled");
-        if (cancelled.event.seq !== seen.event.seq) result.evidence_seqs.push(cancelled.event.seq);
-      }
-    }
-    certifiedCommands.add(command.command_id);
-    if (takesEpoch) lastControlEpoch.set(targetGoalId, command.authority_epoch!);
-    return settle("pass", null);
-  });
+/** One voice step, in baseline order: its baseline, its own window, its one command-bearing call, then its effect. */
+function certifyVoiceStep(ctx: CertificationContext, step: { operationId: string; stepId: string }, baseline: Event | null, result: StudioStepCertification): Settled {
+  const expectedKind = STUDIO_VOICE_STEP_COMMAND_KIND[step.stepId];
+  if (!expectedKind) return settled("unavailable", "not_a_voice_step");
+  const gate = stepBaselineGate(ctx, baseline, result);
+  if (gate !== null) return gate;
+  const window = stepWindowCall(ctx, step, baseline!, result);
+  if ("outcome" in window) return window;
+  const { call, command } = window;
+  const rejected = stepCommandGate(ctx, step.stepId, expectedKind, call, command, window.window);
+  if (rejected !== null) return rejected;
+  // The snapshot's view of the run's task, seen after this step's baseline and before the next step.
+  const upper = ctx.reads.find((event) => event.payload.purpose === "baseline" && event.seq > baseline!.seq)?.seq ?? Number.MAX_SAFE_INTEGER;
+  const stepObservations = ctx.observations.filter((event) => event.seq > baseline!.seq && event.seq <= upper);
+  const later = ctx.observations.filter((event) => event.seq > upper);
+  if (CREATE_STEPS.has(step.stepId)) return certifyCreateStep(ctx, step.stepId, call, command, latestTaskSighting([...stepObservations, ...later], call.task_id), result);
+  return certifyControlStep(ctx, step.stepId, command, baseline!, stepObservations, result);
+}
 
-  // A command-bearing call a later read listed (a baseline, or the End read)
-  // that no step's window holds was never examined by any step.
-  const bearing = new Set(answeredReads.flatMap(callsOf).filter((call) => call.command !== null).map((call) => call.seq));
-  const unattributed = [...bearing].filter((seq) => !windowSeqs.has(seq)).sort((left, right) => left - right);
-  return {
-    steps: input.steps.map((step) => results.get(step.operationId)!),
-    unattributed_seqs: unattributed,
-    createdTaskId,
-    createdGoalId,
-    stopTargetTaskId,
-    stopTargetGoalId,
-    answered: answeredReads.length > 0,
-  };
+/** The step's baseline: of the run's proven exchange, available, well formed and settled. */
+function stepBaselineGate(ctx: CertificationContext, baseline: Event | null, result: StudioStepCertification): Settled | null {
+  if (ctx.runExchange === null) return settled("unavailable", "no_exchange_joined_to_run");
+  if (!ctx.input.ownershipProven) return settled("unavailable", "run_exchange_ownership_unproven");
+  if (!baseline) return settled("unavailable", "no_calls_baseline");
+  result.evidence_seqs.push(baseline.seq);
+  if (baseline.payload.status !== "available") return settled("unavailable", `calls_baseline_${String(baseline.payload.reason ?? "unavailable")}`);
+  if (typeof baseline.payload.exchange_id !== "string" || baseline.payload.exchange_id.toLowerCase() !== ctx.runExchange) return settled("unavailable", "calls_baseline_not_of_run_exchange");
+  const readAt = typeof baseline.payload.read_at === "string" ? baseline.payload.read_at : null;
+  if (readAt === null) return settled("unavailable", "calls_baseline_malformed");
+  result.baseline_read_at = readAt;
+  // The baseline is taken only once every call listed so far was answered.
+  if (baseline.payload.settled !== true) return settled("uncertain", "calls_baseline_unsettled");
+  return null;
+}
+
+/** A command-bearing call one read of the window listed and a later read of the same window no longer lists. */
+function windowEntryDropped(after: ReadonlyArray<Event>): boolean {
+  for (const [position, earlier] of after.entries()) {
+    for (const later of after.slice(position + 1)) {
+      const listed = new Set(callsOf(later).map((call) => call.seq));
+      if (callsOf(earlier).some((call) => call.command !== null && !listed.has(call.seq))) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * The step's own window: its own settled read with after = this baseline's
+ * readAt (verbatim), taken before any later voice step's baseline (of any
+ * operation, performed or not). That read's readAt bounds the window; the
+ * next step's baseline never does. Its calls: none listed at the baseline,
+ * all stable and answered, all at the step's input epoch, exactly one
+ * bearing a command.
+ */
+function stepWindowCall(ctx: CertificationContext, step: { operationId: string; stepId: string }, baseline: Event, result: StudioStepCertification): Settled | { window: Event; call: RecordedCall; command: RecordedCommand } {
+  const { stepReads, after, window } = ownWindow(ctx.reads, baseline, step.operationId, result.baseline_read_at!, ctx.runExchange);
+  if (after.length === 0) {
+    const refused = stepReads.at(-1);
+    return settled("unavailable", refused ? `calls_after_${String(refused.payload.reason ?? "unavailable")}` : "no_calls_read_after_step");
+  }
+  if (window === null) return settled("uncertain", "call_unanswered");
+  result.evidence_seqs.push(window.seq);
+  for (const call of callsOf(window)) ctx.windowSeqs.add(call.seq);
+  if (windowEntryDropped(after)) return settled("uncertain", "calls_entry_conflict");
+  const candidates = callsOf(window);
+  // Defensive: an entry the baseline already listed is never the step's.
+  const listedAtBaseline = new Set(callsOf(baseline).map((call) => call.seq));
+  if (candidates.some((call) => listedAtBaseline.has(call.seq))) return settled("uncertain", "call_listed_at_baseline");
+  result.candidate_seqs = candidates.map((call) => call.seq);
+  if (candidates.some((call) => ctx.conflicting.has(call.seq))) return settled("uncertain", "calls_entry_conflict");
+  if (candidates.length === 0) return settled("uncertain", "no_call_after_baseline");
+  // Every call in the window answered; one still unanswered is never a pass.
+  if (candidates.some((call) => call.answered_at === null)) return settled("uncertain", "call_unanswered");
+  // Every call in the window made at the input epoch the principal held for this step.
+  const stepEpoch = ctx.input.stepInputEpochs.get(step.operationId) ?? null;
+  if (stepEpoch === null) return settled("uncertain", "step_input_epoch_unknown");
+  if (candidates.some((call) => call.input_epoch !== stepEpoch)) return settled("uncertain", "call_input_epoch_mismatch");
+  const bearing = candidates.filter((call) => call.command !== null);
+  if (bearing.length === 0) return settled("uncertain", "call_admitted_no_command");
+  if (bearing.length > 1) return settled("uncertain", "multiple_command_bearing_calls");
+  const call = bearing[0]!;
+  const command = call.command!;
+  Object.assign(result, { command_id: command.command_id, command_kind: command.kind, goal_id: command.goal_id, authority_epoch: command.authority_epoch, task_id: call.task_id, call_outcome: call.outcome });
+  return { window, call, command };
+}
+
+/** The call's command: of the step's kind, answered as the step expects, not yet certified, not denied or of unknown outcome, then or later. */
+function stepCommandGate(ctx: CertificationContext, stepId: string, expectedKind: string, call: RecordedCall, command: RecordedCommand, window: Event): Settled | null {
+  if (command.kind !== expectedKind) return settled("fail", "command_kind_mismatch");
+  const expectedOutcome = STUDIO_VOICE_STEP_OUTCOME[stepId]!;
+  if (call.outcome !== expectedOutcome) return settled(call.outcome !== null && FAILING_OUTCOMES.has(call.outcome) ? "fail" : "uncertain", `call_outcome_${String(call.outcome)}`);
+  if (ctx.certifiedCommands.has(command.command_id)) return settled("uncertain", "command_already_certified");
+  if (command.state === "denied") return settled("fail", "command_denied");
+  if (UNCERTIFIABLE_STATES.has(command.state)) return settled("uncertain", `command_${command.state}`);
+  // The command's state as every LATER answered read shows it: denied, or of
+  // unknown outcome, after the window is never a pass.
+  const laterStates = new Set(ctx.answeredReads.filter((event) => event.seq > window.seq).flatMap(callsOf)
+    .filter((later) => later.command !== null && later.command.command_id === command.command_id).map((later) => later.command!.state));
+  if (laterStates.has("denied")) return settled("fail", "command_denied_later");
+  if (laterStates.has("outcome_unknown")) return settled("uncertain", "command_outcome_unknown_later");
+  return null;
+}
+
+/** Every task an observation lists, with the observation. */
+function taskSightings(events: ReadonlyArray<Event>): TaskSighting[] {
+  return events.flatMap((event) => (Array.isArray(event.payload.tasks) ? event.payload.tasks as unknown[] : []).map((value) => ({ event, task: record(value) ?? {} })));
+}
+
+/** The latest sighting of `taskId` in `observations` (the step's own, then later ones), or null. */
+function latestTaskSighting(observations: ReadonlyArray<Event>, taskId: string | null): TaskSighting | null {
+  if (taskId === null) return null;
+  return taskSightings([...observations].reverse()).find((item) => item.task.task_id === taskId) ?? null;
+}
+
+/** A create (the episode's, or the Stop sub-episode's own): its task bound to the run's exchange, on its command's goal. */
+function certifyCreateStep(ctx: CertificationContext, stepId: string, call: RecordedCall, command: RecordedCommand, seen: TaskSighting | null, result: StudioStepCertification): Settled {
+  if (call.task_id === null) return settled("uncertain", "create_command_without_task");
+  if (seen === null || typeof seen.task.exchange_id !== "string") return settled("uncertain", "created_task_exchange_unconfirmed");
+  result.evidence_seqs.push(seen.event.seq);
+  if (seen.task.exchange_id.toLowerCase() !== ctx.runExchange) return settled("fail", "created_task_bound_to_another_exchange");
+  const taskGoal = typeof seen.task.goal_id === "string" ? seen.task.goal_id : null;
+  if (taskGoal !== null && command.goal_id !== null && taskGoal !== command.goal_id) return settled("fail", "create_goal_mismatch");
+  const goal = taskGoal ?? command.goal_id;
+  if (goal === null) return settled("uncertain", "created_task_goal_unknown");
+  if (stepId === STUDIO_STOP_TARGET_STEP) {
+    // Explicit, distinct joins: the sub-episode's own task and goal, never the episode's.
+    if (ctx.createdTaskId === null) return settled("uncertain", "create_step_not_certified");
+    if (call.task_id === ctx.createdTaskId || goal === ctx.createdGoalId) return settled("uncertain", "stop_target_not_distinct");
+    ctx.certifiedCommands.add(command.command_id);
+    ctx.stopTargetTaskId = call.task_id;
+    ctx.stopTargetGoalId = goal;
+    return settled("pass", null);
+  }
+  ctx.certifiedCommands.add(command.command_id);
+  ctx.createdTaskId = call.task_id;
+  ctx.createdGoalId = goal;
+  return settled("pass", null);
+}
+
+/**
+ * A control (steer, hold, resume, stop) on its target: the episode's created
+ * task, or for Stop the sub-episode's own; a new authority epoch where the
+ * step takes one; Stop only on work still live before it; then the step's
+ * goal status.
+ */
+function certifyControlStep(ctx: CertificationContext, stepId: string, command: RecordedCommand, baseline: Event, stepObservations: Event[], result: StudioStepCertification): Settled {
+  const target = controlTarget(ctx, stepId);
+  if ("outcome" in target) return target;
+  const { taskId: targetTaskId, goalId: targetGoalId } = target;
+  if (command.goal_id !== targetGoalId) return settled("fail", "command_goal_mismatch");
+  // Hold, resume and stop take a new authority epoch on their goal; a steer does not.
+  const takesEpoch = EPOCH_STEPS.has(stepId);
+  const priorEpoch = ctx.lastControlEpoch.get(targetGoalId) ?? null;
+  if (takesEpoch && command.authority_epoch === null) return settled("uncertain", "authority_epoch_missing");
+  if (takesEpoch && priorEpoch !== null && command.authority_epoch! <= priorEpoch) return settled("fail", "authority_epoch_not_increasing");
+  if (stepId === "g7.stop") {
+    const live = stopTargetLiveBeforeStop(ctx, targetTaskId, baseline, result);
+    if (live !== null) return live;
+  }
+  const status = stepGoalStatus(ctx, stepId, targetTaskId, targetGoalId, stepObservations, result);
+  if (status !== null) return status;
+  ctx.certifiedCommands.add(command.command_id);
+  if (takesEpoch) ctx.lastControlEpoch.set(targetGoalId, command.authority_epoch!);
+  return settled("pass", null);
+}
+
+/**
+ * The control's target task and goal. Stop acts only on the Stop
+ * sub-episode's own task, certified by its own create before Stop; without
+ * one, Stop is never credited on the episode's created task (labrev6
+ * Nit-1). Every other control acts on the episode's created task.
+ */
+function controlTarget(ctx: CertificationContext, stepId: string): Settled | { taskId: string; goalId: string } {
+  if (ctx.createdGoalId === null || ctx.createdTaskId === null) return settled("uncertain", "create_step_not_certified");
+  if (stepId === "g7.stop" && (ctx.stopTargetTaskId === null || ctx.stopTargetGoalId === null)) return settled("uncertain", "stop_target_not_certified");
+  const stopsSubEpisode = stepId === "g7.stop";
+  return { taskId: stopsSubEpisode ? ctx.stopTargetTaskId! : ctx.createdTaskId, goalId: stopsSubEpisode ? ctx.stopTargetGoalId! : ctx.createdGoalId };
+}
+
+/**
+ * Stop is credited only on work still live just before it: the target's
+ * latest sighting before Stop's baseline. Never on work already ended.
+ */
+function stopTargetLiveBeforeStop(ctx: CertificationContext, targetTaskId: string, baseline: Event, result: StudioStepCertification): Settled | null {
+  const before = taskSightings(ctx.observations.filter((event) => event.seq < baseline.seq)).filter((item) => item.task.task_id === targetTaskId).at(-1) ?? null;
+  if (before === null) return settled("uncertain", "stop_target_not_observed_before_stop");
+  result.evidence_seqs.push(before.event.seq);
+  if (ENDED_TASK_STATES.has(String(before.task.state)) || ENDED_TASK_PHASES.has(String(before.task.phase))) return settled("uncertain", "stop_target_already_ended");
+  return null;
+}
+
+/**
+ * The step's own observation (its `observe` action) decides; else the
+ * first one after the step. A much later observation (e.g. the final read
+ * after End) is never this step's effect. Hold and resume act on the goal's
+ * live work (the product holds the design under way while the research
+ * reads result_ready): a task of the run's goal shows it. Stop is read on
+ * its target task.
+ */
+function stepGoalStatus(ctx: CertificationContext, stepId: string, targetTaskId: string, targetGoalId: string, stepObservations: Event[], result: StudioStepCertification): Settled | null {
+  const statuses = STUDIO_VOICE_STEP_GOAL_STATUS[stepId];
+  if (!statuses) return null;
+  const isStop = stepId === "g7.stop";
+  const sightings = taskSightings(stepObservations).filter((item) => isStop ? item.task.task_id === targetTaskId : item.task.goal_id === targetGoalId);
+  const own = (items: TaskSighting[]) => items.filter((item) => item.event.payload.purpose === stepId);
+  const matching = sightings.filter((item) => statuses.includes(String(item.task.phase)));
+  const seen = own(matching).at(-1) ?? own(sightings).at(-1) ?? matching[0] ?? sightings[0] ?? null;
+  if (seen === null) return settled("uncertain", "goal_status_not_observed");
+  result.evidence_seqs.push(seen.event.seq);
+  if (!statuses.includes(String(seen.task.phase))) return settled("uncertain", "goal_status_not_matching_step");
+  return isStop ? stopEffectSettled(ctx, targetTaskId, seen, result) : null;
+}
+
+/**
+ * Stop's target ended by Stop's command, not by anything else (never by a
+ * withdrawal of a source it drew on), and its job cancelled for the stop
+ * (reason `stopped`), in this or a later observation.
+ */
+function stopEffectSettled(ctx: CertificationContext, targetTaskId: string, seen: TaskSighting, result: StudioStepCertification): Settled | null {
+  const withdrawn = Array.isArray(seen.task.withdrawn_source_ids) ? seen.task.withdrawn_source_ids.length : 0;
+  if (withdrawn > 0 || seen.task.reason_class === "revoked_source_withdrawn") return settled("uncertain", "stop_target_ended_by_withdrawal");
+  const cancelled = taskSightings(ctx.observations.filter((event) => event.seq >= seen.event.seq))
+    .find((item) => item.task.task_id === targetTaskId && item.task.state === "cancelled" && item.task.reason_class === "stopped") ?? null;
+  if (cancelled === null) return settled("uncertain", "stop_effect_not_settled");
+  if (cancelled.event.seq !== seen.event.seq) result.evidence_seqs.push(cancelled.event.seq);
+  return null;
 }
