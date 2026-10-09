@@ -188,15 +188,24 @@ function validateSessionBody(body: Record<string, unknown> | null, nowSeconds: (
   const expiresIn = body?.expires_in;
   const now = nowSeconds();
   const expiresAt = typeof body?.expires_at === "number" ? body.expires_at : typeof expiresIn === "number" ? now + expiresIn : null;
-  if (typeof accessToken !== "string" || accessToken.length < 16 || accessToken.length > 16_384
-    || typeof refreshToken !== "string" || refreshToken.length < 8 || refreshToken.length > 4_096
-    || tokenType !== "bearer" || typeof expiresIn !== "number" || !Number.isSafeInteger(expiresIn) || expiresIn <= 0
-    || expiresAt === null || !Number.isSafeInteger(expiresAt) || expiresAt <= now
-    || !user || typeof user.id !== "string" || !UUID.test(user.id)) {
+  if (!bearerTokensComplete(accessToken, refreshToken, tokenType) || !sessionLifetimeValid(expiresIn, expiresAt, now) || !user || typeof user.id !== "string" || !UUID.test(user.id)) {
     throw studioAuthError("STUDIO_AUTH_SESSION_INVALID", "The Supabase password grant did not return a complete bearer session.", 200, null);
   }
   const storageValue: Record<string, unknown> = { ...body, expires_at: expiresAt };
-  return { accessToken, refreshToken, tokenType: "bearer", expiresIn, expiresAt, userId: user.id, storageValue };
+  return { accessToken: accessToken as string, refreshToken: refreshToken as string, tokenType: "bearer", expiresIn: expiresIn as number, expiresAt: expiresAt!, userId: user.id, storageValue };
+}
+
+/** A bearer access token and a refresh token, each within its length bounds. */
+function bearerTokensComplete(accessToken: unknown, refreshToken: unknown, tokenType: string | null): boolean {
+  return typeof accessToken === "string" && accessToken.length >= 16 && accessToken.length <= 16_384
+    && typeof refreshToken === "string" && refreshToken.length >= 8 && refreshToken.length <= 4_096
+    && tokenType === "bearer";
+}
+
+/** A positive integer lifetime and an integer expiry still in the future. */
+function sessionLifetimeValid(expiresIn: unknown, expiresAt: number | null, now: number): boolean {
+  return typeof expiresIn === "number" && Number.isSafeInteger(expiresIn) && expiresIn > 0
+    && expiresAt !== null && Number.isSafeInteger(expiresAt) && !(expiresAt <= now);
 }
 
 export interface SignOutReceipt {

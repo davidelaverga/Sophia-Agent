@@ -37,6 +37,14 @@ export const LEDGER_CONNECT_TIMEOUT_MS = 5_000;
 export const LEDGER_STATEMENT_TIMEOUT_MS = 5_000;
 export const LEDGER_LOCK_TIMEOUT_MS = 2_000;
 
+/** Studio G7, inside the caller's transaction (run row locked): refuse a labelled step another operation of the run already holds. */
+async function assertStudioStepFreeTx(client: pg.PoolClient, operation: NewOperation): Promise<void> {
+  if (studioStepOf(operation) === null) return;
+  const siblings = await client.query(`select * from ${SCHEMA}.operations where run_id=$1 and type in ('speak','studio_action')`, [operation.runId]);
+  const stepConflict = studioStepConflict(siblings.rows.map(mapOperation), operation);
+  if (stepConflict) throw stepConflict;
+}
+
 export class PostgresVoiceLabLedger implements VoiceLabLedger {
   readonly pool: pg.Pool;
   readonly #retentionKey: string | null;
@@ -373,13 +381,9 @@ export class PostgresVoiceLabLedger implements VoiceLabLedger {
         [operation.runId],
       );
       if (d02Fence.rows[0]) throw conflict("D02_RUN_FROZEN", "The D02 browser-worker termination freeze forbids every new run operation.");
-      if (studioStepOf(operation) !== null) {
-        // Studio G7: a step at most once per run, under the run row lock held
-        // above, so two concurrent keys for one step cannot both be inserted.
-        const siblings = await client.query(`select * from ${SCHEMA}.operations where run_id=$1 and type in ('speak','studio_action')`, [operation.runId]);
-        const stepConflict = studioStepConflict(siblings.rows.map(mapOperation), operation);
-        if (stepConflict) throw stepConflict;
-      }
+      // Studio G7: a step at most once per run, under the run row lock held
+      // above, so two concurrent keys for one step cannot both be inserted.
+      await assertStudioStepFreeTx(client, operation);
       if (admission && (operation.type === "speak" || operation.type === "barge_in")) {
         const usage = await client.query<{ utterances: string; duration_ms: string; injected_bytes: string; latest_at: Date | null }>(
           `select count(*)::text as utterances,

@@ -256,33 +256,43 @@ export function projectExchangeCalls(raw: unknown): ProjectedExchangeCalls | nul
   if (!body || !exchangeId || readAt === null || !Array.isArray(body.calls) || body.calls.length > 10_000) return null;
   const calls: ProjectedExchangeCall[] = [];
   for (const value of body.calls as unknown[]) {
-    const call = record(value);
-    const seq = positiveSafeInt(call?.seq);
-    const inputEpoch = positiveSafeInt(call?.inputEpoch);
-    const recordedAt = isoOrNull(call?.recordedAt);
-    const tool = typeof call?.tool === "string" && TOOL.test(call.tool) ? call.tool : null;
-    if (!call || seq === null || inputEpoch === null || recordedAt === null || tool === null) return null;
-    if (calls.length > 0 && seq <= calls.at(-1)!.seq) return null;
-    if (call.taskId !== null && uuidOrNull(call.taskId) === null) return null;
-    const answeredAt = call.answeredAt === null ? null : isoOrNull(call.answeredAt);
-    if (call.answeredAt !== null && answeredAt === null) return null;
-    const outcome = call.outcome === null ? null : typeof call.outcome === "string" && EXCHANGE_CALL_OUTCOMES.has(call.outcome) ? call.outcome : undefined;
-    if (outcome === undefined) return null;
-    let command: ProjectedExchangeCall["command"] = null;
-    if (call.command !== null) {
-      const raw = record(call.command);
-      const commandId = uuidOrNull(raw?.commandId);
-      const kind = typeof raw?.kind === "string" && COMMAND_KIND.test(raw.kind) ? raw.kind : null;
-      const state = typeof raw?.state === "string" && EXCHANGE_CALL_COMMAND_STATES.has(raw.state) ? raw.state : null;
-      const createdAt = isoOrNull(raw?.createdAt);
-      const authorityEpoch = nullableInt(raw?.authorityEpoch);
-      const goalRevision = nullableInt(raw?.goalRevision);
-      if (!raw || !commandId || !kind || !state || !createdAt || authorityEpoch === undefined || goalRevision === undefined || (raw.goalId !== null && uuidOrNull(raw.goalId) === null)) return null;
-      command = { commandId, kind, goalId: uuidOrNull(raw.goalId), authorityEpoch, goalRevision, state, createdAt };
-    }
-    calls.push({ seq, recordedAt, inputEpoch, tool, answeredAt, outcome, command, taskId: uuidOrNull(call.taskId) });
+    const call = projectExchangeCall(value);
+    // One malformed call, or a seq not strictly after the previous one, rejects the whole answer.
+    if (call === null || (calls.length > 0 && call.seq <= calls.at(-1)!.seq)) return null;
+    calls.push(call);
   }
   return { exchangeId, readAt, calls };
+}
+
+/** One recorded call of an exchange's calls answer, or null when it is malformed. */
+function projectExchangeCall(value: unknown): ProjectedExchangeCall | null {
+  const call = record(value);
+  const seq = positiveSafeInt(call?.seq);
+  const inputEpoch = positiveSafeInt(call?.inputEpoch);
+  const recordedAt = isoOrNull(call?.recordedAt);
+  const tool = typeof call?.tool === "string" && TOOL.test(call.tool) ? call.tool : null;
+  if (!call || seq === null || inputEpoch === null || recordedAt === null || tool === null) return null;
+  if (call.taskId !== null && uuidOrNull(call.taskId) === null) return null;
+  const answeredAt = call.answeredAt === null ? null : isoOrNull(call.answeredAt);
+  if (call.answeredAt !== null && answeredAt === null) return null;
+  const outcome = call.outcome === null ? null : typeof call.outcome === "string" && EXCHANGE_CALL_OUTCOMES.has(call.outcome) ? call.outcome : undefined;
+  if (outcome === undefined) return null;
+  const command = call.command === null ? null : projectExchangeCallCommand(call.command);
+  if (command === undefined) return null;
+  return { seq, recordedAt, inputEpoch, tool, answeredAt, outcome, command, taskId: uuidOrNull(call.taskId) };
+}
+
+/** A call's command (ids, kind, state, numbers and time only), or undefined when it is malformed. */
+function projectExchangeCallCommand(value: unknown): ProjectedExchangeCall["command"] | undefined {
+  const raw = record(value);
+  const commandId = uuidOrNull(raw?.commandId);
+  const kind = typeof raw?.kind === "string" && COMMAND_KIND.test(raw.kind) ? raw.kind : null;
+  const state = typeof raw?.state === "string" && EXCHANGE_CALL_COMMAND_STATES.has(raw.state) ? raw.state : null;
+  const createdAt = isoOrNull(raw?.createdAt);
+  const authorityEpoch = nullableInt(raw?.authorityEpoch);
+  const goalRevision = nullableInt(raw?.goalRevision);
+  if (!raw || !commandId || !kind || !state || !createdAt || authorityEpoch === undefined || goalRevision === undefined || (raw.goalId !== null && uuidOrNull(raw.goalId) === null)) return undefined;
+  return { commandId, kind, goalId: uuidOrNull(raw.goalId), authorityEpoch, goalRevision, state, createdAt };
 }
 
 const ROOM_VOICE_STATES: ReadonlySet<string> = new Set(["connecting", "ready", "recovering", "unavailable"]);

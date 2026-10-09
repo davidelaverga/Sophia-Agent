@@ -243,6 +243,39 @@ export function studioEffectiveTokenLifetimeMs(events: ReadonlyArray<DecisionEve
   return longest;
 }
 
+/** The browser runtime acquired under (owner, epoch). */
+function isOwnerRuntimeForLease(event: DecisionEvent, workerHash: string, leaseEpoch: number): boolean {
+  return event.kind === "harness.browser_runtime_acquired" && event.source === "canonical" && event.payload.worker_id_sha256 === workerHash && event.payload.browser_lease_epoch === leaseEpoch;
+}
+
+/** A browser process acquisition, naming its execution epoch, before `seq`. */
+function isProcessAcquisitionBefore(event: DecisionEvent, seq: number): boolean {
+  return event.kind === "harness.browser_process_acquired" && event.source === "browser" && event.seq < seq && typeof event.payload.execution_epoch_sha256 === "string";
+}
+
+/** The proven close of execution epoch `epoch`, after `seq`. */
+function isEpochCloseAfter(event: DecisionEvent, epoch: unknown, seq: number): boolean {
+  return event.kind === "cleanup.browser_context_closed" && event.source === "browser" && event.seq > seq
+    && event.payload.execution_epoch_sha256 === epoch && event.payload.close_resolved === true && event.payload.browser_registry_absent === true;
+}
+
+/** A confirmed global sign-out after `seq`. */
+function isGlobalSignOutAfter(event: DecisionEvent, seq: number): boolean {
+  return event.kind === "studio.cleanup.signed_out" && event.source === "canonical" && event.seq > seq && event.payload.confirmed === true && event.payload.scope === "global";
+}
+
+/** The owner's runtime acquired under the lease and the execution epoch of the process acquisition it names, or why not. */
+function ownerExecutionForLease(events: ReadonlyArray<DecisionEvent>, lease: StudioDeadOwnerReleaseInput["lease"]): { runtime: DecisionEvent; epoch: unknown } | { reason: string } {
+  const workerHash = sha256(lease.workerId);
+  const runtime = events.find((event) => isOwnerRuntimeForLease(event, workerHash, lease.leaseEpoch));
+  if (!runtime) return { reason: "owner_runtime_not_bound_to_lease" };
+  const acquisition = events
+    .filter((event) => isProcessAcquisitionBefore(event, runtime.seq))
+    .sort((left, right) => right.seq - left.seq)[0];
+  if (!acquisition) return { reason: "owner_process_not_bound_to_lease" };
+  return { runtime, epoch: acquisition.payload.execution_epoch_sha256 };
+}
+
 /**
  * Basis 1: the dead owner's own cleanup, bound to this lease epoch. The
  * browser runtime acquired under (owner, epoch) names its process
@@ -251,41 +284,79 @@ export function studioEffectiveTokenLifetimeMs(events: ReadonlyArray<DecisionEve
  * acquisition.
  */
 export function ownerCleanupForLease(events: ReadonlyArray<DecisionEvent>, lease: StudioDeadOwnerReleaseInput["lease"]): { complete: true; closedSeq: number } | { complete: false; reason: string } {
-  const workerHash = sha256(lease.workerId);
-  const runtime = events.find((event) => event.kind === "harness.browser_runtime_acquired" && event.source === "canonical" && event.payload.worker_id_sha256 === workerHash && event.payload.browser_lease_epoch === lease.leaseEpoch);
-  if (!runtime) return { complete: false, reason: "owner_runtime_not_bound_to_lease" };
-  const acquisition = events
-    .filter((event) => event.kind === "harness.browser_process_acquired" && event.source === "browser" && event.seq < runtime.seq && typeof event.payload.execution_epoch_sha256 === "string")
-    .sort((left, right) => right.seq - left.seq)[0];
-  if (!acquisition) return { complete: false, reason: "owner_process_not_bound_to_lease" };
-  const epoch = acquisition.payload.execution_epoch_sha256;
-  const closed = events.find((event) => event.kind === "cleanup.browser_context_closed" && event.source === "browser" && event.seq > runtime.seq
-    && event.payload.execution_epoch_sha256 === epoch && event.payload.close_resolved === true && event.payload.browser_registry_absent === true);
+  const execution = ownerExecutionForLease(events, lease);
+  if ("reason" in execution) return { complete: false, reason: execution.reason };
+  const { runtime, epoch } = execution;
+  const closed = events.find((event) => isEpochCloseAfter(event, epoch, runtime.seq));
   if (!closed) return { complete: false, reason: "owner_browser_close_not_proven" };
-  const signedOut = events.some((event) => event.kind === "studio.cleanup.signed_out" && event.source === "canonical" && event.seq > runtime.seq && event.payload.confirmed === true && event.payload.scope === "global");
+  const signedOut = events.some((event) => isGlobalSignOutAfter(event, runtime.seq));
   if (!signedOut) return { complete: false, reason: "owner_sign_out_not_confirmed" };
   const ended = studioExchangeEndAfterJoin(events);
   if (!ended || ended.seq < runtime.seq) return { complete: false, reason: "owner_exchange_end_not_confirmed" };
   return { complete: true, closedSeq: closed.seq };
 }
 
-export function decideStudioDeadOwnerRelease(input: StudioDeadOwnerReleaseInput): StudioDeadOwnerReleaseDecision {
-  if (input.run.scenarioVersion !== STUDIO_G7_SCENARIO_VERSION) return { release: false, reason: "not_studio_run" };
-  if (!TERMINAL_RUN_STATES.has(input.run.state)) return { release: false, reason: "run_not_terminal" };
-  if (input.lease.expiresAt.getTime() > input.now.getTime()) return { release: false, reason: "lease_not_expired" };
-  if (studioLeaseOwnerHeartbeatLive(input)) return { release: false, reason: "owner_heartbeat_live" };
-  const owner = ownerCleanupForLease(input.events, input.lease);
-  if (owner.complete) return { release: true, basis: "owner_cleanup_complete", closedSeq: owner.closedSeq };
+/** The gates common to both bases, in order: a terminal Studio run, an expired lease, an owner not alive. Null when all hold. */
+function deadOwnerCommonGate(input: StudioDeadOwnerReleaseInput): string | null {
+  if (input.run.scenarioVersion !== STUDIO_G7_SCENARIO_VERSION) return "not_studio_run";
+  if (!TERMINAL_RUN_STATES.has(input.run.state)) return "run_not_terminal";
+  if (input.lease.expiresAt.getTime() > input.now.getTime()) return "lease_not_expired";
+  if (studioLeaseOwnerHeartbeatLive(input)) return "owner_heartbeat_live";
+  return null;
+}
+
+/** A not-live verification of this owner and lease epoch, at or after the quiet point. */
+function isOwnerVerificationAfter(event: DecisionEvent, lease: StudioDeadOwnerReleaseInput["lease"], quietAt: number): boolean {
+  return event.kind === STUDIO_DEAD_OWNER_VERIFIED_KIND && event.source === "worker"
+    && event.payload.worker_id_sha256 === sha256(lease.workerId) && event.payload.lease_epoch === lease.leaseEpoch
+    && event.at.getTime() >= quietAt;
+}
+
+/** The fresh verification `verificationId` names: the exchange not live and the principal signed out. */
+function isFreshNotLiveVerification(event: DecisionEvent, input: StudioDeadOwnerReleaseInput, quietAt: number): boolean {
+  return isOwnerVerificationAfter(event, input.lease, quietAt)
+    && event.payload.verification_id === input.verificationId && event.payload.exchange_not_live === true && event.payload.signed_out === true;
+}
+
+/** A verification whose presence read was decisive: a fresh report, present or absent. */
+function isDecisivePresence(event: DecisionEvent): boolean {
+  return event.payload.room_presence === "present" || event.payload.room_presence === "absent";
+}
+
+type QuiescedRelease = Extract<StudioDeadOwnerReleaseDecision, { basis: "quiesced" }>;
+
+/**
+ * The latest decisive verification placed the principal in the room: the
+ * lease is kept, unless the veto expired (this verification shows the
+ * bridge's report gone, at least STUDIO_PRESENCE_VETO_BOUND_MS after that
+ * present) or the stuck-present cap was reached.
+ */
+function presentVetoDecision(decisions: DecisionEvent[], decisive: DecisionEvent, verification: DecisionEvent, released: Omit<QuiescedRelease, "presenceVetoExpired" | "presenceVetoCapped">): StudioDeadOwnerReleaseDecision {
+  // Both times are the database clock (verification events are DB-stamped).
+  // The bound runs only on evidence that the bridge's report is gone (no
+  // report, or a stale one) in THIS verification; a failed read never counts.
+  const gone = verification.seq > decisive.seq && verification.payload.room_presence === "unobservable" && STUDIO_PRESENCE_GONE_REASONS.has(String(verification.payload.room_presence_reason));
+  if (gone && verification.at.getTime() - decisive.at.getTime() >= STUDIO_PRESENCE_VETO_BOUND_MS) {
+    return { ...released, presenceVetoExpired: { presentSeq: decisive.seq, presentAt: decisive.at } };
+  }
+  // Stuck present: the first present of the current unbroken run of presents, capped.
+  const lastAbsent = decisions.map((event) => event.payload.room_presence).lastIndexOf("absent");
+  const firstPresent = decisions[lastAbsent + 1]!;
+  if (verification.at.getTime() - firstPresent.at.getTime() >= STUDIO_PRESENCE_STUCK_CAP_MS) {
+    return { ...released, presenceVetoCapped: { firstPresentSeq: firstPresent.seq, firstPresentAt: firstPresent.at } };
+  }
+  return { release: false, reason: "principal_present_in_room" };
+}
+
+/** Basis 2 (quiesced): a post-expiry global sign-out, the token lifetime since, then a fresh not-live verification and the room's presence. */
+function decideQuiescedRelease(input: StudioDeadOwnerReleaseInput): StudioDeadOwnerReleaseDecision {
   if (!Number.isSafeInteger(input.tokenMaxLifetimeMs) || input.tokenMaxLifetimeMs < 60_000) return { release: false, reason: "token_lifetime_invalid" };
   const signOut = earliestGlobalSignOutAfter(input.events, input.lease.expiresAt);
   if (!signOut) return { release: false, reason: "global_sign_out_after_expiry_missing" };
   const quietAt = signOut.at.getTime() + studioEffectiveTokenLifetimeMs(input.events, input.tokenMaxLifetimeMs);
   if (input.now.getTime() < quietAt) return { release: false, reason: "access_token_lifetime_pending" };
   if (input.verificationId === null) return { release: false, reason: "fresh_exchange_verification_missing" };
-  const verification = input.events.find((event) => event.kind === STUDIO_DEAD_OWNER_VERIFIED_KIND && event.source === "worker"
-    && event.payload.verification_id === input.verificationId && event.payload.exchange_not_live === true && event.payload.signed_out === true
-    && event.payload.worker_id_sha256 === sha256(input.lease.workerId) && event.payload.lease_epoch === input.lease.leaseEpoch
-    && event.at.getTime() >= quietAt);
+  const verification = input.events.find((event) => isFreshNotLiveVerification(event, input, quietAt));
   if (!verification) return { release: false, reason: "fresh_exchange_verification_missing" };
   // Presence is decided by the LATEST decisive verification (a fresh report:
   // present or absent) of this owner and lease epoch after the quiet point,
@@ -296,26 +367,18 @@ export function decideStudioDeadOwnerRelease(input: StudioDeadOwnerReleaseInput)
   // STUDIO_PRESENCE_VETO_BOUND_MS after that present, with no fresh report
   // since, the lease is released and the release records the expired veto.
   const decisions = input.events
-    .filter((event) => event.kind === STUDIO_DEAD_OWNER_VERIFIED_KIND && event.source === "worker"
-      && event.payload.worker_id_sha256 === sha256(input.lease.workerId) && event.payload.lease_epoch === input.lease.leaseEpoch
-      && event.at.getTime() >= quietAt && (event.payload.room_presence === "present" || event.payload.room_presence === "absent"))
+    .filter((event) => isOwnerVerificationAfter(event, input.lease, quietAt) && isDecisivePresence(event))
     .sort((left, right) => left.seq - right.seq);
   const decisive = decisions.at(-1);
-  if (decisive?.payload.room_presence === "present") {
-    // Both times are the database clock (verification events are DB-stamped).
-    // The bound runs only on evidence that the bridge's report is gone (no
-    // report, or a stale one) in THIS verification; a failed read never counts.
-    const gone = verification.seq > decisive.seq && verification.payload.room_presence === "unobservable" && STUDIO_PRESENCE_GONE_REASONS.has(String(verification.payload.room_presence_reason));
-    if (gone && verification.at.getTime() - decisive.at.getTime() >= STUDIO_PRESENCE_VETO_BOUND_MS) {
-      return { release: true, basis: "quiesced", signOutAt: signOut.at, signOutSeq: signOut.seq, verificationSeq: verification.seq, presenceVetoExpired: { presentSeq: decisive.seq, presentAt: decisive.at } };
-    }
-    // Stuck present: the first present of the current unbroken run of presents, capped.
-    const lastAbsent = decisions.map((event) => event.payload.room_presence).lastIndexOf("absent");
-    const firstPresent = decisions[lastAbsent + 1]!;
-    if (verification.at.getTime() - firstPresent.at.getTime() >= STUDIO_PRESENCE_STUCK_CAP_MS) {
-      return { release: true, basis: "quiesced", signOutAt: signOut.at, signOutSeq: signOut.seq, verificationSeq: verification.seq, presenceVetoCapped: { firstPresentSeq: firstPresent.seq, firstPresentAt: firstPresent.at } };
-    }
-    return { release: false, reason: "principal_present_in_room" };
-  }
-  return { release: true, basis: "quiesced", signOutAt: signOut.at, signOutSeq: signOut.seq, verificationSeq: verification.seq };
+  const released = { release: true as const, basis: "quiesced" as const, signOutAt: signOut.at, signOutSeq: signOut.seq, verificationSeq: verification.seq };
+  if (decisive?.payload.room_presence === "present") return presentVetoDecision(decisions, decisive, verification, released);
+  return released;
+}
+
+export function decideStudioDeadOwnerRelease(input: StudioDeadOwnerReleaseInput): StudioDeadOwnerReleaseDecision {
+  const gate = deadOwnerCommonGate(input);
+  if (gate !== null) return { release: false, reason: gate };
+  const owner = ownerCleanupForLease(input.events, input.lease);
+  if (owner.complete) return { release: true, basis: "owner_cleanup_complete", closedSeq: owner.closedSeq };
+  return decideQuiescedRelease(input);
 }

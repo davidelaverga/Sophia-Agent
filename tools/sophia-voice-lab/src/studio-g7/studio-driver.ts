@@ -211,6 +211,21 @@ async function revokeRefusedSessions(sessions: RefusedSessions, principalId: str
   return { refused: sessions.owed.length + sessions.revoked, unrevoked: sessions.owed.length, attempts, httpStatus };
 }
 
+/** The run's own note an action hands over (from its durable record_note receipt): both ids well formed, or none. */
+function studioOwnNoteHandover(input: Record<string, unknown>): { entryId: string; sourceId: string } | null {
+  if (typeof input._own_note_entry_id !== "string" || typeof input._own_note_source_id !== "string" || !UUID.test(input._own_note_entry_id) || !UUID.test(input._own_note_source_id)) return null;
+  return { entryId: input._own_note_entry_id.toLowerCase(), sourceId: input._own_note_source_id.toLowerCase() };
+}
+
+/** An `observe` request: the voice step it reads for, and its wait, bounded by the settle budget. */
+function studioObserveRequest(input: Record<string, unknown>): { stepId: string; waitMs: number } {
+  const forStep = input.for_step;
+  if (typeof forStep !== "string" || !(STUDIO_G7_VOICE_STEPS as readonly string[]).includes(forStep)) throw studioError("STUDIO_ACTION_INVALID", "observe needs for_step naming a G7 voice step.", "validation");
+  const budget = typeof input._settle_budget_ms === "number" ? input._settle_budget_ms : 30_000;
+  const waitMs = Math.min(typeof input.wait_ms === "number" ? Math.max(0, input.wait_ms) : 0, budget);
+  return { stepId: studioG7StepId(forStep as StudioG7VoiceStep), waitMs };
+}
+
 /** The refused sessions' counts on a sign-out or revoke receipt (no token, ever). */
 function refusedSessionsFields(outcome: RefusedSessionsOutcome): Record<string, number> {
   return { refused_sessions: outcome.refused, refused_sessions_unrevoked: outcome.unrevoked, refused_logout_attempts: outcome.attempts };
@@ -546,18 +561,13 @@ export class StudioG7Driver implements VoiceBrowserDriver, StudioDriverExtension
     const tokens = this.#tokenSource(session);
     if (Object.hasOwn(input, "_own_create_task_id")) this.setStudioOwnCreateTask(run.id, typeof input._own_create_task_id === "string" ? input._own_create_task_id : null);
     // The run's own note, handed over from its durable record_note receipt.
-    if (typeof input._own_note_entry_id === "string" && typeof input._own_note_source_id === "string" && UUID.test(input._own_note_entry_id) && UUID.test(input._own_note_source_id)) {
-      this.#ownNote.set(run.id, { entryId: input._own_note_entry_id.toLowerCase(), sourceId: input._own_note_source_id.toLowerCase() });
-    }
+    const ownNote = studioOwnNoteHandover(input);
+    if (ownNote !== null) this.#ownNote.set(run.id, ownNote);
     if (action === "observe") {
       // Not a step: a read-only outcome read for a voice step, optionally
       // after a bounded wait so the product can act on the utterance.
-      const forStep = input.for_step;
-      if (typeof forStep !== "string" || !(STUDIO_G7_VOICE_STEPS as readonly string[]).includes(forStep)) throw studioError("STUDIO_ACTION_INVALID", "observe needs for_step naming a G7 voice step.", "validation");
-      const budget = typeof input._settle_budget_ms === "number" ? input._settle_budget_ms : 30_000;
-      const waitMs = Math.min(typeof input.wait_ms === "number" ? Math.max(0, input.wait_ms) : 0, budget);
+      const { stepId, waitMs } = studioObserveRequest(input);
       if (waitMs > 0) await this.#wait(waitMs);
-      const stepId = studioG7StepId(forStep as StudioG7VoiceStep);
       const events: DriverEvent[] = [...await this.drain(run.id, true)];
       const observed = await this.#observeOutcome(run, tokens, stepId, [], operationId);
       events.push(observed.event);

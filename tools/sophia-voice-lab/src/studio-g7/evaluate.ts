@@ -911,25 +911,45 @@ export function studioG7CleanupProof(events: Event[]): { exchangeEnded: boolean;
   // A run that never acquired a browser (e.g. deployment mismatch before
   // launch) never authenticated and never opened an exchange: the worker's
   // authoritative ledger read is the whole proof.
-  const allocationFree = events.some((event) => event.kind === "cleanup.browser_context_absent" && event.payload.browser_never_allocated === true && event.payload.authoritative_ledger_read === true)
-    && !events.some((event) => event.kind === "harness.browser_process_acquired" || event.kind === "studio.auth.session_established" || event.kind === "studio.exchange.opened" || event.kind === "studio.exchange.speak_requested");
-  if (allocationFree) return { exchangeEnded: true, signedOut: true, browserClosed: true, browserQuiesced: false, refreshSessionsRevoked: true, complete: true };
+  if (studioAllocationFree(events)) return { exchangeEnded: true, signedOut: true, browserClosed: true, browserQuiesced: false, refreshSessionsRevoked: true, complete: true };
   // A confirmed end counts only after the run's exchange join (or Speak
   // intent): an earlier settle cannot speak for an exchange opened later.
   const exchangeEnded = studioExchangeEndAfterJoin(events) !== null;
-  const signedOut = events.some((event) => event.kind === "studio.cleanup.signed_out" && event.source === "canonical" && event.payload.confirmed === true && event.payload.scope === "global");
-  const browserClosed = events.some((event) => event.kind === "cleanup.browser_context_closed" && event.source === "browser" && event.payload.close_resolved === true && event.payload.browser_registry_absent === true)
-    || events.some((event) => event.kind === "cleanup.browser_context_absent" && event.payload.browser_never_allocated === true);
+  const signedOut = events.some(isConfirmedGlobalSignOut);
+  const browserClosed = events.some(isProvenBrowserClose) || events.some(isBrowserNeverAllocated);
   // A dead foreign worker's browser cannot be proven closed; its lease is
   // released only once that browser can no longer act on the product
   // (lease-release.ts). Typed `quiesced`, never `closed`.
-  const browserQuiesced = events.some((event) => event.kind === "cleanup.browser_lease_released" && event.payload.schema === STUDIO_DEAD_OWNER_LEASE_RELEASE_SCHEMA && event.payload.dead_owner_quiesced === true && event.payload.cas_deleted === true);
+  const browserQuiesced = events.some(isQuiescedLeaseRelease);
   // An evidence-refresh session whose local revoke failed stays valid on the
   // server until a later confirmed global sign-out revokes it.
   const refreshSessionsRevoked = events
     .filter((event) => event.kind === "studio.evidence.session_revoked" && event.source === "canonical" && event.payload.confirmed !== true)
-    .every((unrevoked) => events.some((event) => event.kind === "studio.cleanup.signed_out" && event.source === "canonical" && event.payload.confirmed === true && event.payload.scope === "global" && event.seq > unrevoked.seq));
+    .every((unrevoked) => events.some((event) => isConfirmedGlobalSignOut(event) && event.seq > unrevoked.seq));
   return { exchangeEnded, signedOut, browserClosed, browserQuiesced, refreshSessionsRevoked, complete: exchangeEnded && signedOut && (browserClosed || browserQuiesced) && refreshSessionsRevoked };
+}
+
+/** The worker's authoritative ledger read that no browser was ever allocated, and nothing a browser would leave. */
+function studioAllocationFree(events: Event[]): boolean {
+  return events.some((event) => isBrowserNeverAllocated(event) && event.payload.authoritative_ledger_read === true)
+    && !events.some((event) => event.kind === "harness.browser_process_acquired" || event.kind === "studio.auth.session_established" || event.kind === "studio.exchange.opened" || event.kind === "studio.exchange.speak_requested");
+}
+
+/** Only a confirmed global sign-out signs the principal out. */
+function isConfirmedGlobalSignOut(event: Event): boolean {
+  return event.kind === "studio.cleanup.signed_out" && event.source === "canonical" && event.payload.confirmed === true && event.payload.scope === "global";
+}
+
+function isProvenBrowserClose(event: Event): boolean {
+  return event.kind === "cleanup.browser_context_closed" && event.source === "browser" && event.payload.close_resolved === true && event.payload.browser_registry_absent === true;
+}
+
+function isBrowserNeverAllocated(event: Event): boolean {
+  return event.kind === "cleanup.browser_context_absent" && event.payload.browser_never_allocated === true;
+}
+
+function isQuiescedLeaseRelease(event: Event): boolean {
+  return event.kind === "cleanup.browser_lease_released" && event.payload.schema === STUDIO_DEAD_OWNER_LEASE_RELEASE_SCHEMA && event.payload.dead_owner_quiesced === true && event.payload.cas_deleted === true;
 }
 
 /**
