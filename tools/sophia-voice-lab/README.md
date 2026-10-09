@@ -230,9 +230,25 @@ falls back to a global sign-out, because a later run of the same principal may
 be live by then. A refresh session that stays unrevoked is recorded and keeps
 the cleanup proof incomplete (`cleanup.refresh_session_revoked`), so the run
 cannot certify; the worker then signs the principal out globally only once no
-other run holds admission (if the certification deadline passes first, the
-failed run holds admission again until that sign-out is done). A step not
-performed before End fails the harness at once instead of waiting for it.
+other run can hold a live principal session (if the certification deadline
+passes first, the failed run holds admission again until that sign-out is
+done). A step not performed before End fails the harness at once instead of
+waiting for it.
+
+**Global sign-out fence.** Every Studio API-only recovery ends in a global
+sign-out of the one synthetic principal. The ledger grants it in one critical
+section that admission also takes (the PostgreSQL run-quota advisory lock),
+and only when no other run can hold a live principal session: a run that is
+not terminal, or still holds a browser lease. A terminal run whose browser is
+closed is never waited on; there is nothing of it a sign-out could revoke, and
+waiting on it could deadlock. While the sign-out is pending the run holds
+admission and a durable marker makes admission refuse with
+`STUDIO_GLOBAL_SIGNOUT_PENDING`; the marker is cleared when the sign-out is
+confirmed or abandoned. No wait cycle remains: a deferral waits only on a run
+that is live (not terminal, or leased), at most one run is live at a time
+(admission admits one run, and a run never leaves a terminal state or regains a
+lease), and a live run's own recovery never waits on a terminal, lease-free
+run.
 
 **Cleanup.** The Lab never requests End for an exchange it cannot prove is the
 run's own: the exchange joined to this run after its Speak, whose evidence names
@@ -244,13 +260,20 @@ room) that the run's exchange is no longer live, or types the state `uncertain`
 / `unavailable` and re-verifies with backoff until the product guard ends it at
 its deadline. A snapshot answer without a well-formed `room.sophia` presence is
 typed unknown, never "no live exchange". Once Speak was requested and no
-exchange is joined (start still running or not), a room with nothing live is
-typed `uncertain` until the open window has passed (120 s after Speak by
-default): only a read-only member-API observation after it that shows nothing
-live confirms the end (`no_live_exchange_after_open_window`). Each settlement
+exchange is joined (start still running or not), a room with nothing live stays
+`uncertain` until the principal has left the room: only a read-only member-API
+observation made after the run's browser close and a confirmed global sign-out
+(both durable after Speak; for a dead owner, after its lease was quiesced) that
+shows nothing live confirms the end (`no_live_exchange_after_principal_left`).
+No time window is used: a window cannot prove an exchange will not open later,
+and no clock of one worker is compared with another's. Limit: an open request
+the API accepted before the sign-out could still create an exchange after it;
+the Lab treats the principal's departure as the end of its ability to open one.
+If nothing-live-after-departure is never observed (an exchange stays live), the
+run stays not cleanup-complete until the product guard ends it. Each settlement
 records what the driver knew when it observed (Speak requested or not, the
-joined id, the observation time), and the cleanup proof counts an end against
-that, not against when it reached the ledger: after a Speak intent, a
+joined id, browser closed, signed out), and the cleanup proof counts an end
+against that, not against when it reached the ledger: after a Speak intent, a
 confirmation made before Speak or without an API read never counts. Leaving the room (the room
 UI's "Leave the room") and closing the run-owned Chromium are not
 ownership-gated: they act on the principal's own presence and browser, not on an
