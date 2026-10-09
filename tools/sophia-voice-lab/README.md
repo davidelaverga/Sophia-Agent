@@ -264,8 +264,14 @@ principal's first, and every decision resting on one of them), so it is sent
 only when every previewed entry is the run's own note (its recorded note, or
 one bound to its exchange, by the principal) and every previewed decision is the run's own (proposed by
 the principal by voice, decided by nobody else, resting only on the run's own
-notes; the mission read does not expose a decision's exchange); otherwise
-nothing is sent (`withdrawal_cascade_not_own`). The run's report is
+notes; the mission read does not expose a decision's exchange) at exactly the
+revision the preview names; otherwise nothing is sent
+(`withdrawal_cascade_not_own`). A decision is the run's own only at its exact
+`{id, revision}`: accepting it, another member too, gives it a new revision. When
+the preview names a revision of an own decision that the ownership read did not
+see, one bounded fresh mission read must show it still the run's own at exactly
+that revision, or nothing is sent (an unavailable read: `recheck_mission_*`).
+A change after the preview is refused by the product's own staleness check. The run's report is
 resolved only through the product's own chain, every link a member read as the
 principal: the run's certified create task (the create step's certification
 below, whose `NativeTask.exchangeId` is the run's exchange) → its research's
