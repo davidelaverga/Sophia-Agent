@@ -1627,10 +1627,14 @@ export async function requestBoundJsonWithOneTransientRetry(
 /** C046: a FINITE catalog, not a shape filter. Exactly the machine codes the
  * frontend Voice Lab capability/ledger/auth routes and the gateway
  * end-session/capability paths can return (extracted from b103 frontend and
- * 7d0f gateway source). Any other string, however code-shaped, is omitted. */
+ * 7d0f gateway source; `voice_lab_canonical_transcript_unavailable`, the
+ * gateway's 503 `detail.code` when the canonical transcript cannot be read,
+ * added from 6aede7d's backend/app/gateway/routers/sophia.py). Any other
+ * string, however code-shaped, is omitted. */
 export const PRODUCT_ERROR_CODES: ReadonlySet<string> = new Set([
   "voice_lab_auth_active_run_conflict", "voice_lab_auth_ledger_binding_mismatch", "voice_lab_auth_ledger_not_ready", "voice_lab_auth_run_not_found",
   "voice_lab_auth_session_mutation_unconfirmed", "voice_lab_authenticated_principal_required", "voice_lab_canonical_transcript_invalid",
+  "voice_lab_canonical_transcript_unavailable",
   "voice_lab_capability_deployment_mismatch", "voice_lab_capability_expired_or_not_yet_valid", "voice_lab_capability_invalid_lifetime",
   "voice_lab_capability_invalid_signature", "voice_lab_capability_malformed", "voice_lab_capability_missing",
   "voice_lab_capability_operation_denied", "voice_lab_capability_wrong_audience", "voice_lab_capability_wrong_environment",

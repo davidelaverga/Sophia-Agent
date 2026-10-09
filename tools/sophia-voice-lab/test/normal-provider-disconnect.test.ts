@@ -583,6 +583,8 @@ describe("receiving disconnect wait under the worker's absolute end deadline", (
 it("extracts only a catalogued product failure code, never free text, other fields or uncatalogued strings", () => {
   expect(productErrorCode({ error: "voice_lab_auth_run_not_found" })).toBe("voice_lab_auth_run_not_found");
   expect(productErrorCode({ detail: { code: "voice_lab_session_thread_mismatch", message: "PRIVATE" } })).toBe("voice_lab_session_thread_mismatch");
+  // The gateway's 503 when the canonical transcript cannot be read (routers/sophia.py, _read_exact_synthetic_messages).
+  expect(productErrorCode({ detail: { code: "voice_lab_canonical_transcript_unavailable" } })).toBe("voice_lab_canonical_transcript_unavailable");
   expect(productErrorCode({ code: "voice_lab_cleanup_obligation_closed" })).toBe("voice_lab_cleanup_obligation_closed");
   // Code-shaped but uncatalogued: could be an identifier or credential, so omitted (C046).
   for (const body of [{ error: "voice_lab_secret_abcdef0123456789" }, { error: "session_token_abc123" }, { detail: { code: "abcdef0123456789abcdef" } },
