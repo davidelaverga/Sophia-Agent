@@ -33,6 +33,9 @@ import { assertRunAcceptsOperation } from "./state-machine.js";
 import { SCENARIO_CATALOG, SCENARIO_IDS } from "./scenarios.js";
 import { P01_ASSISTANT_OBSERVATIONS, P01_OPERATION_OBSERVATIONS, P01_LIMITS, P01_MAX_CHRONOLOGICAL_CALLS, p01EndNeedsFinalization } from "./p01-contract.js";
 import { verifyRetainedD02OwnerDeath } from "./retained-owner-verifier.js";
+import { STUDIO_G7_CONTRACT_VERSION, STUDIO_G7_RECEIPT_COVERAGE, STUDIO_G7_TARGET_KIND, STUDIO_RUN_BINDING_SCHEMA, computeRunBindingSha256 } from "./studio-g7/contract.js";
+import { projectStudioG7Config, type StudioG7Config } from "./studio-g7/config.js";
+import { STUDIO_G7_CATALOG, STUDIO_G7_SCENARIO_IDS, STUDIO_G7_SCENARIO_VERSION, scenarioSupportForTarget } from "./studio-g7/scenarios.js";
 import { deriveRetainedD02SettlementLookup } from "./retained-d02-provider.js";
 
 const StartSchema = z.object({
@@ -40,6 +43,15 @@ const StartSchema = z.object({
   target: TargetSchema,
   scenario_id: z.enum(SCENARIO_IDS).optional(),
   scenario_version: z.literal(SCENARIO_CATALOG_VERSION).optional(),
+  capture_policy: CapturePolicySchema.optional(),
+  idempotency_key: IdempotencyKeySchema,
+}).strict();
+
+/** Studio G7 start: the target is pinned by configuration, never by the caller. */
+export const StudioG7StartSchema = z.object({
+  environment: z.enum(["production", "staging"]),
+  scenario_id: z.enum(STUDIO_G7_SCENARIO_IDS),
+  scenario_version: z.literal(STUDIO_G7_SCENARIO_VERSION),
   capture_policy: CapturePolicySchema.optional(),
   idempotency_key: IdempotencyKeySchema,
 }).strict();
@@ -572,6 +584,17 @@ export class VoiceLabService {
       raw_audio: "unavailable_until_isolated_storage",
       video: "unavailable_until_isolated_storage",
       kill_switch: this.config.killSwitch ? "engaged" : "open",
+      ...(this.config.targetKind === STUDIO_G7_TARGET_KIND && this.config.studioG7 ? { studio_g7: {
+        target_kind: STUDIO_G7_TARGET_KIND,
+        contract_version: STUDIO_G7_CONTRACT_VERSION,
+        target: projectStudioG7Config(this.config.studioG7),
+        scenario_versions: [STUDIO_G7_SCENARIO_VERSION],
+        scenarios: STUDIO_G7_CATALOG,
+        legacy_scenarios: "unsupported_for_target",
+        receipt_coverage: STUDIO_G7_RECEIPT_COVERAGE,
+        run_binding: { schema: STUDIO_RUN_BINDING_SCHEMA, algorithm: "sha256(utf8(canonical_json({cleanup_obligation_id,scenario_id,scenario_version,schema,test_run_id})))" },
+        start: "VoiceLabService.startStudioG7Run (not registered as an MCP tool in this change)",
+      } } : {}),
     } });
   }
 
@@ -1614,6 +1637,15 @@ export class VoiceLabService {
   async startVoiceRun(caller: AuthenticatedCaller, raw: unknown): Promise<LabEnvelope> {
     requireScope(caller, "voice_lab:run");
     this.assertMutationEnabled("start_voice_run");
+    if (this.config.targetKind === STUDIO_G7_TARGET_KIND) {
+      // Legacy Gemini-browser scenarios (V-A01 … V-P01) need a browser
+      // provider socket the Studio does not have; they are never remapped.
+      const record = raw && typeof raw === "object" && !Array.isArray(raw) ? raw as Record<string, unknown> : {};
+      const scenarioId = typeof record.scenario_id === "string" ? record.scenario_id : null;
+      const scenarioVersion = typeof record.scenario_version === "string" ? record.scenario_version : null;
+      const support = scenarioSupportForTarget(STUDIO_G7_TARGET_KIND, scenarioId, scenarioVersion);
+      throw new VoiceLabError(labError("SCENARIO_UNSUPPORTED_FOR_TARGET", "start_voice_run drives the legacy Gemini-browser target; this deployment targets the Studio LiveKit G7 product.", "validation", false, { status: "unsupported_for_target", target_kind: STUDIO_G7_TARGET_KIND, scenario_id: scenarioId, scenario_version: scenarioVersion, reason: support.status === "unsupported_for_target" ? support.reason : "use_start_studio_g7_run" }));
+    }
     const input = StartSchema.parse(raw);
     if (input.scenario_id === "V-L01") requireScope(caller, "voice_lab:fault");
     assertScenarioSupported(input.scenario_id);
@@ -1671,6 +1703,64 @@ export class VoiceLabService {
     if (!created.replay) await this.ledger.appendEvent(created.run.id, "run.accepted", "mcp", { operation_id: created.operation.id, scenario_id: created.run.scenarioId }, `operation:${created.operation.id}:accepted`);
     const fresh = await this.ledger.getRun(created.run.id) ?? created.run;
     return envelope({ run: fresh, operationId: created.operation.id, status: created.operation.state === "succeeded" ? "completed" : "accepted", data: { replay: created.replay, submission_outcome: created.replay ? "idempotent_replay" : "durably_accepted", run_state: fresh.state, operation_state: created.operation.state, rolling_admission: { replay: rollingAdmission.replay, reset_at: rollingAdmission.resetAt.toISOString(), remaining: rollingAdmission.remaining } } });
+  }
+
+  /**
+   * Reserve a Studio G7 run. The response carries the non-secret run binding
+   * hash the operator passes to `sophia.voice_qualification_grant(...)`; the
+   * worker's start waits (bounded) for the grant-bound page receipt before it
+   * opens an exchange, because a grant never covers an earlier exchange.
+   */
+  async startStudioG7Run(caller: AuthenticatedCaller, raw: unknown): Promise<LabEnvelope> {
+    requireScope(caller, "voice_lab:run");
+    this.assertMutationEnabled("start_studio_g7_run");
+    const studio = this.config.targetKind === STUDIO_G7_TARGET_KIND ? this.config.studioG7 ?? null : null;
+    if (!studio) {
+      const record = raw && typeof raw === "object" && !Array.isArray(raw) ? raw as Record<string, unknown> : {};
+      throw new VoiceLabError(labError("SCENARIO_UNSUPPORTED_FOR_TARGET", "Studio G7 scenarios need the studio-livekit-g7-v1 target kind.", "validation", false, { status: "unsupported_for_target", target_kind: this.config.targetKind ?? "legacy-gemini-browser-v1", scenario_id: typeof record.scenario_id === "string" ? record.scenario_id : null, scenario_version: typeof record.scenario_version === "string" ? record.scenario_version : null }));
+    }
+    const input = StudioG7StartSchema.parse(raw);
+    if (input.environment !== this.config.environment) throw new VoiceLabError(labError("ENVIRONMENT_MISMATCH", "Requested environment does not match this isolated Voice Lab deployment.", "deployment"));
+    const target = studioTargetSpec(studio);
+    this.validateTarget(target);
+    if (this.config.nodeEnv !== "test") {
+      const workers = await this.ledger.listLiveWorkers(new Date(Date.now() - 10_000));
+      const profile = workers.length === 1 ? workers[0]!.detail.active_run_profile as Record<string, unknown> | undefined : undefined;
+      if (profile?.status !== "sufficient") throw new VoiceLabError(labError("WORKER_PROFILE_INSUFFICIENT", "The live singleton worker has not attested the minimum active-run cgroup profile.", "deployment", true, { live_workers: workers.length, profile_status: profile?.status ?? "unavailable" }));
+    }
+    const policy = input.capture_policy ?? { raw_audio: false, screenshot: false, video: false, retention_hours: 24 };
+    if (policy.raw_audio) throw new VoiceLabError(labError("RAW_AUDIO_UNAVAILABLE", "Raw audio capture is unavailable until isolated governed storage is implemented.", "authorization"));
+    if (policy.video) throw new VoiceLabError(labError("VIDEO_UNAVAILABLE", "Video capture is unavailable until isolated durable storage is provisioned.", "validation"));
+    this.validateRetentionPolicy(policy.retention_hours);
+    const now = new Date();
+    const runId = randomUUID();
+    const run: RunRecord = {
+      id: runId, callerId: caller.subject, principalId: this.config.principalId, testRunId: randomUUID(), cleanupObligationId: randomUUID(),
+      environment: input.environment, scenarioId: input.scenario_id, scenarioVersion: input.scenario_version, state: "reserved", version: 1, target,
+      observedDeployment: {},
+      // Screenshots may show captions (speech text); the product's privacy
+      // model forbids retaining speech, so studio runs never capture them.
+      capturePolicy: { rawAudio: false, screenshot: false, video: false, retentionHours: policy.retention_hours },
+      verdicts: initialVerdicts(), canonicalSessionId: null, threadId: null, providerSessionId: null, traceId: null, providerEpoch: null, turnId: null,
+      latestCursor: 0, expiresAt: new Date(now.getTime() + this.config.maxRunSeconds * 1_000), createdAt: now, updatedAt: now, cleanupComplete: false,
+      retentionPurgeDueAt: null, retentionPurgePending: false, retentionPurgeVerifiedAt: null, evidencePurgedAt: null, terminalError: null,
+    };
+    const requestHash = canonicalRequestHash({ ...input, tool: "start_studio_g7_run" });
+    const rolling: RollingAdmissionFence = { reservation: {
+      reservationKey: sha256(`run\u0000${caller.subject}\u0000${input.idempotency_key}`), requestHash, callerId: caller.subject, environment: input.environment, kind: "run",
+      runStarts: 1, providerSeconds: this.config.maxRunSeconds, suites: 0, suiteChildren: 0, audioDurationMs: 0, audioBytes: 0, observedAt: now,
+    }, limits: this.rollingAdmissionLimits() };
+    const created = await this.ledger.createRunWithOperation(run, { id: randomUUID(), runId, callerId: caller.subject, type: "start", idempotencyKey: input.idempotency_key, requestHash, input: input as unknown as Record<string, unknown> }, { global: this.config.maxConcurrentRuns, caller: this.config.maxRunsPerCaller }, rolling);
+    const fresh = await this.ledger.getRun(created.run.id) ?? created.run;
+    const runBindingSha256 = computeRunBindingSha256({ testRunId: fresh.testRunId, cleanupObligationId: fresh.cleanupObligationId, scenarioId: fresh.scenarioId!, scenarioVersion: fresh.scenarioVersion! });
+    if (!created.replay) await this.ledger.appendEvent(created.run.id, "run.accepted", "mcp", { operation_id: created.operation.id, scenario_id: created.run.scenarioId, target_kind: STUDIO_G7_TARGET_KIND, run_binding_sha256: runBindingSha256 }, `operation:${created.operation.id}:accepted`);
+    return envelope({ run: fresh, operationId: created.operation.id, status: created.operation.state === "succeeded" ? "completed" : "accepted", data: {
+      replay: created.replay, submission_outcome: created.replay ? "idempotent_replay" : "durably_accepted", run_state: fresh.state, operation_state: created.operation.state,
+      target_kind: STUDIO_G7_TARGET_KIND, contract_version: STUDIO_G7_CONTRACT_VERSION,
+      // Non-secret: the operator puts this value in the product grant.
+      run_binding: { schema: STUDIO_RUN_BINDING_SCHEMA, run_binding_sha256: runBindingSha256, grant_wait_ms: studio.grantWaitMs },
+      rolling_admission: { replay: created.rollingAdmission!.replay, reset_at: created.rollingAdmission!.resetAt.toISOString(), remaining: created.rollingAdmission!.remaining },
+    } });
   }
 
   async speak(caller: AuthenticatedCaller, raw: unknown): Promise<LabEnvelope> {
@@ -2291,6 +2381,24 @@ export function assertFreshProductAdmissionProof(config: VoiceLabConfig, target:
       frontend_control_adapter_ready: frontendControlAdapterReady,
     }));
   }
+}
+
+/**
+ * Studio runs reuse the TargetSpec container: frontend = Studio origin and
+ * commit, gateway/backend = API origin and commit, voice = the media bridge
+ * commit (the bridge has no public origin; its identity comes only from
+ * provider receipts). The LangGraph slots have no Studio counterpart and hold
+ * the API origin/commit; they are never probed or verified for studio runs.
+ */
+export function studioTargetSpec(studio: StudioG7Config): TargetSpec {
+  return {
+    frontendUrl: studio.studioOrigin,
+    gatewayUrl: studio.apiOrigin,
+    voiceUrl: studio.apiOrigin,
+    langgraphUrl: studio.apiOrigin,
+    expectedDeployment: { frontend: studio.expected.studio, backend: studio.expected.api, voice: studio.expected.bridge },
+    expectedDependencies: { langgraph: studio.expected.api },
+  };
 }
 
 function mapTarget(target: z.infer<typeof TargetSchema>): TargetSpec {

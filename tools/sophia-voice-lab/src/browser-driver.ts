@@ -603,7 +603,7 @@ type StartupPushState = {
   queue: StartupPushEnvelope[];
 };
 
-const PAGE_PUSH_BINDING_NAME = "__sophiaVoiceLabPushV1";
+export const PAGE_PUSH_BINDING_NAME = "__sophiaVoiceLabPushV1";
 const MAX_STARTUP_PUSH_EVENTS = 4_096;
 
 const CONSENT_ACCEPT_SELECTOR = '[data-voice-lab="consent-accept"]';
@@ -975,15 +975,9 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
 
   async drain(runId: string): Promise<Omit<LabEvent, "runId" | "seq" | "at">[]> {
     const session = this.#requireSession(runId);
-    const harness = await session.page.evaluate((after) => (window as any).__sophiaVoiceLab?.drain(after) ?? { min_seq: after + 1, latest_seq: after, events: [] }, session.harnessCursor);
-    if (harness.min_seq > session.harnessCursor + 1) throw cursorGap("harness", session.harnessCursor, harness.min_seq);
-    const events: Omit<LabEvent, "runId" | "seq" | "at">[] = [];
-    for (const event of harness.events as Array<{ seq: number; kind: string; payload: Record<string, unknown> }>) {
-      if (event.seq <= session.harnessCursor) continue;
-      session.harnessCursor = event.seq;
-      const observedAt = typeof (event as any).observed_at === "string" ? (event as any).observed_at : null;
-      events.push({ kind: event.kind, source: "browser", payload: redact({ ...event.payload, _capture_provenance: { source: "voice-lab-init", seq: event.seq, observed_at: observedAt } }), dedupeKey: `browser:${event.seq}` });
-    }
+    const harness = await readHarnessEvents(session.page, session.harnessCursor);
+    session.harnessCursor = harness.cursor;
+    const events: Omit<LabEvent, "runId" | "seq" | "at">[] = harness.events;
     const productDrain = await drainProductCapture(session.productCursor, (cursor) => session.page.evaluate((requestedCursor) => {
         const capture = (window as any).__sophiaCapture;
         if (capture?.readAfter) return capture.readAfter(requestedCursor, 500);
@@ -1546,6 +1540,23 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       : { stage, snapshot: null, unavailable_reason: "snapshot_exceeded_250kb_cap", observed_byte_length: Buffer.byteLength(serialized) };
     return { kind: "capture.snapshot", source: "product", payload, dedupeKey: `snapshot:${stage}:${Date.now()}` };
   }
+}
+
+/** Read the shared init script's harness ring after a cursor. Extracted
+ * unchanged from the legacy drain so the Studio driver reads the same
+ * receipts with the same gap discipline. */
+export async function readHarnessEvents(page: Pick<Page, "evaluate">, harnessCursor: number): Promise<{ cursor: number; events: Omit<LabEvent, "runId" | "seq" | "at">[] }> {
+  const harness = await page.evaluate((after) => (window as any).__sophiaVoiceLab?.drain(after) ?? { min_seq: after + 1, latest_seq: after, events: [] }, harnessCursor);
+  if (harness.min_seq > harnessCursor + 1) throw cursorGap("harness", harnessCursor, harness.min_seq);
+  const events: Omit<LabEvent, "runId" | "seq" | "at">[] = [];
+  let cursor = harnessCursor;
+  for (const event of harness.events as Array<{ seq: number; kind: string; payload: Record<string, unknown> }>) {
+    if (event.seq <= cursor) continue;
+    cursor = event.seq;
+    const observedAt = typeof (event as any).observed_at === "string" ? (event as any).observed_at : null;
+    events.push({ kind: event.kind, source: "browser", payload: redact({ ...event.payload, _capture_provenance: { source: "voice-lab-init", seq: event.seq, observed_at: observedAt } }), dedupeKey: `browser:${event.seq}` });
+  }
+  return { cursor, events };
 }
 
 export async function closeContextWithProof(

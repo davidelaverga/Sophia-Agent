@@ -131,6 +131,61 @@ Optional bounded limits include `SOPHIA_VOICE_LAB_MAX_RUN_SECONDS`, type-specifi
 
 Keep the active caller-partition key plus every prior key whose reservations are still inside the configured admission window. New rows use only the active key; lookups and caller quotas span the full ring. Startup and readiness fail closed if any live admission or runless-audit row names a key absent from the ring. After the last row for an old key has expired and been purged, that key may be removed. Global audit and admission tables never store the raw OAuth/static subject.
 
+## Studio LiveKit G7 target (source only, off by default)
+
+`SOPHIA_VOICE_LAB_TARGET_KIND` selects the driver and evaluator. It defaults to
+`legacy-gemini-browser-v1`, which is unchanged. `studio-livekit-g7-v1` drives the
+Studio (LiveKit) room against the product contract `sophia.voice-qualification.v1`;
+the adapter contract is `sophia.studio-g7.v1` and its catalogue is `studio-g7-v1`
+(scenario `V-G07`). On this kind, every legacy scenario (V-A01 … V-P01) is rejected
+by `start_voice_run` as typed `unsupported_for_target`. Studio runs are reserved by
+`VoiceLabService.startStudioG7Run`; it is not registered as an MCP tool in this change.
+
+| Variable | Purpose |
+|---|---|
+| `SOPHIA_VOICE_LAB_STUDIO_ORIGIN`, `SOPHIA_VOICE_LAB_STUDIO_API_ORIGIN`, `SOPHIA_VOICE_LAB_STUDIO_SUPABASE_URL` | Bare origins; each must also be in `SOPHIA_VOICE_LAB_ALLOWED_ORIGINS` |
+| `SOPHIA_VOICE_LAB_STUDIO_SUPABASE_PUBLISHABLE_KEY` | Supabase publishable (anon) key; not secret, never logged |
+| `SOPHIA_VOICE_LAB_STUDIO_PROJECT_ID` | Dedicated synthetic project UUID (room view `/p/<id>/studio`) |
+| `SOPHIA_VOICE_LAB_STUDIO_PRINCIPAL_EMAIL`, `SOPHIA_VOICE_LAB_STUDIO_PRINCIPAL_PASSWORD` | Synthetic principal; secret, environment only. `SOPHIA_VOICE_LAB_PRINCIPAL_ID` must equal its Supabase user id |
+| `SOPHIA_VOICE_LAB_STUDIO_EXPECTED_STUDIO_SHA`, `..._API_SHA`, `..._BRIDGE_SHA` | Pinned 40-hex commits (Studio meta `sophia-build`, API `/health`, bridge `provider.bridgeCommit`) |
+| `SOPHIA_VOICE_LAB_STUDIO_GRANT_WAIT_SECONDS` (5–240, default 120), `..._GRANT_REJOIN_SECONDS` (default 15) | Bounded wait for the grant-bound `mic_published` receipt before an exchange is opened |
+
+**Run binding.** The value an operator passes as `run_binding_sha256` to
+`sophia.voice_qualification_grant(...)` is the lowercase hex SHA-256 of the UTF-8
+bytes of exactly:
+
+```text
+{"cleanup_obligation_id":"<uuid>","scenario_id":"V-G07","scenario_version":"studio-g7-v1","schema":"sophia.voice-lab.studio-g7.run-binding.v1","test_run_id":"<uuid>"}
+```
+
+(keys in this order, lowercase UUIDs, no whitespace). The start response returns
+it under `data.run_binding.run_binding_sha256`; the raw cleanup obligation id never
+leaves the Lab. Because a grant never covers an earlier exchange, the driver opens
+the exchange ("Speak with Sophia") only after a `mic_published` receipt carrying
+this binding and the Lab-issued track arrives; it rejoins periodically to refetch
+the room token and fails typed `unavailable` at the wait limit.
+
+**Evidence.** Page receipts arrive over the private push binding; bridge receipts
+are read with the principal's JWT from `/api/v1/exchanges/{id}/qualification-evidence`.
+Both are parsed strictly (unknown keys and free text rejected) and bound by grant id
+and run binding. Input is reconciled by window ordinal and envelope only; the Lab
+never compares its PCM chain with the bridge's. WebRTC sender stats are
+corroboration only. Screenshots are never captured on this target (captions are
+speech text). See `src/studio-g7/contract.ts` for the receipt-coverage table: legacy
+browser-frame and transcript-content evidence is typed `unsupported` or
+`not_supported_by_product_privacy_model`, and the member-API task/artifact join is
+typed `unavailable`. Harness and product verdicts stay separate; the catalogue's
+non-voice steps (stale edit, withdrawal) and the leave/return step are `unavailable`
+here, so a G7 run settles as `pending_external_evidence` until a separate controller
+supplies them.
+
+**Cleanup.** End clicks "End" and "Leave the room", verifies through the member
+snapshot that the exchange ended (falling back to `POST /api/v1/exchanges/{id}/end`),
+signs the principal out globally, and closes the run-owned Chromium. Abort, recover
+and a run-deadline watchdog end the exchange through the API and sign out even when
+the page or the whole browser is gone. The product guard independently ends the
+exchange at the grant deadline.
+
 ## Running and container commands
 
 Development processes:

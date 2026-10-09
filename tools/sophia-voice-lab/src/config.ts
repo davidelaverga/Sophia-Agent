@@ -4,6 +4,8 @@ import { fileURLToPath } from "node:url";
 
 import { VoiceLabError, labError, type TargetSpec } from "./domain.js";
 import type { CallerPartitionKeyRing } from "./caller-partition.js";
+import { STUDIO_G7_TARGET_KIND, type TargetKind } from "./studio-g7/contract.js";
+import { loadStudioG7Config, parseTargetKind, type StudioG7Config } from "./studio-g7/config.js";
 
 const CONFIG_MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
 const VOICE_LAB_PACKAGE_ROOT = path.basename(path.dirname(CONFIG_MODULE_DIR)) === "dist" ? path.resolve(CONFIG_MODULE_DIR, "../..") : path.resolve(CONFIG_MODULE_DIR, "..");
@@ -239,6 +241,10 @@ export interface VoiceLabConfig {
   startButtonName: string;
   stopButtonName: string;
   readinessTarget: TargetSpec | null;
+  /** Absent means `legacy-gemini-browser-v1` (the unchanged default). */
+  targetKind?: TargetKind;
+  /** Present only when `targetKind` is `studio-livekit-g7-v1`. */
+  studioG7?: StudioG7Config | null;
   oauth: {
     issuer: string;
     resource: string;
@@ -326,7 +332,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, processRole: "w
   const hasReadinessTarget = readinessValues.some((value) => value !== null);
   if (hasReadinessTarget && readinessValues.some((value) => value === null)) throw new VoiceLabError(labError("CONFIG_INVALID", "All readiness target URLs, product deployment SHAs, and dependency SHAs must be configured together.", "internal"));
   if (hasReadinessTarget && expectedValues.some((value) => !/^[a-f0-9]{40}$/i.test(value!))) throw new VoiceLabError(labError("CONFIG_INVALID", "Readiness expected deployment and dependency values must be exact 40-character SHAs.", "internal"));
-  if (nodeEnv !== "test" && !hasReadinessTarget) throw new VoiceLabError(labError("CONFIG_MISSING", "The exact Voice Lab readiness target and expected component identities are required outside tests.", "internal"));
+  const targetKind = parseTargetKind(env);
+  // The legacy readiness target remains mandatory for the legacy kind. The
+  // Studio kind verifies its own pinned identities at run start instead.
+  if (nodeEnv !== "test" && !hasReadinessTarget && targetKind !== STUDIO_G7_TARGET_KIND) throw new VoiceLabError(labError("CONFIG_MISSING", "The exact Voice Lab readiness target and expected component identities are required outside tests.", "internal"));
   if (nodeEnv !== "test" && !databaseUrl) {
     throw new VoiceLabError(labError("CONFIG_MISSING", "DATABASE_URL is required outside tests; production cannot use the memory ledger.", "internal"));
   }
@@ -506,6 +515,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, processRole: "w
       expectedDependencies: { langgraph: expectedValues[3]! },
     } : null,
     oauth,
+    ...(targetKind === STUDIO_G7_TARGET_KIND ? { targetKind, studioG7: loadStudioG7Config(env, origins(env), nodeEnv) } : {}),
   };
 }
 
