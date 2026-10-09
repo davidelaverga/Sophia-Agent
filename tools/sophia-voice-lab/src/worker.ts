@@ -34,7 +34,7 @@ import { hasStudioExtensions } from "./studio-g7/studio-driver.js";
 import { STUDIO_CALLS_END_STEP, STUDIO_CALLS_READ_KIND } from "./studio-g7/calls-certification.js";
 import { studioWorkerIdSha256 } from "./studio-g7/sign-out-fence.js";
 import { STUDIO_STEP_EXECUTING_STATES, studioStepConflict, studioStepOf } from "./studio-g7/step-guard.js";
-import { STUDIO_DEAD_OWNER_HEARTBEAT_STALE_MS, STUDIO_DEAD_OWNER_LEASE_RELEASE_SCHEMA, STUDIO_DEAD_OWNER_VERIFIED_KIND, STUDIO_PRESENCE_VETO_BOUND_MS, STUDIO_ROOM_PRESENCE_KIND, studioEffectiveTokenLifetimeMs } from "./studio-g7/lease-release.js";
+import { STUDIO_DEAD_OWNER_HEARTBEAT_STALE_MS, STUDIO_DEAD_OWNER_LEASE_RELEASE_SCHEMA, STUDIO_DEAD_OWNER_VERIFIED_KIND, STUDIO_PRESENCE_STUCK_CAP_MS, STUDIO_PRESENCE_VETO_BOUND_MS, STUDIO_ROOM_PRESENCE_KIND, studioEffectiveTokenLifetimeMs } from "./studio-g7/lease-release.js";
 
 interface ActiveLease { epoch: number; }
 interface D02WorkerShutdownArm {
@@ -1054,7 +1054,6 @@ export class VoiceLabWorker {
     await this.#fenceMutation(claimed, signal);
     // The last G7 voice step's calls, read before End signs the principal out.
     if (isStudioG7Run(run) && hasStudioExtensions(this.driver)) {
-      const studioDriver = this.driver;
       // Evidence reads before End never block End's cleanup: a failure is
       // logged, the evidence stays missing (typed by the evaluator), and the
       // driver gets no own task (null: nothing is verified as the run's).
@@ -1063,12 +1062,9 @@ export class VoiceLabWorker {
         return fallback;
       });
       await evidenceRead(() => this.#readStudioCallsAfterPriorStep(run, null), undefined, "studio last step calls read");
-      // The End read: every call the exchange recorded (no after), so a call
-      // made after the last step's window is never unexamined. Read once.
-      await evidenceRead(async () => {
-        const endRead = (await this.#allEvents(run.id)).events.some((event) => event.kind === STUDIO_CALLS_READ_KIND && event.source === "canonical" && event.payload.purpose === "baseline" && event.payload.operation_id === operation.id);
-        if (!endRead) await this.#persistEvents(run.id, [await studioDriver.readStudioCalls(run, "baseline", operation.id, STUDIO_CALLS_END_STEP)]);
-      }, undefined, "studio End calls read");
+      // The read of every call is End's own post-quiescence audit (the driver
+      // takes it once the exchange ended and the provider session closed,
+      // before the global sign-out): a read here could miss later calls.
       // The final outcome read verifies only the run's own report.
       this.driver.setStudioOwnCreateTask(run.id, await evidenceRead(() => this.#studioOwnCreateTaskId(run), null, "studio own create resolution"));
     }
@@ -1775,20 +1771,41 @@ export class VoiceLabWorker {
    * heartbeating would close admission for good.
    */
   async #sweepOwnSignOutMarkers(): Promise<void> {
-    const own = await this.ledger.listStudioSignOutMarkersOwnedBy(studioWorkerIdSha256(this.workerId), 50);
+    // Throttled (it scans the fence events): at most every
+    // STUDIO_MARKER_SWEEP_INTERVAL_MS, and at once while a failed clear waits.
+    const nowMs = Date.now();
+    if (this.#lastMarkerSweepAtMs !== null && nowMs - this.#lastMarkerSweepAtMs < STUDIO_MARKER_SWEEP_INTERVAL_MS && this.#failedSignOutClears.size === 0) return;
+    this.#lastMarkerSweepAtMs = nowMs;
+    const limit = 50;
+    const own = await this.ledger.listStudioSignOutMarkersOwnedBy(studioWorkerIdSha256(this.workerId), limit);
+    // A failed clear whose marker is no longer outstanding (cleared meanwhile) is done.
+    if (own.length < limit) for (const markerId of [...this.#failedSignOutClears.keys()]) if (!own.some((marker) => marker.markerId === markerId)) this.#failedSignOutClears.delete(markerId);
     for (const marker of own) {
       if (this.#heldSignOutMarkers.has(marker.markerId)) continue;
-      const outcome = marker.ownerBootIdSha256 !== null && marker.ownerBootIdSha256 !== this.#workerBootIdentity.bootIdSha256
-        ? "abandoned_owner_restarted"
-        : this.#failedSignOutClears.get(marker.markerId) ?? "abandoned";
+      const foreignBoot = marker.ownerBootIdSha256 !== null && marker.ownerBootIdSha256 !== this.#workerBootIdentity.bootIdSha256;
+      // Another boot's marker is cleared only once the ledger's own rule says
+      // it is abandoned (90 s, its heartbeat stale or from another boot): one
+      // instance id must belong to one live process, and a second live one
+      // under it is never presumed dead.
+      if (foreignBoot && !marker.abandoned) {
+        this.logger.warn({ run_id_sha256: sha256(marker.runId) }, "studio sign-out marker of another boot under this instance id is not abandoned yet; one live process per instance id is required");
+        continue;
+      }
+      const outcome = foreignBoot ? "abandoned_owner_restarted" : this.#failedSignOutClears.get(marker.markerId) ?? "abandoned";
       try {
         await this.ledger.endStudioGlobalSignOut(marker.runId, marker.markerId, outcome);
         this.#failedSignOutClears.delete(marker.markerId);
       } catch (error) {
+        // Already cleared (its clear key holds another outcome): done.
+        if (error instanceof VoiceLabError && error.detail.code === "DEDUPE_CONFLICT") { this.#failedSignOutClears.delete(marker.markerId); continue; }
         this.logger.error({ run_id_sha256: sha256(marker.runId), error: safeError(error) }, "studio sign-out marker clear still failing; retried next maintenance");
       }
     }
   }
+
+  #lastMarkerSweepAtMs: number | null = null;
+  /** Clears that failed and wait for the sweep (diagnostics). */
+  get pendingSignOutClearCount(): number { return this.#failedSignOutClears.size; }
 
   /** The task the run's certified create step made (calls-certification.ts), or null while it is not certified. */
   async #studioOwnCreateTaskId(run: RunRecord): Promise<string | null> {
@@ -2183,6 +2200,8 @@ export class VoiceLabWorker {
           // recovery's evidence): it stays durable, and maintenance retries
           // it (#sweepOwnSignOutMarkers) with the outcome recorded here.
           await this.ledger.endStudioGlobalSignOut(run.id, markerId, signedOut ? "confirmed" : "abandoned").catch((error: unknown) => {
+            // Already cleared (its clear key holds another outcome): nothing to retry.
+            if (error instanceof VoiceLabError && error.detail.code === "DEDUPE_CONFLICT") return;
             this.#failedSignOutClears.set(markerId, signedOut ? "confirmed" : "abandoned");
             this.logger.error({ run_id_sha256: sha256(run.id), error: safeError(error) }, "studio global sign-out marker clear failed; maintenance retries it");
           });
@@ -3219,7 +3238,9 @@ export class VoiceLabWorker {
           ? { dead_owner_cleanup_complete: true, browser_close: "proven_by_owner_epoch", basis: "owner_cleanup_complete", room_presence: "not_required_owner_browser_closed", room_presence_reason: null }
           : { dead_owner_quiesced: true, browser_close: "unobservable_owner_dead", basis: "quiesced", verification_id: verificationId, room_presence: presence ? presence.status : "unobservable", room_presence_reason: presence ? presence.reason : "presence_not_read",
             // Audit: released although the last fresh report placed the principal in the room, its veto expired (STUDIO_PRESENCE_VETO_BOUND_MS).
-            ...(result.reason === "dead_owner_quiesced_presence_veto_expired" ? { presence_veto_expired: true, presence_veto_bound_ms: STUDIO_PRESENCE_VETO_BOUND_MS } : {}) }),
+            ...(result.reason === "dead_owner_quiesced_presence_veto_expired" ? { presence_veto_expired: true, presence_veto_bound_ms: STUDIO_PRESENCE_VETO_BOUND_MS } : {}),
+            // Audit: released at the stuck-present cap although fresh reports still placed the principal in the room.
+            ...(result.reason === "dead_owner_quiesced_presence_veto_capped" ? { presence_veto_capped: true, presence_stuck_cap_ms: STUDIO_PRESENCE_STUCK_CAP_MS } : {}) }),
       }, `cleanup:${runId}:browser-lease`);
       return true;
     };
@@ -3329,6 +3350,9 @@ export function studioPriorInputSettled(events: import("./domain.js").LabEvent[]
 function studioRunBinding(run: RunRecord): string {
   return computeRunBindingSha256({ testRunId: run.testRunId, cleanupObligationId: run.cleanupObligationId, scenarioId: run.scenarioId ?? "", scenarioVersion: run.scenarioVersion ?? "" });
 }
+
+/** How often a worker sweeps its own outstanding sign-out markers (the query scans the fence events). */
+export const STUDIO_MARKER_SWEEP_INTERVAL_MS = 30_000;
 
 /** Studio G7 runs carry the `studio-g7-v1` catalogue version. */
 export function isStudioG7Run(run: Pick<RunRecord, "scenarioVersion">): boolean {

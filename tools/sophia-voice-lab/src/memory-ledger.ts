@@ -119,12 +119,13 @@ export class MemoryVoiceLabLedger implements VoiceLabLedger {
     // An abandoned marker is held by nobody: its stale owner never logs out globally.
     return this.#signOutMarkers(runId, new Date()).some((item) => item.marker.markerId === markerId && !item.abandoned);
   }
-  async listStudioSignOutMarkersOwnedBy(ownerWorkerIdSha256: string, limit: number): Promise<Array<{ runId: string; markerId: string; ownerBootIdSha256: string | null }>> {
-    return [...this.#events.entries()]
-      .flatMap(([runId, events]) => studioOutstandingSignOutMarkers(events).filter((marker) => marker.ownerWorkerIdSha256 === ownerWorkerIdSha256).map((marker) => ({ runId, marker })))
+  async listStudioSignOutMarkersOwnedBy(ownerWorkerIdSha256: string, limit: number): Promise<Array<{ runId: string; markerId: string; ownerBootIdSha256: string | null; abandoned: boolean }>> {
+    const now = new Date();
+    return [...this.#events.keys()]
+      .flatMap((runId) => this.#signOutMarkers(runId, now).filter((item) => item.marker.ownerWorkerIdSha256 === ownerWorkerIdSha256).map((item) => ({ runId, ...item })))
       .sort((left, right) => left.marker.at.getTime() - right.marker.at.getTime())
       .slice(0, limit)
-      .map(({ runId, marker }) => ({ runId, markerId: marker.markerId, ownerBootIdSha256: marker.ownerBootIdSha256 }));
+      .map(({ runId, marker, abandoned }) => ({ runId, markerId: marker.markerId, ownerBootIdSha256: marker.ownerBootIdSha256, abandoned }));
   }
   async endStudioGlobalSignOut(runId: string, markerId: string, outcome: StudioSignOutClearOutcome): Promise<void> {
     await this.appendEvent(runId, STUDIO_GLOBAL_SIGNOUT_CLEARED_KIND, "worker", { marker_id: markerId, outcome }, `studio-global-sign-out-cleared:${runId}:${markerId}`);
@@ -784,7 +785,7 @@ export class MemoryVoiceLabLedger implements VoiceLabLedger {
     });
     if (!decision.release) return { released: false, reason: decision.reason };
     this.#browserLeases.delete(runId);
-    return { released: true, reason: decision.basis === "owner_cleanup_complete" ? "dead_owner_cleanup_complete" : decision.presenceVetoExpired ? "dead_owner_quiesced_presence_veto_expired" : "dead_owner_quiesced" };
+    return { released: true, reason: decision.basis === "owner_cleanup_complete" ? "dead_owner_cleanup_complete" : decision.presenceVetoCapped ? "dead_owner_quiesced_presence_veto_capped" : decision.presenceVetoExpired ? "dead_owner_quiesced_presence_veto_expired" : "dead_owner_quiesced" };
   }
   async heartbeatWorker(heartbeat: WorkerHeartbeat): Promise<void> { this.#workerHeartbeats.set(heartbeat.workerId, clone(heartbeat)); }
   async listLiveWorkers(since: Date): Promise<WorkerHeartbeat[]> { return clone([...this.#workerHeartbeats.values()].filter((heartbeat) => heartbeat.observedAt >= since)); }

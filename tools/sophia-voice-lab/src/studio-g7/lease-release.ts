@@ -65,6 +65,21 @@ export const STUDIO_DEAD_OWNER_CLOCK_SKEW_MARGIN_MS = 60_000;
  * records the expired veto (audit).
  */
 export const STUDIO_PRESENCE_VETO_BOUND_MS = 15 * 60_000;
+/**
+ * Only these say the bridge's report no longer places anyone: no report, or
+ * a stale one. A failed or refused read (presence_read_failed, a 5xx, an
+ * absent route) is not evidence that the bridge left, and never counts
+ * toward the bound.
+ */
+export const STUDIO_PRESENCE_GONE_REASONS: ReadonlySet<string> = new Set(["not_observed", "report_stale"]);
+/**
+ * A report that stays fresh `present` with the exchange proven not live (a
+ * bridge stuck in the room) cannot hold the lease, and admission, forever:
+ * past this cap from the first such present, the lease is released and the
+ * release records the cap; the evaluator fails the orphan's presence. There
+ * is no operator release.
+ */
+export const STUDIO_PRESENCE_STUCK_CAP_MS = 120 * 60_000;
 /** Event kinds the PostgreSQL ledger stamps with clock_timestamp(), whatever time the worker passes. */
 export const STUDIO_DATABASE_CLOCK_EVENT_KINDS: readonly string[] = ["studio.cleanup.signed_out", STUDIO_DEAD_OWNER_VERIFIED_KIND];
 /** Every event kind the release decision reads. */
@@ -90,7 +105,7 @@ export interface StudioDeadOwnerReleaseInput {
 
 export type StudioDeadOwnerReleaseDecision =
   | { release: true; basis: "owner_cleanup_complete"; closedSeq: number }
-  | { release: true; basis: "quiesced"; signOutAt: Date; signOutSeq: number; verificationSeq: number; presenceVetoExpired?: { presentSeq: number; presentAt: Date } }
+  | { release: true; basis: "quiesced"; signOutAt: Date; signOutSeq: number; verificationSeq: number; presenceVetoExpired?: { presentSeq: number; presentAt: Date }; presenceVetoCapped?: { firstPresentSeq: number; firstPresentAt: Date } }
   | { release: false; reason: string };
 
 function sha256(value: string): string {
@@ -233,16 +248,25 @@ export function decideStudioDeadOwnerRelease(input: StudioDeadOwnerReleaseInput)
   // verification proves the exchange not live at least
   // STUDIO_PRESENCE_VETO_BOUND_MS after that present, with no fresh report
   // since, the lease is released and the release records the expired veto.
-  const decisive = input.events
+  const decisions = input.events
     .filter((event) => event.kind === STUDIO_DEAD_OWNER_VERIFIED_KIND && event.source === "worker"
       && event.payload.worker_id_sha256 === sha256(input.lease.workerId) && event.payload.lease_epoch === input.lease.leaseEpoch
       && event.at.getTime() >= quietAt && (event.payload.room_presence === "present" || event.payload.room_presence === "absent"))
-    .sort((left, right) => left.seq - right.seq)
-    .at(-1);
+    .sort((left, right) => left.seq - right.seq);
+  const decisive = decisions.at(-1);
   if (decisive?.payload.room_presence === "present") {
     // Both times are the database clock (verification events are DB-stamped).
-    if (verification.seq > decisive.seq && verification.at.getTime() - decisive.at.getTime() >= STUDIO_PRESENCE_VETO_BOUND_MS) {
+    // The bound runs only on evidence that the bridge's report is gone (no
+    // report, or a stale one) in THIS verification; a failed read never counts.
+    const gone = verification.seq > decisive.seq && verification.payload.room_presence === "unobservable" && STUDIO_PRESENCE_GONE_REASONS.has(String(verification.payload.room_presence_reason));
+    if (gone && verification.at.getTime() - decisive.at.getTime() >= STUDIO_PRESENCE_VETO_BOUND_MS) {
       return { release: true, basis: "quiesced", signOutAt: signOut.at, signOutSeq: signOut.seq, verificationSeq: verification.seq, presenceVetoExpired: { presentSeq: decisive.seq, presentAt: decisive.at } };
+    }
+    // Stuck present: the first present of the current unbroken run of presents, capped.
+    const lastAbsent = decisions.map((event) => event.payload.room_presence).lastIndexOf("absent");
+    const firstPresent = decisions[lastAbsent + 1]!;
+    if (verification.at.getTime() - firstPresent.at.getTime() >= STUDIO_PRESENCE_STUCK_CAP_MS) {
+      return { release: true, basis: "quiesced", signOutAt: signOut.at, signOutSeq: signOut.seq, verificationSeq: verification.seq, presenceVetoCapped: { firstPresentSeq: firstPresent.seq, firstPresentAt: firstPresent.at } };
     }
     return { release: false, reason: "principal_present_in_room" };
   }

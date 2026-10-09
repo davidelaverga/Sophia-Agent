@@ -49,7 +49,7 @@ import { probeStudioReadiness } from "./readiness.js";
 import { STUDIO_G7_ACTIONS, STUDIO_G7_VOICE_STEPS, isStudioG7ScenarioVersion, STUDIO_G7_SCENARIO_ID_SET, studioG7StepId, type StudioG7Action, type StudioG7VoiceStep } from "./scenarios.js";
 import { StudioApiClient, classifyRoomPresence, type IdentityObservation, type ProjectedArtifactVersion, type ProjectedTaskDetail, type StudioRoomSnapshot } from "./studio-api.js";
 import { STUDIO_ROOM_PRESENCE_KIND, STUDIO_ROOM_PRESENCE_SCHEMA } from "./lease-release.js";
-import { STUDIO_CALLS_READ_KIND, STUDIO_CALLS_READ_SCHEMA } from "./calls-certification.js";
+import { STUDIO_CALLS_END_STEP, STUDIO_CALLS_READ_KIND, STUDIO_CALLS_READ_SCHEMA } from "./calls-certification.js";
 import { buildStudioSessionSeedScript, globalSignOut, passwordGrant, signOut, supabaseStorageKey, type FetchLike, type SignOutReceipt, type StudioUserSession } from "./supabase-session.js";
 
 type DriverEvent = Omit<LabEvent, "runId" | "seq" | "at">;
@@ -563,6 +563,15 @@ export class StudioG7Driver implements VoiceBrowserDriver, StudioDriverExtension
       if (settled.confirmed) events.push(...await this.#awaitSessionClosed(session));
       events.push(...await this.drain(run.id, true));
       events.push((await this.#observeIdentities(run, "final")).event);
+      // The final calls audit, post-quiescence: once the exchange ended and
+      // the bridge reported its provider session closed, no further voice call
+      // can be recorded. Read every call (settled: all answered) before the
+      // global sign-out revokes the principal's read. What it was taken after
+      // is recorded; the evaluator proves quiescence from the ledger order and
+      // types anything less unproven.
+      const audit = await this.#readCalls(run.id, tokens, "baseline", "end", STUDIO_CALLS_END_STEP, null)
+        .catch(() => this.#callsReadRefused(run.id, "baseline", "end", STUDIO_CALLS_END_STEP, null, "calls_read_failed"));
+      events.push({ ...audit, payload: { ...audit.payload, quiescence: { exchange_ended: settled.confirmed, session_closed: session.sessionClosedSeen } } });
       events.push(await this.#signOut(run.id, tokens));
       events.push(await this.#closeBrowser(run.id, session, "normal_end"));
       // An exchange that could not be settled keeps the watchdog: recovery

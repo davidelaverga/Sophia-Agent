@@ -293,7 +293,14 @@ step, and one later of unknown outcome is `uncertain`. End reads every call
 of the exchange once (no `after`); a command-bearing call that some read lists
 but no step's window holds (made between a step's window read and the next
 baseline, or after the last step) makes the run `uncertain`
-(`outcome.calls_attributed`: `unattributed_call`). The calls are read only with
+(`outcome.calls_attributed`: `unattributed_call`). That read of every call is
+End's own audit, taken post-quiescence: after the run's exchange was confirmed
+ended and the bridge reported its provider session closed (no further voice
+call can be recorded), settled (every call answered), and before the global
+sign-out revokes the principal's read. The evaluator proves the order from the
+ledger; an audit missing, unsettled, before quiescence or after the sign-out
+is `end_calls_audit_unproven`, a refused one `end_calls_read_unavailable`,
+never a pass. The calls are read only with
 the run's own browser session: without one a read is typed
 `no_browser_session`, never made by signing in. With one, the read uses that
 session, which is renewed (a password grant) within 60 s of its expiry; the
@@ -349,11 +356,17 @@ over or abandoned, or that cannot read the fence, signs out only its own
 session (scope=local), and that never counts as the principal signed out: only
 a confirmed global sign-out does (recovery receipt, cleanup proof and
 `cleanup.principal_signed_out`), so the run stays incomplete and recoverable.
-A marker never outlives its owner's ability to clear it: each maintenance pass
-first clears every outstanding marker carrying the worker's own id that no
-recovery of its process holds: a clear that failed (it is logged, the
-recovery's evidence is kept, and the retry records the intended outcome), or a
-marker its previous boot left behind (`abandoned_owner_restarted`). No
+A marker never outlives its owner's ability to clear it: maintenance (at most
+every 30 s, and at once while a failed clear waits) clears the outstanding
+markers carrying the worker's own id that no recovery of its process holds: a
+clear of this boot that failed (it is logged, the recovery's evidence is kept,
+the retry records the intended outcome, and a marker already cleared meanwhile
+counts as done) at once, and one a previous boot left behind
+(`abandoned_owner_restarted`) only once the ledger's own rule says it is
+abandoned (90 s on its clock, the heartbeat under the id stale or from
+another boot). One instance id must belong to one live process: a second live
+process under it is never presumed dead (its young marker is left alone and
+a warning is logged). No
 wait cycle remains: a deferral waits only on a run that is live (not terminal,
 or leased), at most one run is live at a time (admission admits one run, and a
 run never leaves a terminal state or regains a lease), and a live run's own
@@ -422,11 +435,21 @@ apart. Then either:
   unobservable one does not release; a later fresh absent does. The veto is
   bounded, because the bridge reports only while it is in the room and a fresh
   absent may never come once the exchange ended: a verification that proves the
-  run's exchange not live at least 15 minutes (`STUDIO_PRESENCE_VETO_BOUND_MS`,
-  database clock) after the last fresh present, with no fresh report since,
-  releases the lease, and the release records `presence_veto_expired` (the
-  evaluator types `cleanup.orphan_room_presence` `uncertain`). There is no
-  separate operator path. The orphan browser process's close is typed
+  run's exchange not live and whose presence read shows the bridge's report
+  gone (`not_observed` or `report_stale`; a failed or refused read never
+  counts), at least 15 minutes (`STUDIO_PRESENCE_VETO_BOUND_MS`, database
+  clock) after the last fresh present, releases the lease, and the release
+  records `presence_veto_expired` (the evaluator types
+  `cleanup.orphan_room_presence` `uncertain`). Fifteen minutes is far beyond
+  the bridge's 15 s report freshness and a participant's disconnect timeout,
+  while bounding how long one dead run can hold admission. A report that stays
+  fresh `present` (a bridge stuck in the room) holds the lease for at most two
+  hours (`STUDIO_PRESENCE_STUCK_CAP_MS`) from the first such present; then the
+  release records `presence_veto_capped` and the evaluator fails the orphan's
+  presence. This cap was chosen over an operator release (there is none). The
+  trade-off, stated: a release past the bound or the cap can happen while the
+  orphan browser is still in the room, and the next run joins the same project
+  room (the room is per project). The orphan browser process's close is typed
   `unobservable`, not proven.
 The PostgreSQL ledger stamps the sign-out and verification events with the
 database clock (the clock of the lease expiry), whatever the worker's clock says.

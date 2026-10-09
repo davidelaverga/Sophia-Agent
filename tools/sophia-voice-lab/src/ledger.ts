@@ -242,7 +242,7 @@ export interface VoiceLabLedger {
   /** Whether this marker is still outstanding and not abandoned (not cleared, not taken over, its owner alive): checked right before a global logout. */
   holdsStudioGlobalSignOut(runId: string, markerId: string): Promise<boolean>;
   /** Outstanding markers (any run) carrying this owner worker id hash, oldest first: a worker clears those no recovery of its process holds. */
-  listStudioSignOutMarkersOwnedBy(ownerWorkerIdSha256: string, limit: number): Promise<Array<{ runId: string; markerId: string; ownerBootIdSha256: string | null }>>;
+  listStudioSignOutMarkersOwnedBy(ownerWorkerIdSha256: string, limit: number): Promise<Array<{ runId: string; markerId: string; ownerBootIdSha256: string | null; abandoned: boolean }>>;
   listExpiredRuns(now: Date, limit: number): Promise<RunRecord[]>;
   listRunsNeedingRecovery(limit: number, afterRunId?: string): Promise<RunRecord[]>;
   listRunsPendingEvidence(limit: number): Promise<RunRecord[]>;

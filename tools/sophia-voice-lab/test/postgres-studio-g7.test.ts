@@ -687,12 +687,18 @@ selected("real PostgreSQL Studio G7 worker branches (schema v7)", () => {
     await inFlight.promise;
     expect(await pgOutstanding(h.runId)).toHaveLength(1);
     const restarted = await pgRecoveryWorker(h, id, ledger);
+    // Young (the restart came quickly): the previous boot's marker is not yet abandoned, so it stays (labrev5 S1).
+    await restarted.worker.maintainSessions();
+    expect(await pgOutstanding(h.runId)).toHaveLength(1);
+    expect(await pgCleared(h.runId)).toEqual([]);
     for (let pass = 0; pass < 6 && await pgTryStart(h, `pg-d5-restart-${pass}`).then((status) => status !== "accepted"); pass += 1) {
-      await restarted.worker.maintainSessions();
-      await ledger.pool.query("update sophia_voice_lab.run_events set observed_at=observed_at-interval '2 minutes' where run_id=$1 and kind='studio.cleanup.recovery_attempt'", [h.runId]);
+      // Time passes on the database clock: the marker ages past the 90 s bound; the instance id heartbeats from the new boot.
+      await ledger.pool.query("update sophia_voice_lab.run_events set observed_at=observed_at-interval '2 minutes' where run_id=$1 and kind in ('studio.cleanup.recovery_attempt','studio.cleanup.global_sign_out_pending')", [h.runId]);
       await pgBootBeat(id, restarted.worker);
+      await restarted.worker.maintainSessions();
     }
-    expect(await pgCleared(h.runId)).toEqual(expect.arrayContaining(["abandoned_owner_restarted"]));
+    // Cleared once abandoned on the database clock: by this worker's sweep or by its begin's takeover, whichever runs first.
+    expect((await pgCleared(h.runId)).some((outcome) => outcome === "abandoned_owner_restarted" || outcome === "abandoned_owner_dead")).toBe(true);
     expect(await pgOutstanding(h.runId)).toEqual([]);
     expect(restarted.driver.calls).toContain("recover");
     expect(await ledger.getRun(h.runId)).toMatchObject({ cleanupComplete: true });

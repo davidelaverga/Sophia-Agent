@@ -144,15 +144,16 @@ export class PostgresVoiceLabLedger implements VoiceLabLedger {
     // An abandoned marker is held by nobody: its stale owner never logs out globally.
     return (await outstandingSignOutMarkers(this.pool, runId)).some((marker) => marker.markerId === markerId && !marker.abandoned);
   }
-  async listStudioSignOutMarkersOwnedBy(ownerWorkerIdSha256: string, limit: number): Promise<Array<{ runId: string; markerId: string; ownerBootIdSha256: string | null }>> {
-    const result = await this.pool.query<{ run_id: string; marker_id: string; owner_boot_id_sha256: string | null }>(
-      `select p.run_id, p.payload->>'marker_id' as marker_id, p.payload->>'owner_boot_id_sha256' as owner_boot_id_sha256
+  async listStudioSignOutMarkersOwnedBy(ownerWorkerIdSha256: string, limit: number): Promise<Array<{ runId: string; markerId: string; ownerBootIdSha256: string | null; abandoned: boolean }>> {
+    // `abandoned` by the same rule a takeover uses (SIGN_OUT_MARKER_ABANDONED_SQL), on the database clock.
+    const result = await this.pool.query<{ run_id: string; marker_id: string; owner_boot_id_sha256: string | null; abandoned: boolean }>(
+      `select p.run_id, p.payload->>'marker_id' as marker_id, p.payload->>'owner_boot_id_sha256' as owner_boot_id_sha256, (${SIGN_OUT_MARKER_ABANDONED_SQL}) as abandoned
          from ${SCHEMA}.runs r join ${SCHEMA}.run_events p on p.run_id=r.id and p.kind=$1
-        where p.payload->>'owner_worker_id_sha256' = $3
+        where p.payload->>'owner_worker_id_sha256' = $4
           and not exists (select 1 from ${SCHEMA}.run_events c where c.run_id=p.run_id and c.kind=$2 and c.payload->>'marker_id' = p.payload->>'marker_id')
-        order by p.observed_at, p.run_id, p.seq limit $4`,
-      [STUDIO_GLOBAL_SIGNOUT_PENDING_KIND, STUDIO_GLOBAL_SIGNOUT_CLEARED_KIND, ownerWorkerIdSha256, limit]);
-    return result.rows.map((row) => ({ runId: row.run_id, markerId: row.marker_id, ownerBootIdSha256: row.owner_boot_id_sha256 }));
+        order by p.observed_at, p.run_id, p.seq limit $5`,
+      [STUDIO_GLOBAL_SIGNOUT_PENDING_KIND, STUDIO_GLOBAL_SIGNOUT_CLEARED_KIND, STUDIO_GLOBAL_SIGNOUT_OWNER_STALE_MS / 1_000, ownerWorkerIdSha256, limit]);
+    return result.rows.map((row) => ({ runId: row.run_id, markerId: row.marker_id, ownerBootIdSha256: row.owner_boot_id_sha256, abandoned: row.abandoned === true }));
   }
   async endStudioGlobalSignOut(runId: string, markerId: string, outcome: StudioSignOutClearOutcome): Promise<void> {
     await this.appendEvent(runId, STUDIO_GLOBAL_SIGNOUT_CLEARED_KIND, "worker", { marker_id: markerId, outcome }, `studio-global-sign-out-cleared:${runId}:${markerId}`);
@@ -861,7 +862,7 @@ export class PostgresVoiceLabLedger implements VoiceLabLedger {
       // Release the exact dead execution, never acquire or impersonate its owner.
       const deleted = await client.query(`delete from ${SCHEMA}.browser_leases where run_id=$1 and worker_id=$2 and lease_epoch=$3 and expires_at<=clock_timestamp()`, [runId, lease.worker_id, lease.lease_epoch]);
       await client.query("commit");
-      return deleted.rowCount === 1 ? { released: true, reason: decision.basis === "owner_cleanup_complete" ? "dead_owner_cleanup_complete" : decision.presenceVetoExpired ? "dead_owner_quiesced_presence_veto_expired" : "dead_owner_quiesced" } : { released: false, reason: "lease_changed" };
+      return deleted.rowCount === 1 ? { released: true, reason: decision.basis === "owner_cleanup_complete" ? "dead_owner_cleanup_complete" : decision.presenceVetoCapped ? "dead_owner_quiesced_presence_veto_capped" : decision.presenceVetoExpired ? "dead_owner_quiesced_presence_veto_expired" : "dead_owner_quiesced" } : { released: false, reason: "lease_changed" };
     } catch (error) { await client.query("rollback").catch(() => undefined); throw error; }
     finally { client.release(); }
   }

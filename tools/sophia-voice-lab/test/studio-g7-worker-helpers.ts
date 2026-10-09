@@ -64,6 +64,15 @@ export class ScriptedStudioDriver {
   setStudioOwnCreateTask(runId: string, taskId: string | null): void { this.ownCreateTasks.push({ runId, taskId }); }
   /** The exchange the scripted observations show the create's research task bound to (null: unbound). */
   researchExchangeId: string | null = null;
+  /** Whether End takes its post-quiescence calls audit (as the real driver does). */
+  endAudit = true;
+  /** Calls the product records while End begins (a stray call the audit must still list). */
+  onEndBegins: (() => void) | null = null;
+  #endAudit(run: RunRecord, sessionClosed: boolean): DriverEvent {
+    this.calls.push("calls:audit");
+    const audit = this.#callsEvent(run, "baseline", "end", "final", null);
+    return { ...audit, payload: { ...audit.payload, quiescence: { exchange_ended: this.endExchangeConfirmed, session_closed: sessionClosed } } };
+  }
   /** Every action input the worker passed, in order. */
   readonly actionInputs: Array<Record<string, unknown>> = [];
 
@@ -85,6 +94,10 @@ export class ScriptedStudioDriver {
   async readStudioCalls(run: RunRecord, purpose: "baseline" | "after", operationId: string, stepId: string | null, after: string | null = null): Promise<DriverEvent> {
     this.calls.push(`calls:${purpose}`);
     this.callsReads.push({ purpose, operationId, after });
+    return this.#callsEvent(run, purpose, operationId, stepId, after);
+  }
+
+  #callsEvent(run: RunRecord, purpose: "baseline" | "after", operationId: string, stepId: string | null, after: string | null): DriverEvent {
     const answer = this.callsAnswer(run.id, purpose, after);
     const base = { schema: "sophia_voice_lab_studio_exchange_calls_v1", purpose, operation_id: operationId, step_id: stepId, exchange_id: EXCHANGE_UUID, after, read_id: randomUUID() };
     const payload = answer.status === "available"
@@ -181,6 +194,7 @@ export class ScriptedStudioDriver {
 
   async end(run: RunRecord): Promise<DriverEndResult> {
     this.calls.push("end");
+    this.onEndBegins?.();
     this.sessions.delete(run.id);
     const late = this.lateSessionClosed ? [] : this.closing(run);
     return { artifacts: [], events: [
@@ -190,6 +204,8 @@ export class ScriptedStudioDriver {
         : { kind: "studio.cleanup.exchange_ended", source: "canonical", payload: { confirmed: false, status: "unavailable", basis: "ownership_unproven_not_touched", exchange_id: EXCHANGE_UUID, join: "retained", ownership: "unavailable", verified_by: "member_snapshot", speak_requested_before_observation: true }, dedupeKey: `ended-unproven:${run.id}` },
       ...late,
       { kind: "studio.deployment.identity", source: "canonical", payload: { phase: "final", api: { status: "observed", commit: API_SHA }, studio: { status: "observed", commit: STUDIO_SHA } }, dedupeKey: `studio-identity:${run.id}:final` },
+      // As the real driver: End's post-quiescence audit of every call, before the global sign-out.
+      ...(this.endAudit ? [this.#endAudit(run, late.length > 0)] : []),
       { kind: "studio.cleanup.signed_out", source: "canonical", payload: { schema: "sophia_voice_lab_studio_sign_out_v1", scope: "global", confirmed: true, http_status: 204, basis: "global_logout_accepted" }, dedupeKey: `signed-out:${run.id}` },
       { kind: "cleanup.browser_context_closed", source: "browser", payload: { schema: "sophia_voice_lab_execution_epoch_browser_cleanup_v1", close_resolved: true, browser_registry_absent: true, browser_process_close_resolved: true, browser_process_disconnected: true }, dedupeKey: `cleanup:${run.id}:browser` },
     ] };

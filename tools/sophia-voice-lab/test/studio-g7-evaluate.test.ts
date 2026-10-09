@@ -347,7 +347,7 @@ interface CallsScript {
   unavailable?: { reason: string; http_status: number };
 }
 
-interface G7Options { skip?: string[]; staleCode?: string; staleStatus?: number; artifactStatus?: string; ownership?: "proven" | "mismatch" | "unavailable"; withdrawalCommitted?: boolean; noEnd?: boolean; calls?: CallsScript; researchTask?: Record<string, unknown>; windowEpochs?: Record<string, number>; designBefore?: string | null; designAfter?: string; designEverywhere?: string; withdrawalAfterOperation?: string; stopEffect?: { phase: string; state: string } }
+interface G7Options { skip?: string[]; staleCode?: string; staleStatus?: number; artifactStatus?: string; ownership?: "proven" | "mismatch" | "unavailable"; withdrawalCommitted?: boolean; noEnd?: boolean; calls?: CallsScript; researchTask?: Record<string, unknown>; windowEpochs?: Record<string, number>; designBefore?: string | null; designAfter?: string; designEverywhere?: string; withdrawalAfterOperation?: string; stopEffect?: { phase: string; state: string }; noEndAudit?: boolean }
 
 /** A complete G7 episode: five voice steps, four actions, observations, ownership, cleanup. */
 function g7Episode(options: G7Options = {}): Episode {
@@ -447,7 +447,8 @@ function g7Episode(options: G7Options = {}): Episode {
   log.add("studio.outcome.observed", "canonical", { purpose: "final", operation_id: "end", join: { status: "uncertain" }, tasks: [task(DESIGN_TASK, "design", { state: "succeeded", design: { state: options.designEverywhere ?? "published", mode: "create", artifact_id: ARTIFACT, published_version_id: VERSION_1, research_task_id: RESEARCH_TASK } }), research({ research: { html_state: "published", design_task_id: DESIGN_TASK } })], artifacts: [artifact(DESIGN_TASK, VERSION_1, PAGE_SHA, options.artifactStatus)] });
   log.bridge("provider", providerReceipt(run, seq++, "closed"));
   log.bridge("session_closed", sessionClosed(run, seq++, { windows: voice.length, turns: voice.length, replies: voice.length }));
-  cleanupEvents(log);
+  // End's post-quiescence audit of every call: after the exchange ended and session_closed, before the sign-out.
+  cleanupEvents(log, () => { if (!options.noEndAudit) callsRead("baseline", "end", "final", null); });
   identityEvent(log, "final");
   if (!options.noEnd) operations.push(op(run, "end", T0 + 900, {}, {}));
   return { run, log, operations };
@@ -1037,5 +1038,36 @@ describe("delta 4 review (labrev4 P2): the input-epoch join holds only on an exa
     expect(stepsOf(evaluate(dropped))["g7.create"]).toBe("uncertain:step_input_epoch_unknown");
     // Positive control: every window present, each step at its own epoch.
     expect(stepsOf(evaluate(g7Episode({ researchTask: RUN_TASK, calls: { byStep: happyCalls() } })))).toMatchObject({ "g7.create": "pass:null", "g7.hold": "pass:null", "g7.stop": "pass:null" });
+  });
+});
+
+describe("delta 5 review (labrev5 C3/C4): only End's post-quiescence, settled audit lets calls_attributed pass", () => {
+  const attributed = (item: Episode) => statusOf(evaluate(item), "outcome.calls_attributed");
+  const happy = () => g7Episode({ researchTask: RUN_TASK, calls: { byStep: happyCalls() } });
+  const swapSeq = (item: Episode, left: (event: LabEvent) => boolean, right: (event: LabEvent) => boolean) => {
+    const a = item.log.events.find(left)!, b = item.log.events.find(right)!;
+    [a.seq, b.seq] = [b.seq, a.seq];
+  };
+  const isAudit = (event: LabEvent) => event.kind === "studio.exchange.calls_read" && event.payload.step_id === "final";
+
+  it("no End audit, an audit before the exchange ended, after the sign-out, or unsettled is unproven; a refused one unavailable", () => {
+    expect(attributed(g7Episode({ researchTask: RUN_TASK, calls: { byStep: happyCalls() }, noEndAudit: true }))).toMatchObject({ status: "uncertain", reason: "end_calls_audit_unproven" });
+    const early = happy();
+    swapSeq(early, isAudit, (event) => event.kind === "studio.cleanup.exchange_ended");
+    expect(attributed(early)).toMatchObject({ status: "uncertain", reason: "end_calls_audit_unproven" });
+    const beforeClosed = happy();
+    swapSeq(beforeClosed, isAudit, (event) => event.kind === "studio.bridge_receipt" && event.payload.kind === "session_closed");
+    expect(attributed(beforeClosed)).toMatchObject({ status: "uncertain", reason: "end_calls_audit_unproven" });
+    const late = happy();
+    swapSeq(late, isAudit, (event) => event.kind === "studio.cleanup.signed_out");
+    expect(attributed(late)).toMatchObject({ status: "uncertain", reason: "end_calls_audit_unproven" });
+    const unsettled = happy();
+    unsettled.log.events.find(isAudit)!.payload.settled = false;
+    expect(attributed(unsettled)).toMatchObject({ status: "uncertain", reason: "end_calls_audit_unproven" });
+    const refused = happy();
+    Object.assign(refused.log.events.find(isAudit)!.payload, { status: "unavailable", reason: "http_503", read_at: null, calls: [] });
+    expect(attributed(refused)).toMatchObject({ status: "uncertain", reason: "end_calls_read_unavailable" });
+    // Positive control.
+    expect(attributed(happy())).toMatchObject({ status: "pass", reason: null });
   });
 });

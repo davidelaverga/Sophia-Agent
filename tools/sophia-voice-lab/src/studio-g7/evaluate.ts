@@ -26,7 +26,7 @@ import {
   type StudioPageReceipt,
 } from "./contract.js";
 import { STUDIO_DEAD_OWNER_LEASE_RELEASE_SCHEMA, studioExchangeEndAfterJoin } from "./lease-release.js";
-import { STUDIO_CALLS_READ_KIND, STUDIO_VOICE_STEP_COMMAND_KIND, certifyStudioVoiceSteps, type StudioStepCertification } from "./calls-certification.js";
+import { STUDIO_CALLS_END_STEP, STUDIO_CALLS_READ_KIND, STUDIO_VOICE_STEP_COMMAND_KIND, certifyStudioVoiceSteps, type StudioStepCertification } from "./calls-certification.js";
 import { studioG7Scenario, type StudioG7Step } from "./scenarios.js";
 
 /**
@@ -454,7 +454,10 @@ export function evaluateStudioG7Run(run: RunRecord, events: Event[], operations:
   // live-presence read (A15). Only a fresh report is evidence.
   const quiescedRelease = ordered.filter((event) => event.kind === "cleanup.browser_lease_released" && event.payload.schema === STUDIO_DEAD_OWNER_LEASE_RELEASE_SCHEMA && event.payload.dead_owner_quiesced === true).at(-1) ?? null;
   const roomPresence = quiescedRelease && typeof quiescedRelease.payload.room_presence === "string" ? quiescedRelease.payload.room_presence : null;
-  if (quiescedRelease?.payload.presence_veto_expired === true) {
+  if (quiescedRelease?.payload.presence_veto_capped === true) {
+    // Released at the stuck-present cap: the last fresh reports placed the principal in the room.
+    H("cleanup.orphan_room_presence", "fail", "presence_veto_capped_principal_reported_present", [quiescedRelease]);
+  } else if (quiescedRelease?.payload.presence_veto_expired === true) {
     // Released past the bounded veto: the last fresh report placed the principal in the room.
     H("cleanup.orphan_room_presence", "uncertain", "presence_veto_expired_last_report_present", [quiescedRelease]);
   } else if (quiescedRelease) {
@@ -507,8 +510,23 @@ export function evaluateStudioG7Run(run: RunRecord, events: Event[], operations:
   // step's window; one made between a step's window and the next baseline (or
   // before End) was never examined, so the run's outcome is not all accounted for.
   if (certification.answered) {
-    P("outcome.calls_attributed", certification.unattributed_seqs.length === 0 ? "pass" : "uncertain", certification.unattributed_seqs.length === 0 ? null : "unattributed_call",
-      ordered.filter((event) => event.kind === STUDIO_CALLS_READ_KIND && event.source === "canonical"));
+    // Only a post-quiescence audit proves no call is left unexamined: End's
+    // read of every call, available and settled, taken after the run's
+    // exchange was confirmed ended and the bridge's session_closed, and before
+    // the global sign-out (no voice call can be recorded after quiescence).
+    const callReads = ordered.filter((event) => event.kind === STUDIO_CALLS_READ_KIND && event.source === "canonical");
+    const audit = callReads.filter((event) => event.payload.purpose === "baseline" && event.payload.step_id === STUDIO_CALLS_END_STEP).at(-1) ?? null;
+    const endedBefore = audit !== null && ordered.some((event) => event.kind === "studio.cleanup.exchange_ended" && event.source === "canonical" && event.payload.confirmed === true
+      && (typeof event.payload.exchange_id !== "string" || event.payload.exchange_id.toLowerCase() === runExchangeId) && event.seq < audit.seq);
+    const closedBefore = audit !== null && sessionClosed !== null && sessionClosed.event.seq < audit.seq;
+    const signedOutBefore = audit !== null && ordered.some((event) => event.kind === "studio.cleanup.signed_out" && event.source === "canonical" && event.payload.confirmed === true && event.payload.scope === "global" && event.seq < audit.seq);
+    const auditAnswered = audit !== null && audit.payload.status === "available" && typeof audit.payload.exchange_id === "string" && audit.payload.exchange_id.toLowerCase() === runExchangeId;
+    const [status, reason] = audit === null ? ["uncertain", "end_calls_audit_unproven"]
+      : !auditAnswered ? ["uncertain", "end_calls_read_unavailable"]
+      : audit.payload.settled !== true || !endedBefore || !closedBefore || signedOutBefore ? ["uncertain", "end_calls_audit_unproven"]
+      : certification.unattributed_seqs.length > 0 ? ["uncertain", "unattributed_call"]
+      : ["pass", null];
+    P("outcome.calls_attributed", status as StudioAssertionStatus, reason, audit === null ? callReads : [audit]);
   }
   // The run's own report, resolved only through the product's own links
   // (studio-driver.ts #resolveOwnReport does the same before any mutation):

@@ -1328,7 +1328,7 @@ describe("delta 4 review (labrev4 nits): the worker's own-chain hand-over", () =
   }, 60_000);
 
   for (const failing of ["end_read", "own_create"] as const) {
-    it(`End's cleanup always runs: a failing ${failing === "end_read" ? "End calls read" : "own-create resolution"} is logged and End proceeds`, async () => {
+    it(`End's cleanup always runs: a failing ${failing === "end_read" ? "last step's calls read" : "own-create resolution"} is logged and End proceeds`, async () => {
       let failNow = false;
       const shared = new MemoryVoiceLabLedger("test");
       const flaky = new Proxy(shared, { get(target, property) {
@@ -1342,8 +1342,10 @@ describe("delta 4 review (labrev4 nits): the worker's own-chain hand-over", () =
       } }) as VoiceLabLedger;
       const h = await harness(`end-proceeds-${failing}`, flaky);
       if (failing === "end_read") {
+        // The last step's own calls read, taken right before End, fails.
         const read = h.driver.readStudioCalls.bind(h.driver);
-        h.driver.readStudioCalls = async (run, purpose, operationId, stepId, after) => { if (stepId === "final") throw new Error("calls read failed"); return read(run, purpose, operationId, stepId, after); };
+        h.driver.callsAnswer = () => ({ status: "available", read_at: "2026-10-09T12:00:01.000001Z", calls: [] });
+        h.driver.readStudioCalls = async (run, purpose, operationId, stepId, after) => { if (failNow && purpose === "after") throw new Error("calls read failed"); return read(run, purpose, operationId, stepId, after); };
       }
       await h.worker.runOnce();
       expect((await voice(h, "create")).status).toBe("completed");
@@ -1354,4 +1356,169 @@ describe("delta 4 review (labrev4 nits): the worker's own-chain hand-over", () =
       if (failing === "own_create") expect(h.driver.ownCreateTasks.at(-1)).toEqual({ runId: h.runId, taskId: null });
     }, 60_000);
   }
+});
+
+describe("delta 5 review (labrev5): marker sweep bounds, End's post-quiescence calls audit, the presence veto", () => {
+  afterEach(() => { vi.useRealTimers(); });
+  const fenceOf = async (h: Harness) => (await h.ledger.listEvents(h.runId, 0, 5_000)).events.filter((event) => event.kind === "studio.cleanup.global_sign_out_pending" || event.kind === "studio.cleanup.global_sign_out_cleared");
+
+  it("labrev5 S1: a live process under the same instance id never has its young marker swept; each holder signs out globally", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date());
+    const h = await pendingWithUnrevokedRefresh("s1");
+    const id = "srv-abcdefghij0123456789-5d8f9c7b6-s1abc";
+    const a = await recoveryWorker(h, id, h.ledger);
+    const b = await recoveryWorker(h, id, h.ledger);
+    const inFlight = deferred();
+    const release = deferred();
+    a.driver.recoverHook = async () => { inFlight.resolve(); await release.promise; };
+    await bootBeat(h.ledger, id, a.worker);
+    const pass = a.worker.maintainSessions();
+    await inFlight.promise;
+    const marker = String((await fenceOf(h)).find((event) => event.kind === "studio.cleanup.global_sign_out_pending")!.payload.marker_id);
+    // The other live process (same instance id, its own boot), 1 s later: its sweep leaves the young marker alone.
+    vi.setSystemTime(new Date(Date.now() + 1_000));
+    await bootBeat(h.ledger, id, b.worker);
+    await b.worker.maintainSessions();
+    expect((await fenceOf(h)).filter((event) => event.kind === "studio.cleanup.global_sign_out_cleared")).toEqual([]);
+    expect(await h.ledger.holdsStudioGlobalSignOut(h.runId, marker)).toBe(true);
+    expect(await tryStart(h, "s1-during")).toBe("STUDIO_GLOBAL_SIGNOUT_PENDING");
+    release.resolve();
+    await pass;
+    expect(a.driver.globalLogouts).toEqual([h.runId]);
+    expect(a.driver.withheldLogouts).toEqual([]);
+    expect((await fenceOf(h)).filter((event) => event.kind === "studio.cleanup.global_sign_out_cleared").map((event) => event.payload.outcome)).toEqual(["confirmed"]);
+  }, 60_000);
+
+  it("labrev5 nit: the own-marker sweep is throttled; a clear already made elsewhere (DEDUPE_CONFLICT) is done, never retried", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date());
+    const h = await pendingWithUnrevokedRefresh("sweep-nit");
+    let listings = 0;
+    const counted = new Proxy(h.ledger, { get(target, property) {
+      if (property === "listStudioSignOutMarkersOwnedBy") return (...args: unknown[]) => { listings += 1; return (target.listStudioSignOutMarkersOwnedBy as (...input: unknown[]) => unknown).apply(target, args); };
+      if (property === "endStudioGlobalSignOut") return async (...args: unknown[]) => {
+        // The clear commits, then its answer is a conflict (e.g. a retried request whose first attempt landed with another outcome).
+        await (target.endStudioGlobalSignOut as (...input: unknown[]) => Promise<void>).apply(target, args);
+        const { VoiceLabError: LabError } = await import("../src/domain.js");
+        throw new LabError({ code: "DEDUPE_CONFLICT", message: "Event dedupe key was reused with different canonical evidence.", category: "conflict", retryable: false, detail: {} } as never);
+      };
+      const value = Reflect.get(target, property, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    } }) as VoiceLabLedger;
+    const a = await recoveryWorker(h, "sweep-nit-a", counted);
+    await a.worker.maintainSessions();
+    expect(a.driver.globalLogouts).toEqual([h.runId]);
+    expect(a.worker.pendingSignOutClearCount).toBe(0);
+    for (let n = 0; n < 3; n += 1) await a.worker.maintainSessions();
+    expect(listings).toBe(1);
+    vi.setSystemTime(new Date(Date.now() + 31_000));
+    await a.worker.maintainSessions();
+    expect(listings).toBe(2);
+  }, 60_000);
+
+  const endAuditRun = async (label: string, arrange: (h: Harness, record: (seq: number, kind: string) => void) => void) => {
+    const h = await harness(label);
+    const GOAL = "e0000000-0000-4000-8000-0000000000a1";
+    const RESEARCH = "d0000000-0000-4000-8000-0000000000d3";
+    let tick = 0;
+    const stamps = new Map<string, number>();
+    const recorded: Array<{ began: number; call: Record<string, unknown> }> = [];
+    let endAuditRefused = false;
+    h.driver.callsAnswer = (_run, purpose, after) => {
+      if (endAuditRefused && purpose === "baseline" && after === null && h.driver.calls.includes("end")) return { status: "unavailable", reason: "http_503", http_status: 503 };
+      tick += 1;
+      const readAt = `2026-10-09T12:00:${String(tick).padStart(2, "0")}.000001Z`;
+      stamps.set(readAt, tick);
+      const since = after === null ? null : stamps.get(after)!;
+      return { status: "available", read_at: readAt, calls: recorded.filter((item) => since === null || item.began > since).map((item) => item.call) };
+    };
+    const at = new Date().toISOString();
+    const record = (seq: number, kind: string) => recorded.push({ began: tick + 0.5, call: { seq, recorded_at: at, input_epoch: 1, tool: kind === "native_task" ? "start_research" : "control_work", task_id: kind === "native_task" ? RESEARCH : null, answered_at: at, outcome: kind === "native_task" ? "admitted" : "ok", command: { command_id: `f0000000-0000-4000-8000-${String(seq).padStart(12, "0")}`, kind, goal_id: GOAL, authority_epoch: seq, goal_revision: 1, state: "acknowledged", created_at: at } } });
+    await h.worker.runOnce();
+    const create = h.service.studioG7VoiceStep(caller, { run_id: h.runId, step: "create", fixture_id: "a02_short_command", idempotency_key: newIdempotencyKey("voice-create") });
+    while (!h.driver.callsReads.some((read) => read.purpose === "baseline")) { if (!(await h.worker.runOnce())) await delay(5); }
+    record(1, "native_task");
+    expect((await drive(h, create)).status).toBe("completed");
+    h.driver.researchExchangeId = EXCHANGE_UUID;
+    expect((await action(h, { action: "observe", for_step: "create" })).data).toMatchObject({ performed: false });
+    arrange(h, record);
+    if (label.includes("503")) endAuditRefused = true;
+    await end(h);
+    const events = (await h.ledger.listEvents(h.runId, 0, 5_000)).events;
+    const { evaluateStudioG7Run } = await import("../src/studio-g7/evaluate.js");
+    const evaluation = evaluateStudioG7Run((await h.ledger.getRun(h.runId))!, events, await h.ledger.listOperations(h.runId), { expected: { studio: STUDIO_SHA, api: API_SHA, bridge: BRIDGE_SHA } });
+    return { h, events, evaluation, attributed: evaluation.product.find((assertion) => assertion.id === "outcome.calls_attributed") };
+  };
+
+  it("labrev5 C4: a stray call recorded while End begins is listed by End's post-quiescence audit and never passes", async () => {
+    const { events, evaluation, attributed } = await endAuditRun("c4-stray", (h, record) => { h.driver.onEndBegins = () => record(2, "stop"); });
+    const audit = events.filter((event) => event.kind === "studio.exchange.calls_read" && event.payload.step_id === "final");
+    expect(audit).toHaveLength(1);
+    expect(audit[0]!.payload).toMatchObject({ purpose: "baseline", after: null, status: "available", settled: true, quiescence: { exchange_ended: true, session_closed: true } });
+    // Taken after the exchange ended and session_closed, before the global sign-out.
+    const seqOf = (kind: string, predicate: (event: typeof events[number]) => boolean = () => true) => events.find((event) => event.kind === kind && predicate(event))!.seq;
+    expect(audit[0]!.seq).toBeGreaterThan(seqOf("studio.cleanup.exchange_ended"));
+    expect(audit[0]!.seq).toBeGreaterThan(seqOf("studio.bridge_receipt", (event) => event.payload.kind === "session_closed"));
+    expect(audit[0]!.seq).toBeLessThan(seqOf("studio.cleanup.signed_out"));
+    expect(evaluation.outcome.unattributed_call_seqs).toEqual([2]);
+    expect(attributed).toMatchObject({ status: "uncertain", reason: "unattributed_call" });
+  }, 60_000);
+
+  it("labrev5 C3: End's audit refused (503) never passes: uncertain end_calls_read_unavailable", async () => {
+    const { events, attributed } = await endAuditRun("c3-503", (_h, record) => record(2, "stop"));
+    expect(events.filter((event) => event.kind === "studio.exchange.calls_read" && event.payload.step_id === "final").map((event) => event.payload.status)).toEqual(["unavailable"]);
+    expect(attributed).toMatchObject({ status: "uncertain", reason: "end_calls_read_unavailable" });
+  }, 60_000);
+
+  it("labrev5: End's audit without quiescence (session_closed not received) is unproven, never pass", async () => {
+    const { attributed } = await endAuditRun("no-quiescence", (h) => { h.driver.lateSessionClosed = true; });
+    expect(attributed).toMatchObject({ status: "uncertain", reason: "end_calls_audit_unproven" });
+  }, 60_000);
+
+  it("labrev5 positive control: a quiescent, settled End audit with no stray call passes", async () => {
+    const { attributed, evaluation } = await endAuditRun("audit-pass", () => undefined);
+    expect(evaluation.outcome.unattributed_call_seqs).toEqual([]);
+    expect(attributed).toMatchObject({ status: "pass", reason: null });
+  }, 60_000);
+
+  it("labrev5 V1: a failed presence read never counts toward the veto bound; a gone report past it releases", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date());
+    const ledger = new MemoryVoiceLabLedger("test");
+    const advance = async (ms: number) => { vi.setSystemTime(new Date(Date.now() + ms)); };
+    const { runId, workerB } = await deadOwnerRecovery(ledger, advance);
+    await advance(61 * 60_000);
+    workerB.driver.recoverResult = (id) => [...recoveryEvents(id), presenceEvent(id, "present", null, 41)];
+    await workerB.worker.maintainSessions();
+    await advance(15 * 60_000 + 1_000);
+    workerB.driver.recoverResult = (id) => [...recoveryEvents(id), presenceEvent(id, "unobservable", "presence_read_failed", 42)];
+    await workerB.worker.maintainSessions();
+    expect(await ledger.getBrowserLease(runId)).not.toBeNull();
+    await advance(31_000);
+    workerB.driver.recoverResult = (id) => [...recoveryEvents(id), presenceEvent(id, "unobservable", "report_stale", 43)];
+    await workerB.worker.maintainSessions();
+    expect(await ledger.getBrowserLease(runId)).toBeNull();
+    expect((await ledger.listEvents(runId, 0, 2_000)).events.find((event) => event.kind === "cleanup.browser_lease_released")?.payload).toMatchObject({ presence_veto_expired: true, room_presence_reason: "report_stale" });
+  }, 120_000);
+
+  it("labrev5 V2: a report stuck fresh 'present' holds the lease only up to the cap; the capped release is audited and fails the orphan's presence", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date());
+    const ledger = new MemoryVoiceLabLedger("test");
+    const advance = async (ms: number) => { vi.setSystemTime(new Date(Date.now() + ms)); };
+    const { runId, workerB } = await deadOwnerRecovery(ledger, advance);
+    await advance(61 * 60_000);
+    let n = 50;
+    const present = async () => { n += 1; const k = n; workerB.driver.recoverResult = (id) => [...recoveryEvents(id), presenceEvent(id, "present", null, k)]; await workerB.worker.maintainSessions(); };
+    for (let minutes = 0; minutes < 110; minutes += 10) { await present(); expect(await ledger.getBrowserLease(runId), String(minutes)).not.toBeNull(); await advance(10 * 60_000); }
+    await advance(11 * 60_000);
+    await present();
+    expect(await ledger.getBrowserLease(runId)).toBeNull();
+    const events = (await ledger.listEvents(runId, 0, 3_000)).events;
+    expect(events.find((event) => event.kind === "cleanup.browser_lease_released")?.payload).toMatchObject({ presence_veto_capped: true, presence_stuck_cap_ms: 120 * 60_000, room_presence: "present" });
+    const { evaluateStudioG7Run } = await import("../src/studio-g7/evaluate.js");
+    const evaluation = evaluateStudioG7Run((await ledger.getRun(runId))!, events, await ledger.listOperations(runId), { expected: { studio: STUDIO_SHA, api: API_SHA, bridge: BRIDGE_SHA } });
+    expect(evaluation.harness.find((assertion) => assertion.id === "cleanup.orphan_room_presence")).toMatchObject({ status: "fail", reason: "presence_veto_capped_principal_reported_present" });
+  }, 120_000);
 });

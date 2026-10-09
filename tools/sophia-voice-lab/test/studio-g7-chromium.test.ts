@@ -1148,4 +1148,27 @@ else {
     expect(api.mission.every((entry) => entry.state === "withdrawn")).toBe(true);
     await driver.end(run, "unused", "unused");
   }, 120_000);
+  it("labrev5 C4: End audits every call after the exchange ended and session_closed, before the global sign-out; a stray call made as End begins is listed", async () => {
+    const { driver, run } = harness();
+    await driver.start(run, "unused");
+    let seq = 0;
+    const push = (kind: string, receipt: Record<string, unknown>) => api.receipts.push({ source: "bridge", seq: Number(receipt.seq), kind, receivedAt: new Date().toISOString(), receipt });
+    push("provider", providerReceipt(run, seq++, "ready"));
+    // A stray voice call the principal's session made right before End.
+    const at = new Date().toISOString();
+    api.exchangeCalls.push({ _began: api.callsClock + 0.5, seq: 1, recordedAt: at, inputEpoch: 1, tool: "control_work", answeredAt: at, outcome: "ok", taskId: null, command: { commandId: randomUUID(), kind: "stop", goalId: ids.goal, authorityEpoch: 1, goalRevision: 1, state: "acknowledged", createdAt: at } });
+    api.onEnd = () => {
+      push("provider", providerReceipt(run, seq++, "closed"));
+      push("session_closed", sessionClosed(run, seq++, { windows: 0, turns: 0, replies: 0 }));
+    };
+    const ended = await driver.end(run, "unused", "unused");
+    const index = (predicate: (event: DriverEvent) => boolean) => ended.events.findIndex(predicate);
+    const audit = index((event) => event.kind === "studio.exchange.calls_read" && event.payload.step_id === "final");
+    expect(audit).toBeGreaterThan(-1);
+    expect(ended.events[audit]!.payload).toMatchObject({ purpose: "baseline", operation_id: "end", after: null, status: "available", settled: true, quiescence: { exchange_ended: true, session_closed: true } });
+    expect((ended.events[audit]!.payload.calls as Array<Record<string, unknown>>).map((call) => call.seq)).toEqual([1]);
+    expect(index((event) => event.kind === "studio.cleanup.exchange_ended" && event.payload.confirmed === true)).toBeLessThan(audit);
+    expect(index((event) => event.kind === "studio.bridge_receipt" && event.payload.kind === "session_closed")).toBeLessThan(audit);
+    expect(index((event) => event.kind === "studio.cleanup.signed_out")).toBeGreaterThan(audit);
+  }, 120_000);
 });
