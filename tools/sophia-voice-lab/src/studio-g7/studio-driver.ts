@@ -48,7 +48,7 @@ import type { StudioG7Config } from "./config.js";
 import { buildStudioObserverScript } from "./page-scripts.js";
 import { probeStudioReadiness } from "./readiness.js";
 import { STUDIO_G7_ACTIONS, STUDIO_G7_VOICE_STEPS, isStudioG7ScenarioVersion, STUDIO_G7_SCENARIO_ID_SET, studioG7StepId, type StudioG7Action, type StudioG7VoiceStep } from "./scenarios.js";
-import { STUDIO_ROOM_PRESENCE_KIND, STUDIO_ROOM_PRESENCE_SCHEMA, StudioApiClient, classifyRoomPresence, type IdentityObservation, type ProjectedArtifactVersion, type ProjectedTaskDetail, type StudioRoomSnapshot } from "./studio-api.js";
+import { STUDIO_ROOM_PRESENCE_KIND, STUDIO_ROOM_PRESENCE_SCHEMA, StudioApiClient, classifyRoomPresence, type IdentityObservation, type ProjectedArtifactVersion, type ProjectedMission, type ProjectedTaskDetail, type StudioRoomSnapshot, type WithdrawalPreview } from "./studio-api.js";
 import { STUDIO_CALLS_END_STEP, STUDIO_CALLS_READ_KIND, STUDIO_CALLS_READ_SCHEMA } from "./calls-certification.js";
 import { buildStudioSessionSeedScript, globalSignOut, passwordGrant, revokeIssuedSession, signOut, supabaseStorageKey, type FetchLike, type IssuedStudioSession, type SignOutReceipt, type StudioUserSession } from "./supabase-session.js";
 
@@ -224,6 +224,37 @@ function studioObserveRequest(input: Record<string, unknown>): { stepId: string;
   const budget = typeof input._settle_budget_ms === "number" ? input._settle_budget_ms : 30_000;
   const waitMs = Math.min(typeof input.wait_ms === "number" ? Math.max(0, input.wait_ms) : 0, budget);
   return { stepId: studioG7StepId(forStep as StudioG7VoiceStep), waitMs };
+}
+
+/**
+ * What a withdrawal may reach, as one mission read shows it: the run's own
+ * notes (the principal's, the one its own request recorded or one bound to
+ * its exchange) and, each at the exact revision that read saw, the run's own
+ * decisions (proposed by the principal by voice, decided by nobody else,
+ * resting only on the run's own notes). A decision is the run's own only at
+ * that revision: accepting it (another member too) gives it a new one.
+ */
+export interface StudioWithdrawalScope { entryIds: Set<string>; decisionRevisions: Map<string, number> }
+
+export function studioWithdrawalOwnScope(mission: ProjectedMission, principal: string, ownNoteEntryId: string | null, exchangeId: string): StudioWithdrawalScope {
+  const entryIds = new Set(mission.entries.filter((entry) => entry.actorId === principal && (entry.id === ownNoteEntryId || entry.exchangeId === exchangeId)).map((entry) => entry.id));
+  const own = mission.decisions.filter((decision) => decision.proposedBy === principal && decision.proposedVia === "voice"
+    && (decision.decidedBy === null || decision.decidedBy === principal)
+    && decision.supportingEntryIds.length > 0 && decision.supportingEntryIds.every((id) => entryIds.has(id)));
+  return { entryIds, decisionRevisions: new Map(own.map((decision) => [decision.id, decision.revision] as const)) };
+}
+
+/** Previewed decisions the scope holds as the run's own, but at another revision than the preview names. */
+export function studioWithdrawalRevisionChanges(preview: Pick<WithdrawalPreview, "decisions">, scope: StudioWithdrawalScope): number {
+  return preview.decisions.filter((decision) => scope.decisionRevisions.has(decision.id) && scope.decisionRevisions.get(decision.id) !== decision.revision).length;
+}
+
+/** The preview's entries and decisions outside the scope: a decision counts as the run's own only at its exact {id, revision}. */
+export function studioWithdrawalForeign(preview: Pick<WithdrawalPreview, "entryIds" | "decisions">, scope: StudioWithdrawalScope): { entries: number; decisions: number } {
+  return {
+    entries: preview.entryIds.filter((id) => !scope.entryIds.has(id)).length,
+    decisions: preview.decisions.filter((decision) => scope.decisionRevisions.get(decision.id) !== decision.revision).length,
+  };
 }
 
 /** The refused sessions' counts on a sign-out or revoke receipt (no token, ever). */
@@ -1417,16 +1448,22 @@ export class StudioG7Driver implements VoiceBrowserDriver, StudioDriverExtension
     // The preview's whole cascade (product mission_forget_reach: every
     // version of the note, and every decision resting on one of them) is
     // confirmed by the request. So every previewed entry must be the run's
-    // own note, and every previewed decision the run's own: proposed by the
-    // principal by voice, decided by nobody else, resting only on the run's
-    // own notes. Another member's correction or decision is never withdrawn.
-    const ownEntryIds = new Set(entries.filter((entry) => entry.actorId === principal && (entry.id === ownNote?.entryId || entry.exchangeId === exchangeId)).map((entry) => entry.id));
-    const ownDecisionIds = new Set(mission.value.decisions.filter((decision) => decision.proposedBy === principal && decision.proposedVia === "voice"
-      && (decision.decidedBy === null || decision.decidedBy === principal)
-      && decision.supportingEntryIds.length > 0 && decision.supportingEntryIds.every((id) => ownEntryIds.has(id))).map((decision) => decision.id));
-    const foreignEntries = preview.value.entryIds.filter((id) => !ownEntryIds.has(id)).length;
-    const foreignDecisions = preview.value.decisions.filter((decision) => !ownDecisionIds.has(decision.id)).length;
-    if (foreignEntries > 0 || foreignDecisions > 0) return notPerformed("withdrawal_cascade_not_own", { ...chain, entry_id: target.id, foreign_entry_count: foreignEntries, foreign_decision_count: foreignDecisions, preview_entry_count: preview.value.entryIds.length, preview_decision_count: preview.value.decisions.length });
+    // own note, and every previewed decision the run's own at exactly the
+    // revision the preview names (studioWithdrawalOwnScope). Another member's
+    // correction or decision is never withdrawn.
+    let scope = studioWithdrawalOwnScope(mission.value, principal, ownNote?.entryId ?? null, exchangeId);
+    // A previewed decision that ownership read saw at another revision changed
+    // in between (another member may have accepted it: security P1). One
+    // bounded fresh read must find it the run's own at exactly the previewed
+    // revision, or nothing is sent.
+    const revisionChanges = studioWithdrawalRevisionChanges(preview.value, scope);
+    if (revisionChanges > 0) {
+      const fresh = await this.#api.mission(this.studio.projectId, await tokens.token());
+      if (fresh.status !== "available") return notPerformed(`recheck_mission_${fresh.reason}`, { ...chain, entry_id: target.id, revision_change_count: revisionChanges });
+      scope = studioWithdrawalOwnScope(fresh.value, principal, ownNote?.entryId ?? null, exchangeId);
+    }
+    const foreign = studioWithdrawalForeign(preview.value, scope);
+    if (foreign.entries > 0 || foreign.decisions > 0) return notPerformed("withdrawal_cascade_not_own", { ...chain, entry_id: target.id, foreign_entry_count: foreign.entries, foreign_decision_count: foreign.decisions, revision_change_count: revisionChanges, preview_entry_count: preview.value.entryIds.length, preview_decision_count: preview.value.decisions.length });
     const answer = await this.#api.withdraw(this.studio.projectId, preview.value, await tokens.token(), `voice-lab-g7:${operationId}`);
     const payload = recordEvent({
       status: answer.accepted ? "committed" : "refused", requested: true, ...chain, entry_id: target.id, entry_bound_exchange_id: target.exchangeId,

@@ -122,6 +122,13 @@ describe.skipIf(executablePath === null)("Studio G7 driver against a local fake 
     noteAnswers: new Map<string, { status: number; body: unknown }>(),
     /** Each task's consumed closure (its manifest's source dependencies), which the product keeps apart from inputSourceIds. */
     closures: new Map<string, string[]>(),
+    /** Runs as a withdrawal preview is read (GET), before its cascade is computed: a decision that changes before the preview. */
+    onWithdrawalPreview: null as (() => void) | null,
+    /** Runs as a withdrawal is posted, before the product's staleness check: a change after the preview. */
+    onWithdrawalPost: null as (() => void) | null,
+    /** Runs as the mission is read, with the number of mission reads so far. */
+    onMissionRead: null as ((reads: number) => void) | null,
+    missionReads: 0,
   };
   const ROOM_UUID = "70000000-0000-4000-8000-0000000000a7";
   const tokens = { issued: new Set<string>(), revoked: new Set<string>(), expiresIn: 3_600, failLocal: 0, logouts: [] as string[] };
@@ -371,12 +378,16 @@ describe.skipIf(executablePath === null)("Studio G7 driver against a local fake 
         return;
       }
       if (request.method === "GET" && path === `/api/v1/projects/${PROJECT_UUID}/mission`) {
+        api.missionReads += 1;
+        api.onMissionRead?.(api.missionReads);
         json(200, { projectId: PROJECT_UUID, entries: api.mission.filter((entry) => entry.state === "current"), history: api.mission.filter((entry) => entry.state !== "current"),
           constraints: api.decisions.filter((decision) => decision.state === "accepted"), pending: api.decisions.filter((decision) => decision.state === "proposed"), decided: api.decisions.filter((decision) => decision.state === "rejected") });
         return;
       }
       const withdrawalMatch = new RegExp(`^/api/v1/projects/${PROJECT_UUID}/mission/entries/([0-9a-f-]{36})/withdrawal$`).exec(path);
       if (withdrawalMatch) {
+        if (request.method === "GET") api.onWithdrawalPreview?.();
+        else api.onWithdrawalPost?.();
         const entryId = withdrawalMatch[1]!;
         const note = api.mission.find((entry) => entry.id === entryId);
         if (!note || note.state === "withdrawn" || note.actorId !== PRINCIPAL_UUID) { productError(422, "not_found", "Note not found"); return; }
@@ -554,6 +565,10 @@ else {
     api.noteRequests.length = 0;
     api.noteAnswers.clear();
     api.closures.clear();
+    api.onWithdrawalPreview = null;
+    api.onWithdrawalPost = null;
+    api.onMissionRead = null;
+    api.missionReads = 0;
     return { config, driver, run };
   }
 
@@ -1282,6 +1297,100 @@ else {
     expect(postedWithdrawals()).toHaveLength(1);
     expect(api.withdrawals).toEqual([expect.objectContaining({ expectedAffected: { entryIds: [ids.note, correction], decisions: [{ id: ids.decision, revision: 2 }, { id: decision, revision: 3 }] }, previewToken: PREVIEW_PROOF })]);
     expect(api.mission.every((entry) => entry.state === "withdrawn")).toBe(true);
+    await driver.end(run, "unused", "unused");
+  }, 120_000);
+
+  // Security P1 (root, PR #168 comment 6090735518): a decision is the run's own only at the exact {id, revision} the
+  // ownership read saw. A revision the preview names but that read did not see is confirmed by one fresh mission read
+  // (still the principal's own, at exactly the previewed revision) or the withdrawal sends nothing.
+  const ownProposal = (id: string) => missionDecision(id, { revision: 1, state: "proposed", supportingEntryIds: [ids.note] });
+  const acceptedBy = (actor: string, revision: number, via: string) => (decision: Record<string, unknown>) => ({ ...decision, revision, state: "accepted", decidedBy: actor, decidedVia: via, decidedAt: new Date().toISOString() });
+  const changeDecision = (id: string, change: (decision: Record<string, unknown>) => Record<string, unknown>) => {
+    api.decisions = api.decisions.map((decision) => decision.id === id ? change(decision) : decision);
+  };
+  const decisionOf = (id: string) => api.decisions.find((decision) => decision.id === id);
+
+  it("security P1: another member's acceptance between the ownership read and the preview is never withdrawn (the race)", async () => {
+    const { driver, run } = harness();
+    await driver.start(run, "unused");
+    createReport();
+    const D = randomUUID();
+    api.decisions = [...api.decisions, ownProposal(D)];
+    // Root's sequence: D is the principal's own undecided voice proposal at revision 1 when the mission is read; as
+    // the preview is read, another member accepts it (revision 2, decided by OTHER), and the preview names D@2.
+    api.onWithdrawalPreview = () => { api.onWithdrawalPreview = null; changeDecision(D, acceptedBy(OTHER_PRINCIPAL, 2, "studio")); };
+    const readsBefore = api.missionReads;
+    const acted = await driver.studioAction(run, randomUUID(), { action: "withdrawal", entry_id: ids.note });
+    expect(acted.receipt).toMatchObject({ performed: false, status: "unavailable", reason: "withdrawal_cascade_not_own" });
+    expect(postedWithdrawals()).toEqual([]);
+    expect(api.withdrawals).toEqual([]);
+    expect(decisionOf(D)).toMatchObject({ revision: 2, state: "accepted", decidedBy: OTHER_PRINCIPAL });
+    expect(api.mission.find((entry) => entry.id === ids.note)).toMatchObject({ state: "current" });
+    // One bounded fresh check, never more.
+    expect(api.missionReads - readsBefore).toBe(2);
+    await driver.end(run, "unused", "unused");
+  }, 120_000);
+
+  it("security P1 positive control: the run's own undecided decision at the revision it was read at is still withdrawn, without a fresh read", async () => {
+    const { driver, run } = harness();
+    await driver.start(run, "unused");
+    createReport();
+    const D = randomUUID();
+    api.decisions = [...api.decisions, ownProposal(D)];
+    const readsBefore = api.missionReads;
+    const acted = await driver.studioAction(run, randomUUID(), { action: "withdrawal", entry_id: ids.note });
+    expect(acted.receipt).toMatchObject({ performed: true, status: "committed", entry_id: ids.note, http_status: 202 });
+    expect(api.withdrawals).toEqual([expect.objectContaining({ expectedAffected: { entryIds: [ids.note], decisions: [{ id: ids.decision, revision: 2 }, { id: D, revision: 1 }] }, previewToken: PREVIEW_PROOF })]);
+    expect(decisionOf(D)).toMatchObject({ revision: 1, state: "withdrawn" });
+    expect(api.missionReads - readsBefore).toBe(1);
+    await driver.end(run, "unused", "unused");
+  }, 120_000);
+
+  it("security P1: the principal's own acceptance between the ownership read and the preview is confirmed by the fresh read and withdrawn at that exact revision", async () => {
+    const { driver, run } = harness();
+    await driver.start(run, "unused");
+    createReport();
+    const D = randomUUID();
+    api.decisions = [...api.decisions, ownProposal(D)];
+    api.onWithdrawalPreview = () => { api.onWithdrawalPreview = null; changeDecision(D, acceptedBy(PRINCIPAL_UUID, 2, "voice")); };
+    const readsBefore = api.missionReads;
+    const acted = await driver.studioAction(run, randomUUID(), { action: "withdrawal", entry_id: ids.note });
+    expect(acted.receipt).toMatchObject({ performed: true, status: "committed", entry_id: ids.note, http_status: 202 });
+    expect(api.withdrawals).toEqual([expect.objectContaining({ expectedAffected: { entryIds: [ids.note], decisions: [{ id: ids.decision, revision: 2 }, { id: D, revision: 2 }] } })]);
+    expect(api.missionReads - readsBefore).toBe(2);
+    await driver.end(run, "unused", "unused");
+  }, 120_000);
+
+  it("security P1: a fresh read that finds the decision at yet another revision, even the principal's own again, sends nothing", async () => {
+    const { driver, run } = harness();
+    await driver.start(run, "unused");
+    createReport();
+    const D = randomUUID();
+    api.decisions = [...api.decisions, ownProposal(D)];
+    let previewed = false;
+    api.onWithdrawalPreview = () => { api.onWithdrawalPreview = null; previewed = true; changeDecision(D, acceptedBy(OTHER_PRINCIPAL, 2, "studio")); };
+    // After the preview, before the fresh read: the acceptance is undone (revision 3, the principal's own proposal again).
+    api.onMissionRead = () => { if (!previewed) return; api.onMissionRead = null; changeDecision(D, (decision) => ({ ...decision, revision: 3, state: "proposed", decidedBy: null, decidedVia: null, decidedAt: null })); };
+    const acted = await driver.studioAction(run, randomUUID(), { action: "withdrawal", entry_id: ids.note });
+    expect(acted.receipt).toMatchObject({ performed: false, status: "unavailable", reason: "withdrawal_cascade_not_own" });
+    expect(postedWithdrawals()).toEqual([]);
+    expect(decisionOf(D)).toMatchObject({ revision: 3, state: "proposed" });
+    await driver.end(run, "unused", "unused");
+  }, 120_000);
+
+  it("security P1: a change after the preview is refused by the product's staleness check, as before", async () => {
+    const { driver, run } = harness();
+    await driver.start(run, "unused");
+    createReport();
+    const D = randomUUID();
+    api.decisions = [...api.decisions, ownProposal(D)];
+    // The ownership read and the preview agree (D@1, the principal's own); another member accepts D before the post.
+    api.onWithdrawalPost = () => { api.onWithdrawalPost = null; changeDecision(D, acceptedBy(OTHER_PRINCIPAL, 2, "studio")); };
+    const acted = await driver.studioAction(run, randomUUID(), { action: "withdrawal", entry_id: ids.note });
+    expect(acted.receipt).toMatchObject({ performed: true, status: "refused", entry_id: ids.note, http_status: 409, code: "stale_revision" });
+    expect(postedWithdrawals()).toHaveLength(1);
+    expect(decisionOf(D)).toMatchObject({ revision: 2, state: "accepted", decidedBy: OTHER_PRINCIPAL });
+    expect(api.mission.find((entry) => entry.id === ids.note)).toMatchObject({ state: "current" });
     await driver.end(run, "unused", "unused");
   }, 120_000);
   it("labrev5 C4: End audits every call after the exchange ended and session_closed, before the global sign-out; a stray call made as End begins is listed", async () => {
