@@ -26,6 +26,42 @@ Every merged PR appends an entry here. This file is the team's accumulating inst
 ## Log
 <!-- Append new entries below this line -->
 
+## 2026-10-09 · [voice-lab · Studio/LiveKit G7 adapter (V-G07)] · PR #TBD
+**Author:** Claude · **Track:** voice · **Spec:** pack 03 G7 (`docs/plans/voice-qualification-g7.md` in the product, migration 0046 authoritative); branch `voice-lab/studio-livekit-g7`, 1dbec89..e8f4c46 on 6aede7d
+
+### What Changed
+- **Adapter (1dbec89 partial handoff as delivered, d179d98, e2935b4, a8e3e60; plugin 0.2.0):** a second target kind `studio-livekit-g7-v1` (off by default; the legacy Gemini browser target, its tools, `/readyz` and init-script bytes unchanged). Lab schema v7 admits `studio_action` (additive CHECK widening, quiescent upgrade binary). Three Studio-only MCP tools; every G7 step is one durable, idempotent operation (`speak` or `studio_action`), at most once per run, enforced in the ledger transaction and re-checked by the worker. Receipts parsed strictly in the 0046 shape, bound by grant id and run binding; separate harness and product verdicts; owned-only cleanup (End only as the id-bound API End of an ownership-proven exchange, global sign-out, browser closed).
+- **Review rounds 1–4 (8518699, 782e459, e5cbcb9, 87a6f62, c1f9e08, 4815489, cca65ec, 9599fe5; plugin 0.2.1–0.2.4):** dead-owner lease release by compare-and-delete or API-only recovery on the database clock; an exchange end counts only after Speak and for the joined exchange; JWT lifetime made durable and bounded; the admission deadlock (P2) fixed; the same-run global sign-out fence; no failure-shaped manifest while evidence is pending.
+- **Product joins (0c183e5, dab44f5, 21b9aff, 547c032, 237d5fc, 45dd942; plugin 0.2.5–0.2.9):** refused member reads typed as the product answers them (422 `not_found` vs a 404 absent route); tasks bound only by `NativeTask.exchangeId`; room live presence; every voice step certified only from the exchange's calls (`readAt`, `?after=`, answered calls, input epoch, one command of the step's kind).
+- **Delta 3 review (df8239d; plugin 0.2.10):** the withdrawal's effect needs its own before/after observations; the presence veto decided by the latest verification; calls read only with the run's own session.
+- **Delta 4 (96a271f, root P2 and review P2-3; plugin 0.2.11):** the report is resolved only through the run's own chain (certified create → research `designTaskId` → design naming it back → artifact); foreign designs are never edited, downloaded or judged.
+- **Delta 5 (72b0d57; plugin 0.2.12):** marker healing by boot id, global-only sign-out proof, command later states and unattributed calls, a bounded presence veto.
+- **labrev4 fixes (6c590e1; plugin 0.2.13):** exact-prefix input-epoch join; the revision sends the own artifact's current version; a withdrawal is sent only when its whole cascade is the run's own (foreign corrections and decisions get zero POSTs).
+- **labrev5 fixes with root's C3/C4 (1fcdfc6; plugin 0.2.14):** the own-marker sweep clears another boot's marker only once abandoned (throttled to 30 s); a `DEDUPE_CONFLICT` clear counts as done; End's post-quiescence calls audit replaces the pre-End read; the veto bound counts only gone reports, and a report stuck `present` is capped at 2 h and audited.
+- **Delta 6 (1df8d1b, tests e8f4c46; plugin 0.2.15):** the episode follows the product's lifecycle order. It records the run's own note first (`record_note`, giving source S), then: create, steer, leave/return, hold/resume while D is live, the HTTP revision once D publishes (X left live), the stale probe, the withdrawal while X is live, and the Stop sub-episode (`create_stop_target`, then `stop`).
+  - `design_ended` is proven only on S, through R2's `inputSourceIds` and `withdrawnSourceIds`. The old limitation is removed.
+  - Stop is credited only on the sub-episode's own live work.
+  - Contract `sophia.studio-g7.v2`; the catalogue stays `studio-g7-v1`.
+
+### What We Learned
+- Never attribute a product effect by actor, time window or "the only one published": every false pass in review came from that. Join only on ids the product records for the run's own act (the exchange on a task, the command on a call, the source on a receipt).
+- Order the episode by the product's real lifecycle, observed on its own PostgreSQL tests:
+  - the product admits no edit while the first design is live;
+  - it admits one design of a page at a time;
+  - it refuses Stop on a completed goal, so Stop needs its own sub-episode.
+- Use the note's source id, not its entry id, for the withdrawal join. A correction gets a new source, and the closure the product computes lists sources.
+- A read of "every call" is only an audit once quiescence holds: the exchange has ended, no provider session remains, and the read happens before the sign-out. It relies on the product's C5 fence of recording against End: reported 04fac683, verification pending. Before quiescence, an empty read proves nothing.
+- Review state: delta 6 (1df8d1b, e8f4c46) is not reviewed yet. Every earlier round's findings are fixed, each with a regression test that fails at the prior head and mutants that are killed.
+
+### CLAUDE.md Updates
+- None
+
+### Skills Created / Modified
+- `plugins/sophia-voice-lab/skills/autonomous-voice-dogfood/SKILL.md` and its references (`scenario-catalog.md`, `tool-contracts.md`, `evidence-interpretation.md`, `recovery.md`): the Studio G7 flow, tools, evidence rules and episode order. Plugin 0.2.0 → 0.2.15+codex.20261009151737.
+
+### GEPA Log Entry
+- N/A
+
 ## 2026-06-29 · [decks · restore HTML-slide path + partial-image floor + truthful image errors] · PR #TBD
 **Author:** Claude · **Track:** backend + skills · forensics `docs/audits/sophia-builder-deck-revert-and-trace-forensics-2026-06-29.md`
 
