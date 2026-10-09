@@ -123,7 +123,7 @@ export interface StudioG7Evaluation {
   bridge: { receipt_count: number; distinct_seq_count: number; duplicate_count: number; conflicting_seqs: string[]; missing_seqs: number[]; first_seq: number | null; max_seq: number | null; read_after_lab_end_count: number; after_session_closed_kinds: string[]; exchange_state: string | null };
   cleanup: { required: true; guard_reason: string | null; exchange_ended: boolean; exchange_status: string | null; ownership: string | null; signed_out: boolean; browser_closed: boolean; browser_lease_released: boolean; room_presence: string | null; complete: boolean };
   deployed_identities: Record<string, { expected: string | null; observed: string[]; status: "verified" | "mismatch" | "unavailable" }>;
-  outcome: { observations: number; join: "exchange_calls" | "uncertain"; bound_tasks: number; missing_product_field: "ExchangeCalls" | null; voice_steps: StudioStepCertification[]; artifacts_verified: number; artifacts_mismatched: number; artifacts_unavailable: number };
+  outcome: { observations: number; join: "exchange_calls" | "uncertain"; bound_tasks: number; own_report: { status: "resolved" | "unavailable" | "uncertain"; reason: string | null; create_task_id: string | null; design_task_id: string | null; artifact_id: string | null }; missing_product_field: "ExchangeCalls" | null; voice_steps: StudioStepCertification[]; artifacts_verified: number; artifacts_mismatched: number; artifacts_unavailable: number };
   corroboration: { webrtc_sender_stats: { status: "corroboration_only"; samples: number; issued_track_rows: number; max_packets_sent: number | null } };
   coverage: typeof STUDIO_G7_RECEIPT_COVERAGE;
   summary: string;
@@ -474,19 +474,6 @@ export function evaluateStudioG7Run(run: RunRecord, events: Event[], operations:
 
   // ---------------------------------------------------------- outcome reads
   const observations = ofKind("studio.outcome.observed", "canonical");
-  const artifactFacts = observations.flatMap((event) => (Array.isArray(event.payload.artifacts) ? event.payload.artifacts as unknown[] : []).map((value) => ({ event, artifact: record(value) ?? {} })));
-  const latestArtifact = new Map<string, { event: Event; artifact: Record<string, unknown> }>();
-  for (const item of artifactFacts) latestArtifact.set(String(item.artifact.version_id), item);
-  const artifactStates = [...latestArtifact.values()];
-  const mismatched = artifactStates.filter((item) => item.artifact.status === "mismatch");
-  const verifiedArtifacts = artifactStates.filter((item) => item.artifact.status === "verified");
-  if (mismatched.length > 0) P("outcome.artifact_bytes_integrity", "fail", "downloaded_bytes_disagree_with_declared_digest", mismatched.map((item) => item.event));
-  else if (verifiedArtifacts.length > 0) P("outcome.artifact_bytes_integrity", "pass", null, verifiedArtifacts.map((item) => item.event));
-  else P("outcome.artifact_bytes_integrity", "unavailable", artifactStates.length > 0 ? String(artifactStates[0]!.artifact.reason ?? "artifact_bytes_unavailable") : "no_published_artifact_observed", observations);
-
-  // ------------------------------------------------------------ scenario steps
-  const scenario = studioG7Scenario(run.scenarioId);
-  const steps: StudioStepResult[] = [];
   const tasksOf = (event: Event) => (Array.isArray(event.payload.tasks) ? event.payload.tasks as unknown[] : []).map((value) => record(value) ?? {});
   // A voice step is certified only from the exchange's calls
   // (calls-certification.ts): the one command its own voice call admitted
@@ -499,22 +486,72 @@ export function evaluateStudioG7Run(run: RunRecord, events: Event[], operations:
     steps: voiceOperations.map((operation) => ({ operationId: operation.id, stepId: String(operation.input._g7_step) })),
     runExchangeId,
     ownershipProven: ownershipProven.length > 0 && ownershipMismatch.length === 0,
-    // The input epoch each step's voice was heard at: its input window's bridge receipt (joined by ordinal above).
-    stepInputEpochs: new Map(utterances.map((utterance) => {
-      const window = utterance.bridge_window as { input_epoch?: unknown } | null | undefined;
-      return [String(utterance.operation_id), typeof window?.input_epoch === "number" ? window.input_epoch : null];
+    // The input epoch each step's voice was heard at: the bridge's input
+    // window receipt of the same ordinal (available mid-run too, before
+    // session_closed; a dropped window leaves the step's epoch unknown).
+    stepInputEpochs: new Map(nonSilence.map((entry, index) => {
+      const window = windows.find((item) => item.receipt.windowSeq === index + 1);
+      return [entry.operation.id, window ? window.receipt.inputEpoch : null];
     })),
   });
   const certifiedSteps = new Map(certification.steps.map((item) => [item.operation_id, item]));
-  // The run's own tasks: the one its certified create command made, then the
-  // product's own link from that research task to its design.
+  // The run's own report, resolved only through the product's own links
+  // (studio-driver.ts #resolveOwnReport does the same before any mutation):
+  // the certified create's research task (bound to the run's exchange), the
+  // one design task its page went to (research.design_task_id), which names
+  // that research task back, and that design's artifact. Its own versions are
+  // that design's published version and those of the Lab's own edit tasks on
+  // the same artifact and research. Bytes, edits and refusals of any other
+  // artifact are never the run's, whatever the time window or the principal.
   const allTasks = observations.flatMap(tasksOf);
-  const boundIds = new Set<string>(certification.createdTaskId === null ? [] : [certification.createdTaskId]);
-  for (const task of allTasks) {
-    const designTaskId = record(task.research)?.design_task_id;
-    if (boundIds.has(String(task.task_id)) && typeof designTaskId === "string") boundIds.add(designTaskId);
+  const sightings = (taskId: string) => allTasks.filter((task) => task.task_id === taskId);
+  const ownReport = ((): { status: "resolved"; designTaskId: string; artifactId: string } | { status: "unavailable" | "uncertain"; reason: string } => {
+    const created = certification.createdTaskId;
+    if (created === null) return { status: "unavailable", reason: "create_step_not_certified" };
+    const research = sightings(created);
+    if (research.length === 0) return { status: "unavailable", reason: "own_research_not_observed" };
+    if (research.some((task) => typeof task.exchange_id !== "string" || task.exchange_id.toLowerCase() !== runExchangeId)) return { status: "uncertain", reason: "own_research_not_bound_to_run_exchange" };
+    const designIds = new Set(research.map((task) => record(task.research)?.design_task_id).filter((value): value is string => typeof value === "string"));
+    if (designIds.size === 0) return { status: "unavailable", reason: "own_design_pending" };
+    if (designIds.size > 1) return { status: "uncertain", reason: "own_design_ambiguous" };
+    const designTaskId = [...designIds][0]!;
+    const designs = sightings(designTaskId).map((task) => ({ task, design: record(task.design) })).filter((item) => item.design !== null);
+    if (designs.length === 0) return { status: "unavailable", reason: "own_design_not_observed" };
+    if (designs.some((item) => item.design!.research_task_id !== created)) return { status: "uncertain", reason: "target_not_canonical" };
+    if (designs.some((item) => typeof item.task.exchange_id === "string" && item.task.exchange_id.toLowerCase() !== runExchangeId)) return { status: "uncertain", reason: "target_not_canonical" };
+    const artifactIds = new Set(designs.map((item) => item.design!.artifact_id).filter((value): value is string => typeof value === "string"));
+    if (artifactIds.size === 0) return { status: "unavailable", reason: "own_design_pending" };
+    if (artifactIds.size > 1) return { status: "uncertain", reason: "own_artifact_ambiguous" };
+    return { status: "resolved", designTaskId, artifactId: [...artifactIds][0]! };
+  })();
+  const ownChain = ownReport.status === "resolved" ? ownReport : null;
+  // The Lab's own admitted edits of the run's own artifact (their tasks name the same research and artifact).
+  const ownEditTaskIds = new Set<string>();
+  if (ownChain !== null) {
+    for (const event of ofKind("studio.action.html_edit", "canonical")) {
+      if (event.payload.requested !== true || event.payload.status !== "admitted" || event.payload.artifact_id !== ownChain.artifactId || typeof event.payload.task_id !== "string") continue;
+      const seen = sightings(event.payload.task_id).map((task) => record(task.design));
+      if (seen.length > 0 && seen.every((design) => design !== null && design.research_task_id === certification.createdTaskId && design.artifact_id === ownChain.artifactId)) ownEditTaskIds.add(event.payload.task_id);
+    }
   }
+  const boundIds = new Set<string>([...(certification.createdTaskId === null ? [] : [certification.createdTaskId]), ...(ownChain === null ? [] : [ownChain.designTaskId])]);
   const boundTasksOf = (event: Event) => tasksOf(event).filter((task) => boundIds.has(String(task.task_id)));
+  const isOwnVersion = (artifact: Record<string, unknown>) => ownChain !== null && artifact.artifact_id === ownChain.artifactId && typeof artifact.task_id === "string" && (artifact.task_id === ownChain.designTaskId || ownEditTaskIds.has(artifact.task_id));
+  const artifactFacts = observations.flatMap((event) => (Array.isArray(event.payload.artifacts) ? event.payload.artifacts as unknown[] : []).map((value) => ({ event, artifact: record(value) ?? {} })));
+  const latestArtifact = new Map<string, { event: Event; artifact: Record<string, unknown> }>();
+  for (const item of artifactFacts) if (isOwnVersion(item.artifact)) latestArtifact.set(String(item.artifact.version_id), item);
+  // Only the run's own versions count; another artifact's bytes are never the run's.
+  const artifactStates = [...latestArtifact.values()];
+  const mismatched = artifactStates.filter((item) => item.artifact.status === "mismatch");
+  const verifiedArtifacts = artifactStates.filter((item) => item.artifact.status === "verified");
+  if (mismatched.length > 0) P("outcome.artifact_bytes_integrity", "fail", "downloaded_bytes_disagree_with_declared_digest", mismatched.map((item) => item.event));
+  else if (verifiedArtifacts.length > 0) P("outcome.artifact_bytes_integrity", "pass", null, verifiedArtifacts.map((item) => item.event));
+  else if (ownReport.status !== "resolved") P("outcome.artifact_bytes_integrity", ownReport.status, ownReport.reason, observations);
+  else P("outcome.artifact_bytes_integrity", "unavailable", artifactStates.length > 0 ? String(artifactStates[0]!.artifact.reason ?? "artifact_bytes_unavailable") : "no_own_published_artifact_observed", observations);
+
+  // ------------------------------------------------------------ scenario steps
+  const scenario = studioG7Scenario(run.scenarioId);
+  const steps: StudioStepResult[] = [];
   if (!scenario) {
     H("scenario.catalog_binding", "unavailable", "scenario_not_in_studio_g7_catalog");
   } else {
@@ -556,6 +593,9 @@ export function evaluateStudioG7Run(run: RunRecord, events: Event[], operations:
       if (step.label === "section_revision" || step.label === "stale_edit") {
         const edit = ofKind("studio.action.html_edit", "canonical").filter((event) => event.payload.operation_id === operation!.id && event.payload.requested === true).at(-1);
         if (!edit) { result.outcome = "unavailable"; result.reason = "edit_receipt_missing"; steps.push(result); continue; }
+        // Only an edit (or refusal) of the run's own artifact, on its own chain, is the run's.
+        if (ownReport.status !== "resolved") { result.outcome = ownReport.status; result.reason = ownReport.reason; steps.push(result); continue; }
+        if (edit.payload.artifact_id !== ownReport.artifactId) { result.outcome = "uncertain"; result.reason = "edit_target_not_canonical"; steps.push(result); continue; }
         if (step.label === "stale_edit") {
           const refusedStale = edit.payload.http_status === 409 && edit.payload.code === "stale_revision";
           result.outcome = refusedStale ? "pass" : "fail";
@@ -656,7 +696,7 @@ export function evaluateStudioG7Run(run: RunRecord, events: Event[], operations:
     bridge: { receipt_count: bridgeRaw.length, distinct_seq_count: bridge.length, duplicate_count: duplicateCount, conflicting_seqs: conflictingSeqs, missing_seqs: missingSeqs, first_seq: firstSeq, max_seq: maxSeq, read_after_lab_end_count: readAfterLabEnd, after_session_closed_kinds: afterClosedKinds, exchange_state: latestGrant?.exchangeState ?? null },
     cleanup: { required: true, guard_reason: guardReason, exchange_ended: cleanup.exchangeEnded, exchange_status: typeof latestEnded?.payload.status === "string" ? latestEnded.payload.status : null, ownership: typeof latestOwnership === "string" ? latestOwnership : null, signed_out: cleanup.signedOut, browser_closed: cleanup.browserClosed, browser_lease_released: leaseReleased.length > 0, room_presence: roomPresence, complete: cleanupComplete },
     deployed_identities: identities,
-    outcome: { observations: observations.length, join: certification.steps.some((item) => item.outcome === "pass") ? "exchange_calls" : "uncertain", bound_tasks: boundIds.size, missing_product_field: certification.answered ? null : "ExchangeCalls", voice_steps: certification.steps, artifacts_verified: verifiedArtifacts.length, artifacts_mismatched: mismatched.length, artifacts_unavailable: artifactStates.filter((item) => item.artifact.status === "unavailable").length },
+    outcome: { observations: observations.length, join: certification.steps.some((item) => item.outcome === "pass") ? "exchange_calls" : "uncertain", bound_tasks: boundIds.size, own_report: ownReport.status === "resolved" ? { status: "resolved", reason: null, create_task_id: certification.createdTaskId, design_task_id: ownReport.designTaskId, artifact_id: ownReport.artifactId } : { status: ownReport.status, reason: ownReport.reason, create_task_id: certification.createdTaskId, design_task_id: null, artifact_id: null }, missing_product_field: certification.answered ? null : "ExchangeCalls", voice_steps: certification.steps, artifacts_verified: verifiedArtifacts.length, artifacts_mismatched: mismatched.length, artifacts_unavailable: artifactStates.filter((item) => item.artifact.status === "unavailable").length },
     corroboration: { webrtc_sender_stats: { status: "corroboration_only", samples: stats.length, issued_track_rows: issuedRows, max_packets_sent: maxPackets } },
     coverage: STUDIO_G7_RECEIPT_COVERAGE,
     summary: withheld.length === 0 ? `harness_pass_${harness.length}` : `harness_withheld:${withheld.slice(0, 32).join(",")}`,

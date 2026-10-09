@@ -59,6 +59,13 @@ export class ScriptedStudioDriver {
   readonly withheldLogouts: string[] = [];
   gateChecks = 0;
   setStudioSignOutGate(runId: string, gate: (() => Promise<boolean>) | null): void { if (gate === null) this.signOutGates.delete(runId); else this.signOutGates.set(runId, gate); }
+  /** The certified create task the worker handed over, in order (before each action and before End). */
+  readonly ownCreateTasks: Array<{ runId: string; taskId: string | null }> = [];
+  setStudioOwnCreateTask(runId: string, taskId: string | null): void { this.ownCreateTasks.push({ runId, taskId }); }
+  /** The exchange the scripted observations show the create's research task bound to (null: unbound). */
+  researchExchangeId: string | null = null;
+  /** Every action input the worker passed, in order. */
+  readonly actionInputs: Array<Record<string, unknown>> = [];
 
   constructor(readonly run: RunRecord) {}
 
@@ -144,10 +151,11 @@ export class ScriptedStudioDriver {
 
   async studioAction(run: RunRecord, operationId: string, input: Record<string, unknown>): Promise<DriverOperationResult> {
     this.calls.push(`action:${String(input.action)}`);
+    this.actionInputs.push({ ...input });
     const task = (id: string, kind: string, extra: Record<string, unknown> = {}) => ({ task_id: id, kind, state: "running", phase: "running", created_at: new Date().toISOString(), focus: false, research: null, design: null, outputs: [], ...extra });
     if (input.action === "observe") {
       const phase = input.for_step === "hold" ? "held" : input.for_step === "stop" ? "stopped" : "running";
-      return { receipt: { action: "observe", performed: false, status: "observed" }, events: [this.#outcome(`g7.${String(input.for_step)}`, [task(RESEARCH, "research", { phase })])] };
+      return { receipt: { action: "observe", performed: false, status: "observed" }, events: [this.#outcome(`g7.${String(input.for_step)}`, [task(RESEARCH, "research", { phase, exchange_id: this.researchExchangeId })])] };
     }
     if (input.action === "leave_and_return") {
       const published = canonicalJson(pageReceipt(run, "mic_published", Date.now() + 1));

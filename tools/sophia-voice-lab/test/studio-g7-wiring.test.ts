@@ -848,6 +848,48 @@ describe("a G7 voice step's calls baseline is durable before the step's write-ah
   }, 60_000);
 });
 
+describe("delta 4: the worker hands the driver only the run's certified create task", () => {
+  it("passes null until the create step is certified from the exchange's calls, then that task, before every action and before End", async () => {
+    const h = await harness("own-create-worker");
+    const GOAL = "e0000000-0000-4000-8000-0000000000a1";
+    const RESEARCH = "d0000000-0000-4000-8000-0000000000d3";
+    let tick = 0;
+    const stamps = new Map<string, number>();
+    const recorded: Array<{ began: number; call: Record<string, unknown> }> = [];
+    h.driver.callsAnswer = (_run, _purpose, after) => {
+      tick += 1;
+      const readAt = `2026-10-09T12:00:${String(tick).padStart(2, "0")}.000001Z`;
+      stamps.set(readAt, tick);
+      const since = after === null ? null : stamps.get(after)!;
+      return { status: "available", read_at: readAt, calls: recorded.filter((item) => since === null || item.began > since).map((item) => item.call) };
+    };
+    const at = new Date().toISOString();
+    await h.worker.runOnce();
+    const create = h.service.studioG7VoiceStep(caller, { run_id: h.runId, step: "create", fixture_id: "a02_short_command", idempotency_key: newIdempotencyKey("voice-create") });
+    // The create step's own voice call, recorded after its baseline: it admitted the research task.
+    while (!h.driver.callsReads.some((read) => read.purpose === "baseline")) { if (!(await h.worker.runOnce())) await delay(5); }
+    recorded.push({ began: tick + 0.5, call: { seq: 1, recorded_at: at, input_epoch: 1, tool: "start_research", task_id: RESEARCH, answered_at: at, outcome: "admitted", command: { command_id: "f0000000-0000-4000-8000-000000000001", kind: "native_task", goal_id: GOAL, authority_epoch: 1, goal_revision: 1, state: "acknowledged", created_at: at } } });
+    expect((await drive(h, create)).status).toBe("completed");
+    // The task is not yet seen bound to the run's exchange: the create is not certified, so nothing is handed over.
+    h.driver.researchExchangeId = EXCHANGE_UUID;
+    expect((await action(h, { action: "observe", for_step: "create" })).data).toMatchObject({ performed: false });
+    expect(h.driver.actionInputs.at(-1)).toMatchObject({ action: "observe", _own_create_task_id: null });
+    expect(h.driver.ownCreateTasks.at(-1)).toEqual({ runId: h.runId, taskId: null });
+    // That observation saw the research task bound to the run's exchange: the create is certified now.
+    expect((await action(h, { action: "section_revision", instruction: "Shorten the introduction" })).data).toMatchObject({ performed: true });
+    expect(h.driver.actionInputs.at(-1)).toMatchObject({ action: "section_revision", _own_create_task_id: RESEARCH });
+    expect(h.driver.ownCreateTasks.at(-1)).toEqual({ runId: h.runId, taskId: RESEARCH });
+    // Never a task from another source: a caller cannot name one.
+    await expect(h.service.studioG7Action(caller, { run_id: h.runId, idempotency_key: newIdempotencyKey("forged"), action: "stale_edit", _own_create_task_id: "d0000000-0000-4000-8000-0000000000ff" })).rejects.toThrow();
+    expect((await action(h, { action: "stale_edit" })).data).toMatchObject({ performed: true });
+    expect(h.driver.actionInputs.at(-1)).toMatchObject({ action: "stale_edit", _own_create_task_id: RESEARCH });
+    const handedBeforeEnd = h.driver.ownCreateTasks.length;
+    await end(h);
+    expect(h.driver.ownCreateTasks.slice(handedBeforeEnd)).toEqual([{ runId: h.runId, taskId: RESEARCH }]);
+    expect(h.driver.calls.indexOf("end")).toBeGreaterThan(-1);
+  }, 60_000);
+});
+
 /**
  * Root's P2: two real workers recovering the SAME run. Each worker gets its own
  * view of one shared ledger whose begin is synchronized: both reach

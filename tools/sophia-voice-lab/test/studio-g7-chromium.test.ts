@@ -109,6 +109,10 @@ describe.skipIf(executablePath === null)("Studio G7 driver against a local fake 
     callsClock: 0,
     callsStamps: new Map<string, number>(),
     onCallsRead: null as (() => void) | null,
+    /** Every html-edit request as sent (the version and sections it targets). */
+    editRequests: [] as Array<{ versionId: string; sections: string[] }>,
+    /** Runs as a native task is read, before it is answered (a chain that changes between reads). */
+    onTaskRead: null as ((taskId: string) => void) | null,
   };
   const ROOM_UUID = "70000000-0000-4000-8000-0000000000a7";
   const tokens = { issued: new Set<string>(), revoked: new Set<string>(), expiresIn: 3_600, failLocal: 0, logouts: [] as string[] };
@@ -251,7 +255,7 @@ describe.skipIf(executablePath === null)("Studio G7 driver against a local fake 
         return;
       }
       const taskMatch = new RegExp(`^/api/v1/projects/${PROJECT_UUID}/native-tasks/([0-9a-f-]{36})$`).exec(path);
-      if (request.method === "GET" && taskMatch) { const detail = api.tasks.get(taskMatch[1]!); if (detail) json(200, detail); else productError(422, "not_found", "Task not found"); return; }
+      if (request.method === "GET" && taskMatch) { api.onTaskRead?.(taskMatch[1]!); const detail = api.tasks.get(taskMatch[1]!); if (detail) json(200, detail); else productError(422, "not_found", "Task not found"); return; }
       const versionsMatch = /^\/api\/v1\/artifacts\/([0-9a-f-]{36})\/versions$/.exec(path);
       if (request.method === "GET" && versionsMatch) { json(200, api.versions.get(versionsMatch[1]!) ?? []); return; }
       const sourceMatch = /^\/api\/v1\/sources\/([0-9a-f-]{36})\/content$/.exec(path);
@@ -275,9 +279,10 @@ describe.skipIf(executablePath === null)("Studio G7 driver against a local fake 
       }
       if (request.method === "POST" && path === `/api/v1/projects/${PROJECT_UUID}/html-edits`) {
         const key = String(request.headers["idempotency-key"] ?? "");
+        const parsed = JSON.parse(body) as { versionId: string; sections: string[]; instruction: string };
+        api.editRequests.push({ versionId: parsed.versionId, sections: parsed.sections });
         const prior = api.edits.get(key);
         if (prior) { json(prior.status, prior.body); return; }
-        const parsed = JSON.parse(body) as { versionId: string; sections: string[]; instruction: string };
         const versions = api.versions.get(ids.artifact) ?? [];
         if (parsed.versionId !== versions[0]?.id) { const answer = { status: 409, body: { code: "stale_revision", message: FREE_TEXT[4], requestId: randomUUID(), retry: "reconcile_first" } }; api.edits.set(key, answer); json(answer.status, answer.body); return; }
         const edit = nativeTask(ids.edit, "design", { state: "succeeded", phase: "result_ready", artifactId: ids.artifact });
@@ -404,6 +409,8 @@ else {
     api.callsClock = 0;
     api.callsStamps.clear();
     api.onCallsRead = null;
+    api.editRequests.length = 0;
+    api.onTaskRead = null;
     return { config, driver, run };
   }
 
@@ -456,7 +463,8 @@ else {
     };
     const act = async (input: Record<string, unknown>) => {
       const operation: OperationRecord = { ...speakOperation(run, new Date(Date.now() + operations.length)), type: "studio_action", input, result: null };
-      const result = await driver.studioAction(run, operation.id, input);
+      // As the worker does: the run's certified create task (the create step's /calls certification).
+      const result = await driver.studioAction(run, operation.id, { ...input, _own_create_task_id: ids.research });
       collected.push(...result.events);
       operations.push({ ...operation, result: result.receipt });
       return result;
@@ -659,7 +667,7 @@ else {
     expect(api.calls.filter((call) => call.startsWith("POST") && call.includes("/withdrawal"))).toHaveLength(0);
     // A stale edit with no superseded version is typed, never sent.
     api.evidenceMode = "ok";
-    expect((await driver.studioAction(run, randomUUID(), { action: "stale_edit" })).receipt).toMatchObject({ performed: false, reason: "no_superseded_version" });
+    expect((await driver.studioAction(run, randomUUID(), { action: "stale_edit", _own_create_task_id: ids.research })).receipt).toMatchObject({ performed: false, reason: "no_superseded_version" });
     expect(api.calls.filter((call) => call.endsWith("/html-edits"))).toHaveLength(0);
     await driver.end(run, "unused", "unused");
   }, 120_000);
@@ -853,4 +861,144 @@ else {
     await driver.end(run, "unused", "unused");
     expect(api.exchangeId).toBeNull();
   }, 120_000);
+  // ------------------------------------------------------------------ delta 4
+  // The run's report is resolved only through the product's own chain: the
+  // certified create task (bound to the run's exchange) -> its research's
+  // designTaskId -> that design (naming the research back) -> its artifact and
+  // published version. A design in the window or by the principal is never a
+  // fallback, and it is never verified or edited.
+
+  /** Root's exact scenario: the run's own research is still pending with no design; the only published design belongs to OTHER_EXCHANGE's research. */
+  function rootScenario(): { pendingId: string } {
+    createReport();
+    const detail = api.tasks.get(ids.research)!;
+    const foreign = { ...(detail.task as Record<string, unknown>), exchangeId: OTHER_EXCHANGE };
+    api.tasks.set(ids.research, { ...detail, task: foreign });
+    api.work = api.work.map((task) => task.id === ids.research ? foreign : task);
+    const pendingId = randomUUID();
+    const pending = nativeTask(pendingId, "research", { exchangeId: EXCHANGE_UUID, goalId: randomUUID() });
+    api.work.push(pending);
+    api.tasks.set(pendingId, { task: pending, instruction: "Own research still pending", result: null, research: { outputs: [], rootTaskId: pendingId, html: { state: "none", designTaskId: null } } });
+    return { pendingId };
+  }
+
+  /** A second version of the report artifact (so a stale edit has a superseded version to send). */
+  function supersede(): void {
+    api.versions.set(ids.artifact, [version(ids.v2, ids.html2, html2, ids.v1), version(ids.v1, ids.html1, html1, null)]);
+    api.contents.set(ids.html2, html2);
+  }
+
+  /** Another exchange's research and its published design, newer, by the principal, in the run's window: its own artifact and versions. */
+  function foreignReport(): { research: string; design: string; artifact: string; v1: string; v2: string; html: string } {
+    const f = { research: randomUUID(), design: randomUUID(), artifact: randomUUID(), v1: randomUUID(), v2: randomUUID(), html: randomUUID() };
+    const later = new Date(Date.now() + 1_000).toISOString();
+    const research = nativeTask(f.research, "research", { exchangeId: OTHER_EXCHANGE, createdAt: later });
+    const design = nativeTask(f.design, "design", { state: "succeeded", phase: "result_ready", artifactId: f.artifact, createdAt: later });
+    api.work = [design, research, ...api.work];
+    api.tasks.set(f.research, { task: research, instruction: FREE_TEXT[0], result: null, research: { outputs: [], rootTaskId: f.research, html: { state: "published", designTaskId: f.design } } });
+    api.tasks.set(f.design, { task: design, instruction: FREE_TEXT[0], result: null, design: { researchTaskId: f.research, artifactId: f.artifact, baseVersionId: f.v1, state: "published", targets: [], revisions: 0, renders: 1, candidates: [], maxRepairs: 2, publishedVersionId: f.v2, mode: "create", sections: ["intro"] } });
+    api.versions.set(f.artifact, [{ ...version(f.v2, f.html, html2, f.v1), artifactId: f.artifact }, { ...version(f.v1, f.html, html1, null), artifactId: f.artifact }]);
+    api.contents.set(f.html, html2);
+    return f;
+  }
+
+  const postedEdits = () => api.calls.filter((call) => call.startsWith("POST") && call.endsWith("/html-edits"));
+  const observedArtifacts = (events: DriverEvent[]) => events.filter((event) => event.kind === "studio.outcome.observed").flatMap((event) => event.payload.artifacts as Array<Record<string, unknown>>);
+
+  for (const action of ["section_revision", "stale_edit"] as const) {
+    it(`delta 4 (${action}): root's scenario — the own research is pending and the sole recent design is another exchange's — performs nothing`, async () => {
+      const { driver, run } = harness();
+      await driver.start(run, "unused");
+      const { pendingId } = rootScenario();
+      if (action === "stale_edit") supersede();
+      const input = action === "section_revision" ? { action, instruction: "Shorten the introduction", sections: ["intro"] } : { action };
+      const acted = await driver.studioAction(run, randomUUID(), { ...input, _own_create_task_id: pendingId });
+      expect({ receipt: acted.receipt, edits: api.edits.size }).toMatchObject({ receipt: { performed: false, status: "unavailable", reason: "own_design_pending" }, edits: 0 });
+      expect(postedEdits()).toEqual([]);
+      expect(acted.events.find((event) => event.kind === "studio.action.html_edit")?.payload).toMatchObject({ requested: false, status: "unavailable", reason: "own_design_pending", target_join: "canonical_chain", own_create_task_id: pendingId });
+      // The foreign design is never verified either: its bytes are never downloaded.
+      expect(observedArtifacts(acted.events)).toEqual([]);
+      expect(acted.events.find((event) => event.kind === "studio.outcome.observed")?.payload.own_report).toMatchObject({ status: "unavailable", reason: "own_design_pending", create_task_id: pendingId });
+      // A create task bound to another exchange is never the run's own; nor is one the worker did not certify.
+      const foreignRoot = await driver.studioAction(run, randomUUID(), { ...input, _own_create_task_id: ids.research });
+      expect(foreignRoot.receipt).toMatchObject({ performed: false, status: "uncertain", reason: "target_not_canonical" });
+      const uncertified = await driver.studioAction(run, randomUUID(), { ...input, _own_create_task_id: null });
+      expect(uncertified.receipt).toMatchObject({ performed: false, status: "unavailable", reason: "create_step_not_certified" });
+      // An own research whose design names another research back: not the run's report.
+      api.tasks.set(pendingId, { ...api.tasks.get(pendingId)!, research: { outputs: [], rootTaskId: pendingId, html: { state: "published", designTaskId: ids.design } } });
+      const misLinked = await driver.studioAction(run, randomUUID(), { ...input, _own_create_task_id: pendingId });
+      expect(misLinked.receipt).toMatchObject({ performed: false, status: "uncertain", reason: "target_not_canonical" });
+      expect(api.edits.size).toBe(0);
+      expect(postedEdits()).toEqual([]);
+      const ended = await driver.end(run, "unused", "unused");
+      expect(observedArtifacts(ended.events)).toEqual([]);
+      expect(api.calls.filter((call) => call.includes(`/sources/${ids.html1}/`) || call.includes(`/sources/${ids.html2}/`))).toEqual([]);
+    }, 120_000);
+  }
+
+  it("delta 4: own-positive control — the run's own create -> research -> published design: the revision and the stale edit land on that design's artifact only", async () => {
+    const { driver, run } = harness();
+    await driver.start(run, "unused");
+    createReport();
+    const revised = await driver.studioAction(run, randomUUID(), { action: "section_revision", instruction: "Shorten the introduction", sections: ["intro"], _own_create_task_id: ids.research });
+    expect(revised.receipt).toMatchObject({ performed: true, status: "admitted", http_status: 202, task_id: ids.edit });
+    expect(api.editRequests).toEqual([{ versionId: ids.v1, sections: ["intro"] }]);
+    expect(revised.events.find((event) => event.kind === "studio.action.html_edit")?.payload).toMatchObject({ requested: true, target_join: "canonical_chain", own_create_task_id: ids.research, design_task_id: ids.design, artifact_id: ids.artifact, version_id: ids.v1 });
+    // Its outcome verifies the own design's published version and the Lab's own edit of it.
+    expect(observedArtifacts(revised.events).map((artifact) => [artifact.task_id, artifact.version_id, artifact.status])).toEqual([[ids.design, ids.v1, "verified"], [ids.edit, ids.v2, "verified"]]);
+    const stale = await driver.studioAction(run, randomUUID(), { action: "stale_edit", _own_create_task_id: ids.research });
+    expect(stale.receipt).toMatchObject({ performed: true, status: "refused", http_status: 409, code: "stale_revision" });
+    expect(api.editRequests.at(-1)).toEqual({ versionId: ids.v1, sections: ["intro"] });
+    expect(stale.events.find((event) => event.kind === "studio.action.html_edit")?.payload).toMatchObject({ artifact_id: ids.artifact, version_id: ids.v1, superseded_by_version_id: ids.v2 });
+    expect(api.edits.size).toBe(2);
+    await driver.end(run, "unused", "unused");
+  }, 120_000);
+
+  it("delta 4: mixed control — own and foreign designs both published in the window: only the own one is targeted and verified", async () => {
+    const { driver, run } = harness();
+    await driver.start(run, "unused");
+    createReport();
+    const foreign = foreignReport();
+    const revised = await driver.studioAction(run, randomUUID(), { action: "section_revision", instruction: "Shorten the introduction", sections: ["intro"], _own_create_task_id: ids.research });
+    expect(revised.receipt).toMatchObject({ performed: true, status: "admitted", http_status: 202 });
+    const stale = await driver.studioAction(run, randomUUID(), { action: "stale_edit", _own_create_task_id: ids.research });
+    expect(stale.receipt).toMatchObject({ performed: true, status: "refused", http_status: 409, code: "stale_revision" });
+    // Both requests target the own artifact's versions; the foreign versions are never sent.
+    expect(api.editRequests.map((request) => request.versionId)).toEqual([ids.v1, ids.v1]);
+    expect(api.editRequests.some((request) => request.versionId === foreign.v1 || request.versionId === foreign.v2)).toBe(false);
+    for (const acted of [revised, stale]) {
+      expect(acted.events.find((event) => event.kind === "studio.action.html_edit")?.payload).toMatchObject({ artifact_id: ids.artifact, design_task_id: ids.design });
+      expect(observedArtifacts(acted.events).every((artifact) => artifact.artifact_id === ids.artifact)).toBe(true);
+    }
+    const ended = await driver.end(run, "unused", "unused");
+    expect(observedArtifacts(ended.events).map((artifact) => artifact.artifact_id)).toEqual([ids.artifact, ids.artifact]);
+    // The foreign design's bytes are never downloaded, so they can never judge the run.
+    expect(api.calls.filter((call) => call.includes(`/artifacts/${foreign.artifact}/`) || call.includes(`/sources/${foreign.html}/`))).toEqual([]);
+  }, 120_000);
+
+  for (const flip of ["exchange_rebound", "design_replaced"] as const) {
+    it(`delta 4: the chain is re-verified immediately before the mutating request (${flip}): a chain that changed is refused, nothing is edited`, async () => {
+      const { driver, run } = harness();
+      await driver.start(run, "unused");
+      createReport();
+      const other = foreignReport();
+      let reads = 0;
+      api.onTaskRead = (taskId) => {
+        if (taskId !== ids.research || ++reads !== 2) return;
+        // Between the first resolution and the mutation the product's chain changes.
+        const detail = api.tasks.get(ids.research)!;
+        if (flip === "exchange_rebound") api.tasks.set(ids.research, { ...detail, task: { ...(detail.task as Record<string, unknown>), exchangeId: OTHER_EXCHANGE } });
+        else {
+          api.tasks.set(ids.research, { ...detail, research: { ...(detail.research as Record<string, unknown>), html: { state: "published", designTaskId: other.design } } });
+          const design = api.tasks.get(other.design)!;
+          api.tasks.set(other.design, { ...design, design: { ...(design.design as Record<string, unknown>), researchTaskId: ids.research } });
+        }
+      };
+      const acted = await driver.studioAction(run, randomUUID(), { action: "section_revision", instruction: "Shorten the introduction", sections: ["intro"], _own_create_task_id: ids.research });
+      expect(acted.receipt).toMatchObject({ performed: false, status: "uncertain", reason: "target_changed" });
+      expect(api.edits.size).toBe(0);
+      expect(postedEdits()).toEqual([]);
+      await driver.end(run, "unused", "unused");
+    }, 120_000);
+  }
 });

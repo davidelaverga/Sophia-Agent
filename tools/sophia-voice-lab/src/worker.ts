@@ -1005,7 +1005,11 @@ export class VoiceLabWorker {
       await this.#readStudioCallsAfterPriorStep(run, null);
       await this.#fenceMutation(claimed, signal);
       const settleBudgetMs = deadlineAt === undefined ? undefined : Math.max(0, deadlineAt - Date.now() - 15_000);
-      const acted = await this.driver.studioAction(run, operation.id, { ...operation.input, ...(settleBudgetMs === undefined ? {} : { _settle_budget_ms: settleBudgetMs }) });
+      // The run's report is resolved only from the certified create task
+      // (the create step's /calls certification), never from a time window.
+      const ownCreateTaskId = await this.#studioOwnCreateTaskId(run);
+      this.driver.setStudioOwnCreateTask(run.id, ownCreateTaskId);
+      const acted = await this.driver.studioAction(run, operation.id, { ...operation.input, _own_create_task_id: ownCreateTaskId, ...(settleBudgetMs === undefined ? {} : { _settle_budget_ms: settleBudgetMs }) });
       await this.#persistEvents(run.id, acted.events);
       run = await this.#freshRun(run.id);
       if (run.state === "ready") run = await transitionRun(this.ledger, run, "active");
@@ -1044,7 +1048,11 @@ export class VoiceLabWorker {
     if (run.state !== "ending") run = await transitionRun(this.ledger, run, "ending");
     await this.#fenceMutation(claimed, signal);
     // The last G7 voice step's calls, read before End signs the principal out.
-    if (isStudioG7Run(run) && hasStudioExtensions(this.driver)) await this.#readStudioCallsAfterPriorStep(run, null);
+    if (isStudioG7Run(run) && hasStudioExtensions(this.driver)) {
+      await this.#readStudioCallsAfterPriorStep(run, null);
+      // The final outcome read verifies only the run's own report.
+      this.driver.setStudioOwnCreateTask(run.id, await this.#studioOwnCreateTaskId(run));
+    }
     const ended = await this.driver.end(run, finalizeGrant.token, cleanupGrant.token, deadlineAt).catch(async (error: unknown) => {
       if (error instanceof DriverEndFailure) await this.#persistEvents(run.id, error.events);
       throw error;
@@ -1728,6 +1736,13 @@ export class VoiceLabWorker {
     if (reads.some((event) => event.payload.purpose === "after" && event.payload.operation_id === baseline.payload.operation_id && event.payload.settled === true)) return;
     const stepId = typeof baseline.payload.step_id === "string" ? baseline.payload.step_id : null;
     await this.#persistEvents(run.id, [await this.driver.readStudioCalls(run, "after", String(baseline.payload.operation_id), stepId, baseline.payload.read_at)]);
+  }
+
+  /** The task the run's certified create step made (calls-certification.ts), or null while it is not certified. */
+  async #studioOwnCreateTaskId(run: RunRecord): Promise<string | null> {
+    const events = (await this.#allEvents(run.id)).events;
+    const operations = await this.ledger.listOperations(run.id);
+    return evaluateStudioG7Run(run, events, operations, { expected: studioExpectedIdentities(run) }).outcome.own_report.create_task_id;
   }
 
   async #awaitPriorInputSettlement(run: RunRecord, operationId: string, signal: AbortSignal): Promise<void> {

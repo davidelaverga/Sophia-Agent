@@ -425,25 +425,25 @@ function g7Episode(options: G7Options = {}): Episode {
   if (!skip.has("g7.section_revision")) {
     const edit = op(run, "studio_action", T0 + 300, { action: "section_revision", instruction: "x" }, { performed: true, status: "admitted" });
     operations.push(edit);
-    log.add("studio.action.html_edit", "canonical", { purpose: "section_revision", operation_id: edit.id, requested: true, status: "admitted", http_status: 202, code: null, task_id: EDIT_TASK, version_id: VERSION_1 });
-    log.add("studio.outcome.observed", "canonical", { purpose: "g7.section_revision", operation_id: edit.id, join: { status: "uncertain" }, tasks: [task(EDIT_TASK, "design", { state: "succeeded", design: { state: "published", mode: "edit", artifact_id: ARTIFACT, published_version_id: VERSION_2 } })], artifacts: [artifact(EDIT_TASK, VERSION_2, PAGE2_SHA, options.artifactStatus)] });
+    log.add("studio.action.html_edit", "canonical", { purpose: "section_revision", operation_id: edit.id, target_join: "canonical_chain", requested: true, status: "admitted", http_status: 202, code: null, task_id: EDIT_TASK, artifact_id: ARTIFACT, version_id: VERSION_1 });
+    log.add("studio.outcome.observed", "canonical", { purpose: "g7.section_revision", operation_id: edit.id, join: { status: "uncertain" }, tasks: [task(EDIT_TASK, "design", { state: "succeeded", design: { state: "published", mode: "edit", artifact_id: ARTIFACT, published_version_id: VERSION_2, research_task_id: RESEARCH_TASK } })], artifacts: [artifact(EDIT_TASK, VERSION_2, PAGE2_SHA, options.artifactStatus)] });
   }
   if (!skip.has("g7.stale_edit")) {
     const stale = op(run, "studio_action", T0 + 400, { action: "stale_edit" }, { performed: true, status: options.staleStatus === 202 ? "admitted" : "refused" });
     operations.push(stale);
-    log.add("studio.action.html_edit", "canonical", { purpose: "stale_edit", operation_id: stale.id, requested: true, status: options.staleStatus === 202 ? "admitted" : "refused", http_status: options.staleStatus ?? 409, code: options.staleCode ?? "stale_revision", version_id: VERSION_1, superseded_by_version_id: VERSION_2 });
+    log.add("studio.action.html_edit", "canonical", { purpose: "stale_edit", operation_id: stale.id, target_join: "canonical_chain", artifact_id: ARTIFACT, requested: true, status: options.staleStatus === 202 ? "admitted" : "refused", http_status: options.staleStatus ?? 409, code: options.staleCode ?? "stale_revision", version_id: VERSION_1, superseded_by_version_id: VERSION_2 });
   }
   if (!skip.has("g7.withdrawal")) {
     const withdraw = op(run, "studio_action", T0 + 500, { action: "withdrawal" }, { performed: true, status: "committed" });
     operations.push(withdraw);
     const committed = options.withdrawalCommitted ?? true;
-    const design = (state: string) => task(DESIGN_TASK, "design", { design: { state: options.designEverywhere ?? state, mode: "create", artifact_id: ARTIFACT, published_version_id: VERSION_1 } });
+    const design = (state: string) => task(DESIGN_TASK, "design", { design: { state: options.designEverywhere ?? state, mode: "create", artifact_id: ARTIFACT, published_version_id: VERSION_1, research_task_id: RESEARCH_TASK } });
     // The withdrawal's own observation before it (the driver records it as leave_and_return does).
     if (options.designBefore !== null) log.add("studio.outcome.observed", "canonical", { purpose: "g7.withdrawal:before", operation_id: withdraw.id, join: { status: "uncertain" }, tasks: [design(options.designBefore ?? "published")], artifacts: [] });
     log.add("studio.action.withdrawal", "canonical", { operation_id: withdraw.id, requested: true, status: committed ? "committed" : "refused", entry_id: NOTE, entry_bound_exchange_id: EXCHANGE_UUID, http_status: committed ? 202 : 409, code: committed ? null : "stale_revision", receipt_operation: committed ? "withdraw_note" : null });
     log.add("studio.outcome.observed", "canonical", { purpose: "g7.withdrawal", operation_id: options.withdrawalAfterOperation ?? withdraw.id, join: { status: "uncertain" }, tasks: [design(options.designAfter ?? "cancelled")], artifacts: [] });
   }
-  log.add("studio.outcome.observed", "canonical", { purpose: "final", operation_id: "end", join: { status: "uncertain" }, tasks: [task(DESIGN_TASK, "design", { state: "succeeded", design: { state: options.designEverywhere ?? "published", mode: "create", artifact_id: ARTIFACT, published_version_id: VERSION_1 } }), research({ research: { html_state: "published", design_task_id: DESIGN_TASK } })], artifacts: [artifact(DESIGN_TASK, VERSION_1, PAGE_SHA, options.artifactStatus)] });
+  log.add("studio.outcome.observed", "canonical", { purpose: "final", operation_id: "end", join: { status: "uncertain" }, tasks: [task(DESIGN_TASK, "design", { state: "succeeded", design: { state: options.designEverywhere ?? "published", mode: "create", artifact_id: ARTIFACT, published_version_id: VERSION_1, research_task_id: RESEARCH_TASK } }), research({ research: { html_state: "published", design_task_id: DESIGN_TASK } })], artifacts: [artifact(DESIGN_TASK, VERSION_1, PAGE_SHA, options.artifactStatus)] });
   log.bridge("provider", providerReceipt(run, seq++, "closed"));
   log.bridge("session_closed", sessionClosed(run, seq++, { windows: voice.length, turns: voice.length, replies: voice.length }));
   cleanupEvents(log);
@@ -467,16 +467,17 @@ describe("Studio G7 episode: every step is an operation, outcomes are canonical 
       "g7.create": "pass/unavailable:no_calls_baseline",
       "g7.steer": "pass/unavailable:no_calls_baseline",
       "g7.leave_return": "pass/pass:null",
-      "g7.section_revision": "pass/pass:null",
-      "g7.stale_edit": "pass/pass:null",
+      // Without a certified create there is no own report: an edit is never the run's by its window.
+      "g7.section_revision": "pass/unavailable:create_step_not_certified",
+      "g7.stale_edit": "pass/unavailable:create_step_not_certified",
       "g7.hold": "pass/unavailable:no_calls_baseline",
       "g7.resume": "pass/unavailable:no_calls_baseline",
       "g7.stop": "pass/unavailable:no_calls_baseline",
       "g7.withdrawal": "pass/pass:null",
     });
     expect(statusOf(evaluation, "step.g7.withdrawal.design_ended")).toMatchObject({ status: "unavailable", reason: "create_step_not_certified" });
-    expect(statusOf(evaluation, "outcome.artifact_bytes_integrity")).toMatchObject({ status: "pass" });
-    expect(evaluation.outcome).toMatchObject({ join: "uncertain", bound_tasks: 0, missing_product_field: "ExchangeCalls", artifacts_verified: 2, artifacts_mismatched: 0 });
+    expect(statusOf(evaluation, "outcome.artifact_bytes_integrity")).toMatchObject({ status: "unavailable", reason: "create_step_not_certified" });
+    expect(evaluation.outcome).toMatchObject({ join: "uncertain", bound_tasks: 0, missing_product_field: "ExchangeCalls", artifacts_verified: 0, artifacts_mismatched: 0, own_report: { status: "unavailable", reason: "create_step_not_certified" } });
     const verdicts = deriveStudioG7Verdicts(evaluation, { sessionEstablished: true });
     expect(verdicts).toEqual({ harness: "pass", product: "inconclusive", provider: "pass", auth: "pass", evidence: "pass" });
   });
@@ -499,10 +500,12 @@ describe("Studio G7 episode: every step is an operation, outcomes are canonical 
   });
 
   it("fails product outcomes the Lab's own requests prove wrong", () => {
-    expect(statusOf(evaluate(g7Episode({ staleStatus: 202 })), "step.g7.stale_edit.outcome")).toMatchObject({ status: "fail", reason: "stale_edit_admitted" });
-    expect(statusOf(evaluate(g7Episode({ staleStatus: 409, staleCode: "invalid_state" })), "step.g7.stale_edit.outcome")).toMatchObject({ status: "fail", reason: "stale_edit_refused_as_invalid_state" });
-    expect(statusOf(evaluate(g7Episode({ withdrawalCommitted: false })), "step.g7.withdrawal.outcome")).toMatchObject({ status: "fail" });
-    const mismatch = evaluate(g7Episode({ artifactStatus: "mismatch" }));
+    // The run's own report: its create step is certified from the exchange's calls.
+    const own = (options: G7Options) => g7Episode({ researchTask: RUN_TASK, calls: { byStep: happyCalls() }, ...options });
+    expect(statusOf(evaluate(own({ staleStatus: 202 })), "step.g7.stale_edit.outcome")).toMatchObject({ status: "fail", reason: "stale_edit_admitted" });
+    expect(statusOf(evaluate(own({ staleStatus: 409, staleCode: "invalid_state" })), "step.g7.stale_edit.outcome")).toMatchObject({ status: "fail", reason: "stale_edit_refused_as_invalid_state" });
+    expect(statusOf(evaluate(own({ withdrawalCommitted: false })), "step.g7.withdrawal.outcome")).toMatchObject({ status: "fail" });
+    const mismatch = evaluate(own({ artifactStatus: "mismatch" }));
     expect(statusOf(mismatch, "outcome.artifact_bytes_integrity")).toMatchObject({ status: "fail", reason: "downloaded_bytes_disagree_with_declared_digest" });
     expect(statusOf(mismatch, "step.g7.section_revision.outcome")).toMatchObject({ status: "fail", reason: "revised_page_bytes_mismatch" });
     expect(mismatch.verdicts.product).toBe("fail");
@@ -817,5 +820,80 @@ describe("Studio G7 orphan browser room presence (A15 live presence)", () => {
       const unobservable = quiesced({ room_presence: "unobservable", room_presence_reason: reason });
       expect(statusOf(unobservable, "cleanup.orphan_room_presence"), reason).toMatchObject({ status: "unavailable", reason: `room_presence_unobservable_${reason}` });
     }
+  });
+});
+
+describe("delta 4: only the run's own report, on its canonical chain, is evidence (foreign bytes, edits and acceptances never count)", () => {
+  const FOREIGN_RESEARCH = "d0000000-0000-4000-8000-0000000000fe";
+  const FOREIGN_DESIGN = "d0000000-0000-4000-8000-0000000000ff";
+  const FOREIGN_EDIT = "d0000000-0000-4000-8000-0000000000fd";
+  const FOREIGN_ARTIFACT = "a0000000-0000-4000-8000-0000000000ff";
+  const FOREIGN_VERSION = "b0000000-0000-4000-8000-0000000000ff";
+  const FOREIGN_VERSION_2 = "b0000000-0000-4000-8000-0000000000fe";
+  const foreignTasks = () => [
+    task(FOREIGN_RESEARCH, "research", { exchange_id: OTHER_EXCHANGE_ID, research: { html_state: "published", design_task_id: FOREIGN_DESIGN } }),
+    task(FOREIGN_DESIGN, "design", { state: "succeeded", design: { state: "published", mode: "create", artifact_id: FOREIGN_ARTIFACT, published_version_id: FOREIGN_VERSION, research_task_id: FOREIGN_RESEARCH } }),
+  ];
+  const foreignArtifact = (status: string, taskId = FOREIGN_DESIGN, versionId = FOREIGN_VERSION) => ({ ...artifact(taskId, versionId, PAGE_SHA, status), artifact_id: FOREIGN_ARTIFACT });
+  /** A certified episode (its create step certified from the calls), with every observation rewritten. */
+  const certified = (rewrite: (payload: Record<string, unknown>) => Record<string, unknown>, options: G7Options = {}) => {
+    const item = g7Episode({ researchTask: RUN_TASK, calls: { byStep: happyCalls() }, ...options });
+    for (const event of item.log.events.filter((candidate) => candidate.kind === "studio.outcome.observed")) event.payload = rewrite(event.payload);
+    return item;
+  };
+  const ownArtifactsAs = (status: string) => (payload: Record<string, unknown>) => ({ ...payload, artifacts: (payload.artifacts as Array<Record<string, unknown>>).map((entry) => ({ ...entry, status, ...(status === "verified" ? {} : { reason: "content_unavailable", hashes_agree: undefined }) })) });
+  const withForeign = (status: string) => (payload: Record<string, unknown>) => ({ ...payload, tasks: [...(payload.tasks as unknown[]), ...foreignTasks()], artifacts: [...(payload.artifacts as unknown[]), foreignArtifact(status)] });
+  const integrity = (item: Episode) => statusOf(evaluate(item), "outcome.artifact_bytes_integrity");
+
+  it("review P2-3 (E1): a foreign design's verified bytes never pass the run's integrity; its mismatch never fails it", () => {
+    const ownUnavailable = certified((payload) => withForeign("verified")(ownArtifactsAs("unavailable")(payload)));
+    expect(integrity(ownUnavailable)).toMatchObject({ status: "unavailable", reason: "content_unavailable" });
+    expect(evaluate(ownUnavailable).outcome).toMatchObject({ artifacts_verified: 0, own_report: { status: "resolved", create_task_id: RESEARCH_TASK, design_task_id: DESIGN_TASK, artifact_id: ARTIFACT } });
+    const ownVerified = certified((payload) => withForeign("mismatch")(ownArtifactsAs("verified")(payload)));
+    expect(integrity(ownVerified)).toMatchObject({ status: "pass" });
+    expect(evaluate(ownVerified).outcome).toMatchObject({ artifacts_verified: 2, artifacts_mismatched: 0 });
+    // Positive control: the run's own mismatch fails it.
+    expect(integrity(certified(withForeign("verified"), { artifactStatus: "mismatch" }))).toMatchObject({ status: "fail" });
+  });
+
+  it("root's scenario: the own research is pending (no design) and the only published design is another exchange's — nothing of it is the run's", () => {
+    const pendingOwn = (payload: Record<string, unknown>) => withForeign("verified")({
+      ...payload,
+      tasks: (payload.tasks as Array<Record<string, unknown>>).filter((entry) => entry.task_id !== DESIGN_TASK && entry.task_id !== EDIT_TASK).map((entry) => entry.task_id === RESEARCH_TASK ? { ...entry, research: { html_state: "none", design_task_id: null } } : entry),
+      artifacts: [],
+    });
+    const item = certified(pendingOwn);
+    // The Lab's (hypothetical) edit and refusal on the foreign artifact.
+    for (const event of item.log.events.filter((candidate) => candidate.kind === "studio.action.html_edit")) event.payload = { ...event.payload, artifact_id: FOREIGN_ARTIFACT };
+    const evaluation = evaluate(item);
+    expect(statusOf(evaluation, "outcome.artifact_bytes_integrity")).toMatchObject({ status: "unavailable", reason: "own_design_pending" });
+    expect(stepsOf(evaluation)).toMatchObject({ "g7.create": "pass:null", "g7.section_revision": "unavailable:own_design_pending", "g7.stale_edit": "unavailable:own_design_pending" });
+    expect(evaluation.outcome).toMatchObject({ artifacts_verified: 0, own_report: { status: "unavailable", reason: "own_design_pending" } });
+  });
+
+  it("a foreign edit (admitted 202 on another artifact, its task published and verified) and a foreign stale refusal never pass the run's steps", () => {
+    const item = certified((payload) => payload.purpose === "g7.section_revision"
+      ? { ...payload, tasks: [task(FOREIGN_EDIT, "design", { state: "succeeded", design: { state: "published", mode: "edit", artifact_id: FOREIGN_ARTIFACT, published_version_id: FOREIGN_VERSION_2, research_task_id: FOREIGN_RESEARCH } })], artifacts: [foreignArtifact("verified", FOREIGN_EDIT, FOREIGN_VERSION_2)] }
+      : withForeign("verified")(payload));
+    for (const event of item.log.events.filter((candidate) => candidate.kind === "studio.action.html_edit")) {
+      event.payload = { ...event.payload, artifact_id: FOREIGN_ARTIFACT, ...(event.payload.purpose === "section_revision" ? { task_id: FOREIGN_EDIT } : {}) };
+    }
+    const evaluation = evaluate(item);
+    expect(stepsOf(evaluation)).toMatchObject({ "g7.section_revision": "uncertain:edit_target_not_canonical", "g7.stale_edit": "uncertain:edit_target_not_canonical" });
+    // The foreign edit's bytes are never the run's: only the own design's version counts.
+    expect(evaluation.outcome).toMatchObject({ artifacts_verified: 1 });
+    // Positive control: the same episode on the own artifact passes both.
+    expect(stepsOf(evaluate(certified(withForeign("verified"))))).toMatchObject({ "g7.section_revision": "pass:null", "g7.stale_edit": "pass:null" });
+  });
+
+  it("an own edit task that names another research, or a design that names another research back, is not on the chain", () => {
+    const foreignEditTask = certified((payload) => payload.purpose === "g7.section_revision"
+      ? { ...payload, tasks: (payload.tasks as Array<Record<string, unknown>>).map((entry) => ({ ...entry, design: { ...(entry.design as Record<string, unknown>), research_task_id: FOREIGN_RESEARCH } })) }
+      : payload);
+    expect(stepsOf(evaluate(foreignEditTask))).toMatchObject({ "g7.section_revision": "unavailable:revised_page_bytes_unavailable" });
+    const misLinked = certified((payload) => ({ ...payload, tasks: (payload.tasks as Array<Record<string, unknown>>).map((entry) => entry.task_id === DESIGN_TASK ? { ...entry, design: { ...(entry.design as Record<string, unknown>), research_task_id: FOREIGN_RESEARCH } } : entry) }));
+    const evaluation = evaluate(misLinked);
+    expect(statusOf(evaluation, "outcome.artifact_bytes_integrity")).toMatchObject({ status: "uncertain", reason: "target_not_canonical" });
+    expect(stepsOf(evaluation)).toMatchObject({ "g7.section_revision": "uncertain:target_not_canonical", "g7.stale_edit": "uncertain:target_not_canonical" });
   });
 });

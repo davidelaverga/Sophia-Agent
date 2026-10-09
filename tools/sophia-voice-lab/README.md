@@ -224,7 +224,22 @@ principal: snapshot work → native task (ids, kinds, states, phases; instructio
 and Markdown dropped) → the design's published version → its HTML rendition's
 source → the downloaded bytes' SHA-256, compared with the declared source,
 rendition and version digests. A section revision, a stale edit and a withdrawal
-are the Lab's own requests, so their outcomes are canonical. A voice step is
+are the Lab's own requests, so their outcomes are canonical. The run's report is
+resolved only through the product's own chain, every link a member read as the
+principal: the run's certified create task (the create step's certification
+below, whose `NativeTask.exchangeId` is the run's exchange) → its research's
+`designTaskId` → that design, which names the research back (`researchTaskId`)
+and no other exchange → its artifact and published version. A section revision
+sends that published version (it must be the current one), and a stale edit
+sends it once a newer version superseded it. Without a certified create, a
+missing, ambiguous or foreign link, or a design not yet published, nothing is
+sent: the step is typed `unavailable` or `uncertain` (`create_step_not_certified`,
+`own_design_pending`, `target_not_canonical`), and the chain is re-read right
+before the request (a change refuses it, `target_changed`). A design in the
+run's time window or by the principal is never a fallback. Only that chain's
+versions (the own design's, then the Lab's own edits of that artifact) are
+downloaded and judged: another design's bytes, edits or refusals never pass or
+fail the run. A voice step is
 certified only from the exchange's calls (A15 `GET
 /api/v1/exchanges/{id}/calls`: the grant principal's own voice tool calls in an
 exchange opened under the grant, each with the command the transaction inserted

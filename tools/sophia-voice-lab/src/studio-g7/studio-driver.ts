@@ -163,6 +163,11 @@ export interface DurableStudioJoin {
 
 export type OwnershipStatus = "proven" | "unavailable" | "mismatch";
 
+/** The run's own report on its canonical chain, or why it cannot be resolved without guessing. */
+type OwnReport =
+  | { status: "found"; createTaskId: string; designTaskId: string; artifactId: string; publishedVersionId: string; versions: ProjectedArtifactVersion[]; sections: string[] }
+  | { status: "refused"; outcome: "unavailable" | "uncertain"; reason: string };
+
 /** Caches one principal token per cleanup flow; never logged or persisted. */
 interface TokenSource { token(): Promise<string>; held(): StudioUserSession | null; forget(): void }
 
@@ -178,6 +183,12 @@ export interface StudioDriverExtensions {
    */
   setStudioSignOutGate(runId: string, gate: (() => Promise<boolean>) | null): void;
   /**
+   * The run's certified create task (the create step's /calls
+   * certification), or null while it is not certified: the only root the
+   * run's report is resolved from, before an edit and for byte verification.
+   */
+  setStudioOwnCreateTask(runId: string, taskId: string | null): void;
+  /**
    * One settled read of the run's exchange's calls (A15 getExchangeCalls), as
    * the principal: re-read (bounded) until every listed call is answered.
    * `baseline` (no `after`) is a voice step's write-ahead baseline; `after`
@@ -191,7 +202,7 @@ export interface StudioDriverExtensions {
 
 export function hasStudioExtensions(driver: VoiceBrowserDriver): driver is VoiceBrowserDriver & StudioDriverExtensions {
   const candidate = driver as Partial<StudioDriverExtensions>;
-  return typeof candidate.studioAction === "function" && typeof candidate.refreshStudioEvidence === "function" && typeof candidate.adoptStudioJoin === "function" && typeof candidate.readStudioCalls === "function" && typeof candidate.setStudioSignOutGate === "function";
+  return typeof candidate.studioAction === "function" && typeof candidate.refreshStudioEvidence === "function" && typeof candidate.adoptStudioJoin === "function" && typeof candidate.readStudioCalls === "function" && typeof candidate.setStudioSignOutGate === "function" && typeof candidate.setStudioOwnCreateTask === "function";
 }
 
 /** More calls than this in one exchange: the read is typed unavailable rather than truncated. */
@@ -486,6 +497,7 @@ export class StudioG7Driver implements VoiceBrowserDriver, StudioDriverExtension
     const action = input.action;
     const session = this.#requireSession(run.id);
     const tokens = this.#tokenSource(session);
+    if (Object.hasOwn(input, "_own_create_task_id")) this.setStudioOwnCreateTask(run.id, typeof input._own_create_task_id === "string" ? input._own_create_task_id : null);
     if (action === "observe") {
       // Not a step: a read-only outcome read for a voice step, optionally
       // after a bounded wait so the product can act on the utterance.
@@ -1061,59 +1073,97 @@ export class StudioG7Driver implements VoiceBrowserDriver, StudioDriverExtension
   }
 
   /**
-   * The run's candidate report: design tasks of the principal in the run's
-   * window with a published page. The join to the run is `uncertain`; a
-   * target that is not unique is refused, never guessed.
+   * The run's own report, resolved ONLY through the product's own links, each
+   * read as the principal through the member API: the run's certified create
+   * task (the worker hands it over from the create step's /calls
+   * certification) whose NativeTask.exchangeId is the run's own exchange, the
+   * design task its research handed the page to (research.designTaskId), which
+   * names that research task back, and that design's artifact and published
+   * version. Any missing, ambiguous or foreign link refuses: a candidate in the
+   * time window or by the principal is never a fallback.
    */
-  async #reportTarget(run: RunRecord, tokens: TokenSource): Promise<{ status: "found"; artifactId: string; versions: ProjectedArtifactVersion[]; sections: string[]; designTaskId: string } | { status: "unavailable"; reason: string }> {
-    const observed = await this.#observeTasks(run, tokens, []);
-    const designs = observed.details.filter((detail) => detail.task.kind === "design" && detail.design?.artifactId && detail.design.publishedVersionId);
-    const artifacts = [...new Set(designs.map((detail) => detail.design!.artifactId!))];
-    if (artifacts.length === 0) return { status: "unavailable", reason: "no_published_design_in_run_window" };
-    if (artifacts.length > 1) return { status: "unavailable", reason: "report_target_ambiguous" };
-    const artifactId = artifacts[0]!;
-    const versions = await this.#api.artifactVersions(artifactId, await tokens.token());
-    if (versions.status !== "available") return { status: "unavailable", reason: `artifact_versions_${versions.reason}` };
-    const latestDesign = designs.sort((left, right) => (right.task.createdAt ?? "").localeCompare(left.task.createdAt ?? ""))[0]!;
-    return { status: "found", artifactId, versions: versions.value, sections: latestDesign.design!.sections, designTaskId: latestDesign.task.id };
+  async #resolveOwnReport(run: RunRecord, tokens: TokenSource): Promise<OwnReport> {
+    const refuse = (outcome: "unavailable" | "uncertain", reason: string): OwnReport => ({ status: "refused", outcome, reason });
+    const createTaskId = this.#ownCreate.get(run.id) ?? null;
+    if (createTaskId === null) return refuse("unavailable", "create_step_not_certified");
+    const runExchange = this.#exchanges.get(run.id)?.exchangeId?.toLowerCase() ?? null;
+    if (runExchange === null) return refuse("unavailable", "no_exchange_joined_to_run");
+    const research = await this.#api.nativeTask(this.studio.projectId, createTaskId, await tokens.token());
+    if (research.status !== "available") return refuse("unavailable", `own_research_${research.reason}`);
+    if (research.value.task.id !== createTaskId || research.value.task.kind !== "research" || research.value.research === null) return refuse("uncertain", "target_not_canonical");
+    // The research task's exchange binding must be the run's own exchange.
+    if (research.value.task.exchangeId?.toLowerCase() !== runExchange) return refuse("uncertain", "target_not_canonical");
+    const designTaskId = research.value.research.designTaskId;
+    if (designTaskId === null) return refuse("unavailable", "own_design_pending");
+    const design = await this.#api.nativeTask(this.studio.projectId, designTaskId, await tokens.token());
+    if (design.status !== "available") return refuse("unavailable", `own_design_${design.reason}`);
+    const progress = design.value.design;
+    if (design.value.task.id !== designTaskId || design.value.task.kind !== "design" || progress === null) return refuse("uncertain", "target_not_canonical");
+    // The design names the run's own research back, and is bound to no other exchange.
+    if (progress.researchTaskId !== createTaskId) return refuse("uncertain", "target_not_canonical");
+    if (design.value.task.exchangeId !== null && design.value.task.exchangeId.toLowerCase() !== runExchange) return refuse("uncertain", "target_not_canonical");
+    if (progress.state !== "published" || progress.artifactId === null || progress.publishedVersionId === null) return refuse("unavailable", "own_design_pending");
+    const versions = await this.#api.artifactVersions(progress.artifactId, await tokens.token());
+    if (versions.status !== "available") return refuse("unavailable", `artifact_versions_${versions.reason}`);
+    if (versions.value.some((version) => version.artifactId !== progress.artifactId)) return refuse("uncertain", "target_not_canonical");
+    if (!versions.value.some((version) => version.id === progress.publishedVersionId)) return refuse("uncertain", "own_published_version_not_listed");
+    return { status: "found", createTaskId, designTaskId, artifactId: progress.artifactId, publishedVersionId: progress.publishedVersionId, versions: versions.value, sections: progress.sections };
+  }
+
+  readonly #ownCreate = new Map<string, string | null>();
+  /**
+   * The run's certified create task (the create step's /calls certification),
+   * as the worker last computed it; null while the create step is not
+   * certified. The run's report is resolved only from it.
+   */
+  setStudioOwnCreateTask(runId: string, taskId: string | null): void {
+    this.#ownCreate.set(runId, typeof taskId === "string" && UUID.test(taskId) ? taskId.toLowerCase() : null);
   }
 
   async #htmlEditAction(run: RunRecord, tokens: TokenSource, operationId: string, purpose: "section_revision" | "stale_edit", input: Record<string, unknown>): Promise<{ events: DriverEvent[]; taskId: string | null; receipt: Record<string, unknown> }> {
     const events: DriverEvent[] = [];
     const record = (payload: Record<string, unknown>): Record<string, unknown> => {
-      const full: Record<string, unknown> = { purpose, operation_id: operationId, target_join: "uncertain", ...payload };
+      const full: Record<string, unknown> = { purpose, operation_id: operationId, target_join: "canonical_chain", own_create_task_id: this.#ownCreate.get(run.id) ?? null, ...payload };
       events.push({ kind: "studio.action.html_edit", source: "canonical", payload: full, dedupeKey: contentKey("studio-html-edit", run.id, full) });
       return full;
     };
     // A target that cannot be resolved without guessing is typed, the
     // request is not sent, and the step reports `performed: false`.
-    const notPerformed = (reason: string, extra: Record<string, unknown> = {}) => {
-      record({ status: "unavailable", reason, requested: false, ...extra });
-      return { events, taskId: null, receipt: { performed: false, status: "unavailable", reason } };
+    const notPerformed = (reason: string, extra: Record<string, unknown> = {}, outcome: "unavailable" | "uncertain" = "unavailable") => {
+      record({ status: outcome, reason, requested: false, ...extra });
+      return { events, taskId: null, receipt: { performed: false, status: outcome, reason } };
     };
-    const target = await this.#reportTarget(run, tokens);
-    if (target.status !== "found") return notPerformed(target.reason);
-    const withPage = target.versions.filter((version) => version.renditions.some((rendition) => rendition.format === "html"));
+    // Only the run's own report, on its canonical chain, is ever edited.
+    const target = await this.#resolveOwnReport(run, tokens);
+    if (target.status !== "found") return notPerformed(target.reason, {}, target.outcome);
+    const chain = { design_task_id: target.designTaskId, artifact_id: target.artifactId };
+    const withPage = (versionId: string) => target.versions.some((version) => version.id === versionId && version.renditions.some((rendition) => rendition.format === "html"));
     const current = target.versions[0] ?? null;
     const requestedSections = Array.isArray(input.sections) ? (input.sections as unknown[]).filter((value): value is string => typeof value === "string" && SECTION.test(value)) : [];
     const sections = requestedSections.length > 0 ? requestedSections.slice(0, 16) : target.sections.slice(0, 1);
-    if (sections.length === 0) return notPerformed("section_unknown", { artifact_id: target.artifactId });
-    let versionId: string;
+    if (sections.length === 0) return notPerformed("section_unknown", chain);
+    // The version sent is always the own design's published version: as the
+    // current version for a revision, superseded for the stale probe.
+    const versionId = target.publishedVersionId;
     let supersededBy: string | null = null;
+    if (!withPage(versionId)) return notPerformed("own_version_has_no_designed_page", chain);
     if (purpose === "section_revision") {
-      if (!current || !withPage.some((version) => version.id === current.id)) return notPerformed("current_version_has_no_designed_page", { artifact_id: target.artifactId });
-      versionId = current.id;
+      if (current === null || current.id !== versionId) return notPerformed("own_version_not_current", chain, "uncertain");
     } else {
-      const older = withPage.find((version) => current !== null && version.id !== current.id);
-      if (!older || !current) return notPerformed("no_superseded_version", { artifact_id: target.artifactId });
-      versionId = older.id;
+      if (current === null || current.id === versionId) return notPerformed("no_superseded_version", chain);
       supersededBy = current.id;
     }
     const instruction = purpose === "stale_edit" ? STALE_EDIT_PROBE_INSTRUCTION : typeof input.instruction === "string" ? input.instruction : "";
     if (instruction.length < 1 || instruction.length > 2_000) throw studioError("STUDIO_ACTION_INVALID", "A section-only revision needs an instruction of 1 to 2000 characters.", "validation");
+    // Re-verified immediately before the mutating request: a chain that
+    // changed in between (another design, artifact, version or binding) is
+    // refused, never followed.
+    const again = await this.#resolveOwnReport(run, tokens);
+    if (again.status !== "found") return notPerformed("target_changed", { ...chain, recheck_reason: again.reason }, "uncertain");
+    if (again.createTaskId !== target.createTaskId || again.designTaskId !== target.designTaskId || again.artifactId !== target.artifactId || again.publishedVersionId !== target.publishedVersionId || (again.versions[0]?.id ?? null) !== (current?.id ?? null)) return notPerformed("target_changed", chain, "uncertain");
     const answer = await this.#api.htmlEdit(this.studio.projectId, { versionId, sections, instruction }, await tokens.token(), `voice-lab-g7:${operationId}`);
     const payload = record({
-      status: answer.accepted ? "admitted" : "refused", requested: true, artifact_id: target.artifactId, version_id: versionId, superseded_by_version_id: supersededBy,
+      status: answer.accepted ? "admitted" : "refused", requested: true, ...chain, version_id: versionId, superseded_by_version_id: supersededBy,
       sections, instruction_sha256: sha256(instruction), http_status: answer.http_status, code: answer.code,
       task_id: answer.receipt?.taskId ?? null, receipt_state: answer.receipt?.state ?? null, receipt_version_id: answer.receipt?.versionId ?? null,
     });
@@ -1192,7 +1242,9 @@ export class StudioG7Driver implements VoiceBrowserDriver, StudioDriverExtension
       .filter((task) => task.actorId === principal && task.createdAt !== null && Date.parse(task.createdAt) >= windowStartMs)
       .sort((left, right) => (right.createdAt ?? "").localeCompare(left.createdAt ?? ""))
       .map((task) => task.id);
-    const ids = [...new Set([...focus, ...bound, ...inWindow])].slice(0, MAX_OBSERVED_TASKS);
+    // The run's own create task is read first, whatever the window holds.
+    const ownCreate = this.#ownCreate.get(run.id) ?? null;
+    const ids = [...new Set([...(ownCreate === null ? [] : [ownCreate]), ...focus, ...bound, ...inWindow])].slice(0, MAX_OBSERVED_TASKS);
     const details: ProjectedTaskDetail[] = [];
     const unavailable: Array<{ task_id: string; reason: string }> = [];
     for (const id of ids) {
@@ -1201,8 +1253,11 @@ export class StudioG7Driver implements VoiceBrowserDriver, StudioDriverExtension
       else unavailable.push({ task_id: id, reason: detail.reason });
     }
     // Design tasks a research task handed its HTML to are part of the outcome.
-    for (const designId of details.map((detail) => detail.research?.designTaskId).filter((value): value is string => typeof value === "string")) {
-      if (details.length >= MAX_OBSERVED_TASKS || details.some((detail) => detail.task.id === designId)) continue;
+    for (const [index, designId] of details.map((detail) => detail.research?.designTaskId ?? null).entries()) {
+      if (designId === null) continue;
+      // The own research's design is always read (it is the run's report); others within the bound.
+      const own = details[index]!.task.id === ownCreate;
+      if ((!own && details.length >= MAX_OBSERVED_TASKS) || details.some((detail) => detail.task.id === designId)) continue;
       const detail = await this.#api.nativeTask(this.studio.projectId, designId, await tokens.token());
       if (detail.status === "available") details.push(detail.value);
     }
@@ -1218,15 +1273,19 @@ export class StudioG7Driver implements VoiceBrowserDriver, StudioDriverExtension
   async #observeOutcome(run: RunRecord, tokens: TokenSource, purpose: string, focus: string[], operationId: string): Promise<{ event: DriverEvent }> {
     if (focus.length > 0) this.#focus.set(run.id, [...new Set([...(this.#focus.get(run.id) ?? []), ...focus])].slice(0, MAX_OBSERVED_TASKS));
     const observed = await this.#observeTasks(run, tokens, this.#focusTasks(run.id));
+    const runExchange = this.#exchanges.get(run.id)?.exchangeId ?? null;
+    // Only the run's own report is verified, on its canonical chain (as an
+    // edit resolves it): the own design's published version first, then the
+    // Lab's own edits of that artifact. Another design's bytes, in the window
+    // or by the principal, are never downloaded or judged.
+    const ownReport = this.#ownReportOf(run.id, observed.details, runExchange);
     const artifacts: Array<Record<string, unknown>> = [];
     const verified = new Set<string>();
-    for (const detail of observed.details) {
-      const design = detail.design;
-      if (!design?.artifactId || !design.publishedVersionId || verified.has(design.publishedVersionId) || verified.size >= MAX_VERIFIED_ARTIFACTS) continue;
-      verified.add(design.publishedVersionId);
-      artifacts.push(await this.#verifyArtifact(tokens, design.artifactId, design.publishedVersionId, detail.task.id));
+    for (const target of ownReport.status === "resolved" ? ownReport.versions : []) {
+      if (verified.has(target.versionId) || verified.size >= MAX_VERIFIED_ARTIFACTS) continue;
+      verified.add(target.versionId);
+      artifacts.push(await this.#verifyArtifact(tokens, target.artifactId, target.versionId, target.taskId));
     }
-    const runExchange = this.#exchanges.get(run.id)?.exchangeId ?? null;
     const exchangeOf = (detail: ProjectedTaskDetail) => detail.task.exchangeId;
     const payload = {
       purpose, operation_id: operationId,
@@ -1250,9 +1309,42 @@ export class StudioG7Driver implements VoiceBrowserDriver, StudioDriverExtension
         outputs: detail.outputs.map((output) => ({ artifact_version_id: output.artifactVersionId, format: output.format, source_id: output.sourceId, sha256: output.sha256, byte_length: output.byteLength })),
       })),
       tasks_unavailable: observed.unavailable,
+      own_report: ownReport.status === "resolved"
+        ? { status: "resolved", reason: null, create_task_id: ownReport.createTaskId, design_task_id: ownReport.designTaskId, artifact_id: ownReport.artifactId }
+        : { status: ownReport.status, reason: ownReport.reason, create_task_id: this.#ownCreate.get(run.id) ?? null, design_task_id: null, artifact_id: null },
       artifacts,
     };
     return { event: { kind: "studio.outcome.observed", source: "canonical", payload, dedupeKey: contentKey("studio-outcome", run.id, payload) } };
+  }
+
+  /**
+   * The run's own report from one observation's member reads (the same chain
+   * #resolveOwnReport follows): the own research bound to the run's exchange,
+   * its one design naming it back, and that design's published version, then
+   * the Lab's own edit tasks of the same artifact and research.
+   */
+  #ownReportOf(runId: string, details: ProjectedTaskDetail[], runExchange: string | null): { status: "resolved"; createTaskId: string; designTaskId: string; artifactId: string; versions: Array<{ taskId: string; artifactId: string; versionId: string }> } | { status: "unavailable" | "uncertain"; reason: string } {
+    const createTaskId = this.#ownCreate.get(runId) ?? null;
+    if (createTaskId === null) return { status: "unavailable", reason: "create_step_not_certified" };
+    if (runExchange === null) return { status: "unavailable", reason: "no_exchange_joined_to_run" };
+    const research = details.find((detail) => detail.task.id === createTaskId) ?? null;
+    if (research === null) return { status: "unavailable", reason: "own_research_not_observed" };
+    if (research.task.kind !== "research" || research.research === null || research.task.exchangeId?.toLowerCase() !== runExchange.toLowerCase()) return { status: "uncertain", reason: "target_not_canonical" };
+    const designTaskId = research.research.designTaskId;
+    if (designTaskId === null) return { status: "unavailable", reason: "own_design_pending" };
+    const design = details.find((detail) => detail.task.id === designTaskId) ?? null;
+    if (design === null || design.design === null) return { status: "unavailable", reason: "own_design_not_observed" };
+    if (design.task.kind !== "design" || design.design.researchTaskId !== createTaskId || (design.task.exchangeId !== null && design.task.exchangeId.toLowerCase() !== runExchange.toLowerCase())) return { status: "uncertain", reason: "target_not_canonical" };
+    // A version the own design published stays the run's own (a later withdrawal may cancel the design).
+    const artifactId = design.design.artifactId;
+    if (artifactId === null || design.design.publishedVersionId === null) return { status: "unavailable", reason: "own_design_pending" };
+    const versions = [{ taskId: designTaskId, artifactId, versionId: design.design.publishedVersionId }];
+    for (const editTaskId of this.#focusTasks(runId)) {
+      const edit = details.find((detail) => detail.task.id === editTaskId)?.design ?? null;
+      if (edit === null || edit.researchTaskId !== createTaskId || edit.artifactId !== artifactId || edit.publishedVersionId === null) continue;
+      versions.push({ taskId: editTaskId, artifactId, versionId: edit.publishedVersionId });
+    }
+    return { status: "resolved", createTaskId, designTaskId, artifactId, versions };
   }
 
   async #verifyArtifact(tokens: TokenSource, artifactId: string, versionId: string, taskId: string): Promise<Record<string, unknown>> {
