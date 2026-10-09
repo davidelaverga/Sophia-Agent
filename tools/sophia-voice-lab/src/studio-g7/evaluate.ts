@@ -26,6 +26,7 @@ import {
   type StudioPageReceipt,
 } from "./contract.js";
 import { STUDIO_DEAD_OWNER_LEASE_RELEASE_SCHEMA, studioExchangeEndAfterJoin } from "./lease-release.js";
+import { STUDIO_VOICE_STEP_COMMAND_KIND, certifyStudioVoiceSteps, type StudioStepCertification } from "./calls-certification.js";
 import { studioG7Scenario, type StudioG7Step } from "./scenarios.js";
 
 /**
@@ -122,7 +123,7 @@ export interface StudioG7Evaluation {
   bridge: { receipt_count: number; distinct_seq_count: number; duplicate_count: number; conflicting_seqs: string[]; missing_seqs: number[]; first_seq: number | null; max_seq: number | null; read_after_lab_end_count: number; after_session_closed_kinds: string[]; exchange_state: string | null };
   cleanup: { required: true; guard_reason: string | null; exchange_ended: boolean; exchange_status: string | null; ownership: string | null; signed_out: boolean; browser_closed: boolean; browser_lease_released: boolean; room_presence: string | null; complete: boolean };
   deployed_identities: Record<string, { expected: string | null; observed: string[]; status: "verified" | "mismatch" | "unavailable" }>;
-  outcome: { observations: number; join: "native_task_exchange_id" | "uncertain"; bound_tasks: number; missing_product_field: "NativeTask.exchangeId" | null; artifacts_verified: number; artifacts_mismatched: number; artifacts_unavailable: number };
+  outcome: { observations: number; join: "exchange_calls" | "uncertain"; bound_tasks: number; missing_product_field: "ExchangeCalls" | null; voice_steps: StudioStepCertification[]; artifacts_verified: number; artifacts_mismatched: number; artifacts_unavailable: number };
   corroboration: { webrtc_sender_stats: { status: "corroboration_only"; samples: number; issued_track_rows: number; max_packets_sent: number | null } };
   coverage: typeof STUDIO_G7_RECEIPT_COVERAGE;
   summary: string;
@@ -138,18 +139,13 @@ export const STUDIO_G7_LIMITATIONS = Object.freeze([
   "no_audio_retained",
   "pcm_reconciliation_envelope_only",
   "fake_studio_loopback_peer_has_no_packet_flow_proof",
-  "native_task_join_only_by_exchange_id_requires_voice_qualification",
-  "steer_effect_not_exposed_by_member_api",
+  "voice_steps_certified_only_from_exchange_calls_requires_voice_qualification",
+  "steer_effect_beyond_admitted_command_not_exposed",
+  "goal_status_is_the_created_task_phase",
   "orphan_browser_room_presence_only_from_fresh_bridge_report",
   "orphan_browser_process_close_unobservable",
 ]);
 
-/** Phases and states that show each voice step's intended effect (positive observation only). */
-const STEP_EFFECTS: Record<string, { phases?: string[]; states?: string[] }> = {
-  "g7.hold": { phases: ["holding", "held"] },
-  "g7.resume": { phases: ["queued", "dispatched", "running", "result_ready"], states: ["running", "pending"] },
-  "g7.stop": { phases: ["stopping", "stopped"], states: ["cancelled"] },
-};
 
 export function evaluateStudioG7Run(run: RunRecord, events: Event[], operations: OperationRecord[], options: StudioEvaluationOptions): StudioG7Evaluation {
   const harness: StudioAssertion[] = [];
@@ -492,25 +488,28 @@ export function evaluateStudioG7Run(run: RunRecord, events: Event[], operations:
   const scenario = studioG7Scenario(run.scenarioId);
   const steps: StudioStepResult[] = [];
   const tasksOf = (event: Event) => (Array.isArray(event.payload.tasks) ? event.payload.tasks as unknown[] : []).map((value) => record(value) ?? {});
-  // A voice step's task is the run's only through the exchange id the service
-  // recorded for the voice tool call that created it (A15
-  // NativeTask.exchangeId), equal to the run's joined exchange, whose
-  // ownership is proven; then through the product's own link from such a
-  // research task to its design task. Never by timing or by actor.
+  // A voice step is certified only from the exchange's calls
+  // (calls-certification.ts): the one command its own voice call admitted
+  // after the step's durable baseline, of its kind and on its goal, with its
+  // effect seen. Never by a task's timing, actor or exchange id alone.
   const runExchangeId = typeof exchangeJoin?.payload.exchange_id === "string" ? exchangeJoin.payload.exchange_id.toLowerCase() : null;
+  const voiceOperations = inputs.filter((operation) => typeof operation.input._g7_step === "string" && STUDIO_VOICE_STEP_COMMAND_KIND[operation.input._g7_step] !== undefined);
+  const certification = certifyStudioVoiceSteps({
+    events: ordered,
+    steps: voiceOperations.map((operation) => ({ operationId: operation.id, stepId: String(operation.input._g7_step) })),
+    runExchangeId,
+    ownershipProven: ownershipProven.length > 0 && ownershipMismatch.length === 0,
+  });
+  const certifiedSteps = new Map(certification.steps.map((item) => [item.operation_id, item]));
+  // The run's own tasks: the one its certified create command made, then the
+  // product's own link from that research task to its design.
   const allTasks = observations.flatMap(tasksOf);
-  const boundIds = new Set(runExchangeId === null ? [] : allTasks.filter((task) => typeof task.exchange_id === "string" && task.exchange_id.toLowerCase() === runExchangeId).map((task) => String(task.task_id)));
+  const boundIds = new Set<string>(certification.createdTaskId === null ? [] : [certification.createdTaskId]);
   for (const task of allTasks) {
     const designTaskId = record(task.research)?.design_task_id;
     if (boundIds.has(String(task.task_id)) && typeof designTaskId === "string") boundIds.add(designTaskId);
   }
-  const anyExchangeId = allTasks.some((task) => typeof task.exchange_id === "string");
-  const exchangeBound = boundIds.size > 0 && ownershipProven.length > 0 && ownershipMismatch.length === 0;
   const boundTasksOf = (event: Event) => tasksOf(event).filter((task) => boundIds.has(String(task.task_id)));
-  /** Why a voice step has no bound task: none observed, none carrying the run's exchange id, or ownership unproven. */
-  const unboundReason = () => runExchangeId === null ? "no_exchange_joined_to_run"
-    : boundIds.size > 0 ? "run_exchange_ownership_unproven"
-    : anyExchangeId ? "no_task_bound_to_run_exchange" : "native_task_exchange_id_absent";
   if (!scenario) {
     H("scenario.catalog_binding", "unavailable", "scenario_not_in_studio_g7_catalog");
   } else {
@@ -534,30 +533,9 @@ export function evaluateStudioG7Run(run: RunRecord, events: Event[], operations:
       }
       result.executed = "pass";
       if (step.executor === "speak") {
-        const stepObservations = observations.filter((event) => event.payload.purpose === step.id);
-        const final = observations.filter((event) => event.payload.purpose === "final").at(-1) ?? null;
-        const observation = stepObservations.at(-1) ?? (step.id === "g7.create" || step.id === "g7.steer" ? final : null);
-        if (!observation) { result.outcome = "unavailable"; result.reason = "no_outcome_observation_for_step"; steps.push(result); continue; }
-        const tasks = exchangeBound ? boundTasksOf(observation) : [];
-        if (tasks.length === 0) {
-          result.outcome = "unavailable";
-          result.reason = exchangeBound ? "no_bound_task_in_observation" : unboundReason();
-        } else if (step.id === "g7.create") {
-          const designs = tasks.filter((task) => record(task.design)?.published_version_id);
-          const pages = designs.flatMap((task) => artifactStates.filter((item) => item.artifact.task_id === task.task_id));
-          const verified = pages.some((item) => item.artifact.status === "verified");
-          const mismatch = pages.some((item) => item.artifact.status === "mismatch");
-          result.outcome = mismatch ? "fail" : verified ? "pass" : "unavailable";
-          result.reason = mismatch ? "bound_task_page_bytes_mismatch" : verified ? null : "bound_task_without_verified_page";
-        } else if (step.id === "g7.steer") {
-          result.outcome = "uncertain";
-          result.reason = "steer_effect_not_exposed_by_member_api";
-        } else {
-          const effect = STEP_EFFECTS[step.id]!;
-          const matched = tasks.some((task) => (effect.phases ?? []).includes(String(task.phase)) || (effect.states ?? []).includes(String(task.state)));
-          result.outcome = matched ? "pass" : "uncertain";
-          result.reason = matched ? null : "intended_phase_not_observed_on_bound_task";
-        }
+        const certified = certifiedSteps.get(operation!.id);
+        result.outcome = certified ? certified.outcome : "unavailable";
+        result.reason = certified ? certified.reason : "no_calls_certification";
         steps.push(result);
         continue;
       }
@@ -605,10 +583,10 @@ export function evaluateStudioG7Run(run: RunRecord, events: Event[], operations:
       result.reason = committed ? null : `withdrawal_refused_${String(withdrawal.payload.code ?? withdrawal.payload.http_status ?? "unknown")}`;
       steps.push(result);
       const after = observations.filter((event) => event.seq > withdrawal.seq);
-      const boundDesigns = exchangeBound ? after.flatMap(boundTasksOf).filter((task) => record(task.design) !== null) : [];
+      const boundDesigns = after.flatMap(boundTasksOf).filter((task) => record(task.design) !== null);
       const designEnded = boundDesigns.some((task) => ["cancelled", "failed", "superseded"].includes(String(record(task.design)?.state)));
       if (after.length === 0) P("step.g7.withdrawal.design_ended", "unavailable", "no_observation_after_withdrawal", after);
-      else if (boundDesigns.length === 0) P("step.g7.withdrawal.design_ended", "unavailable", exchangeBound ? "no_bound_design_observed_after_withdrawal" : unboundReason(), after);
+      else if (boundDesigns.length === 0) P("step.g7.withdrawal.design_ended", "unavailable", certification.createdTaskId === null ? "create_step_not_certified" : "no_bound_design_observed_after_withdrawal", after);
       else P("step.g7.withdrawal.design_ended", designEnded ? "pass" : "uncertain", designEnded ? null : "design_end_not_observed_on_bound_task", after);
     }
     for (const step of steps) {
@@ -660,7 +638,7 @@ export function evaluateStudioG7Run(run: RunRecord, events: Event[], operations:
     bridge: { receipt_count: bridgeRaw.length, distinct_seq_count: bridge.length, duplicate_count: duplicateCount, conflicting_seqs: conflictingSeqs, missing_seqs: missingSeqs, first_seq: firstSeq, max_seq: maxSeq, read_after_lab_end_count: readAfterLabEnd, after_session_closed_kinds: afterClosedKinds, exchange_state: latestGrant?.exchangeState ?? null },
     cleanup: { required: true, guard_reason: guardReason, exchange_ended: cleanup.exchangeEnded, exchange_status: typeof latestEnded?.payload.status === "string" ? latestEnded.payload.status : null, ownership: typeof latestOwnership === "string" ? latestOwnership : null, signed_out: cleanup.signedOut, browser_closed: cleanup.browserClosed, browser_lease_released: leaseReleased.length > 0, room_presence: roomPresence, complete: cleanupComplete },
     deployed_identities: identities,
-    outcome: { observations: observations.length, join: exchangeBound ? "native_task_exchange_id" : "uncertain", bound_tasks: exchangeBound ? boundIds.size : 0, missing_product_field: anyExchangeId ? null : "NativeTask.exchangeId", artifacts_verified: verifiedArtifacts.length, artifacts_mismatched: mismatched.length, artifacts_unavailable: artifactStates.filter((item) => item.artifact.status === "unavailable").length },
+    outcome: { observations: observations.length, join: certification.steps.some((item) => item.outcome === "pass") ? "exchange_calls" : "uncertain", bound_tasks: boundIds.size, missing_product_field: certification.answered ? null : "ExchangeCalls", voice_steps: certification.steps, artifacts_verified: verifiedArtifacts.length, artifacts_mismatched: mismatched.length, artifacts_unavailable: artifactStates.filter((item) => item.artifact.status === "unavailable").length },
     corroboration: { webrtc_sender_stats: { status: "corroboration_only", samples: stats.length, issued_track_rows: issuedRows, max_packets_sent: maxPackets } },
     coverage: STUDIO_G7_RECEIPT_COVERAGE,
     summary: withheld.length === 0 ? `harness_pass_${harness.length}` : `harness_withheld:${withheld.slice(0, 32).join(",")}`,

@@ -31,6 +31,7 @@ import { deriveStudioG7Verdicts, evaluateStudioG7Run, studioDurableJoin, studioG
 import { isStudioG7ScenarioVersion } from "./studio-g7/scenarios.js";
 import { STUDIO_G7_TARGET_KIND, computeRunBindingSha256 } from "./studio-g7/contract.js";
 import { hasStudioExtensions } from "./studio-g7/studio-driver.js";
+import { STUDIO_CALLS_READ_KIND } from "./studio-g7/calls-certification.js";
 import { STUDIO_STEP_EXECUTING_STATES, studioStepConflict, studioStepOf } from "./studio-g7/step-guard.js";
 import { STUDIO_DEAD_OWNER_HEARTBEAT_STALE_MS, STUDIO_DEAD_OWNER_LEASE_RELEASE_SCHEMA, STUDIO_DEAD_OWNER_VERIFIED_KIND, STUDIO_ROOM_PRESENCE_KIND, studioEffectiveTokenLifetimeMs } from "./studio-g7/lease-release.js";
 
@@ -972,6 +973,16 @@ export class VoiceLabWorker {
       const targetAt = typeof bargeTarget?.target_schedule_at === "string" ? new Date(bargeTarget.target_schedule_at).getTime() : Number.NaN;
       if (operation.type === "barge_in") assertBargeWindow(bargeTarget);
       const delayMs = operation.type === "barge_in" ? (Number.isNaN(targetAt) ? Number(operation.input.delay_ms ?? 0) : Math.max(0, targetAt - Date.now())) : Number(timing.delay_ms ?? 0);
+      if (isStudioG7Run(run) && hasStudioExtensions(this.driver)) {
+        // A G7 voice step is certified only from the exchange's calls recorded
+        // after this baseline (calls-certification.ts). The baseline is made
+        // durable before the step's write-ahead. A re-executed operation keeps
+        // its first baseline and never reads a later one (which could already
+        // include the step's own call).
+        const stepId = typeof operation.input._g7_step === "string" ? operation.input._g7_step : null;
+        const prior = (await this.#allEvents(run.id)).events.some((event) => event.kind === STUDIO_CALLS_READ_KIND && event.payload.purpose === "baseline" && event.payload.operation_id === operation.id);
+        if (!prior) await this.#persistEvents(run.id, [await this.driver.readStudioCalls(run, "baseline", operation.id, stepId)]);
+      }
       await this.ledger.appendEvent(run.id, "utterance.resolved", "worker", { utterance_id: utteranceId, operation_id: operation.id, idempotency_key_hash: sha256(operation.idempotencyKey), test_run_id: run.testRunId, scenario_id: run.scenarioId, scenario_version: run.scenarioVersion, source: audio.source, fixture: audio.fixture ?? null, source_text_hash: audio.sourceTextHash ?? null, synthesis: audio.synthesis ?? null, barge_target: bargeTarget ?? null, scheduled_delay_ms: delayMs, wav: { sha256: audio.sha256, sample_rate: audio.sampleRate, channels: audio.channels, duration_ms: audio.durationMs, byte_length: audio.bytes.byteLength } }, `utterance:${utteranceId}:resolved`);
       if (operation.type === "barge_in" && operation.input._tool_target) await this.#revalidateActiveTarget(run, operation.id, operation.input._tool_target as Record<string, unknown>);
       await this.#fenceMutation(claimed, signal);

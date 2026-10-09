@@ -49,6 +49,7 @@ import { probeStudioReadiness } from "./readiness.js";
 import { STUDIO_G7_ACTIONS, STUDIO_G7_VOICE_STEPS, isStudioG7ScenarioVersion, STUDIO_G7_SCENARIO_ID_SET, studioG7StepId, type StudioG7Action, type StudioG7VoiceStep } from "./scenarios.js";
 import { StudioApiClient, classifyRoomPresence, type IdentityObservation, type ProjectedArtifactVersion, type ProjectedTaskDetail, type StudioRoomSnapshot } from "./studio-api.js";
 import { STUDIO_ROOM_PRESENCE_KIND, STUDIO_ROOM_PRESENCE_SCHEMA } from "./lease-release.js";
+import { STUDIO_CALLS_READ_KIND, STUDIO_CALLS_READ_SCHEMA } from "./calls-certification.js";
 import { buildStudioSessionSeedScript, globalSignOut, passwordGrant, signOut, supabaseStorageKey, type FetchLike, type SignOutReceipt, type StudioUserSession } from "./supabase-session.js";
 
 type DriverEvent = Omit<LabEvent, "runId" | "seq" | "at">;
@@ -168,6 +169,8 @@ type IdentitySnapshot = { observed: Partial<DeploymentIdentity>; event: DriverEv
 /** The Studio extensions the worker calls for G7 runs (absent on the legacy driver). */
 export interface StudioDriverExtensions {
   studioAction(run: RunRecord, operationId: string, input: Record<string, unknown>): Promise<DriverOperationResult>;
+  /** One read of the run's exchange's calls (A15 getExchangeCalls), as the principal: a voice step's write-ahead baseline. */
+  readStudioCalls(run: RunRecord, purpose: string, operationId: string | null, stepId: string | null): Promise<DriverEvent>;
   refreshStudioEvidence(run: RunRecord, join: DurableStudioJoin): Promise<DriverEvent[]>;
   adoptStudioJoin(runId: string, join: DurableStudioJoin): void;
   studioReadiness(): Promise<Record<string, unknown>>;
@@ -175,8 +178,11 @@ export interface StudioDriverExtensions {
 
 export function hasStudioExtensions(driver: VoiceBrowserDriver): driver is VoiceBrowserDriver & StudioDriverExtensions {
   const candidate = driver as Partial<StudioDriverExtensions>;
-  return typeof candidate.studioAction === "function" && typeof candidate.refreshStudioEvidence === "function" && typeof candidate.adoptStudioJoin === "function";
+  return typeof candidate.studioAction === "function" && typeof candidate.refreshStudioEvidence === "function" && typeof candidate.adoptStudioJoin === "function" && typeof candidate.readStudioCalls === "function";
 }
+
+/** More calls than this in one exchange: the read is typed unavailable rather than truncated. */
+const MAX_RECORDED_CALLS = 1_000;
 
 function sha256(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
@@ -477,6 +483,8 @@ export class StudioG7Driver implements VoiceBrowserDriver, StudioDriverExtension
       const events: DriverEvent[] = [...await this.drain(run.id, true)];
       const observed = await this.#observeOutcome(run, tokens, stepId, [], operationId);
       events.push(observed.event);
+      // The calls read after the step, with the same session (calls-certification.ts).
+      events.push(await this.#readCalls(run.id, tokens, stepId, operationId, stepId));
       return { receipt: { action, step_id: stepId, performed: false, status: "observed", outcome_observation_sha256: sha256(canonicalJson(observed.event.payload)), execution_epoch_sha256: session.ownership.executionEpochSha256 }, events };
     }
     if (typeof action !== "string" || !(STUDIO_G7_ACTIONS as readonly string[]).includes(action)) throw studioError("STUDIO_ACTION_INVALID", "Unknown Studio G7 action.", "validation");
@@ -511,10 +519,11 @@ export class StudioG7Driver implements VoiceBrowserDriver, StudioDriverExtension
     try {
       events.push(...await this.drain(run.id, true));
       const tokens = this.#tokenSource(session);
-      // The final canonical outcome read happens while the principal session
-      // still exists; its join to the run stays `uncertain` (no exchange
-      // binding on native tasks).
+      // The final canonical outcome read, and the exchange's calls (the read
+      // after the last voice steps), happen while the principal session
+      // still exists.
       events.push((await this.#observeOutcome(run, tokens, "final", this.#focusTasks(run.id), "end").catch((error: unknown) => ({ event: this.#outcomeUnavailable(run.id, "final", error) }))).event);
+      events.push(await this.#readCalls(run.id, tokens, "final", "end", null));
       const settled = await this.#settleExchange(run.id, tokens);
       events.push(...settled.events);
       const left = await this.#clickIfVisible(session, /^Leave the room$/);
@@ -1218,7 +1227,7 @@ export class StudioG7Driver implements VoiceBrowserDriver, StudioDriverExtension
       focus_task_ids: this.#focusTasks(run.id),
       live_exchange_present: observed.snapshot.exchangeId !== null,
       tasks: observed.details.map((detail) => ({
-        task_id: detail.task.id, kind: detail.task.kind, state: detail.task.state, phase: detail.task.phase, created_at: detail.task.createdAt, exchange_id: detail.task.exchangeId,
+        task_id: detail.task.id, kind: detail.task.kind, state: detail.task.state, phase: detail.task.phase, created_at: detail.task.createdAt, exchange_id: detail.task.exchangeId, goal_id: detail.task.goalId,
         focus: this.#focusTasks(run.id).includes(detail.task.id),
         research: detail.research ? { html_state: detail.research.htmlState, design_task_id: detail.research.designTaskId, amends_task_id: detail.research.amendsTaskId } : null,
         design: detail.design ? { state: detail.design.state, mode: detail.design.mode, artifact_id: detail.design.artifactId, base_version_id: detail.design.baseVersionId, published_version_id: detail.design.publishedVersionId, research_task_id: detail.design.researchTaskId, revisions: detail.design.revisions, section_count: detail.design.sections.length } : null,
@@ -1384,6 +1393,37 @@ export class StudioG7Driver implements VoiceBrowserDriver, StudioDriverExtension
       observed: read.value.observed, fresh: read.value.fresh, self_present: read.value.selfPresent, participants: read.value.participants, guests: read.value.guests,
       voice: read.value.voice, live_exchange_id: read.value.exchangeId, reported_at: read.value.reportedAt,
     } : {});
+  }
+
+  async readStudioCalls(run: RunRecord, purpose: string, operationId: string | null, stepId: string | null): Promise<DriverEvent> {
+    return this.#readCalls(run.id, this.#tokenSource(this.#sessions.get(run.id) ?? null), purpose, operationId, stepId);
+  }
+
+  /**
+   * Read the principal's own voice calls in the run's joined exchange (A15
+   * getExchangeCalls) and record them: seq, tool, the command each admitted
+   * (id, kind, goal, authority epoch, state) and the task it created. Ids,
+   * kinds, numbers and times only. A refusal is typed by the product's
+   * convention: 422 not_found (not the principal's exchange) or 404 (the
+   * route is absent: voice qualification off); neither is ever a baseline.
+   */
+  async #readCalls(runId: string, tokens: TokenSource, purpose: string, operationId: string | null, stepId: string | null): Promise<DriverEvent> {
+    const exchangeId = this.#exchanges.get(runId)?.exchangeId ?? null;
+    const emit = (body: Record<string, unknown>): DriverEvent => {
+      const payload = { schema: STUDIO_CALLS_READ_SCHEMA, purpose, operation_id: operationId, step_id: stepId, exchange_id: exchangeId, read_id: randomUUID(), observed_at_lab_ms: this.#now(), ...body };
+      return { kind: STUDIO_CALLS_READ_KIND, source: "canonical", payload, dedupeKey: purpose === "baseline" && operationId !== null ? `studio-calls-baseline:${runId}:${operationId}` : contentKey("studio-calls-read", runId, payload) };
+    };
+    if (exchangeId === null) return emit({ status: "unavailable", reason: "no_exchange_join", http_status: null, max_seq: null, calls: [] });
+    let read;
+    try { read = await this.#api.exchangeCalls(exchangeId, await tokens.token()); }
+    catch (error) { return emit({ status: "unavailable", reason: error instanceof VoiceLabError ? error.detail.code : "calls_read_failed", http_status: null, max_seq: null, calls: [] }); }
+    if (read.status !== "available") return emit({ status: "unavailable", reason: read.reason, http_status: read.http_status, max_seq: null, calls: [] });
+    if (read.value.calls.length > MAX_RECORDED_CALLS) return emit({ status: "unavailable", reason: "calls_over_bound", http_status: read.http_status, max_seq: null, calls: [] });
+    const calls = read.value.calls.map((call) => ({
+      seq: call.seq, recorded_at: call.recordedAt, input_epoch: call.inputEpoch, tool: call.tool, task_id: call.taskId,
+      command: call.command === null ? null : { command_id: call.command.commandId, kind: call.command.kind, goal_id: call.command.goalId, authority_epoch: call.command.authorityEpoch, goal_revision: call.command.goalRevision, state: call.command.state, created_at: call.command.createdAt },
+    }));
+    return emit({ status: "available", reason: null, http_status: read.http_status, max_seq: calls.at(-1)?.seq ?? 0, calls });
   }
 
   #state(runId: string): ExchangeRecord {

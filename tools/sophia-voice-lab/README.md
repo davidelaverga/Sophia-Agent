@@ -225,20 +225,28 @@ and Markdown dropped) → the design's published version → its HTML rendition'
 source → the downloaded bytes' SHA-256, compared with the declared source,
 rendition and version digests. A section revision, a stale edit and a withdrawal
 are the Lab's own requests, so their outcomes are canonical. A voice step is
-joined to a native task only through the product's own record (A15
-`NativeTask.exchangeId`: the exchange whose voice tool call created the task,
-recorded as the service bound the call to its speaker) equal to the run's
-joined, ownership-proven exchange, and then through the product's link from such
-a research task to its design (`html.designTaskId`). The actor and a time window
-only choose which tasks to read; they never attribute one. A task of another
-exchange, or with no exchange id (any other creation, or one made while the
-API's voice qualification was off), is never the run's: without a bound task the
-step is `unavailable` (`native_task_exchange_id_absent`,
-`no_task_bound_to_run_exchange` or `run_exchange_ownership_unproven`). With one,
-`create` passes on its design's verified bytes and `hold`, `resume` and `stop`
-pass on the intended phase of the bound task; `steer` stays `uncertain` (its
-effect is not exposed by the member API), so a complete run certifies the
-harness and reports the product `inconclusive`.
+certified only from the exchange's calls (A15 `GET
+/api/v1/exchanges/{id}/calls`: the principal's own voice tool calls in the
+exchange, in recording order `seq`, each with the command the transaction
+inserted for that call, or none). Before each voice step's write-ahead the
+worker reads the calls and makes the highest `seq` durable as the step's
+baseline (a re-executed step keeps its first baseline). After the step, only
+calls above that baseline and no later than the next voice step's baseline
+count, and the step passes only if exactly one of them carries a command:
+`native_task` with its task for create (the task naming the run's
+ownership-proven exchange in the snapshot, `NativeTask.exchangeId`), and
+`steer`, `hold`, `resume` or `stop` on the created task's goal. The command must
+not be denied, superseded or of unknown outcome, never certified by an earlier
+step, a control's authority epoch must rise, and hold, resume and stop must see
+the created task's status match in that step's own observation
+(`holding`/`held`, `running`, `stopping`/`stopped`). No new call, a call with no
+command (a refusal, e.g. a Hold on work already held), another kind or goal, two
+command-bearing calls, a call at or below the baseline, or a task or command
+seen only elsewhere (another exchange, or the principal's own HTTP request)
+never passes; a product that does not serve the calls (404) or refuses them (422
+`not_found`) leaves the steps `unavailable`. A complete run whose five voice
+steps are certified can report the product `pass`; otherwise it stays
+`inconclusive` (or `fail` where a step's own command contradicts it).
 
 **Completion.** A run ends `completed` once its harness assertions and cleanup are
 proven. Receipts that arrive after End (the bridge's `session_closed`, the last
@@ -348,9 +356,9 @@ track is the published sender track, not packet flow to any SFU or the bridge.
 No transcript and no audio is retained by the Lab or the product contract. An
 orphan browser's room presence is evidence only from a fresh bridge report (the
 bridge reports only while it is in the room), and absence at that report does
-not prove the process closed. The task join needs the API's voice qualification
-on; tasks created otherwise, and the steer effect, stay unattributed or
-`uncertain`.
+not prove the process closed. Voice-step certification needs the API's voice
+qualification on; a steer's effect beyond its admitted command, and a goal's
+status other than its created task's phase, are not exposed by the member API.
 
 ## Running and container commands
 

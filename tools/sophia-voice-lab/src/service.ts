@@ -647,7 +647,7 @@ export class VoiceLabService {
         tools: [...STUDIO_G7_TOOL_NAMES],
         operation_types: { voice_steps: "speak (studio_g7_voice_step)", non_voice_steps: "studio_action (studio_g7_action)" },
         lab_schema: { version: 7, studio_action_requires_upgrade_from_v6: true },
-        limitations: ["no_transcript_retained", "no_audio_retained", "pcm_reconciliation_envelope_only", "fake_studio_loopback_peer_has_no_packet_flow_proof", "native_task_join_only_by_exchange_id_requires_voice_qualification", "steer_effect_not_exposed_by_member_api", "orphan_browser_room_presence_only_from_fresh_bridge_report", "orphan_browser_process_close_unobservable"],
+        limitations: ["no_transcript_retained", "no_audio_retained", "pcm_reconciliation_envelope_only", "fake_studio_loopback_peer_has_no_packet_flow_proof", "voice_steps_certified_only_from_exchange_calls_requires_voice_qualification", "steer_effect_beyond_admitted_command_not_exposed", "goal_status_is_the_created_task_phase", "orphan_browser_room_presence_only_from_fresh_bridge_report", "orphan_browser_process_close_unobservable"],
       } } : {}),
     } });
   }

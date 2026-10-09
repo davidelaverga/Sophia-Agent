@@ -34,6 +34,8 @@ class FakeStudioBackend {
   voiceQualificationOn = true;
   /** A raw refusal of the evidence read (negative controls: other 422 codes, 401, 403). */
   evidenceRefusal: { status: number; body: unknown } | null = null;
+  /** The exchange's calls (A15 ExchangeCalls body, without exchangeId); null: not an exchange of the caller's (422 not_found). */
+  callsBody: Record<string, unknown> | null = { calls: [] };
   /** The room as the bridge last saw it (A15 RoomLivePresence); the default is no report. */
   presence: Record<string, unknown> = { observed: false, reportedAt: null, fresh: false, voice: null, exchangeId: null, selfPresent: false, participants: 0, guests: 0, emptySince: null };
   grantUser = PRINCIPAL_UUID;
@@ -86,6 +88,12 @@ class FakeStudioBackend {
         if (this.evidenceRefusal) return json(this.evidenceRefusal.body, this.evidenceRefusal.status);
         const body = this.evidence?.(evidence[1]!) ?? null;
         return body === null ? productError(422, "not_found", "Qualification evidence not found") : json(body);
+      }
+      const calls = /^\/api\/v1\/exchanges\/([0-9a-f-]{36})\/calls$/.exec(url.pathname);
+      if (calls) {
+        if (!this.voiceQualificationOn) return routeNotFound();
+        if (this.callsBody === null || calls[1] !== EXCHANGE_UUID) return productError(422, "not_found", "Exchange not found");
+        return json({ exchangeId: EXCHANGE_UUID, ...this.callsBody });
       }
       const presence = /^\/api\/v1\/rooms\/([0-9a-f-]{36})\/live-presence$/.exec(url.pathname);
       if (presence) {
@@ -563,5 +571,67 @@ describe("a recovery reads the room as the bridge last saw it (A15 live presence
     expect(read).toEqual({ status: "unavailable", reason: "not_found_for_principal", http_status: 422 });
     expect(classifyRoomPresence(read, ROOM_UUID)).toEqual({ status: "unobservable", reason: "not_found_for_principal" });
     expect(classifyRoomPresence({ status: "available", value: { roomId: OTHER_EXCHANGE, observed: true, fresh: true, selfPresent: false, participants: 0, guests: 0, voice: null, exchangeId: null, reportedAt: null }, http_status: 200 }, ROOM_UUID)).toEqual({ status: "unobservable", reason: "room_mismatch" });
+  });
+});
+
+describe("the exchange's calls are read as the principal and typed by the product's convention (A15 getExchangeCalls)", () => {
+  const productCall = (seq: number, command: Record<string, unknown> | null, taskId: string | null = null) => ({ seq, recordedAt: new Date(1_800_000_000_000 + seq).toISOString(), inputEpoch: 1, tool: command ? "control_work" : "project_status", command, taskId });
+  const hold = (seq: number) => ({ commandId: `f0000000-0000-4000-8000-${String(seq).padStart(12, "0")}`, kind: "hold", goalId: "e0000000-0000-4000-8000-0000000000a1", authorityEpoch: seq, goalRevision: 1, state: "checked", createdAt: new Date(1_800_000_000_000).toISOString() });
+  async function read(configure: (backend: FakeStudioBackend) => void) {
+    const backend = new FakeStudioBackend();
+    configure(backend);
+    const { config, driver } = driverFor(backend);
+    const run = studioRun(config);
+    adopt(driver, run);
+    const event = await driver.readStudioCalls(run, "baseline", "op-1", "g7.hold");
+    expect(event).toMatchObject({ kind: "studio.exchange.calls_read", source: "canonical", dedupeKey: `studio-calls-baseline:${run.id}:op-1` });
+    return event.payload;
+  }
+
+  it("records each call's seq, tool, command and task, and the highest seq as the baseline", async () => {
+    const payload = await read((backend) => { backend.callsBody = { calls: [productCall(3, null), productCall(7, hold(7))] }; });
+    expect(payload).toMatchObject({ schema: "sophia_voice_lab_studio_exchange_calls_v1", status: "available", exchange_id: EXCHANGE_UUID, max_seq: 7, operation_id: "op-1", step_id: "g7.hold" });
+    expect(payload.calls).toEqual([
+      expect.objectContaining({ seq: 3, tool: "project_status", command: null, task_id: null }),
+      expect.objectContaining({ seq: 7, command: expect.objectContaining({ kind: "hold", authority_epoch: 7, state: "checked", goal_id: "e0000000-0000-4000-8000-0000000000a1" }) }),
+    ]);
+    expect((await read(() => undefined)).max_seq).toBe(0);
+  });
+
+  it("never takes a refused, absent or malformed answer as a baseline", async () => {
+    expect(await read((backend) => { backend.voiceQualificationOn = false; })).toMatchObject({ status: "unavailable", reason: "endpoint_not_served", http_status: 404, max_seq: null });
+    expect(await read((backend) => { backend.callsBody = null; })).toMatchObject({ status: "unavailable", reason: "not_found_for_principal", http_status: 422, max_seq: null });
+    // seq not strictly increasing (the recording order), or an unknown command state: the whole answer is refused.
+    expect(await read((backend) => { backend.callsBody = { calls: [productCall(5, null), productCall(5, hold(5))] }; })).toMatchObject({ status: "unavailable", reason: "answer_malformed" });
+    expect(await read((backend) => { backend.callsBody = { calls: [productCall(5, { ...hold(5), state: "done" })] }; })).toMatchObject({ status: "unavailable", reason: "answer_malformed" });
+    // An answer about another exchange.
+    expect(await read((backend) => { backend.callsBody = { exchangeId: OTHER_EXCHANGE, calls: [] }; })).toMatchObject({ status: "unavailable", reason: "exchange_mismatch" });
+  });
+});
+
+describe("(h) presence is only the principal's own fresh selfPresent", () => {
+  it("never takes counts, a stale report or another member's presence as the principal's", async () => {
+    const backend = new FakeStudioBackend();
+    backend.exchangeId = null;
+    const { config, driver } = driverFor(backend);
+    const run = studioRun(config);
+    const cases: Array<[string, Record<string, unknown>, string]> = [
+      // Another member is in the room: the counts say so, the principal's own read does not.
+      ["counts > 0 with selfPresent false", { observed: true, fresh: true, selfPresent: false, participants: 2, guests: 1 }, "absent"],
+      ["selfPresent true but stale", { observed: true, fresh: false, selfPresent: true, participants: 1, guests: 0 }, "unobservable"],
+      ["participants without a report", { observed: false, fresh: false, selfPresent: false, participants: 3, guests: 0 }, "unobservable"],
+    ];
+    for (const [name, report, status] of cases) {
+      backend.presence = { reportedAt: new Date().toISOString(), voice: "ready", exchangeId: null, emptySince: null, ...report };
+      adopt(driver, run);
+      const recovered = await driver.recover(binding(run), "unused");
+      const presence = ofKind(recovered.events, "studio.room.live_presence")[0]!.payload;
+      expect(presence.status, name).toBe(status);
+      expect(presence.status, name).not.toBe("present");
+    }
+    // Every presence read was the principal's own (its own session's bearer token).
+    const reads = backend.calls.filter((item) => item.path.endsWith("/live-presence"));
+    expect(reads.length).toBe(cases.length);
+    expect(reads.every((item) => item.authorization?.startsWith("Bearer fake-access-token-"))).toBe(true);
   });
 });

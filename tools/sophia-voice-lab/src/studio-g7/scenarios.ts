@@ -32,13 +32,14 @@ export interface StudioG7Step {
   unavailable_reason: string | null;
   /**
    * How the step's product outcome joins to this run. `canonical`: the Lab's
-   * own member-API request returned the task or receipt id. `uncertain`: the
-   * join depends on the product: only `NativeTask.exchangeId` (A15, with the
-   * API's voice qualification on) equal to the run's ownership-proven
-   * exchange binds a task, never actor or time; without such a task the
-   * outcome is unavailable (evaluate.ts).
+   * own member-API request returned the task or receipt id. `exchange_calls`:
+   * a voice step, certified only from the exchange's calls (A15
+   * getExchangeCalls, with the API's voice qualification on): the one
+   * command its own call admitted after its baseline, of its kind and goal
+   * (calls-certification.ts); never by actor or time, and unavailable when
+   * the product does not serve the calls. `lab_owned`: the Lab's own receipts.
    */
-  outcome_join: "canonical" | "uncertain" | "lab_owned";
+  outcome_join: "canonical" | "exchange_calls" | "lab_owned";
   /** Receipts the step's assertions are drawn from. */
   evidence: readonly string[];
 }
@@ -53,8 +54,8 @@ export interface StudioG7Scenario {
   steps: readonly StudioG7Step[];
 }
 
-const VOICE_EVIDENCE = ["utterance.resolved", "audio.input.scheduled", "audio.input.started", "audio.input.completed", "page:mic_published", "input_window", "input_turn", "provider", "output_reply", "page:sophia_playback", "studio.outcome.observed"] as const;
-const voice = (id: string, ordinal: number, intent: StudioG7Step["intent"], label: StudioG7VoiceStep): StudioG7Step => ({ id, ordinal, intent, executor: "speak", label, availability: "supported", unavailable_reason: null, outcome_join: "uncertain", evidence: VOICE_EVIDENCE });
+const VOICE_EVIDENCE = ["studio.exchange.calls_read", "utterance.resolved", "audio.input.scheduled", "audio.input.started", "audio.input.completed", "page:mic_published", "input_window", "input_turn", "provider", "output_reply", "page:sophia_playback", "studio.outcome.observed"] as const;
+const voice = (id: string, ordinal: number, intent: StudioG7Step["intent"], label: StudioG7VoiceStep): StudioG7Step => ({ id, ordinal, intent, executor: "speak", label, availability: "supported", unavailable_reason: null, outcome_join: "exchange_calls", evidence: VOICE_EVIDENCE });
 
 export const STUDIO_G7_CATALOG: readonly StudioG7Scenario[] = Object.freeze([
   {

@@ -320,7 +320,16 @@ function artifact(taskId: string, versionId: string, digest: string, status = "v
   return { artifact_id: ARTIFACT, version_id: versionId, task_id: taskId, version_state: "stable", version_format: "html", is_latest: true, source_id: randomUUID(), rendition_sha256: digest, source_hash: digest, content_sha256: digest, downloaded_sha256: status === "mismatch" ? sha256("other bytes") : digest, downloaded_byte_length: 20, download_basis: "signed_object_store_url", source_hash_compared: true, hashes_agree: status === "verified", status, reason: status === "verified" ? null : "downloaded_bytes_disagree_with_declared_digest" };
 }
 
-interface G7Options { skip?: string[]; staleCode?: string; staleStatus?: number; artifactStatus?: string; ownership?: "proven" | "mismatch" | "unavailable"; withdrawalCommitted?: boolean; noEnd?: boolean }
+/**
+ * The exchange's calls as the product records them (A15 getExchangeCalls):
+ * `byStep` lists the calls recorded while each voice step runs. Each step's
+ * baseline read precedes it; the step's after-read follows it (or is the next
+ * step's baseline), and a final read follows the last observation.
+ * `unavailable` answers every read with that typed refusal instead.
+ */
+interface CallsScript { byStep: Record<string, Array<Record<string, unknown>>>; unavailable?: { reason: string; http_status: number } }
+
+interface G7Options { skip?: string[]; staleCode?: string; staleStatus?: number; artifactStatus?: string; ownership?: "proven" | "mismatch" | "unavailable"; withdrawalCommitted?: boolean; noEnd?: boolean; calls?: CallsScript; researchTask?: Record<string, unknown> }
 
 /** A complete G7 episode: five voice steps, four actions, observations, ownership, cleanup. */
 function g7Episode(options: G7Options = {}): Episode {
@@ -340,9 +349,21 @@ function g7Episode(options: G7Options = {}): Episode {
   const voice = ["create", "steer", "hold", "resume", "stop"].filter((step) => !skip.has(`g7.${step}`));
   let seq = 0;
   log.bridge("provider", providerReceipt(run, seq++, "ready"));
+  const recorded: Array<Record<string, unknown>> = [];
+  const callsRead = (purpose: string, operationId: string | null, stepId: string | null) => {
+    if (!options.calls) return;
+    const base = { schema: "sophia_voice_lab_studio_exchange_calls_v1", purpose, operation_id: operationId, step_id: stepId, exchange_id: EXCHANGE_UUID, read_id: randomUUID() };
+    const refusal = options.calls.unavailable;
+    log.add("studio.exchange.calls_read", "canonical", refusal
+      ? { ...base, status: "unavailable", reason: refusal.reason, http_status: refusal.http_status, max_seq: null, calls: [] }
+      : { ...base, status: "available", reason: null, http_status: 200, max_seq: recorded.reduce((max, call) => Math.max(max, Number(call.seq)), 0), calls: [...recorded].sort((left, right) => Number(left.seq) - Number(right.seq)) });
+  };
+  const research = (extra: Record<string, unknown>) => task(RESEARCH_TASK, "research", { ...(options.researchTask ?? {}), ...extra });
   voice.forEach((step, index) => {
     const speak = op(run, "speak", T0 + 100 + index, { fixture_id: "conversation_greeting_probe", _g7_step: `g7.${step}` }, { schedule_receipt: { product: {} } });
     operations.push(speak);
+    callsRead("baseline", speak.id, `g7.${step}`);
+    recorded.push(...(options.calls?.byStep[`g7.${step}`] ?? []));
     labUtterance(log, speak.id, T0 + 1_000 + index * 10_000, 1_500);
     log.bridge("input_window", inputWindow(run, seq++, index + 1, 1_500));
     log.bridge("input_turn", inputTurn(run, seq++, index + 1));
@@ -352,7 +373,8 @@ function g7Episode(options: G7Options = {}): Episode {
       const phase = step === "hold" ? "held" : step === "resume" ? "running" : "stopped";
       const observe = op(run, "studio_action", T0 + 150 + index, { action: "observe", for_step: step }, { performed: false, status: "observed" });
       operations.push(observe);
-      log.add("studio.outcome.observed", "canonical", { purpose: `g7.${step}`, operation_id: observe.id, join: { status: "uncertain" }, tasks: [task(RESEARCH_TASK, "research", { phase, state: step === "stop" ? "cancelled" : "running" })], artifacts: [] });
+      log.add("studio.outcome.observed", "canonical", { purpose: `g7.${step}`, operation_id: observe.id, join: { status: "uncertain" }, tasks: [research({ phase, state: step === "stop" ? "cancelled" : "running" })], artifacts: [] });
+      callsRead(`g7.${step}`, observe.id, `g7.${step}`);
     }
   });
   if (!skip.has("g7.leave_return")) {
@@ -381,7 +403,8 @@ function g7Episode(options: G7Options = {}): Episode {
     log.add("studio.action.withdrawal", "canonical", { operation_id: withdraw.id, requested: true, status: committed ? "committed" : "refused", entry_id: NOTE, entry_bound_exchange_id: EXCHANGE_UUID, http_status: committed ? 202 : 409, code: committed ? null : "stale_revision", receipt_operation: committed ? "withdraw_note" : null });
     log.add("studio.outcome.observed", "canonical", { purpose: "g7.withdrawal", operation_id: withdraw.id, join: { status: "uncertain" }, tasks: [task(DESIGN_TASK, "design", { design: { state: "cancelled", mode: "create", artifact_id: ARTIFACT, published_version_id: VERSION_1 } })], artifacts: [] });
   }
-  log.add("studio.outcome.observed", "canonical", { purpose: "final", operation_id: "end", join: { status: "uncertain" }, tasks: [task(DESIGN_TASK, "design", { state: "succeeded", design: { state: "published", mode: "create", artifact_id: ARTIFACT, published_version_id: VERSION_1 } }), task(RESEARCH_TASK, "research", { research: { html_state: "published", design_task_id: DESIGN_TASK } })], artifacts: [artifact(DESIGN_TASK, VERSION_1, PAGE_SHA, options.artifactStatus)] });
+  log.add("studio.outcome.observed", "canonical", { purpose: "final", operation_id: "end", join: { status: "uncertain" }, tasks: [task(DESIGN_TASK, "design", { state: "succeeded", design: { state: "published", mode: "create", artifact_id: ARTIFACT, published_version_id: VERSION_1 } }), research({ research: { html_state: "published", design_task_id: DESIGN_TASK } })], artifacts: [artifact(DESIGN_TASK, VERSION_1, PAGE_SHA, options.artifactStatus)] });
+  callsRead("final", "end", null);
   log.bridge("provider", providerReceipt(run, seq++, "closed"));
   log.bridge("session_closed", sessionClosed(run, seq++, { windows: voice.length, turns: voice.length, replies: voice.length }));
   cleanupEvents(log);
@@ -391,7 +414,7 @@ function g7Episode(options: G7Options = {}): Episode {
 }
 
 describe("Studio G7 episode: every step is an operation, outcomes are canonical or typed uncertain", () => {
-  it("certifies the harness of a complete episode; without the product's task exchange ids no voice outcome is attributed, so the product is inconclusive", () => {
+  it("certifies the harness of a complete episode; without the exchange's calls no voice outcome is certified, so the product is inconclusive", () => {
     const item = g7Episode();
     const evaluation = evaluate(item);
     const failing = [...evaluation.harness].filter((assertion) => assertion.status !== "pass");
@@ -400,21 +423,21 @@ describe("Studio G7 episode: every step is an operation, outcomes are canonical 
     expect(evaluation.bridge.first_seq).toBe(0);
     expect(evaluation.bridge.missing_seqs).toEqual([]);
     const steps = Object.fromEntries(evaluation.steps.map((step) => [step.step_id, `${step.executed}/${step.outcome}:${step.reason}`]));
-    // The tasks carry no exchange id (a product without voice qualification): never attributed by timing.
+    // No calls were read (a product without voice qualification): never attributed by timing.
     expect(steps).toEqual({
-      "g7.create": "pass/unavailable:native_task_exchange_id_absent",
-      "g7.steer": "pass/unavailable:native_task_exchange_id_absent",
+      "g7.create": "pass/unavailable:no_calls_baseline",
+      "g7.steer": "pass/unavailable:no_calls_baseline",
       "g7.leave_return": "pass/pass:null",
       "g7.section_revision": "pass/pass:null",
       "g7.stale_edit": "pass/pass:null",
-      "g7.hold": "pass/unavailable:native_task_exchange_id_absent",
-      "g7.resume": "pass/unavailable:native_task_exchange_id_absent",
-      "g7.stop": "pass/unavailable:native_task_exchange_id_absent",
+      "g7.hold": "pass/unavailable:no_calls_baseline",
+      "g7.resume": "pass/unavailable:no_calls_baseline",
+      "g7.stop": "pass/unavailable:no_calls_baseline",
       "g7.withdrawal": "pass/pass:null",
     });
-    expect(statusOf(evaluation, "step.g7.withdrawal.design_ended")).toMatchObject({ status: "unavailable", reason: "native_task_exchange_id_absent" });
+    expect(statusOf(evaluation, "step.g7.withdrawal.design_ended")).toMatchObject({ status: "unavailable", reason: "create_step_not_certified" });
     expect(statusOf(evaluation, "outcome.artifact_bytes_integrity")).toMatchObject({ status: "pass" });
-    expect(evaluation.outcome).toMatchObject({ join: "uncertain", bound_tasks: 0, missing_product_field: "NativeTask.exchangeId", artifacts_verified: 2, artifacts_mismatched: 0 });
+    expect(evaluation.outcome).toMatchObject({ join: "uncertain", bound_tasks: 0, missing_product_field: "ExchangeCalls", artifacts_verified: 2, artifacts_mismatched: 0 });
     const verdicts = deriveStudioG7Verdicts(evaluation, { sessionEstablished: true });
     expect(verdicts).toEqual({ harness: "pass", product: "inconclusive", provider: "pass", auth: "pass", evidence: "pass" });
   });
@@ -570,65 +593,110 @@ describe("Studio G7 cleanup proof: a no-join end needs the principal gone (third
 });
 
 const OTHER_EXCHANGE_ID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
-const DECOY_TASK = "d0000000-0000-4000-8000-0000000000de";
+const GOAL = "e0000000-0000-4000-8000-0000000000a1";
+const OTHER_GOAL = "e0000000-0000-4000-8000-0000000000a2";
+const commandId = (n: number) => `f0000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 
-/** Set each observed task's `exchange_id` as the product reported it (A15 NativeTask.exchangeId); absent keys stay unset. */
-function withTaskExchangeIds(item: Episode, ids: Record<string, string | null>): Episode {
-  for (const event of item.log.events.filter((candidate) => candidate.kind === "studio.outcome.observed")) {
-    event.payload = { ...event.payload, tasks: (event.payload.tasks as Array<Record<string, unknown>>).map((task) => String(task.task_id) in ids ? { ...task, exchange_id: ids[String(task.task_id)] } : task) };
-  }
-  return item;
+/** One recorded voice call (A15 ExchangeCalls entry, as the driver records it). */
+function call(seq: number, tool: string, command: { kind: string; goal?: string | null; epoch?: number | null; state?: string; id?: string } | null, taskId: string | null = null): Record<string, unknown> {
+  const at = new Date(T0 + seq * 1_000).toISOString();
+  return { seq, recorded_at: at, input_epoch: 1, tool, task_id: taskId, command: command === null ? null : { command_id: command.id ?? commandId(seq), kind: command.kind, goal_id: command.goal === undefined ? GOAL : command.goal, authority_epoch: command.epoch === undefined ? seq : command.epoch, goal_revision: 1, state: command.state ?? "checked", created_at: at } };
 }
-const stepsOf = (evaluation: StudioG7Evaluation) => Object.fromEntries(evaluation.steps.map((step) => [step.step_id, `${step.executed}/${step.outcome}:${step.reason}`]));
 
-describe("Studio G7 voice outcomes are bound only by the product's task exchange id (A15)", () => {
-  it("binds a voice step to the task its exchange created, and through the product's own link to the design's verified page", () => {
-    const evaluation = evaluate(withTaskExchangeIds(g7Episode(), { [RESEARCH_TASK]: EXCHANGE_UUID }));
-    expect(stepsOf(evaluation)).toMatchObject({
-      "g7.create": "pass/pass:null",
-      "g7.steer": "pass/uncertain:steer_effect_not_exposed_by_member_api",
-      "g7.hold": "pass/pass:null",
-      "g7.resume": "pass/pass:null",
-      "g7.stop": "pass/pass:null",
-    });
+/** Each voice step's own call, admitting exactly its command on the created task's goal. */
+function happyCalls(): CallsScript["byStep"] {
+  return {
+    "g7.create": [call(1, "start_research", { kind: "native_task" }, RESEARCH_TASK)],
+    // A read in the same exchange admits nothing and never counts.
+    "g7.steer": [call(2, "project_status", null), call(3, "control_work", { kind: "steer" })],
+    "g7.hold": [call(4, "control_work", { kind: "hold" })],
+    "g7.resume": [call(5, "control_work", { kind: "resume" })],
+    "g7.stop": [call(6, "control_work", { kind: "stop" })],
+  };
+}
+const RUN_TASK = { exchange_id: EXCHANGE_UUID, goal_id: GOAL };
+const stepsOf = (evaluation: StudioG7Evaluation) => Object.fromEntries(evaluation.steps.map((step) => [step.step_id, `${step.outcome}:${step.reason}`]));
+const certify = (byStep: CallsScript["byStep"], options: G7Options = {}) => stepsOf(evaluate(g7Episode({ researchTask: RUN_TASK, ...options, calls: { byStep } })));
+
+describe("Studio G7 voice steps are certified only from the exchange's calls (A15 getExchangeCalls)", () => {
+  it("certifies each of the five voice steps from the one command its own call admitted (positive controls)", () => {
+    const evaluation = evaluate(g7Episode({ researchTask: RUN_TASK, calls: { byStep: happyCalls() } }));
+    expect(stepsOf(evaluation)).toMatchObject({ "g7.create": "pass:null", "g7.steer": "pass:null", "g7.hold": "pass:null", "g7.resume": "pass:null", "g7.stop": "pass:null" });
+    expect(evaluation.outcome).toMatchObject({ join: "exchange_calls", bound_tasks: 2, missing_product_field: null });
+    expect(evaluation.outcome.voice_steps.map((step) => [step.step_id, step.command_kind, step.baseline_seq, step.candidate_seqs])).toEqual([
+      ["g7.create", "native_task", 0, [1]], ["g7.steer", "steer", 1, [2, 3]], ["g7.hold", "hold", 3, [4]], ["g7.resume", "resume", 4, [5]], ["g7.stop", "stop", 5, [6]],
+    ]);
+    // The withdrawal ended the design the certified create's research task handed its page to.
     expect(statusOf(evaluation, "step.g7.withdrawal.design_ended")).toMatchObject({ status: "pass", reason: null });
-    expect(evaluation.outcome).toMatchObject({ join: "native_task_exchange_id", bound_tasks: 2, missing_product_field: null });
-    // The steer effect is still not exposed by the member API: the product stays inconclusive.
-    expect(evaluation.verdicts).toEqual({ harness: "pass", product: "inconclusive", provider: "pass" });
-    expect(evaluation.limitations).toEqual(expect.arrayContaining(["native_task_join_only_by_exchange_id_requires_voice_qualification", "steer_effect_not_exposed_by_member_api"]));
+    expect(evaluation.verdicts.harness).toBe("pass");
   });
 
-  it("never attributes a task of another exchange, or one with no exchange id, even inside the time window", () => {
-    for (const ids of [{ [RESEARCH_TASK]: OTHER_EXCHANGE_ID, [DESIGN_TASK]: OTHER_EXCHANGE_ID }, { [RESEARCH_TASK]: null, [DESIGN_TASK]: OTHER_EXCHANGE_ID }]) {
-      const evaluation = evaluate(withTaskExchangeIds(g7Episode(), ids));
-      expect(stepsOf(evaluation), JSON.stringify(ids)).toMatchObject({
-        "g7.create": "pass/unavailable:no_task_bound_to_run_exchange",
-        "g7.steer": "pass/unavailable:no_task_bound_to_run_exchange",
-        "g7.hold": "pass/unavailable:no_task_bound_to_run_exchange",
-        "g7.resume": "pass/unavailable:no_task_bound_to_run_exchange",
-        "g7.stop": "pass/unavailable:no_task_bound_to_run_exchange",
-      });
-      expect(statusOf(evaluation, "step.g7.withdrawal.design_ended")).toMatchObject({ status: "unavailable", reason: "no_task_bound_to_run_exchange" });
-      expect(evaluation.outcome).toMatchObject({ join: "uncertain", bound_tasks: 0, missing_product_field: null });
+  it("(a) never certifies a Hold whose goal was already held: the call admitted no command", () => {
+    expect(certify({ ...happyCalls(), "g7.hold": [call(4, "control_work", null)] })["g7.hold"]).toBe("uncertain:call_admitted_no_command");
+  });
+
+  it("(b) never certifies from another exchange's task or calls", () => {
+    // The created task carries another exchange's id in the snapshot.
+    const foreignTask = certify(happyCalls(), { researchTask: { exchange_id: OTHER_EXCHANGE_ID, goal_id: GOAL } });
+    expect(foreignTask["g7.create"]).toBe("fail:created_task_bound_to_another_exchange");
+    expect(foreignTask["g7.hold"]).toBe("uncertain:create_step_not_certified");
+    // The matching command exists only in another exchange's calls: this exchange recorded none.
+    const elsewhere = certify({ ...happyCalls(), "g7.create": [] });
+    expect(elsewhere["g7.create"]).toBe("uncertain:no_call_after_baseline");
+    expect(elsewhere["g7.stop"]).toBe("uncertain:create_step_not_certified");
+  });
+
+  it("(c) never certifies an unrelated action in the same exchange", () => {
+    expect(certify({ ...happyCalls(), "g7.hold": [call(4, "project_status", null)] })["g7.hold"]).toBe("uncertain:call_admitted_no_command");
+    expect(certify({ ...happyCalls(), "g7.hold": [call(4, "control_work", { kind: "steer" })] })["g7.hold"]).toBe("fail:command_kind_mismatch");
+    expect(certify({ ...happyCalls(), "g7.hold": [call(4, "control_work", { kind: "hold", goal: OTHER_GOAL })] })["g7.hold"]).toBe("fail:command_goal_mismatch");
+  });
+
+  it("(d) never certifies a duplicate or replayed entry", () => {
+    // The same command id the Hold step already certified.
+    expect(certify({ ...happyCalls(), "g7.stop": [call(6, "control_work", { kind: "stop", id: commandId(4) })] })["g7.stop"]).toBe("uncertain:command_already_certified");
+    // A replayed call stays its one entry at its original seq: nothing new for this step.
+    expect(certify({ ...happyCalls(), "g7.stop": [] })["g7.stop"]).toBe("uncertain:no_call_after_baseline");
+  });
+
+  it("(e) never counts a call at or below the step's baseline (out of order)", () => {
+    const steps = certify({ ...happyCalls(), "g7.steer": [call(2, "project_status", null), call(5, "control_work", { kind: "steer", epoch: 3 })], "g7.hold": [call(4, "control_work", { kind: "hold" })], "g7.resume": [call(6, "control_work", { kind: "resume" })], "g7.stop": [call(7, "control_work", { kind: "stop" })] });
+    expect(steps["g7.steer"]).toBe("pass:null");
+    expect(steps["g7.hold"]).toBe("uncertain:no_call_after_baseline");
+  });
+
+  it("(f) never certifies when two calls after the baseline carry commands", () => {
+    expect(certify({ ...happyCalls(), "g7.hold": [call(4, "control_work", { kind: "hold" }), call(5, "control_work", { kind: "hold" })], "g7.resume": [call(6, "control_work", { kind: "resume" })], "g7.stop": [call(7, "control_work", { kind: "stop" })] })["g7.hold"]).toBe("uncertain:multiple_command_bearing_calls");
+  });
+
+  it("(g) never certifies the principal's own HTTP command, which shows in the snapshot but never as a call's command", () => {
+    const steps = certify({ ...happyCalls(), "g7.create": [] }, { researchTask: { exchange_id: null, goal_id: GOAL } });
+    expect(steps["g7.create"]).toBe("uncertain:no_call_after_baseline");
+    expect(steps["g7.steer"]).toBe("uncertain:create_step_not_certified");
+  });
+
+  it("checks each control's effect: its command's state, a rising authority epoch and the goal's status", () => {
+    expect(certify({ ...happyCalls(), "g7.hold": [call(4, "control_work", { kind: "hold", state: "denied" })] })["g7.hold"]).toBe("fail:command_denied");
+    for (const state of ["superseded", "outcome_unknown"]) expect(certify({ ...happyCalls(), "g7.hold": [call(4, "control_work", { kind: "hold", state })] })["g7.hold"], state).toBe(`uncertain:command_${state}`);
+    expect(certify({ ...happyCalls(), "g7.resume": [call(5, "control_work", { kind: "resume", epoch: 4 })] })["g7.resume"]).toBe("fail:authority_epoch_not_increasing");
+    // The Hold was admitted, but the snapshot never shows the goal holding.
+    const item = g7Episode({ researchTask: RUN_TASK, calls: { byStep: happyCalls() } });
+    const hold = item.log.events.find((event) => event.kind === "studio.outcome.observed" && event.payload.purpose === "g7.hold")!;
+    hold.payload = { ...hold.payload, tasks: [{ ...(hold.payload.tasks as Array<Record<string, unknown>>)[0], phase: "running" }] };
+    expect(stepsOf(evaluate(item))["g7.hold"]).toBe("uncertain:goal_status_not_matching_step");
+  });
+
+  it("types a product that does not serve the calls (404) or refuses them (422 not_found) as unavailable, never a pass", () => {
+    for (const [refusal, reason] of [[{ reason: "endpoint_not_served", http_status: 404 }, "calls_baseline_endpoint_not_served"], [{ reason: "not_found_for_principal", http_status: 422 }, "calls_baseline_not_found_for_principal"]] as const) {
+      const evaluation = evaluate(g7Episode({ researchTask: RUN_TASK, calls: { byStep: happyCalls(), unavailable: refusal } }));
+      for (const step of ["g7.create", "g7.steer", "g7.hold", "g7.resume", "g7.stop"]) expect(stepsOf(evaluation)[step], `${refusal.reason} ${step}`).toBe(`unavailable:${reason}`);
+      expect(evaluation.outcome).toMatchObject({ join: "uncertain", missing_product_field: "ExchangeCalls" });
     }
   });
 
-  it("never attributes another exchange's task that shows the step's effect while the run's own task does not", () => {
-    const item = withTaskExchangeIds(g7Episode(), { [RESEARCH_TASK]: EXCHANGE_UUID });
-    const hold = item.log.events.find((event) => event.kind === "studio.outcome.observed" && event.payload.purpose === "g7.hold")!;
-    hold.payload = { ...hold.payload, tasks: [
-      { ...(hold.payload.tasks as Array<Record<string, unknown>>)[0], phase: "running" },
-      task(DECOY_TASK, "research", { phase: "held", exchange_id: OTHER_EXCHANGE_ID }),
-    ] };
-    expect(stepsOf(evaluate(item))["g7.hold"]).toBe("pass/uncertain:intended_phase_not_observed_on_bound_task");
-  });
-
-  it("binds nothing while the run's exchange ownership is unproven", () => {
+  it("certifies nothing while the run's exchange ownership is unproven", () => {
     for (const ownership of ["unavailable", "mismatch"] as const) {
-      const evaluation = evaluate(withTaskExchangeIds(g7Episode({ ownership }), { [RESEARCH_TASK]: EXCHANGE_UUID }));
-      expect(stepsOf(evaluation)["g7.create"], ownership).toBe("pass/unavailable:run_exchange_ownership_unproven");
-      expect(stepsOf(evaluation)["g7.hold"], ownership).toBe("pass/unavailable:run_exchange_ownership_unproven");
-      expect(evaluation.outcome.join).toBe("uncertain");
+      expect(certify(happyCalls(), { ownership })["g7.create"], ownership).toBe("unavailable:run_exchange_ownership_unproven");
     }
   });
 });

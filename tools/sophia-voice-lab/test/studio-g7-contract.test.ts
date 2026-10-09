@@ -120,9 +120,10 @@ describe("Studio G7 contract strictness", () => {
     expect(byChannel.output_leg_audio_artifact!.status).toBe("not_supported_by_product_privacy_model");
     expect(byChannel.webrtc_sender_stats!.status).toBe("corroboration_only");
     expect(byChannel.downstream_pcm_window_envelope!.sources).toEqual(["input_window"]);
-    // The task join is the product's NativeTask.exchangeId (A15), room presence a fresh report only, and the loopback limitation is explicit.
-    expect(byChannel.builder_task_and_artifact_join).toMatchObject({ status: "product_receipt", reason: "bound_only_by_exchange_id_requires_voice_qualification" });
-    expect(byChannel.builder_task_and_artifact_join!.sources).toContain("NativeTask.exchangeId (A15)");
+    // Voice steps are certified from the exchange's calls (A15), room presence is a fresh report only, and the loopback limitation is explicit.
+    expect(byChannel.builder_task_and_artifact_join).toMatchObject({ status: "product_receipt", reason: "certified_only_from_exchange_calls_requires_voice_qualification" });
+    expect(byChannel.builder_task_and_artifact_join!.sources).toEqual(expect.arrayContaining(["GET /api/v1/exchanges/{e}/calls (A15)", "NativeTask.exchangeId (A15)"]));
+    expect(byChannel.voice_step_command).toMatchObject({ status: "product_receipt", reason: "exactly_one_new_command_of_the_step_kind_on_the_created_goal" });
     expect(byChannel.orphan_browser_room_presence).toMatchObject({ status: "product_receipt", reason: "fresh_report_only_else_unobservable" });
     expect(byChannel.webrtc_packet_flow_on_loopback_peer).toMatchObject({ status: "unsupported", reason: "fake_studio_loopback_peer_has_no_livekit_sfu" });
     // Each plan-vs-migration difference is data, and the adapter follows the migration.
@@ -146,7 +147,7 @@ describe("Studio G7 contract strictness", () => {
     // Every G7 step (pack L3 order) is an operation: speak or studio_action, none only a driver method.
     expect(steps.every((step) => step.availability === "supported" && (step.executor === "speak" || step.executor === "studio_action"))).toBe(true);
     expect(steps.map((step) => step.intent)).toEqual(["create_html_by_voice", "steer_by_voice", "leave_and_return", "section_revision", "stale_edit", "hold_by_voice", "resume_by_voice", "stop_by_voice", "withdrawal"]);
-    expect(steps.filter((step) => step.executor === "speak").map((step) => step.outcome_join)).toEqual(["uncertain", "uncertain", "uncertain", "uncertain", "uncertain"]);
+    expect(steps.filter((step) => step.executor === "speak").map((step) => step.outcome_join)).toEqual(["exchange_calls", "exchange_calls", "exchange_calls", "exchange_calls", "exchange_calls"]);
     expect(STUDIO_G7_CATALOG[0]!.required_tools).toEqual(expect.arrayContaining(["start_studio_g7_run", "studio_g7_voice_step", "studio_g7_action"]));
   });
 

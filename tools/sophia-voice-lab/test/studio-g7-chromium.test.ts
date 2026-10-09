@@ -104,12 +104,14 @@ describe.skipIf(executablePath === null)("Studio G7 driver against a local fake 
     contents: new Map<string, Buffer>(), mission: [] as Array<Record<string, unknown>>, edits: new Map<string, { status: number; body: unknown }>(), withdrawals: [] as unknown[],
     /** The room as the bridge last saw it (A15 RoomLivePresence, without roomId); null: no report yet. */
     presence: null as Record<string, unknown> | null,
+    /** The principal's own voice calls in the exchange, as the service recorded them (A15 ExchangeCalls). */
+    exchangeCalls: [] as Array<Record<string, unknown>>,
   };
   const ROOM_UUID = "70000000-0000-4000-8000-0000000000a7";
   const tokens = { issued: new Set<string>(), revoked: new Set<string>(), expiresIn: 3_600, failLocal: 0, logouts: [] as string[] };
   let origins = { studio: "", api: "", supabase: "", store: "" };
 
-  const ids = { research: randomUUID(), design: randomUUID(), edit: randomUUID(), artifact: randomUUID(), v1: randomUUID(), v2: randomUUID(), html1: randomUUID(), html2: randomUUID(), md: randomUUID(), note: randomUUID(), decision: randomUUID() };
+  const ids = { goal: randomUUID(), research: randomUUID(), design: randomUUID(), edit: randomUUID(), artifact: randomUUID(), v1: randomUUID(), v2: randomUUID(), html1: randomUUID(), html2: randomUUID(), md: randomUUID(), note: randomUUID(), decision: randomUUID() };
   const html1 = Buffer.from("<!doctype html><section id=intro>Otters</section>");
   const html2 = Buffer.from("<!doctype html><section id=intro>Otters, briefly</section>");
 
@@ -126,7 +128,7 @@ describe.skipIf(executablePath === null)("Studio G7 driver against a local fake 
    * task, created by the service from the handoff, does not.
    */
   function createReport(): void {
-    const research = nativeTask(ids.research, "research", { exchangeId: EXCHANGE_UUID });
+    const research = nativeTask(ids.research, "research", { exchangeId: EXCHANGE_UUID, goalId: ids.goal });
     const design = nativeTask(ids.design, "design", { state: "succeeded", phase: "result_ready", artifactId: ids.artifact });
     api.work = [research, design];
     api.tasks.set(ids.research, { task: research, instruction: FREE_TEXT[0], result: { markdown: FREE_TEXT[1], sourceId: ids.md, sha256: sha256("markdown"), outputs: [] }, research: { question: FREE_TEXT[0], specialist: "x", outputs: [], rootTaskId: ids.research, capUsd: 1, committedUsd: 0, spentUsd: 0, searches: {}, reads: {}, html: { state: "published", designTaskId: ids.design } } });
@@ -214,6 +216,13 @@ describe.skipIf(executablePath === null)("Studio G7 driver against a local fake 
         json(200, { exchangeId: EXCHANGE_UUID, state: api.exchangeId === EXCHANGE_UUID ? "open" : "ended", grant, receipts: api.evidenceMode === "foreign" ? [] : [...api.receipts].sort((left, right) => left.source === right.source ? left.seq - right.seq : left.source < right.source ? -1 : 1) });
         // Product changes that land right after this answer (e.g. the guard ends the exchange).
         api.onEvidence?.();
+        return;
+      }
+      const callsMatch = /^\/api\/v1\/exchanges\/([0-9a-f-]{36})\/calls$/.exec(path);
+      if (request.method === "GET" && callsMatch) {
+        if (api.evidenceMode === "route_absent") { routeNotFound(); return; }
+        if (callsMatch[1] !== EXCHANGE_UUID) { productError(422, "not_found", "Exchange not found"); return; }
+        json(200, { exchangeId: EXCHANGE_UUID, calls: api.exchangeCalls });
         return;
       }
       const presenceMatch = /^\/api\/v1\/rooms\/([0-9a-f-]{36})\/live-presence$/.exec(path);
@@ -381,6 +390,7 @@ else {
     api.edits.clear();
     api.withdrawals.length = 0;
     api.presence = null;
+    api.exchangeCalls = [];
     return { config, driver, run };
   }
 
@@ -405,10 +415,19 @@ else {
     push("provider", providerReceipt(run, seq++, "ready"));
     const operations: OperationRecord[] = [];
     const wav = sineWav(800);
-    const speakStep = async (step: string) => {
+    // The product records the principal's voice tool call as the step is spoken (A15 ExchangeCalls).
+    const recordCall = (tool: string, kind: string | null, taskId: string | null = null) => {
+      const callSeq = api.exchangeCalls.length + 1;
+      const at = new Date().toISOString();
+      api.exchangeCalls.push({ seq: callSeq, recordedAt: at, inputEpoch: 1, tool, taskId, command: kind === null ? null : { commandId: randomUUID(), kind, goalId: ids.goal, authorityEpoch: callSeq, goalRevision: 1, state: "acknowledged", createdAt: at } });
+    };
+    const speakStep = async (step: string, calls: () => void = () => undefined) => {
       const operation = speakOperation(run, new Date(Date.now() + operations.length), { input: { fixture_id: "sine", _g7_step: `g7.${step}` } });
       operations.push(operation);
+      // As the worker does: the step's calls baseline before it acts.
+      collected.push(await driver.readStudioCalls(run, "baseline", operation.id, `g7.${step}`));
       collected.push(...(await driver.schedule(run, operation.id, randomUUID(), audioOf(wav), 0)).events);
+      calls();
       const deadline = Date.now() + 15_000;
       while (!collected.some((event) => event.kind === "audio.input.completed" && event.payload.operation_id === operation.id) && Date.now() < deadline) {
         await new Promise((resolve) => setTimeout(resolve, 150));
@@ -427,7 +446,7 @@ else {
       return result;
     };
 
-    await speakStep("create");
+    await speakStep("create", () => recordCall("start_research", "native_task", ids.research));
     createReport();
     // Decoys in the time window, by the principal: one created by another
     // exchange's voice call, one with no exchange (a typed command, or voice
@@ -438,7 +457,7 @@ else {
       api.work = [...api.work, decoy];
       api.tasks.set(id, { task: decoy, instruction: FREE_TEXT[0], result: null, research: { question: FREE_TEXT[0], specialist: "x", outputs: [], rootTaskId: id, capUsd: 1, committedUsd: 0, spentUsd: 0, searches: {}, reads: {}, html: { state: "none", designTaskId: null } } });
     }
-    await speakStep("steer");
+    await speakStep("steer", () => { recordCall("project_status", null); recordCall("control_work", "steer"); });
     const left = await act({ action: "leave_and_return" });
     expect(left.receipt).toMatchObject({ performed: true, status: "returned" });
     const revised = await act({ action: "section_revision", instruction: FREE_TEXT[3], sections: ["intro"] });
@@ -446,7 +465,7 @@ else {
     const stale = await act({ action: "stale_edit" });
     expect(stale.receipt).toMatchObject({ performed: true, status: "refused", http_status: 409, code: "stale_revision" });
     for (const [step, phase, state] of [["hold", "held", "running"], ["resume", "running", "running"], ["stop", "stopped", "cancelled"]] as const) {
-      await speakStep(step);
+      await speakStep(step, () => recordCall("control_work", step));
       for (const id of [ids.research, decoys.other, decoys.none]) setPhase(id, phase, state);
       expect((await act({ action: "observe", for_step: step })).receipt).toMatchObject({ performed: false, status: "observed" });
     }
@@ -498,11 +517,15 @@ else {
     const withheld = evaluation.harness.filter((assertion) => assertion.status !== "pass").map((assertion) => `${assertion.id}:${assertion.status}:${assertion.reason}`);
     expect(withheld).toEqual([]);
     expect(Object.fromEntries(evaluation.steps.map((step) => [step.step_id, `${step.executed}/${step.outcome}`]))).toEqual({
-      "g7.create": "pass/pass", "g7.steer": "pass/uncertain", "g7.leave_return": "pass/pass", "g7.section_revision": "pass/pass", "g7.stale_edit": "pass/pass",
+      "g7.create": "pass/pass", "g7.steer": "pass/pass", "g7.leave_return": "pass/pass", "g7.section_revision": "pass/pass", "g7.stale_edit": "pass/pass",
       "g7.hold": "pass/pass", "g7.resume": "pass/pass", "g7.stop": "pass/pass", "g7.withdrawal": "pass/pass",
     });
-    expect(evaluation.outcome).toMatchObject({ join: "native_task_exchange_id", bound_tasks: 2 });
-    expect(deriveStudioG7Verdicts(evaluation, { sessionEstablished: true })).toEqual({ harness: "pass", product: "inconclusive", provider: "pass", auth: "pass", evidence: "pass" });
+    expect(evaluation.outcome).toMatchObject({ join: "exchange_calls", bound_tasks: 2 });
+    expect(evaluation.outcome.voice_steps.map((step) => [step.step_id, step.command_kind, step.candidate_seqs])).toEqual([
+      ["g7.create", "native_task", [1]], ["g7.steer", "steer", [2, 3]], ["g7.hold", "hold", [4]], ["g7.resume", "resume", [5]], ["g7.stop", "stop", [6]],
+    ]);
+    // Every voice step is certified from its own call's command, so the product passes.
+    expect(deriveStudioG7Verdicts(evaluation, { sessionEstablished: true })).toEqual({ harness: "pass", product: "pass", provider: "pass", auth: "pass", evidence: "pass" });
   }, 180_000);
 
   it("never touches an exchange whose evidence names another run, nor one held by another principal", async () => {

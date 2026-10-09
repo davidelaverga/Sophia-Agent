@@ -48,7 +48,25 @@ export interface ProjectedTask {
    * API's voice qualification was off.
    */
   exchangeId: string | null;
+  /** The task's goal (NativeTask.goalId): a control command (steer/hold/resume/stop) names it. */
+  goalId: string | null;
 }
+
+/** States a voice call's command can be in (A15 ExchangeCalls). */
+export const EXCHANGE_CALL_COMMAND_STATES: ReadonlySet<string> = new Set(["admitted", "dispatching", "acknowledged", "checked", "denied", "outcome_unknown", "superseded"]);
+
+/** One of the principal's own voice tool calls in an exchange, as the service recorded it (A15 ExchangeCalls). */
+export interface ProjectedExchangeCall {
+  seq: number;
+  recordedAt: string;
+  inputEpoch: number;
+  tool: string;
+  /** null: the call admitted nothing (a read, a clarification, a refusal, or a repeat answered with the existing task). */
+  command: { commandId: string; kind: string; goalId: string | null; authorityEpoch: number | null; goalRevision: number | null; state: string; createdAt: string } | null;
+  taskId: string | null;
+}
+
+export interface ProjectedExchangeCalls { exchangeId: string; calls: ProjectedExchangeCall[] }
 
 /**
  * The room as the media bridge last saw it, for the principal (A15
@@ -160,7 +178,51 @@ export function projectTask(raw: unknown): ProjectedTask | null {
   const state = wordOrNull(task.state);
   const phase = wordOrNull(task.phase);
   if (!id || !actorId || (kind !== "draft_brief" && kind !== "research" && kind !== "design") || !state || !phase) return null;
-  return { id, kind, state, phase, actorId, commandId: uuidOrNull(task.commandId), createdAt: isoOrNull(task.createdAt), artifactId: uuidOrNull(task.artifactId), resultSourceId: uuidOrNull(task.resultSourceId), exchangeId: uuidOrNull(task.exchangeId) };
+  return { id, kind, state, phase, actorId, commandId: uuidOrNull(task.commandId), createdAt: isoOrNull(task.createdAt), artifactId: uuidOrNull(task.artifactId), resultSourceId: uuidOrNull(task.resultSourceId), exchangeId: uuidOrNull(task.exchangeId), goalId: uuidOrNull(task.goalId) };
+}
+
+const TOOL = /^[a-z][a-z_]{0,63}$/;
+const COMMAND_KIND = /^[a-z][a-z0-9_]{0,63}$/;
+
+function positiveSafeInt(value: unknown): number | null { return typeof value === "number" && Number.isSafeInteger(value) && value >= 1 ? value : null; }
+function nullableInt(value: unknown): number | null | undefined { return value === null ? null : intOrNull(value) ?? undefined; }
+
+/**
+ * Strict projection of GET /api/v1/exchanges/{id}/calls. Every entry must be
+ * well formed and `seq` strictly increasing (the recording order); anything
+ * else rejects the whole answer, since a call silently dropped could change
+ * which call is the step's. Only ids, kinds, states, numbers and times are
+ * kept.
+ */
+export function projectExchangeCalls(raw: unknown): ProjectedExchangeCalls | null {
+  const body = record(raw);
+  const exchangeId = uuidOrNull(body?.exchangeId);
+  if (!body || !exchangeId || !Array.isArray(body.calls) || body.calls.length > 10_000) return null;
+  const calls: ProjectedExchangeCall[] = [];
+  for (const value of body.calls as unknown[]) {
+    const call = record(value);
+    const seq = positiveSafeInt(call?.seq);
+    const inputEpoch = positiveSafeInt(call?.inputEpoch);
+    const recordedAt = isoOrNull(call?.recordedAt);
+    const tool = typeof call?.tool === "string" && TOOL.test(call.tool) ? call.tool : null;
+    if (!call || seq === null || inputEpoch === null || recordedAt === null || tool === null) return null;
+    if (calls.length > 0 && seq <= calls.at(-1)!.seq) return null;
+    if (call.taskId !== null && uuidOrNull(call.taskId) === null) return null;
+    let command: ProjectedExchangeCall["command"] = null;
+    if (call.command !== null) {
+      const raw = record(call.command);
+      const commandId = uuidOrNull(raw?.commandId);
+      const kind = typeof raw?.kind === "string" && COMMAND_KIND.test(raw.kind) ? raw.kind : null;
+      const state = typeof raw?.state === "string" && EXCHANGE_CALL_COMMAND_STATES.has(raw.state) ? raw.state : null;
+      const createdAt = isoOrNull(raw?.createdAt);
+      const authorityEpoch = nullableInt(raw?.authorityEpoch);
+      const goalRevision = nullableInt(raw?.goalRevision);
+      if (!raw || !commandId || !kind || !state || !createdAt || authorityEpoch === undefined || goalRevision === undefined || (raw.goalId !== null && uuidOrNull(raw.goalId) === null)) return null;
+      command = { commandId, kind, goalId: uuidOrNull(raw.goalId), authorityEpoch, goalRevision, state, createdAt };
+    }
+    calls.push({ seq, recordedAt, inputEpoch, tool, command, taskId: uuidOrNull(call.taskId) });
+  }
+  return { exchangeId, calls };
 }
 
 const ROOM_VOICE_STATES: ReadonlySet<string> = new Set(["connecting", "ready", "recovering", "unavailable"]);
@@ -357,6 +419,15 @@ export class StudioApiClient {
     } catch {
       return { accepted: false, http_status: null };
     }
+  }
+
+  /** `GET /api/v1/exchanges/{e}/calls` (A15 getExchangeCalls): the principal's own voice tool calls in the exchange. */
+  async exchangeCalls(exchangeId: string, accessToken: string): Promise<MemberRead<ProjectedExchangeCalls>> {
+    if (!UUID.test(exchangeId)) return { status: "unavailable", reason: "id_invalid", http_status: null };
+    const read = await this.#read(`/api/v1/exchanges/${encodeURIComponent(exchangeId)}/calls`, accessToken, projectExchangeCalls);
+    // The answer must be about the exchange asked for.
+    if (read.status === "available" && read.value.exchangeId !== exchangeId.toLowerCase()) return { status: "unavailable", reason: "exchange_mismatch", http_status: read.http_status };
+    return read;
   }
 
   /** `GET /api/v1/rooms/{r}/live-presence` (A15): the caller's own presence and counts only. */

@@ -419,13 +419,15 @@ export const STUDIO_G7_RECEIPT_COVERAGE: readonly CoverageEntry[] = Object.freez
   { channel: "playback_realization", status: "product_receipt", sources: ["output_reply", "page:sophia_playback"], reason: null },
   { channel: "output_leg_audio_artifact", status: "not_supported_by_product_privacy_model", sources: [], reason: "no_audio_retained" },
   { channel: "tool_calls_and_counts", status: "product_receipt", sources: ["input_turn", "session_closed"], reason: "counts_only" },
-  // Exchange -> task is the product's own record (A15 NativeTask.exchangeId:
-  // the exchange whose voice tool call created the task), equal to the run's
-  // ownership-proven exchange; task -> design (research html.designTaskId) ->
-  // artifact version -> downloaded bytes is canonical (member API, as the
-  // principal). Never joined by actor or time. A task with no exchange id
-  // (another kind of creation, or voice qualification off) is never the run's.
-  { channel: "builder_task_and_artifact_join", status: "product_receipt", sources: ["NativeTask.exchangeId (A15)", "GET /api/v1/projects/{p}/snapshot work", "GET /api/v1/projects/{p}/native-tasks/{t}", "GET /api/v1/artifacts/{a}/versions", "GET /api/v1/sources/{s}/content", "downloaded_bytes_sha256"], reason: "bound_only_by_exchange_id_requires_voice_qualification" },
+  // A voice step -> its command -> its task is the product's own record (A15
+  // getExchangeCalls): the one command the step's own voice call admitted
+  // after the step's durable baseline, of the step's kind and on the created
+  // task's goal (calls-certification.ts); the created task names the run's
+  // ownership-proven exchange (NativeTask.exchangeId). Task -> design
+  // (research html.designTaskId) -> artifact version -> downloaded bytes is
+  // canonical. Never joined by actor or time.
+  { channel: "builder_task_and_artifact_join", status: "product_receipt", sources: ["GET /api/v1/exchanges/{e}/calls (A15)", "NativeTask.exchangeId (A15)", "GET /api/v1/projects/{p}/snapshot work", "GET /api/v1/projects/{p}/native-tasks/{t}", "GET /api/v1/artifacts/{a}/versions", "GET /api/v1/sources/{s}/content", "downloaded_bytes_sha256"], reason: "certified_only_from_exchange_calls_requires_voice_qualification" },
+  { channel: "voice_step_command", status: "product_receipt", sources: ["GET /api/v1/exchanges/{e}/calls (A15)", "studio.exchange.calls_read"], reason: "exactly_one_new_command_of_the_step_kind_on_the_created_goal" },
   // A dead owner's orphan browser: the room as the media bridge last saw it
   // (A15 live presence, the principal's own presence and counts only). A
   // fresh report is evidence either way; none, or a stale one, proves nothing.
