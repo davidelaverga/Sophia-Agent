@@ -129,8 +129,14 @@ async function pgRecoveryWorker(h: Harness, workerId: string, view: VoiceLabLedg
   const driver = new ScriptedStudioDriver((await ledger.getRun(h.runId))!);
   driver.recoverResult = pgFreshRecovery();
   const worker = new VoiceLabWorker(workerId, view, config, audio, driver as unknown as VoiceBrowserDriver, new CapabilityCodec(config.capabilitySecret, config.capabilityIssuer, config.capabilityTtlSeconds), pino({ level: "silent" }));
-  await ledger.heartbeatWorker({ workerId, serviceVersion: "test", browserReady: true, attestation: null, detail: {}, observedAt: new Date() });
+  // As the worker's own heartbeat loop does: its attestation names its process boot.
+  await pgBootBeat(workerId, worker);
   return { driver, worker };
+}
+
+/** A heartbeat of this worker process (its attestation's boot id, as its own heartbeat loop records it). */
+function pgBootBeat(workerId: string, worker: VoiceLabWorker | { workerBootIdSha256: string }, observedAt = new Date()) {
+  return ledger.heartbeatWorker({ workerId, serviceVersion: "test", browserReady: true, attestation: { worker_boot_id_sha256: worker.workerBootIdSha256 } as never, detail: {}, observedAt });
 }
 
 const pgFenceEvents = async (runId: string) => (await ledger.listEvents(runId, 0, 2_000)).events.filter((event) => event.kind === "studio.cleanup.global_sign_out_pending" || event.kind === "studio.cleanup.global_sign_out_cleared");
@@ -642,5 +648,116 @@ selected("real PostgreSQL Studio G7 worker branches (schema v7)", () => {
     expect(h.driver.calls.filter((call) => call === "action:leave_and_return")).toHaveLength(1);
     // The ledger itself refuses a new operation for a performed step, whatever its key.
     await expect(ledger.createOperation({ id: randomUUID(), runId: h.runId, callerId: caller.subject, type: "studio_action", idempotencyKey: newIdempotencyKey("pg-again"), requestHash: "e".repeat(64), input: { run_id: h.runId, action: "leave_and_return" } })).rejects.toMatchObject({ detail: { code: "STUDIO_G7_STEP_ALREADY_PERFORMED" } });
+  }, 120_000);
+  // ------------------------------------------------------------------ delta 5
+  const pgOutstanding = async (runId: string) => {
+    const { studioOutstandingSignOutMarkers } = await import("../src/studio-g7/sign-out-fence.js");
+    return studioOutstandingSignOutMarkers((await ledger.listEvents(runId, 0, 5_000)).events).map((marker) => marker.markerId);
+  };
+  const pgCleared = async (runId: string) => (await pgFenceEvents(runId)).filter((event) => event.kind === "studio.cleanup.global_sign_out_cleared").map((event) => event.payload.outcome);
+  const backdateMarker = (runId: string, marker: string) => ledger.pool.query("update sophia_voice_lab.run_events set observed_at = observed_at - interval '10 minutes' where run_id=$1 and kind='studio.cleanup.global_sign_out_pending' and payload->>'marker_id'=$2", [runId, marker]);
+
+  it("delta 5 PG-W2/W3 on PostgreSQL: a marker whose owner id heartbeats from another boot is abandoned and taken over; an abandoned marker is held by nobody", async () => {
+    const h = await harness("pg-d5-w2");
+    const OWNER = "srv-abcdefghij0123456789-5d8f9c7b6-xk2lp";
+    const bootA = { workerBootIdSha256: "a".repeat(64) }, bootB = { workerBootIdSha256: "b".repeat(64) };
+    expect(await ledger.beginStudioGlobalSignOut(h.runId, "m1", OWNER, bootA.workerBootIdSha256)).toMatchObject({ granted: true });
+    await backdateMarker(h.runId, "m1");
+    // The same boot heartbeating: alive, never taken over, still held.
+    await pgBootBeat(OWNER, bootA);
+    expect(await ledger.beginStudioGlobalSignOut(h.runId, "m2", "pg-d5-other", "c".repeat(64))).toMatchObject({ granted: false, reason: "sign_out_in_flight" });
+    expect(await ledger.holdsStudioGlobalSignOut(h.runId, "m1")).toBe(true);
+    expect(await pgTryStart(h, "pg-d5-w2-alive")).toBe("STUDIO_GLOBAL_SIGNOUT_PENDING");
+    // The instance id restarted (another boot heartbeats under it): the writer of m1 is gone.
+    await pgBootBeat(OWNER, bootB);
+    // P3-1: nobody holds an abandoned marker, so its stale owner can never log out globally.
+    expect(await ledger.holdsStudioGlobalSignOut(h.runId, "m1")).toBe(false);
+    expect(await ledger.beginStudioGlobalSignOut(h.runId, "m3", "pg-d5-other", "c".repeat(64))).toMatchObject({ granted: true });
+    expect(await pgCleared(h.runId)).toEqual(["abandoned_owner_dead"]);
+    expect(await pgOutstanding(h.runId)).toEqual(["m3"]);
+  }, 120_000);
+
+  it("delta 5 PG-W2 heals on PostgreSQL: a worker restarted under the same instance id clears its previous boot's marker; the run recovers and admission reopens", async () => {
+    const h = await pgPendingWithUnrevokedRefresh("pg-d5-restart");
+    const id = "srv-abcdefghij0123456789-5d8f9c7b6-pg2lp";
+    const crashed = await pgRecoveryWorker(h, id, ledger);
+    const inFlight = pgDeferred();
+    crashed.driver.recoverHook = async () => { inFlight.resolve(); await new Promise(() => undefined); }; // the process dies here
+    void crashed.worker.maintainSessions();
+    await inFlight.promise;
+    expect(await pgOutstanding(h.runId)).toHaveLength(1);
+    const restarted = await pgRecoveryWorker(h, id, ledger);
+    for (let pass = 0; pass < 6 && await pgTryStart(h, `pg-d5-restart-${pass}`).then((status) => status !== "accepted"); pass += 1) {
+      await restarted.worker.maintainSessions();
+      await ledger.pool.query("update sophia_voice_lab.run_events set observed_at=observed_at-interval '2 minutes' where run_id=$1 and kind='studio.cleanup.recovery_attempt'", [h.runId]);
+      await pgBootBeat(id, restarted.worker);
+    }
+    expect(await pgCleared(h.runId)).toEqual(expect.arrayContaining(["abandoned_owner_restarted"]));
+    expect(await pgOutstanding(h.runId)).toEqual([]);
+    expect(restarted.driver.calls).toContain("recover");
+    expect(await ledger.getRun(h.runId)).toMatchObject({ cleanupComplete: true });
+  }, 120_000);
+
+  it("delta 5 PG-W1 heals on PostgreSQL: a clear that failed is retried by its live owner from the durable marker", async () => {
+    const h = await pgPendingWithUnrevokedRefresh("pg-d5-w1");
+    let failures = 1;
+    const flaky = new Proxy(ledger, { get(target, property) {
+      if (property === "endStudioGlobalSignOut") return async (...args: unknown[]) => { if (failures-- > 0) throw new Error("transient ledger error"); return (target.endStudioGlobalSignOut as (...input: unknown[]) => Promise<void>).apply(target, args); };
+      const value = Reflect.get(target, property, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    } }) as VoiceLabLedger;
+    const a = await pgRecoveryWorker(h, "pg-d5-w1-a", flaky);
+    await a.worker.maintainSessions();
+    expect(a.driver.globalLogouts).toEqual([h.runId]);
+    expect(await pgOutstanding(h.runId)).toHaveLength(1);
+    // Ten minutes on the database clock; the owner keeps heartbeating from its own boot: never abandoned.
+    await ledger.pool.query("update sophia_voice_lab.run_events set observed_at=observed_at-interval '10 minutes' where run_id=$1 and kind='studio.cleanup.global_sign_out_pending'", [h.runId]);
+    await pgBootBeat("pg-d5-w1-a", a.worker);
+    expect(await ledger.holdsStudioGlobalSignOut(h.runId, (await pgOutstanding(h.runId))[0]!)).toBe(true);
+    await a.worker.maintainSessions();
+    expect(await pgOutstanding(h.runId)).toEqual([]);
+    expect(await pgCleared(h.runId)).toEqual(["confirmed"]);
+    expect(await pgTryStart(h, "pg-d5-w1-after")).toBe("accepted");
+  }, 120_000);
+
+  it("delta 5 (P3-4) on PostgreSQL: a fresh present vetoes the release only within the bound; past it, with the exchange verified not live, the release records the expired veto", async () => {
+    const a = await harness("pg-d5-veto-a");
+    await a.worker.runOnce();
+    await voice(a, "create");
+    const config = studioTestConfig(undefined, { SOPHIA_VOICE_LAB_MAX_CONCURRENT_RUNS: "1" });
+    const audio = new AudioResolver(config);
+    await audio.initialize();
+    const driverB = new ScriptedStudioDriver((await ledger.getRun(a.runId))!);
+    let presence: { status: string; reason: string | null } = { status: "present", reason: null };
+    let read = 0;
+    driverB.recoverResult = (runId) => {
+      read += 1;
+      return [
+        { kind: "studio.cleanup.exchange_ended", source: "canonical", payload: { confirmed: true, status: "confirmed", basis: "run_exchange_not_live", exchange_id: EXCHANGE_UUID, join: "durable", ownership: "not_required", verified_by: "member_snapshot", speak_requested_before_observation: true }, dedupeKey: `pg-veto-ended:${runId}` },
+        { kind: "studio.room.live_presence", source: "canonical", payload: { schema: "sophia_voice_lab_studio_room_presence_v1", purpose: "recover", status: presence.status, reason: presence.reason, http_status: 200, observation_id: `pg-veto-${read}`, identities_excluded: true }, dedupeKey: `pg-veto:${runId}:${read}` },
+        { kind: "studio.cleanup.signed_out", source: "canonical", payload: { schema: "sophia_voice_lab_studio_sign_out_v1", scope: "global", confirmed: true, http_status: 204, basis: "global_logout_accepted", session_basis: "fresh_grant", sign_out_id: `pg-veto-${read}` }, dedupeKey: `pg-veto-signed-out:${runId}:${read}` },
+      ];
+    };
+    const workerB = new VoiceLabWorker("pg-d5-veto-b", ledger, config, audio, driverB as unknown as VoiceBrowserDriver, new CapabilityCodec(config.capabilitySecret, config.capabilityIssuer, config.capabilityTtlSeconds), pino({ level: "silent" }));
+    await ledger.pool.query("update sophia_voice_lab.browser_leases set expires_at=clock_timestamp()-interval '3 hours' where run_id=$1", [a.runId]);
+    await workerB.maintainSessions();
+    await workerB.maintainSessions();
+    await ledger.pool.query("update sophia_voice_lab.worker_heartbeats set observed_at=clock_timestamp()-interval '10 minutes' where worker_id='pg-d5-veto-a'");
+    const age = (by = "2 hours") => ledger.pool.query(`update sophia_voice_lab.run_events set observed_at=observed_at-interval '${by}' where run_id=$1 and kind in ('studio.cleanup.signed_out','studio.cleanup.recovery_attempt')`, [a.runId]);
+    await age();
+    await workerB.maintainSessions();
+    expect(await ledger.getBrowserLease(a.runId)).not.toBeNull();
+    // The bridge left the room with the exchange: only unobservable reports now. Within the bound: still held.
+    presence = { status: "unobservable", reason: "not_observed" };
+    await age();
+    await workerB.maintainSessions();
+    expect(await ledger.getBrowserLease(a.runId)).not.toBeNull();
+    // Past the bound on the database clock (the present verification 16 minutes old): released, the expired veto audited.
+    await ledger.pool.query("update sophia_voice_lab.run_events set observed_at=observed_at-interval '16 minutes' where run_id=$1 and kind='studio.cleanup.dead_owner_verified' and payload->>'room_presence'='present'", [a.runId]);
+    await age();
+    await workerB.maintainSessions();
+    expect(await ledger.getBrowserLease(a.runId)).toBeNull();
+    const released = (await ledger.pool.query("select payload from sophia_voice_lab.run_events where run_id=$1 and kind='cleanup.browser_lease_released'", [a.runId])).rows[0].payload;
+    expect(released).toMatchObject({ dead_owner_quiesced: true, presence_veto_expired: true, presence_veto_bound_ms: 15 * 60_000, room_presence: "unobservable" });
   }, 120_000);
 });

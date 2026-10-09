@@ -1,6 +1,6 @@
 import { decideStudioDeadOwnerRelease, STUDIO_DATABASE_CLOCK_EVENT_KINDS, STUDIO_DEAD_OWNER_DECISION_EVENT_KINDS } from "./studio-g7/lease-release.js";
 import { studioStepConflict, studioStepOf } from "./studio-g7/step-guard.js";
-import { STUDIO_GLOBAL_SIGNOUT_CLEARED_KIND, STUDIO_GLOBAL_SIGNOUT_OWNER_STALE_MS, STUDIO_GLOBAL_SIGNOUT_PENDING_CODE, STUDIO_GLOBAL_SIGNOUT_PENDING_KIND, studioWorkerIdSha256 } from "./studio-g7/sign-out-fence.js";
+import { STUDIO_GLOBAL_SIGNOUT_CLEARED_KIND, STUDIO_GLOBAL_SIGNOUT_OWNER_STALE_MS, STUDIO_GLOBAL_SIGNOUT_PENDING_CODE, STUDIO_GLOBAL_SIGNOUT_PENDING_KIND, studioWorkerIdSha256, type StudioSignOutClearOutcome } from "./studio-g7/sign-out-fence.js";
 import pg from "pg";
 import { CANONICAL_EVIDENCE_REFRESH_BASE_BACKOFF_MS, CANONICAL_EVIDENCE_REFRESH_EVENT, CANONICAL_EVIDENCE_REFRESH_MAX_ATTEMPTS } from "./canonical-evidence-refresh.js";
 import { retentionHmac } from "./retention-identity.js";
@@ -104,7 +104,7 @@ export class PostgresVoiceLabLedger implements VoiceLabLedger {
   async countLiveSessionRunsExcept(runId: string): Promise<number> {
     return liveSessionRunCount(this.pool, runId);
   }
-  async beginStudioGlobalSignOut(runId: string, markerId: string, ownerWorkerId: string): Promise<{ granted: boolean; liveSessionRuns: number; reason: "granted" | "sign_out_in_flight" | "live_session_runs" }> {
+  async beginStudioGlobalSignOut(runId: string, markerId: string, ownerWorkerId: string, ownerBootIdSha256: string | null = null): Promise<{ granted: boolean; liveSessionRuns: number; reason: "granted" | "sign_out_in_flight" | "live_session_runs" }> {
     const client = await this.pool.connect();
     try {
       await client.query("begin");
@@ -133,7 +133,7 @@ export class PostgresVoiceLabLedger implements VoiceLabLedger {
       }
       seq += 1;
       await client.query(`insert into ${SCHEMA}.run_events (run_id,seq,kind,source,payload,dedupe_key,observed_at) values ($1,$2,$3,'worker',$4,$5,clock_timestamp())`,
-        [runId, seq, STUDIO_GLOBAL_SIGNOUT_PENDING_KIND, { marker_id: markerId, previous_cleanup_complete: previousCleanupComplete, owner_worker_id_sha256: studioWorkerIdSha256(ownerWorkerId) }, `studio-global-sign-out-pending:${runId}:${markerId}`]);
+        [runId, seq, STUDIO_GLOBAL_SIGNOUT_PENDING_KIND, { marker_id: markerId, previous_cleanup_complete: previousCleanupComplete, owner_worker_id_sha256: studioWorkerIdSha256(ownerWorkerId), owner_boot_id_sha256: ownerBootIdSha256 }, `studio-global-sign-out-pending:${runId}:${markerId}`]);
       await client.query(`update ${SCHEMA}.runs set latest_cursor=$2,updated_at=now() where id=$1`, [runId, seq]);
       await client.query("commit");
       return { granted: true, liveSessionRuns: 0, reason: "granted" };
@@ -141,9 +141,20 @@ export class PostgresVoiceLabLedger implements VoiceLabLedger {
     finally { client.release(); }
   }
   async holdsStudioGlobalSignOut(runId: string, markerId: string): Promise<boolean> {
-    return (await outstandingSignOutMarkers(this.pool, runId)).some((marker) => marker.markerId === markerId);
+    // An abandoned marker is held by nobody: its stale owner never logs out globally.
+    return (await outstandingSignOutMarkers(this.pool, runId)).some((marker) => marker.markerId === markerId && !marker.abandoned);
   }
-  async endStudioGlobalSignOut(runId: string, markerId: string, outcome: "confirmed" | "abandoned"): Promise<void> {
+  async listStudioSignOutMarkersOwnedBy(ownerWorkerIdSha256: string, limit: number): Promise<Array<{ runId: string; markerId: string; ownerBootIdSha256: string | null }>> {
+    const result = await this.pool.query<{ run_id: string; marker_id: string; owner_boot_id_sha256: string | null }>(
+      `select p.run_id, p.payload->>'marker_id' as marker_id, p.payload->>'owner_boot_id_sha256' as owner_boot_id_sha256
+         from ${SCHEMA}.runs r join ${SCHEMA}.run_events p on p.run_id=r.id and p.kind=$1
+        where p.payload->>'owner_worker_id_sha256' = $3
+          and not exists (select 1 from ${SCHEMA}.run_events c where c.run_id=p.run_id and c.kind=$2 and c.payload->>'marker_id' = p.payload->>'marker_id')
+        order by p.observed_at, p.run_id, p.seq limit $4`,
+      [STUDIO_GLOBAL_SIGNOUT_PENDING_KIND, STUDIO_GLOBAL_SIGNOUT_CLEARED_KIND, ownerWorkerIdSha256, limit]);
+    return result.rows.map((row) => ({ runId: row.run_id, markerId: row.marker_id, ownerBootIdSha256: row.owner_boot_id_sha256 }));
+  }
+  async endStudioGlobalSignOut(runId: string, markerId: string, outcome: StudioSignOutClearOutcome): Promise<void> {
     await this.appendEvent(runId, STUDIO_GLOBAL_SIGNOUT_CLEARED_KIND, "worker", { marker_id: markerId, outcome }, `studio-global-sign-out-cleared:${runId}:${markerId}`);
   }
   async countActiveRuns(callerId?: string): Promise<number> {
@@ -850,7 +861,7 @@ export class PostgresVoiceLabLedger implements VoiceLabLedger {
       // Release the exact dead execution, never acquire or impersonate its owner.
       const deleted = await client.query(`delete from ${SCHEMA}.browser_leases where run_id=$1 and worker_id=$2 and lease_epoch=$3 and expires_at<=clock_timestamp()`, [runId, lease.worker_id, lease.lease_epoch]);
       await client.query("commit");
-      return deleted.rowCount === 1 ? { released: true, reason: decision.basis === "owner_cleanup_complete" ? "dead_owner_cleanup_complete" : "dead_owner_quiesced" } : { released: false, reason: "lease_changed" };
+      return deleted.rowCount === 1 ? { released: true, reason: decision.basis === "owner_cleanup_complete" ? "dead_owner_cleanup_complete" : decision.presenceVetoExpired ? "dead_owner_quiesced_presence_veto_expired" : "dead_owner_quiesced" } : { released: false, reason: "lease_changed" };
     } catch (error) { await client.query("rollback").catch(() => undefined); throw error; }
     finally { client.release(); }
   }
@@ -1163,11 +1174,13 @@ export class PostgresVoiceLabLedger implements VoiceLabLedger {
 /**
  * A pending marker `p` (aliased in the query) that is provably abandoned: older
  * than the owner-stale bound on the database clock, its owner's heartbeat
- * absent or older than that bound ($3: seconds).
+ * absent, older than that bound ($3: seconds), or from another process boot
+ * than the one that wrote the marker (its attestation's boot id).
  */
 const SIGN_OUT_MARKER_ABANDONED_SQL = `p.observed_at < clock_timestamp() - make_interval(secs => $3::double precision)
   and not exists (select 1 from ${SCHEMA}.worker_heartbeats h where encode(sha256(convert_to(h.worker_id,'UTF8')),'hex') = p.payload->>'owner_worker_id_sha256'
-    and h.observed_at >= clock_timestamp() - make_interval(secs => $3::double precision))`;
+    and h.observed_at >= clock_timestamp() - make_interval(secs => $3::double precision)
+    and (p.payload->>'owner_boot_id_sha256' is null or h.detail->'heartbeat_attestation'->>'worker_boot_id_sha256' is not distinct from p.payload->>'owner_boot_id_sha256'))`;
 
 /** The run's outstanding sign-out markers (no clear for their own id), each with whether it is provably abandoned. */
 async function outstandingSignOutMarkers(database: Pick<pg.Pool | pg.PoolClient, "query">, runId: string): Promise<Array<{ markerId: string; abandoned: boolean }>> {

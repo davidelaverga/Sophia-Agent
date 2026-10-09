@@ -1,3 +1,4 @@
+import type { StudioSignOutClearOutcome } from "./studio-g7/sign-out-fence.js";
 import type {
   EvidenceRecord,
   DeploymentIdentity,
@@ -235,11 +236,13 @@ export interface VoiceLabLedger {
    * is not provably abandoned; one that is (its owner dead) is cleared by the
    * begin that takes over.
    */
-  beginStudioGlobalSignOut(runId: string, markerId: string, ownerWorkerId: string): Promise<{ granted: boolean; liveSessionRuns: number; reason: "granted" | "sign_out_in_flight" | "live_session_runs" }>;
+  beginStudioGlobalSignOut(runId: string, markerId: string, ownerWorkerId: string, ownerBootIdSha256?: string | null): Promise<{ granted: boolean; liveSessionRuns: number; reason: "granted" | "sign_out_in_flight" | "live_session_runs" }>;
   /** Clears exactly this marker id (the caller's own). */
-  endStudioGlobalSignOut(runId: string, markerId: string, outcome: "confirmed" | "abandoned"): Promise<void>;
-  /** Whether this marker is still outstanding (not cleared, not taken over): checked right before a global logout. */
+  endStudioGlobalSignOut(runId: string, markerId: string, outcome: StudioSignOutClearOutcome): Promise<void>;
+  /** Whether this marker is still outstanding and not abandoned (not cleared, not taken over, its owner alive): checked right before a global logout. */
   holdsStudioGlobalSignOut(runId: string, markerId: string): Promise<boolean>;
+  /** Outstanding markers (any run) carrying this owner worker id hash, oldest first: a worker clears those no recovery of its process holds. */
+  listStudioSignOutMarkersOwnedBy(ownerWorkerIdSha256: string, limit: number): Promise<Array<{ runId: string; markerId: string; ownerBootIdSha256: string | null }>>;
   listExpiredRuns(now: Date, limit: number): Promise<RunRecord[]>;
   listRunsNeedingRecovery(limit: number, afterRunId?: string): Promise<RunRecord[]>;
   listRunsPendingEvidence(limit: number): Promise<RunRecord[]>;

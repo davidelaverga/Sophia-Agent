@@ -56,6 +56,15 @@ export const STUDIO_ROOM_PRESENCE_SCHEMA = "sophia_voice_lab_studio_room_presenc
 export const STUDIO_DEAD_OWNER_HEARTBEAT_STALE_MS = 30_000;
 /** Allowance for a worker clock running behind the ledger's clock (heartbeats are worker-stamped). */
 export const STUDIO_DEAD_OWNER_CLOCK_SKEW_MARGIN_MS = 60_000;
+/**
+ * How long a fresh "present" report vetoes a dead owner's lease release once
+ * the run's exchange is proven not live. The media bridge reports presence
+ * only while it is in the room, so after the exchange ended a fresh "absent"
+ * may never come: past this bound, with no fresh report since and the
+ * exchange verified not live after it, the lease is released and the release
+ * records the expired veto (audit).
+ */
+export const STUDIO_PRESENCE_VETO_BOUND_MS = 15 * 60_000;
 /** Event kinds the PostgreSQL ledger stamps with clock_timestamp(), whatever time the worker passes. */
 export const STUDIO_DATABASE_CLOCK_EVENT_KINDS: readonly string[] = ["studio.cleanup.signed_out", STUDIO_DEAD_OWNER_VERIFIED_KIND];
 /** Every event kind the release decision reads. */
@@ -81,7 +90,7 @@ export interface StudioDeadOwnerReleaseInput {
 
 export type StudioDeadOwnerReleaseDecision =
   | { release: true; basis: "owner_cleanup_complete"; closedSeq: number }
-  | { release: true; basis: "quiesced"; signOutAt: Date; signOutSeq: number; verificationSeq: number }
+  | { release: true; basis: "quiesced"; signOutAt: Date; signOutSeq: number; verificationSeq: number; presenceVetoExpired?: { presentSeq: number; presentAt: Date } }
   | { release: false; reason: string };
 
 function sha256(value: string): string {
@@ -220,14 +229,22 @@ export function decideStudioDeadOwnerRelease(input: StudioDeadOwnerReleaseInput)
   // present or absent) of this owner and lease epoch after the quiet point,
   // never by the current one alone: once a fresh report placed the principal
   // in the room, a later stale or missing report (unobservable) does not
-  // release; only a later fresh absent does (or an operator). The trade-off:
-  // the lease, and admission with it, may stay held until a fresh absent.
+  // release; a later fresh absent does. The veto is bounded: once this
+  // verification proves the exchange not live at least
+  // STUDIO_PRESENCE_VETO_BOUND_MS after that present, with no fresh report
+  // since, the lease is released and the release records the expired veto.
   const decisive = input.events
     .filter((event) => event.kind === STUDIO_DEAD_OWNER_VERIFIED_KIND && event.source === "worker"
       && event.payload.worker_id_sha256 === sha256(input.lease.workerId) && event.payload.lease_epoch === input.lease.leaseEpoch
       && event.at.getTime() >= quietAt && (event.payload.room_presence === "present" || event.payload.room_presence === "absent"))
     .sort((left, right) => left.seq - right.seq)
     .at(-1);
-  if (decisive?.payload.room_presence === "present") return { release: false, reason: "principal_present_in_room" };
+  if (decisive?.payload.room_presence === "present") {
+    // Both times are the database clock (verification events are DB-stamped).
+    if (verification.seq > decisive.seq && verification.at.getTime() - decisive.at.getTime() >= STUDIO_PRESENCE_VETO_BOUND_MS) {
+      return { release: true, basis: "quiesced", signOutAt: signOut.at, signOutSeq: signOut.seq, verificationSeq: verification.seq, presenceVetoExpired: { presentSeq: decisive.seq, presentAt: decisive.at } };
+    }
+    return { release: false, reason: "principal_present_in_room" };
+  }
   return { release: true, basis: "quiesced", signOutAt: signOut.at, signOutSeq: signOut.seq, verificationSeq: verification.seq };
 }

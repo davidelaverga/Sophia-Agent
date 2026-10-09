@@ -36,10 +36,19 @@ import { STUDIO_DEAD_OWNER_CLOCK_SKEW_MARGIN_MS, STUDIO_DEAD_OWNER_HEARTBEAT_STA
  * provably abandoned only under the dead-owner rules: on the ledger's clock it
  * is older than STUDIO_GLOBAL_SIGNOUT_OWNER_STALE_MS and its owner's heartbeat
  * is absent or older than that (the heartbeat staleness plus the clock-skew
- * margin); the begin that takes over clears it (`abandoned_owner_dead`).
- * Before its global logout the holder re-checks, in the ledger, that its
- * marker is still outstanding (holdsStudioGlobalSignOut); a holder whose
- * marker was taken over signs out only its own session (scope=local).
+ * margin), or the latest heartbeat under its owner's id comes from another
+ * process boot (the marker records its owner's boot id: a worker restarted
+ * under the same instance id is not the process that wrote it); the begin
+ * that takes over clears it (`abandoned_owner_dead`). Before its global
+ * logout the holder re-checks, in the ledger, that its marker is still
+ * outstanding and not abandoned (holdsStudioGlobalSignOut); a holder whose
+ * marker was taken over or abandoned signs out only its own session
+ * (scope=local), and never counts that as the run's sign-out.
+ *
+ * A marker never outlives its owner's ability to clear it: a worker clears,
+ * during maintenance, every outstanding marker carrying its own worker id
+ * that no recovery of this process holds (a clear that failed, or one its
+ * previous boot left behind: `abandoned_owner_restarted`).
  */
 export const STUDIO_GLOBAL_SIGNOUT_PENDING_KIND = "studio.cleanup.global_sign_out_pending";
 export const STUDIO_GLOBAL_SIGNOUT_CLEARED_KIND = "studio.cleanup.global_sign_out_cleared";
@@ -48,7 +57,13 @@ export const STUDIO_GLOBAL_SIGNOUT_PENDING_CODE = "STUDIO_GLOBAL_SIGNOUT_PENDING
 /** A marker older than this, whose owner's heartbeat is absent or older than this, is provably abandoned. */
 export const STUDIO_GLOBAL_SIGNOUT_OWNER_STALE_MS = STUDIO_DEAD_OWNER_HEARTBEAT_STALE_MS + STUDIO_DEAD_OWNER_CLOCK_SKEW_MARGIN_MS;
 
-export interface StudioSignOutMarker { markerId: string; ownerWorkerIdSha256: string | null; at: Date; seq: number }
+export interface StudioSignOutMarker { markerId: string; ownerWorkerIdSha256: string | null; ownerBootIdSha256: string | null; at: Date; seq: number }
+
+/** How a marker's clear is recorded. */
+export type StudioSignOutClearOutcome = "confirmed" | "abandoned" | "abandoned_owner_restarted";
+
+/** The latest heartbeat under a marker owner's worker id: when, and from which process boot. */
+export interface StudioSignOutOwnerHeartbeat { at: Date; bootIdSha256: string | null }
 
 export function studioWorkerIdSha256(workerId: string): string {
   return createHash("sha256").update(workerId, "utf8").digest("hex");
@@ -59,14 +74,26 @@ export function studioOutstandingSignOutMarkers(events: ReadonlyArray<Pick<LabEv
   const cleared = new Set(events.filter((event) => event.kind === STUDIO_GLOBAL_SIGNOUT_CLEARED_KIND && typeof event.payload.marker_id === "string").map((event) => event.payload.marker_id as string));
   return events
     .filter((event) => event.kind === STUDIO_GLOBAL_SIGNOUT_PENDING_KIND && typeof event.payload.marker_id === "string" && !cleared.has(event.payload.marker_id))
-    .map((event) => ({ markerId: event.payload.marker_id as string, ownerWorkerIdSha256: typeof event.payload.owner_worker_id_sha256 === "string" ? event.payload.owner_worker_id_sha256 : null, at: event.at, seq: event.seq }))
+    .map((event) => ({ markerId: event.payload.marker_id as string, ownerWorkerIdSha256: typeof event.payload.owner_worker_id_sha256 === "string" ? event.payload.owner_worker_id_sha256 : null, ownerBootIdSha256: typeof event.payload.owner_boot_id_sha256 === "string" ? event.payload.owner_boot_id_sha256 : null, at: event.at, seq: event.seq }))
     .sort((left, right) => left.seq - right.seq);
 }
 
-/** Provably abandoned: old enough, and its owner's heartbeat absent or stale, on the deciding ledger's clock. */
-export function studioSignOutMarkerAbandoned(marker: StudioSignOutMarker, ownerLastHeartbeatAt: Date | null, now: Date): boolean {
+/**
+ * Provably abandoned: old enough, and its owner dead on the deciding ledger's
+ * clock: no heartbeat under its id, a stale one, or one from another process
+ * boot than the one that wrote the marker.
+ */
+export function studioSignOutMarkerAbandoned(marker: StudioSignOutMarker, owner: StudioSignOutOwnerHeartbeat | null, now: Date): boolean {
   const cutoff = now.getTime() - STUDIO_GLOBAL_SIGNOUT_OWNER_STALE_MS;
-  return marker.at.getTime() < cutoff && (ownerLastHeartbeatAt === null || ownerLastHeartbeatAt.getTime() < cutoff);
+  if (marker.at.getTime() >= cutoff) return false;
+  if (owner === null || owner.at.getTime() < cutoff) return true;
+  return marker.ownerBootIdSha256 !== null && owner.bootIdSha256 !== marker.ownerBootIdSha256;
+}
+
+/** The process boot a heartbeat came from (its attestation's boot id), or null. */
+export function studioHeartbeatBootIdSha256(attestation: unknown): string | null {
+  const boot = attestation !== null && typeof attestation === "object" && !Array.isArray(attestation) ? (attestation as Record<string, unknown>).worker_boot_id_sha256 : null;
+  return typeof boot === "string" && /^[a-f0-9]{64}$/.test(boot) ? boot : null;
 }
 
 /** True while the run has any outstanding marker (abandoned or not). */

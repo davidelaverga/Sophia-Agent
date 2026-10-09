@@ -271,8 +271,21 @@ leaves the steps `unavailable`. The withdrawal ended the run's design only if
 that design (the one the certified create's research task handed its page to)
 was live in the withdrawal's own observation before it and is `cancelled` in its
 own observation after it; an end it did not cause (already ended, or `failed`)
-is never its effect. The calls are read only with the run's own browser session:
-without one a read is typed `no_browser_session`, never made by signing in. A
+is never its effect. Even then nothing the product exposes ties the withdrawn
+note to the design's inputs, so a design end is never credited to the
+withdrawal: it is at most `uncertain` (`withdrawn_note_not_linked_to_design`);
+it also needs a committed withdrawal and, after a Stop, Stop's effect settled
+(the created task stopped or ended) with the design still live before the
+withdrawal. A command that a later answered read shows `denied` fails its
+step, and one later of unknown outcome is `uncertain`. End reads every call
+of the exchange once (no `after`); a command-bearing call that some read lists
+but no step's window holds (made between a step's window read and the next
+baseline, or after the last step) makes the run `uncertain`
+(`outcome.calls_attributed`: `unattributed_call`). The calls are read only with
+the run's own browser session: without one a read is typed
+`no_browser_session`, never made by signing in. With one, the read uses that
+session, which is renewed (a password grant) within 60 s of its expiry; the
+renewed session replaces the run's own, so End's global sign-out revokes it. A
 complete run whose five voice steps are certified can report the product `pass`;
 otherwise it stays `inconclusive` (or `fail` where a step's own command
 contradicts it).
@@ -312,10 +325,23 @@ run has an outstanding marker, so two workers never hold markers for one run at
 once, and admission stays closed while any run has an outstanding marker,
 whatever its cleanup flag. Only a marker that is provably abandoned is taken
 over: on the ledger's clock it is older than the heartbeat staleness plus the
-60 s skew margin (90 s), and so is its owner's last heartbeat; the taking-over
-begin clears it (`abandoned_owner_dead`). Right before its global logout the
-holder re-checks in the ledger that its marker is still outstanding; a holder
-whose marker was taken over signs out only its own session (scope=local). No
+60 s skew margin (90 s), and its owner is dead: no heartbeat under its worker
+id, one older than that, or one from another process boot than the one that
+wrote the marker (each marker records its owner's random per-process boot id,
+which the worker's heartbeat attestation carries, so a container restarted
+under the same instance id is not its previous process); the taking-over begin
+clears it (`abandoned_owner_dead`). An abandoned marker is held by nobody.
+Right before its global logout the holder re-checks in the ledger that its
+marker is still outstanding and not abandoned; a holder whose marker was taken
+over or abandoned, or that cannot read the fence, signs out only its own
+session (scope=local), and that never counts as the principal signed out: only
+a confirmed global sign-out does (recovery receipt, cleanup proof and
+`cleanup.principal_signed_out`), so the run stays incomplete and recoverable.
+A marker never outlives its owner's ability to clear it: each maintenance pass
+first clears every outstanding marker carrying the worker's own id that no
+recovery of its process holds: a clear that failed (it is logged, the
+recovery's evidence is kept, and the retry records the intended outcome), or a
+marker its previous boot left behind (`abandoned_owner_restarted`). No
 wait cycle remains: a deferral waits only on a run that is live (not terminal,
 or leased), at most one run is live at a time (admission admits one run, and a
 run never leaves a terminal state or regains a lease), and a live run's own
@@ -381,9 +407,14 @@ apart. Then either:
   than 15 s), a 422 `not_found` or an absent route (404) proves nothing either
   way: it is recorded `unobservable`. The latest decisive verification (present
   or absent) of that owner and lease epoch decides: after a present, a later
-  unobservable one never releases; only a later fresh absent does, or an
-  operator. The trade-off: the lease, and admission with it, may stay held until
-  a fresh absent arrives. The orphan browser process's close is typed
+  unobservable one does not release; a later fresh absent does. The veto is
+  bounded, because the bridge reports only while it is in the room and a fresh
+  absent may never come once the exchange ended: a verification that proves the
+  run's exchange not live at least 15 minutes (`STUDIO_PRESENCE_VETO_BOUND_MS`,
+  database clock) after the last fresh present, with no fresh report since,
+  releases the lease, and the release records `presence_veto_expired` (the
+  evaluator types `cleanup.orphan_room_presence` `uncertain`). There is no
+  separate operator path. The orphan browser process's close is typed
   `unobservable`, not proven.
 The PostgreSQL ledger stamps the sign-out and verification events with the
 database clock (the clock of the lease expiry), whatever the worker's clock says.
@@ -402,6 +433,9 @@ bridge reports only while it is in the room), and absence at that report does
 not prove the process closed. Voice-step certification needs the API's voice
 qualification on; a steer's effect beyond its admitted command, and a goal's
 status other than its created task's phase, are not exposed by the member API.
+Nor is a link from a withdrawn note to the design's inputs, so "the withdrawal
+ended the design" is at most `uncertain` and a complete G7 run's product
+verdict is `inconclusive` until the product exposes one.
 
 ## Running and container commands
 

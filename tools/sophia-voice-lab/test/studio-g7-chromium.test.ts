@@ -548,8 +548,11 @@ else {
     expect(evaluation.outcome.voice_steps.map((step) => [step.step_id, step.command_kind, step.candidate_seqs])).toEqual([
       ["g7.create", "native_task", [1]], ["g7.steer", "steer", [2, 3]], ["g7.hold", "hold", [4]], ["g7.resume", "resume", [5]], ["g7.stop", "stop", [6]],
     ]);
-    // Every voice step is certified from its own call's command, so the product passes.
-    expect(deriveStudioG7Verdicts(evaluation, { sessionEstablished: true })).toEqual({ harness: "pass", product: "pass", provider: "pass", auth: "pass", evidence: "pass" });
+    // Every voice step is certified from its own call's command; the product
+    // stays inconclusive only because nothing the product exposes ties the
+    // withdrawn note to the design (delta 5): every other assertion passes.
+    expect(evaluation.product.filter((assertion) => assertion.status !== "pass").map((assertion) => `${assertion.id}:${assertion.status}:${assertion.reason}`)).toEqual(["step.g7.withdrawal.design_ended:uncertain:withdrawn_note_not_linked_to_design"]);
+    expect(deriveStudioG7Verdicts(evaluation, { sessionEstablished: true })).toEqual({ harness: "pass", product: "inconclusive", provider: "pass", auth: "pass", evidence: "pass" });
   }, 180_000);
 
   it("never touches an exchange whose evidence names another run, nor one held by another principal", async () => {
@@ -1001,4 +1004,19 @@ else {
       await driver.end(run, "unused", "unused");
     }, 120_000);
   }
+  it("delta 5 nit: a calls read renews the run's own session near its expiry (a password grant); End's global sign-out revokes the renewed session too", async () => {
+    const { driver, run } = harness();
+    tokens.expiresIn = 62;
+    await driver.start(run, "unused");
+    // Every token issued so far is at least 3 s old: within 60 s of its expiry.
+    await sleep(3_000);
+    const issuedBefore = tokens.issued.size;
+    const read = await driver.readStudioCalls(run, "baseline", randomUUID(), "g7.create");
+    expect(read.payload).toMatchObject({ status: "available" });
+    expect(tokens.issued.size).toBe(issuedBefore + 1);
+    const ended = await driver.end(run, "unused", "unused");
+    expect(ended.events.find((event) => event.kind === "studio.cleanup.signed_out")?.payload).toMatchObject({ scope: "global", confirmed: true });
+    expect(tokens.logouts).toContain("global");
+    expect([...tokens.issued].filter((token) => !tokens.revoked.has(token))).toEqual([]);
+  }, 120_000);
 });

@@ -26,7 +26,7 @@ import {
   type StudioPageReceipt,
 } from "./contract.js";
 import { STUDIO_DEAD_OWNER_LEASE_RELEASE_SCHEMA, studioExchangeEndAfterJoin } from "./lease-release.js";
-import { STUDIO_VOICE_STEP_COMMAND_KIND, certifyStudioVoiceSteps, type StudioStepCertification } from "./calls-certification.js";
+import { STUDIO_CALLS_READ_KIND, STUDIO_VOICE_STEP_COMMAND_KIND, certifyStudioVoiceSteps, type StudioStepCertification } from "./calls-certification.js";
 import { studioG7Scenario, type StudioG7Step } from "./scenarios.js";
 
 /**
@@ -123,7 +123,7 @@ export interface StudioG7Evaluation {
   bridge: { receipt_count: number; distinct_seq_count: number; duplicate_count: number; conflicting_seqs: string[]; missing_seqs: number[]; first_seq: number | null; max_seq: number | null; read_after_lab_end_count: number; after_session_closed_kinds: string[]; exchange_state: string | null };
   cleanup: { required: true; guard_reason: string | null; exchange_ended: boolean; exchange_status: string | null; ownership: string | null; signed_out: boolean; browser_closed: boolean; browser_lease_released: boolean; room_presence: string | null; complete: boolean };
   deployed_identities: Record<string, { expected: string | null; observed: string[]; status: "verified" | "mismatch" | "unavailable" }>;
-  outcome: { observations: number; join: "exchange_calls" | "uncertain"; bound_tasks: number; own_report: { status: "resolved" | "unavailable" | "uncertain"; reason: string | null; create_task_id: string | null; design_task_id: string | null; artifact_id: string | null }; missing_product_field: "ExchangeCalls" | null; voice_steps: StudioStepCertification[]; artifacts_verified: number; artifacts_mismatched: number; artifacts_unavailable: number };
+  outcome: { observations: number; join: "exchange_calls" | "uncertain"; bound_tasks: number; own_report: { status: "resolved" | "unavailable" | "uncertain"; reason: string | null; create_task_id: string | null; design_task_id: string | null; artifact_id: string | null }; missing_product_field: "ExchangeCalls" | null; voice_steps: StudioStepCertification[]; unattributed_call_seqs: number[]; artifacts_verified: number; artifacts_mismatched: number; artifacts_unavailable: number };
   corroboration: { webrtc_sender_stats: { status: "corroboration_only"; samples: number; issued_track_rows: number; max_packets_sent: number | null } };
   coverage: typeof STUDIO_G7_RECEIPT_COVERAGE;
   summary: string;
@@ -144,6 +144,7 @@ export const STUDIO_G7_LIMITATIONS = Object.freeze([
   "goal_status_is_the_created_task_phase",
   "orphan_browser_room_presence_only_from_fresh_bridge_report",
   "orphan_browser_process_close_unobservable",
+  "withdrawn_note_to_design_link_not_exposed_design_ended_at_most_uncertain",
 ]);
 
 
@@ -436,7 +437,8 @@ export function evaluateStudioG7Run(run: RunRecord, events: Event[], operations:
   const cleanup = studioG7CleanupProof(ordered);
   const endedEvents = ofKind("studio.cleanup.exchange_ended", "canonical");
   const latestEnded = endedEvents.at(-1) ?? null;
-  const signedOutEvents = ofKind("studio.cleanup.signed_out", "canonical").filter((event) => event.payload.confirmed === true);
+  // Only a confirmed global sign-out signs the principal out (a withheld or local-only one never does).
+  const signedOutEvents = ofKind("studio.cleanup.signed_out", "canonical").filter((event) => event.payload.confirmed === true && event.payload.scope === "global");
   const browserClosed = ofKind("cleanup.browser_context_closed", "browser").filter((event) => event.payload.close_resolved === true && event.payload.browser_registry_absent === true && event.payload.browser_process_close_resolved === true);
   const leaseReleased = ordered.filter((event) => (event.kind === "cleanup.browser_lease_released" && event.payload.cas_deleted === true) || (event.kind === "cleanup.browser_lease_absent" && event.payload.authoritative_ledger_read === true));
   const cleanupComplete = cleanup.complete && leaseReleased.length > 0;
@@ -450,7 +452,10 @@ export function evaluateStudioG7Run(run: RunRecord, events: Event[], operations:
   // live-presence read (A15). Only a fresh report is evidence.
   const quiescedRelease = ordered.filter((event) => event.kind === "cleanup.browser_lease_released" && event.payload.schema === STUDIO_DEAD_OWNER_LEASE_RELEASE_SCHEMA && event.payload.dead_owner_quiesced === true).at(-1) ?? null;
   const roomPresence = quiescedRelease && typeof quiescedRelease.payload.room_presence === "string" ? quiescedRelease.payload.room_presence : null;
-  if (quiescedRelease) {
+  if (quiescedRelease?.payload.presence_veto_expired === true) {
+    // Released past the bounded veto: the last fresh report placed the principal in the room.
+    H("cleanup.orphan_room_presence", "uncertain", "presence_veto_expired_last_report_present", [quiescedRelease]);
+  } else if (quiescedRelease) {
     H("cleanup.orphan_room_presence", roomPresence === "absent" ? "pass" : roomPresence === "present" ? "fail" : "unavailable",
       roomPresence === "absent" ? null : roomPresence === "present" ? "principal_present_in_room" : `room_presence_unobservable_${String(quiescedRelease.payload.room_presence_reason ?? "unknown")}`, [quiescedRelease]);
   }
@@ -495,6 +500,13 @@ export function evaluateStudioG7Run(run: RunRecord, events: Event[], operations:
     })),
   });
   const certifiedSteps = new Map(certification.steps.map((item) => [item.operation_id, item]));
+  // Every command-bearing call the exchange's reads listed must fall in some
+  // step's window; one made between a step's window and the next baseline (or
+  // before End) was never examined, so the run's outcome is not all accounted for.
+  if (certification.answered) {
+    P("outcome.calls_attributed", certification.unattributed_seqs.length === 0 ? "pass" : "uncertain", certification.unattributed_seqs.length === 0 ? null : "unattributed_call",
+      ordered.filter((event) => event.kind === STUDIO_CALLS_READ_KIND && event.source === "canonical"));
+  }
   // The run's own report, resolved only through the product's own links
   // (studio-driver.ts #resolveOwnReport does the same before any mutation):
   // the certified create's research task (bound to the run's exchange), the
@@ -637,14 +649,26 @@ export function evaluateStudioG7Run(run: RunRecord, events: Event[], operations:
       const boundDesigns = (event: Event) => boundTasksOf(event).filter((task) => record(task.design) !== null);
       const designState = (task: Record<string, unknown>) => String(record(task.design)?.state);
       const ENDED_DESIGN_STATES = ["cancelled", "failed", "superseded"];
+      // A Stop before the withdrawal may end the design itself: its effect
+      // (the created task stopped, or ended) must be settled by the
+      // withdrawal's before-observation, with the design still live there.
+      const stopPerformed = inputs.some((candidate) => candidate.input._g7_step === "g7.stop");
+      const createdSeenBefore = before === null || certification.createdTaskId === null ? null
+        : observations.filter((event) => event.seq <= before.seq).flatMap((event) => tasksOf(event).filter((task) => task.task_id === certification.createdTaskId)).at(-1) ?? null;
+      const stopSettled = createdSeenBefore !== null && (createdSeenBefore.phase === "stopped" || ["cancelled", "failed", "succeeded"].includes(String(createdSeenBefore.state)));
       const id = "step.g7.withdrawal.design_ended";
       if (certification.createdTaskId === null) P(id, "unavailable", "create_step_not_certified", []);
+      else if (!committed) P(id, "unavailable", "withdrawal_not_committed", [withdrawal]);
       else if (before === null || before.seq > withdrawal.seq) P(id, "uncertain", "no_observation_before_withdrawal", []);
       else if (boundDesigns(before).length === 0) P(id, "uncertain", "bound_design_not_observed_before_withdrawal", [before]);
       else if (boundDesigns(before).some((task) => ENDED_DESIGN_STATES.includes(designState(task)))) P(id, "uncertain", "design_already_ended_before_withdrawal", [before]);
+      else if (stopPerformed && !stopSettled) P(id, "uncertain", "stop_effect_not_settled_before_withdrawal", [before]);
       else if (afterOwn === null || afterOwn.seq < withdrawal.seq) P(id, "uncertain", "no_observation_after_withdrawal", [before]);
       else if (boundDesigns(afterOwn).length === 0) P(id, "uncertain", "bound_design_not_observed_after_withdrawal", [before, afterOwn]);
-      else if (boundDesigns(afterOwn).every((task) => designState(task) === "cancelled")) P(id, "pass", null, [before, withdrawal, afterOwn]);
+      // Cancelled after the withdrawal, live before it and after Stop's effect:
+      // still, nothing the product exposes ties the withdrawn note to the
+      // design's inputs, so the end is never credited to the withdrawal.
+      else if (boundDesigns(afterOwn).every((task) => designState(task) === "cancelled")) P(id, "uncertain", "withdrawn_note_not_linked_to_design", [before, withdrawal, afterOwn]);
       else P(id, "uncertain", "design_not_cancelled_by_withdrawal", [before, afterOwn]);
     }
     for (const step of steps) {
@@ -696,7 +720,7 @@ export function evaluateStudioG7Run(run: RunRecord, events: Event[], operations:
     bridge: { receipt_count: bridgeRaw.length, distinct_seq_count: bridge.length, duplicate_count: duplicateCount, conflicting_seqs: conflictingSeqs, missing_seqs: missingSeqs, first_seq: firstSeq, max_seq: maxSeq, read_after_lab_end_count: readAfterLabEnd, after_session_closed_kinds: afterClosedKinds, exchange_state: latestGrant?.exchangeState ?? null },
     cleanup: { required: true, guard_reason: guardReason, exchange_ended: cleanup.exchangeEnded, exchange_status: typeof latestEnded?.payload.status === "string" ? latestEnded.payload.status : null, ownership: typeof latestOwnership === "string" ? latestOwnership : null, signed_out: cleanup.signedOut, browser_closed: cleanup.browserClosed, browser_lease_released: leaseReleased.length > 0, room_presence: roomPresence, complete: cleanupComplete },
     deployed_identities: identities,
-    outcome: { observations: observations.length, join: certification.steps.some((item) => item.outcome === "pass") ? "exchange_calls" : "uncertain", bound_tasks: boundIds.size, own_report: ownReport.status === "resolved" ? { status: "resolved", reason: null, create_task_id: certification.createdTaskId, design_task_id: ownReport.designTaskId, artifact_id: ownReport.artifactId } : { status: ownReport.status, reason: ownReport.reason, create_task_id: certification.createdTaskId, design_task_id: null, artifact_id: null }, missing_product_field: certification.answered ? null : "ExchangeCalls", voice_steps: certification.steps, artifacts_verified: verifiedArtifacts.length, artifacts_mismatched: mismatched.length, artifacts_unavailable: artifactStates.filter((item) => item.artifact.status === "unavailable").length },
+    outcome: { observations: observations.length, join: certification.steps.some((item) => item.outcome === "pass") ? "exchange_calls" : "uncertain", bound_tasks: boundIds.size, own_report: ownReport.status === "resolved" ? { status: "resolved", reason: null, create_task_id: certification.createdTaskId, design_task_id: ownReport.designTaskId, artifact_id: ownReport.artifactId } : { status: ownReport.status, reason: ownReport.reason, create_task_id: certification.createdTaskId, design_task_id: null, artifact_id: null }, missing_product_field: certification.answered ? null : "ExchangeCalls", voice_steps: certification.steps, unattributed_call_seqs: certification.unattributed_seqs, artifacts_verified: verifiedArtifacts.length, artifacts_mismatched: mismatched.length, artifacts_unavailable: artifactStates.filter((item) => item.artifact.status === "unavailable").length },
     corroboration: { webrtc_sender_stats: { status: "corroboration_only", samples: stats.length, issued_track_rows: issuedRows, max_packets_sent: maxPackets } },
     coverage: STUDIO_G7_RECEIPT_COVERAGE,
     summary: withheld.length === 0 ? `harness_pass_${harness.length}` : `harness_withheld:${withheld.slice(0, 32).join(",")}`,
@@ -760,7 +784,7 @@ export function studioG7CleanupProof(events: Event[]): { exchangeEnded: boolean;
   // A confirmed end counts only after the run's exchange join (or Speak
   // intent): an earlier settle cannot speak for an exchange opened later.
   const exchangeEnded = studioExchangeEndAfterJoin(events) !== null;
-  const signedOut = events.some((event) => event.kind === "studio.cleanup.signed_out" && event.source === "canonical" && event.payload.confirmed === true);
+  const signedOut = events.some((event) => event.kind === "studio.cleanup.signed_out" && event.source === "canonical" && event.payload.confirmed === true && event.payload.scope === "global");
   const browserClosed = events.some((event) => event.kind === "cleanup.browser_context_closed" && event.source === "browser" && event.payload.close_resolved === true && event.payload.browser_registry_absent === true)
     || events.some((event) => event.kind === "cleanup.browser_context_absent" && event.payload.browser_never_allocated === true);
   // A dead foreign worker's browser cannot be proven closed; its lease is

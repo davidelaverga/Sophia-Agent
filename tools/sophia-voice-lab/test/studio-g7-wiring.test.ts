@@ -948,8 +948,14 @@ async function recoveryWorker(h: Harness, workerId: string, ledger: VoiceLabLedg
   const driver = new ScriptedStudioDriver((await h.ledger.getRun(h.runId))!);
   driver.recoverResult = freshRecovery();
   const worker = new VoiceLabWorker(workerId, ledger, h.config, audio, driver as unknown as VoiceBrowserDriver, new CapabilityCodec(h.config.capabilitySecret, h.config.capabilityIssuer, h.config.capabilityTtlSeconds), pino({ level: "silent" }));
-  await h.ledger.heartbeatWorker({ workerId, serviceVersion: "test", browserReady: true, attestation: null, detail: {}, observedAt: new Date() });
+  // As the worker's own heartbeat loop does: its attestation names its process boot.
+  await bootBeat(h.ledger, workerId, worker);
   return { driver, worker };
+}
+
+/** A heartbeat of this worker process (its attestation's boot id, as its own heartbeat loop records it). */
+function bootBeat(ledger: VoiceLabLedger, workerId: string, worker: VoiceLabWorker, observedAt = new Date()) {
+  return ledger.heartbeatWorker({ workerId, serviceVersion: "test", browserReady: true, attestation: { worker_boot_id_sha256: worker.workerBootIdSha256 } as never, detail: {}, observedAt });
 }
 
 const fenceEvents = async (h: Harness) => (await h.ledger.listEvents(h.runId, 0, 2_000)).events.filter((event) => event.kind === "studio.cleanup.global_sign_out_pending" || event.kind === "studio.cleanup.global_sign_out_cleared");
@@ -1116,4 +1122,185 @@ describe("(P3-2) a fresh 'present' keeps a dead owner's lease until a later fres
     const released = (await ledger.listEvents(runId, 0, 2_000)).events.find((event) => event.kind === "cleanup.browser_lease_released");
     expect(released?.payload).toMatchObject({ dead_owner_quiesced: true, room_presence: "absent", room_presence_reason: null });
   }, 60_000);
+});
+
+describe("delta 5 (review P2-1, P3-1): a sign-out marker never outlives its owner's ability to clear it", () => {
+  const outstanding = async (h: Harness) => {
+    const { studioOutstandingSignOutMarkers } = await import("../src/studio-g7/sign-out-fence.js");
+    return studioOutstandingSignOutMarkers((await h.ledger.listEvents(h.runId, 0, 5_000)).events).map((marker) => marker.markerId);
+  };
+  const clearedOutcomes = async (h: Harness) => (await fenceEvents(h)).filter((event) => event.kind === "studio.cleanup.global_sign_out_cleared").map((event) => event.payload.outcome);
+  afterEach(() => { vi.useRealTimers(); });
+
+  it("W1: a clear that failed is retried by its live owner from the durable marker; the recovery's evidence is kept and admission reopens", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date());
+    const h = await pendingWithUnrevokedRefresh("w1");
+    let failures = 1;
+    const flaky = new Proxy(h.ledger, { get(target, property) {
+      if (property === "endStudioGlobalSignOut") return async (...args: unknown[]) => { if (failures-- > 0) throw new Error("transient ledger error"); return (target.endStudioGlobalSignOut as (...input: unknown[]) => Promise<void>).apply(target, args); };
+      const value = Reflect.get(target, property, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    } }) as VoiceLabLedger;
+    const a = await recoveryWorker(h, "w1-a", flaky);
+    await a.worker.maintainSessions();
+    // The global sign-out happened and its evidence is durable; only the clear failed.
+    expect(a.driver.globalLogouts).toEqual([h.runId]);
+    expect(await outstanding(h)).toHaveLength(1);
+    expect((await h.ledger.listEvents(h.runId, 0, 5_000)).events.some((event) => event.kind === "studio.cleanup.signed_out" && event.payload.scope === "global" && event.payload.confirmed === true)).toBe(true);
+    // The owner is alive (heartbeating from its own boot): nobody may take the marker over, so its own sweep clears it.
+    vi.setSystemTime(new Date(Date.now() + 31_000));
+    await bootBeat(h.ledger, "w1-a", a.worker);
+    await a.worker.maintainSessions();
+    expect(await outstanding(h)).toEqual([]);
+    expect(await clearedOutcomes(h)).toEqual(["confirmed"]);
+    expect(await tryStart(h, "w1-after")).toBe("accepted");
+  }, 60_000);
+
+  it("W2: a worker restarted under the same instance id clears its previous boot's marker; the run then recovers and admission reopens", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date());
+    const h = await pendingWithUnrevokedRefresh("w2");
+    const id = "srv-abcdefghij0123456789-5d8f9c7b6-xk2lp";
+    const crashed = await recoveryWorker(h, id, h.ledger);
+    const inFlight = deferred();
+    crashed.driver.recoverHook = async () => { inFlight.resolve(); await new Promise(() => undefined); }; // the process dies here
+    void crashed.worker.maintainSessions();
+    await inFlight.promise;
+    expect(await outstanding(h)).toHaveLength(1);
+    // The platform restarts the container in the same pod: same instance id, a fresh process (a new boot) that heartbeats.
+    vi.setSystemTime(new Date(Date.now() + 20_000));
+    const restarted = await recoveryWorker(h, id, h.ledger);
+    for (let pass = 0; pass < 6 && await tryStart(h, `w2-probe-${pass}`).then((status) => status !== "accepted"); pass += 1) {
+      await restarted.worker.maintainSessions();
+      vi.setSystemTime(new Date(Date.now() + 31_000));
+      await bootBeat(h.ledger, id, restarted.worker);
+    }
+    expect(await clearedOutcomes(h)).toEqual(expect.arrayContaining(["abandoned_owner_restarted"]));
+    expect(await outstanding(h)).toEqual([]);
+    expect(restarted.driver.calls).toContain("recover");
+    expect(await h.ledger.getRun(h.runId)).toMatchObject({ cleanupComplete: true });
+    expect(restarted.worker.workerBootIdSha256).not.toBe(crashed.worker.workerBootIdSha256);
+  }, 60_000);
+
+  it("W2 (ledger): a marker whose owner id now heartbeats from another boot is abandoned past the stale bound and taken over; from its own boot it never is", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date());
+    for (const sameBoot of [false, true]) {
+      const h = await harness(`w2-ledger-${String(sameBoot)}`);
+      const owner = "srv-abcdefghij0123456789-5d8f9c7b6-ab12c";
+      const bootA = "a".repeat(64), bootB = "b".repeat(64);
+      expect(await h.ledger.beginStudioGlobalSignOut(h.runId, "m1", owner, bootA)).toMatchObject({ granted: true });
+      vi.setSystemTime(new Date(Date.now() + 91_000));
+      await h.ledger.heartbeatWorker({ workerId: owner, serviceVersion: "test", browserReady: true, attestation: { worker_boot_id_sha256: sameBoot ? bootA : bootB } as never, detail: {}, observedAt: new Date() });
+      const takeover = await h.ledger.beginStudioGlobalSignOut(h.runId, "m2", "w2-other", "c".repeat(64));
+      expect(takeover, String(sameBoot)).toMatchObject(sameBoot ? { granted: false, reason: "sign_out_in_flight" } : { granted: true });
+      expect(await h.ledger.holdsStudioGlobalSignOut(h.runId, "m1"), String(sameBoot)).toBe(sameBoot);
+    }
+  }, 60_000);
+
+  it("W3 (P3-1): an abandoned marker nobody took over is held by nobody: its stale owner can never log out globally", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date());
+    const h = await pendingWithUnrevokedRefresh("w3");
+    expect(await h.ledger.beginStudioGlobalSignOut(h.runId, "w3-marker", "w3-owner", "d".repeat(64))).toMatchObject({ granted: true });
+    expect(await h.ledger.holdsStudioGlobalSignOut(h.runId, "w3-marker")).toBe(true);
+    expect(await tryStart(h, "w3-young")).toBe("STUDIO_GLOBAL_SIGNOUT_PENDING");
+    vi.setSystemTime(new Date(Date.now() + 91_000));
+    expect(await h.ledger.holdsStudioGlobalSignOut(h.runId, "w3-marker")).toBe(false);
+  }, 60_000);
+
+  it("the sweep never clears a marker a recovery of its own process holds", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date());
+    const h = await pendingWithUnrevokedRefresh("held");
+    const a = await recoveryWorker(h, "held-a", h.ledger);
+    const inFlight = deferred();
+    const release = deferred();
+    a.driver.recoverHook = async () => { inFlight.resolve(); await release.promise; };
+    const first = a.worker.maintainSessions();
+    await inFlight.promise;
+    const [marker] = await outstanding(h);
+    // A second maintenance pass of the same process, while the recovery is in flight.
+    vi.setSystemTime(new Date(Date.now() + 31_000));
+    await bootBeat(h.ledger, "held-a", a.worker);
+    await a.worker.maintainSessions();
+    expect(await outstanding(h)).toEqual([marker]);
+    expect(await clearedOutcomes(h)).toEqual([]);
+    release.resolve();
+    await first;
+    expect(await outstanding(h)).toEqual([]);
+    expect(await clearedOutcomes(h)).toEqual(["confirmed"]);
+  }, 60_000);
+});
+
+describe("delta 5 (review P3-3): End reads every call, so a call after the last step's window is never unexamined", () => {
+  it("records End's read of every call; a command made after the create's window makes the run uncertain:unattributed_call", async () => {
+    const h = await harness("end-read-worker");
+    const GOAL = "e0000000-0000-4000-8000-0000000000a1";
+    const RESEARCH = "d0000000-0000-4000-8000-0000000000d3";
+    let tick = 0;
+    const stamps = new Map<string, number>();
+    const recorded: Array<{ began: number; call: Record<string, unknown> }> = [];
+    h.driver.callsAnswer = (_run, _purpose, after) => {
+      tick += 1;
+      const readAt = `2026-10-09T12:00:${String(tick).padStart(2, "0")}.000001Z`;
+      stamps.set(readAt, tick);
+      const since = after === null ? null : stamps.get(after)!;
+      return { status: "available", read_at: readAt, calls: recorded.filter((item) => since === null || item.began > since).map((item) => item.call) };
+    };
+    const at = new Date().toISOString();
+    const command = (seq: number, kind: string) => ({ command_id: `f0000000-0000-4000-8000-${String(seq).padStart(12, "0")}`, kind, goal_id: GOAL, authority_epoch: seq, goal_revision: 1, state: "acknowledged", created_at: at });
+    await h.worker.runOnce();
+    const create = h.service.studioG7VoiceStep(caller, { run_id: h.runId, step: "create", fixture_id: "a02_short_command", idempotency_key: newIdempotencyKey("voice-create") });
+    while (!h.driver.callsReads.some((read) => read.purpose === "baseline")) { if (!(await h.worker.runOnce())) await delay(5); }
+    recorded.push({ began: tick + 0.5, call: { seq: 1, recorded_at: at, input_epoch: 1, tool: "start_research", task_id: RESEARCH, answered_at: at, outcome: "admitted", command: command(1, "native_task") } });
+    expect((await drive(h, create)).status).toBe("completed");
+    h.driver.researchExchangeId = EXCHANGE_UUID;
+    expect((await action(h, { action: "observe", for_step: "create" })).data).toMatchObject({ performed: false });
+    // After the create's window read: a stop the principal's session made, in no step's window.
+    recorded.push({ began: tick + 0.5, call: { seq: 2, recorded_at: at, input_epoch: 1, tool: "control_work", task_id: null, answered_at: at, outcome: "ok", command: command(2, "stop") } });
+    await end(h);
+    const events = (await h.ledger.listEvents(h.runId, 0, 5_000)).events;
+    const endRead = events.filter((event) => event.kind === "studio.exchange.calls_read" && event.payload.step_id === "final");
+    expect(endRead).toHaveLength(1);
+    expect(endRead[0]!.payload).toMatchObject({ purpose: "baseline", after: null, status: "available" });
+    expect((endRead[0]!.payload.calls as Array<Record<string, unknown>>).map((entry) => entry.seq)).toEqual([1, 2]);
+    const { evaluateStudioG7Run } = await import("../src/studio-g7/evaluate.js");
+    const evaluation = evaluateStudioG7Run((await h.ledger.getRun(h.runId))!, events, await h.ledger.listOperations(h.runId), { expected: { studio: STUDIO_SHA, api: API_SHA, bridge: BRIDGE_SHA } });
+    expect(evaluation.outcome.unattributed_call_seqs).toEqual([2]);
+    expect(evaluation.product.find((assertion) => assertion.id === "outcome.calls_attributed")).toMatchObject({ status: "uncertain", reason: "unattributed_call" });
+  }, 60_000);
+});
+
+describe("delta 5 (review P3-4): the presence veto is bounded, and its expiry is audited", () => {
+  it("present, then only unobservable verifications: held within the bound, released past it with the expired veto recorded (memory ledger)", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date());
+    const ledger = new MemoryVoiceLabLedger("test");
+    const advance = async (ms: number) => { vi.setSystemTime(new Date(Date.now() + ms)); };
+    const { runId, workerB } = await deadOwnerRecovery(ledger, advance);
+    await advance(61 * 60_000);
+    workerB.driver.recoverResult = (id) => [...recoveryEvents(id), presenceEvent(id, "present", null, 21)];
+    await workerB.worker.maintainSessions();
+    expect(await ledger.getBrowserLease(runId)).not.toBeNull();
+    // The exchange ended; the bridge left the room: only unobservable reports from now on.
+    for (let n = 22; n < 26; n += 1) {
+      await advance(31_000);
+      workerB.driver.recoverResult = (id) => [...recoveryEvents(id), presenceEvent(id, "unobservable", "not_observed", n)];
+      await workerB.worker.maintainSessions();
+    }
+    expect(await ledger.getBrowserLease(runId)).not.toBeNull();
+    // Past the bound (15 min after the present), with the exchange verified not live: released, audited.
+    await advance(15 * 60_000);
+    workerB.driver.recoverResult = (id) => [...recoveryEvents(id), presenceEvent(id, "unobservable", "not_observed", 30)];
+    await workerB.worker.maintainSessions();
+    expect(await ledger.getBrowserLease(runId)).toBeNull();
+    const events = (await ledger.listEvents(runId, 0, 2_000)).events;
+    expect(events.find((event) => event.kind === "cleanup.browser_lease_released")?.payload).toMatchObject({ dead_owner_quiesced: true, presence_veto_expired: true, presence_veto_bound_ms: 15 * 60_000, room_presence: "unobservable" });
+    const { evaluateStudioG7Run } = await import("../src/studio-g7/evaluate.js");
+    const run = (await ledger.getRun(runId))!;
+    const evaluation = evaluateStudioG7Run(run, events, await ledger.listOperations(runId), { expected: { studio: STUDIO_SHA, api: API_SHA, bridge: BRIDGE_SHA } });
+    expect(evaluation.harness.find((assertion) => assertion.id === "cleanup.orphan_room_presence")).toMatchObject({ status: "uncertain", reason: "presence_veto_expired_last_report_present" });
+  }, 120_000);
 });

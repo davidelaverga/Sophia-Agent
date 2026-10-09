@@ -667,3 +667,51 @@ describe("(h) presence is only the principal's own fresh selfPresent", () => {
     expect(reads.every((item) => item.authorization?.startsWith("Bearer fake-access-token-"))).toBe(true);
   });
 });
+
+describe("delta 5 (review P2-2): a withheld global sign-out is never the run's sign-out", () => {
+  for (const gateKind of ["taken_over", "ledger_read_failed"] as const) {
+    it(`D1 (${gateKind}): only a confirmed global sign-out counts; the recovery stays incomplete and recoverable`, async () => {
+      const { studioG7CleanupProof } = await import("../src/studio-g7/evaluate.js");
+      const backend = new FakeStudioBackend();
+      const { config, driver } = driverFor(backend);
+      const run = studioRun(config);
+      adopt(driver, run);
+      backend.exchangeId = null; // nothing live in the room: the exchange is proven ended read-only
+      driver.setStudioSignOutGate(run.id, gateKind === "taken_over" ? async () => false : async () => { throw new Error("ledger unavailable"); });
+      const recovered = await driver.recover(binding(run), "unused");
+      const signedOut = ofKind(recovered.events, "studio.cleanup.signed_out").map((event) => event.payload);
+      // Never a global logout; only the recovery's own session is revoked.
+      expect(backend.logoutScopes()).toEqual(["local"]);
+      expect(signedOut).toEqual([expect.objectContaining({ scope: "local", global_sign_out_withheld: true, basis: gateKind === "taken_over" ? "sign_out_fence_not_held" : "sign_out_fence_unreadable" })]);
+      const recovery = ofKind(recovered.events, "studio.cleanup.recovery")[0]!.payload;
+      expect(recovery).toMatchObject({ complete: false, signed_out: false, exchange_ended: true });
+      const events = [
+        { seq: 1, kind: "cleanup.browser_context_closed", source: "browser", payload: { close_resolved: true, browser_registry_absent: true }, at: new Date() },
+        ...recovered.events.map((event, index) => ({ seq: 2 + index, kind: event.kind, source: event.source, payload: event.payload, at: new Date() })),
+      ] as never;
+      expect(studioG7CleanupProof(events)).toMatchObject({ signedOut: false, complete: false });
+      // Positive control: with the gate held, the global sign-out counts.
+      const held = new FakeStudioBackend();
+      const control = driverFor(held);
+      adopt(control.driver, run);
+      held.exchangeId = null;
+      control.driver.setStudioSignOutGate(run.id, async () => true);
+      const ok = await control.driver.recover(binding(run), "unused");
+      expect(held.logoutScopes()).toEqual(["global"]);
+      expect(ofKind(ok.events, "studio.cleanup.recovery")[0]!.payload).toMatchObject({ complete: true, signed_out: true });
+    });
+  }
+
+  it("a local sign-out with no session held is never recorded as confirmed", async () => {
+    const backend = new FakeStudioBackend();
+    backend.password = "wrong-fake-password-0003"; // the recovery cannot sign in: no session is ever held
+    const { config, driver } = driverFor(backend);
+    const run = studioRun(config);
+    adopt(driver, run);
+    driver.setStudioSignOutGate(run.id, async () => false);
+    const recovered = await driver.recover(binding(run), "unused");
+    const local = ofKind(recovered.events, "studio.cleanup.signed_out").map((event) => event.payload).find((payload) => payload.scope === "local");
+    expect(local).toMatchObject({ scope: "local", confirmed: false, session_basis: "none" });
+    expect(ofKind(recovered.events, "studio.cleanup.recovery")[0]!.payload).toMatchObject({ signed_out: false, complete: false });
+  });
+});

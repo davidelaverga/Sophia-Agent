@@ -602,7 +602,8 @@ export class StudioG7Driver implements VoiceBrowserDriver, StudioDriverExtension
     const events = await this.#apiOnlyCleanup(run.id, "recover");
     const ended = events.filter((event) => event.kind === "studio.cleanup.exchange_ended");
     const exchangeEnded = ended.length > 0 && ended.every((event) => event.payload.confirmed === true);
-    const signedOut = events.some((event) => event.kind === "studio.cleanup.signed_out" && event.payload.confirmed === true);
+    // Only a confirmed GLOBAL sign-out signs the principal out; a withheld or local-only one never does.
+    const signedOut = events.some((event) => event.kind === "studio.cleanup.signed_out" && event.payload.confirmed === true && event.payload.scope === "global");
     const exchangeStatus = ended.at(-1)?.payload.status ?? "unavailable";
     const recovery = { complete: exchangeEnded && signedOut && !this.#sessions.has(run.id), exchange_ended: exchangeEnded, exchange_status: exchangeStatus, signed_out: signedOut, browser_session_absent: !this.#sessions.has(run.id) };
     events.push({ kind: "studio.cleanup.recovery", source: "canonical", payload: recovery, dedupeKey: contentKey("studio-recovery", run.id, recovery) });
@@ -1466,10 +1467,12 @@ export class StudioG7Driver implements VoiceBrowserDriver, StudioDriverExtension
     // that never allocated a browser stays network-free).
     if (purpose === "recover" && tokens.held() !== null) events.push(await this.#readRoomPresence(runId, tokens, purpose));
     // A fenced recovery logs the principal out globally only while it still
-    // holds its sign-out marker; otherwise only its own session goes.
+    // holds its sign-out marker; otherwise only its own session goes. A gate
+    // that cannot be read is never "not held" nor "held": nothing global is
+    // sent, and the recovery stays incomplete, to be retried.
     const gate = this.#signOutGates.get(runId);
-    const held = gate === undefined ? true : await gate().catch(() => false);
-    events.push(held ? await this.#signOut(runId, tokens) : await this.#localSignOutOnly(runId, tokens, "sign_out_fence_not_held"));
+    const fence = gate === undefined ? "held" : await gate().then((value) => value ? "held" : "not_held", () => "unreadable");
+    events.push(fence === "held" ? await this.#signOut(runId, tokens) : await this.#localSignOutOnly(runId, tokens, fence === "not_held" ? "sign_out_fence_not_held" : "sign_out_fence_unreadable"));
     const known = this.#exchanges.get(runId);
     if (known !== undefined && known.join === "retained" && !known.browserLaunched) {
       // Start failed before Chromium launched (e.g. deployment mismatch):
@@ -1522,13 +1525,17 @@ export class StudioG7Driver implements VoiceBrowserDriver, StudioDriverExtension
         .catch(() => ({ schema: "sophia_voice_lab_studio_sign_out_v1", scope: "local", confirmed: false, http_status: null, basis: "unreachable" }) as SignOutReceipt);
     }
     tokens.forget();
-    const payload = { schema: "sophia_voice_lab_studio_sign_out_v1", scope: "local", confirmed: receipt?.confirmed ?? true, http_status: receipt?.http_status ?? null, basis, session_basis: held ? "held_session" : "none", global_sign_out_withheld: true, credentials_excluded: true, sign_out_id: randomUUID() };
+    // confirmed: only a revoke the server confirmed (no session held is no revoke). A local
+    // sign-out never counts as the principal signed out (only a global one does).
+    const payload = { schema: "sophia_voice_lab_studio_sign_out_v1", scope: "local", confirmed: receipt?.confirmed === true, http_status: receipt?.http_status ?? null, basis, session_basis: held ? "held_session" : "none", global_sign_out_withheld: true, credentials_excluded: true, sign_out_id: randomUUID() };
     return { kind: "studio.cleanup.signed_out", source: "canonical", payload, dedupeKey: contentKey("studio-signed-out", runId, payload) };
   }
 
   async readStudioCalls(run: RunRecord, purpose: "baseline" | "after", operationId: string, stepId: string | null, after: string | null = null): Promise<DriverEvent> {
-    // Read only with the run's own browser session: never sign in for a read
-    // (a password grant here would be a session nobody signs out or records).
+    // Read only with the run's own browser session: never a sign-in without
+    // one. With one, the read uses the session's token source, which renews
+    // the session (a password grant) within 60 s of its expiry; the renewed
+    // session replaces the run's own, so End's global sign-out revokes it.
     const session = this.#sessions.get(run.id) ?? null;
     if (session === null) return this.#callsReadRefused(run.id, purpose, operationId, stepId, after, "no_browser_session");
     return this.#readCalls(run.id, this.#tokenSource(session), purpose, operationId, stepId, after);

@@ -346,7 +346,7 @@ interface CallsScript {
   unavailable?: { reason: string; http_status: number };
 }
 
-interface G7Options { skip?: string[]; staleCode?: string; staleStatus?: number; artifactStatus?: string; ownership?: "proven" | "mismatch" | "unavailable"; withdrawalCommitted?: boolean; noEnd?: boolean; calls?: CallsScript; researchTask?: Record<string, unknown>; windowEpochs?: Record<string, number>; designBefore?: string | null; designAfter?: string; designEverywhere?: string; withdrawalAfterOperation?: string }
+interface G7Options { skip?: string[]; staleCode?: string; staleStatus?: number; artifactStatus?: string; ownership?: "proven" | "mismatch" | "unavailable"; withdrawalCommitted?: boolean; noEnd?: boolean; calls?: CallsScript; researchTask?: Record<string, unknown>; windowEpochs?: Record<string, number>; designBefore?: string | null; designAfter?: string; designEverywhere?: string; withdrawalAfterOperation?: string; stopEffect?: { phase: string; state: string } }
 
 /** A complete G7 episode: five voice steps, four actions, observations, ownership, cleanup. */
 function g7Episode(options: G7Options = {}): Episode {
@@ -411,7 +411,7 @@ function g7Episode(options: G7Options = {}): Episode {
       const phase = step === "hold" ? "held" : step === "resume" ? "running" : "stopped";
       const observe = op(run, "studio_action", T0 + 150 + index, { action: "observe", for_step: step }, { performed: false, status: "observed" });
       operations.push(observe);
-      log.add("studio.outcome.observed", "canonical", { purpose: `g7.${step}`, operation_id: observe.id, join: { status: "uncertain" }, tasks: [research({ phase, state: step === "stop" ? "cancelled" : "running" })], artifacts: [] });
+      log.add("studio.outcome.observed", "canonical", { purpose: `g7.${step}`, operation_id: observe.id, join: { status: "uncertain" }, tasks: [research(step === "stop" && options.stopEffect ? options.stopEffect : { phase, state: step === "stop" ? "cancelled" : "running" })], artifacts: [] });
     }
   });
   if (!skip.has("g7.leave_return")) {
@@ -674,7 +674,10 @@ describe("Studio G7 voice steps are certified only from the exchange's calls (A1
     ]);
     // The baseline is the read's readAt, kept as the exact string the product sent.
     expect(evaluation.outcome.voice_steps.every((step) => typeof step.baseline_read_at === "string" && /T.*Z$/.test(step.baseline_read_at))).toBe(true);
-    expect(statusOf(evaluation, "step.g7.withdrawal.design_ended")).toMatchObject({ status: "pass", reason: null });
+    // Nothing the product exposes ties the withdrawn note to the design: never credited (delta 5 nit).
+    expect(statusOf(evaluation, "step.g7.withdrawal.design_ended")).toMatchObject({ status: "uncertain", reason: "withdrawn_note_not_linked_to_design" });
+    // Every command-bearing call the reads listed falls in a step's window.
+    expect(statusOf(evaluation, "outcome.calls_attributed")).toMatchObject({ status: "pass", reason: null });
     expect(evaluation.verdicts.harness).toBe("pass");
   });
 
@@ -794,8 +797,8 @@ describe("(P2-1) the withdrawal ended the design only if it was live before and 
     expect(designEnded({ withdrawalAfterOperation: "another-operation" }).assertion).toMatchObject({ status: "uncertain", reason: "no_observation_after_withdrawal" });
   });
 
-  it("passes only a design live before and cancelled in the withdrawal's own observation after", () => {
-    expect(designEnded({}).assertion).toMatchObject({ status: "pass", reason: null });
+  it("a design live before and cancelled in the withdrawal's own observation after is still never credited without a canonical link (delta 5 nit)", () => {
+    expect(designEnded({}).assertion).toMatchObject({ status: "uncertain", reason: "withdrawn_note_not_linked_to_design" });
   });
 });
 
@@ -895,5 +898,92 @@ describe("delta 4: only the run's own report, on its canonical chain, is evidenc
     const evaluation = evaluate(misLinked);
     expect(statusOf(evaluation, "outcome.artifact_bytes_integrity")).toMatchObject({ status: "uncertain", reason: "target_not_canonical" });
     expect(stepsOf(evaluation)).toMatchObject({ "g7.section_revision": "uncertain:target_not_canonical", "g7.stale_edit": "uncertain:target_not_canonical" });
+  });
+});
+
+describe("delta 5 (review P2-2): only a confirmed global sign-out passes cleanup.principal_signed_out and the cleanup proof", () => {
+  it("a confirmed local or withheld sign-out never signs the principal out", () => {
+    const withSignOut = (payload: Record<string, unknown>) => {
+      const item = g7Episode({ researchTask: RUN_TASK, calls: { byStep: happyCalls() } });
+      for (const event of item.log.events.filter((candidate) => candidate.kind === "studio.cleanup.signed_out")) event.payload = { ...event.payload, ...payload };
+      const evaluation = evaluate(item);
+      return { assertion: statusOf(evaluation, "cleanup.principal_signed_out"), proof: studioG7CleanupProof(item.log.events) };
+    };
+    const local = withSignOut({ scope: "local", confirmed: true, global_sign_out_withheld: true, basis: "sign_out_fence_not_held" });
+    expect(local.assertion).toMatchObject({ status: "fail", reason: "global_sign_out_unconfirmed" });
+    expect(local.proof).toMatchObject({ signedOut: false, complete: false });
+    // Positive control: the episode's own confirmed global sign-out.
+    const global = withSignOut({});
+    expect(global.assertion).toMatchObject({ status: "pass" });
+    expect(global.proof).toMatchObject({ signedOut: true });
+  });
+});
+
+describe("delta 5 (review P3-2, P3-3): a command's later state, and calls no step's window holds", () => {
+  const EX = "c0000000-0000-4000-8000-000000000001";
+  const CGOAL = "e0000000-0000-4000-8000-0000000000a1";
+  const TASK = "d0000000-0000-4000-8000-0000000000d1";
+  const cmd = (n: number) => `f0000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+  const at = (n: number) => `2026-10-09T12:00:${String(n).padStart(2, "0")}.000001Z`;
+  const rec = (seq: number, kind: string | null, state = "admitted") => ({ seq, recorded_at: at(seq), input_epoch: 1, tool: kind === "native_task" ? "start_research" : "control_work", task_id: kind === "native_task" ? TASK : null, answered_at: at(seq), outcome: kind === "native_task" ? "admitted" : kind === null ? "refused" : "ok",
+    command: kind === null ? null : { command_id: cmd(seq), kind, goal_id: CGOAL, authority_epoch: seq, goal_revision: 1, state } });
+  const read = (seq: number, purpose: "baseline" | "after", op: string, step: string, readAt: string, after: string | null, calls: unknown[]) => ({ seq, kind: "studio.exchange.calls_read", source: "canonical" as const, payload: { purpose, operation_id: op, step_id: step, exchange_id: EX, after, status: "available", read_at: readAt, settled: true, calls } });
+  const obs = (seq: number, purpose: string, phase = "running") => ({ seq, kind: "studio.outcome.observed", source: "canonical" as const, payload: { purpose, tasks: [{ task_id: TASK, exchange_id: EX, goal_id: CGOAL, phase }] } });
+  const steps = [{ operationId: "op-create", stepId: "g7.create" }, { operationId: "op-steer", stepId: "g7.steer" }, { operationId: "op-hold", stepId: "g7.hold" }];
+  const epochs = new Map(steps.map((step) => [step.operationId, 1]));
+
+  it("C1: a command a later read shows denied fails, and one of unknown outcome is uncertain", async () => {
+    const { certifyStudioVoiceSteps } = await import("../src/studio-g7/calls-certification.js");
+    const run = (later: string) => certifyStudioVoiceSteps({ runExchangeId: EX, ownershipProven: true, stepInputEpochs: epochs, steps, events: [
+      read(1, "baseline", "op-create", "g7.create", at(10), null, []),
+      read(2, "after", "op-create", "g7.create", at(20), at(10), [rec(11, "native_task")]),
+      obs(3, "g7.create"),
+      read(4, "baseline", "op-steer", "g7.steer", at(30), null, [rec(11, "native_task", "checked")]),
+      read(5, "after", "op-steer", "g7.steer", at(40), at(30), [rec(31, "steer", "admitted")]),
+      read(6, "baseline", "op-hold", "g7.hold", at(50), null, [rec(11, "native_task", "checked"), rec(31, "steer", later)]),
+      read(7, "after", "op-hold", "g7.hold", at(60), at(50), [rec(51, "hold", "checked")]),
+      obs(8, "g7.hold", "held"),
+    ] }).steps.find((step) => step.step_id === "g7.steer");
+    expect(run("denied")).toMatchObject({ outcome: "fail", reason: "command_denied_later" });
+    expect(run("outcome_unknown")).toMatchObject({ outcome: "uncertain", reason: "command_outcome_unknown_later" });
+    // Positive control: a command that progressed normally still passes.
+    expect(run("checked")).toMatchObject({ outcome: "pass", reason: null });
+  });
+
+  it("C2: a command-bearing call made between a step's window and the next baseline is unattributed, and the run is uncertain", async () => {
+    const { certifyStudioVoiceSteps } = await import("../src/studio-g7/calls-certification.js");
+    const certification = (extra: boolean) => certifyStudioVoiceSteps({ runExchangeId: EX, ownershipProven: true, stepInputEpochs: epochs, steps, events: [
+      read(1, "baseline", "op-create", "g7.create", at(10), null, []),
+      read(2, "after", "op-create", "g7.create", at(20), at(10), [rec(11, "native_task")]),
+      obs(3, "g7.create"),
+      read(4, "baseline", "op-steer", "g7.steer", at(30), null, [rec(11, "native_task", "checked")]),
+      read(5, "after", "op-steer", "g7.steer", at(40), at(30), [rec(31, "steer", "checked")]),
+      read(6, "baseline", "op-hold", "g7.hold", at(50), null, [rec(11, "native_task", "checked"), rec(31, "steer", "checked"), ...(extra ? [rec(41, "stop", "checked")] : [])]),
+      read(7, "after", "op-hold", "g7.hold", at(60), at(50), [rec(51, "hold", "checked")]),
+      obs(8, "g7.hold", "held"),
+    ] });
+    expect(certification(true).unattributed_seqs).toEqual([41]);
+    expect(certification(false).unattributed_seqs).toEqual([]);
+    // In the evaluation: a call recorded after the steer's own window read, listed only by later reads.
+    const evaluation = evaluate(g7Episode({ researchTask: RUN_TASK, calls: { byStep: happyCalls(), lateAfterRead: { "g7.steer": [call(41, "control_work", { kind: "stop" })] } } }));
+    expect(statusOf(evaluation, "outcome.calls_attributed")).toMatchObject({ status: "uncertain", reason: "unattributed_call" });
+    expect(evaluation.outcome.unattributed_call_seqs).toEqual([41]);
+    expect(evaluation.verdicts.product).not.toBe("pass");
+    // Positive control: every call in some step's window.
+    expect(statusOf(evaluate(g7Episode({ researchTask: RUN_TASK, calls: { byStep: happyCalls() } })), "outcome.calls_attributed")).toMatchObject({ status: "pass" });
+  });
+});
+
+describe("delta 5 nits: the withdrawal's design end needs a committed withdrawal and a settled Stop", () => {
+  const designEnded = (options: G7Options) => statusOf(evaluate(g7Episode({ researchTask: RUN_TASK, calls: { byStep: happyCalls() }, ...options })), "step.g7.withdrawal.design_ended");
+
+  it("a refused withdrawal never ends the design", () => {
+    expect(designEnded({ withdrawalCommitted: false })).toMatchObject({ status: "unavailable", reason: "withdrawal_not_committed" });
+  });
+
+  it("a cancellation the preceding Stop may cause is never the withdrawal's: Stop's effect must have settled before it", () => {
+    expect(designEnded({ stopEffect: { phase: "stopping", state: "running" } })).toMatchObject({ status: "uncertain", reason: "stop_effect_not_settled_before_withdrawal" });
+    // Stop settled, the design live after it: only the missing note-to-design link keeps it uncertain.
+    expect(designEnded({ stopEffect: { phase: "stopped", state: "cancelled" } })).toMatchObject({ status: "uncertain", reason: "withdrawn_note_not_linked_to_design" });
   });
 });

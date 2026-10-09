@@ -43,6 +43,8 @@ import { canonicalJson } from "./contract.js";
  */
 export const STUDIO_CALLS_READ_KIND = "studio.exchange.calls_read" as const;
 export const STUDIO_CALLS_READ_SCHEMA = "sophia_voice_lab_studio_exchange_calls_v1" as const;
+/** The step id of End's read of every call (a baseline of no step: it bounds the last step's window and lists every later call). */
+export const STUDIO_CALLS_END_STEP = "final" as const;
 
 export const STUDIO_VOICE_STEP_COMMAND_KIND: Readonly<Record<string, string>> = Object.freeze({
   "g7.create": "native_task", "g7.steer": "steer", "g7.hold": "hold", "g7.resume": "resume", "g7.stop": "stop",
@@ -86,6 +88,12 @@ export interface StudioStepCertification {
 
 export interface StudioCallsCertification {
   steps: StudioStepCertification[];
+  /**
+   * Command-bearing calls some read listed that fall in no step's window
+   * (made between a step's window read and the next baseline, or before the
+   * first): the run's calls are then not all accounted for.
+   */
+  unattributed_seqs: number[];
   /** The task the certified create step made, and its goal; null unless certified. */
   createdTaskId: string | null;
   createdGoalId: string | null;
@@ -159,6 +167,8 @@ export function certifyStudioVoiceSteps(input: {
   let lastControlEpoch: number | null = null;
   const results = new Map<string, StudioStepCertification>();
 
+  // Every call each step's window read listed (attributed to that step's window, whatever its outcome).
+  const windowSeqs = new Set<number>();
   ordering.forEach(({ step, baseline }, index) => {
     const result: StudioStepCertification = { step_id: step.stepId, operation_id: step.operationId, outcome: "unavailable", reason: null, baseline_read_at: null, candidate_seqs: [], call_outcome: null, command_id: null, command_kind: null, goal_id: null, authority_epoch: null, task_id: null, evidence_seqs: [] };
     results.set(step.operationId, result);
@@ -190,6 +200,7 @@ export function certifyStudioVoiceSteps(input: {
     const window = after.find((event) => event.payload.settled === true) ?? null;
     if (window === null) return settle("uncertain", "call_unanswered");
     result.evidence_seqs.push(window.seq);
+    for (const call of callsOf(window)) windowSeqs.add(call.seq);
     // A command-bearing call one read listed and a later read of the same window no longer lists: not one stable record.
     for (const [position, earlier] of after.entries()) {
       for (const later of after.slice(position + 1)) {
@@ -222,6 +233,12 @@ export function certifyStudioVoiceSteps(input: {
     if (certifiedCommands.has(command.command_id)) return settle("uncertain", "command_already_certified");
     if (command.state === "denied") return settle("fail", "command_denied");
     if (UNCERTIFIABLE_STATES.has(command.state)) return settle("uncertain", `command_${command.state}`);
+    // The command's state as every LATER answered read shows it: denied, or of
+    // unknown outcome, after the window is never a pass.
+    const laterStates = new Set(answeredReads.filter((event) => event.seq > window.seq).flatMap(callsOf)
+      .filter((later) => later.command !== null && later.command.command_id === command.command_id).map((later) => later.command!.state));
+    if (laterStates.has("denied")) return settle("fail", "command_denied_later");
+    if (laterStates.has("outcome_unknown")) return settle("uncertain", "command_outcome_unknown_later");
     // The snapshot's view of the run's task, seen after this step's baseline and before the next step.
     const stepObservations = observations.filter((event) => event.seq > baseline.seq && event.seq <= upper);
     const taskSeen = (taskId: string) => [...stepObservations, ...observations.filter((event) => event.seq > upper)].reverse()
@@ -265,8 +282,13 @@ export function certifyStudioVoiceSteps(input: {
     return settle("pass", null);
   });
 
+  // A command-bearing call a later read listed (a baseline, or the End read)
+  // that no step's window holds was never examined by any step.
+  const bearing = new Set(answeredReads.flatMap(callsOf).filter((call) => call.command !== null).map((call) => call.seq));
+  const unattributed = [...bearing].filter((seq) => !windowSeqs.has(seq)).sort((left, right) => left - right);
   return {
     steps: input.steps.map((step) => results.get(step.operationId)!),
+    unattributed_seqs: unattributed,
     createdTaskId,
     createdGoalId,
     answered: answeredReads.length > 0,

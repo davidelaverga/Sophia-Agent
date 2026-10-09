@@ -1,6 +1,6 @@
 import { decideStudioDeadOwnerRelease } from "./studio-g7/lease-release.js";
 import { studioStepConflict } from "./studio-g7/step-guard.js";
-import { STUDIO_GLOBAL_SIGNOUT_CLEARED_KIND, STUDIO_GLOBAL_SIGNOUT_PENDING_CODE, STUDIO_GLOBAL_SIGNOUT_PENDING_KIND, studioOutstandingSignOutMarkers, studioSignOutMarkerAbandoned, studioWorkerIdSha256 } from "./studio-g7/sign-out-fence.js";
+import { STUDIO_GLOBAL_SIGNOUT_CLEARED_KIND, STUDIO_GLOBAL_SIGNOUT_PENDING_CODE, STUDIO_GLOBAL_SIGNOUT_PENDING_KIND, studioHeartbeatBootIdSha256, studioOutstandingSignOutMarkers, studioSignOutMarkerAbandoned, studioWorkerIdSha256, type StudioSignOutClearOutcome } from "./studio-g7/sign-out-fence.js";
 import { deriveExecutionOwnership } from "./execution-ownership.js";
 import { canonicalEvidenceRefreshDue } from "./canonical-evidence-refresh.js";
 import { ingestGenericOwnerLoss } from "./generic-owner-loss.js";
@@ -84,10 +84,10 @@ export class MemoryVoiceLabLedger implements VoiceLabLedger {
   async countLiveSessionRunsExcept(runId: string): Promise<number> { return this.#liveSessionRunsExcept(runId); }
   /** The run's outstanding sign-out markers, each with whether it is provably abandoned (its owner dead). */
   #signOutMarkers(runId: string, now: Date) {
-    const heartbeats = new Map([...this.#workerHeartbeats.values()].map((heartbeat) => [studioWorkerIdSha256(heartbeat.workerId), heartbeat.observedAt]));
+    const heartbeats = new Map([...this.#workerHeartbeats.values()].map((heartbeat) => [studioWorkerIdSha256(heartbeat.workerId), { at: heartbeat.observedAt, bootIdSha256: studioHeartbeatBootIdSha256(heartbeat.attestation) }]));
     return studioOutstandingSignOutMarkers(this.#events.get(runId) ?? []).map((marker) => ({ marker, abandoned: studioSignOutMarkerAbandoned(marker, marker.ownerWorkerIdSha256 === null ? null : heartbeats.get(marker.ownerWorkerIdSha256) ?? null, now) }));
   }
-  async beginStudioGlobalSignOut(runId: string, markerId: string, ownerWorkerId: string): Promise<{ granted: boolean; liveSessionRuns: number; reason: "granted" | "sign_out_in_flight" | "live_session_runs" }> {
+  async beginStudioGlobalSignOut(runId: string, markerId: string, ownerWorkerId: string, ownerBootIdSha256: string | null = null): Promise<{ granted: boolean; liveSessionRuns: number; reason: "granted" | "sign_out_in_flight" | "live_session_runs" }> {
     // One synchronous section (no await): atomic with createRunWithOperation.
     const run = this.#runs.get(runId);
     if (!run) throw notFound("RUN_NOT_FOUND", "Run was not found.");
@@ -109,16 +109,24 @@ export class MemoryVoiceLabLedger implements VoiceLabLedger {
       const control = this.#recoveryControls.get(runId);
       if (control) { control.liveCleanupComplete = false; control.version += 1; }
     }
-    events.push({ runId, seq: events.length + 1, kind: STUDIO_GLOBAL_SIGNOUT_PENDING_KIND, source: "worker", at: now, payload: { marker_id: markerId, previous_cleanup_complete: previousCleanupComplete, owner_worker_id_sha256: studioWorkerIdSha256(ownerWorkerId) }, dedupeKey: `studio-global-sign-out-pending:${runId}:${markerId}` });
+    events.push({ runId, seq: events.length + 1, kind: STUDIO_GLOBAL_SIGNOUT_PENDING_KIND, source: "worker", at: now, payload: { marker_id: markerId, previous_cleanup_complete: previousCleanupComplete, owner_worker_id_sha256: studioWorkerIdSha256(ownerWorkerId), owner_boot_id_sha256: ownerBootIdSha256 }, dedupeKey: `studio-global-sign-out-pending:${runId}:${markerId}` });
     this.#events.set(runId, events);
     run.latestCursor = events.length;
     run.updatedAt = now;
     return { granted: true, liveSessionRuns: 0, reason: "granted" };
   }
   async holdsStudioGlobalSignOut(runId: string, markerId: string): Promise<boolean> {
-    return studioOutstandingSignOutMarkers(this.#events.get(runId) ?? []).some((marker) => marker.markerId === markerId);
+    // An abandoned marker is held by nobody: its stale owner never logs out globally.
+    return this.#signOutMarkers(runId, new Date()).some((item) => item.marker.markerId === markerId && !item.abandoned);
   }
-  async endStudioGlobalSignOut(runId: string, markerId: string, outcome: "confirmed" | "abandoned"): Promise<void> {
+  async listStudioSignOutMarkersOwnedBy(ownerWorkerIdSha256: string, limit: number): Promise<Array<{ runId: string; markerId: string; ownerBootIdSha256: string | null }>> {
+    return [...this.#events.entries()]
+      .flatMap(([runId, events]) => studioOutstandingSignOutMarkers(events).filter((marker) => marker.ownerWorkerIdSha256 === ownerWorkerIdSha256).map((marker) => ({ runId, marker })))
+      .sort((left, right) => left.marker.at.getTime() - right.marker.at.getTime())
+      .slice(0, limit)
+      .map(({ runId, marker }) => ({ runId, markerId: marker.markerId, ownerBootIdSha256: marker.ownerBootIdSha256 }));
+  }
+  async endStudioGlobalSignOut(runId: string, markerId: string, outcome: StudioSignOutClearOutcome): Promise<void> {
     await this.appendEvent(runId, STUDIO_GLOBAL_SIGNOUT_CLEARED_KIND, "worker", { marker_id: markerId, outcome }, `studio-global-sign-out-cleared:${runId}:${markerId}`);
   }
   async countActiveRuns(callerId?: string): Promise<number> {
@@ -776,7 +784,7 @@ export class MemoryVoiceLabLedger implements VoiceLabLedger {
     });
     if (!decision.release) return { released: false, reason: decision.reason };
     this.#browserLeases.delete(runId);
-    return { released: true, reason: decision.basis === "owner_cleanup_complete" ? "dead_owner_cleanup_complete" : "dead_owner_quiesced" };
+    return { released: true, reason: decision.basis === "owner_cleanup_complete" ? "dead_owner_cleanup_complete" : decision.presenceVetoExpired ? "dead_owner_quiesced_presence_veto_expired" : "dead_owner_quiesced" };
   }
   async heartbeatWorker(heartbeat: WorkerHeartbeat): Promise<void> { this.#workerHeartbeats.set(heartbeat.workerId, clone(heartbeat)); }
   async listLiveWorkers(since: Date): Promise<WorkerHeartbeat[]> { return clone([...this.#workerHeartbeats.values()].filter((heartbeat) => heartbeat.observedAt >= since)); }
