@@ -86,6 +86,16 @@ Running migrate twice is the expected idempotency check. `SOPHIA_VOICE_LAB_TEST_
 
 The Studio G7 product-shape test (`-t PRODUCT-SHAPE-SQL`, in `test/studio-g7-evaluate.test.ts`) applies the product's own migrations (`SOPHIA_VOICE_LAB_PRODUCT_MIGRATIONS_DIR`, e.g. from `git archive <product commit> db/migrations`) to a disposable database (`SOPHIA_VOICE_LAB_PRODUCT_SHAPE_DATABASE_URL`, named `voice_lab_test_studio_product*`, with `SOPHIA_VOICE_LAB_TEST_DATABASE_RESET_APPROVED=YES`). Without them it is skipped; set `SOPHIA_VOICE_LAB_REQUIRE_PRODUCT_SHAPE=1` in any receipt run so that a missing variable fails instead of skipping.
 
+**Python verifier environments.** `test/security.test.ts` ("golden HMAC vectors accepted by the actual Python Gateway and Voice verifiers") runs the real gateway and voice verifiers, each in its project's own Python 3.12 environment. Create both once, from the repository root (`uv` installs from the network, or `--offline` from a populated local cache; `backend/uv.lock` and every tracked file stay unchanged, and both directories are gitignored):
+
+```bash
+(cd backend && uv sync --group dev)                    # backend/.venv
+uv venv voice/.venv --python 3.12
+uv pip install --python voice/.venv/bin/python -r voice/requirements-dev.txt   # voice/.venv
+```
+
+Without them that test fails, never skips: it names the missing interpreter and the command above. It also checks that both verifiers refuse the same claims signed with another secret.
+
 ## Required production configuration
 
 All credentials below must be distinct and at least 32 bytes. They are secret environment variables and must never appear in MCP results, logs, manifests, or plugin files.

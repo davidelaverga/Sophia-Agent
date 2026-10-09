@@ -137,14 +137,29 @@ describe("security contracts", () => {
     const secret = "cross-language-capability-secret-000001";
     const now = Math.floor(Date.now() / 1_000);
     const gateway = new CapabilityCodec(secret, "sophia-frontend", 120).mint({ ...INPUT, aud: "sophia-voice-gateway", allowed_ops: ["voice:start"] }, new Date(now * 1_000));
-    const gatewayCode = `from app.gateway.voice_lab_capability import verify_capability\nverify_capability(${JSON.stringify(gateway.token)}, secret=${JSON.stringify(secret)}, audience='sophia-voice-gateway', issuer='sophia-frontend', principal_id='voice-lab-user-1', environment='production', required_operation='voice:start', expected_build_key='backend', expected_build=${JSON.stringify(SHA_B)}, now_seconds=${now})`;
-    const gatewayResult = spawnSync(path.join(repo, "backend/.venv/bin/python"), ["-c", gatewayCode], { cwd: path.join(repo, "backend"), env: { ...process.env, PYTHONPATH: ".", SOPHIA_VOICE_LAB_MAX_TTL_SECONDS: "300" }, encoding: "utf8" });
+    // The real verifiers run in each project's own uv environment (README: "Python verifier environments"):
+    // backend/.venv from `cd backend && uv sync --group dev`, voice/.venv from voice/requirements-dev.txt.
+    const gatewayPython = path.join(repo, "backend/.venv/bin/python");
+    const voicePython = path.join(repo, "voice/.venv/bin/python");
+    const gatewayVerify = (token: string) => spawnSync(gatewayPython, ["-c", `from app.gateway.voice_lab_capability import verify_capability\nverify_capability(${JSON.stringify(token)}, secret=${JSON.stringify(secret)}, audience='sophia-voice-gateway', issuer='sophia-frontend', principal_id='voice-lab-user-1', environment='production', required_operation='voice:start', expected_build_key='backend', expected_build=${JSON.stringify(SHA_B)}, now_seconds=${now})`], { cwd: path.join(repo, "backend"), env: { ...process.env, PYTHONPATH: ".", SOPHIA_VOICE_LAB_MAX_TTL_SECONDS: "300" }, encoding: "utf8" });
+    const gatewayResult = gatewayVerify(gateway.token);
+    expect(gatewayResult.error, `${gatewayPython} did not run: create the backend uv environment (cd backend && uv sync --group dev)`).toBeUndefined();
     expect(gatewayResult.status, gatewayResult.stderr).toBe(0);
 
     const runtime = new CapabilityCodec(secret, "sophia-gateway", 120).mint({ ...INPUT, aud: "sophia-voice-runtime", allowed_ops: ["voice:start"] }, new Date(now * 1_000));
-    const voiceCode = `from internal_auth import _verify_runtime_capability\n_verify_runtime_capability(${JSON.stringify(runtime.token)}, principal_id='voice-lab-user-1', environment='production', required_operation='voice:start')`;
-    const voiceResult = spawnSync(path.join(repo, "voice/.venv/bin/python"), ["-c", voiceCode], { cwd: path.join(repo, "voice"), env: { ...process.env, PYTHONPATH: ".", SOPHIA_VOICE_LAB_CAPABILITY_SECRET: secret, SOPHIA_VOICE_LAB_MAX_TTL_SECONDS: "300", SOPHIA_DEPLOYMENT_SHA: SHA_C }, encoding: "utf8" });
+    const voiceVerify = (token: string) => spawnSync(voicePython, ["-c", `from internal_auth import _verify_runtime_capability\n_verify_runtime_capability(${JSON.stringify(token)}, principal_id='voice-lab-user-1', environment='production', required_operation='voice:start')`], { cwd: path.join(repo, "voice"), env: { ...process.env, PYTHONPATH: ".", SOPHIA_VOICE_LAB_CAPABILITY_SECRET: secret, SOPHIA_VOICE_LAB_MAX_TTL_SECONDS: "300", SOPHIA_DEPLOYMENT_SHA: SHA_C }, encoding: "utf8" });
+    const voiceResult = voiceVerify(runtime.token);
+    expect(voiceResult.error, `${voicePython} did not run: create the voice uv environment (uv venv voice/.venv --python 3.12 && uv pip install --python voice/.venv/bin/python -r voice/requirements-dev.txt)`).toBeUndefined();
     expect(voiceResult.status, voiceResult.stderr).toBe(0);
+
+    // Negative controls: the same claims signed with another secret are refused by both real verifiers, on the signature.
+    const foreign = "cross-language-capability-secret-000002";
+    const forgedGateway = gatewayVerify(new CapabilityCodec(foreign, "sophia-frontend", 120).mint({ ...INPUT, aud: "sophia-voice-gateway", allowed_ops: ["voice:start"] }, new Date(now * 1_000)).token);
+    expect(forgedGateway.status).toBe(1);
+    expect(forgedGateway.stderr).toContain("voice_lab_capability_invalid_signature");
+    const forgedRuntime = voiceVerify(new CapabilityCodec(foreign, "sophia-gateway", 120).mint({ ...INPUT, aud: "sophia-voice-runtime", allowed_ops: ["voice:start"] }, new Date(now * 1_000)).token);
+    expect(forgedRuntime.status).toBe(1);
+    expect(forgedRuntime.stderr).toContain("voice_lab_capability_invalid_signature");
   });
 
   it("redacts transcripts and hard-aborts native continuation/resumption secrets", () => {
