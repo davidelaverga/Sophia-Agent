@@ -26,6 +26,37 @@ Every merged PR appends an entry here. This file is the team's accumulating inst
 ## Log
 <!-- Append new entries below this line -->
 
+## 2026-10-09 · [voice-lab · Studio G7 labrev7 nits] · PR #TBD
+**Author:** Claude · **Track:** voice · **Spec:** pack 03 G7; independent review of 5d4463d (labrev7: the four labrev6 findings confirmed fixed, no P1/P2/P3, five nits); fixes in 2b8dbd8 and 6cf354b (tests only)
+
+### What Changed
+- **The epoch join's residual is now stated as the code applies it, and pinned by tests.** A count-preserving shift is unseen whenever every displaced window shows a count within its new step's bounds: 1 to the step's own listed calls, or 0 to them for a step without a command. The review's R1 and R2 are pinned tests.
+- **A call refused before it is recorded (by the bridge, or the API's `not_declared`) still refuses the whole join.** It is documented as a known false negative, with the reason: such a window cannot be told from a shifted one, and a shift displaces every step from an unknown point on.
+- **The settlement gate waits for each arrived window's `input_turn`, bounded at 5 s.** Before `session_closed`, the cross-check skips a window whose turn has not arrived; after it, every window is checked, even when no drop is detected.
+- **`design_ended` needs S to be the only source newly withdrawn from X's closure.** Otherwise it is `concurrent_foreign_withdrawal`.
+- **The product-shape test is `PRODUCT-SHAPE-SQL`.**
+  - With `SOPHIA_VOICE_LAB_REQUIRE_PRODUCT_SHAPE=1`, it fails instead of skipping when its variables are missing.
+  - On the product's own SQL, it now asserts the `withdraw_note` receipt's `sourceId` is S, and `task_withdrawn_sources` is [] before and [S] after for the research that drew on S.
+  - The design-edit revocation needs the runtime protocol, so it stays covered by the product's own test.
+- Plugin 0.2.17+codex.20261009164559. Toolchain: Node v22.22.0 and pnpm 10.26.2 (corepack).
+
+### What We Learned
+- **State a residual exactly as the code bounds it.** "Exactly as many" described one case of a 1..n range, and the review found the rest.
+- **When an anomaly cannot be told apart from an attack, refuse the whole inference rather than scope the refusal.** A local excess of tool calls may mark a shift that began earlier.
+- **A gate that waits on one receipt of a pair races its partner.** The bridge sends `input_turn` as a separate POST after its window.
+- **"S was withdrawn" is not "the withdrawal caused it" unless S is the only new withdrawal in the window.**
+- **An env-gated test must be able to fail when it is required, and must exercise the fields the verdict actually joins on.**
+- **Review state:** 2b8dbd8 and 6cf354b are not yet reviewed.
+
+### CLAUDE.md Updates
+- None
+
+### Skills Created / Modified
+- `plugins/sophia-voice-lab/skills/autonomous-voice-dogfood/references/evidence-interpretation.md`: the epoch join's cross-check, and the single-new-source rule for the withdrawal's end.
+
+### GEPA Log Entry
+- N/A
+
 ## 2026-10-09 · [voice-lab · Studio G7 labrev6 fixes, and a correction to the entry below] · PR #TBD
 **Author:** Claude · **Track:** voice · **Spec:** pack 03 G7; independent review of 1df8d1b..7f23015 (labrev6); fixes in 5d4463d
 
