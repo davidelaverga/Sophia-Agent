@@ -15,15 +15,15 @@ export type StudioG7StepExecutor =
   /** A `studio_action` operation (MCP `studio_g7_action`): a room UI action or a member-API request as the principal. */
   | "studio_action";
 
-export const STUDIO_G7_VOICE_STEPS = ["create", "steer", "hold", "resume", "stop"] as const;
+export const STUDIO_G7_VOICE_STEPS = ["create", "steer", "hold", "resume", "create_stop_target", "stop"] as const;
 export type StudioG7VoiceStep = typeof STUDIO_G7_VOICE_STEPS[number];
-export const STUDIO_G7_ACTIONS = ["leave_and_return", "section_revision", "stale_edit", "withdrawal"] as const;
+export const STUDIO_G7_ACTIONS = ["record_note", "leave_and_return", "section_revision", "stale_edit", "withdrawal"] as const;
 export type StudioG7Action = typeof STUDIO_G7_ACTIONS[number];
 
 export interface StudioG7Step {
   id: string;
   ordinal: number;
-  intent: "create_html_by_voice" | "steer_by_voice" | "leave_and_return" | "section_revision" | "stale_edit" | "hold_by_voice" | "resume_by_voice" | "stop_by_voice" | "withdrawal";
+  intent: "record_note" | "create_html_by_voice" | "steer_by_voice" | "leave_and_return" | "section_revision" | "stale_edit" | "hold_by_voice" | "resume_by_voice" | "create_stop_target_by_voice" | "stop_by_voice" | "withdrawal";
   executor: StudioG7StepExecutor;
   /** The `step` (voice) or `action` value that performs it. */
   label: StudioG7VoiceStep | StudioG7Action;
@@ -65,16 +65,25 @@ export const STUDIO_G7_CATALOG: readonly StudioG7Scenario[] = Object.freeze([
     target_kind: STUDIO_G7_TARGET_KIND,
     summary: "Pack 03 G7 synthetic in-app episode through the Studio room microphone and the member API",
     required_tools: ["start_studio_g7_run", "studio_g7_voice_step", "studio_g7_action", "inspect_voice_run", "wait_for_turn", "end_voice_run", "export_voice_evidence"],
+    // The order the product supports (its lifecycle, observed on real
+    // PostgreSQL: voice-episode.db.test.ts): the note the research draws on
+    // first; hold and resume while the first design is live; the revision
+    // (an edit, X) once that design published; the withdrawal of the note
+    // while X is live; then a separate, bounded voice-created task of the
+    // run's own that Stop ends (after the withdrawal nothing of the main goal
+    // is left for Stop).
     steps: [
-      voice("g7.create", 1, "create_html_by_voice", "create"),
-      voice("g7.steer", 2, "steer_by_voice", "steer"),
-      { id: "g7.leave_return", ordinal: 3, intent: "leave_and_return", executor: "studio_action", label: "leave_and_return", availability: "supported", unavailable_reason: null, outcome_join: "lab_owned", evidence: ["studio.room.left", "studio.room.rejoined", "page:mic_unpublished", "page:mic_published", "studio.outcome.observed"] },
-      { id: "g7.section_revision", ordinal: 4, intent: "section_revision", executor: "studio_action", label: "section_revision", availability: "supported", unavailable_reason: null, outcome_join: "canonical", evidence: ["studio.action.html_edit", "studio.outcome.observed"] },
-      { id: "g7.stale_edit", ordinal: 5, intent: "stale_edit", executor: "studio_action", label: "stale_edit", availability: "supported", unavailable_reason: null, outcome_join: "canonical", evidence: ["studio.action.html_edit"] },
-      voice("g7.hold", 6, "hold_by_voice", "hold"),
-      voice("g7.resume", 7, "resume_by_voice", "resume"),
-      voice("g7.stop", 8, "stop_by_voice", "stop"),
+      { id: "g7.record_note", ordinal: 1, intent: "record_note", executor: "studio_action", label: "record_note", availability: "supported", unavailable_reason: null, outcome_join: "canonical", evidence: ["studio.action.record_note"] },
+      voice("g7.create", 2, "create_html_by_voice", "create"),
+      voice("g7.steer", 3, "steer_by_voice", "steer"),
+      { id: "g7.leave_return", ordinal: 4, intent: "leave_and_return", executor: "studio_action", label: "leave_and_return", availability: "supported", unavailable_reason: null, outcome_join: "lab_owned", evidence: ["studio.room.left", "studio.room.rejoined", "page:mic_unpublished", "page:mic_published", "studio.outcome.observed"] },
+      voice("g7.hold", 5, "hold_by_voice", "hold"),
+      voice("g7.resume", 6, "resume_by_voice", "resume"),
+      { id: "g7.section_revision", ordinal: 7, intent: "section_revision", executor: "studio_action", label: "section_revision", availability: "supported", unavailable_reason: null, outcome_join: "canonical", evidence: ["studio.action.html_edit", "studio.outcome.observed"] },
+      { id: "g7.stale_edit", ordinal: 8, intent: "stale_edit", executor: "studio_action", label: "stale_edit", availability: "supported", unavailable_reason: null, outcome_join: "canonical", evidence: ["studio.action.html_edit"] },
       { id: "g7.withdrawal", ordinal: 9, intent: "withdrawal", executor: "studio_action", label: "withdrawal", availability: "supported", unavailable_reason: null, outcome_join: "canonical", evidence: ["studio.action.withdrawal", "studio.outcome.observed"] },
+      voice("g7.create_stop_target", 10, "create_stop_target_by_voice", "create_stop_target"),
+      voice("g7.stop", 11, "stop_by_voice", "stop"),
     ],
   },
 ] satisfies StudioG7Scenario[]);

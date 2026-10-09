@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 
 /**
- * Studio G7 adapter contract (`sophia.studio-g7.v1`).
+ * Studio G7 adapter contract (`sophia.studio-g7.v2`: the episode in the order the product's lifecycle supports).
  *
  * This module is the Lab-side reading of the product contract
  * `sophia.voice-qualification.v1` (docs/plans/voice-qualification-g7.md in the
@@ -19,7 +19,9 @@ export const TARGET_KINDS = [LEGACY_TARGET_KIND, STUDIO_G7_TARGET_KIND] as const
 export type TargetKind = typeof TARGET_KINDS[number];
 
 /** The Lab's scenario/target contract version for this adapter. */
-export const STUDIO_G7_CONTRACT_VERSION = "sophia.studio-g7.v1" as const;
+export const STUDIO_G7_CONTRACT_VERSION = "sophia.studio-g7.v2" as const;
+/** A design (or edit) task's states while its work is under way (DesignProgress). */
+export const STUDIO_LIVE_DESIGN_STATES: ReadonlySet<string> = new Set(["designing", "reviewing"]);
 /** The product contract this adapter reads. */
 export const STUDIO_G7_PRODUCT_CONTRACT = "sophia.voice-qualification.v1" as const;
 export const STUDIO_PAGE_RECEIPT_SCHEMA = "sophia.studio.voice_qualification.v1" as const;

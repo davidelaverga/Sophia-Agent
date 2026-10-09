@@ -146,8 +146,8 @@ describe("Studio G7 contract strictness", () => {
     const steps = STUDIO_G7_CATALOG[0]!.steps;
     // Every G7 step (pack L3 order) is an operation: speak or studio_action, none only a driver method.
     expect(steps.every((step) => step.availability === "supported" && (step.executor === "speak" || step.executor === "studio_action"))).toBe(true);
-    expect(steps.map((step) => step.intent)).toEqual(["create_html_by_voice", "steer_by_voice", "leave_and_return", "section_revision", "stale_edit", "hold_by_voice", "resume_by_voice", "stop_by_voice", "withdrawal"]);
-    expect(steps.filter((step) => step.executor === "speak").map((step) => step.outcome_join)).toEqual(["exchange_calls", "exchange_calls", "exchange_calls", "exchange_calls", "exchange_calls"]);
+    expect(steps.map((step) => step.intent)).toEqual(["record_note", "create_html_by_voice", "steer_by_voice", "leave_and_return", "hold_by_voice", "resume_by_voice", "section_revision", "stale_edit", "withdrawal", "create_stop_target_by_voice", "stop_by_voice"]);
+    expect(steps.filter((step) => step.executor === "speak").map((step) => step.outcome_join)).toEqual(["exchange_calls", "exchange_calls", "exchange_calls", "exchange_calls", "exchange_calls", "exchange_calls"]);
     expect(STUDIO_G7_CATALOG[0]!.required_tools).toEqual(expect.arrayContaining(["start_studio_g7_run", "studio_g7_voice_step", "studio_g7_action"]));
   });
 

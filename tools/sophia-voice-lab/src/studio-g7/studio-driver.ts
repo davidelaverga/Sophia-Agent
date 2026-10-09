@@ -35,6 +35,7 @@ import { VoiceLabError, labError, type DeploymentIdentity, type LabEvent, type R
 import { redact, sha256 as labSha256, validateAllowedOrigin } from "../security.js";
 import {
   STUDIO_G7_CONTRACT_VERSION,
+  STUDIO_LIVE_DESIGN_STATES,
   STUDIO_G7_TARGET_KIND,
   STUDIO_RUN_BINDING_SCHEMA,
   StudioContractViolation,
@@ -65,6 +66,8 @@ const MAX_VERIFIED_ARTIFACTS = 4;
 /** Waits before each local revoke attempt of the evidence-refresh session (three attempts). */
 export const STUDIO_REFRESH_REVOKE_BACKOFF_MS: readonly number[] = [0, 500, 1_000];
 export const STALE_EDIT_PROBE_INSTRUCTION = "Voice Lab stale-edit probe: revise this section of a superseded version.";
+/** The run's own synthetic note, recorded first; the create utterance asks for research that draws on it. */
+export const STUDIO_G7_NOTE_TEXT = "Families in the pilot prefer Saturday morning sessions near the river.";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const SECTION = /^[a-z][a-z0-9-]{0,63}$/;
 
@@ -498,6 +501,10 @@ export class StudioG7Driver implements VoiceBrowserDriver, StudioDriverExtension
     const session = this.#requireSession(run.id);
     const tokens = this.#tokenSource(session);
     if (Object.hasOwn(input, "_own_create_task_id")) this.setStudioOwnCreateTask(run.id, typeof input._own_create_task_id === "string" ? input._own_create_task_id : null);
+    // The run's own note, handed over from its durable record_note receipt.
+    if (typeof input._own_note_entry_id === "string" && typeof input._own_note_source_id === "string" && UUID.test(input._own_note_entry_id) && UUID.test(input._own_note_source_id)) {
+      this.#ownNote.set(run.id, { entryId: input._own_note_entry_id.toLowerCase(), sourceId: input._own_note_source_id.toLowerCase() });
+    }
     if (action === "observe") {
       // Not a step: a read-only outcome read for a voice step, optionally
       // after a bounded wait so the product can act on the utterance.
@@ -517,6 +524,12 @@ export class StudioG7Driver implements VoiceBrowserDriver, StudioDriverExtension
     const events: DriverEvent[] = [...await this.drain(run.id, true)];
     const focus: string[] = [];
     let receipt: Record<string, unknown>;
+    if (action === "record_note") {
+      // No outcome observation: the note's effect is read where it matters (the research's inputs, the withdrawal).
+      const result = await this.#recordNoteAction(run, tokens, operationId, input);
+      events.push(...result.events);
+      return { receipt: { action, step_id: stepId, ...result.receipt, execution_epoch_sha256: session.ownership.executionEpochSha256 }, events: [...events, ...await this.drain(run.id, true)] };
+    }
     if (action === "leave_and_return") {
       const before = await this.#observeOutcome(run, tokens, `${stepId}:before`, [], operationId);
       events.push(before.event);
@@ -679,6 +692,7 @@ export class StudioG7Driver implements VoiceBrowserDriver, StudioDriverExtension
     this.#sessions.clear();
     this.#ownCreate.clear();
     this.#focus.clear();
+    this.#ownNote.clear();
     await this.#readiness.close();
     if (results.some((result) => !result.closed)) throw studioError("BROWSER_PROCESS_CLOSE_FAILED", "Worker shutdown could not prove every owned browser process closed.", "harness", true, { unresolved_processes: results.filter((result) => !result.closed).length });
   }
@@ -1122,10 +1136,47 @@ export class StudioG7Driver implements VoiceBrowserDriver, StudioDriverExtension
     return { status: "found", createTaskId, designTaskId, artifactId: progress.artifactId, publishedVersionId: progress.publishedVersionId, versions: versions.value, sections: progress.sections };
   }
 
+  /**
+   * The run's own live work: its own design (create task -> research ->
+   * designTaskId -> the design naming that research back) and the Lab's own
+   * edits of that design's artifact (same research), each read as the
+   * principal; live while designing or reviewing.
+   */
+  async #ownLiveWork(run: RunRecord, tokens: TokenSource): Promise<{ status: "found"; createTaskId: string; designTaskId: string; liveTaskIds: string[] } | { status: "refused"; reason: string }> {
+    const createTaskId = this.#ownCreate.get(run.id) ?? null;
+    if (createTaskId === null) return { status: "refused", reason: "create_step_not_certified" };
+    const runExchange = this.#exchanges.get(run.id)?.exchangeId?.toLowerCase() ?? null;
+    const research = await this.#api.nativeTask(this.studio.projectId, createTaskId, await tokens.token());
+    if (research.status !== "available") return { status: "refused", reason: `own_research_${research.reason}` };
+    if (research.value.task.kind !== "research" || research.value.research === null || runExchange === null || research.value.task.exchangeId?.toLowerCase() !== runExchange) return { status: "refused", reason: "target_not_canonical" };
+    const designTaskId = research.value.research.designTaskId;
+    if (designTaskId === null) return { status: "refused", reason: "own_design_pending" };
+    const candidates = [designTaskId, ...this.#focusTasks(run.id).filter((id) => id !== designTaskId)];
+    let artifactId: string | null = null;
+    const liveTaskIds: string[] = [];
+    for (const taskId of candidates) {
+      const detail = await this.#api.nativeTask(this.studio.projectId, taskId, await tokens.token());
+      if (detail.status !== "available" || detail.value.design === null || detail.value.task.kind !== "design") {
+        if (taskId === designTaskId) return { status: "refused", reason: detail.status === "available" ? "target_not_canonical" : `own_design_${detail.reason}` };
+        continue;
+      }
+      const design = detail.value.design;
+      if (design.researchTaskId !== createTaskId || (detail.value.task.exchangeId !== null && detail.value.task.exchangeId.toLowerCase() !== runExchange)) {
+        if (taskId === designTaskId) return { status: "refused", reason: "target_not_canonical" };
+        continue;
+      }
+      if (taskId === designTaskId) artifactId = design.artifactId;
+      else if (design.artifactId !== artifactId) continue;
+      if (STUDIO_LIVE_DESIGN_STATES.has(design.state) && !["succeeded", "failed", "cancelled"].includes(detail.value.task.state)) liveTaskIds.push(taskId);
+    }
+    if (liveTaskIds.length === 0) return { status: "refused", reason: "no_own_live_design" };
+    return { status: "found", createTaskId, designTaskId, liveTaskIds };
+  }
+
   readonly #ownCreate = new Map<string, string | null>();
   /** Whether per-run own-chain state (the certified create, the Lab's edit tasks) is still held for this run (diagnostics). */
   retainsStudioRunState(runId: string): boolean {
-    return this.#ownCreate.has(runId) || this.#focus.has(runId);
+    return this.#ownCreate.has(runId) || this.#focus.has(runId) || this.#ownNote.has(runId);
   }
   /**
    * The run's certified create task (the create step's /calls certification),
@@ -1149,8 +1200,16 @@ export class StudioG7Driver implements VoiceBrowserDriver, StudioDriverExtension
       record({ status: outcome, reason, requested: false, ...extra });
       return { events, taskId: null, receipt: { performed: false, status: outcome, reason } };
     };
-    // Only the run's own report, on its canonical chain, is ever edited.
-    const target = await this.#resolveOwnReport(run, tokens);
+    // Only the run's own report, on its canonical chain, is ever edited. A
+    // revision first waits (bounded) for the own design to publish its page:
+    // the product admits no edit before (not_started:no_html_page).
+    const budget = typeof input._settle_budget_ms === "number" ? input._settle_budget_ms : this.#timeouts.designSettleMs;
+    const deadline = this.#now() + Math.min(typeof input.timeout_ms === "number" ? Math.max(input.timeout_ms, 0) : this.#timeouts.designSettleMs, this.#timeouts.designSettleMs, budget);
+    let target = await this.#resolveOwnReport(run, tokens);
+    while (purpose === "section_revision" && target.status !== "found" && target.reason === "own_design_pending" && this.#now() < deadline) {
+      await this.#wait(2_000);
+      target = await this.#resolveOwnReport(run, tokens);
+    }
     if (target.status !== "found") return notPerformed(target.reason, {}, target.outcome);
     const chain = { design_task_id: target.designTaskId, artifact_id: target.artifactId };
     const withPage = (versionId: string) => target.versions.some((version) => version.id === versionId && version.renditions.some((rendition) => rendition.format === "html"));
@@ -1161,8 +1220,9 @@ export class StudioG7Driver implements VoiceBrowserDriver, StudioDriverExtension
     // A revision sends the own artifact's CURRENT version (the version id
     // binds the request to that artifact: a later version of the own report,
     // e.g. a PDF rendition that keeps the page, is still the run's own). The
-    // stale probe sends the own design's published version once a newer
-    // version superseded it.
+    // stale probe sends an own version a newer one superseded (the newest
+    // such): the product checks staleness before anything else, so it is
+    // refused 409 stale_revision even while an edit is under way.
     let versionId: string;
     let supersededBy: string | null = null;
     if (purpose === "section_revision") {
@@ -1170,9 +1230,9 @@ export class StudioG7Driver implements VoiceBrowserDriver, StudioDriverExtension
       if (!withPage(current.id)) return notPerformed("current_version_has_no_designed_page", chain);
       versionId = current.id;
     } else {
-      versionId = target.publishedVersionId;
-      if (!withPage(versionId)) return notPerformed("own_version_has_no_designed_page", chain);
-      if (current === null || current.id === versionId) return notPerformed("no_superseded_version", chain);
+      const superseded = current === null ? null : target.versions.find((version) => version.id !== current.id) ?? null;
+      if (current === null || superseded === null) return notPerformed("no_superseded_version", chain);
+      versionId = superseded.id;
       supersededBy = current.id;
     }
     const instruction = purpose === "stale_edit" ? STALE_EDIT_PROBE_INSTRUCTION : typeof input.instruction === "string" ? input.instruction : "";
@@ -1189,26 +1249,47 @@ export class StudioG7Driver implements VoiceBrowserDriver, StudioDriverExtension
       sections, instruction_sha256: sha256(instruction), http_status: answer.http_status, code: answer.code,
       task_id: answer.receipt?.taskId ?? null, receipt_state: answer.receipt?.state ?? null, receipt_version_id: answer.receipt?.versionId ?? null,
     });
+    // The edit (X) is not waited for: the episode withdraws the note while X
+    // is still live. Its state at return is read once.
     let finalState: string | null = null;
     if (purpose === "section_revision" && answer.accepted && answer.receipt) {
-      const budget = typeof input._settle_budget_ms === "number" ? input._settle_budget_ms : this.#timeouts.designSettleMs;
-      const settle = Math.min(typeof input.timeout_ms === "number" ? Math.max(input.timeout_ms, 0) : this.#timeouts.designSettleMs, this.#timeouts.designSettleMs, budget);
-      const deadline = this.#now() + settle;
-      for (;;) {
-        const detail = await this.#api.nativeTask(this.studio.projectId, answer.receipt.taskId, await tokens.token());
-        finalState = detail.status === "available" ? detail.value.design?.state ?? null : null;
-        if (finalState !== null && ["published", "failed", "cancelled", "superseded"].includes(finalState)) break;
-        if (this.#now() >= deadline) break;
-        await this.#wait(2_000);
-      }
+      const detail = await this.#api.nativeTask(this.studio.projectId, answer.receipt.taskId, await tokens.token());
+      finalState = detail.status === "available" ? detail.value.design?.state ?? null : null;
     }
     return { events, taskId: answer.receipt?.taskId ?? null, receipt: { performed: true, status: payload.status, http_status: payload.http_status, code: payload.code, task_id: payload.task_id, design_state_at_return: finalState } };
   }
 
   /**
-   * Forget a note this run recorded by voice. Only a note bound to the run's
-   * own, ownership-proven exchange is withdrawn: the preview's ids and
-   * revisions are sent back with its proof, never its words.
+   * The run's own note, recorded through the principal's own member route
+   * (record_note): the receipt names the entry and the note's source S (the
+   * entry's source_id), which a research that draws on the note lists in its
+   * inputs and a withdrawal later reaches. The words are never kept.
+   */
+  async #recordNoteAction(run: RunRecord, tokens: TokenSource, operationId: string, input: Record<string, unknown>): Promise<{ events: DriverEvent[]; receipt: Record<string, unknown> }> {
+    const text = typeof input.text === "string" ? input.text : STUDIO_G7_NOTE_TEXT;
+    if (text.length < 1 || text.length > 2_000) throw studioError("STUDIO_ACTION_INVALID", "A note needs 1 to 2000 characters.", "validation");
+    const answer = await this.#api.recordNote(this.studio.projectId, { kind: "observation", epistemic: "reported", text }, await tokens.token(), `voice-lab-g7:${operationId}`);
+    const committed = answer.accepted && answer.receipt !== null && answer.receipt.status === "committed" && answer.receipt.operation === "record_note";
+    const payload = {
+      operation_id: operationId, requested: true, status: committed ? "committed" : "refused", http_status: answer.http_status, code: answer.code,
+      entry_id: answer.receipt?.entryId ?? null, source_id: answer.receipt?.sourceId ?? null, receipt_operation: answer.receipt?.operation ?? null, text_sha256: sha256(text),
+    };
+    this.#ownNote.set(run.id, committed ? { entryId: answer.receipt!.entryId, sourceId: answer.receipt!.sourceId } : null);
+    return { events: [{ kind: "studio.action.record_note", source: "canonical", payload, dedupeKey: contentKey("studio-record-note", run.id, payload) }],
+      receipt: { performed: true, status: payload.status, http_status: payload.http_status, code: payload.code, entry_id: payload.entry_id, source_id: payload.source_id } };
+  }
+
+  /** The run's own note (from its record_note receipt), as the worker last handed it over or as recorded by this driver. */
+  readonly #ownNote = new Map<string, { entryId: string; sourceId: string } | null>();
+
+  /**
+   * Forget the run's own note: the one its own record_note request recorded
+   * (else, without one, the one current note the principal recorded by voice
+   * in the run's ownership-proven exchange). The preview's ids and revisions
+   * are sent back with its proof, never its words, and only when the whole
+   * cascade is the run's own. The run's own live work (the edit X, resolved
+   * on the own chain) is recorded, never guessed: an edit that is no longer
+   * live leaves the design's end unproven, never a pass (evaluate.ts).
    */
   async #withdrawalAction(run: RunRecord, tokens: TokenSource, operationId: string, input: Record<string, unknown>): Promise<{ events: DriverEvent[]; receipt: Record<string, unknown> }> {
     const events: DriverEvent[] = [];
@@ -1225,40 +1306,48 @@ export class StudioG7Driver implements VoiceBrowserDriver, StudioDriverExtension
     events.push(proof.event);
     const exchangeId = this.#exchanges.get(run.id)?.exchangeId ?? null;
     if (proof.status !== "proven" || exchangeId === null) return notPerformed("exchange_ownership_unproven", { ownership: proof.status, ownership_reason: proof.reason });
+    const live = await this.#ownLiveWork(run, tokens);
+    const chain = live.status === "found"
+      ? { own_create_task_id: live.createTaskId, design_task_id: live.designTaskId, own_live_task_ids: live.liveTaskIds }
+      : { own_create_task_id: this.#ownCreate.get(run.id) ?? null, design_task_id: null, own_live_task_ids: [], own_live_reason: live.reason };
     const mission = await this.#api.mission(this.studio.projectId, await tokens.token());
-    if (mission.status !== "available") return notPerformed(`mission_${mission.reason}`);
-    const entries = { value: mission.value.entries };
+    if (mission.status !== "available") return notPerformed(`mission_${mission.reason}`, chain);
+    const entries = mission.value.entries;
     const principal = run.principalId.toLowerCase();
-    // The run's own notes: bound to its exchange, by the principal. A named
-    // one may be any version not yet withdrawn (forgetting it forgets its
-    // whole chain); without a name, the one current own note.
-    const ownNotes = entries.value.filter((entry) => entry.exchangeId === exchangeId && entry.actorId === principal && entry.state !== "withdrawn");
+    const ownNote = this.#ownNote.get(run.id) ?? null;
+    // The run's own notes: the one its own request recorded, and the
+    // principal's notes bound to its exchange (voice). A named one may be any
+    // version not yet withdrawn (forgetting it forgets its whole chain).
+    const ownNotes = entries.filter((entry) => entry.state !== "withdrawn" && entry.actorId === principal && (entry.id === ownNote?.entryId || entry.exchangeId === exchangeId));
     const bound = ownNotes.filter((entry) => entry.state === "current");
     const requested = typeof input.entry_id === "string" ? input.entry_id.toLowerCase() : null;
-    const target = requested !== null ? ownNotes.find((entry) => entry.id === requested) ?? null : bound.length === 1 ? bound[0]! : null;
-    if (!target) return notPerformed(requested !== null ? "entry_not_bound_to_run_exchange" : bound.length === 0 ? "no_note_bound_to_run_exchange" : "note_target_ambiguous", { bound_note_count: bound.length });
+    const target = requested !== null ? ownNotes.find((entry) => entry.id === requested) ?? null
+      : ownNote !== null ? ownNotes.find((entry) => entry.id === ownNote.entryId) ?? null
+      : bound.length === 1 ? bound[0]! : null;
+    if (!target) return notPerformed(requested !== null ? "entry_not_own_note" : ownNote !== null ? "own_note_not_found" : bound.length === 0 ? "no_note_bound_to_run_exchange" : "note_target_ambiguous", { ...chain, bound_note_count: bound.length });
     const preview = await this.#api.withdrawalPreview(this.studio.projectId, target.id, await tokens.token());
-    if (preview.status !== "available" || preview.value.entryId !== target.id) return notPerformed(preview.status === "available" ? "preview_entry_mismatch" : `preview_${preview.reason}`, { entry_id: target.id });
+    if (preview.status !== "available" || preview.value.entryId !== target.id) return notPerformed(preview.status === "available" ? "preview_entry_mismatch" : `preview_${preview.reason}`, { ...chain, entry_id: target.id });
     // The preview's whole cascade (product mission_forget_reach: every
     // version of the note, and every decision resting on one of them) is
     // confirmed by the request. So every previewed entry must be the run's
-    // own note (bound to its exchange, by the principal), and every previewed
-    // decision the run's own: proposed by the principal by voice, decided by
-    // nobody else, resting only on the run's own notes. Another member's
-    // correction or decision is never withdrawn by the Lab.
-    const ownEntryIds = new Set(entries.value.filter((entry) => entry.exchangeId === exchangeId && entry.actorId === principal).map((entry) => entry.id));
+    // own note, and every previewed decision the run's own: proposed by the
+    // principal by voice, decided by nobody else, resting only on the run's
+    // own notes. Another member's correction or decision is never withdrawn.
+    const ownEntryIds = new Set(entries.filter((entry) => entry.actorId === principal && (entry.id === ownNote?.entryId || entry.exchangeId === exchangeId)).map((entry) => entry.id));
     const ownDecisionIds = new Set(mission.value.decisions.filter((decision) => decision.proposedBy === principal && decision.proposedVia === "voice"
       && (decision.decidedBy === null || decision.decidedBy === principal)
       && decision.supportingEntryIds.length > 0 && decision.supportingEntryIds.every((id) => ownEntryIds.has(id))).map((decision) => decision.id));
     const foreignEntries = preview.value.entryIds.filter((id) => !ownEntryIds.has(id)).length;
     const foreignDecisions = preview.value.decisions.filter((decision) => !ownDecisionIds.has(decision.id)).length;
-    if (foreignEntries > 0 || foreignDecisions > 0) return notPerformed("withdrawal_cascade_not_own", { entry_id: target.id, foreign_entry_count: foreignEntries, foreign_decision_count: foreignDecisions, preview_entry_count: preview.value.entryIds.length, preview_decision_count: preview.value.decisions.length });
+    if (foreignEntries > 0 || foreignDecisions > 0) return notPerformed("withdrawal_cascade_not_own", { ...chain, entry_id: target.id, foreign_entry_count: foreignEntries, foreign_decision_count: foreignDecisions, preview_entry_count: preview.value.entryIds.length, preview_decision_count: preview.value.decisions.length });
     const answer = await this.#api.withdraw(this.studio.projectId, preview.value, await tokens.token(), `voice-lab-g7:${operationId}`);
     const payload = recordEvent({
-      status: answer.accepted ? "committed" : "refused", requested: true, entry_id: target.id, entry_bound_exchange_id: exchangeId,
+      status: answer.accepted ? "committed" : "refused", requested: true, ...chain, entry_id: target.id, entry_bound_exchange_id: target.exchangeId,
+      own_note_entry_id: ownNote?.entryId ?? null, own_note_source_id: ownNote?.sourceId ?? null, entry_source_id: target.sourceId,
       preview_entry_count: preview.value.entryIds.length, preview_decision_count: preview.value.decisions.length,
       http_status: answer.http_status, code: answer.code, receipt_status: answer.receipt?.status ?? null, receipt_operation: answer.receipt?.operation ?? null,
-      affected_count: answer.receipt?.affectedCount ?? null,
+      // The forgotten note's source as the withdraw_note receipt names it.
+      receipt_source_id: answer.receipt?.sourceId ?? null, affected_count: answer.receipt?.affectedCount ?? null,
     });
     return { events, receipt: { performed: true, status: payload.status, entry_id: target.id, http_status: payload.http_status, code: payload.code } };
   }
@@ -1344,9 +1433,11 @@ export class StudioG7Driver implements VoiceBrowserDriver, StudioDriverExtension
       live_exchange_present: observed.snapshot.exchangeId !== null,
       tasks: observed.details.map((detail) => ({
         task_id: detail.task.id, kind: detail.task.kind, state: detail.task.state, phase: detail.task.phase, created_at: detail.task.createdAt, exchange_id: detail.task.exchangeId, goal_id: detail.task.goalId,
+        // Ids and enumerated classes only: the sources of its consumed closure now withdrawn (R2), and why it ended.
+        withdrawn_source_ids: detail.withdrawnSourceIds, reason_class: detail.reasonClass, input_source_ids: detail.task.inputSourceIds,
         focus: this.#focusTasks(run.id).includes(detail.task.id),
         research: detail.research ? { html_state: detail.research.htmlState, design_task_id: detail.research.designTaskId, amends_task_id: detail.research.amendsTaskId } : null,
-        design: detail.design ? { state: detail.design.state, mode: detail.design.mode, artifact_id: detail.design.artifactId, base_version_id: detail.design.baseVersionId, published_version_id: detail.design.publishedVersionId, research_task_id: detail.design.researchTaskId, revisions: detail.design.revisions, section_count: detail.design.sections.length } : null,
+        design: detail.design ? { state: detail.design.state, mode: detail.design.mode, artifact_id: detail.design.artifactId, base_version_id: detail.design.baseVersionId, published_version_id: detail.design.publishedVersionId, research_task_id: detail.design.researchTaskId, revisions: detail.design.revisions, section_count: detail.design.sections.length, reason_class: detail.designReasonClass } : null,
         outputs: detail.outputs.map((output) => ({ artifact_version_id: output.artifactVersionId, format: output.format, source_id: output.sourceId, sha256: output.sha256, byte_length: output.byteLength })),
       })),
       tasks_unavailable: observed.unavailable,
@@ -1465,6 +1556,7 @@ export class StudioG7Driver implements VoiceBrowserDriver, StudioDriverExtension
     // own-chain root or its edit tasks.
     this.#ownCreate.delete(runId);
     this.#focus.delete(runId);
+    this.#ownNote.delete(runId);
     const ownership = session.ownership;
     // A context cannot outlive its browser process. When the process already
     // exited (crash, OOM kill) the close proof is the reaped process itself.

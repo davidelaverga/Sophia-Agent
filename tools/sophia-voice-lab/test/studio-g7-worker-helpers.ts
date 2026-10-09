@@ -18,6 +18,9 @@ const VERSION_2 = "b0000000-0000-4000-8000-0000000000b2";
 const DESIGN = "d0000000-0000-4000-8000-0000000000d1";
 const EDIT = "d0000000-0000-4000-8000-0000000000d2";
 const RESEARCH = "d0000000-0000-4000-8000-0000000000d3";
+const STOP_RESEARCH = "d0000000-0000-4000-8000-0000000000d4";
+const NOTE_ENTRY = "c0000000-0000-4000-8000-0000000000c1";
+const NOTE_SOURCE = "c0000000-0000-4000-8000-0000000000c2";
 
 function key(prefix: string, payload: unknown): string { return `${prefix}:${sha256(canonicalJson(payload))}`; }
 
@@ -73,6 +76,8 @@ export class ScriptedStudioDriver {
     const audit = this.#callsEvent(run, "baseline", "end", "final", null);
     return { ...audit, payload: { ...audit.payload, quiescence: { exchange_ended: this.endExchangeConfirmed, session_closed: sessionClosed } } };
   }
+  /** Whether the product commits the run's own note (record_note); false: refused, no receipt ids. */
+  recordNoteCommitted = true;
   /** Every action input the worker passed, in order. */
   readonly actionInputs: Array<Record<string, unknown>> = [];
 
@@ -168,7 +173,17 @@ export class ScriptedStudioDriver {
     const task = (id: string, kind: string, extra: Record<string, unknown> = {}) => ({ task_id: id, kind, state: "running", phase: "running", created_at: new Date().toISOString(), focus: false, research: null, design: null, outputs: [], ...extra });
     if (input.action === "observe") {
       const phase = input.for_step === "hold" ? "held" : input.for_step === "stop" ? "stopped" : "running";
-      return { receipt: { action: "observe", performed: false, status: "observed" }, events: [this.#outcome(`g7.${String(input.for_step)}`, [task(RESEARCH, "research", { phase, exchange_id: this.researchExchangeId })])] };
+      // The Stop sub-episode's own research (its own goal); the main research otherwise.
+      const own = input.for_step === "create_stop_target" || input.for_step === "stop" ? STOP_RESEARCH : RESEARCH;
+      return { receipt: { action: "observe", performed: false, status: "observed" }, events: [this.#outcome(`g7.${String(input.for_step)}`, [task(own, "research", { phase, exchange_id: this.researchExchangeId })])] };
+    }
+    if (input.action === "record_note") {
+      // As the real driver: the run's own note, through the member route; its receipt names the entry and the note's source S.
+      const committed = this.recordNoteCommitted;
+      const payload = { operation_id: operationId, requested: true, status: committed ? "committed" : "refused", http_status: committed ? 202 : 409, code: committed ? null : "invalid_state", entry_id: committed ? NOTE_ENTRY : null, source_id: committed ? NOTE_SOURCE : null, receipt_operation: committed ? "record_note" : null, text_sha256: sha256("scripted note") };
+      return { receipt: { action: "record_note", performed: true, status: payload.status, http_status: payload.http_status, code: payload.code, entry_id: payload.entry_id, source_id: payload.source_id }, events: [
+        { kind: "studio.action.record_note", source: "canonical", payload, dedupeKey: key(`record-note:${run.id}`, payload) },
+      ] };
     }
     if (input.action === "leave_and_return") {
       const published = canonicalJson(pageReceipt(run, "mic_published", Date.now() + 1));
@@ -185,7 +200,7 @@ export class ScriptedStudioDriver {
       if (revision) events.push(this.#outcome("g7.section_revision", [task(EDIT, "design", { state: "succeeded", design: { state: "published", mode: "edit", artifact_id: ARTIFACT, published_version_id: VERSION_2 } })], [{ artifact_id: ARTIFACT, version_id: VERSION_2, task_id: EDIT, status: "verified", downloaded_sha256: sha256("v2"), hashes_agree: true }]));
       return { receipt: { action: input.action, performed: true, status: payload.status, http_status: payload.http_status, code: payload.code, task_id: payload.task_id }, events };
     }
-    const payload = { operation_id: operationId, requested: true, status: "committed", entry_id: "c0000000-0000-4000-8000-0000000000c1", entry_bound_exchange_id: EXCHANGE_UUID, http_status: 202, code: null, receipt_operation: "withdraw_note" };
+    const payload = { operation_id: operationId, requested: true, status: "committed", entry_id: NOTE_ENTRY, entry_bound_exchange_id: null, own_note_entry_id: NOTE_ENTRY, own_note_source_id: NOTE_SOURCE, entry_source_id: NOTE_SOURCE, receipt_source_id: NOTE_SOURCE, http_status: 202, code: null, receipt_operation: "withdraw_note" };
     return { receipt: { action: "withdrawal", performed: true, status: "committed" }, events: [
       { kind: "studio.action.withdrawal", source: "canonical", payload, dedupeKey: key(`withdrawal:${run.id}`, payload) },
       this.#outcome("g7.withdrawal", [task(DESIGN, "design", { design: { state: "cancelled", mode: "create", artifact_id: ARTIFACT, published_version_id: VERSION_1 } })]),
@@ -259,5 +274,5 @@ export class ScriptedStudioDriver {
   }
 }
 
-export const SCRIPTED_IDS = { ARTIFACT, VERSION_1, VERSION_2, DESIGN, EDIT, RESEARCH };
+export const SCRIPTED_IDS = { ARTIFACT, VERSION_1, VERSION_2, DESIGN, EDIT, RESEARCH, STOP_RESEARCH, NOTE_ENTRY, NOTE_SOURCE };
 export function newIdempotencyKey(prefix: string): string { return `${prefix}-${randomUUID()}`; }

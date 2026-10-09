@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import type { LabEvent, OperationRecord, RunRecord, Verdicts } from "../domain.js";
 import {
   STUDIO_G7_CONTRACT_VERSION,
+  STUDIO_LIVE_DESIGN_STATES,
   STUDIO_G7_EVALUATION_SCHEMA,
   STUDIO_G7_PRODUCT_CONTRACT,
   STUDIO_G7_RECEIPT_COVERAGE,
@@ -144,7 +145,6 @@ export const STUDIO_G7_LIMITATIONS = Object.freeze([
   "goal_status_is_the_created_task_phase",
   "orphan_browser_room_presence_only_from_fresh_bridge_report",
   "orphan_browser_process_close_unobservable",
-  "withdrawn_note_to_design_link_not_exposed_design_ended_at_most_uncertain",
 ]);
 
 
@@ -639,17 +639,34 @@ export function evaluateStudioG7Run(run: RunRecord, events: Event[], operations:
         if (edit.payload.status !== "admitted" || typeof edit.payload.task_id !== "string") {
           result.outcome = "fail"; result.reason = `section_revision_refused_${String(edit.payload.code ?? edit.payload.http_status ?? "unknown")}`; steps.push(result); continue;
         }
+        // The revision's effect, in its own observation: the Lab's own edit
+        // task X under way on the run's own design (mode edit, the run's
+        // research, the run's artifact). The episode withdraws the note while
+        // X is live, so X is not waited for; a published X must show its bytes.
         const taskId = edit.payload.task_id;
-        const latest = [...observations].reverse().map((event) => tasksOf(event).find((task) => task.task_id === taskId)).find((task) => task !== undefined);
-        const design = record(latest?.design);
+        const ownObservation = observations.filter((event) => event.payload.purpose === "g7.section_revision" && event.payload.operation_id === operation!.id).at(-1) ?? null;
+        const seen = ownObservation === null ? null : tasksOf(ownObservation).find((task) => task.task_id === taskId) ?? null;
+        const design = record(seen?.design);
         const artifact = artifactStates.find((item) => item.artifact.task_id === taskId);
         if (!design) { result.outcome = "unavailable"; result.reason = "edit_task_not_observed"; }
-        else if (design.state === "published" && design.mode === "edit") {
+        else if (design.mode !== "edit" || design.research_task_id !== certification.createdTaskId || design.artifact_id !== ownReport.artifactId) { result.outcome = "uncertain"; result.reason = "edit_task_not_on_own_chain"; }
+        else if (STUDIO_LIVE_DESIGN_STATES.has(String(design.state)) && !["failed", "cancelled", "succeeded"].includes(String(seen!.state))) { result.outcome = "pass"; result.reason = null; }
+        else if (design.state === "published") {
           result.outcome = artifact?.artifact.status === "verified" ? "pass" : artifact?.artifact.status === "mismatch" ? "fail" : "unavailable";
           result.reason = artifact?.artifact.status === "verified" ? null : artifact?.artifact.status === "mismatch" ? "revised_page_bytes_mismatch" : "revised_page_bytes_unavailable";
         } else if (design.state === "failed" || design.state === "cancelled" || design.state === "superseded") {
           result.outcome = "fail"; result.reason = `section_revision_${String(design.state)}`;
         } else { result.outcome = "unavailable"; result.reason = "section_revision_not_settled"; }
+        steps.push(result);
+        continue;
+      }
+      if (step.label === "record_note") {
+        // The run's own note: its own request's receipt names the entry and the note's source.
+        const note = ofKind("studio.action.record_note", "canonical").filter((event) => event.payload.operation_id === operation!.id && event.payload.requested === true).at(-1);
+        if (!note) { result.outcome = "unavailable"; result.reason = "record_note_receipt_missing"; steps.push(result); continue; }
+        const recorded = note.payload.status === "committed" && typeof note.payload.entry_id === "string" && typeof note.payload.source_id === "string";
+        result.outcome = recorded ? "pass" : "fail";
+        result.reason = recorded ? null : `record_note_refused_${String(note.payload.code ?? note.payload.http_status ?? "unknown")}`;
         steps.push(result);
         continue;
       }
@@ -660,37 +677,56 @@ export function evaluateStudioG7Run(run: RunRecord, events: Event[], operations:
       result.outcome = committed ? "pass" : "fail";
       result.reason = committed ? null : `withdrawal_refused_${String(withdrawal.payload.code ?? withdrawal.payload.http_status ?? "unknown")}`;
       steps.push(result);
-      // The withdrawal ended the run's design only if that design was live in
-      // the withdrawal's own observation before it, and cancelled in the
-      // withdrawal's own observation after it (both tied to this operation).
-      // An end it did not cause (already ended, or failed) is never its effect.
+      // The withdrawal ended the run's own edit X only with all of (every
+      // join on the note's SOURCE S from the run's own record_note receipt,
+      // never its entry id):
+      // - X is canonically the run's own: its id is the Lab's own edit receipt
+      //   on the run's own design;
+      // - X was live in the withdrawal's own before-observation;
+      // - the withdrawal committed, for the run's own note, and its receipt
+      //   names S;
+      // - the run's research drew on the note: its inputSourceIds held S in an
+      //   observation before the withdrawal;
+      // - in the withdrawal's own after-observation X failed for the
+      //   product's revoke reason, with S in its withdrawnSourceIds;
+      // - nothing else ended it first (no Stop before that observation).
       const own = (purpose: string) => observations.filter((event) => event.payload.purpose === purpose && event.payload.operation_id === operation!.id).at(-1) ?? null;
       const before = own("g7.withdrawal:before");
       const afterOwn = own("g7.withdrawal");
-      const boundDesigns = (event: Event) => boundTasksOf(event).filter((task) => record(task.design) !== null);
-      const designState = (task: Record<string, unknown>) => String(record(task.design)?.state);
-      const ENDED_DESIGN_STATES = ["cancelled", "failed", "superseded"];
-      // A Stop before the withdrawal may end the design itself: its effect
-      // (the created task stopped, or ended) must be settled by the
-      // withdrawal's before-observation, with the design still live there.
-      const stopPerformed = inputs.some((candidate) => candidate.input._g7_step === "g7.stop");
-      const createdSeenBefore = before === null || certification.createdTaskId === null ? null
-        : observations.filter((event) => event.seq <= before.seq).flatMap((event) => tasksOf(event).filter((task) => task.task_id === certification.createdTaskId)).at(-1) ?? null;
-      const stopSettled = createdSeenBefore !== null && (createdSeenBefore.phase === "stopped" || ["cancelled", "failed", "succeeded"].includes(String(createdSeenBefore.state)));
+      const sightingIn = (event: Event | null, taskId: string) => event === null ? null : tasksOf(event).find((task) => task.task_id === taskId) ?? null;
+      const noteEvent = ofKind("studio.action.record_note", "canonical").filter((event) => event.payload.status === "committed" && typeof event.payload.entry_id === "string" && typeof event.payload.source_id === "string").at(-1) ?? null;
+      const noteEntry = noteEvent === null ? null : String(noteEvent.payload.entry_id);
+      const noteSource = noteEvent === null ? null : String(noteEvent.payload.source_id);
+      const lists = (value: unknown, id: string | null) => id !== null && Array.isArray(value) && (value as unknown[]).includes(id);
+      const editTask = ofKind("studio.action.html_edit", "canonical").filter((event) => event.payload.purpose === "section_revision" && event.payload.requested === true && event.payload.status === "admitted"
+        && ownReport.status === "resolved" && event.payload.artifact_id === ownReport.artifactId && typeof event.payload.task_id === "string").map((event) => String(event.payload.task_id)).at(-1) ?? null;
+      const designOf = (task: Record<string, unknown> | null) => record(task?.design);
+      const liveBefore = (task: Record<string, unknown> | null) => STUDIO_LIVE_DESIGN_STATES.has(String(designOf(task)?.state)) && !["succeeded", "failed", "cancelled"].includes(String(task?.state));
+      const revoked = (task: Record<string, unknown> | null) => (designOf(task)?.state === "failed" || task?.state === "failed")
+        && (designOf(task)?.reason_class === "revoked_source_withdrawn" || task?.reason_class === "revoked_source_withdrawn");
+      const stopBaseline = ordered.find((event) => event.kind === STUDIO_CALLS_READ_KIND && event.source === "canonical" && event.payload.purpose === "baseline" && event.payload.step_id === "g7.stop") ?? null;
+      const researchDrewOnNote = certification.createdTaskId !== null && observations.filter((event) => event.seq < withdrawal.seq)
+        .some((event) => lists(sightingIn(event, certification.createdTaskId!)?.input_source_ids, noteSource));
+      const xBefore = editTask === null ? null : sightingIn(before, editTask);
+      const xAfter = editTask === null ? null : sightingIn(afterOwn, editTask);
       const id = "step.g7.withdrawal.design_ended";
+      const evidence = [noteEvent, before, withdrawal, afterOwn].filter((event): event is Event => event !== null);
       if (certification.createdTaskId === null) P(id, "unavailable", "create_step_not_certified", []);
       else if (!committed) P(id, "unavailable", "withdrawal_not_committed", [withdrawal]);
-      else if (before === null || before.seq > withdrawal.seq) P(id, "uncertain", "no_observation_before_withdrawal", []);
-      else if (boundDesigns(before).length === 0) P(id, "uncertain", "bound_design_not_observed_before_withdrawal", [before]);
-      else if (boundDesigns(before).some((task) => ENDED_DESIGN_STATES.includes(designState(task)))) P(id, "uncertain", "design_already_ended_before_withdrawal", [before]);
-      else if (stopPerformed && !stopSettled) P(id, "uncertain", "stop_effect_not_settled_before_withdrawal", [before]);
-      else if (afterOwn === null || afterOwn.seq < withdrawal.seq) P(id, "uncertain", "no_observation_after_withdrawal", [before]);
-      else if (boundDesigns(afterOwn).length === 0) P(id, "uncertain", "bound_design_not_observed_after_withdrawal", [before, afterOwn]);
-      // Cancelled after the withdrawal, live before it and after Stop's effect:
-      // still, nothing the product exposes ties the withdrawn note to the
-      // design's inputs, so the end is never credited to the withdrawal.
-      else if (boundDesigns(afterOwn).every((task) => designState(task) === "cancelled")) P(id, "uncertain", "withdrawn_note_not_linked_to_design", [before, withdrawal, afterOwn]);
-      else P(id, "uncertain", "design_not_cancelled_by_withdrawal", [before, afterOwn]);
+      else if (ownReport.status !== "resolved") P(id, ownReport.status, ownReport.reason, [withdrawal]);
+      else if (noteEvent === null) P(id, "unavailable", "own_note_not_recorded", [withdrawal]);
+      else if (withdrawal.payload.entry_id !== noteEntry) P(id, "uncertain", "withdrawn_note_not_own_note", evidence);
+      else if (withdrawal.payload.receipt_source_id !== noteSource) P(id, "uncertain", "withdrawal_receipt_source_mismatch", evidence);
+      else if (editTask === null) P(id, "unavailable", "own_edit_not_admitted", evidence);
+      else if (before === null || before.seq > withdrawal.seq) P(id, "uncertain", "no_observation_before_withdrawal", evidence);
+      else if (!liveBefore(xBefore)) P(id, "uncertain", "own_edit_no_longer_live", evidence);
+      else if (afterOwn === null || afterOwn.seq < withdrawal.seq) P(id, "uncertain", "no_observation_after_withdrawal", evidence);
+      else if (stopBaseline !== null && stopBaseline.seq < afterOwn.seq) P(id, "uncertain", "stop_before_withdrawal_effect_observed", evidence);
+      else if (!Array.isArray(xAfter?.withdrawn_source_ids)) P(id, "unavailable", "withdrawn_sources_not_served", evidence);
+      else if (!researchDrewOnNote) P(id, "uncertain", "own_research_did_not_draw_on_note", evidence);
+      else if (!revoked(xAfter)) P(id, "uncertain", "design_not_ended_by_withdrawal", evidence);
+      else if (!lists(xAfter!.withdrawn_source_ids, noteSource)) P(id, "uncertain", "note_source_not_in_edit_closure", evidence);
+      else P(id, "pass", null, evidence);
     }
     for (const step of steps) {
       H(`step.${step.step_id}.executed`, step.executed, step.executed === "pass" ? null : step.reason);

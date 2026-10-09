@@ -347,9 +347,39 @@ interface CallsScript {
   unavailable?: { reason: string; http_status: number };
 }
 
-interface G7Options { skip?: string[]; staleCode?: string; staleStatus?: number; artifactStatus?: string; ownership?: "proven" | "mismatch" | "unavailable"; withdrawalCommitted?: boolean; noEnd?: boolean; calls?: CallsScript; researchTask?: Record<string, unknown>; windowEpochs?: Record<string, number>; designBefore?: string | null; designAfter?: string; designEverywhere?: string; withdrawalAfterOperation?: string; stopEffect?: { phase: string; state: string }; noEndAudit?: boolean }
+interface G7Options {
+  skip?: string[]; staleCode?: string; staleStatus?: number; artifactStatus?: string; ownership?: "proven" | "mismatch" | "unavailable"; withdrawalCommitted?: boolean;
+  noEnd?: boolean; calls?: CallsScript; researchTask?: Record<string, unknown>; windowEpochs?: Record<string, number>; noEndAudit?: boolean;
+  /** R's inputSourceIds (default: the run's note source S). */
+  researchInputs?: string[] | null;
+  /** X's design state in the withdrawal's before-observation (default designing); null: no before-observation. */
+  editBefore?: string | null;
+  /** X's sighting in the withdrawal's after-observation (default: failed for the revoke reason, S withdrawn). */
+  editAfter?: Record<string, unknown>;
+  withdrawalAfterOperation?: string;
+  /** The withdraw_note receipt's sourceId (default S). */
+  receiptSource?: string | null;
+  /** The withdrawal's entry (default the run's own note N). */
+  withdrawnEntry?: string;
+  /** The Stop sub-episode task in its own observe, and in Stop's observe. */
+  stopTargetBefore?: Record<string, unknown>;
+  stopEffect?: Record<string, unknown>;
+}
 
-/** A complete G7 episode: five voice steps, four actions, observations, ownership, cleanup. */
+const GOAL_A = "e0000000-0000-4000-8000-0000000000a1";
+const GOAL_B = "e0000000-0000-4000-8000-0000000000b2";
+const STOP_TASK = "d0000000-0000-4000-8000-000000000004";
+const NOTE_SOURCE = "c0000000-0000-4000-8000-000000000051";
+
+/**
+ * A complete G7 episode in the order the product's lifecycle supports: the
+ * run's own note N (source S) recorded first; create (research R drawing on
+ * S, its design D under way); steer; leave and return; hold and resume while
+ * D is live; once D published (version 2), the revision (edit X, live);
+ * the stale probe (version 1, superseded); the withdrawal of N while X is
+ * live (X failed for the revoke reason, S withdrawn); then the Stop
+ * sub-episode: a second create (STOP_TASK on its own goal) and Stop on it.
+ */
 function g7Episode(options: G7Options = {}): Episode {
   const run = studioRun(config);
   const log = new EventLog(run.id);
@@ -364,7 +394,6 @@ function g7Episode(options: G7Options = {}): Episode {
   log.add("studio.exchange.ownership", "canonical", { exchange_id: EXCHANGE_UUID, status: options.ownership ?? "proven", reason: options.ownership === "mismatch" ? "evidence_bound_to_another_run" : null });
   log.grant(evidenceGrant(run));
   const operations: Operation[] = [];
-  const voice = ["create", "steer", "hold", "resume", "stop"].filter((step) => !skip.has(`g7.${step}`));
   let seq = 0;
   log.bridge("provider", providerReceipt(run, seq++, "ready"));
   // The product's record on a logical clock: when each call's recording began and when it committed.
@@ -382,9 +411,22 @@ function g7Episode(options: G7Options = {}): Episode {
     return clock;
   };
   const record = (calls: Array<Record<string, unknown>>, began: number, committed: number) => { for (const call of calls) recorded.push({ call, began, committed }); };
-  const research = (extra: Record<string, unknown>) => task(RESEARCH_TASK, "research", { ...(options.researchTask ?? {}), ...extra });
-  voice.forEach((step, index) => {
-    const speak = op(run, "speak", T0 + 100 + index, { fixture_id: "conversation_greeting_probe", _g7_step: `g7.${step}` }, { schedule_receipt: { product: {} } });
+  const researchInputs = options.researchInputs === undefined ? [NOTE_SOURCE] : options.researchInputs;
+  const research = (extra: Record<string, unknown> = {}) => task(RESEARCH_TASK, "research", { input_source_ids: researchInputs, withdrawn_source_ids: [], ...(options.researchTask ?? {}), state: "running", phase: "result_ready", research: { html_state: "designing", design_task_id: DESIGN_TASK }, ...extra });
+  const goalOf = { goal_id: (options.researchTask?.goal_id as string | undefined) ?? GOAL_A };
+  const designD = (state: string, phase = "running") => task(DESIGN_TASK, "design", { ...goalOf, state: state === "published" ? "succeeded" : "running", phase: state === "published" ? "result_ready" : phase, withdrawn_source_ids: [], design: { state, mode: "create", artifact_id: ARTIFACT, published_version_id: state === "published" ? VERSION_2 : null, research_task_id: RESEARCH_TASK } });
+  const editX = (extra: Record<string, unknown> = {}) => task(EDIT_TASK, "design", { ...goalOf, state: "running", phase: "running", withdrawn_source_ids: [], design: { state: "designing", mode: "edit", artifact_id: ARTIFACT, published_version_id: null, research_task_id: RESEARCH_TASK }, ...extra });
+  const stopTask = (extra: Record<string, unknown>) => task(STOP_TASK, "research", { exchange_id: EXCHANGE_UUID, goal_id: GOAL_B, input_source_ids: [], withdrawn_source_ids: [], ...extra });
+  const observe = (forStep: string, at: number, tasks: Array<Record<string, unknown>>, artifacts: Array<Record<string, unknown>> = []) => {
+    const observeOp = op(run, "studio_action", at, { action: "observe", for_step: forStep }, { performed: false, status: "observed" });
+    operations.push(observeOp);
+    log.add("studio.outcome.observed", "canonical", { purpose: `g7.${forStep}`, operation_id: observeOp.id, join: { status: "uncertain" }, tasks, artifacts });
+  };
+  let ordinal = 0;
+  const voiceStep = (step: string, after: () => void = () => undefined) => {
+    if (skip.has(`g7.${step}`)) return;
+    const index = ordinal++;
+    const speak = op(run, "speak", T0 + 100 + index * 100, { fixture_id: "conversation_greeting_probe", _g7_step: `g7.${step}` }, { schedule_receipt: { product: {} } });
     operations.push(speak);
     const stepId = `g7.${step}`;
     const calls = options.calls;
@@ -408,13 +450,17 @@ function g7Episode(options: G7Options = {}): Episode {
     log.bridge("input_turn", inputTurn(run, seq++, index + 1));
     if (index === 0) log.page(pageReceipt(run, "sophia_playback", T0 + 2_900, { phase: "playing" }));
     log.bridge("output_reply", outputReply(run, seq++, index + 1, T0 + 3_000 + index * 10_000));
-    if (step !== "create" && step !== "steer") {
-      const phase = step === "hold" ? "held" : step === "resume" ? "running" : "stopped";
-      const observe = op(run, "studio_action", T0 + 150 + index, { action: "observe", for_step: step }, { performed: false, status: "observed" });
-      operations.push(observe);
-      log.add("studio.outcome.observed", "canonical", { purpose: `g7.${step}`, operation_id: observe.id, join: { status: "uncertain" }, tasks: [research(step === "stop" && options.stopEffect ? options.stopEffect : { phase, state: step === "stop" ? "cancelled" : "running" })], artifacts: [] });
-    }
-  });
+    after();
+  };
+  // 1. The run's own note N, through the principal's own route: its receipt names S.
+  if (!skip.has("g7.record_note")) {
+    const note = op(run, "studio_action", T0 + 50, { action: "record_note" }, { performed: true, status: "committed" });
+    operations.push(note);
+    log.add("studio.action.record_note", "canonical", { operation_id: note.id, requested: true, status: "committed", http_status: 202, code: null, entry_id: NOTE, source_id: NOTE_SOURCE, receipt_operation: "record_note", text_sha256: sha256("note") });
+  }
+  // 2-3. Create (R draws on S; its design D under way), steer.
+  voiceStep("create", () => observe("create", T0 + 110, [research(), designD("designing")]));
+  voiceStep("steer");
   if (!skip.has("g7.leave_return")) {
     const leave = op(run, "studio_action", T0 + 200, { action: "leave_and_return" }, { performed: true, status: "returned" });
     operations.push(leave);
@@ -423,34 +469,45 @@ function g7Episode(options: G7Options = {}): Episode {
     log.page(pageReceipt(run, "mic_published", T0 + 61_000));
     log.add("studio.room.rejoined", "browser", { lab_track_republished: true, operation_id: leave.id });
   }
+  // 5-6. Hold and resume while D is live (the research reads result_ready; D is held, then running).
+  voiceStep("hold", () => observe("hold", T0 + 310, [research(), designD("designing", "held")]));
+  voiceStep("resume", () => observe("resume", T0 + 410, [research(), designD("designing", "running")]));
+  // 7. Once D published its page (version 2): the revision, an edit X under way.
   if (!skip.has("g7.section_revision")) {
-    const edit = op(run, "studio_action", T0 + 300, { action: "section_revision", instruction: "x" }, { performed: true, status: "admitted" });
+    const edit = op(run, "studio_action", T0 + 500, { action: "section_revision", instruction: "x" }, { performed: true, status: "admitted" });
     operations.push(edit);
-    log.add("studio.action.html_edit", "canonical", { purpose: "section_revision", operation_id: edit.id, target_join: "canonical_chain", requested: true, status: "admitted", http_status: 202, code: null, task_id: EDIT_TASK, artifact_id: ARTIFACT, version_id: VERSION_1 });
-    log.add("studio.outcome.observed", "canonical", { purpose: "g7.section_revision", operation_id: edit.id, join: { status: "uncertain" }, tasks: [task(EDIT_TASK, "design", { state: "succeeded", design: { state: "published", mode: "edit", artifact_id: ARTIFACT, published_version_id: VERSION_2, research_task_id: RESEARCH_TASK } })], artifacts: [artifact(EDIT_TASK, VERSION_2, PAGE2_SHA, options.artifactStatus)] });
+    log.add("studio.action.html_edit", "canonical", { purpose: "section_revision", operation_id: edit.id, target_join: "canonical_chain", requested: true, status: "admitted", http_status: 202, code: null, task_id: EDIT_TASK, artifact_id: ARTIFACT, version_id: VERSION_2 });
+    log.add("studio.outcome.observed", "canonical", { purpose: "g7.section_revision", operation_id: edit.id, join: { status: "uncertain" }, tasks: [editX(), designD("published"), research()], artifacts: [artifact(DESIGN_TASK, VERSION_2, PAGE_SHA, options.artifactStatus)] });
   }
+  // 8. The stale probe: version 1, superseded by D's version 2.
   if (!skip.has("g7.stale_edit")) {
-    const stale = op(run, "studio_action", T0 + 400, { action: "stale_edit" }, { performed: true, status: options.staleStatus === 202 ? "admitted" : "refused" });
+    const stale = op(run, "studio_action", T0 + 600, { action: "stale_edit" }, { performed: true, status: options.staleStatus === 202 ? "admitted" : "refused" });
     operations.push(stale);
     log.add("studio.action.html_edit", "canonical", { purpose: "stale_edit", operation_id: stale.id, target_join: "canonical_chain", artifact_id: ARTIFACT, requested: true, status: options.staleStatus === 202 ? "admitted" : "refused", http_status: options.staleStatus ?? 409, code: options.staleCode ?? "stale_revision", version_id: VERSION_1, superseded_by_version_id: VERSION_2 });
   }
+  // 9. The withdrawal of N while X is live.
   if (!skip.has("g7.withdrawal")) {
-    const withdraw = op(run, "studio_action", T0 + 500, { action: "withdrawal" }, { performed: true, status: "committed" });
+    const withdraw = op(run, "studio_action", T0 + 700, { action: "withdrawal" }, { performed: true, status: "committed" });
     operations.push(withdraw);
     const committed = options.withdrawalCommitted ?? true;
-    const design = (state: string) => task(DESIGN_TASK, "design", { design: { state: options.designEverywhere ?? state, mode: "create", artifact_id: ARTIFACT, published_version_id: VERSION_1, research_task_id: RESEARCH_TASK } });
-    // The withdrawal's own observation before it (the driver records it as leave_and_return does).
-    if (options.designBefore !== null) log.add("studio.outcome.observed", "canonical", { purpose: "g7.withdrawal:before", operation_id: withdraw.id, join: { status: "uncertain" }, tasks: [design(options.designBefore ?? "published")], artifacts: [] });
-    log.add("studio.action.withdrawal", "canonical", { operation_id: withdraw.id, requested: true, status: committed ? "committed" : "refused", entry_id: NOTE, entry_bound_exchange_id: EXCHANGE_UUID, http_status: committed ? 202 : 409, code: committed ? null : "stale_revision", receipt_operation: committed ? "withdraw_note" : null });
-    log.add("studio.outcome.observed", "canonical", { purpose: "g7.withdrawal", operation_id: options.withdrawalAfterOperation ?? withdraw.id, join: { status: "uncertain" }, tasks: [design(options.designAfter ?? "cancelled")], artifacts: [] });
+    if (options.editBefore !== null) {
+      const before = options.editBefore ?? "designing";
+      log.add("studio.outcome.observed", "canonical", { purpose: "g7.withdrawal:before", operation_id: withdraw.id, join: { status: "uncertain" }, tasks: [editX(before === "designing" ? {} : { state: before === "published" ? "succeeded" : before === "failed" ? "failed" : "running", design: { state: before, mode: "edit", artifact_id: ARTIFACT, published_version_id: before === "published" ? randomUUID() : null, research_task_id: RESEARCH_TASK } }), designD("published"), research()], artifacts: [] });
+    }
+    log.add("studio.action.withdrawal", "canonical", { operation_id: withdraw.id, requested: true, status: committed ? "committed" : "refused", own_create_task_id: RESEARCH_TASK, design_task_id: DESIGN_TASK, own_live_task_ids: [EDIT_TASK], entry_id: options.withdrawnEntry ?? NOTE, entry_bound_exchange_id: null, own_note_entry_id: NOTE, own_note_source_id: NOTE_SOURCE, entry_source_id: NOTE_SOURCE, http_status: committed ? 202 : 409, code: committed ? null : "stale_revision", receipt_operation: committed ? "withdraw_note" : null, receipt_source_id: committed ? (options.receiptSource === undefined ? NOTE_SOURCE : options.receiptSource) : null });
+    const xAfter = editX({ state: "failed", phase: "failed", reason_class: "revoked_source_withdrawn", withdrawn_source_ids: [NOTE_SOURCE], design: { state: "failed", mode: "edit", artifact_id: ARTIFACT, published_version_id: null, research_task_id: RESEARCH_TASK, reason_class: "revoked_source_withdrawn" }, ...(options.editAfter ?? {}) });
+    log.add("studio.outcome.observed", "canonical", { purpose: "g7.withdrawal", operation_id: options.withdrawalAfterOperation ?? withdraw.id, join: { status: "uncertain" }, tasks: [xAfter, designD("published"), research({ withdrawn_source_ids: [NOTE_SOURCE] })], artifacts: [] });
   }
-  log.add("studio.outcome.observed", "canonical", { purpose: "final", operation_id: "end", join: { status: "uncertain" }, tasks: [task(DESIGN_TASK, "design", { state: "succeeded", design: { state: options.designEverywhere ?? "published", mode: "create", artifact_id: ARTIFACT, published_version_id: VERSION_1, research_task_id: RESEARCH_TASK } }), research({ research: { html_state: "published", design_task_id: DESIGN_TASK } })], artifacts: [artifact(DESIGN_TASK, VERSION_1, PAGE_SHA, options.artifactStatus)] });
+  // 10-11. The Stop sub-episode: its own create (STOP_TASK on its own goal), then Stop on it.
+  voiceStep("create_stop_target", () => observe("create_stop_target", T0 + 810, [stopTask({ state: "pending", phase: "queued", ...(options.stopTargetBefore ?? {}) })]));
+  voiceStep("stop", () => observe("stop", T0 + 910, [stopTask({ state: "cancelled", phase: "stopped", reason_class: "stopped", ...(options.stopEffect ?? {}) })]));
+  log.add("studio.outcome.observed", "canonical", { purpose: "final", operation_id: "end", join: { status: "uncertain" }, tasks: [designD("published"), research({ withdrawn_source_ids: [NOTE_SOURCE] }), editX({ state: "failed", phase: "failed", reason_class: "revoked_source_withdrawn", withdrawn_source_ids: [NOTE_SOURCE], design: { state: "failed", mode: "edit", artifact_id: ARTIFACT, published_version_id: null, research_task_id: RESEARCH_TASK, reason_class: "revoked_source_withdrawn" } })], artifacts: [artifact(DESIGN_TASK, VERSION_2, PAGE_SHA, options.artifactStatus)] });
   log.bridge("provider", providerReceipt(run, seq++, "closed"));
-  log.bridge("session_closed", sessionClosed(run, seq++, { windows: voice.length, turns: voice.length, replies: voice.length }));
+  log.bridge("session_closed", sessionClosed(run, seq++, { windows: ordinal, turns: ordinal, replies: ordinal }));
   // End's post-quiescence audit of every call: after the exchange ended and session_closed, before the sign-out.
   cleanupEvents(log, () => { if (!options.noEndAudit) callsRead("baseline", "end", "final", null); });
   identityEvent(log, "final");
-  if (!options.noEnd) operations.push(op(run, "end", T0 + 900, {}, {}));
+  if (!options.noEnd) operations.push(op(run, "end", T0 + 990, {}, {}));
   return { run, log, operations };
 }
 
@@ -466,6 +523,7 @@ describe("Studio G7 episode: every step is an operation, outcomes are canonical 
     const steps = Object.fromEntries(evaluation.steps.map((step) => [step.step_id, `${step.executed}/${step.outcome}:${step.reason}`]));
     // No calls were read (a product without voice qualification): never attributed by timing.
     expect(steps).toEqual({
+      "g7.record_note": "pass/pass:null",
       "g7.create": "pass/unavailable:no_calls_baseline",
       "g7.steer": "pass/unavailable:no_calls_baseline",
       "g7.leave_return": "pass/pass:null",
@@ -474,8 +532,9 @@ describe("Studio G7 episode: every step is an operation, outcomes are canonical 
       "g7.stale_edit": "pass/unavailable:create_step_not_certified",
       "g7.hold": "pass/unavailable:no_calls_baseline",
       "g7.resume": "pass/unavailable:no_calls_baseline",
-      "g7.stop": "pass/unavailable:no_calls_baseline",
       "g7.withdrawal": "pass/pass:null",
+      "g7.create_stop_target": "pass/unavailable:no_calls_baseline",
+      "g7.stop": "pass/unavailable:no_calls_baseline",
     });
     expect(statusOf(evaluation, "step.g7.withdrawal.design_ended")).toMatchObject({ status: "unavailable", reason: "create_step_not_certified" });
     expect(statusOf(evaluation, "outcome.artifact_bytes_integrity")).toMatchObject({ status: "unavailable", reason: "create_step_not_certified" });
@@ -509,7 +568,6 @@ describe("Studio G7 episode: every step is an operation, outcomes are canonical 
     expect(statusOf(evaluate(own({ withdrawalCommitted: false })), "step.g7.withdrawal.outcome")).toMatchObject({ status: "fail" });
     const mismatch = evaluate(own({ artifactStatus: "mismatch" }));
     expect(statusOf(mismatch, "outcome.artifact_bytes_integrity")).toMatchObject({ status: "fail", reason: "downloaded_bytes_disagree_with_declared_digest" });
-    expect(statusOf(mismatch, "step.g7.section_revision.outcome")).toMatchObject({ status: "fail", reason: "revised_page_bytes_mismatch" });
     expect(mismatch.verdicts.product).toBe("fail");
   });
 
@@ -659,7 +717,9 @@ function happyCalls(): CallsScript["byStep"] {
     "g7.steer": [call(2, "project_status", null), call(3, "control_work", { kind: "steer" })],
     "g7.hold": [call(4, "control_work", { kind: "hold" })],
     "g7.resume": [call(5, "control_work", { kind: "resume" })],
-    "g7.stop": [call(6, "control_work", { kind: "stop" })],
+    // The Stop sub-episode: its own create on its own goal, then Stop on that goal.
+    "g7.create_stop_target": [call(6, "start_research", { kind: "native_task", goal: GOAL_B }, STOP_TASK)],
+    "g7.stop": [call(7, "control_work", { kind: "stop", goal: GOAL_B })],
   };
 }
 const RUN_TASK = { exchange_id: EXCHANGE_UUID, goal_id: GOAL };
@@ -667,20 +727,22 @@ const stepsOf = (evaluation: StudioG7Evaluation) => Object.fromEntries(evaluatio
 const certify = (byStep: CallsScript["byStep"], options: G7Options = {}, script: Omit<CallsScript, "byStep"> = {}) => stepsOf(evaluate(g7Episode({ researchTask: RUN_TASK, ...options, calls: { byStep, ...script } })));
 
 describe("Studio G7 voice steps are certified only from the exchange's calls (A15 getExchangeCalls)", () => {
-  it("certifies each of the five voice steps from the one command its own call admitted (positive controls)", () => {
+  it("certifies each of the six voice steps from the one command its own call admitted, and every product assertion passes (positive controls)", () => {
     const evaluation = evaluate(g7Episode({ researchTask: RUN_TASK, calls: { byStep: happyCalls() } }));
-    expect(stepsOf(evaluation)).toMatchObject({ "g7.create": "pass:null", "g7.steer": "pass:null", "g7.hold": "pass:null", "g7.resume": "pass:null", "g7.stop": "pass:null" });
+    expect(stepsOf(evaluation)).toMatchObject({ "g7.create": "pass:null", "g7.steer": "pass:null", "g7.hold": "pass:null", "g7.resume": "pass:null", "g7.create_stop_target": "pass:null", "g7.stop": "pass:null" });
     expect(evaluation.outcome).toMatchObject({ join: "exchange_calls", bound_tasks: 2, missing_product_field: null });
-    expect(evaluation.outcome.voice_steps.map((step) => [step.step_id, step.command_kind, step.call_outcome, step.candidate_seqs])).toEqual([
-      ["g7.create", "native_task", "admitted", [1]], ["g7.steer", "steer", "ok", [2, 3]], ["g7.hold", "hold", "ok", [4]], ["g7.resume", "resume", "ok", [5]], ["g7.stop", "stop", "ok", [6]],
+    expect(evaluation.outcome.voice_steps.map((step) => [step.step_id, step.command_kind, step.call_outcome, step.candidate_seqs, step.goal_id, step.task_id])).toEqual([
+      ["g7.create", "native_task", "admitted", [1], GOAL, RESEARCH_TASK], ["g7.steer", "steer", "ok", [2, 3], GOAL, null], ["g7.hold", "hold", "ok", [4], GOAL, null], ["g7.resume", "resume", "ok", [5], GOAL, null],
+      // The Stop sub-episode's own joins: its own create, task and goal, and its own stop on that goal.
+      ["g7.create_stop_target", "native_task", "admitted", [6], GOAL_B, STOP_TASK], ["g7.stop", "stop", "ok", [7], GOAL_B, null],
     ]);
     // The baseline is the read's readAt, kept as the exact string the product sent.
     expect(evaluation.outcome.voice_steps.every((step) => typeof step.baseline_read_at === "string" && /T.*Z$/.test(step.baseline_read_at))).toBe(true);
-    // Nothing the product exposes ties the withdrawn note to the design: never credited (delta 5 nit).
-    expect(statusOf(evaluation, "step.g7.withdrawal.design_ended")).toMatchObject({ status: "uncertain", reason: "withdrawn_note_not_linked_to_design" });
+    expect(statusOf(evaluation, "step.g7.withdrawal.design_ended")).toMatchObject({ status: "pass", reason: null });
     // Every command-bearing call the reads listed falls in a step's window.
     expect(statusOf(evaluation, "outcome.calls_attributed")).toMatchObject({ status: "pass", reason: null });
-    expect(evaluation.verdicts.harness).toBe("pass");
+    expect(evaluation.product.filter((assertion) => assertion.status !== "pass").map((assertion) => `${assertion.id}:${assertion.status}:${assertion.reason}`)).toEqual([]);
+    expect(evaluation.verdicts).toMatchObject({ harness: "pass", product: "pass" });
   });
 
   it("(a) never certifies a Hold whose goal was already held: the call admitted no command", () => {
@@ -703,7 +765,7 @@ describe("Studio G7 voice steps are certified only from the exchange's calls (A1
   });
 
   it("(d) never certifies a duplicate or replayed entry", () => {
-    expect(certify({ ...happyCalls(), "g7.stop": [call(6, "control_work", { kind: "stop", id: commandId(4) })] })["g7.stop"]).toBe("uncertain:command_already_certified");
+    expect(certify({ ...happyCalls(), "g7.stop": [call(7, "control_work", { kind: "stop", goal: GOAL_B, id: commandId(4) })] })["g7.stop"]).toBe("uncertain:command_already_certified");
     expect(certify({ ...happyCalls(), "g7.stop": [] })["g7.stop"]).toBe("uncertain:no_call_after_baseline");
   });
 
@@ -778,29 +840,72 @@ describe("Studio G7 voice steps are certified only from the exchange's calls (A1
   });
 });
 
-describe("(P2-1) the withdrawal ended the design only if it was live before and the withdrawal's own observation shows it cancelled", () => {
-  const designEnded = (options: G7Options) => {
-    const evaluation = evaluate(g7Episode({ researchTask: RUN_TASK, calls: { byStep: happyCalls() }, ...options }));
+describe("delta 6: the withdrawal ended the run's own edit X only on the note's source S, while X was live", () => {
+  const designEnded = (options: G7Options, rewrite: (item: Episode) => void = () => undefined) => {
+    const item = g7Episode({ researchTask: RUN_TASK, calls: { byStep: happyCalls() }, ...options });
+    rewrite(item);
+    const evaluation = evaluate(item);
     return { assertion: statusOf(evaluation, "step.g7.withdrawal.design_ended"), product: evaluation.verdicts.product };
   };
 
-  it("never passes a design that had already failed before the withdrawal (the reviewer's repro)", () => {
-    const { assertion, product } = designEnded({ designEverywhere: "failed" });
-    expect(assertion).toMatchObject({ status: "uncertain", reason: "design_already_ended_before_withdrawal" });
-    expect(product).not.toBe("pass");
+  it("passes with every join on S: R drew on S, X live before, the receipt names S, X failed for the revoke reason with S withdrawn", () => {
+    expect(designEnded({})).toMatchObject({ assertion: { status: "pass", reason: null }, product: "pass" });
   });
 
-  it("never passes an end the withdrawal did not cause, or one not tied to the withdrawal", () => {
-    expect(designEnded({ designBefore: "cancelled" }).assertion).toMatchObject({ status: "uncertain", reason: "design_already_ended_before_withdrawal" });
-    expect(designEnded({ designAfter: "failed" }).assertion).toMatchObject({ status: "uncertain", reason: "design_not_cancelled_by_withdrawal" });
-    expect(designEnded({ designAfter: "superseded" }).assertion).toMatchObject({ status: "uncertain", reason: "design_not_cancelled_by_withdrawal" });
-    expect(designEnded({ designBefore: null }).assertion).toMatchObject({ status: "uncertain", reason: "no_observation_before_withdrawal" });
-    // An observation showing it cancelled that is not the withdrawal's own.
+  it("never passes an edit no longer live before the withdrawal (it published or ended first: the timing risk)", () => {
+    for (const before of ["published", "failed"]) expect(designEnded({ editBefore: before }).assertion, before).toMatchObject({ status: "uncertain", reason: "own_edit_no_longer_live" });
+    expect(designEnded({ editBefore: null }).assertion).toMatchObject({ status: "uncertain", reason: "no_observation_before_withdrawal" });
+  });
+
+  it("never credits the withdrawal for an end Stop caused, nor for one seen only in another observation", () => {
+    const stopped = { state: "cancelled", phase: "stopped", reason_class: "stopped", withdrawn_source_ids: [], design: { state: "cancelled", mode: "edit", artifact_id: ARTIFACT, published_version_id: null, research_task_id: RESEARCH_TASK, reason_class: "stopped" } };
+    expect(designEnded({ editAfter: stopped }).assertion).toMatchObject({ status: "uncertain", reason: "design_not_ended_by_withdrawal" });
     expect(designEnded({ withdrawalAfterOperation: "another-operation" }).assertion).toMatchObject({ status: "uncertain", reason: "no_observation_after_withdrawal" });
+    // A Stop whose baseline precedes the withdrawal's own after-observation.
+    expect(designEnded({}, (item) => {
+      const after = item.log.events.find((event) => event.kind === "studio.outcome.observed" && event.payload.purpose === "g7.withdrawal")!;
+      after.seq = Math.max(...item.log.events.map((event) => event.seq)) + 1;
+    }).assertion).toMatchObject({ status: "uncertain", reason: "stop_before_withdrawal_effect_observed" });
   });
 
-  it("a design live before and cancelled in the withdrawal's own observation after is still never credited without a canonical link (delta 5 nit)", () => {
-    expect(designEnded({}).assertion).toMatchObject({ status: "uncertain", reason: "withdrawn_note_not_linked_to_design" });
+  it("never passes on the note's entry id alone, or on another source (root's correction 1)", () => {
+    // X's withdrawn sources name the entry id N, not the source S.
+    expect(designEnded({ editAfter: { withdrawn_source_ids: [NOTE] } }).assertion).toMatchObject({ status: "uncertain", reason: "note_source_not_in_edit_closure" });
+    expect(designEnded({ editAfter: { withdrawn_source_ids: ["c0000000-0000-4000-8000-0000000000ff"] } }).assertion).toMatchObject({ status: "uncertain", reason: "note_source_not_in_edit_closure" });
+    // R's inputs name the entry id, or another source.
+    expect(designEnded({ researchInputs: [NOTE] }).assertion).toMatchObject({ status: "uncertain", reason: "own_research_did_not_draw_on_note" });
+    expect(designEnded({ researchInputs: [] }).assertion).toMatchObject({ status: "uncertain", reason: "own_research_did_not_draw_on_note" });
+    // The withdraw_note receipt names another source, or none.
+    expect(designEnded({ receiptSource: "c0000000-0000-4000-8000-0000000000fe" }).assertion).toMatchObject({ status: "uncertain", reason: "withdrawal_receipt_source_mismatch" });
+    expect(designEnded({ receiptSource: null }).assertion).toMatchObject({ status: "uncertain", reason: "withdrawal_receipt_source_mismatch" });
+    // Another note than the run's own.
+    expect(designEnded({ withdrawnEntry: "c0000000-0000-4000-8000-0000000000fd" }).assertion).toMatchObject({ status: "uncertain", reason: "withdrawn_note_not_own_note" });
+    // Without the run's own note receipt there is no S at all.
+    expect(designEnded({ skip: ["g7.record_note"] }).assertion).toMatchObject({ status: "unavailable", reason: "own_note_not_recorded" });
+  });
+
+  it("an X that is not failed for the revoke reason (failed otherwise) is never the withdrawal's end", () => {
+    expect(designEnded({ editAfter: { reason_class: "other", design: { state: "failed", mode: "edit", artifact_id: ARTIFACT, published_version_id: null, research_task_id: RESEARCH_TASK, reason_class: "other" } } }).assertion).toMatchObject({ status: "uncertain", reason: "design_not_ended_by_withdrawal" });
+  });
+});
+
+describe("delta 6: Stop is credited only on the sub-episode's own live work, never on work already ended", () => {
+  it("Stop on the main goal after the withdrawal is never a pass (its research already ended; the product admits no command)", () => {
+    const main = certify({ ...happyCalls(), "g7.create_stop_target": [], "g7.stop": [call(7, "control_work", { kind: "stop" })] }, { skip: ["g7.create_stop_target"] });
+    expect(main["g7.stop"]).toBe("uncertain:stop_target_already_ended");
+    const refused = certify({ ...happyCalls(), "g7.create_stop_target": [], "g7.stop": [call(7, "control_work", null)] }, { skip: ["g7.create_stop_target"] });
+    expect(refused["g7.stop"]).toBe("uncertain:call_admitted_no_command");
+  });
+
+  it("Stop on a sub-episode task already ended before it, or not yet cancelled for the stop, never passes", () => {
+    expect(certify(happyCalls(), { stopTargetBefore: { state: "cancelled", phase: "stopped" } })["g7.stop"]).toBe("uncertain:stop_target_already_ended");
+    expect(certify(happyCalls(), { stopEffect: { state: "running", phase: "stopping", reason_class: null } })["g7.stop"]).toBe("uncertain:stop_effect_not_settled");
+    expect(certify(happyCalls(), { stopEffect: { withdrawn_source_ids: [NOTE_SOURCE] } })["g7.stop"]).toBe("uncertain:stop_target_ended_by_withdrawal");
+  });
+
+  it("the sub-episode keeps its own joins: a create of the main task or goal, or a stop on the main goal, never stands in", () => {
+    expect(certify({ ...happyCalls(), "g7.create_stop_target": [call(6, "start_research", { kind: "native_task" }, RESEARCH_TASK)] })["g7.create_stop_target"]).toBe("uncertain:stop_target_not_distinct");
+    expect(certify({ ...happyCalls(), "g7.stop": [call(7, "control_work", { kind: "stop" })] })["g7.stop"]).toBe("fail:command_goal_mismatch");
   });
 });
 
@@ -856,7 +961,8 @@ describe("delta 4: only the run's own report, on its canonical chain, is evidenc
     expect(evaluate(ownUnavailable).outcome).toMatchObject({ artifacts_verified: 0, own_report: { status: "resolved", create_task_id: RESEARCH_TASK, design_task_id: DESIGN_TASK, artifact_id: ARTIFACT } });
     const ownVerified = certified((payload) => withForeign("mismatch")(ownArtifactsAs("verified")(payload)));
     expect(integrity(ownVerified)).toMatchObject({ status: "pass" });
-    expect(evaluate(ownVerified).outcome).toMatchObject({ artifacts_verified: 2, artifacts_mismatched: 0 });
+    // The run's own version: D's published page (the edit X never publishes: the note is withdrawn while it is live).
+    expect(evaluate(ownVerified).outcome).toMatchObject({ artifacts_verified: 1, artifacts_mismatched: 0 });
     // Positive control: the run's own mismatch fails it.
     expect(integrity(certified(withForeign("verified"), { artifactStatus: "mismatch" }))).toMatchObject({ status: "fail" });
   });
@@ -893,9 +999,9 @@ describe("delta 4: only the run's own report, on its canonical chain, is evidenc
 
   it("an own edit task that names another research, or a design that names another research back, is not on the chain", () => {
     const foreignEditTask = certified((payload) => payload.purpose === "g7.section_revision"
-      ? { ...payload, tasks: (payload.tasks as Array<Record<string, unknown>>).map((entry) => ({ ...entry, design: { ...(entry.design as Record<string, unknown>), research_task_id: FOREIGN_RESEARCH } })) }
+      ? { ...payload, tasks: (payload.tasks as Array<Record<string, unknown>>).map((entry) => entry.task_id === EDIT_TASK ? { ...entry, design: { ...(entry.design as Record<string, unknown>), research_task_id: FOREIGN_RESEARCH } } : entry) }
       : payload);
-    expect(stepsOf(evaluate(foreignEditTask))).toMatchObject({ "g7.section_revision": "unavailable:revised_page_bytes_unavailable" });
+    expect(stepsOf(evaluate(foreignEditTask))).toMatchObject({ "g7.section_revision": "uncertain:edit_task_not_on_own_chain" });
     const misLinked = certified((payload) => ({ ...payload, tasks: (payload.tasks as Array<Record<string, unknown>>).map((entry) => entry.task_id === DESIGN_TASK ? { ...entry, design: { ...(entry.design as Record<string, unknown>), research_task_id: FOREIGN_RESEARCH } } : entry) }));
     const evaluation = evaluate(misLinked);
     expect(statusOf(evaluation, "outcome.artifact_bytes_integrity")).toMatchObject({ status: "uncertain", reason: "target_not_canonical" });
@@ -983,11 +1089,6 @@ describe("delta 5 nits: the withdrawal's design end needs a committed withdrawal
     expect(designEnded({ withdrawalCommitted: false })).toMatchObject({ status: "unavailable", reason: "withdrawal_not_committed" });
   });
 
-  it("a cancellation the preceding Stop may cause is never the withdrawal's: Stop's effect must have settled before it", () => {
-    expect(designEnded({ stopEffect: { phase: "stopping", state: "running" } })).toMatchObject({ status: "uncertain", reason: "stop_effect_not_settled_before_withdrawal" });
-    // Stop settled, the design live after it: only the missing note-to-design link keeps it uncertain.
-    expect(designEnded({ stopEffect: { phase: "stopped", state: "cancelled" } })).toMatchObject({ status: "uncertain", reason: "withdrawn_note_not_linked_to_design" });
-  });
 });
 
 describe("delta 4 review (labrev4 P2): the input-epoch join holds only on an exact window prefix", () => {

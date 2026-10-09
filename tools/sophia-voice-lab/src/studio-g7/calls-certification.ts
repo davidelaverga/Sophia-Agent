@@ -46,13 +46,25 @@ export const STUDIO_CALLS_READ_SCHEMA = "sophia_voice_lab_studio_exchange_calls_
 /** The step id of End's read of every call (a baseline of no step: it bounds the last step's window and lists every later call). */
 export const STUDIO_CALLS_END_STEP = "final" as const;
 
+/**
+ * The Stop sub-episode's own create: a second, bounded voice-created task of
+ * the run's own, distinct from the episode's create (its own task and goal),
+ * whose work Stop then ends. Steer, hold and resume join the episode's create;
+ * Stop joins this one when the run made it.
+ */
+export const STUDIO_STOP_TARGET_STEP = "g7.create_stop_target" as const;
+const CREATE_STEPS: ReadonlySet<string> = new Set(["g7.create", STUDIO_STOP_TARGET_STEP]);
+
 export const STUDIO_VOICE_STEP_COMMAND_KIND: Readonly<Record<string, string>> = Object.freeze({
-  "g7.create": "native_task", "g7.steer": "steer", "g7.hold": "hold", "g7.resume": "resume", "g7.stop": "stop",
+  "g7.create": "native_task", [STUDIO_STOP_TARGET_STEP]: "native_task", "g7.steer": "steer", "g7.hold": "hold", "g7.resume": "resume", "g7.stop": "stop",
 });
 /** The outcome each step's command must be answered with. */
 export const STUDIO_VOICE_STEP_OUTCOME: Readonly<Record<string, string>> = Object.freeze({
-  "g7.create": "admitted", "g7.steer": "ok", "g7.hold": "ok", "g7.resume": "ok", "g7.stop": "ok",
+  "g7.create": "admitted", [STUDIO_STOP_TARGET_STEP]: "admitted", "g7.steer": "ok", "g7.hold": "ok", "g7.resume": "ok", "g7.stop": "ok",
 });
+/** A task state or phase that says its work already ended (nothing left for a control to act on). */
+const ENDED_TASK_STATES: ReadonlySet<string> = new Set(["succeeded", "failed", "cancelled", "outcome_unknown"]);
+const ENDED_TASK_PHASES: ReadonlySet<string> = new Set(["stopping", "stopped", "denied", "failed", "outcome_unknown", "result_ready"]);
 /** Steps whose command takes a new authority epoch (a steer does not). */
 const EPOCH_STEPS: ReadonlySet<string> = new Set(["g7.hold", "g7.resume", "g7.stop"]);
 /** Outcomes that say the product refused or failed the step's call. */
@@ -97,6 +109,9 @@ export interface StudioCallsCertification {
   /** The task the certified create step made, and its goal; null unless certified. */
   createdTaskId: string | null;
   createdGoalId: string | null;
+  /** The Stop sub-episode's own certified task and goal (STUDIO_STOP_TARGET_STEP); null unless certified. */
+  stopTargetTaskId: string | null;
+  stopTargetGoalId: string | null;
   /** Whether any read of the calls was answered (false: the product never served it to the principal). */
   answered: boolean;
 }
@@ -164,7 +179,10 @@ export function certifyStudioVoiceSteps(input: {
   const certifiedCommands = new Set<string>();
   let createdTaskId: string | null = null;
   let createdGoalId: string | null = null;
-  let lastControlEpoch: number | null = null;
+  let stopTargetTaskId: string | null = null;
+  let stopTargetGoalId: string | null = null;
+  // Authority epochs rise per goal (the sub-episode's goal has its own).
+  const lastControlEpoch = new Map<string, number>();
   const results = new Map<string, StudioStepCertification>();
 
   // Every call each step's window read listed (attributed to that step's window, whatever its outcome).
@@ -244,7 +262,7 @@ export function certifyStudioVoiceSteps(input: {
     const taskSeen = (taskId: string) => [...stepObservations, ...observations.filter((event) => event.seq > upper)].reverse()
       .flatMap((event) => (Array.isArray(event.payload.tasks) ? event.payload.tasks as unknown[] : []).map((value) => ({ event, task: record(value) ?? {} })))
       .find((item) => item.task.task_id === taskId) ?? null;
-    if (step.stepId === "g7.create") {
+    if (CREATE_STEPS.has(step.stepId)) {
       if (call.task_id === null) return settle("uncertain", "create_command_without_task");
       const seen = taskSeen(call.task_id);
       if (seen === null || typeof seen.task.exchange_id !== "string") return settle("uncertain", "created_task_exchange_unconfirmed");
@@ -254,31 +272,72 @@ export function certifyStudioVoiceSteps(input: {
       if (taskGoal !== null && command.goal_id !== null && taskGoal !== command.goal_id) return settle("fail", "create_goal_mismatch");
       const goal = taskGoal ?? command.goal_id;
       if (goal === null) return settle("uncertain", "created_task_goal_unknown");
+      if (step.stepId === STUDIO_STOP_TARGET_STEP) {
+        // Explicit, distinct joins: the sub-episode's own task and goal, never the episode's.
+        if (createdTaskId === null) return settle("uncertain", "create_step_not_certified");
+        if (call.task_id === createdTaskId || goal === createdGoalId) return settle("uncertain", "stop_target_not_distinct");
+        certifiedCommands.add(command.command_id);
+        stopTargetTaskId = call.task_id;
+        stopTargetGoalId = goal;
+        return settle("pass", null);
+      }
       certifiedCommands.add(command.command_id);
       createdTaskId = call.task_id;
       createdGoalId = goal;
       return settle("pass", null);
     }
     if (createdGoalId === null || createdTaskId === null) return settle("uncertain", "create_step_not_certified");
-    if (command.goal_id !== createdGoalId) return settle("fail", "command_goal_mismatch");
-    // Hold, resume and stop take a new authority epoch; a steer does not.
+    // Stop acts on the sub-episode's task when the run made one (certified
+    // before Stop); every other control on the episode's created task.
+    const stopsSubEpisode = step.stepId === "g7.stop" && stopTargetTaskId !== null;
+    const targetTaskId = stopsSubEpisode ? stopTargetTaskId! : createdTaskId;
+    const targetGoalId = stopsSubEpisode ? stopTargetGoalId! : createdGoalId;
+    if (command.goal_id !== targetGoalId) return settle("fail", "command_goal_mismatch");
+    // Hold, resume and stop take a new authority epoch on their goal; a steer does not.
     const takesEpoch = EPOCH_STEPS.has(step.stepId);
+    const priorEpoch = lastControlEpoch.get(targetGoalId) ?? null;
     if (takesEpoch && command.authority_epoch === null) return settle("uncertain", "authority_epoch_missing");
-    if (takesEpoch && lastControlEpoch !== null && command.authority_epoch! <= lastControlEpoch) return settle("fail", "authority_epoch_not_increasing");
+    if (takesEpoch && priorEpoch !== null && command.authority_epoch! <= priorEpoch) return settle("fail", "authority_epoch_not_increasing");
+    const sightingsOf = (events: Event[]) => events.flatMap((event) => (Array.isArray(event.payload.tasks) ? event.payload.tasks as unknown[] : []).map((value) => ({ event, task: record(value) ?? {} })))
+      .filter((item) => item.task.task_id === targetTaskId);
+    if (step.stepId === "g7.stop") {
+      // Stop is credited only on work still live just before it: the target's
+      // latest sighting before Stop's baseline. Never on work already ended.
+      const before = sightingsOf(observations.filter((event) => event.seq < baseline.seq)).at(-1) ?? null;
+      if (before === null) return settle("uncertain", "stop_target_not_observed_before_stop");
+      result.evidence_seqs.push(before.event.seq);
+      if (ENDED_TASK_STATES.has(String(before.task.state)) || ENDED_TASK_PHASES.has(String(before.task.phase))) return settle("uncertain", "stop_target_already_ended");
+    }
     const statuses = STUDIO_VOICE_STEP_GOAL_STATUS[step.stepId];
     if (statuses) {
       // The step's own observation (its `observe` action) decides; else the
       // first one after the step. A much later observation (e.g. the final
-      // read after End) is never this step's effect.
-      const sightings = stepObservations.flatMap((event) => (Array.isArray(event.payload.tasks) ? event.payload.tasks as unknown[] : []).map((value) => ({ event, task: record(value) ?? {} })))
-        .filter((item) => item.task.task_id === createdTaskId);
-      const seen = sightings.filter((item) => item.event.payload.purpose === step.stepId).at(-1) ?? sightings[0] ?? null;
+      // read after End) is never this step's effect. Hold and resume act on
+      // the goal's live work (the product holds the design under way while
+      // the research reads result_ready): a task of the run's goal shows it.
+      // Stop is read on its target task.
+      const onGoal = (events: Event[]) => events.flatMap((event) => (Array.isArray(event.payload.tasks) ? event.payload.tasks as unknown[] : []).map((value) => ({ event, task: record(value) ?? {} })))
+        .filter((item) => item.task.goal_id === targetGoalId);
+      const own = (items: Array<{ event: Event; task: Record<string, unknown> }>) => items.filter((item) => item.event.payload.purpose === step.stepId);
+      const isStop = step.stepId === "g7.stop";
+      const sightings = isStop ? sightingsOf(stepObservations) : onGoal(stepObservations);
+      const matching = sightings.filter((item) => statuses.includes(String(item.task.phase)));
+      const seen = own(matching).at(-1) ?? own(sightings).at(-1) ?? matching[0] ?? sightings[0] ?? null;
       if (seen === null) return settle("uncertain", "goal_status_not_observed");
       result.evidence_seqs.push(seen.event.seq);
       if (!statuses.includes(String(seen.task.phase))) return settle("uncertain", "goal_status_not_matching_step");
+      if (isStop) {
+        // Ended by Stop's command, not by anything else: never by a withdrawal of a source it drew on.
+        const withdrawn = Array.isArray(seen.task.withdrawn_source_ids) ? seen.task.withdrawn_source_ids.length : 0;
+        if (withdrawn > 0 || seen.task.reason_class === "revoked_source_withdrawn") return settle("uncertain", "stop_target_ended_by_withdrawal");
+        // And its job cancelled for the stop (reason `stopped`), in this or a later observation.
+        const cancelled = sightingsOf(observations.filter((event) => event.seq >= seen.event.seq)).find((item) => item.task.state === "cancelled" && item.task.reason_class === "stopped") ?? null;
+        if (cancelled === null) return settle("uncertain", "stop_effect_not_settled");
+        if (cancelled.event.seq !== seen.event.seq) result.evidence_seqs.push(cancelled.event.seq);
+      }
     }
     certifiedCommands.add(command.command_id);
-    if (takesEpoch) lastControlEpoch = command.authority_epoch;
+    if (takesEpoch) lastControlEpoch.set(targetGoalId, command.authority_epoch!);
     return settle("pass", null);
   });
 
@@ -291,6 +350,8 @@ export function certifyStudioVoiceSteps(input: {
     unattributed_seqs: unattributed,
     createdTaskId,
     createdGoalId,
+    stopTargetTaskId,
+    stopTargetGoalId,
     answered: answeredReads.length > 0,
   };
 }

@@ -139,8 +139,8 @@ MCP tool surface. It defaults to `legacy-gemini-browser-v1`, which is unchanged
 (LiveKit) room against the product contract `sophia.voice-qualification.v1`
 (migration 0046 is authoritative where the plan document differs; see
 `STUDIO_G7_CONTRACT_DIFFERENCES` in `src/studio-g7/contract.ts`). The adapter
-contract is `sophia.studio-g7.v1`, its catalogue `studio-g7-v1` (scenario
-`V-G07`). On this kind every legacy scenario (V-A01 … V-P01) is rejected by
+contract is `sophia.studio-g7.v2`, its catalogue `studio-g7-v1` (scenario
+`V-G07`; the run binding keeps that version). On this kind every legacy scenario (V-A01 … V-P01) is rejected by
 `start_voice_run` as typed `unsupported_for_target`.
 
 | Variable | Purpose |
@@ -156,11 +156,13 @@ contract is `sophia.studio-g7.v1`, its catalogue `studio-g7-v1` (scenario
 
 **MCP tools (Studio kind only).** `start_studio_g7_run` reserves the run and returns
 the non-secret run binding. `studio_g7_voice_step` performs one voice step
-(`create`, `steer`, `hold`, `resume`, `stop`) as one `speak` operation labelled
-`_g7_step`. `studio_g7_action` performs one non-voice step as one `studio_action`
-operation: `leave_and_return`, `section_revision` (needs `instruction`, optional
-`sections`), `stale_edit`, `withdrawal` (optional `entry_id`), or `observe`
-(`for_step`, optional `wait_ms`), a read-only outcome read for a voice step. A
+(`create`, `steer`, `hold`, `resume`, `create_stop_target`, `stop`) as one
+`speak` operation labelled `_g7_step`. `studio_g7_action` performs one
+non-voice step as one `studio_action` operation: `record_note` (optional
+`text`; the run's own note through the member route), `leave_and_return`,
+`section_revision` (needs `instruction`, optional `sections`), `stale_edit`,
+`withdrawal` (optional `entry_id`), or `observe` (`for_step`, optional
+`wait_ms`), a read-only outcome read for a voice step. A
 step runs at most once per run: the same key replays the same operation, and a
 new key for a step that is in flight or was performed is refused
 (`STUDIO_G7_STEP_IN_FLIGHT` / `STUDIO_G7_STEP_ALREADY_PERFORMED`). Both ledgers
@@ -170,6 +172,21 @@ re-checks it before executing. Every G7 step is therefore a durable, idempotent
 operation; none is only a driver method. The legacy input tools (`speak`,
 `barge_in`, `force_socket_rotation`) answer `unsupported_for_target` on this
 kind, and the worker refuses any unlabelled input operation on a Studio run.
+
+**Episode order.** The G7 episode follows the lifecycle the product supports
+(R2, the product's `apps/api/src/voice-episode.db.test.ts`), one operation per
+step: `record_note` (the run's own note N; its receipt names the entry and the
+note's source S), `create` by voice (a research R drawing on S, whose design D
+is then under way on the same goal), `steer` (while R/D are live),
+`leave_and_return`, `hold` then `resume` (while D is live, each observed), then
+the section revision over HTTP once D published its page (the Lab's own edit
+X, left under way), the stale probe, the withdrawal of N while X is live, and
+last the Stop sub-episode: `create_stop_target` by voice (a second research on
+its own goal, observed pending or running) and `stop` on it (observed). The
+product admits no edit while D is live (`not_started:no_html_page`), one design
+of a page at a time, and no Stop on a goal that already completed (`invalid_state`),
+which is why Stop gets its own sub-episode. Only HTTP revisions are made: a
+revision by voice is out of scope.
 
 **Lab schema v7.** `studio_action` is a new value of `operations.type`
 (`migrations/007_studio_g7_operations.sql`, an additive CHECK widening; no row
@@ -225,10 +242,13 @@ and Markdown dropped) → the design's published version → its HTML rendition'
 source → the downloaded bytes' SHA-256, compared with the declared source,
 rendition and version digests. A section revision, a stale edit and a withdrawal
 are the Lab's own requests, so their outcomes are canonical. A withdrawal
-confirms the preview's whole cascade (every version of the note from the
+forgets the run's own note (the one its `record_note` receipt names; without
+one, the single current note the principal recorded by voice in the run's
+exchange; a named `entry_id` must be one of those) and confirms the preview's
+whole cascade (every version of the note from the
 principal's first, and every decision resting on one of them), so it is sent
-only when every previewed entry is the run's own note (bound to its exchange,
-by the principal) and every previewed decision is the run's own (proposed by
+only when every previewed entry is the run's own note (its recorded note, or
+one bound to its exchange, by the principal) and every previewed decision is the run's own (proposed by
 the principal by voice, decided by nobody else, resting only on the run's own
 notes; the mission read does not expose a decision's exchange); otherwise
 nothing is sent (`withdrawal_cascade_not_own`). The run's report is
@@ -240,7 +260,11 @@ and no other exchange → its artifact and published version. A section revision
 sends that artifact's current version (with a designed page; the version id
 binds the request to the run's own artifact, so a later version of it, e.g. a
 rendition that keeps the page, is revised too), and a stale edit sends the
-design's published version once a newer version superseded it. Without a certified create, a
+newest own version a newer one superseded (the product checks staleness first,
+so the probe is refused `409 stale_revision` even while X is under way). A
+revision first waits, bounded by the step's settle budget, for the own design
+to publish its page; it never waits for X (its state at return is read once).
+Without a certified create, a
 missing, ambiguous or foreign link, or a design not yet published, nothing is
 sent: the step is typed `unavailable` or `uncertain` (`create_step_not_certified`,
 `own_design_pending`, `target_not_canonical`), and the chain is re-read right
@@ -269,26 +293,51 @@ windows seen are exactly 1..k for the k non-silence inputs so far and, after
 step's epoch unknown, `step_input_epoch_unknown`), and exactly one carries a command:
 `native_task` with its task, answered `admitted`, for create (the task naming
 the run's ownership-proven exchange in the snapshot, `NativeTask.exchangeId`);
-`steer`, `hold`, `resume` or `stop` on the created task's goal, answered `ok`.
+`steer`, `hold`, `resume` on the created task's goal, and `stop` on the Stop
+sub-episode's goal, answered `ok`.
 The command must not be denied, superseded or of unknown outcome, never
 certified by an earlier step; hold, resume and stop (which take a new authority
-epoch; a steer does not) must carry an epoch above the previous of those, and
-see the created task's status match in the step's own observation
-(`holding`/`held`, `running`, `stopping`/`stopped`). An unsettled read, no new
+epoch; a steer does not) must carry an epoch above the previous of those on
+their goal, and see the status match in the step's own observation: hold and
+resume on a task of the created task's goal (the product holds the design under
+way while the research reads `result_ready`: `holding`/`held`, `running`), Stop
+on its target (`stopping`/`stopped`). An unsettled read, no new
 call, an unanswered call, no command or more than one, another kind, goal, epoch
 or outcome, a command a later read no longer lists, or a task or command seen
 only elsewhere (another exchange, or the principal's own HTTP request) never
 passes; a product that does not serve the calls (404) or refuses them (422)
-leaves the steps `unavailable`. The withdrawal ended the run's design only if
-that design (the one the certified create's research task handed its page to)
-was live in the withdrawal's own observation before it and is `cancelled` in its
-own observation after it; an end it did not cause (already ended, or `failed`)
-is never its effect. Even then nothing the product exposes ties the withdrawn
-note to the design's inputs, so a design end is never credited to the
-withdrawal: it is at most `uncertain` (`withdrawn_note_not_linked_to_design`);
-it also needs a committed withdrawal and, after a Stop, Stop's effect settled
-(the created task stopped or ended) with the design still live before the
-withdrawal. A command that a later answered read shows `denied` fails its
+leaves the steps `unavailable`.
+
+The withdrawal ended the run's own edit X (`step.g7.withdrawal.design_ended`)
+only with every join on the note's SOURCE S, the `sourceId` of the run's own
+`record_note` receipt (the entry id serves only the routes and the preview's
+`expectedAffected`; a match on the entry id alone, or on another source, never
+passes): the withdrawal committed, for the run's own note, and its
+`withdraw_note` receipt names S; the run's research R listed S in its
+`inputSourceIds` in an observation before the withdrawal; X is canonically the
+run's own (the task the Lab's own admitted edit receipt names, on the own
+design's artifact) and was live (designing or reviewing) in the withdrawal's own
+before-observation; in the withdrawal's own after-observation X `failed` for the
+product's revoke reason (`revoked_source_withdrawn`, only the class is kept)
+with S in its `withdrawnSourceIds` (R2, computed live by the product); and
+nothing else ended it first (no Stop before that observation). Anything less is
+`uncertain` or `unavailable`, never a pass. Timing risk: if X publishes (or
+ends) before the withdrawal reaches it, the end is `uncertain`
+(`own_edit_no_longer_live`); the episode withdraws right after the stale probe
+to keep that window short.
+
+Stop is credited only on the Stop sub-episode's own live work, never on work
+already ended: its own certified create (`create_stop_target`, with its own
+baseline, window and command, a `native_task` naming the run's exchange, on a
+task and goal distinct from the episode's: `stop_target_not_distinct`), its
+target seen live before Stop's baseline (`stop_target_not_observed_before_stop`,
+`stop_target_already_ended`), Stop's own command on that goal, then the target
+`stopping`/`stopped` in Stop's own observation and its job `cancelled` for the
+reason `stopped` (`stop_effect_not_settled`); a target that lists a withdrawn
+source or the revoke reason is never Stop's effect
+(`stop_target_ended_by_withdrawal`). The sub-episode never borrows the main
+create's joins, and a Stop on the main goal after the withdrawal (refused by the
+product, no command) is never a pass. A command that a later answered read shows `denied` fails its
 step, and one later of unknown outcome is `uncertain`. End reads every call
 of the exchange once (no `after`); a command-bearing call that some read lists
 but no step's window holds (made between a step's window read and the next
@@ -297,7 +346,15 @@ baseline, or after the last step) makes the run `uncertain`
 End's own audit, taken post-quiescence: after the run's exchange was confirmed
 ended and the bridge reported its provider session closed (no further voice
 call can be recorded), settled (every call answered), and before the global
-sign-out revokes the principal's read. The evaluator proves the order from the
+sign-out revokes the principal's read. It relies on the product's
+"fence recording against End" (C5: recording a voice call takes the exchange's
+project lock, then the exchange row, and checks its state under both, so End is
+a durable recording boundary; reported as 04fac683 on
+`sdd-01/voice-lab-g7-r1`, its verification and merge still pending, pin to
+follow): a call recorded before End may still be listed unanswered right after
+it and answered later, and none is recorded after it. The audit therefore
+re-reads until every listed call is answered, bounded; a read that never
+settles is `uncertain`, never treated as final. The evaluator proves the order from the
 ledger; an audit missing, unsettled, before quiescence or after the sign-out
 is `end_calls_audit_unproven`, a refused one `end_calls_read_unavailable`,
 never a pass. The calls are read only with
@@ -305,7 +362,9 @@ the run's own browser session: without one a read is typed
 `no_browser_session`, never made by signing in. With one, the read uses that
 session, which is renewed (a password grant) within 60 s of its expiry; the
 renewed session replaces the run's own, so End's global sign-out revokes it. A
-complete run whose five voice steps are certified can report the product `pass`;
+complete run whose six voice steps are certified, with every other product
+assertion (the withdrawal's end of X on S included) passing, can report the
+product `pass`;
 otherwise it stays `inconclusive` (or `fail` where a step's own command
 contradicts it).
 
@@ -468,9 +527,10 @@ bridge reports only while it is in the room), and absence at that report does
 not prove the process closed. Voice-step certification needs the API's voice
 qualification on; a steer's effect beyond its admitted command, and a goal's
 status other than its created task's phase, are not exposed by the member API.
-Nor is a link from a withdrawn note to the design's inputs, so "the withdrawal
-ended the design" is at most `uncertain` and a complete G7 run's product
-verdict is `inconclusive` until the product exposes one.
+The withdrawal's end of X is proven only through R2's `inputSourceIds` and
+`withdrawnSourceIds` (voice qualification on); without them it is
+`unavailable`. Section revisions are made over HTTP only; revising by voice is
+out of scope.
 
 ## Running and container commands
 

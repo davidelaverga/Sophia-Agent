@@ -1011,10 +1011,12 @@ export class VoiceLabWorker {
       // Computed before the fence, so nothing long runs between the fence
       // check and the driver's mutation.
       const ownCreateTaskId = await this.#studioOwnCreateTaskId(run);
+      // The run's own note: its committed record_note receipt (entry and source), never a note found elsewhere.
+      const ownNote = await this.#studioOwnNote(run);
       await this.#fenceMutation(claimed, signal);
       const settleBudgetMs = deadlineAt === undefined ? undefined : Math.max(0, deadlineAt - Date.now() - 15_000);
       this.driver.setStudioOwnCreateTask(run.id, ownCreateTaskId);
-      const acted = await this.driver.studioAction(run, operation.id, { ...operation.input, _own_create_task_id: ownCreateTaskId, ...(settleBudgetMs === undefined ? {} : { _settle_budget_ms: settleBudgetMs }) });
+      const acted = await this.driver.studioAction(run, operation.id, { ...operation.input, _own_create_task_id: ownCreateTaskId, ...(ownNote === null ? {} : { _own_note_entry_id: ownNote.entryId, _own_note_source_id: ownNote.sourceId }), ...(settleBudgetMs === undefined ? {} : { _settle_budget_ms: settleBudgetMs }) });
       await this.#persistEvents(run.id, acted.events);
       run = await this.#freshRun(run.id);
       if (run.state === "ready") run = await transitionRun(this.ledger, run, "active");
@@ -1806,6 +1808,13 @@ export class VoiceLabWorker {
   #lastMarkerSweepAtMs: number | null = null;
   /** Clears that failed and wait for the sweep (diagnostics). */
   get pendingSignOutClearCount(): number { return this.#failedSignOutClears.size; }
+
+  /** The run's own note from its durable record_note receipt (the latest committed one), or null. */
+  async #studioOwnNote(run: RunRecord): Promise<{ entryId: string; sourceId: string } | null> {
+    const recorded = (await this.#allEvents(run.id)).events.filter((event) => event.kind === "studio.action.record_note" && event.source === "canonical" && event.payload.status === "committed"
+      && typeof event.payload.entry_id === "string" && typeof event.payload.source_id === "string").at(-1);
+    return recorded ? { entryId: String(recorded.payload.entry_id), sourceId: String(recorded.payload.source_id) } : null;
+  }
 
   /** The task the run's certified create step made (calls-certification.ts), or null while it is not certified. */
   async #studioOwnCreateTaskId(run: RunRecord): Promise<string | null> {

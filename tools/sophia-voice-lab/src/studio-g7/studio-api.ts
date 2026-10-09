@@ -50,6 +50,8 @@ export interface ProjectedTask {
   exchangeId: string | null;
   /** The task's goal (NativeTask.goalId): a control command (steer/hold/resume/stop) names it. */
   goalId: string | null;
+  /** The sources the task's input drew on (NativeTask.inputSourceIds): a research's manifest inputs, e.g. a note's source. */
+  inputSourceIds: string[] | null;
 }
 
 /** States a voice call's command can be in (A15 ExchangeCalls). */
@@ -124,6 +126,33 @@ export interface ProjectedTaskDetail {
     researchTaskId: string | null; revisions: number | null; sections: string[];
   } | null;
   outputs: Array<{ artifactVersionId: string; format: string; sourceId: string; sha256: string; byteLength: number | null }>;
+  /**
+   * The sources of this task's attempt's consumed closure that are now
+   * withdrawn, computed live by the product (R2 `withdrawnSourceIds`, for
+   * research, design and design_review tasks, with voice qualification on);
+   * null when the product does not send it (or sends it malformed).
+   */
+  withdrawnSourceIds: string[] | null;
+  /** The task's and its design's end reason, as an enumerated class (the product's text is never kept). */
+  reasonClass: StudioReasonClass | null;
+  designReasonClass: StudioReasonClass | null;
+}
+
+/**
+ * The product's end reasons the Lab recognizes (exact strings the product's
+ * SQL writes); any other reason is `other`. Only the class is recorded.
+ */
+export const STUDIO_PRODUCT_REASONS: Readonly<Record<string, "revoked_source_withdrawn" | "stopped">> = Object.freeze({
+  // sophia.design_revoke_source (0041_design_lifecycle.sql): a design that drew on a withdrawn source.
+  "revoked: a source the report drew on was withdrawn": "revoked_source_withdrawn",
+  // A job cancelled by a Stop (the goal stopping, then stopped).
+  stopped: "stopped",
+});
+export type StudioReasonClass = "revoked_source_withdrawn" | "stopped" | "other";
+
+export function classifyProductReason(value: unknown): StudioReasonClass | null {
+  if (typeof value !== "string" || value.length === 0) return null;
+  return STUDIO_PRODUCT_REASONS[value] ?? "other";
 }
 
 export interface ProjectedArtifactVersion {
@@ -149,7 +178,8 @@ export interface SourceContentRead {
   inlineText: string | null;
 }
 
-export interface ProjectedMissionEntry { id: string; state: string; actorId: string | null; origin: string | null; exchangeId: string | null }
+/** A mission entry: ids, state and joins; `sourceId` is the note's own source (the one a task's closure consumes). */
+export interface ProjectedMissionEntry { id: string; state: string; actorId: string | null; origin: string | null; exchangeId: string | null; sourceId: string | null; goalId: string | null }
 
 /**
  * A mission decision (a proposal, or one accepted or rejected): who proposed
@@ -198,7 +228,7 @@ export function projectTask(raw: unknown): ProjectedTask | null {
   const state = wordOrNull(task.state);
   const phase = wordOrNull(task.phase);
   if (!id || !actorId || (kind !== "draft_brief" && kind !== "research" && kind !== "design") || !state || !phase) return null;
-  return { id, kind, state, phase, actorId, commandId: uuidOrNull(task.commandId), createdAt: isoOrNull(task.createdAt), artifactId: uuidOrNull(task.artifactId), resultSourceId: uuidOrNull(task.resultSourceId), exchangeId: uuidOrNull(task.exchangeId), goalId: uuidOrNull(task.goalId) };
+  return { id, kind, state, phase, actorId, commandId: uuidOrNull(task.commandId), createdAt: isoOrNull(task.createdAt), artifactId: uuidOrNull(task.artifactId), resultSourceId: uuidOrNull(task.resultSourceId), exchangeId: uuidOrNull(task.exchangeId), goalId: uuidOrNull(task.goalId), inputSourceIds: projectUuidList(task.inputSourceIds) };
 }
 
 const TOOL = /^[a-z][a-z_]{0,63}$/;
@@ -282,6 +312,13 @@ export function classifyRoomPresence(read: MemberRead<ProjectedRoomPresence>, ro
   return read.value.selfPresent ? { status: "present", reason: null } : { status: "absent", reason: null };
 }
 
+/** A list of UUIDs (lowercased, at most 64); null when absent or not a list of UUIDs. */
+function projectUuidList(value: unknown): string[] | null {
+  if (!Array.isArray(value) || value.length > 64) return null;
+  const ids = value.map((item) => uuidOrNull(item));
+  return ids.every((id): id is string => id !== null) ? [...new Set(ids)] : null;
+}
+
 export function projectTaskDetail(raw: unknown): ProjectedTaskDetail | null {
   const body = record(raw);
   const task = projectTask(body?.task);
@@ -307,6 +344,9 @@ export function projectTaskDetail(raw: unknown): ProjectedTaskDetail | null {
       const format = wordOrNull(output?.format);
       return artifactVersionId && sourceId && sha256 && format ? [{ artifactVersionId, format, sourceId, sha256, byteLength: intOrNull(output!.byteLength) }] : [];
     }),
+    withdrawnSourceIds: projectUuidList(body.withdrawnSourceIds),
+    reasonClass: classifyProductReason(record(body.task)?.reason),
+    designReasonClass: classifyProductReason(design?.reason),
   };
 }
 
@@ -545,7 +585,7 @@ export class StudioApiClient {
         const state = wordOrNull(entry?.state);
         if (!entry || !id || !state || seen.has(id)) return [];
         seen.add(id);
-        return [{ id, state, actorId: uuidOrNull(entry.actorId), origin: wordOrNull(entry.origin), exchangeId: uuidOrNull(entry.exchangeId) }];
+        return [{ id, state, actorId: uuidOrNull(entry.actorId), origin: wordOrNull(entry.origin), exchangeId: uuidOrNull(entry.exchangeId), sourceId: uuidOrNull(entry.sourceId), goalId: uuidOrNull(entry.goalId) }];
       });
       const decided = [...(Array.isArray(body.constraints) ? body.constraints : []), ...(Array.isArray(body.pending) ? body.pending : []), ...(Array.isArray(body.decided) ? body.decided : [])] as unknown[];
       const seenDecisions = new Set<string>();
@@ -580,14 +620,33 @@ export class StudioApiClient {
   }
 
   /** `POST .../mission/entries/{e}/withdrawal` with exactly what the preview listed. */
-  async withdraw(projectId: string, preview: WithdrawalPreview, accessToken: string, idempotencyKey: string): Promise<MutationAnswer<{ status: string; operation: string; entryId: string | null; affectedCount: number; ledgerRevision: number | null }>> {
+  async withdraw(projectId: string, preview: WithdrawalPreview, accessToken: string, idempotencyKey: string): Promise<MutationAnswer<{ status: string; operation: string; entryId: string | null; sourceId: string | null; affectedCount: number; ledgerRevision: number | null }>> {
     const body = { expectedAffected: { entryIds: preview.entryIds, decisions: preview.decisions }, previewToken: preview.previewProof };
     return this.#mutate(`/api/v1/projects/${encodeURIComponent(projectId)}/mission/entries/${encodeURIComponent(preview.entryId)}/withdrawal`, accessToken, idempotencyKey, body, (raw) => {
       const receipt = record(raw);
       const status = wordOrNull(receipt?.status);
       const operation = wordOrNull(receipt?.operation);
       if (!receipt || !status || !operation) return null;
-      return { status, operation, entryId: uuidOrNull(receipt.entryId), affectedCount: Array.isArray(receipt.affected) ? receipt.affected.length : 0, ledgerRevision: intOrNull(receipt.ledgerRevision) };
+      // sourceId: the forgotten note's source (MissionReceipt, withdraw_note).
+      return { status, operation, entryId: uuidOrNull(receipt.entryId), sourceId: uuidOrNull(receipt.sourceId), affectedCount: Array.isArray(receipt.affected) ? receipt.affected.length : 0, ledgerRevision: intOrNull(receipt.ledgerRevision) };
+    });
+  }
+
+  /**
+   * `POST /api/v1/projects/{p}/mission/entries` (record_note): the principal's
+   * own note. Its receipt names the entry and the note's source (`sourceId`,
+   * the entry's source_id): the source a research that draws on the note
+   * lists in its inputs, and a withdrawal reaches. The text is never kept.
+   */
+  async recordNote(projectId: string, note: { kind: string; epistemic: string; text: string }, accessToken: string, idempotencyKey: string): Promise<MutationAnswer<{ status: string; operation: string; entryId: string; sourceId: string }>> {
+    return this.#mutate(`/api/v1/projects/${encodeURIComponent(projectId)}/mission/entries`, accessToken, idempotencyKey, note, (raw) => {
+      const receipt = record(raw);
+      const status = wordOrNull(receipt?.status);
+      const operation = wordOrNull(receipt?.operation);
+      const entryId = uuidOrNull(receipt?.entryId);
+      const sourceId = uuidOrNull(receipt?.sourceId);
+      if (!receipt || !status || !operation || !entryId || !sourceId) return null;
+      return { status, operation, entryId, sourceId };
     });
   }
 

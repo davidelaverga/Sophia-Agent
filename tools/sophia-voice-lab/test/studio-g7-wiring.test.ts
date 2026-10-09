@@ -21,7 +21,7 @@ import { STUDIO_DEAD_OWNER_LEASE_RELEASE_SCHEMA } from "../src/studio-g7/lease-r
 import { VoiceLabWorker } from "../src/worker.js";
 import { testConfig } from "./helpers.js";
 import { API_SHA, BRIDGE_SHA, EXCHANGE_UUID, GRANT_UUID, STUDIO_SHA, studioRun, studioTestConfig } from "./studio-g7-helpers.js";
-import { ScriptedStudioDriver, newIdempotencyKey } from "./studio-g7-worker-helpers.js";
+import { SCRIPTED_IDS, ScriptedStudioDriver, newIdempotencyKey } from "./studio-g7-worker-helpers.js";
 
 const caller: AuthenticatedCaller = { subject: "caller-1", scopes: new Set(["voice_lab:read", "voice_lab:run"]) };
 const START = { environment: "production", scenario_id: "V-G07", scenario_version: "studio-g7-v1" } as const;
@@ -61,8 +61,8 @@ describe("target-kind wiring in the service", () => {
       const byName = Object.fromEntries(studio.listed.tools.map((tool) => [tool.name, tool]));
       expect(Object.keys(byName)).toEqual(expect.arrayContaining([...STUDIO_G7_TOOL_NAMES]));
       expect(byName.studio_g7_action.annotations).toMatchObject({ destructiveHint: true, idempotentHint: true });
-      expect(byName.studio_g7_voice_step.inputSchema.properties.step.enum).toEqual(["create", "steer", "hold", "resume", "stop"]);
-      expect(byName.studio_g7_action.inputSchema.properties.action.enum).toEqual(["leave_and_return", "section_revision", "stale_edit", "withdrawal", "observe"]);
+      expect(byName.studio_g7_voice_step.inputSchema.properties.step.enum).toEqual(["create", "steer", "hold", "resume", "create_stop_target", "stop"]);
+      expect(byName.studio_g7_action.inputSchema.properties.action.enum).toEqual(["record_note", "leave_and_return", "section_revision", "stale_edit", "withdrawal", "observe"]);
       const started = await studio.client.callTool({ name: "start_studio_g7_run", arguments: { ...START, idempotency_key: "mcp-studio-start-01" } }) as unknown as { structuredContent: LabEnvelope; isError?: boolean };
       expect(started.isError).toBeFalsy();
       expect(started.structuredContent.data.run_binding).toMatchObject({ run_binding_sha256: expect.stringMatching(/^[0-9a-f]{64}$/) });
@@ -158,20 +158,33 @@ async function action(h: Harness, input: Record<string, unknown>): Promise<LabEn
   return drive(h, h.service.studioG7Action(caller, { run_id: h.runId, idempotency_key: newIdempotencyKey(`action-${String(input.action)}`), ...input }));
 }
 
+/**
+ * The G7 episode in the order the product supports (R2): the run's own note,
+ * create, steer, leave and return, hold and resume while the design is live,
+ * the HTTP revision and stale probe, the withdrawal of the run's own note while
+ * its edit is live, then the Stop sub-episode (its own certified create, then
+ * Stop on its own live research).
+ */
 async function episode(h: Harness, skip: string[] = []): Promise<void> {
   await h.worker.runOnce();
   expect(await h.ledger.getRun(h.runId)).toMatchObject({ state: "ready" });
+  if (!skip.includes("record_note")) expect((await action(h, { action: "record_note" })).data).toMatchObject({ performed: true, status: h.driver.recordNoteCommitted ? "committed" : "refused" });
   if (!skip.includes("create")) expect((await voice(h, "create")).status).toBe("completed");
   if (!skip.includes("steer")) expect((await voice(h, "steer")).status).toBe("completed");
   if (!skip.includes("leave_and_return")) expect((await action(h, { action: "leave_and_return" })).data).toMatchObject({ performed: true, operation_state: "succeeded" });
-  if (!skip.includes("section_revision")) expect((await action(h, { action: "section_revision", instruction: "Shorten the introduction" })).data).toMatchObject({ performed: true, http_status: 202 });
-  if (!skip.includes("stale_edit")) expect((await action(h, { action: "stale_edit" })).data).toMatchObject({ performed: true, http_status: 409, code: "stale_revision" });
-  for (const step of ["hold", "resume", "stop"]) {
+  for (const step of ["hold", "resume"]) {
     if (skip.includes(step)) continue;
     expect((await voice(h, step)).status).toBe("completed");
     expect((await action(h, { action: "observe", for_step: step })).data).toMatchObject({ performed: false, status: "observed" });
   }
+  if (!skip.includes("section_revision")) expect((await action(h, { action: "section_revision", instruction: "Shorten the introduction" })).data).toMatchObject({ performed: true, http_status: 202 });
+  if (!skip.includes("stale_edit")) expect((await action(h, { action: "stale_edit" })).data).toMatchObject({ performed: true, http_status: 409, code: "stale_revision" });
   if (!skip.includes("withdrawal")) expect((await action(h, { action: "withdrawal" })).data).toMatchObject({ performed: true });
+  for (const step of ["create_stop_target", "stop"]) {
+    if (skip.includes(step)) continue;
+    expect((await voice(h, step)).status).toBe("completed");
+    expect((await action(h, { action: "observe", for_step: step })).data).toMatchObject({ performed: false, status: "observed" });
+  }
 }
 
 async function end(h: Harness): Promise<LabEnvelope> {
@@ -183,8 +196,8 @@ describe("target-kind wiring in the worker", () => {
     const h = await harness();
     await episode(h);
     const operations = await h.ledger.listOperations(h.runId);
-    expect(operations.filter((operation) => operation.type === "speak").map((operation) => operation.input._g7_step)).toEqual(["g7.create", "g7.steer", "g7.hold", "g7.resume", "g7.stop"]);
-    expect(operations.filter((operation) => operation.type === "studio_action").map((operation) => operation.input.action)).toEqual(["leave_and_return", "section_revision", "stale_edit", "observe", "observe", "observe", "withdrawal"]);
+    expect(operations.filter((operation) => operation.type === "speak").map((operation) => operation.input._g7_step)).toEqual(["g7.create", "g7.steer", "g7.hold", "g7.resume", "g7.create_stop_target", "g7.stop"]);
+    expect(operations.filter((operation) => operation.type === "studio_action").map((operation) => operation.input.action)).toEqual(["record_note", "leave_and_return", "observe", "observe", "section_revision", "stale_edit", "withdrawal", "observe", "observe"]);
     // Write-ahead events were durable before the driver acted on them.
     expect(h.driver.durable).toEqual(["studio.exchange.speak_requested", "studio.exchange.opened"]);
     await end(h);
@@ -194,7 +207,7 @@ describe("target-kind wiring in the worker", () => {
     const manifestRef = evidence!.artifactRefs.find((ref) => ref.kind === "manifest")!;
     const manifest = JSON.parse(Buffer.from((await h.ledger.getArtifact(manifestRef.resource_id.replace("voice-lab://evidence/", "")))!.bytes).toString("utf8"));
     expect(manifest.studio_g7).toMatchObject({ grant_id: GRANT_UUID, pcm_reconciliation: "envelope_only", retention: { transcript: "not_retained", audio: "not_retained" }, cleanup: { complete: true, ownership: "proven" } });
-    expect(manifest.studio_g7.steps.map((step: { step_id: string; executed: string }) => `${step.step_id}:${step.executed}`)).toEqual(["g7.create:pass", "g7.steer:pass", "g7.leave_return:pass", "g7.section_revision:pass", "g7.stale_edit:pass", "g7.hold:pass", "g7.resume:pass", "g7.stop:pass", "g7.withdrawal:pass"]);
+    expect(manifest.studio_g7.steps.map((step: { step_id: string; executed: string }) => `${step.step_id}:${step.executed}`)).toEqual(["g7.record_note:pass", "g7.create:pass", "g7.steer:pass", "g7.leave_return:pass", "g7.hold:pass", "g7.resume:pass", "g7.section_revision:pass", "g7.stale_edit:pass", "g7.withdrawal:pass", "g7.create_stop_target:pass", "g7.stop:pass"]);
     const events = (await h.ledger.listEvents(h.runId, 0, 1_000)).events;
     expect(events.some((event) => event.kind === "cleanup.browser_lease_released" && event.payload.schema === "sophia_voice_lab_studio_g7_lease_release_v1")).toBe(true);
     expect(JSON.stringify(events)).not.toContain(h.config.studioG7!.principalPassword);
@@ -1521,4 +1534,32 @@ describe("delta 5 review (labrev5): marker sweep bounds, End's post-quiescence c
     const evaluation = evaluateStudioG7Run((await ledger.getRun(runId))!, events, await ledger.listOperations(runId), { expected: { studio: STUDIO_SHA, api: API_SHA, bridge: BRIDGE_SHA } });
     expect(evaluation.harness.find((assertion) => assertion.id === "cleanup.orphan_room_presence")).toMatchObject({ status: "fail", reason: "presence_veto_capped_principal_reported_present" });
   }, 120_000);
+});
+
+describe("delta 6: the worker hands the driver the run's own note from its own record_note receipt", () => {
+  it("passes the committed receipt's entry and source to every later action (the withdrawal joins on that source)", async () => {
+    const h = await harness();
+    await episode(h);
+    const inputs = h.driver.actionInputs.filter((input) => input.action !== "observe");
+    expect(inputs.map((input) => input.action)).toEqual(["record_note", "leave_and_return", "section_revision", "stale_edit", "withdrawal"]);
+    // Before its own receipt exists the run has no own note; after it, every action carries exactly its ids.
+    expect(inputs[0]).not.toHaveProperty("_own_note_entry_id");
+    for (const input of inputs.slice(1)) expect(input).toMatchObject({ _own_note_entry_id: SCRIPTED_IDS.NOTE_ENTRY, _own_note_source_id: SCRIPTED_IDS.NOTE_SOURCE });
+    await end(h);
+    const events = (await h.ledger.listEvents(h.runId, 0, 2_000)).events;
+    expect(events.filter((event) => event.kind === "studio.action.record_note").map((event) => event.payload)).toEqual([expect.objectContaining({ status: "committed", entry_id: SCRIPTED_IDS.NOTE_ENTRY, source_id: SCRIPTED_IDS.NOTE_SOURCE })]);
+  }, 60_000);
+
+  it("a refused record_note hands over no own note: the withdrawal is never joined to a note the run did not record", async () => {
+    const h = await harness();
+    h.driver.recordNoteCommitted = false;
+    await episode(h);
+    const withdrawal = h.driver.actionInputs.find((input) => input.action === "withdrawal")!;
+    expect(withdrawal).not.toHaveProperty("_own_note_entry_id");
+    expect(withdrawal).not.toHaveProperty("_own_note_source_id");
+    await end(h);
+    const settled = (await h.ledger.getRun(h.runId))!;
+    // The step itself failed (refused), so the product can never pass.
+    expect(settled.verdicts.product).not.toBe("pass");
+  }, 60_000);
 });

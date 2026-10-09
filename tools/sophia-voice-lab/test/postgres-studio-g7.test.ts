@@ -53,17 +53,23 @@ async function drive(h: Harness, call: Promise<LabEnvelope>): Promise<LabEnvelop
 const voice = (h: Harness, step: string) => drive(h, h.service.studioG7VoiceStep(caller, { run_id: h.runId, step, fixture_id: "a02_short_command", idempotency_key: newIdempotencyKey(`pg-voice-${step}`) }));
 const action = (h: Harness, input: Record<string, unknown>) => drive(h, h.service.studioG7Action(caller, { run_id: h.runId, idempotency_key: newIdempotencyKey(`pg-action-${String(input.action)}`), ...input }));
 
+/** The G7 episode in the order the product supports (R2), the Stop sub-episode last. */
 async function episode(h: Harness): Promise<void> {
   await h.worker.runOnce();
+  expect((await action(h, { action: "record_note" })).data).toMatchObject({ performed: true, status: "committed" });
   for (const step of ["create", "steer"]) expect((await voice(h, step)).status).toBe("completed");
   expect((await action(h, { action: "leave_and_return" })).data).toMatchObject({ performed: true });
-  expect((await action(h, { action: "section_revision", instruction: "Shorten the introduction" })).data).toMatchObject({ performed: true });
-  expect((await action(h, { action: "stale_edit" })).data).toMatchObject({ performed: true, code: "stale_revision" });
-  for (const step of ["hold", "resume", "stop"]) {
+  for (const step of ["hold", "resume"]) {
     expect((await voice(h, step)).status).toBe("completed");
     await action(h, { action: "observe", for_step: step });
   }
+  expect((await action(h, { action: "section_revision", instruction: "Shorten the introduction" })).data).toMatchObject({ performed: true });
+  expect((await action(h, { action: "stale_edit" })).data).toMatchObject({ performed: true, code: "stale_revision" });
   expect((await action(h, { action: "withdrawal" })).data).toMatchObject({ performed: true });
+  for (const step of ["create_stop_target", "stop"]) {
+    expect((await voice(h, step)).status).toBe("completed");
+    await action(h, { action: "observe", for_step: step });
+  }
 }
 
 /** Recovery results with a fresh global sign-out per call (as the real driver records them). */
@@ -167,7 +173,7 @@ selected("real PostgreSQL Studio G7 worker branches (schema v7)", () => {
     const h = await harness("pg-studio-worker");
     await episode(h);
     const types = (await ledger.pool.query("select type, count(*)::int as n from sophia_voice_lab.operations where run_id=$1 group by type order by type", [h.runId])).rows;
-    expect(types).toEqual([{ type: "speak", n: 5 }, { type: "start", n: 1 }, { type: "studio_action", n: 7 }]);
+    expect(types).toEqual([{ type: "speak", n: 6 }, { type: "start", n: 1 }, { type: "studio_action", n: 9 }]);
     // Concurrency 1: a second Studio run is not admitted while this one is live.
     const config = studioTestConfig(undefined, { SOPHIA_VOICE_LAB_MAX_CONCURRENT_RUNS: "1" });
     const second = new VoiceLabService(ledger, config, async () => []);

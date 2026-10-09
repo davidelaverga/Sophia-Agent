@@ -12,7 +12,7 @@ import { sha256 } from "../src/security.js";
 import { deriveStudioG7Verdicts, evaluateStudioG7Run, studioG7CleanupProof } from "../src/studio-g7/evaluate.js";
 import { ownerCleanupForLease } from "../src/studio-g7/lease-release.js";
 import { passwordGrant } from "../src/studio-g7/supabase-session.js";
-import { StudioG7Driver, type StudioDriverDependencies } from "../src/studio-g7/studio-driver.js";
+import { STUDIO_G7_NOTE_TEXT, StudioG7Driver, type StudioDriverDependencies } from "../src/studio-g7/studio-driver.js";
 import {
   API_SHA, BRIDGE_SHA, EXCHANGE_UUID, FAKE_EMAIL, FAKE_PASSWORD, FAKE_PUBLISHABLE_KEY, PRINCIPAL_UUID, PROJECT_UUID, STUDIO_SHA,
   bindingOf, evidenceGrant, inputTurn, inputWindow, outputReply, providerReceipt, sessionClosed, speakOperation, studioRun, studioTestConfig,
@@ -38,6 +38,8 @@ const OTHER_PRINCIPAL = "12345678-1234-4234-8234-123456789abc";
 const OTHER_EXCHANGE = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
 const FREE_TEXT = ["Build me a page about river otters", "secret research markdown body", "the user's dog is called Rex", "Make the introduction shorter please", "A newer version of this report exists"];
 const PREVIEW_PROOF = `v1.1791500000.${"c".repeat(64)}`;
+/** The product's revoke reason (sophia.design_revoke_source, 0041_design_lifecycle.sql), verbatim. */
+const REVOKED = "revoked: a source the report drew on was withdrawn";
 const SIGNATURE = "X-Amz-Signature=fakesignature0123456789";
 
 function sineWav(durationMs = 800, sampleRate = 16_000): Buffer {
@@ -115,12 +117,19 @@ describe.skipIf(executablePath === null)("Studio G7 driver against a local fake 
     onTaskRead: null as ((taskId: string) => void) | null,
     /** Mission decisions (MissionDecision): proposals and decisions, each resting on `supportingEntryIds`. */
     decisions: [] as Array<Record<string, unknown>>,
+    /** record_note requests as sent (idempotency key and the note's kind; never its words), and their replayable answers. */
+    noteRequests: [] as Array<{ idempotencyKey: unknown; kind: string; epistemic: string }>,
+    noteAnswers: new Map<string, { status: number; body: unknown }>(),
   };
   const ROOM_UUID = "70000000-0000-4000-8000-0000000000a7";
   const tokens = { issued: new Set<string>(), revoked: new Set<string>(), expiresIn: 3_600, failLocal: 0, logouts: [] as string[] };
   let origins = { studio: "", api: "", supabase: "", store: "" };
 
-  const ids = { goal: randomUUID(), research: randomUUID(), design: randomUUID(), edit: randomUUID(), artifact: randomUUID(), v1: randomUUID(), v2: randomUUID(), html1: randomUUID(), html2: randomUUID(), md: randomUUID(), note: randomUUID(), decision: randomUUID() };
+  const ids = { goal: randomUUID(), research: randomUUID(), design: randomUUID(), edit: randomUUID(), artifact: randomUUID(), v1: randomUUID(), v2: randomUUID(), html1: randomUUID(), html2: randomUUID(), md: randomUUID(), note: randomUUID(), decision: randomUUID(),
+    /** The run's own note's source S (its record_note receipt names it). */
+    noteSource: randomUUID(),
+    /** The Stop sub-episode: its own research on its own goal. */
+    stopGoal: randomUUID(), stopResearch: randomUUID() };
   const html1 = Buffer.from("<!doctype html><section id=intro>Otters</section>");
   const html2 = Buffer.from("<!doctype html><section id=intro>Otters, briefly</section>");
 
@@ -167,10 +176,60 @@ describe.skipIf(executablePath === null)("Studio G7 driver against a local fake 
     const ids = new Set(reach.map((entry) => String(entry.id)));
     return { entries: reach, decisions: api.decisions.filter((decision) => decision.state !== "withdrawn" && (decision.supportingEntryIds as string[]).some((id) => ids.has(id))) };
   }
-  function setPhase(taskId: string, phase: string, state = "running"): void {
-    api.work = api.work.map((task) => task.id === taskId ? { ...task, phase, state } : task);
+  function setPhase(taskId: string, phase: string, state = "running", reason: string | null = null): void {
+    api.work = api.work.map((task) => task.id === taskId ? { ...task, phase, state, reason } : task);
     const detail = api.tasks.get(taskId)!;
-    api.tasks.set(taskId, { ...detail, task: { ...(detail.task as Record<string, unknown>), phase, state } });
+    api.tasks.set(taskId, { ...detail, task: { ...(detail.task as Record<string, unknown>), phase, state, reason } });
+  }
+  function setDesign(taskId: string, change: Record<string, unknown>): void {
+    const detail = api.tasks.get(taskId)!;
+    api.tasks.set(taskId, { ...detail, design: { ...(detail.design as Record<string, unknown>), ...change } });
+  }
+  /** A report version without a page (the research's Markdown, version 1). */
+  function markdownVersion(id: string): Record<string, unknown> {
+    return { id, artifactId: ids.artifact, projectId: PROJECT_UUID, parentId: null, sourceId: ids.md, sourceHash: sha256("markdown"), state: "stable", previewId: null, format: "markdown", exportEditability: "source_editable", title: "River otters report", versionNumber: 1, limitations: [], renditions: [] };
+  }
+  /**
+   * The product's lifecycle (R2, apps/api/src/voice-episode.db.test.ts): the
+   * research R the create's voice call made (bound to the exchange) drew on
+   * the run's own note's source S and reads result_ready; its report is
+   * version 1 (Markdown, no page); the design D it handed the page to is
+   * under way (create, designing) on the same goal, bound to no exchange.
+   * Every research and design detail serves withdrawnSourceIds (computed
+   * live), [] until a source it drew on is withdrawn.
+   */
+  function lifecycleReport(noteSource: string): void {
+    const research = nativeTask(ids.research, "research", { state: "succeeded", phase: "result_ready", exchangeId: EXCHANGE_UUID, goalId: ids.goal, inputSourceIds: [noteSource] });
+    const design = nativeTask(ids.design, "design", { goalId: ids.goal, artifactId: ids.artifact });
+    api.work = [research, design];
+    api.tasks.set(ids.research, { task: research, instruction: FREE_TEXT[0], result: { markdown: FREE_TEXT[1], sourceId: ids.md, sha256: sha256("markdown"), outputs: [] }, research: { question: FREE_TEXT[0], specialist: "x", outputs: [], rootTaskId: ids.research, capUsd: 1, committedUsd: 0, spentUsd: 0, searches: {}, reads: {}, html: { state: "designing", designTaskId: ids.design } }, withdrawnSourceIds: [] });
+    api.tasks.set(ids.design, { task: design, instruction: FREE_TEXT[0], result: null, design: { researchTaskId: ids.research, artifactId: ids.artifact, baseVersionId: ids.v1, state: "designing", targets: [], revisions: 0, renders: 0, candidates: [], maxRepairs: 2, mode: "create", sections: ["intro", "findings"] }, withdrawnSourceIds: [] });
+    api.versions.set(ids.artifact, [markdownVersion(ids.v1)]);
+  }
+  /** D publishes its page: version 2 (the page) over version 1; D's job succeeds and the goal completes. */
+  function publishDesign(): void {
+    setPhase(ids.design, "result_ready", "succeeded");
+    setDesign(ids.design, { state: "published", renders: 1, publishedVersionId: ids.v2 });
+    const research = api.tasks.get(ids.research)!;
+    api.tasks.set(ids.research, { ...research, research: { ...(research.research as Record<string, unknown>), html: { state: "published", designTaskId: ids.design } } });
+    api.versions.set(ids.artifact, [version(ids.v2, ids.html1, html1, ids.v1), markdownVersion(ids.v1)]);
+    api.contents.set(ids.html1, html1);
+  }
+  /** The Lab's admitted edit X publishes its revision: a new version (with its page) of the same artifact. */
+  function publishEdit(): string {
+    const versions = api.versions.get(ids.artifact) ?? [];
+    const published = versions.some((listed) => listed.id === ids.v2) ? randomUUID() : ids.v2;
+    setPhase(ids.edit, "result_ready", "succeeded");
+    setDesign(ids.edit, { state: "published", renders: 1, publishedVersionId: published });
+    api.versions.set(ids.artifact, [version(published, ids.html2, html2, String(versions[0]?.id ?? ids.v1)), ...versions]);
+    api.contents.set(ids.html2, html2);
+    return published;
+  }
+  /** The Stop sub-episode's research: a second voice create on its own goal, pending (queued, goal ready). */
+  function stopTarget(): void {
+    const pending = nativeTask(ids.stopResearch, "research", { state: "pending", phase: "queued", exchangeId: EXCHANGE_UUID, goalId: ids.stopGoal });
+    api.work = [...api.work, pending];
+    api.tasks.set(ids.stopResearch, { task: pending, instruction: FREE_TEXT[0], result: null, research: { question: FREE_TEXT[0], specialist: "x", outputs: [], rootTaskId: ids.stopResearch, capUsd: 1, committedUsd: 0, spentUsd: 0, searches: {}, reads: {}, html: { state: "none", designTaskId: null } }, withdrawnSourceIds: [] });
   }
 
   beforeAll(async () => {
@@ -288,6 +347,23 @@ describe.skipIf(executablePath === null)("Studio G7 driver against a local fake 
         json(200, { sourceId: sourceMatch[1], sha256: createHash("sha256").update(bytes).digest("hex"), mime: "text/html", byteLength: bytes.byteLength, filename: "River otters.html", disposition: "inline", downloadUrl: `${origins.store}/obj/${sourceMatch[1]}?${SIGNATURE}`, expiresAt: new Date(Date.now() + 60_000).toISOString() });
         return;
       }
+      if (request.method === "POST" && path === `/api/v1/projects/${PROJECT_UUID}/mission/entries`) {
+        // record_note (MissionEntryRequest -> MissionReceipt, 202): a member's note through the member route
+        // (origin studio, no exchange); the receipt names the entry and the note's source.
+        const key = String(request.headers["idempotency-key"] ?? "");
+        const prior = api.noteAnswers.get(key);
+        if (prior) { json(prior.status, prior.body); return; }
+        const parsed = JSON.parse(body) as { kind: string; epistemic: string; text: string };
+        api.noteRequests.push({ idempotencyKey: request.headers["idempotency-key"], kind: parsed.kind, epistemic: parsed.epistemic });
+        const first = !api.mission.some((entry) => entry.id === ids.note);
+        const entryId = first ? ids.note : randomUUID();
+        const sourceId = first ? ids.noteSource : randomUUID();
+        api.mission = [...api.mission, { id: entryId, kind: parsed.kind, epistemic: parsed.epistemic, state: "current", text: parsed.text, textKind: "member_text", authoredBy: "member", actorId: PRINCIPAL_UUID, origin: "studio", exchangeId: null, inputEpoch: null, supersedesEntryId: null, goalId: null, sourceId }];
+        const answer = { status: 202, body: { status: "committed", operation: "record_note", projectId: PROJECT_UUID, entryId, decisionId: null, decisionRevision: null, decision: null, sourceId, sha256: sha256(parsed.text), affected: [entryId], ledgerRevision: 4, missionRevision: 1, eligibilityRevision: 1, cursor: "11" } };
+        api.noteAnswers.set(key, answer);
+        json(answer.status, answer.body);
+        return;
+      }
       if (request.method === "GET" && path === `/api/v1/projects/${PROJECT_UUID}/mission`) {
         json(200, { projectId: PROJECT_UUID, entries: api.mission.filter((entry) => entry.state === "current"), history: api.mission.filter((entry) => entry.state !== "current"),
           constraints: api.decisions.filter((decision) => decision.state === "accepted"), pending: api.decisions.filter((decision) => decision.state === "proposed"), decided: api.decisions.filter((decision) => decision.state === "rejected") });
@@ -309,9 +385,23 @@ describe.skipIf(executablePath === null)("Studio G7 driver against a local fake 
         const reached = new Set([...previewEntries.map((entry) => String(entry.id)), ...previewDecisions.map((decision) => String(decision.id))]);
         api.mission = api.mission.map((entry) => reached.has(String(entry.id)) ? { ...entry, state: "withdrawn", text: null } : entry);
         api.decisions = api.decisions.map((decision) => reached.has(String(decision.id)) ? { ...decision, state: "withdrawn" } : decision);
-        const design = api.tasks.get(ids.design)!;
-        api.tasks.set(ids.design, { ...design, design: { ...(design.design as Record<string, unknown>), state: "cancelled" } });
-        json(202, { status: "committed", operation: "withdraw_note", projectId: PROJECT_UUID, entryId, decisionId: null, decisionRevision: null, decision: null, sourceId: null, sha256: null, affected: [...reached], ledgerRevision: 5, missionRevision: 2, eligibilityRevision: 2, cursor: "12" });
+        // As the product (0041 design_revoke_source, R2 withdrawnSourceIds): every research that drew on a
+        // forgotten source, and every design of its report, lists that source (computed live); a design still
+        // under way that drew on it is revoked (failed, the revoke reason); a published or ended one is not touched.
+        const forgotten = new Set(reach.entries.map((entry) => String(entry.sourceId)));
+        const drew = (taskId: unknown) => ((api.tasks.get(String(taskId))?.task as Record<string, unknown> | undefined)?.inputSourceIds as string[] | undefined ?? []).filter((id) => forgotten.has(id));
+        for (const [taskId, detail] of [...api.tasks.entries()]) {
+          const design = detail.design as Record<string, unknown> | undefined;
+          const listed = [...new Set([...drew(taskId), ...(design ? drew(design.researchTaskId) : [])])];
+          if (listed.length === 0) continue;
+          let next: Record<string, unknown> = { ...detail, withdrawnSourceIds: [...new Set([...((detail.withdrawnSourceIds as string[] | undefined) ?? []), ...listed])] };
+          if (design && (design.state === "designing" || design.state === "reviewing")) {
+            next = { ...next, task: { ...(detail.task as Record<string, unknown>), state: "failed", phase: "failed", reason: REVOKED }, design: { ...design, state: "failed", reason: REVOKED } };
+            api.work = api.work.map((task) => task.id === taskId ? { ...task, state: "failed", phase: "failed", reason: REVOKED } : task);
+          }
+          api.tasks.set(taskId, next);
+        }
+        json(202, { status: "committed", operation: "withdraw_note", projectId: PROJECT_UUID, entryId, decisionId: null, decisionRevision: null, decision: null, sourceId: note.sourceId ?? null, sha256: null, affected: [...reached], ledgerRevision: 5, missionRevision: 2, eligibilityRevision: 2, cursor: "12" });
         return;
       }
       if (request.method === "POST" && path === `/api/v1/projects/${PROJECT_UUID}/html-edits`) {
@@ -321,12 +411,17 @@ describe.skipIf(executablePath === null)("Studio G7 driver against a local fake 
         const prior = api.edits.get(key);
         if (prior) { json(prior.status, prior.body); return; }
         const versions = api.versions.get(ids.artifact) ?? [];
-        if (parsed.versionId !== versions[0]?.id) { const answer = { status: 409, body: { code: "stale_revision", message: FREE_TEXT[4], requestId: randomUUID(), retry: "reconcile_first" } }; api.edits.set(key, answer); json(answer.status, answer.body); return; }
-        const edit = nativeTask(ids.edit, "design", { state: "succeeded", phase: "result_ready", artifactId: ids.artifact });
+        const refuse = (status: number, code: string, message: string) => { const answer = { status, body: { code, message, requestId: randomUUID(), retry: "reconcile_first" } }; api.edits.set(key, answer); json(answer.status, answer.body); };
+        // As the product: staleness is checked before anything else (so the stale probe is refused even while an edit is live).
+        if (parsed.versionId !== versions[0]?.id) { refuse(409, "stale_revision", FREE_TEXT[4]!); return; }
+        // No designed page on the current version yet: nothing is started.
+        if (!((versions[0]!.renditions as Array<Record<string, unknown>>) ?? []).some((rendition) => rendition.format === "html")) { refuse(409, "invalid_state", "That report has no designed HTML page to revise."); return; }
+        // One design of a page at a time.
+        if ([...api.tasks.values()].some((detail) => { const design = detail.design as Record<string, unknown> | undefined; return design?.artifactId === ids.artifact && (design.state === "designing" || design.state === "reviewing"); })) { refuse(409, "invalid_state", "A design of this page is under way."); return; }
+        // The edit X: admitted, designing on the run's goal, the same research and artifact; it does not publish by itself.
+        const edit = nativeTask(ids.edit, "design", { goalId: ids.goal, artifactId: ids.artifact });
         api.work = [...api.work, edit];
-        api.tasks.set(ids.edit, { task: edit, instruction: parsed.instruction, result: null, design: { researchTaskId: ids.research, artifactId: ids.artifact, baseVersionId: ids.v1, state: "published", targets: [], revisions: 1, renders: 1, candidates: [], maxRepairs: 2, publishedVersionId: ids.v2, mode: "edit", sections: parsed.sections } });
-        api.versions.set(ids.artifact, [version(ids.v2, ids.html2, html2, ids.v1), ...versions]);
-        api.contents.set(ids.html2, html2);
+        api.tasks.set(ids.edit, { task: edit, instruction: parsed.instruction, result: null, design: { researchTaskId: ids.research, artifactId: ids.artifact, baseVersionId: parsed.versionId, state: "designing", targets: [], revisions: 1, renders: 0, candidates: [], maxRepairs: 2, mode: "edit", sections: parsed.sections }, withdrawnSourceIds: [] });
         const answer = { status: 202, body: { taskId: ids.edit, state: "designing", versionId: parsed.versionId, baseCandidateId: randomUUID(), sections: parsed.sections, shell: false, styles: false, contributionId: randomUUID() } };
         api.edits.set(key, answer);
         json(answer.status, answer.body);
@@ -449,12 +544,14 @@ else {
     api.editRequests.length = 0;
     api.onTaskRead = null;
     api.decisions = [];
+    api.noteRequests.length = 0;
+    api.noteAnswers.clear();
     return { config, driver, run };
   }
 
   const audioOf = (wav: Buffer): ResolvedAudio => ({ id: "sine", sha256: createHash("sha256").update(wav).digest("hex"), sampleRate: 16_000, channels: 1, durationMs: 800, bytes: wav, source: "fixture", synthesis: { engine: "fixture", engine_version: "1", voice: "none", rate: "none" } });
 
-  it("performs the whole G7 episode as operations, reads canonical outcomes, and cleans up only what it owns", async () => {
+  it("performs the whole G7 episode in the order the product supports, reads canonical outcomes, passes every product assertion, and cleans up only what it owns", async () => {
     const { driver, run } = harness();
     let seq = 0;
     const push = (kind: string, receipt: Record<string, unknown>) => api.receipts.push({ source: kind === "guard" ? "service" : "bridge", seq: Number(receipt.seq), kind, receivedAt: new Date().toISOString(), receipt });
@@ -474,10 +571,10 @@ else {
     const operations: OperationRecord[] = [];
     const wav = sineWav(800);
     // The product records the principal's voice tool call as the step is spoken (A15 ExchangeCalls).
-    const recordCall = (tool: string, kind: string | null, taskId: string | null = null) => {
+    const recordCall = (tool: string, kind: string | null, taskId: string | null = null, goalId = ids.goal) => {
       const callSeq = api.exchangeCalls.length + 1;
       const at = new Date().toISOString();
-      api.exchangeCalls.push({ _began: api.callsClock + 0.5, seq: callSeq, recordedAt: at, inputEpoch: 1, tool, answeredAt: at, outcome: kind === null ? "ok" : kind === "native_task" ? "admitted" : "ok", taskId, command: kind === null ? null : { commandId: randomUUID(), kind, goalId: ids.goal, authorityEpoch: callSeq, goalRevision: 1, state: "acknowledged", createdAt: at } });
+      api.exchangeCalls.push({ _began: api.callsClock + 0.5, seq: callSeq, recordedAt: at, inputEpoch: 1, tool, answeredAt: at, outcome: kind === null ? "ok" : kind === "native_task" ? "admitted" : "ok", taskId, command: kind === null ? null : { commandId: randomUUID(), kind, goalId, authorityEpoch: callSeq, goalRevision: 1, state: "acknowledged", createdAt: at } });
     };
     const speakStep = async (step: string, calls: () => void = () => undefined) => {
       const operation = speakOperation(run, new Date(Date.now() + operations.length), { input: { fixture_id: "sine", _g7_step: `g7.${step}` } });
@@ -507,38 +604,60 @@ else {
       operations.push({ ...operation, result: result.receipt });
       return result;
     };
+    const decoys = { other: randomUUID(), none: randomUUID() };
+    const mirror = (phase: string, state: string) => { for (const id of [decoys.other, decoys.none]) setPhase(id, phase, state); };
 
-    await speakStep("create", () => recordCall("start_research", "native_task", ids.research));
-    createReport();
+    // 1. The run's own note N, through the member route: its receipt names the entry and the note's source S.
+    const noted = await act({ action: "record_note" });
+    expect(noted.receipt).toMatchObject({ performed: true, status: "committed", http_status: 202, entry_id: ids.note, source_id: ids.noteSource });
+    expect(api.noteRequests).toEqual([{ idempotencyKey: expect.stringMatching(/^voice-lab-g7:/), kind: "observation", epistemic: "reported" }]);
+    // 2. Create by voice: the research R draws on S; its design D is under way on the same goal.
+    await speakStep("create", () => { recordCall("start_research", "native_task", ids.research); lifecycleReport(ids.noteSource); });
     // Decoys in the time window, by the principal: one created by another
     // exchange's voice call, one with no exchange (a typed command, or voice
     // qualification off). Both mirror every step's phase; neither is ever bound.
-    const decoys = { other: randomUUID(), none: randomUUID() };
     for (const [id, exchangeId] of [[decoys.other, OTHER_EXCHANGE], [decoys.none, null]] as const) {
       const decoy = nativeTask(id, "research", exchangeId === null ? {} : { exchangeId });
       api.work = [...api.work, decoy];
       api.tasks.set(id, { task: decoy, instruction: FREE_TEXT[0], result: null, research: { question: FREE_TEXT[0], specialist: "x", outputs: [], rootTaskId: id, capUsd: 1, committedUsd: 0, spentUsd: 0, searches: {}, reads: {}, html: { state: "none", designTaskId: null } } });
     }
+    // 3. Steer while R/D are live; leave and return.
     await speakStep("steer", () => { recordCall("project_status", null); recordCall("control_work", "steer"); });
     const left = await act({ action: "leave_and_return" });
     expect(left.receipt).toMatchObject({ performed: true, status: "returned" });
-    const revised = await act({ action: "section_revision", instruction: FREE_TEXT[3], sections: ["intro"] });
-    expect(revised.receipt).toMatchObject({ performed: true, status: "admitted", http_status: 202, task_id: ids.edit, design_state_at_return: "published" });
-    const stale = await act({ action: "stale_edit" });
-    expect(stale.receipt).toMatchObject({ performed: true, status: "refused", http_status: 409, code: "stale_revision" });
-    for (const [step, phase, state] of [["hold", "held", "running"], ["resume", "running", "running"], ["stop", "stopped", "cancelled"]] as const) {
+    // 4. Hold, then resume, by voice, while D is under way: the goal holds D (held), then runs it again.
+    for (const [step, phase] of [["hold", "held"], ["resume", "running"]] as const) {
       await speakStep(step, () => recordCall("control_work", step));
-      for (const id of [ids.research, decoys.other, decoys.none]) setPhase(id, phase, state);
+      setPhase(ids.design, phase);
+      mirror(phase, "running");
       expect((await act({ action: "observe", for_step: step })).receipt).toMatchObject({ performed: false, status: "observed" });
     }
+    // 5. D publishes its page (version 2 over the report's version 1); its goal completes.
+    publishDesign();
+    // 6. The section revision over HTTP: the Lab's own edit X, admitted on the current version, left under way.
+    const revised = await act({ action: "section_revision", instruction: FREE_TEXT[3], sections: ["intro"] });
+    expect(revised.receipt).toMatchObject({ performed: true, status: "admitted", http_status: 202, task_id: ids.edit, design_state_at_return: "designing" });
+    expect(api.editRequests).toEqual([{ versionId: ids.v2, sections: ["intro"] }]);
+    // 7. The stale probe: the superseded version 1, refused 409 stale_revision (the product checks staleness first).
+    const stale = await act({ action: "stale_edit" });
+    expect(stale.receipt).toMatchObject({ performed: true, status: "refused", http_status: 409, code: "stale_revision" });
+    expect(api.editRequests.at(-1)).toMatchObject({ versionId: ids.v1 });
+    // 8. The run's own note N withdrawn while X is live: X is revoked, listing S; R and D list S and are not ended.
     const withdrawn = await act({ action: "withdrawal" });
     expect(withdrawn.receipt).toMatchObject({ performed: true, status: "committed", entry_id: ids.note, http_status: 202 });
-    expect(api.withdrawals).toHaveLength(1);
-    expect(api.withdrawals[0]).toMatchObject({ idempotencyKey: expect.stringMatching(/^voice-lab-g7:/), previewToken: PREVIEW_PROOF });
+    expect(api.withdrawals).toEqual([expect.objectContaining({ idempotencyKey: expect.stringMatching(/^voice-lab-g7:/), previewToken: PREVIEW_PROOF, expectedAffected: { entryIds: [ids.note], decisions: [] } })]);
+    expect(withdrawn.events.find((event) => event.kind === "studio.action.withdrawal")?.payload).toMatchObject({ entry_id: ids.note, own_note_entry_id: ids.note, own_note_source_id: ids.noteSource, entry_source_id: ids.noteSource, receipt_source_id: ids.noteSource, own_live_task_ids: [ids.edit] });
+    // 9. The Stop sub-episode: a second voice create (its own research, on its own goal, pending), then Stop on it.
+    await speakStep("create_stop_target", () => { recordCall("start_research", "native_task", ids.stopResearch, ids.stopGoal); stopTarget(); });
+    expect((await act({ action: "observe", for_step: "create_stop_target" })).receipt).toMatchObject({ performed: false, status: "observed" });
+    await speakStep("stop", () => recordCall("control_work", "stop", null, ids.stopGoal));
+    setPhase(ids.stopResearch, "stopped", "cancelled", "stopped");
+    mirror("stopped", "cancelled");
+    expect((await act({ action: "observe", for_step: "stop" })).receipt).toMatchObject({ performed: false, status: "observed" });
 
     api.onEnd = () => {
       push("provider", providerReceipt(run, seq++, "closed"));
-      push("session_closed", sessionClosed(run, seq++, { windows: 5, turns: 5, replies: 5 }));
+      push("session_closed", sessionClosed(run, seq++, { windows: 6, turns: 6, replies: 6 }));
     };
     const ended = await driver.end(run, "unused", "unused");
     collected.push(...ended.events);
@@ -552,23 +671,24 @@ else {
     expect(ended.events.find((event) => event.kind === "studio.cleanup.signed_out")?.payload).toMatchObject({ confirmed: true, scope: "global" });
     expect(ended.events.find((event) => event.kind === "cleanup.browser_context_closed")?.payload).toMatchObject({ close_resolved: true, browser_process_close_resolved: true });
 
-    // Canonical outcomes: downloaded bytes hashed and compared with the declared digests.
+    // Canonical outcomes: the own design's page, its downloaded bytes hashed and compared with the declared digests (X never published).
     const outcomes = collected.filter((event) => event.kind === "studio.outcome.observed");
     const finalOutcome = outcomes.find((event) => event.payload.purpose === "final")!;
     const artifacts = finalOutcome.payload.artifacts as Array<Record<string, unknown>>;
-    expect(artifacts.map((artifact) => [artifact.version_id, artifact.status, artifact.downloaded_sha256])).toEqual(expect.arrayContaining([
-      [ids.v1, "verified", createHash("sha256").update(html1).digest("hex")],
-      [ids.v2, "verified", createHash("sha256").update(html2).digest("hex")],
-    ]));
+    expect(artifacts.map((artifact) => [artifact.task_id, artifact.version_id, artifact.status, artifact.downloaded_sha256])).toEqual([[ids.design, ids.v2, "verified", createHash("sha256").update(html1).digest("hex")]]);
     // Bound only by the exchange id the product recorded for the voice call that created the task.
-    expect(finalOutcome.payload.join).toMatchObject({ basis: "native_task_exchange_id", run_exchange_id: EXCHANGE_UUID, bound_task_ids: [ids.research], other_exchange_task_count: 1 });
+    expect(finalOutcome.payload.join).toMatchObject({ basis: "native_task_exchange_id", run_exchange_id: EXCHANGE_UUID, bound_task_ids: expect.arrayContaining([ids.research, ids.stopResearch]), other_exchange_task_count: 1 });
     const finalTasks = finalOutcome.payload.tasks as Array<Record<string, unknown>>;
     expect(finalTasks.find((item) => item.task_id === decoys.other)).toMatchObject({ exchange_id: OTHER_EXCHANGE });
     expect(finalTasks.find((item) => item.task_id === decoys.none)).toMatchObject({ exchange_id: null });
+    expect(finalTasks.find((item) => item.task_id === ids.edit)).toMatchObject({ state: "failed", withdrawn_source_ids: [ids.noteSource], design: { state: "failed", mode: "edit", reason_class: "revoked_source_withdrawn" } });
+    expect(finalTasks.find((item) => item.task_id === ids.research)).toMatchObject({ phase: "result_ready", input_source_ids: [ids.noteSource], withdrawn_source_ids: [ids.noteSource] });
+    expect(finalTasks.find((item) => item.task_id === ids.design)).toMatchObject({ design: { state: "published" } });
+    expect(finalTasks.find((item) => item.task_id === ids.stopResearch)).toMatchObject({ state: "cancelled", phase: "stopped", reason_class: "stopped", withdrawn_source_ids: [] });
 
-    // Nothing secret or free-text is durable: no password, JWT, refresh token, preview proof, signed URL, instruction, Markdown, title or note words.
+    // Nothing secret or free-text is durable: no password, JWT, refresh token, preview proof, signed URL, instruction, Markdown, title, note words or reason text.
     const serialized = JSON.stringify(collected);
-    for (const forbidden of [FAKE_PASSWORD, "fake-access-token-", "fake-refresh-", PREVIEW_PROOF, "fakesignature", "River otters report", "River otters.html", "free text limitation", ...FREE_TEXT]) expect(serialized, forbidden).not.toContain(forbidden);
+    for (const forbidden of [FAKE_PASSWORD, "fake-access-token-", "fake-refresh-", PREVIEW_PROOF, "fakesignature", "River otters report", "River otters.html", "free text limitation", STUDIO_G7_NOTE_TEXT, REVOKED, ...FREE_TEXT]) expect(serialized, forbidden).not.toContain(forbidden);
 
     const events: LabEvent[] = [
       ...operations.filter((operation) => operation.type === "speak").map((operation) => ({ kind: "utterance.resolved", source: "worker" as const, payload: { operation_id: operation.id, wav: { sha256: sha256(wav.toString("base64")), duration_ms: 800 } }, dedupeKey: null })),
@@ -579,18 +699,17 @@ else {
     const withheld = evaluation.harness.filter((assertion) => assertion.status !== "pass").map((assertion) => `${assertion.id}:${assertion.status}:${assertion.reason}`);
     expect(withheld).toEqual([]);
     expect(Object.fromEntries(evaluation.steps.map((step) => [step.step_id, `${step.executed}/${step.outcome}`]))).toEqual({
-      "g7.create": "pass/pass", "g7.steer": "pass/pass", "g7.leave_return": "pass/pass", "g7.section_revision": "pass/pass", "g7.stale_edit": "pass/pass",
-      "g7.hold": "pass/pass", "g7.resume": "pass/pass", "g7.stop": "pass/pass", "g7.withdrawal": "pass/pass",
+      "g7.record_note": "pass/pass", "g7.create": "pass/pass", "g7.steer": "pass/pass", "g7.leave_return": "pass/pass", "g7.hold": "pass/pass", "g7.resume": "pass/pass",
+      "g7.section_revision": "pass/pass", "g7.stale_edit": "pass/pass", "g7.withdrawal": "pass/pass", "g7.create_stop_target": "pass/pass", "g7.stop": "pass/pass",
     });
-    expect(evaluation.outcome).toMatchObject({ join: "exchange_calls", bound_tasks: 2 });
     expect(evaluation.outcome.voice_steps.map((step) => [step.step_id, step.command_kind, step.candidate_seqs])).toEqual([
-      ["g7.create", "native_task", [1]], ["g7.steer", "steer", [2, 3]], ["g7.hold", "hold", [4]], ["g7.resume", "resume", [5]], ["g7.stop", "stop", [6]],
+      ["g7.create", "native_task", [1]], ["g7.steer", "steer", [2, 3]], ["g7.hold", "hold", [4]], ["g7.resume", "resume", [5]], ["g7.create_stop_target", "native_task", [6]], ["g7.stop", "stop", [7]],
     ]);
-    // Every voice step is certified from its own call's command; the product
-    // stays inconclusive only because nothing the product exposes ties the
-    // withdrawn note to the design (delta 5): every other assertion passes.
-    expect(evaluation.product.filter((assertion) => assertion.status !== "pass").map((assertion) => `${assertion.id}:${assertion.status}:${assertion.reason}`)).toEqual(["step.g7.withdrawal.design_ended:uncertain:withdrawn_note_not_linked_to_design"]);
-    expect(deriveStudioG7Verdicts(evaluation, { sessionEstablished: true })).toEqual({ harness: "pass", product: "inconclusive", provider: "pass", auth: "pass", evidence: "pass" });
+    // Every assertion passes, design_ended on S and the sub-episode's independent Stop included.
+    expect(evaluation.product.filter((assertion) => assertion.status !== "pass").map((assertion) => `${assertion.id}:${assertion.status}:${assertion.reason}`)).toEqual([]);
+    expect(evaluation.product.find((assertion) => assertion.id === "step.g7.withdrawal.design_ended")).toMatchObject({ status: "pass" });
+    expect(evaluation.product.find((assertion) => assertion.id === "step.g7.stop.outcome")).toMatchObject({ status: "pass" });
+    expect(deriveStudioG7Verdicts(evaluation, { sessionEstablished: true })).toEqual({ harness: "pass", product: "pass", provider: "pass", auth: "pass", evidence: "pass" });
   }, 180_000);
 
   it("never touches an exchange whose evidence names another run, nor one held by another principal", async () => {
@@ -689,14 +808,14 @@ else {
     await driver.end(run, "unused", "unused");
   }, 120_000);
 
-  it("withdraws only a note bound to the run's own, ownership-proven exchange", async () => {
+  it("withdraws only the run's own note: a named note neither recorded by the run nor bound to its ownership-proven exchange is refused", async () => {
     const { driver, run } = harness();
     await driver.start(run, "unused");
     createReport();
     const foreignNote = { ...api.mission[0]!, exchangeId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee" };
     api.mission = [foreignNote];
     const foreign = await driver.studioAction(run, randomUUID(), { action: "withdrawal", entry_id: ids.note });
-    expect(foreign.receipt).toMatchObject({ performed: false, status: "unavailable", reason: "entry_not_bound_to_run_exchange" });
+    expect(foreign.receipt).toMatchObject({ performed: false, status: "unavailable", reason: "entry_not_own_note" });
     api.mission = [{ ...foreignNote, exchangeId: EXCHANGE_UUID, actorId: OTHER_PRINCIPAL }];
     expect((await driver.studioAction(run, randomUUID(), { action: "withdrawal" })).receipt).toMatchObject({ performed: false, reason: "no_note_bound_to_run_exchange" });
     // Without proven ownership of the exchange nothing is withdrawn at all.
@@ -985,8 +1104,12 @@ else {
     expect(revised.receipt).toMatchObject({ performed: true, status: "admitted", http_status: 202, task_id: ids.edit });
     expect(api.editRequests).toEqual([{ versionId: ids.v1, sections: ["intro"] }]);
     expect(revised.events.find((event) => event.kind === "studio.action.html_edit")?.payload).toMatchObject({ requested: true, target_join: "canonical_chain", own_create_task_id: ids.research, design_task_id: ids.design, artifact_id: ids.artifact, version_id: ids.v1 });
-    // Its outcome verifies the own design's published version and the Lab's own edit of it.
-    expect(observedArtifacts(revised.events).map((artifact) => [artifact.task_id, artifact.version_id, artifact.status])).toEqual([[ids.design, ids.v1, "verified"], [ids.edit, ids.v2, "verified"]]);
+    // Its outcome verifies the own design's published version; the Lab's own edit X is under way (it publishes nothing yet).
+    expect(observedArtifacts(revised.events).map((artifact) => [artifact.task_id, artifact.version_id, artifact.status])).toEqual([[ids.design, ids.v1, "verified"]]);
+    // X publishes its revision; the outcome then verifies it too, and v1 is superseded.
+    publishEdit();
+    const observed = await driver.studioAction(run, randomUUID(), { action: "observe", for_step: "create", _own_create_task_id: ids.research });
+    expect(observedArtifacts(observed.events).map((artifact) => [artifact.task_id, artifact.version_id, artifact.status])).toEqual([[ids.design, ids.v1, "verified"], [ids.edit, ids.v2, "verified"]]);
     const stale = await driver.studioAction(run, randomUUID(), { action: "stale_edit", _own_create_task_id: ids.research });
     expect(stale.receipt).toMatchObject({ performed: true, status: "refused", http_status: 409, code: "stale_revision" });
     expect(api.editRequests.at(-1)).toEqual({ versionId: ids.v1, sections: ["intro"] });
@@ -1002,6 +1125,7 @@ else {
     const foreign = foreignReport();
     const revised = await driver.studioAction(run, randomUUID(), { action: "section_revision", instruction: "Shorten the introduction", sections: ["intro"], _own_create_task_id: ids.research });
     expect(revised.receipt).toMatchObject({ performed: true, status: "admitted", http_status: 202 });
+    publishEdit();
     const stale = await driver.studioAction(run, randomUUID(), { action: "stale_edit", _own_create_task_id: ids.research });
     expect(stale.receipt).toMatchObject({ performed: true, status: "refused", http_status: 409, code: "stale_revision" });
     // Both requests target the own artifact's versions; the foreign versions are never sent.
