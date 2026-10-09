@@ -76,6 +76,8 @@ export class ScriptedStudioDriver {
     const audit = this.#callsEvent(run, "baseline", "end", "final", null);
     return { ...audit, payload: { ...audit.payload, quiescence: { exchange_ended: this.endExchangeConfirmed, session_closed: sessionClosed } } };
   }
+  /** How many tool calls the provider showed in each input window's turn (by ordinal); the bridge's input_turn toolCallCount. */
+  turnToolCalls: (ordinal: number) => number = () => 0;
   /** Whether the product commits the run's own note (record_note); false: refused, no receipt ids. */
   recordNoteCommitted = true;
   /** Every action input the worker passed, in order. */
@@ -161,7 +163,7 @@ export class ScriptedStudioDriver {
       { kind: "audio.input.started", source: "browser", payload: { operation_id: operationId, ...at(0) }, dedupeKey: `started:${operationId}` },
       { kind: "audio.input.completed", source: "browser", payload: { operation_id: operationId, ...at(5_000) }, dedupeKey: `completed:${operationId}` },
       this.#bridge("input_window", inputWindow(run, this.seq++, this.ordinal, 20_000)),
-      this.#bridge("input_turn", inputTurn(run, this.seq++, this.ordinal)),
+      this.#bridge("input_turn", inputTurn(run, this.seq++, this.ordinal, { toolCallCount: this.turnToolCalls(this.ordinal) })),
       ...(this.ordinal === 1 ? [{ kind: "studio.page_receipt", source: "product" as const, payload: (() => { const json = canonicalJson(pageReceipt(run, "sophia_playback", Date.now() + 100, { phase: "playing" })); return { event: "sophia_playback", receipt_json: json, receipt_sha256: sha256(json) }; })(), dedupeKey: `studio-page:${run.id}:playback` }] : []),
       this.#bridge("output_reply", outputReply(run, this.seq++, this.ordinal, Date.now() + 200)),
     ] };

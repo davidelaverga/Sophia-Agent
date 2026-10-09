@@ -50,7 +50,12 @@ export interface ProjectedTask {
   exchangeId: string | null;
   /** The task's goal (NativeTask.goalId): a control command (steer/hold/resume/stop) names it. */
   goalId: string | null;
-  /** The sources the task's input drew on (NativeTask.inputSourceIds): a research's manifest inputs, e.g. a note's source. */
+  /**
+   * NativeTask.inputSourceIds as the product serves it (native_task_view,
+   * 0022): only the manifest inputs that are discussion contributions. A
+   * mission note's source is in the manifest's dependency graph but never
+   * listed here, so it is recorded, never used to join a note to a task.
+   */
   inputSourceIds: string[] | null;
 }
 
@@ -636,7 +641,8 @@ export class StudioApiClient {
    * `POST /api/v1/projects/{p}/mission/entries` (record_note): the principal's
    * own note. Its receipt names the entry and the note's source (`sourceId`,
    * the entry's source_id): the source a research that draws on the note
-   * lists in its inputs, and a withdrawal reaches. The text is never kept.
+   * holds in its manifest's dependency graph (never in NativeTask
+   * .inputSourceIds), and a withdrawal reaches. The text is never kept.
    */
   async recordNote(projectId: string, note: { kind: string; epistemic: string; text: string }, accessToken: string, idempotencyKey: string): Promise<MutationAnswer<{ status: string; operation: string; entryId: string; sourceId: string }>> {
     return this.#mutate(`/api/v1/projects/${encodeURIComponent(projectId)}/mission/entries`, accessToken, idempotencyKey, note, (raw) => {

@@ -1,15 +1,20 @@
-import { describe, expect, it } from "vitest";
+import { createHash, randomUUID } from "node:crypto";
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+
+import pg from "pg";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import type { LabEvent, OperationRecord, RunRecord } from "../src/domain.js";
 import { sha256 } from "../src/security.js";
 import { deriveStudioG7Verdicts, evaluateStudioG7Run, studioG7CleanupProof, type StudioG7Evaluation } from "../src/studio-g7/evaluate.js";
 import { studioPriorInputSettled } from "../src/worker.js";
 import { canonicalJson } from "../src/studio-g7/contract.js";
+import { projectTask } from "../src/studio-g7/studio-api.js";
 import {
   API_SHA, BRIDGE_SHA, EXCHANGE_UUID, EventLog, GRANT_UUID, LAB_TRACK_ID, STUDIO_SHA,
   cleanupEvents, evidenceGrant, guardReceipt, identityEvent, inputTurn, inputWindow, labUtterance, outputReply, pageReceipt, providerReceipt, sessionClosed, speakOperation, studioRun, studioTestConfig,
 } from "./studio-g7-helpers.js";
-import { randomUUID } from "node:crypto";
 import type { OperationRecord as Operation } from "../src/domain.js";
 
 const config = studioTestConfig();
@@ -350,10 +355,17 @@ interface CallsScript {
 interface G7Options {
   skip?: string[]; staleCode?: string; staleStatus?: number; artifactStatus?: string; ownership?: "proven" | "mismatch" | "unavailable"; withdrawalCommitted?: boolean;
   noEnd?: boolean; calls?: CallsScript; researchTask?: Record<string, unknown>; windowEpochs?: Record<string, number>; noEndAudit?: boolean;
-  /** R's inputSourceIds (default: the run's note source S). */
+  /**
+   * R's inputSourceIds as the product serves them (native_task_view, 0022):
+   * only discussion contributions' sources, never a note's (default none).
+   */
   researchInputs?: string[] | null;
   /** X's design state in the withdrawal's before-observation (default designing); null: no before-observation. */
   editBefore?: string | null;
+  /** The tool calls each step's input turn showed (default: as many as the step's own calls). */
+  toolCallCounts?: Record<string, number>;
+  /** Fields merged into X's sighting in the withdrawal's before-observation. */
+  editBeforeTask?: Record<string, unknown>;
   /** X's sighting in the withdrawal's after-observation (default: failed for the revoke reason, S withdrawn). */
   editAfter?: Record<string, unknown>;
   withdrawalAfterOperation?: string;
@@ -413,7 +425,7 @@ function g7Episode(options: G7Options = {}): Episode {
     return clock;
   };
   const record = (calls: Array<Record<string, unknown>>, began: number, committed: number) => { for (const call of calls) recorded.push({ call, began, committed }); };
-  const researchInputs = options.researchInputs === undefined ? [NOTE_SOURCE] : options.researchInputs;
+  const researchInputs = options.researchInputs === undefined ? [] : options.researchInputs;
   const research = (extra: Record<string, unknown> = {}) => task(RESEARCH_TASK, "research", { input_source_ids: researchInputs, withdrawn_source_ids: [], ...(options.researchTask ?? {}), state: "running", phase: "result_ready", research: { html_state: "designing", design_task_id: DESIGN_TASK }, ...extra });
   const goalOf = { goal_id: (options.researchTask?.goal_id as string | undefined) ?? GOAL_A };
   const designD = (state: string, phase = "running") => task(DESIGN_TASK, "design", { ...goalOf, state: state === "published" ? "succeeded" : "running", phase: state === "published" ? "result_ready" : phase, withdrawn_source_ids: [], design: { state, mode: "create", artifact_id: ARTIFACT, published_version_id: state === "published" ? VERSION_2 : null, research_task_id: RESEARCH_TASK } });
@@ -449,7 +461,8 @@ function g7Episode(options: G7Options = {}): Episode {
       if (late) { record(late, clock + 0.1, clock + 0.2); callsRead("after", speak.id, stepId, baseline); }
       if (calls.vanishing?.includes(stepId)) callsRead("after", speak.id, stepId, baseline, (listed) => listed.filter((call) => call.command === null));
     }
-    log.bridge("input_turn", inputTurn(run, seq++, index + 1));
+    // The provider showed the step's own calls while its window was open (as a normal turn does).
+    log.bridge("input_turn", inputTurn(run, seq++, index + 1, { toolCallCount: options.toolCallCounts?.[stepId] ?? calls?.byStep[stepId]?.length ?? 0 }));
     if (index === 0) log.page(pageReceipt(run, "sophia_playback", T0 + 2_900, { phase: "playing" }));
     log.bridge("output_reply", outputReply(run, seq++, index + 1, T0 + 3_000 + index * 10_000));
     after();
@@ -494,7 +507,7 @@ function g7Episode(options: G7Options = {}): Episode {
     const committed = options.withdrawalCommitted ?? true;
     if (options.editBefore !== null) {
       const before = options.editBefore ?? "designing";
-      log.add("studio.outcome.observed", "canonical", { purpose: "g7.withdrawal:before", operation_id: withdraw.id, join: { status: "uncertain" }, tasks: [editX(before === "designing" ? {} : { state: before === "published" ? "succeeded" : before === "failed" ? "failed" : "running", design: { state: before, mode: "edit", artifact_id: ARTIFACT, published_version_id: before === "published" ? randomUUID() : null, research_task_id: RESEARCH_TASK } }), designD("published"), research()], artifacts: [] });
+      log.add("studio.outcome.observed", "canonical", { purpose: "g7.withdrawal:before", operation_id: withdraw.id, join: { status: "uncertain" }, tasks: [editX({ ...(before === "designing" ? {} : { state: before === "published" ? "succeeded" : before === "failed" ? "failed" : "running", design: { state: before, mode: "edit", artifact_id: ARTIFACT, published_version_id: before === "published" ? randomUUID() : null, research_task_id: RESEARCH_TASK } }), ...(options.editBeforeTask ?? {}) }), designD("published"), research()], artifacts: [] });
     }
     log.add("studio.action.withdrawal", "canonical", { operation_id: withdraw.id, requested: true, status: committed ? "committed" : "refused", own_create_task_id: RESEARCH_TASK, design_task_id: DESIGN_TASK, own_live_task_ids: [EDIT_TASK], entry_id: options.withdrawnEntry ?? NOTE, entry_bound_exchange_id: null, own_note_entry_id: NOTE, own_note_source_id: NOTE_SOURCE, entry_source_id: NOTE_SOURCE, http_status: committed ? 202 : 409, code: committed ? null : "stale_revision", receipt_operation: committed ? "withdraw_note" : null, receipt_source_id: committed ? (options.receiptSource === undefined ? NOTE_SOURCE : options.receiptSource) : null });
     const xAfter = editX({ state: "failed", phase: "failed", reason_class: "revoked_source_withdrawn", withdrawn_source_ids: [NOTE_SOURCE], design: { state: "failed", mode: "edit", artifact_id: ARTIFACT, published_version_id: null, research_task_id: RESEARCH_TASK, reason_class: "revoked_source_withdrawn" }, ...(options.editAfter ?? {}) });
@@ -850,8 +863,26 @@ describe("delta 6: the withdrawal ended the run's own edit X only on the note's 
     return { assertion: statusOf(evaluation, "step.g7.withdrawal.design_ended"), product: evaluation.verdicts.product };
   };
 
-  it("passes with every join on S: R drew on S, X live before, the receipt names S, X failed for the revoke reason with S withdrawn", () => {
+  it("passes with every join on S: the receipt names S, X (the own edit of R's report) live before, failed for the revoke reason with S withdrawn after", () => {
     expect(designEnded({})).toMatchObject({ assertion: { status: "pass", reason: null }, product: "pass" });
+  });
+
+  it("labrev6 P2-1 (F1): passes on R's inputSourceIds exactly as the product serves them (S never listed; only a contribution's source)", () => {
+    const CONTRIBUTION = "c0000000-0000-4000-8000-0000000000c9";
+    // The product's native_task_view lists only discussion contributions; the note's source S is in the manifest's graph, not here.
+    for (const inputs of [[], [CONTRIBUTION], null]) expect(designEnded({ researchInputs: inputs }), JSON.stringify(inputs)).toMatchObject({ assertion: { status: "pass", reason: null }, product: "pass" });
+    // R listing S (a fake that served it) neither helps nor hurts: the join is X's own withdrawnSourceIds.
+    expect(designEnded({ researchInputs: [NOTE_SOURCE] })).toMatchObject({ assertion: { status: "pass", reason: null }, product: "pass" });
+  });
+
+  it("labrev6 P2-1: X must be an edit of the run's own research on the run's own artifact, not yet listing S before the withdrawal", () => {
+    const xDesign = (change: Record<string, unknown>) => ({ design: { state: "designing", mode: "edit", artifact_id: ARTIFACT, published_version_id: null, research_task_id: RESEARCH_TASK, ...change } });
+    expect(designEnded({ editBeforeTask: xDesign({ research_task_id: "d0000000-0000-4000-8000-0000000000ee" }) }).assertion).toMatchObject({ status: "uncertain", reason: "own_edit_not_on_own_chain" });
+    expect(designEnded({ editBeforeTask: xDesign({ artifact_id: "a0000000-0000-4000-8000-0000000000ee" }) }).assertion).toMatchObject({ status: "uncertain", reason: "own_edit_not_on_own_chain" });
+    expect(designEnded({ editBeforeTask: xDesign({ mode: "create" }) }).assertion).toMatchObject({ status: "uncertain", reason: "own_edit_not_on_own_chain" });
+    expect(designEnded({ editBeforeTask: { withdrawn_source_ids: [NOTE_SOURCE] } }).assertion).toMatchObject({ status: "uncertain", reason: "note_source_withdrawn_before" });
+    // X's withdrawn sources not served at all after the withdrawal: unavailable, never a pass.
+    expect(designEnded({ editAfter: { withdrawn_source_ids: null } }).assertion).toMatchObject({ status: "unavailable", reason: "withdrawn_sources_not_served" });
   });
 
   it("never passes an edit no longer live before the withdrawal (it published or ended first: the timing risk)", () => {
@@ -874,9 +905,8 @@ describe("delta 6: the withdrawal ended the run's own edit X only on the note's 
     // X's withdrawn sources name the entry id N, not the source S.
     expect(designEnded({ editAfter: { withdrawn_source_ids: [NOTE] } }).assertion).toMatchObject({ status: "uncertain", reason: "note_source_not_in_edit_closure" });
     expect(designEnded({ editAfter: { withdrawn_source_ids: ["c0000000-0000-4000-8000-0000000000ff"] } }).assertion).toMatchObject({ status: "uncertain", reason: "note_source_not_in_edit_closure" });
-    // R's inputs name the entry id, or another source.
-    expect(designEnded({ researchInputs: [NOTE] }).assertion).toMatchObject({ status: "uncertain", reason: "own_research_did_not_draw_on_note" });
-    expect(designEnded({ researchInputs: [] }).assertion).toMatchObject({ status: "uncertain", reason: "own_research_did_not_draw_on_note" });
+    // X's withdrawn sources name the entry id together with another source, never S.
+    expect(designEnded({ editAfter: { withdrawn_source_ids: [NOTE, "c0000000-0000-4000-8000-0000000000ff"] } }).assertion).toMatchObject({ status: "uncertain", reason: "note_source_not_in_edit_closure" });
     // The withdraw_note receipt names another source, or none.
     expect(designEnded({ receiptSource: "c0000000-0000-4000-8000-0000000000fe" }).assertion).toMatchObject({ status: "uncertain", reason: "withdrawal_receipt_source_mismatch" });
     expect(designEnded({ receiptSource: null }).assertion).toMatchObject({ status: "uncertain", reason: "withdrawal_receipt_source_mismatch" });
@@ -892,11 +922,26 @@ describe("delta 6: the withdrawal ended the run's own edit X only on the note's 
 });
 
 describe("delta 6: Stop is credited only on the sub-episode's own live work, never on work already ended", () => {
-  it("Stop on the main goal after the withdrawal is never a pass (its research already ended; the product admits no command)", () => {
+  it("Stop on the main goal after the withdrawal is never a pass (no sub-episode; the product admits no command)", () => {
     const main = certify({ ...happyCalls(), "g7.create_stop_target": [], "g7.stop": [call(7, "control_work", { kind: "stop" })] }, { skip: ["g7.create_stop_target"] });
-    expect(main["g7.stop"]).toBe("uncertain:stop_target_already_ended");
+    expect(main["g7.stop"]).toBe("uncertain:stop_target_not_certified");
     const refused = certify({ ...happyCalls(), "g7.create_stop_target": [], "g7.stop": [call(7, "control_work", null)] }, { skip: ["g7.create_stop_target"] });
     expect(refused["g7.stop"]).toBe("uncertain:call_admitted_no_command");
+  });
+
+  it("labrev6 Nit-1 (S-fallback): without the sub-episode's certified create, Stop is never certified on the main create's live work", () => {
+    // The review's probe: no create_stop_target; R still running before Stop; a stop on R's goal; R stopped and cancelled for the stop.
+    const item = g7Episode({ researchTask: RUN_TASK, calls: { byStep: { ...happyCalls(), "g7.create_stop_target": [], "g7.stop": [call(7, "control_work", { kind: "stop" })] } }, skip: ["g7.create_stop_target", "g7.section_revision", "g7.stale_edit", "g7.withdrawal"] });
+    const stopObserve = item.log.events.find((event) => event.kind === "studio.outcome.observed" && event.payload.purpose === "g7.stop")!;
+    for (const event of item.log.events.filter((e) => e.kind === "studio.outcome.observed" && e.seq < stopObserve.seq)) {
+      event.payload = { ...event.payload, tasks: (event.payload.tasks as Array<Record<string, unknown>>).map((t) => t.task_id === RESEARCH_TASK ? { ...t, state: "running", phase: "running" } : t) };
+    }
+    stopObserve.payload = { ...stopObserve.payload, tasks: [task(RESEARCH_TASK, "research", { ...RUN_TASK, state: "cancelled", phase: "stopped", reason_class: "stopped", withdrawn_source_ids: [], input_source_ids: [] })] };
+    const steps = stepsOf(evaluate(item));
+    expect(steps["g7.create_stop_target"]).toBe("unavailable:step_not_performed_before_end");
+    expect(steps["g7.stop"]).toBe("uncertain:stop_target_not_certified");
+    // An uncertified sub-episode create (its call names the main task) gives Stop nothing to act on either.
+    expect(certify({ ...happyCalls(), "g7.create_stop_target": [call(6, "start_research", { kind: "native_task" }, RESEARCH_TASK)] })["g7.stop"]).toBe("uncertain:stop_target_not_certified");
   });
 
   it("Stop on a sub-episode task already ended before it, or not yet cancelled for the stop, never passes", () => {
@@ -1181,5 +1226,189 @@ describe("delta 5 review (labrev5 C3/C4): only End's post-quiescence, settled au
     expect(attributed(refused)).toMatchObject({ status: "uncertain", reason: "end_calls_read_unavailable" });
     // Positive control.
     expect(attributed(happy())).toMatchObject({ status: "pass", reason: null });
+  });
+});
+
+// ------------------------------------------------------------------ labrev6 P2-1 on the product's own SQL
+// The product's migrations applied verbatim to a disposable database (env:
+// SOPHIA_VOICE_LAB_PRODUCT_MIGRATIONS_DIR, e.g. `git archive <product> db/migrations`;
+// SOPHIA_VOICE_LAB_PRODUCT_SHAPE_DATABASE_URL naming voice_lab_test_studio_product*;
+// SOPHIA_VOICE_LAB_TEST_DATABASE_RESET_APPROVED=YES). The principal records a
+// note (sophia.record_mission_entry) and a discussion contribution, a research
+// is admitted on both (sophia.admit_research_task), and the member reads
+// native_task_view as the API serves NativeTask, projected by the Lab's own
+// projectTask: the note's source S is in the manifest's graph but not in
+// inputSourceIds, the contribution's source is. design_ended must pass on
+// exactly that shape (it failed safe, uncertain, at 7f23015).
+const PRODUCT_MIGRATIONS = process.env.SOPHIA_VOICE_LAB_PRODUCT_MIGRATIONS_DIR ?? "";
+const PRODUCT_DB = process.env.SOPHIA_VOICE_LAB_PRODUCT_SHAPE_DATABASE_URL ?? "";
+describe.skipIf(PRODUCT_MIGRATIONS === "" || PRODUCT_DB === "")("labrev6 P2-1: design_ended on NativeTask.inputSourceIds exactly as the product's SQL serves it", () => {
+  const A = randomUUID();
+  const E = randomUUID();
+  const MD_ROLE = { id: "sophia-research-md-v1", route: "research-sol-medium-v1", presetDigest: "sha256:md" };
+  const UNIT = "sophia-runtime-test";
+  const tokenSha = createHash("sha256").update(`runtime-capability-${randomUUID()}`, "utf8").digest();
+  const BRIDGE = randomUUID();
+  let projectId = "";
+  const target = () => new URL(PRODUCT_DB);
+  const admin = () => { const url = target(); url.pathname = "/postgres"; return url.toString(); };
+  const name = () => target().pathname.slice(1);
+  async function onAdmin(sql: string): Promise<void> {
+    const c = new pg.Client({ connectionString: admin() });
+    await c.connect();
+    try { await c.query(sql); } finally { await c.end(); }
+  }
+  async function asOwner<T>(fn: (c: pg.Client) => Promise<T>): Promise<T> {
+    const c = new pg.Client({ connectionString: PRODUCT_DB });
+    await c.connect();
+    try { return await fn(c); } finally { await c.end(); }
+  }
+  /** One transaction as the API's role, the member actor set transaction-locally (null: a service call), as withActor does. */
+  async function asApi<T>(actor: string | null, fn: (c: pg.Client) => Promise<T>, readOnly = false): Promise<T> {
+    return asOwner(async (c) => {
+      try {
+        await c.query(readOnly ? "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY" : "BEGIN");
+        await c.query("SET LOCAL ROLE sophia_api");
+        if (actor !== null) await c.query("SELECT set_config('sophia.actor_id', $1, true)", [actor]);
+        const out = await fn(c);
+        await c.query("COMMIT");
+        return out;
+      } catch (error) { await c.query("ROLLBACK").catch(() => undefined); throw error; }
+    });
+  }
+
+  beforeAll(async () => {
+    if (!/^voice_lab_test_studio_product[a-z0-9_]*$/.test(name()) || process.env.SOPHIA_VOICE_LAB_TEST_DATABASE_RESET_APPROVED !== "YES") throw new Error("Dedicated product-shape test database/reset approval required");
+    await onAdmin(`DROP DATABASE IF EXISTS ${name()} WITH (FORCE)`);
+    await onAdmin(`CREATE DATABASE ${name()}`);
+    await asOwner(async (c) => { for (const file of readdirSync(PRODUCT_MIGRATIONS).filter((entry) => entry.endsWith(".sql")).sort()) await c.query(readFileSync(join(PRODUCT_MIGRATIONS, file), "utf8")); });
+    projectId = randomUUID();
+    await asOwner(async (c) => {
+      await c.query("BEGIN");
+      await c.query("INSERT INTO sophia.projects(id, title, created_by) VALUES ($1, 'Synthetic project', $2)", [projectId, A]);
+      await c.query("INSERT INTO sophia.project_members(project_id, actor_id, role) VALUES ($1, $2, 'admin'), ($1, $3, 'editor')", [projectId, A, E]);
+      await c.query("INSERT INTO sophia.project_revisions(project_id, revision, frame, accepted_by) VALUES ($1, 1, '{}', $2)", [projectId, A]);
+      await c.query("COMMIT");
+      await c.query("SELECT sophia.set_research_grant($1, 'enabled', 5, 40, 'web-pilot-v1', 'approval:test')", [projectId]);
+      await c.query("SELECT sophia.register_runtime($1, $2, $3, $4)", [projectId, A, UNIT, tokenSha]);
+    });
+    await asApi(null, (c) => c.query("SELECT sophia.runtime_hello($1, $2, $3, $4)", [tokenSha, UNIT, BRIDGE, JSON.stringify({ bundle: "test", protocolVersion: 1, dshVersion: "x", roles: [MD_ROLE] })]));
+    await asApi(null, (c) => c.query("SELECT sophia.runtime_record_ready($1, $2, $3, $4)", [tokenSha, UNIT, BRIDGE, JSON.stringify({ state: "ready", reason: null, unrecovered: [] })]));
+  }, 300_000);
+
+  afterAll(async () => { await onAdmin(`DROP DATABASE IF EXISTS ${name()} WITH (FORCE)`); }, 60_000);
+
+  it("S is in the manifest's graph, not in inputSourceIds (a contribution's source is); design_ended passes on the projected task", async () => {
+    const note = await asApi(E, async (c) => (await c.query("SELECT sophia.record_mission_entry($1, $2, $3) AS receipt", [projectId, `note-${randomUUID()}`, JSON.stringify({ kind: "observation", epistemic: "reported", text: "Families in the pilot prefer Saturday morning sessions." })])).rows[0].receipt as Record<string, unknown>);
+    expect(note.operation).toBe("record_note");
+    const S = String(note.sourceId);
+    await asApi(E, (c) => c.query("SELECT sophia.submit_contribution($1, $2, $3)", [projectId, `contrib-${randomUUID()}`, JSON.stringify({ intent: "discuss", text: "A contribution the research may draw on." })]));
+    const C = await asOwner(async (c) => String((await c.query("SELECT source_id FROM sophia.contributions WHERE project_id=$1 AND actor_id=$2 ORDER BY created_at DESC LIMIT 1", [projectId, E])).rows[0].source_id));
+    const admitted = await asApi(E, async (c) => (await c.query("SELECT sophia.admit_research_task($1, $2, NULL, $3, $4, $5) AS result", [projectId, `research-${randomUUID()}`, JSON.stringify({ question: "Which sessions suit the pilot families?", outputs: ["markdown"], inputSourceIds: [S, C] }), MD_ROLE.id, MD_ROLE.route])).rows[0].result as Record<string, unknown>);
+    const R = String(admitted.taskId);
+    // What the API serves (native-tasks.ts TASK_COLUMNS / toTask), read as the member.
+    const row = await asApi(E, async (c) => (await c.query("SELECT id, kind, goal_id, attempt_id, command_id, actor_id, state, phase, created_at, input_source_id, input_source_ids, result_source_id, reason, artifact_id FROM sophia.native_task_view WHERE project_id=$1 AND id=$2", [projectId, R])).rows[0] as Record<string, unknown>, true);
+    const projected = projectTask({ id: row.id, kind: row.kind, goalId: row.goal_id, attemptId: row.attempt_id, commandId: row.command_id, actorId: row.actor_id, state: row.state, phase: row.phase, createdAt: new Date(String(row.created_at)).toISOString(), contextSourceId: row.input_source_id, inputSourceIds: row.input_source_ids, resultSourceId: row.result_source_id, reason: row.reason });
+    const held = await asOwner(async (c) => (await c.query("SELECT EXISTS(SELECT 1 FROM sophia.jobs j JOIN sophia.source_dependencies d ON d.derived_source_id=j.input_source_id AND d.project_id=j.project_id WHERE j.id=$1 AND d.source_id=$2) AS held", [R, S])).rows[0].held as boolean);
+    expect(held).toBe(true);
+    expect(projected?.inputSourceIds).toEqual([C]);
+    // The run's research R exactly as projected: design_ended (and the product) pass on it.
+    const evaluation = evaluate(g7Episode({ researchTask: RUN_TASK, calls: { byStep: happyCalls() }, researchInputs: projected!.inputSourceIds }));
+    expect(statusOf(evaluation, "step.g7.withdrawal.design_ended")).toMatchObject({ status: "pass", reason: null });
+    expect(evaluation.product.filter((assertion) => assertion.status !== "pass").map((assertion) => `${assertion.id}:${assertion.reason}`)).toEqual([]);
+    expect(evaluation.verdicts.product).toBe("pass");
+  }, 120_000);
+});
+
+// ------------------------------------------------------------------ labrev6 P3-1 (adapted from the review's probes)
+describe("labrev6 P3-1: a count-preserving extra-plus-missing window pair never shifts the epoch join", () => {
+  /** Rewrite an episode's bridge receipts in place (each keeps its ledger slot; seqs renumbered contiguously; extra ones follow the last). */
+  const rebridge = (item: Episode, edit: (receipts: Array<{ kind: string; receipt: Record<string, unknown> }>) => Array<{ kind: string; receipt: Record<string, unknown> }>) => {
+    const events = item.log.events;
+    const bridgeEvents = events.filter((event) => event.kind === "studio.bridge_receipt" && event.payload.source === "bridge");
+    const sorted = [...bridgeEvents].sort((left, right) => Number(left.payload.seq) - Number(right.payload.seq));
+    const first = Number(sorted[0]!.payload.seq);
+    const rows = edit(sorted.map((event) => ({ kind: String(event.payload.kind), receipt: JSON.parse(String(event.payload.receipt_json)) as Record<string, unknown> })));
+    const make = (row: { kind: string; receipt: Record<string, unknown> }, index: number) => {
+      const receipt = { ...row.receipt, seq: first + index };
+      const json = canonicalJson(receipt);
+      return { exchange_id: EXCHANGE_UUID, source: "bridge", seq: first + index, kind: row.kind, received_at: new Date().toISOString(), receipt_json: json, receipt_sha256: sha256(json) };
+    };
+    const slots = events.map((event, index) => ({ event, index })).filter((slot) => bridgeEvents.includes(slot.event));
+    const kept = Math.min(slots.length, rows.length);
+    for (let n = 0; n < kept; n += 1) slots[n]!.event.payload = make(rows[n]!, n);
+    const removed = new Set(slots.slice(kept).map((slot) => slot.event));
+    const tail = rows.slice(kept).map((row, n) => ({ ...events[0]!, kind: "studio.bridge_receipt", source: "canonical" as const, payload: make(row, kept + n), dedupeKey: null }));
+    const lastSlot = slots[kept - 1]!.event;
+    const rebuilt = events.filter((event) => !removed.has(event)).flatMap((event) => event === lastSlot ? [event, ...tail] : [event]);
+    rebuilt.forEach((event, index) => { event.seq = index + 1; });
+    events.splice(0, events.length, ...rebuilt);
+    return item;
+  };
+  type Rows = Array<{ kind: string; receipt: Record<string, unknown> }>;
+  /** One extra window (windowSeq 3, epoch 1) before hold's own, with a turn (by default a copy of window 2's, the steer's); later windows renumbered +1. */
+  const withExtra = (rows: Rows, extraWindow: Record<string, unknown> = {}, extraTurn: Record<string, unknown> = {}) => {
+    const out: Rows = [];
+    let inserted = false;
+    for (const row of rows) {
+      const windowSeq = Number(row.receipt.windowSeq);
+      if (!inserted && row.kind === "input_window" && windowSeq === 3) {
+        out.push({ kind: "input_window", receipt: { ...row.receipt, windowSeq: 3, inputEpoch: 1, ...extraWindow } }, { kind: "input_turn", receipt: { ...rows.find((r) => r.kind === "input_turn" && Number(r.receipt.windowSeq) === 2)!.receipt, windowSeq: 3, turnOrdinal: 3, ...extraTurn } });
+        inserted = true;
+      }
+      if ((row.kind === "input_window" || row.kind === "input_turn") && windowSeq >= 3) out.push({ kind: row.kind, receipt: { ...row.receipt, windowSeq: windowSeq + 1, ...(row.kind === "input_turn" ? { turnOrdinal: windowSeq + 1 } : {}) } });
+      else out.push(row);
+    }
+    return out;
+  };
+  const closedCounts = (rows: Rows) => rows.map((row) => row.kind !== "session_closed" ? row : { kind: row.kind, receipt: { ...row.receipt, windows: rows.filter((r) => r.kind === "input_window").length, turns: rows.filter((r) => r.kind === "input_turn").length } });
+  /** The extra window plus the last step's window and turn missing: still exactly 1..k windows. */
+  const compensate = (extraWindow: Record<string, unknown> = {}, extraTurn: Record<string, unknown> = {}) => (rows: Rows) => {
+    const extra = withExtra(rows, extraWindow, extraTurn);
+    const last = Math.max(...extra.filter((row) => row.kind === "input_window").map((row) => Number(row.receipt.windowSeq)));
+    return closedCounts(extra.filter((row) => !((row.kind === "input_window" || row.kind === "input_turn") && Number(row.receipt.windowSeq) === last)));
+  };
+  /** hold/resume/stop heard at input epoch 2 (after leave and return); every call carries epoch 1 (labrev4 E-epoch). */
+  const epochEpisode = () => g7Episode({ researchTask: RUN_TASK, calls: { byStep: happyCalls() }, windowEpochs: { "g7.hold": 2, "g7.resume": 2, "g7.create_stop_target": 2, "g7.stop": 2 } });
+
+  it("E-compensate: the review's pair no longer certifies hold's stale-epoch call; every epoch is unknown and the positional input assertions are unavailable", () => {
+    expect(stepsOf(evaluate(epochEpisode()))["g7.hold"]).toBe("uncertain:call_input_epoch_mismatch");
+    const compensated = evaluate(rebridge(epochEpisode(), compensate()));
+    const steps = stepsOf(compensated);
+    for (const step of ["g7.create", "g7.steer", "g7.hold", "g7.resume", "g7.create_stop_target", "g7.stop"]) expect(steps[step], step).toBe("uncertain:step_input_epoch_unknown");
+    expect(statusOf(compensated, "input.3.window_envelope")).toMatchObject({ status: "unavailable", reason: "ordinal_join_inconsistent" });
+    expect(compensated.verdicts.product).not.toBe("pass");
+  });
+
+  it("E-compensate-run: with only hold's call stale, the run is never a product pass (the control stays inconclusive on that call)", () => {
+    const calls = happyCalls();
+    const at2 = (entries: Array<Record<string, unknown>>) => entries.map((entry) => ({ ...entry, input_epoch: 2 }));
+    const byStep = { ...calls, "g7.resume": at2(calls["g7.resume"]!), "g7.create_stop_target": at2(calls["g7.create_stop_target"]!), "g7.stop": at2(calls["g7.stop"]!) };
+    const build = () => g7Episode({ researchTask: RUN_TASK, calls: { byStep }, windowEpochs: { "g7.hold": 2, "g7.resume": 2, "g7.create_stop_target": 2, "g7.stop": 2 } });
+    const control = evaluate(build());
+    expect(stepsOf(control)["g7.hold"]).toBe("uncertain:call_input_epoch_mismatch");
+    const compensated = evaluate(rebridge(build(), compensate()));
+    expect(stepsOf(compensated)["g7.hold"]).not.toBe("pass:null");
+    expect(compensated.verdicts.product).not.toBe("pass");
+  });
+
+  it("each cross-check alone refuses the shift: an extra window cut by a pause, or one whose turn showed no call where the step made its command", () => {
+    // A pause-split fragment (the bridge ends it 'paused') showing as many calls as hold made.
+    const paused = stepsOf(evaluate(rebridge(epochEpisode(), compensate({ endReason: "paused" }, { toolCallCount: 1 }))));
+    expect(paused["g7.hold"]).toBe("uncertain:step_input_epoch_unknown");
+    // A fragment the provider completed a turn on without a tool call; hold's own command came after it.
+    const silent = stepsOf(evaluate(rebridge(epochEpisode(), compensate({}, { toolCallCount: 0 }))));
+    expect(silent["g7.hold"]).toBe("uncertain:step_input_epoch_unknown");
+  });
+
+  it("controls: a normal run (each window turn_complete; each turn's calls within the step's own) keeps the join; fewer calls shown than recorded (a tool continuation after the turn) is normal", () => {
+    expect(evaluate(g7Episode({ researchTask: RUN_TASK, calls: { byStep: happyCalls() } })).verdicts.product).toBe("pass");
+    // The steer's control_work came in a continuation generated after its turn completed: the window showed one of its two calls.
+    const continuation = evaluate(g7Episode({ researchTask: RUN_TASK, calls: { byStep: happyCalls() }, toolCallCounts: { "g7.steer": 1 } }));
+    expect(stepsOf(continuation)["g7.steer"]).toBe("pass:null");
+    expect(continuation.verdicts.product).toBe("pass");
+    // More calls shown than the step's own read lists, or none where its command is: the join is refused.
+    expect(stepsOf(evaluate(g7Episode({ researchTask: RUN_TASK, calls: { byStep: happyCalls() }, toolCallCounts: { "g7.hold": 2 } })))["g7.hold"]).toBe("uncertain:step_input_epoch_unknown");
+    expect(stepsOf(evaluate(g7Episode({ researchTask: RUN_TASK, calls: { byStep: happyCalls() }, toolCallCounts: { "g7.create": 0 } })))["g7.create"]).toBe("uncertain:step_input_epoch_unknown");
   });
 });

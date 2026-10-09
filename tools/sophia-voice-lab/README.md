@@ -158,8 +158,10 @@ contract is `sophia.studio-g7.v2`, its catalogue `studio-g7-v1` (scenario
 the non-secret run binding. `studio_g7_voice_step` performs one voice step
 (`create`, `steer`, `hold`, `resume`, `create_stop_target`, `stop`) as one
 `speak` operation labelled `_g7_step`. `studio_g7_action` performs one
-non-voice step as one `studio_action` operation: `record_note` (optional
-`text`; the run's own note through the member route), `leave_and_return`,
+non-voice step as one `studio_action` operation: `record_note` (the run's own
+note through the member route: always the Lab's fixed synthetic note, so no
+caller text is kept in the durable operation; only its hash is recorded),
+`leave_and_return`,
 `section_revision` (needs `instruction`, optional `sections`), `stale_edit`,
 `withdrawal` (optional `entry_id`), or `observe` (`for_step`, optional
 `wait_ms`), a read-only outcome read for a voice step. A
@@ -290,7 +292,19 @@ the window is answered and was made at the input epoch the principal held for
 the step (its input window's bridge receipt, joined by ordinal only while the
 windows seen are exactly 1..k for the k non-silence inputs so far and, after
 `session_closed`, the run is joinable; an extra or missing window leaves every
-step's epoch unknown, `step_input_epoch_unknown`), and exactly one carries a command:
+step's epoch unknown, `step_input_epoch_unknown`). Because an extra window
+before a step and a missing one after it keep the count, the join is also
+cross-checked: every window must have ended `turn_complete` (a pause, handoff,
+barge-in or close splits or cuts an utterance), and each window's turn must
+have shown no more tool calls than the step's own calls read lists, and at
+least one when that read holds a command-bearing call; otherwise every epoch
+is unknown and the per-input envelope assertions are `unavailable`
+(`ordinal_join_inconsistent`). Exact equality is not required, because a
+normal run can show fewer (a tool continuation generated after the turn
+completed is not in its window's count). A residual remains: a provider turn
+completed on an utterance fragment that showed exactly as many calls as the
+step it lands on, together with a later utterance that got no window, still
+shifts the join. Exactly one call must carry a command:
 `native_task` with its task, answered `admitted`, for create (the task naming
 the run's ownership-proven exchange in the snapshot, `NativeTask.exchangeId`);
 `steer`, `hold`, `resume` on the created task's goal, and `stop` on the Stop
@@ -313,14 +327,19 @@ only with every join on the note's SOURCE S, the `sourceId` of the run's own
 `record_note` receipt (the entry id serves only the routes and the preview's
 `expectedAffected`; a match on the entry id alone, or on another source, never
 passes): the withdrawal committed, for the run's own note, and its
-`withdraw_note` receipt names S; the run's research R listed S in its
-`inputSourceIds` in an observation before the withdrawal; X is canonically the
-run's own (the task the Lab's own admitted edit receipt names, on the own
-design's artifact) and was live (designing or reviewing) in the withdrawal's own
-before-observation; in the withdrawal's own after-observation X `failed` for the
-product's revoke reason (`revoked_source_withdrawn`, only the class is kept)
-with S in its `withdrawnSourceIds` (R2, computed live by the product); and
-nothing else ended it first (no Stop before that observation). Anything less is
+`withdraw_note` receipt names S; X is canonically the run's own (the task the
+Lab's own admitted edit receipt names, on the own design's artifact, and in the
+withdrawal's own before-observation an edit whose design names the run's own
+research R on that artifact) and was live there (designing or reviewing),
+not yet listing S as withdrawn; in the withdrawal's own after-observation X
+`failed` for the product's revoke reason (`revoked_source_withdrawn`, only the
+class is kept) with S in its `withdrawnSourceIds` (A15/0046, computed live by
+the product from X's attempt's consumed closure, so this is also the proof
+that X drew on S); and nothing else ended it first (no Stop before that
+observation). `NativeTask.inputSourceIds` is never used for this join: the
+product builds it from discussion contributions only (`native_task_view`,
+migration 0022), so a note's source is in the research manifest's dependency
+graph but never listed there. Anything less is
 `uncertain` or `unavailable`, never a pass. Timing risk: if X publishes (or
 ends) before the withdrawal reaches it, the end is `uncertain`
 (`own_edit_no_longer_live`); the episode withdraws right after the stale probe
@@ -336,8 +355,9 @@ target seen live before Stop's baseline (`stop_target_not_observed_before_stop`,
 reason `stopped` (`stop_effect_not_settled`); a target that lists a withdrawn
 source or the revoke reason is never Stop's effect
 (`stop_target_ended_by_withdrawal`). The sub-episode never borrows the main
-create's joins, and a Stop on the main goal after the withdrawal (refused by the
-product, no command) is never a pass. A command that a later answered read shows `denied` fails its
+create's joins: without its certified create, Stop is `stop_target_not_certified`
+and is never credited on the main create's work, and a Stop on the main goal
+after the withdrawal (refused by the product, no command) is never a pass. A command that a later answered read shows `denied` fails its
 step, and one later of unknown outcome is `uncertain`. End reads every call
 of the exchange once (no `after`); a command-bearing call that some read lists
 but no step's window holds (made between a step's window read and the next
@@ -527,9 +547,9 @@ bridge reports only while it is in the room), and absence at that report does
 not prove the process closed. Voice-step certification needs the API's voice
 qualification on; a steer's effect beyond its admitted command, and a goal's
 status other than its created task's phase, are not exposed by the member API.
-The withdrawal's end of X is proven only through R2's `inputSourceIds` and
-`withdrawnSourceIds` (voice qualification on); without them it is
-`unavailable`. Section revisions are made over HTTP only; revising by voice is
+The withdrawal's end of X is proven only through the `withdraw_note`
+receipt's `sourceId` and X's own `withdrawnSourceIds` (A15/0046, voice
+qualification on); without them it is `unavailable`. Section revisions are made over HTTP only; revising by voice is
 out of scope.
 
 ## Running and container commands

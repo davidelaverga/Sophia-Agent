@@ -1262,12 +1262,15 @@ export class StudioG7Driver implements VoiceBrowserDriver, StudioDriverExtension
   /**
    * The run's own note, recorded through the principal's own member route
    * (record_note): the receipt names the entry and the note's source S (the
-   * entry's source_id), which a research that draws on the note lists in its
-   * inputs and a withdrawal later reaches. The words are never kept.
+   * entry's source_id), which a research drawing on the note holds in its
+   * manifest's dependency graph and a withdrawal later reaches. The words
+   * are the Lab's fixed synthetic note (STUDIO_G7_NOTE_TEXT), never a
+   * caller's: a durable operation must be re-executable after a crash, so
+   * caller-chosen words would have to be kept in its input. Only the hash of
+   * the words is recorded.
    */
-  async #recordNoteAction(run: RunRecord, tokens: TokenSource, operationId: string, input: Record<string, unknown>): Promise<{ events: DriverEvent[]; receipt: Record<string, unknown> }> {
-    const text = typeof input.text === "string" ? input.text : STUDIO_G7_NOTE_TEXT;
-    if (text.length < 1 || text.length > 2_000) throw studioError("STUDIO_ACTION_INVALID", "A note needs 1 to 2000 characters.", "validation");
+  async #recordNoteAction(run: RunRecord, tokens: TokenSource, operationId: string, _input: Record<string, unknown>): Promise<{ events: DriverEvent[]; receipt: Record<string, unknown> }> {
+    const text = STUDIO_G7_NOTE_TEXT;
     const answer = await this.#api.recordNote(this.studio.projectId, { kind: "observation", epistemic: "reported", text }, await tokens.token(), `voice-lab-g7:${operationId}`);
     const committed = answer.accepted && answer.receipt !== null && answer.receipt.status === "committed" && answer.receipt.operation === "record_note";
     const payload = {

@@ -877,6 +877,8 @@ describe("delta 4: the worker hands the driver only the run's certified create t
       return { status: "available", read_at: readAt, calls: recorded.filter((item) => since === null || item.began > since).map((item) => item.call) };
     };
     const at = new Date().toISOString();
+    // The provider showed the create's call in its input window's turn (the join's cross-check, labrev6 P3-1).
+    h.driver.turnToolCalls = () => 1;
     await h.worker.runOnce();
     const create = h.service.studioG7VoiceStep(caller, { run_id: h.runId, step: "create", fixture_id: "a02_short_command", idempotency_key: newIdempotencyKey("voice-create") });
     // The create step's own voice call, recorded after its baseline: it admitted the research task.
@@ -1561,5 +1563,21 @@ describe("delta 6: the worker hands the driver the run's own note from its own r
     const settled = (await h.ledger.getRun(h.runId))!;
     // The step itself failed (refused), so the product can never pass.
     expect(settled.verdicts.product).not.toBe("pass");
+  }, 60_000);
+});
+
+describe("labrev6 Nit-2: record_note keeps no caller text in any durable record", () => {
+  it("refuses caller words at the boundary (adapted N1): nothing is reserved, and the performed note's operation input carries no text", async () => {
+    const h = await harness("n1-worker");
+    await h.worker.runOnce();
+    const words = "labrev6 synthetic note words that should not be retained";
+    await expect(h.service.studioG7Action(caller, { run_id: h.runId, action: "record_note", text: words, idempotency_key: newIdempotencyKey("action-record_note-text") })).rejects.toThrow();
+    const acted = await action(h, { action: "record_note" });
+    expect(acted.data).toMatchObject({ performed: true, status: "committed" });
+    const operations = (await h.ledger.listOperations(h.runId)).filter((item) => item.type === "studio_action" && item.input.action === "record_note");
+    expect(operations).toHaveLength(1);
+    expect(Object.keys(operations[0]!.input).sort()).toEqual(["_g7_step", "action", "idempotency_key", "run_id"]);
+    const durable = JSON.stringify({ operations: await h.ledger.listOperations(h.runId), events: (await h.ledger.listEvents(h.runId, 0, 5_000)).events, audits: await h.ledger.listAuthAudit(h.runId) });
+    expect(durable).not.toContain(words);
   }, 60_000);
 });

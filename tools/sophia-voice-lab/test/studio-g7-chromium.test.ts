@@ -120,6 +120,8 @@ describe.skipIf(executablePath === null)("Studio G7 driver against a local fake 
     /** record_note requests as sent (idempotency key and the note's kind; never its words), and their replayable answers. */
     noteRequests: [] as Array<{ idempotencyKey: unknown; kind: string; epistemic: string }>,
     noteAnswers: new Map<string, { status: number; body: unknown }>(),
+    /** Each task's consumed closure (its manifest's source dependencies), which the product keeps apart from inputSourceIds. */
+    closures: new Map<string, string[]>(),
   };
   const ROOM_UUID = "70000000-0000-4000-8000-0000000000a7";
   const tokens = { issued: new Set<string>(), revoked: new Set<string>(), expiresIn: 3_600, failLocal: 0, logouts: [] as string[] };
@@ -195,11 +197,15 @@ describe.skipIf(executablePath === null)("Studio G7 driver against a local fake 
    * the run's own note's source S and reads result_ready; its report is
    * version 1 (Markdown, no page); the design D it handed the page to is
    * under way (create, designing) on the same goal, bound to no exchange.
+   * As the product: S is in R's manifest's dependency graph (the closure a
+   * withdrawal reaches, `api.closures`), never in NativeTask.inputSourceIds,
+   * which native_task_view (0022) builds from discussion contributions only.
    * Every research and design detail serves withdrawnSourceIds (computed
    * live), [] until a source it drew on is withdrawn.
    */
   function lifecycleReport(noteSource: string): void {
-    const research = nativeTask(ids.research, "research", { state: "succeeded", phase: "result_ready", exchangeId: EXCHANGE_UUID, goalId: ids.goal, inputSourceIds: [noteSource] });
+    const research = nativeTask(ids.research, "research", { state: "succeeded", phase: "result_ready", exchangeId: EXCHANGE_UUID, goalId: ids.goal, inputSourceIds: [] });
+    api.closures.set(ids.research, [noteSource]);
     const design = nativeTask(ids.design, "design", { goalId: ids.goal, artifactId: ids.artifact });
     api.work = [research, design];
     api.tasks.set(ids.research, { task: research, instruction: FREE_TEXT[0], result: { markdown: FREE_TEXT[1], sourceId: ids.md, sha256: sha256("markdown"), outputs: [] }, research: { question: FREE_TEXT[0], specialist: "x", outputs: [], rootTaskId: ids.research, capUsd: 1, committedUsd: 0, spentUsd: 0, searches: {}, reads: {}, html: { state: "designing", designTaskId: ids.design } }, withdrawnSourceIds: [] });
@@ -359,7 +365,7 @@ describe.skipIf(executablePath === null)("Studio G7 driver against a local fake 
         const entryId = first ? ids.note : randomUUID();
         const sourceId = first ? ids.noteSource : randomUUID();
         api.mission = [...api.mission, { id: entryId, kind: parsed.kind, epistemic: parsed.epistemic, state: "current", text: parsed.text, textKind: "member_text", authoredBy: "member", actorId: PRINCIPAL_UUID, origin: "studio", exchangeId: null, inputEpoch: null, supersedesEntryId: null, goalId: null, sourceId }];
-        const answer = { status: 202, body: { status: "committed", operation: "record_note", projectId: PROJECT_UUID, entryId, decisionId: null, decisionRevision: null, decision: null, sourceId, sha256: sha256(parsed.text), affected: [entryId], ledgerRevision: 4, missionRevision: 1, eligibilityRevision: 1, cursor: "11" } };
+        const answer = { status: 202, body: { status: "committed", operation: "record_note", projectId: PROJECT_UUID, entryId, decisionId: null, decisionRevision: null, decision: null, sourceId, sha256: sha256(parsed.text), affected: [], ledgerRevision: 4, missionRevision: 1, eligibilityRevision: 1, cursor: "11" } };
         api.noteAnswers.set(key, answer);
         json(answer.status, answer.body);
         return;
@@ -389,7 +395,8 @@ describe.skipIf(executablePath === null)("Studio G7 driver against a local fake 
         // forgotten source, and every design of its report, lists that source (computed live); a design still
         // under way that drew on it is revoked (failed, the revoke reason); a published or ended one is not touched.
         const forgotten = new Set(reach.entries.map((entry) => String(entry.sourceId)));
-        const drew = (taskId: unknown) => ((api.tasks.get(String(taskId))?.task as Record<string, unknown> | undefined)?.inputSourceIds as string[] | undefined ?? []).filter((id) => forgotten.has(id));
+        // The closure (the manifest's source_dependencies), never NativeTask.inputSourceIds.
+        const drew = (taskId: unknown) => (api.closures.get(String(taskId)) ?? []).filter((id) => forgotten.has(id));
         for (const [taskId, detail] of [...api.tasks.entries()]) {
           const design = detail.design as Record<string, unknown> | undefined;
           const listed = [...new Set([...drew(taskId), ...(design ? drew(design.researchTaskId) : [])])];
@@ -414,8 +421,8 @@ describe.skipIf(executablePath === null)("Studio G7 driver against a local fake 
         const refuse = (status: number, code: string, message: string) => { const answer = { status, body: { code, message, requestId: randomUUID(), retry: "reconcile_first" } }; api.edits.set(key, answer); json(answer.status, answer.body); };
         // As the product: staleness is checked before anything else (so the stale probe is refused even while an edit is live).
         if (parsed.versionId !== versions[0]?.id) { refuse(409, "stale_revision", FREE_TEXT[4]!); return; }
-        // No designed page on the current version yet: nothing is started.
-        if (!((versions[0]!.renditions as Array<Record<string, unknown>>) ?? []).some((rendition) => rendition.format === "html")) { refuse(409, "invalid_state", "That report has no designed HTML page to revise."); return; }
+        // No designed page on the current version yet: nothing is started (the product raises 22023, mapped to 422 invalid_request).
+        if (!((versions[0]!.renditions as Array<Record<string, unknown>>) ?? []).some((rendition) => rendition.format === "html")) { refuse(422, "invalid_request", "That report has no designed HTML page to revise."); return; }
         // One design of a page at a time.
         if ([...api.tasks.values()].some((detail) => { const design = detail.design as Record<string, unknown> | undefined; return design?.artifactId === ids.artifact && (design.state === "designing" || design.state === "reviewing"); })) { refuse(409, "invalid_state", "A design of this page is under way."); return; }
         // The edit X: admitted, designing on the run's goal, the same research and artifact; it does not publish by itself.
@@ -546,6 +553,7 @@ else {
     api.decisions = [];
     api.noteRequests.length = 0;
     api.noteAnswers.clear();
+    api.closures.clear();
     return { config, driver, run };
   }
 
@@ -583,7 +591,10 @@ else {
       const baseline = await driver.readStudioCalls(run, "baseline", operation.id, `g7.${step}`);
       collected.push(baseline);
       collected.push(...(await driver.schedule(run, operation.id, randomUUID(), audioOf(wav), 0)).events);
+      const callsBefore = api.exchangeCalls.length;
       calls();
+      // The provider showed the step's calls while its input window was open (the bridge's toolCallCount).
+      const shown = api.exchangeCalls.length - callsBefore;
       const ownCalls = () => driver.readStudioCalls(run, "after", operation.id, `g7.${step}`, String(baseline.payload.read_at));
       const deadline = Date.now() + 15_000;
       while (!collected.some((event) => event.kind === "audio.input.completed" && event.payload.operation_id === operation.id) && Date.now() < deadline) {
@@ -592,7 +603,7 @@ else {
       }
       const ordinal = operations.filter((candidate) => candidate.type === "speak").length;
       push("input_window", inputWindow(run, seq++, ordinal, 800));
-      push("input_turn", inputTurn(run, seq++, ordinal));
+      push("input_turn", inputTurn(run, seq++, ordinal, { toolCallCount: shown }));
       push("output_reply", outputReply(run, seq++, ordinal, Date.now()));
       collected.push(await ownCalls());
     };
@@ -682,7 +693,8 @@ else {
     expect(finalTasks.find((item) => item.task_id === decoys.other)).toMatchObject({ exchange_id: OTHER_EXCHANGE });
     expect(finalTasks.find((item) => item.task_id === decoys.none)).toMatchObject({ exchange_id: null });
     expect(finalTasks.find((item) => item.task_id === ids.edit)).toMatchObject({ state: "failed", withdrawn_source_ids: [ids.noteSource], design: { state: "failed", mode: "edit", reason_class: "revoked_source_withdrawn" } });
-    expect(finalTasks.find((item) => item.task_id === ids.research)).toMatchObject({ phase: "result_ready", input_source_ids: [ids.noteSource], withdrawn_source_ids: [ids.noteSource] });
+    // As the product serves R: S only in withdrawnSourceIds, never in inputSourceIds (contributions only).
+    expect(finalTasks.find((item) => item.task_id === ids.research)).toMatchObject({ phase: "result_ready", input_source_ids: [], withdrawn_source_ids: [ids.noteSource] });
     expect(finalTasks.find((item) => item.task_id === ids.design)).toMatchObject({ design: { state: "published" } });
     expect(finalTasks.find((item) => item.task_id === ids.stopResearch)).toMatchObject({ state: "cancelled", phase: "stopped", reason_class: "stopped", withdrawn_source_ids: [] });
 

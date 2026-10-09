@@ -81,8 +81,6 @@ export const StudioG7ActionSchema = z.object({
   idempotency_key: IdempotencyKeySchema,
   sections: z.array(z.string().regex(/^[a-z][a-z0-9-]{0,63}$/)).min(1).max(16).optional(),
   instruction: z.string().min(1).max(2_000).optional(),
-  /** record_note: the note's words (optional; a synthetic default otherwise). Sent to the product, never kept. */
-  text: z.string().min(1).max(2_000).optional(),
   entry_id: z.string().uuid().optional(),
   for_step: z.enum(STUDIO_G7_VOICE_STEPS).optional(),
   wait_ms: z.number().int().min(0).max(30_000).optional(),
@@ -92,7 +90,6 @@ export const StudioG7ActionSchema = z.object({
   if ((value.action === "section_revision") !== (value.instruction !== undefined)) issue("instruction is required for section_revision and accepted only there.");
   if (value.sections !== undefined && value.action !== "section_revision" && value.action !== "stale_edit") issue("sections apply only to section_revision or stale_edit.");
   if (value.entry_id !== undefined && value.action !== "withdrawal") issue("entry_id applies only to withdrawal.");
-  if (value.text !== undefined && value.action !== "record_note") issue("text applies only to record_note.");
   if ((value.action === STUDIO_G7_OBSERVE_ACTION) !== (value.for_step !== undefined)) issue("for_step is required for observe and accepted only there.");
   if (value.wait_ms !== undefined && value.action !== STUDIO_G7_OBSERVE_ACTION) issue("wait_ms applies only to observe.");
 });

@@ -27,7 +27,7 @@ import {
   type StudioPageReceipt,
 } from "./contract.js";
 import { STUDIO_DEAD_OWNER_LEASE_RELEASE_SCHEMA, studioExchangeEndAfterJoin } from "./lease-release.js";
-import { STUDIO_CALLS_END_STEP, STUDIO_CALLS_READ_KIND, STUDIO_VOICE_STEP_COMMAND_KIND, certifyStudioVoiceSteps, type StudioStepCertification } from "./calls-certification.js";
+import { STUDIO_CALLS_END_STEP, STUDIO_CALLS_READ_KIND, STUDIO_VOICE_STEP_COMMAND_KIND, certifyStudioVoiceSteps, studioStepOwnCalls, type StudioStepCertification } from "./calls-certification.js";
 import { studioG7Scenario, type StudioG7Step } from "./scenarios.js";
 
 /**
@@ -80,6 +80,11 @@ function sha256(value: string): string {
 function stringField(payload: Record<string, unknown>, key: string): string | null {
   const value = payload[key];
   return typeof value === "string" ? value : null;
+}
+
+/** The run's joined exchange (its write-ahead join), lowercased; null without one. */
+function runExchangeIdOf(join: Event | null): string | null {
+  return typeof join?.payload.exchange_id === "string" ? join.payload.exchange_id.toLowerCase() : null;
 }
 
 function record(value: unknown): Record<string, unknown> | null {
@@ -352,14 +357,39 @@ export function evaluateStudioG7Run(run: RunRecord, events: Event[], operations:
   }
   const joinable = !receiptsDropped && sessionClosed !== null && windows.length === nonSilence.length;
   const windowSeqsSeen = windows.map((item) => item.receipt.windowSeq).sort((left, right) => left - right);
-  const epochJoinable = windowSeqsSeen.length === nonSilence.length && windowSeqsSeen.every((seq, index) => seq === index + 1) && (sessionClosed === null || joinable);
+  // The ordinal join's cross-checks (labrev6 P3-1): a count-preserving pair
+  // (one extra window before a step, one missing after it) keeps the windows
+  // exactly 1..k, so counts alone cannot see the shift. Each joined window
+  // must also be one the provider's own turn completed (a pause, a handoff,
+  // a barge-in, a cut or a close splits or cuts an utterance), and its turn
+  // must have shown no more tool calls than the step's own calls read lists,
+  // and at least one when that read holds a command-bearing call. A normal
+  // run satisfies both: each step waits for the previous reply to end, so
+  // its window ends turn_complete; every call the provider shows while the
+  // window is open reaches the API and is recorded after the step's baseline
+  // (so listed in its own read), and the step's command comes from the
+  // generation answering it while its window is open. Exact equality is not
+  // required: a tool continuation generated after the turn completed, or a
+  // call the bridge refuses before the API, makes them differ in a normal run.
+  const ownCalls = studioStepOwnCalls(ordered, nonSilence.map((entry) => ({ operationId: entry.operation.id })), runExchangeIdOf(exchangeJoin));
+  const shownToolCalls = (windowSeq: number) => turnsAll.filter((item) => item.receipt.windowSeq === windowSeq).reduce((sum, item) => sum + item.receipt.toolCallCount, 0);
+  const windowsTurnComplete = windows.every((item) => item.receipt.endReason === "turn_complete");
+  const toolCallsConsistent = nonSilence.every((entry, index) => {
+    const own = ownCalls.get(entry.operation.id) ?? null;
+    if (own === null) return true;
+    const shown = shownToolCalls(index + 1);
+    return shown <= own.calls && (!own.commandBearing || shown >= 1);
+  });
+  const joinConsistent = windowsTurnComplete && toolCallsConsistent;
+  const epochJoinable = windowSeqsSeen.length === nonSilence.length && windowSeqsSeen.every((seq, index) => seq === index + 1) && (sessionClosed === null || joinable) && joinConsistent;
   nonSilence.forEach((entry, index) => {
     const id = `input.${index + 1}`;
     const window = windows[index];
     const utterance = utterances.find((candidate) => candidate.operation_id === entry.operation.id)!;
-    if (!joinable || !window) {
-      P(`${id}.window_envelope`, "unavailable", "ordinal_join_unavailable");
-      P(`${id}.turn_accepted`, "unavailable", "ordinal_join_unavailable");
+    if (!joinable || !window || !joinConsistent) {
+      const reason = joinable && window ? "ordinal_join_inconsistent" : "ordinal_join_unavailable";
+      P(`${id}.window_envelope`, "unavailable", reason);
+      P(`${id}.turn_accepted`, "unavailable", reason);
       utterance.bridge_window = null;
       return;
     }
@@ -489,7 +519,7 @@ export function evaluateStudioG7Run(run: RunRecord, events: Event[], operations:
   // (calls-certification.ts): the one command its own voice call admitted
   // after the step's durable baseline, of its kind and on its goal, with its
   // effect seen. Never by a task's timing, actor or exchange id alone.
-  const runExchangeId = typeof exchangeJoin?.payload.exchange_id === "string" ? exchangeJoin.payload.exchange_id.toLowerCase() : null;
+  const runExchangeId = runExchangeIdOf(exchangeJoin);
   const voiceOperations = inputs.filter((operation) => typeof operation.input._g7_step === "string" && STUDIO_VOICE_STEP_COMMAND_KIND[operation.input._g7_step] !== undefined);
   const certification = certifyStudioVoiceSteps({
     events: ordered,
@@ -500,9 +530,11 @@ export function evaluateStudioG7Run(run: RunRecord, events: Event[], operations:
     // window receipt of the same ordinal. Joined only when the windows seen
     // are exactly 1..k, k the non-silence inputs so far (mid-run too, before
     // session_closed), and after session_closed only when the run is
-    // joinable (nothing dropped, counts equal). An extra window (a split
-    // utterance, a silence the bridge opened one for, a rejoin chunk) or a
-    // missing one would shift every later step: then every epoch is unknown.
+    // joinable (nothing dropped, counts equal), and only while the join's
+    // cross-checks hold (every window turn_complete; each window's tool calls
+    // within its step's own calls). An extra window (a split utterance, a
+    // silence the bridge opened one for, a rejoin chunk) or a missing one
+    // would shift every later step: then every epoch is unknown.
     stepInputEpochs: new Map(nonSilence.map((entry, index) => [entry.operation.id, epochJoinable ? windows.find((item) => item.receipt.windowSeq === index + 1)!.receipt.inputEpoch : null])),
   });
   const certifiedSteps = new Map(certification.steps.map((item) => [item.operation_id, item]));
@@ -679,16 +711,20 @@ export function evaluateStudioG7Run(run: RunRecord, events: Event[], operations:
       steps.push(result);
       // The withdrawal ended the run's own edit X only with all of (every
       // join on the note's SOURCE S from the run's own record_note receipt,
-      // never its entry id):
-      // - X is canonically the run's own: its id is the Lab's own edit receipt
-      //   on the run's own design;
-      // - X was live in the withdrawal's own before-observation;
-      // - the withdrawal committed, for the run's own note, and its receipt
-      //   names S;
-      // - the run's research drew on the note: its inputSourceIds held S in an
-      //   observation before the withdrawal;
+      // never its entry id), each a field the product serves:
+      // - the withdrawal committed, for the run's own note, and its
+      //   withdraw_note receipt names S;
+      // - X is canonically the run's own: the task the Lab's own admitted edit
+      //   receipt names, on the run's own artifact, and in the withdrawal's
+      //   own before-observation an edit of the run's own research (its
+      //   design's researchTaskId is R) on that artifact;
+      // - X was live there, and did not yet list S as withdrawn;
       // - in the withdrawal's own after-observation X failed for the
-      //   product's revoke reason, with S in its withdrawnSourceIds;
+      //   product's revoke reason, with S in its withdrawnSourceIds: the
+      //   product computes those from X's attempt's consumed closure, so this
+      //   is also the proof that X drew on S (NativeTask.inputSourceIds lists
+      //   only discussion contributions, never a note's source: the product's
+      //   native_task_view, 0022, so it is never read for this join);
       // - nothing else ended it first (no Stop before that observation).
       const own = (purpose: string) => observations.filter((event) => event.payload.purpose === purpose && event.payload.operation_id === operation!.id).at(-1) ?? null;
       const before = own("g7.withdrawal:before");
@@ -705,8 +741,9 @@ export function evaluateStudioG7Run(run: RunRecord, events: Event[], operations:
       const revoked = (task: Record<string, unknown> | null) => (designOf(task)?.state === "failed" || task?.state === "failed")
         && (designOf(task)?.reason_class === "revoked_source_withdrawn" || task?.reason_class === "revoked_source_withdrawn");
       const stopBaseline = ordered.find((event) => event.kind === STUDIO_CALLS_READ_KIND && event.source === "canonical" && event.payload.purpose === "baseline" && event.payload.step_id === "g7.stop") ?? null;
-      const researchDrewOnNote = certification.createdTaskId !== null && observations.filter((event) => event.seq < withdrawal.seq)
-        .some((event) => lists(sightingIn(event, certification.createdTaskId!)?.input_source_ids, noteSource));
+      // An edit of the run's own research on the run's own artifact (the chain R -> D -> artifact the edit receipt was resolved on).
+      const onOwnChain = (task: Record<string, unknown> | null) => designOf(task)?.mode === "edit" && designOf(task)?.research_task_id === certification.createdTaskId
+        && ownReport.status === "resolved" && designOf(task)?.artifact_id === ownReport.artifactId;
       const xBefore = editTask === null ? null : sightingIn(before, editTask);
       const xAfter = editTask === null ? null : sightingIn(afterOwn, editTask);
       const id = "step.g7.withdrawal.design_ended";
@@ -719,11 +756,12 @@ export function evaluateStudioG7Run(run: RunRecord, events: Event[], operations:
       else if (withdrawal.payload.receipt_source_id !== noteSource) P(id, "uncertain", "withdrawal_receipt_source_mismatch", evidence);
       else if (editTask === null) P(id, "unavailable", "own_edit_not_admitted", evidence);
       else if (before === null || before.seq > withdrawal.seq) P(id, "uncertain", "no_observation_before_withdrawal", evidence);
+      else if (xBefore !== null && !onOwnChain(xBefore)) P(id, "uncertain", "own_edit_not_on_own_chain", evidence);
       else if (!liveBefore(xBefore)) P(id, "uncertain", "own_edit_no_longer_live", evidence);
+      else if (lists(xBefore!.withdrawn_source_ids, noteSource)) P(id, "uncertain", "note_source_withdrawn_before", evidence);
       else if (afterOwn === null || afterOwn.seq < withdrawal.seq) P(id, "uncertain", "no_observation_after_withdrawal", evidence);
       else if (stopBaseline !== null && stopBaseline.seq < afterOwn.seq) P(id, "uncertain", "stop_before_withdrawal_effect_observed", evidence);
       else if (!Array.isArray(xAfter?.withdrawn_source_ids)) P(id, "unavailable", "withdrawn_sources_not_served", evidence);
-      else if (!researchDrewOnNote) P(id, "uncertain", "own_research_did_not_draw_on_note", evidence);
       else if (!revoked(xAfter)) P(id, "uncertain", "design_not_ended_by_withdrawal", evidence);
       else if (!lists(xAfter!.withdrawn_source_ids, noteSource)) P(id, "uncertain", "note_source_not_in_edit_closure", evidence);
       else P(id, "pass", null, evidence);

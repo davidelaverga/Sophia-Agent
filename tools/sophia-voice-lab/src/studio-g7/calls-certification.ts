@@ -26,12 +26,15 @@ import { canonicalJson } from "./contract.js";
  * exactly one carries a command, of the step's kind and target, with the
  * expected outcome: `native_task` with its task, answered `admitted`, for
  * create (the task naming the run's ownership-proven exchange in the
- * snapshot); `steer`, `hold`, `resume`, `stop` on the created task's goal,
- * answered `ok`. Its state is not denied, superseded or outcome_unknown; its
+ * snapshot), and likewise for the Stop sub-episode's own create on a task
+ * and goal of its own; `steer`, `hold`, `resume` on the created task's goal
+ * and `stop` on the sub-episode's goal (never without the sub-episode's
+ * certified create), answered `ok`. Its state is not denied, superseded or outcome_unknown; its
  * id was never certified by an earlier step; hold, resume and stop (which
  * take a new authority epoch; a steer does not) carry an epoch above the
- * previous of those; hold, resume and stop see the created task's status
- * match in the step's own observation.
+ * previous of those on their goal; hold and resume see the status match on
+ * a task of the created task's goal, Stop on its own live target, in the
+ * step's own observation.
  *
  * Anything else is never a pass: an unsettled read, no new call, an
  * unanswered call, no command or more than one, another kind, goal or
@@ -50,7 +53,7 @@ export const STUDIO_CALLS_END_STEP = "final" as const;
  * The Stop sub-episode's own create: a second, bounded voice-created task of
  * the run's own, distinct from the episode's create (its own task and goal),
  * whose work Stop then ends. Steer, hold and resume join the episode's create;
- * Stop joins this one when the run made it.
+ * Stop joins only this one: without it, Stop is `stop_target_not_certified`.
  */
 export const STUDIO_STOP_TARGET_STEP = "g7.create_stop_target" as const;
 const CREATE_STEPS: ReadonlySet<string> = new Set(["g7.create", STUDIO_STOP_TARGET_STEP]);
@@ -147,6 +150,41 @@ function stableIdentity(call: RecordedCall): string {
   return canonicalJson({ seq: call.seq, tool: call.tool, input_epoch: call.input_epoch, task_id: call.task_id, outcome: call.outcome, command: call.command ? { ...call.command, state: null } : null });
 }
 
+/**
+ * A step's own window read, as certification selects it: after its baseline
+ * (available, of the run's exchange, with a readAt), its after-reads with
+ * `after` = that readAt taken before any later baseline; the window is the
+ * first of them answered for the run's exchange and settled.
+ */
+function ownWindow(reads: ReadonlyArray<Event>, baseline: Event, operationId: string, readAt: string, runExchange: string | null): { stepReads: Event[]; after: Event[]; window: Event | null } {
+  const upper = reads.find((event) => event.payload.purpose === "baseline" && event.seq > baseline.seq)?.seq ?? Number.MAX_SAFE_INTEGER;
+  const stepReads = reads.filter((event) => event.payload.purpose === "after" && event.payload.operation_id === operationId && event.payload.after === readAt && event.seq > baseline.seq && event.seq < upper);
+  const after = stepReads.filter((event) => event.payload.status === "available" && typeof event.payload.exchange_id === "string" && event.payload.exchange_id.toLowerCase() === runExchange);
+  return { stepReads, after, window: after.find((event) => event.payload.settled === true) ?? null };
+}
+
+/**
+ * Each voice step's own calls (its own settled window read, as
+ * certifyStudioVoiceSteps selects it): how many calls it lists and whether
+ * one carries a command; null when the step has no such read. The evaluator
+ * cross-checks the ordinal join of the bridge's input windows with them.
+ */
+export function studioStepOwnCalls(events: ReadonlyArray<Event>, steps: ReadonlyArray<{ operationId: string }>, runExchangeId: string | null): Map<string, { calls: number; commandBearing: boolean } | null> {
+  const ordered = [...events].sort((left, right) => left.seq - right.seq);
+  const runExchange = runExchangeId?.toLowerCase() ?? null;
+  const reads = ordered.filter((event) => event.kind === STUDIO_CALLS_READ_KIND && event.source === "canonical");
+  return new Map(steps.map((step) => {
+    const baseline = reads.find((event) => event.payload.purpose === "baseline" && event.payload.operation_id === step.operationId) ?? null;
+    const readAt = baseline !== null && typeof baseline.payload.read_at === "string" ? baseline.payload.read_at : null;
+    if (runExchange === null || baseline === null || readAt === null || baseline.payload.status !== "available" || baseline.payload.settled !== true
+      || typeof baseline.payload.exchange_id !== "string" || baseline.payload.exchange_id.toLowerCase() !== runExchange) return [step.operationId, null];
+    const { window } = ownWindow(reads, baseline, step.operationId, readAt, runExchange);
+    if (window === null) return [step.operationId, null];
+    const calls = callsOf(window);
+    return [step.operationId, { calls: calls.length, commandBearing: calls.some((call) => call.command !== null) }];
+  }));
+}
+
 export function certifyStudioVoiceSteps(input: {
   events: ReadonlyArray<Event>;
   /** The run's voice-step operations: id and G7 step id. */
@@ -209,13 +247,11 @@ export function certifyStudioVoiceSteps(input: {
     // baseline (of any operation, performed or not). That read's readAt bounds
     // the window; the next step's baseline never does.
     const upper = reads.find((event) => event.payload.purpose === "baseline" && event.seq > baseline.seq)?.seq ?? Number.MAX_SAFE_INTEGER;
-    const stepReads = reads.filter((event) => event.payload.purpose === "after" && event.payload.operation_id === step.operationId && event.payload.after === readAt && event.seq > baseline.seq && event.seq < upper);
-    const after = stepReads.filter((event) => event.payload.status === "available" && typeof event.payload.exchange_id === "string" && event.payload.exchange_id.toLowerCase() === runExchange);
+    const { stepReads, after, window } = ownWindow(reads, baseline, step.operationId, readAt, runExchange);
     if (after.length === 0) {
       const refused = stepReads.at(-1);
       return settle("unavailable", refused ? `calls_after_${String(refused.payload.reason ?? "unavailable")}` : "no_calls_read_after_step");
     }
-    const window = after.find((event) => event.payload.settled === true) ?? null;
     if (window === null) return settle("uncertain", "call_unanswered");
     result.evidence_seqs.push(window.seq);
     for (const call of callsOf(window)) windowSeqs.add(call.seq);
@@ -287,9 +323,12 @@ export function certifyStudioVoiceSteps(input: {
       return settle("pass", null);
     }
     if (createdGoalId === null || createdTaskId === null) return settle("uncertain", "create_step_not_certified");
-    // Stop acts on the sub-episode's task when the run made one (certified
-    // before Stop); every other control on the episode's created task.
-    const stopsSubEpisode = step.stepId === "g7.stop" && stopTargetTaskId !== null;
+    // Stop acts only on the Stop sub-episode's own task, certified by its own
+    // create before Stop; without one, Stop is never credited on the
+    // episode's created task (labrev6 Nit-1). Every other control acts on the
+    // episode's created task.
+    if (step.stepId === "g7.stop" && (stopTargetTaskId === null || stopTargetGoalId === null)) return settle("uncertain", "stop_target_not_certified");
+    const stopsSubEpisode = step.stepId === "g7.stop";
     const targetTaskId = stopsSubEpisode ? stopTargetTaskId! : createdTaskId;
     const targetGoalId = stopsSubEpisode ? stopTargetGoalId! : createdGoalId;
     if (command.goal_id !== targetGoalId) return settle("fail", "command_goal_mismatch");
