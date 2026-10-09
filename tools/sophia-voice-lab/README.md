@@ -152,7 +152,7 @@ contract is `sophia.studio-g7.v1`, its catalogue `studio-g7-v1` (scenario
 | `SOPHIA_VOICE_LAB_STUDIO_EXPECTED_STUDIO_SHA`, `..._API_SHA`, `..._BRIDGE_SHA` | Pinned 40-hex commits (Studio meta `sophia-build`, API `/health`, bridge `provider.bridgeCommit`) |
 | `SOPHIA_VOICE_LAB_STUDIO_GRANT_WAIT_SECONDS` (5–240, default 120), `..._GRANT_REJOIN_SECONDS` (default 15) | Bounded wait for the grant-bound `mic_published` receipt before an exchange is opened |
 | `SOPHIA_VOICE_LAB_STUDIO_OBJECT_STORE_ORIGINS` | Comma list (≤ 8) of the signed-download origins `GET /sources/{id}/content` returns; artifact bytes are downloaded and hashed only from these. Empty: byte checks are typed `unavailable` |
-| `SOPHIA_VOICE_LAB_STUDIO_ACCESS_TOKEN_MAX_SECONDS` (60–86400, default 3600) | Upper bound of a Supabase access JWT's lifetime; gates the release of a dead foreign worker's lease (raised automatically to any longer `expires_in` the product issued) |
+| `SOPHIA_VOICE_LAB_STUDIO_ACCESS_TOKEN_MAX_SECONDS` (60–86400, default 3600) | Upper bound of a Supabase access JWT's lifetime; gates the release of a dead foreign worker's lease (raised automatically to any longer `expires_in` the product issued, up to the hard 24 h bound; a grant above 24 h is refused and fails start closed) |
 
 **MCP tools (Studio kind only).** `start_studio_g7_run` reserves the run and returns
 the non-secret run binding. `studio_g7_voice_step` performs one voice step
@@ -225,9 +225,14 @@ run therefore certifies the harness and reports the product `inconclusive`.
 proven. Receipts that arrive after End (the bridge's `session_closed`, the last
 reply) are re-read by a bounded evidence completion path before the
 certification deadline: a fresh principal session reads the evidence, then only
-that session is revoked (`scope=local`). It never signs the principal out
-globally, because a later run of the same principal may be live by then. A step
-not performed before End fails the harness at once instead of waiting for it.
+that session is revoked (`scope=local`, three attempts with backoff). It never
+falls back to a global sign-out, because a later run of the same principal may
+be live by then. A refresh session that stays unrevoked is recorded and keeps
+the cleanup proof incomplete (`cleanup.refresh_session_revoked`), so the run
+cannot certify; the worker then signs the principal out globally only once no
+other run holds admission (if the certification deadline passes first, the
+failed run holds admission again until that sign-out is done). A step not
+performed before End fails the harness at once instead of waiting for it.
 
 **Cleanup.** The Lab never requests End for an exchange it cannot prove is the
 run's own: the exchange joined to this run after its Speak, whose evidence names
@@ -238,9 +243,15 @@ click time. Without proof the Lab verifies read-only (one live exchange per
 room) that the run's exchange is no longer live, or types the state `uncertain`
 / `unavailable` and re-verifies with backoff until the product guard ends it at
 its deadline. A snapshot answer without a well-formed `room.sophia` presence is
-typed unknown, never "no live exchange", and an exchange end counts only when it
-was confirmed after the run's exchange join (a settle that ran while Speak was
-still opening the exchange is typed `uncertain`). Leaving the room (the room
+typed unknown, never "no live exchange". Once Speak was requested and no
+exchange is joined (start still running or not), a room with nothing live is
+typed `uncertain` until the open window has passed (120 s after Speak by
+default): only a read-only member-API observation after it that shows nothing
+live confirms the end (`no_live_exchange_after_open_window`). Each settlement
+records what the driver knew when it observed (Speak requested or not, the
+joined id, the observation time), and the cleanup proof counts an end against
+that, not against when it reached the ledger: after a Speak intent, a
+confirmation made before Speak or without an API read never counts. Leaving the room (the room
 UI's "Leave the room") and closing the run-owned Chromium are not
 ownership-gated: they act on the principal's own presence and browser, not on an
 exchange. The principal is signed out globally and the run-owned Chromium is
@@ -249,7 +260,13 @@ closed on every cleanup path.
 A dead foreign worker's Studio lease is released by compare-and-delete in one
 ledger transaction, after the run is terminal, the lease expired and the owner's
 heartbeat is stale by more than 30 s plus a 60 s clock-skew margin (heartbeats
-carry each worker's own clock). Then either:
+carry each worker's own clock). Every gate is evaluated by the ledger on its own
+clock: the releasing worker asks the ledger first (without a verification) and
+recovers only when the ledger says a post-expiry sign-out or the fresh
+verification is what is missing, never on its own clock. Only this path
+recovers a run whose lease a foreign worker holds, and every Studio API-only
+recovery (a password grant and a global sign-out) is spaced at least 30 s
+apart. Then either:
 - the owner's own cleanup for that lease epoch is durable (the browser acquired
   under it proven closed, a confirmed global sign-out, the exchange confirmed
   ended after its join), and the lease is released at once; or
@@ -258,9 +275,11 @@ carry each worker's own clock). Then either:
   after a global sign-out confirmed after the lease expired, the access-JWT
   lifetime elapsed since, and a fresh verification that the run's exchange is
   not live. The lifetime is `SOPHIA_VOICE_LAB_STUDIO_ACCESS_TOKEN_MAX_SECONDS`
-  raised to any longer `expires_in` the product issued to the run, so a wrong
-  setting never shortens the wait. The orphan browser's close is typed
-  `unobservable`, not proven.
+  raised to any longer `expires_in` the product issued to the run (made durable
+  before the browser is seeded with the session), so a wrong setting never
+  shortens the wait; a lifetime above the 24 h bound is refused at the grant and
+  never becomes the wait. The orphan browser's close is typed `unobservable`,
+  not proven.
 The PostgreSQL ledger stamps the sign-out and verification events with the
 database clock (the clock of the lease expiry), whatever the worker's clock says.
 
