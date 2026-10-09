@@ -1295,4 +1295,37 @@ else {
     expect(index((event) => event.kind === "studio.bridge_receipt" && event.payload.kind === "session_closed")).toBeLessThan(audit);
     expect(index((event) => event.kind === "studio.cleanup.signed_out")).toBeGreaterThan(audit);
   }, 120_000);
+
+  // C5 (the product fences call recording against End): a call recorded before
+  // End may be listed unanswered right after End and answered later; none is
+  // recorded after it. End's audit re-reads (bounded) until every listed call
+  // is answered, before the global sign-out; one never answered stays unsettled.
+  for (const answered of [true, false] as const) {
+    it(`C5: End's post-quiescence audit ${answered ? "settles once a call recorded before End is answered after it" : "stays unsettled (never final) while a call recorded before End is never answered"}`, async () => {
+      const { driver, run } = harness();
+      await driver.start(run, "unused");
+      let seq = 0;
+      const push = (kind: string, receipt: Record<string, unknown>) => api.receipts.push({ source: "bridge", seq: Number(receipt.seq), kind, receivedAt: new Date().toISOString(), receipt });
+      push("provider", providerReceipt(run, seq++, "ready"));
+      const at = new Date().toISOString();
+      api.exchangeCalls.push({ _began: api.callsClock + 0.5, seq: 1, recordedAt: at, inputEpoch: 1, tool: "project_status", answeredAt: null, outcome: null, taskId: null, command: null });
+      api.onEnd = () => {
+        push("provider", providerReceipt(run, seq++, "closed"));
+        push("session_closed", sessionClosed(run, seq++, { windows: 0, turns: 0, replies: 0 }));
+      };
+      // Reads after the exchange ended: the second one sees the call answered (or never does).
+      let readsAfterEnd = 0;
+      api.onCallsRead = () => {
+        if (api.exchangeId !== null) return;
+        readsAfterEnd += 1;
+        if (answered && readsAfterEnd === 2) api.exchangeCalls = api.exchangeCalls.map((call) => ({ ...call, answeredAt: new Date().toISOString(), outcome: "ok" }));
+      };
+      const ended = await driver.end(run, "unused", "unused");
+      const audit = ended.events.find((event) => event.kind === "studio.exchange.calls_read" && event.payload.step_id === "final")!;
+      expect(audit.payload).toMatchObject({ purpose: "baseline", operation_id: "end", status: "available", settled: answered, attempts: answered ? 2 : 10, quiescence: { exchange_ended: true, session_closed: true } });
+      expect((audit.payload.calls as Array<Record<string, unknown>>).map((call) => [call.seq, call.answered_at === null])).toEqual([[1, !answered]]);
+      // Taken while the principal could still read, before the global sign-out.
+      expect(ended.events.indexOf(audit)).toBeLessThan(ended.events.findIndex((event) => event.kind === "studio.cleanup.signed_out"));
+    }, 120_000);
+  }
 });

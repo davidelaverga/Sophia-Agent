@@ -363,6 +363,8 @@ interface G7Options {
   withdrawnEntry?: string;
   /** The Stop sub-episode task in its own observe, and in Stop's observe. */
   stopTargetBefore?: Record<string, unknown>;
+  /** false: the sub-episode's research is not in the create_stop_target observation (first seen in Stop's own). */
+  stopTargetObserved?: boolean;
   stopEffect?: Record<string, unknown>;
 }
 
@@ -499,7 +501,7 @@ function g7Episode(options: G7Options = {}): Episode {
     log.add("studio.outcome.observed", "canonical", { purpose: "g7.withdrawal", operation_id: options.withdrawalAfterOperation ?? withdraw.id, join: { status: "uncertain" }, tasks: [xAfter, designD("published"), research({ withdrawn_source_ids: [NOTE_SOURCE] })], artifacts: [] });
   }
   // 10-11. The Stop sub-episode: its own create (STOP_TASK on its own goal), then Stop on it.
-  voiceStep("create_stop_target", () => observe("create_stop_target", T0 + 810, [stopTask({ state: "pending", phase: "queued", ...(options.stopTargetBefore ?? {}) })]));
+  voiceStep("create_stop_target", () => observe("create_stop_target", T0 + 810, options.stopTargetObserved === false ? [] : [stopTask({ state: "pending", phase: "queued", ...(options.stopTargetBefore ?? {}) })]));
   voiceStep("stop", () => observe("stop", T0 + 910, [stopTask({ state: "cancelled", phase: "stopped", reason_class: "stopped", ...(options.stopEffect ?? {}) })]));
   log.add("studio.outcome.observed", "canonical", { purpose: "final", operation_id: "end", join: { status: "uncertain" }, tasks: [designD("published"), research({ withdrawn_source_ids: [NOTE_SOURCE] }), editX({ state: "failed", phase: "failed", reason_class: "revoked_source_withdrawn", withdrawn_source_ids: [NOTE_SOURCE], design: { state: "failed", mode: "edit", artifact_id: ARTIFACT, published_version_id: null, research_task_id: RESEARCH_TASK, reason_class: "revoked_source_withdrawn" } })], artifacts: [artifact(DESIGN_TASK, VERSION_2, PAGE_SHA, options.artifactStatus)] });
   log.bridge("provider", providerReceipt(run, seq++, "closed"));
@@ -901,6 +903,15 @@ describe("delta 6: Stop is credited only on the sub-episode's own live work, nev
     expect(certify(happyCalls(), { stopTargetBefore: { state: "cancelled", phase: "stopped" } })["g7.stop"]).toBe("uncertain:stop_target_already_ended");
     expect(certify(happyCalls(), { stopEffect: { state: "running", phase: "stopping", reason_class: null } })["g7.stop"]).toBe("uncertain:stop_effect_not_settled");
     expect(certify(happyCalls(), { stopEffect: { withdrawn_source_ids: [NOTE_SOURCE] } })["g7.stop"]).toBe("uncertain:stop_target_ended_by_withdrawal");
+  });
+
+  it("Stop on a target never seen live before Stop's baseline is never a pass (first seen already stopped, in Stop's own observation)", () => {
+    const unseen = certify(happyCalls(), { stopTargetObserved: false });
+    // The sub-episode's create is still certified (its task is seen, bound to the run's exchange, later) ...
+    expect(unseen["g7.create_stop_target"]).toBe("pass:null");
+    // ... but nothing shows its work live before Stop.
+    expect(unseen["g7.stop"]).toBe("uncertain:stop_target_not_observed_before_stop");
+    expect(certify(happyCalls())["g7.stop"]).toBe("pass:null");
   });
 
   it("the sub-episode keeps its own joins: a create of the main task or goal, or a stop on the main goal, never stands in", () => {
