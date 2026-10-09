@@ -31,7 +31,8 @@ import { deriveStudioG7Verdicts, evaluateStudioG7Run, studioDurableJoin, studioG
 import { isStudioG7ScenarioVersion } from "./studio-g7/scenarios.js";
 import { STUDIO_G7_TARGET_KIND, computeRunBindingSha256 } from "./studio-g7/contract.js";
 import { hasStudioExtensions } from "./studio-g7/studio-driver.js";
-import { STUDIO_DEAD_OWNER_HEARTBEAT_STALE_MS, STUDIO_DEAD_OWNER_LEASE_RELEASE_SCHEMA, STUDIO_DEAD_OWNER_VERIFIED_KIND, earliestGlobalSignOutAfter } from "./studio-g7/lease-release.js";
+import { STUDIO_STEP_EXECUTING_STATES, studioStepConflict, studioStepOf } from "./studio-g7/step-guard.js";
+import { STUDIO_DEAD_OWNER_CLOCK_SKEW_MARGIN_MS, STUDIO_DEAD_OWNER_HEARTBEAT_STALE_MS, STUDIO_DEAD_OWNER_LEASE_RELEASE_SCHEMA, STUDIO_DEAD_OWNER_VERIFIED_KIND, earliestGlobalSignOutAfter, ownerCleanupForLease, studioEffectiveTokenLifetimeMs } from "./studio-g7/lease-release.js";
 
 interface ActiveLease { epoch: number; }
 interface D02WorkerShutdownArm {
@@ -932,6 +933,11 @@ export class VoiceLabWorker {
         await this.#certifyFreshApiReattach(run);
       }
       return { run_state: run.state, capability_jti_hash: sha256(grant.claims.jti) };
+    }
+    if ((operation.type === "speak" || operation.type === "barge_in" || operation.type === "force_socket_rotation" || operation.type === "studio_action") && isStudioG7Run(run)) {
+      // Re-checked at execution, whatever admitted the row: only labelled G7
+      // steps run on a Studio run, and each step at most once.
+      await this.#assertStudioOperationExecutable(run, operation);
     }
     if (operation.type === "speak" || operation.type === "barge_in") {
       const allowedOp = operation.type === "speak" ? "voice:synthetic_input" : "voice:barge_in";
@@ -1979,12 +1985,13 @@ export class VoiceLabWorker {
     await this.ledger.settleRecoveryControl(binding.runId, control.version, completed, attempt);
   }
 
-  async #recoverRun(run: RunRecord): Promise<Awaited<ReturnType<VoiceBrowserDriver["recover"]>>> {
+  async #recoverRun(run: RunRecord, options: { force?: boolean } = {}): Promise<Awaited<ReturnType<VoiceBrowserDriver["recover"]>>> {
     if (isStudioG7Run(run)) {
       // One API-only recovery (end the exchange, global sign-out); skipped
-      // once the Studio cleanup proof is already durable for a closed browser.
+      // once the Studio cleanup proof is already durable for a closed browser,
+      // unless forced (a dead owner's lease whose proof is not bound to it).
       const studioEvents = (await this.#allEvents(run.id)).events;
-      if (!this.driver.hasSession(run.id) && studioG7CleanupProof(studioEvents).complete) return { events: [], artifacts: [] };
+      if (!options.force && !this.driver.hasSession(run.id) && studioG7CleanupProof(studioEvents).complete) return { events: [], artifacts: [] };
       // Never allocated (failed before browser launch): the durable control
       // record is the authoritative proof; no sign-in, no member-API call.
       const control = await this.ledger.getRecoveryControl(run.id);
@@ -2932,6 +2939,20 @@ export class VoiceLabWorker {
   }
 
   /**
+   * A Studio run executes only labelled G7 steps (a `speak` carrying its
+   * `_g7_step`, or a `studio_action`), each at most once: another operation of
+   * the same step that already performed it, or is executing now, refuses this
+   * one before the driver acts.
+   */
+  async #assertStudioOperationExecutable(run: RunRecord, operation: import("./domain.js").OperationRecord): Promise<void> {
+    if (operation.type === "barge_in" || operation.type === "force_socket_rotation" || (operation.type === "speak" && studioStepOf(operation) === null)) {
+      throw new VoiceLabError(labError("SCENARIO_UNSUPPORTED_FOR_TARGET", "Only labelled G7 steps run on a Studio G7 run.", "validation", false, { status: "unsupported_for_target", target_kind: STUDIO_G7_TARGET_KIND, operation_type: operation.type }));
+    }
+    const conflict = studioStepConflict(await this.ledger.listOperations(run.id), operation, operation.id, STUDIO_STEP_EXECUTING_STATES);
+    if (conflict) throw conflict;
+  }
+
+  /**
    * Studio G7 evidence completion. A run that ended with every operation and
    * cleanup settled but evidence still awaited (typically the bridge's late
    * `session_closed` or last reply) re-reads its exchange's evidence with a
@@ -2957,12 +2978,18 @@ export class VoiceLabWorker {
   }
 
   /**
-   * A dead foreign worker's Studio lease. Its browser cannot be proven closed
-   * by anyone else, so the lease is released only once that browser can no
-   * longer act on the product (studio-g7/lease-release.ts): lease expired,
-   * owner heartbeat stale, a global sign-out confirmed after the expiry, the
-   * access-JWT lifetime elapsed since, and then a fresh verification that the
-   * run's exchange is not live. Until then the obligation stays durable.
+   * A dead foreign worker's Studio lease (studio-g7/lease-release.ts).
+   *
+   * When the owner's own cleanup for that lease epoch is durable (its browser
+   * proven closed, a global sign-out, the exchange confirmed ended after its
+   * join) the lease is released at once by compare-and-delete. Otherwise its
+   * browser cannot be proven closed by anyone else, so this worker runs an
+   * API-only recovery (never short-circuited by a cleanup proof that is not
+   * bound to the lease) and releases the lease only once that browser can no
+   * longer act: lease expired, owner heartbeat stale, a global sign-out
+   * confirmed after the expiry, the access-JWT lifetime elapsed since, and
+   * then a fresh verification that the run's exchange is not live. Until then
+   * the obligation stays durable.
    */
   async #releaseDeadOwnerStudioLease(runId: string, lease: { workerId: string; leaseEpoch: number; expiresAt: Date }): Promise<boolean> {
     const studio = this.config.studioG7;
@@ -2973,11 +3000,29 @@ export class VoiceLabWorker {
       await this.ledger.appendEvent(runId, "cleanup.browser_lease_unconfirmed", "worker", { worker_id_hash: ownerHash, lease_epoch: lease.leaseEpoch, expires_at: lease.expiresAt.toISOString(), dead_owner_release: reason }, `cleanup:${runId}:browser-lease-unconfirmed:${ownerHash}:${lease.leaseEpoch}:${reason}`);
       return false;
     };
-    const live = await this.ledger.listLiveWorkers(new Date(Date.now() - STUDIO_DEAD_OWNER_HEARTBEAT_STALE_MS));
+    const released = async (result: { released: boolean; reason: string }, verificationId: string | null) => {
+      if (!result.released) return pending(result.reason);
+      const ownerCleanup = result.reason === "dead_owner_cleanup_complete";
+      await this.ledger.appendEvent(runId, "cleanup.browser_lease_released", "worker", {
+        schema: STUDIO_DEAD_OWNER_LEASE_RELEASE_SCHEMA, worker_id_hash: ownerHash, lease_epoch: lease.leaseEpoch, cas_deleted: true,
+        ...(ownerCleanup
+          ? { dead_owner_cleanup_complete: true, browser_close: "proven_by_owner_epoch", basis: "owner_cleanup_complete" }
+          : { dead_owner_quiesced: true, browser_close: "unobservable_owner_dead", basis: "quiesced", verification_id: verificationId }),
+        room_presence: "unobservable_via_member_api",
+      }, `cleanup:${runId}:browser-lease`);
+      return true;
+    };
+    const live = await this.ledger.listLiveWorkers(new Date(Date.now() - STUDIO_DEAD_OWNER_HEARTBEAT_STALE_MS - STUDIO_DEAD_OWNER_CLOCK_SKEW_MARGIN_MS));
     if (live.some((worker) => worker.workerId === lease.workerId)) return pending("owner_heartbeat_live");
-    const before = earliestGlobalSignOutAfter((await this.#allEvents(runId)).events, lease.expiresAt);
-    if (before && Date.now() < before.at.getTime() + studio.accessTokenMaxLifetimeMs) return pending("access_token_lifetime_pending");
-    const recovered = await this.#recoverRun(run);
+    const events = (await this.#allEvents(runId)).events;
+    if (ownerCleanupForLease(events, lease).complete) {
+      // Basis 1, decided again inside the ledger transaction on its clock.
+      return released(await this.ledger.releaseDeadOwnerStudioBrowserLease(runId, { verificationId: null, tokenMaxLifetimeMs: studio.accessTokenMaxLifetimeMs, heartbeatStaleMs: STUDIO_DEAD_OWNER_HEARTBEAT_STALE_MS }), null);
+    }
+    const lifetimeMs = studioEffectiveTokenLifetimeMs(events, studio.accessTokenMaxLifetimeMs);
+    const before = earliestGlobalSignOutAfter(events, lease.expiresAt);
+    if (before && Date.now() < before.at.getTime() + lifetimeMs) return pending("access_token_lifetime_pending");
+    const recovered = await this.#recoverRun(run, { force: true });
     if (recovered.events.length === 0) return pending("recovery_backoff");
     await this.#persistEvents(runId, recovered.events);
     const exchangeNotLive = recovered.events.some((event) => event.kind === "studio.cleanup.exchange_ended" && event.payload.confirmed === true)
@@ -2986,14 +3031,8 @@ export class VoiceLabWorker {
     if (!before) return pending(signedOut ? "access_token_lifetime_pending" : "global_sign_out_unconfirmed");
     if (!exchangeNotLive || !signedOut) return pending(!signedOut ? "global_sign_out_unconfirmed" : "exchange_not_verified_not_live");
     const verificationId = randomUUID();
-    await this.ledger.appendEvent(runId, STUDIO_DEAD_OWNER_VERIFIED_KIND, "worker", { verification_id: verificationId, worker_id_sha256: ownerHash, lease_epoch: lease.leaseEpoch, exchange_not_live: true, signed_out: true, access_token_max_lifetime_ms: studio.accessTokenMaxLifetimeMs }, `studio-dead-owner-verified:${runId}:${verificationId}`);
-    const result = await this.ledger.releaseDeadOwnerStudioBrowserLease(runId, { verificationId, tokenMaxLifetimeMs: studio.accessTokenMaxLifetimeMs, heartbeatStaleMs: STUDIO_DEAD_OWNER_HEARTBEAT_STALE_MS });
-    if (!result.released) return pending(result.reason);
-    await this.ledger.appendEvent(runId, "cleanup.browser_lease_released", "worker", {
-      schema: STUDIO_DEAD_OWNER_LEASE_RELEASE_SCHEMA, worker_id_hash: ownerHash, lease_epoch: lease.leaseEpoch, cas_deleted: true,
-      dead_owner_quiesced: true, browser_close: "unobservable_owner_dead", room_presence: "unobservable_via_member_api", verification_id: verificationId,
-    }, `cleanup:${runId}:browser-lease`);
-    return true;
+    await this.ledger.appendEvent(runId, STUDIO_DEAD_OWNER_VERIFIED_KIND, "worker", { verification_id: verificationId, worker_id_sha256: ownerHash, lease_epoch: lease.leaseEpoch, exchange_not_live: true, signed_out: true, access_token_max_lifetime_ms: lifetimeMs }, `studio-dead-owner-verified:${runId}:${verificationId}`);
+    return released(await this.ledger.releaseDeadOwnerStudioBrowserLease(runId, { verificationId, tokenMaxLifetimeMs: studio.accessTokenMaxLifetimeMs, heartbeatStaleMs: STUDIO_DEAD_OWNER_HEARTBEAT_STALE_MS }), verificationId);
   }
 
   /**

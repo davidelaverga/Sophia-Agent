@@ -36,6 +36,8 @@ export class ScriptedStudioDriver {
   readonly calls: string[] = [];
   adopted: DurableStudioJoin | null = null;
   recoverResult: (runId: string) => DriverEvent[] = () => [];
+  /** The Supabase `expires_in` the start's password grant answered with (seconds). */
+  sessionExpiresInS = 3_600;
 
   constructor(readonly run: RunRecord) {}
 
@@ -79,7 +81,7 @@ export class ScriptedStudioDriver {
     return { observedDeployment: { frontend: STUDIO_SHA, backend: API_SHA } as never, events: [
       acquisition,
       { kind: "studio.deployment.identity", source: "canonical", payload: { phase: "startup", api: { status: "observed", commit: API_SHA }, studio: { status: "observed", commit: STUDIO_SHA } }, dedupeKey: `studio-identity:${run.id}:startup` },
-      { kind: "studio.auth.session_established", source: "canonical", payload: { principal_bound: true }, dedupeKey: `studio-auth:${run.id}` },
+      { kind: "studio.auth.session_established", source: "canonical", payload: { principal_bound: true, expires_in_s: this.sessionExpiresInS }, dedupeKey: `studio-auth:${run.id}` },
       { kind: "harness.media_stream_issued", source: "browser", payload: { replacement_active: true, track_id_sha256s: [sha256(LAB_TRACK_ID)] }, dedupeKey: `issued:${run.id}` },
       { kind: "studio.page_receipt", source: "product", payload: { event: "mic_published", receipt_json: mic, receipt_sha256: sha256(mic) }, dedupeKey: `studio-page:${run.id}:1` },
       { kind: "studio.grant_gate.passed", source: "browser", payload: { grant_id: GRANT_UUID, run_binding_sha256: binding }, dedupeKey: `gate:${run.id}` },
@@ -158,7 +160,8 @@ export class ScriptedStudioDriver {
 
   async refreshStudioEvidence(run: RunRecord, join: DurableStudioJoin): Promise<DriverEvent[]> {
     this.calls.push(`refresh:${join.exchangeId}`);
-    return [...this.closing(run), { kind: "studio.cleanup.signed_out", source: "canonical", payload: { schema: "sophia_voice_lab_studio_sign_out_v1", scope: "global", confirmed: true, http_status: 204, basis: "global_logout_accepted", session_basis: "held_session" }, dedupeKey: `refresh-signed-out:${run.id}` }];
+    // Like the real driver: only the refresh's own fresh session is revoked (scope=local).
+    return [...this.closing(run), { kind: "studio.evidence.session_revoked", source: "canonical", payload: { schema: "sophia_voice_lab_studio_sign_out_v1", scope: "local", confirmed: true, http_status: 204, basis: "local_logout_accepted", purpose: "evidence_refresh" }, dedupeKey: `refresh-session-revoked:${run.id}` }];
   }
 
   /** Abort with an ownership-proven exchange: the real driver ends it, signs out and closes the browser. */

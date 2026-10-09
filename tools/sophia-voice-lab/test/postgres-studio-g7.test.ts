@@ -9,7 +9,7 @@ import { AudioResolver } from "../src/audio.js";
 import type { VoiceBrowserDriver } from "../src/browser-driver.js";
 import type { LabEnvelope } from "../src/domain.js";
 import { PostgresVoiceLabLedger } from "../src/postgres-ledger.js";
-import { CapabilityCodec, type AuthenticatedCaller } from "../src/security.js";
+import { CapabilityCodec, sha256, type AuthenticatedCaller } from "../src/security.js";
 import { VoiceLabService } from "../src/service.js";
 import { composeStudioG7OperationsMigration } from "../src/service-fence-migration.js";
 import { STUDIO_DEAD_OWNER_LEASE_RELEASE_SCHEMA } from "../src/studio-g7/lease-release.js";
@@ -160,5 +160,72 @@ selected("real PostgreSQL Studio G7 worker branches (schema v7)", () => {
     expect(await ledger.getRun(a.runId)).toMatchObject({ state: "aborted_driver_restart", cleanupComplete: true });
     // Settled cleanup frees the admission slot.
     expect((await second.startStudioG7Run(caller, { ...START, idempotency_key: newIdempotencyKey("pg-after-release") })).status).toBe("accepted");
+  }, 120_000);
+
+  it("releases by compare-and-delete the lease of a dead owner whose own cleanup for that lease epoch is durable (P2-1)", async () => {
+    const a = await harness("pg-worker-a-cleaned");
+    await a.worker.runOnce();
+    await voice(a, "create");
+    // A persisted its End: exchange ended, global sign-out, its own browser (this lease's execution epoch) closed; then died.
+    await ledger.appendEvents(a.runId, [
+      { kind: "studio.cleanup.exchange_ended", source: "canonical", payload: { confirmed: true, status: "confirmed", basis: "api_end", exchange_id: EXCHANGE_UUID, join: "retained", ownership: "proven", verified_by: "member_snapshot" }, dedupeKey: `pg-owner-ended:${a.runId}` },
+      { kind: "studio.cleanup.signed_out", source: "canonical", payload: { schema: "sophia_voice_lab_studio_sign_out_v1", scope: "global", confirmed: true, http_status: 204, basis: "global_logout_accepted", session_basis: "held_session" }, dedupeKey: `pg-owner-signed-out:${a.runId}` },
+      { kind: "cleanup.browser_context_closed", source: "browser", payload: { schema: "sophia_voice_lab_execution_epoch_browser_cleanup_v1", close_resolved: true, browser_registry_absent: true, browser_process_close_resolved: true, execution_epoch_sha256: sha256(`epoch:${a.runId}`) }, dedupeKey: `cleanup:${a.runId}:browser` },
+    ]);
+    const config = studioTestConfig(undefined, { SOPHIA_VOICE_LAB_MAX_CONCURRENT_RUNS: "1" });
+    const audio = new AudioResolver(config);
+    await audio.initialize();
+    const driverB = new ScriptedStudioDriver((await ledger.getRun(a.runId))!);
+    const workerB = new VoiceLabWorker("pg-worker-b-cleaned", ledger, config, audio, driverB as unknown as VoiceBrowserDriver, new CapabilityCodec(config.capabilitySecret, config.capabilityIssuer, config.capabilityTtlSeconds), pino({ level: "silent" }));
+    await ledger.pool.query("update sophia_voice_lab.browser_leases set expires_at=clock_timestamp()-interval '10 minutes' where run_id=$1", [a.runId]);
+    await ledger.pool.query("update sophia_voice_lab.worker_heartbeats set observed_at=clock_timestamp()-interval '10 minutes' where worker_id='pg-worker-a-cleaned'");
+    for (let pass = 0; pass < 4 && (await ledger.getBrowserLease(a.runId)) !== null; pass += 1) await workerB.maintainSessions();
+    expect(await ledger.getBrowserLease(a.runId)).toBeNull();
+    const released = (await ledger.pool.query("select payload from sophia_voice_lab.run_events where run_id=$1 and kind='cleanup.browser_lease_released'", [a.runId])).rows[0].payload;
+    expect(released).toMatchObject({ schema: STUDIO_DEAD_OWNER_LEASE_RELEASE_SCHEMA, cas_deleted: true, dead_owner_cleanup_complete: true, browser_close: "proven_by_owner_epoch" });
+    expect(driverB.calls).not.toContain("recover");
+    await workerB.maintainSessions();
+    expect(await ledger.getRun(a.runId)).toMatchObject({ cleanupComplete: true });
+    const next = new VoiceLabService(ledger, config, async () => []);
+    expect((await next.startStudioG7Run(caller, { ...START, idempotency_key: newIdempotencyKey("pg-after-owner-cleanup") })).status).toBe("accepted");
+  }, 120_000);
+
+  it("stamps the dead-owner ordering events on the database clock, whatever the worker clock says (P3-6)", async () => {
+    const a = await harness("pg-worker-skewed");
+    await a.worker.runOnce();
+    // A worker whose clock runs two hours behind the database.
+    const skewed = new Date(Date.now() - 2 * 3_600_000);
+    await ledger.appendEvents(a.runId, [{ kind: "studio.cleanup.signed_out", source: "canonical", payload: { schema: "sophia_voice_lab_studio_sign_out_v1", scope: "global", confirmed: true, http_status: 204, basis: "global_logout_accepted", sign_out_id: randomUUID() }, dedupeKey: `pg-skewed-sign-out:${randomUUID()}`, observedAt: skewed }]);
+    await ledger.appendEvent(a.runId, "studio.cleanup.dead_owner_verified", "worker", { verification_id: randomUUID(), exchange_not_live: true, signed_out: true }, `pg-skewed-verified:${randomUUID()}`, skewed);
+    const ages = (await ledger.pool.query("select kind, extract(epoch from (clock_timestamp()-observed_at))::float8 as age_s from sophia_voice_lab.run_events where run_id=$1 and kind in ('studio.cleanup.signed_out','studio.cleanup.dead_owner_verified') order by seq", [a.runId])).rows;
+    expect(ages).toHaveLength(2);
+    for (const row of ages) expect(Math.abs(row.age_s), row.kind).toBeLessThan(60);
+  }, 120_000);
+
+  it("never treats a live owner as dead when its heartbeat clock runs behind the database's (P3-6)", async () => {
+    const a = await harness("pg-worker-skewed");
+    await a.worker.runOnce();
+    // An owner whose clock runs 45 s behind heartbeated just now: it is alive, never stale.
+    await ledger.pool.query("update sophia_voice_lab.runs set state='aborted_driver_restart' where id=$1", [a.runId]);
+    await ledger.pool.query("update sophia_voice_lab.browser_leases set expires_at=clock_timestamp()-interval '10 minutes' where run_id=$1", [a.runId]);
+    await ledger.heartbeatWorker({ workerId: "pg-worker-skewed", serviceVersion: "x", browserReady: true, attestation: null, detail: {}, observedAt: new Date() });
+    await ledger.pool.query("update sophia_voice_lab.worker_heartbeats set observed_at=clock_timestamp()-interval '45 seconds' where worker_id='pg-worker-skewed'");
+    expect(await ledger.releaseDeadOwnerStudioBrowserLease(a.runId, { verificationId: randomUUID(), tokenMaxLifetimeMs: 3_600_000, heartbeatStaleMs: 30_000 })).toEqual({ released: false, reason: "owner_heartbeat_live" });
+    await ledger.pool.query("update sophia_voice_lab.runs set state='active' where id=$1", [a.runId]);
+  }, 120_000);
+
+  it("re-checks a G7 step when the worker executes it: a second operation of a performed step is refused (P3-3)", async () => {
+    const h = await harness("pg-worker-step");
+    await h.worker.runOnce();
+    expect((await action(h, { action: "leave_and_return" })).data).toMatchObject({ performed: true });
+    // A row the ledger guard never saw (written before the guard existed).
+    const rowId = randomUUID();
+    await ledger.pool.query("insert into sophia_voice_lab.operations (id,run_id,caller_id,type,state,idempotency_key,request_hash,input) values ($1,$2,$3,'studio_action','queued',$4,$5,$6)",
+      [rowId, h.runId, caller.subject, newIdempotencyKey("pg-legacy-row"), "f".repeat(64), { run_id: h.runId, action: "leave_and_return" }]);
+    while (await h.worker.runOnce()) { /* drain */ }
+    expect(await ledger.getOperation(rowId)).toMatchObject({ state: "failed", error: { code: "STUDIO_G7_STEP_ALREADY_PERFORMED" } });
+    expect(h.driver.calls.filter((call) => call === "action:leave_and_return")).toHaveLength(1);
+    // The ledger itself refuses a new operation for a performed step, whatever its key.
+    await expect(ledger.createOperation({ id: randomUUID(), runId: h.runId, callerId: caller.subject, type: "studio_action", idempotencyKey: newIdempotencyKey("pg-again"), requestHash: "e".repeat(64), input: { run_id: h.runId, action: "leave_and_return" } })).rejects.toMatchObject({ detail: { code: "STUDIO_G7_STEP_ALREADY_PERFORMED" } });
   }, 120_000);
 });

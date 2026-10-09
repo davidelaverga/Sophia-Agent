@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
 
 import { chromium, type BrowserContext, type Page } from "playwright";
@@ -48,7 +48,7 @@ import { buildStudioObserverScript } from "./page-scripts.js";
 import { probeStudioReadiness } from "./readiness.js";
 import { STUDIO_G7_ACTIONS, STUDIO_G7_VOICE_STEPS, isStudioG7ScenarioVersion, STUDIO_G7_SCENARIO_ID_SET, studioG7StepId, type StudioG7Action, type StudioG7VoiceStep } from "./scenarios.js";
 import { StudioApiClient, type IdentityObservation, type ProjectedArtifactVersion, type ProjectedTaskDetail, type StudioRoomSnapshot } from "./studio-api.js";
-import { buildStudioSessionSeedScript, globalSignOut, passwordGrant, supabaseStorageKey, type FetchLike, type SignOutReceipt, type StudioUserSession } from "./supabase-session.js";
+import { buildStudioSessionSeedScript, globalSignOut, passwordGrant, signOut, supabaseStorageKey, type FetchLike, type SignOutReceipt, type StudioUserSession } from "./supabase-session.js";
 
 type DriverEvent = Omit<LabEvent, "runId" | "seq" | "at">;
 
@@ -130,6 +130,8 @@ export interface ExchangeRecord {
   runBindingSha256: string | null;
   exchangeOpenedAtMs: number | null;
   join: "retained" | "durable";
+  /** This driver's start is still running (Speak may be opening the exchange right now). */
+  startInProgress: boolean;
 }
 
 /** The durable join a restarted worker hands the driver (from write-ahead events). */
@@ -184,14 +186,19 @@ function studioError(code: string, message: string, category: "harness" | "produ
  * Supabase session; product evidence and outcomes are read only through the
  * member API with that principal's JWT.
  *
- * Exchange cleanup is conservative. The driver ends (UI End, then API End)
- * only an exchange it can prove is this run's own: the exchange id joined to
- * this run when its Speak opened it, whose qualification evidence names this
- * run's binding hash and the grant id of this run's bound page receipts.
- * Anything else is never touched: the driver only verifies, read-only, that
- * the run's exchange is no longer live (one live exchange per room), or types
- * the state `uncertain` / `unavailable` for a later recovery. The product's
- * guard ends every exchange under a grant at its deadline independently.
+ * Exchange cleanup is conservative. The driver requests End only for an
+ * exchange it can prove is this run's own (the exchange id joined to this run
+ * when its Speak opened it, whose qualification evidence names this run's
+ * binding hash and the grant id of this run's bound page receipts), and only
+ * as the id-bound API End of that exchange, never the room UI's End button
+ * (which acts on whatever exchange the room shows when clicked). For anything
+ * else it never requests End: it only verifies, read-only, that the run's
+ * exchange is no longer live (one live exchange per room), or types the state
+ * `uncertain` / `unavailable` for a later recovery. Leaving the room and
+ * closing its own browser are not ownership-gated: they act on the
+ * principal's presence and the run's browser, not on an exchange. The
+ * product's guard ends every exchange under a grant at its deadline
+ * independently.
  */
 export class StudioG7Driver implements VoiceBrowserDriver, StudioDriverExtensions {
   readonly #sessions = new Map<string, StudioSession>();
@@ -249,7 +256,15 @@ export class StudioG7Driver implements VoiceBrowserDriver, StudioDriverExtension
     }
     this.#starting.add(run.id);
     const runBindingSha256 = computeRunBindingSha256({ testRunId: run.testRunId, cleanupObligationId: run.cleanupObligationId, scenarioId: run.scenarioId, scenarioVersion: run.scenarioVersion! });
-    this.#exchanges.set(run.id, { exchangeId: null, preexistingExchangeId: null, speakRequested: false, browserLaunched: false, authIssued: false, grantId: null, runBindingSha256, exchangeOpenedAtMs: null, join: "retained" });
+    this.#exchanges.set(run.id, { exchangeId: null, preexistingExchangeId: null, speakRequested: false, browserLaunched: false, authIssued: false, grantId: null, runBindingSha256, exchangeOpenedAtMs: null, join: "retained", startInProgress: true });
+    try { return await this.#startReserved(run, runBindingSha256, onStage, onAcquired, onDurable); }
+    finally {
+      const record = this.#exchanges.get(run.id);
+      if (record) record.startInProgress = false;
+    }
+  }
+
+  async #startReserved(run: RunRecord, runBindingSha256: string, onStage?: (stage: BrowserStartStage) => Promise<void>, onAcquired?: BrowserAcquisitionObserver, onDurable?: (events: DriverEvent[]) => Promise<void>): Promise<DriverStartResult> {
     let identity: IdentitySnapshot;
     let ownership: OwnedBrowserProcess;
     try {
@@ -294,7 +309,9 @@ export class StudioG7Driver implements VoiceBrowserDriver, StudioDriverExtension
     };
     const events: DriverEvent[] = [identity.event, acquisition, declared, {
       kind: "studio.auth.session_established", source: "canonical",
-      payload: { principal_id_sha256: labSha256(run.principalId), principal_bound: true, expires_at: auth.expiresAt, credentials_excluded: true },
+      // expires_in_s: the access-JWT lifetime the product issued (a dead
+      // owner's lease is never released before it has elapsed).
+      payload: { principal_id_sha256: labSha256(run.principalId), principal_bound: true, expires_at: auth.expiresAt, expires_in_s: auth.expiresIn, credentials_excluded: true },
       dedupeKey: `studio-auth:${run.id}:${auth.expiresAt}`,
     }];
     try {
@@ -477,7 +494,7 @@ export class StudioG7Driver implements VoiceBrowserDriver, StudioDriverExtension
       // still exists; its join to the run stays `uncertain` (no exchange
       // binding on native tasks).
       events.push((await this.#observeOutcome(run, tokens, "final", this.#focusTasks(run.id), "end").catch((error: unknown) => ({ event: this.#outcomeUnavailable(run.id, "final", error) }))).event);
-      const settled = await this.#settleExchange(run.id, tokens, session);
+      const settled = await this.#settleExchange(run.id, tokens);
       events.push(...settled.events);
       const left = await this.#clickIfVisible(session, /^Leave the room$/);
       const leftPayload = { basis: "ui_leave", control_clicked: left };
@@ -512,7 +529,7 @@ export class StudioG7Driver implements VoiceBrowserDriver, StudioDriverExtension
     }
     const pageAlive = session.page !== null && disposableBrowserProcessIsActive(session.ownership) && !session.page.isClosed();
     const tokens = this.#tokenSource(session);
-    const settled = await this.#settleExchange(run.id, tokens, pageAlive ? session : null).catch((error: unknown) => ({ confirmed: false, events: [this.#exchangeEndUnavailable(run.id, "abort", error)] }));
+    const settled = await this.#settleExchange(run.id, tokens).catch((error: unknown) => ({ confirmed: false, events: [this.#exchangeEndUnavailable(run.id, "abort", error)] }));
     events.push(...settled.events);
     if (pageAlive) await this.#clickIfVisible(session, /^Leave the room$/).catch(() => false);
     const exchangeId = this.#exchanges.get(run.id)?.exchangeId ?? null;
@@ -537,8 +554,10 @@ export class StudioG7Driver implements VoiceBrowserDriver, StudioDriverExtension
   /**
    * Evidence completion after End: re-read the run's exchange evidence with a
    * fresh principal session (late receipts such as `session_closed` or the
-   * last reply), then sign the principal out globally again. Nothing else is
-   * read or touched.
+   * last reply), then revoke only that session (scope=local). The run's own
+   * cleanup already signed the principal out globally; a later run of the
+   * same principal may be live now, and a global sign-out would revoke its
+   * tokens. Nothing else is read or touched.
    */
   async refreshStudioEvidence(run: RunRecord, join: DurableStudioJoin): Promise<DriverEvent[]> {
     if (join.exchangeId === null || !UUID.test(join.exchangeId)) return [];
@@ -551,7 +570,13 @@ export class StudioG7Driver implements VoiceBrowserDriver, StudioDriverExtension
       const payload = { exchange_id: join.exchangeId, reason: error instanceof VoiceLabError ? error.detail.code : "refresh_failed", http_status: null };
       events.push({ kind: "studio.bridge_evidence_unavailable", source: "canonical", payload, dedupeKey: contentKey("studio-bridge-unavailable", run.id, payload) });
     }
-    if (tokens.held() !== null) events.push(await this.#signOut(run.id, tokens));
+    const held = tokens.held();
+    if (held !== null) {
+      const receipt = await signOut({ supabaseUrl: this.studio.supabaseUrl, publishableKey: this.studio.supabasePublishableKey }, held.accessToken, "local", { fetchImpl: this.#fetch });
+      tokens.forget();
+      const revoked = { ...receipt, purpose: "evidence_refresh", credentials_excluded: true, revocation_id: randomUUID() };
+      events.push({ kind: "studio.evidence.session_revoked", source: "canonical", payload: revoked, dedupeKey: contentKey("studio-evidence-session-revoked", run.id, revoked) });
+    }
     return events;
   }
 
@@ -811,8 +836,11 @@ export class StudioG7Driver implements VoiceBrowserDriver, StudioDriverExtension
 
   /**
    * The exchange this run's Speak opened: the room's live exchange, absent
-   * before the click, whose floor holder is this run's principal. Another
-   * principal's exchange is never joined (and never touched).
+   * before the click. When the snapshot names a floor holder other than this
+   * run's principal the exchange is not joined (End is never requested for
+   * it); when it names none, the join is recorded with
+   * `input_actor_is_principal: null` (unverified) and ownership rests on the
+   * evidence proof alone.
    */
   async #awaitExchange(session: StudioSession, run: RunRecord): Promise<DriverEvent> {
     const deadline = this.#now() + this.#timeouts.exchangeOpenMs;
@@ -879,11 +907,13 @@ export class StudioG7Driver implements VoiceBrowserDriver, StudioDriverExtension
   }
 
   /**
-   * Settle this run's exchange. Ends it (UI End when the run's page is alive,
-   * then API End) only when ownership is proven; otherwise verifies read-only
-   * that the run's exchange is not live, or types the state for recovery.
+   * Settle this run's exchange. Requests End only when ownership is proven,
+   * and only as the id-bound API End of that exchange (never the room UI's
+   * End, which acts on whatever exchange the room shows at click time);
+   * otherwise verifies read-only that the run's exchange is not live, or types
+   * the state for recovery.
    */
-  async #settleExchange(runId: string, tokens: TokenSource, session: StudioSession | null): Promise<{ confirmed: boolean; events: DriverEvent[] }> {
+  async #settleExchange(runId: string, tokens: TokenSource): Promise<{ confirmed: boolean; events: DriverEvent[] }> {
     const record = this.#exchanges.get(runId) ?? null;
     const events: DriverEvent[] = [];
     const settle = (confirmed: boolean, status: "confirmed" | "uncertain" | "unavailable", basis: string, extra: Record<string, unknown> = {}) => {
@@ -895,6 +925,11 @@ export class StudioG7Driver implements VoiceBrowserDriver, StudioDriverExtension
       // This driver owns the run and never clicked Speak: no exchange can
       // have been opened by it, so no member-API read is needed.
       return settle(true, "confirmed", "no_exchange_opened_by_run", { verified_by: "driver_never_requested_exchange", ownership: "not_required" });
+    }
+    if (record && record.join === "retained" && record.startInProgress && record.speakRequested && record.exchangeId === null) {
+      // Speak was requested and this start is still waiting for the exchange
+      // to open: a room with nothing live yet proves nothing about it.
+      return settle(false, "uncertain", "exchange_join_pending", { ownership: "not_required" });
     }
     let snapshot = await this.#api.snapshot(this.studio.projectId, await tokens.token());
     const join = record?.exchangeId ?? null;
@@ -912,18 +947,10 @@ export class StudioG7Driver implements VoiceBrowserDriver, StudioDriverExtension
     if (proof.status !== "proven") {
       return settle(false, proof.status === "mismatch" ? "uncertain" : "unavailable", "ownership_unproven_not_touched", { ownership: proof.status, reason: proof.reason });
     }
-    let clickedEnd = false;
-    if (session && session.page && !session.page.isClosed() && disposableBrowserProcessIsActive(session.ownership)) {
-      clickedEnd = await this.#clickIfVisible(session, /^End$/).catch(() => false);
-      const requested = { basis: "ui_end", control_clicked: clickedEnd, exchange_id: join };
-      events.push({ kind: "studio.exchange.end_requested", source: "browser", payload: requested, dedupeKey: contentKey("studio-end-ui", runId, requested) });
-    }
     let usedApi = false;
-    const start = this.#now();
-    const apiAt = clickedEnd ? start + Math.floor(this.#timeouts.exchangeEndMs / 2) : start;
-    const deadline = start + this.#timeouts.exchangeEndMs;
+    const deadline = this.#now() + this.#timeouts.exchangeEndMs;
     while (snapshot.exchangeId === join) {
-      if (!usedApi && this.#now() >= apiAt) {
+      if (!usedApi) {
         const ended = await this.#api.endExchange(join, await tokens.token());
         usedApi = true;
         const requested = { basis: "api_end", exchange_id: join, accepted: ended.accepted, http_status: ended.http_status };
@@ -934,7 +961,7 @@ export class StudioG7Driver implements VoiceBrowserDriver, StudioDriverExtension
       snapshot = await this.#api.snapshot(this.studio.projectId, await tokens.token());
     }
     const confirmed = snapshot.exchangeId !== join;
-    return settle(confirmed, confirmed ? "confirmed" : "unavailable", usedApi ? "api_end" : clickedEnd ? "ui_end" : "already_ended", { ownership: "proven" });
+    return settle(confirmed, confirmed ? "confirmed" : "unavailable", usedApi ? "api_end" : "already_ended", { ownership: "proven" });
   }
 
   #exchangeEndUnavailable(runId: string, purpose: string, error: unknown): DriverEvent {
@@ -1188,6 +1215,7 @@ export class StudioG7Driver implements VoiceBrowserDriver, StudioDriverExtension
       // The password grant never succeeded for this run: there is no session
       // to revoke, and attempting a fresh grant would create one.
       const none = { schema: "sophia_voice_lab_studio_sign_out_v1", scope: "global", confirmed: true, http_status: null, basis: "no_session_issued", session_basis: "none", credentials_excluded: true };
+      // Content-addressed: a repeated "no session was ever issued" is one fact.
       return { kind: "studio.cleanup.signed_out", source: "canonical", payload: none, dedupeKey: contentKey("studio-signed-out", runId, none) };
     }
     let receipt: SignOutReceipt | null = null;
@@ -1205,7 +1233,10 @@ export class StudioG7Driver implements VoiceBrowserDriver, StudioDriverExtension
       tokenBasis = error instanceof VoiceLabError ? error.detail.code : "sign_out_failed";
     }
     tokens.forget();
-    const signedOut = { ...receipt, session_basis: tokenBasis, credentials_excluded: true };
+    // Each sign-out is its own durable event (a later identical-looking
+    // sign-out must never dedupe into an earlier one: the dead-owner release
+    // needs the sign-out that happened after the lease expired).
+    const signedOut = { ...receipt, session_basis: tokenBasis, credentials_excluded: true, sign_out_id: randomUUID() };
     return { kind: "studio.cleanup.signed_out", source: "canonical", payload: signedOut, dedupeKey: contentKey("studio-signed-out", runId, signedOut) };
   }
 
@@ -1242,7 +1273,7 @@ export class StudioG7Driver implements VoiceBrowserDriver, StudioDriverExtension
     const events: DriverEvent[] = [...(this.#orphanEvents.get(runId) ?? [])];
     this.#orphanEvents.delete(runId);
     const tokens = this.#tokenSource(null);
-    const settled = await this.#settleExchange(runId, tokens, null).catch((error: unknown) => ({ confirmed: false, events: [this.#exchangeEndUnavailable(runId, purpose, error)] }));
+    const settled = await this.#settleExchange(runId, tokens).catch((error: unknown) => ({ confirmed: false, events: [this.#exchangeEndUnavailable(runId, purpose, error)] }));
     events.push(...settled.events);
     // The joined exchange's late receipts are read with the same session.
     const exchangeId = this.#exchanges.get(runId)?.exchangeId ?? null;
@@ -1262,7 +1293,7 @@ export class StudioG7Driver implements VoiceBrowserDriver, StudioDriverExtension
   #state(runId: string): ExchangeRecord {
     let state = this.#exchanges.get(runId);
     if (!state) {
-      state = { exchangeId: null, preexistingExchangeId: null, speakRequested: false, browserLaunched: false, authIssued: false, grantId: null, runBindingSha256: null, exchangeOpenedAtMs: null, join: "retained" };
+      state = { exchangeId: null, preexistingExchangeId: null, speakRequested: false, browserLaunched: false, authIssued: false, grantId: null, runBindingSha256: null, exchangeOpenedAtMs: null, join: "retained", startInProgress: false };
       this.#exchanges.set(runId, state);
     }
     return state;
@@ -1287,7 +1318,7 @@ export class StudioG7Driver implements VoiceBrowserDriver, StudioDriverExtension
     this.#watchdogs.delete(runId);
     const session = this.#sessions.get(runId) ?? null;
     const tokens = this.#tokenSource(session);
-    const settled = await this.#settleExchange(runId, tokens, session).catch((error: unknown) => ({ confirmed: false, events: [this.#exchangeEndUnavailable(runId, "watchdog", error)] }));
+    const settled = await this.#settleExchange(runId, tokens).catch((error: unknown) => ({ confirmed: false, events: [this.#exchangeEndUnavailable(runId, "watchdog", error)] }));
     const fired = { basis: "run_deadline", exchange_end_confirmed: settled.confirmed };
     const events: DriverEvent[] = [{ kind: "studio.watchdog.fired", source: "worker", payload: fired, dedupeKey: contentKey("studio-watchdog", runId, fired) }, ...settled.events];
     if (session) session.pendingEvents.push(...events);
@@ -1309,7 +1340,7 @@ export class StudioG7Driver implements VoiceBrowserDriver, StudioDriverExtension
     if (this.#exchanges.has(runId)) return;
     const exchangeId = join.exchangeId !== null && UUID.test(join.exchangeId) ? join.exchangeId : null;
     const grantId = join.grantId !== null && UUID.test(join.grantId) ? join.grantId : null;
-    this.#exchanges.set(runId, { exchangeId, preexistingExchangeId: null, speakRequested: join.speakRequested || exchangeId !== null, browserLaunched: true, authIssued: true, grantId, runBindingSha256: /^[0-9a-f]{64}$/.test(join.runBindingSha256) ? join.runBindingSha256 : null, exchangeOpenedAtMs: join.exchangeOpenedAtMs, join: "durable" });
+    this.#exchanges.set(runId, { exchangeId, preexistingExchangeId: null, speakRequested: join.speakRequested || exchangeId !== null, browserLaunched: true, authIssued: true, grantId, runBindingSha256: /^[0-9a-f]{64}$/.test(join.runBindingSha256) ? join.runBindingSha256 : null, exchangeOpenedAtMs: join.exchangeOpenedAtMs, join: "durable", startInProgress: false });
   }
 
   /** Test seam: the exchange join the driver retains across browser loss. */

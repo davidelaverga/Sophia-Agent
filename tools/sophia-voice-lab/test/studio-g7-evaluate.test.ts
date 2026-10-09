@@ -481,3 +481,26 @@ describe("Studio G7 episode: every step is an operation, outcomes are canonical 
     expect(statusOf(evaluateStudioG7Run(run, uncertain.events, [], { expected }), "cleanup.exchange_ended")).toMatchObject({ status: "unavailable", reason: "exchange_uncertain_live_exchange_not_joined_to_run" });
   });
 });
+
+describe("Studio G7 cleanup proof ordering (adversarial review)", () => {
+  it("counts an exchange end only when it follows the run's exchange join", () => {
+    const run = studioRun(config);
+    const log = new EventLog(run.id);
+    log.add("studio.exchange.speak_requested", "canonical", { grant_id: GRANT_UUID, write_ahead: true });
+    // A settle that ran while Speak was still opening the exchange (e.g. a watchdog during start).
+    log.add("studio.cleanup.exchange_ended", "canonical", { confirmed: true, status: "confirmed", basis: "no_live_exchange_in_room", exchange_id: null, join: "retained", ownership: "not_required", verified_by: "member_snapshot" });
+    log.add("studio.exchange.opened", "canonical", { exchange_id: EXCHANGE_UUID, grant_id: GRANT_UUID, opened_at_lab_ms: T0 });
+    log.add("studio.cleanup.signed_out", "canonical", { schema: "sophia_voice_lab_studio_sign_out_v1", scope: "global", confirmed: true, http_status: 204, basis: "global_logout_accepted" });
+    log.add("cleanup.browser_context_closed", "browser", { close_resolved: true, browser_registry_absent: true, browser_process_close_resolved: true });
+    expect(studioG7CleanupProof(log.events)).toMatchObject({ exchangeEnded: false, complete: false });
+    expect(statusOf(evaluateStudioG7Run(run, log.events, [], { expected }), "cleanup.exchange_ended")?.status).toBe("unavailable");
+    // An end confirmed after the join counts.
+    log.add("studio.cleanup.exchange_ended", "canonical", { confirmed: true, status: "confirmed", basis: "api_end", exchange_id: EXCHANGE_UUID, join: "retained", ownership: "proven", verified_by: "member_snapshot" });
+    expect(studioG7CleanupProof(log.events)).toMatchObject({ exchangeEnded: true, complete: true });
+    // A Speak intent with no join yet: only an end after the intent counts.
+    const intentOnly = new EventLog(run.id);
+    intentOnly.add("studio.cleanup.exchange_ended", "canonical", { confirmed: true, status: "confirmed", basis: "no_live_exchange_in_room", exchange_id: null, join: "retained", ownership: "not_required" });
+    intentOnly.add("studio.exchange.speak_requested", "canonical", { grant_id: GRANT_UUID, write_ahead: true });
+    expect(studioG7CleanupProof(intentOnly.events).exchangeEnded).toBe(false);
+  });
+});

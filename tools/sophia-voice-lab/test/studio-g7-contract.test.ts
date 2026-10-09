@@ -147,7 +147,11 @@ describe("Studio G7 contract strictness", () => {
     expect(parseStudioBuildMeta("<html><head><meta charset=utf-8></head>")).toMatchObject({ status: "unavailable", reason: "identity_not_published" });
     expect(parseStudioBuildMeta('<meta content="dev" name="sophia-build">')).toMatchObject({ status: "unavailable", reason: "identity_malformed" });
     expect(projectRoomSnapshot({ room: { id: "room-1", sophia: { exchangeId: EXCHANGE_UUID.toUpperCase(), exchange: "open", inputEpoch: 3, inputActorId: PRINCIPAL_UUID } }, work: [{ text: "ignored" }] })).toEqual({ roomIdPresent: true, roomId: "room-1", exchangeId: EXCHANGE_UUID, exchangeState: "open", inputEpoch: 3, inputActorId: PRINCIPAL_UUID, work: [] });
-    expect(projectRoomSnapshot({ room: { id: "room-1", sophia: null } }).exchangeId).toBeNull();
+    // A room without Sophia's presence, or with a malformed state or id, is unknown, never "no exchange".
+    expect(() => projectRoomSnapshot({ room: { id: "room-1", sophia: null } })).toThrow(StudioContractViolation);
+    expect(() => projectRoomSnapshot({ room: { id: "room-1", sophia: { exchangeId: null } } })).toThrow(StudioContractViolation);
+    expect(() => projectRoomSnapshot({ room: { id: "room-1", sophia: { exchange: "open", exchangeId: null } } })).toThrow(StudioContractViolation);
+    expect(() => projectRoomSnapshot({})).toThrow(StudioContractViolation);
     // `exchange: none` is no live exchange, whatever id is echoed.
     expect(projectRoomSnapshot({ room: { id: "room-1", sophia: { exchangeId: EXCHANGE_UUID, exchange: "none" } } }).exchangeId).toBeNull();
   });

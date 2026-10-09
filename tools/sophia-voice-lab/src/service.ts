@@ -1859,7 +1859,9 @@ export class VoiceLabService {
       this.assertStudioStepFree(operations, "studio_action", stepId, (operation) => operation.input.action === input.action);
     }
     const { run_id: _runId, ...operationInput } = input;
-    const accepted = await this.queueRunOperation(caller, input.run_id, "studio_action", input.idempotency_key, { run_id: input.run_id, ...operationInput }, false);
+    // The step label makes the ledger's at-most-once rule exact for actions too.
+    const stepLabel = input.action === STUDIO_G7_OBSERVE_ACTION ? {} : { _g7_step: studioG7StepId(input.action) };
+    const accepted = await this.queueRunOperation(caller, input.run_id, "studio_action", input.idempotency_key, { run_id: input.run_id, ...operationInput, ...stepLabel }, false);
     return this.awaitSchedulingReceipt(caller, accepted, Math.min(input.timeout_ms ?? this.config.maxOperationSeconds * 1_000, this.config.maxOperationSeconds * 1_000));
   }
 
@@ -1882,12 +1884,26 @@ export class VoiceLabService {
     }
   }
 
+  /**
+   * The legacy Gemini-path input tools answer `unsupported_for_target` on the
+   * Studio kind (and for any Studio run) before any work: a Studio voice step
+   * goes through studio_g7_voice_step, which enforces the G7 step rules.
+   */
+  private assertLegacyTargetTool(tool: "speak" | "barge_in" | "force_socket_rotation", run?: Pick<RunRecord, "scenarioId" | "scenarioVersion">): void {
+    if (this.config.targetKind !== STUDIO_G7_TARGET_KIND && !(run && isStudioG7ScenarioVersion(run.scenarioVersion))) return;
+    throw new VoiceLabError(labError("SCENARIO_UNSUPPORTED_FOR_TARGET", `${tool} drives the legacy Gemini browser path; Studio G7 runs use studio_g7_voice_step and studio_g7_action.`, "validation", false, {
+      status: "unsupported_for_target", target_kind: this.config.targetKind ?? "legacy-gemini-browser-v1", tool,
+      ...(run ? { scenario_id: run.scenarioId, scenario_version: run.scenarioVersion } : {}),
+    }));
+  }
+
   async speak(caller: AuthenticatedCaller, raw: unknown): Promise<LabEnvelope> {
     requireScope(caller, "voice_lab:run");
     this.assertMutationEnabled("speak");
+    this.assertLegacyTargetTool("speak");
     const input = SpeakSchema.parse(raw);
     validateAudioInputLimit(input, this.config.maxTextCharacters);
-    await this.ownedRun(caller, input.run_id);
+    this.assertLegacyTargetTool("speak", await this.ownedRun(caller, input.run_id));
     // Resolve only immutable metadata before the ready-state precondition. This
     // gives V-S02 a real authenticated public `/mcp` path for an unknown
     // fixture while still creating no operation, TTS process, browser, or
@@ -1909,9 +1925,11 @@ export class VoiceLabService {
   async bargeIn(caller: AuthenticatedCaller, raw: unknown): Promise<LabEnvelope> {
     requireScope(caller, "voice_lab:run");
     this.assertMutationEnabled("barge_in");
+    this.assertLegacyTargetTool("barge_in");
     const input = BargeSchema.parse(raw);
     validateAudioInputLimit(input, this.config.maxTextCharacters);
     const run = await this.ownedRun(caller, input.run_id);
+    this.assertLegacyTargetTool("barge_in", run);
     await this.assertInputPreconditions(caller, input.run_id, input);
     await this.assertAdaptiveObservation(run, input);
     const page = await this.ledger.listEvents(input.run_id, input.after_output_event_seq - 1, 1);
@@ -1984,8 +2002,10 @@ export class VoiceLabService {
   async forceSocketRotation(caller: AuthenticatedCaller, raw: unknown): Promise<LabEnvelope> {
     requireScope(caller, "voice_lab:fault");
     this.assertMutationEnabled("force_socket_rotation");
+    this.assertLegacyTargetTool("force_socket_rotation");
     const input = RotateSchema.parse(raw);
     const run = await this.ownedRun(caller, input.run_id);
+    this.assertLegacyTargetTool("force_socket_rotation", run);
     if (run.scenarioId === "V-N02" && !input.commit_target) throw new VoiceLabError(labError("COMMIT_TARGET_REQUIRED", "V-N02 requires an exact app-authored committed output or tool-effect target.", "validation", false));
     if (run.scenarioId !== "V-N02" && input.commit_target) throw new VoiceLabError(labError("COMMIT_TARGET_NOT_ALLOWED", "A committed-boundary target is only accepted for V-N02.", "validation", false));
     if (input.expected_socket_epoch !== run.providerEpoch) throw new VoiceLabError(labError("PROVIDER_EPOCH_PRECONDITION_FAILED", "Requested provider epoch is not the run's current exact product epoch.", "conflict", true));

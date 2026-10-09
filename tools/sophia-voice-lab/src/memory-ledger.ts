@@ -1,4 +1,5 @@
 import { decideStudioDeadOwnerRelease } from "./studio-g7/lease-release.js";
+import { studioStepConflict } from "./studio-g7/step-guard.js";
 import { deriveExecutionOwnership } from "./execution-ownership.js";
 import { canonicalEvidenceRefreshDue } from "./canonical-evidence-refresh.js";
 import { ingestGenericOwnerLoss } from "./generic-owner-loss.js";
@@ -408,6 +409,10 @@ export class MemoryVoiceLabLedger implements VoiceLabLedger {
       throw conflict("D02_RUN_FROZEN", "The D02 browser-worker termination freeze forbids every new run operation.");
     }
     if (admission && (operation.type === "speak" || operation.type === "barge_in")) assertAdmission([...this.#operations.values()], operation, admission);
+    // Studio G7: a step at most once per run, checked in the same synchronous
+    // section that inserts the operation (no await in between).
+    const stepConflict = studioStepConflict([...this.#operations.values()].filter((candidate) => candidate.runId === operation.runId), operation);
+    if (stepConflict) throw stepConflict;
     const rollingAdmission = rolling ? this.#reserveRollingAdmission(rolling.reservation, rolling.limits) : undefined;
     const record = newOperationRecord(operation);
     this.#operations.set(record.id, record);
@@ -711,7 +716,7 @@ export class MemoryVoiceLabLedger implements VoiceLabLedger {
     this.#browserLeases.delete(runId);
     return true;
   }
-  async releaseDeadOwnerStudioBrowserLease(runId: string, proof: { verificationId: string; tokenMaxLifetimeMs: number; heartbeatStaleMs: number }): Promise<{ released: boolean; reason: string }> {
+  async releaseDeadOwnerStudioBrowserLease(runId: string, proof: { verificationId: string | null; tokenMaxLifetimeMs: number; heartbeatStaleMs: number }): Promise<{ released: boolean; reason: string }> {
     const run = this.#runs.get(runId), lease = this.#browserLeases.get(runId);
     if (!run || !lease) return { released: false, reason: !run ? "run_missing" : "lease_absent" };
     const decision = decideStudioDeadOwnerRelease({
@@ -720,7 +725,7 @@ export class MemoryVoiceLabLedger implements VoiceLabLedger {
     });
     if (!decision.release) return { released: false, reason: decision.reason };
     this.#browserLeases.delete(runId);
-    return { released: true, reason: "dead_owner_quiesced" };
+    return { released: true, reason: decision.basis === "owner_cleanup_complete" ? "dead_owner_cleanup_complete" : "dead_owner_quiesced" };
   }
   async heartbeatWorker(heartbeat: WorkerHeartbeat): Promise<void> { this.#workerHeartbeats.set(heartbeat.workerId, clone(heartbeat)); }
   async listLiveWorkers(since: Date): Promise<WorkerHeartbeat[]> { return clone([...this.#workerHeartbeats.values()].filter((heartbeat) => heartbeat.observedAt >= since)); }

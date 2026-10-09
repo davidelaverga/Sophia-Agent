@@ -25,7 +25,7 @@ import {
   type SessionClosedReceipt,
   type StudioPageReceipt,
 } from "./contract.js";
-import { STUDIO_DEAD_OWNER_LEASE_RELEASE_SCHEMA } from "./lease-release.js";
+import { STUDIO_DEAD_OWNER_LEASE_RELEASE_SCHEMA, studioExchangeEndAfterJoin } from "./lease-release.js";
 import { studioG7Scenario, type StudioG7Step } from "./scenarios.js";
 
 /**
@@ -250,7 +250,8 @@ export function evaluateStudioG7Run(run: RunRecord, events: Event[], operations:
   if (conflictingSeqs.length > 0) H("bridge.seq_integrity", "fail", "bridge_seq_conflict", bridgeRaw.filter((item) => conflictingSeqs.includes(`${item.source}:${item.seq}`)).map((item) => item.event));
   else H("bridge.seq_integrity", bridge.length === 0 ? "unavailable" : "pass", bridge.length === 0 ? "no_bridge_receipt" : null, bridge.map((item) => item.event));
 
-  const labEndEvent = ofKind("studio.cleanup.exchange_ended", "canonical").find((event) => event.payload.confirmed === true) ?? null;
+  // Only an end confirmed after the run's exchange join proves anything about that exchange.
+  const labEndEvent = studioExchangeEndAfterJoin(ordered);
   const readAfterLabEnd = labEndEvent ? bridge.filter((item) => item.event.seq > labEndEvent.seq).length : 0;
   const of = <T,>(kind: BridgeReceiptKind) => bridge.filter((item) => item.kind === kind) as unknown as Array<BoundBridgeReceipt<T>>;
   const windowsAll = of<InputWindowReceipt>("input_window");
@@ -441,7 +442,7 @@ export function evaluateStudioG7Run(run: RunRecord, events: Event[], operations:
   const browserClosed = ofKind("cleanup.browser_context_closed", "browser").filter((event) => event.payload.close_resolved === true && event.payload.browser_registry_absent === true && event.payload.browser_process_close_resolved === true);
   const leaseReleased = ordered.filter((event) => (event.kind === "cleanup.browser_lease_released" && event.payload.cas_deleted === true) || (event.kind === "cleanup.browser_lease_absent" && event.payload.authoritative_ledger_read === true));
   const cleanupComplete = cleanup.complete && leaseReleased.length > 0;
-  H("cleanup.exchange_ended", cleanup.exchangeEnded ? "pass" : latestEnded ? "unavailable" : "fail", cleanup.exchangeEnded ? null : latestEnded ? `exchange_${String(latestEnded.payload.status ?? "unconfirmed")}_${String(latestEnded.payload.basis ?? "unknown")}` : "exchange_end_not_verified", labEndEvent ? [labEndEvent] : endedEvents);
+  H("cleanup.exchange_ended", cleanup.exchangeEnded ? "pass" : latestEnded ? "unavailable" : "fail", cleanup.exchangeEnded ? null : latestEnded?.payload.confirmed === true ? "exchange_end_precedes_join" : latestEnded ? `exchange_${String(latestEnded.payload.status ?? "unconfirmed")}_${String(latestEnded.payload.basis ?? "unknown")}` : "exchange_end_not_verified", labEndEvent ? [labEndEvent] : endedEvents);
   H("cleanup.principal_signed_out", signedOutEvents.length > 0 ? "pass" : "fail", signedOutEvents.length > 0 ? null : "global_sign_out_unconfirmed", signedOutEvents);
   H("cleanup.browser_closed", cleanup.browserClosed ? "pass" : cleanup.browserQuiesced ? "unavailable" : "fail", cleanup.browserClosed ? null : cleanup.browserQuiesced ? "dead_owner_quiesced_close_unobservable" : "browser_close_unproven", browserClosed);
   H("cleanup.browser_lease_released", leaseReleased.length > 0 ? "pass" : "fail", leaseReleased.length > 0 ? null : "browser_lease_release_unproven", leaseReleased);
@@ -681,7 +682,9 @@ export function studioG7CleanupProof(events: Event[]): { exchangeEnded: boolean;
   const allocationFree = events.some((event) => event.kind === "cleanup.browser_context_absent" && event.payload.browser_never_allocated === true && event.payload.authoritative_ledger_read === true)
     && !events.some((event) => event.kind === "harness.browser_process_acquired" || event.kind === "studio.auth.session_established" || event.kind === "studio.exchange.opened" || event.kind === "studio.exchange.speak_requested");
   if (allocationFree) return { exchangeEnded: true, signedOut: true, browserClosed: true, browserQuiesced: false, complete: true };
-  const exchangeEnded = events.some((event) => event.kind === "studio.cleanup.exchange_ended" && event.source === "canonical" && event.payload.confirmed === true);
+  // A confirmed end counts only after the run's exchange join (or Speak
+  // intent): an earlier settle cannot speak for an exchange opened later.
+  const exchangeEnded = studioExchangeEndAfterJoin(events) !== null;
   const signedOut = events.some((event) => event.kind === "studio.cleanup.signed_out" && event.source === "canonical" && event.payload.confirmed === true);
   const browserClosed = events.some((event) => event.kind === "cleanup.browser_context_closed" && event.source === "browser" && event.payload.close_resolved === true && event.payload.browser_registry_absent === true)
     || events.some((event) => event.kind === "cleanup.browser_context_absent" && event.payload.browser_never_allocated === true);

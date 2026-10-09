@@ -29,6 +29,8 @@ class FakeStudioBackend {
   /** The evidence answer: built per request; null answers 404 (not the principal's, or the route is missing). */
   evidence: ((exchangeId: string) => Record<string, unknown> | null) | null = null;
   grantUser = PRINCIPAL_UUID;
+  /** A raw 200 snapshot body that replaces the well-formed one (malformed-answer tests). */
+  snapshotBody: unknown = undefined;
 
   fetch = async (input: URL | string, init?: RequestInit): Promise<Response> => {
     const url = new URL(String(input));
@@ -59,6 +61,7 @@ class FakeStudioBackend {
       if (url.pathname === "/ready") return this.apiDown ? json({ ready: false }, 503) : json({ ready: true });
       if (this.apiDown) return json({ error: "unavailable" }, 503);
       if (!authorization?.startsWith("Bearer fake-access-token-")) return json({ error: "unauthorized" }, 401);
+      if (url.pathname === `/api/v1/projects/${PROJECT_UUID}/snapshot` && this.snapshotBody !== undefined) return typeof this.snapshotBody === "string" ? new Response(this.snapshotBody, { status: 200, headers: { "content-type": "application/json" } }) : json(this.snapshotBody);
       if (url.pathname === `/api/v1/projects/${PROJECT_UUID}/snapshot`) return json({ room: { id: "room-g7", sophia: { exchangeId: this.exchangeId, exchange: this.exchangeId ? "open" : "none", inputEpoch: 2, inputActorId: this.exchangeId ? this.inputActorId : null } }, work: [] });
       const evidence = /^\/api\/v1\/exchanges\/([0-9a-f-]{36})\/qualification-evidence$/.exec(url.pathname);
       if (evidence) {
@@ -72,6 +75,7 @@ class FakeStudioBackend {
   };
 
   endCalls(): number { return this.calls.filter((call) => call.method === "POST" && call.path.endsWith("/end")).length; }
+  logoutScopes(): Array<string | null> { return this.calls.filter((call) => call.path.includes("/auth/v1/logout")).map((call) => new URL(call.path).searchParams.get("scope")); }
 }
 
 function driverFor(backend: FakeStudioBackend, timers: Array<{ callback: () => void; ms: number }> = []) {
@@ -234,7 +238,7 @@ describe("Studio G7 cleanup never touches an exchange the run cannot prove is it
 });
 
 describe("Studio G7 evidence completion and readiness", () => {
-  it("re-reads late bridge receipts after End with a fresh session, then signs out again", async () => {
+  it("re-reads late bridge receipts after End with a fresh session, then revokes only that session", async () => {
     const backend = new FakeStudioBackend();
     backend.exchangeId = null;
     const { config, driver } = driverFor(backend);
@@ -243,7 +247,7 @@ describe("Studio G7 evidence completion and readiness", () => {
     const events = await driver.refreshStudioEvidence(run, { exchangeId: EXCHANGE_UUID, grantId: GRANT_UUID, runBindingSha256: bindingOf(run), speakRequested: true, exchangeOpenedAtMs: null });
     expect(ofKind(events, "studio.bridge_grant")[0]?.payload).toMatchObject({ exchange_state: "ended" });
     expect(ofKind(events, "studio.bridge_receipt").map((event) => [event.payload.source, event.payload.seq, event.payload.kind])).toEqual([["bridge", 0, "input_window"], ["bridge", 1, "session_closed"], ["service", 0, "guard"]]);
-    expect(ofKind(events, "studio.cleanup.signed_out")[0]?.payload).toMatchObject({ confirmed: true, scope: "global" });
+    expect(ofKind(events, "studio.evidence.session_revoked")[0]?.payload).toMatchObject({ confirmed: true, scope: "local" });
     expect(backend.calls.filter((call) => call.path.includes("/api/v1/")).map((call) => call.path.replace(DEFAULT_ORIGINS.api, ""))).toEqual([`/api/v1/exchanges/${EXCHANGE_UUID}/qualification-evidence`]);
     expect(backend.endCalls()).toBe(0);
     // Without a durable exchange join there is nothing to refresh and no sign-in.
@@ -356,5 +360,40 @@ describe("Studio G7 driver target checks", () => {
     expect(backend.calls).toHaveLength(0);
     await expect(driver.rotate()).rejects.toMatchObject({ detail: { code: "STUDIO_OPERATION_UNSUPPORTED", details: { status: "unsupported" } } });
     await expect(driver.continueSession()).resolves.toEqual([]);
+  });
+});
+
+describe("Studio G7 adversarial review fixes (driver)", () => {
+  it("evidence completion revokes only its own fresh session, never the principal's other sessions", async () => {
+    const backend = new FakeStudioBackend();
+    backend.exchangeId = null;
+    const { config, driver } = driverFor(backend);
+    const run = studioRun(config);
+    backend.evidence = () => evidenceEnvelope(run, [["session_closed", sessionClosed(run, 1, { windows: 1, turns: 0, replies: 0 })]], { state: "ended" });
+    const events = await driver.refreshStudioEvidence(run, { exchangeId: EXCHANGE_UUID, grantId: GRANT_UUID, runBindingSha256: bindingOf(run), speakRequested: true, exchangeOpenedAtMs: null });
+    expect(ofKind(events, "studio.bridge_receipt")).toHaveLength(1);
+    // A later run of the same principal may be live: a global sign-out would revoke its tokens.
+    expect(backend.logoutScopes()).toEqual(["local"]);
+    expect(ofKind(events, "studio.cleanup.signed_out")).toHaveLength(0);
+    expect(ofKind(events, "studio.evidence.session_revoked")[0]?.payload).toMatchObject({ scope: "local", confirmed: true, http_status: 204 });
+    expect(JSON.stringify(events)).not.toContain("fake-access-token-");
+  });
+
+  it("treats a 200 snapshot whose room is missing or malformed as unknown, never as 'no live exchange'", async () => {
+    const malformed: unknown[] = [{}, { room: null }, { room: { id: "room-g7" } }, { room: { id: "room-g7", sophia: {} } }, { room: { id: "room-g7", sophia: { exchange: "open", exchangeId: "not-a-uuid" } } }, { room: { id: "room-g7", sophia: { exchange: "closing", exchangeId: EXCHANGE_UUID } } }, "not json"];
+    for (const body of malformed) {
+      const backend = new FakeStudioBackend();
+      backend.snapshotBody = body;
+      const { config, driver } = driverFor(backend);
+      const run = studioRun(config);
+      backend.evidence = () => evidenceEnvelope(run, []);
+      adopt(driver, run);
+      const result = await driver.abort(run, "TEST");
+      const label = JSON.stringify(body);
+      expect(ofKind(result.events, "studio.cleanup.exchange_ended").at(-1)?.payload, label).toMatchObject({ confirmed: false, status: "unavailable" });
+      expect(backend.endCalls(), label).toBe(0);
+      // The exchange the run joined is still recorded unsettled for recovery; sign-out still happens.
+      expect(ofKind(result.events, "studio.cleanup.signed_out")[0]?.payload, label).toMatchObject({ confirmed: true });
+    }
   });
 });

@@ -356,13 +356,145 @@ describe("dead foreign worker: Studio lease recovery", () => {
     await ledger.heartbeatWorker({ workerId: "worker-a-dies", serviceVersion: "x", browserReady: true, attestation: null, detail: {}, observedAt: new Date() });
     await workerB.worker.maintainSessions();
     expect(await ledger.getBrowserLease(runId)).not.toBeNull();
-    // The exchange cannot be verified not live: no release either.
-    await advance(60_000);
+    // The exchange cannot be verified not live: no release either (past the
+    // heartbeat staleness plus its clock-skew margin, 30 s + 60 s).
+    await advance(120_000);
     workerB.driver.recoverResult = (id) => recoveryEvents(id).map((event) => event.kind === "studio.cleanup.exchange_ended" ? { ...event, payload: { ...event.payload, confirmed: false, status: "uncertain", basis: "live_exchange_not_joined_to_run" }, dedupeKey: `uncertain:${id}` } : event);
     await workerB.worker.maintainSessions();
     expect(await ledger.getBrowserLease(runId)).not.toBeNull();
     // The ledger itself refuses a release without a matching verification.
     expect(await ledger.releaseDeadOwnerStudioBrowserLease(runId, { verificationId: randomUUID(), tokenMaxLifetimeMs: 3_600_000, heartbeatStaleMs: 30_000 })).toEqual({ released: false, reason: "fresh_exchange_verification_missing" });
     expect(await ledger.getRun(runId)).toMatchObject({ cleanupComplete: false });
+  }, 60_000);
+});
+
+/** A fresh worker B process for worker A's run: its driver retains nothing about the run. */
+async function workerBFor(ledger: VoiceLabLedger, a: Harness, workerId = "worker-b-recovers"): Promise<Harness> {
+  const audio = new AudioResolver(a.config);
+  await audio.initialize();
+  const driverB = new ScriptedStudioDriver((await ledger.getRun(a.runId))!);
+  return { ...a, driver: driverB, worker: new VoiceLabWorker(workerId, ledger, a.config, audio, driverB as unknown as VoiceBrowserDriver, new CapabilityCodec(a.config.capabilitySecret, a.config.capabilityIssuer, a.config.capabilityTtlSeconds), pino({ level: "silent" })) };
+}
+
+/** What a real driver persists when its own End/abort completed: exchange ended, global sign-out, browser closed. */
+function ownerCleanupEvents(runId: string, bindEpoch: boolean) {
+  return [
+    { kind: "studio.cleanup.exchange_ended", source: "canonical" as const, payload: { confirmed: true, status: "confirmed", basis: "api_end", exchange_id: EXCHANGE_UUID, join: "retained", ownership: "proven", verified_by: "member_snapshot" }, dedupeKey: `owner-ended:${runId}` },
+    { kind: "studio.cleanup.signed_out", source: "canonical" as const, payload: { schema: "sophia_voice_lab_studio_sign_out_v1", scope: "global", confirmed: true, http_status: 204, basis: "global_logout_accepted", session_basis: "held_session", credentials_excluded: true }, dedupeKey: `owner-signed-out:${runId}` },
+    { kind: "cleanup.browser_context_closed", source: "browser" as const, payload: { schema: "sophia_voice_lab_execution_epoch_browser_cleanup_v1", close_resolved: true, browser_registry_absent: true, browser_process_close_resolved: true, browser_process_disconnected: true, reason: "normal_end", ...(bindEpoch ? { execution_epoch_sha256: sha256(`epoch:${runId}`) } : {}) }, dedupeKey: `cleanup:${runId}:browser` },
+  ];
+}
+
+describe("adversarial review: dead owner whose own cleanup completed (P2-1)", () => {
+  it("releases the lease of an owner that finished its own cleanup for that lease epoch, then admits the next run", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date());
+    const ledger = new MemoryVoiceLabLedger("test");
+    const advance = async (ms: number) => { vi.setSystemTime(new Date(Date.now() + ms)); };
+    const a = await harness("worker-a-finished-cleanup", ledger);
+    await a.worker.runOnce();
+    await voice(a, "create");
+    // A's End/abort persisted all of its cleanup, then A died before deleting its lease.
+    await ledger.appendEvents(a.runId, ownerCleanupEvents(a.runId, true));
+    expect(await ledger.getBrowserLease(a.runId)).toMatchObject({ workerId: "worker-a-finished-cleanup" });
+    const b = await workerBFor(ledger, a);
+    await advance(40_000);
+    for (let pass = 0; pass < 13 && (await ledger.getBrowserLease(a.runId)) !== null; pass += 1) {
+      await b.worker.maintainSessions();
+      await advance(30 * 60_000);
+    }
+    expect(await ledger.getBrowserLease(a.runId)).toBeNull();
+    const events = (await ledger.listEvents(a.runId, 0, 1_000)).events;
+    expect(events.find((event) => event.kind === "cleanup.browser_lease_released")?.payload).toMatchObject({ schema: STUDIO_DEAD_OWNER_LEASE_RELEASE_SCHEMA, cas_deleted: true, dead_owner_cleanup_complete: true, browser_close: "proven_by_owner_epoch" });
+    await b.worker.maintainSessions();
+    expect(await ledger.getRun(a.runId)).toMatchObject({ cleanupComplete: true });
+    const next = await a.service.startStudioG7Run(caller, { ...START, idempotency_key: newIdempotencyKey("after-dead-owner") });
+    expect(next.status).toBe("accepted");
+  }, 60_000);
+
+  it("re-verifies through an API-only recovery when the dead owner's cleanup cannot be bound to its lease epoch", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date());
+    const ledger = new MemoryVoiceLabLedger("test");
+    const advance = async (ms: number) => { vi.setSystemTime(new Date(Date.now() + ms)); };
+    const a = await harness("worker-a-unbound-cleanup", ledger);
+    await a.worker.runOnce();
+    await voice(a, "create");
+    await ledger.appendEvents(a.runId, ownerCleanupEvents(a.runId, false));
+    const b = await workerBFor(ledger, a);
+    b.driver.recoverResult = recoveryEvents;
+    await advance(40_000);
+    await b.worker.maintainSessions();
+    await advance(1_000);
+    await b.worker.maintainSessions();
+    // Not short-circuited by the (unbound) complete proof: B signs in, re-verifies and signs out.
+    expect(b.driver.calls).toContain("recover");
+    expect(await ledger.getBrowserLease(a.runId)).not.toBeNull();
+    await advance(61 * 60_000);
+    await b.worker.maintainSessions();
+    expect(await ledger.getBrowserLease(a.runId)).toBeNull();
+    const events = (await ledger.listEvents(a.runId, 0, 1_000)).events;
+    expect(events.find((event) => event.kind === "cleanup.browser_lease_released")?.payload).toMatchObject({ dead_owner_quiesced: true, browser_close: "unobservable_owner_dead" });
+  }, 60_000);
+});
+
+describe("adversarial review: G7 step singularity and legacy tools (P3-3, P3-4)", () => {
+  it("performs a step at most once when two different keys race for it", async () => {
+    const h = await harness();
+    await h.worker.runOnce();
+    const calls = [1, 2].map((n) => h.service.studioG7Action(caller, { run_id: h.runId, action: "section_revision", instruction: "Shorten the introduction", idempotency_key: newIdempotencyKey(`race-${n}`) }));
+    let settled = false;
+    const all = Promise.allSettled(calls).finally(() => { settled = true; });
+    while (!settled) { if (!(await h.worker.runOnce())) await delay(10); }
+    const results = await all;
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    const rejected = results.find((result) => result.status === "rejected") as PromiseRejectedResult | undefined;
+    expect(rejected?.reason).toMatchObject({ detail: { code: expect.stringMatching(/^STUDIO_G7_STEP_(IN_FLIGHT|ALREADY_PERFORMED)$/) } });
+    expect(h.driver.calls.filter((call) => call === "action:section_revision")).toHaveLength(1);
+    expect((await h.ledger.listOperations(h.runId)).filter((operation) => operation.type === "studio_action" && operation.input.action === "section_revision")).toHaveLength(1);
+  }, 60_000);
+
+  it("answers legacy speak, barge_in and force_socket_rotation on the Studio kind as unsupported_for_target, and the worker refuses a legacy speak", async () => {
+    const h = await harness();
+    await h.worker.runOnce();
+    await voice(h, "create");
+    const unsupported = { detail: { code: "SCENARIO_UNSUPPORTED_FOR_TARGET", details: { status: "unsupported_for_target" } } };
+    await expect(h.service.speak(caller, { run_id: h.runId, fixture_id: "a02_short_command", idempotency_key: newIdempotencyKey("legacy-speak") })).rejects.toMatchObject(unsupported);
+    await expect(h.service.bargeIn(caller, { run_id: h.runId, fixture_id: "a02_short_command", after_output_event_seq: 1, delay_ms: 0, max_lateness_ms: 500, idempotency_key: newIdempotencyKey("legacy-barge") })).rejects.toMatchObject(unsupported);
+    const faultCaller: AuthenticatedCaller = { subject: caller.subject, scopes: new Set([...caller.scopes, "voice_lab:fault"]) };
+    await expect(h.service.forceSocketRotation(faultCaller, { run_id: h.runId, expected_socket_epoch: 0, idempotency_key: newIdempotencyKey("legacy-rotate") })).rejects.toMatchObject(unsupported);
+    expect(h.driver.calls.filter((call) => call.startsWith("schedule:"))).toHaveLength(1);
+    // A legacy speak row that reached the ledger anyway (no G7 step) is refused when the worker executes it.
+    const legacy = await h.ledger.createOperation({ id: randomUUID(), runId: h.runId, callerId: caller.subject, type: "speak", idempotencyKey: newIdempotencyKey("legacy-row"), requestHash: sha256("legacy-row"), input: { run_id: h.runId, fixture_id: "a02_short_command" } });
+    while (await h.worker.runOnce()) { /* drain */ }
+    expect(await h.ledger.getOperation(legacy.operation.id)).toMatchObject({ state: "failed", error: { code: "SCENARIO_UNSUPPORTED_FOR_TARGET" } });
+    expect(h.driver.calls.filter((call) => call.startsWith("schedule:"))).toHaveLength(1);
+  }, 60_000);
+});
+
+describe("adversarial review: dead-owner token lifetime clamp (P3-6)", () => {
+  it("never shortens the wait below the access-token lifetime the product actually issued", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date());
+    const ledger = new MemoryVoiceLabLedger("test");
+    const advance = async (ms: number) => { vi.setSystemTime(new Date(Date.now() + ms)); };
+    const a = await harness("worker-a-long-jwt", ledger);
+    // The product issued 2 h JWTs although the Lab is configured for 1 h.
+    a.driver.sessionExpiresInS = 7_200;
+    await a.worker.runOnce();
+    await voice(a, "create");
+    const b = await workerBFor(ledger, a);
+    b.driver.recoverResult = recoveryEvents;
+    await advance(40_000);
+    await b.worker.maintainSessions();
+    await advance(1_000);
+    await b.worker.maintainSessions();
+    await advance(61 * 60_000);
+    await b.worker.maintainSessions();
+    // One configured hour is not enough: the orphan's 2 h JWT could still be valid.
+    expect(await ledger.getBrowserLease(a.runId)).not.toBeNull();
+    await advance(60 * 60_000);
+    await b.worker.maintainSessions();
+    expect(await ledger.getBrowserLease(a.runId)).toBeNull();
   }, 60_000);
 });

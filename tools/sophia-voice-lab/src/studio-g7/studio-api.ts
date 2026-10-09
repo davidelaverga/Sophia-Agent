@@ -252,7 +252,13 @@ export class StudioApiClient {
     const response = await this.#request("GET", `/api/v1/projects/${encodeURIComponent(projectId)}/snapshot`, accessToken);
     if (response.status === 401 || response.status === 403) throw new VoiceLabError(labError("STUDIO_API_AUTH_REJECTED", "The member API rejected the synthetic principal's session.", "authorization", true, { http_status: response.status }));
     if (!response.ok) throw new VoiceLabError(labError("STUDIO_SNAPSHOT_UNAVAILABLE", "The project snapshot could not be read.", "product", true, { http_status: response.status }));
-    return projectRoomSnapshot(await readJson(response));
+    try { return projectRoomSnapshot(await readJson(response)); }
+    catch (error) {
+      // A 200 without a well-formed room answers nothing about the exchange:
+      // unknown, never "no live exchange".
+      if (error instanceof StudioContractViolation) throw new VoiceLabError(labError("STUDIO_SNAPSHOT_MALFORMED", "The project snapshot did not carry a well-formed room exchange state.", "product", true, { http_status: response.status, reason: error.reason, path: error.path }));
+      throw error;
+    }
   }
 
   async qualificationEvidence(exchangeId: string, accessToken: string): Promise<EvidenceRead> {
@@ -466,18 +472,28 @@ export function parseStudioBuildMeta(html: string, httpStatus: number | null = n
   return { status: "unavailable", reason: "identity_not_published", http_status: httpStatus };
 }
 
-/** Extract only the joins the adapter needs from the member snapshot. */
+/**
+ * Extract only the joins the adapter needs from the member snapshot.
+ *
+ * The room's Sophia presence (`room.sophia.exchange`, always one of
+ * none/open/paused in the product contract) is required: a body without it,
+ * or a live state without a UUID exchange id, throws StudioContractViolation
+ * so the caller types the exchange state unknown rather than "none".
+ */
 export function projectRoomSnapshot(body: unknown): StudioRoomSnapshot {
-  const root = record(body) ?? {};
-  const room = record(root.room);
+  const root = record(body);
+  const room = record(root?.room);
   const sophia = record(room?.sophia);
-  const roomId = typeof room?.id === "string" && /^[A-Za-z0-9._:-]{1,128}$/.test(room.id) ? room.id : null;
-  const exchangeState = sophia?.exchange === "none" || sophia?.exchange === "open" || sophia?.exchange === "paused" ? sophia.exchange : null;
-  const rawExchangeId = uuidOrNull(sophia?.exchangeId);
-  // `exchange: none` means no live exchange whatever id is echoed; an answer
-  // without the state field falls back to the id alone.
+  if (!root || !room) throw new StudioContractViolation("snapshot_room_missing", "room");
+  if (!sophia) throw new StudioContractViolation("snapshot_sophia_presence_missing", "room.sophia");
+  const roomId = typeof room.id === "string" && /^[A-Za-z0-9._:-]{1,128}$/.test(room.id) ? room.id : null;
+  const exchangeState = sophia.exchange === "none" || sophia.exchange === "open" || sophia.exchange === "paused" ? sophia.exchange : null;
+  if (exchangeState === null) throw new StudioContractViolation("snapshot_exchange_state_malformed", "room.sophia.exchange");
+  const rawExchangeId = uuidOrNull(sophia.exchangeId);
+  if (exchangeState !== "none" && rawExchangeId === null) throw new StudioContractViolation("snapshot_exchange_id_malformed", "room.sophia.exchangeId");
+  // `exchange: none` means no live exchange whatever id is echoed.
   const exchangeId = exchangeState === "none" ? null : rawExchangeId;
-  const inputEpoch = typeof sophia?.inputEpoch === "number" && Number.isSafeInteger(sophia.inputEpoch) && sophia.inputEpoch >= 0 ? sophia.inputEpoch : null;
+  const inputEpoch = typeof sophia.inputEpoch === "number" && Number.isSafeInteger(sophia.inputEpoch) && sophia.inputEpoch >= 0 ? sophia.inputEpoch : null;
   const work = Array.isArray(root.work) ? (root.work as unknown[]).slice(0, 200).map(projectTask).filter((task): task is ProjectedTask => task !== null) : [];
-  return { roomIdPresent: roomId !== null, roomId, exchangeId, exchangeState, inputEpoch, inputActorId: uuidOrNull(sophia?.inputActorId), work };
+  return { roomIdPresent: roomId !== null, roomId, exchangeId, exchangeState, inputEpoch, inputActorId: uuidOrNull(sophia.inputActorId), work };
 }

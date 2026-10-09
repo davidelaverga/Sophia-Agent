@@ -33,6 +33,7 @@ function resolveChromium(): string | null {
 
 const executablePath = resolveChromium();
 const OTHER_PRINCIPAL = "12345678-1234-4234-8234-123456789abc";
+const OTHER_EXCHANGE = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
 const FREE_TEXT = ["Build me a page about river otters", "secret research markdown body", "the user's dog is called Rex", "Make the introduction shorter please", "A newer version of this report exists"];
 const PREVIEW_PROOF = `v1.1791500000.${"c".repeat(64)}`;
 const SIGNATURE = "X-Amz-Signature=fakesignature0123456789";
@@ -70,6 +71,7 @@ describe.skipIf(executablePath === null)("Studio G7 driver against a local fake 
   const api = {
     exchangeId: null as string | null, inputActorId: PRINCIPAL_UUID, evidenceMode: "ok" as "ok" | "missing" | "foreign",
     receipts: [] as Row[], calls: [] as string[], grant: null as Record<string, unknown> | null, onEnd: null as (() => void) | null,
+    onEvidence: null as (() => void) | null, openDelayMs: 0, ended: [] as string[],
     work: [] as Array<Record<string, unknown>>, tasks: new Map<string, Record<string, unknown>>(), versions: new Map<string, Array<Record<string, unknown>>>(),
     contents: new Map<string, Buffer>(), mission: [] as Array<Record<string, unknown>>, edits: new Map<string, { status: number; body: unknown }>(), withdrawals: [] as unknown[],
   };
@@ -143,7 +145,11 @@ describe.skipIf(executablePath === null)("Studio G7 driver against a local fake 
       if (!tokens.issued.has(token) || tokens.revoked.has(token)) { json(401, { error: "unauthorized" }); return; }
       api.calls.push(`${request.method} ${url.pathname}`);
       const path = url.pathname;
-      if (request.method === "POST" && path === `/test/projects/${PROJECT_UUID}/exchanges`) { api.exchangeId = EXCHANGE_UUID; json(200, { exchangeId: EXCHANGE_UUID }); return; }
+      if (request.method === "POST" && path === `/test/projects/${PROJECT_UUID}/exchanges`) {
+        const open = () => { api.exchangeId = EXCHANGE_UUID; json(200, { exchangeId: EXCHANGE_UUID }); };
+        if (api.openDelayMs > 0) setTimeout(open, api.openDelayMs); else open();
+        return;
+      }
       if (request.method === "GET" && path === `/api/v1/projects/${PROJECT_UUID}/snapshot`) {
         json(200, { projectId: PROJECT_UUID, title: "Synthetic", room: { id: "room-g7-test", revision: 1, inputActorId: api.exchangeId ? api.inputActorId : null, mode: "invoked", sophia: { exchangeId: api.exchangeId, exchange: api.exchangeId ? "open" : "none", inputEpoch: 1, inputActorId: api.exchangeId ? api.inputActorId : null } }, work: api.work });
         return;
@@ -152,9 +158,18 @@ describe.skipIf(executablePath === null)("Studio G7 driver against a local fake 
         if (api.evidenceMode === "missing" || !api.grant) { json(404, { code: "not_found", message: "Qualification evidence not found" }); return; }
         const grant = api.evidenceMode === "foreign" ? { ...api.grant, runBindingSha256: "e".repeat(64) } : api.grant;
         json(200, { exchangeId: EXCHANGE_UUID, state: api.exchangeId === EXCHANGE_UUID ? "open" : "ended", grant, receipts: api.evidenceMode === "foreign" ? [] : [...api.receipts].sort((left, right) => left.source === right.source ? left.seq - right.seq : left.source < right.source ? -1 : 1) });
+        // Product changes that land right after this answer (e.g. the guard ends the exchange).
+        api.onEvidence?.();
         return;
       }
-      if (request.method === "POST" && path === `/api/v1/exchanges/${EXCHANGE_UUID}/end`) { api.exchangeId = null; api.onEnd?.(); api.onEnd = null; response.writeHead(204, cors).end(); return; }
+      const endMatch = /^\/api\/v1\/exchanges\/([0-9a-f-]{36})\/end$/.exec(path);
+      if (request.method === "POST" && endMatch) {
+        // End is id-bound: it ends exactly the named exchange, if it is the live one.
+        api.ended.push(endMatch[1]!);
+        if (api.exchangeId === endMatch[1]) { api.exchangeId = null; api.onEnd?.(); api.onEnd = null; }
+        response.writeHead(204, cors).end();
+        return;
+      }
       const taskMatch = new RegExp(`^/api/v1/projects/${PROJECT_UUID}/native-tasks/([0-9a-f-]{36})$`).exec(path);
       if (request.method === "GET" && taskMatch) { const detail = api.tasks.get(taskMatch[1]!); if (detail) json(200, detail); else json(404, { code: "not_found", message: "Task not found" }); return; }
       const versionsMatch = /^\/api\/v1\/artifacts\/([0-9a-f-]{36})\/versions$/.exec(path);
@@ -243,7 +258,10 @@ else {
     emit('sophia_playback', { phase: 'playing', trackSid: sophiaSid, mediaTimeMs: 0 });
   };
   end.onclick = async () => {
-    if (exchangeId) await fetch(cfg.api + '/api/v1/exchanges/' + exchangeId + '/end', { method: 'POST', headers: { authorization: 'Bearer ' + session.access_token } });
+    // Like the room UI, End acts on whatever exchange the room shows now.
+    const shown = await (await fetch(cfg.api + '/api/v1/projects/' + cfg.projectId + '/snapshot', { headers: { authorization: 'Bearer ' + session.access_token } })).json();
+    const current = shown && shown.room && shown.room.sophia ? shown.room.sophia.exchangeId : null;
+    if (current) await fetch(cfg.api + '/api/v1/exchanges/' + current + '/end', { method: 'POST', headers: { authorization: 'Bearer ' + session.access_token } });
     emit('sophia_playback', { phase: 'pause', trackSid: sophiaSid, mediaTimeMs: 1200 });
   };
 }
@@ -280,6 +298,9 @@ else {
     api.exchangeId = null;
     api.inputActorId = PRINCIPAL_UUID;
     api.evidenceMode = "ok";
+    api.onEvidence = null;
+    api.openDelayMs = 0;
+    api.ended.length = 0;
     api.calls.length = 0;
     api.receipts = [];
     api.work = [];
@@ -307,6 +328,8 @@ else {
     expect(durable.indexOf("studio.exchange.opened")).toBeGreaterThan(durable.indexOf("studio.exchange.speak_requested"));
     expect(started.events.find((event) => event.kind === "studio.exchange.opened")?.payload).toMatchObject({ exchange_id: EXCHANGE_UUID, grant_id: page.grantId, input_actor_is_principal: true });
     expect(started.events.find((event) => event.kind === "studio.exchange.ownership")?.payload).toMatchObject({ status: "proven", run_binding_matches: true });
+    // The access-JWT lifetime the product issued is durable (it bounds a dead owner's lease release).
+    expect(started.events.find((event) => event.kind === "studio.auth.session_established")?.payload).toMatchObject({ expires_in_s: 3_600 });
 
     push("provider", providerReceipt(run, seq++, "ready"));
     const operations: OperationRecord[] = [];
@@ -361,7 +384,10 @@ else {
     operations.push({ ...speakOperation(run, new Date(Date.now() + 100)), type: "end", input: {}, result: {} });
     expect(driver.hasSession(run.id)).toBe(false);
     expect(api.exchangeId).toBeNull();
-    expect(ended.events.find((event) => event.kind === "studio.cleanup.exchange_ended")?.payload).toMatchObject({ confirmed: true, basis: "ui_end", ownership: "proven", verified_by: "member_snapshot" });
+    // End is requested only as the id-bound API End of the proven exchange, never by the room UI.
+    expect(ended.events.find((event) => event.kind === "studio.cleanup.exchange_ended")?.payload).toMatchObject({ confirmed: true, basis: "api_end", ownership: "proven", verified_by: "member_snapshot" });
+    expect(ended.events.filter((event) => event.kind === "studio.exchange.end_requested").map((event) => event.payload.basis)).toEqual(["api_end"]);
+    expect(api.ended).toEqual([EXCHANGE_UUID]);
     expect(ended.events.find((event) => event.kind === "studio.cleanup.signed_out")?.payload).toMatchObject({ confirmed: true, scope: "global" });
     expect(ended.events.find((event) => event.kind === "cleanup.browser_context_closed")?.payload).toMatchObject({ close_resolved: true, browser_process_close_resolved: true });
 
@@ -495,4 +521,39 @@ else {
     expect(aborted.events.some((event) => event.kind === "cleanup.capture_unavailable")).toBe(true);
     expect(driver.hasSession(run.id)).toBe(false);
   }, 90_000);
+
+  it("ends only the proven exchange by id: another member's exchange that replaced it after the proof is never ended", async () => {
+    const { driver, run } = harness();
+    const started = await driver.start(run, "unused");
+    expect(started.events.find((event) => event.kind === "studio.exchange.ownership")?.payload).toMatchObject({ status: "proven" });
+    // Right after End's ownership proof (the second evidence read of end():
+    // the final drain reads it first), the guard ends the run's exchange and
+    // another member opens a new one in the same room.
+    let reads = 0;
+    api.onEvidence = () => { reads += 1; if (reads === 2) { api.exchangeId = OTHER_EXCHANGE; api.inputActorId = OTHER_PRINCIPAL; } };
+    const ended = await driver.end(run, "unused", "unused");
+    expect(api.exchangeId).toBe(OTHER_EXCHANGE);
+    expect(api.ended).not.toContain(OTHER_EXCHANGE);
+    expect(api.ended.every((id) => id === EXCHANGE_UUID)).toBe(true);
+    expect(ended.events.filter((event) => event.kind === "studio.exchange.end_requested").map((event) => event.payload.basis)).not.toContain("ui_end");
+    expect(ended.events.find((event) => event.kind === "studio.exchange.ownership")?.payload).toMatchObject({ status: "proven", exchange_id: EXCHANGE_UUID });
+    expect(ended.events.find((event) => event.kind === "studio.cleanup.exchange_ended")?.payload).toMatchObject({ confirmed: true, exchange_id: EXCHANGE_UUID });
+  }, 120_000);
+
+  it("a run-deadline watchdog firing while Speak is still opening the exchange never confirms it ended", async () => {
+    const { driver, run } = harness();
+    api.openDelayMs = 3_000;
+    const starting = driver.start(run, "unused");
+    const deadline = Date.now() + 60_000;
+    while (!(driver.exchangeJoin(run.id)?.speakRequested === true && driver.exchangeJoin(run.id)?.exchangeId === null && api.calls.includes(`POST /test/projects/${PROJECT_UUID}/exchanges`)) && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    expect(api.exchangeId).toBeNull();
+    const fired = await driver.fireWatchdog(run.id);
+    expect(fired.find((event) => event.kind === "studio.cleanup.exchange_ended")?.payload).toMatchObject({ confirmed: false, status: "uncertain" });
+    await starting;
+    expect(api.exchangeId).toBe(EXCHANGE_UUID);
+    await driver.end(run, "unused", "unused");
+    expect(api.exchangeId).toBeNull();
+  }, 120_000);
 });

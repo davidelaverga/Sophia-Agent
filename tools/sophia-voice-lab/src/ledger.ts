@@ -270,7 +270,7 @@ export interface VoiceLabLedger {
    * studio-g7/lease-release.ts). Evaluated in one transaction on the
    * ledger's own clock; never acquires or extends the lease.
    */
-  releaseDeadOwnerStudioBrowserLease(runId: string, proof: { verificationId: string; tokenMaxLifetimeMs: number; heartbeatStaleMs: number }): Promise<{ released: boolean; reason: string }>;
+  releaseDeadOwnerStudioBrowserLease(runId: string, proof: { verificationId: string | null; tokenMaxLifetimeMs: number; heartbeatStaleMs: number }): Promise<{ released: boolean; reason: string }>;
   /** Observe expired leases without deleting their durable recovery receipts. */
   reapExpiredBrowserLeases(now?: Date, limit?: number, afterRunId?: string): Promise<BrowserLease[]>;
   heartbeatWorker(heartbeat: WorkerHeartbeat): Promise<void>;

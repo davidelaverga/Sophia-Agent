@@ -1,4 +1,5 @@
-import { decideStudioDeadOwnerRelease, STUDIO_DEAD_OWNER_VERIFIED_KIND } from "./studio-g7/lease-release.js";
+import { decideStudioDeadOwnerRelease, STUDIO_DATABASE_CLOCK_EVENT_KINDS, STUDIO_DEAD_OWNER_DECISION_EVENT_KINDS } from "./studio-g7/lease-release.js";
+import { studioStepConflict, studioStepOf } from "./studio-g7/step-guard.js";
 import pg from "pg";
 import { CANONICAL_EVIDENCE_REFRESH_BASE_BACKOFF_MS, CANONICAL_EVIDENCE_REFRESH_EVENT, CANONICAL_EVIDENCE_REFRESH_MAX_ATTEMPTS } from "./canonical-evidence-refresh.js";
 import { retentionHmac } from "./retention-identity.js";
@@ -304,6 +305,13 @@ export class PostgresVoiceLabLedger implements VoiceLabLedger {
         [operation.runId],
       );
       if (d02Fence.rows[0]) throw conflict("D02_RUN_FROZEN", "The D02 browser-worker termination freeze forbids every new run operation.");
+      if (studioStepOf(operation) !== null) {
+        // Studio G7: a step at most once per run, under the run row lock held
+        // above, so two concurrent keys for one step cannot both be inserted.
+        const siblings = await client.query(`select * from ${SCHEMA}.operations where run_id=$1 and type in ('speak','studio_action')`, [operation.runId]);
+        const stepConflict = studioStepConflict(siblings.rows.map(mapOperation), operation);
+        if (stepConflict) throw stepConflict;
+      }
       if (admission && (operation.type === "speak" || operation.type === "barge_in")) {
         const usage = await client.query<{ utterances: string; duration_ms: string; injected_bytes: string; latest_at: Date | null }>(
           `select count(*)::text as utterances,
@@ -458,8 +466,8 @@ export class PostgresVoiceLabLedger implements VoiceLabLedger {
         await client.query(`update ${SCHEMA}.recovery_controls set d02_journal=$2,version=version+1 where run_id=$1`, [runId, journal]);
       }
       const inserted = await client.query(
-        `insert into ${SCHEMA}.run_events (run_id,seq,kind,source,payload,dedupe_key,observed_at) values ($1,$2,$3,$4,$5,$6,$7) returning *`,
-        [runId, seq, kind, source, payload, dedupeKey ?? null, observedAt],
+        `insert into ${SCHEMA}.run_events (run_id,seq,kind,source,payload,dedupe_key,observed_at) values ($1,$2,$3,$4,$5,$6,${DATABASE_CLOCK_OBSERVED_AT("$3", "$7", "$8")}) returning *`,
+        [runId, seq, kind, source, payload, dedupeKey ?? null, observedAt, STUDIO_DATABASE_CLOCK_EVENT_KINDS],
       );
       await client.query(`update ${SCHEMA}.runs set latest_cursor=$2,updated_at=now() where id=$1`, [runId, seq]);
       await client.query("commit");
@@ -477,8 +485,8 @@ export class PostgresVoiceLabLedger implements VoiceLabLedger {
       if (!locked.rows[0]) throw notFound("RUN_NOT_FOUND", "Run was not found.");
       const seq = Number(locked.rows[0].latest_cursor) + 1;
       const inserted = await client.query(
-        `insert into ${SCHEMA}.run_events (run_id,seq,kind,source,payload,dedupe_key,observed_at) values ($1,$2,$3,$4,$5,$6,$7) returning *`,
-        [runId, seq, kind, source, payload, null, observedAt],
+        `insert into ${SCHEMA}.run_events (run_id,seq,kind,source,payload,dedupe_key,observed_at) values ($1,$2,$3,$4,$5,$6,${DATABASE_CLOCK_OBSERVED_AT("$3", "$7", "$8")}) returning *`,
+        [runId, seq, kind, source, payload, null, observedAt, STUDIO_DATABASE_CLOCK_EVENT_KINDS],
       );
       await client.query(`update ${SCHEMA}.runs set latest_cursor=$2,updated_at=now() where id=$1`, [runId, seq]);
       await client.query("commit");
@@ -519,7 +527,7 @@ export class PostgresVoiceLabLedger implements VoiceLabLedger {
       if (pending.length > 0) {
         const insertedResult = await client.query(
           `insert into ${SCHEMA}.run_events (run_id,seq,kind,source,payload,dedupe_key,observed_at)
-           select $1, $2 + ordinal::integer, kind, source, payload::jsonb, dedupe_key, observed_at
+           select $1, $2 + ordinal::integer, kind, source, payload::jsonb, dedupe_key, ${DATABASE_CLOCK_OBSERVED_AT("kind", "observed_at", "$8")}
            from unnest($3::text[],$4::text[],$5::text[],$6::text[],$7::timestamptz[])
              with ordinality as batch(kind,source,payload,dedupe_key,observed_at,ordinal)
            returning *`,
@@ -531,6 +539,7 @@ export class PostgresVoiceLabLedger implements VoiceLabLedger {
             pending.map((input) => JSON.stringify(input.payload)),
             pending.map((input) => input.dedupeKey ?? null),
             pending.map((input) => input.observedAt ?? new Date()),
+            STUDIO_DATABASE_CLOCK_EVENT_KINDS,
           ],
         );
         inserted = insertedResult.rows.map(mapEvent);
@@ -765,7 +774,7 @@ export class PostgresVoiceLabLedger implements VoiceLabLedger {
     return new PostgresRecoveryControls(this.pool).releaseRecoveredBrowserLease(runId);
   }
 
-  async releaseDeadOwnerStudioBrowserLease(runId: string, proof: { verificationId: string; tokenMaxLifetimeMs: number; heartbeatStaleMs: number }): Promise<{ released: boolean; reason: string }> {
+  async releaseDeadOwnerStudioBrowserLease(runId: string, proof: { verificationId: string | null; tokenMaxLifetimeMs: number; heartbeatStaleMs: number }): Promise<{ released: boolean; reason: string }> {
     const client = await this.pool.connect();
     try {
       await client.query("begin");
@@ -774,7 +783,7 @@ export class PostgresVoiceLabLedger implements VoiceLabLedger {
       const run = runs.rows[0], lease = leases.rows[0];
       if (!run || !lease) { await client.query("rollback"); return { released: false, reason: !run ? "run_missing" : "lease_absent" }; }
       const heartbeat = await client.query(`select observed_at from ${SCHEMA}.worker_heartbeats where worker_id=$1`, [lease.worker_id]);
-      const events = await client.query(`select * from ${SCHEMA}.run_events where run_id=$1 and kind = any($2::text[]) order by seq`, [runId, ["studio.cleanup.signed_out", STUDIO_DEAD_OWNER_VERIFIED_KIND]]);
+      const events = await client.query(`select * from ${SCHEMA}.run_events where run_id=$1 and kind = any($2::text[]) order by seq`, [runId, STUDIO_DEAD_OWNER_DECISION_EVENT_KINDS]);
       const decision = decideStudioDeadOwnerRelease({
         run: { state: run.state, scenarioVersion: run.scenario_version },
         lease: { workerId: lease.worker_id, leaseEpoch: Number(lease.lease_epoch), expiresAt: new Date(lease.expires_at) },
@@ -785,7 +794,7 @@ export class PostgresVoiceLabLedger implements VoiceLabLedger {
       // Release the exact dead execution, never acquire or impersonate its owner.
       const deleted = await client.query(`delete from ${SCHEMA}.browser_leases where run_id=$1 and worker_id=$2 and lease_epoch=$3 and expires_at<=clock_timestamp()`, [runId, lease.worker_id, lease.lease_epoch]);
       await client.query("commit");
-      return deleted.rowCount === 1 ? { released: true, reason: "dead_owner_quiesced" } : { released: false, reason: "lease_changed" };
+      return deleted.rowCount === 1 ? { released: true, reason: decision.basis === "owner_cleanup_complete" ? "dead_owner_cleanup_complete" : "dead_owner_quiesced" } : { released: false, reason: "lease_changed" };
     } catch (error) { await client.query("rollback").catch(() => undefined); throw error; }
     finally { client.release(); }
   }
@@ -1155,6 +1164,14 @@ function mapPrincipalProvision(row: any): PrincipalProvisionControlRecord {
 function assertSameRequest(operation: OperationRecord, requestHash: string): void { if (operation.requestHash !== requestHash) throw conflict("IDEMPOTENCY_CONFLICT", "Idempotency key was reused with different arguments."); }
 function conflict(code: string, message: string): VoiceLabError { return new VoiceLabError(labError(code, message, "conflict")); }
 function notFound(code: string, message: string): VoiceLabError { return new VoiceLabError(labError(code, message, "validation")); }
+/**
+ * Ordering-critical Studio events (lease-release.ts) carry the database's
+ * clock, the same clock as lease expiry, never the appending worker's.
+ */
+function DATABASE_CLOCK_OBSERVED_AT(kind: string, observedAt: string, kinds: string): string {
+  return `(case when ${kind} = any(${kinds}::text[]) then clock_timestamp() else ${observedAt}::timestamptz end)`;
+}
+
 function translatePgError(error: unknown): Error {
   if (error instanceof VoiceLabError) return error;
   const code = typeof error === "object" && error !== null && "code" in error ? String((error as { code: unknown }).code) : "";
