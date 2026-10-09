@@ -172,7 +172,7 @@ export function labUtterance(log: EventLog, operationId: string, startMs: number
 
 /** Cleanup proofs the Studio driver and worker author on a normal end. */
 export function cleanupEvents(log: EventLog): void {
-  log.add("studio.cleanup.exchange_ended", "canonical", { confirmed: true, status: "confirmed", basis: "ui_end", exchange_id: EXCHANGE_UUID, join: "retained", ownership: "proven", verified_by: "member_snapshot" });
+  log.add("studio.cleanup.exchange_ended", "canonical", { confirmed: true, status: "confirmed", basis: "api_end", exchange_id: EXCHANGE_UUID, join: "retained", ownership: "proven", verified_by: "member_snapshot", speak_requested_before_observation: true });
   log.add("studio.cleanup.signed_out", "canonical", { schema: "sophia_voice_lab_studio_sign_out_v1", scope: "global", confirmed: true, http_status: 204, basis: "global_logout_accepted" });
   log.add("cleanup.browser_context_closed", "browser", { close_resolved: true, browser_registry_absent: true, browser_process_close_resolved: true });
   log.add("cleanup.browser_lease_released", "worker", { cas_deleted: true });

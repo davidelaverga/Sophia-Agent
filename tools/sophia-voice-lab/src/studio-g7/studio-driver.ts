@@ -60,6 +60,8 @@ export const OUTCOME_WINDOW_TOLERANCE_MS = 120_000;
 const MAX_OBSERVED_TASKS = 12;
 const MAX_VERIFIED_ARTIFACTS = 4;
 /** A stale edit carries this fixed Lab instruction; it must be refused before anything is admitted. */
+/** Waits before each local revoke attempt of the evidence-refresh session (three attempts). */
+export const STUDIO_REFRESH_REVOKE_BACKOFF_MS: readonly number[] = [0, 500, 1_000];
 export const STALE_EDIT_PROBE_INSTRUCTION = "Voice Lab stale-edit probe: revise this section of a superseded version.";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const SECTION = /^[a-z][a-z0-9-]{0,63}$/;
@@ -84,6 +86,11 @@ const DEFAULT_TIMEOUTS = {
   ariaPressedMs: 10_000,
   micArrivalGraceMs: 5_000,
   exchangeOpenMs: 20_000,
+  /**
+   * How long after Speak an exchange may still appear. Until then, a room with
+   * nothing live proves nothing about the exchange Speak requested.
+   */
+  exchangeOpenWindowMs: 120_000,
   exchangeEndMs: 15_000,
   sessionClosedMs: 10_000,
   uiActionMs: 5_000,
@@ -132,6 +139,8 @@ export interface ExchangeRecord {
   join: "retained" | "durable";
   /** This driver's start is still running (Speak may be opening the exchange right now). */
   startInProgress: boolean;
+  /** When Speak was requested (driver clock), or null if unknown. */
+  speakRequestedAtMs: number | null;
 }
 
 /** The durable join a restarted worker hands the driver (from write-ahead events). */
@@ -141,6 +150,8 @@ export interface DurableStudioJoin {
   runBindingSha256: string;
   speakRequested: boolean;
   exchangeOpenedAtMs: number | null;
+  /** When the durable Speak intent was recorded; anchors the open window. */
+  speakRequestedAtMs?: number | null;
 }
 
 export type OwnershipStatus = "proven" | "unavailable" | "mismatch";
@@ -256,7 +267,7 @@ export class StudioG7Driver implements VoiceBrowserDriver, StudioDriverExtension
     }
     this.#starting.add(run.id);
     const runBindingSha256 = computeRunBindingSha256({ testRunId: run.testRunId, cleanupObligationId: run.cleanupObligationId, scenarioId: run.scenarioId, scenarioVersion: run.scenarioVersion! });
-    this.#exchanges.set(run.id, { exchangeId: null, preexistingExchangeId: null, speakRequested: false, browserLaunched: false, authIssued: false, grantId: null, runBindingSha256, exchangeOpenedAtMs: null, join: "retained", startInProgress: true });
+    this.#exchanges.set(run.id, { exchangeId: null, preexistingExchangeId: null, speakRequested: false, browserLaunched: false, authIssued: false, grantId: null, runBindingSha256, exchangeOpenedAtMs: null, join: "retained", startInProgress: true, speakRequestedAtMs: null });
     try { return await this.#startReserved(run, runBindingSha256, onStage, onAcquired, onDurable); }
     finally {
       const record = this.#exchanges.get(run.id);
@@ -307,14 +318,18 @@ export class StudioG7Driver implements VoiceBrowserDriver, StudioDriverExtension
       payload: { schema: STUDIO_RUN_BINDING_SCHEMA, contract_version: STUDIO_G7_CONTRACT_VERSION, run_binding_sha256: runBindingSha256, scenario_id: run.scenarioId, scenario_version: run.scenarioVersion, test_run_id: run.testRunId, cleanup_obligation_id_sha256: labSha256(run.cleanupObligationId) },
       dedupeKey: `studio-run-binding:${run.id}`,
     };
-    const events: DriverEvent[] = [identity.event, acquisition, declared, {
+    const established: DriverEvent = {
       kind: "studio.auth.session_established", source: "canonical",
       // expires_in_s: the access-JWT lifetime the product issued (a dead
       // owner's lease is never released before it has elapsed).
       payload: { principal_id_sha256: labSha256(run.principalId), principal_bound: true, expires_at: auth.expiresAt, expires_in_s: auth.expiresIn, credentials_excluded: true },
       dedupeKey: `studio-auth:${run.id}:${auth.expiresAt}`,
-    }];
+    };
+    const events: DriverEvent[] = [identity.event, acquisition, declared, established];
     try {
+      // Durable before the browser is seeded with the session: a worker that
+      // dies from here on leaves the issued lifetime for the dead-owner wait.
+      await onDurable?.([declared, established]);
       await onStage?.("browser_init_script");
       const context = await ownership.browser.newContext(VOICE_LAB_BROWSER_CONTEXT_OPTIONS);
       session.context = context;
@@ -353,11 +368,13 @@ export class StudioG7Driver implements VoiceBrowserDriver, StudioDriverExtension
       }
       // Write-ahead: the durable intent precedes the click, so a restarted
       // worker that finds no intent knows this run never opened an exchange.
-      const intentPayload = { grant_id: gate.grantId, run_binding_sha256: runBindingSha256, write_ahead: true };
+      const requestedAt = this.#now();
+      const intentPayload = { grant_id: gate.grantId, run_binding_sha256: runBindingSha256, write_ahead: true, requested_at_lab_ms: requestedAt };
       const intent: DriverEvent = { kind: "studio.exchange.speak_requested", source: "canonical", payload: intentPayload, dedupeKey: `studio-speak-requested:${run.id}` };
       await onDurable?.([...events, intent]);
       events.push(intent);
       this.#state(run.id).speakRequested = true;
+      this.#state(run.id).speakRequestedAtMs = requestedAt;
       await this.#clickControl(session, /^Speak with Sophia$/, this.#timeouts.controlVisibleMs);
       const opened = await this.#awaitExchange(session, run);
       await onDurable?.([opened]);
@@ -572,9 +589,21 @@ export class StudioG7Driver implements VoiceBrowserDriver, StudioDriverExtension
     }
     const held = tokens.held();
     if (held !== null) {
-      const receipt = await signOut({ supabaseUrl: this.studio.supabaseUrl, publishableKey: this.studio.supabasePublishableKey }, held.accessToken, "local", { fetchImpl: this.#fetch });
+      // Revoke only this session, retrying with backoff. Never fall back to a
+      // global sign-out here: a later run of the principal may be live. If it
+      // stays unrevoked the cleanup proof says so (refresh_session_revoked)
+      // until a global sign-out the worker makes only once no other run
+      // holds admission.
+      let receipt: SignOutReceipt | null = null;
+      let attempts = 0;
+      for (const backoffMs of STUDIO_REFRESH_REVOKE_BACKOFF_MS) {
+        if (backoffMs > 0) await this.#wait(backoffMs);
+        attempts += 1;
+        receipt = await signOut({ supabaseUrl: this.studio.supabaseUrl, publishableKey: this.studio.supabasePublishableKey }, held.accessToken, "local", { fetchImpl: this.#fetch });
+        if (receipt.confirmed) break;
+      }
       tokens.forget();
-      const revoked = { ...receipt, purpose: "evidence_refresh", credentials_excluded: true, revocation_id: randomUUID() };
+      const revoked = { ...receipt!, status: receipt!.confirmed ? "revoked" : "unrevoked", attempts, purpose: "evidence_refresh", credentials_excluded: true, revocation_id: randomUUID() };
       events.push({ kind: "studio.evidence.session_revoked", source: "canonical", payload: revoked, dedupeKey: contentKey("studio-evidence-session-revoked", run.id, revoked) });
     }
     return events;
@@ -916,26 +945,36 @@ export class StudioG7Driver implements VoiceBrowserDriver, StudioDriverExtension
   async #settleExchange(runId: string, tokens: TokenSource): Promise<{ confirmed: boolean; events: DriverEvent[] }> {
     const record = this.#exchanges.get(runId) ?? null;
     const events: DriverEvent[] = [];
+    const openWindowMs = Math.max(this.#timeouts.exchangeOpenWindowMs, this.#timeouts.exchangeOpenMs);
     const settle = (confirmed: boolean, status: "confirmed" | "uncertain" | "unavailable", basis: string, extra: Record<string, unknown> = {}) => {
-      const payload = { confirmed, status, basis, exchange_id: record?.exchangeId ?? null, join: record?.join ?? "none", verified_by: "member_snapshot", ...extra };
+      // What the driver knew when it OBSERVED this (the ledger seq is only
+      // when it was drained): the proof counts an end against that.
+      const payload = { confirmed, status, basis, exchange_id: record?.exchangeId ?? null, join: record?.join ?? "none", verified_by: "member_snapshot",
+        speak_requested_before_observation: record?.speakRequested === true, speak_requested_at_lab_ms: record?.speakRequestedAtMs ?? null,
+        observed_at_lab_ms: this.#now(), open_window_ms: openWindowMs, ...extra };
       events.push({ kind: "studio.cleanup.exchange_ended", source: "canonical", payload, dedupeKey: contentKey("studio-exchange-ended", runId, payload) });
       return { confirmed, events };
     };
     if (record && record.join === "retained" && !record.speakRequested && record.exchangeId === null) {
       // This driver owns the run and never clicked Speak: no exchange can
-      // have been opened by it, so no member-API read is needed.
+      // have been opened by it, so no member-API read is needed. (Should Speak
+      // be requested later, the proof no longer counts this confirmation.)
       return settle(true, "confirmed", "no_exchange_opened_by_run", { verified_by: "driver_never_requested_exchange", ownership: "not_required" });
     }
-    if (record && record.join === "retained" && record.startInProgress && record.speakRequested && record.exchangeId === null) {
-      // Speak was requested and this start is still waiting for the exchange
-      // to open: a room with nothing live yet proves nothing about it.
-      return settle(false, "uncertain", "exchange_join_pending", { ownership: "not_required" });
-    }
     let snapshot = await this.#api.snapshot(this.studio.projectId, await tokens.token());
+    if (record && record.speakRequested && record.exchangeId === null) {
+      // Speak was requested but no exchange is joined, whether or not start is
+      // still running: the requested exchange may still open. Nothing live in
+      // the room confirms only after the open window.
+      if (snapshot.exchangeId !== null) return settle(false, "uncertain", "live_exchange_not_joined_to_run", { ownership: "not_required", live_exchange_present: true });
+      const windowElapsed = !record.startInProgress && record.speakRequestedAtMs !== null && this.#now() >= record.speakRequestedAtMs + openWindowMs;
+      if (!windowElapsed) return settle(false, "uncertain", "exchange_open_window_pending", { ownership: "not_required" });
+      return settle(true, "confirmed", "no_live_exchange_after_open_window", { ownership: "not_required" });
+    }
     const join = record?.exchangeId ?? null;
     if (join === null) {
-      // No exchange is joined to this run. One live exchange per room: if
-      // none is live, whatever this run may have opened has ended.
+      // No Speak intent and no join known to this driver. One live exchange
+      // per room: if none is live, whatever this run may have opened has ended.
       if (snapshot.exchangeId === null) return settle(true, "confirmed", "no_live_exchange_in_room", { ownership: "not_required" });
       return settle(false, "uncertain", "live_exchange_not_joined_to_run", { ownership: "not_required", live_exchange_present: true });
     }
@@ -1293,7 +1332,7 @@ export class StudioG7Driver implements VoiceBrowserDriver, StudioDriverExtension
   #state(runId: string): ExchangeRecord {
     let state = this.#exchanges.get(runId);
     if (!state) {
-      state = { exchangeId: null, preexistingExchangeId: null, speakRequested: false, browserLaunched: false, authIssued: false, grantId: null, runBindingSha256: null, exchangeOpenedAtMs: null, join: "retained", startInProgress: false };
+      state = { exchangeId: null, preexistingExchangeId: null, speakRequested: false, browserLaunched: false, authIssued: false, grantId: null, runBindingSha256: null, exchangeOpenedAtMs: null, join: "retained", startInProgress: false, speakRequestedAtMs: null };
       this.#exchanges.set(runId, state);
     }
     return state;
@@ -1340,7 +1379,7 @@ export class StudioG7Driver implements VoiceBrowserDriver, StudioDriverExtension
     if (this.#exchanges.has(runId)) return;
     const exchangeId = join.exchangeId !== null && UUID.test(join.exchangeId) ? join.exchangeId : null;
     const grantId = join.grantId !== null && UUID.test(join.grantId) ? join.grantId : null;
-    this.#exchanges.set(runId, { exchangeId, preexistingExchangeId: null, speakRequested: join.speakRequested || exchangeId !== null, browserLaunched: true, authIssued: true, grantId, runBindingSha256: /^[0-9a-f]{64}$/.test(join.runBindingSha256) ? join.runBindingSha256 : null, exchangeOpenedAtMs: join.exchangeOpenedAtMs, join: "durable", startInProgress: false });
+    this.#exchanges.set(runId, { exchangeId, preexistingExchangeId: null, speakRequested: join.speakRequested || exchangeId !== null, browserLaunched: true, authIssued: true, grantId, runBindingSha256: /^[0-9a-f]{64}$/.test(join.runBindingSha256) ? join.runBindingSha256 : null, exchangeOpenedAtMs: join.exchangeOpenedAtMs, join: "durable", startInProgress: false, speakRequestedAtMs: typeof join.speakRequestedAtMs === "number" ? join.speakRequestedAtMs : null });
   }
 
   /** Test seam: the exchange join the driver retains across browser loss. */

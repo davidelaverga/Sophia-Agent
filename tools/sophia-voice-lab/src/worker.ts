@@ -32,7 +32,7 @@ import { isStudioG7ScenarioVersion } from "./studio-g7/scenarios.js";
 import { STUDIO_G7_TARGET_KIND, computeRunBindingSha256 } from "./studio-g7/contract.js";
 import { hasStudioExtensions } from "./studio-g7/studio-driver.js";
 import { STUDIO_STEP_EXECUTING_STATES, studioStepConflict, studioStepOf } from "./studio-g7/step-guard.js";
-import { STUDIO_DEAD_OWNER_CLOCK_SKEW_MARGIN_MS, STUDIO_DEAD_OWNER_HEARTBEAT_STALE_MS, STUDIO_DEAD_OWNER_LEASE_RELEASE_SCHEMA, STUDIO_DEAD_OWNER_VERIFIED_KIND, earliestGlobalSignOutAfter, ownerCleanupForLease, studioEffectiveTokenLifetimeMs } from "./studio-g7/lease-release.js";
+import { STUDIO_DEAD_OWNER_HEARTBEAT_STALE_MS, STUDIO_DEAD_OWNER_LEASE_RELEASE_SCHEMA, STUDIO_DEAD_OWNER_VERIFIED_KIND, studioEffectiveTokenLifetimeMs } from "./studio-g7/lease-release.js";
 
 interface ActiveLease { epoch: number; }
 interface D02WorkerShutdownArm {
@@ -422,7 +422,11 @@ export class VoiceLabWorker {
       try {
         const error = labError("EXTERNAL_EVIDENCE_DEADLINE_EXPIRED", "The bounded external-evidence window expired before every mandatory supported assertion became machine-verifiable.", "harness", false, { deadline_at: pending.expiresAt.toISOString() });
         const verdicts: Verdicts = { ...pending.verdicts, harness: "fail", evidence: "fail" };
-        let failed = await transitionRun(this.ledger, pending, "failed_harness", { verdicts, terminalError: error });
+        // A Studio run whose cleanup proof is incomplete (e.g. an unrevoked
+        // evidence-refresh session) holds admission again, so terminal
+        // recovery completes it once no other run does.
+        const studioCleanupIncomplete = isStudioG7Run(pending) && pending.cleanupComplete && !studioG7CleanupProof((await this.#allEvents(pending.id)).events).complete;
+        let failed = await transitionRun(this.ledger, pending, "failed_harness", { verdicts, terminalError: error, ...(studioCleanupIncomplete ? { cleanupComplete: false } : {}) });
         const terminal = await this.ledger.appendEvent(failed.id, "run.failed_harness", "worker", { terminal_state: "failed_harness", terminal_reason: error.code, certification_deadline_at: pending.expiresAt.toISOString(), execution_cleanup_complete: failed.cleanupComplete }, `run:${failed.id}:failed_harness`);
         failed = await this.#freshRun(failed.id);
         await this.#saveFailureEvidence(failed, error, []);
@@ -1992,6 +1996,9 @@ export class VoiceLabWorker {
       // unless forced (a dead owner's lease whose proof is not bound to it).
       const studioEvents = (await this.#allEvents(run.id)).events;
       if (!options.force && !this.driver.hasSession(run.id) && studioG7CleanupProof(studioEvents).complete) return { events: [], artifacts: [] };
+      // A foreign worker's lease: its owner may be alive. The dead-owner
+      // release path alone recovers such a run, on the ledger's clock.
+      if (!options.force && await this.#studioForeignLeaseHeld(run)) return { events: [], artifacts: [] };
       // Never allocated (failed before browser launch): the durable control
       // record is the authoritative proof; no sign-in, no member-API call.
       const control = await this.ledger.getRecoveryControl(run.id);
@@ -2006,7 +2013,17 @@ export class VoiceLabWorker {
       // to its first time), so the cadence is kept by a per-attempt event.
       const lastSettlement = [...studioEvents].reverse().find((event) => event.kind === "studio.cleanup.exchange_ended" && event.source === "canonical");
       const lastAttempt = [...studioEvents].reverse().find((event) => event.kind === STUDIO_RECOVERY_ATTEMPT_EVENT && event.source === "worker");
-      if (!this.driver.hasSession(run.id) && lastSettlement && lastSettlement.payload.confirmed !== true && lastAttempt && lastAttempt.at.getTime() > Date.now() - STUDIO_EXCHANGE_REVERIFY_BACKOFF_MS) {
+      // Every API-only recovery (forced or not, whatever the last settlement)
+      // is spaced by the backoff: each one is a password grant and a global
+      // sign-out.
+      if (!this.driver.hasSession(run.id) && lastAttempt && lastAttempt.at.getTime() > Date.now() - STUDIO_EXCHANGE_REVERIFY_BACKOFF_MS) {
+        return { events: [], artifacts: [] };
+      }
+      // A global sign-out would revoke the tokens of any other run of the
+      // principal that holds admission now (e.g. a run admitted while this one
+      // awaited evidence): defer until it no longer does.
+      if (!this.driver.hasSession(run.id) && await this.ledger.countActiveRunsExcept(run.id) > 0) {
+        this.logger.warn({ run_id_sha256: sha256(run.id) }, "studio API-only recovery deferred: another run holds admission");
         return { events: [], artifacts: [] };
       }
       if (!this.driver.hasSession(run.id)) await this.ledger.appendEvent(run.id, STUDIO_RECOVERY_ATTEMPT_EVENT, "worker", { attempt_id: randomUUID(), prior_exchange_status: typeof lastSettlement?.payload.status === "string" ? lastSettlement.payload.status : null }, `studio-recovery-attempt:${run.id}:${randomUUID()}`);
@@ -2938,6 +2955,13 @@ export class VoiceLabWorker {
     return false;
   }
 
+  /** Another worker holds this run's browser lease (it may still be alive). */
+  async #studioForeignLeaseHeld(run: RunRecord): Promise<boolean> {
+    if (this.driver.hasSession(run.id) || this.#activeLeases.has(run.id)) return false;
+    const lease = await this.ledger.getBrowserLease(run.id);
+    return lease !== null && lease.workerId !== this.workerId;
+  }
+
   /**
    * A Studio run executes only labelled G7 steps (a `speak` carrying its
    * `_g7_step`, or a `studio_action`), each at most once: another operation of
@@ -2963,6 +2987,11 @@ export class VoiceLabWorker {
   async #completeStudioG7Evidence(runId: string, now: Date): Promise<void> {
     const run = await this.#freshRun(runId);
     if (run.state !== "pending_external_evidence" || !run.cleanupComplete || !hasStudioExtensions(this.driver)) return;
+    if (!studioG7CleanupProof((await this.#allEvents(run.id)).events).refreshSessionsRevoked) {
+      // An earlier refresh session is still unrevoked: resolve that first.
+      if (await this.#revokeUnrevokedRefreshSessions(run)) await this.#finalizeEndRun(run.id);
+      return;
+    }
     const page = await this.#allEvents(run.id);
     const attempts = page.events.filter((event) => event.kind === STUDIO_EVIDENCE_REFRESH_EVENT && event.source === "worker");
     if (attempts.length >= STUDIO_EVIDENCE_REFRESH_MAX_ATTEMPTS) return;
@@ -2974,7 +3003,26 @@ export class VoiceLabWorker {
     await this.ledger.appendEvent(run.id, STUDIO_EVIDENCE_REFRESH_EVENT, "worker", { attempt, max_attempts: STUDIO_EVIDENCE_REFRESH_MAX_ATTEMPTS, exchange_id: join.exchangeId }, `studio-evidence-refresh:${run.id}:${attempt}`);
     const refreshed = await this.driver.refreshStudioEvidence(run, join);
     await this.#persistEvents(run.id, refreshed);
+    if (!studioG7CleanupProof((await this.#allEvents(run.id)).events).refreshSessionsRevoked && !await this.#revokeUnrevokedRefreshSessions(run)) return;
     await this.#finalizeEndRun(run.id);
+  }
+
+  /**
+   * An evidence-refresh session whose local revoke failed stays valid on the
+   * server. A global sign-out revokes it, but would also revoke the tokens of
+   * any other run of the principal that holds admission now; so it is made
+   * (as one API-only recovery, which also re-verifies the exchange read-only)
+   * only when no other run holds admission. Until then the cleanup proof stays
+   * incomplete and the run cannot certify. True once resolved.
+   */
+  async #revokeUnrevokedRefreshSessions(run: RunRecord): Promise<boolean> {
+    if (await this.ledger.countActiveRunsExcept(run.id) > 0) {
+      await this.ledger.appendEvent(run.id, "studio.cleanup.global_sign_out_deferred", "worker", { reason: "another_run_holds_admission", purpose: "unrevoked_evidence_refresh_session" }, `studio-global-sign-out-deferred:${run.id}:unrevoked-refresh`);
+      return false;
+    }
+    const recovered = await this.#recoverRun(run, { force: true });
+    await this.#persistEvents(run.id, recovered.events);
+    return studioG7CleanupProof((await this.#allEvents(run.id)).events).refreshSessionsRevoked;
   }
 
   /**
@@ -2994,7 +3042,7 @@ export class VoiceLabWorker {
   async #releaseDeadOwnerStudioLease(runId: string, lease: { workerId: string; leaseEpoch: number; expiresAt: Date }): Promise<boolean> {
     const studio = this.config.studioG7;
     const run = await this.#freshRun(runId);
-    if (!studio || !hasStudioExtensions(this.driver) || !TERMINAL_RUN_STATES.has(run.state) || lease.expiresAt.getTime() > Date.now()) return false;
+    if (!studio || !hasStudioExtensions(this.driver) || !TERMINAL_RUN_STATES.has(run.state)) return false;
     const ownerHash = sha256(lease.workerId);
     const pending = async (reason: string) => {
       await this.ledger.appendEvent(runId, "cleanup.browser_lease_unconfirmed", "worker", { worker_id_hash: ownerHash, lease_epoch: lease.leaseEpoch, expires_at: lease.expiresAt.toISOString(), dead_owner_release: reason }, `cleanup:${runId}:browser-lease-unconfirmed:${ownerHash}:${lease.leaseEpoch}:${reason}`);
@@ -3012,16 +3060,18 @@ export class VoiceLabWorker {
       }, `cleanup:${runId}:browser-lease`);
       return true;
     };
-    const live = await this.ledger.listLiveWorkers(new Date(Date.now() - STUDIO_DEAD_OWNER_HEARTBEAT_STALE_MS - STUDIO_DEAD_OWNER_CLOCK_SKEW_MARGIN_MS));
-    if (live.some((worker) => worker.workerId === lease.workerId)) return pending("owner_heartbeat_live");
-    const events = (await this.#allEvents(runId)).events;
-    if (ownerCleanupForLease(events, lease).complete) {
-      // Basis 1, decided again inside the ledger transaction on its clock.
-      return released(await this.ledger.releaseDeadOwnerStudioBrowserLease(runId, { verificationId: null, tokenMaxLifetimeMs: studio.accessTokenMaxLifetimeMs, heartbeatStaleMs: STUDIO_DEAD_OWNER_HEARTBEAT_STALE_MS }), null);
-    }
-    const lifetimeMs = studioEffectiveTokenLifetimeMs(events, studio.accessTokenMaxLifetimeMs);
-    const before = earliestGlobalSignOutAfter(events, lease.expiresAt);
-    if (before && Date.now() < before.at.getTime() + lifetimeMs) return pending("access_token_lifetime_pending");
+    // Every gate is decided by the ledger on ITS clock (the clock of the lease
+    // expiry and of the DB-stamped sign-out), never on this worker's clock: a
+    // dry run without a verification either releases on basis 1 (the owner's
+    // own cleanup for this lease epoch) or says what is still missing.
+    const proof = { tokenMaxLifetimeMs: studio.accessTokenMaxLifetimeMs, heartbeatStaleMs: STUDIO_DEAD_OWNER_HEARTBEAT_STALE_MS };
+    const dryRun = await this.ledger.releaseDeadOwnerStudioBrowserLease(runId, { verificationId: null, ...proof });
+    if (dryRun.released) return released(dryRun, null);
+    if (dryRun.reason !== "global_sign_out_after_expiry_missing" && dryRun.reason !== "fresh_exchange_verification_missing") return pending(dryRun.reason);
+    const before = dryRun.reason === "fresh_exchange_verification_missing";
+    const lifetimeMs = studioEffectiveTokenLifetimeMs((await this.#allEvents(runId)).events, studio.accessTokenMaxLifetimeMs);
+    // One API-only recovery (sign-in, read-only verification, global
+    // sign-out), spaced by the Studio recovery backoff.
     const recovered = await this.#recoverRun(run, { force: true });
     if (recovered.events.length === 0) return pending("recovery_backoff");
     await this.#persistEvents(runId, recovered.events);
@@ -3032,7 +3082,7 @@ export class VoiceLabWorker {
     if (!exchangeNotLive || !signedOut) return pending(!signedOut ? "global_sign_out_unconfirmed" : "exchange_not_verified_not_live");
     const verificationId = randomUUID();
     await this.ledger.appendEvent(runId, STUDIO_DEAD_OWNER_VERIFIED_KIND, "worker", { verification_id: verificationId, worker_id_sha256: ownerHash, lease_epoch: lease.leaseEpoch, exchange_not_live: true, signed_out: true, access_token_max_lifetime_ms: lifetimeMs }, `studio-dead-owner-verified:${runId}:${verificationId}`);
-    return released(await this.ledger.releaseDeadOwnerStudioBrowserLease(runId, { verificationId, tokenMaxLifetimeMs: studio.accessTokenMaxLifetimeMs, heartbeatStaleMs: STUDIO_DEAD_OWNER_HEARTBEAT_STALE_MS }), verificationId);
+    return released(await this.ledger.releaseDeadOwnerStudioBrowserLease(runId, { verificationId, ...proof }), verificationId);
   }
 
   /**

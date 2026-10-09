@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 import { TERMINAL_RUN_STATES, type LabEvent, type RunState } from "../domain.js";
 import { STUDIO_G7_SCENARIO_VERSION } from "./scenarios.js";
+import { STUDIO_ACCESS_TOKEN_LIFETIME_BOUND_S } from "./supabase-session.js";
 
 /**
  * Release of a dead foreign worker's Studio browser lease.
@@ -87,8 +88,7 @@ export function earliestGlobalSignOutAfter(events: ReadonlyArray<DecisionEvent>,
 
 /**
  * The run's exchange join anchor: the latest durable join (`opened`) or Speak
- * intent. An exchange end counts only after it: a settle that ran before the
- * exchange opened (e.g. a watchdog during start) proves nothing about it.
+ * intent. An exchange end counts only after it.
  */
 export function studioExchangeJoinAnchorSeq(events: ReadonlyArray<DecisionEvent>): number {
   return events
@@ -96,22 +96,55 @@ export function studioExchangeJoinAnchorSeq(events: ReadonlyArray<DecisionEvent>
     .reduce((latest, event) => Math.max(latest, event.seq), 0);
 }
 
-/** A confirmed exchange end that follows the run's exchange join (see studioExchangeJoinAnchorSeq). */
+/** Bases under which a settle observed the run's own joined exchange not live (or ended it). */
+const JOINED_EXCHANGE_END_BASES: ReadonlySet<string> = new Set(["run_exchange_not_live", "run_exchange_not_live_other_exchange_live", "api_end", "already_ended"]);
+
+/**
+ * Whether one confirmed end counts for the run's exchange.
+ *
+ * A confirmation is evidence about the moment it was OBSERVED, not about the
+ * moment it reached the ledger (a watchdog's result can be drained after the
+ * write-ahead join). So once any Speak intent exists, an end counts only when
+ * the observation itself says it was made after Speak was requested and by a
+ * read-only member-API read (never the driver's own "never requested"), and
+ * - with a joined exchange: names that exchange and a basis that observed it
+ *   not live (or ended it by id);
+ * - with no join: observed nothing live AFTER the open window (an exchange
+ *   Speak requested may still open until then).
+ * Without any Speak intent, the run never asked for an exchange and any
+ * confirmed end stands.
+ */
+function countsForRunExchange(event: DecisionEvent, intent: DecisionEvent | null, opened: DecisionEvent | null): boolean {
+  if (!intent && !opened) return true;
+  const payload = event.payload;
+  if (payload.verified_by !== "member_snapshot" || payload.speak_requested_before_observation !== true) return false;
+  if (opened) return typeof payload.basis === "string" && JOINED_EXCHANGE_END_BASES.has(payload.basis) && payload.exchange_id === opened.payload.exchange_id;
+  const observedAt = payload.observed_at_lab_ms, requestedAt = payload.speak_requested_at_lab_ms, window = payload.open_window_ms;
+  return payload.basis === "no_live_exchange_after_open_window" && typeof observedAt === "number" && typeof requestedAt === "number" && typeof window === "number"
+    && window > 0 && observedAt >= requestedAt + window;
+}
+
+/** The confirmed end that counts for the run's exchange (see countsForRunExchange), or null. */
 export function studioExchangeEndAfterJoin<T extends DecisionEvent>(events: ReadonlyArray<T>): T | null {
   const anchor = studioExchangeJoinAnchorSeq(events);
-  return events.find((event) => event.kind === "studio.cleanup.exchange_ended" && event.source === "canonical" && event.payload.confirmed === true && event.seq > anchor) ?? null;
+  const intent = events.find((event) => event.kind === "studio.exchange.speak_requested" && event.source === "canonical") ?? null;
+  const opened = [...events].filter((event) => event.kind === "studio.exchange.opened" && event.source === "canonical" && typeof event.payload.exchange_id === "string").sort((left, right) => right.seq - left.seq)[0] ?? null;
+  return events.find((event) => event.kind === "studio.cleanup.exchange_ended" && event.source === "canonical" && event.payload.confirmed === true
+    && event.seq > anchor && countsForRunExchange(event, intent, opened)) ?? null;
 }
 
 /**
  * The access-JWT lifetime to wait out: the configured maximum, raised to the
- * longest `expires_in` the product issued to this run's sessions.
+ * longest `expires_in` the product issued to this run's sessions, never above
+ * the 24 h bound. A grant above the bound is refused before any browser holds
+ * it (supabase-session.ts), so such a value never becomes the wait.
  */
 export function studioEffectiveTokenLifetimeMs(events: ReadonlyArray<DecisionEvent>, configuredMs: number): number {
   let longest = configuredMs;
   for (const event of events) {
     if (event.kind !== "studio.auth.session_established") continue;
     const seconds = event.payload.expires_in_s;
-    if (typeof seconds === "number" && Number.isSafeInteger(seconds) && seconds > 0) longest = Math.max(longest, seconds * 1_000);
+    if (typeof seconds === "number" && Number.isSafeInteger(seconds) && seconds > 0 && seconds <= STUDIO_ACCESS_TOKEN_LIFETIME_BOUND_S) longest = Math.max(longest, seconds * 1_000);
   }
   return longest;
 }

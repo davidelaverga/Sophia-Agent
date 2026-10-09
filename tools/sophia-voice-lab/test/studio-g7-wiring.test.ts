@@ -287,7 +287,7 @@ describe("target-kind wiring in the worker", () => {
 /** Worker B's recovery of worker A's run: the scripted driver reports what a real API-only recovery would. */
 function recoveryEvents(runId: string) {
   return [
-    { kind: "studio.cleanup.exchange_ended", source: "canonical" as const, payload: { confirmed: true, status: "confirmed", basis: "run_exchange_not_live", exchange_id: EXCHANGE_UUID, join: "durable", ownership: "not_required", verified_by: "member_snapshot" }, dedupeKey: `recovery-ended:${runId}` },
+    { kind: "studio.cleanup.exchange_ended", source: "canonical" as const, payload: { confirmed: true, status: "confirmed", basis: "run_exchange_not_live", exchange_id: EXCHANGE_UUID, join: "durable", ownership: "not_required", verified_by: "member_snapshot", speak_requested_before_observation: true }, dedupeKey: `recovery-ended:${runId}` },
     { kind: "studio.cleanup.signed_out", source: "canonical" as const, payload: { schema: "sophia_voice_lab_studio_sign_out_v1", scope: "global", confirmed: true, http_status: 204, basis: "global_logout_accepted", session_basis: "fresh_grant" }, dedupeKey: `recovery-signed-out:${runId}` },
     { kind: "studio.cleanup.recovery", source: "canonical" as const, payload: { complete: true, exchange_ended: true, signed_out: true, browser_session_absent: true }, dedupeKey: `recovery:${runId}` },
   ];
@@ -379,7 +379,7 @@ async function workerBFor(ledger: VoiceLabLedger, a: Harness, workerId = "worker
 /** What a real driver persists when its own End/abort completed: exchange ended, global sign-out, browser closed. */
 function ownerCleanupEvents(runId: string, bindEpoch: boolean) {
   return [
-    { kind: "studio.cleanup.exchange_ended", source: "canonical" as const, payload: { confirmed: true, status: "confirmed", basis: "api_end", exchange_id: EXCHANGE_UUID, join: "retained", ownership: "proven", verified_by: "member_snapshot" }, dedupeKey: `owner-ended:${runId}` },
+    { kind: "studio.cleanup.exchange_ended", source: "canonical" as const, payload: { confirmed: true, status: "confirmed", basis: "api_end", exchange_id: EXCHANGE_UUID, join: "retained", ownership: "proven", verified_by: "member_snapshot", speak_requested_before_observation: true }, dedupeKey: `owner-ended:${runId}` },
     { kind: "studio.cleanup.signed_out", source: "canonical" as const, payload: { schema: "sophia_voice_lab_studio_sign_out_v1", scope: "global", confirmed: true, http_status: 204, basis: "global_logout_accepted", session_basis: "held_session", credentials_excluded: true }, dedupeKey: `owner-signed-out:${runId}` },
     { kind: "cleanup.browser_context_closed", source: "browser" as const, payload: { schema: "sophia_voice_lab_execution_epoch_browser_cleanup_v1", close_resolved: true, browser_registry_absent: true, browser_process_close_resolved: true, browser_process_disconnected: true, reason: "normal_end", ...(bindEpoch ? { execution_epoch_sha256: sha256(`epoch:${runId}`) } : {}) }, dedupeKey: `cleanup:${runId}:browser` },
   ];
@@ -496,5 +496,75 @@ describe("adversarial review: dead-owner token lifetime clamp (P3-6)", () => {
     await advance(60 * 60_000);
     await b.worker.maintainSessions();
     expect(await ledger.getBrowserLease(a.runId)).toBeNull();
+  }, 60_000);
+});
+
+describe("adversarial re-review: token lifetime bound and unrevoked refresh sessions", () => {
+  it("never lets an access-JWT lifetime above the 24 h bound become the dead-owner wait (P3-6)", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date());
+    const ledger = new MemoryVoiceLabLedger("test");
+    const advance = async (ms: number) => { vi.setSystemTime(new Date(Date.now() + ms)); };
+    const a = await harness("worker-a-unbounded-jwt", ledger);
+    a.driver.sessionExpiresInS = 1_000_000_000_000;
+    await a.worker.runOnce();
+    await voice(a, "create");
+    const b = await workerBFor(ledger, a);
+    b.driver.recoverResult = recoveryEvents;
+    await advance(100_000);
+    await b.worker.maintainSessions();
+    await advance(1_000);
+    await b.worker.maintainSessions();
+    // The configured hour bounds the wait: the refused value never does.
+    await advance(61 * 60_000);
+    await b.worker.maintainSessions();
+    expect(await ledger.getBrowserLease(a.runId)).toBeNull();
+  }, 60_000);
+
+  it("an unrevoked evidence-refresh session keeps cleanup incomplete and is signed out globally only once no other run holds admission (P3-5 follow-up)", async () => {
+    const h = await harness();
+    h.driver.lateSessionClosed = true;
+    h.driver.refreshRevokeConfirmed = false;
+    await episode(h);
+    await end(h);
+    expect(await h.ledger.getRun(h.runId)).toMatchObject({ state: "pending_external_evidence", cleanupComplete: true });
+    // A later run is admitted while this one awaits evidence; it holds admission.
+    const second = await h.service.startStudioG7Run(caller, { ...START, idempotency_key: newIdempotencyKey("second-run") });
+    await h.worker.maintainSessions();
+    expect(h.driver.calls).toContain(`refresh:${EXCHANGE_UUID}`);
+    // The refresh session could not be revoked: no global sign-out while the other run holds admission.
+    expect(h.driver.calls).not.toContain("recover");
+    expect(await h.ledger.getRun(h.runId)).toMatchObject({ state: "pending_external_evidence" });
+    const { studioG7CleanupProof } = await import("../src/studio-g7/evaluate.js");
+    expect(studioG7CleanupProof((await h.ledger.listEvents(h.runId, 0, 1_000)).events)).toMatchObject({ refreshSessionsRevoked: false, complete: false });
+    // The other run finishes (its admission is released).
+    const other = (await h.ledger.getRun(second.run_id!))!;
+    await h.ledger.updateRun(other.id, other.version, { state: "aborted_driver_restart", cleanupComplete: true });
+    h.driver.recoverResult = (id) => recoveryEvents(id);
+    await h.worker.maintainSessions();
+    expect(h.driver.calls).toContain("recover");
+    expect(studioG7CleanupProof((await h.ledger.listEvents(h.runId, 0, 1_000)).events)).toMatchObject({ refreshSessionsRevoked: true, complete: true });
+    expect(await h.ledger.getRun(h.runId)).toMatchObject({ state: "completed", cleanupComplete: true });
+  }, 60_000);
+});
+
+describe("adversarial re-review: forced recoveries are spaced (new P3)", () => {
+  it("runs at most one forced recovery per backoff window, even when each one settles the exchange", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date());
+    const ledger = new MemoryVoiceLabLedger("test");
+    const advance = async (ms: number) => { vi.setSystemTime(new Date(Date.now() + ms)); };
+    const { runId, workerB } = await deadOwnerRecovery(ledger, advance);
+    await advance(61 * 60_000);
+    // The exchange is confirmed not live, but the global sign-out keeps failing.
+    let attempt = 0;
+    workerB.driver.recoverResult = (id) => {
+      attempt += 1;
+      return recoveryEvents(id).map((event) => event.kind === "studio.cleanup.signed_out" ? { ...event, payload: { ...event.payload, confirmed: false, basis: "unreachable", sign_out_id: `failed-${attempt}` }, dedupeKey: `failed-sign-out:${id}:${attempt}` } : event);
+    };
+    const before = workerB.driver.calls.filter((call) => call === "recover").length;
+    for (let pass = 0; pass < 5; pass += 1) { await workerB.worker.maintainSessions(); await advance(2_000); }
+    expect(workerB.driver.calls.filter((call) => call === "recover").length - before).toBe(1);
+    expect(await ledger.getBrowserLease(runId)).not.toBeNull();
   }, 60_000);
 });

@@ -442,8 +442,10 @@ export function evaluateStudioG7Run(run: RunRecord, events: Event[], operations:
   const browserClosed = ofKind("cleanup.browser_context_closed", "browser").filter((event) => event.payload.close_resolved === true && event.payload.browser_registry_absent === true && event.payload.browser_process_close_resolved === true);
   const leaseReleased = ordered.filter((event) => (event.kind === "cleanup.browser_lease_released" && event.payload.cas_deleted === true) || (event.kind === "cleanup.browser_lease_absent" && event.payload.authoritative_ledger_read === true));
   const cleanupComplete = cleanup.complete && leaseReleased.length > 0;
-  H("cleanup.exchange_ended", cleanup.exchangeEnded ? "pass" : latestEnded ? "unavailable" : "fail", cleanup.exchangeEnded ? null : latestEnded?.payload.confirmed === true ? "exchange_end_precedes_join" : latestEnded ? `exchange_${String(latestEnded.payload.status ?? "unconfirmed")}_${String(latestEnded.payload.basis ?? "unknown")}` : "exchange_end_not_verified", labEndEvent ? [labEndEvent] : endedEvents);
+  H("cleanup.exchange_ended", cleanup.exchangeEnded ? "pass" : latestEnded ? "unavailable" : "fail", cleanup.exchangeEnded ? null : latestEnded?.payload.confirmed === true ? "exchange_end_not_attributable_to_run_exchange" : latestEnded ? `exchange_${String(latestEnded.payload.status ?? "unconfirmed")}_${String(latestEnded.payload.basis ?? "unknown")}` : "exchange_end_not_verified", labEndEvent ? [labEndEvent] : endedEvents);
   H("cleanup.principal_signed_out", signedOutEvents.length > 0 ? "pass" : "fail", signedOutEvents.length > 0 ? null : "global_sign_out_unconfirmed", signedOutEvents);
+  // The evidence refresh revokes only its own session; one it could not revoke stays live until a later global sign-out.
+  H("cleanup.refresh_session_revoked", cleanup.refreshSessionsRevoked ? "pass" : "fail", cleanup.refreshSessionsRevoked ? null : "evidence_refresh_session_unrevoked", ofKind("studio.evidence.session_revoked", "canonical"));
   H("cleanup.browser_closed", cleanup.browserClosed ? "pass" : cleanup.browserQuiesced ? "unavailable" : "fail", cleanup.browserClosed ? null : cleanup.browserQuiesced ? "dead_owner_quiesced_close_unobservable" : "browser_close_unproven", browserClosed);
   H("cleanup.browser_lease_released", leaseReleased.length > 0 ? "pass" : "fail", leaseReleased.length > 0 ? null : "browser_lease_release_unproven", leaseReleased);
 
@@ -675,13 +677,13 @@ export function deriveStudioG7Verdicts(evaluation: StudioG7Evaluation, auth: { s
  * - Sign-out: a confirmed global sign-out.
  * - Browser: a proven close, or a proof that none was ever allocated.
  */
-export function studioG7CleanupProof(events: Event[]): { exchangeEnded: boolean; signedOut: boolean; browserClosed: boolean; browserQuiesced: boolean; complete: boolean } {
+export function studioG7CleanupProof(events: Event[]): { exchangeEnded: boolean; signedOut: boolean; browserClosed: boolean; browserQuiesced: boolean; refreshSessionsRevoked: boolean; complete: boolean } {
   // A run that never acquired a browser (e.g. deployment mismatch before
   // launch) never authenticated and never opened an exchange: the worker's
   // authoritative ledger read is the whole proof.
   const allocationFree = events.some((event) => event.kind === "cleanup.browser_context_absent" && event.payload.browser_never_allocated === true && event.payload.authoritative_ledger_read === true)
     && !events.some((event) => event.kind === "harness.browser_process_acquired" || event.kind === "studio.auth.session_established" || event.kind === "studio.exchange.opened" || event.kind === "studio.exchange.speak_requested");
-  if (allocationFree) return { exchangeEnded: true, signedOut: true, browserClosed: true, browserQuiesced: false, complete: true };
+  if (allocationFree) return { exchangeEnded: true, signedOut: true, browserClosed: true, browserQuiesced: false, refreshSessionsRevoked: true, complete: true };
   // A confirmed end counts only after the run's exchange join (or Speak
   // intent): an earlier settle cannot speak for an exchange opened later.
   const exchangeEnded = studioExchangeEndAfterJoin(events) !== null;
@@ -692,14 +694,19 @@ export function studioG7CleanupProof(events: Event[]): { exchangeEnded: boolean;
   // released only once that browser can no longer act on the product
   // (lease-release.ts). Typed `quiesced`, never `closed`.
   const browserQuiesced = events.some((event) => event.kind === "cleanup.browser_lease_released" && event.payload.schema === STUDIO_DEAD_OWNER_LEASE_RELEASE_SCHEMA && event.payload.dead_owner_quiesced === true && event.payload.cas_deleted === true);
-  return { exchangeEnded, signedOut, browserClosed, browserQuiesced, complete: exchangeEnded && signedOut && (browserClosed || browserQuiesced) };
+  // An evidence-refresh session whose local revoke failed stays valid on the
+  // server until a later confirmed global sign-out revokes it.
+  const refreshSessionsRevoked = events
+    .filter((event) => event.kind === "studio.evidence.session_revoked" && event.source === "canonical" && event.payload.confirmed !== true)
+    .every((unrevoked) => events.some((event) => event.kind === "studio.cleanup.signed_out" && event.source === "canonical" && event.payload.confirmed === true && event.payload.scope === "global" && event.seq > unrevoked.seq));
+  return { exchangeEnded, signedOut, browserClosed, browserQuiesced, refreshSessionsRevoked, complete: exchangeEnded && signedOut && (browserClosed || browserQuiesced) && refreshSessionsRevoked };
 }
 
 /**
  * The durable exchange join of a run, from its write-ahead events, for a
  * restarted worker. Null when the run never durably requested Speak.
  */
-export function studioDurableJoin(events: Event[], runBindingSha256: string): { exchangeId: string | null; grantId: string | null; runBindingSha256: string; speakRequested: boolean; exchangeOpenedAtMs: number | null } | null {
+export function studioDurableJoin(events: Event[], runBindingSha256: string): { exchangeId: string | null; grantId: string | null; runBindingSha256: string; speakRequested: boolean; exchangeOpenedAtMs: number | null; speakRequestedAtMs: number | null } | null {
   const opened = [...events].reverse().find((event) => event.kind === "studio.exchange.opened" && event.source === "canonical" && typeof event.payload.exchange_id === "string") ?? null;
   const intent = [...events].reverse().find((event) => event.kind === "studio.exchange.speak_requested" && event.source === "canonical") ?? null;
   const gate = [...events].reverse().find((event) => event.kind === "studio.grant_gate.passed" && typeof event.payload.grant_id === "string") ?? null;
@@ -711,5 +718,6 @@ export function studioDurableJoin(events: Event[], runBindingSha256: string): { 
     runBindingSha256,
     speakRequested: true,
     exchangeOpenedAtMs: typeof opened?.payload.opened_at_lab_ms === "number" ? opened.payload.opened_at_lab_ms : opened ? opened.at.getTime() : null,
+    speakRequestedAtMs: typeof intent?.payload.requested_at_lab_ms === "number" ? intent.payload.requested_at_lab_ms : intent ? intent.at.getTime() : null,
   };
 }

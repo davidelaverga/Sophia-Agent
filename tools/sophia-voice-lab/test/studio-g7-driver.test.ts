@@ -31,6 +31,10 @@ class FakeStudioBackend {
   grantUser = PRINCIPAL_UUID;
   /** A raw 200 snapshot body that replaces the well-formed one (malformed-answer tests). */
   snapshotBody: unknown = undefined;
+  /** Local (scope=local) logouts that answer 503 before the next one succeeds. */
+  failLocalLogouts = 0;
+  /** The `expires_in` the password grant answers with. */
+  expiresIn = 3_600;
 
   fetch = async (input: URL | string, init?: RequestInit): Promise<Response> => {
     const url = new URL(String(input));
@@ -46,9 +50,10 @@ class FakeStudioBackend {
         const body = JSON.parse(String(init?.body)) as { email: string; password: string };
         if (body.email !== FAKE_EMAIL || body.password !== this.password) return json({ error: "invalid_grant", error_description: "Invalid login credentials" }, 400);
         this.issued += 1;
-        return json({ access_token: `fake-access-token-${this.issued}-xxxxxxxx`, refresh_token: `fake-refresh-${this.issued}`, token_type: "bearer", expires_in: 3_600, expires_at: Math.floor(Date.now() / 1_000) + 3_600, user: { id: this.grantUser } });
+        return json({ access_token: `fake-access-token-${this.issued}-xxxxxxxx`, refresh_token: `fake-refresh-${this.issued}`, token_type: "bearer", expires_in: this.expiresIn, expires_at: Math.floor(Date.now() / 1_000) + this.expiresIn, user: { id: this.grantUser } });
       }
       if (url.pathname === "/auth/v1/logout") {
+        if (url.searchParams.get("scope") === "local" && this.failLocalLogouts > 0) { this.failLocalLogouts -= 1; return json({}, 503); }
         const token = authorization?.replace(/^Bearer /, "") ?? "";
         if (!token.startsWith("fake-access-token-") || this.revoked.has(token)) return json({}, 401);
         this.revoked.add(token);
@@ -395,5 +400,39 @@ describe("Studio G7 adversarial review fixes (driver)", () => {
       // The exchange the run joined is still recorded unsettled for recovery; sign-out still happens.
       expect(ofKind(result.events, "studio.cleanup.signed_out")[0]?.payload, label).toMatchObject({ confirmed: true });
     }
+  });
+});
+
+describe("Studio G7 adversarial re-review fixes (driver)", () => {
+  it("retries a failed local revoke with backoff, never falls back to a global sign-out, and records the refresh session unrevoked", async () => {
+    const run = studioRun(studioTestConfig());
+    const join = { exchangeId: EXCHANGE_UUID, grantId: GRANT_UUID, runBindingSha256: bindingOf(run), speakRequested: true, exchangeOpenedAtMs: null };
+    const failing = new FakeStudioBackend();
+    failing.exchangeId = null;
+    failing.failLocalLogouts = 5;
+    failing.evidence = () => evidenceEnvelope(run, [], { state: "ended" });
+    const unrevoked = await driverFor(failing).driver.refreshStudioEvidence(run, join);
+    expect(failing.logoutScopes()).toEqual(["local", "local", "local"]);
+    expect(ofKind(unrevoked, "studio.evidence.session_revoked")[0]?.payload).toMatchObject({ scope: "local", confirmed: false, status: "unrevoked", attempts: 3, http_status: 503 });
+    const recovering = new FakeStudioBackend();
+    recovering.exchangeId = null;
+    recovering.failLocalLogouts = 1;
+    recovering.evidence = () => evidenceEnvelope(run, [], { state: "ended" });
+    const revoked = await driverFor(recovering).driver.refreshStudioEvidence(run, join);
+    expect(recovering.logoutScopes()).toEqual(["local", "local"]);
+    expect(ofKind(revoked, "studio.evidence.session_revoked")[0]?.payload).toMatchObject({ confirmed: true, status: "revoked", attempts: 2 });
+  });
+
+  it("refuses an access-JWT lifetime above the 24 h bound during cleanup too, revoking only the issued session", async () => {
+    const backend = new FakeStudioBackend();
+    backend.expiresIn = 1_000_000_000_000;
+    const { config, driver } = driverFor(backend);
+    const run = studioRun(config);
+    adopt(driver, run);
+    const result = await driver.abort(run, "TEST");
+    expect(ofKind(result.events, "studio.cleanup.exchange_ended")[0]?.payload).toMatchObject({ confirmed: false, status: "unavailable", error_code: "STUDIO_AUTH_TOKEN_LIFETIME_UNBOUNDED" });
+    expect(backend.calls.some((call) => call.path.includes("/api/v1/"))).toBe(false);
+    expect(backend.logoutScopes().every((scope) => scope === "local")).toBe(true);
+    expect(backend.endCalls()).toBe(0);
   });
 });

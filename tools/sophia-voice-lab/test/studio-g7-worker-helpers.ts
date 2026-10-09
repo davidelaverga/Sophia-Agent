@@ -38,6 +38,8 @@ export class ScriptedStudioDriver {
   recoverResult: (runId: string) => DriverEvent[] = () => [];
   /** The Supabase `expires_in` the start's password grant answered with (seconds). */
   sessionExpiresInS = 3_600;
+  /** Whether the evidence refresh's local revoke of its own session succeeds. */
+  refreshRevokeConfirmed = true;
 
   constructor(readonly run: RunRecord) {}
 
@@ -142,7 +144,7 @@ export class ScriptedStudioDriver {
     const late = this.lateSessionClosed ? [] : this.closing(run);
     return { artifacts: [], events: [
       this.#outcome("final", [{ task_id: DESIGN, kind: "design", state: "succeeded", phase: "result_ready", design: { state: "published", mode: "create", artifact_id: ARTIFACT, published_version_id: VERSION_1 } }], [{ artifact_id: ARTIFACT, version_id: VERSION_1, task_id: DESIGN, status: "verified", downloaded_sha256: sha256("v1"), hashes_agree: true }]),
-      { kind: "studio.cleanup.exchange_ended", source: "canonical", payload: { confirmed: true, status: "confirmed", basis: "ui_end", exchange_id: EXCHANGE_UUID, join: "retained", ownership: "proven", verified_by: "member_snapshot" }, dedupeKey: `ended:${run.id}` },
+      { kind: "studio.cleanup.exchange_ended", source: "canonical", payload: { confirmed: true, status: "confirmed", basis: "api_end", exchange_id: EXCHANGE_UUID, join: "retained", ownership: "proven", verified_by: "member_snapshot", speak_requested_before_observation: true }, dedupeKey: `ended:${run.id}` },
       ...late,
       { kind: "studio.deployment.identity", source: "canonical", payload: { phase: "final", api: { status: "observed", commit: API_SHA }, studio: { status: "observed", commit: STUDIO_SHA } }, dedupeKey: `studio-identity:${run.id}:final` },
       { kind: "studio.cleanup.signed_out", source: "canonical", payload: { schema: "sophia_voice_lab_studio_sign_out_v1", scope: "global", confirmed: true, http_status: 204, basis: "global_logout_accepted" }, dedupeKey: `signed-out:${run.id}` },
@@ -161,7 +163,10 @@ export class ScriptedStudioDriver {
   async refreshStudioEvidence(run: RunRecord, join: DurableStudioJoin): Promise<DriverEvent[]> {
     this.calls.push(`refresh:${join.exchangeId}`);
     // Like the real driver: only the refresh's own fresh session is revoked (scope=local).
-    return [...this.closing(run), { kind: "studio.evidence.session_revoked", source: "canonical", payload: { schema: "sophia_voice_lab_studio_sign_out_v1", scope: "local", confirmed: true, http_status: 204, basis: "local_logout_accepted", purpose: "evidence_refresh" }, dedupeKey: `refresh-session-revoked:${run.id}` }];
+    const revoked = this.refreshRevokeConfirmed
+      ? { schema: "sophia_voice_lab_studio_sign_out_v1", scope: "local", confirmed: true, http_status: 204, basis: "local_logout_accepted", status: "revoked", attempts: 1, purpose: "evidence_refresh" }
+      : { schema: "sophia_voice_lab_studio_sign_out_v1", scope: "local", confirmed: false, http_status: 503, basis: "rejected", status: "unrevoked", attempts: 3, purpose: "evidence_refresh" };
+    return [...this.closing(run), { kind: "studio.evidence.session_revoked", source: "canonical", payload: revoked, dedupeKey: `refresh-session-revoked:${run.id}:${String(revoked.status)}` }];
   }
 
   /** Abort with an ownership-proven exchange: the real driver ends it, signs out and closes the browser. */
@@ -171,7 +176,7 @@ export class ScriptedStudioDriver {
     this.session = false;
     if (!had) return { events: [], artifacts: [] };
     return { artifacts: [], events: [
-      { kind: "studio.cleanup.exchange_ended", source: "canonical", payload: { confirmed: true, status: "confirmed", basis: "api_end", exchange_id: EXCHANGE_UUID, join: "retained", ownership: "proven", verified_by: "member_snapshot" }, dedupeKey: `abort-ended:${run.id}` },
+      { kind: "studio.cleanup.exchange_ended", source: "canonical", payload: { confirmed: true, status: "confirmed", basis: "api_end", exchange_id: EXCHANGE_UUID, join: "retained", ownership: "proven", verified_by: "member_snapshot", speak_requested_before_observation: true }, dedupeKey: `abort-ended:${run.id}` },
       { kind: "studio.cleanup.signed_out", source: "canonical", payload: { schema: "sophia_voice_lab_studio_sign_out_v1", scope: "global", confirmed: true, http_status: 204, basis: "global_logout_accepted" }, dedupeKey: `abort-signed-out:${run.id}` },
       { kind: "cleanup.browser_context_closed", source: "browser", payload: { schema: "sophia_voice_lab_execution_epoch_browser_cleanup_v1", close_resolved: true, browser_registry_absent: true, browser_process_close_resolved: true, browser_process_disconnected: true, reason }, dedupeKey: `cleanup:${run.id}:browser` },
     ] };

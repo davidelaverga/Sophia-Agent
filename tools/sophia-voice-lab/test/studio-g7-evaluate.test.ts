@@ -285,7 +285,7 @@ describe("Studio G7 evaluation", () => {
 
   it("derives the cleanup proof and the studio input-settlement gate", () => {
     const item = episode();
-    expect(studioG7CleanupProof(item.log.events)).toEqual({ exchangeEnded: true, signedOut: true, browserClosed: true, browserQuiesced: false, complete: true });
+    expect(studioG7CleanupProof(item.log.events)).toEqual({ exchangeEnded: true, signedOut: true, browserClosed: true, browserQuiesced: false, refreshSessionsRevoked: true, complete: true });
     expect(studioG7CleanupProof(episode({ skipCleanup: true }).log.events).complete).toBe(false);
     const run = studioRun(config);
     const log = new EventLog(run.id);
@@ -472,7 +472,7 @@ describe("Studio G7 episode: every step is an operation, outcomes are canonical 
     log.add("studio.cleanup.signed_out", "canonical", { confirmed: true, scope: "global" });
     expect(studioG7CleanupProof(log.events).complete).toBe(false);
     log.add("cleanup.browser_lease_released", "worker", { schema: "sophia_voice_lab_studio_g7_dead_owner_lease_release_v1", cas_deleted: true, dead_owner_quiesced: true });
-    expect(studioG7CleanupProof(log.events)).toEqual({ exchangeEnded: true, signedOut: true, browserClosed: false, browserQuiesced: true, complete: true });
+    expect(studioG7CleanupProof(log.events)).toEqual({ exchangeEnded: true, signedOut: true, browserClosed: false, browserQuiesced: true, refreshSessionsRevoked: true, complete: true });
     expect(statusOf(evaluateStudioG7Run(run, log.events, [], { expected }), "cleanup.browser_closed")).toMatchObject({ status: "unavailable", reason: "dead_owner_quiesced_close_unobservable" });
     // An uncertain settlement is never an exchange end.
     const uncertain = new EventLog(run.id);
@@ -495,12 +495,51 @@ describe("Studio G7 cleanup proof ordering (adversarial review)", () => {
     expect(studioG7CleanupProof(log.events)).toMatchObject({ exchangeEnded: false, complete: false });
     expect(statusOf(evaluateStudioG7Run(run, log.events, [], { expected }), "cleanup.exchange_ended")?.status).toBe("unavailable");
     // An end confirmed after the join counts.
-    log.add("studio.cleanup.exchange_ended", "canonical", { confirmed: true, status: "confirmed", basis: "api_end", exchange_id: EXCHANGE_UUID, join: "retained", ownership: "proven", verified_by: "member_snapshot" });
+    log.add("studio.cleanup.exchange_ended", "canonical", { confirmed: true, status: "confirmed", basis: "api_end", exchange_id: EXCHANGE_UUID, join: "retained", ownership: "proven", verified_by: "member_snapshot", speak_requested_before_observation: true });
     expect(studioG7CleanupProof(log.events)).toMatchObject({ exchangeEnded: true, complete: true });
     // A Speak intent with no join yet: only an end after the intent counts.
     const intentOnly = new EventLog(run.id);
     intentOnly.add("studio.cleanup.exchange_ended", "canonical", { confirmed: true, status: "confirmed", basis: "no_live_exchange_in_room", exchange_id: null, join: "retained", ownership: "not_required" });
     intentOnly.add("studio.exchange.speak_requested", "canonical", { grant_id: GRANT_UUID, write_ahead: true });
     expect(studioG7CleanupProof(intentOnly.events).exchangeEnded).toBe(false);
+  });
+});
+
+describe("Studio G7 cleanup proof after a Speak intent (adversarial re-review)", () => {
+  const ended = (extra: Record<string, unknown>) => ({ confirmed: true, status: "confirmed", verified_by: "member_snapshot", speak_requested_before_observation: true, ...extra });
+  it("counts only an API-read end observed after the intent, bound to the joined exchange or after the open window", () => {
+    const run = studioRun(config);
+    // A confirmation made before Speak (no API read), drained after the anchors.
+    const early = new EventLog(run.id);
+    early.add("studio.exchange.speak_requested", "canonical", { grant_id: GRANT_UUID, requested_at_lab_ms: T0 });
+    early.add("studio.exchange.opened", "canonical", { exchange_id: EXCHANGE_UUID, grant_id: GRANT_UUID });
+    early.add("studio.cleanup.exchange_ended", "canonical", { confirmed: true, status: "confirmed", basis: "no_exchange_opened_by_run", exchange_id: null, verified_by: "driver_never_requested_exchange", speak_requested_before_observation: false });
+    expect(studioG7CleanupProof(early.events).exchangeEnded).toBe(false);
+    // Joined: only an end of the joined exchange counts.
+    early.add("studio.cleanup.exchange_ended", "canonical", ended({ basis: "no_live_exchange_in_room", exchange_id: null }));
+    expect(studioG7CleanupProof(early.events).exchangeEnded).toBe(false);
+    early.add("studio.cleanup.exchange_ended", "canonical", ended({ basis: "api_end", exchange_id: EXCHANGE_UUID }));
+    expect(studioG7CleanupProof(early.events).exchangeEnded).toBe(true);
+    // Speak requested, never joined: only "nothing live" after the open window counts.
+    const unjoined = new EventLog(run.id);
+    unjoined.add("studio.exchange.speak_requested", "canonical", { grant_id: GRANT_UUID, requested_at_lab_ms: T0 });
+    unjoined.add("studio.cleanup.exchange_ended", "canonical", ended({ basis: "no_live_exchange_in_room", exchange_id: null }));
+    unjoined.add("studio.cleanup.exchange_ended", "canonical", ended({ basis: "no_live_exchange_after_open_window", exchange_id: null, speak_requested_at_lab_ms: T0, observed_at_lab_ms: T0 + 10_000, open_window_ms: 120_000 }));
+    expect(studioG7CleanupProof(unjoined.events).exchangeEnded).toBe(false);
+    unjoined.add("studio.cleanup.exchange_ended", "canonical", ended({ basis: "no_live_exchange_after_open_window", exchange_id: null, speak_requested_at_lab_ms: T0, observed_at_lab_ms: T0 + 121_000, open_window_ms: 120_000 }));
+    expect(studioG7CleanupProof(unjoined.events).exchangeEnded).toBe(true);
+    // No Speak intent at all: the driver's own "never requested" confirmation stands.
+    const never = new EventLog(run.id);
+    never.add("studio.cleanup.exchange_ended", "canonical", { confirmed: true, status: "confirmed", basis: "no_exchange_opened_by_run", verified_by: "driver_never_requested_exchange" });
+    expect(studioG7CleanupProof(never.events).exchangeEnded).toBe(true);
+  });
+
+  it("an unrevoked evidence-refresh session keeps cleanup incomplete until a later global sign-out", () => {
+    const item = episode();
+    expect(studioG7CleanupProof(item.log.events).complete).toBe(true);
+    item.log.add("studio.evidence.session_revoked", "canonical", { schema: "sophia_voice_lab_studio_sign_out_v1", scope: "local", confirmed: false, status: "unrevoked", http_status: 503 });
+    expect(studioG7CleanupProof(item.log.events)).toMatchObject({ refreshSessionsRevoked: false, complete: false });
+    item.log.add("studio.cleanup.signed_out", "canonical", { schema: "sophia_voice_lab_studio_sign_out_v1", scope: "global", confirmed: true, http_status: 204 });
+    expect(studioG7CleanupProof(item.log.events)).toMatchObject({ refreshSessionsRevoked: true, complete: true });
   });
 });

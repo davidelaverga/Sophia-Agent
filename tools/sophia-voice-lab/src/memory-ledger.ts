@@ -76,6 +76,10 @@ export class MemoryVoiceLabLedger implements VoiceLabLedger {
     return !TERMINAL_RUN_STATES.has(run.state) || !run.cleanupComplete
       || this.#recoveryControls.get(run.id)?.liveCleanupComplete === false || this.#browserLeases.has(run.id);
   }
+  async countActiveRunsExcept(runId: string): Promise<number> {
+    const retained = [...this.#recoveryControls.values()].filter((control) => control.binding.runId !== runId && !this.#runs.has(control.binding.runId) && (!control.liveCleanupComplete || this.#browserLeases.has(control.binding.runId))).length;
+    return retained + [...this.#runs.values()].filter((run) => run.id !== runId && this.#runRequiresAdmission(run)).length;
+  }
   async countActiveRuns(callerId?: string): Promise<number> {
     const partitions = callerId === undefined ? null : new Set(this.#callerPartitions.callerIds(callerId));
     const retained = [...this.#recoveryControls.values()].filter((control) => !this.#runs.has(control.binding.runId) && (!control.liveCleanupComplete || this.#browserLeases.has(control.binding.runId)) && (partitions === null || partitions.has(control.binding.callerPartitionId))).length;

@@ -9,7 +9,9 @@ import type { ResolvedAudio } from "../src/audio.js";
 import type { VoiceBrowserDriver } from "../src/browser-driver.js";
 import type { LabEvent, OperationRecord } from "../src/domain.js";
 import { sha256 } from "../src/security.js";
-import { deriveStudioG7Verdicts, evaluateStudioG7Run } from "../src/studio-g7/evaluate.js";
+import { deriveStudioG7Verdicts, evaluateStudioG7Run, studioG7CleanupProof } from "../src/studio-g7/evaluate.js";
+import { ownerCleanupForLease } from "../src/studio-g7/lease-release.js";
+import { passwordGrant } from "../src/studio-g7/supabase-session.js";
 import { StudioG7Driver } from "../src/studio-g7/studio-driver.js";
 import {
   API_SHA, BRIDGE_SHA, EXCHANGE_UUID, FAKE_EMAIL, FAKE_PASSWORD, FAKE_PUBLISHABLE_KEY, PRINCIPAL_UUID, PROJECT_UUID, STUDIO_SHA,
@@ -63,19 +65,45 @@ function listen(handler: (request: IncomingMessage, response: ServerResponse, bo
 }
 
 type Row = { source: string; seq: number; kind: string; receivedAt: string; receipt: Record<string, unknown> };
+type DriverEvent = Omit<LabEvent, "runId" | "seq" | "at">;
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+const OWNER = { workerId: "chromium-probe-owner", leaseEpoch: 1, expiresAt: new Date(Date.now() - 600_000) };
+
+/**
+ * The ledger order the worker gives driver events: each batch is persisted in
+ * turn and an event already persisted under its dedupe key keeps its first
+ * seq (so a confirmation drained late lands after the write-ahead anchors).
+ */
+function ledgerOrder(runId: string, batches: DriverEvent[][]): LabEvent[] {
+  const events: LabEvent[] = [];
+  const seen = new Set<string>();
+  for (const batch of batches) for (const event of batch) {
+    if (event.dedupeKey && seen.has(event.dedupeKey)) continue;
+    if (event.dedupeKey) seen.add(event.dedupeKey);
+    events.push({ ...event, runId, seq: events.length + 1, at: new Date(), dedupeKey: event.dedupeKey ?? null });
+  }
+  return events;
+}
+
+/** The worker's acquisition batch: the process acquisition and the runtime bound to (owner, lease epoch). */
+function acquisitionRecorder(batches: DriverEvent[][]) {
+  return async (acquisition: DriverEvent): Promise<void> => {
+    batches.push([acquisition, { kind: "harness.browser_runtime_acquired", source: "canonical", payload: { worker_id_sha256: sha256(OWNER.workerId), browser_lease_epoch: OWNER.leaseEpoch }, dedupeKey: "runtime" }]);
+  };
+}
 
 describe.skipIf(executablePath === null)("Studio G7 driver against a local fake Studio in real Chromium", () => {
   const servers: Server[] = [];
   const browserServers: BrowserServer[] = [];
-  const page = { grantId: evidenceGrant(studioRun(studioTestConfig())).grantId as string, runBindingSha256: "" };
+  const page = { grantId: evidenceGrant(studioRun(studioTestConfig())).grantId as string, runBindingSha256: "", micDelayMs: 0, serves: 0 };
   const api = {
     exchangeId: null as string | null, inputActorId: PRINCIPAL_UUID, evidenceMode: "ok" as "ok" | "missing" | "foreign",
     receipts: [] as Row[], calls: [] as string[], grant: null as Record<string, unknown> | null, onEnd: null as (() => void) | null,
-    onEvidence: null as (() => void) | null, openDelayMs: 0, ended: [] as string[],
+    onEvidence: null as (() => void) | null, openDelayMs: 0, ended: [] as string[], openTimer: null as ReturnType<typeof setTimeout> | null,
     work: [] as Array<Record<string, unknown>>, tasks: new Map<string, Record<string, unknown>>(), versions: new Map<string, Array<Record<string, unknown>>>(),
     contents: new Map<string, Buffer>(), mission: [] as Array<Record<string, unknown>>, edits: new Map<string, { status: number; body: unknown }>(), withdrawals: [] as unknown[],
   };
-  const tokens = { issued: new Set<string>(), revoked: new Set<string>() };
+  const tokens = { issued: new Set<string>(), revoked: new Set<string>(), expiresIn: 3_600, failLocal: 0, logouts: [] as string[] };
   let origins = { studio: "", api: "", supabase: "", store: "" };
 
   const ids = { research: randomUUID(), design: randomUUID(), edit: randomUUID(), artifact: randomUUID(), v1: randomUUID(), v2: randomUUID(), html1: randomUUID(), html2: randomUUID(), md: randomUUID(), note: randomUUID(), decision: randomUUID() };
@@ -115,13 +143,24 @@ describe.skipIf(executablePath === null)("Studio G7 driver against a local fake 
         if (credentials.email !== FAKE_EMAIL || credentials.password !== FAKE_PASSWORD) { response.writeHead(400, { "content-type": "application/json" }).end(JSON.stringify({ error: "invalid_grant" })); return; }
         const token = `fake-access-token-${randomUUID()}`;
         tokens.issued.add(token);
-        response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ access_token: token, refresh_token: `fake-refresh-${randomUUID()}`, token_type: "bearer", expires_in: 3_600, expires_at: Math.floor(Date.now() / 1_000) + 3_600, user: { id: PRINCIPAL_UUID, aud: "authenticated" } }));
+        response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ access_token: token, refresh_token: `fake-refresh-${randomUUID()}`, token_type: "bearer", expires_in: tokens.expiresIn, expires_at: Math.floor(Date.now() / 1_000) + tokens.expiresIn, user: { id: PRINCIPAL_UUID, aud: "authenticated" } }));
         return;
       }
       if (request.method === "POST" && url.pathname === "/auth/v1/logout" && url.searchParams.get("scope") === "global") {
+        tokens.logouts.push("global");
         const token = String(request.headers.authorization ?? "").replace(/^Bearer /, "");
         if (!tokens.issued.has(token) || tokens.revoked.has(token)) { response.writeHead(401).end(); return; }
         for (const issued of tokens.issued) tokens.revoked.add(issued);
+        response.writeHead(204).end();
+        return;
+      }
+      // scope=local revokes only the presented session, as Supabase Auth does.
+      if (request.method === "POST" && url.pathname === "/auth/v1/logout" && url.searchParams.get("scope") === "local") {
+        tokens.logouts.push("local");
+        const token = String(request.headers.authorization ?? "").replace(/^Bearer /, "");
+        if (tokens.failLocal > 0) { tokens.failLocal -= 1; response.writeHead(503).end(); return; }
+        if (!tokens.issued.has(token) || tokens.revoked.has(token)) { response.writeHead(401).end(); return; }
+        tokens.revoked.add(token);
         response.writeHead(204).end();
         return;
       }
@@ -147,7 +186,7 @@ describe.skipIf(executablePath === null)("Studio G7 driver against a local fake 
       const path = url.pathname;
       if (request.method === "POST" && path === `/test/projects/${PROJECT_UUID}/exchanges`) {
         const open = () => { api.exchangeId = EXCHANGE_UUID; json(200, { exchangeId: EXCHANGE_UUID }); };
-        if (api.openDelayMs > 0) setTimeout(open, api.openDelayMs); else open();
+        if (api.openDelayMs > 0) api.openTimer = setTimeout(open, api.openDelayMs); else open();
         return;
       }
       if (request.method === "GET" && path === `/api/v1/projects/${PROJECT_UUID}/snapshot`) {
@@ -216,7 +255,8 @@ describe.skipIf(executablePath === null)("Studio G7 driver against a local fake 
       const url = new URL(request.url ?? "/", "http://local");
       if (url.pathname === "/") { response.writeHead(200, { "content-type": "text/html" }).end(`<!doctype html><html><head><meta charset="utf-8"><meta name="sophia-build" content="${STUDIO_SHA}"><title>Studio</title></head><body></body></html>`); return; }
       if (url.pathname !== `/p/${PROJECT_UUID}/studio`) { response.writeHead(404).end(); return; }
-      const cfg = JSON.stringify({ api: origins.api, storageKey: "sb-127-auth-token", projectId: PROJECT_UUID, grantId: page.grantId, runBindingSha256: page.runBindingSha256 });
+      page.serves += 1;
+      const cfg = JSON.stringify({ api: origins.api, storageKey: "sb-127-auth-token", projectId: PROJECT_UUID, grantId: page.grantId, runBindingSha256: page.runBindingSha256, micDelayMs: page.micDelayMs });
       response.writeHead(200, { "content-type": "text/html", "cache-control": "no-store" }).end(`<!doctype html><html><head><meta charset="utf-8"><title>Room</title></head><body><main id="app"></main><audio data-sophia-room-audio="sophia"></audio><script>
 const cfg = ${cfg};
 const app = document.getElementById('app');
@@ -248,7 +288,7 @@ else {
   const end = button('End', { hidden: '' });
   const leave = button('Leave the room', { hidden: '' });
   const show = (joined) => { join.hidden = joined; for (const node of [mic, speak, end, leave]) node.hidden = !joined; };
-  join.onclick = async () => { show(true); if (localStorage.getItem('sophia.mic.v1') !== 'off') await publish(); };
+  join.onclick = async () => { show(true); if (cfg.micDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, cfg.micDelayMs)); if (localStorage.getItem('sophia.mic.v1') !== 'off') await publish(); };
   mic.onclick = async () => { if (mic.getAttribute('aria-pressed') === 'true') unpublish(); else await publish(); };
   leave.onclick = () => { unpublish(); show(false); };
   speak.onclick = async () => {
@@ -276,7 +316,7 @@ else {
     await Promise.all(servers.map((server) => new Promise<void>((resolve) => server.close(() => resolve()))));
   }, 30_000);
 
-  function harness(overrides: NodeJS.ProcessEnv = {}) {
+  function harness(overrides: NodeJS.ProcessEnv = {}, timeouts: Record<string, number> = {}) {
     const config = studioTestConfig({ studio: origins.studio, api: origins.api, supabase: origins.supabase }, {
       SOPHIA_VOICE_LAB_ALLOWED_ORIGINS: `http://frontend.test,http://gateway.test,http://voice.test,http://langgraph.test,${origins.studio},${origins.api},${origins.supabase},${origins.store}`,
       SOPHIA_VOICE_LAB_STUDIO_OBJECT_STORE_ORIGINS: origins.store,
@@ -290,15 +330,23 @@ else {
         browserServers.push(server);
         return server;
       },
-      timeouts: { micArrivalGraceMs: 3_000, exchangeEndMs: 8_000, sessionClosedMs: 5_000, uiActionMs: 3_000, designSettleMs: 5_000 },
+      timeouts: { micArrivalGraceMs: 3_000, exchangeEndMs: 8_000, sessionClosedMs: 5_000, uiActionMs: 3_000, designSettleMs: 5_000, exchangeOpenWindowMs: 4_000, ...timeouts },
     });
     const run = studioRun(config);
+    page.micDelayMs = 0;
+    page.serves = 0;
+    tokens.expiresIn = 3_600;
+    tokens.failLocal = 0;
+    tokens.logouts.length = 0;
     page.runBindingSha256 = bindingOf(run);
     api.grant = evidenceGrant(run);
     api.exchangeId = null;
     api.inputActorId = PRINCIPAL_UUID;
     api.evidenceMode = "ok";
     api.onEvidence = null;
+    // A delayed open left over from an earlier test must never land in this one.
+    if (api.openTimer !== null) clearTimeout(api.openTimer);
+    api.openTimer = null;
     api.openDelayMs = 0;
     api.ended.length = 0;
     api.calls.length = 0;
@@ -538,6 +586,107 @@ else {
     expect(ended.events.filter((event) => event.kind === "studio.exchange.end_requested").map((event) => event.payload.basis)).not.toContain("ui_end");
     expect(ended.events.find((event) => event.kind === "studio.exchange.ownership")?.payload).toMatchObject({ status: "proven", exchange_id: EXCHANGE_UUID });
     expect(ended.events.find((event) => event.kind === "studio.cleanup.exchange_ended")?.payload).toMatchObject({ confirmed: true, exchange_id: EXCHANGE_UUID });
+  }, 120_000);
+
+  it("a watchdog during the grant gate never counts as the end of the exchange Speak opens later, nor releases the owner's lease (P3-7)", async () => {
+    const { driver, run } = harness();
+    page.micDelayMs = 2_500;
+    api.evidenceMode = "missing";
+    const batches: DriverEvent[][] = [];
+    const starting = driver.start(run, "unused", undefined, undefined, acquisitionRecorder(batches) as never, async (events) => { batches.push(events); });
+    const deadline = Date.now() + 60_000;
+    while (!(page.serves > 0 && driver.hasSession(run.id) && driver.exchangeJoin(run.id)?.speakRequested === false) && Date.now() < deadline) await sleep(25);
+    await sleep(800);
+    const fired = await driver.fireWatchdog(run.id);
+    // True at that moment: Speak was not requested yet.
+    expect(fired.find((event) => event.kind === "studio.cleanup.exchange_ended")?.payload).toMatchObject({ confirmed: true, basis: "no_exchange_opened_by_run" });
+    const started = await starting;
+    expect(api.exchangeId).toBe(EXCHANGE_UUID);
+    // Ownership is unprovable (no evidence route): the exchange stays live; the browser closes and the principal signs out.
+    const aborted = await driver.abort(run, "TEST_ABORT");
+    expect(api.exchangeId).toBe(EXCHANGE_UUID);
+    const events = ledgerOrder(run.id, [...batches, started.events, aborted.events]);
+    const stale = events.find((event) => event.kind === "studio.cleanup.exchange_ended" && event.payload.basis === "no_exchange_opened_by_run")!;
+    expect(stale.seq).toBeGreaterThan(events.find((event) => event.kind === "studio.exchange.opened")!.seq);
+    expect(studioG7CleanupProof(events)).toMatchObject({ exchangeEnded: false, signedOut: true, browserClosed: true, complete: false });
+    expect(ownerCleanupForLease(events, OWNER)).toMatchObject({ complete: false, reason: "owner_exchange_end_not_confirmed" });
+  }, 120_000);
+
+  it("an exchange that opens after start gave up is never confirmed ended while live; only a read after the open window with nothing live confirms it (P3-7)", async () => {
+    const { driver, run } = harness({}, { exchangeOpenMs: 2_000, exchangeOpenWindowMs: 6_000 });
+    api.openDelayMs = 3_500;
+    const batches: DriverEvent[][] = [];
+    const error = await driver.start(run, "unused", undefined, undefined, acquisitionRecorder(batches) as never, async (events) => { batches.push(events); }).catch((caught: unknown) => caught) as { detail?: Record<string, unknown> };
+    expect(error.detail).toMatchObject({ code: "STUDIO_EXCHANGE_NOT_OPENED" });
+    const speakAt = Date.now();
+    const aborted = await driver.abort(run, "STUDIO_EXCHANGE_NOT_OPENED");
+    expect(aborted.events.find((event) => event.kind === "studio.cleanup.exchange_ended")?.payload).toMatchObject({ confirmed: false, status: "uncertain" });
+    const opened = Date.now() + 15_000;
+    while (api.exchangeId === null && Date.now() < opened) await sleep(50);
+    expect(api.exchangeId).toBe(EXCHANGE_UUID);
+    await sleep(Math.max(0, speakAt + 6_500 - Date.now()));
+    // After the window, but the exchange is live: still never confirmed.
+    const binding = { id: run.id, testRunId: run.testRunId, cleanupObligationId: run.cleanupObligationId } as never;
+    const live = await driver.recover(binding, "unused");
+    expect(live.events.find((event) => event.kind === "studio.cleanup.exchange_ended")?.payload).toMatchObject({ confirmed: false });
+    let events = ledgerOrder(run.id, [...batches, aborted.events, live.events]);
+    expect(studioG7CleanupProof(events)).toMatchObject({ exchangeEnded: false, complete: false });
+    expect(ownerCleanupForLease(events, OWNER)).toMatchObject({ complete: false, reason: "owner_exchange_end_not_confirmed" });
+    // The product guard ends it; a read-only observation after the window with nothing live confirms.
+    api.exchangeId = null;
+    const after = await driver.recover(binding, "unused");
+    expect(after.events.find((event) => event.kind === "studio.cleanup.exchange_ended")?.payload).toMatchObject({ confirmed: true, basis: "no_live_exchange_after_open_window", verified_by: "member_snapshot" });
+    events = ledgerOrder(run.id, [...batches, aborted.events, live.events, after.events]);
+    expect(studioG7CleanupProof(events).exchangeEnded).toBe(true);
+  }, 120_000);
+
+  it("fails start closed when the product issues an access-JWT lifetime above 24 h, before any browser holds it (P3-6)", async () => {
+    const { driver, run } = harness();
+    tokens.expiresIn = 1_000_000_000_000;
+    const durable: DriverEvent[] = [];
+    const error = await driver.start(run, "unused", undefined, undefined, undefined, async (events) => { durable.push(...events); }).catch((caught: unknown) => caught) as { detail?: Record<string, unknown> };
+    expect(error.detail).toMatchObject({ code: "STUDIO_AUTH_TOKEN_LIFETIME_UNBOUNDED", details: { expires_in_s: 1_000_000_000_000, max_expires_in_s: 86_400, issued_session_revoked: true } });
+    expect(page.serves).toBe(0);
+    expect(tokens.logouts).toEqual(["local"]);
+    expect(durable.some((event) => event.kind === "studio.auth.session_established")).toBe(false);
+    const aborted = await driver.abort(run, "STUDIO_AUTH_TOKEN_LIFETIME_UNBOUNDED");
+    expect(aborted.events.find((event) => event.kind === "cleanup.browser_context_closed")?.payload).toMatchObject({ close_resolved: true });
+  }, 60_000);
+
+  it("makes the issued access-JWT lifetime durable before the browser is seeded with the session (P3-6)", async () => {
+    const { driver, run } = harness();
+    const batches: DriverEvent[][] = [];
+    const error = await driver.start(run, "unused", undefined, undefined, undefined, async (events) => { batches.push(events); throw new Error("ledger unavailable"); }).catch((caught: unknown) => caught);
+    expect(error).toBeTruthy();
+    expect(batches[0]?.find((event) => event.kind === "studio.auth.session_established")?.payload).toMatchObject({ expires_in_s: 3_600 });
+    // The durable write failed, so the session was never seeded: the room page was never loaded.
+    expect(page.serves).toBe(0);
+    await driver.abort(run, "LEDGER_UNAVAILABLE");
+  }, 60_000);
+
+  it("revokes only the evidence-refresh session end to end; a failed local revoke leaves cleanup incomplete and never signs out globally (P3-5 follow-up)", async () => {
+    const { config, driver, run } = harness();
+    const batches: DriverEvent[][] = [];
+    const started = await driver.start(run, "unused", undefined, undefined, acquisitionRecorder(batches) as never, async (events) => { batches.push(events); });
+    const ended = await driver.end(run, "unused", "unused");
+    expect(api.exchangeId).toBeNull();
+    // A later run of the same principal is live now.
+    const later = await passwordGrant({ supabaseUrl: config.studioG7!.supabaseUrl, publishableKey: FAKE_PUBLISHABLE_KEY }, { email: FAKE_EMAIL, password: FAKE_PASSWORD });
+    tokens.logouts.length = 0;
+    const join = { exchangeId: EXCHANGE_UUID, grantId: page.grantId, runBindingSha256: bindingOf(run), speakRequested: true, exchangeOpenedAtMs: null };
+    const refreshed = await driver.refreshStudioEvidence(run, join);
+    expect(tokens.logouts).toEqual(["local"]);
+    expect(refreshed.find((event) => event.kind === "studio.evidence.session_revoked")?.payload).toMatchObject({ scope: "local", confirmed: true });
+    expect(tokens.revoked.has(later.accessToken)).toBe(false);
+    // The local revoke keeps failing: retried with backoff, never replaced by a global sign-out.
+    tokens.logouts.length = 0;
+    tokens.failLocal = 3;
+    const failed = await driver.refreshStudioEvidence(run, join);
+    expect(tokens.logouts).toEqual(["local", "local", "local"]);
+    expect(failed.find((event) => event.kind === "studio.evidence.session_revoked")?.payload).toMatchObject({ scope: "local", confirmed: false, status: "unrevoked", attempts: 3 });
+    expect(tokens.revoked.has(later.accessToken)).toBe(false);
+    const events = ledgerOrder(run.id, [...batches, started.events, ended.events, refreshed, failed]);
+    expect(studioG7CleanupProof(events)).toMatchObject({ exchangeEnded: true, signedOut: true, refreshSessionsRevoked: false, complete: false });
   }, 120_000);
 
   it("a run-deadline watchdog firing while Speak is still opening the exchange never confirms it ended", async () => {

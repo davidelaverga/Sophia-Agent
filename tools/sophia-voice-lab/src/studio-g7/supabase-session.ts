@@ -31,6 +31,14 @@ export interface StudioUserSession {
 }
 
 const SAFE_ERROR_CODE = /^[a-z][a-z0-9_]{0,63}$/;
+
+/**
+ * The longest access-JWT lifetime (`expires_in`, seconds) the Lab accepts:
+ * 24 h, the top of SOPHIA_VOICE_LAB_STUDIO_ACCESS_TOKEN_MAX_SECONDS. A grant
+ * above it is refused (its session revoked) before any browser or request
+ * uses it, so a refused value can never become a dead owner's wait.
+ */
+export const STUDIO_ACCESS_TOKEN_LIFETIME_BOUND_S = 86_400;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** supabase-js default storage key: `sb-<first DNS label of the project host>-auth-token`. */
@@ -73,7 +81,7 @@ export function studioAuthError(code: string, message: string, status: number | 
 export async function passwordGrant(
   target: SupabaseAuthTarget,
   credentials: { email: string; password: string },
-  options: { fetchImpl?: FetchLike; timeoutMs?: number; expectedUserId?: string; nowSeconds?: () => number } = {},
+  options: { fetchImpl?: FetchLike; timeoutMs?: number; expectedUserId?: string; nowSeconds?: () => number; maxExpiresInSeconds?: number } = {},
 ): Promise<StudioUserSession> {
   const fetchImpl = options.fetchImpl ?? fetch;
   const url = authEndpoint(target, "/auth/v1/token", { grant_type: "password" });
@@ -103,6 +111,14 @@ export async function passwordGrant(
     // would touch every session of a principal this Lab does not own.
     const revoked = await signOut(target, session.accessToken, "local", { fetchImpl, ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }) });
     throw new VoiceLabError(labError("STUDIO_AUTH_PRINCIPAL_MISMATCH", "The Supabase session is not bound to the configured synthetic principal.", "authorization", false, { http_status: response.status, supabase_error_code: null, issued_session_revoked: revoked.confirmed }));
+  }
+  const maxExpiresIn = Math.min(options.maxExpiresInSeconds ?? STUDIO_ACCESS_TOKEN_LIFETIME_BOUND_S, STUDIO_ACCESS_TOKEN_LIFETIME_BOUND_S);
+  const nowSeconds = (options.nowSeconds ?? (() => Math.floor(Date.now() / 1_000)))();
+  if (session.expiresIn > maxExpiresIn || session.expiresAt - nowSeconds > maxExpiresIn + 60) {
+    // Fail closed: an unbounded lifetime would make a dead owner's lease wait
+    // unbounded. Only the session just issued is revoked (scope=local).
+    const revoked = await signOut(target, session.accessToken, "local", { fetchImpl, ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }) });
+    throw new VoiceLabError(labError("STUDIO_AUTH_TOKEN_LIFETIME_UNBOUNDED", "The Supabase access-JWT lifetime exceeds the Lab's 24 h bound; the session was refused.", "authorization", false, { http_status: response.status, supabase_error_code: null, expires_in_s: session.expiresIn, max_expires_in_s: maxExpiresIn, issued_session_revoked: revoked.confirmed }));
   }
   return session;
 }

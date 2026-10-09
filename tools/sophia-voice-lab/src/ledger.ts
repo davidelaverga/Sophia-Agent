@@ -220,6 +220,8 @@ export interface VoiceLabLedger {
   close(): Promise<void>;
   health(): Promise<LedgerHealth>;
   countActiveRuns(callerId?: string): Promise<number>;
+  /** Runs (and retained controls) holding admission, other than `runId`. */
+  countActiveRunsExcept(runId: string): Promise<number>;
   listExpiredRuns(now: Date, limit: number): Promise<RunRecord[]>;
   listRunsNeedingRecovery(limit: number, afterRunId?: string): Promise<RunRecord[]>;
   listRunsPendingEvidence(limit: number): Promise<RunRecord[]>;

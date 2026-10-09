@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { setTimeout as delay } from "node:timers/promises";
 
 import pino from "pino";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { AudioResolver } from "../src/audio.js";
 import type { VoiceBrowserDriver } from "../src/browser-driver.js";
@@ -126,7 +126,7 @@ selected("real PostgreSQL Studio G7 worker branches (schema v7)", () => {
     await audio.initialize();
     const driverB = new ScriptedStudioDriver((await ledger.getRun(a.runId))!);
     driverB.recoverResult = (runId) => [
-      { kind: "studio.cleanup.exchange_ended", source: "canonical", payload: { confirmed: true, status: "confirmed", basis: "run_exchange_not_live", exchange_id: EXCHANGE_UUID, join: "durable", ownership: "not_required", verified_by: "member_snapshot" }, dedupeKey: `pg-recovery-ended:${runId}` },
+      { kind: "studio.cleanup.exchange_ended", source: "canonical", payload: { confirmed: true, status: "confirmed", basis: "run_exchange_not_live", exchange_id: EXCHANGE_UUID, join: "durable", ownership: "not_required", verified_by: "member_snapshot", speak_requested_before_observation: true }, dedupeKey: `pg-recovery-ended:${runId}` },
       { kind: "studio.cleanup.signed_out", source: "canonical", payload: { schema: "sophia_voice_lab_studio_sign_out_v1", scope: "global", confirmed: true, http_status: 204, basis: "global_logout_accepted", session_basis: "fresh_grant" }, dedupeKey: `pg-recovery-signed-out:${runId}` },
     ];
     const workerB = new VoiceLabWorker("pg-worker-b", ledger, config, audio, driverB as unknown as VoiceBrowserDriver, new CapabilityCodec(config.capabilitySecret, config.capabilityIssuer, config.capabilityTtlSeconds), pino({ level: "silent" }));
@@ -151,7 +151,8 @@ selected("real PostgreSQL Studio G7 worker branches (schema v7)", () => {
     await ledger.pool.query("update sophia_voice_lab.worker_heartbeats set observed_at=clock_timestamp()-interval '10 minutes' where worker_id='pg-worker-a-dies'");
     expect(await ledger.releaseDeadOwnerStudioBrowserLease(randomUUID(), proof)).toMatchObject({ released: false });
 
-    // Now past the JWT lifetime: B re-verifies the exchange is not live and releases the lease (quiesced, not closed).
+    // Now past the JWT lifetime (and B's recovery backoff): B re-verifies the exchange is not live and releases the lease (quiesced, not closed).
+    await ledger.pool.query("update sophia_voice_lab.run_events set observed_at=observed_at-interval '2 hours' where run_id=$1 and kind='studio.cleanup.recovery_attempt'", [a.runId]);
     await workerB.maintainSessions();
     expect(await ledger.getBrowserLease(a.runId)).toBeNull();
     const released = (await ledger.pool.query("select payload from sophia_voice_lab.run_events where run_id=$1 and kind='cleanup.browser_lease_released'", [a.runId])).rows[0].payload;
@@ -168,7 +169,7 @@ selected("real PostgreSQL Studio G7 worker branches (schema v7)", () => {
     await voice(a, "create");
     // A persisted its End: exchange ended, global sign-out, its own browser (this lease's execution epoch) closed; then died.
     await ledger.appendEvents(a.runId, [
-      { kind: "studio.cleanup.exchange_ended", source: "canonical", payload: { confirmed: true, status: "confirmed", basis: "api_end", exchange_id: EXCHANGE_UUID, join: "retained", ownership: "proven", verified_by: "member_snapshot" }, dedupeKey: `pg-owner-ended:${a.runId}` },
+      { kind: "studio.cleanup.exchange_ended", source: "canonical", payload: { confirmed: true, status: "confirmed", basis: "api_end", exchange_id: EXCHANGE_UUID, join: "retained", ownership: "proven", verified_by: "member_snapshot", speak_requested_before_observation: true }, dedupeKey: `pg-owner-ended:${a.runId}` },
       { kind: "studio.cleanup.signed_out", source: "canonical", payload: { schema: "sophia_voice_lab_studio_sign_out_v1", scope: "global", confirmed: true, http_status: 204, basis: "global_logout_accepted", session_basis: "held_session" }, dedupeKey: `pg-owner-signed-out:${a.runId}` },
       { kind: "cleanup.browser_context_closed", source: "browser", payload: { schema: "sophia_voice_lab_execution_epoch_browser_cleanup_v1", close_resolved: true, browser_registry_absent: true, browser_process_close_resolved: true, execution_epoch_sha256: sha256(`epoch:${a.runId}`) }, dedupeKey: `cleanup:${a.runId}:browser` },
     ]);
@@ -212,6 +213,41 @@ selected("real PostgreSQL Studio G7 worker branches (schema v7)", () => {
     await ledger.pool.query("update sophia_voice_lab.worker_heartbeats set observed_at=clock_timestamp()-interval '45 seconds' where worker_id='pg-worker-skewed'");
     expect(await ledger.releaseDeadOwnerStudioBrowserLease(a.runId, { verificationId: randomUUID(), tokenMaxLifetimeMs: 3_600_000, heartbeatStaleMs: 30_000 })).toEqual({ released: false, reason: "owner_heartbeat_live" });
     await ledger.pool.query("update sophia_voice_lab.runs set state='active' where id=$1", [a.runId]);
+  }, 120_000);
+
+  it("a worker clock ahead of the database runs no forced recovery before the database says the token lifetime elapsed (re-review P3)", async () => {
+    const a = await harness("pg-worker-a-clock");
+    await a.worker.runOnce();
+    await voice(a, "create");
+    const config = studioTestConfig(undefined, { SOPHIA_VOICE_LAB_MAX_CONCURRENT_RUNS: "1" });
+    const audio = new AudioResolver(config);
+    await audio.initialize();
+    const driverB = new ScriptedStudioDriver((await ledger.getRun(a.runId))!);
+    let attempt = 0;
+    driverB.recoverResult = (runId) => {
+      attempt += 1;
+      return [
+        { kind: "studio.cleanup.exchange_ended", source: "canonical", payload: { confirmed: true, status: "confirmed", basis: "run_exchange_not_live", exchange_id: EXCHANGE_UUID, join: "durable", ownership: "not_required", verified_by: "member_snapshot", speak_requested_before_observation: true }, dedupeKey: `pg-clock-ended:${runId}` },
+        { kind: "studio.cleanup.signed_out", source: "canonical", payload: { schema: "sophia_voice_lab_studio_sign_out_v1", scope: "global", confirmed: true, http_status: 204, basis: "global_logout_accepted", session_basis: "fresh_grant", sign_out_id: `clock-${attempt}` }, dedupeKey: `pg-clock-signed-out:${runId}:${attempt}` },
+      ];
+    };
+    const workerB = new VoiceLabWorker("pg-worker-b-clock", ledger, config, audio, driverB as unknown as VoiceBrowserDriver, new CapabilityCodec(config.capabilitySecret, config.capabilityIssuer, config.capabilityTtlSeconds), pino({ level: "silent" }));
+    await ledger.pool.query("update sophia_voice_lab.browser_leases set expires_at=clock_timestamp()-interval '3 hours' where run_id=$1", [a.runId]);
+    await workerB.maintainSessions();
+    await workerB.maintainSessions();
+    expect(await ledger.getRun(a.runId)).toMatchObject({ state: "aborted_driver_restart", cleanupComplete: false });
+    // On the database clock the access-JWT lifetime since B's post-expiry sign-out elapses only in 30 s.
+    await ledger.pool.query("update sophia_voice_lab.run_events set observed_at=clock_timestamp()-interval '3570 seconds' where run_id=$1 and kind='studio.cleanup.signed_out'", [a.runId]);
+    const before = driverB.calls.filter((call) => call === "recover").length;
+    // Worker B's clock runs ten minutes ahead of the database.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date(Date.now() + 10 * 60_000));
+    try { for (let pass = 0; pass < 5; pass += 1) await workerB.maintainSessions(); }
+    finally { vi.useRealTimers(); }
+    // Not even one: the database says the lifetime has not elapsed, and the
+    // worker's clock is never consulted for that gate.
+    expect(driverB.calls.filter((call) => call === "recover").length - before).toBe(0);
+    expect(await ledger.getBrowserLease(a.runId)).not.toBeNull();
   }, 120_000);
 
   it("re-checks a G7 step when the worker executes it: a second operation of a performed step is refused (P3-3)", async () => {

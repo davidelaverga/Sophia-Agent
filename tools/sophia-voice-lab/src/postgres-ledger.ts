@@ -100,6 +100,9 @@ export class PostgresVoiceLabLedger implements VoiceLabLedger {
     this.#callerPartitions.assertLivePartitionIds(result.rows.map((row) => row.caller_partition_id));
   }
 
+  async countActiveRunsExcept(runId: string): Promise<number> {
+    return (await activeRunCounts(this.pool, null, [], runId)).global;
+  }
   async countActiveRuns(callerId?: string): Promise<number> {
     const counts = await activeRunCounts(this.pool, callerId ?? null, callerId === undefined ? [] : this.#callerPartitions.callerIds(callerId));
     return callerId === undefined ? counts.global : counts.caller;
@@ -1104,7 +1107,7 @@ export class PostgresVoiceLabLedger implements VoiceLabLedger {
 }
 
 
-async function activeRunCounts(database: pg.Pool | pg.PoolClient, callerId: string | null, partitions: string[]): Promise<{ global: number; caller: number }> {
+async function activeRunCounts(database: pg.Pool | pg.PoolClient, callerId: string | null, partitions: string[], excludeRunId: string | null = null): Promise<{ global: number; caller: number }> {
   const result = await database.query<{ global_count: string; caller_count: string }>(`with active as (
     select r.id,r.caller_id,null::text as caller_partition from ${SCHEMA}.runs r
       where not r.cleanup_complete or not (r.state=any($1::text[]))
@@ -1114,9 +1117,9 @@ async function activeRunCounts(database: pg.Pool | pg.PoolClient, callerId: stri
     select c.run_id,null::text,c.binding->>'callerPartitionId' from ${SCHEMA}.recovery_controls c
       where not exists (select 1 from ${SCHEMA}.runs r where r.id=c.run_id)
         and (not c.live_cleanup_complete or exists (select 1 from ${SCHEMA}.browser_leases b where b.run_id=c.run_id))
-  ) select count(*)::text as global_count,
-      count(*) filter (where caller_id=$2 or caller_partition=any($3::text[]))::text as caller_count from active`,
-  [[...TERMINAL_RUN_STATES], callerId, partitions]);
+  ) select count(*) filter (where $4::uuid is null or id<>$4::uuid)::text as global_count,
+      count(*) filter (where ($4::uuid is null or id<>$4::uuid) and (caller_id=$2 or caller_partition=any($3::text[])))::text as caller_count from active`,
+  [[...TERMINAL_RUN_STATES], callerId, partitions, excludeRunId]);
   return { global: Number(result.rows[0]?.global_count ?? 0), caller: Number(result.rows[0]?.caller_count ?? 0) };
 }
 
