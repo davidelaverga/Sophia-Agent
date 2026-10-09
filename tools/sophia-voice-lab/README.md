@@ -276,11 +276,21 @@ An abandoned sign-out leaves the run's cleanup incomplete until terminal
 recovery retries it. A run that was awaiting external evidence still is: it
 never gets a failure-shaped manifest from that recovery or from the generic
 evidence revision, and only the Studio evidence path finalizes it from the
-ledger once its cleanup is proven again. No wait cycle remains: a deferral
-waits only on a run that is live (not terminal, or leased), at most one run is
-live at a time (admission admits one run, and a run never leaves a terminal
-state or regains a lease), and a live run's own recovery never waits on a
-terminal, lease-free run.
+ledger once its cleanup is proven again. Markers are matched by id: a worker
+clears only its own, and a marker stays outstanding until a clear for that id.
+A second recovery of the same run is refused (`sign_out_in_flight`) while the
+run has an outstanding marker, so two workers never hold markers for one run at
+once, and admission stays closed while any run has an outstanding marker,
+whatever its cleanup flag. Only a marker that is provably abandoned is taken
+over: on the ledger's clock it is older than the heartbeat staleness plus the
+60 s skew margin (90 s), and so is its owner's last heartbeat; the taking-over
+begin clears it (`abandoned_owner_dead`). Right before its global logout the
+holder re-checks in the ledger that its marker is still outstanding; a holder
+whose marker was taken over signs out only its own session (scope=local). No
+wait cycle remains: a deferral waits only on a run that is live (not terminal,
+or leased), at most one run is live at a time (admission admits one run, and a
+run never leaves a terminal state or regains a lease), and a live run's own
+recovery never waits on a terminal, lease-free run.
 
 **Cleanup.** The Lab never requests End for an exchange it cannot prove is the
 run's own: the exchange joined to this run after its Speak, whose evidence names

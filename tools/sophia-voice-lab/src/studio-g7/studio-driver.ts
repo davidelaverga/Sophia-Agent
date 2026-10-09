@@ -169,6 +169,12 @@ type IdentitySnapshot = { observed: Partial<DeploymentIdentity>; event: DriverEv
 /** The Studio extensions the worker calls for G7 runs (absent on the legacy driver). */
 export interface StudioDriverExtensions {
   studioAction(run: RunRecord, operationId: string, input: Record<string, unknown>): Promise<DriverOperationResult>;
+  /**
+   * The sign-out fence's holder check for an API-only recovery: consulted right
+   * before its global logout; false (the marker was taken over) means only
+   * the recovery's own session is signed out (scope=local). null removes it.
+   */
+  setStudioSignOutGate(runId: string, gate: (() => Promise<boolean>) | null): void;
   /** One read of the run's exchange's calls (A15 getExchangeCalls), as the principal: a voice step's write-ahead baseline. */
   readStudioCalls(run: RunRecord, purpose: string, operationId: string | null, stepId: string | null): Promise<DriverEvent>;
   refreshStudioEvidence(run: RunRecord, join: DurableStudioJoin): Promise<DriverEvent[]>;
@@ -178,7 +184,7 @@ export interface StudioDriverExtensions {
 
 export function hasStudioExtensions(driver: VoiceBrowserDriver): driver is VoiceBrowserDriver & StudioDriverExtensions {
   const candidate = driver as Partial<StudioDriverExtensions>;
-  return typeof candidate.studioAction === "function" && typeof candidate.refreshStudioEvidence === "function" && typeof candidate.adoptStudioJoin === "function" && typeof candidate.readStudioCalls === "function";
+  return typeof candidate.studioAction === "function" && typeof candidate.refreshStudioEvidence === "function" && typeof candidate.adoptStudioJoin === "function" && typeof candidate.readStudioCalls === "function" && typeof candidate.setStudioSignOutGate === "function";
 }
 
 /** More calls than this in one exchange: the read is typed unavailable rather than truncated. */
@@ -1357,7 +1363,11 @@ export class StudioG7Driver implements VoiceBrowserDriver, StudioDriverExtension
     // before the sign-out ends it. It never signs in for this alone (a run
     // that never allocated a browser stays network-free).
     if (purpose === "recover" && tokens.held() !== null) events.push(await this.#readRoomPresence(runId, tokens, purpose));
-    events.push(await this.#signOut(runId, tokens));
+    // A fenced recovery logs the principal out globally only while it still
+    // holds its sign-out marker; otherwise only its own session goes.
+    const gate = this.#signOutGates.get(runId);
+    const held = gate === undefined ? true : await gate().catch(() => false);
+    events.push(held ? await this.#signOut(runId, tokens) : await this.#localSignOutOnly(runId, tokens, "sign_out_fence_not_held"));
     const known = this.#exchanges.get(runId);
     if (known !== undefined && known.join === "retained" && !known.browserLaunched) {
       // Start failed before Chromium launched (e.g. deployment mismatch):
@@ -1393,6 +1403,25 @@ export class StudioG7Driver implements VoiceBrowserDriver, StudioDriverExtension
       observed: read.value.observed, fresh: read.value.fresh, self_present: read.value.selfPresent, participants: read.value.participants, guests: read.value.guests,
       voice: read.value.voice, live_exchange_id: read.value.exchangeId, reported_at: read.value.reportedAt,
     } : {});
+  }
+
+  readonly #signOutGates = new Map<string, () => Promise<boolean>>();
+  setStudioSignOutGate(runId: string, gate: (() => Promise<boolean>) | null): void {
+    if (gate === null) this.#signOutGates.delete(runId);
+    else this.#signOutGates.set(runId, gate);
+  }
+
+  /** Revoke only the session this recovery holds (scope=local); never the principal's others. */
+  async #localSignOutOnly(runId: string, tokens: TokenSource, basis: string): Promise<DriverEvent> {
+    const held = tokens.held();
+    let receipt: SignOutReceipt | null = null;
+    if (held) {
+      receipt = await signOut({ supabaseUrl: this.studio.supabaseUrl, publishableKey: this.studio.supabasePublishableKey }, held.accessToken, "local", { fetchImpl: this.#fetch })
+        .catch(() => ({ schema: "sophia_voice_lab_studio_sign_out_v1", scope: "local", confirmed: false, http_status: null, basis: "unreachable" }) as SignOutReceipt);
+    }
+    tokens.forget();
+    const payload = { schema: "sophia_voice_lab_studio_sign_out_v1", scope: "local", confirmed: receipt?.confirmed ?? true, http_status: receipt?.http_status ?? null, basis, session_basis: held ? "held_session" : "none", global_sign_out_withheld: true, credentials_excluded: true, sign_out_id: randomUUID() };
+    return { kind: "studio.cleanup.signed_out", source: "canonical", payload, dedupeKey: contentKey("studio-signed-out", runId, payload) };
   }
 
   async readStudioCalls(run: RunRecord, purpose: string, operationId: string | null, stepId: string | null): Promise<DriverEvent> {

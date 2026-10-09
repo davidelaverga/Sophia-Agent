@@ -2048,9 +2048,11 @@ export class VoiceLabWorker {
       const markerId = randomUUID();
       const fenced = !this.driver.hasSession(run.id);
       if (fenced) {
-        const fence = await this.ledger.beginStudioGlobalSignOut(run.id, markerId);
+        const fence = await this.ledger.beginStudioGlobalSignOut(run.id, markerId, this.workerId);
         if (!fence.granted) {
-          this.logger.warn({ run_id_sha256: sha256(run.id), live_session_runs: fence.liveSessionRuns }, "studio API-only recovery deferred: another run can hold a live principal session");
+          this.logger.warn({ run_id_sha256: sha256(run.id), live_session_runs: fence.liveSessionRuns, reason: fence.reason }, fence.reason === "sign_out_in_flight"
+            ? "studio API-only recovery deferred: another recovery's global sign-out of this run is in flight"
+            : "studio API-only recovery deferred: another run can hold a live principal session");
           return { events: [], artifacts: [] };
         }
       }
@@ -2059,6 +2061,9 @@ export class VoiceLabWorker {
       // abandoned otherwise.
       let recovered: Awaited<ReturnType<VoiceBrowserDriver["recover"]>> | null = null;
       try {
+        // Right before its global logout the driver re-checks, in the ledger,
+        // that this marker is still ours (never taken over).
+        if (fenced && hasStudioExtensions(this.driver)) this.driver.setStudioSignOutGate(run.id, () => this.ledger.holdsStudioGlobalSignOut(run.id, markerId));
         if (fenced) await this.ledger.appendEvent(run.id, STUDIO_RECOVERY_ATTEMPT_EVENT, "worker", { attempt_id: randomUUID(), prior_exchange_status: typeof lastSettlement?.payload.status === "string" ? lastSettlement.payload.status : null }, `studio-recovery-attempt:${run.id}:${randomUUID()}`);
         // Hand the durable write-ahead join to the driver (it may have
         // restarted). Without one, the driver touches nothing: it only
@@ -2073,6 +2078,7 @@ export class VoiceLabWorker {
         return recovered;
       } finally {
         if (fenced) {
+          if (hasStudioExtensions(this.driver)) this.driver.setStudioSignOutGate(run.id, null);
           const signedOut = recovered?.events.some((event) => event.kind === "studio.cleanup.signed_out" && event.payload.confirmed === true && event.payload.scope === "global") === true;
           await this.ledger.endStudioGlobalSignOut(run.id, markerId, signedOut ? "confirmed" : "abandoned");
         }

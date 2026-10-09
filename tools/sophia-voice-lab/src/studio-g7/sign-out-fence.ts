@@ -1,4 +1,7 @@
+import { createHash } from "node:crypto";
+
 import type { LabEvent } from "../domain.js";
+import { STUDIO_DEAD_OWNER_CLOCK_SKEW_MARGIN_MS, STUDIO_DEAD_OWNER_HEARTBEAT_STALE_MS } from "./lease-release.js";
 
 /**
  * The durable fence around a Studio global sign-out.
@@ -24,17 +27,49 @@ import type { LabEvent } from "../domain.js";
  * terminal state or regains a lease, so at most one run is live; its own
  * recovery never waits on a terminal, lease-free run, and the marker is held
  * only for one recovery call (cleared in a finally).
+ *
+ * Same-run serialization (root's P2): markers are matched by id. A marker is
+ * outstanding until a clear for THAT marker id; a worker clears only its own.
+ * A begin is refused (`sign_out_in_flight`) while the run has any
+ * outstanding marker that is not provably abandoned, and admission stays
+ * closed while any run has one, whatever its cleanup flag. A marker is
+ * provably abandoned only under the dead-owner rules: on the ledger's clock it
+ * is older than STUDIO_GLOBAL_SIGNOUT_OWNER_STALE_MS and its owner's heartbeat
+ * is absent or older than that (the heartbeat staleness plus the clock-skew
+ * margin); the begin that takes over clears it (`abandoned_owner_dead`).
+ * Before its global logout the holder re-checks, in the ledger, that its
+ * marker is still outstanding (holdsStudioGlobalSignOut); a holder whose
+ * marker was taken over signs out only its own session (scope=local).
  */
 export const STUDIO_GLOBAL_SIGNOUT_PENDING_KIND = "studio.cleanup.global_sign_out_pending";
 export const STUDIO_GLOBAL_SIGNOUT_CLEARED_KIND = "studio.cleanup.global_sign_out_cleared";
 export const STUDIO_GLOBAL_SIGNOUT_PENDING_CODE = "STUDIO_GLOBAL_SIGNOUT_PENDING";
 
-/** True while the run's latest fence event is a pending marker. */
-export function studioGlobalSignOutPending(events: ReadonlyArray<Pick<LabEvent, "kind" | "seq">>): boolean {
-  let latest: Pick<LabEvent, "kind" | "seq"> | null = null;
-  for (const event of events) {
-    if (event.kind !== STUDIO_GLOBAL_SIGNOUT_PENDING_KIND && event.kind !== STUDIO_GLOBAL_SIGNOUT_CLEARED_KIND) continue;
-    if (!latest || event.seq > latest.seq) latest = event;
-  }
-  return latest?.kind === STUDIO_GLOBAL_SIGNOUT_PENDING_KIND;
+/** A marker older than this, whose owner's heartbeat is absent or older than this, is provably abandoned. */
+export const STUDIO_GLOBAL_SIGNOUT_OWNER_STALE_MS = STUDIO_DEAD_OWNER_HEARTBEAT_STALE_MS + STUDIO_DEAD_OWNER_CLOCK_SKEW_MARGIN_MS;
+
+export interface StudioSignOutMarker { markerId: string; ownerWorkerIdSha256: string | null; at: Date; seq: number }
+
+export function studioWorkerIdSha256(workerId: string): string {
+  return createHash("sha256").update(workerId, "utf8").digest("hex");
+}
+
+/** Pending markers of one run with no clear for their own marker id. */
+export function studioOutstandingSignOutMarkers(events: ReadonlyArray<Pick<LabEvent, "kind" | "seq" | "payload" | "at">>): StudioSignOutMarker[] {
+  const cleared = new Set(events.filter((event) => event.kind === STUDIO_GLOBAL_SIGNOUT_CLEARED_KIND && typeof event.payload.marker_id === "string").map((event) => event.payload.marker_id as string));
+  return events
+    .filter((event) => event.kind === STUDIO_GLOBAL_SIGNOUT_PENDING_KIND && typeof event.payload.marker_id === "string" && !cleared.has(event.payload.marker_id))
+    .map((event) => ({ markerId: event.payload.marker_id as string, ownerWorkerIdSha256: typeof event.payload.owner_worker_id_sha256 === "string" ? event.payload.owner_worker_id_sha256 : null, at: event.at, seq: event.seq }))
+    .sort((left, right) => left.seq - right.seq);
+}
+
+/** Provably abandoned: old enough, and its owner's heartbeat absent or stale, on the deciding ledger's clock. */
+export function studioSignOutMarkerAbandoned(marker: StudioSignOutMarker, ownerLastHeartbeatAt: Date | null, now: Date): boolean {
+  const cutoff = now.getTime() - STUDIO_GLOBAL_SIGNOUT_OWNER_STALE_MS;
+  return marker.at.getTime() < cutoff && (ownerLastHeartbeatAt === null || ownerLastHeartbeatAt.getTime() < cutoff);
+}
+
+/** True while the run has any outstanding marker (abandoned or not). */
+export function studioGlobalSignOutPending(events: ReadonlyArray<Pick<LabEvent, "kind" | "seq" | "payload" | "at">>): boolean {
+  return studioOutstandingSignOutMarkers(events).length > 0;
 }

@@ -1,6 +1,6 @@
 import { decideStudioDeadOwnerRelease, STUDIO_DATABASE_CLOCK_EVENT_KINDS, STUDIO_DEAD_OWNER_DECISION_EVENT_KINDS } from "./studio-g7/lease-release.js";
 import { studioStepConflict, studioStepOf } from "./studio-g7/step-guard.js";
-import { STUDIO_GLOBAL_SIGNOUT_CLEARED_KIND, STUDIO_GLOBAL_SIGNOUT_PENDING_CODE, STUDIO_GLOBAL_SIGNOUT_PENDING_KIND } from "./studio-g7/sign-out-fence.js";
+import { STUDIO_GLOBAL_SIGNOUT_CLEARED_KIND, STUDIO_GLOBAL_SIGNOUT_OWNER_STALE_MS, STUDIO_GLOBAL_SIGNOUT_PENDING_CODE, STUDIO_GLOBAL_SIGNOUT_PENDING_KIND, studioWorkerIdSha256 } from "./studio-g7/sign-out-fence.js";
 import pg from "pg";
 import { CANONICAL_EVIDENCE_REFRESH_BASE_BACKOFF_MS, CANONICAL_EVIDENCE_REFRESH_EVENT, CANONICAL_EVIDENCE_REFRESH_MAX_ATTEMPTS } from "./canonical-evidence-refresh.js";
 import { retentionHmac } from "./retention-identity.js";
@@ -104,30 +104,44 @@ export class PostgresVoiceLabLedger implements VoiceLabLedger {
   async countLiveSessionRunsExcept(runId: string): Promise<number> {
     return liveSessionRunCount(this.pool, runId);
   }
-  async beginStudioGlobalSignOut(runId: string, markerId: string): Promise<{ granted: boolean; liveSessionRuns: number }> {
+  async beginStudioGlobalSignOut(runId: string, markerId: string, ownerWorkerId: string): Promise<{ granted: boolean; liveSessionRuns: number; reason: "granted" | "sign_out_in_flight" | "live_session_runs" }> {
     const client = await this.pool.connect();
     try {
       await client.query("begin");
       // The admission lock: a start can neither be admitted between this
-      // count and the marker, nor while the marker is pending.
+      // count and the marker, nor while the marker is pending; and a second
+      // begin for the same run waits here until the first committed its marker.
       await client.query("select pg_advisory_xact_lock(hashtext('sophia_voice_lab_run_quota'))");
       const locked = await client.query(`select cleanup_complete,latest_cursor from ${SCHEMA}.runs where id=$1 for update`, [runId]);
       if (!locked.rows[0]) throw notFound("RUN_NOT_FOUND", "Run was not found.");
+      // Same-run serialization: another recovery's sign-out is in flight.
+      const markers = await outstandingSignOutMarkers(client, runId);
+      if (markers.some((marker) => !marker.abandoned)) { await client.query("rollback"); return { granted: false, liveSessionRuns: 0, reason: "sign_out_in_flight" }; }
       const liveSessionRuns = await liveSessionRunCount(client, runId);
-      if (liveSessionRuns > 0) { await client.query("rollback"); return { granted: false, liveSessionRuns }; }
+      if (liveSessionRuns > 0) { await client.query("rollback"); return { granted: false, liveSessionRuns, reason: "live_session_runs" }; }
       const previousCleanupComplete = locked.rows[0].cleanup_complete === true;
       if (previousCleanupComplete) {
         await client.query(`update ${SCHEMA}.runs set cleanup_complete=false,version=version+1,updated_at=now() where id=$1`, [runId]);
         await client.query(`update ${SCHEMA}.recovery_controls set live_cleanup_complete=false,version=version+1 where run_id=$1`, [runId]);
       }
-      const seq = Number(locked.rows[0].latest_cursor) + 1;
+      let seq = Number(locked.rows[0].latest_cursor);
+      // Take over markers whose owner provably died holding them.
+      for (const marker of markers) {
+        seq += 1;
+        await client.query(`insert into ${SCHEMA}.run_events (run_id,seq,kind,source,payload,dedupe_key,observed_at) values ($1,$2,$3,'worker',$4,$5,clock_timestamp())`,
+          [runId, seq, STUDIO_GLOBAL_SIGNOUT_CLEARED_KIND, { marker_id: marker.markerId, outcome: "abandoned_owner_dead", taken_over_by_marker_id: markerId }, `studio-global-sign-out-abandoned:${runId}:${marker.markerId}`]);
+      }
+      seq += 1;
       await client.query(`insert into ${SCHEMA}.run_events (run_id,seq,kind,source,payload,dedupe_key,observed_at) values ($1,$2,$3,'worker',$4,$5,clock_timestamp())`,
-        [runId, seq, STUDIO_GLOBAL_SIGNOUT_PENDING_KIND, { marker_id: markerId, previous_cleanup_complete: previousCleanupComplete }, `studio-global-sign-out-pending:${runId}:${markerId}`]);
+        [runId, seq, STUDIO_GLOBAL_SIGNOUT_PENDING_KIND, { marker_id: markerId, previous_cleanup_complete: previousCleanupComplete, owner_worker_id_sha256: studioWorkerIdSha256(ownerWorkerId) }, `studio-global-sign-out-pending:${runId}:${markerId}`]);
       await client.query(`update ${SCHEMA}.runs set latest_cursor=$2,updated_at=now() where id=$1`, [runId, seq]);
       await client.query("commit");
-      return { granted: true, liveSessionRuns: 0 };
+      return { granted: true, liveSessionRuns: 0, reason: "granted" };
     } catch (error) { await client.query("rollback").catch(() => undefined); throw translatePgError(error); }
     finally { client.release(); }
+  }
+  async holdsStudioGlobalSignOut(runId: string, markerId: string): Promise<boolean> {
+    return (await outstandingSignOutMarkers(this.pool, runId)).some((marker) => marker.markerId === markerId);
   }
   async endStudioGlobalSignOut(runId: string, markerId: string, outcome: "confirmed" | "abandoned"): Promise<void> {
     await this.appendEvent(runId, STUDIO_GLOBAL_SIGNOUT_CLEARED_KIND, "worker", { marker_id: markerId, outcome }, `studio-global-sign-out-cleared:${runId}:${markerId}`);
@@ -258,13 +272,15 @@ export class PostgresVoiceLabLedger implements VoiceLabLedger {
         return { run: mapRun(priorRun.rows[0]), operation: prior, replay: true, ...(rollingAdmission ? { rollingAdmission } : {}) };
       }
       if (rollingAdmission?.replay) throw conflict("IDEMPOTENCY_RETENTION_EXPIRED", "The idempotent start receipt was retention-purged and cannot be replayed or reallocated.");
-      // A Studio global sign-out in flight (its marker is written under this
-      // same lock): a run admitted now could have its tokens revoked.
+      // A Studio global sign-out in flight on ANY run, whatever its cleanup
+      // flag (its marker is written under this same lock): a run admitted now
+      // could have its tokens revoked. Markers match their own clear by id.
       const signOutPending = await client.query(
-        `select 1 from ${SCHEMA}.runs r where not r.cleanup_complete and exists (
+        `select 1 from ${SCHEMA}.runs r where exists (
            select 1 from ${SCHEMA}.run_events p where p.run_id=r.id and p.kind=$1
-             and not exists (select 1 from ${SCHEMA}.run_events c where c.run_id=r.id and c.kind in ($1,$2) and c.seq>p.seq)) limit 1`,
-        [STUDIO_GLOBAL_SIGNOUT_PENDING_KIND, STUDIO_GLOBAL_SIGNOUT_CLEARED_KIND]);
+             and not exists (select 1 from ${SCHEMA}.run_events c where c.run_id=r.id and c.kind=$2 and c.payload->>'marker_id' = p.payload->>'marker_id')
+             and not (${SIGN_OUT_MARKER_ABANDONED_SQL})) limit 1`,
+        [STUDIO_GLOBAL_SIGNOUT_PENDING_KIND, STUDIO_GLOBAL_SIGNOUT_CLEARED_KIND, STUDIO_GLOBAL_SIGNOUT_OWNER_STALE_MS / 1_000]);
       if (signOutPending.rows[0]) throw conflict(STUDIO_GLOBAL_SIGNOUT_PENDING_CODE, "A global sign-out of the Studio principal is in progress; admission waits for it.");
       const quota = await activeRunCounts(client, operation.callerId, this.#callerPartitions.callerIds(operation.callerId));
       if (quota.global >= limits.global || quota.caller >= limits.caller) throw conflict("CONCURRENCY_LIMIT", "Voice Lab concurrency limit is reached.");
@@ -1143,6 +1159,27 @@ export class PostgresVoiceLabLedger implements VoiceLabLedger {
   }
 }
 
+
+/**
+ * A pending marker `p` (aliased in the query) that is provably abandoned: older
+ * than the owner-stale bound on the database clock, its owner's heartbeat
+ * absent or older than that bound ($3: seconds).
+ */
+const SIGN_OUT_MARKER_ABANDONED_SQL = `p.observed_at < clock_timestamp() - make_interval(secs => $3::double precision)
+  and not exists (select 1 from ${SCHEMA}.worker_heartbeats h where encode(sha256(convert_to(h.worker_id,'UTF8')),'hex') = p.payload->>'owner_worker_id_sha256'
+    and h.observed_at >= clock_timestamp() - make_interval(secs => $3::double precision))`;
+
+/** The run's outstanding sign-out markers (no clear for their own id), each with whether it is provably abandoned. */
+async function outstandingSignOutMarkers(database: Pick<pg.Pool | pg.PoolClient, "query">, runId: string): Promise<Array<{ markerId: string; abandoned: boolean }>> {
+  const result = await database.query<{ marker_id: string; abandoned: boolean }>(
+    `select p.payload->>'marker_id' as marker_id, (${SIGN_OUT_MARKER_ABANDONED_SQL}) as abandoned
+       from ${SCHEMA}.run_events p
+      where p.run_id=$4 and p.kind=$1
+        and not exists (select 1 from ${SCHEMA}.run_events c where c.run_id=p.run_id and c.kind=$2 and c.payload->>'marker_id' = p.payload->>'marker_id')
+      order by p.seq`,
+    [STUDIO_GLOBAL_SIGNOUT_PENDING_KIND, STUDIO_GLOBAL_SIGNOUT_CLEARED_KIND, STUDIO_GLOBAL_SIGNOUT_OWNER_STALE_MS / 1_000, runId]);
+  return result.rows.map((row) => ({ markerId: row.marker_id, abandoned: row.abandoned === true }));
+}
 
 /** Runs other than `excludeRunId` that can hold a live principal session (non-terminal, or holding a browser lease). */
 async function liveSessionRunCount(database: pg.Pool | pg.PoolClient, excludeRunId: string): Promise<number> {

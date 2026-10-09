@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AudioResolver } from "../src/audio.js";
 import type { VoiceBrowserDriver } from "../src/browser-driver.js";
 import type { LabEnvelope } from "../src/domain.js";
+import type { VoiceLabLedger } from "../src/ledger.js";
 import { PostgresVoiceLabLedger } from "../src/postgres-ledger.js";
 import { CapabilityCodec, sha256, type AuthenticatedCaller } from "../src/security.js";
 import { VoiceLabService } from "../src/service.js";
@@ -76,6 +77,64 @@ function pgFreshRecovery() {
     ];
   };
 }
+
+function pgDeferred<T = void>() { let resolve!: (value: T) => void; const promise = new Promise<T>((done) => { resolve = done; }); return { promise, resolve }; }
+
+/** Root's synchronization: both workers reach begin after their initial reads; B's begin runs first, then A's. */
+function pgSynchronizedBegins(shared: VoiceLabLedger) {
+  const arrived = new Map<string, { promise: Promise<void>; resolve: () => void }>();
+  const bDone = pgDeferred();
+  const results: Record<string, { granted: boolean; reason?: string }> = {};
+  const view = (label: "a" | "b") => new Proxy(shared, {
+    get(target, property) {
+      if (property === "beginStudioGlobalSignOut") {
+        return async (...args: unknown[]) => {
+          const gate = pgDeferred();
+          arrived.set(label, gate);
+          if (arrived.size === 2) void (async () => { arrived.get("b")!.resolve(); await bDone.promise; arrived.get("a")!.resolve(); })();
+          await gate.promise;
+          try {
+            const result = await (target.beginStudioGlobalSignOut as (...input: unknown[]) => Promise<{ granted: boolean; reason?: string }>).apply(target, args);
+            results[label] = result;
+            return result;
+          } finally { if (label === "b") bDone.resolve(); }
+        };
+      }
+      const value = Reflect.get(target, property, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  }) as VoiceLabLedger;
+  return { view, results };
+}
+
+/** A run pending external evidence whose evidence-refresh session could not be revoked (it needs a global sign-out). */
+async function pgPendingWithUnrevokedRefresh(label: string): Promise<Harness> {
+  const h = await harness(`${label}-owner`);
+  h.driver.lateSessionClosed = true;
+  h.driver.refreshRevokeConfirmed = false;
+  await episode(h);
+  await drive(h, h.service.endVoiceRun(caller, { run_id: h.runId, idempotency_key: newIdempotencyKey(`${label}-end`), wait_timeout_ms: 5_000 }));
+  const other = await h.service.startStudioG7Run(caller, { ...START, idempotency_key: newIdempotencyKey(`${label}-other`) });
+  await h.worker.maintainSessions();
+  const finished = (await ledger.getRun(other.run_id!))!;
+  await ledger.updateRun(finished.id, finished.version, { state: "aborted_driver_restart", cleanupComplete: true });
+  expect(await ledger.getRun(h.runId)).toMatchObject({ state: "pending_external_evidence", cleanupComplete: true });
+  return h;
+}
+
+async function pgRecoveryWorker(h: Harness, workerId: string, view: VoiceLabLedger) {
+  const config = studioTestConfig(undefined, { SOPHIA_VOICE_LAB_MAX_CONCURRENT_RUNS: "1" });
+  const audio = new AudioResolver(config);
+  await audio.initialize();
+  const driver = new ScriptedStudioDriver((await ledger.getRun(h.runId))!);
+  driver.recoverResult = pgFreshRecovery();
+  const worker = new VoiceLabWorker(workerId, view, config, audio, driver as unknown as VoiceBrowserDriver, new CapabilityCodec(config.capabilitySecret, config.capabilityIssuer, config.capabilityTtlSeconds), pino({ level: "silent" }));
+  await ledger.heartbeatWorker({ workerId, serviceVersion: "test", browserReady: true, attestation: null, detail: {}, observedAt: new Date() });
+  return { driver, worker };
+}
+
+const pgFenceEvents = async (runId: string) => (await ledger.listEvents(runId, 0, 2_000)).events.filter((event) => event.kind === "studio.cleanup.global_sign_out_pending" || event.kind === "studio.cleanup.global_sign_out_cleared");
+const pgTryStart = (h: Harness, key: string) => h.service.startStudioG7Run(caller, { ...START, idempotency_key: newIdempotencyKey(key) }).then((started) => started.status, (error: { detail?: { code?: string } }) => error.detail?.code ?? "error");
 
 selected("real PostgreSQL Studio G7 worker branches (schema v7)", () => {
   beforeEach(async () => {
@@ -407,7 +466,7 @@ selected("real PostgreSQL Studio G7 worker branches (schema v7)", () => {
     for (let round = 0; round < 8; round += 1) {
       const markerId = randomUUID();
       const order = round % 3;
-      const fence = () => ledger.beginStudioGlobalSignOut(h.runId, markerId);
+      const fence = () => ledger.beginStudioGlobalSignOut(h.runId, markerId, "pg-interleave-worker");
       const admit = () => service.startStudioG7Run(caller, { ...START, idempotency_key: newIdempotencyKey(`pg-interleave-${round}`) });
       let fenceResult: { granted: boolean } | null = null;
       let admission: unknown;
@@ -428,6 +487,127 @@ selected("real PostgreSQL Studio G7 worker branches (schema v7)", () => {
     }
     expect(refused).toBeGreaterThan(0);
     expect(deferred).toBeGreaterThan(0);
+  }, 120_000);
+
+  it("root P2 on PostgreSQL: serializes two workers' begins for the same run; admission stays closed until B's sign-out finished", async () => {
+    const h = await pgPendingWithUnrevokedRefresh("pg-root");
+    const sync = pgSynchronizedBegins(ledger);
+    const a = await pgRecoveryWorker(h, "pg-fence-root-a", sync.view("a"));
+    const b = await pgRecoveryWorker(h, "pg-fence-root-b", sync.view("b"));
+    const held = pgDeferred();
+    const inFlight = pgDeferred();
+    b.driver.recoverHook = async () => { inFlight.resolve(); await held.promise; };
+    const bPass = b.worker.maintainSessions();
+    const aPass = a.worker.maintainSessions();
+    await inFlight.promise;
+    await aPass;
+    expect(await pgTryStart(h, "pg-root-during")).toBe("STUDIO_GLOBAL_SIGNOUT_PENDING");
+    expect(sync.results.b).toMatchObject({ granted: true });
+    expect(sync.results.a).toMatchObject({ granted: false, reason: "sign_out_in_flight" });
+    expect((await pgFenceEvents(h.runId)).filter((event) => event.kind === "studio.cleanup.global_sign_out_pending")).toHaveLength(1);
+    held.resolve();
+    await bPass;
+    expect(b.driver.globalLogouts).toEqual([h.runId]);
+    expect(await ledger.getRun(h.runId)).toMatchObject({ state: "completed", cleanupComplete: true });
+    expect(await pgTryStart(h, "pg-root-after")).toBe("accepted");
+  }, 120_000);
+
+  for (const mode of ["rejected", "abandoned"] as const) {
+    it(`a ${mode} recovery on PostgreSQL holds admission while in flight, frees only its own marker, and the other worker then completes the run`, async () => {
+      const h = await pgPendingWithUnrevokedRefresh(`pg-${mode}`);
+      const sync = pgSynchronizedBegins(ledger);
+      const a = await pgRecoveryWorker(h, `pg-fence-${mode}-a`, sync.view("a"));
+      const b = await pgRecoveryWorker(h, `pg-fence-${mode}-b`, sync.view("b"));
+      const held = pgDeferred();
+      const inFlight = pgDeferred();
+      b.driver.recoverHook = async () => { inFlight.resolve(); await held.promise; if (mode === "abandoned") throw new Error("recovery aborted"); };
+      b.driver.recoverResult = (id) => pgFreshRecovery()(id).map((event) => event.kind === "studio.cleanup.signed_out" ? { ...event, payload: { ...event.payload, confirmed: false, http_status: 401, basis: "rejected" }, dedupeKey: `pg-rejected:${id}` } : event);
+      const bPass = b.worker.maintainSessions().catch(() => undefined);
+      const aPass = a.worker.maintainSessions();
+      await inFlight.promise;
+      await aPass;
+      expect(await pgTryStart(h, `pg-${mode}-during`)).toBe("STUDIO_GLOBAL_SIGNOUT_PENDING");
+      expect(sync.results.a).toMatchObject({ granted: false, reason: "sign_out_in_flight" });
+      held.resolve();
+      await bPass;
+      expect((await pgFenceEvents(h.runId)).filter((event) => event.kind === "studio.cleanup.global_sign_out_cleared").map((event) => event.payload.outcome)).toEqual(["abandoned"]);
+      expect(await ledger.getRun(h.runId)).toMatchObject({ cleanupComplete: false });
+      await ledger.pool.query("update sophia_voice_lab.run_events set observed_at=observed_at-interval '2 minutes' where run_id=$1 and kind='studio.cleanup.recovery_attempt'", [h.runId]);
+      await a.worker.maintainSessions();
+      await a.worker.maintainSessions();
+      expect(a.driver.globalLogouts).toEqual([h.runId]);
+      expect(await ledger.getRun(h.runId)).toMatchObject({ state: "completed", cleanupComplete: true });
+      expect(await pgTryStart(h, `pg-${mode}-after`)).toBe("accepted");
+    }, 120_000);
+  }
+
+  it("on PostgreSQL takes over only a marker whose owner provably died holding it; the dead owner's late logout is withheld", async () => {
+    const h = await pgPendingWithUnrevokedRefresh("pg-stale");
+    const b = await pgRecoveryWorker(h, "pg-fence-stale-b", ledger);
+    const held = pgDeferred();
+    const inFlight = pgDeferred();
+    b.driver.recoverHook = async () => { inFlight.resolve(); await held.promise; };
+    const bPass = b.worker.maintainSessions();
+    await inFlight.promise;
+    const a = await pgRecoveryWorker(h, "pg-fence-stale-a", ledger);
+    const ageAttempts = () => ledger.pool.query("update sophia_voice_lab.run_events set observed_at=observed_at-interval '2 minutes' where run_id=$1 and kind='studio.cleanup.recovery_attempt'", [h.runId]);
+    // Young marker, owner heartbeat fresh: nobody takes over.
+    await ageAttempts();
+    await a.worker.maintainSessions();
+    expect(a.driver.calls).not.toContain("recover");
+    expect(await pgTryStart(h, "pg-stale-young")).toBe("STUDIO_GLOBAL_SIGNOUT_PENDING");
+    // On the database clock: the marker and its owner's heartbeat are older than the owner-stale bound.
+    await ledger.pool.query("update sophia_voice_lab.run_events set observed_at=observed_at-interval '5 minutes' where run_id=$1 and kind='studio.cleanup.global_sign_out_pending'", [h.runId]);
+    await ledger.pool.query("update sophia_voice_lab.worker_heartbeats set observed_at=clock_timestamp()-interval '5 minutes' where worker_id='pg-fence-stale-b'");
+    await ageAttempts();
+    const aHeld = pgDeferred();
+    const aInFlight = pgDeferred();
+    a.driver.recoverHook = async () => { aInFlight.resolve(); await aHeld.promise; };
+    const aPass = a.worker.maintainSessions();
+    await aInFlight.promise;
+    // B wakes while A (which took over) is in flight: B's logout is withheld, and B clearing its own marker never clears A's.
+    held.resolve();
+    await bPass;
+    expect(b.driver.globalLogouts).toEqual([]);
+    expect(b.driver.withheldLogouts).toEqual([h.runId]);
+    expect(await pgTryStart(h, "pg-stale-during")).toBe("STUDIO_GLOBAL_SIGNOUT_PENDING");
+    aHeld.resolve();
+    await aPass;
+    await a.worker.maintainSessions();
+    expect(a.driver.globalLogouts).toEqual([h.runId]);
+    expect((await pgFenceEvents(h.runId)).filter((event) => event.kind === "studio.cleanup.global_sign_out_cleared").map((event) => event.payload.outcome)).toEqual(["abandoned_owner_dead", "abandoned", "confirmed"]);
+    expect(await ledger.getRun(h.runId)).toMatchObject({ state: "completed", cleanupComplete: true });
+    expect(await pgTryStart(h, "pg-stale-after")).toBe("accepted");
+  }, 120_000);
+
+  it("on PostgreSQL grants exactly one of two truly concurrent begins for the same run (the admission lock serializes them)", async () => {
+    const h = await pgPendingWithUnrevokedRefresh("pg-concurrent");
+    // Hold both transactions at their marker insert: only the lock order decides.
+    const blocker = await ledger.pool.connect();
+    try {
+      await blocker.query("begin");
+      await blocker.query("lock table sophia_voice_lab.run_events in share row exclusive mode");
+      const both = Promise.all([ledger.beginStudioGlobalSignOut(h.runId, randomUUID(), "pg-concurrent-a"), ledger.beginStudioGlobalSignOut(h.runId, randomUUID(), "pg-concurrent-b")]);
+      await delay(400);
+      await blocker.query("rollback");
+      const results = await both;
+      expect(results.filter((result) => result.granted)).toHaveLength(1);
+      expect(results.find((result) => !result.granted)).toMatchObject({ reason: "sign_out_in_flight" });
+    } finally { blocker.release(); }
+    expect((await pgFenceEvents(h.runId)).filter((event) => event.kind === "studio.cleanup.global_sign_out_pending")).toHaveLength(1);
+  }, 120_000);
+
+  it("positive control on PostgreSQL: a single worker's fenced recovery logs out while it holds its marker, clears it, and admission reopens", async () => {
+    const h = await pgPendingWithUnrevokedRefresh("pg-single");
+    const a = await pgRecoveryWorker(h, "pg-fence-single-a", ledger);
+    await a.worker.maintainSessions();
+    expect(a.driver.gateChecks).toBe(1);
+    expect(a.driver.globalLogouts).toEqual([h.runId]);
+    const events = await pgFenceEvents(h.runId);
+    expect(events.map((event) => [event.kind, event.payload.marker_id === events[0]!.payload.marker_id])).toEqual([["studio.cleanup.global_sign_out_pending", true], ["studio.cleanup.global_sign_out_cleared", true]]);
+    expect(events[0]!.payload.owner_worker_id_sha256).toBe(sha256("pg-fence-single-a"));
+    expect(await ledger.getRun(h.runId)).toMatchObject({ state: "completed", cleanupComplete: true });
+    expect(await pgTryStart(h, "pg-single-after")).toBe("accepted");
   }, 120_000);
 
   it("re-checks a G7 step when the worker executes it: a second operation of a performed step is refused (P3-3)", async () => {

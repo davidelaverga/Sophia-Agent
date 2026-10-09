@@ -1,6 +1,6 @@
 import { decideStudioDeadOwnerRelease } from "./studio-g7/lease-release.js";
 import { studioStepConflict } from "./studio-g7/step-guard.js";
-import { STUDIO_GLOBAL_SIGNOUT_CLEARED_KIND, STUDIO_GLOBAL_SIGNOUT_PENDING_CODE, STUDIO_GLOBAL_SIGNOUT_PENDING_KIND, studioGlobalSignOutPending } from "./studio-g7/sign-out-fence.js";
+import { STUDIO_GLOBAL_SIGNOUT_CLEARED_KIND, STUDIO_GLOBAL_SIGNOUT_PENDING_CODE, STUDIO_GLOBAL_SIGNOUT_PENDING_KIND, studioOutstandingSignOutMarkers, studioSignOutMarkerAbandoned, studioWorkerIdSha256 } from "./studio-g7/sign-out-fence.js";
 import { deriveExecutionOwnership } from "./execution-ownership.js";
 import { canonicalEvidenceRefreshDue } from "./canonical-evidence-refresh.js";
 import { ingestGenericOwnerLoss } from "./generic-owner-loss.js";
@@ -82,12 +82,26 @@ export class MemoryVoiceLabLedger implements VoiceLabLedger {
     return retained + [...this.#runs.values()].filter((run) => run.id !== runId && (!TERMINAL_RUN_STATES.has(run.state) || this.#browserLeases.has(run.id))).length;
   }
   async countLiveSessionRunsExcept(runId: string): Promise<number> { return this.#liveSessionRunsExcept(runId); }
-  async beginStudioGlobalSignOut(runId: string, markerId: string): Promise<{ granted: boolean; liveSessionRuns: number }> {
+  /** The run's outstanding sign-out markers, each with whether it is provably abandoned (its owner dead). */
+  #signOutMarkers(runId: string, now: Date) {
+    const heartbeats = new Map([...this.#workerHeartbeats.values()].map((heartbeat) => [studioWorkerIdSha256(heartbeat.workerId), heartbeat.observedAt]));
+    return studioOutstandingSignOutMarkers(this.#events.get(runId) ?? []).map((marker) => ({ marker, abandoned: studioSignOutMarkerAbandoned(marker, marker.ownerWorkerIdSha256 === null ? null : heartbeats.get(marker.ownerWorkerIdSha256) ?? null, now) }));
+  }
+  async beginStudioGlobalSignOut(runId: string, markerId: string, ownerWorkerId: string): Promise<{ granted: boolean; liveSessionRuns: number; reason: "granted" | "sign_out_in_flight" | "live_session_runs" }> {
     // One synchronous section (no await): atomic with createRunWithOperation.
     const run = this.#runs.get(runId);
     if (!run) throw notFound("RUN_NOT_FOUND", "Run was not found.");
+    const now = new Date();
+    // Same-run serialization: another recovery's sign-out is in flight.
+    const markers = this.#signOutMarkers(runId, now);
+    if (markers.some((item) => !item.abandoned)) return { granted: false, liveSessionRuns: 0, reason: "sign_out_in_flight" };
     const liveSessionRuns = this.#liveSessionRunsExcept(runId);
-    if (liveSessionRuns > 0) return { granted: false, liveSessionRuns };
+    if (liveSessionRuns > 0) return { granted: false, liveSessionRuns, reason: "live_session_runs" };
+    const events = this.#events.get(runId) ?? [];
+    // Take over markers whose owner provably died holding them.
+    for (const { marker } of markers) {
+      events.push({ runId, seq: events.length + 1, kind: STUDIO_GLOBAL_SIGNOUT_CLEARED_KIND, source: "worker", at: now, payload: { marker_id: marker.markerId, outcome: "abandoned_owner_dead", taken_over_by_marker_id: markerId }, dedupeKey: `studio-global-sign-out-abandoned:${runId}:${marker.markerId}` });
+    }
     const previousCleanupComplete = run.cleanupComplete;
     if (run.cleanupComplete) {
       run.cleanupComplete = false;
@@ -95,13 +109,14 @@ export class MemoryVoiceLabLedger implements VoiceLabLedger {
       const control = this.#recoveryControls.get(runId);
       if (control) { control.liveCleanupComplete = false; control.version += 1; }
     }
-    const events = this.#events.get(runId) ?? [];
-    const now = new Date();
-    events.push({ runId, seq: events.length + 1, kind: STUDIO_GLOBAL_SIGNOUT_PENDING_KIND, source: "worker", at: now, payload: { marker_id: markerId, previous_cleanup_complete: previousCleanupComplete }, dedupeKey: `studio-global-sign-out-pending:${runId}:${markerId}` });
+    events.push({ runId, seq: events.length + 1, kind: STUDIO_GLOBAL_SIGNOUT_PENDING_KIND, source: "worker", at: now, payload: { marker_id: markerId, previous_cleanup_complete: previousCleanupComplete, owner_worker_id_sha256: studioWorkerIdSha256(ownerWorkerId) }, dedupeKey: `studio-global-sign-out-pending:${runId}:${markerId}` });
     this.#events.set(runId, events);
     run.latestCursor = events.length;
     run.updatedAt = now;
-    return { granted: true, liveSessionRuns: 0 };
+    return { granted: true, liveSessionRuns: 0, reason: "granted" };
+  }
+  async holdsStudioGlobalSignOut(runId: string, markerId: string): Promise<boolean> {
+    return studioOutstandingSignOutMarkers(this.#events.get(runId) ?? []).some((marker) => marker.markerId === markerId);
   }
   async endStudioGlobalSignOut(runId: string, markerId: string, outcome: "confirmed" | "abandoned"): Promise<void> {
     await this.appendEvent(runId, STUDIO_GLOBAL_SIGNOUT_CLEARED_KIND, "worker", { marker_id: markerId, outcome }, `studio-global-sign-out-cleared:${runId}:${markerId}`);
@@ -378,8 +393,10 @@ export class MemoryVoiceLabLedger implements VoiceLabLedger {
     // Do not await between admission and insertion: the memory transaction must
     // remain atomic even when multiple callers submit starts in one tick.
     const active = [...this.#runs.values()].filter((candidate) => this.#runRequiresAdmission(candidate));
-    // A Studio global sign-out in flight: a run admitted now could have its tokens revoked.
-    if (active.some((candidate) => !candidate.cleanupComplete && studioGlobalSignOutPending(this.#events.get(candidate.id) ?? []))) {
+    // A Studio global sign-out in flight on ANY run (whatever its cleanup
+    // flag): a run admitted now could have its tokens revoked.
+    const admissionNow = new Date();
+    if ([...this.#runs.keys()].some((id) => this.#signOutMarkers(id, admissionNow).some((item) => !item.abandoned))) {
       throw conflict(STUDIO_GLOBAL_SIGNOUT_PENDING_CODE, "A global sign-out of the Studio principal is in progress; admission waits for it.");
     }
     const retained = [...this.#recoveryControls.values()].filter((control) => !this.#runs.has(control.binding.runId) && (!control.liveCleanupComplete || this.#browserLeases.has(control.binding.runId)));

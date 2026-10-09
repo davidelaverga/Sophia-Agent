@@ -829,3 +829,188 @@ describe("a G7 voice step's calls baseline is durable before the step's write-ah
     expect(h.driver.callsReads.filter((item) => item.operationId === queued!.id)).toEqual([]);
   }, 60_000);
 });
+
+/**
+ * Root's P2: two real workers recovering the SAME run. Each worker gets its own
+ * view of one shared ledger whose begin is synchronized: both reach
+ * beginStudioGlobalSignOut after their initial reads, then worker B's begin
+ * runs first and worker A's right after.
+ */
+function deferred<T = void>() { let resolve!: (value: T) => void; const promise = new Promise<T>((done) => { resolve = done; }); return { promise, resolve }; }
+
+function synchronizedBegins(shared: VoiceLabLedger) {
+  const arrived = new Map<string, { promise: Promise<void>; resolve: () => void }>();
+  const bDone = deferred();
+  const results: Record<string, { granted: boolean; reason?: string }> = {};
+  const view = (label: "a" | "b") => new Proxy(shared, {
+    get(target, property) {
+      if (property === "beginStudioGlobalSignOut") {
+        return async (...args: unknown[]) => {
+          const gate = deferred();
+          arrived.set(label, gate);
+          if (arrived.size === 2) void (async () => { arrived.get("b")!.resolve(); await bDone.promise; arrived.get("a")!.resolve(); })();
+          await gate.promise;
+          try {
+            const result = await (target.beginStudioGlobalSignOut as (...input: unknown[]) => Promise<{ granted: boolean; reason?: string }>).apply(target, args);
+            results[label] = result;
+            return result;
+          } finally { if (label === "b") bDone.resolve(); }
+        };
+      }
+      const value = Reflect.get(target, property, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  }) as VoiceLabLedger;
+  return { view, results };
+}
+
+/** A run that ended pending external evidence, whose evidence-refresh session could not be revoked (it needs a global sign-out). */
+async function pendingWithUnrevokedRefresh(label: string) {
+  const h = await harness(`${label}-owner`);
+  h.driver.lateSessionClosed = true;
+  h.driver.refreshRevokeConfirmed = false;
+  await episode(h);
+  await end(h);
+  // The refresh happens while another run is live, so its global sign-out is deferred.
+  const other = await h.service.startStudioG7Run(caller, { ...START, idempotency_key: newIdempotencyKey(`${label}-other`) });
+  await h.worker.maintainSessions();
+  const finished = (await h.ledger.getRun(other.run_id!))!;
+  await h.ledger.updateRun(finished.id, finished.version, { state: "aborted_driver_restart", cleanupComplete: true });
+  const { studioG7CleanupProof } = await import("../src/studio-g7/evaluate.js");
+  expect(studioG7CleanupProof((await h.ledger.listEvents(h.runId, 0, 1_000)).events)).toMatchObject({ refreshSessionsRevoked: false });
+  expect(await h.ledger.getRun(h.runId)).toMatchObject({ state: "pending_external_evidence", cleanupComplete: true });
+  return h;
+}
+
+async function recoveryWorker(h: Harness, workerId: string, ledger: VoiceLabLedger) {
+  const audio = new AudioResolver(h.config);
+  await audio.initialize();
+  const driver = new ScriptedStudioDriver((await h.ledger.getRun(h.runId))!);
+  driver.recoverResult = freshRecovery();
+  const worker = new VoiceLabWorker(workerId, ledger, h.config, audio, driver as unknown as VoiceBrowserDriver, new CapabilityCodec(h.config.capabilitySecret, h.config.capabilityIssuer, h.config.capabilityTtlSeconds), pino({ level: "silent" }));
+  await h.ledger.heartbeatWorker({ workerId, serviceVersion: "test", browserReady: true, attestation: null, detail: {}, observedAt: new Date() });
+  return { driver, worker };
+}
+
+const fenceEvents = async (h: Harness) => (await h.ledger.listEvents(h.runId, 0, 2_000)).events.filter((event) => event.kind === "studio.cleanup.global_sign_out_pending" || event.kind === "studio.cleanup.global_sign_out_cleared");
+const tryStart = (h: Harness, key: string) => h.service.startStudioG7Run(caller, { ...START, idempotency_key: newIdempotencyKey(key) }).then((started) => started.status, (error: { detail?: { code?: string } }) => error.detail?.code ?? "error");
+
+describe("root P2: overlapping same-run recovery never reopens admission while a global sign-out is in flight", () => {
+  it("serializes two workers' begins for the same run: admission stays closed until B's sign-out finished (root's interleaving, memory ledger)", async () => {
+    const h = await pendingWithUnrevokedRefresh("root");
+    const sync = synchronizedBegins(h.ledger);
+    const a = await recoveryWorker(h, "fence-root-a", sync.view("a"));
+    const b = await recoveryWorker(h, "fence-root-b", sync.view("b"));
+    const held = deferred();
+    const inFlight = deferred();
+    b.driver.recoverHook = async () => { inFlight.resolve(); await held.promise; };
+    const bPass = b.worker.maintainSessions();
+    const aPass = a.worker.maintainSessions();
+    await inFlight.promise;
+    await aPass;
+    // B is inside its global logout; A's recovery must not have reopened admission.
+    expect(await tryStart(h, "root-during")).toBe("STUDIO_GLOBAL_SIGNOUT_PENDING");
+    expect(sync.results.b).toMatchObject({ granted: true });
+    expect(sync.results.a).toMatchObject({ granted: false, reason: "sign_out_in_flight" });
+    expect(a.driver.calls).not.toContain("recover");
+    const pending = (await fenceEvents(h)).filter((event) => event.kind === "studio.cleanup.global_sign_out_pending");
+    expect(pending).toHaveLength(1);
+    held.resolve();
+    await bPass;
+    expect(b.driver.globalLogouts).toEqual([h.runId]);
+    expect(await h.ledger.getRun(h.runId)).toMatchObject({ state: "completed", cleanupComplete: true });
+    // B cleared its own marker; only then does admission reopen.
+    expect((await fenceEvents(h)).filter((event) => event.kind === "studio.cleanup.global_sign_out_cleared").map((event) => [event.payload.marker_id, event.payload.outcome])).toEqual([[pending[0]!.payload.marker_id, "confirmed"]]);
+    expect(await tryStart(h, "root-after")).toBe("accepted");
+  }, 60_000);
+
+  for (const mode of ["rejected", "abandoned"] as const) {
+    it(`a ${mode} recovery holds admission while in flight, frees only its own marker, and the other worker then completes the run (memory ledger)`, async () => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(new Date());
+      const h = await pendingWithUnrevokedRefresh(mode);
+      const sync = synchronizedBegins(h.ledger);
+      const a = await recoveryWorker(h, `fence-${mode}-a`, sync.view("a"));
+      const b = await recoveryWorker(h, `fence-${mode}-b`, sync.view("b"));
+      const held = deferred();
+      const inFlight = deferred();
+      b.driver.recoverHook = async () => { inFlight.resolve(); await held.promise; if (mode === "abandoned") throw new Error("recovery aborted"); };
+      b.driver.recoverResult = (id) => freshRecovery()(id).map((event) => event.kind === "studio.cleanup.signed_out" ? { ...event, payload: { ...event.payload, confirmed: false, http_status: 401, basis: "rejected" }, dedupeKey: `rejected:${id}` } : event);
+      const bPass = b.worker.maintainSessions().catch(() => undefined);
+      const aPass = a.worker.maintainSessions();
+      await inFlight.promise;
+      await aPass;
+      expect(await tryStart(h, `${mode}-during`)).toBe("STUDIO_GLOBAL_SIGNOUT_PENDING");
+      expect(sync.results.a).toMatchObject({ granted: false, reason: "sign_out_in_flight" });
+      held.resolve();
+      await bPass;
+      // B's marker is cleared as abandoned (by B, for its own id); the run is not complete.
+      const cleared = (await fenceEvents(h)).filter((event) => event.kind === "studio.cleanup.global_sign_out_cleared");
+      expect(cleared.map((event) => event.payload.outcome)).toEqual(["abandoned"]);
+      expect(await h.ledger.getRun(h.runId)).toMatchObject({ cleanupComplete: false });
+      // Past the recovery backoff, worker A's own fenced recovery completes the run.
+      vi.setSystemTime(new Date(Date.now() + 31_000));
+      await h.ledger.heartbeatWorker({ workerId: `fence-${mode}-a`, serviceVersion: "test", browserReady: true, attestation: null, detail: {}, observedAt: new Date() });
+      await a.worker.maintainSessions();
+      await a.worker.maintainSessions();
+      expect(a.driver.globalLogouts).toEqual([h.runId]);
+      expect(await h.ledger.getRun(h.runId)).toMatchObject({ state: "completed", cleanupComplete: true });
+      expect(await tryStart(h, `${mode}-after`)).toBe("accepted");
+    }, 60_000);
+  }
+
+  it("takes over only a marker whose owner provably died holding it; the dead owner's late logout is withheld (memory ledger)", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date());
+    const h = await pendingWithUnrevokedRefresh("stale");
+    const b = await recoveryWorker(h, "fence-stale-b", h.ledger);
+    const held = deferred();
+    const inFlight = deferred();
+    b.driver.recoverHook = async () => { inFlight.resolve(); await held.promise; };
+    const bPass = b.worker.maintainSessions();
+    await inFlight.promise;
+    // B hangs inside its recovery and stops heartbeating. While its marker is young, nobody takes over.
+    const a = await recoveryWorker(h, "fence-stale-a", h.ledger);
+    vi.setSystemTime(new Date(Date.now() + 31_000));
+    await a.worker.maintainSessions();
+    expect(a.driver.calls).not.toContain("recover");
+    expect(await tryStart(h, "stale-young")).toBe("STUDIO_GLOBAL_SIGNOUT_PENDING");
+    // Past the owner-stale bound (heartbeat staleness plus skew margin) A takes over; A is held in its own logout.
+    vi.setSystemTime(new Date(Date.now() + 120_000));
+    await h.ledger.heartbeatWorker({ workerId: "fence-stale-a", serviceVersion: "test", browserReady: true, attestation: null, detail: {}, observedAt: new Date() });
+    const aHeld = deferred();
+    const aInFlight = deferred();
+    a.driver.recoverHook = async () => { aInFlight.resolve(); await aHeld.promise; };
+    const aPass = a.worker.maintainSessions();
+    await aInFlight.promise;
+    // B wakes up while A is in flight: its marker was taken over, so its global logout is withheld, and
+    // clearing its OWN marker never clears A's: admission stays closed.
+    held.resolve();
+    await bPass;
+    expect(b.driver.globalLogouts).toEqual([]);
+    expect(b.driver.withheldLogouts).toEqual([h.runId]);
+    expect(await tryStart(h, "stale-during")).toBe("STUDIO_GLOBAL_SIGNOUT_PENDING");
+    aHeld.resolve();
+    await aPass;
+    await a.worker.maintainSessions();
+    expect(a.driver.globalLogouts).toEqual([h.runId]);
+    const cleared = (await fenceEvents(h)).filter((event) => event.kind === "studio.cleanup.global_sign_out_cleared");
+    expect(cleared.map((event) => event.payload.outcome)).toEqual(["abandoned_owner_dead", "abandoned", "confirmed"]);
+    expect(await h.ledger.getRun(h.runId)).toMatchObject({ state: "completed", cleanupComplete: true });
+    expect(await tryStart(h, "stale-after")).toBe("accepted");
+  }, 60_000);
+
+  it("positive control: a single worker's fenced recovery logs out while it holds its marker, clears it, and admission reopens (memory ledger)", async () => {
+    const h = await pendingWithUnrevokedRefresh("single");
+    const a = await recoveryWorker(h, "fence-single-a", h.ledger);
+    await a.worker.maintainSessions();
+    expect(a.driver.gateChecks).toBe(1);
+    expect(a.driver.globalLogouts).toEqual([h.runId]);
+    const events = await fenceEvents(h);
+    const { studioWorkerIdSha256 } = await import("../src/studio-g7/sign-out-fence.js");
+    expect(events.map((event) => [event.kind, event.payload.marker_id === events[0]!.payload.marker_id])).toEqual([["studio.cleanup.global_sign_out_pending", true], ["studio.cleanup.global_sign_out_cleared", true]]);
+    expect(events[0]!.payload.owner_worker_id_sha256).toBe(studioWorkerIdSha256("fence-single-a"));
+    expect(await h.ledger.getRun(h.runId)).toMatchObject({ state: "completed", cleanupComplete: true });
+    expect(await tryStart(h, "single-after")).toBe("accepted");
+  }, 60_000);
+});

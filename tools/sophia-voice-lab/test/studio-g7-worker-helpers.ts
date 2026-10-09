@@ -52,6 +52,13 @@ export class ScriptedStudioDriver {
    */
   callsAnswer: (runId: string, purpose: string) => { status: "available"; calls: Array<Record<string, unknown>> } | { status: "unavailable"; reason: string; http_status: number | null } = () => ({ status: "unavailable", reason: "endpoint_not_served", http_status: 404 });
   readonly callsReads: Array<{ purpose: string; operationId: string | null }> = [];
+  /** The sign-out fence's holder checks, as the real driver consults them right before a global logout. */
+  readonly signOutGates = new Map<string, () => Promise<boolean>>();
+  /** Global logouts this driver actually sent, and those it withheld because its marker was no longer held. */
+  readonly globalLogouts: string[] = [];
+  readonly withheldLogouts: string[] = [];
+  gateChecks = 0;
+  setStudioSignOutGate(runId: string, gate: (() => Promise<boolean>) | null): void { if (gate === null) this.signOutGates.delete(runId); else this.signOutGates.set(runId, gate); }
 
   constructor(readonly run: RunRecord) {}
 
@@ -212,7 +219,19 @@ export class ScriptedStudioDriver {
   async recover(binding: { id: string }): Promise<DriverEndResult> {
     this.calls.push("recover");
     await this.recoverHook?.(binding.id);
-    return { events: this.recoverResult(binding.id), artifacts: [] };
+    const events = this.recoverResult(binding.id);
+    // Like the real driver: the global logout goes out only while the fence's marker is still held.
+    const gate = this.signOutGates.get(binding.id);
+    if (gate !== undefined) this.gateChecks += 1;
+    const held = gate === undefined ? true : await gate();
+    if (!held) {
+      this.withheldLogouts.push(binding.id);
+      return { artifacts: [], events: events.map((event) => event.kind === "studio.cleanup.signed_out" && event.payload.scope === "global"
+        ? { ...event, payload: { schema: "sophia_voice_lab_studio_sign_out_v1", scope: "local", confirmed: true, http_status: 204, basis: "sign_out_fence_not_held", global_sign_out_withheld: true, sign_out_id: randomUUID() }, dedupeKey: `withheld:${binding.id}:${randomUUID()}` }
+        : event) };
+    }
+    if (events.some((event) => event.kind === "studio.cleanup.signed_out" && event.payload.scope === "global")) this.globalLogouts.push(binding.id);
+    return { events, artifacts: [] };
   }
 }
 

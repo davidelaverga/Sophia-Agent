@@ -230,10 +230,16 @@ export interface VoiceLabLedger {
    * Studio global sign-out fence (studio-g7/sign-out-fence.ts): atomically with
    * admission, grant only when no other run can hold a live session; then the
    * run holds admission and a pending marker makes admission refuse with
-   * STUDIO_GLOBAL_SIGNOUT_PENDING until endStudioGlobalSignOut.
+   * STUDIO_GLOBAL_SIGNOUT_PENDING until endStudioGlobalSignOut. Refused
+   * (`sign_out_in_flight`) while the run has another outstanding marker that
+   * is not provably abandoned; one that is (its owner dead) is cleared by the
+   * begin that takes over.
    */
-  beginStudioGlobalSignOut(runId: string, markerId: string): Promise<{ granted: boolean; liveSessionRuns: number }>;
+  beginStudioGlobalSignOut(runId: string, markerId: string, ownerWorkerId: string): Promise<{ granted: boolean; liveSessionRuns: number; reason: "granted" | "sign_out_in_flight" | "live_session_runs" }>;
+  /** Clears exactly this marker id (the caller's own). */
   endStudioGlobalSignOut(runId: string, markerId: string, outcome: "confirmed" | "abandoned"): Promise<void>;
+  /** Whether this marker is still outstanding (not cleared, not taken over): checked right before a global logout. */
+  holdsStudioGlobalSignOut(runId: string, markerId: string): Promise<boolean>;
   listExpiredRuns(now: Date, limit: number): Promise<RunRecord[]>;
   listRunsNeedingRecovery(limit: number, afterRunId?: string): Promise<RunRecord[]>;
   listRunsPendingEvidence(limit: number): Promise<RunRecord[]>;
