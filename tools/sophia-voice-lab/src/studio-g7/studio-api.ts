@@ -301,6 +301,10 @@ export function projectRoomPresence(raw: unknown): ProjectedRoomPresence | null 
   };
 }
 
+/** One live-presence read of the run's room (A15), made by an API-only recovery. */
+export const STUDIO_ROOM_PRESENCE_KIND = "studio.room.live_presence" as const;
+export const STUDIO_ROOM_PRESENCE_SCHEMA = "sophia_voice_lab_studio_room_presence_v1" as const;
+
 /**
  * What a live-presence read proves about the principal's browser in the
  * room. Only an observed, fresh report (the product's own `fresh`: younger

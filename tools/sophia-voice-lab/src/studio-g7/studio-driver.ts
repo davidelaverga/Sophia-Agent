@@ -48,8 +48,7 @@ import type { StudioG7Config } from "./config.js";
 import { buildStudioObserverScript } from "./page-scripts.js";
 import { probeStudioReadiness } from "./readiness.js";
 import { STUDIO_G7_ACTIONS, STUDIO_G7_VOICE_STEPS, isStudioG7ScenarioVersion, STUDIO_G7_SCENARIO_ID_SET, studioG7StepId, type StudioG7Action, type StudioG7VoiceStep } from "./scenarios.js";
-import { StudioApiClient, classifyRoomPresence, type IdentityObservation, type ProjectedArtifactVersion, type ProjectedTaskDetail, type StudioRoomSnapshot } from "./studio-api.js";
-import { STUDIO_ROOM_PRESENCE_KIND, STUDIO_ROOM_PRESENCE_SCHEMA } from "./lease-release.js";
+import { STUDIO_ROOM_PRESENCE_KIND, STUDIO_ROOM_PRESENCE_SCHEMA, StudioApiClient, classifyRoomPresence, type IdentityObservation, type ProjectedArtifactVersion, type ProjectedTaskDetail, type StudioRoomSnapshot } from "./studio-api.js";
 import { STUDIO_CALLS_END_STEP, STUDIO_CALLS_READ_KIND, STUDIO_CALLS_READ_SCHEMA } from "./calls-certification.js";
 import { buildStudioSessionSeedScript, globalSignOut, passwordGrant, revokeIssuedSession, signOut, supabaseStorageKey, type FetchLike, type IssuedStudioSession, type SignOutReceipt, type StudioUserSession } from "./supabase-session.js";
 

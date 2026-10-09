@@ -60,9 +60,8 @@ import { STUDIO_ACCESS_TOKEN_LIFETIME_BOUND_S } from "./supabase-session.js";
  */
 export const STUDIO_DEAD_OWNER_LEASE_RELEASE_SCHEMA = "sophia_voice_lab_studio_g7_dead_owner_lease_release_v1" as const;
 export const STUDIO_DEAD_OWNER_VERIFIED_KIND = "studio.cleanup.dead_owner_verified" as const;
-/** One live-presence read of the run's room (A15), made by an API-only recovery. */
-export const STUDIO_ROOM_PRESENCE_KIND = "studio.room.live_presence" as const;
-export const STUDIO_ROOM_PRESENCE_SCHEMA = "sophia_voice_lab_studio_room_presence_v1" as const;
+/** One live-presence read of the run's room (A15), made by an API-only recovery (defined with the read, studio-api.ts). */
+export { STUDIO_ROOM_PRESENCE_KIND, STUDIO_ROOM_PRESENCE_SCHEMA } from "./studio-api.js";
 export const STUDIO_DEAD_OWNER_HEARTBEAT_STALE_MS = 30_000;
 /** Allowance for a worker clock running behind the ledger's clock (heartbeats are worker-stamped). */
 export const STUDIO_DEAD_OWNER_CLOCK_SKEW_MARGIN_MS = 60_000;
