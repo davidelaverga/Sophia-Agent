@@ -26,6 +26,39 @@ Every merged PR appends an entry here. This file is the team's accumulating inst
 ## Log
 <!-- Append new entries below this line -->
 
+## 2026-10-09 · [voice-lab · Studio G7 labrev8 nit, and a correction to the labrev6 entry] · PR #TBD
+**Author:** Claude · **Track:** voice · **Spec:** pack 03 G7; independent review of 148f8fc..6cf354b (labrev8: the five labrev7 nits confirmed resolved, no P1/P2/P3, one nit, a step-level regression from 2b8dbd8); fix in cdba228, tests in 1ba1ab3
+
+### What Changed
+- **The mid-run turn tolerance now covers only the one window whose turn may still be in flight.** It applies only:
+  - in the worker's hand-over of the certified create, through the new evaluator option `midRun`;
+  - before `session_closed`;
+  - to the highest `windowSeq` seen, while its own `input_turn` has not arrived and no later input receipt has.
+- An earlier window without its turn is checked, mid-run too. A run's own evaluation never skips, even when `session_closed` never came. Before this fix, the review's NOCLOSE probe certified hold's stale-epoch call at the step level.
+- The settlement gate's 5 s bound is unchanged, so the latest window's turn is still tolerated mid-run (the review's GATE-NEVER and GATE-LATE shapes).
+- Each condition has a test that kills its removal (mutants m9a–m9e).
+- The plugin is unchanged (0.2.17+codex.20261009164559). Toolchain: Node v22.22.0 and pnpm 10.26.2 (corepack).
+
+### What We Learned
+- **Correction to the labrev6 entry below (148f8fc).** It describes the join's residual as "a fragment turn completed with exactly the step's call count". The bound is wider:
+  - a displaced window passes when it shows 1 to n calls, n being its new step's own listed calls;
+  - for a step with no command, it passes when it shows 0 to n.
+
+  The labrev7 entry states this correctly, and tests pin it (R1, R2).
+- **A tolerance justified by "this receipt may still be in flight" must be scoped to exactly what can be in flight.** That is the newest window, before anything later arrived, and only in a mid-run evaluation; never an earlier gap, and never a final evaluation.
+- **An evaluator cannot tell mid-run from a final evaluation of a run that lost its last receipts.** The caller has to say which it is (`midRun`), and the default must be the strict one.
+- **Every condition of a guard needs a test that kills its removal.** Three of five conditions here were covered only after the mutants showed they survived.
+- **Review state:** cdba228 and 1ba1ab3 are not yet reviewed.
+
+### CLAUDE.md Updates
+- None
+
+### Skills Created / Modified
+- None
+
+### GEPA Log Entry
+- N/A
+
 ## 2026-10-09 · [voice-lab · Studio G7 labrev7 nits] · PR #TBD
 **Author:** Claude · **Track:** voice · **Spec:** pack 03 G7; independent review of 5d4463d (labrev7: the four labrev6 findings confirmed fixed, no P1/P2/P3, five nits); fixes in 2b8dbd8 and 6cf354b (tests only)
 
