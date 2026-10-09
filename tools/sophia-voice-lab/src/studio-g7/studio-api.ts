@@ -59,7 +59,7 @@ export interface StudioRoomSnapshot {
 
 export type EvidenceRead =
   | { status: "available"; evidence: ParsedQualificationEvidence; http_status: number }
-  | { status: "unavailable"; reason: "not_answered_to_principal" | "endpoint_unavailable" | "auth_rejected"; http_status: number | null }
+  | { status: "unavailable"; reason: "not_answered_to_principal" | "endpoint_not_served" | "endpoint_unavailable" | "auth_rejected"; http_status: number | null }
   | { status: "rejected"; reason: string; path: string | null; http_status: number };
 
 export interface ProjectedTaskDetail {
@@ -251,7 +251,10 @@ export class StudioApiClient {
     if (!UUID.test(projectId)) throw new VoiceLabError(labError("STUDIO_CONFIG_INVALID", "The synthetic project id must be a UUID.", "internal"));
     const response = await this.#request("GET", `/api/v1/projects/${encodeURIComponent(projectId)}/snapshot`, accessToken);
     if (response.status === 401 || response.status === 403) throw new VoiceLabError(labError("STUDIO_API_AUTH_REJECTED", "The member API rejected the synthetic principal's session.", "authorization", true, { http_status: response.status }));
-    if (!response.ok) throw new VoiceLabError(labError("STUDIO_SNAPSHOT_UNAVAILABLE", "The project snapshot could not be read.", "product", true, { http_status: response.status }));
+    if (!response.ok) {
+      const refusal = await memberReadRefusal(response);
+      throw new VoiceLabError(labError("STUDIO_SNAPSHOT_UNAVAILABLE", "The project snapshot could not be read.", "product", true, { http_status: response.status, reason: refusal === "not_found" ? "not_found_for_principal" : refusal }));
+    }
     try { return projectRoomSnapshot(await readJson(response)); }
     catch (error) {
       // A 200 without a well-formed room answers nothing about the exchange:
@@ -269,9 +272,12 @@ export class StudioApiClient {
     } catch {
       return { status: "unavailable", reason: "endpoint_unavailable", http_status: null };
     }
-    if (response.status === 404) return { status: "unavailable", reason: "not_answered_to_principal", http_status: 404 };
-    if (response.status === 401 || response.status === 403) return { status: "unavailable", reason: "auth_rejected", http_status: response.status };
-    if (!response.ok) return { status: "unavailable", reason: "endpoint_unavailable", http_status: response.status };
+    if (!response.ok) {
+      // 422 `not_found`: not the grant's principal, or no grant covers the
+      // exchange (A15). 404: the route is absent (voice qualification off).
+      const refusal = await memberReadRefusal(response);
+      return { status: "unavailable", reason: refusal === "not_found" ? "not_answered_to_principal" : refusal, http_status: response.status };
+    }
     const body = await readJson(response);
     try {
       const evidence = parseQualificationEvidence(body);
@@ -423,9 +429,10 @@ export class StudioApiClient {
     let response: Response;
     try { response = await this.#request("GET", pathname, accessToken); }
     catch { return { status: "unavailable", reason: "endpoint_unavailable", http_status: null }; }
-    if (response.status === 401 || response.status === 403) { await response.arrayBuffer().catch(() => undefined); return { status: "unavailable", reason: "auth_rejected", http_status: response.status }; }
-    if (response.status === 404) { await response.arrayBuffer().catch(() => undefined); return { status: "unavailable", reason: "not_found_for_principal", http_status: 404 }; }
-    if (!response.ok) { await response.arrayBuffer().catch(() => undefined); return { status: "unavailable", reason: "endpoint_unavailable", http_status: response.status }; }
+    if (!response.ok) {
+      const refusal = await memberReadRefusal(response);
+      return { status: "unavailable", reason: refusal === "not_found" ? "not_found_for_principal" : refusal, http_status: response.status };
+    }
     const value = project(await readJson(response));
     return value === null ? { status: "unavailable", reason: "answer_malformed", http_status: response.status } : { status: "available", value, http_status: response.status };
   }
@@ -450,6 +457,24 @@ export class StudioApiClient {
     if (idempotencyKey !== undefined) headers["idempotency-key"] = idempotencyKey;
     return this.fetchImpl(url, { method, redirect: "error", signal: AbortSignal.timeout(this.timeoutMs), headers, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
   }
+}
+
+/**
+ * Type a refused member read by the product's own convention (sdd-01 A15 and
+ * the API's error map). A missing object, or one the caller may not read, is
+ * the domain error `not_found`: HTTP 422 with `{code: "not_found"}`, the same
+ * for every member read. A 404 is Fastify's "route not found": the route
+ * itself is absent (the evidence route exists only with
+ * SOPHIA_VOICE_QUALIFICATION=on), so it is typed `endpoint_not_served`:
+ * unavailable, never "not yours", and never proof of anything. Only the
+ * enumerated code is read; the rest of the body is dropped.
+ */
+async function memberReadRefusal(response: Response): Promise<"auth_rejected" | "endpoint_not_served" | "not_found" | "endpoint_unavailable"> {
+  if (response.status === 422) return wordOrNull(record(await readJson(response))?.code) === "not_found" ? "not_found" : "endpoint_unavailable";
+  await response.arrayBuffer().catch(() => undefined);
+  if (response.status === 401 || response.status === 403) return "auth_rejected";
+  if (response.status === 404) return "endpoint_not_served";
+  return "endpoint_unavailable";
 }
 
 async function readJson(response: Response): Promise<unknown> {

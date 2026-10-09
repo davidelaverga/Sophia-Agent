@@ -97,7 +97,7 @@ describe.skipIf(executablePath === null)("Studio G7 driver against a local fake 
   const browserServers: BrowserServer[] = [];
   const page = { grantId: evidenceGrant(studioRun(studioTestConfig())).grantId as string, runBindingSha256: "", micDelayMs: 0, serves: 0 };
   const api = {
-    exchangeId: null as string | null, inputActorId: PRINCIPAL_UUID, evidenceMode: "ok" as "ok" | "missing" | "foreign",
+    exchangeId: null as string | null, inputActorId: PRINCIPAL_UUID, evidenceMode: "ok" as "ok" | "missing" | "foreign" | "route_absent",
     receipts: [] as Row[], calls: [] as string[], grant: null as Record<string, unknown> | null, onEnd: null as (() => void) | null,
     onEvidence: null as (() => void) | null, openDelayMs: 0, ended: [] as string[], openTimer: null as ReturnType<typeof setTimeout> | null,
     work: [] as Array<Record<string, unknown>>, tasks: new Map<string, Record<string, unknown>>(), versions: new Map<string, Array<Record<string, unknown>>>(),
@@ -177,6 +177,10 @@ describe.skipIf(executablePath === null)("Studio G7 driver against a local fake 
       const url = new URL(request.url ?? "/", "http://local");
       const cors = { "access-control-allow-origin": origins.studio, "access-control-allow-headers": "authorization", "access-control-allow-methods": "GET, POST" };
       const json = (status: number, value: unknown) => response.writeHead(status, { ...cors, "content-type": "application/json" }).end(JSON.stringify(value));
+      // Exactly as the product answers: a domain error is `{code, message, retry, requestId}`
+      // (`not_found` is HTTP 422), and Fastify answers an absent route with its own 404.
+      const productError = (status: number, code: string, message: string) => json(status, { code, message, retry: "never", requestId: randomUUID() });
+      const routeNotFound = () => json(404, { message: `Route ${request.method}:${url.pathname} not found`, error: "Not Found", statusCode: 404 });
       if (request.method === "OPTIONS") { response.writeHead(204, cors).end(); return; }
       if (url.pathname === "/health") { json(200, { ok: true, commit: API_SHA }); return; }
       if (url.pathname === "/ready") { json(200, { ready: true }); return; }
@@ -194,7 +198,10 @@ describe.skipIf(executablePath === null)("Studio G7 driver against a local fake 
         return;
       }
       if (request.method === "GET" && path === `/api/v1/exchanges/${EXCHANGE_UUID}/qualification-evidence`) {
-        if (api.evidenceMode === "missing" || !api.grant) { json(404, { code: "not_found", message: "Qualification evidence not found" }); return; }
+        // SOPHIA_VOICE_QUALIFICATION off: the route is absent and Fastify answers its own 404.
+        if (api.evidenceMode === "route_absent") { routeNotFound(); return; }
+        // Not the grant's principal, or no grant covers the exchange: the domain error not_found (HTTP 422, A15).
+        if (api.evidenceMode === "missing" || !api.grant) { productError(422, "not_found", "Qualification evidence not found"); return; }
         const grant = api.evidenceMode === "foreign" ? { ...api.grant, runBindingSha256: "e".repeat(64) } : api.grant;
         json(200, { exchangeId: EXCHANGE_UUID, state: api.exchangeId === EXCHANGE_UUID ? "open" : "ended", grant, receipts: api.evidenceMode === "foreign" ? [] : [...api.receipts].sort((left, right) => left.source === right.source ? left.seq - right.seq : left.source < right.source ? -1 : 1) });
         // Product changes that land right after this answer (e.g. the guard ends the exchange).
@@ -210,13 +217,13 @@ describe.skipIf(executablePath === null)("Studio G7 driver against a local fake 
         return;
       }
       const taskMatch = new RegExp(`^/api/v1/projects/${PROJECT_UUID}/native-tasks/([0-9a-f-]{36})$`).exec(path);
-      if (request.method === "GET" && taskMatch) { const detail = api.tasks.get(taskMatch[1]!); if (detail) json(200, detail); else json(404, { code: "not_found", message: "Task not found" }); return; }
+      if (request.method === "GET" && taskMatch) { const detail = api.tasks.get(taskMatch[1]!); if (detail) json(200, detail); else productError(422, "not_found", "Task not found"); return; }
       const versionsMatch = /^\/api\/v1\/artifacts\/([0-9a-f-]{36})\/versions$/.exec(path);
       if (request.method === "GET" && versionsMatch) { json(200, api.versions.get(versionsMatch[1]!) ?? []); return; }
       const sourceMatch = /^\/api\/v1\/sources\/([0-9a-f-]{36})\/content$/.exec(path);
       if (request.method === "GET" && sourceMatch) {
         const bytes = api.contents.get(sourceMatch[1]!);
-        if (!bytes) { json(404, { code: "not_found", message: "Source not found" }); return; }
+        if (!bytes) { productError(422, "not_found", "Source not found"); return; }
         json(200, { sourceId: sourceMatch[1], sha256: createHash("sha256").update(bytes).digest("hex"), mime: "text/html", byteLength: bytes.byteLength, filename: "River otters.html", disposition: "inline", downloadUrl: `${origins.store}/obj/${sourceMatch[1]}?${SIGNATURE}`, expiresAt: new Date(Date.now() + 60_000).toISOString() });
         return;
       }
@@ -249,7 +256,7 @@ describe.skipIf(executablePath === null)("Studio G7 driver against a local fake 
         json(answer.status, answer.body);
         return;
       }
-      json(404, { error: "not_found" });
+      routeNotFound();
     });
     const studio = await listen((request, response) => {
       const url = new URL(request.url ?? "/", "http://local");
@@ -490,7 +497,7 @@ else {
     expect(cleaned.events.find((event) => event.kind === "studio.cleanup.exchange_ended")?.payload).toMatchObject({ confirmed: false, status: "uncertain", basis: "live_exchange_not_joined_to_run" });
   }, 120_000);
 
-  it("without the evidence route, End never touches the exchange; recovery confirms it only once it is no longer live", async () => {
+  it("when the evidence is not answered to the principal (422 not_found), End never touches the exchange; recovery confirms it only once it is no longer live", async () => {
     const { driver, run } = harness();
     api.evidenceMode = "missing";
     const started = await driver.start(run, "unused");
@@ -506,6 +513,39 @@ else {
     const recovered = await driver.recover({ id: run.id, testRunId: run.testRunId, cleanupObligationId: run.cleanupObligationId } as never, "unused");
     expect(recovered.events.find((event) => event.kind === "studio.cleanup.exchange_ended")?.payload).toMatchObject({ confirmed: true, basis: "run_exchange_not_live" });
     expect(recovered.events.find((event) => event.kind === "studio.cleanup.recovery")?.payload).toMatchObject({ complete: true });
+  }, 120_000);
+
+  it("against a product whose evidence route is absent (404: voice qualification off), a run never requests End and the absent route proves nothing", async () => {
+    const { driver, run } = harness();
+    api.evidenceMode = "route_absent";
+    const batches: DriverEvent[][] = [];
+    const started = await driver.start(run, "unused", undefined, undefined, acquisitionRecorder(batches) as never, async (events) => { batches.push(events); });
+    // Unavailable, never "not yours" and never a mismatch.
+    expect(started.events.find((event) => event.kind === "studio.exchange.ownership")?.payload).toMatchObject({ status: "unavailable", reason: "evidence_endpoint_not_served" });
+    const ended = await driver.end(run, "unused", "unused");
+    expect(api.exchangeId).toBe(EXCHANGE_UUID);
+    expect(ended.events.find((event) => event.kind === "studio.cleanup.exchange_ended")?.payload).toMatchObject({ confirmed: false, status: "unavailable", basis: "ownership_unproven_not_touched", ownership: "unavailable", reason: "evidence_endpoint_not_served" });
+    expect(ended.events.find((event) => event.kind === "studio.cleanup.signed_out")?.payload).toMatchObject({ confirmed: true });
+    // Recovery while the exchange is still live and the route still absent: still nothing is ended.
+    const binding = { id: run.id, testRunId: run.testRunId, cleanupObligationId: run.cleanupObligationId } as never;
+    const live = await driver.recover(binding, "unused");
+    expect(live.events.find((event) => event.kind === "studio.cleanup.exchange_ended")?.payload).toMatchObject({ confirmed: false, reason: "evidence_endpoint_not_served" });
+    let events = ledgerOrder(run.id, [...batches, started.events, ended.events, live.events]);
+    const unavailable = events.filter((event) => event.kind === "studio.bridge_evidence_unavailable");
+    expect(unavailable.length).toBeGreaterThan(0);
+    expect(unavailable.every((event) => event.payload.reason === "endpoint_not_served" && event.payload.http_status === 404)).toBe(true);
+    expect(events.filter((event) => event.kind === "studio.exchange.end_requested")).toHaveLength(0);
+    expect(events.some((event) => event.kind === "studio.exchange.ownership" && event.payload.status !== "unavailable")).toBe(false);
+    expect(studioG7CleanupProof(events)).toMatchObject({ exchangeEnded: false, complete: false });
+    expect(ownerCleanupForLease(events, OWNER)).toMatchObject({ complete: false });
+    // The product guard ends it; only a read that sees it no longer live confirms the end, read-only.
+    api.exchangeId = null;
+    const after = await driver.recover(binding, "unused");
+    expect(after.events.find((event) => event.kind === "studio.cleanup.exchange_ended")?.payload).toMatchObject({ confirmed: true, basis: "run_exchange_not_live" });
+    events = ledgerOrder(run.id, [...batches, started.events, ended.events, live.events, after.events]);
+    expect(studioG7CleanupProof(events).exchangeEnded).toBe(true);
+    expect(api.calls.filter((call) => call.startsWith("POST") && call.endsWith("/end"))).toHaveLength(0);
+    expect(api.ended).toHaveLength(0);
   }, 120_000);
 
   it("withdraws only a note bound to the run's own, ownership-proven exchange", async () => {

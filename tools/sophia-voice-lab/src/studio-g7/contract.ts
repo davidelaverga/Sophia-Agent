@@ -456,7 +456,12 @@ export const STUDIO_G7_CONTRACT_DIFFERENCES: ReadonlyArray<{ field: string; plan
   { field: "grant counters", plan: "absent", migration_0046: "connectionsOpened, turns, usageTokens, lastPromptTokens, expiresAt, revokedAt", adapter: "migration" },
   { field: "provider receipt counters", plan: "usageTokens only", migration_0046: "connectionsOpened, turns, usageTokens, lastPromptTokens", adapter: "optional counters accepted" },
   { field: "usage guard", plan: "tokens reported reach max_usage_tokens", migration_0046: "usage + last prompt + one turn's output cap reach the budget", adapter: "reported only; the Lab does not recompute it" },
-  { field: "not found answer", plan: "404", migration_0046: "SQLSTATE 22023 'Qualification evidence not found' (route mapping not in source)", adapter: "404 typed unavailable" },
+  {
+    field: "not found answer",
+    plan: "404",
+    migration_0046: "SQLSTATE 22023 'Qualification evidence not found'; the API (A15) answers 422 {code: 'not_found'} when the caller is not the grant's principal or no grant covers the exchange, as for every member read; 404 only when the route is absent (SOPHIA_VOICE_QUALIFICATION off)",
+    adapter: "422 not_found: not_answered_to_principal (evidence) or not_found_for_principal (other member reads), unavailable; 404: endpoint_not_served, unavailable, never 'not yours' and never proof; any other 422/4xx/5xx: endpoint_unavailable; 401/403: auth_rejected",
+  },
 ]);
 
 /** Legacy Gemini-browser evidence kinds that this target never produces. */

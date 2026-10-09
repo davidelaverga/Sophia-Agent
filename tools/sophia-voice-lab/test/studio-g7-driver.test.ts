@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { VoiceBrowserDriver } from "../src/browser-driver.js";
 import { VoiceLabError } from "../src/domain.js";
+import { StudioApiClient } from "../src/studio-g7/studio-api.js";
 import { StudioG7Driver } from "../src/studio-g7/studio-driver.js";
 import { canonicalJson } from "../src/studio-g7/contract.js";
 import { recoveryTransportBinding } from "../src/recovery-control.js";
@@ -26,8 +27,12 @@ class FakeStudioBackend {
   apiCommit: string | null = API_SHA;
   studioMeta = `<meta name="sophia-build" content="${STUDIO_SHA}">`;
   apiDown = false;
-  /** The evidence answer: built per request; null answers 404 (not the principal's, or the route is missing). */
+  /** The evidence answer: built per request; null answers as the product does when it is not the principal's (422 `not_found`). */
   evidence: ((exchangeId: string) => Record<string, unknown> | null) | null = null;
+  /** Whether the API runs with SOPHIA_VOICE_QUALIFICATION=on; off, the evidence route is absent (Fastify 404). */
+  voiceQualificationOn = true;
+  /** A raw refusal of the evidence read (negative controls: other 422 codes, 401, 403). */
+  evidenceRefusal: { status: number; body: unknown } | null = null;
   grantUser = PRINCIPAL_UUID;
   /** A raw 200 snapshot body that replaces the well-formed one (malformed-answer tests). */
   snapshotBody: unknown = undefined;
@@ -43,6 +48,10 @@ class FakeStudioBackend {
     const authorization = headers.authorization ?? null;
     this.calls.push({ method, path: `${url.origin}${url.pathname}${url.search}`, authorization });
     const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+    // Exactly as the product answers: a domain error is `{code, message, retry, requestId}`
+    // (`not_found` is HTTP 422), and Fastify answers an absent route with its own 404.
+    const productError = (status: number, code: string, message: string) => json({ code, message, retry: "never", requestId: "req-fake-0001" }, status);
+    const routeNotFound = () => json({ message: `Route ${method}:${url.pathname} not found`, error: "Not Found", statusCode: 404 }, 404);
     if (url.origin === DEFAULT_ORIGINS.supabase) {
       if (headers.apikey !== FAKE_PUBLISHABLE_KEY) return json({ error: "no_api_key" }, 401);
       if (url.pathname === "/auth/v1/health") return json({ name: "GoTrue" });
@@ -70,13 +79,15 @@ class FakeStudioBackend {
       if (url.pathname === `/api/v1/projects/${PROJECT_UUID}/snapshot`) return json({ room: { id: "room-g7", sophia: { exchangeId: this.exchangeId, exchange: this.exchangeId ? "open" : "none", inputEpoch: 2, inputActorId: this.exchangeId ? this.inputActorId : null } }, work: [] });
       const evidence = /^\/api\/v1\/exchanges\/([0-9a-f-]{36})\/qualification-evidence$/.exec(url.pathname);
       if (evidence) {
+        if (!this.voiceQualificationOn) return routeNotFound();
+        if (this.evidenceRefusal) return json(this.evidenceRefusal.body, this.evidenceRefusal.status);
         const body = this.evidence?.(evidence[1]!) ?? null;
-        return body === null ? json({ code: "not_found", message: "Qualification evidence not found" }, 404) : json(body);
+        return body === null ? productError(422, "not_found", "Qualification evidence not found") : json(body);
       }
       const end = /^\/api\/v1\/exchanges\/([0-9a-f-]{36})\/end$/.exec(url.pathname);
       if (method === "POST" && end) { if (this.exchangeId === end[1]) this.exchangeId = null; return new Response(null, { status: 204 }); }
     }
-    return json({ error: "not_found" }, 404);
+    return routeNotFound();
   };
 
   endCalls(): number { return this.calls.filter((call) => call.method === "POST" && call.path.endsWith("/end")).length; }
@@ -146,15 +157,20 @@ describe("Studio G7 cleanup never touches an exchange the run cannot prove is it
   it("an exchange whose evidence names another run, another grant, or is not answered is never ended", async () => {
     const run = studioRun(studioTestConfig());
     const grant = evidenceEnvelope(run, []).grant as Record<string, unknown>;
-    const cases: Array<{ name: string; evidence: (exchangeId: string) => Record<string, unknown> | null; status: string; reason: string }> = [
+    const cases: Array<{ name: string; evidence: (exchangeId: string) => Record<string, unknown> | null; status: string; reason: string; configure?: (backend: FakeStudioBackend) => void }> = [
       { name: "another run's binding", evidence: () => evidenceEnvelope(run, [], { grant: { ...grant, runBindingSha256: "e".repeat(64) } }), status: "mismatch", reason: "evidence_bound_to_another_run" },
       { name: "another grant", evidence: () => evidenceEnvelope(run, [], { grant: { ...grant, grantId: "22222222-3333-4444-8555-666666666666" } }), status: "mismatch", reason: "evidence_bound_to_another_grant" },
-      { name: "not answered to the principal (or route missing)", evidence: () => null, status: "unavailable", reason: "evidence_not_answered_to_principal" },
+      { name: "not answered to the principal (product 422 not_found)", evidence: () => null, status: "unavailable", reason: "evidence_not_answered_to_principal" },
+      { name: "route absent (voice qualification off: 404)", evidence: () => evidenceEnvelope(run, []), status: "unavailable", reason: "evidence_endpoint_not_served", configure: (backend) => { backend.voiceQualificationOn = false; } },
+      { name: "a 422 with another code (invalid_request)", evidence: () => evidenceEnvelope(run, []), status: "unavailable", reason: "evidence_endpoint_unavailable", configure: (backend) => { backend.evidenceRefusal = { status: 422, body: { code: "invalid_request", message: "body/exchangeId must match format \"uuid\"", retry: "never", requestId: "req-fake-0002" } }; } },
+      { name: "401", evidence: () => evidenceEnvelope(run, []), status: "unavailable", reason: "evidence_auth_rejected", configure: (backend) => { backend.evidenceRefusal = { status: 401, body: { code: "unauthorized", message: "Unauthorized", retry: "never", requestId: "req-fake-0003" } }; } },
+      { name: "403", evidence: () => evidenceEnvelope(run, []), status: "unavailable", reason: "evidence_auth_rejected", configure: (backend) => { backend.evidenceRefusal = { status: 403, body: { code: "forbidden", message: "Forbidden", retry: "never", requestId: "req-fake-0004" } }; } },
       { name: "a receipt bound to another run inside the answer", evidence: () => evidenceEnvelope(run, [["provider", { ...providerReceipt(run, 0, "ready"), runBindingSha256: "d".repeat(64) }]]), status: "unavailable", reason: "evidence_rejected" },
     ];
     for (const item of cases) {
       const backend = new FakeStudioBackend();
       backend.evidence = item.evidence;
+      item.configure?.(backend);
       const { driver } = driverFor(backend);
       adopt(driver, run);
       const result = await driver.abort(run, "WORKER_RESTARTED");
@@ -454,5 +470,38 @@ describe("Studio G7 third review: a no-join end needs the principal gone, never 
     later.adoptStudioJoin(run.id, { ...join, speakRequestedAtMs: Date.now() + 10 * 3_600_000, browserClosed: true, globalSignOutConfirmed: true } as never);
     const settled = await later.recover(binding(run), "unused");
     expect(ofKind(settled.events, "studio.cleanup.exchange_ended")[0]?.payload).toMatchObject({ confirmed: true, basis: "no_live_exchange_after_principal_left", browser_closed_before_observation: true, signed_out_before_observation: true, verified_by: "member_snapshot" });
+  });
+});
+
+describe("member-read refusals follow the product's convention (A15)", () => {
+  const TASK = "c0000000-0000-4000-8000-0000000000c9";
+  /** One programmed answer per request, exactly as the product (or Fastify, for an absent route) sends it. */
+  function client(status: number, body: unknown) {
+    const config = studioTestConfig();
+    const studio = config.studioG7!;
+    const fetchImpl = async () => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+    return new StudioApiClient(studio.apiOrigin, studio.studioOrigin, config.allowedOrigins, fetchImpl as never, 5_000, []);
+  }
+  const productError = (code: string) => ({ code, message: "Refused", retry: "never", requestId: "req-fake-0100" });
+  const fastify404 = { message: "Route GET:/api/v1/exchanges/x/qualification-evidence not found", error: "Not Found", statusCode: 404 };
+  const cases: Array<{ name: string; status: number; body: unknown; evidence: string; member: string }> = [
+    { name: "422 not_found (not the principal's, or no grant covers it)", status: 422, body: productError("not_found"), evidence: "not_answered_to_principal", member: "not_found_for_principal" },
+    { name: "404 route not found (voice qualification off)", status: 404, body: fastify404, evidence: "endpoint_not_served", member: "endpoint_not_served" },
+    { name: "a 404 is never 'not yours', whatever its body", status: 404, body: productError("not_found"), evidence: "endpoint_not_served", member: "endpoint_not_served" },
+    { name: "422 invalid_request", status: 422, body: productError("invalid_request"), evidence: "endpoint_unavailable", member: "endpoint_unavailable" },
+    { name: "422 without a code", status: 422, body: { message: "Refused" }, evidence: "endpoint_unavailable", member: "endpoint_unavailable" },
+    { name: "401", status: 401, body: productError("unauthorized"), evidence: "auth_rejected", member: "auth_rejected" },
+    { name: "403", status: 403, body: productError("forbidden"), evidence: "auth_rejected", member: "auth_rejected" },
+    { name: "409", status: 409, body: productError("conflict"), evidence: "endpoint_unavailable", member: "endpoint_unavailable" },
+    { name: "503", status: 503, body: productError("unavailable"), evidence: "endpoint_unavailable", member: "endpoint_unavailable" },
+  ];
+  it.each(cases)("$name", async ({ status, body, evidence, member }) => {
+    expect(await client(status, body).qualificationEvidence(EXCHANGE_UUID, "fake-access-token-1-xxxxxxxx")).toEqual({ status: "unavailable", reason: evidence, http_status: status });
+    expect(await client(status, body).nativeTask(PROJECT_UUID, TASK, "fake-access-token-1-xxxxxxxx")).toEqual({ status: "unavailable", reason: member, http_status: status });
+    expect(await client(status, body).sourceContent(TASK, "fake-access-token-1-xxxxxxxx")).toEqual({ status: "unavailable", reason: member, http_status: status });
+    expect(await client(status, body).artifactVersions(TASK, "fake-access-token-1-xxxxxxxx")).toEqual({ status: "unavailable", reason: member, http_status: status });
+    if (status === 401 || status === 403) return;
+    const snapshot = await client(status, body).snapshot(PROJECT_UUID, "fake-access-token-1-xxxxxxxx").catch((error: unknown) => error) as VoiceLabError;
+    expect(snapshot.detail).toMatchObject({ code: "STUDIO_SNAPSHOT_UNAVAILABLE", details: { http_status: status, reason: member } });
   });
 });

@@ -32,7 +32,8 @@ function studioFetch(calls: Array<{ url: string; authorization: string | null }>
     if (url.origin === DEFAULT_ORIGINS.api && url.pathname === "/health") return json({ ok: true, commit: options.apiCommit ?? API_SHA });
     if (url.origin === DEFAULT_ORIGINS.api && url.pathname === "/ready") return json({ ready: options.apiReady ?? true }, options.apiReady === false ? 503 : 200);
     if (url.origin === DEFAULT_ORIGINS.supabase && url.pathname === "/auth/v1/health" && headers.apikey === FAKE_PUBLISHABLE_KEY) return json({ name: "GoTrue" });
-    return json({ error: "not_found" }, 404);
+    // An absent route: Fastify's own 404 (the product's not-found objects are 422 `not_found`).
+    return json({ message: `Route ${init?.method ?? "GET"}:${url.pathname} not found`, error: "Not Found", statusCode: 404 }, 404);
   };
 }
 

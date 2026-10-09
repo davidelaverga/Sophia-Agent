@@ -125,6 +125,12 @@ describe("Studio G7 contract strictness", () => {
     expect(byChannel.webrtc_packet_flow_on_loopback_peer).toMatchObject({ status: "unsupported", reason: "fake_studio_loopback_peer_has_no_livekit_sfu" });
     // Each plan-vs-migration difference is data, and the adapter follows the migration.
     expect(STUDIO_G7_CONTRACT_DIFFERENCES.map((entry) => entry.field)).toEqual(expect.arrayContaining(["evidence.grant", "evidence.receipts[].source", "guard.reason", "grant.max_usage_tokens", "receipt.kind"]));
+    // Not found: the product answers 422 `not_found` (A15); a 404 means the route is absent.
+    const notFound = STUDIO_G7_CONTRACT_DIFFERENCES.find((entry) => entry.field === "not found answer")!;
+    expect(notFound.migration_0046).toContain("422 {code: 'not_found'}");
+    expect(notFound.migration_0046).toContain("404 only when the route is absent");
+    expect(notFound.adapter).toContain("422 not_found: not_answered_to_principal");
+    expect(notFound.adapter).toContain("404: endpoint_not_served");
   });
 
   it("types scenario support per target kind", () => {
