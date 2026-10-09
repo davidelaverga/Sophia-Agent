@@ -9,6 +9,7 @@ Use only the Sophia Voice Lab MCP tools for live test control. Do not use raw br
 
 Before acting, read `references/tool-contracts.md` and the relevant scenario in `references/scenario-catalog.md`. Read `references/evidence-interpretation.md` before assigning a verdict. Use `references/recovery.md` when any operation is not successful.
 For V-P01, also read `references/p01-asynchronous-flow.md` before the first call; it defines the bounded asynchronous observation contract.
+For a Studio LiveKit G7 deployment (`get_capabilities` returns a `studio_g7` block), follow the Studio G7 flow below and `V-G07` in the scenario catalog instead of the default flow.
 
 ## Default bounded flow
 
@@ -25,6 +26,16 @@ For V-P01, also read `references/p01-asynchronous-flow.md` before the first call
 11. Call `export_voice_evidence`. Report its durable artifact reference, `harness_verdict`, `product_verdict`, cleanup audit, and every typed unavailable join. For the fresh-plugin scenario, this response may be `pending_external_evidence` until an independent platform controller binds the registered app, install, task, and exact response hash in a later immutable manifest revision; do not spend an eleventh semantic plugin call or claim the pending bundle is already P01-certified. Never turn a product failure into a harness pass or vice versa.
 
 Use stable idempotency keys for retries. A timed-out observing call may be retried from its returned cursor. A mutating retry must reuse the original key; never invent a new key merely because a response was lost.
+
+## Studio G7 flow (`studio-livekit-g7-v1` deployments only)
+
+1. Call `get_capabilities`; require the `studio_g7` block, its pinned Studio/API/bridge commits, `lab_schema.version` 7 and the three Studio tools. Legacy tools (`start_voice_run`, `barge_in`, `force_socket_rotation`) answer `unsupported_for_target` here.
+2. Call `start_studio_g7_run` with a fresh idempotency key. Hand `data.run_binding.run_binding_sha256` to the operator, who alone makes the product grant; never create, approve or revoke a grant yourself. The start waits (bounded) for a grant-bound microphone receipt before it opens an exchange.
+3. Perform the episode in order, one operation per step: `studio_g7_voice_step` `create` (ask for the HTML page by voice) and `steer`; `studio_g7_action` `leave_and_return`, `section_revision` (with an `instruction`, optional `sections`), `stale_edit`; `studio_g7_voice_step` `hold`, `resume`, `stop`, each followed by `studio_g7_action` `observe` with `for_step` (and a bounded `wait_ms`); then `studio_g7_action` `withdrawal` (it forgets only a note bound to this run's own exchange; pass `entry_id` when there is more than one).
+4. A performed step is never performed again: retry a lost response only with the same idempotency key. An action that answers `performed: false` with a typed reason (for example `no_superseded_version`) may be retried with a new key after its precondition holds.
+5. Call `end_voice_run`, then `export_voice_evidence`. Report `studio_g7.steps`, the separate harness and product verdicts, `cleanup` (including `ownership`), and every `uncertain` or `unavailable` item as such. Voice-step outcomes are joined to product tasks by actor and time window only and stay `uncertain`; never report them as passes. A run may show `pending_external_evidence` while late bridge receipts are re-read; do not start another run to force it.
+
+The Lab never ends or touches an exchange it cannot prove is its own, retains no transcript and no audio, and its fake-Studio tests prove no LiveKit packet flow; say so when it matters to a verdict.
 
 ## Hard aborts
 

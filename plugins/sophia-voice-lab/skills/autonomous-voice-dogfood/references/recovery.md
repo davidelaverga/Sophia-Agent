@@ -13,3 +13,5 @@ Use these classes:
 - `aborted_driver_restart`: browser worker was lost; do not claim browser reattachment.
 
 An MCP API restart may reattach through the durable ledger. A browser-worker crash is not resumable and must be reported honestly. Always attempt idempotent `end_voice_run` and `export_voice_evidence` after a safe failure. Never repeat a mutating call with a new idempotency key because its first response was lost.
+
+Studio G7 runs: an exchange the Lab cannot prove is the run's own is never ended by the Lab; recovery re-verifies it read-only with backoff until it is not live (the product guard ends it at its deadline). A dead worker's Studio lease is released only after a global sign-out confirmed after the lease expired, the access-token lifetime, a fresh not-live verification and a stale owner heartbeat; until then the run's cleanup, and admission of the next run, stay pending. Report these as typed pending states, not failures to work around.

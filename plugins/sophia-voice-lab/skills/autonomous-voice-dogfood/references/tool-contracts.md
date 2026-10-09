@@ -16,4 +16,12 @@ All tools return a versioned common envelope containing `contract_version`, `req
 - `run_regression_suite`: start a durable asynchronous suite whose child runs remain separately inspectable.
 - `get_suite_run`: inspect suite and child states without hiding individual failures.
 
+### Studio LiveKit G7 deployments only
+
+These three tools are registered only when the service runs with `SOPHIA_VOICE_LAB_TARGET_KIND=studio-livekit-g7-v1`; the legacy surface above is unchanged elsewhere.
+
+- `start_studio_g7_run`: reserve a `V-G07` run (`scenario_version` `studio-g7-v1`) against the configured, pinned Studio/API/bridge commits. Returns the non-secret `run_binding.run_binding_sha256` the operator puts in the product grant. Inputs: environment, scenario id/version, optional capture policy (raw audio, video and screenshots stay off), idempotency key.
+- `studio_g7_voice_step`: one voice step (`create`, `steer`, `hold`, `resume`, `stop`) as one `speak` operation labelled with its step, through the Studio room's own microphone path. Exactly one of `text` or `fixture_id`. A performed step answers `STUDIO_G7_STEP_ALREADY_PERFORMED` under a new key.
+- `studio_g7_action`: one non-voice step as one `studio_action` operation: `leave_and_return`; `section_revision` (`instruction` required, `sections` optional); `stale_edit` (refused by the product as stale is the expected outcome); `withdrawal` (`entry_id` optional; only a note bound to this run's ownership-proven exchange); or `observe` (`for_step`, optional `wait_ms`), a read-only outcome read that is not a step and may repeat. Answers `performed`, a typed `status`, and only ids, HTTP statuses, enumerated product codes and hashes.
+
 Mutating calls require an idempotency key. Do not parallelize two speech/fault mutations for one run unless the selected scenario explicitly declares intentional overlap.

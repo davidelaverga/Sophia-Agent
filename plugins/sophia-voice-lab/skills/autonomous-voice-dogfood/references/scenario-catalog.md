@@ -162,6 +162,15 @@ Use a harmless, synthetic-only HTML deliverable. Do not reference or edit an ord
 - Harness pass requires discoverability, current contract versions, exact deployment validation, durable evidence after shutdown, zero orphans, and no more than ten high-level MCP calls excluding read-only polling for deliberately long work.
 - Call ten may truthfully report `pending_external_evidence` for P01 itself: the independent platform controller must bind the registered app, private install, fresh task, and exact call-ten response hash, then append a new immutable certification-manifest revision. Do not make an eleventh plugin call merely to observe that out-of-band revision, and never describe the call-ten bundle as already P01-certified.
 
+## Studio LiveKit G7
+
+### V-G07 — synthetic in-app episode (catalogue `studio-g7-v1`)
+
+- Only on a `studio-livekit-g7-v1` deployment, started with `start_studio_g7_run`; legacy scenarios are `unsupported_for_target` there and V-G07 is `unsupported_for_target` on the legacy target.
+- Steps, each one operation, in this order: `create` (HTML asked for by voice), `steer`, `leave_and_return`, `section_revision`, `stale_edit`, `hold`, `resume`, `stop`, `withdrawal` (forget a note the research used, which should end the design). Observe each of `hold`, `resume` and `stop` with `studio_g7_action` `observe`.
+- Harness pass requires every step executed before End, every bound receipt valid, the exchange proven the run's own, deployed identities verified, and complete cleanup. A step not performed before End fails the harness.
+- Product outcomes: `leave_and_return`, `section_revision`, `stale_edit` and `withdrawal` are canonical (the Lab's own receipts); `create`, `steer`, `hold`, `resume`, `stop` and "the withdrawal ended the design" are `uncertain`.
+
 ## Promotion minimums
 
 Promotion additionally requires 20/20 deterministic idempotent dynamic-injection trials, 100% pre-resource security rejection, five consecutive fresh deployed smokes with no harness-caused failure, one gap-free >500-event run, MCP API restart/reattach, wrong-SHA hard refusal, LangSmith fail-open proof, zero terminal orphans, evidence availability within 30 seconds, and the installed-plugin cold flow. Preserve every product failure and assign it to its owning mission; never weaken a harness assertion to make the aggregate green.

@@ -133,22 +133,46 @@ Keep the active caller-partition key plus every prior key whose reservations are
 
 ## Studio LiveKit G7 target (source only, off by default)
 
-`SOPHIA_VOICE_LAB_TARGET_KIND` selects the driver and evaluator. It defaults to
-`legacy-gemini-browser-v1`, which is unchanged. `studio-livekit-g7-v1` drives the
-Studio (LiveKit) room against the product contract `sophia.voice-qualification.v1`;
-the adapter contract is `sophia.studio-g7.v1` and its catalogue is `studio-g7-v1`
-(scenario `V-G07`). On this kind, every legacy scenario (V-A01 … V-P01) is rejected
-by `start_voice_run` as typed `unsupported_for_target`. Studio runs are reserved by
-`VoiceLabService.startStudioG7Run`; it is not registered as an MCP tool in this change.
+`SOPHIA_VOICE_LAB_TARGET_KIND` selects the driver, evaluator, readiness probe and
+MCP tool surface. It defaults to `legacy-gemini-browser-v1`, which is unchanged
+(same eleven tools, same `/readyz` body). `studio-livekit-g7-v1` drives the Studio
+(LiveKit) room against the product contract `sophia.voice-qualification.v1`
+(migration 0046 is authoritative where the plan document differs; see
+`STUDIO_G7_CONTRACT_DIFFERENCES` in `src/studio-g7/contract.ts`). The adapter
+contract is `sophia.studio-g7.v1`, its catalogue `studio-g7-v1` (scenario
+`V-G07`). On this kind every legacy scenario (V-A01 … V-P01) is rejected by
+`start_voice_run` as typed `unsupported_for_target`.
 
 | Variable | Purpose |
 |---|---|
 | `SOPHIA_VOICE_LAB_STUDIO_ORIGIN`, `SOPHIA_VOICE_LAB_STUDIO_API_ORIGIN`, `SOPHIA_VOICE_LAB_STUDIO_SUPABASE_URL` | Bare origins; each must also be in `SOPHIA_VOICE_LAB_ALLOWED_ORIGINS` |
 | `SOPHIA_VOICE_LAB_STUDIO_SUPABASE_PUBLISHABLE_KEY` | Supabase publishable (anon) key; not secret, never logged |
 | `SOPHIA_VOICE_LAB_STUDIO_PROJECT_ID` | Dedicated synthetic project UUID (room view `/p/<id>/studio`) |
-| `SOPHIA_VOICE_LAB_STUDIO_PRINCIPAL_EMAIL`, `SOPHIA_VOICE_LAB_STUDIO_PRINCIPAL_PASSWORD` | Synthetic principal; secret, environment only. `SOPHIA_VOICE_LAB_PRINCIPAL_ID` must equal its Supabase user id |
+| `SOPHIA_VOICE_LAB_STUDIO_PRINCIPAL_EMAIL`, `SOPHIA_VOICE_LAB_STUDIO_PRINCIPAL_PASSWORD` | Synthetic principal; secret, environment only. `SOPHIA_VOICE_LAB_PRINCIPAL_ID` must equal its Supabase user id (the product's actor id) |
 | `SOPHIA_VOICE_LAB_STUDIO_EXPECTED_STUDIO_SHA`, `..._API_SHA`, `..._BRIDGE_SHA` | Pinned 40-hex commits (Studio meta `sophia-build`, API `/health`, bridge `provider.bridgeCommit`) |
 | `SOPHIA_VOICE_LAB_STUDIO_GRANT_WAIT_SECONDS` (5–240, default 120), `..._GRANT_REJOIN_SECONDS` (default 15) | Bounded wait for the grant-bound `mic_published` receipt before an exchange is opened |
+| `SOPHIA_VOICE_LAB_STUDIO_OBJECT_STORE_ORIGINS` | Comma list (≤ 8) of the signed-download origins `GET /sources/{id}/content` returns; artifact bytes are downloaded and hashed only from these. Empty: byte checks are typed `unavailable` |
+| `SOPHIA_VOICE_LAB_STUDIO_ACCESS_TOKEN_MAX_SECONDS` (60–86400, default 3600) | Upper bound of a Supabase access JWT's lifetime; gates the release of a dead foreign worker's lease |
+
+**MCP tools (Studio kind only).** `start_studio_g7_run` reserves the run and returns
+the non-secret run binding. `studio_g7_voice_step` performs one voice step
+(`create`, `steer`, `hold`, `resume`, `stop`) as one `speak` operation labelled
+`_g7_step`. `studio_g7_action` performs one non-voice step as one `studio_action`
+operation: `leave_and_return`, `section_revision` (needs `instruction`, optional
+`sections`), `stale_edit`, `withdrawal` (optional `entry_id`), or `observe`
+(`for_step`, optional `wait_ms`), a read-only outcome read for a voice step. A
+step that was performed is never performed again under a new idempotency key;
+the same key replays the same operation. Every G7 step is therefore a durable,
+idempotent operation; none is only a driver method.
+
+**Lab schema v7.** `studio_action` is a new value of `operations.type`
+(`migrations/007_studio_g7_operations.sql`, an additive CHECK widening; no row
+changes). The release bundle is v7 (`VOICE_LAB_MIGRATION_SHA256`
+`fcba91c6…`). An existing v6 database must be upgraded first, while quiescent and
+kill-switched, with `src/bin/upgrade-studio-g7-operations.ts`
+(`SOPHIA_VOICE_LAB_STUDIO_G7_OPERATIONS_UPGRADE_{APPROVED,EXPECTED_COMMIT,INVENTORY_SHA256}`;
+inventory from `src/bin/service-fence-inventory.ts`). Until then `migrate.js`
+refuses the v6 schema at startup, for the legacy target too.
 
 **Run binding.** The value an operator passes as `run_binding_sha256` to
 `sophia.voice_qualification_grant(...)` is the lowercase hex SHA-256 of the UTF-8
@@ -163,28 +187,61 @@ it under `data.run_binding.run_binding_sha256`; the raw cleanup obligation id ne
 leaves the Lab. Because a grant never covers an earlier exchange, the driver opens
 the exchange ("Speak with Sophia") only after a `mic_published` receipt carrying
 this binding and the Lab-issued track arrives; it rejoins periodically to refetch
-the room token and fails typed `unavailable` at the wait limit.
+the room token and fails typed `unavailable` at the wait limit. The Speak intent
+and the exchange join are written ahead (durable before the driver acts), and the
+join requires the live exchange's floor holder to be the principal.
 
-**Evidence.** Page receipts arrive over the private push binding; bridge receipts
-are read with the principal's JWT from `/api/v1/exchanges/{id}/qualification-evidence`.
-Both are parsed strictly (unknown keys and free text rejected) and bound by grant id
-and run binding. Input is reconciled by window ordinal and envelope only; the Lab
-never compares its PCM chain with the bridge's. WebRTC sender stats are
-corroboration only. Screenshots are never captured on this target (captions are
-speech text). See `src/studio-g7/contract.ts` for the receipt-coverage table: legacy
-browser-frame and transcript-content evidence is typed `unsupported` or
-`not_supported_by_product_privacy_model`, and the member-API task/artifact join is
-typed `unavailable`. Harness and product verdicts stay separate; the catalogue's
-non-voice steps (stale edit, withdrawal) and the leave/return step are `unavailable`
-here, so a G7 run settles as `pending_external_evidence` until a separate controller
-supplies them.
+**Evidence.** Page receipts arrive over the private push binding; bridge and
+guard receipts are read with the principal's JWT from
+`/api/v1/exchanges/{id}/qualification-evidence` in the 0046 shape (one `grant`,
+rows `{source, seq, kind, receivedAt, receipt}`). Both are parsed strictly
+(unknown keys and free text rejected) and bound by grant id and run binding, and
+are ordered and de-duplicated by `(source, seq)`. Input is reconciled by window
+ordinal and envelope only; the Lab never compares its PCM chain with the
+bridge's. WebRTC sender stats are corroboration only. Neither side retains a
+transcript or audio: the Lab records counts, envelopes, ids, states and hashes,
+and never captures screenshots on this target (captions are speech text).
 
-**Cleanup.** End clicks "End" and "Leave the room", verifies through the member
-snapshot that the exchange ended (falling back to `POST /api/v1/exchanges/{id}/end`),
-signs the principal out globally, and closes the run-owned Chromium. Abort, recover
-and a run-deadline watchdog end the exchange through the API and sign out even when
-the page or the whole browser is gone. The product guard independently ends the
-exchange at the grant deadline.
+**Outcomes.** Canonical outcome reads go through the member API as the
+principal: snapshot work → native task (ids, kinds, states, phases; instructions
+and Markdown dropped) → the design's published version → its HTML rendition's
+source → the downloaded bytes' SHA-256, compared with the declared source,
+rendition and version digests. A section revision, a stale edit and a withdrawal
+are the Lab's own requests, so their outcomes are canonical. The join of a voice
+step to a native task is not: `NativeTask` carries no exchange binding, so that
+join is by actor and time window and typed `uncertain`, never a pass; a complete
+run therefore certifies the harness and reports the product `inconclusive`.
+
+**Completion.** A run ends `completed` once its harness assertions and cleanup are
+proven. Receipts that arrive after End (the bridge's `session_closed`, the last
+reply) are re-read by a bounded evidence completion path (a fresh principal
+session, then global sign-out) before the certification deadline; a step not
+performed before End fails the harness at once instead of waiting for it.
+
+**Cleanup.** The driver ends an exchange (UI End, then
+`POST /api/v1/exchanges/{id}/end`) only when it can prove the exchange is the
+run's own: the exchange joined to this run after its Speak, whose evidence names
+this run's binding hash and the grant id of its page receipts. Otherwise it never
+touches it: it verifies read-only (one live exchange per room) that the run's
+exchange is no longer live, or types the state `uncertain` / `unavailable` and
+re-verifies with backoff until the product guard ends it at its deadline. The
+principal is signed out globally and the run-owned Chromium is closed on every
+path. A dead foreign worker's Studio lease is released (compare-and-delete, in
+one ledger transaction) only after its owner's heartbeat is stale, a global
+sign-out was confirmed after the lease expired, the access-JWT lifetime has
+elapsed since, and a fresh verification found the run's exchange not live; the
+orphan browser's close is typed `unobservable`, not proven.
+
+**`/readyz`.** On the Studio kind it answers for the Studio document and its
+build meta, the API's `/health` identity and `/ready`, Supabase Auth's public
+health (publishable key only), the worker heartbeat and the kill switch; no
+credential is used. A published identity that differs from its pin is not ready.
+
+**Limitations (explicit).** The Chromium tests drive a local fake Studio whose
+loopback `RTCPeerConnection` stands in for LiveKit: it proves the Lab-issued
+track is the published sender track, not packet flow to any SFU or the bridge.
+No transcript and no audio is retained by the Lab or the product contract. An
+orphan browser's LiveKit room presence is not observable through the member API.
 
 ## Running and container commands
 
@@ -202,13 +259,13 @@ web:    node dist/src/bin/migrate.js && node dist/src/bin/web.js
 worker: node dist/src/bin/migrate.js && node dist/src/bin/worker.js
 ```
 
-The web service owns the public health check. `/readyz` requires Postgres, a live durable worker heartbeat with browser/fixtures ready, exact target build identity plus Gateway/Voice `/ready`, and a signed no-session frontend auth readiness receipt. A 503 is intentional if an execution prerequisite is unavailable.
+The web service owns the public health check. `/readyz` requires Postgres, a live durable worker heartbeat with browser/fixtures ready, exact target build identity plus Gateway/Voice `/ready`, and a signed no-session frontend auth readiness receipt (on the Studio kind, the Studio/API/Supabase probes above instead). A 503 is intentional if an execution prerequisite is unavailable.
 
 ## MCP client contract
 
 Connect an MCP client to the HTTPS `/mcp` endpoint with `Authorization: Bearer <base-token>`. Use the separate fault token only for `force_socket_rotation`. The eleven tools are:
 
-`get_capabilities`, `start_voice_run`, `speak`, `wait_for_turn`, `inspect_voice_run`, `barge_in`, `force_socket_rotation`, `end_voice_run`, `export_voice_evidence`, `run_regression_suite`, and `get_suite_run`.
+`get_capabilities`, `start_voice_run`, `speak`, `wait_for_turn`, `inspect_voice_run`, `barge_in`, `force_socket_rotation`, `end_voice_run`, `export_voice_evidence`, `run_regression_suite`, and `get_suite_run`. A `studio-livekit-g7-v1` deployment additionally registers `start_studio_g7_run`, `studio_g7_voice_step` and `studio_g7_action`.
 
 Every tool uses a strict schema and the common `sophia.voice-lab.v1` envelope. Mutations require idempotency keys; retries return the same durable operation and scheduling receipt. Resources use `voice-lab://artifact/<id>` and remain resolvable across web/worker restarts until governed retention expires.
 
