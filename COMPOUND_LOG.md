@@ -26,6 +26,81 @@ Every merged PR appends an entry here. This file is the team's accumulating inst
 ## Log
 <!-- Append new entries below this line -->
 
+## 2026-10-09 · [voice-lab · the four full-env failures repaired, and the plugin's recovery notes] · PR #168
+**Author:** Claude · **Track:** voice · **Spec:** root's final review of b31d7b8 on PR #168 ([comment](https://github.com/davidelaverga/Sophia-Agent/pull/168#issuecomment-6089907815)): diagnose and repair the 4 full-env failures in additive commits; update the plugin's recovery.md (docs only). Commits d8d0b4e (the catalogue: one code in `src/browser-driver.ts`, one test assertion), cc9f732 (a test and the README), 348be3f (tests only), 41ced42 (recovery.md only)
+
+### What Changed
+- **Root's review of b31d7b8** accepted it within scope as documentation only, with the packet fully verified. It is not a final PR approval, and the 4 full-env failures were not waived by the earlier r9 evidence. This entry records their diagnosis and repair.
+- Each failure was captured before the fix, at b31d7b8, one file per invocation with its own timeout. Each was then classified, fixed with a fail-before and an after, and its assertions were kept.
+- **1. `normal-provider-disconnect` › "catalogues every Voice Lab error code…" (d8d0b4e). Catalogue drift.**
+  - Since the base 6aede7d, the gateway returns `voice_lab_canonical_transcript_unavailable` as the 503 `detail.code` of `routers/sophia.py` (`_read_exact_synthetic_messages`). The Lab's finite C046 catalogue lacked it.
+  - `PRODUCT_ERROR_CODES` gains exactly that code. A new assertion pins the gateway's `{detail: {code}}` shape.
+  - The catalogue test is unchanged and still exhaustive.
+  - Fail-before against b31d7b8's `browser-driver.ts`: 2 of 77 fail. After: 77/77.
+- **2. `security` › "golden HMAC vectors accepted by the actual Python Gateway and Voice verifiers" (cc9f732). Environment and setup.**
+  - The interpreters `backend/.venv/bin/python` and `voice/.venv/bin/python` did not exist, so `spawnSync` returned status null.
+  - Both environments were created, untracked, with uv 0.8.17 and Python 3.12.3. The two installs ran `--offline` from the local cache (no network); `uv venv` used the installed interpreter. `backend/uv.lock` and every tracked file are unchanged. The commands:
+    - `(cd backend && uv sync --group dev)`;
+    - `uv venv voice/.venv --python 3.12`;
+    - `uv pip install --python voice/.venv/bin/python -r voice/requirements-dev.txt`.
+  - With them, the test passes against the real verifiers.
+  - The test now fails loudly, never skips, naming a missing interpreter and the command that creates it.
+  - New negative controls: claims signed with another secret must be refused by both verifiers (`voice_lab_capability_invalid_signature`). Mutants s1 and s2, which skip each verifier's signature check, are killed.
+  - The README documents the setup.
+- **3. `postgres-integration` P01 ×2 (348be3f). Contamination by fixtures the Lab's tests own, not a defect in order, admission or concurrency.**
+  - On fresh, exactly named databases, both P01 tests pass alone. Bisection finds the two earlier tests that break them:
+    - "persists an invalid input-delivery verdict…";
+    - `verifyRecoveredLeaseRelease`.
+  - Each leaves a ledger-only run with a queued start it never retires. `claimNextOperation` hands out any queued start, oldest first, whatever its run's state; this is the same in both ledgers and is unchanged. The P01 proof's settle claimed the leftover ("collector operation order drifted"). The second test's CONCURRENCY_LIMIT was the first test's aborted run.
+  - Production never leaves such a start claimable:
+    - A run turns terminal only while its own claimed operation executes, or through `#terminalizeFailure`, which first cancels every pending operation: expiry, kill switch, graceful shutdown, recovery after an earlier boot.
+    - The D02 shutdown also cancels first.
+    - The certification-deadline transition starts from `pending_external_evidence`, after the start.
+    - The reserved run and its start are created in one transaction.
+    - A start claimed late for a run past `reserved` is refused before any lease or driver start (BROWSER_SESSION_LOST).
+  - The fix is in the tests only:
+    - Both fixtures retire their own start (TEST_FIXTURE_COMPLETE), as six others already do.
+    - Each P01 test gets an explicit precondition: no earlier claimable operation and no active run. Mutants f1 and f2, which remove either teardown, fail on it and name the rows.
+    - `test/stray-start-operation.test.ts` pins the production half on the worker's real path. Mutants p1 (no cancellation on terminalization) and p2 (no reserved check) are killed.
+  - Fail-before at b31d7b8: 2 of 20. After: 20/20.
+- **4. Plugin `recovery.md` (41ced42), documentation only, authorized by root.** It gains two paragraphs, one per residual:
+  - leases from an earlier boot (before 7f22c29, heartbeats that name no boot, non-Studio leases);
+  - logouts owed for sessions issued but refused (the token lives only in process memory).
+
+  No other plugin file was touched, and nothing was installed, activated, updated, granted, hosted, provider-called or spent. The plugin package hash moves from `cedf70ccaae57ee6e5ca7cb36d5c6e4ccf98c368354b0dd003d2201ff407ae9b` to `dcb2919326a1a5e719f59db0e7f0aae8f0e94f3206590bc94a0d5cc004de4d15`, which the read-only `--check` confirms. A deployment that pins the old hash needs the new one.
+
+### What We Learned
+- **A shared integration ledger needs every fixture to retire its own work.** A queued start left by one test is claimed, correctly, by the next test that claims work. A precondition that names the leftover beats an assertion failing deep inside the next proof.
+- **Before calling it contamination, prove production cannot reach the same state.** Here that meant listing every terminal transition, and pinning both the retirement and the late refusal on the worker's real path.
+- **A cross-language test that runs real interpreters must say which environment is missing**, and must show the verifiers can refuse as well as accept.
+- **Records:**
+  - The r12 summary header recorded `pnpm 11.7.0`, because it was measured in the shell's working directory outside the Lab. Every vitest run used corepack's pnpm 10.26.2 from `tools/sophia-voice-lab`; the runner now checks this before each run.
+  - A deliberately failing security run printed a test-only capability token (test constant secret, 120 s lifetime). That log was redacted and the original kept out of every packet.
+  - The main PostgreSQL database must be named exactly `voice_lab_test`. A first before-run under another name failed on that, and the log is kept.
+- **Validation at 41ced42, the last source head** (Node v22.22.0, pnpm 10.26.2, PostgreSQL 127.0.0.1:55434 with only this writer's own named databases): full-env exit 0: 1 373 tests passed in 112 files, 0 failed, 0 skipped. The product-shape run used the product roles already present on 55434; it never created, changed or dropped them. Chromium is the **substitute** chromium-1194 (141.0.7390.37) through a scratch shim, because the pinned chromium-1234 is absent here.
+- **Root's scoped review of cc9f732** accepted it for its two-file setup and test repair ([PR #168 comment](https://github.com/davidelaverga/Sophia-Agent/pull/168#issuecomment-6090248261)). Root, independently:
+  - verified the packet: 40 checksums, both bundles and the exact tree;
+  - used Node 22.22, pnpm 10.26.2, uv 0.8.17 and Python 3.12.14 (the author's runs used Python 3.12.3);
+  - created the environments as documented: backend `uv sync --group dev`, plus the voice environment;
+  - ran the security file 9/9 and the typecheck across the whole Lab, exit 0;
+  - with either the backend or the voice environment missing, saw the test fail loudly and name the setup;
+  - removed either verifier's signature check: the exact parent's golden test still passes with it, while the candidate's fails both mutants;
+  - narrowed its first mutant selector, which had stopped before mutating anything because another verifier shares that condition, to the exact capability-error block, and resumed only the mutants not yet run;
+  - restored its source and environments in `finally`, leaving its checkout clean;
+  - redacted the synthetic capability tokens in its own failure logs before sharing them.
+
+  That reproduces the mechanism. The classification of the author's redacted log stays the author's.
+- **Pending, explicitly:** labrev10 (the independent review of the refactor), the wider security review, root's review of d8d0b4e, 348be3f, 41ced42 and this entry, and the final published-head gates, publication, merge and production choices. Nothing here approves publication, a base retarget, a merge, any plugin action or production.
+
+### CLAUDE.md Updates
+- None
+
+### Skills Created / Modified
+- `plugins/sophia-voice-lab/skills/autonomous-voice-dogfood/references/recovery.md`: two residual paragraphs (documentation only)
+
+### GEPA Log Entry
+- N/A
+
 ## 2026-10-09 · [voice-lab · Studio G7 Codex P1/P2, and the Sentrux gate back to its base] · PR #168
 **Author:** Claude · **Track:** voice · **Spec:** pack 03 G7; Codex review on PR #168 (r4233383200 P1, r4233383211 P2); Sentrux v0.5.7 architecture gate against base 6aede7d. Commits 7f22c29 (P1), 1faa5aa (P2), 4e92063, af4aad6, 3d6a3b9, 1d31b6f, 9e166aa (pure refactors), 752a801 and f5b2ae0 (bound tests only)
 
