@@ -151,6 +151,16 @@ export interface SourceContentRead {
 
 export interface ProjectedMissionEntry { id: string; state: string; actorId: string | null; origin: string | null; exchangeId: string | null }
 
+/**
+ * A mission decision (a proposal, or one accepted or rejected): who proposed
+ * it and how, who decided it, and the notes it rests on (MissionDecision
+ * `supportingEntryIds`: the notes it names and those whose words it repeats).
+ * Its words are dropped.
+ */
+export interface ProjectedMissionDecision { id: string; revision: number; proposedBy: string | null; proposedVia: string | null; decidedBy: string | null; supportingEntryIds: string[] }
+
+export interface ProjectedMission { entries: ProjectedMissionEntry[]; decisions: ProjectedMissionDecision[] }
+
 export interface WithdrawalPreview {
   entryId: string;
   entryIds: string[];
@@ -521,15 +531,15 @@ export class StudioApiClient {
     return { status: "downloaded", sha256: digest.digest("hex"), byteLength: total };
   }
 
-  /** `GET /api/v1/projects/{p}/mission`: entries projected to ids, states and joins; their words are dropped. */
-  async missionEntries(projectId: string, accessToken: string): Promise<MemberRead<ProjectedMissionEntry[]>> {
+  /** `GET /api/v1/projects/{p}/mission`: entries and decisions projected to ids, states and joins; their words are dropped. */
+  async mission(projectId: string, accessToken: string): Promise<MemberRead<ProjectedMission>> {
     if (!UUID.test(projectId)) return { status: "unavailable", reason: "id_invalid", http_status: null };
     return this.#read(`/api/v1/projects/${encodeURIComponent(projectId)}/mission`, accessToken, (raw) => {
       const body = record(raw);
       if (!body) return null;
       const all = [...(Array.isArray(body.entries) ? body.entries : []), ...(Array.isArray(body.history) ? body.history : [])] as unknown[];
       const seen = new Set<string>();
-      return all.slice(0, 200).flatMap((value) => {
+      const entries = all.slice(0, 200).flatMap((value) => {
         const entry = record(value);
         const id = uuidOrNull(entry?.id);
         const state = wordOrNull(entry?.state);
@@ -537,6 +547,20 @@ export class StudioApiClient {
         seen.add(id);
         return [{ id, state, actorId: uuidOrNull(entry.actorId), origin: wordOrNull(entry.origin), exchangeId: uuidOrNull(entry.exchangeId) }];
       });
+      const decided = [...(Array.isArray(body.constraints) ? body.constraints : []), ...(Array.isArray(body.pending) ? body.pending : []), ...(Array.isArray(body.decided) ? body.decided : [])] as unknown[];
+      const seenDecisions = new Set<string>();
+      const decisions = decided.slice(0, 200).flatMap((value) => {
+        const decision = record(value);
+        const id = uuidOrNull(decision?.id);
+        const revision = intOrNull(decision?.revision);
+        if (!decision || !id || revision === null || seenDecisions.has(id)) return [];
+        seenDecisions.add(id);
+        const supporting = Array.isArray(decision.supportingEntryIds) ? (decision.supportingEntryIds as unknown[]).slice(0, 64).map((item) => uuidOrNull(item)) : null;
+        return [{ id, revision, proposedBy: uuidOrNull(decision.proposedBy), proposedVia: wordOrNull(decision.proposedVia), decidedBy: uuidOrNull(decision.decidedBy),
+          // A malformed list proves nothing about what it rests on: no supporting notes (never the run's own).
+          supportingEntryIds: supporting !== null && supporting.every((item): item is string => item !== null) ? supporting : [] }];
+      });
+      return { entries, decisions };
     });
   }
 

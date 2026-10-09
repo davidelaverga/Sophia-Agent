@@ -113,6 +113,8 @@ describe.skipIf(executablePath === null)("Studio G7 driver against a local fake 
     editRequests: [] as Array<{ versionId: string; sections: string[] }>,
     /** Runs as a native task is read, before it is answered (a chain that changes between reads). */
     onTaskRead: null as ((taskId: string) => void) | null,
+    /** Mission decisions (MissionDecision): proposals and decisions, each resting on `supportingEntryIds`. */
+    decisions: [] as Array<Record<string, unknown>>,
   };
   const ROOM_UUID = "70000000-0000-4000-8000-0000000000a7";
   const tokens = { issued: new Set<string>(), revoked: new Set<string>(), expiresIn: 3_600, failLocal: 0, logouts: [] as string[] };
@@ -142,7 +144,28 @@ describe.skipIf(executablePath === null)("Studio G7 driver against a local fake 
     api.tasks.set(ids.design, { task: design, instruction: FREE_TEXT[0], result: null, design: { researchTaskId: ids.research, artifactId: ids.artifact, baseVersionId: ids.v1, state: "published", targets: [], revisions: 0, renders: 1, candidates: [], maxRepairs: 2, publishedVersionId: ids.v1, mode: "create", sections: ["intro", "findings"] } });
     api.versions.set(ids.artifact, [version(ids.v1, ids.html1, html1, null)]);
     api.contents.set(ids.html1, html1);
-    api.mission = [{ id: ids.note, kind: "observation", epistemic: "reported", state: "current", text: FREE_TEXT[2], textKind: "member_text", authoredBy: "member", actorId: PRINCIPAL_UUID, origin: "voice", exchangeId: EXCHANGE_UUID, inputEpoch: 1 }];
+    api.mission = [{ id: ids.note, kind: "observation", epistemic: "reported", state: "current", text: FREE_TEXT[2], textKind: "member_text", authoredBy: "member", actorId: PRINCIPAL_UUID, origin: "voice", exchangeId: EXCHANGE_UUID, inputEpoch: 1, supersedesEntryId: null, sourceId: randomUUID() }];
+    // The run's own decision resting on the note: proposed and accepted by the principal by voice.
+    api.decisions = [missionDecision(ids.decision, { revision: 2, state: "accepted", supportingEntryIds: [ids.note], decidedBy: PRINCIPAL_UUID })];
+  }
+  /** A MissionDecision as the product lists it (its words are free text the Lab drops). */
+  function missionDecision(id: string, extra: Record<string, unknown> = {}): Record<string, unknown> {
+    return { id, revision: 1, kind: "constraint", state: "proposed", statement: FREE_TEXT[2], purpose: null, destination: null, origin: null, textKind: "member_text", proposedBy: PRINCIPAL_UUID, proposedVia: "voice", createdAt: new Date().toISOString(), baseMissionRevision: null, stale: false, supersedesDecisionId: null, supportingEntryIds: [], decidedBy: null, decidedAt: null, decidedVia: null, sourceId: randomUUID(), sha256: "e".repeat(64), ...extra };
+  }
+  /**
+   * What forgetting a note reaches, as the product computes it
+   * (mission_forget_reach): every version of the note from the first one the
+   * principal authored on, and every decision resting on one of them.
+   */
+  function forgetReach(entryId: string): { entries: Array<Record<string, unknown>>; decisions: Array<Record<string, unknown>> } {
+    const byId = new Map(api.mission.map((entry) => [String(entry.id), entry]));
+    const chain: Array<Record<string, unknown>> = [];
+    for (let at: Record<string, unknown> | undefined = byId.get(entryId); at; at = typeof at.supersedesEntryId === "string" ? byId.get(at.supersedesEntryId) : undefined) chain.unshift(at);
+    for (let at = api.mission.find((entry) => entry.supersedesEntryId === entryId); at; at = api.mission.find((entry) => entry.supersedesEntryId === at!.id)) chain.push(at);
+    const first = Math.max(0, chain.findIndex((entry) => entry.actorId === PRINCIPAL_UUID));
+    const reach = chain.slice(first).filter((entry) => entry.state !== "withdrawn");
+    const ids = new Set(reach.map((entry) => String(entry.id)));
+    return { entries: reach, decisions: api.decisions.filter((decision) => decision.state !== "withdrawn" && (decision.supportingEntryIds as string[]).some((id) => ids.has(id))) };
   }
   function setPhase(taskId: string, phase: string, state = "running"): void {
     api.work = api.work.map((task) => task.id === taskId ? { ...task, phase, state } : task);
@@ -265,16 +288,30 @@ describe.skipIf(executablePath === null)("Studio G7 driver against a local fake 
         json(200, { sourceId: sourceMatch[1], sha256: createHash("sha256").update(bytes).digest("hex"), mime: "text/html", byteLength: bytes.byteLength, filename: "River otters.html", disposition: "inline", downloadUrl: `${origins.store}/obj/${sourceMatch[1]}?${SIGNATURE}`, expiresAt: new Date(Date.now() + 60_000).toISOString() });
         return;
       }
-      if (request.method === "GET" && path === `/api/v1/projects/${PROJECT_UUID}/mission`) { json(200, { projectId: PROJECT_UUID, entries: api.mission, history: [] }); return; }
-      if (path === `/api/v1/projects/${PROJECT_UUID}/mission/entries/${ids.note}/withdrawal`) {
-        if (request.method === "GET") { json(200, { entryId: ids.note, ledgerRevision: 4, previewToken: PREVIEW_PROOF, expiresAt: new Date(Date.now() + 900_000).toISOString(), entries: [{ id: ids.note, state: "current", text: FREE_TEXT[2] }], decisions: [{ id: ids.decision, kind: "mission", state: "accepted", revision: 2, statement: FREE_TEXT[2], purpose: null, destination: null, origin: null }] }); return; }
+      if (request.method === "GET" && path === `/api/v1/projects/${PROJECT_UUID}/mission`) {
+        json(200, { projectId: PROJECT_UUID, entries: api.mission.filter((entry) => entry.state === "current"), history: api.mission.filter((entry) => entry.state !== "current"),
+          constraints: api.decisions.filter((decision) => decision.state === "accepted"), pending: api.decisions.filter((decision) => decision.state === "proposed"), decided: api.decisions.filter((decision) => decision.state === "rejected") });
+        return;
+      }
+      const withdrawalMatch = new RegExp(`^/api/v1/projects/${PROJECT_UUID}/mission/entries/([0-9a-f-]{36})/withdrawal$`).exec(path);
+      if (withdrawalMatch) {
+        const entryId = withdrawalMatch[1]!;
+        const note = api.mission.find((entry) => entry.id === entryId);
+        if (!note || note.state === "withdrawn" || note.actorId !== PRINCIPAL_UUID) { productError(422, "not_found", "Note not found"); return; }
+        // The cascade as the product previews it: every version of the note, and every decision resting on one of them.
+        const reach = forgetReach(entryId);
+        const previewEntries = reach.entries.map((entry) => ({ id: entry.id, state: entry.state, text: entry.text }));
+        const previewDecisions = reach.decisions.map((decision) => ({ id: decision.id, kind: decision.kind, state: decision.state, revision: decision.revision, statement: decision.statement, purpose: decision.purpose, destination: decision.destination, origin: decision.origin }));
+        if (request.method === "GET") { json(200, { entryId, ledgerRevision: 4, previewToken: PREVIEW_PROOF, expiresAt: new Date(Date.now() + 900_000).toISOString(), entries: previewEntries, decisions: previewDecisions }); return; }
         const parsed = JSON.parse(body) as { previewToken: string; expectedAffected: { entryIds: string[]; decisions: Array<{ id: string; revision: number }> } };
         api.withdrawals.push({ idempotencyKey: request.headers["idempotency-key"], ...parsed });
-        if (parsed.previewToken !== PREVIEW_PROOF || JSON.stringify(parsed.expectedAffected) !== JSON.stringify({ entryIds: [ids.note], decisions: [{ id: ids.decision, revision: 2 }] })) { json(409, { code: "stale_revision", message: FREE_TEXT[4] }); return; }
-        api.mission = api.mission.map((entry) => ({ ...entry, state: "withdrawn", text: null }));
+        if (parsed.previewToken !== PREVIEW_PROOF || JSON.stringify(parsed.expectedAffected) !== JSON.stringify({ entryIds: previewEntries.map((entry) => entry.id), decisions: previewDecisions.map((decision) => ({ id: decision.id, revision: decision.revision })) })) { json(409, { code: "stale_revision", message: FREE_TEXT[4] }); return; }
+        const reached = new Set([...previewEntries.map((entry) => String(entry.id)), ...previewDecisions.map((decision) => String(decision.id))]);
+        api.mission = api.mission.map((entry) => reached.has(String(entry.id)) ? { ...entry, state: "withdrawn", text: null } : entry);
+        api.decisions = api.decisions.map((decision) => reached.has(String(decision.id)) ? { ...decision, state: "withdrawn" } : decision);
         const design = api.tasks.get(ids.design)!;
         api.tasks.set(ids.design, { ...design, design: { ...(design.design as Record<string, unknown>), state: "cancelled" } });
-        json(202, { status: "committed", operation: "withdraw_note", projectId: PROJECT_UUID, entryId: ids.note, decisionId: null, decisionRevision: null, decision: null, sourceId: null, sha256: null, affected: [ids.note], ledgerRevision: 5, missionRevision: 2, eligibilityRevision: 2, cursor: "12" });
+        json(202, { status: "committed", operation: "withdraw_note", projectId: PROJECT_UUID, entryId, decisionId: null, decisionRevision: null, decision: null, sourceId: null, sha256: null, affected: [...reached], ledgerRevision: 5, missionRevision: 2, eligibilityRevision: 2, cursor: "12" });
         return;
       }
       if (request.method === "POST" && path === `/api/v1/projects/${PROJECT_UUID}/html-edits`) {
@@ -411,6 +448,7 @@ else {
     api.onCallsRead = null;
     api.editRequests.length = 0;
     api.onTaskRead = null;
+    api.decisions = [];
     return { config, driver, run };
   }
 
@@ -1018,5 +1056,96 @@ else {
     expect(ended.events.find((event) => event.kind === "studio.cleanup.signed_out")?.payload).toMatchObject({ scope: "global", confirmed: true });
     expect(tokens.logouts).toContain("global");
     expect([...tokens.issued].filter((token) => !tokens.revoked.has(token))).toEqual([]);
+  }, 120_000);
+  // ---------------------------------------------------- delta 4 review (labrev4)
+  it("labrev4 P3-1: a newer version of the run's own artifact (a rendition that keeps the page) is revised; the stale probe still sends the design's published version", async () => {
+    const { driver, run } = harness();
+    await driver.start(run, "unused");
+    createReport();
+    const rendition = randomUUID();
+    api.versions.set(ids.artifact, [version(rendition, ids.html1, html1, ids.v1), version(ids.v1, ids.html1, html1, null)]);
+    const revised = await driver.studioAction(run, randomUUID(), { action: "section_revision", instruction: "Shorten the introduction", sections: ["intro"], _own_create_task_id: ids.research });
+    expect(revised.receipt).toMatchObject({ performed: true, status: "admitted", http_status: 202 });
+    expect(api.editRequests).toEqual([{ versionId: rendition, sections: ["intro"] }]);
+    expect(revised.events.find((event) => event.kind === "studio.action.html_edit")?.payload).toMatchObject({ artifact_id: ids.artifact, version_id: rendition });
+    const stale = await driver.studioAction(run, randomUUID(), { action: "stale_edit", _own_create_task_id: ids.research });
+    expect(stale.receipt).toMatchObject({ performed: true, status: "refused", http_status: 409, code: "stale_revision" });
+    expect(api.editRequests.at(-1)).toEqual({ versionId: ids.v1, sections: ["intro"] });
+    await driver.end(run, "unused", "unused");
+  }, 120_000);
+
+  it("labrev4 nit: the run's own-chain state is forgotten once its browser closes", async () => {
+    const { driver, run } = harness();
+    await driver.start(run, "unused");
+    createReport();
+    await driver.studioAction(run, randomUUID(), { action: "section_revision", instruction: "Shorten the introduction", sections: ["intro"], _own_create_task_id: ids.research });
+    expect(driver.retainsStudioRunState(run.id)).toBe(true);
+    await driver.end(run, "unused", "unused");
+    expect(driver.retainsStudioRunState(run.id)).toBe(false);
+  }, 120_000);
+
+  // labrev4 P3-2: the withdrawal confirms the preview's whole cascade, so it is sent only when all of it is the run's own.
+  const postedWithdrawals = () => api.calls.filter((call) => call.startsWith("POST") && call.includes("/withdrawal"));
+  const foreignCascades: Array<[string, () => { entryId: string }]> = [
+    ["a correction of the run's note by another member", () => {
+      const correction = randomUUID();
+      api.mission = [{ ...api.mission[0]!, state: "superseded" }, { ...api.mission[0]!, id: correction, actorId: OTHER_PRINCIPAL, origin: "studio", exchangeId: null, inputEpoch: null, supersedesEntryId: ids.note, sourceId: randomUUID() }];
+      return { entryId: ids.note };
+    }],
+    ["a correction of the run's note not bound to the run's exchange (the principal's typed one)", () => {
+      const correction = randomUUID();
+      api.mission = [{ ...api.mission[0]!, state: "superseded" }, { ...api.mission[0]!, id: correction, origin: "studio", exchangeId: null, inputEpoch: null, supersedesEntryId: ids.note, sourceId: randomUUID() }];
+      return { entryId: ids.note };
+    }],
+    ["another member's correction inside the chain of the run's current note (the run corrected it back)", () => {
+      const foreign = randomUUID(), own = randomUUID();
+      api.mission = [{ ...api.mission[0]!, state: "superseded" }, { ...api.mission[0]!, id: foreign, state: "superseded", actorId: OTHER_PRINCIPAL, origin: "studio", exchangeId: null, inputEpoch: null, supersedesEntryId: ids.note, sourceId: randomUUID() },
+        { ...api.mission[0]!, id: own, supersedesEntryId: foreign, inputEpoch: 2, sourceId: randomUUID() }];
+      return { entryId: own };
+    }],
+    ["a proposal citing the note made by another member", () => {
+      api.decisions = [...api.decisions, missionDecision(randomUUID(), { proposedBy: OTHER_PRINCIPAL, proposedVia: "studio", supportingEntryIds: [ids.note] })];
+      return { entryId: ids.note };
+    }],
+    ["a decision citing the note accepted by another member", () => {
+      api.decisions = [...api.decisions, missionDecision(randomUUID(), { state: "accepted", revision: 2, supportingEntryIds: [ids.note], decidedBy: OTHER_PRINCIPAL, decidedVia: "studio" })];
+      return { entryId: ids.note };
+    }],
+    ["a decision citing the note that also rests on a note not bound to the run's exchange", () => {
+      const typed = randomUUID();
+      api.mission = [...api.mission, { ...api.mission[0]!, id: typed, origin: "studio", exchangeId: null, inputEpoch: null, sourceId: randomUUID() }];
+      api.decisions = [...api.decisions, missionDecision(randomUUID(), { supportingEntryIds: [ids.note, typed] })];
+      return { entryId: ids.note };
+    }],
+  ];
+  for (const [label, arrange] of foreignCascades) {
+    it(`labrev4 P3-2: a withdrawal whose cascade reaches ${label} sends nothing`, async () => {
+      const { driver, run } = harness();
+      await driver.start(run, "unused");
+      createReport();
+      const { entryId } = arrange();
+      const acted = await driver.studioAction(run, randomUUID(), { action: "withdrawal", entry_id: entryId });
+      expect(acted.receipt).toMatchObject({ performed: false, status: "unavailable", reason: "withdrawal_cascade_not_own" });
+      expect(acted.events.find((event) => event.kind === "studio.action.withdrawal")?.payload).toMatchObject({ requested: false, reason: "withdrawal_cascade_not_own" });
+      expect(postedWithdrawals()).toEqual([]);
+      expect(api.withdrawals).toEqual([]);
+      await driver.end(run, "unused", "unused");
+    }, 120_000);
+  }
+
+  it("labrev4 P3-2 positive control: the run's own note, its own correction and its own decision citing it are withdrawn with exactly those ids and revisions", async () => {
+    const { driver, run } = harness();
+    await driver.start(run, "unused");
+    createReport();
+    const correction = randomUUID();
+    const decision = randomUUID();
+    api.mission = [{ ...api.mission[0]!, state: "superseded" }, { ...api.mission[0]!, id: correction, supersedesEntryId: ids.note, inputEpoch: 2, sourceId: randomUUID() }];
+    api.decisions = [...api.decisions, missionDecision(decision, { revision: 3, state: "accepted", supportingEntryIds: [correction], decidedBy: PRINCIPAL_UUID, decidedVia: "voice" })];
+    const acted = await driver.studioAction(run, randomUUID(), { action: "withdrawal" });
+    expect(acted.receipt).toMatchObject({ performed: true, status: "committed", entry_id: correction, http_status: 202 });
+    expect(postedWithdrawals()).toHaveLength(1);
+    expect(api.withdrawals).toEqual([expect.objectContaining({ expectedAffected: { entryIds: [ids.note, correction], decisions: [{ id: ids.decision, revision: 2 }, { id: decision, revision: 3 }] }, previewToken: PREVIEW_PROOF })]);
+    expect(api.mission.every((entry) => entry.state === "withdrawn")).toBe(true);
+    await driver.end(run, "unused", "unused");
   }, 120_000);
 });

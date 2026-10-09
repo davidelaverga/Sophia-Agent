@@ -224,14 +224,23 @@ principal: snapshot work → native task (ids, kinds, states, phases; instructio
 and Markdown dropped) → the design's published version → its HTML rendition's
 source → the downloaded bytes' SHA-256, compared with the declared source,
 rendition and version digests. A section revision, a stale edit and a withdrawal
-are the Lab's own requests, so their outcomes are canonical. The run's report is
+are the Lab's own requests, so their outcomes are canonical. A withdrawal
+confirms the preview's whole cascade (every version of the note from the
+principal's first, and every decision resting on one of them), so it is sent
+only when every previewed entry is the run's own note (bound to its exchange,
+by the principal) and every previewed decision is the run's own (proposed by
+the principal by voice, decided by nobody else, resting only on the run's own
+notes; the mission read does not expose a decision's exchange); otherwise
+nothing is sent (`withdrawal_cascade_not_own`). The run's report is
 resolved only through the product's own chain, every link a member read as the
 principal: the run's certified create task (the create step's certification
 below, whose `NativeTask.exchangeId` is the run's exchange) → its research's
 `designTaskId` → that design, which names the research back (`researchTaskId`)
 and no other exchange → its artifact and published version. A section revision
-sends that published version (it must be the current one), and a stale edit
-sends it once a newer version superseded it. Without a certified create, a
+sends that artifact's current version (with a designed page; the version id
+binds the request to the run's own artifact, so a later version of it, e.g. a
+rendition that keeps the page, is revised too), and a stale edit sends the
+design's published version once a newer version superseded it. Without a certified create, a
 missing, ambiguous or foreign link, or a design not yet published, nothing is
 sent: the step is typed `unavailable` or `uncertain` (`create_step_not_certified`,
 `own_design_pending`, `target_not_canonical`), and the chain is re-read right
@@ -254,7 +263,10 @@ verbatim, never parsed). As soon as the step settles, before the next operation
 acts (or at End), it reads `?after=<baseline>` until every listed call is
 answered: that read is the step's window. The step passes only if every call in
 the window is answered and was made at the input epoch the principal held for
-the step (its input window's bridge receipt), and exactly one carries a command:
+the step (its input window's bridge receipt, joined by ordinal only while the
+windows seen are exactly 1..k for the k non-silence inputs so far and, after
+`session_closed`, the run is joinable; an extra or missing window leaves every
+step's epoch unknown, `step_input_epoch_unknown`), and exactly one carries a command:
 `native_task` with its task, answered `admitted`, for create (the task naming
 the run's ownership-proven exchange in the snapshot, `NativeTask.exchangeId`);
 `steer`, `hold`, `resume` or `stop` on the created task's goal, answered `ok`.

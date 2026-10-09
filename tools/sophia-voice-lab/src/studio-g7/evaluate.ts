@@ -351,6 +351,8 @@ export function evaluateStudioG7Run(run: RunRecord, events: Event[], operations:
     H("input.window_join", "pass", null, windows.map((item) => item.event));
   }
   const joinable = !receiptsDropped && sessionClosed !== null && windows.length === nonSilence.length;
+  const windowSeqsSeen = windows.map((item) => item.receipt.windowSeq).sort((left, right) => left - right);
+  const epochJoinable = windowSeqsSeen.length === nonSilence.length && windowSeqsSeen.every((seq, index) => seq === index + 1) && (sessionClosed === null || joinable);
   nonSilence.forEach((entry, index) => {
     const id = `input.${index + 1}`;
     const window = windows[index];
@@ -492,12 +494,13 @@ export function evaluateStudioG7Run(run: RunRecord, events: Event[], operations:
     runExchangeId,
     ownershipProven: ownershipProven.length > 0 && ownershipMismatch.length === 0,
     // The input epoch each step's voice was heard at: the bridge's input
-    // window receipt of the same ordinal (available mid-run too, before
-    // session_closed; a dropped window leaves the step's epoch unknown).
-    stepInputEpochs: new Map(nonSilence.map((entry, index) => {
-      const window = windows.find((item) => item.receipt.windowSeq === index + 1);
-      return [entry.operation.id, window ? window.receipt.inputEpoch : null];
-    })),
+    // window receipt of the same ordinal. Joined only when the windows seen
+    // are exactly 1..k, k the non-silence inputs so far (mid-run too, before
+    // session_closed), and after session_closed only when the run is
+    // joinable (nothing dropped, counts equal). An extra window (a split
+    // utterance, a silence the bridge opened one for, a rejoin chunk) or a
+    // missing one would shift every later step: then every epoch is unknown.
+    stepInputEpochs: new Map(nonSilence.map((entry, index) => [entry.operation.id, epochJoinable ? windows.find((item) => item.receipt.windowSeq === index + 1)!.receipt.inputEpoch : null])),
   });
   const certifiedSteps = new Map(certification.steps.map((item) => [item.operation_id, item]));
   // Every command-bearing call the exchange's reads listed must fall in some

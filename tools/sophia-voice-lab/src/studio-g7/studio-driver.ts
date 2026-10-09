@@ -668,6 +668,8 @@ export class StudioG7Driver implements VoiceBrowserDriver, StudioDriverExtension
     for (const handle of this.#watchdogs.values()) this.#clearTimer(handle);
     this.#watchdogs.clear();
     this.#sessions.clear();
+    this.#ownCreate.clear();
+    this.#focus.clear();
     await this.#readiness.close();
     if (results.some((result) => !result.closed)) throw studioError("BROWSER_PROCESS_CLOSE_FAILED", "Worker shutdown could not prove every owned browser process closed.", "harness", true, { unresolved_processes: results.filter((result) => !result.closed).length });
   }
@@ -1112,6 +1114,10 @@ export class StudioG7Driver implements VoiceBrowserDriver, StudioDriverExtension
   }
 
   readonly #ownCreate = new Map<string, string | null>();
+  /** Whether per-run own-chain state (the certified create, the Lab's edit tasks) is still held for this run (diagnostics). */
+  retainsStudioRunState(runId: string): boolean {
+    return this.#ownCreate.has(runId) || this.#focus.has(runId);
+  }
   /**
    * The run's certified create task (the create step's /calls certification),
    * as the worker last computed it; null while the create step is not
@@ -1143,14 +1149,20 @@ export class StudioG7Driver implements VoiceBrowserDriver, StudioDriverExtension
     const requestedSections = Array.isArray(input.sections) ? (input.sections as unknown[]).filter((value): value is string => typeof value === "string" && SECTION.test(value)) : [];
     const sections = requestedSections.length > 0 ? requestedSections.slice(0, 16) : target.sections.slice(0, 1);
     if (sections.length === 0) return notPerformed("section_unknown", chain);
-    // The version sent is always the own design's published version: as the
-    // current version for a revision, superseded for the stale probe.
-    const versionId = target.publishedVersionId;
+    // A revision sends the own artifact's CURRENT version (the version id
+    // binds the request to that artifact: a later version of the own report,
+    // e.g. a PDF rendition that keeps the page, is still the run's own). The
+    // stale probe sends the own design's published version once a newer
+    // version superseded it.
+    let versionId: string;
     let supersededBy: string | null = null;
-    if (!withPage(versionId)) return notPerformed("own_version_has_no_designed_page", chain);
     if (purpose === "section_revision") {
-      if (current === null || current.id !== versionId) return notPerformed("own_version_not_current", chain, "uncertain");
+      if (current === null || current.artifactId !== target.artifactId) return notPerformed("own_version_not_current", chain, "uncertain");
+      if (!withPage(current.id)) return notPerformed("current_version_has_no_designed_page", chain);
+      versionId = current.id;
     } else {
+      versionId = target.publishedVersionId;
+      if (!withPage(versionId)) return notPerformed("own_version_has_no_designed_page", chain);
       if (current === null || current.id === versionId) return notPerformed("no_superseded_version", chain);
       supersededBy = current.id;
     }
@@ -1204,15 +1216,34 @@ export class StudioG7Driver implements VoiceBrowserDriver, StudioDriverExtension
     events.push(proof.event);
     const exchangeId = this.#exchanges.get(run.id)?.exchangeId ?? null;
     if (proof.status !== "proven" || exchangeId === null) return notPerformed("exchange_ownership_unproven", { ownership: proof.status, ownership_reason: proof.reason });
-    const entries = await this.#api.missionEntries(this.studio.projectId, await tokens.token());
-    if (entries.status !== "available") return notPerformed(`mission_${entries.reason}`);
+    const mission = await this.#api.mission(this.studio.projectId, await tokens.token());
+    if (mission.status !== "available") return notPerformed(`mission_${mission.reason}`);
+    const entries = { value: mission.value.entries };
     const principal = run.principalId.toLowerCase();
-    const bound = entries.value.filter((entry) => entry.exchangeId === exchangeId && entry.actorId === principal && entry.state === "current");
+    // The run's own notes: bound to its exchange, by the principal. A named
+    // one may be any version not yet withdrawn (forgetting it forgets its
+    // whole chain); without a name, the one current own note.
+    const ownNotes = entries.value.filter((entry) => entry.exchangeId === exchangeId && entry.actorId === principal && entry.state !== "withdrawn");
+    const bound = ownNotes.filter((entry) => entry.state === "current");
     const requested = typeof input.entry_id === "string" ? input.entry_id.toLowerCase() : null;
-    const target = requested !== null ? bound.find((entry) => entry.id === requested) ?? null : bound.length === 1 ? bound[0]! : null;
+    const target = requested !== null ? ownNotes.find((entry) => entry.id === requested) ?? null : bound.length === 1 ? bound[0]! : null;
     if (!target) return notPerformed(requested !== null ? "entry_not_bound_to_run_exchange" : bound.length === 0 ? "no_note_bound_to_run_exchange" : "note_target_ambiguous", { bound_note_count: bound.length });
     const preview = await this.#api.withdrawalPreview(this.studio.projectId, target.id, await tokens.token());
     if (preview.status !== "available" || preview.value.entryId !== target.id) return notPerformed(preview.status === "available" ? "preview_entry_mismatch" : `preview_${preview.reason}`, { entry_id: target.id });
+    // The preview's whole cascade (product mission_forget_reach: every
+    // version of the note, and every decision resting on one of them) is
+    // confirmed by the request. So every previewed entry must be the run's
+    // own note (bound to its exchange, by the principal), and every previewed
+    // decision the run's own: proposed by the principal by voice, decided by
+    // nobody else, resting only on the run's own notes. Another member's
+    // correction or decision is never withdrawn by the Lab.
+    const ownEntryIds = new Set(entries.value.filter((entry) => entry.exchangeId === exchangeId && entry.actorId === principal).map((entry) => entry.id));
+    const ownDecisionIds = new Set(mission.value.decisions.filter((decision) => decision.proposedBy === principal && decision.proposedVia === "voice"
+      && (decision.decidedBy === null || decision.decidedBy === principal)
+      && decision.supportingEntryIds.length > 0 && decision.supportingEntryIds.every((id) => ownEntryIds.has(id))).map((decision) => decision.id));
+    const foreignEntries = preview.value.entryIds.filter((id) => !ownEntryIds.has(id)).length;
+    const foreignDecisions = preview.value.decisions.filter((decision) => !ownDecisionIds.has(decision.id)).length;
+    if (foreignEntries > 0 || foreignDecisions > 0) return notPerformed("withdrawal_cascade_not_own", { entry_id: target.id, foreign_entry_count: foreignEntries, foreign_decision_count: foreignDecisions, preview_entry_count: preview.value.entryIds.length, preview_decision_count: preview.value.decisions.length });
     const answer = await this.#api.withdraw(this.studio.projectId, preview.value, await tokens.token(), `voice-lab-g7:${operationId}`);
     const payload = recordEvent({
       status: answer.accepted ? "committed" : "refused", requested: true, entry_id: target.id, entry_bound_exchange_id: exchangeId,
@@ -1421,6 +1452,10 @@ export class StudioG7Driver implements VoiceBrowserDriver, StudioDriverExtension
   }
 
   async #closeBrowser(runId: string, session: StudioSession, reason: string): Promise<DriverEvent> {
+    // The run's session ends here: no later action or outcome read uses its
+    // own-chain root or its edit tasks.
+    this.#ownCreate.delete(runId);
+    this.#focus.delete(runId);
     const ownership = session.ownership;
     // A context cannot outlive its browser process. When the process already
     // exited (crash, OOM kill) the close proof is the reaped process itself.

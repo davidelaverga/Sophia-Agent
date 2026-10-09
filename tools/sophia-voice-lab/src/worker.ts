@@ -1006,11 +1006,13 @@ export class VoiceLabWorker {
       await this.#awaitPriorInputSettlement(run, operation.id, signal);
       // The prior voice step has settled: its own calls are read now, before this action acts.
       await this.#readStudioCallsAfterPriorStep(run, null);
-      await this.#fenceMutation(claimed, signal);
-      const settleBudgetMs = deadlineAt === undefined ? undefined : Math.max(0, deadlineAt - Date.now() - 15_000);
       // The run's report is resolved only from the certified create task
       // (the create step's /calls certification), never from a time window.
+      // Computed before the fence, so nothing long runs between the fence
+      // check and the driver's mutation.
       const ownCreateTaskId = await this.#studioOwnCreateTaskId(run);
+      await this.#fenceMutation(claimed, signal);
+      const settleBudgetMs = deadlineAt === undefined ? undefined : Math.max(0, deadlineAt - Date.now() - 15_000);
       this.driver.setStudioOwnCreateTask(run.id, ownCreateTaskId);
       const acted = await this.driver.studioAction(run, operation.id, { ...operation.input, _own_create_task_id: ownCreateTaskId, ...(settleBudgetMs === undefined ? {} : { _settle_budget_ms: settleBudgetMs }) });
       await this.#persistEvents(run.id, acted.events);
@@ -1052,13 +1054,23 @@ export class VoiceLabWorker {
     await this.#fenceMutation(claimed, signal);
     // The last G7 voice step's calls, read before End signs the principal out.
     if (isStudioG7Run(run) && hasStudioExtensions(this.driver)) {
-      await this.#readStudioCallsAfterPriorStep(run, null);
+      const studioDriver = this.driver;
+      // Evidence reads before End never block End's cleanup: a failure is
+      // logged, the evidence stays missing (typed by the evaluator), and the
+      // driver gets no own task (null: nothing is verified as the run's).
+      const evidenceRead = <T>(read: () => Promise<T>, fallback: T, what: string): Promise<T> => read().catch((error: unknown) => {
+        this.logger.error({ run_id_sha256: sha256(run.id), error: safeError(error) }, `${what} failed before End; cleanup continues`);
+        return fallback;
+      });
+      await evidenceRead(() => this.#readStudioCallsAfterPriorStep(run, null), undefined, "studio last step calls read");
       // The End read: every call the exchange recorded (no after), so a call
       // made after the last step's window is never unexamined. Read once.
-      const endRead = (await this.#allEvents(run.id)).events.some((event) => event.kind === STUDIO_CALLS_READ_KIND && event.source === "canonical" && event.payload.purpose === "baseline" && event.payload.operation_id === operation.id);
-      if (!endRead) await this.#persistEvents(run.id, [await this.driver.readStudioCalls(run, "baseline", operation.id, STUDIO_CALLS_END_STEP)]);
+      await evidenceRead(async () => {
+        const endRead = (await this.#allEvents(run.id)).events.some((event) => event.kind === STUDIO_CALLS_READ_KIND && event.source === "canonical" && event.payload.purpose === "baseline" && event.payload.operation_id === operation.id);
+        if (!endRead) await this.#persistEvents(run.id, [await studioDriver.readStudioCalls(run, "baseline", operation.id, STUDIO_CALLS_END_STEP)]);
+      }, undefined, "studio End calls read");
       // The final outcome read verifies only the run's own report.
-      this.driver.setStudioOwnCreateTask(run.id, await this.#studioOwnCreateTaskId(run));
+      this.driver.setStudioOwnCreateTask(run.id, await evidenceRead(() => this.#studioOwnCreateTaskId(run), null, "studio own create resolution"));
     }
     const ended = await this.driver.end(run, finalizeGrant.token, cleanupGrant.token, deadlineAt).catch(async (error: unknown) => {
       if (error instanceof DriverEndFailure) await this.#persistEvents(run.id, error.events);

@@ -1304,3 +1304,54 @@ describe("delta 5 (review P3-4): the presence veto is bounded, and its expiry is
     expect(evaluation.harness.find((assertion) => assertion.id === "cleanup.orphan_room_presence")).toMatchObject({ status: "uncertain", reason: "presence_veto_expired_last_report_present" });
   }, 120_000);
 });
+
+describe("delta 4 review (labrev4 nits): the worker's own-chain hand-over", () => {
+  it("resolves the certified create before the mutation fence: nothing reads the ledger between the fence and the driver's action", async () => {
+    const log: string[] = [];
+    const shared = new MemoryVoiceLabLedger("test");
+    const traced = new Proxy(shared, { get(target, property) {
+      const value = Reflect.get(target, property, target);
+      if (typeof value !== "function") return value;
+      return (...args: unknown[]) => { if (property === "heartbeatBrowserLease" || property === "listOperations" || property === "listEvents") log.push(String(property)); return (value as (...input: unknown[]) => unknown).apply(target, args); };
+    } }) as VoiceLabLedger;
+    const h = await harness("own-create-fence", traced);
+    const act = h.driver.studioAction.bind(h.driver);
+    h.driver.studioAction = async (run, operationId, input) => { log.push(`action:${String(input.action)}`); return act(run, operationId, input); };
+    await h.worker.runOnce();
+    expect((await voice(h, "create")).status).toBe("completed");
+    log.length = 0;
+    expect((await action(h, { action: "leave_and_return" })).data).toMatchObject({ performed: true });
+    const at = log.indexOf("action:leave_and_return");
+    const fence = log.slice(0, at).lastIndexOf("heartbeatBrowserLease");
+    expect(fence).toBeGreaterThan(-1);
+    expect(log.slice(fence + 1, at)).toEqual([]);
+  }, 60_000);
+
+  for (const failing of ["end_read", "own_create"] as const) {
+    it(`End's cleanup always runs: a failing ${failing === "end_read" ? "End calls read" : "own-create resolution"} is logged and End proceeds`, async () => {
+      let failNow = false;
+      const shared = new MemoryVoiceLabLedger("test");
+      const flaky = new Proxy(shared, { get(target, property) {
+        const value = Reflect.get(target, property, target);
+        if (typeof value !== "function") return value;
+        return (...args: unknown[]) => {
+          // Only the own-create resolution's read fails (it is the one that evaluates the run).
+          if (failing === "own_create" && failNow && property === "listOperations" && /studioOwnCreateTaskId/.test(new Error().stack ?? "")) throw new Error("ledger read failed");
+          return (value as (...input: unknown[]) => unknown).apply(target, args);
+        };
+      } }) as VoiceLabLedger;
+      const h = await harness(`end-proceeds-${failing}`, flaky);
+      if (failing === "end_read") {
+        const read = h.driver.readStudioCalls.bind(h.driver);
+        h.driver.readStudioCalls = async (run, purpose, operationId, stepId, after) => { if (stepId === "final") throw new Error("calls read failed"); return read(run, purpose, operationId, stepId, after); };
+      }
+      await h.worker.runOnce();
+      expect((await voice(h, "create")).status).toBe("completed");
+      failNow = true;
+      const ended = await end(h);
+      expect(h.driver.calls).toContain("end");
+      expect(ended.status).toBe("completed");
+      if (failing === "own_create") expect(h.driver.ownCreateTasks.at(-1)).toEqual({ runId: h.runId, taskId: null });
+    }, 60_000);
+  }
+});

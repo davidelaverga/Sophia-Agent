@@ -4,6 +4,7 @@ import type { LabEvent, OperationRecord, RunRecord } from "../src/domain.js";
 import { sha256 } from "../src/security.js";
 import { deriveStudioG7Verdicts, evaluateStudioG7Run, studioG7CleanupProof, type StudioG7Evaluation } from "../src/studio-g7/evaluate.js";
 import { studioPriorInputSettled } from "../src/worker.js";
+import { canonicalJson } from "../src/studio-g7/contract.js";
 import {
   API_SHA, BRIDGE_SHA, EXCHANGE_UUID, EventLog, GRANT_UUID, LAB_TRACK_ID, STUDIO_SHA,
   cleanupEvents, evidenceGrant, guardReceipt, identityEvent, inputTurn, inputWindow, labUtterance, outputReply, pageReceipt, providerReceipt, sessionClosed, speakOperation, studioRun, studioTestConfig,
@@ -985,5 +986,56 @@ describe("delta 5 nits: the withdrawal's design end needs a committed withdrawal
     expect(designEnded({ stopEffect: { phase: "stopping", state: "running" } })).toMatchObject({ status: "uncertain", reason: "stop_effect_not_settled_before_withdrawal" });
     // Stop settled, the design live after it: only the missing note-to-design link keeps it uncertain.
     expect(designEnded({ stopEffect: { phase: "stopped", state: "cancelled" } })).toMatchObject({ status: "uncertain", reason: "withdrawn_note_not_linked_to_design" });
+  });
+});
+
+describe("delta 4 review (labrev4 P2): the input-epoch join holds only on an exact window prefix", () => {
+  /**
+   * hold, resume and stop are heard at input epoch 2 (after leave and return);
+   * every call carries epoch 1. With `extraWindow`, one extra bridge window
+   * (windowSeq 3, epoch 1: e.g. the steer utterance split by a pause, or a
+   * silence the bridge opened a window for) precedes hold's own window.
+   */
+  const build = (extraWindow: boolean, closed = true) => {
+    const item = g7Episode({ researchTask: RUN_TASK, calls: { byStep: happyCalls() }, windowEpochs: { "g7.hold": 2, "g7.resume": 2, "g7.stop": 2 } });
+    let closedSeq = -1;
+    for (const event of item.log.events) {
+      if (event.kind !== "studio.bridge_receipt") continue;
+      const kind = event.payload.kind;
+      if (kind !== "input_window" && kind !== "input_turn" && kind !== "session_closed") continue;
+      const receipt = JSON.parse(String(event.payload.receipt_json)) as Record<string, number>;
+      if (kind === "session_closed") closedSeq = receipt.seq!;
+      if (!extraWindow) continue;
+      if (kind === "session_closed") { receipt.seq = closedSeq + 1; receipt.windows = receipt.windows! + 1; event.payload = { ...event.payload, seq: closedSeq + 1 }; }
+      else if (receipt.windowSeq! >= 3) { receipt.windowSeq = receipt.windowSeq! + 1; if (kind === "input_turn") receipt.turnOrdinal = receipt.windowSeq; }
+      const json = canonicalJson(receipt);
+      event.payload = { ...event.payload, receipt_json: json, receipt_sha256: sha256(json) };
+    }
+    if (extraWindow) item.log.bridge("input_window", inputWindow(item.run, closedSeq, 3, 1_500, { inputEpoch: 1 }));
+    // Mid-run: no session_closed yet.
+    if (!closed) item.log.events.splice(0, item.log.events.length, ...item.log.events.filter((event) => !(event.kind === "studio.bridge_receipt" && event.payload.kind === "session_closed")));
+    return item;
+  };
+
+  it("labrev4 E-epoch: an extra window leaves every step's epoch unknown instead of shifting the join", () => {
+    // Control: hold's own window is epoch 2, its call epoch 1.
+    expect(stepsOf(evaluate(build(false)))["g7.hold"]).toBe("uncertain:call_input_epoch_mismatch");
+    // One extra window: never a pass, never a shifted join.
+    const shifted = stepsOf(evaluate(build(true)));
+    for (const step of ["g7.create", "g7.steer", "g7.hold", "g7.resume", "g7.stop"]) expect(shifted[step], step).toBe("uncertain:step_input_epoch_unknown");
+    // Mid-run (before session_closed): the same rule; an exact prefix still joins.
+    expect(stepsOf(evaluate(build(true, false)))["g7.create"]).toBe("uncertain:step_input_epoch_unknown");
+    expect(stepsOf(evaluate(build(false, false)))["g7.create"]).toBe("pass:null");
+    // After session_closed the run must also be joinable: a window the bridge reports but the Lab never received leaves every epoch unknown.
+    const dropped = g7Episode({ researchTask: RUN_TASK, calls: { byStep: happyCalls() } });
+    for (const event of dropped.log.events.filter((candidate) => candidate.kind === "studio.bridge_receipt" && candidate.payload.kind === "session_closed")) {
+      const receipt = JSON.parse(String(event.payload.receipt_json)) as Record<string, number>;
+      receipt.windows = receipt.windows! + 1;
+      const json = canonicalJson(receipt);
+      event.payload = { ...event.payload, receipt_json: json, receipt_sha256: sha256(json) };
+    }
+    expect(stepsOf(evaluate(dropped))["g7.create"]).toBe("uncertain:step_input_epoch_unknown");
+    // Positive control: every window present, each step at its own epoch.
+    expect(stepsOf(evaluate(g7Episode({ researchTask: RUN_TASK, calls: { byStep: happyCalls() } })))).toMatchObject({ "g7.create": "pass:null", "g7.hold": "pass:null", "g7.stop": "pass:null" });
   });
 });
