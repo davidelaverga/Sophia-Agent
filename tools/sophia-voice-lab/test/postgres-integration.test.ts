@@ -201,6 +201,8 @@ describePostgres("real PostgreSQL Voice Lab adapter", () => {
     const row = await ledger!.pool.query("select verdicts from sophia_voice_lab.runs where id=$1", [run.id]);
     expect(row.rows[0]?.verdicts).toMatchObject({ harness: "invalid_test", product: "unavailable" });
     expect((await ledger!.getRun(run.id))?.verdicts).toMatchObject({ harness: "invalid_test", product: "unavailable" });
+    // Ledger-only fixture: retire exactly its never-dispatched start before the next real admission (the suite's ledger is shared).
+    await ledger!.cancelPendingRunOperations(run.id, null, labError("TEST_FIXTURE_COMPLETE", "Ledger-only verdict test does not dispatch a start.", "harness"));
   });
 
   it("refuses to seal pre-existing column/index/ACL drift against the release reference", async () => {
@@ -559,12 +561,14 @@ describePostgres("real PostgreSQL Voice Lab adapter", () => {
   }, 180_000);
 
   it("collects real P01 MCP envelopes/audits and attaches the signed claim to the same PostgreSQL run", async () => {
+    await expectNoEarlierClaimableWork(ledger!);
     const result = await proveP01LiveBoundary(ledger!);
     expect(result.runId).toMatch(/^[0-9a-f-]{36}$/);
     expect(result.pollingCallCount).toBe(4);
   }, 60_000);
 
   it("retains bounded startup timeouts through the PostgreSQL P01 collector and verifier", async () => {
+    await expectNoEarlierClaimableWork(ledger!);
     const result = await proveP01LiveBoundary(ledger!, { delayedStart: true, delayedAssistant: true, delayedEvidence: true });
     expect(result.pollingCallCount).toBe(8);
   }, 60_000);
@@ -785,6 +789,23 @@ describePostgres("real PostgreSQL Voice Lab adapter", () => {
   }, 60_000);
 });
 
+
+/**
+ * The P01 boundary proof settles its own operations through the ledger-wide
+ * claim (`claimNextOperation`: any queued start, oldest first, whatever its
+ * run's state, as production's worker claims) and admits a run under the
+ * global concurrency limit. So the shared suite ledger must hold no earlier
+ * test's claimable operation and no active run: a fixture that leaves either
+ * is named here, instead of surfacing as "collector operation order drifted"
+ * or CONCURRENCY_LIMIT inside the proof.
+ */
+async function expectNoEarlierClaimableWork(ledger: PostgresVoiceLabLedger): Promise<void> {
+  const claimable = await ledger.pool.query(
+    `select o.id, o.type, o.state, r.state as run_state from sophia_voice_lab.operations o join sophia_voice_lab.runs r on r.id=o.run_id
+      where o.state in ('accepted','queued') or (o.state in ('leased','executing') and o.lease_expires_at < now()) order by o.created_at`);
+  expect(claimable.rows, "an earlier fixture left a claimable operation in the shared ledger").toEqual([]);
+  expect(await ledger.countActiveRuns(), "an earlier fixture left an active run in the shared ledger").toBe(0);
+}
 function assertDedicatedTestDatabase(raw: string): void {
   const parsed = new URL(raw);
   const database = decodeURIComponent(parsed.pathname.replace(/^\//, ""));
