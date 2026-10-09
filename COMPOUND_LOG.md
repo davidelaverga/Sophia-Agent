@@ -26,6 +26,101 @@ Every merged PR appends an entry here. This file is the team's accumulating inst
 ## Log
 <!-- Append new entries below this line -->
 
+## 2026-10-09 · [voice-lab · Studio G7 Codex P1/P2, and the Sentrux gate back to its base] · PR #168
+**Author:** Claude · **Track:** voice · **Spec:** pack 03 G7; Codex review on PR #168 (r4233383200 P1, r4233383211 P2); Sentrux v0.5.7 architecture gate against base 6aede7d. Commits 7f22c29 (P1), 1faa5aa (P2), 4e92063, af4aad6, 3d6a3b9, 1d31b6f, 9e166aa (pure refactors), 752a801 and f5b2ae0 (bound tests only)
+
+### What Changed
+- **Codex P1 (7f22c29): a worker restarted under the same stable worker id no longer takes its earlier boot's lease for its own.**
+  - Before a Studio lease exists, the worker records its random per-process boot (`harness.browser_lease_owner_boot`, schema `sophia_voice_lab_studio_g7_lease_owner_boot_v1`, hashes only). Its heartbeat attestation carries `worker_boot_id_sha256`. Both changes are additive.
+  - A lease recorded under another boot goes through the dead-owner release: sign-out after expiry, the JWT lifetime, a fresh verification, with fencing intact. The release records `owner_earlier_boot_of_this_worker`.
+  - In both ledgers, only a heartbeat from the lease's own boot keeps the owner alive. A heartbeat from a later boot under the same id does not.
+  - Tests: `test/studio-g7-lease-boot.test.ts` (5) and two PostgreSQL tests.
+    - Fail-before against the 3794c84 sources: 3 of the 5 fail, and both PostgreSQL tests fail. The 2 that pass are positive controls: the same boot keeps its own lease, and a foreign live lease is not taken.
+    - Mutants m11a–m11f were each killed. They are: boot id ignored, prior boot treated as local, takeover without cleanup, boot record omitted, own boot not local, and unattested heartbeat not live. Each ran twice: in the worktree on 3794c84, and again at the committed 1faa5aa.
+- **Codex P2 (1faa5aa): a session that is issued and then refused still owes its logout.**
+  - `passwordGrant` hands each issued session to the driver (`onIssued`) before any validation can refuse it. The tokens are held in memory only: never logged, persisted or put in an event.
+  - The refused session's local logout is retried with a bounded backoff of 0, 500 and 1 000 ms.
+  - This fails closed. Until the logout is confirmed, the run is never certified `no_session_issued` or signed out (basis `issued_session_unrevoked`), and its cleanup stays incomplete.
+  - A confirmed global sign-out discharges only a refused session of the principal itself. The evidence refresh revokes a refused session locally as well.
+  - Tests: 6 driver tests and 1 contract test.
+    - Fail-before against the 3794c84 sources: 4 of the 6 driver tests and the contract test fail. The 2 that pass are positive controls: a credential refused before any session is issued, and the normal path.
+    - Mutants m11g–m11l were each killed. They are: obligation recorded after validation, no retry, abort certifies success, refused branch dropped, global sign-out not downgraded, and any user discharged.
+- **The Sentrux gate is back to its base.** All of these are pure refactors into ordinary named functions, each at or under cc 15, with nothing hidden. Thresholds, exclusions, the baseline, `rules.toml` and the workflow are untouched.
+  - God files went from 30 to 27 (4e92063):
+    - the service's Studio surface moved to `studio-g7/service-surface.ts`;
+    - `genericOwnerDispatch` moved verbatim to `generic-owner-control.ts`. It is the base's offender (cc 22), still counted;
+    - the presence constants moved to `studio-api.ts`;
+    - the wiring test's first describe moved to `studio-g7-service-wiring.test.ts`.
+  - Complex functions went from 728 to 718:
+    - af4aad6: the seven small ones (the dead-owner decision and its cleanup, the cleanup proof, the exchange-calls projection, the session-body validation, `studioAction`, `createOperation`);
+    - 3d6a3b9: `certifyStudioVoiceSteps` (in `calls-certification.ts`);
+    - 1d31b6f: `evaluateStudioG7Run`;
+    - 9e166aa: the test builder `g7Episode`.
+  - The CI comparison, exactly: `gate --save` at 6aede7d, its baseline copied into a clean checkout of the candidate, then `gate .` and `check .`.
+    - Before, at 1faa5aa: gate exit 1. God files 27 → 30 and complex functions 718 → 728.
+    - After, at 9e166aa: gate exit 0, "No degradation detected". Quality 4272 → 4280, coupling 0.04 → 0.03, cycles 7 → 7, god files 27 → 27.
+    - `check .` lists the same findings as at 6aede7d. It exits 1 at both, on the pre-existing cycles, god files and layer rules.
+- **Bound tests only:**
+  - 752a801: `studio-g7-release-bounds.test.ts` (7) and `studio-g7-session-bounds.test.ts` (4);
+  - f5b2ae0: `studio-g7-evaluate-bounds.test.ts` (11).
+- **README:** P1 is in the dead-owner section. P2 is a new paragraph, "Refused sessions".
+- No plugin change: `plugins/` is untouched since 3794c84, and its `--check cedf70cc…` passes. The plugin's `recovery.md` is not updated (plugin files were out of scope). Toolchain: Node v22.22.0 and pnpm 10.26.2.
+
+### What We Learned
+- **Prove a pure refactor equivalent, then test the proof.**
+  - A corpus of 3 042 recorded (input, output) pairs was taken at 1faa5aa, over the six refactored decisions. It replays identically at every refactor head and at 9e166aa.
+  - A differential fuzz (50 000 exchange-call inputs, 20 000 session bodies) found no difference.
+  - Under a deterministic `randomUUID` and a frozen clock, `g7Episode` builds the same 139 episodes before and after. The 2 product-shape SQL builds are identical once the database-issued ids are renamed.
+- **The corpus is not exhaustive, and one check proved it.**
+  - Its sensitivity check caught three seeded mutants (o1–o3) but missed o4: the presence veto's `>=` turned `>`. No recorded input sits on that millisecond.
+  - Separately, two of the four seeded `g7Episode` mutants pass the test suite, but the episode comparison catches them.
+- **The suites reach numeric bounds only far from their edges.** Each bound got an off-by-one mutant. The records:
+  - b1–b7, the dead-owner decision's time and size bounds (b1 is o4): all survived the Studio suites (136/136 at 3d6a3b9). Each was killed by the release-bounds tests (752a801).
+  - v1–v6, the session-body bounds: all survived (63/63). Each was killed by the session-bounds tests (752a801).
+  - e01–e15, the evaluation's bounds:
+    - e06, e09, e10 and e13 were killed by the existing suites.
+    - e01–e05, e07, e08, e11, e12, e14 and e15 survived (130/130 at 1d31b6f). Each was killed by the evaluate-bounds tests (f5b2ae0).
+  - c1 and c2 were killed by the suites. c3 (`event.seq <= upper` → `<`) survives, and it is equivalent: `upper` is the seq of a calls-read event, never an observation's.
+  - Each bound test passes against the 1faa5aa and 3794c84 sources as well as at HEAD, so the bounds pin the behaviour from before the refactor.
+- **How Sentrux counts.**
+  - It counts `if`, loops, `catch`, `&&` and `||`, and a `switch` once. It does not count ternaries, `?.` or `??`.
+  - A closure counts both in its parent and on its own, so splitting a function means lifting its closures out too.
+  - A type-only import still counts toward fan-out.
+- **Residuals, not fixed here:**
+  - A lease acquired before 7f22c29 has no boot record, and a heartbeat that names no boot still counts. Either one proves no restart, so the earlier behaviour stands for such leases.
+  - Legacy (non-Studio) leases record no boot.
+  - A refused session's token lives only in the process's memory. A crash before its logout is confirmed loses the revoke material. After that, only a confirmed global sign-out of the principal discharges a refused session of its own; any other refused session lasts until its JWT lifetime ends.
+- **The author's validation at 9e166aa** (Node v22.22.0, pnpm 10.26.2, PostgreSQL 127.0.0.1:55434, logs in `lab-author-logs-r11`):
+  - typecheck exit 0.
+  - The Studio files with `SOPHIA_VOICE_LAB_REQUIRE_PRODUCT_SHAPE=1`, one file per invocation, each exit 0. That is 263 tests: the 241 of 1faa5aa (the 6 wiring tests now in their own file) plus the 22 bound tests.
+  - PostgreSQL Studio 25/25 and fence upgrade 6/6.
+  - full-env: only the 4 known failures (the catalogue code, golden HMAC, P01 ×2), 1 367 passed, 0 skipped.
+    - The first full-env run had no shim. Three Chromium files failed in `beforeAll` because the pinned chromium-1234 was absent; that is not a test result, and the log is kept.
+    - Those three files were then rerun one per invocation (1, 9 and 1 pass), and full-env again, through a scratch `PLAYWRIGHT_BROWSERS_PATH` shim.
+  - Chromium in all of these is a **substitute**: chromium-1194 (Chromium 141.0.7390.37), because the pinned chromium-1234 is absent here.
+  - Plugin `--check cedf70cc…` exit 0. A first attempt exited 127 because `uv` was not on the script's PATH, which is not a check result; that log is kept as it is.
+  - The Sentrux runs, the 3 042-pair corpus, the fuzz, the `g7Episode` comparison and all the mutant runs are the author's.
+- **Root's scoped reviews** (independent of the author's runs above):
+  - f5b2ae0, accepted within scope ([PR #168 comment](https://github.com/davidelaverga/Sophia-Agent/pull/168#issuecomment-6089331075)): all 15 bound mutants killed, the 11 new assertions passing against the actual evaluators at 1faa5aa and 3794c84, typecheck.
+  - 9e166aa, accepted within scope as the refactor ([PR #168 comment](https://github.com/davidelaverga/Sophia-Agent/pull/168#issuecomment-6089607942)):
+    - the whole one-file test-helper delta reviewed;
+    - 167 independent strict comparisons of the complete old and new `g7Episode` objects pass, including the running, queued and cancelled `editBefore` states the author's corpus never sampled;
+    - focused: 16 files, 300/300, zero skips, on the actual pinned Chromium 1234 (151.0.7922.34). Root's broader run was interrupted; root kept that original partial log and recovered only the missing focused stage;
+    - owned PostgreSQL 31 pass, plus 1 required product-shape run against product 46f22b90;
+    - typecheck of the whole Lab exit 0;
+    - all 46 packet hashes and both bundles verified.
+  - Earlier, root accepted 1faa5aa, 4e92063, af4aad6, 3d6a3b9, 752a801 and 1d31b6f, each within its own scope.
+  - None of this approves publication, a base retarget, a merge, any plugin action or production. The original Lab threads stay open until the fixes are published, and labrev10 (an independent review of the refactor) is pending.
+
+### CLAUDE.md Updates
+- None
+
+### Skills Created / Modified
+- None
+
+### GEPA Log Entry
+- N/A
+
 ## 2026-10-09 · [voice-lab · Studio G7 labrev9 nit, and observations] · PR #TBD
 **Author:** Claude · **Track:** voice · **Spec:** pack 03 G7; independent review of cdba228..1ba1ab3 (labrev9: no P1/P2/P3, one nit); fix in 3ea24cf (tests and README only)
 
