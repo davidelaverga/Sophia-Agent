@@ -313,8 +313,8 @@ surfaces agree in a normal G7 flow). Only in the worker's mid-run hand-over
 of the certified create (before an action or End, before `session_closed`) is
 one window not checked: the highest `windowSeq` seen, while its own
 `input_turn` has not arrived and no later input receipt has (the bridge sends
-each turn right after its window, in seq order, and the settlement gate waits
-for it, bounded at 5 s). An earlier window without its turn lost it and is
+each turn right after its window, in seq order; before an action or a voice
+step, not before End, the settlement gate waits for it, bounded at 5 s). An earlier window without its turn lost it and is
 checked like any other, mid-run too; a run's own evaluation checks every
 window, even when its `session_closed` never came. The residual
 is exactly what the bounds accept: a count-preserving shift (an utterance

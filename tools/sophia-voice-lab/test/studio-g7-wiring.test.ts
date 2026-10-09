@@ -18,7 +18,7 @@ import { createVoiceLabMcpServer } from "../src/mcp-server.js";
 import { STUDIO_G7_TOOL_NAMES, VoiceLabService, toolNamesForTarget } from "../src/service.js";
 import { computeRunBindingSha256 } from "../src/studio-g7/contract.js";
 import { STUDIO_DEAD_OWNER_LEASE_RELEASE_SCHEMA } from "../src/studio-g7/lease-release.js";
-import { VoiceLabWorker } from "../src/worker.js";
+import { STUDIO_INPUT_TURN_WAIT_MS, VoiceLabWorker } from "../src/worker.js";
 import { testConfig } from "./helpers.js";
 import { API_SHA, BRIDGE_SHA, EXCHANGE_UUID, GRANT_UUID, STUDIO_SHA, studioRun, studioTestConfig } from "./studio-g7-helpers.js";
 import { SCRIPTED_IDS, ScriptedStudioDriver, newIdempotencyKey } from "./studio-g7-worker-helpers.js";
@@ -1640,11 +1640,22 @@ describe("labrev8 Nit 1: the hand-over's mid-run evaluation tolerates only the l
     while (!h.driver.callsReads.some((read) => read.purpose === "baseline")) { if (!(await h.worker.runOnce())) await delay(5); }
     recorded.push({ began: tick + 0.5, call: { seq: 1, recorded_at: at, input_epoch: 1, tool: "start_research", task_id: RESEARCH, answered_at: at, outcome: "admitted", command: { command_id: "f0000000-0000-4000-8000-000000000001", kind: "native_task", goal_id: GOAL, authority_epoch: 1, goal_revision: 1, state: "acknowledged", created_at: at } } });
     expect((await drive(h, create)).status).toBe("completed");
-    const started = Date.now();
-    expect((await action(h, { action: "observe", for_step: "create" })).data).toMatchObject({ performed: false });
-    expect(Date.now() - started).toBeGreaterThanOrEqual(4_500);
+    // labrev9 Nit 1: the wait is pinned from both sides. Each action after the lost turn takes
+    // at least the turn bound, and less than 12 s. 12 s leaves 7 s over the 5 s bound for a
+    // loaded runner (the scripted gate's own overhead is a few 100 ms ticks). It stays 3 s
+    // under the gate's 15 s settlement deadline, which the action reaches if the turn bound is
+    // raised or ignored. The README's "bounded at 5 s" is the constant itself.
+    expect(STUDIO_INPUT_TURN_WAIT_MS).toBe(5_000);
+    const timed = async <T,>(work: () => Promise<T>) => { const started = Date.now(); const value = await work(); return { value, ms: Date.now() - started }; };
+    const observed = await timed(() => action(h, { action: "observe", for_step: "create" }));
+    expect(observed.value.data).toMatchObject({ performed: false });
     expect((await h.ledger.listEvents(h.runId, 0, 2_000)).events.filter((event) => event.kind === "studio.bridge_receipt" && event.payload.kind === "input_turn")).toHaveLength(0);
-    expect((await action(h, { action: "section_revision", instruction: "Shorten the introduction" })).data).toMatchObject({ performed: true });
+    const revised = await timed(() => action(h, { action: "section_revision", instruction: "Shorten the introduction" }));
+    expect(revised.value.data).toMatchObject({ performed: true });
     expect(h.driver.actionInputs.at(-1)).toMatchObject({ action: "section_revision", _own_create_task_id: RESEARCH });
+    for (const [label, ms] of [["observe", observed.ms], ["section_revision", revised.ms]] as const) {
+      expect(ms, label).toBeGreaterThanOrEqual(STUDIO_INPUT_TURN_WAIT_MS - 500);
+      expect(ms, label).toBeLessThan(12_000);
+    }
   }, 90_000);
 });
