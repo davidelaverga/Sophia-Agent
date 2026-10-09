@@ -1494,7 +1494,8 @@ describe("labrev6 P3-1: a count-preserving extra-plus-missing window pair never 
   });
 
   it("labrev7 Nit-3 RACE: mid-run, a window persisted before its own input_turn keeps the already-certified create (and hands it over); after session_closed a missing turn still refuses", () => {
-    const midRun = (keepSteerTurn: boolean, closed = false) => {
+    // The worker's hand-over evaluation (midRun); the run's own evaluation never tolerates a missing turn.
+    const midRun = (keepSteerTurn: boolean, closed = false, handOver = true) => {
       const later = ["g7.leave_return", "g7.hold", "g7.resume", "g7.section_revision", "g7.stale_edit", "g7.withdrawal", "g7.create_stop_target", "g7.stop"];
       const item = g7Episode({ researchTask: RUN_TASK, calls: { byStep: happyCalls() }, skip: later, noEnd: true });
       const drop = (event: LabEvent) => {
@@ -1506,11 +1507,13 @@ describe("labrev6 P3-1: a count-preserving extra-plus-missing window pair never 
         return !keepSteerTurn && kind === "input_turn" && Number(receipt.windowSeq) === 2;
       };
       item.log.events.splice(0, item.log.events.length, ...item.log.events.filter((event) => !drop(event)));
-      const evaluation = evaluate(item);
+      const evaluation = evaluateStudioG7Run(item.run, item.log.events, item.operations, { expected, midRun: handOver });
       return { create: stepsOf(evaluation)["g7.create"], handedOverCreate: evaluation.outcome.own_report.create_task_id };
     };
     expect(midRun(true)).toEqual({ create: "pass:null", handedOverCreate: RESEARCH_TASK });
     expect(midRun(false)).toEqual({ create: "pass:null", handedOverCreate: RESEARCH_TASK });
+    // labrev8 Nit 1: the same state in a run's own evaluation (not a hand-over) is checked: the join is refused.
+    expect(midRun(false, false, false).create).toBe("uncertain:step_input_epoch_unknown");
     // Once the session closed, the steer's turn must be there: without it the join is refused.
     expect(midRun(false, true).create).toBe("uncertain:step_input_epoch_unknown");
     // Even when no drop is detected (seqs contiguous, session_closed's counts matching), a window without its turn is checked after session_closed.
@@ -1529,5 +1532,74 @@ describe("labrev7 Nit-4: design_ended needs S to be the only source newly withdr
     expect(designEnded({ editBeforeTask: { withdrawn_source_ids: [OTHER] }, editAfter: { withdrawn_source_ids: [OTHER, NOTE_SOURCE] } })).toMatchObject({ status: "pass", reason: null });
     expect(designEnded({ editBeforeTask: { withdrawn_source_ids: null } })).toMatchObject({ status: "unavailable", reason: "withdrawn_sources_not_served" });
     expect(designEnded({})).toMatchObject({ status: "pass", reason: null });
+  });
+});
+
+describe("labrev8 Nit 1: only the latest window's turn may be in flight, and only in the hand-over's mid-run evaluation", () => {
+  type Rows = Array<{ kind: string; receipt: Record<string, unknown> }>;
+  /** Rewrite an episode's bridge receipts in place (each keeps its ledger slot; seqs renumbered contiguously in the returned order). */
+  const rebridge = (item: Episode, edit: (receipts: Rows) => Rows) => {
+    const events = item.log.events;
+    const bridgeEvents = events.filter((event) => event.kind === "studio.bridge_receipt" && event.payload.source === "bridge");
+    const sorted = [...bridgeEvents].sort((left, right) => Number(left.payload.seq) - Number(right.payload.seq));
+    const first = Number(sorted[0]!.payload.seq);
+    const rows = edit(sorted.map((event) => ({ kind: String(event.payload.kind), receipt: JSON.parse(String(event.payload.receipt_json)) as Record<string, unknown> })));
+    const make = (row: { kind: string; receipt: Record<string, unknown> }, index: number) => {
+      const receipt = { ...row.receipt, seq: first + index };
+      const json = canonicalJson(receipt);
+      return { exchange_id: EXCHANGE_UUID, source: "bridge", seq: first + index, kind: row.kind, received_at: new Date().toISOString(), receipt_json: json, receipt_sha256: sha256(json) };
+    };
+    const slots = events.filter((event) => bridgeEvents.includes(event));
+    const kept = Math.min(slots.length, rows.length);
+    for (let n = 0; n < kept; n += 1) slots[n]!.payload = make(rows[n]!, n);
+    const removed = new Set(slots.slice(kept));
+    events.splice(0, events.length, ...events.filter((event) => !removed.has(event)));
+    events.forEach((event, index) => { event.seq = index + 1; });
+    return item;
+  };
+  const at2 = (entries: Array<Record<string, unknown>>) => entries.map((entry) => ({ ...entry, input_epoch: 2 }));
+  /** The review's NOCLOSE shape: hold heard at epoch 2 with a stale epoch-1 call; an extra epoch-1 turn_complete window before hold whose turn never arrived; the last window missing; no session_closed or provider close. */
+  const noClose = () => {
+    const calls = happyCalls();
+    const byStep = { ...calls, "g7.resume": at2(calls["g7.resume"]!), "g7.create_stop_target": at2(calls["g7.create_stop_target"]!), "g7.stop": at2(calls["g7.stop"]!) };
+    const item = g7Episode({ researchTask: RUN_TASK, calls: { byStep }, windowEpochs: { "g7.hold": 2, "g7.resume": 2, "g7.create_stop_target": 2, "g7.stop": 2 } });
+    return rebridge(item, (rows) => {
+      const out: Rows = [];
+      let inserted = false;
+      for (const row of rows) {
+        const windowSeq = Number(row.receipt.windowSeq);
+        if (!inserted && row.kind === "input_window" && windowSeq === 3) { out.push({ kind: "input_window", receipt: { ...row.receipt, windowSeq: 3, inputEpoch: 1 } }); inserted = true; }
+        if ((row.kind === "input_window" || row.kind === "input_turn") && windowSeq >= 3) out.push({ kind: row.kind, receipt: { ...row.receipt, windowSeq: windowSeq + 1, ...(row.kind === "input_turn" ? { turnOrdinal: windowSeq + 1 } : {}) } });
+        else out.push(row);
+      }
+      const last = Math.max(...out.filter((row) => row.kind === "input_window").map((row) => Number(row.receipt.windowSeq)));
+      return out.filter((row) => !((row.kind === "input_window" || row.kind === "input_turn") && Number(row.receipt.windowSeq) === last))
+        .filter((row) => row.kind !== "session_closed" && !(row.kind === "provider" && row.receipt.phase === "closed"));
+    });
+  };
+
+  it("NOCLOSE (pinned): a run's own evaluation without session_closed checks every window; hold's stale-epoch call is never certified", () => {
+    const evaluation = evaluate(noClose());
+    expect(stepsOf(evaluation)["g7.hold"]).toBe("uncertain:step_input_epoch_unknown");
+    expect(evaluation.verdicts.product).not.toBe("pass");
+  });
+
+  it("NOCLOSE mid-run: an earlier window that lost its turn (later input receipts came) refuses the join in the hand-over too", () => {
+    const item = noClose();
+    const evaluation = evaluateStudioG7Run(item.run, item.log.events, item.operations, { expected, midRun: true });
+    expect(stepsOf(evaluation)["g7.hold"]).toBe("uncertain:step_input_epoch_unknown");
+  });
+
+  it("the latest window without its turn is not in flight once a later input receipt came (another window's late turn): the hand-over refuses the join", () => {
+    // Mid-run after steer: steer's window (the latest) without its turn, and the create's turn delivered after it.
+    const later = ["g7.leave_return", "g7.hold", "g7.resume", "g7.section_revision", "g7.stale_edit", "g7.withdrawal", "g7.create_stop_target", "g7.stop"];
+    const item = rebridge(g7Episode({ researchTask: RUN_TASK, calls: { byStep: happyCalls() }, skip: later, noEnd: true }), (rows) => {
+      const kept = rows.filter((row) => !(row.kind === "input_turn" && Number(row.receipt.windowSeq) === 2) && row.kind !== "session_closed" && !(row.kind === "provider" && row.receipt.phase === "closed") && !(row.kind === "output_reply" && Number(row.receipt.replyOrdinal) === 2));
+      const createTurn = kept.find((row) => row.kind === "input_turn" && Number(row.receipt.windowSeq) === 1)!;
+      return [...kept.filter((row) => row !== createTurn), createTurn];
+    });
+    const handOver = evaluateStudioG7Run(item.run, item.log.events, item.operations, { expected, midRun: true });
+    expect(stepsOf(handOver)["g7.create"]).toBe("uncertain:step_input_epoch_unknown");
+    expect(handOver.outcome.own_report.create_task_id).toBeNull();
   });
 });

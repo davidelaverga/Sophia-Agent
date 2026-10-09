@@ -1820,7 +1820,8 @@ export class VoiceLabWorker {
   async #studioOwnCreateTaskId(run: RunRecord): Promise<string | null> {
     const events = (await this.#allEvents(run.id)).events;
     const operations = await this.ledger.listOperations(run.id);
-    return evaluateStudioG7Run(run, events, operations, { expected: studioExpectedIdentities(run) }).outcome.own_report.create_task_id;
+    // Mid-run: the latest input window's own turn may still be in flight (the run's own evaluations never pass midRun).
+    return evaluateStudioG7Run(run, events, operations, { expected: studioExpectedIdentities(run), midRun: true }).outcome.own_report.create_task_id;
   }
 
   async #awaitPriorInputSettlement(run: RunRecord, operationId: string, signal: AbortSignal): Promise<void> {

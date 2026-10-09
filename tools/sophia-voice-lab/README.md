@@ -309,10 +309,14 @@ as `not_declared`) is counted in its turn but never listed, so its window
 shows more calls than its read; the Lab cannot tell that from a shifted
 window, and a shift displaces every step from an unknown point on, so the
 whole join is refused, not only that step's (the bridge and API tool
-surfaces agree in a normal G7 flow). Mid-run, before `session_closed`, a
-window whose own `input_turn` has not arrived yet is not checked (the bridge
-sends the turn right after its window, and the settlement gate waits for it,
-bounded at 5 s); after `session_closed` every window is checked. The residual
+surfaces agree in a normal G7 flow). Only in the worker's mid-run hand-over
+of the certified create (before an action or End, before `session_closed`) is
+one window not checked: the highest `windowSeq` seen, while its own
+`input_turn` has not arrived and no later input receipt has (the bridge sends
+each turn right after its window, in seq order, and the settlement gate waits
+for it, bounded at 5 s). An earlier window without its turn lost it and is
+checked like any other, mid-run too; a run's own evaluation checks every
+window, even when its `session_closed` never came. The residual
 is exactly what the bounds accept: a count-preserving shift (an utterance
 split into a turn-completed fragment, together with a later utterance that
 got no window) stays unseen whenever every displaced window shows a count

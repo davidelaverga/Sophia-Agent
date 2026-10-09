@@ -137,6 +137,13 @@ export interface StudioG7Evaluation {
 
 export interface StudioEvaluationOptions {
   expected: { studio: string; api: string; bridge: string };
+  /**
+   * A mid-run evaluation: the worker's hand-over of the certified create
+   * before an action or End, while the latest input window's own input_turn
+   * may still be in flight. Never set for a run's own (final) evaluation,
+   * whether or not its session_closed arrived.
+   */
+  midRun?: boolean;
 }
 
 /** Explicit limitations every Studio G7 evaluation carries. */
@@ -384,16 +391,24 @@ export function evaluateStudioG7Run(run: RunRecord, events: Event[], operations:
   // step's bounds: from 1 to that step's own listed calls (0 to them for a
   // step with no command), e.g. a fragment turn showing exactly one call
   // landing on a single-call step, or one call on a step with two.
-  // Mid-run (no session_closed yet), a window whose own input_turn has not
-  // arrived yet is not checked: the bridge sends the turn right after its
-  // window, and the evaluation after session_closed checks it (labrev7 Nit-3).
+  // Mid-run only (the worker's hand-over, before session_closed), the one
+  // window whose own input_turn may still be in flight is not checked: the
+  // highest windowSeq seen, without its turn, with no later input receipt
+  // (the bridge sends each turn right after its window, in seq order). An
+  // earlier window without its turn lost it (a later input receipt came), so
+  // it is checked like any other; a run's own evaluation never skips, even
+  // without session_closed (labrev7 Nit-3, labrev8 Nit 1).
   const ownCalls = studioStepOwnCalls(ordered, nonSilence.map((entry) => ({ operationId: entry.operation.id })), runExchangeIdOf(exchangeJoin));
   const shownToolCalls = (windowSeq: number) => turnsAll.filter((item) => item.receipt.windowSeq === windowSeq).reduce((sum, item) => sum + item.receipt.toolCallCount, 0);
   const windowsTurnComplete = windows.every((item) => item.receipt.endReason === "turn_complete");
+  const latestWindow = windows.at(-1) ?? null;
+  const turnInFlight = (windowSeq: number) => options.midRun === true && sessionClosed === null && latestWindow !== null && latestWindow.receipt.windowSeq === windowSeq
+    && !turnsAll.some((item) => item.receipt.windowSeq === windowSeq)
+    && !bridge.some((item) => item.source === "bridge" && (item.kind === "input_window" || item.kind === "input_turn") && item.seq > latestWindow.seq);
   const toolCallsConsistent = nonSilence.every((entry, index) => {
     const own = ownCalls.get(entry.operation.id) ?? null;
     if (own === null) return true;
-    if (sessionClosed === null && !turnsAll.some((item) => item.receipt.windowSeq === index + 1)) return true;
+    if (turnInFlight(index + 1)) return true;
     const shown = shownToolCalls(index + 1);
     return shown <= own.calls && (!own.commandBearing || shown >= 1);
   });
