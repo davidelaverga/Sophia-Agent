@@ -1590,6 +1590,28 @@ describe("labrev8 Nit 1: only the latest window's turn may be in flight, and onl
     expect(stepsOf(evaluation)["g7.hold"]).toBe("uncertain:step_input_epoch_unknown");
   });
 
+  it("NOCLOSE mid-run with the latest window's turn also in flight: only that one is tolerated; the earlier, dropped one still refuses", () => {
+    const item = noClose();
+    // Drop the latest window's own turn as well (still in flight: no later input receipt).
+    const events = item.log.events;
+    const latest = Math.max(...events.filter((event) => event.kind === "studio.bridge_receipt" && event.payload.kind === "input_window").map((event) => Number((JSON.parse(String(event.payload.receipt_json)) as Record<string, unknown>).windowSeq)));
+    const kept = events.filter((event) => !(event.kind === "studio.bridge_receipt" && event.payload.kind === "input_turn" && Number((JSON.parse(String(event.payload.receipt_json)) as Record<string, unknown>).windowSeq) === latest));
+    events.splice(0, events.length, ...kept);
+    const evaluation = evaluateStudioG7Run(item.run, item.log.events, item.operations, { expected, midRun: true });
+    expect(stepsOf(evaluation)["g7.hold"]).toBe("uncertain:step_input_epoch_unknown");
+  });
+
+  it("after session_closed even the hand-over checks the latest window: a missing latest turn is never in flight then", () => {
+    // Contiguous seqs and session_closed's counts matching (no drop detected); the latest window's turn missing.
+    const item = rebridge(g7Episode({ researchTask: RUN_TASK, calls: { byStep: happyCalls() } }), (rows) => {
+      const latest = Math.max(...rows.filter((row) => row.kind === "input_window").map((row) => Number(row.receipt.windowSeq)));
+      const kept = rows.filter((row) => !(row.kind === "input_turn" && Number(row.receipt.windowSeq) === latest));
+      return kept.map((row) => row.kind !== "session_closed" ? row : { kind: row.kind, receipt: { ...row.receipt, windows: kept.filter((r) => r.kind === "input_window").length, turns: kept.filter((r) => r.kind === "input_turn").length } });
+    });
+    const evaluation = evaluateStudioG7Run(item.run, item.log.events, item.operations, { expected, midRun: true });
+    expect(stepsOf(evaluation)["g7.create"]).toBe("uncertain:step_input_epoch_unknown");
+  });
+
   it("the latest window without its turn is not in flight once a later input receipt came (another window's late turn): the hand-over refuses the join", () => {
     // Mid-run after steer: steer's window (the latest) without its turn, and the create's turn delivered after it.
     const later = ["g7.leave_return", "g7.hold", "g7.resume", "g7.section_revision", "g7.stale_edit", "g7.withdrawal", "g7.create_stop_target", "g7.stop"];

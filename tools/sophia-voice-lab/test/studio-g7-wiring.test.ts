@@ -1615,3 +1615,36 @@ describe("labrev7 Nit-3: the settlement gate waits for each earlier window's inp
     expect(h.driver.actionInputs.at(-1)).toMatchObject({ action: "section_revision", _own_create_task_id: RESEARCH });
   }, 60_000);
 });
+
+describe("labrev8 Nit 1: the hand-over's mid-run evaluation tolerates only the latest window's turn in flight", () => {
+  it("a turn that never arrives delays the next action by the gate's bound only; the hand-over (mid-run) still keeps the certified create", async () => {
+    const h = await harness("never-turn-worker");
+    const GOAL = "e0000000-0000-4000-8000-0000000000a1";
+    const RESEARCH = "d0000000-0000-4000-8000-0000000000d3";
+    let tick = 0;
+    const stamps = new Map<string, number>();
+    const recorded: Array<{ began: number; call: Record<string, unknown> }> = [];
+    h.driver.callsAnswer = (_run, _purpose, after) => {
+      tick += 1;
+      const readAt = `2026-10-09T12:00:${String(tick).padStart(2, "0")}.000001Z`;
+      stamps.set(readAt, tick);
+      const since = after === null ? null : stamps.get(after)!;
+      return { status: "available", read_at: readAt, calls: recorded.filter((item) => since === null || item.began > since).map((item) => item.call) };
+    };
+    const at = new Date().toISOString();
+    h.driver.turnToolCalls = () => 1;
+    h.driver.turnsNeverArrive = true;
+    h.driver.researchExchangeId = EXCHANGE_UUID;
+    await h.worker.runOnce();
+    const create = h.service.studioG7VoiceStep(caller, { run_id: h.runId, step: "create", fixture_id: "a02_short_command", idempotency_key: newIdempotencyKey("voice-create") });
+    while (!h.driver.callsReads.some((read) => read.purpose === "baseline")) { if (!(await h.worker.runOnce())) await delay(5); }
+    recorded.push({ began: tick + 0.5, call: { seq: 1, recorded_at: at, input_epoch: 1, tool: "start_research", task_id: RESEARCH, answered_at: at, outcome: "admitted", command: { command_id: "f0000000-0000-4000-8000-000000000001", kind: "native_task", goal_id: GOAL, authority_epoch: 1, goal_revision: 1, state: "acknowledged", created_at: at } } });
+    expect((await drive(h, create)).status).toBe("completed");
+    const started = Date.now();
+    expect((await action(h, { action: "observe", for_step: "create" })).data).toMatchObject({ performed: false });
+    expect(Date.now() - started).toBeGreaterThanOrEqual(4_500);
+    expect((await h.ledger.listEvents(h.runId, 0, 2_000)).events.filter((event) => event.kind === "studio.bridge_receipt" && event.payload.kind === "input_turn")).toHaveLength(0);
+    expect((await action(h, { action: "section_revision", instruction: "Shorten the introduction" })).data).toMatchObject({ performed: true });
+    expect(h.driver.actionInputs.at(-1)).toMatchObject({ action: "section_revision", _own_create_task_id: RESEARCH });
+  }, 90_000);
+});
