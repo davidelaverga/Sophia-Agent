@@ -29,13 +29,13 @@ Use stable idempotency keys for retries. A timed-out observing call may be retri
 
 ## Studio G7 flow (`studio-livekit-g7-v1` deployments only)
 
-1. Call `get_capabilities`; require the `studio_g7` block, its pinned Studio/API/bridge commits, `lab_schema.version` 7 and the three Studio tools. Legacy tools (`start_voice_run`, `barge_in`, `force_socket_rotation`) answer `unsupported_for_target` here.
+1. Call `get_capabilities`; require the `studio_g7` block, its pinned Studio/API/bridge commits, `lab_schema.version` 7 and the three Studio tools. Legacy tools (`start_voice_run`, `speak`, `barge_in`, `force_socket_rotation`) answer `unsupported_for_target` here.
 2. Call `start_studio_g7_run` with a fresh idempotency key. Hand `data.run_binding.run_binding_sha256` to the operator, who alone makes the product grant; never create, approve or revoke a grant yourself. The start waits (bounded) for a grant-bound microphone receipt before it opens an exchange.
 3. Perform the episode in order, one operation per step: `studio_g7_voice_step` `create` (ask for the HTML page by voice) and `steer`; `studio_g7_action` `leave_and_return`, `section_revision` (with an `instruction`, optional `sections`), `stale_edit`; `studio_g7_voice_step` `hold`, `resume`, `stop`, each followed by `studio_g7_action` `observe` with `for_step` (and a bounded `wait_ms`); then `studio_g7_action` `withdrawal` (it forgets only a note bound to this run's own exchange; pass `entry_id` when there is more than one).
-4. A performed step is never performed again: retry a lost response only with the same idempotency key. An action that answers `performed: false` with a typed reason (for example `no_superseded_version`) may be retried with a new key after its precondition holds.
+4. A step runs at most once per run: retry a lost response only with the same idempotency key. A new key for a step that is in flight or already performed is refused (`STUDIO_G7_STEP_IN_FLIGHT`, `STUDIO_G7_STEP_ALREADY_PERFORMED`). An action that answers `performed: false` with a typed reason (for example `no_superseded_version`) may be retried with a new key after its precondition holds.
 5. Call `end_voice_run`, then `export_voice_evidence`. Report `studio_g7.steps`, the separate harness and product verdicts, `cleanup` (including `ownership`), and every `uncertain` or `unavailable` item as such. Voice-step outcomes are joined to product tasks by actor and time window only and stay `uncertain`; never report them as passes. A run may show `pending_external_evidence` while late bridge receipts are re-read; do not start another run to force it.
 
-The Lab never ends or touches an exchange it cannot prove is its own, retains no transcript and no audio, and its fake-Studio tests prove no LiveKit packet flow; say so when it matters to a verdict.
+The Lab never requests End for an exchange it cannot prove is its own, and requests it only as the id-bound API End of that exchange (never the room's End button). Leaving the room and closing its own browser are not ownership-gated. It retains no transcript and no audio, and its fake-Studio tests prove no LiveKit packet flow; say so when it matters to a verdict.
 
 ## Hard aborts
 

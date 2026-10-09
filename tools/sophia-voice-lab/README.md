@@ -152,7 +152,7 @@ contract is `sophia.studio-g7.v1`, its catalogue `studio-g7-v1` (scenario
 | `SOPHIA_VOICE_LAB_STUDIO_EXPECTED_STUDIO_SHA`, `..._API_SHA`, `..._BRIDGE_SHA` | Pinned 40-hex commits (Studio meta `sophia-build`, API `/health`, bridge `provider.bridgeCommit`) |
 | `SOPHIA_VOICE_LAB_STUDIO_GRANT_WAIT_SECONDS` (5–240, default 120), `..._GRANT_REJOIN_SECONDS` (default 15) | Bounded wait for the grant-bound `mic_published` receipt before an exchange is opened |
 | `SOPHIA_VOICE_LAB_STUDIO_OBJECT_STORE_ORIGINS` | Comma list (≤ 8) of the signed-download origins `GET /sources/{id}/content` returns; artifact bytes are downloaded and hashed only from these. Empty: byte checks are typed `unavailable` |
-| `SOPHIA_VOICE_LAB_STUDIO_ACCESS_TOKEN_MAX_SECONDS` (60–86400, default 3600) | Upper bound of a Supabase access JWT's lifetime; gates the release of a dead foreign worker's lease |
+| `SOPHIA_VOICE_LAB_STUDIO_ACCESS_TOKEN_MAX_SECONDS` (60–86400, default 3600) | Upper bound of a Supabase access JWT's lifetime; gates the release of a dead foreign worker's lease (raised automatically to any longer `expires_in` the product issued) |
 
 **MCP tools (Studio kind only).** `start_studio_g7_run` reserves the run and returns
 the non-secret run binding. `studio_g7_voice_step` performs one voice step
@@ -161,9 +161,15 @@ the non-secret run binding. `studio_g7_voice_step` performs one voice step
 operation: `leave_and_return`, `section_revision` (needs `instruction`, optional
 `sections`), `stale_edit`, `withdrawal` (optional `entry_id`), or `observe`
 (`for_step`, optional `wait_ms`), a read-only outcome read for a voice step. A
-step that was performed is never performed again under a new idempotency key;
-the same key replays the same operation. Every G7 step is therefore a durable,
-idempotent operation; none is only a driver method.
+step runs at most once per run: the same key replays the same operation, and a
+new key for a step that is in flight or was performed is refused
+(`STUDIO_G7_STEP_IN_FLIGHT` / `STUDIO_G7_STEP_ALREADY_PERFORMED`). Both ledgers
+enforce this in the transaction that inserts the operation (the PostgreSQL run
+row lock), so two keys racing for one step cannot both run, and the worker
+re-checks it before executing. Every G7 step is therefore a durable, idempotent
+operation; none is only a driver method. The legacy input tools (`speak`,
+`barge_in`, `force_socket_rotation`) answer `unsupported_for_target` on this
+kind, and the worker refuses any unlabelled input operation on a Studio run.
 
 **Lab schema v7.** `studio_action` is a new value of `operations.type`
 (`migrations/007_studio_g7_operations.sql`, an additive CHECK widening; no row
@@ -188,8 +194,11 @@ leaves the Lab. Because a grant never covers an earlier exchange, the driver ope
 the exchange ("Speak with Sophia") only after a `mic_published` receipt carrying
 this binding and the Lab-issued track arrives; it rejoins periodically to refetch
 the room token and fails typed `unavailable` at the wait limit. The Speak intent
-and the exchange join are written ahead (durable before the driver acts), and the
-join requires the live exchange's floor holder to be the principal.
+and the exchange join are written ahead (durable before the driver acts). The
+join is refused when the snapshot names another member as the exchange's floor
+holder; when the snapshot reports no holder the join is recorded with
+`input_actor_is_principal: null` (unverified), and ownership still rests only on
+the evidence proof below.
 
 **Evidence.** Page receipts arrive over the private push binding; bridge and
 guard receipts are read with the principal's JWT from
@@ -214,23 +223,46 @@ run therefore certifies the harness and reports the product `inconclusive`.
 
 **Completion.** A run ends `completed` once its harness assertions and cleanup are
 proven. Receipts that arrive after End (the bridge's `session_closed`, the last
-reply) are re-read by a bounded evidence completion path (a fresh principal
-session, then global sign-out) before the certification deadline; a step not
-performed before End fails the harness at once instead of waiting for it.
+reply) are re-read by a bounded evidence completion path before the
+certification deadline: a fresh principal session reads the evidence, then only
+that session is revoked (`scope=local`). It never signs the principal out
+globally, because a later run of the same principal may be live by then. A step
+not performed before End fails the harness at once instead of waiting for it.
 
-**Cleanup.** The driver ends an exchange (UI End, then
-`POST /api/v1/exchanges/{id}/end`) only when it can prove the exchange is the
+**Cleanup.** The Lab never requests End for an exchange it cannot prove is the
 run's own: the exchange joined to this run after its Speak, whose evidence names
-this run's binding hash and the grant id of its page receipts. Otherwise it never
-touches it: it verifies read-only (one live exchange per room) that the run's
-exchange is no longer live, or types the state `uncertain` / `unavailable` and
-re-verifies with backoff until the product guard ends it at its deadline. The
-principal is signed out globally and the run-owned Chromium is closed on every
-path. A dead foreign worker's Studio lease is released (compare-and-delete, in
-one ledger transaction) only after its owner's heartbeat is stale, a global
-sign-out was confirmed after the lease expired, the access-JWT lifetime has
-elapsed since, and a fresh verification found the run's exchange not live; the
-orphan browser's close is typed `unobservable`, not proven.
+this run's binding hash and the grant id of its page receipts. End is requested
+only as `POST /api/v1/exchanges/{id}/end` for that proven id; the room UI's End
+button is never used, because it acts on whatever exchange the room shows at
+click time. Without proof the Lab verifies read-only (one live exchange per
+room) that the run's exchange is no longer live, or types the state `uncertain`
+/ `unavailable` and re-verifies with backoff until the product guard ends it at
+its deadline. A snapshot answer without a well-formed `room.sophia` presence is
+typed unknown, never "no live exchange", and an exchange end counts only when it
+was confirmed after the run's exchange join (a settle that ran while Speak was
+still opening the exchange is typed `uncertain`). Leaving the room (the room
+UI's "Leave the room") and closing the run-owned Chromium are not
+ownership-gated: they act on the principal's own presence and browser, not on an
+exchange. The principal is signed out globally and the run-owned Chromium is
+closed on every cleanup path.
+
+A dead foreign worker's Studio lease is released by compare-and-delete in one
+ledger transaction, after the run is terminal, the lease expired and the owner's
+heartbeat is stale by more than 30 s plus a 60 s clock-skew margin (heartbeats
+carry each worker's own clock). Then either:
+- the owner's own cleanup for that lease epoch is durable (the browser acquired
+  under it proven closed, a confirmed global sign-out, the exchange confirmed
+  ended after its join), and the lease is released at once; or
+- the releasing worker runs an API-only recovery (never short-circuited by a
+  cleanup proof that is not bound to the lease), and releases the lease only
+  after a global sign-out confirmed after the lease expired, the access-JWT
+  lifetime elapsed since, and a fresh verification that the run's exchange is
+  not live. The lifetime is `SOPHIA_VOICE_LAB_STUDIO_ACCESS_TOKEN_MAX_SECONDS`
+  raised to any longer `expires_in` the product issued to the run, so a wrong
+  setting never shortens the wait. The orphan browser's close is typed
+  `unobservable`, not proven.
+The PostgreSQL ledger stamps the sign-out and verification events with the
+database clock (the clock of the lease expiry), whatever the worker's clock says.
 
 **`/readyz`.** On the Studio kind it answers for the Studio document and its
 build meta, the API's `/health` identity and `/ready`, Supabase Auth's public
