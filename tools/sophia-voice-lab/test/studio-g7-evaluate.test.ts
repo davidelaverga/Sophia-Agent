@@ -8,7 +8,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { LabEvent, OperationRecord, RunRecord } from "../src/domain.js";
 import { sha256 } from "../src/security.js";
 import { deriveStudioG7Verdicts, evaluateStudioG7Run, studioG7CleanupProof, type StudioG7Evaluation } from "../src/studio-g7/evaluate.js";
-import { studioPriorInputSettled } from "../src/worker.js";
+import { studioInputTurnsArrived, studioPriorInputSettled } from "../src/worker.js";
 import { canonicalJson } from "../src/studio-g7/contract.js";
 import { projectTask } from "../src/studio-g7/studio-api.js";
 import {
@@ -301,6 +301,10 @@ describe("Studio G7 evaluation", () => {
     expect(studioPriorInputSettled(log.events, [prior], prior.id)).toBe(false);
     log.bridge("input_window", inputWindow(run, 1, 1, 1_000));
     expect(studioPriorInputSettled(log.events, [prior], prior.id)).toBe(true);
+    // labrev7 Nit-3: the gate also waits (bounded) for each arrived window's own input_turn.
+    expect(studioInputTurnsArrived(log.events)).toBe(false);
+    log.bridge("input_turn", inputTurn(run, 2, 1));
+    expect(studioInputTurnsArrived(log.events)).toBe(true);
   });
 });
 
@@ -364,6 +368,8 @@ interface G7Options {
   editBefore?: string | null;
   /** The tool calls each step's input turn showed (default: as many as the step's own calls). */
   toolCallCounts?: Record<string, number>;
+  /** The run's own note's source S (default NOTE_SOURCE): the record_note receipt's, the withdraw_note receipt's, and what X and R list as withdrawn. */
+  noteSource?: string;
   /** Fields merged into X's sighting in the withdrawal's before-observation. */
   editBeforeTask?: Record<string, unknown>;
   /** X's sighting in the withdrawal's after-observation (default: failed for the revoke reason, S withdrawn). */
@@ -398,6 +404,7 @@ function g7Episode(options: G7Options = {}): Episode {
   const run = studioRun(config);
   const log = new EventLog(run.id);
   const skip = new Set(options.skip ?? []);
+  const S = options.noteSource ?? NOTE_SOURCE;
   identityEvent(log, "startup");
   log.add("studio.auth.session_established", "canonical", { principal_bound: true });
   log.add("harness.media_stream_issued", "browser", { replacement_active: true, track_id_sha256s: [sha256(LAB_TRACK_ID)] });
@@ -471,7 +478,7 @@ function g7Episode(options: G7Options = {}): Episode {
   if (!skip.has("g7.record_note")) {
     const note = op(run, "studio_action", T0 + 50, { action: "record_note" }, { performed: true, status: "committed" });
     operations.push(note);
-    log.add("studio.action.record_note", "canonical", { operation_id: note.id, requested: true, status: "committed", http_status: 202, code: null, entry_id: NOTE, source_id: NOTE_SOURCE, receipt_operation: "record_note", text_sha256: sha256("note") });
+    log.add("studio.action.record_note", "canonical", { operation_id: note.id, requested: true, status: "committed", http_status: 202, code: null, entry_id: NOTE, source_id: S, receipt_operation: "record_note", text_sha256: sha256("note") });
   }
   // 2-3. Create (R draws on S; its design D under way), steer.
   voiceStep("create", () => observe("create", T0 + 110, [research(), designD("designing")]));
@@ -509,14 +516,14 @@ function g7Episode(options: G7Options = {}): Episode {
       const before = options.editBefore ?? "designing";
       log.add("studio.outcome.observed", "canonical", { purpose: "g7.withdrawal:before", operation_id: withdraw.id, join: { status: "uncertain" }, tasks: [editX({ ...(before === "designing" ? {} : { state: before === "published" ? "succeeded" : before === "failed" ? "failed" : "running", design: { state: before, mode: "edit", artifact_id: ARTIFACT, published_version_id: before === "published" ? randomUUID() : null, research_task_id: RESEARCH_TASK } }), ...(options.editBeforeTask ?? {}) }), designD("published"), research()], artifacts: [] });
     }
-    log.add("studio.action.withdrawal", "canonical", { operation_id: withdraw.id, requested: true, status: committed ? "committed" : "refused", own_create_task_id: RESEARCH_TASK, design_task_id: DESIGN_TASK, own_live_task_ids: [EDIT_TASK], entry_id: options.withdrawnEntry ?? NOTE, entry_bound_exchange_id: null, own_note_entry_id: NOTE, own_note_source_id: NOTE_SOURCE, entry_source_id: NOTE_SOURCE, http_status: committed ? 202 : 409, code: committed ? null : "stale_revision", receipt_operation: committed ? "withdraw_note" : null, receipt_source_id: committed ? (options.receiptSource === undefined ? NOTE_SOURCE : options.receiptSource) : null });
-    const xAfter = editX({ state: "failed", phase: "failed", reason_class: "revoked_source_withdrawn", withdrawn_source_ids: [NOTE_SOURCE], design: { state: "failed", mode: "edit", artifact_id: ARTIFACT, published_version_id: null, research_task_id: RESEARCH_TASK, reason_class: "revoked_source_withdrawn" }, ...(options.editAfter ?? {}) });
-    log.add("studio.outcome.observed", "canonical", { purpose: "g7.withdrawal", operation_id: options.withdrawalAfterOperation ?? withdraw.id, join: { status: "uncertain" }, tasks: [xAfter, designD("published"), research({ withdrawn_source_ids: [NOTE_SOURCE] })], artifacts: [] });
+    log.add("studio.action.withdrawal", "canonical", { operation_id: withdraw.id, requested: true, status: committed ? "committed" : "refused", own_create_task_id: RESEARCH_TASK, design_task_id: DESIGN_TASK, own_live_task_ids: [EDIT_TASK], entry_id: options.withdrawnEntry ?? NOTE, entry_bound_exchange_id: null, own_note_entry_id: NOTE, own_note_source_id: S, entry_source_id: S, http_status: committed ? 202 : 409, code: committed ? null : "stale_revision", receipt_operation: committed ? "withdraw_note" : null, receipt_source_id: committed ? (options.receiptSource === undefined ? S : options.receiptSource) : null });
+    const xAfter = editX({ state: "failed", phase: "failed", reason_class: "revoked_source_withdrawn", withdrawn_source_ids: [S], design: { state: "failed", mode: "edit", artifact_id: ARTIFACT, published_version_id: null, research_task_id: RESEARCH_TASK, reason_class: "revoked_source_withdrawn" }, ...(options.editAfter ?? {}) });
+    log.add("studio.outcome.observed", "canonical", { purpose: "g7.withdrawal", operation_id: options.withdrawalAfterOperation ?? withdraw.id, join: { status: "uncertain" }, tasks: [xAfter, designD("published"), research({ withdrawn_source_ids: [S] })], artifacts: [] });
   }
   // 10-11. The Stop sub-episode: its own create (STOP_TASK on its own goal), then Stop on it.
   voiceStep("create_stop_target", () => observe("create_stop_target", T0 + 810, options.stopTargetObserved === false ? [] : [stopTask({ state: "pending", phase: "queued", ...(options.stopTargetBefore ?? {}) })]));
   voiceStep("stop", () => observe("stop", T0 + 910, [stopTask({ state: "cancelled", phase: "stopped", reason_class: "stopped", ...(options.stopEffect ?? {}) })]));
-  log.add("studio.outcome.observed", "canonical", { purpose: "final", operation_id: "end", join: { status: "uncertain" }, tasks: [designD("published"), research({ withdrawn_source_ids: [NOTE_SOURCE] }), editX({ state: "failed", phase: "failed", reason_class: "revoked_source_withdrawn", withdrawn_source_ids: [NOTE_SOURCE], design: { state: "failed", mode: "edit", artifact_id: ARTIFACT, published_version_id: null, research_task_id: RESEARCH_TASK, reason_class: "revoked_source_withdrawn" } })], artifacts: [artifact(DESIGN_TASK, VERSION_2, PAGE_SHA, options.artifactStatus)] });
+  log.add("studio.outcome.observed", "canonical", { purpose: "final", operation_id: "end", join: { status: "uncertain" }, tasks: [designD("published"), research({ withdrawn_source_ids: [S] }), editX({ state: "failed", phase: "failed", reason_class: "revoked_source_withdrawn", withdrawn_source_ids: [S], design: { state: "failed", mode: "edit", artifact_id: ARTIFACT, published_version_id: null, research_task_id: RESEARCH_TASK, reason_class: "revoked_source_withdrawn" } })], artifacts: [artifact(DESIGN_TASK, VERSION_2, PAGE_SHA, options.artifactStatus)] });
   log.bridge("provider", providerReceipt(run, seq++, "closed"));
   log.bridge("session_closed", sessionClosed(run, seq++, { windows: ordinal, turns: ordinal, replies: ordinal }));
   // End's post-quiescence audit of every call: after the exchange ended and session_closed, before the sign-out.
@@ -1229,20 +1236,35 @@ describe("delta 5 review (labrev5 C3/C4): only End's post-quiescence, settled au
   });
 });
 
-// ------------------------------------------------------------------ labrev6 P2-1 on the product's own SQL
+// ------------------------------------------------------------------ PRODUCT-SHAPE-SQL (labrev6 P2-1, labrev7 Nit-5)
 // The product's migrations applied verbatim to a disposable database (env:
 // SOPHIA_VOICE_LAB_PRODUCT_MIGRATIONS_DIR, e.g. `git archive <product> db/migrations`;
 // SOPHIA_VOICE_LAB_PRODUCT_SHAPE_DATABASE_URL naming voice_lab_test_studio_product*;
-// SOPHIA_VOICE_LAB_TEST_DATABASE_RESET_APPROVED=YES). The principal records a
-// note (sophia.record_mission_entry) and a discussion contribution, a research
-// is admitted on both (sophia.admit_research_task), and the member reads
-// native_task_view as the API serves NativeTask, projected by the Lab's own
-// projectTask: the note's source S is in the manifest's graph but not in
-// inputSourceIds, the contribution's source is. design_ended must pass on
-// exactly that shape (it failed safe, uncertain, at 7f23015).
+// SOPHIA_VOICE_LAB_TEST_DATABASE_RESET_APPROVED=YES). Without them the test is
+// skipped, unless SOPHIA_VOICE_LAB_REQUIRE_PRODUCT_SHAPE=1: then it FAILS, so a
+// receipt run cannot mistake a skip for a pass. Select it alone with
+// `-t PRODUCT-SHAPE-SQL`.
+// The principal records a note (sophia.record_mission_entry) and a discussion
+// contribution; one research is admitted on both, another on the contribution
+// only (sophia.admit_research_task). The member reads native_task_view as the
+// API serves NativeTask (projected by the Lab's own projectTask): the note's
+// source S is in the manifest's graph but not in inputSourceIds, the
+// contribution's is. The member then withdraws the note exactly as previewed
+// (preview_mission_withdrawal, withdraw_mission_entry): the withdraw_note
+// receipt names S, and sophia.task_withdrawn_sources (what the API serves as
+// withdrawnSourceIds) lists S for the research that drew on it, [] before,
+// and never for the one that did not. design_ended is then evaluated on
+// exactly those product values. The design-edit revocation itself (X failed
+// for the revoke reason) needs the runtime protocol (a research result with
+// its HTML hand-off, the designer's dispatch and acceptance, a rendered and
+// published page) that the SQL alone cannot drive without reimplementing the
+// runtime; it stays covered by the product's own voice-episode.db.test.ts
+// step 4, and X's withdrawn sources here are the research's (its closure
+// through R's report).
 const PRODUCT_MIGRATIONS = process.env.SOPHIA_VOICE_LAB_PRODUCT_MIGRATIONS_DIR ?? "";
 const PRODUCT_DB = process.env.SOPHIA_VOICE_LAB_PRODUCT_SHAPE_DATABASE_URL ?? "";
-describe.skipIf(PRODUCT_MIGRATIONS === "" || PRODUCT_DB === "")("labrev6 P2-1: design_ended on NativeTask.inputSourceIds exactly as the product's SQL serves it", () => {
+const PRODUCT_SHAPE_REQUIRED = process.env.SOPHIA_VOICE_LAB_REQUIRE_PRODUCT_SHAPE === "1";
+describe.skipIf(!PRODUCT_SHAPE_REQUIRED && (PRODUCT_MIGRATIONS === "" || PRODUCT_DB === ""))("PRODUCT-SHAPE-SQL: design_ended on the product's own SQL", () => {
   const A = randomUUID();
   const E = randomUUID();
   const MD_ROLE = { id: "sophia-research-md-v1", route: "research-sol-medium-v1", presetDigest: "sha256:md" };
@@ -1278,10 +1300,13 @@ describe.skipIf(PRODUCT_MIGRATIONS === "" || PRODUCT_DB === "")("labrev6 P2-1: d
   }
 
   beforeAll(async () => {
+    if (PRODUCT_MIGRATIONS === "" || PRODUCT_DB === "") throw new Error("SOPHIA_VOICE_LAB_REQUIRE_PRODUCT_SHAPE=1, but SOPHIA_VOICE_LAB_PRODUCT_MIGRATIONS_DIR or SOPHIA_VOICE_LAB_PRODUCT_SHAPE_DATABASE_URL is missing");
     if (!/^voice_lab_test_studio_product[a-z0-9_]*$/.test(name()) || process.env.SOPHIA_VOICE_LAB_TEST_DATABASE_RESET_APPROVED !== "YES") throw new Error("Dedicated product-shape test database/reset approval required");
     await onAdmin(`DROP DATABASE IF EXISTS ${name()} WITH (FORCE)`);
     await onAdmin(`CREATE DATABASE ${name()}`);
-    await asOwner(async (c) => { for (const file of readdirSync(PRODUCT_MIGRATIONS).filter((entry) => entry.endsWith(".sql")).sort()) await c.query(readFileSync(join(PRODUCT_MIGRATIONS, file), "utf8")); });
+    const files = readdirSync(PRODUCT_MIGRATIONS).filter((entry) => entry.endsWith(".sql")).sort();
+    if (files.length === 0) throw new Error("no product migrations found");
+    await asOwner(async (c) => { for (const file of files) await c.query(readFileSync(join(PRODUCT_MIGRATIONS, file), "utf8")); });
     projectId = randomUUID();
     await asOwner(async (c) => {
       await c.query("BEGIN");
@@ -1296,27 +1321,40 @@ describe.skipIf(PRODUCT_MIGRATIONS === "" || PRODUCT_DB === "")("labrev6 P2-1: d
     await asApi(null, (c) => c.query("SELECT sophia.runtime_record_ready($1, $2, $3, $4)", [tokenSha, UNIT, BRIDGE, JSON.stringify({ state: "ready", reason: null, unrecovered: [] })]));
   }, 300_000);
 
-  afterAll(async () => { await onAdmin(`DROP DATABASE IF EXISTS ${name()} WITH (FORCE)`); }, 60_000);
+  afterAll(async () => { if (PRODUCT_DB !== "") await onAdmin(`DROP DATABASE IF EXISTS ${name()} WITH (FORCE)`); }, 60_000);
 
-  it("S is in the manifest's graph, not in inputSourceIds (a contribution's source is); design_ended passes on the projected task", async () => {
+  it("PRODUCT-SHAPE-SQL: S absent from inputSourceIds (C listed); the withdraw_note receipt names S; task_withdrawn_sources lists S only for the research that drew on it; design_ended passes on exactly those values", async () => {
     const note = await asApi(E, async (c) => (await c.query("SELECT sophia.record_mission_entry($1, $2, $3) AS receipt", [projectId, `note-${randomUUID()}`, JSON.stringify({ kind: "observation", epistemic: "reported", text: "Families in the pilot prefer Saturday morning sessions." })])).rows[0].receipt as Record<string, unknown>);
     expect(note.operation).toBe("record_note");
     const S = String(note.sourceId);
     await asApi(E, (c) => c.query("SELECT sophia.submit_contribution($1, $2, $3)", [projectId, `contrib-${randomUUID()}`, JSON.stringify({ intent: "discuss", text: "A contribution the research may draw on." })]));
     const C = await asOwner(async (c) => String((await c.query("SELECT source_id FROM sophia.contributions WHERE project_id=$1 AND actor_id=$2 ORDER BY created_at DESC LIMIT 1", [projectId, E])).rows[0].source_id));
-    const admitted = await asApi(E, async (c) => (await c.query("SELECT sophia.admit_research_task($1, $2, NULL, $3, $4, $5) AS result", [projectId, `research-${randomUUID()}`, JSON.stringify({ question: "Which sessions suit the pilot families?", outputs: ["markdown"], inputSourceIds: [S, C] }), MD_ROLE.id, MD_ROLE.route])).rows[0].result as Record<string, unknown>);
-    const R = String(admitted.taskId);
+    const admit = async (inputs: string[]) => String((await asApi(E, async (c) => (await c.query("SELECT sophia.admit_research_task($1, $2, NULL, $3, $4, $5) AS result", [projectId, `research-${randomUUID()}`, JSON.stringify({ question: `Which sessions suit the pilot families? ${randomUUID()}`, outputs: ["markdown"], inputSourceIds: inputs }), MD_ROLE.id, MD_ROLE.route])).rows[0].result as Record<string, unknown>)).taskId);
+    const R = await admit([S, C]);
+    const R2 = await admit([C]);
     // What the API serves (native-tasks.ts TASK_COLUMNS / toTask), read as the member.
     const row = await asApi(E, async (c) => (await c.query("SELECT id, kind, goal_id, attempt_id, command_id, actor_id, state, phase, created_at, input_source_id, input_source_ids, result_source_id, reason, artifact_id FROM sophia.native_task_view WHERE project_id=$1 AND id=$2", [projectId, R])).rows[0] as Record<string, unknown>, true);
     const projected = projectTask({ id: row.id, kind: row.kind, goalId: row.goal_id, attemptId: row.attempt_id, commandId: row.command_id, actorId: row.actor_id, state: row.state, phase: row.phase, createdAt: new Date(String(row.created_at)).toISOString(), contextSourceId: row.input_source_id, inputSourceIds: row.input_source_ids, resultSourceId: row.result_source_id, reason: row.reason });
     const held = await asOwner(async (c) => (await c.query("SELECT EXISTS(SELECT 1 FROM sophia.jobs j JOIN sophia.source_dependencies d ON d.derived_source_id=j.input_source_id AND d.project_id=j.project_id WHERE j.id=$1 AND d.source_id=$2) AS held", [R, S])).rows[0].held as boolean);
     expect(held).toBe(true);
     expect(projected?.inputSourceIds).toEqual([C]);
-    // The run's research R exactly as projected: design_ended (and the product) pass on it.
-    const evaluation = evaluate(g7Episode({ researchTask: RUN_TASK, calls: { byStep: happyCalls() }, researchInputs: projected!.inputSourceIds }));
+    // withdrawnSourceIds as the API computes them (task_withdrawn_sources, 0046), before and after the member's own withdrawal of exactly the preview.
+    const withdrawn = async (task: string) => asApi(E, async (c) => (await c.query("SELECT sophia.task_withdrawn_sources($1, $2) AS ids", [projectId, task])).rows[0].ids as string[] | null, true);
+    expect({ R: await withdrawn(R), R2: await withdrawn(R2) }).toEqual({ R: [], R2: [] });
+    const preview = await asApi(E, async (c) => (await c.query("SELECT sophia.preview_mission_withdrawal($1, $2) AS preview", [projectId, note.entryId])).rows[0].preview as Record<string, unknown>, true);
+    const expected = { entryIds: (preview.entries as Array<Record<string, unknown>>).map((entry) => entry.id), decisions: (preview.decisions as Array<Record<string, unknown>>).map((decision) => ({ id: decision.id, revision: decision.revision })) };
+    const gone = await asApi(E, async (c) => (await c.query("SELECT sophia.withdraw_mission_entry($1, $2, $3, $4, $5) AS receipt", [projectId, note.entryId, `forget-${randomUUID()}`, JSON.stringify(expected), preview.previewToken])).rows[0].receipt as Record<string, unknown>);
+    expect([gone.operation, gone.sourceId]).toEqual(["withdraw_note", S]);
+    const after = { R: await withdrawn(R), R2: await withdrawn(R2) };
+    expect(after.R).toEqual([S]);
+    expect(after.R2 ?? []).not.toContain(S);
+    // design_ended on exactly those product values: S from the receipts, R's projection, R's withdrawn sources (X's closure runs through R's report).
+    const evaluation = evaluate(g7Episode({ researchTask: RUN_TASK, calls: { byStep: happyCalls() }, noteSource: String(gone.sourceId), researchInputs: projected!.inputSourceIds, editAfter: { withdrawn_source_ids: after.R } }));
     expect(statusOf(evaluation, "step.g7.withdrawal.design_ended")).toMatchObject({ status: "pass", reason: null });
     expect(evaluation.product.filter((assertion) => assertion.status !== "pass").map((assertion) => `${assertion.id}:${assertion.reason}`)).toEqual([]);
-    expect(evaluation.verdicts.product).toBe("pass");
+    // The research that did not draw on S gives nothing to join on.
+    const unrelated = evaluate(g7Episode({ researchTask: RUN_TASK, calls: { byStep: happyCalls() }, noteSource: S, editAfter: { withdrawn_source_ids: after.R2 ?? [] } }));
+    expect(statusOf(unrelated, "step.g7.withdrawal.design_ended")).toMatchObject({ status: "uncertain", reason: "note_source_not_in_edit_closure" });
   }, 120_000);
 });
 
@@ -1410,5 +1448,83 @@ describe("labrev6 P3-1: a count-preserving extra-plus-missing window pair never 
     // More calls shown than the step's own read lists, or none where its command is: the join is refused.
     expect(stepsOf(evaluate(g7Episode({ researchTask: RUN_TASK, calls: { byStep: happyCalls() }, toolCallCounts: { "g7.hold": 2 } })))["g7.hold"]).toBe("uncertain:step_input_epoch_unknown");
     expect(stepsOf(evaluate(g7Episode({ researchTask: RUN_TASK, calls: { byStep: happyCalls() }, toolCallCounts: { "g7.create": 0 } })))["g7.create"]).toBe("uncertain:step_input_epoch_unknown");
+  });
+
+  // ---------------------------------------------------------------- labrev7 (review of 5d4463d)
+  const at2 = (entries: Array<Record<string, unknown>>) => entries.map((entry) => ({ ...entry, input_epoch: 2 }));
+  const epochs2 = { "g7.hold": 2, "g7.resume": 2, "g7.create_stop_target": 2, "g7.stop": 2 };
+
+  it("labrev7 Nit-1 RESIDUAL R1 (pinned, documented): a turn_complete fragment showing exactly hold's one call, plus a later utterance with no window, still shifts the join to a run-level pass", () => {
+    const calls = happyCalls();
+    const byStep = { ...calls, "g7.resume": at2(calls["g7.resume"]!), "g7.create_stop_target": at2(calls["g7.create_stop_target"]!), "g7.stop": at2(calls["g7.stop"]!) };
+    // Steer's utterance split in two turn_complete fragments, each showing one of steer's two recorded calls.
+    const build = () => g7Episode({ researchTask: RUN_TASK, calls: { byStep }, windowEpochs: epochs2, toolCallCounts: { "g7.steer": 1 } });
+    expect(stepsOf(evaluate(build()))["g7.hold"]).toBe("uncertain:call_input_epoch_mismatch");
+    const shifted = evaluate(rebridge(build(), compensate({}, { toolCallCount: 1 })));
+    // The residual the bounds accept (README): every displaced window's count lies within its new step's bounds.
+    expect(stepsOf(shifted)["g7.hold"]).toBe("pass:null");
+    expect(shifted.verdicts).toMatchObject({ harness: "pass", product: "pass" });
+  });
+
+  it("labrev7 Nit-1 RESIDUAL R2 (pinned, documented): the fragment shows fewer calls than the step it lands on (1 of hold's 2), and the shift still reaches a run-level pass", () => {
+    const byStep = {
+      "g7.create": [call(1, "start_research", { kind: "native_task" }, RESEARCH_TASK)],
+      "g7.steer": [call(2, "project_status", null), call(3, "control_work", { kind: "steer" })],
+      "g7.hold": [call(4, "project_status", null), call(5, "control_work", { kind: "hold" })],
+      "g7.resume": at2([call(6, "control_work", { kind: "resume" })]),
+      "g7.create_stop_target": at2([call(7, "start_research", { kind: "native_task", goal: GOAL_B }, STOP_TASK)]),
+      "g7.stop": at2([call(8, "control_work", { kind: "stop", goal: GOAL_B })]),
+    };
+    // Hold's own turn showed one of its two calls (the continuation case, normal); so does the fragment that lands on it.
+    const build = () => g7Episode({ researchTask: RUN_TASK, calls: { byStep }, windowEpochs: epochs2, toolCallCounts: { "g7.steer": 1, "g7.hold": 1 } });
+    expect(stepsOf(evaluate(build()))["g7.hold"]).toBe("uncertain:call_input_epoch_mismatch");
+    const shifted = evaluate(rebridge(build(), compensate({}, { toolCallCount: 1 })));
+    expect(stepsOf(shifted)["g7.hold"]).toBe("pass:null");
+    expect(shifted.verdicts).toMatchObject({ harness: "pass", product: "pass" });
+  });
+
+  it("labrev7 Nit-2 (pinned, a known false negative): one call refused before it is recorded refuses the whole join, never only its step's, so a perfect run is inconclusive", () => {
+    expect(evaluate(g7Episode({ researchTask: RUN_TASK, calls: { byStep: happyCalls() } })).verdicts.product).toBe("pass");
+    const refused = evaluate(g7Episode({ researchTask: RUN_TASK, calls: { byStep: happyCalls() }, toolCallCounts: { "g7.hold": 2 } }));
+    for (const step of ["g7.create", "g7.steer", "g7.hold", "g7.resume", "g7.create_stop_target", "g7.stop"]) expect(stepsOf(refused)[step], step).toBe("uncertain:step_input_epoch_unknown");
+    expect(refused.verdicts.product).toBe("inconclusive");
+    // Why scoping it to hold would be unsafe: the same excess also marks a shifted window (labrev6 E-compensate), which displaces later steps too.
+    const shifted = stepsOf(evaluate(rebridge(epochEpisode(), compensate())));
+    for (const step of ["g7.resume", "g7.create_stop_target", "g7.stop"]) expect(shifted[step], step).toBe("uncertain:step_input_epoch_unknown");
+  });
+
+  it("labrev7 Nit-3 RACE: mid-run, a window persisted before its own input_turn keeps the already-certified create (and hands it over); after session_closed a missing turn still refuses", () => {
+    const midRun = (keepSteerTurn: boolean, closed = false) => {
+      const later = ["g7.leave_return", "g7.hold", "g7.resume", "g7.section_revision", "g7.stale_edit", "g7.withdrawal", "g7.create_stop_target", "g7.stop"];
+      const item = g7Episode({ researchTask: RUN_TASK, calls: { byStep: happyCalls() }, skip: later, noEnd: true });
+      const drop = (event: LabEvent) => {
+        if (event.kind !== "studio.bridge_receipt" || event.payload.source !== "bridge") return false;
+        const kind = String(event.payload.kind);
+        const receipt = JSON.parse(String(event.payload.receipt_json)) as Record<string, unknown>;
+        if (!closed && (kind === "session_closed" || (kind === "provider" && receipt.phase === "closed"))) return true;
+        if (!closed && kind === "output_reply" && Number(receipt.replyOrdinal) === 2) return true;
+        return !keepSteerTurn && kind === "input_turn" && Number(receipt.windowSeq) === 2;
+      };
+      item.log.events.splice(0, item.log.events.length, ...item.log.events.filter((event) => !drop(event)));
+      const evaluation = evaluate(item);
+      return { create: stepsOf(evaluation)["g7.create"], handedOverCreate: evaluation.outcome.own_report.create_task_id };
+    };
+    expect(midRun(true)).toEqual({ create: "pass:null", handedOverCreate: RESEARCH_TASK });
+    expect(midRun(false)).toEqual({ create: "pass:null", handedOverCreate: RESEARCH_TASK });
+    // Once the session closed, the steer's turn must be there: without it the join is refused.
+    expect(midRun(false, true).create).toBe("uncertain:step_input_epoch_unknown");
+  });
+});
+
+describe("labrev7 Nit-4: design_ended needs S to be the only source newly withdrawn from X's closure", () => {
+  const OTHER = "c0000000-0000-4000-8000-0000000000aa";
+  const designEnded = (options: G7Options) => statusOf(evaluate(g7Episode({ researchTask: RUN_TASK, calls: { byStep: happyCalls() }, ...options })), "step.g7.withdrawal.design_ended");
+  it("D-AMBIG: another source newly withdrawn in the same window (a concurrent foreign withdrawal) is uncertain", () => {
+    expect(designEnded({ editAfter: { withdrawn_source_ids: [OTHER, NOTE_SOURCE] } })).toMatchObject({ status: "uncertain", reason: "concurrent_foreign_withdrawal" });
+  });
+  it("a source already withdrawn before (not new) does not block it; X's sources not served before is unavailable", () => {
+    expect(designEnded({ editBeforeTask: { withdrawn_source_ids: [OTHER] }, editAfter: { withdrawn_source_ids: [OTHER, NOTE_SOURCE] } })).toMatchObject({ status: "pass", reason: null });
+    expect(designEnded({ editBeforeTask: { withdrawn_source_ids: null } })).toMatchObject({ status: "unavailable", reason: "withdrawn_sources_not_served" });
+    expect(designEnded({})).toMatchObject({ status: "pass", reason: null });
   });
 });

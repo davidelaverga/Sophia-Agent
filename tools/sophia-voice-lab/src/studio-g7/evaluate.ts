@@ -369,14 +369,31 @@ export function evaluateStudioG7Run(run: RunRecord, events: Event[], operations:
   // window is open reaches the API and is recorded after the step's baseline
   // (so listed in its own read), and the step's command comes from the
   // generation answering it while its window is open. Exact equality is not
-  // required: a tool continuation generated after the turn completed, or a
-  // call the bridge refuses before the API, makes them differ in a normal run.
+  // required: a tool continuation generated after the turn completed is not
+  // in the window's count, so a normal run can show fewer calls than its read
+  // lists.
+  // NOT tolerated (a known false negative, labrev7 Nit-2): a call refused
+  // before it is recorded (by the bridge, or by the API as not_declared) is
+  // counted in the turn but never listed, so its window shows more calls
+  // than its read. The Lab cannot tell that from a shifted window (both show
+  // more than the step's own calls), and a shift displaces every step from an
+  // unknown point on, so the whole join is refused, never only that step's.
+  // The bridge and API tool surfaces agree in a normal G7 flow.
+  // Residual (labrev7 Nit-1, pinned by tests): a count-preserving shift stays
+  // unseen whenever every displaced window shows a count within its new
+  // step's bounds: from 1 to that step's own listed calls (0 to them for a
+  // step with no command), e.g. a fragment turn showing exactly one call
+  // landing on a single-call step, or one call on a step with two.
+  // Mid-run (no session_closed yet), a window whose own input_turn has not
+  // arrived yet is not checked: the bridge sends the turn right after its
+  // window, and the evaluation after session_closed checks it (labrev7 Nit-3).
   const ownCalls = studioStepOwnCalls(ordered, nonSilence.map((entry) => ({ operationId: entry.operation.id })), runExchangeIdOf(exchangeJoin));
   const shownToolCalls = (windowSeq: number) => turnsAll.filter((item) => item.receipt.windowSeq === windowSeq).reduce((sum, item) => sum + item.receipt.toolCallCount, 0);
   const windowsTurnComplete = windows.every((item) => item.receipt.endReason === "turn_complete");
   const toolCallsConsistent = nonSilence.every((entry, index) => {
     const own = ownCalls.get(entry.operation.id) ?? null;
     if (own === null) return true;
+    if (sessionClosed === null && !turnsAll.some((item) => item.receipt.windowSeq === index + 1)) return true;
     const shown = shownToolCalls(index + 1);
     return shown <= own.calls && (!own.commandBearing || shown >= 1);
   });
@@ -725,7 +742,8 @@ export function evaluateStudioG7Run(run: RunRecord, events: Event[], operations:
       //   is also the proof that X drew on S (NativeTask.inputSourceIds lists
       //   only discussion contributions, never a note's source: the product's
       //   native_task_view, 0022, so it is never read for this join);
-      // - nothing else ended it first (no Stop before that observation).
+      // - nothing else ended it first (no Stop before that observation), and
+      //   no other source was newly withdrawn from X's closure between the two.
       const own = (purpose: string) => observations.filter((event) => event.payload.purpose === purpose && event.payload.operation_id === operation!.id).at(-1) ?? null;
       const before = own("g7.withdrawal:before");
       const afterOwn = own("g7.withdrawal");
@@ -761,9 +779,14 @@ export function evaluateStudioG7Run(run: RunRecord, events: Event[], operations:
       else if (lists(xBefore!.withdrawn_source_ids, noteSource)) P(id, "uncertain", "note_source_withdrawn_before", evidence);
       else if (afterOwn === null || afterOwn.seq < withdrawal.seq) P(id, "uncertain", "no_observation_after_withdrawal", evidence);
       else if (stopBaseline !== null && stopBaseline.seq < afterOwn.seq) P(id, "uncertain", "stop_before_withdrawal_effect_observed", evidence);
-      else if (!Array.isArray(xAfter?.withdrawn_source_ids)) P(id, "unavailable", "withdrawn_sources_not_served", evidence);
+      else if (!Array.isArray(xAfter?.withdrawn_source_ids) || !Array.isArray(xBefore?.withdrawn_source_ids)) P(id, "unavailable", "withdrawn_sources_not_served", evidence);
       else if (!revoked(xAfter)) P(id, "uncertain", "design_not_ended_by_withdrawal", evidence);
       else if (!lists(xAfter!.withdrawn_source_ids, noteSource)) P(id, "uncertain", "note_source_not_in_edit_closure", evidence);
+      // Only S newly withdrawn from X's closure between its two reads: another
+      // source withdrawn in the same window (a concurrent foreign withdrawal,
+      // or an eligibility change) could be the revocation's cause, and the
+      // product's reason does not say which.
+      else if ((xAfter!.withdrawn_source_ids as unknown[]).some((source) => source !== noteSource && !lists(xBefore!.withdrawn_source_ids, String(source)))) P(id, "uncertain", "concurrent_foreign_withdrawal", evidence);
       else P(id, "pass", null, evidence);
     }
     for (const step of steps) {

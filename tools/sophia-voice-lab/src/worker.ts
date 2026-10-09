@@ -1829,16 +1829,28 @@ export class VoiceLabWorker {
       .sort((left, right) => right.updatedAt.getTime() - left.updatedAt.getTime())[0];
     if (!prior) return;
     const deadline = Date.now() + 15_000;
+    // Studio: once every earlier window arrived, also wait (bounded) for each
+    // one's input_turn, which the bridge sends right after its window: the
+    // evaluation that hands the certified create over cross-checks the
+    // window's tool calls with its step's (labrev7 Nit-3). A turn still
+    // missing at the bound does not block the step; the evaluation skips a
+    // window without its turn until session_closed.
+    let turnsDeadline: number | null = null;
     while (Date.now() < deadline) {
       throwIfCancelled(signal);
       const events = await this.#allEvents(run.id);
       const settled = isStudioG7Run(run)
         ? studioPriorInputSettled(events.events, (await this.ledger.listOperations(run.id)).filter((operation) => operation.id !== operationId && operation.state === "succeeded" && (operation.type === "speak" || operation.type === "barge_in")), prior.id)
         : events.events.some((event) => isExactBoundProductEvent(run, event) && event.kind === "audio.input.product_turn" && (event.payload.receipt as Record<string, unknown> | undefined)?.operation_id === prior.id && (event.payload.receipt as Record<string, unknown> | undefined)?.source === "settlement");
-      if (settled) return;
+      if (settled && (!isStudioG7Run(run) || studioInputTurnsArrived(events.events))) return;
+      if (settled) {
+        turnsDeadline ??= Date.now() + STUDIO_INPUT_TURN_WAIT_MS;
+        if (Date.now() >= turnsDeadline) return;
+      }
       await this.#persistEvents(run.id, await this.driver.drain(run.id));
       await delay(100);
     }
+    if (turnsDeadline !== null) return;
     throw new VoiceLabError(labError("INPUT_OPERATION_SETTLEMENT_PENDING", "The prior exact input operation did not reach its app-authored turn settlement before another injection could start.", "harness", true, { prior_operation_id: prior.id }));
   }
 
@@ -3353,6 +3365,18 @@ export function studioPriorInputSettled(events: import("./domain.js").LabEvent[]
     try { return Number((JSON.parse(String(event.payload.receipt_json)) as Record<string, unknown>).windowSeq); } catch { return Number.NaN; }
   }).filter(Number.isSafeInteger));
   return windows.size >= nonSilence;
+}
+
+/** How long the settlement gate waits for an arrived window's input_turn (the bridge sends it right after the window). */
+export const STUDIO_INPUT_TURN_WAIT_MS = 5_000;
+
+/** Whether every input window the bridge reported so far has its own input_turn receipt (same windowSeq). */
+export function studioInputTurnsArrived(events: import("./domain.js").LabEvent[]): boolean {
+  const seqsOf = (kind: string) => new Set(events.filter((event) => event.kind === "studio.bridge_receipt" && event.source === "canonical" && event.payload.kind === kind).map((event) => {
+    try { return Number((JSON.parse(String(event.payload.receipt_json)) as Record<string, unknown>).windowSeq); } catch { return Number.NaN; }
+  }).filter(Number.isSafeInteger));
+  const turns = seqsOf("input_turn");
+  return [...seqsOf("input_window")].every((windowSeq) => turns.has(windowSeq));
 }
 
 /** The run binding hash a Studio run's grant must carry. */

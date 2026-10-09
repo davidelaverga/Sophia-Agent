@@ -117,7 +117,11 @@ export class ScriptedStudioDriver {
   async rotate(): Promise<never> { throw new Error("unsupported"); }
   async continueSession() { return []; }
   async quiesceD02Provider(): Promise<never> { throw new Error("unsupported"); }
-  async drain() { return []; }
+  /** Receipts the bridge sends after the step's own events (with lateTurns: each window's input_turn), handed over by the next drain. */
+  #pendingDrain: DriverEvent[] = [];
+  /** Whether each input_turn arrives only after its window, on a later drain (the bridge's separate POST). */
+  lateTurns = false;
+  async drain() { const out = this.#pendingDrain; this.#pendingDrain = []; return out; }
   async cancel(runId: string) { this.sessions.delete(runId); }
   async close() { return undefined; }
   async studioReadiness() { return { ok: true }; }
@@ -163,7 +167,7 @@ export class ScriptedStudioDriver {
       { kind: "audio.input.started", source: "browser", payload: { operation_id: operationId, ...at(0) }, dedupeKey: `started:${operationId}` },
       { kind: "audio.input.completed", source: "browser", payload: { operation_id: operationId, ...at(5_000) }, dedupeKey: `completed:${operationId}` },
       this.#bridge("input_window", inputWindow(run, this.seq++, this.ordinal, 20_000)),
-      this.#bridge("input_turn", inputTurn(run, this.seq++, this.ordinal, { toolCallCount: this.turnToolCalls(this.ordinal) })),
+      ...(() => { const turn = this.#bridge("input_turn", inputTurn(run, this.seq++, this.ordinal, { toolCallCount: this.turnToolCalls(this.ordinal) })); if (this.lateTurns) { this.#pendingDrain.push(turn); return []; } return [turn]; })(),
       ...(this.ordinal === 1 ? [{ kind: "studio.page_receipt", source: "product" as const, payload: (() => { const json = canonicalJson(pageReceipt(run, "sophia_playback", Date.now() + 100, { phase: "playing" })); return { event: "sophia_playback", receipt_json: json, receipt_sha256: sha256(json) }; })(), dedupeKey: `studio-page:${run.id}:playback` }] : []),
       this.#bridge("output_reply", outputReply(run, this.seq++, this.ordinal, Date.now() + 200)),
     ] };

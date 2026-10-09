@@ -1581,3 +1581,37 @@ describe("labrev6 Nit-2: record_note keeps no caller text in any durable record"
     expect(durable).not.toContain(words);
   }, 60_000);
 });
+
+describe("labrev7 Nit-3: the settlement gate waits for each earlier window's input_turn before the hand-over", () => {
+  it("an input_turn that arrives after its window (a later drain) is waited for, so the certified create is still handed over", async () => {
+    const h = await harness("late-turn-worker");
+    const GOAL = "e0000000-0000-4000-8000-0000000000a1";
+    const RESEARCH = "d0000000-0000-4000-8000-0000000000d3";
+    let tick = 0;
+    const stamps = new Map<string, number>();
+    const recorded: Array<{ began: number; call: Record<string, unknown> }> = [];
+    h.driver.callsAnswer = (_run, _purpose, after) => {
+      tick += 1;
+      const readAt = `2026-10-09T12:00:${String(tick).padStart(2, "0")}.000001Z`;
+      stamps.set(readAt, tick);
+      const since = after === null ? null : stamps.get(after)!;
+      return { status: "available", read_at: readAt, calls: recorded.filter((item) => since === null || item.began > since).map((item) => item.call) };
+    };
+    const at = new Date().toISOString();
+    h.driver.turnToolCalls = () => 1;
+    // The bridge's input_turn is a separate POST after its window: it reaches the Lab only on a later drain.
+    h.driver.lateTurns = true;
+    h.driver.researchExchangeId = EXCHANGE_UUID;
+    await h.worker.runOnce();
+    const create = h.service.studioG7VoiceStep(caller, { run_id: h.runId, step: "create", fixture_id: "a02_short_command", idempotency_key: newIdempotencyKey("voice-create") });
+    while (!h.driver.callsReads.some((read) => read.purpose === "baseline")) { if (!(await h.worker.runOnce())) await delay(5); }
+    recorded.push({ began: tick + 0.5, call: { seq: 1, recorded_at: at, input_epoch: 1, tool: "start_research", task_id: RESEARCH, answered_at: at, outcome: "admitted", command: { command_id: "f0000000-0000-4000-8000-000000000001", kind: "native_task", goal_id: GOAL, authority_epoch: 1, goal_revision: 1, state: "acknowledged", created_at: at } } });
+    expect((await drive(h, create)).status).toBe("completed");
+    // The create's own observation shows its task bound to the run's exchange (certified from then on).
+    expect((await action(h, { action: "observe", for_step: "create" })).data).toMatchObject({ performed: false });
+    const turns = (await h.ledger.listEvents(h.runId, 0, 2_000)).events.filter((event) => event.kind === "studio.bridge_receipt" && event.payload.kind === "input_turn");
+    expect(turns).toHaveLength(1);
+    expect((await action(h, { action: "section_revision", instruction: "Shorten the introduction" })).data).toMatchObject({ performed: true });
+    expect(h.driver.actionInputs.at(-1)).toMatchObject({ action: "section_revision", _own_create_task_id: RESEARCH });
+  }, 60_000);
+});

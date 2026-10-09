@@ -84,6 +84,8 @@ DATABASE_URL=postgresql://... pnpm migrate
 
 Running migrate twice is the expected idempotency check. `SOPHIA_VOICE_LAB_TEST_DATABASE_URL` enables the destructive, dedicated-database integration suite; never point it at a shared or production database.
 
+The Studio G7 product-shape test (`-t PRODUCT-SHAPE-SQL`, in `test/studio-g7-evaluate.test.ts`) applies the product's own migrations (`SOPHIA_VOICE_LAB_PRODUCT_MIGRATIONS_DIR`, e.g. from `git archive <product commit> db/migrations`) to a disposable database (`SOPHIA_VOICE_LAB_PRODUCT_SHAPE_DATABASE_URL`, named `voice_lab_test_studio_product*`, with `SOPHIA_VOICE_LAB_TEST_DATABASE_RESET_APPROVED=YES`). Without them it is skipped; set `SOPHIA_VOICE_LAB_REQUIRE_PRODUCT_SHAPE=1` in any receipt run so that a missing variable fails instead of skipping.
+
 ## Required production configuration
 
 All credentials below must be distinct and at least 32 bytes. They are secret environment variables and must never appear in MCP results, logs, manifests, or plugin files.
@@ -301,10 +303,23 @@ least one when that read holds a command-bearing call; otherwise every epoch
 is unknown and the per-input envelope assertions are `unavailable`
 (`ordinal_join_inconsistent`). Exact equality is not required, because a
 normal run can show fewer (a tool continuation generated after the turn
-completed is not in its window's count). A residual remains: a provider turn
-completed on an utterance fragment that showed exactly as many calls as the
-step it lands on, together with a later utterance that got no window, still
-shifts the join. Exactly one call must carry a command:
+completed is not in its window's count). Not tolerated, a known false
+negative: a call refused before it is recorded (by the bridge, or by the API
+as `not_declared`) is counted in its turn but never listed, so its window
+shows more calls than its read; the Lab cannot tell that from a shifted
+window, and a shift displaces every step from an unknown point on, so the
+whole join is refused, not only that step's (the bridge and API tool
+surfaces agree in a normal G7 flow). Mid-run, before `session_closed`, a
+window whose own `input_turn` has not arrived yet is not checked (the bridge
+sends the turn right after its window, and the settlement gate waits for it,
+bounded at 5 s); after `session_closed` every window is checked. The residual
+is exactly what the bounds accept: a count-preserving shift (an utterance
+split into a turn-completed fragment, together with a later utterance that
+got no window) stays unseen whenever every displaced window shows a count
+within its new step's bounds, from 1 to that step's own listed calls (0 to
+them for a step without a command): for example a fragment showing one call
+landing on a single-call step, or one call on a step with two (both pinned by
+tests). Exactly one call must carry a command:
 `native_task` with its task, answered `admitted`, for create (the task naming
 the run's ownership-proven exchange in the snapshot, `NativeTask.exchangeId`);
 `steer`, `hold`, `resume` on the created task's goal, and `stop` on the Stop
@@ -335,8 +350,10 @@ not yet listing S as withdrawn; in the withdrawal's own after-observation X
 `failed` for the product's revoke reason (`revoked_source_withdrawn`, only the
 class is kept) with S in its `withdrawnSourceIds` (A15/0046, computed live by
 the product from X's attempt's consumed closure, so this is also the proof
-that X drew on S); and nothing else ended it first (no Stop before that
-observation). `NativeTask.inputSourceIds` is never used for this join: the
+that X drew on S), and S the only source newly withdrawn from X's closure
+between the two observations (another one, e.g. a concurrent foreign
+withdrawal, could be the revocation's cause: `concurrent_foreign_withdrawal`);
+and nothing else ended it first (no Stop before that observation). `NativeTask.inputSourceIds` is never used for this join: the
 product builds it from discussion contributions only (`native_task_view`,
 migration 0022), so a note's source is in the research manifest's dependency
 graph but never listed there. Anything less is
