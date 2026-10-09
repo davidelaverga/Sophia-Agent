@@ -1,5 +1,6 @@
 import { decideStudioDeadOwnerRelease, STUDIO_DATABASE_CLOCK_EVENT_KINDS, STUDIO_DEAD_OWNER_DECISION_EVENT_KINDS } from "./studio-g7/lease-release.js";
 import { studioStepConflict, studioStepOf } from "./studio-g7/step-guard.js";
+import { STUDIO_GLOBAL_SIGNOUT_CLEARED_KIND, STUDIO_GLOBAL_SIGNOUT_PENDING_CODE, STUDIO_GLOBAL_SIGNOUT_PENDING_KIND } from "./studio-g7/sign-out-fence.js";
 import pg from "pg";
 import { CANONICAL_EVIDENCE_REFRESH_BASE_BACKOFF_MS, CANONICAL_EVIDENCE_REFRESH_EVENT, CANONICAL_EVIDENCE_REFRESH_MAX_ATTEMPTS } from "./canonical-evidence-refresh.js";
 import { retentionHmac } from "./retention-identity.js";
@@ -100,8 +101,36 @@ export class PostgresVoiceLabLedger implements VoiceLabLedger {
     this.#callerPartitions.assertLivePartitionIds(result.rows.map((row) => row.caller_partition_id));
   }
 
-  async countActiveRunsExcept(runId: string): Promise<number> {
-    return (await activeRunCounts(this.pool, null, [], runId)).global;
+  async countLiveSessionRunsExcept(runId: string): Promise<number> {
+    return liveSessionRunCount(this.pool, runId);
+  }
+  async beginStudioGlobalSignOut(runId: string, markerId: string): Promise<{ granted: boolean; liveSessionRuns: number }> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("begin");
+      // The admission lock: a start can neither be admitted between this
+      // count and the marker, nor while the marker is pending.
+      await client.query("select pg_advisory_xact_lock(hashtext('sophia_voice_lab_run_quota'))");
+      const locked = await client.query(`select cleanup_complete,latest_cursor from ${SCHEMA}.runs where id=$1 for update`, [runId]);
+      if (!locked.rows[0]) throw notFound("RUN_NOT_FOUND", "Run was not found.");
+      const liveSessionRuns = await liveSessionRunCount(client, runId);
+      if (liveSessionRuns > 0) { await client.query("rollback"); return { granted: false, liveSessionRuns }; }
+      const previousCleanupComplete = locked.rows[0].cleanup_complete === true;
+      if (previousCleanupComplete) {
+        await client.query(`update ${SCHEMA}.runs set cleanup_complete=false,version=version+1,updated_at=now() where id=$1`, [runId]);
+        await client.query(`update ${SCHEMA}.recovery_controls set live_cleanup_complete=false,version=version+1 where run_id=$1`, [runId]);
+      }
+      const seq = Number(locked.rows[0].latest_cursor) + 1;
+      await client.query(`insert into ${SCHEMA}.run_events (run_id,seq,kind,source,payload,dedupe_key,observed_at) values ($1,$2,$3,'worker',$4,$5,clock_timestamp())`,
+        [runId, seq, STUDIO_GLOBAL_SIGNOUT_PENDING_KIND, { marker_id: markerId, previous_cleanup_complete: previousCleanupComplete }, `studio-global-sign-out-pending:${runId}:${markerId}`]);
+      await client.query(`update ${SCHEMA}.runs set latest_cursor=$2,updated_at=now() where id=$1`, [runId, seq]);
+      await client.query("commit");
+      return { granted: true, liveSessionRuns: 0 };
+    } catch (error) { await client.query("rollback").catch(() => undefined); throw translatePgError(error); }
+    finally { client.release(); }
+  }
+  async endStudioGlobalSignOut(runId: string, markerId: string, outcome: "confirmed" | "abandoned"): Promise<void> {
+    await this.appendEvent(runId, STUDIO_GLOBAL_SIGNOUT_CLEARED_KIND, "worker", { marker_id: markerId, outcome }, `studio-global-sign-out-cleared:${runId}:${markerId}`);
   }
   async countActiveRuns(callerId?: string): Promise<number> {
     const counts = await activeRunCounts(this.pool, callerId ?? null, callerId === undefined ? [] : this.#callerPartitions.callerIds(callerId));
@@ -229,6 +258,14 @@ export class PostgresVoiceLabLedger implements VoiceLabLedger {
         return { run: mapRun(priorRun.rows[0]), operation: prior, replay: true, ...(rollingAdmission ? { rollingAdmission } : {}) };
       }
       if (rollingAdmission?.replay) throw conflict("IDEMPOTENCY_RETENTION_EXPIRED", "The idempotent start receipt was retention-purged and cannot be replayed or reallocated.");
+      // A Studio global sign-out in flight (its marker is written under this
+      // same lock): a run admitted now could have its tokens revoked.
+      const signOutPending = await client.query(
+        `select 1 from ${SCHEMA}.runs r where not r.cleanup_complete and exists (
+           select 1 from ${SCHEMA}.run_events p where p.run_id=r.id and p.kind=$1
+             and not exists (select 1 from ${SCHEMA}.run_events c where c.run_id=r.id and c.kind in ($1,$2) and c.seq>p.seq)) limit 1`,
+        [STUDIO_GLOBAL_SIGNOUT_PENDING_KIND, STUDIO_GLOBAL_SIGNOUT_CLEARED_KIND]);
+      if (signOutPending.rows[0]) throw conflict(STUDIO_GLOBAL_SIGNOUT_PENDING_CODE, "A global sign-out of the Studio principal is in progress; admission waits for it.");
       const quota = await activeRunCounts(client, operation.callerId, this.#callerPartitions.callerIds(operation.callerId));
       if (quota.global >= limits.global || quota.caller >= limits.caller) throw conflict("CONCURRENCY_LIMIT", "Voice Lab concurrency limit is reached.");
       const binding = projectRecoveryControlBinding(run, this.#callerPartitions.activeCallerId(run.callerId));
@@ -1107,7 +1144,18 @@ export class PostgresVoiceLabLedger implements VoiceLabLedger {
 }
 
 
-async function activeRunCounts(database: pg.Pool | pg.PoolClient, callerId: string | null, partitions: string[], excludeRunId: string | null = null): Promise<{ global: number; caller: number }> {
+/** Runs other than `excludeRunId` that can hold a live principal session (non-terminal, or holding a browser lease). */
+async function liveSessionRunCount(database: pg.Pool | pg.PoolClient, excludeRunId: string): Promise<number> {
+  const result = await database.query<{ n: string }>(`select count(*)::text as n from (
+      select r.id from ${SCHEMA}.runs r where r.id<>$1::uuid and (not (r.state=any($2::text[])) or exists (select 1 from ${SCHEMA}.browser_leases b where b.run_id=r.id))
+      union all
+      select c.run_id from ${SCHEMA}.recovery_controls c where c.run_id<>$1::uuid and not exists (select 1 from ${SCHEMA}.runs r where r.id=c.run_id)
+        and exists (select 1 from ${SCHEMA}.browser_leases b where b.run_id=c.run_id)
+    ) live`, [excludeRunId, [...TERMINAL_RUN_STATES]]);
+  return Number(result.rows[0]?.n ?? 0);
+}
+
+async function activeRunCounts(database: pg.Pool | pg.PoolClient, callerId: string | null, partitions: string[]): Promise<{ global: number; caller: number }> {
   const result = await database.query<{ global_count: string; caller_count: string }>(`with active as (
     select r.id,r.caller_id,null::text as caller_partition from ${SCHEMA}.runs r
       where not r.cleanup_complete or not (r.state=any($1::text[]))
@@ -1117,9 +1165,9 @@ async function activeRunCounts(database: pg.Pool | pg.PoolClient, callerId: stri
     select c.run_id,null::text,c.binding->>'callerPartitionId' from ${SCHEMA}.recovery_controls c
       where not exists (select 1 from ${SCHEMA}.runs r where r.id=c.run_id)
         and (not c.live_cleanup_complete or exists (select 1 from ${SCHEMA}.browser_leases b where b.run_id=c.run_id))
-  ) select count(*) filter (where $4::uuid is null or id<>$4::uuid)::text as global_count,
-      count(*) filter (where ($4::uuid is null or id<>$4::uuid) and (caller_id=$2 or caller_partition=any($3::text[])))::text as caller_count from active`,
-  [[...TERMINAL_RUN_STATES], callerId, partitions, excludeRunId]);
+  ) select count(*)::text as global_count,
+      count(*) filter (where caller_id=$2 or caller_partition=any($3::text[]))::text as caller_count from active`,
+  [[...TERMINAL_RUN_STATES], callerId, partitions]);
   return { global: Number(result.rows[0]?.global_count ?? 0), caller: Number(result.rows[0]?.caller_count ?? 0) };
 }
 

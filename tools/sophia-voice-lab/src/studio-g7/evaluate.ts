@@ -703,10 +703,23 @@ export function studioG7CleanupProof(events: Event[]): { exchangeEnded: boolean;
 }
 
 /**
+ * Whether, after the run's Speak intent, its browser is durably closed (or a
+ * dead owner's lease was released as quiesced) and a global sign-out of the
+ * principal was confirmed.
+ */
+export function studioPrincipalLeft(events: Event[]): { browserClosed: boolean; globalSignOutConfirmed: boolean } {
+  const intentSeq = events.filter((event) => event.kind === "studio.exchange.speak_requested" && event.source === "canonical").reduce((latest, event) => Math.max(latest, event.seq), 0);
+  const browserClosed = events.some((event) => event.seq > intentSeq && ((event.kind === "cleanup.browser_context_closed" && event.source === "browser" && event.payload.close_resolved === true && event.payload.browser_registry_absent === true)
+    || (event.kind === "cleanup.browser_lease_released" && event.payload.schema === STUDIO_DEAD_OWNER_LEASE_RELEASE_SCHEMA && event.payload.dead_owner_quiesced === true)));
+  const globalSignOutConfirmed = events.some((event) => event.seq > intentSeq && event.kind === "studio.cleanup.signed_out" && event.source === "canonical" && event.payload.confirmed === true && event.payload.scope === "global");
+  return { browserClosed, globalSignOutConfirmed };
+}
+
+/**
  * The durable exchange join of a run, from its write-ahead events, for a
  * restarted worker. Null when the run never durably requested Speak.
  */
-export function studioDurableJoin(events: Event[], runBindingSha256: string): { exchangeId: string | null; grantId: string | null; runBindingSha256: string; speakRequested: boolean; exchangeOpenedAtMs: number | null; speakRequestedAtMs: number | null } | null {
+export function studioDurableJoin(events: Event[], runBindingSha256: string): { exchangeId: string | null; grantId: string | null; runBindingSha256: string; speakRequested: boolean; exchangeOpenedAtMs: number | null; speakRequestedAtMs: number | null; browserClosed: boolean; globalSignOutConfirmed: boolean } | null {
   const opened = [...events].reverse().find((event) => event.kind === "studio.exchange.opened" && event.source === "canonical" && typeof event.payload.exchange_id === "string") ?? null;
   const intent = [...events].reverse().find((event) => event.kind === "studio.exchange.speak_requested" && event.source === "canonical") ?? null;
   const gate = [...events].reverse().find((event) => event.kind === "studio.grant_gate.passed" && typeof event.payload.grant_id === "string") ?? null;
@@ -719,5 +732,8 @@ export function studioDurableJoin(events: Event[], runBindingSha256: string): { 
     speakRequested: true,
     exchangeOpenedAtMs: typeof opened?.payload.opened_at_lab_ms === "number" ? opened.payload.opened_at_lab_ms : opened ? opened.at.getTime() : null,
     speakRequestedAtMs: typeof intent?.payload.requested_at_lab_ms === "number" ? intent.payload.requested_at_lab_ms : intent ? intent.at.getTime() : null,
+    // Whether the principal has durably left the room since Speak: its
+    // browser close and a confirmed global sign-out, both after the intent.
+    ...studioPrincipalLeft(events),
   };
 }

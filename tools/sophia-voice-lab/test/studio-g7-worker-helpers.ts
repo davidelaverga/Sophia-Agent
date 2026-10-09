@@ -28,7 +28,8 @@ function key(prefix: string, payload: unknown): string { return `${prefix}:${sha
  * records what the worker asked of it. No browser and no network.
  */
 export class ScriptedStudioDriver {
-  session = false;
+  /** Runs whose (scripted) browser session is open on this driver. */
+  readonly sessions = new Set<string>();
   seq = 0;
   ordinal = 0;
   lateSessionClosed = false;
@@ -36,6 +37,10 @@ export class ScriptedStudioDriver {
   readonly calls: string[] = [];
   adopted: DurableStudioJoin | null = null;
   recoverResult: (runId: string) => DriverEvent[] = () => [];
+  /** Runs inside recover() after its read-only checks and before its global sign-out lands. */
+  recoverHook: ((runId: string) => Promise<void>) | null = null;
+  /** Whether End proves ownership and ends the exchange (false: the evidence route is unavailable). */
+  endExchangeConfirmed = true;
   /** The Supabase `expires_in` the start's password grant answered with (seconds). */
   sessionExpiresInS = 3_600;
   /** Whether the evidence refresh's local revoke of its own session succeeds. */
@@ -53,14 +58,14 @@ export class ScriptedStudioDriver {
     return { kind: "studio.outcome.observed", source: "canonical", payload, dedupeKey: key(`studio-outcome:${this.run.id}`, payload) };
   }
 
-  hasSession(): boolean { return this.session; }
+  hasSession(runId: string): boolean { return this.sessions.has(runId); }
   async readiness() { return { ok: true, detail: "fixture", engine: "chromium", version: "fixture" }; }
   async verifyTarget(): Promise<DriverStartResult> { return { observedDeployment: { frontend: STUDIO_SHA, backend: API_SHA } as never, events: [] }; }
   async rotate(): Promise<never> { throw new Error("unsupported"); }
   async continueSession() { return []; }
   async quiesceD02Provider(): Promise<never> { throw new Error("unsupported"); }
   async drain() { return []; }
-  async cancel() { this.session = false; }
+  async cancel(runId: string) { this.sessions.delete(runId); }
   async close() { return undefined; }
   async studioReadiness() { return { ok: true }; }
   adoptStudioJoin(_runId: string, join: DurableStudioJoin): void { this.adopted = join; }
@@ -70,7 +75,9 @@ export class ScriptedStudioDriver {
     const epoch = sha256(`epoch:${run.id}`);
     const acquisition: DriverEvent = { kind: "harness.browser_process_acquired", source: "browser", payload: { schema: "sophia_voice_lab_browser_process_ownership_v1", voice_lab_run_id_sha256: sha256(run.id), cleanup_obligation_id_sha256: sha256(run.cleanupObligationId), process_id_sha256: sha256("pid"), browser_boot_id_sha256: sha256("boot"), execution_epoch_sha256: epoch, started_at: new Date().toISOString(), one_process_per_run: true, raw_process_id_excluded: true }, dedupeKey: `browser-process:${epoch}` };
     await acquired(acquisition, { engine: "chromium", version: "fixture" });
-    this.session = true;
+    this.sessions.add(run.id);
+    this.seq = 0;
+    this.ordinal = 0;
     const binding = computeRunBindingSha256({ testRunId: run.testRunId, cleanupObligationId: run.cleanupObligationId, scenarioId: run.scenarioId!, scenarioVersion: run.scenarioVersion! });
     const mic = canonicalJson(pageReceipt(run, "mic_published", Date.now()));
     const intent: DriverEvent = { kind: "studio.exchange.speak_requested", source: "canonical", payload: { grant_id: GRANT_UUID, run_binding_sha256: binding, write_ahead: true }, dedupeKey: `studio-speak-requested:${run.id}` };
@@ -140,11 +147,13 @@ export class ScriptedStudioDriver {
 
   async end(run: RunRecord): Promise<DriverEndResult> {
     this.calls.push("end");
-    this.session = false;
+    this.sessions.delete(run.id);
     const late = this.lateSessionClosed ? [] : this.closing(run);
     return { artifacts: [], events: [
       this.#outcome("final", [{ task_id: DESIGN, kind: "design", state: "succeeded", phase: "result_ready", design: { state: "published", mode: "create", artifact_id: ARTIFACT, published_version_id: VERSION_1 } }], [{ artifact_id: ARTIFACT, version_id: VERSION_1, task_id: DESIGN, status: "verified", downloaded_sha256: sha256("v1"), hashes_agree: true }]),
-      { kind: "studio.cleanup.exchange_ended", source: "canonical", payload: { confirmed: true, status: "confirmed", basis: "api_end", exchange_id: EXCHANGE_UUID, join: "retained", ownership: "proven", verified_by: "member_snapshot", speak_requested_before_observation: true }, dedupeKey: `ended:${run.id}` },
+      this.endExchangeConfirmed
+        ? { kind: "studio.cleanup.exchange_ended", source: "canonical", payload: { confirmed: true, status: "confirmed", basis: "api_end", exchange_id: EXCHANGE_UUID, join: "retained", ownership: "proven", verified_by: "member_snapshot", speak_requested_before_observation: true }, dedupeKey: `ended:${run.id}` }
+        : { kind: "studio.cleanup.exchange_ended", source: "canonical", payload: { confirmed: false, status: "unavailable", basis: "ownership_unproven_not_touched", exchange_id: EXCHANGE_UUID, join: "retained", ownership: "unavailable", verified_by: "member_snapshot", speak_requested_before_observation: true }, dedupeKey: `ended-unproven:${run.id}` },
       ...late,
       { kind: "studio.deployment.identity", source: "canonical", payload: { phase: "final", api: { status: "observed", commit: API_SHA }, studio: { status: "observed", commit: STUDIO_SHA } }, dedupeKey: `studio-identity:${run.id}:final` },
       { kind: "studio.cleanup.signed_out", source: "canonical", payload: { schema: "sophia_voice_lab_studio_sign_out_v1", scope: "global", confirmed: true, http_status: 204, basis: "global_logout_accepted" }, dedupeKey: `signed-out:${run.id}` },
@@ -172,8 +181,8 @@ export class ScriptedStudioDriver {
   /** Abort with an ownership-proven exchange: the real driver ends it, signs out and closes the browser. */
   async abort(run: RunRecord, reason: string): Promise<DriverEndResult> {
     this.calls.push(`abort:${reason}`);
-    const had = this.session;
-    this.session = false;
+    const had = this.sessions.has(run.id);
+    this.sessions.delete(run.id);
     if (!had) return { events: [], artifacts: [] };
     return { artifacts: [], events: [
       { kind: "studio.cleanup.exchange_ended", source: "canonical", payload: { confirmed: true, status: "confirmed", basis: "api_end", exchange_id: EXCHANGE_UUID, join: "retained", ownership: "proven", verified_by: "member_snapshot", speak_requested_before_observation: true }, dedupeKey: `abort-ended:${run.id}` },
@@ -181,7 +190,11 @@ export class ScriptedStudioDriver {
       { kind: "cleanup.browser_context_closed", source: "browser", payload: { schema: "sophia_voice_lab_execution_epoch_browser_cleanup_v1", close_resolved: true, browser_registry_absent: true, browser_process_close_resolved: true, browser_process_disconnected: true, reason }, dedupeKey: `cleanup:${run.id}:browser` },
     ] };
   }
-  async recover(binding: { id: string }): Promise<DriverEndResult> { this.calls.push("recover"); return { events: this.recoverResult(binding.id), artifacts: [] }; }
+  async recover(binding: { id: string }): Promise<DriverEndResult> {
+    this.calls.push("recover");
+    await this.recoverHook?.(binding.id);
+    return { events: this.recoverResult(binding.id), artifacts: [] };
+  }
 }
 
 export const SCRIPTED_IDS = { ARTIFACT, VERSION_1, VERSION_2, DESIGN, EDIT, RESEARCH };

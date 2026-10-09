@@ -65,6 +65,18 @@ async function episode(h: Harness): Promise<void> {
   expect((await action(h, { action: "withdrawal" })).data).toMatchObject({ performed: true });
 }
 
+/** Recovery results with a fresh global sign-out per call (as the real driver records them). */
+function pgFreshRecovery() {
+  let call = 0;
+  return (id: string) => {
+    call += 1;
+    return [
+      { kind: "studio.cleanup.exchange_ended", source: "canonical" as const, payload: { confirmed: true, status: "confirmed", basis: "run_exchange_not_live", exchange_id: EXCHANGE_UUID, join: "durable", ownership: "not_required", verified_by: "member_snapshot", speak_requested_before_observation: true, call }, dedupeKey: `pg-fresh-ended:${id}:${call}` },
+      { kind: "studio.cleanup.signed_out", source: "canonical" as const, payload: { schema: "sophia_voice_lab_studio_sign_out_v1", scope: "global", confirmed: true, http_status: 204, basis: "global_logout_accepted", session_basis: "fresh_grant", sign_out_id: `pg-fresh-${id}-${call}` }, dedupeKey: `pg-fresh-signed-out:${id}:${call}` },
+    ];
+  };
+}
+
 selected("real PostgreSQL Studio G7 worker branches (schema v7)", () => {
   beforeEach(async () => {
     const parsed = new URL(url);
@@ -248,6 +260,94 @@ selected("real PostgreSQL Studio G7 worker branches (schema v7)", () => {
     // worker's clock is never consulted for that gate.
     expect(driverB.calls.filter((call) => call === "recover").length - before).toBe(0);
     expect(await ledger.getBrowserLease(a.runId)).not.toBeNull();
+  }, 120_000);
+
+  it("never deadlocks on PostgreSQL: a terminal run with a closed browser does not block a live run's recovery (third review P2)", async () => {
+    const h = await harness("pg-deadlock");
+    h.driver.lateSessionClosed = true;
+    h.driver.refreshRevokeConfirmed = false;
+    await episode(h);
+    await drive(h, h.service.endVoiceRun(caller, { run_id: h.runId, idempotency_key: newIdempotencyKey("pg-deadlock-end-1"), wait_timeout_ms: 5_000 }));
+    expect(await ledger.getRun(h.runId)).toMatchObject({ state: "pending_external_evidence", cleanupComplete: true });
+    const second = await h.service.startStudioG7Run(caller, { ...START, idempotency_key: newIdempotencyKey("pg-deadlock-second") });
+    const run2Id = second.run_id!;
+    await h.worker.runOnce();
+    expect(await ledger.getRun(run2Id)).toMatchObject({ state: "ready" });
+    h.driver.recoverResult = pgFreshRecovery();
+    await h.worker.maintainSessions();
+    expect(h.driver.calls).not.toContain("recover");
+    // Run 1's certification deadline passes (database clock) while run 2 is live.
+    await ledger.pool.query("update sophia_voice_lab.runs set expires_at=clock_timestamp()-interval '1 second' where id=$1", [h.runId]);
+    await h.worker.maintainSessions();
+    expect(await ledger.getRun(h.runId)).toMatchObject({ state: "failed_harness", cleanupComplete: false });
+    // Run 2's End cannot prove ownership: an API-only re-verification is needed.
+    h.driver.endExchangeConfirmed = false;
+    const endKey = newIdempotencyKey("pg-deadlock-end-2");
+    await h.service.queueRunOperation(caller, run2Id, "end", endKey, { run_id: run2Id, idempotency_key: endKey });
+    for (let step = 0; step < 5 && await h.worker.runOnce(); step += 1) { /* execute the End */ }
+    for (let pass = 0; pass < 6; pass += 1) {
+      const [first, latest] = [await ledger.getRun(h.runId), await ledger.getRun(run2Id)];
+      if (first?.cleanupComplete && latest?.cleanupComplete) break;
+      await h.worker.maintainSessions();
+    }
+    expect(await ledger.getRun(run2Id)).toMatchObject({ cleanupComplete: true });
+    expect(await ledger.getRun(h.runId)).toMatchObject({ state: "failed_harness", cleanupComplete: true });
+    expect((await h.service.startStudioG7Run(caller, { ...START, idempotency_key: newIdempotencyKey("pg-deadlock-third") })).status).toBe("accepted");
+  }, 120_000);
+
+  it("refuses an admission that arrives while a global sign-out is in flight on PostgreSQL (third review P3 residual 2)", async () => {
+    const h = await harness("pg-fence-worker");
+    h.driver.lateSessionClosed = true;
+    h.driver.refreshRevokeConfirmed = false;
+    await episode(h);
+    await drive(h, h.service.endVoiceRun(caller, { run_id: h.runId, idempotency_key: newIdempotencyKey("pg-fence-end"), wait_timeout_ms: 5_000 }));
+    expect(await ledger.getRun(h.runId)).toMatchObject({ state: "pending_external_evidence", cleanupComplete: true });
+    let admission: unknown = null;
+    h.driver.recoverHook = async () => { admission = await h.service.startStudioG7Run(caller, { ...START, idempotency_key: newIdempotencyKey("pg-racing-start") }).catch((error: unknown) => error); };
+    h.driver.recoverResult = pgFreshRecovery();
+    await h.worker.maintainSessions();
+    expect(h.driver.calls).toContain("recover");
+    expect(admission).toMatchObject({ detail: { code: "STUDIO_GLOBAL_SIGNOUT_PENDING" } });
+    expect(await ledger.getRun(h.runId)).toMatchObject({ state: "completed", cleanupComplete: true });
+    expect((await h.service.startStudioG7Run(caller, { ...START, idempotency_key: newIdempotencyKey("pg-after-fence") })).status).toBe("accepted");
+  }, 120_000);
+
+  it("serializes the global sign-out fence with admission for two interleaved callers (third review P3 residual 2)", async () => {
+    const h = await harness("pg-fence-ledger");
+    const config = studioTestConfig(undefined, { SOPHIA_VOICE_LAB_MAX_CONCURRENT_RUNS: "1" });
+    const service = new VoiceLabService(ledger, config, async () => []);
+    // Run 1 awaits evidence with its cleanup complete: it holds no admission and no live session.
+    const settleRun1 = async () => {
+      await ledger.pool.query("update sophia_voice_lab.runs set state='pending_external_evidence',cleanup_complete=true where id=$1", [h.runId]);
+      await ledger.pool.query("update sophia_voice_lab.recovery_controls set live_cleanup_complete=true where run_id=$1", [h.runId]);
+      await ledger.pool.query("update sophia_voice_lab.operations set state='cancelled' where run_id=$1 and state in ('queued','leased','executing')", [h.runId]);
+    };
+    await settleRun1();
+    let refused = 0, deferred = 0;
+    for (let round = 0; round < 8; round += 1) {
+      const markerId = randomUUID();
+      const order = round % 3;
+      const fence = () => ledger.beginStudioGlobalSignOut(h.runId, markerId);
+      const admit = () => service.startStudioG7Run(caller, { ...START, idempotency_key: newIdempotencyKey(`pg-interleave-${round}`) });
+      let fenceResult: { granted: boolean } | null = null;
+      let admission: unknown;
+      if (order === 0) { fenceResult = await fence(); admission = await admit().catch((error: unknown) => error); }
+      else if (order === 1) { admission = await admit().catch((error: unknown) => error); fenceResult = await fence(); }
+      else { const [a, b] = await Promise.all([fence(), admit().catch((error: unknown) => error)]); fenceResult = a; admission = b; }
+      const admitted = (admission as { status?: string }).status === "accepted";
+      // Never both: an admission is refused while the fence is set, and the fence is never granted over a live run.
+      expect(fenceResult!.granted && admitted, `round ${round}`).toBe(false);
+      expect(fenceResult!.granted || admitted, `round ${round}`).toBe(true);
+      if (fenceResult!.granted) { refused += 1; expect(admission, `round ${round}`).toMatchObject({ detail: { code: "STUDIO_GLOBAL_SIGNOUT_PENDING" } }); await ledger.endStudioGlobalSignOut(h.runId, markerId, "abandoned"); }
+      else deferred += 1;
+      // Reset: the admitted run (if any) ends; run 1 is back to awaiting evidence.
+      await ledger.pool.query("update sophia_voice_lab.runs set state='aborted_driver_restart',cleanup_complete=true where id<>$1 and state not in ('aborted_driver_restart','completed')", [h.runId]);
+      await ledger.pool.query("update sophia_voice_lab.recovery_controls set live_cleanup_complete=true where run_id<>$1", [h.runId]);
+      await ledger.pool.query("update sophia_voice_lab.operations set state='cancelled' where state in ('queued','leased','executing')");
+      await settleRun1();
+    }
+    expect(refused).toBeGreaterThan(0);
+    expect(deferred).toBeGreaterThan(0);
   }, 120_000);
 
   it("re-checks a G7 step when the worker executes it: a second operation of a performed step is refused (P3-3)", async () => {

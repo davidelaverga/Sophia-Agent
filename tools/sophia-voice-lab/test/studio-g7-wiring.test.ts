@@ -10,7 +10,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { AudioResolver } from "../src/audio.js";
 import type { VoiceBrowserDriver } from "../src/browser-driver.js";
 import type { VoiceLabConfig } from "../src/config.js";
-import { VoiceLabError, type LabEnvelope } from "../src/domain.js";
+import { TERMINAL_RUN_STATES as TERMINAL, VoiceLabError, type LabEnvelope } from "../src/domain.js";
 import type { VoiceLabLedger } from "../src/ledger.js";
 import { MemoryVoiceLabLedger } from "../src/memory-ledger.js";
 import { CapabilityCodec, sha256, type AuthenticatedCaller } from "../src/security.js";
@@ -125,8 +125,8 @@ describe("target-kind wiring in the service", () => {
 
 interface Harness { config: VoiceLabConfig; ledger: VoiceLabLedger; service: VoiceLabService; driver: ScriptedStudioDriver; worker: VoiceLabWorker; runId: string }
 
-async function harness(workerId = "studio-worker", ledger: VoiceLabLedger = new MemoryVoiceLabLedger("test")): Promise<Harness> {
-  const config = studioTestConfig();
+async function harness(workerId = "studio-worker", ledger: VoiceLabLedger = new MemoryVoiceLabLedger("test"), overrides: NodeJS.ProcessEnv = {}): Promise<Harness> {
+  const config = studioTestConfig(undefined, overrides);
   const audio = new AudioResolver(config);
   await audio.initialize();
   const service = new VoiceLabService(ledger, config, async () => audio.summaries());
@@ -566,5 +566,89 @@ describe("adversarial re-review: forced recoveries are spaced (new P3)", () => {
     for (let pass = 0; pass < 5; pass += 1) { await workerB.worker.maintainSessions(); await advance(2_000); }
     expect(workerB.driver.calls.filter((call) => call === "recover").length - before).toBe(1);
     expect(await ledger.getBrowserLease(runId)).not.toBeNull();
+  }, 60_000);
+});
+
+/** Recovery results with a fresh global sign-out per call (as the real driver now records). */
+function freshRecovery(): (id: string) => Array<{ kind: string; source: "canonical"; payload: Record<string, unknown>; dedupeKey: string }> {
+  let call = 0;
+  return (id) => {
+    call += 1;
+    return [
+      { kind: "studio.cleanup.exchange_ended", source: "canonical", payload: { confirmed: true, status: "confirmed", basis: "run_exchange_not_live", exchange_id: EXCHANGE_UUID, join: "durable", ownership: "not_required", verified_by: "member_snapshot", speak_requested_before_observation: true, call }, dedupeKey: `fresh-ended:${id}:${call}` },
+      { kind: "studio.cleanup.signed_out", source: "canonical", payload: { schema: "sophia_voice_lab_studio_sign_out_v1", scope: "global", confirmed: true, http_status: 204, basis: "global_logout_accepted", session_basis: "fresh_grant", sign_out_id: `fresh-${id}-${call}` }, dedupeKey: `fresh-signed-out:${id}:${call}` },
+    ];
+  };
+}
+
+describe("adversarial third review: no admission deadlock, fenced global sign-out", () => {
+  it("never deadlocks: a terminal run with a closed browser does not block a live run's recovery (P2)", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date());
+    const advance = async (ms: number) => { vi.setSystemTime(new Date(Date.now() + ms)); };
+    // Short runs (120 s TTL) so the deadline is reached while run 2's lease is heartbeated.
+    const h = await harness("deadlock-worker", new MemoryVoiceLabLedger("test"), { SOPHIA_VOICE_LAB_MAX_RUN_SECONDS: "120" });
+    // 1. Run 1 ends pending external evidence; its refresh session's local revoke fails three times.
+    h.driver.lateSessionClosed = true;
+    h.driver.refreshRevokeConfirmed = false;
+    await episode(h);
+    await end(h);
+    expect(await h.ledger.getRun(h.runId)).toMatchObject({ state: "pending_external_evidence", cleanupComplete: true });
+    // 2. Run 2 is admitted and starts; run 1's global sign-out is deferred.
+    await advance(60_000);
+    const second = await h.service.startStudioG7Run(caller, { ...START, idempotency_key: newIdempotencyKey("deadlock-second") });
+    const run2Id = second.run_id!;
+    await h.worker.runOnce();
+    expect(await h.ledger.getRun(run2Id)).toMatchObject({ state: "ready" });
+    h.driver.recoverResult = freshRecovery();
+    await h.worker.maintainSessions();
+    expect(h.driver.calls).not.toContain("recover");
+    // 3. Run 1's certification deadline passes while run 2 is live.
+    const run1 = (await h.ledger.getRun(h.runId))!;
+    const run2 = (await h.ledger.getRun(run2Id))!;
+    expect(run1.expiresAt.getTime()).toBeLessThan(run2.expiresAt.getTime());
+    while (Date.now() <= run1.expiresAt.getTime()) {
+      await advance(Math.min(15_000, run1.expiresAt.getTime() + 1_000 - Date.now()));
+      await h.worker.maintainSessions();
+    }
+    expect(await h.ledger.getRun(h.runId)).toMatchObject({ state: "failed_harness", cleanupComplete: false });
+    // 4. Run 2's End cannot prove ownership: it needs an API-only re-verification.
+    h.driver.endExchangeConfirmed = false;
+    // (Queued without the service's settlement wait, whose deadline would read the frozen test clock.)
+    const endKey = newIdempotencyKey("deadlock-end");
+    await h.service.queueRunOperation(caller, run2Id, "end", endKey, { run_id: run2Id, idempotency_key: endKey });
+    for (let step = 0; step < 5 && await h.worker.runOnce(); step += 1) { /* execute the End */ }
+    // 5. Bounded simulated time: both runs settle, then run 3 is admitted.
+    for (let pass = 0; pass < 12; pass += 1) {
+      const [first, latest] = [await h.ledger.getRun(h.runId), await h.ledger.getRun(run2Id)];
+      if (first?.cleanupComplete && latest?.cleanupComplete && TERMINAL.has(latest.state)) break;
+      await advance(40_000);
+      await h.worker.maintainSessions();
+    }
+    expect(await h.ledger.getRun(run2Id)).toMatchObject({ cleanupComplete: true });
+    expect(await h.ledger.getRun(h.runId)).toMatchObject({ state: "failed_harness", cleanupComplete: true });
+    const third = await h.service.startStudioG7Run(caller, { ...START, idempotency_key: newIdempotencyKey("deadlock-third") });
+    expect(third.status).toBe("accepted");
+  }, 120_000);
+
+  it("refuses an admission that arrives while a global sign-out is in flight, instead of revoking it (P3 residual 2)", async () => {
+    const h = await harness("fence-worker");
+    h.driver.lateSessionClosed = true;
+    h.driver.refreshRevokeConfirmed = false;
+    await episode(h);
+    await end(h);
+    expect(await h.ledger.getRun(h.runId)).toMatchObject({ state: "pending_external_evidence", cleanupComplete: true });
+    // No other run holds a live session: the worker resolves the unrevoked
+    // refresh session with a global sign-out. A start arrives meanwhile.
+    let admission: unknown = null;
+    h.driver.recoverHook = async () => { admission = await h.service.startStudioG7Run(caller, { ...START, idempotency_key: newIdempotencyKey("racing-start") }).catch((error: unknown) => error); };
+    h.driver.recoverResult = freshRecovery();
+    await h.worker.maintainSessions();
+    expect(h.driver.calls).toContain("recover");
+    expect(admission).toMatchObject({ detail: { code: "STUDIO_GLOBAL_SIGNOUT_PENDING" } });
+    // The sign-out landed, the marker cleared: run 1 completes and admission reopens.
+    expect(await h.ledger.getRun(h.runId)).toMatchObject({ state: "completed", cleanupComplete: true });
+    const next = await h.service.startStudioG7Run(caller, { ...START, idempotency_key: newIdempotencyKey("after-fence") });
+    expect(next.status).toBe("accepted");
   }, 60_000);
 });

@@ -1,5 +1,6 @@
 import { decideStudioDeadOwnerRelease } from "./studio-g7/lease-release.js";
 import { studioStepConflict } from "./studio-g7/step-guard.js";
+import { STUDIO_GLOBAL_SIGNOUT_CLEARED_KIND, STUDIO_GLOBAL_SIGNOUT_PENDING_CODE, STUDIO_GLOBAL_SIGNOUT_PENDING_KIND, studioGlobalSignOutPending } from "./studio-g7/sign-out-fence.js";
 import { deriveExecutionOwnership } from "./execution-ownership.js";
 import { canonicalEvidenceRefreshDue } from "./canonical-evidence-refresh.js";
 import { ingestGenericOwnerLoss } from "./generic-owner-loss.js";
@@ -76,9 +77,34 @@ export class MemoryVoiceLabLedger implements VoiceLabLedger {
     return !TERMINAL_RUN_STATES.has(run.state) || !run.cleanupComplete
       || this.#recoveryControls.get(run.id)?.liveCleanupComplete === false || this.#browserLeases.has(run.id);
   }
-  async countActiveRunsExcept(runId: string): Promise<number> {
-    const retained = [...this.#recoveryControls.values()].filter((control) => control.binding.runId !== runId && !this.#runs.has(control.binding.runId) && (!control.liveCleanupComplete || this.#browserLeases.has(control.binding.runId))).length;
-    return retained + [...this.#runs.values()].filter((run) => run.id !== runId && this.#runRequiresAdmission(run)).length;
+  #liveSessionRunsExcept(runId: string): number {
+    const retained = [...this.#recoveryControls.values()].filter((control) => control.binding.runId !== runId && !this.#runs.has(control.binding.runId) && this.#browserLeases.has(control.binding.runId)).length;
+    return retained + [...this.#runs.values()].filter((run) => run.id !== runId && (!TERMINAL_RUN_STATES.has(run.state) || this.#browserLeases.has(run.id))).length;
+  }
+  async countLiveSessionRunsExcept(runId: string): Promise<number> { return this.#liveSessionRunsExcept(runId); }
+  async beginStudioGlobalSignOut(runId: string, markerId: string): Promise<{ granted: boolean; liveSessionRuns: number }> {
+    // One synchronous section (no await): atomic with createRunWithOperation.
+    const run = this.#runs.get(runId);
+    if (!run) throw notFound("RUN_NOT_FOUND", "Run was not found.");
+    const liveSessionRuns = this.#liveSessionRunsExcept(runId);
+    if (liveSessionRuns > 0) return { granted: false, liveSessionRuns };
+    const previousCleanupComplete = run.cleanupComplete;
+    if (run.cleanupComplete) {
+      run.cleanupComplete = false;
+      run.version += 1;
+      const control = this.#recoveryControls.get(runId);
+      if (control) { control.liveCleanupComplete = false; control.version += 1; }
+    }
+    const events = this.#events.get(runId) ?? [];
+    const now = new Date();
+    events.push({ runId, seq: events.length + 1, kind: STUDIO_GLOBAL_SIGNOUT_PENDING_KIND, source: "worker", at: now, payload: { marker_id: markerId, previous_cleanup_complete: previousCleanupComplete }, dedupeKey: `studio-global-sign-out-pending:${runId}:${markerId}` });
+    this.#events.set(runId, events);
+    run.latestCursor = events.length;
+    run.updatedAt = now;
+    return { granted: true, liveSessionRuns: 0 };
+  }
+  async endStudioGlobalSignOut(runId: string, markerId: string, outcome: "confirmed" | "abandoned"): Promise<void> {
+    await this.appendEvent(runId, STUDIO_GLOBAL_SIGNOUT_CLEARED_KIND, "worker", { marker_id: markerId, outcome }, `studio-global-sign-out-cleared:${runId}:${markerId}`);
   }
   async countActiveRuns(callerId?: string): Promise<number> {
     const partitions = callerId === undefined ? null : new Set(this.#callerPartitions.callerIds(callerId));
@@ -352,6 +378,10 @@ export class MemoryVoiceLabLedger implements VoiceLabLedger {
     // Do not await between admission and insertion: the memory transaction must
     // remain atomic even when multiple callers submit starts in one tick.
     const active = [...this.#runs.values()].filter((candidate) => this.#runRequiresAdmission(candidate));
+    // A Studio global sign-out in flight: a run admitted now could have its tokens revoked.
+    if (active.some((candidate) => !candidate.cleanupComplete && studioGlobalSignOutPending(this.#events.get(candidate.id) ?? []))) {
+      throw conflict(STUDIO_GLOBAL_SIGNOUT_PENDING_CODE, "A global sign-out of the Studio principal is in progress; admission waits for it.");
+    }
     const retained = [...this.#recoveryControls.values()].filter((control) => !this.#runs.has(control.binding.runId) && (!control.liveCleanupComplete || this.#browserLeases.has(control.binding.runId)));
     const partitions = new Set(this.#callerPartitions.callerIds(operation.callerId));
     if (active.length + retained.length >= limits.global || active.filter((candidate) => candidate.callerId === operation.callerId).length + retained.filter((control) => partitions.has(control.binding.callerPartitionId)).length >= limits.caller) throw conflict("CONCURRENCY_LIMIT", "Voice Lab concurrency limit is reached.");

@@ -51,7 +51,7 @@ export const STUDIO_DATABASE_CLOCK_EVENT_KINDS: readonly string[] = ["studio.cle
 export const STUDIO_DEAD_OWNER_DECISION_EVENT_KINDS: readonly string[] = [
   "studio.cleanup.signed_out", STUDIO_DEAD_OWNER_VERIFIED_KIND, "studio.auth.session_established",
   "harness.browser_process_acquired", "harness.browser_runtime_acquired", "cleanup.browser_context_closed",
-  "studio.cleanup.exchange_ended", "studio.exchange.opened", "studio.exchange.speak_requested",
+  "studio.cleanup.exchange_ended", "studio.exchange.opened", "studio.exchange.speak_requested", "cleanup.browser_lease_released",
 ];
 
 type DecisionEvent = Pick<LabEvent, "kind" | "source" | "payload" | "at" | "seq">;
@@ -109,19 +109,30 @@ const JOINED_EXCHANGE_END_BASES: ReadonlySet<string> = new Set(["run_exchange_no
  * read-only member-API read (never the driver's own "never requested"), and
  * - with a joined exchange: names that exchange and a basis that observed it
  *   not live (or ended it by id);
- * - with no join: observed nothing live AFTER the open window (an exchange
- *   Speak requested may still open until then).
+ * - with no join: saw nothing live AFTER the principal left the room, i.e.
+ *   after the run's browser close and a confirmed global sign-out, both
+ *   stamped on the observation and both durable in the ledger after Speak. No
+ *   time window is used: a window cannot prove an exchange will not open
+ *   later, and clocks of different workers are never compared. If that can
+ *   never be observed, the run stays not cleanup-complete.
  * Without any Speak intent, the run never asked for an exchange and any
  * confirmed end stands.
  */
-function countsForRunExchange(event: DecisionEvent, intent: DecisionEvent | null, opened: DecisionEvent | null): boolean {
+function countsForRunExchange(event: DecisionEvent, intent: DecisionEvent | null, opened: DecisionEvent | null, principalLeftDurably: boolean): boolean {
   if (!intent && !opened) return true;
   const payload = event.payload;
   if (payload.verified_by !== "member_snapshot" || payload.speak_requested_before_observation !== true) return false;
   if (opened) return typeof payload.basis === "string" && JOINED_EXCHANGE_END_BASES.has(payload.basis) && payload.exchange_id === opened.payload.exchange_id;
-  const observedAt = payload.observed_at_lab_ms, requestedAt = payload.speak_requested_at_lab_ms, window = payload.open_window_ms;
-  return payload.basis === "no_live_exchange_after_open_window" && typeof observedAt === "number" && typeof requestedAt === "number" && typeof window === "number"
-    && window > 0 && observedAt >= requestedAt + window;
+  return payload.basis === "no_live_exchange_after_principal_left" && payload.browser_closed_before_observation === true && payload.signed_out_before_observation === true && principalLeftDurably;
+}
+
+/** After the Speak intent: the run's browser durably closed (or quiesced) and a confirmed global sign-out. */
+function principalLeftDurably(events: ReadonlyArray<DecisionEvent>, intent: DecisionEvent | null): boolean {
+  const after = intent?.seq ?? 0;
+  const closed = events.some((event) => event.seq > after && ((event.kind === "cleanup.browser_context_closed" && event.source === "browser" && event.payload.close_resolved === true && event.payload.browser_registry_absent === true)
+    || (event.kind === "cleanup.browser_lease_released" && event.payload.schema === STUDIO_DEAD_OWNER_LEASE_RELEASE_SCHEMA && event.payload.dead_owner_quiesced === true)));
+  const signedOut = events.some((event) => event.seq > after && event.kind === "studio.cleanup.signed_out" && event.source === "canonical" && event.payload.confirmed === true && event.payload.scope === "global");
+  return closed && signedOut;
 }
 
 /** The confirmed end that counts for the run's exchange (see countsForRunExchange), or null. */
@@ -129,8 +140,9 @@ export function studioExchangeEndAfterJoin<T extends DecisionEvent>(events: Read
   const anchor = studioExchangeJoinAnchorSeq(events);
   const intent = events.find((event) => event.kind === "studio.exchange.speak_requested" && event.source === "canonical") ?? null;
   const opened = [...events].filter((event) => event.kind === "studio.exchange.opened" && event.source === "canonical" && typeof event.payload.exchange_id === "string").sort((left, right) => right.seq - left.seq)[0] ?? null;
+  const left = principalLeftDurably(events, intent);
   return events.find((event) => event.kind === "studio.cleanup.exchange_ended" && event.source === "canonical" && event.payload.confirmed === true
-    && event.seq > anchor && countsForRunExchange(event, intent, opened)) ?? null;
+    && event.seq > anchor && countsForRunExchange(event, intent, opened, left)) ?? null;
 }
 
 /**

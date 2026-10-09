@@ -220,8 +220,20 @@ export interface VoiceLabLedger {
   close(): Promise<void>;
   health(): Promise<LedgerHealth>;
   countActiveRuns(callerId?: string): Promise<number>;
-  /** Runs (and retained controls) holding admission, other than `runId`. */
-  countActiveRunsExcept(runId: string): Promise<number>;
+  /**
+   * Runs other than `runId` that can hold a live principal session: not in a
+   * terminal state, or still holding a browser lease (retained controls with a
+   * lease included). A terminal run whose browser is closed is not counted.
+   */
+  countLiveSessionRunsExcept(runId: string): Promise<number>;
+  /**
+   * Studio global sign-out fence (studio-g7/sign-out-fence.ts): atomically with
+   * admission, grant only when no other run can hold a live session; then the
+   * run holds admission and a pending marker makes admission refuse with
+   * STUDIO_GLOBAL_SIGNOUT_PENDING until endStudioGlobalSignOut.
+   */
+  beginStudioGlobalSignOut(runId: string, markerId: string): Promise<{ granted: boolean; liveSessionRuns: number }>;
+  endStudioGlobalSignOut(runId: string, markerId: string, outcome: "confirmed" | "abandoned"): Promise<void>;
   listExpiredRuns(now: Date, limit: number): Promise<RunRecord[]>;
   listRunsNeedingRecovery(limit: number, afterRunId?: string): Promise<RunRecord[]>;
   listRunsPendingEvidence(limit: number): Promise<RunRecord[]>;

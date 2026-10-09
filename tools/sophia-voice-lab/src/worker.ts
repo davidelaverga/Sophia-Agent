@@ -1989,7 +1989,7 @@ export class VoiceLabWorker {
     await this.ledger.settleRecoveryControl(binding.runId, control.version, completed, attempt);
   }
 
-  async #recoverRun(run: RunRecord, options: { force?: boolean } = {}): Promise<Awaited<ReturnType<VoiceBrowserDriver["recover"]>>> {
+  async #recoverRun(run: RunRecord, options: { force?: boolean; principalQuiesced?: boolean } = {}): Promise<Awaited<ReturnType<VoiceBrowserDriver["recover"]>>> {
     if (isStudioG7Run(run)) {
       // One API-only recovery (end the exchange, global sign-out); skipped
       // once the Studio cleanup proof is already durable for a closed browser,
@@ -2019,20 +2019,41 @@ export class VoiceLabWorker {
       if (!this.driver.hasSession(run.id) && lastAttempt && lastAttempt.at.getTime() > Date.now() - STUDIO_EXCHANGE_REVERIFY_BACKOFF_MS) {
         return { events: [], artifacts: [] };
       }
-      // A global sign-out would revoke the tokens of any other run of the
-      // principal that holds admission now (e.g. a run admitted while this one
-      // awaited evidence): defer until it no longer does.
-      if (!this.driver.hasSession(run.id) && await this.ledger.countActiveRunsExcept(run.id) > 0) {
-        this.logger.warn({ run_id_sha256: sha256(run.id) }, "studio API-only recovery deferred: another run holds admission");
-        return { events: [], artifacts: [] };
+      // The API-only recovery ends in a global sign-out, which would revoke
+      // the tokens of any other run of the principal that can hold a live
+      // session. The ledger's fence (studio-g7/sign-out-fence.ts) grants it,
+      // atomically with admission, only when no such run exists (a terminal
+      // run whose browser is closed never blocks it), and refuses admission
+      // until the sign-out is done.
+      const markerId = randomUUID();
+      const fenced = !this.driver.hasSession(run.id);
+      if (fenced) {
+        const fence = await this.ledger.beginStudioGlobalSignOut(run.id, markerId);
+        if (!fence.granted) {
+          this.logger.warn({ run_id_sha256: sha256(run.id), live_session_runs: fence.liveSessionRuns }, "studio API-only recovery deferred: another run can hold a live principal session");
+          return { events: [], artifacts: [] };
+        }
+        await this.ledger.appendEvent(run.id, STUDIO_RECOVERY_ATTEMPT_EVENT, "worker", { attempt_id: randomUUID(), prior_exchange_status: typeof lastSettlement?.payload.status === "string" ? lastSettlement.payload.status : null }, `studio-recovery-attempt:${run.id}:${randomUUID()}`);
       }
-      if (!this.driver.hasSession(run.id)) await this.ledger.appendEvent(run.id, STUDIO_RECOVERY_ATTEMPT_EVENT, "worker", { attempt_id: randomUUID(), prior_exchange_status: typeof lastSettlement?.payload.status === "string" ? lastSettlement.payload.status : null }, `studio-recovery-attempt:${run.id}:${randomUUID()}`);
       // Hand the durable write-ahead join to the driver (it may have
       // restarted). Without one, the driver touches nothing: it only
-      // verifies, read-only, that no exchange is live in the room.
+      // verifies, read-only, that no exchange is live in the room. The join
+      // carries whether the principal has durably left (browser closed and a
+      // global sign-out confirmed after Speak), or, for a dead owner past its
+      // token lifetime, can no longer act at all.
       const join = studioDurableJoin(studioEvents, studioRunBinding(run));
+      if (join && options.principalQuiesced) { join.browserClosed = true; join.globalSignOutConfirmed = true; }
       if (join && hasStudioExtensions(this.driver)) this.driver.adoptStudioJoin(run.id, join);
-      return this.driver.recover(recoveryTransportBinding({ runId: run.id, testRunId: run.testRunId, cleanupObligationId: run.cleanupObligationId, gatewayOrigin: run.target.gatewayUrl }), "studio-g7-recovery-uses-principal-session");
+      let recovered: Awaited<ReturnType<VoiceBrowserDriver["recover"]>> | null = null;
+      try {
+        recovered = await this.driver.recover(recoveryTransportBinding({ runId: run.id, testRunId: run.testRunId, cleanupObligationId: run.cleanupObligationId, gatewayOrigin: run.target.gatewayUrl }), "studio-g7-recovery-uses-principal-session");
+        return recovered;
+      } finally {
+        if (fenced) {
+          const signedOut = recovered?.events.some((event) => event.kind === "studio.cleanup.signed_out" && event.payload.confirmed === true && event.payload.scope === "global") === true;
+          await this.ledger.endStudioGlobalSignOut(run.id, markerId, signedOut ? "confirmed" : "abandoned");
+        }
+      }
     }
     const combined: Awaited<ReturnType<VoiceBrowserDriver["recover"]>> = { events: [], artifacts: [] };
     const browserLease = await this.ledger.getBrowserLease(run.id);
@@ -3016,13 +3037,19 @@ export class VoiceLabWorker {
    * incomplete and the run cannot certify. True once resolved.
    */
   async #revokeUnrevokedRefreshSessions(run: RunRecord): Promise<boolean> {
-    if (await this.ledger.countActiveRunsExcept(run.id) > 0) {
-      await this.ledger.appendEvent(run.id, "studio.cleanup.global_sign_out_deferred", "worker", { reason: "another_run_holds_admission", purpose: "unrevoked_evidence_refresh_session" }, `studio-global-sign-out-deferred:${run.id}:unrevoked-refresh`);
+    if (await this.ledger.countLiveSessionRunsExcept(run.id) > 0) {
+      await this.ledger.appendEvent(run.id, "studio.cleanup.global_sign_out_deferred", "worker", { reason: "another_run_can_hold_a_live_session", purpose: "unrevoked_evidence_refresh_session" }, `studio-global-sign-out-deferred:${run.id}:unrevoked-refresh`);
       return false;
     }
+    // The ledger fence inside #recoverRun re-checks this atomically with
+    // admission and holds admission (cleanup not complete) until the sign-out.
     const recovered = await this.#recoverRun(run, { force: true });
     await this.#persistEvents(run.id, recovered.events);
-    return studioG7CleanupProof((await this.#allEvents(run.id)).events).refreshSessionsRevoked;
+    const proof = studioG7CleanupProof((await this.#allEvents(run.id)).events);
+    if (!proof.refreshSessionsRevoked) return false;
+    const fresh = await this.#freshRun(run.id);
+    if (proof.complete && !fresh.cleanupComplete) await this.ledger.updateRun(fresh.id, fresh.version, { cleanupComplete: true });
+    return true;
   }
 
   /**
@@ -3072,7 +3099,9 @@ export class VoiceLabWorker {
     const lifetimeMs = studioEffectiveTokenLifetimeMs((await this.#allEvents(runId)).events, studio.accessTokenMaxLifetimeMs);
     // One API-only recovery (sign-in, read-only verification, global
     // sign-out), spaced by the Studio recovery backoff.
-    const recovered = await this.#recoverRun(run, { force: true });
+    // Past the token lifetime after a post-expiry sign-out, the dead owner's
+    // browser can no longer act: the principal has left the room for good.
+    const recovered = await this.#recoverRun(run, { force: true, principalQuiesced: before });
     if (recovered.events.length === 0) return pending("recovery_backoff");
     await this.#persistEvents(runId, recovered.events);
     const exchangeNotLive = recovered.events.some((event) => event.kind === "studio.cleanup.exchange_ended" && event.payload.confirmed === true)

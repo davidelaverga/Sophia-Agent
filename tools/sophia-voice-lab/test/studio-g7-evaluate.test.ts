@@ -507,7 +507,7 @@ describe("Studio G7 cleanup proof ordering (adversarial review)", () => {
 
 describe("Studio G7 cleanup proof after a Speak intent (adversarial re-review)", () => {
   const ended = (extra: Record<string, unknown>) => ({ confirmed: true, status: "confirmed", verified_by: "member_snapshot", speak_requested_before_observation: true, ...extra });
-  it("counts only an API-read end observed after the intent, bound to the joined exchange or after the open window", () => {
+  it("counts only an API-read end observed after the intent, bound to the joined exchange or after the principal left", () => {
     const run = studioRun(config);
     // A confirmation made before Speak (no API read), drained after the anchors.
     const early = new EventLog(run.id);
@@ -526,7 +526,10 @@ describe("Studio G7 cleanup proof after a Speak intent (adversarial re-review)",
     unjoined.add("studio.cleanup.exchange_ended", "canonical", ended({ basis: "no_live_exchange_in_room", exchange_id: null }));
     unjoined.add("studio.cleanup.exchange_ended", "canonical", ended({ basis: "no_live_exchange_after_open_window", exchange_id: null, speak_requested_at_lab_ms: T0, observed_at_lab_ms: T0 + 10_000, open_window_ms: 120_000 }));
     expect(studioG7CleanupProof(unjoined.events).exchangeEnded).toBe(false);
-    unjoined.add("studio.cleanup.exchange_ended", "canonical", ended({ basis: "no_live_exchange_after_open_window", exchange_id: null, speak_requested_at_lab_ms: T0, observed_at_lab_ms: T0 + 121_000, open_window_ms: 120_000 }));
+    // Only "nothing live" observed after the principal left (browser closed, global sign-out) counts.
+    unjoined.add("studio.cleanup.signed_out", "canonical", { schema: "sophia_voice_lab_studio_sign_out_v1", scope: "global", confirmed: true, http_status: 204 });
+    unjoined.add("cleanup.browser_context_closed", "browser", { close_resolved: true, browser_registry_absent: true, browser_process_close_resolved: true });
+    unjoined.add("studio.cleanup.exchange_ended", "canonical", ended({ basis: "no_live_exchange_after_principal_left", exchange_id: null, browser_closed_before_observation: true, signed_out_before_observation: true }));
     expect(studioG7CleanupProof(unjoined.events).exchangeEnded).toBe(true);
     // No Speak intent at all: the driver's own "never requested" confirmation stands.
     const never = new EventLog(run.id);
@@ -541,5 +544,26 @@ describe("Studio G7 cleanup proof after a Speak intent (adversarial re-review)",
     expect(studioG7CleanupProof(item.log.events)).toMatchObject({ refreshSessionsRevoked: false, complete: false });
     item.log.add("studio.cleanup.signed_out", "canonical", { schema: "sophia_voice_lab_studio_sign_out_v1", scope: "global", confirmed: true, http_status: 204 });
     expect(studioG7CleanupProof(item.log.events)).toMatchObject({ refreshSessionsRevoked: true, complete: true });
+  });
+});
+
+describe("Studio G7 cleanup proof: a no-join end needs the principal gone (third review)", () => {
+  const ended = (extra: Record<string, unknown>) => ({ confirmed: true, status: "confirmed", verified_by: "member_snapshot", speak_requested_before_observation: true, exchange_id: null, ...extra });
+  it("counts a no-join end only when observed after the run's browser close and global sign-out, never on a time window", () => {
+    const run = studioRun(config);
+    const log = new EventLog(run.id);
+    log.add("studio.exchange.speak_requested", "canonical", { grant_id: GRANT_UUID, requested_at_lab_ms: T0 });
+    // A time window alone (the earlier rule) proves nothing about a later open.
+    log.add("studio.cleanup.exchange_ended", "canonical", ended({ basis: "no_live_exchange_after_open_window", speak_requested_at_lab_ms: T0, observed_at_lab_ms: T0 + 200_000, open_window_ms: 120_000 }));
+    expect(studioG7CleanupProof(log.events).exchangeEnded).toBe(false);
+    // Observed before the principal left: not counted.
+    log.add("studio.cleanup.exchange_ended", "canonical", ended({ basis: "no_live_exchange_after_principal_left", browser_closed_before_observation: false, signed_out_before_observation: true }));
+    expect(studioG7CleanupProof(log.events).exchangeEnded).toBe(false);
+    // Claimed after the principal left, but the ledger holds no close or sign-out after Speak: not counted.
+    log.add("studio.cleanup.exchange_ended", "canonical", ended({ basis: "no_live_exchange_after_principal_left", browser_closed_before_observation: true, signed_out_before_observation: true }));
+    expect(studioG7CleanupProof(log.events).exchangeEnded).toBe(false);
+    log.add("studio.cleanup.signed_out", "canonical", { schema: "sophia_voice_lab_studio_sign_out_v1", scope: "global", confirmed: true, http_status: 204 });
+    log.add("cleanup.browser_context_closed", "browser", { close_resolved: true, browser_registry_absent: true, browser_process_close_resolved: true });
+    expect(studioG7CleanupProof(log.events).exchangeEnded).toBe(true);
   });
 });

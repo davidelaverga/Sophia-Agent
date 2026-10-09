@@ -330,7 +330,7 @@ else {
         browserServers.push(server);
         return server;
       },
-      timeouts: { micArrivalGraceMs: 3_000, exchangeEndMs: 8_000, sessionClosedMs: 5_000, uiActionMs: 3_000, designSettleMs: 5_000, exchangeOpenWindowMs: 4_000, ...timeouts },
+      timeouts: { micArrivalGraceMs: 3_000, exchangeEndMs: 8_000, sessionClosedMs: 5_000, uiActionMs: 3_000, designSettleMs: 5_000, ...timeouts },
     });
     const run = studioRun(config);
     page.micDelayMs = 0;
@@ -612,7 +612,7 @@ else {
     expect(ownerCleanupForLease(events, OWNER)).toMatchObject({ complete: false, reason: "owner_exchange_end_not_confirmed" });
   }, 120_000);
 
-  it("an exchange that opens after start gave up is never confirmed ended while live; only a read after the open window with nothing live confirms it (P3-7)", async () => {
+  it("an exchange that opens after start gave up is never confirmed ended while live; only a read after the principal left with nothing live confirms it (P3-7)", async () => {
     const { driver, run } = harness({}, { exchangeOpenMs: 2_000, exchangeOpenWindowMs: 6_000 });
     api.openDelayMs = 3_500;
     const batches: DriverEvent[][] = [];
@@ -635,9 +635,27 @@ else {
     // The product guard ends it; a read-only observation after the window with nothing live confirms.
     api.exchangeId = null;
     const after = await driver.recover(binding, "unused");
-    expect(after.events.find((event) => event.kind === "studio.cleanup.exchange_ended")?.payload).toMatchObject({ confirmed: true, basis: "no_live_exchange_after_open_window", verified_by: "member_snapshot" });
+    expect(after.events.find((event) => event.kind === "studio.cleanup.exchange_ended")?.payload).toMatchObject({ confirmed: true, basis: "no_live_exchange_after_principal_left", verified_by: "member_snapshot", browser_closed_before_observation: true, signed_out_before_observation: true });
     events = ledgerOrder(run.id, [...batches, aborted.events, live.events, after.events]);
     expect(studioG7CleanupProof(events).exchangeEnded).toBe(true);
+  }, 120_000);
+
+  it("E3: an exchange that opens later than any open window is never reported ended by the abort that preceded it (third review)", async () => {
+    // A 20 s-style floor: the earlier rule confirmed "ended" once exchangeOpenMs had passed.
+    const { driver, run } = harness({}, { exchangeOpenMs: 2_000, exchangeOpenWindowMs: 1 });
+    api.openDelayMs = 5_000;
+    const batches: DriverEvent[][] = [];
+    const error = await driver.start(run, "unused", undefined, undefined, acquisitionRecorder(batches) as never, async (events) => { batches.push(events); }).catch((caught: unknown) => caught) as { detail?: Record<string, unknown> };
+    expect(error.detail).toMatchObject({ code: "STUDIO_EXCHANGE_NOT_OPENED" });
+    const aborted = await driver.abort(run, "STUDIO_EXCHANGE_NOT_OPENED");
+    // The abort's read precedes its own browser close and sign-out: never a confirmation.
+    expect(aborted.events.find((event) => event.kind === "studio.cleanup.exchange_ended")?.payload).toMatchObject({ confirmed: false, status: "uncertain", browser_closed_before_observation: false });
+    const deadline = Date.now() + 15_000;
+    while (api.exchangeId === null && Date.now() < deadline) await sleep(50);
+    expect(api.exchangeId).toBe(EXCHANGE_UUID);
+    const events = ledgerOrder(run.id, [...batches, aborted.events]);
+    expect(studioG7CleanupProof(events)).toMatchObject({ exchangeEnded: false, complete: false });
+    expect(ownerCleanupForLease(events, OWNER)).toMatchObject({ complete: false });
   }, 120_000);
 
   it("fails start closed when the product issues an access-JWT lifetime above 24 h, before any browser holds it (P3-6)", async () => {

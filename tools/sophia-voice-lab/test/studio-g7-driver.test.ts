@@ -436,3 +436,23 @@ describe("Studio G7 adversarial re-review fixes (driver)", () => {
     expect(backend.endCalls()).toBe(0);
   });
 });
+
+describe("Studio G7 third review: a no-join end needs the principal gone, never a clock (driver)", () => {
+  it("never confirms a no-join end on a clock comparison: a skewed recovering worker stays uncertain until the principal has left", async () => {
+    const backend = new FakeStudioBackend();
+    backend.exchangeId = null;
+    const run = studioRun(studioTestConfig());
+    const join = { exchangeId: null, grantId: GRANT_UUID, runBindingSha256: bindingOf(run), speakRequested: true, exchangeOpenedAtMs: null };
+    // Worker B adopts A's durable Speak intent with no join; B's clock reads ten hours after A's.
+    const skewed = driverFor(backend).driver;
+    skewed.adoptStudioJoin(run.id, { ...join, speakRequestedAtMs: Date.now() - 10 * 3_600_000 });
+    const early = await skewed.recover(binding(run), "unused");
+    expect(ofKind(early.events, "studio.cleanup.exchange_ended")[0]?.payload).toMatchObject({ confirmed: false, status: "uncertain" });
+    expect(backend.endCalls()).toBe(0);
+    // Once A's browser close and a global sign-out are durable, a read with nothing live confirms.
+    const later = driverFor(backend).driver;
+    later.adoptStudioJoin(run.id, { ...join, speakRequestedAtMs: Date.now() + 10 * 3_600_000, browserClosed: true, globalSignOutConfirmed: true } as never);
+    const settled = await later.recover(binding(run), "unused");
+    expect(ofKind(settled.events, "studio.cleanup.exchange_ended")[0]?.payload).toMatchObject({ confirmed: true, basis: "no_live_exchange_after_principal_left", browser_closed_before_observation: true, signed_out_before_observation: true, verified_by: "member_snapshot" });
+  });
+});
