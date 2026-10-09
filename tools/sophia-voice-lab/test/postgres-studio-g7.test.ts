@@ -312,6 +312,43 @@ selected("real PostgreSQL Studio G7 worker branches (schema v7)", () => {
     expect((await h.service.startStudioG7Run(caller, { ...START, idempotency_key: newIdempotencyKey("pg-after-fence") })).status).toBe("accepted");
   }, 120_000);
 
+  it("never publishes a failure-shaped manifest for a run awaiting evidence whose fenced sign-out was abandoned, on PostgreSQL (fourth review P3)", async () => {
+    const h = await harness("pg-abandoned-fence");
+    h.driver.lateSessionClosed = true;
+    h.driver.refreshRevokeConfirmed = false;
+    await episode(h);
+    await drive(h, h.service.endVoiceRun(caller, { run_id: h.runId, idempotency_key: newIdempotencyKey("pg-abandoned-end"), wait_timeout_ms: 5_000 }));
+    expect(await ledger.getRun(h.runId)).toMatchObject({ state: "pending_external_evidence", cleanupComplete: true });
+    // The first fenced global sign-out fails (the marker is abandoned); the next one lands.
+    const fresh = pgFreshRecovery();
+    let calls = 0;
+    h.driver.recoverResult = (id) => {
+      calls += 1;
+      return fresh(id).map((event) => calls === 1 && event.kind === "studio.cleanup.signed_out"
+        ? { ...event, payload: { ...event.payload, confirmed: false, http_status: 503, basis: "unreachable" }, dedupeKey: `pg-abandoned-sign-out:${id}` }
+        : event);
+    };
+    await h.worker.maintainSessions();
+    expect(calls).toBe(1);
+    expect(await ledger.getRun(h.runId)).toMatchObject({ state: "pending_external_evidence", cleanupComplete: false });
+    for (let pass = 0; pass < 4 && (await ledger.getRun(h.runId))?.state !== "completed"; pass += 1) {
+      // The recovery backoff elapses on the database clock.
+      await ledger.pool.query("update sophia_voice_lab.run_events set observed_at=clock_timestamp()-interval '31 seconds' where run_id=$1 and kind='studio.cleanup.recovery_attempt'", [h.runId]);
+      await h.worker.maintainSessions();
+    }
+    expect(calls).toBeGreaterThanOrEqual(2);
+    const published = (await ledger.listArtifacts(h.runId))
+      .filter((artifact) => artifact.kind === "manifest_attachment")
+      .map((artifact) => JSON.parse(Buffer.from(artifact.bytes).toString("utf8")) as Record<string, unknown>);
+    expect(published.length).toBeGreaterThan(0);
+    for (const manifest of published) {
+      expect(manifest.terminal_reason).not.toBe("RECOVERY_PENDING");
+      expect(manifest.terminal_reason).not.toBe("TERMINAL_CERTIFICATION_REVISION");
+      if (manifest.terminal_state === "pending_external_evidence") expect(manifest.terminal_error).toBeNull();
+    }
+    expect(await ledger.getRun(h.runId)).toMatchObject({ state: "completed", cleanupComplete: true, terminalError: null, verdicts: { harness: "pass", evidence: "pass" } });
+  }, 120_000);
+
   it("serializes the global sign-out fence with admission for two interleaved callers (third review P3 residual 2)", async () => {
     const h = await harness("pg-fence-ledger");
     const config = studioTestConfig(undefined, { SOPHIA_VOICE_LAB_MAX_CONCURRENT_RUNS: "1" });

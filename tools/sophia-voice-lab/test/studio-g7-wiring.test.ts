@@ -652,3 +652,89 @@ describe("adversarial third review: no admission deadlock, fenced global sign-ou
     expect(next.status).toBe("accepted");
   }, 60_000);
 });
+
+/** Every evidence manifest published for a run, oldest first. */
+async function manifests(ledger: VoiceLabLedger, runId: string): Promise<Array<Record<string, unknown>>> {
+  return (await ledger.listArtifacts(runId))
+    .filter((artifact) => artifact.kind === "manifest_attachment")
+    .map((artifact) => JSON.parse(Buffer.from(artifact.bytes).toString("utf8")) as Record<string, unknown>);
+}
+
+describe("adversarial fourth review: an abandoned fenced sign-out on a run awaiting evidence", () => {
+  it("never publishes a failure-shaped manifest for a pending_external_evidence run; the Studio evidence path re-finalizes it (P3)", async () => {
+    const h = await harness("abandoned-fence-worker");
+    h.driver.lateSessionClosed = true;
+    h.driver.refreshRevokeConfirmed = false;
+    await episode(h);
+    await end(h);
+    expect(await h.ledger.getRun(h.runId)).toMatchObject({ state: "pending_external_evidence", cleanupComplete: true });
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date());
+    const advance = (ms: number) => { vi.setSystemTime(new Date(Date.now() + ms)); };
+    // The first fenced global sign-out fails (the marker is abandoned); the next one lands.
+    const fresh = freshRecovery();
+    let calls = 0;
+    h.driver.recoverResult = (id) => {
+      calls += 1;
+      return fresh(id).map((event) => calls === 1 && event.kind === "studio.cleanup.signed_out"
+        ? { ...event, payload: { ...event.payload, confirmed: false, http_status: 503, basis: "unreachable" }, dedupeKey: `abandoned-sign-out:${id}` }
+        : event);
+    };
+    await h.worker.maintainSessions();
+    expect(calls).toBe(1);
+    expect(await h.ledger.getRun(h.runId)).toMatchObject({ state: "pending_external_evidence", cleanupComplete: false });
+    for (let pass = 0; pass < 4; pass += 1) {
+      advance(31_000);
+      await h.worker.maintainSessions();
+      const run = (await h.ledger.getRun(h.runId))!;
+      if (run.state === "completed") break;
+    }
+    expect(calls).toBeGreaterThanOrEqual(2);
+    const published = await manifests(h.ledger, h.runId);
+    expect(published.length).toBeGreaterThan(0);
+    // No manifest ever presents the run as failed while it awaited evidence.
+    for (const manifest of published) {
+      expect(manifest.terminal_reason).not.toBe("RECOVERY_PENDING");
+      expect(manifest.terminal_reason).not.toBe("TERMINAL_CERTIFICATION_REVISION");
+      if (manifest.terminal_state === "pending_external_evidence") expect(manifest.terminal_error).toBeNull();
+    }
+    // The Studio evidence path finalized the run from the durable ledger.
+    expect(await h.ledger.getRun(h.runId)).toMatchObject({ state: "completed", cleanupComplete: true, terminalError: null, verdicts: { harness: "pass", evidence: "pass" } });
+    expect(published.at(-1)).toMatchObject({ terminal_state: "completed" });
+  }, 60_000);
+});
+
+describe("adversarial fourth review: the fence marker is cleared on every path after a granted begin", () => {
+  it("abandons the marker when a step between the granted begin and the driver's recovery throws", async () => {
+    const { STUDIO_GLOBAL_SIGNOUT_CLEARED_KIND, STUDIO_GLOBAL_SIGNOUT_PENDING_KIND, studioGlobalSignOutPending } = await import("../src/studio-g7/sign-out-fence.js");
+    const { STUDIO_RECOVERY_ATTEMPT_EVENT } = await import("../src/worker.js");
+    const h = await harness("marker-finally-worker");
+    h.driver.lateSessionClosed = true;
+    h.driver.refreshRevokeConfirmed = false;
+    await episode(h);
+    await end(h);
+    expect(await h.ledger.getRun(h.runId)).toMatchObject({ state: "pending_external_evidence", cleanupComplete: true });
+    // The recovery-attempt append (after the granted begin, before the driver runs) fails.
+    const append = h.ledger.appendEvent.bind(h.ledger);
+    const spy = vi.spyOn(h.ledger, "appendEvent").mockImplementation(async (runId, kind, ...rest) => {
+      if (kind === STUDIO_RECOVERY_ATTEMPT_EVENT) throw new Error("injected ledger write failure");
+      return append(runId, kind, ...rest);
+    });
+    h.driver.recoverResult = freshRecovery();
+    await h.worker.maintainSessions();
+    spy.mockRestore();
+    expect(h.driver.calls).not.toContain("recover");
+    const events = (await h.ledger.listEvents(h.runId, 0, 1_000)).events;
+    const pending = events.filter((event) => event.kind === STUDIO_GLOBAL_SIGNOUT_PENDING_KIND);
+    const cleared = events.filter((event) => event.kind === STUDIO_GLOBAL_SIGNOUT_CLEARED_KIND);
+    expect(pending.length).toBeGreaterThan(0);
+    // Every granted begin ended as abandoned: no marker is left pending.
+    expect(cleared.map((event) => event.payload.marker_id).sort()).toEqual(pending.map((event) => event.payload.marker_id).sort());
+    expect(cleared.every((event) => event.payload.outcome === "abandoned")).toBe(true);
+    expect(studioGlobalSignOutPending(events)).toBe(false);
+    // The next recovery is granted and completes the run.
+    await h.worker.maintainSessions();
+    expect(h.driver.calls).toContain("recover");
+    expect(await h.ledger.getRun(h.runId)).toMatchObject({ state: "completed", cleanupComplete: true });
+  }, 60_000);
+});

@@ -12,7 +12,7 @@ import { sha256 } from "../src/security.js";
 import { deriveStudioG7Verdicts, evaluateStudioG7Run, studioG7CleanupProof } from "../src/studio-g7/evaluate.js";
 import { ownerCleanupForLease } from "../src/studio-g7/lease-release.js";
 import { passwordGrant } from "../src/studio-g7/supabase-session.js";
-import { StudioG7Driver } from "../src/studio-g7/studio-driver.js";
+import { StudioG7Driver, type StudioDriverDependencies } from "../src/studio-g7/studio-driver.js";
 import {
   API_SHA, BRIDGE_SHA, EXCHANGE_UUID, FAKE_EMAIL, FAKE_PASSWORD, FAKE_PUBLISHABLE_KEY, PRINCIPAL_UUID, PROJECT_UUID, STUDIO_SHA,
   bindingOf, evidenceGrant, inputTurn, inputWindow, outputReply, providerReceipt, sessionClosed, speakOperation, studioRun, studioTestConfig,
@@ -316,7 +316,7 @@ else {
     await Promise.all(servers.map((server) => new Promise<void>((resolve) => server.close(() => resolve()))));
   }, 30_000);
 
-  function harness(overrides: NodeJS.ProcessEnv = {}, timeouts: Record<string, number> = {}) {
+  function harness(overrides: NodeJS.ProcessEnv = {}, timeouts: NonNullable<StudioDriverDependencies["timeouts"]> = {}) {
     const config = studioTestConfig({ studio: origins.studio, api: origins.api, supabase: origins.supabase }, {
       SOPHIA_VOICE_LAB_ALLOWED_ORIGINS: `http://frontend.test,http://gateway.test,http://voice.test,http://langgraph.test,${origins.studio},${origins.api},${origins.supabase},${origins.store}`,
       SOPHIA_VOICE_LAB_STUDIO_OBJECT_STORE_ORIGINS: origins.store,
@@ -613,26 +613,24 @@ else {
   }, 120_000);
 
   it("an exchange that opens after start gave up is never confirmed ended while live; only a read after the principal left with nothing live confirms it (P3-7)", async () => {
-    const { driver, run } = harness({}, { exchangeOpenMs: 2_000, exchangeOpenWindowMs: 6_000 });
+    const { driver, run } = harness({}, { exchangeOpenMs: 2_000 });
     api.openDelayMs = 3_500;
     const batches: DriverEvent[][] = [];
     const error = await driver.start(run, "unused", undefined, undefined, acquisitionRecorder(batches) as never, async (events) => { batches.push(events); }).catch((caught: unknown) => caught) as { detail?: Record<string, unknown> };
     expect(error.detail).toMatchObject({ code: "STUDIO_EXCHANGE_NOT_OPENED" });
-    const speakAt = Date.now();
     const aborted = await driver.abort(run, "STUDIO_EXCHANGE_NOT_OPENED");
     expect(aborted.events.find((event) => event.kind === "studio.cleanup.exchange_ended")?.payload).toMatchObject({ confirmed: false, status: "uncertain" });
     const opened = Date.now() + 15_000;
     while (api.exchangeId === null && Date.now() < opened) await sleep(50);
     expect(api.exchangeId).toBe(EXCHANGE_UUID);
-    await sleep(Math.max(0, speakAt + 6_500 - Date.now()));
-    // After the window, but the exchange is live: still never confirmed.
+    // The principal has left, but the exchange is live: never confirmed.
     const binding = { id: run.id, testRunId: run.testRunId, cleanupObligationId: run.cleanupObligationId } as never;
     const live = await driver.recover(binding, "unused");
     expect(live.events.find((event) => event.kind === "studio.cleanup.exchange_ended")?.payload).toMatchObject({ confirmed: false });
     let events = ledgerOrder(run.id, [...batches, aborted.events, live.events]);
     expect(studioG7CleanupProof(events)).toMatchObject({ exchangeEnded: false, complete: false });
     expect(ownerCleanupForLease(events, OWNER)).toMatchObject({ complete: false, reason: "owner_exchange_end_not_confirmed" });
-    // The product guard ends it; a read-only observation after the window with nothing live confirms.
+    // The product guard ends it; a read-only observation after the principal left (browser closed, global sign-out) with nothing live confirms.
     api.exchangeId = null;
     const after = await driver.recover(binding, "unused");
     expect(after.events.find((event) => event.kind === "studio.cleanup.exchange_ended")?.payload).toMatchObject({ confirmed: true, basis: "no_live_exchange_after_principal_left", verified_by: "member_snapshot", browser_closed_before_observation: true, signed_out_before_observation: true });
@@ -640,9 +638,9 @@ else {
     expect(studioG7CleanupProof(events).exchangeEnded).toBe(true);
   }, 120_000);
 
-  it("E3: an exchange that opens later than any open window is never reported ended by the abort that preceded it (third review)", async () => {
-    // A 20 s-style floor: the earlier rule confirmed "ended" once exchangeOpenMs had passed.
-    const { driver, run } = harness({}, { exchangeOpenMs: 2_000, exchangeOpenWindowMs: 1 });
+  it("E3: an exchange that opens after the start gave up is never reported ended by the abort that preceded it (third review)", async () => {
+    // The exchange opens 5 s after Speak, long after the start's 2 s open timeout.
+    const { driver, run } = harness({}, { exchangeOpenMs: 2_000 });
     api.openDelayMs = 5_000;
     const batches: DriverEvent[][] = [];
     const error = await driver.start(run, "unused", undefined, undefined, acquisitionRecorder(batches) as never, async (events) => { batches.push(events); }).catch((caught: unknown) => caught) as { detail?: Record<string, unknown> };

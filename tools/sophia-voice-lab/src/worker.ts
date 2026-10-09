@@ -524,7 +524,11 @@ export class VoiceLabWorker {
     });
     for (const pending of evidencePending) {
       try {
-        if (pending.terminalError !== null || !["completed", "product_failed", "inconclusive_provider", "failed_harness", "authorization_failed"].includes(pending.state)) await this.#saveFailureEvidence(pending, pending.terminalError ?? labError("TERMINAL_CERTIFICATION_REVISION", "Terminal execution evidence was revised without mutating the execution decision.", "evidence"), []);
+        // A Studio run awaiting evidence is re-finalized by its own path (which
+        // refuses while its cleanup proof is incomplete), never revised into a
+        // failure-shaped manifest.
+        if (studioAwaitingExternalEvidence(pending)) await this.#finalizeEndRun(pending.id);
+        else if (pending.terminalError !== null || !["completed", "product_failed", "inconclusive_provider", "failed_harness", "authorization_failed"].includes(pending.state)) await this.#saveFailureEvidence(pending, pending.terminalError ?? labError("TERMINAL_CERTIFICATION_REVISION", "Terminal execution evidence was revised without mutating the execution decision.", "evidence"), []);
         else if (pending.scenarioId === "V-S01" || pending.scenarioId === "V-S02") await this.#finalizePreResourceScenario(pending.id);
         else await this.#finalizeEndRun(pending.id);
       } catch (error) {
@@ -1890,6 +1894,11 @@ export class VoiceLabWorker {
       if (run.cleanupComplete !== liveCleanupComplete || control?.liveCleanupComplete !== liveCleanupComplete) {
         run = await this.ledger.updateRun(run.id, run.version, { cleanupComplete: liveCleanupComplete, ...retentionPatchFromEvents(recoveryPage.events) });
       }
+      // A Studio run awaiting external evidence did not fail: a fenced global
+      // sign-out only held its cleanup open (and was abandoned, so this
+      // recovery retried it). Its evidence is re-finalized from the durable
+      // ledger by the Studio evidence path, never published failure-shaped.
+      if (studioAwaitingExternalEvidence(run)) return;
       // Rebuild the deterministic failure manifest after every recovery
       // attempt so a pending receipt can become a durable complete receipt.
       await this.#saveFailureEvidence(run, run.terminalError ?? error, recoveredArtifacts);
@@ -2033,19 +2042,22 @@ export class VoiceLabWorker {
           this.logger.warn({ run_id_sha256: sha256(run.id), live_session_runs: fence.liveSessionRuns }, "studio API-only recovery deferred: another run can hold a live principal session");
           return { events: [], artifacts: [] };
         }
-        await this.ledger.appendEvent(run.id, STUDIO_RECOVERY_ATTEMPT_EVENT, "worker", { attempt_id: randomUUID(), prior_exchange_status: typeof lastSettlement?.payload.status === "string" ? lastSettlement.payload.status : null }, `studio-recovery-attempt:${run.id}:${randomUUID()}`);
       }
-      // Hand the durable write-ahead join to the driver (it may have
-      // restarted). Without one, the driver touches nothing: it only
-      // verifies, read-only, that no exchange is live in the room. The join
-      // carries whether the principal has durably left (browser closed and a
-      // global sign-out confirmed after Speak), or, for a dead owner past its
-      // token lifetime, can no longer act at all.
-      const join = studioDurableJoin(studioEvents, studioRunBinding(run));
-      if (join && options.principalQuiesced) { join.browserClosed = true; join.globalSignOutConfirmed = true; }
-      if (join && hasStudioExtensions(this.driver)) this.driver.adoptStudioJoin(run.id, join);
+      // From a granted begin on, every path (a throw included) clears the
+      // marker in the finally: confirmed only on a confirmed global sign-out,
+      // abandoned otherwise.
       let recovered: Awaited<ReturnType<VoiceBrowserDriver["recover"]>> | null = null;
       try {
+        if (fenced) await this.ledger.appendEvent(run.id, STUDIO_RECOVERY_ATTEMPT_EVENT, "worker", { attempt_id: randomUUID(), prior_exchange_status: typeof lastSettlement?.payload.status === "string" ? lastSettlement.payload.status : null }, `studio-recovery-attempt:${run.id}:${randomUUID()}`);
+        // Hand the durable write-ahead join to the driver (it may have
+        // restarted). Without one, the driver touches nothing: it only
+        // verifies, read-only, that no exchange is live in the room. The join
+        // carries whether the principal has durably left (browser closed and a
+        // global sign-out confirmed after Speak), or, for a dead owner past its
+        // token lifetime, can no longer act at all.
+        const join = studioDurableJoin(studioEvents, studioRunBinding(run));
+        if (join && options.principalQuiesced) { join.browserClosed = true; join.globalSignOutConfirmed = true; }
+        if (join && hasStudioExtensions(this.driver)) this.driver.adoptStudioJoin(run.id, join);
         recovered = await this.driver.recover(recoveryTransportBinding({ runId: run.id, testRunId: run.testRunId, cleanupObligationId: run.cleanupObligationId, gatewayOrigin: run.target.gatewayUrl }), "studio-g7-recovery-uses-principal-session");
         return recovered;
       } finally {
@@ -3190,6 +3202,15 @@ function studioRunBinding(run: RunRecord): string {
 /** Studio G7 runs carry the `studio-g7-v1` catalogue version. */
 export function isStudioG7Run(run: Pick<RunRecord, "scenarioVersion">): boolean {
   return isStudioG7ScenarioVersion(run.scenarioVersion);
+}
+
+/**
+ * A Studio run that ended without a failure and still awaits external
+ * evidence. Its manifests come only from the Studio evidence path
+ * (#finalizeEndRun), never from the generic failure or revision publishers.
+ */
+function studioAwaitingExternalEvidence(run: Pick<RunRecord, "scenarioVersion" | "state" | "terminalError">): boolean {
+  return isStudioG7Run(run) && run.state === "pending_external_evidence" && run.terminalError === null;
 }
 
 /** Studio runs store their pinned identities in the TargetSpec container:
