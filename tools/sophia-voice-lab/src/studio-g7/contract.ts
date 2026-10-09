@@ -109,27 +109,56 @@ export const StudioPageReceiptSchema = z.discriminatedUnion("event", [MicPublish
 export type StudioPageReceipt = z.infer<typeof StudioPageReceiptSchema>;
 
 // ---------------------------------------------------------------------------
-// Bridge receipts (read through GET /api/v1/exchanges/{id}/qualification-evidence)
+// Bridge and service receipts (read through
+// GET /api/v1/exchanges/{id}/qualification-evidence, which returns
+// `sophia.voice_qualification_evidence_read(exchange)` of migration 0046).
+//
+// Shapes follow the migration, which is authoritative where the plan document
+// differs (see STUDIO_G7_CONTRACT_DIFFERENCES):
+// - one `grant` object, not a `grants` array;
+// - every row carries `source` ('bridge' | 'service') and `seq` 0..99999,
+//   ordered by source then seq; `(source = 'service') = (kind = 'guard')`;
+// - every receipt body carries its own `kind` (the database refuses a body
+//   whose kind differs from the row's);
+// - the guard body is written by the database:
+//   {kind, schema:'sophia.service.guard.v1', grantId, runBindingSha256, reason, atMs}
+//   with no seq, always at service seq 0;
+// - the guard has six reasons (the plan lists five; `turns` is the sixth);
+// - provider receipts may carry the counters the guard holds to the limits:
+//   connectionsOpened, turns, usageTokens, lastPromptTokens.
 // ---------------------------------------------------------------------------
 
 export const BRIDGE_RECEIPT_KINDS = ["input_window", "input_turn", "provider", "output_reply", "session_closed", "guard"] as const;
 export type BridgeReceiptKind = typeof BRIDGE_RECEIPT_KINDS[number];
+export const EVIDENCE_SOURCES = ["bridge", "service"] as const;
+export type EvidenceSource = typeof EVIDENCE_SOURCES[number];
 export const INPUT_WINDOW_END_REASONS = ["turn_complete", "interrupted", "handoff", "paused", "closed", "deadline"] as const;
 export const INPUT_TURN_OUTCOMES = ["answered", "no_user_turn_observed", "interrupted", "connection_lost"] as const;
 export const PROVIDER_PHASES = ["setup", "ready", "recovering", "unavailable", "closed", "usage"] as const;
 export const OUTPUT_REPLY_TERMINALS = ["played", "stopped", "interrupted", "recovered", "closed"] as const;
 export const SESSION_CLOSED_REASONS = ["ended", "lost", "guard"] as const;
-export const GUARD_REASONS = ["deadline", "expired", "revoked", "connections", "usage"] as const;
-export const GRANT_ENDED_REASONS = [...GUARD_REASONS, "ended"] as const;
+/** Migration 0046 `ended_reason` / guard reasons (six; the plan lists five). */
+export const GUARD_REASONS = ["deadline", "expired", "revoked", "connections", "turns", "usage"] as const;
+export type GuardReason = typeof GUARD_REASONS[number];
+export const GUARD_RECEIPT_SCHEMA = "sophia.service.guard.v1" as const;
+/** Exchange states the evidence read reports (`room_exchanges.state`). */
+export const EXCHANGE_STATES = ["open", "paused", "ended"] as const;
+export const EVIDENCE_SEQ_MAX = 99_999;
+export const EvidenceSeqSchema = z.number().int().min(0).max(EVIDENCE_SEQ_MAX);
 
-function bridgeReceipt<K extends BridgeReceiptKind, S extends z.ZodRawShape>(kind: K, shape: S) {
+function bridgeReceipt<K extends Exclude<BridgeReceiptKind, "guard">, S extends z.ZodRawShape>(kind: K, shape: S) {
   return z.object({
+    kind: z.literal(kind),
+    // The product's own tests label bridge bodies `sophia.bridge.<kind>.v1`;
+    // the plan does not name a schema field, so it is optional but exact.
+    schema: z.literal(`sophia.bridge.${kind}.v1`).optional(),
     grantId: UuidSchema,
     runBindingSha256: Sha256HexSchema,
-    seq: OrdinalSchema,
+    // The plan lists `seq` among the body fields; the migration keys the row
+    // by seq and its tests omit it from the body. Optional, and when present
+    // it must equal the row's seq.
+    seq: EvidenceSeqSchema.optional(),
     atMs: EpochMsSchema,
-    // Tolerated only as an exact echo of the envelope kind (checked below).
-    kind: z.literal(kind).optional(),
     ...shape,
   }).strict();
 }
@@ -178,6 +207,10 @@ export const ProviderReceiptSchema = bridgeReceipt("provider", {
   instructionSha256: Sha256HexSchema,
   bridgeCommit: Commit40Schema.nullable(),
   usageTokens: CountSchema.nullable(),
+  // Migration 0046: the counters `media_record_evidence` holds to the grant.
+  connectionsOpened: CountSchema.optional(),
+  turns: CountSchema.optional(),
+  lastPromptTokens: CountSchema.optional(),
 });
 export const OutputReplyReceiptSchema = bridgeReceipt("output_reply", {
   replyOrdinal: OrdinalSchema,
@@ -207,9 +240,15 @@ export const SessionClosedReceiptSchema = bridgeReceipt("session_closed", {
   transcriptRetained: z.literal(false),
   reason: z.enum(SESSION_CLOSED_REASONS),
 });
-export const GuardReceiptSchema = bridgeReceipt("guard", {
+/** Written by `sophia.voice_qualification_guard()` itself (service seq 0). */
+export const GuardReceiptSchema = z.object({
+  kind: z.literal("guard"),
+  schema: z.literal(GUARD_RECEIPT_SCHEMA),
+  grantId: UuidSchema,
+  runBindingSha256: Sha256HexSchema,
   reason: z.enum(GUARD_REASONS),
-});
+  atMs: EpochMsSchema,
+}).strict();
 
 export const BRIDGE_RECEIPT_SCHEMAS = {
   input_window: InputWindowReceiptSchema,
@@ -228,19 +267,29 @@ export type SessionClosedReceipt = z.infer<typeof SessionClosedReceiptSchema>;
 export type GuardReceipt = z.infer<typeof GuardReceiptSchema>;
 export type BridgeReceiptBody = InputWindowReceipt | InputTurnReceipt | ProviderReceipt | OutputReplyReceipt | SessionClosedReceipt | GuardReceipt;
 
+/** The `grant` object of `voice_qualification_evidence_read` (0046). */
 export const EvidenceGrantSchema = z.object({
   grantId: UuidSchema,
   runBindingSha256: Sha256HexSchema,
   deadline: IsoTimestampSchema,
+  expiresAt: IsoTimestampSchema,
+  revokedAt: IsoTimestampSchema.nullable(),
   maxExchangeSeconds: z.number().int().min(60).max(1_800),
   maxProviderConnections: z.number().int().min(1).max(10),
-  maxUsageTokens: z.number().int().min(1_000).max(2_000_000),
-  endedReason: z.enum(GRANT_ENDED_REASONS).nullable(),
+  maxTurns: z.number().int().min(1).max(200),
+  maxOutputTokensPerTurn: z.number().int().min(64).max(8_192),
+  maxUsageTokens: z.number().int().min(1_000).max(5_000_000),
+  connectionsOpened: CountSchema,
+  turns: CountSchema,
+  usageTokens: CountSchema,
+  lastPromptTokens: CountSchema,
+  endedReason: z.enum(GUARD_REASONS).nullable(),
 }).strict();
 export type EvidenceGrant = z.infer<typeof EvidenceGrantSchema>;
 
 const EnvelopeReceiptBase = z.object({
-  seq: OrdinalSchema,
+  source: z.enum(EVIDENCE_SOURCES),
+  seq: EvidenceSeqSchema,
   kind: z.enum(BRIDGE_RECEIPT_KINDS),
   receivedAt: IsoTimestampSchema,
   receipt: z.record(z.string(), z.unknown()),
@@ -248,11 +297,13 @@ const EnvelopeReceiptBase = z.object({
 
 export const QualificationEvidenceEnvelopeSchema = z.object({
   exchangeId: UuidSchema,
-  grants: z.array(EvidenceGrantSchema).max(16),
+  state: z.enum(EXCHANGE_STATES),
+  grant: EvidenceGrantSchema,
   receipts: z.array(EnvelopeReceiptBase).max(10_000),
 }).strict();
 
 export interface ParsedBridgeReceipt {
+  source: EvidenceSource;
   seq: number;
   kind: BridgeReceiptKind;
   receivedAt: string;
@@ -261,7 +312,8 @@ export interface ParsedBridgeReceipt {
 
 export interface ParsedQualificationEvidence {
   exchangeId: string;
-  grants: EvidenceGrant[];
+  state: typeof EXCHANGE_STATES[number];
+  grant: EvidenceGrant;
   receipts: ParsedBridgeReceipt[];
 }
 
@@ -272,29 +324,48 @@ export class StudioContractViolation extends Error {
   }
 }
 
-/** Parse one envelope receipt strictly, including kind/seq agreement. */
-export function parseBridgeReceipt(kind: BridgeReceiptKind, seq: number, receipt: unknown): BridgeReceiptBody {
+/** The source a kind must arrive from: the guard is the service's, every other kind the bridge's. */
+export function sourceOfKind(kind: BridgeReceiptKind): EvidenceSource {
+  return kind === "guard" ? "service" : "bridge";
+}
+
+/**
+ * Parse one envelope receipt strictly: the body's own kind must equal the
+ * row's, the source must match the kind, the guard sits at service seq 0, and
+ * a body seq (optional) must equal the row's.
+ */
+export function parseBridgeReceipt(kind: BridgeReceiptKind, seq: number, receipt: unknown, source: EvidenceSource = sourceOfKind(kind)): BridgeReceiptBody {
+  if (source !== sourceOfKind(kind)) throw new StudioContractViolation("evidence_source_kind_mismatch");
+  if (kind === "guard" && seq !== 0) throw new StudioContractViolation("guard_receipt_seq_not_zero");
   const parsed = BRIDGE_RECEIPT_SCHEMAS[kind].safeParse(receipt);
   if (!parsed.success) throw new StudioContractViolation(`bridge_${kind}_schema_invalid`, parsed.error.issues[0]?.path.join(".") ?? null);
-  if (parsed.data.seq !== seq) throw new StudioContractViolation("bridge_envelope_seq_mismatch");
+  const body = parsed.data as BridgeReceiptBody & { seq?: number };
+  if (body.seq !== undefined && body.seq !== seq) throw new StudioContractViolation("bridge_envelope_seq_mismatch");
   return parsed.data;
 }
 
 /**
  * Strictly parse the whole evidence answer. Any unknown key, free-text value,
- * or kind/seq disagreement rejects the entire answer: a partially parsed
- * evidence page is never evidence.
+ * kind/source/seq disagreement, receipt bound to a grant other than the
+ * envelope's, or a duplicate (source, seq) rejects the entire answer: a
+ * partially parsed evidence page is never evidence.
  */
 export function parseQualificationEvidence(raw: unknown): ParsedQualificationEvidence {
   const envelope = QualificationEvidenceEnvelopeSchema.safeParse(raw);
   if (!envelope.success) throw new StudioContractViolation("evidence_envelope_schema_invalid", envelope.error.issues[0]?.path.join(".") ?? null);
-  const receipts = envelope.data.receipts.map((entry) => ({
-    seq: entry.seq,
-    kind: entry.kind,
-    receivedAt: entry.receivedAt,
-    receipt: parseBridgeReceipt(entry.kind, entry.seq, entry.receipt),
-  }));
-  return { exchangeId: envelope.data.exchangeId.toLowerCase(), grants: envelope.data.grants, receipts };
+  const seen = new Set<string>();
+  const grantId = envelope.data.grant.grantId.toLowerCase();
+  const receipts = envelope.data.receipts.map((entry) => {
+    const key = `${entry.source}:${entry.seq}`;
+    if (seen.has(key)) throw new StudioContractViolation("evidence_duplicate_source_seq");
+    seen.add(key);
+    const receipt = parseBridgeReceipt(entry.kind, entry.seq, entry.receipt, entry.source);
+    if (receipt.grantId.toLowerCase() !== grantId || receipt.runBindingSha256 !== envelope.data.grant.runBindingSha256) {
+      throw new StudioContractViolation("evidence_receipt_grant_mismatch");
+    }
+    return { source: entry.source, seq: entry.seq, kind: entry.kind, receivedAt: entry.receivedAt, receipt };
+  });
+  return { exchangeId: envelope.data.exchangeId.toLowerCase(), state: envelope.data.state, grant: envelope.data.grant, receipts };
 }
 
 export function parsePageReceipt(raw: unknown): StudioPageReceipt {
@@ -321,7 +392,7 @@ export function canonicalSha256(value: unknown): string {
 // product receipt that serves it or to a typed status. Data, not prose.
 // ---------------------------------------------------------------------------
 
-export const COVERAGE_STATUSES = ["product_receipt", "lab_owned", "corroboration_only", "unsupported", "not_supported_by_product_privacy_model", "unavailable"] as const;
+export const COVERAGE_STATUSES = ["product_receipt", "lab_owned", "corroboration_only", "uncertain", "unsupported", "not_supported_by_product_privacy_model", "unavailable"] as const;
 export type CoverageStatus = typeof COVERAGE_STATUSES[number];
 
 export interface CoverageEntry {
@@ -348,10 +419,15 @@ export const STUDIO_G7_RECEIPT_COVERAGE: readonly CoverageEntry[] = Object.freez
   { channel: "playback_realization", status: "product_receipt", sources: ["output_reply", "page:sophia_playback"], reason: null },
   { channel: "output_leg_audio_artifact", status: "not_supported_by_product_privacy_model", sources: [], reason: "no_audio_retained" },
   { channel: "tool_calls_and_counts", status: "product_receipt", sources: ["input_turn", "session_closed"], reason: "counts_only" },
-  { channel: "builder_task_and_artifact_join", status: "unavailable", sources: [], reason: "member_api_task_artifact_join_not_implemented_in_adapter" },
+  // Task -> artifact version -> downloaded bytes is canonical (member API, as
+  // the principal). Exchange/run -> task is not: NativeTask carries no
+  // exchange or command-key binding, so that edge is joined by actor and
+  // time window and typed `uncertain`, never pass.
+  { channel: "builder_task_and_artifact_join", status: "uncertain", sources: ["GET /api/v1/projects/{p}/snapshot work", "GET /api/v1/projects/{p}/native-tasks/{t}", "GET /api/v1/artifacts/{a}/versions", "GET /api/v1/sources/{s}/content", "downloaded_bytes_sha256"], reason: "native_task_has_no_exchange_binding" },
   { channel: "canonical_transcript_with_content", status: "not_supported_by_product_privacy_model", sources: [], reason: "no_speech_text_retained" },
   { channel: "session_lifecycle", status: "product_receipt", sources: ["session_closed", "guard"], reason: null },
-  { channel: "exchange_end_and_cleanup", status: "lab_owned", sources: ["studio.cleanup.exchange_ended", "studio.cleanup.signed_out", "cleanup.browser_context_closed"], reason: "member_snapshot_verified" },
+  { channel: "exchange_end_and_cleanup", status: "lab_owned", sources: ["studio.exchange.ownership", "studio.cleanup.exchange_ended", "studio.cleanup.signed_out", "cleanup.browser_context_closed"], reason: "ended_only_when_ownership_proven_else_observed_not_live" },
+  { channel: "webrtc_packet_flow_on_loopback_peer", status: "unsupported", sources: [], reason: "fake_studio_loopback_peer_has_no_livekit_sfu" },
   { channel: "deployed_identity_api", status: "product_receipt", sources: ["GET /health commit"], reason: null },
   { channel: "deployed_identity_studio", status: "product_receipt", sources: ["meta[name=sophia-build]"], reason: null },
   { channel: "deployed_identity_bridge", status: "product_receipt", sources: ["provider.bridgeCommit"], reason: null },
@@ -359,8 +435,32 @@ export const STUDIO_G7_RECEIPT_COVERAGE: readonly CoverageEntry[] = Object.freez
   { channel: "captions_and_screenshots", status: "not_supported_by_product_privacy_model", sources: [], reason: "may_contain_speech_text" },
 ] satisfies CoverageEntry[]);
 
+/**
+ * Where the plan document (docs/plans/voice-qualification-g7.md) and
+ * migration 0046 differ, the adapter follows the migration. Data, not prose:
+ * each entry names the field and both readings.
+ */
+export const STUDIO_G7_CONTRACT_DIFFERENCES: ReadonlyArray<{ field: string; plan: string; migration_0046: string; adapter: string }> = Object.freeze([
+  { field: "evidence.grant", plan: "grants (array covering the exchange)", migration_0046: "grant (single object)", adapter: "migration" },
+  { field: "evidence.state", plan: "absent", migration_0046: "exchange state open|paused|ended", adapter: "migration" },
+  { field: "evidence.receipts[].source", plan: "absent", migration_0046: "bridge|service", adapter: "migration" },
+  { field: "evidence.receipts order", plan: "seq order", migration_0046: "source, then seq", adapter: "migration" },
+  { field: "receipt.seq range", plan: "per-exchange sequence (start unspecified)", migration_0046: "0..99999 per (exchange, grant, source)", adapter: "migration; first bridge seq inferred as 0 when present, else 1" },
+  { field: "receipt.kind", plan: "row kind only", migration_0046: "body kind required and equal to row kind", adapter: "migration" },
+  { field: "receipt.schema", plan: "absent", migration_0046: "tests use sophia.bridge.<kind>.v1; guard sophia.service.guard.v1", adapter: "optional for bridge kinds, required for guard" },
+  { field: "receipt.seq (body)", plan: "listed among fields", migration_0046: "row key; tests omit it from the body", adapter: "optional; equal to row seq when present" },
+  { field: "guard.reason", plan: "deadline, expired, revoked, connections, usage", migration_0046: "adds turns", adapter: "migration (six)" },
+  { field: "guard receipt", plan: "bridge-style receipt with seq", migration_0046: "service row, seq 0, no body seq", adapter: "migration" },
+  { field: "grant.max_usage_tokens", plan: "1,000..2,000,000", migration_0046: "1,000..5,000,000", adapter: "migration" },
+  { field: "grant limits", plan: "exchange seconds, connections, usage tokens", migration_0046: "adds max_turns 1..200 and max_output_tokens_per_turn 64..8192", adapter: "migration" },
+  { field: "grant counters", plan: "absent", migration_0046: "connectionsOpened, turns, usageTokens, lastPromptTokens, expiresAt, revokedAt", adapter: "migration" },
+  { field: "provider receipt counters", plan: "usageTokens only", migration_0046: "connectionsOpened, turns, usageTokens, lastPromptTokens", adapter: "optional counters accepted" },
+  { field: "usage guard", plan: "tokens reported reach max_usage_tokens", migration_0046: "usage + last prompt + one turn's output cap reach the budget", adapter: "reported only; the Lab does not recompute it" },
+  { field: "not found answer", plan: "404", migration_0046: "SQLSTATE 22023 'Qualification evidence not found' (route mapping not in source)", adapter: "404 typed unavailable" },
+]);
+
 /** Legacy Gemini-browser evidence kinds that this target never produces. */
-export const LEGACY_ONLY_EVIDENCE: Readonly<Record<string, Exclude<CoverageStatus, "product_receipt" | "lab_owned" | "corroboration_only" | "unavailable">>> = Object.freeze({
+export const LEGACY_ONLY_EVIDENCE: Readonly<Record<string, Exclude<CoverageStatus, "product_receipt" | "lab_owned" | "corroboration_only" | "uncertain" | "unavailable">>> = Object.freeze({
   "harness.input_frame_forwarded": "unsupported",
   "harness.provider_frame_sent": "unsupported",
   "harness.provider_frame_received": "unsupported",

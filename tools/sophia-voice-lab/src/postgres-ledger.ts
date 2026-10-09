@@ -1,3 +1,4 @@
+import { decideStudioDeadOwnerRelease, STUDIO_DEAD_OWNER_VERIFIED_KIND } from "./studio-g7/lease-release.js";
 import pg from "pg";
 import { CANONICAL_EVIDENCE_REFRESH_BASE_BACKOFF_MS, CANONICAL_EVIDENCE_REFRESH_EVENT, CANONICAL_EVIDENCE_REFRESH_MAX_ATTEMPTS } from "./canonical-evidence-refresh.js";
 import { retentionHmac } from "./retention-identity.js";
@@ -762,6 +763,31 @@ export class PostgresVoiceLabLedger implements VoiceLabLedger {
 
   releaseRecoveredBrowserLease(runId: string): Promise<boolean> {
     return new PostgresRecoveryControls(this.pool).releaseRecoveredBrowserLease(runId);
+  }
+
+  async releaseDeadOwnerStudioBrowserLease(runId: string, proof: { verificationId: string; tokenMaxLifetimeMs: number; heartbeatStaleMs: number }): Promise<{ released: boolean; reason: string }> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("begin");
+      const runs = await client.query(`select state,scenario_version from ${SCHEMA}.runs where id=$1 for update`, [runId]);
+      const leases = await client.query(`select worker_id,lease_epoch,expires_at,clock_timestamp() as now from ${SCHEMA}.browser_leases where run_id=$1 for update`, [runId]);
+      const run = runs.rows[0], lease = leases.rows[0];
+      if (!run || !lease) { await client.query("rollback"); return { released: false, reason: !run ? "run_missing" : "lease_absent" }; }
+      const heartbeat = await client.query(`select observed_at from ${SCHEMA}.worker_heartbeats where worker_id=$1`, [lease.worker_id]);
+      const events = await client.query(`select * from ${SCHEMA}.run_events where run_id=$1 and kind = any($2::text[]) order by seq`, [runId, ["studio.cleanup.signed_out", STUDIO_DEAD_OWNER_VERIFIED_KIND]]);
+      const decision = decideStudioDeadOwnerRelease({
+        run: { state: run.state, scenarioVersion: run.scenario_version },
+        lease: { workerId: lease.worker_id, leaseEpoch: Number(lease.lease_epoch), expiresAt: new Date(lease.expires_at) },
+        ownerLastHeartbeatAt: heartbeat.rows[0] ? new Date(heartbeat.rows[0].observed_at) : null,
+        events: events.rows.map(mapEvent), now: new Date(lease.now), ...proof,
+      });
+      if (!decision.release) { await client.query("rollback"); return { released: false, reason: decision.reason }; }
+      // Release the exact dead execution, never acquire or impersonate its owner.
+      const deleted = await client.query(`delete from ${SCHEMA}.browser_leases where run_id=$1 and worker_id=$2 and lease_epoch=$3 and expires_at<=clock_timestamp()`, [runId, lease.worker_id, lease.lease_epoch]);
+      await client.query("commit");
+      return deleted.rowCount === 1 ? { released: true, reason: "dead_owner_quiesced" } : { released: false, reason: "lease_changed" };
+    } catch (error) { await client.query("rollback").catch(() => undefined); throw error; }
+    finally { client.release(); }
   }
 
   async reapExpiredBrowserLeases(now?: Date, limit = 100, afterRunId?: string): Promise<BrowserLease[]> {

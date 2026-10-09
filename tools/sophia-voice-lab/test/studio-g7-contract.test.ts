@@ -8,6 +8,7 @@ import { VoiceLabError } from "../src/domain.js";
 import { SCENARIO_IDS } from "../src/scenarios.js";
 import {
   COVERAGE_STATUSES,
+  STUDIO_G7_CONTRACT_DIFFERENCES,
   STUDIO_G7_RECEIPT_COVERAGE,
   StudioContractViolation,
   canonicalRunBindingJson,
@@ -22,7 +23,7 @@ import { buildStudioSessionSeedScript, globalSignOut, passwordGrant, supabaseSto
 import { parseStudioBuildMeta, projectRoomSnapshot } from "../src/studio-g7/studio-api.js";
 import {
   EXCHANGE_UUID, FAKE_ACCESS_TOKEN, FAKE_EMAIL, FAKE_PASSWORD, FAKE_PUBLISHABLE_KEY, FAKE_REFRESH_TOKEN, PRINCIPAL_UUID,
-  evidenceGrant, inputWindow, pageReceipt, providerReceipt, studioRun, studioTestConfig,
+  GRANT_UUID, evidenceEnvelope, evidenceGrant, guardReceipt, inputTurn, inputWindow, pageReceipt, providerReceipt, studioRun, studioTestConfig,
 } from "./studio-g7-helpers.js";
 import { testConfig } from "./helpers.js";
 
@@ -39,26 +40,62 @@ describe("Studio G7 contract strictness", () => {
     expect(() => parsePageReceipt({ ...pageReceipt(run, "mic_unpublished", 1_000), schema: "other" })).toThrow(StudioContractViolation);
   });
 
-  it("parses bridge receipts strictly, rejecting free text, unknown keys and seq disagreement", () => {
+  it("parses bridge receipts strictly (0046 bodies), rejecting free text, unknown keys and kind/seq disagreement", () => {
     const window = inputWindow(run, 2, 1, 1_000);
-    expect(parseBridgeReceipt("input_window", 2, window)).toMatchObject({ windowSeq: 1, sampleRate: 16_000 });
+    expect(parseBridgeReceipt("input_window", 2, window)).toMatchObject({ windowSeq: 1, sampleRate: 16_000, kind: "input_window" });
     expect(() => parseBridgeReceipt("input_window", 2, { ...window, transcript: "build me a page" })).toThrow(StudioContractViolation);
     expect(() => parseBridgeReceipt("input_window", 3, window)).toThrow(/bridge_envelope_seq_mismatch/);
     expect(() => parseBridgeReceipt("input_window", 2, { ...window, rawAudioExcluded: false })).toThrow(StudioContractViolation);
     expect(() => parseBridgeReceipt("input_window", 2, { ...window, sampleRate: 48_000 })).toThrow(StudioContractViolation);
-    expect(() => parseBridgeReceipt("provider", 1, providerReceipt(run, 1, "ready", { model: "a free text model description" }))).toThrow(StudioContractViolation);
+    // The body's own kind is required and must equal the row's (0046 refuses otherwise).
+    const { kind: _kind, ...kindless } = window;
+    expect(() => parseBridgeReceipt("input_window", 2, kindless)).toThrow(StudioContractViolation);
     expect(() => parseBridgeReceipt("provider", 1, providerReceipt(run, 1, "ready", { kind: "input_window" }))).toThrow(StudioContractViolation);
-    expect(parseBridgeReceipt("provider", 1, providerReceipt(run, 1, "ready", { kind: "provider" }))).toMatchObject({ phase: "ready" });
+    expect(() => parseBridgeReceipt("provider", 1, providerReceipt(run, 1, "ready", { schema: "sophia.bridge.input_window.v1" }))).toThrow(StudioContractViolation);
+    expect(() => parseBridgeReceipt("provider", 1, providerReceipt(run, 1, "ready", { model: "a free text model description" }))).toThrow(StudioContractViolation);
+    // Body seq is optional (the migration keys rows by seq; its tests omit it).
+    const { seq: _seq, ...seqless } = providerReceipt(run, 7, "usage");
+    expect(parseBridgeReceipt("provider", 7, seqless)).toMatchObject({ phase: "usage" });
+    // 0046 provider counters are accepted, as counts only.
+    expect(parseBridgeReceipt("provider", 1, providerReceipt(run, 1, "usage", { connectionsOpened: 2, turns: 3, lastPromptTokens: 9_000 }))).toMatchObject({ turns: 3 });
+    expect(() => parseBridgeReceipt("provider", 1, providerReceipt(run, 1, "usage", { turns: "three" }))).toThrow(StudioContractViolation);
+    expect((parseBridgeReceipt("input_window", 0, inputWindow(run, 0, 1, 1_000)) as { seq?: number }).seq).toBe(0);
+    expect(() => parseBridgeReceipt("input_window", 100_000, inputWindow(run, 100_000, 1, 1_000))).toThrow(StudioContractViolation);
     // A count is allowed; text is not.
-    expect(() => parseBridgeReceipt("input_turn", 1, { grantId: evidenceGrant(run).grantId, runBindingSha256: "a".repeat(64), seq: 1, atMs: 1, windowSeq: 1, turnOrdinal: 1, inputTranscriptionObserved: true, transcriptChars: "hello", finished: true, attributedToHolder: true, modelResponded: true, toolCallCount: 0, outcome: "answered" })).toThrow(StudioContractViolation);
+    expect(() => parseBridgeReceipt("input_turn", 1, { ...inputTurn(run, 1, 1), transcriptChars: "hello" })).toThrow(StudioContractViolation);
   });
 
-  it("rejects a whole evidence answer when any entry is malformed", () => {
-    const answer = { exchangeId: EXCHANGE_UUID, grants: [evidenceGrant(run)], receipts: [{ seq: 1, kind: "provider", receivedAt: new Date().toISOString(), receipt: providerReceipt(run, 1, "ready") }] };
-    expect(parseQualificationEvidence(answer).receipts).toHaveLength(1);
+  it("parses the guard's own receipt: service source, seq 0, six reasons, no body seq", () => {
+    const guard = guardReceipt(run, "turns");
+    expect(parseBridgeReceipt("guard", 0, guard, "service")).toMatchObject({ reason: "turns", schema: "sophia.service.guard.v1" });
+    for (const reason of ["deadline", "expired", "revoked", "connections", "turns", "usage"]) expect(parseBridgeReceipt("guard", 0, guardReceipt(run, reason), "service")).toMatchObject({ reason });
+    expect(() => parseBridgeReceipt("guard", 0, guardReceipt(run, "because the operator wanted"), "service")).toThrow(StudioContractViolation);
+    expect(() => parseBridgeReceipt("guard", 1, guard, "service")).toThrow(/guard_receipt_seq_not_zero/);
+    expect(() => parseBridgeReceipt("guard", 0, guard, "bridge")).toThrow(/evidence_source_kind_mismatch/);
+    expect(() => parseBridgeReceipt("guard", 0, { ...guard, seq: 0 }, "service")).toThrow(StudioContractViolation);
+    expect(() => parseBridgeReceipt("guard", 0, { ...guard, schema: "sophia.bridge.guard.v1" }, "service")).toThrow(StudioContractViolation);
+    expect(() => parseBridgeReceipt("provider", 1, providerReceipt(run, 1, "ready"), "service")).toThrow(/evidence_source_kind_mismatch/);
+  });
+
+  it("parses the 0046 evidence answer and rejects the whole answer when any entry is malformed", () => {
+    const answer = evidenceEnvelope(run, [["provider", providerReceipt(run, 0, "ready")], ["input_window", inputWindow(run, 1, 1, 1_000)], ["guard", guardReceipt(run, "deadline")]], { state: "ended" });
+    const parsed = parseQualificationEvidence(answer);
+    expect(parsed).toMatchObject({ exchangeId: EXCHANGE_UUID, state: "ended", grant: { grantId: GRANT_UUID, maxTurns: 20 } });
+    expect(parsed.receipts.map((receipt) => [receipt.source, receipt.seq, receipt.kind])).toEqual([["bridge", 0, "provider"], ["bridge", 1, "input_window"], ["service", 0, "guard"]]);
     expect(() => parseQualificationEvidence({ ...answer, extra: true })).toThrow(StudioContractViolation);
-    expect(() => parseQualificationEvidence({ ...answer, grants: [{ ...evidenceGrant(run), approvalRef: "owner said yes" }] })).toThrow(StudioContractViolation);
-    expect(() => parseQualificationEvidence({ ...answer, receipts: [...answer.receipts, { seq: 2, kind: "guard", receivedAt: new Date().toISOString(), receipt: { grantId: evidenceGrant(run).grantId, runBindingSha256: "a".repeat(64), seq: 2, atMs: 1, reason: "because the operator wanted" } }] })).toThrow(StudioContractViolation);
+    // The plan's `grants` array is not the migration's shape.
+    const { grant, ...rest } = answer as { grant: Record<string, unknown> };
+    expect(() => parseQualificationEvidence({ ...rest, grants: [grant] })).toThrow(StudioContractViolation);
+    expect(() => parseQualificationEvidence({ ...answer, grant: { ...grant, approvalRef: "owner said yes" } })).toThrow(StudioContractViolation);
+    expect(() => parseQualificationEvidence({ ...answer, grant: { ...grant, maxUsageTokens: 5_000_001 } })).toThrow(StudioContractViolation);
+    expect(parseQualificationEvidence({ ...answer, grant: { ...grant, maxUsageTokens: 5_000_000, endedReason: "turns" } }).grant.endedReason).toBe("turns");
+    expect(() => parseQualificationEvidence({ ...answer, state: "closed" })).toThrow(StudioContractViolation);
+    const rows = (answer as { receipts: Array<Record<string, unknown>> }).receipts;
+    // A duplicate (source, seq), a receipt bound to another grant or run, or a guard from the bridge rejects everything.
+    expect(() => parseQualificationEvidence({ ...answer, receipts: [...rows, rows[0]] })).toThrow(/evidence_duplicate_source_seq/);
+    expect(() => parseQualificationEvidence({ ...answer, receipts: [...rows, { ...rows[0], seq: 9, receipt: { ...providerReceipt(run, 9, "usage"), grantId: "11111111-2222-4333-8444-555555555555" } }] })).toThrow(/evidence_receipt_grant_mismatch/);
+    expect(() => parseQualificationEvidence({ ...answer, receipts: [...rows, { ...rows[0], seq: 9, receipt: { ...providerReceipt(run, 9, "usage"), runBindingSha256: "e".repeat(64) } }] })).toThrow(/evidence_receipt_grant_mismatch/);
+    expect(() => parseQualificationEvidence({ ...answer, receipts: rows.map((row) => row.kind === "guard" ? { ...row, source: "bridge" } : row) })).toThrow(StudioContractViolation);
   });
 
   it("derives the documented run binding from canonical JSON", () => {
@@ -83,6 +120,11 @@ describe("Studio G7 contract strictness", () => {
     expect(byChannel.output_leg_audio_artifact!.status).toBe("not_supported_by_product_privacy_model");
     expect(byChannel.webrtc_sender_stats!.status).toBe("corroboration_only");
     expect(byChannel.downstream_pcm_window_envelope!.sources).toEqual(["input_window"]);
+    // The task join is typed uncertain (no exchange binding on native tasks), and the loopback limitation is explicit.
+    expect(byChannel.builder_task_and_artifact_join).toMatchObject({ status: "uncertain", reason: "native_task_has_no_exchange_binding" });
+    expect(byChannel.webrtc_packet_flow_on_loopback_peer).toMatchObject({ status: "unsupported", reason: "fake_studio_loopback_peer_has_no_livekit_sfu" });
+    // Each plan-vs-migration difference is data, and the adapter follows the migration.
+    expect(STUDIO_G7_CONTRACT_DIFFERENCES.map((entry) => entry.field)).toEqual(expect.arrayContaining(["evidence.grant", "evidence.receipts[].source", "guard.reason", "grant.max_usage_tokens", "receipt.kind"]));
   });
 
   it("types scenario support per target kind", () => {
@@ -93,16 +135,21 @@ describe("Studio G7 contract strictness", () => {
     expect(scenarioSupportForTarget("studio-livekit-g7-v1", "V-G07", "studio-g7-v1").status).toBe("supported");
     expect(scenarioSupportForTarget("legacy-gemini-browser-v1", "V-G07", "studio-g7-v1")).toMatchObject({ status: "unsupported_for_target" });
     const steps = STUDIO_G7_CATALOG[0]!.steps;
-    expect(steps.filter((step) => step.executor === "separate_controller").every((step) => step.availability === "unavailable")).toBe(true);
-    expect(steps.map((step) => step.intent)).toEqual(["create_html_by_voice", "steer_by_voice", "leave_and_return", "hold_by_voice", "resume_by_voice", "stop_by_voice", "stale_edit", "withdrawal"]);
+    // Every G7 step (pack L3 order) is an operation: speak or studio_action, none only a driver method.
+    expect(steps.every((step) => step.availability === "supported" && (step.executor === "speak" || step.executor === "studio_action"))).toBe(true);
+    expect(steps.map((step) => step.intent)).toEqual(["create_html_by_voice", "steer_by_voice", "leave_and_return", "section_revision", "stale_edit", "hold_by_voice", "resume_by_voice", "stop_by_voice", "withdrawal"]);
+    expect(steps.filter((step) => step.executor === "speak").map((step) => step.outcome_join)).toEqual(["uncertain", "uncertain", "uncertain", "uncertain", "uncertain"]);
+    expect(STUDIO_G7_CATALOG[0]!.required_tools).toEqual(expect.arrayContaining(["start_studio_g7_run", "studio_g7_voice_step", "studio_g7_action"]));
   });
 
   it("reads deployed identities without guessing", () => {
     expect(parseStudioBuildMeta(`<html><head><meta charset="utf-8"><meta name="sophia-build" content="${"A".repeat(40)}"></head>`)).toEqual({ status: "observed", commit: "a".repeat(40) });
     expect(parseStudioBuildMeta("<html><head><meta charset=utf-8></head>")).toMatchObject({ status: "unavailable", reason: "identity_not_published" });
     expect(parseStudioBuildMeta('<meta content="dev" name="sophia-build">')).toMatchObject({ status: "unavailable", reason: "identity_malformed" });
-    expect(projectRoomSnapshot({ room: { id: "room-1", sophia: { exchangeId: EXCHANGE_UUID.toUpperCase(), inputEpoch: 3 } }, work: [{ text: "ignored" }] })).toEqual({ roomIdPresent: true, roomId: "room-1", exchangeId: EXCHANGE_UUID, inputEpoch: 3 });
+    expect(projectRoomSnapshot({ room: { id: "room-1", sophia: { exchangeId: EXCHANGE_UUID.toUpperCase(), exchange: "open", inputEpoch: 3, inputActorId: PRINCIPAL_UUID } }, work: [{ text: "ignored" }] })).toEqual({ roomIdPresent: true, roomId: "room-1", exchangeId: EXCHANGE_UUID, exchangeState: "open", inputEpoch: 3, inputActorId: PRINCIPAL_UUID, work: [] });
     expect(projectRoomSnapshot({ room: { id: "room-1", sophia: null } }).exchangeId).toBeNull();
+    // `exchange: none` is no live exchange, whatever id is echoed.
+    expect(projectRoomSnapshot({ room: { id: "room-1", sophia: { exchangeId: EXCHANGE_UUID, exchange: "none" } } }).exchangeId).toBeNull();
   });
 });
 

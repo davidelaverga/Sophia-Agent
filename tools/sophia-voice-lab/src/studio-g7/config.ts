@@ -20,6 +20,19 @@ export interface StudioG7Config {
   grantWaitMs: number;
   /** Interval after which the driver leaves and rejoins to refetch the room token. */
   grantRejoinIntervalMs: number;
+  /**
+   * Origins of the signed object-store URLs `GET /sources/{id}/content`
+   * returns. Artifact bytes are downloaded and hashed only from these; an
+   * empty list types every byte check `unavailable`.
+   */
+  objectStoreOrigins: string[];
+  /**
+   * Upper bound of a Supabase access JWT's lifetime. Global sign-out revokes
+   * refresh tokens, not issued JWTs, so a dead foreign worker's Studio lease
+   * is released only after this much time has passed since the first
+   * confirmed global sign-out that followed the lease's expiry.
+   */
+  accessTokenMaxLifetimeMs: number;
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -38,6 +51,14 @@ function bareOrigin(env: NodeJS.ProcessEnv, name: string, allowedOrigins: Readon
   if (url.protocol !== "https:" && !(nodeEnv !== "production" && url.protocol === "http:")) throw new VoiceLabError(labError("CONFIG_INVALID", `${name} must use HTTPS.`, "internal"));
   if (!allowedOrigins.has(url.origin)) throw new VoiceLabError(labError("CONFIG_INVALID", `${name} must be listed in SOPHIA_VOICE_LAB_ALLOWED_ORIGINS.`, "internal"));
   return url.origin;
+}
+
+function origins(env: NodeJS.ProcessEnv, name: string, allowedOrigins: ReadonlySet<string>, nodeEnv: string): string[] {
+  const raw = env[name]?.trim();
+  if (!raw) return [];
+  const values = raw.split(",").map((value) => value.trim()).filter(Boolean);
+  if (values.length > 8) throw new VoiceLabError(labError("CONFIG_INVALID", `${name} accepts at most 8 origins.`, "internal"));
+  return [...new Set(values.map((value) => bareOrigin({ [name]: value }, name, allowedOrigins, nodeEnv)))];
 }
 
 function commit(env: NodeJS.ProcessEnv, name: string): string {
@@ -87,6 +108,8 @@ export function loadStudioG7Config(env: NodeJS.ProcessEnv, allowedOrigins: Reado
     },
     grantWaitMs: grantWaitSeconds * 1_000,
     grantRejoinIntervalMs: Math.min(rejoinSeconds, grantWaitSeconds) * 1_000,
+    objectStoreOrigins: origins(env, "SOPHIA_VOICE_LAB_STUDIO_OBJECT_STORE_ORIGINS", allowedOrigins, nodeEnv),
+    accessTokenMaxLifetimeMs: seconds(env, "SOPHIA_VOICE_LAB_STUDIO_ACCESS_TOKEN_MAX_SECONDS", 3_600, 60, 86_400) * 1_000,
   };
   return config;
 }
@@ -101,6 +124,8 @@ export function projectStudioG7Config(config: StudioG7Config): Record<string, un
     project_id: config.projectId,
     expected_deployment: { studio: config.expected.studio, api: config.expected.api, bridge: config.expected.bridge },
     grant_wait_ms: config.grantWaitMs,
+    object_store_origins: [...config.objectStoreOrigins],
+    access_token_max_lifetime_ms: config.accessTokenMaxLifetimeMs,
     principal_credentials: "environment_only_never_projected",
   };
 }

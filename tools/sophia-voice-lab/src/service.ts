@@ -35,7 +35,7 @@ import { P01_ASSISTANT_OBSERVATIONS, P01_OPERATION_OBSERVATIONS, P01_LIMITS, P01
 import { verifyRetainedD02OwnerDeath } from "./retained-owner-verifier.js";
 import { STUDIO_G7_CONTRACT_VERSION, STUDIO_G7_RECEIPT_COVERAGE, STUDIO_G7_TARGET_KIND, STUDIO_RUN_BINDING_SCHEMA, computeRunBindingSha256 } from "./studio-g7/contract.js";
 import { projectStudioG7Config, type StudioG7Config } from "./studio-g7/config.js";
-import { STUDIO_G7_CATALOG, STUDIO_G7_SCENARIO_IDS, STUDIO_G7_SCENARIO_VERSION, scenarioSupportForTarget } from "./studio-g7/scenarios.js";
+import { STUDIO_G7_ACTIONS, STUDIO_G7_CATALOG, STUDIO_G7_SCENARIO_IDS, STUDIO_G7_SCENARIO_VERSION, STUDIO_G7_VOICE_STEPS, isStudioG7ScenarioVersion, scenarioSupportForTarget, studioG7StepId } from "./studio-g7/scenarios.js";
 import { deriveRetainedD02SettlementLookup } from "./retained-d02-provider.js";
 
 const StartSchema = z.object({
@@ -55,6 +55,44 @@ export const StudioG7StartSchema = z.object({
   capture_policy: CapturePolicySchema.optional(),
   idempotency_key: IdempotencyKeySchema,
 }).strict();
+
+const StudioTimingPolicySchema = z.object({
+  delay_ms: z.number().int().min(0).max(10_000).default(0),
+  schedule_timeout_ms: z.number().int().min(100).max(30_000).default(10_000),
+}).strict();
+
+/** One G7 voice step: a `speak` operation labelled with its step. */
+export const StudioG7VoiceStepSchema = z.object({
+  run_id: RunIdSchema,
+  step: z.enum(STUDIO_G7_VOICE_STEPS),
+  text: z.string().min(1).optional(),
+  fixture_id: z.string().min(1).max(128).regex(/^[A-Za-z0-9._:-]+$/).optional(),
+  idempotency_key: IdempotencyKeySchema,
+  timing_policy: StudioTimingPolicySchema.optional(),
+}).strict().refine((value) => Number(value.text !== undefined) + Number(value.fixture_id !== undefined) === 1, "Exactly one of text or fixture_id is required.");
+
+/** `observe` is not a step: it reads the outcome a voice step should have had. */
+export const STUDIO_G7_OBSERVE_ACTION = "observe" as const;
+
+/** One G7 non-voice step (or an outcome observation): a `studio_action` operation. */
+export const StudioG7ActionSchema = z.object({
+  run_id: RunIdSchema,
+  action: z.enum([...STUDIO_G7_ACTIONS, STUDIO_G7_OBSERVE_ACTION]),
+  idempotency_key: IdempotencyKeySchema,
+  sections: z.array(z.string().regex(/^[a-z][a-z0-9-]{0,63}$/)).min(1).max(16).optional(),
+  instruction: z.string().min(1).max(2_000).optional(),
+  entry_id: z.string().uuid().optional(),
+  for_step: z.enum(STUDIO_G7_VOICE_STEPS).optional(),
+  wait_ms: z.number().int().min(0).max(30_000).optional(),
+  timeout_ms: z.number().int().min(0).max(300_000).optional(),
+}).strict().superRefine((value, context) => {
+  const issue = (message: string) => context.addIssue({ code: "custom", message });
+  if ((value.action === "section_revision") !== (value.instruction !== undefined)) issue("instruction is required for section_revision and accepted only there.");
+  if (value.sections !== undefined && value.action !== "section_revision" && value.action !== "stale_edit") issue("sections apply only to section_revision or stale_edit.");
+  if (value.entry_id !== undefined && value.action !== "withdrawal") issue("entry_id applies only to withdrawal.");
+  if ((value.action === STUDIO_G7_OBSERVE_ACTION) !== (value.for_step !== undefined)) issue("for_step is required for observe and accepted only there.");
+  if (value.wait_ms !== undefined && value.action !== STUDIO_G7_OBSERVE_ACTION) issue("wait_ms applies only to observe.");
+});
 
 const AudioInputSchema = z.object({
   text: z.string().min(1).optional(),
@@ -443,7 +481,20 @@ export const toolInputSchemas = {
   export_voice_evidence: ExportSchema,
   run_regression_suite: SuiteSchema,
   get_suite_run: GetSuiteSchema,
+  // Studio LiveKit G7 (registered only when SOPHIA_VOICE_LAB_TARGET_KIND is
+  // studio-livekit-g7-v1; the legacy tool surface is unchanged).
+  start_studio_g7_run: StudioG7StartSchema,
+  studio_g7_voice_step: StudioG7VoiceStepSchema,
+  studio_g7_action: StudioG7ActionSchema,
 } as const;
+
+export const STUDIO_G7_TOOL_NAMES = ["start_studio_g7_run", "studio_g7_voice_step", "studio_g7_action"] as const;
+
+/** The MCP tools a deployment exposes: the legacy target keeps exactly its original surface. */
+export function toolNamesForTarget(targetKind: string | undefined): Array<keyof typeof toolInputSchemas> {
+  const all = Object.keys(toolInputSchemas) as Array<keyof typeof toolInputSchemas>;
+  return targetKind === STUDIO_G7_TARGET_KIND ? all : all.filter((name) => !(STUDIO_G7_TOOL_NAMES as readonly string[]).includes(name));
+}
 
 export interface FixtureSummary {
   id: string;
@@ -549,7 +600,7 @@ export class VoiceLabService {
     const [fixtures, ttsEngine, targetIdentity, workers] = await Promise.all([this.fixtures(), this.ttsEngine(), this.targetIdentity(), this.ledger.listLiveWorkers(new Date(Date.now() - 10_000))]);
     const configuredTarget = this.config.readinessTarget;
     return envelope({ status: "ok", data: {
-      tools: Object.keys(toolInputSchemas),
+      tools: toolNamesForTarget(this.config.targetKind),
       server_version: this.config.serviceVersion,
       versions: { harness: this.config.harnessVersion, mcp: this.config.mcpVersion, plugin: this.config.pluginVersion, evidence_schema: "sophia.voice-lab.evidence.v1", scenario_catalog: SCENARIO_CATALOG_VERSION },
       repository_commits: { base: this.config.repositoryBaseSha, candidate: this.config.repositoryCandidateSha, rollback: this.config.repositoryRollbackSha },
@@ -593,7 +644,10 @@ export class VoiceLabService {
         legacy_scenarios: "unsupported_for_target",
         receipt_coverage: STUDIO_G7_RECEIPT_COVERAGE,
         run_binding: { schema: STUDIO_RUN_BINDING_SCHEMA, algorithm: "sha256(utf8(canonical_json({cleanup_obligation_id,scenario_id,scenario_version,schema,test_run_id})))" },
-        start: "VoiceLabService.startStudioG7Run (not registered as an MCP tool in this change)",
+        tools: [...STUDIO_G7_TOOL_NAMES],
+        operation_types: { voice_steps: "speak (studio_g7_voice_step)", non_voice_steps: "studio_action (studio_g7_action)" },
+        lab_schema: { version: 7, studio_action_requires_upgrade_from_v6: true },
+        limitations: ["no_transcript_retained", "no_audio_retained", "pcm_reconciliation_envelope_only", "fake_studio_loopback_peer_has_no_packet_flow_proof", "native_task_join_uncertain_no_exchange_binding", "orphan_browser_room_presence_not_observable_via_member_api"],
       } } : {}),
     } });
   }
@@ -1763,6 +1817,71 @@ export class VoiceLabService {
     } });
   }
 
+  /**
+   * One G7 voice step (create, steer, hold, resume, stop) as one `speak`
+   * operation through the Studio's own microphone path, labelled with its
+   * step. A step that already succeeded is not performed again under a new
+   * idempotency key; the same key replays the same operation.
+   */
+  async studioG7VoiceStep(caller: AuthenticatedCaller, raw: unknown): Promise<LabEnvelope> {
+    requireScope(caller, "voice_lab:run");
+    this.assertMutationEnabled("studio_g7_voice_step");
+    const input = StudioG7VoiceStepSchema.parse(raw);
+    validateAudioInputLimit(input, this.config.maxTextCharacters);
+    const run = await this.studioRun(caller, input.run_id);
+    const stepId = studioG7StepId(input.step);
+    const reservation = await reserveAudioInput(input, await this.fixtures(), this.config);
+    const { step: _step, ...speech } = input;
+    const operationInput: Record<string, unknown> = { ...speech, _g7_step: stepId, _admission: reservation };
+    const operations = await this.ledger.listOperations(run.id);
+    const existing = operations.find((operation) => operation.type === "speak" && operation.idempotencyKey === input.idempotency_key);
+    if (!existing) this.assertStudioStepFree(operations, "speak", stepId, (operation) => operation.input._g7_step === stepId);
+    const rolling = this.rollingAudioFence(run, caller.subject, "speak", input.idempotency_key, operationInput, reservation);
+    const accepted = await this.queueRunOperation(caller, input.run_id, "speak", input.idempotency_key, operationInput, true, rolling);
+    return this.awaitSchedulingReceipt(caller, accepted, input.timing_policy?.schedule_timeout_ms ?? 10_000);
+  }
+
+  /**
+   * One G7 non-voice step as one `studio_action` operation: leave and return,
+   * a section-only revision, a stale edit, or a withdrawal; or `observe`, a
+   * read-only outcome read for a voice step. Product requests are made by the
+   * worker as the synthetic principal through the member API.
+   */
+  async studioG7Action(caller: AuthenticatedCaller, raw: unknown): Promise<LabEnvelope> {
+    requireScope(caller, "voice_lab:run");
+    this.assertMutationEnabled("studio_g7_action");
+    const input = StudioG7ActionSchema.parse(raw);
+    const run = await this.studioRun(caller, input.run_id);
+    const operations = await this.ledger.listOperations(run.id);
+    const existing = operations.find((operation) => operation.type === "studio_action" && operation.idempotencyKey === input.idempotency_key);
+    if (!existing && input.action !== STUDIO_G7_OBSERVE_ACTION) {
+      const stepId = studioG7StepId(input.action);
+      this.assertStudioStepFree(operations, "studio_action", stepId, (operation) => operation.input.action === input.action);
+    }
+    const { run_id: _runId, ...operationInput } = input;
+    const accepted = await this.queueRunOperation(caller, input.run_id, "studio_action", input.idempotency_key, { run_id: input.run_id, ...operationInput }, false);
+    return this.awaitSchedulingReceipt(caller, accepted, Math.min(input.timeout_ms ?? this.config.maxOperationSeconds * 1_000, this.config.maxOperationSeconds * 1_000));
+  }
+
+  private async studioRun(caller: AuthenticatedCaller, runId: string): Promise<RunRecord> {
+    const run = await this.ownedRun(caller, runId);
+    if (this.config.targetKind !== STUDIO_G7_TARGET_KIND || !isStudioG7ScenarioVersion(run.scenarioVersion)) {
+      throw new VoiceLabError(labError("SCENARIO_UNSUPPORTED_FOR_TARGET", "Studio G7 steps run only on a Studio G7 run of a studio-livekit-g7-v1 deployment.", "validation", false, { status: "unsupported_for_target", target_kind: this.config.targetKind ?? "legacy-gemini-browser-v1", scenario_id: run.scenarioId, scenario_version: run.scenarioVersion }));
+    }
+    return run;
+  }
+
+  /** A step runs at most once: one in flight, and none after a performed success. */
+  private assertStudioStepFree(operations: Awaited<ReturnType<VoiceLabLedger["listOperations"]>>, type: "speak" | "studio_action", stepId: string, matches: (operation: Awaited<ReturnType<VoiceLabLedger["listOperations"]>>[number]) => boolean): void {
+    const same = operations.filter((operation) => operation.type === type && matches(operation));
+    if (same.some((operation) => ["accepted", "queued", "leased", "executing"].includes(operation.state))) {
+      throw new VoiceLabError(labError("STUDIO_G7_STEP_IN_FLIGHT", "This G7 step already has an operation in flight; inspect it or retry with its idempotency key.", "conflict", true, { step_id: stepId }));
+    }
+    if (same.some((operation) => operation.state === "succeeded" && (type === "speak" || operation.result?.performed === true))) {
+      throw new VoiceLabError(labError("STUDIO_G7_STEP_ALREADY_PERFORMED", "This G7 step was already performed in this run; it is never performed twice.", "conflict", false, { step_id: stepId }));
+    }
+  }
+
   async speak(caller: AuthenticatedCaller, raw: unknown): Promise<LabEnvelope> {
     requireScope(caller, "voice_lab:run");
     this.assertMutationEnabled("speak");
@@ -2093,7 +2212,7 @@ export class VoiceLabService {
     return envelope({ suite: fresh, status: fresh.state === "completed" ? "completed" : terminal ? "failed" : "running", ...(evidence ? { evidence: evidence.artifactRefs.filter((reference) => reference.kind === "suite_manifest") } : {}), data: { state: fresh.state, scheduling: "agent_guided_sequential", next_scenario_index: fresh.nextScenarioIndex, scenario_count: fresh.definition.scenarios.length, current_child_run_id: current?.id ?? null, next_required_action: terminal ? null : current ? "inspect_child_and_drive_scenario_recipe_then_end" : "wait_for_child_allocation", aggregate_evidence: evidence ? { status: "available", manifest_id: evidence.manifestId, manifest_sha256: evidence.manifestSha256, schema_version: evidence.schemaVersion, resource_id: `voice-lab://suite-evidence/${evidence.manifestId}` } : terminal ? { status: "pending", reason: "terminal_aggregate_manifest_pending" } : { status: "pending", reason: "children_not_terminal" }, unsupported_scenarios: unsupported, runs: runs.filter(Boolean).map((run) => ({ run_id: run!.id, scenario_id: run!.scenarioId, scenario_version: run!.scenarioVersion, state: run!.state, verdicts: run!.verdicts, cleanup_complete: run!.cleanupComplete, event_cursor: run!.latestCursor })) } });
   }
 
-  async queueRunOperation(caller: AuthenticatedCaller, runId: string, type: "speak" | "barge_in" | "force_socket_rotation" | "end", idempotencyKey: string, input: Record<string, unknown>, audioAdmission = false, rolling?: RollingAdmissionFence): Promise<LabEnvelope> {
+  async queueRunOperation(caller: AuthenticatedCaller, runId: string, type: "speak" | "barge_in" | "force_socket_rotation" | "end" | "studio_action", idempotencyKey: string, input: Record<string, unknown>, audioAdmission = false, rolling?: RollingAdmissionFence): Promise<LabEnvelope> {
     const run = await this.ownedRun(caller, runId);
     assertRunAcceptsOperation(run, type);
     const created = await this.ledger.createOperation({ id: randomUUID(), runId, callerId: caller.subject, type, idempotencyKey, requestHash: canonicalRequestHash(input), input }, audioAdmission ? { maxUtterances: this.config.maxUtterancesPerRun, maxTotalDurationMs: this.config.maxInjectedDurationMs, maxTotalBytes: this.config.maxInjectedBytes, minIntervalMs: this.config.minUtteranceIntervalMs } : undefined, rolling);

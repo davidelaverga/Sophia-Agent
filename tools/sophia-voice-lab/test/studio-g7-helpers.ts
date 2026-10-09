@@ -76,13 +76,13 @@ export class EventLog {
     const json = canonicalJson(receipt);
     return this.add("studio.page_receipt", "product", { event: receipt.event, receipt_json: json, receipt_sha256: sha256(json) });
   }
-  bridge(kind: string, receipt: Record<string, unknown>): LabEvent {
+  bridge(kind: string, receipt: Record<string, unknown>, source = kind === "guard" ? "service" : "bridge", seq: unknown = receipt.seq ?? 0): LabEvent {
     const json = canonicalJson(receipt);
-    return this.add("studio.bridge_receipt", "canonical", { exchange_id: EXCHANGE_UUID, seq: receipt.seq, kind, received_at: new Date().toISOString(), receipt_json: json, receipt_sha256: sha256(json) });
+    return this.add("studio.bridge_receipt", "canonical", { exchange_id: EXCHANGE_UUID, source, seq, kind, received_at: new Date().toISOString(), receipt_json: json, receipt_sha256: sha256(json) });
   }
-  grant(grant: Record<string, unknown>): LabEvent {
+  grant(grant: Record<string, unknown>, exchangeState = "open"): LabEvent {
     const json = canonicalJson(grant);
-    return this.add("studio.bridge_grant", "canonical", { exchange_id: EXCHANGE_UUID, grant_json: json, grant_sha256: sha256(json) });
+    return this.add("studio.bridge_grant", "canonical", { exchange_id: EXCHANGE_UUID, exchange_state: exchangeState, grant_json: json, grant_sha256: sha256(json) });
   }
 }
 
@@ -98,14 +98,20 @@ export function pageReceipt(run: RunRecord, event: "mic_published" | "mic_unpubl
   };
 }
 
-export function bridgeBase(run: RunRecord, seq: number, atMs: number, binding = bindingOf(run), grantId = GRANT_UUID): Record<string, unknown> {
-  return { grantId, runBindingSha256: binding, seq, atMs };
+/** Migration 0046 bridge body: its own kind, the optional bridge schema label, the grant binding. */
+export function bridgeBase(run: RunRecord, kind: string, seq: number, atMs: number, binding = bindingOf(run), grantId = GRANT_UUID): Record<string, unknown> {
+  return { kind, schema: `sophia.bridge.${kind}.v1`, grantId, runBindingSha256: binding, seq, atMs };
+}
+
+/** The guard's own receipt, as `sophia.voice_qualification_guard()` writes it (service seq 0, no body seq). */
+export function guardReceipt(run: RunRecord, reason: string, atMs = 2_000, binding = bindingOf(run), grantId = GRANT_UUID): Record<string, unknown> {
+  return { kind: "guard", schema: "sophia.service.guard.v1", grantId, runBindingSha256: binding, reason, atMs };
 }
 
 export function inputWindow(run: RunRecord, seq: number, windowSeq: number, durationMs: number, overrides: Record<string, unknown> = {}): Record<string, unknown> {
   const samples = Math.round(durationMs * 16 * 1.25);
   return {
-    ...bridgeBase(run, seq, 1_000 + seq),
+    ...bridgeBase(run, "input_window", seq, 1_000 + seq),
     windowSeq, inputEpoch: 1, providerSession: PROVIDER_SESSION_UUID, connection: 1,
     startedAtMs: 10_000 * windowSeq, endedAtMs: 10_000 * windowSeq + Math.round(durationMs * 1.25), endReason: "turn_complete",
     chunkCount: 50, sampleCount: samples, nonzeroSampleCount: Math.round(samples * 0.7), audibleChunkCount: 30,
@@ -116,23 +122,35 @@ export function inputWindow(run: RunRecord, seq: number, windowSeq: number, dura
 }
 
 export function inputTurn(run: RunRecord, seq: number, windowSeq: number, overrides: Record<string, unknown> = {}): Record<string, unknown> {
-  return { ...bridgeBase(run, seq, 1_000 + seq), windowSeq, turnOrdinal: windowSeq, inputTranscriptionObserved: true, transcriptChars: 42, finished: true, attributedToHolder: true, modelResponded: true, toolCallCount: 0, outcome: "answered", ...overrides };
+  return { ...bridgeBase(run, "input_turn", seq, 1_000 + seq), windowSeq, turnOrdinal: windowSeq, inputTranscriptionObserved: true, transcriptChars: 42, finished: true, attributedToHolder: true, modelResponded: true, toolCallCount: 0, outcome: "answered", ...overrides };
 }
 
 export function providerReceipt(run: RunRecord, seq: number, phase: string, overrides: Record<string, unknown> = {}): Record<string, unknown> {
-  return { ...bridgeBase(run, seq, 1_000 + seq), phase, providerSession: PROVIDER_SESSION_UUID, connection: 1, resumed: false, model: "models/gemini-live-2.5-flash", instructionSha256: sha256("instructions"), bridgeCommit: BRIDGE_SHA, usageTokens: phase === "usage" ? 1_234 : null, ...overrides };
+  return { ...bridgeBase(run, "provider", seq, 1_000 + seq), phase, providerSession: PROVIDER_SESSION_UUID, connection: 1, resumed: false, model: "models/gemini-live-2.5-flash", instructionSha256: sha256("instructions"), bridgeCommit: BRIDGE_SHA, usageTokens: phase === "usage" ? 1_234 : null, ...overrides };
 }
 
 export function outputReply(run: RunRecord, seq: number, replyOrdinal: number, firstPlayedAtMs: number, overrides: Record<string, unknown> = {}): Record<string, unknown> {
-  return { ...bridgeBase(run, seq, 1_000 + seq), replyOrdinal, turnOrdinal: replyOrdinal, providerSession: PROVIDER_SESSION_UUID, connection: 1, receivedAtMs: firstPlayedAtMs - 100, firstPlayedAtMs, endedAtMs: firstPlayedAtMs + 2_000, terminal: "played", samplesReceived: 48_000, framesPlayed: 100, nonSilentFramesPlayed: 80, rms: 0.1, peak: 0.5, durationMs: 2_000, playedDigestAlgorithm: "sha-256-chain-v1", playedSha256Chain: sha256(`played-${replyOrdinal}`), ...overrides };
+  return { ...bridgeBase(run, "output_reply", seq, 1_000 + seq), replyOrdinal, turnOrdinal: replyOrdinal, providerSession: PROVIDER_SESSION_UUID, connection: 1, receivedAtMs: firstPlayedAtMs - 100, firstPlayedAtMs, endedAtMs: firstPlayedAtMs + 2_000, terminal: "played", samplesReceived: 48_000, framesPlayed: 100, nonSilentFramesPlayed: 80, rms: 0.1, peak: 0.5, durationMs: 2_000, playedDigestAlgorithm: "sha-256-chain-v1", playedSha256Chain: sha256(`played-${replyOrdinal}`), ...overrides };
 }
 
 export function sessionClosed(run: RunRecord, seq: number, counts: { windows: number; turns: number; replies: number }, overrides: Record<string, unknown> = {}): Record<string, unknown> {
-  return { ...bridgeBase(run, seq, 1_000 + seq), providerClosed: true, windows: counts.windows, turns: counts.turns, replies: counts.replies, toolCalls: 0, typedMessages: 0, transcriptRetained: false, reason: "ended", ...overrides };
+  return { ...bridgeBase(run, "session_closed", seq, 1_000 + seq), providerClosed: true, windows: counts.windows, turns: counts.turns, replies: counts.replies, toolCalls: 0, typedMessages: 0, transcriptRetained: false, reason: "ended", ...overrides };
 }
 
+/** The `grant` object of `voice_qualification_evidence_read` (0046). */
 export function evidenceGrant(run: RunRecord, overrides: Record<string, unknown> = {}): Record<string, unknown> {
-  return { grantId: GRANT_UUID, runBindingSha256: bindingOf(run), deadline: new Date(Date.now() + 600_000).toISOString(), maxExchangeSeconds: 600, maxProviderConnections: 3, maxUsageTokens: 200_000, endedReason: null, ...overrides };
+  return {
+    grantId: GRANT_UUID, runBindingSha256: bindingOf(run), deadline: new Date(Date.now() + 600_000).toISOString(), expiresAt: new Date(Date.now() + 3_600_000).toISOString(), revokedAt: null,
+    maxExchangeSeconds: 600, maxProviderConnections: 3, maxTurns: 20, maxOutputTokensPerTurn: 1_000, maxUsageTokens: 200_000,
+    connectionsOpened: 1, turns: 2, usageTokens: 1_234, lastPromptTokens: 600, endedReason: null, ...overrides,
+  };
+}
+
+/** The whole evidence answer (0046), receipts ordered by source then seq. */
+export function evidenceEnvelope(run: RunRecord, receipts: Array<[string, Record<string, unknown>]>, overrides: { state?: string; grant?: Record<string, unknown>; exchangeId?: string } = {}): Record<string, unknown> {
+  const rows = receipts.map(([kind, receipt]) => ({ source: kind === "guard" ? "service" : "bridge", seq: kind === "guard" ? 0 : Number(receipt.seq), kind, receivedAt: new Date(1_791_500_000_000 + Number(receipt.seq ?? 0)).toISOString(), receipt }));
+  rows.sort((left, right) => left.source === right.source ? left.seq - right.seq : left.source < right.source ? -1 : 1);
+  return { exchangeId: overrides.exchangeId ?? EXCHANGE_UUID, state: overrides.state ?? "open", grant: overrides.grant ?? evidenceGrant(run), receipts: rows };
 }
 
 export function speakOperation(run: RunRecord, createdAt: Date, overrides: Partial<OperationRecord> = {}): OperationRecord {
@@ -154,7 +172,7 @@ export function labUtterance(log: EventLog, operationId: string, startMs: number
 
 /** Cleanup proofs the Studio driver and worker author on a normal end. */
 export function cleanupEvents(log: EventLog): void {
-  log.add("studio.cleanup.exchange_ended", "canonical", { confirmed: true, basis: "ui_end", exchange_id: EXCHANGE_UUID, verified_by: "member_snapshot" });
+  log.add("studio.cleanup.exchange_ended", "canonical", { confirmed: true, status: "confirmed", basis: "ui_end", exchange_id: EXCHANGE_UUID, join: "retained", ownership: "proven", verified_by: "member_snapshot" });
   log.add("studio.cleanup.signed_out", "canonical", { schema: "sophia_voice_lab_studio_sign_out_v1", scope: "global", confirmed: true, http_status: 204, basis: "global_logout_accepted" });
   log.add("cleanup.browser_context_closed", "browser", { close_resolved: true, browser_registry_absent: true, browser_process_close_resolved: true });
   log.add("cleanup.browser_lease_released", "worker", { cas_deleted: true });

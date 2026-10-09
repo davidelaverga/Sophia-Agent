@@ -45,8 +45,9 @@ import {
 } from "./contract.js";
 import type { StudioG7Config } from "./config.js";
 import { buildStudioObserverScript } from "./page-scripts.js";
-import { isStudioG7ScenarioVersion, STUDIO_G7_SCENARIO_ID_SET } from "./scenarios.js";
-import { StudioApiClient, type IdentityObservation } from "./studio-api.js";
+import { probeStudioReadiness } from "./readiness.js";
+import { STUDIO_G7_ACTIONS, STUDIO_G7_VOICE_STEPS, isStudioG7ScenarioVersion, STUDIO_G7_SCENARIO_ID_SET, studioG7StepId, type StudioG7Action, type StudioG7VoiceStep } from "./scenarios.js";
+import { StudioApiClient, type IdentityObservation, type ProjectedArtifactVersion, type ProjectedTaskDetail, type StudioRoomSnapshot } from "./studio-api.js";
 import { buildStudioSessionSeedScript, globalSignOut, passwordGrant, supabaseStorageKey, type FetchLike, type SignOutReceipt, type StudioUserSession } from "./supabase-session.js";
 
 type DriverEvent = Omit<LabEvent, "runId" | "seq" | "at">;
@@ -54,6 +55,14 @@ type DriverEvent = Omit<LabEvent, "runId" | "seq" | "at">;
 const MAX_PUSH_QUEUE = 4_096;
 const BRIDGE_POLL_MS = 2_000;
 const STATS_POLL_MS = 5_000;
+/** Product clock vs Lab clock tolerance for the actor/time-window task join. */
+export const OUTCOME_WINDOW_TOLERANCE_MS = 120_000;
+const MAX_OBSERVED_TASKS = 12;
+const MAX_VERIFIED_ARTIFACTS = 4;
+/** A stale edit carries this fixed Lab instruction; it must be refused before anything is admitted. */
+export const STALE_EDIT_PROBE_INSTRUCTION = "Voice Lab stale-edit probe: revise this section of a superseded version.";
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const SECTION = /^[a-z][a-z0-9-]{0,63}$/;
 
 export interface StudioDriverDependencies {
   fetchImpl?: FetchLike;
@@ -78,6 +87,7 @@ const DEFAULT_TIMEOUTS = {
   exchangeEndMs: 15_000,
   sessionClosedMs: 10_000,
   uiActionMs: 5_000,
+  designSettleMs: 120_000,
 };
 
 interface PushItem { arrival: number; payload: unknown }
@@ -96,9 +106,6 @@ interface StudioSession {
   issuedTrackHashes: Set<string>;
   auth: StudioUserSession | null;
   runBindingSha256: string;
-  preexistingExchangeId: string | null;
-  exchangeId: string | null;
-  speakRequested: boolean;
   bridgeSeen: Map<string, string>;
   sessionClosedSeen: boolean;
   lastBridgePollAt: number;
@@ -107,19 +114,52 @@ interface StudioSession {
   pendingEvents: DriverEvent[];
 }
 
-/** What this driver instance knows about a run, independent of its browser. */
-interface ExchangeRecord {
+/**
+ * What this driver instance knows about a run, independent of its browser.
+ * A record is either retained (this instance ran the start) or adopted from
+ * the run's durable write-ahead events after a worker restart.
+ */
+export interface ExchangeRecord {
   exchangeId: string | null;
   preexistingExchangeId: string | null;
   speakRequested: boolean;
   browserLaunched: boolean;
   authIssued: boolean;
+  /** Grant id of this run's bound `mic_published` page receipt (the grant gate). */
+  grantId: string | null;
+  runBindingSha256: string | null;
+  exchangeOpenedAtMs: number | null;
+  join: "retained" | "durable";
 }
+
+/** The durable join a restarted worker hands the driver (from write-ahead events). */
+export interface DurableStudioJoin {
+  exchangeId: string | null;
+  grantId: string | null;
+  runBindingSha256: string;
+  speakRequested: boolean;
+  exchangeOpenedAtMs: number | null;
+}
+
+export type OwnershipStatus = "proven" | "unavailable" | "mismatch";
 
 /** Caches one principal token per cleanup flow; never logged or persisted. */
 interface TokenSource { token(): Promise<string>; held(): StudioUserSession | null; forget(): void }
 
 type IdentitySnapshot = { observed: Partial<DeploymentIdentity>; event: DriverEvent };
+
+/** The Studio extensions the worker calls for G7 runs (absent on the legacy driver). */
+export interface StudioDriverExtensions {
+  studioAction(run: RunRecord, operationId: string, input: Record<string, unknown>): Promise<DriverOperationResult>;
+  refreshStudioEvidence(run: RunRecord, join: DurableStudioJoin): Promise<DriverEvent[]>;
+  adoptStudioJoin(runId: string, join: DurableStudioJoin): void;
+  studioReadiness(): Promise<Record<string, unknown>>;
+}
+
+export function hasStudioExtensions(driver: VoiceBrowserDriver): driver is VoiceBrowserDriver & StudioDriverExtensions {
+  const candidate = driver as Partial<StudioDriverExtensions>;
+  return typeof candidate.studioAction === "function" && typeof candidate.refreshStudioEvidence === "function" && typeof candidate.adoptStudioJoin === "function";
+}
 
 function sha256(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
@@ -141,13 +181,19 @@ function studioError(code: string, message: string, category: "harness" | "produ
  * driver: one disposable Chromium process per run, the shared init script's
  * getUserMedia replacement and `__sophiaVoiceLab.schedule` injection, and the
  * private page-push binding. Authority is the synthetic principal's own
- * Supabase session; product evidence is read only through the member API with
- * that principal's JWT. Every cleanup path (end, abort, recover, watchdog)
- * ends the exchange through `POST /exchanges/{id}/end` when the UI cannot,
- * verifies the end via the member snapshot, and signs the principal out
- * globally, whether or not the page is alive.
+ * Supabase session; product evidence and outcomes are read only through the
+ * member API with that principal's JWT.
+ *
+ * Exchange cleanup is conservative. The driver ends (UI End, then API End)
+ * only an exchange it can prove is this run's own: the exchange id joined to
+ * this run when its Speak opened it, whose qualification evidence names this
+ * run's binding hash and the grant id of this run's bound page receipts.
+ * Anything else is never touched: the driver only verifies, read-only, that
+ * the run's exchange is no longer live (one live exchange per room), or types
+ * the state `uncertain` / `unavailable` for a later recovery. The product's
+ * guard ends every exchange under a grant at its deadline independently.
  */
-export class StudioG7Driver implements VoiceBrowserDriver {
+export class StudioG7Driver implements VoiceBrowserDriver, StudioDriverExtensions {
   readonly #sessions = new Map<string, StudioSession>();
   readonly #starting = new Set<string>();
   /** Survives browser loss: the watchdog and recovery still need the exchange join. */
@@ -170,7 +216,7 @@ export class StudioG7Driver implements VoiceBrowserDriver {
     readonly deps: StudioDriverDependencies = {},
   ) {
     this.#fetch = deps.fetchImpl ?? fetch;
-    this.#api = new StudioApiClient(studio.apiOrigin, studio.studioOrigin, config.allowedOrigins, this.#fetch);
+    this.#api = new StudioApiClient(studio.apiOrigin, studio.studioOrigin, config.allowedOrigins, this.#fetch, 10_000, studio.objectStoreOrigins ?? []);
     validateAllowedOrigin(studio.supabaseUrl, config.allowedOrigins);
     this.#readiness = deps.readinessDriver ?? new PlaywrightVoiceDriver(config, fetch, undefined, undefined, deps.launchBrowserServer, deps.connectBrowser);
     this.#now = deps.now ?? (() => Date.now());
@@ -186,21 +232,26 @@ export class StudioG7Driver implements VoiceBrowserDriver {
     return this.#readiness.readiness();
   }
 
+  /** Target-aware readiness without signing in (see readiness.ts). */
+  async studioReadiness(): Promise<Record<string, unknown>> {
+    return probeStudioReadiness(this.config, this.studio, this.#fetch);
+  }
+
   async verifyTarget(run: RunRecord): Promise<DriverStartResult> {
     const identity = await this.#observeIdentities(run, "pre_resource");
     return { observedDeployment: identity.observed as DeploymentIdentity, events: [identity.event] };
   }
 
-  async start(run: RunRecord, _frontendCapability: string, _browserContextBinding?: D02BrowserContextBinding, onStage?: (stage: BrowserStartStage) => Promise<void>, onAcquired?: BrowserAcquisitionObserver): Promise<DriverStartResult> {
+  async start(run: RunRecord, _frontendCapability: string, _browserContextBinding?: D02BrowserContextBinding, onStage?: (stage: BrowserStartStage) => Promise<void>, onAcquired?: BrowserAcquisitionObserver, onDurable?: (events: DriverEvent[]) => Promise<void>): Promise<DriverStartResult> {
     if (this.#sessions.has(run.id) || this.#starting.has(run.id)) throw studioError("BROWSER_ALREADY_STARTED", "Run already owns or is acquiring a browser process.", "harness");
     if (!isStudioG7ScenarioVersion(run.scenarioVersion) || run.scenarioId === null || !STUDIO_G7_SCENARIO_ID_SET.has(run.scenarioId)) {
       throw new VoiceLabError(labError("SCENARIO_UNSUPPORTED_FOR_TARGET", "Only Studio G7 scenarios run on the Studio LiveKit target.", "validation", false, { status: "unsupported_for_target", target_kind: STUDIO_G7_TARGET_KIND, scenario_id: run.scenarioId, scenario_version: run.scenarioVersion }));
     }
     this.#starting.add(run.id);
-    this.#exchanges.set(run.id, { exchangeId: null, preexistingExchangeId: null, speakRequested: false, browserLaunched: false, authIssued: false });
+    const runBindingSha256 = computeRunBindingSha256({ testRunId: run.testRunId, cleanupObligationId: run.cleanupObligationId, scenarioId: run.scenarioId, scenarioVersion: run.scenarioVersion! });
+    this.#exchanges.set(run.id, { exchangeId: null, preexistingExchangeId: null, speakRequested: false, browserLaunched: false, authIssued: false, grantId: null, runBindingSha256, exchangeOpenedAtMs: null, join: "retained" });
     let identity: IdentitySnapshot;
     let ownership: OwnedBrowserProcess;
-    const runBindingSha256 = computeRunBindingSha256({ testRunId: run.testRunId, cleanupObligationId: run.cleanupObligationId, scenarioId: run.scenarioId, scenarioVersion: run.scenarioVersion! });
     try {
       identity = await this.#observeIdentities(run, "startup");
       ownership = await launchDisposableBrowserProcess(run, this.deps.launchBrowserServer, this.deps.connectBrowser);
@@ -221,12 +272,12 @@ export class StudioG7Driver implements VoiceBrowserDriver {
       runId: run.id, testRunId: run.testRunId, cleanupObligationId: run.cleanupObligationId,
       ownership, context: null, page: null, harnessCursor: 0,
       push: { queue: [], overflow: false, arrival: 0 }, accepted: [], issuedTrackHashes: new Set(),
-      auth: null, runBindingSha256, preexistingExchangeId: null, exchangeId: null, speakRequested: false,
+      auth: null, runBindingSha256,
       bridgeSeen: new Map(), sessionClosedSeen: false, lastBridgePollAt: 0, lastStatsAt: 0, statsSequence: 0, pendingEvents: [],
     };
     // Registered immediately after launch: every later failure (ownership
     // persistence, auth, UI) flows through abort, which proves the browser
-    // close, ends any exchange and signs the principal out.
+    // close, settles the exchange and signs the principal out.
     this.#sessions.set(run.id, session);
     this.#armWatchdog(run);
     session.pendingEvents.push(identity.event, acquisition);
@@ -236,11 +287,12 @@ export class StudioG7Driver implements VoiceBrowserDriver {
     await onStage?.("frontend_auth_session");
     const auth = await this.#tokenSource(session).token().then(() => session.auth!);
     session.pendingEvents.splice(0);
-    const events: DriverEvent[] = [identity.event, acquisition, {
+    const declared: DriverEvent = {
       kind: "studio.run_binding.declared", source: "canonical",
       payload: { schema: STUDIO_RUN_BINDING_SCHEMA, contract_version: STUDIO_G7_CONTRACT_VERSION, run_binding_sha256: runBindingSha256, scenario_id: run.scenarioId, scenario_version: run.scenarioVersion, test_run_id: run.testRunId, cleanup_obligation_id_sha256: labSha256(run.cleanupObligationId) },
       dedupeKey: `studio-run-binding:${run.id}`,
-    }, {
+    };
+    const events: DriverEvent[] = [identity.event, acquisition, declared, {
       kind: "studio.auth.session_established", source: "canonical",
       payload: { principal_id_sha256: labSha256(run.principalId), principal_bound: true, expires_at: auth.expiresAt, credentials_excluded: true },
       dedupeKey: `studio-auth:${run.id}:${auth.expiresAt}`,
@@ -274,17 +326,30 @@ export class StudioG7Driver implements VoiceBrowserDriver {
       events.push(await this.#joinRoom(session, "initial"));
       events.push(await this.#ensureMicrophoneOn(session));
       await onStage?.("voice_startup_readiness");
-      events.push(...await this.#awaitGrantGate(session));
+      const gate = await this.#awaitGrantGate(session);
+      events.push(...gate.events);
+      this.#state(run.id).grantId = gate.grantId;
       const before = await this.#api.snapshot(this.studio.projectId, await this.#tokenSource(session).token());
       if (before.exchangeId !== null) {
-        session.preexistingExchangeId = before.exchangeId;
         this.#state(run.id).preexistingExchangeId = before.exchangeId;
-        throw studioError("STUDIO_PROJECT_EXCHANGE_ALREADY_OPEN", "The synthetic project already had an open exchange before this run spoke; it was not adopted.", "harness", false, { status: "unavailable" });
+        throw studioError("STUDIO_PROJECT_EXCHANGE_ALREADY_OPEN", "The synthetic project already had a live exchange before this run spoke; it was not adopted and is never touched.", "harness", false, { status: "unavailable" });
       }
-      await this.#clickControl(session, /^Speak with Sophia$/, this.#timeouts.controlVisibleMs);
-      session.speakRequested = true;
+      // Write-ahead: the durable intent precedes the click, so a restarted
+      // worker that finds no intent knows this run never opened an exchange.
+      const intentPayload = { grant_id: gate.grantId, run_binding_sha256: runBindingSha256, write_ahead: true };
+      const intent: DriverEvent = { kind: "studio.exchange.speak_requested", source: "canonical", payload: intentPayload, dedupeKey: `studio-speak-requested:${run.id}` };
+      await onDurable?.([...events, intent]);
+      events.push(intent);
       this.#state(run.id).speakRequested = true;
-      events.push(await this.#awaitExchange(session));
+      await this.#clickControl(session, /^Speak with Sophia$/, this.#timeouts.controlVisibleMs);
+      const opened = await this.#awaitExchange(session, run);
+      await onDurable?.([opened]);
+      events.push(opened);
+      const ownershipProof = await this.#proveOwnership(run.id, this.#tokenSource(session));
+      events.push(ownershipProof.event);
+      if (ownershipProof.status === "mismatch") {
+        throw studioError("STUDIO_EXCHANGE_OWNERSHIP_MISMATCH", "The opened exchange's qualification evidence is bound to another run or grant; it is never touched.", "harness", false, { status: "fail", reason: ownershipProof.reason });
+      }
       events.push(...await this.drain(run.id));
       return { observedDeployment: identity.observed as DeploymentIdentity, events };
     } catch (error) {
@@ -339,9 +404,10 @@ export class StudioG7Driver implements VoiceBrowserDriver {
     events.push(...harness.events);
     events.push(...this.#drainPush(session));
     const now = this.#now();
-    if (session.exchangeId !== null && (force || now - session.lastBridgePollAt >= BRIDGE_POLL_MS)) {
+    const exchangeId = this.#exchanges.get(runId)?.exchangeId ?? null;
+    if (exchangeId !== null && (force || now - session.lastBridgePollAt >= BRIDGE_POLL_MS)) {
       session.lastBridgePollAt = now;
-      events.push(...await this.#drainBridge(session));
+      events.push(...await this.#readBridge(runId, exchangeId, this.#tokenSource(session), session.bridgeSeen, (closed) => { if (closed) session.sessionClosedSeen = true; }));
     }
     if (force || now - session.lastStatsAt >= STATS_POLL_MS) {
       session.lastStatsAt = now;
@@ -352,30 +418,53 @@ export class StudioG7Driver implements VoiceBrowserDriver {
   }
 
   /**
-   * Leave the room and return. Not exposed as an MCP operation in this change;
-   * the G7 catalogue types the step `unavailable` until it is.
+   * One G7 non-voice step as one operation: leave and return, a section-only
+   * revision, a stale edit, or a withdrawal. Every product request is made as
+   * the principal through the member API; only ids, states, hashes and
+   * enumerated codes are recorded.
    */
-  async leaveAndReturn(run: RunRecord): Promise<DriverEvent[]> {
+  async studioAction(run: RunRecord, operationId: string, input: Record<string, unknown>): Promise<DriverOperationResult> {
+    const action = input.action;
     const session = this.#requireSession(run.id);
-    const events: DriverEvent[] = [...await this.drain(run.id, true)];
-    const leftAt = session.push.arrival;
-    await this.#clickControl(session, /^Leave the room$/, this.#timeouts.controlVisibleMs);
-    const leftPayload = { basis: "ui_leave", push_arrival_before: leftAt };
-    events.push({ kind: "studio.room.left", source: "browser", payload: leftPayload, dedupeKey: contentKey("studio-room-left", run.id, leftPayload) });
-    events.push(await this.#joinRoom(session, "return"));
-    events.push(await this.#ensureMicrophoneOn(session));
-    const deadline = this.#now() + this.#timeouts.controlVisibleMs;
-    while (this.#now() < deadline) {
-      this.#noteIssuedTracks(session, await this.#peekHarness(session));
-      const republished = session.accepted.some((item) => item.arrival > leftAt && item.receipt.event === "mic_published" && item.receipt.runBindingSha256 === session.runBindingSha256 && session.issuedTrackHashes.has(sha256(item.receipt.trackId)));
-      if (republished) {
-        events.push({ kind: "studio.room.rejoined", source: "browser", payload: { lab_track_republished: true }, dedupeKey: `studio-room-rejoined:${run.id}:${leftAt}` });
-        events.push(...await this.drain(run.id, true));
-        return events;
-      }
-      await this.#wait(250);
+    const tokens = this.#tokenSource(session);
+    if (action === "observe") {
+      // Not a step: a read-only outcome read for a voice step, optionally
+      // after a bounded wait so the product can act on the utterance.
+      const forStep = input.for_step;
+      if (typeof forStep !== "string" || !(STUDIO_G7_VOICE_STEPS as readonly string[]).includes(forStep)) throw studioError("STUDIO_ACTION_INVALID", "observe needs for_step naming a G7 voice step.", "validation");
+      const budget = typeof input._settle_budget_ms === "number" ? input._settle_budget_ms : 30_000;
+      const waitMs = Math.min(typeof input.wait_ms === "number" ? Math.max(0, input.wait_ms) : 0, budget);
+      if (waitMs > 0) await this.#wait(waitMs);
+      const stepId = studioG7StepId(forStep as StudioG7VoiceStep);
+      const events: DriverEvent[] = [...await this.drain(run.id, true)];
+      const observed = await this.#observeOutcome(run, tokens, stepId, [], operationId);
+      events.push(observed.event);
+      return { receipt: { action, step_id: stepId, performed: false, status: "observed", outcome_observation_sha256: sha256(canonicalJson(observed.event.payload)), execution_epoch_sha256: session.ownership.executionEpochSha256 }, events };
     }
-    throw studioError("STUDIO_RETURN_UNCONFIRMED", "The returning participant did not republish a Lab-issued microphone track.", "product", true);
+    if (typeof action !== "string" || !(STUDIO_G7_ACTIONS as readonly string[]).includes(action)) throw studioError("STUDIO_ACTION_INVALID", "Unknown Studio G7 action.", "validation");
+    const stepId = studioG7StepId(action as StudioG7Action);
+    const events: DriverEvent[] = [...await this.drain(run.id, true)];
+    const focus: string[] = [];
+    let receipt: Record<string, unknown>;
+    if (action === "leave_and_return") {
+      const before = await this.#observeOutcome(run, tokens, `${stepId}:before`, [], operationId);
+      events.push(before.event);
+      events.push(...await this.#leaveAndReturn(run, session, operationId));
+      receipt = { action, step_id: stepId, performed: true, status: "returned" };
+    } else if (action === "section_revision" || action === "stale_edit") {
+      const result = await this.#htmlEditAction(run, tokens, operationId, action, input);
+      events.push(...result.events);
+      if (result.taskId) focus.push(result.taskId);
+      receipt = { action, step_id: stepId, ...result.receipt };
+    } else {
+      const result = await this.#withdrawalAction(run, tokens, operationId, input);
+      events.push(...result.events);
+      receipt = { action, step_id: stepId, ...result.receipt };
+    }
+    const after = await this.#observeOutcome(run, tokens, stepId, focus, operationId);
+    events.push(after.event);
+    events.push(...await this.drain(run.id, true));
+    return { receipt: { ...receipt, outcome_observation_sha256: sha256(canonicalJson(after.event.payload)), execution_epoch_sha256: session.ownership.executionEpochSha256 }, events };
   }
 
   async end(run: RunRecord, _frontendFinalizeCapability: string, _frontendCleanupCapability: string, _operationDeadlineAt?: number): Promise<DriverEndResult> {
@@ -383,24 +472,27 @@ export class StudioG7Driver implements VoiceBrowserDriver {
     const events: DriverEvent[] = [];
     try {
       events.push(...await this.drain(run.id, true));
-      const clickedEnd = await this.#clickIfVisible(session, /^End$/);
-      const endRequested = { basis: "ui_end", control_clicked: clickedEnd };
-      events.push({ kind: "studio.exchange.end_requested", source: "browser", payload: endRequested, dedupeKey: contentKey("studio-end-ui", run.id, endRequested) });
       const tokens = this.#tokenSource(session);
-      const ended = await this.#verifyExchangeEnded(run.id, tokens, clickedEnd);
-      events.push(...ended.events);
-      if (!ended.confirmed) throw studioError("STUDIO_EXCHANGE_END_UNCONFIRMED", "The member snapshot did not confirm the exchange ended.", "product", true);
+      // The final canonical outcome read happens while the principal session
+      // still exists; its join to the run stays `uncertain` (no exchange
+      // binding on native tasks).
+      events.push((await this.#observeOutcome(run, tokens, "final", this.#focusTasks(run.id), "end").catch((error: unknown) => ({ event: this.#outcomeUnavailable(run.id, "final", error) }))).event);
+      const settled = await this.#settleExchange(run.id, tokens, session);
+      events.push(...settled.events);
       const left = await this.#clickIfVisible(session, /^Leave the room$/);
       const leftPayload = { basis: "ui_leave", control_clicked: left };
       events.push({ kind: "studio.room.left", source: "browser", payload: leftPayload, dedupeKey: contentKey("studio-room-left", run.id, leftPayload) });
       // Receipts written after End (session_closed, the last reply) are read
-      // here and by every later drain; they are ordered by seq, not arrival.
-      events.push(...await this.#awaitSessionClosed(session));
+      // here, by every later drain and by the evidence refresh; they are
+      // ordered by (source, seq), never by arrival.
+      if (settled.confirmed) events.push(...await this.#awaitSessionClosed(session));
       events.push(...await this.drain(run.id, true));
       events.push((await this.#observeIdentities(run, "final")).event);
       events.push(await this.#signOut(run.id, tokens));
       events.push(await this.#closeBrowser(run.id, session, "normal_end"));
-      this.#clearWatchdog(run.id);
+      // An exchange that could not be settled keeps the watchdog: recovery
+      // re-verifies it read-only until it is no longer live.
+      if (settled.confirmed) this.#clearWatchdog(run.id);
       return { events, artifacts: [] };
     } catch (error) {
       throw new DriverEndFailure(error, events);
@@ -419,29 +511,48 @@ export class StudioG7Driver implements VoiceBrowserDriver {
       events.push({ kind: "cleanup.capture_unavailable", source: "browser", payload: capture, dedupeKey: contentKey("cleanup-capture-unavailable", run.id, capture) });
     }
     const pageAlive = session.page !== null && disposableBrowserProcessIsActive(session.ownership) && !session.page.isClosed();
-    if (pageAlive && session.exchangeId !== null) {
-      const clicked = await this.#clickIfVisible(session, /^End$/).catch(() => false);
-      const endRequested = { basis: "ui_end", control_clicked: clicked };
-      events.push({ kind: "studio.exchange.end_requested", source: "browser", payload: endRequested, dedupeKey: contentKey("studio-end-ui", run.id, endRequested) });
-    }
     const tokens = this.#tokenSource(session);
-    const ended = await this.#verifyExchangeEnded(run.id, tokens, false).catch((error: unknown) => ({ confirmed: false, events: [this.#exchangeEndUnavailable(run.id, "abort", error)] }));
-    events.push(...ended.events);
+    const settled = await this.#settleExchange(run.id, tokens, pageAlive ? session : null).catch((error: unknown) => ({ confirmed: false, events: [this.#exchangeEndUnavailable(run.id, "abort", error)] }));
+    events.push(...settled.events);
     if (pageAlive) await this.#clickIfVisible(session, /^Leave the room$/).catch(() => false);
-    if (session.exchangeId !== null) events.push(...await this.#drainBridge(session).catch(() => []));
+    const exchangeId = this.#exchanges.get(run.id)?.exchangeId ?? null;
+    if (exchangeId !== null) events.push(...await this.#readBridge(run.id, exchangeId, tokens, session.bridgeSeen).catch(() => []));
     events.push(await this.#signOut(run.id, tokens));
     events.push(await this.#closeBrowser(run.id, session, reason));
-    if (ended.confirmed) this.#clearWatchdog(run.id);
+    if (settled.confirmed) this.#clearWatchdog(run.id);
     return { events, artifacts: [] };
   }
 
   async recover(run: RecoveryTransportBinding, _recoveryCapability: string, _processTermination?: BrowserProcessTermination): Promise<DriverEndResult> {
     const events = await this.#apiOnlyCleanup(run.id, "recover");
-    const exchangeEnded = events.some((event) => event.kind === "studio.cleanup.exchange_ended" && event.payload.confirmed === true);
+    const ended = events.filter((event) => event.kind === "studio.cleanup.exchange_ended");
+    const exchangeEnded = ended.length > 0 && ended.every((event) => event.payload.confirmed === true);
     const signedOut = events.some((event) => event.kind === "studio.cleanup.signed_out" && event.payload.confirmed === true);
-    const recovery = { complete: exchangeEnded && signedOut && !this.#sessions.has(run.id), exchange_ended: exchangeEnded, signed_out: signedOut, browser_session_absent: !this.#sessions.has(run.id) };
+    const exchangeStatus = ended.at(-1)?.payload.status ?? "unavailable";
+    const recovery = { complete: exchangeEnded && signedOut && !this.#sessions.has(run.id), exchange_ended: exchangeEnded, exchange_status: exchangeStatus, signed_out: signedOut, browser_session_absent: !this.#sessions.has(run.id) };
     events.push({ kind: "studio.cleanup.recovery", source: "canonical", payload: recovery, dedupeKey: contentKey("studio-recovery", run.id, recovery) });
     return { events, artifacts: [] };
+  }
+
+  /**
+   * Evidence completion after End: re-read the run's exchange evidence with a
+   * fresh principal session (late receipts such as `session_closed` or the
+   * last reply), then sign the principal out globally again. Nothing else is
+   * read or touched.
+   */
+  async refreshStudioEvidence(run: RunRecord, join: DurableStudioJoin): Promise<DriverEvent[]> {
+    if (join.exchangeId === null || !UUID.test(join.exchangeId)) return [];
+    this.adoptStudioJoin(run.id, join);
+    const tokens = this.#tokenSource(null);
+    const events: DriverEvent[] = [];
+    try {
+      events.push(...await this.#readBridge(run.id, join.exchangeId, tokens, new Map()));
+    } catch (error) {
+      const payload = { exchange_id: join.exchangeId, reason: error instanceof VoiceLabError ? error.detail.code : "refresh_failed", http_status: null };
+      events.push({ kind: "studio.bridge_evidence_unavailable", source: "canonical", payload, dedupeKey: contentKey("studio-bridge-unavailable", run.id, payload) });
+    }
+    if (tokens.held() !== null) events.push(await this.#signOut(run.id, tokens));
+    return events;
   }
 
   async cancel(runId: string, _reason: string): Promise<void> {
@@ -450,8 +561,8 @@ export class StudioG7Driver implements VoiceBrowserDriver {
     const closed = session.context ? await closeContextWithProof(session.context, () => session.ownership.browser.contexts()) : { closed: true, errorClass: null };
     const processClosed = closed.closed ? await closeDisposableBrowserProcess(session.ownership) : { closed: false, errorClass: closed.errorClass };
     if (!closed.closed || !processClosed.closed) throw studioError("BROWSER_PROCESS_CLOSE_FAILED", "Cancelled operation left a browser context or process that could not be proven closed.", "harness", true, { error_class: closed.errorClass ?? processClosed.errorClass });
-    // The exchange join and the watchdog survive: abort/recover still end the
-    // exchange through the API and sign the principal out.
+    // The exchange join and the watchdog survive: abort/recover still settle
+    // the exchange and sign the principal out.
     this.#orphanEvents.set(runId, [...(this.#orphanEvents.get(runId) ?? []), ...session.pendingEvents.splice(0)]);
     this.#sessions.delete(runId);
   }
@@ -551,29 +662,38 @@ export class StudioG7Driver implements VoiceBrowserDriver {
     return events;
   }
 
-  async #drainBridge(session: StudioSession): Promise<DriverEvent[]> {
-    if (session.exchangeId === null) return [];
-    const exchangeId = session.exchangeId;
-    const read = await this.#api.qualificationEvidence(exchangeId, await this.#tokenSource(session).token());
-    if (read.status === "unavailable") return [{ kind: "studio.bridge_evidence_unavailable", source: "canonical", payload: { exchange_id: exchangeId, reason: read.reason, http_status: read.http_status }, dedupeKey: `studio-bridge-unavailable:${exchangeId}:${read.reason}:${read.http_status}` }];
-    if (read.status === "rejected") return [{ kind: "studio.bridge_evidence_rejected", source: "canonical", payload: { exchange_id: exchangeId, reason: read.reason, path: read.path, http_status: read.http_status }, dedupeKey: `studio-bridge-rejected:${exchangeId}:${read.reason}:${read.path ?? ""}` }];
+  /**
+   * Read the exchange's qualification evidence and return only receipts not
+   * yet returned through `seen`. Identical replays dedupe by content; a
+   * different body under the same (source, seq) is kept and fails the
+   * evaluation's sequence integrity.
+   */
+  async #readBridge(runId: string, exchangeId: string, tokens: TokenSource, seen: Map<string, string>, onClosed?: (closed: boolean) => void): Promise<DriverEvent[]> {
+    const read = await this.#api.qualificationEvidence(exchangeId, await tokens.token());
+    if (read.status === "unavailable") {
+      const payload = { exchange_id: exchangeId, reason: read.reason, http_status: read.http_status };
+      return [{ kind: "studio.bridge_evidence_unavailable", source: "canonical", payload, dedupeKey: contentKey("studio-bridge-unavailable", runId, payload) }];
+    }
+    if (read.status === "rejected") {
+      const payload = { exchange_id: exchangeId, reason: read.reason, path: read.path, http_status: read.http_status };
+      return [{ kind: "studio.bridge_evidence_rejected", source: "canonical", payload, dedupeKey: contentKey("studio-bridge-rejected", runId, payload) }];
+    }
     const events: DriverEvent[] = [];
-    for (const grant of read.evidence.grants) {
-      const grantJson = canonicalJson(grant);
-      const grantSha256 = sha256(grantJson);
-      const key = `grant:${grant.grantId}`;
-      if (session.bridgeSeen.get(key) === grantSha256) continue;
-      session.bridgeSeen.set(key, grantSha256);
-      events.push({ kind: "studio.bridge_grant", source: "canonical", payload: { exchange_id: exchangeId, grant_json: grantJson, grant_sha256: grantSha256 }, dedupeKey: `studio-bridge-grant:${exchangeId}:${grantSha256}` });
+    const grantJson = canonicalJson(read.evidence.grant);
+    const grantSha256 = sha256(grantJson);
+    const grantKey = `grant:${read.evidence.grant.grantId}:${read.evidence.state}`;
+    if (seen.get(grantKey) !== grantSha256) {
+      seen.set(grantKey, grantSha256);
+      events.push({ kind: "studio.bridge_grant", source: "canonical", payload: { exchange_id: exchangeId, exchange_state: read.evidence.state, grant_json: grantJson, grant_sha256: grantSha256 }, dedupeKey: `studio-bridge-grant:${exchangeId}:${read.evidence.state}:${grantSha256}` });
     }
     for (const entry of read.evidence.receipts) {
       const receiptJson = canonicalJson(entry.receipt);
       const receiptSha256 = sha256(receiptJson);
-      const key = `seq:${entry.seq}:${receiptSha256}`;
-      if (entry.kind === "session_closed") session.sessionClosedSeen = true;
-      if (session.bridgeSeen.has(key)) continue;
-      session.bridgeSeen.set(key, receiptSha256);
-      events.push({ kind: "studio.bridge_receipt", source: "canonical", payload: { exchange_id: exchangeId, seq: entry.seq, kind: entry.kind, received_at: entry.receivedAt, receipt_json: receiptJson, receipt_sha256: receiptSha256, _capture_provenance: { source: "studio-member-api", observed_at: entry.receivedAt } }, dedupeKey: `studio-bridge:${exchangeId}:${entry.seq}:${receiptSha256}:${sha256(entry.receivedAt)}` });
+      const key = `${entry.source}:${entry.seq}:${receiptSha256}`;
+      if (entry.kind === "session_closed") onClosed?.(true);
+      if (seen.has(key)) continue;
+      seen.set(key, receiptSha256);
+      events.push({ kind: "studio.bridge_receipt", source: "canonical", payload: { exchange_id: exchangeId, source: entry.source, seq: entry.seq, kind: entry.kind, received_at: entry.receivedAt, receipt_json: receiptJson, receipt_sha256: receiptSha256, _capture_provenance: { source: "studio-member-api", observed_at: entry.receivedAt } }, dedupeKey: `studio-bridge:${exchangeId}:${entry.source}:${entry.seq}:${receiptSha256}:${sha256(entry.receivedAt)}` });
     }
     return events;
   }
@@ -651,7 +771,7 @@ export class StudioG7Driver implements VoiceBrowserDriver {
    * qualification. Wait for one bound to this run's binding and carrying the
    * Lab-issued track; rejoin periodically to refetch the room token.
    */
-  async #awaitGrantGate(session: StudioSession): Promise<DriverEvent[]> {
+  async #awaitGrantGate(session: StudioSession): Promise<{ events: DriverEvent[]; grantId: string }> {
     const events: DriverEvent[] = [];
     const deadline = this.#now() + this.studio.grantWaitMs;
     let nextRejoin = this.#now() + this.studio.grantRejoinIntervalMs;
@@ -670,9 +790,10 @@ export class StudioG7Driver implements VoiceBrowserDriver {
             throw studioError("STUDIO_PHYSICAL_MICROPHONE_FALLBACK", "The Studio published a microphone track the Lab did not issue.", "harness", false, { status: "fail" });
           }
         }
-        const gate = { run_binding_sha256: session.runBindingSha256, grant_id: item.receipt.grantId, rejoins, lab_issued_track: true };
+        const grantId = item.receipt.grantId.toLowerCase();
+        const gate = { run_binding_sha256: session.runBindingSha256, grant_id: grantId, rejoins, lab_issued_track: true };
         events.push({ kind: "studio.grant_gate.passed", source: "browser", payload: gate, dedupeKey: contentKey("studio-grant-gate", session.runId, gate) });
-        return events;
+        return { events, grantId };
       }
       checkedArrival = session.push.arrival;
       if (this.#now() >= nextRejoin && this.#now() + 1_000 < deadline) {
@@ -688,14 +809,28 @@ export class StudioG7Driver implements VoiceBrowserDriver {
     throw studioError("STUDIO_QUALIFICATION_GRANT_UNAVAILABLE", "No grant-bound mic_published receipt arrived; the operator grant for this run binding is absent or inactive.", "harness", false, { status: "unavailable", run_binding_sha256: session.runBindingSha256, rejoins });
   }
 
-  async #awaitExchange(session: StudioSession): Promise<DriverEvent> {
+  /**
+   * The exchange this run's Speak opened: the room's live exchange, absent
+   * before the click, whose floor holder is this run's principal. Another
+   * principal's exchange is never joined (and never touched).
+   */
+  async #awaitExchange(session: StudioSession, run: RunRecord): Promise<DriverEvent> {
     const deadline = this.#now() + this.#timeouts.exchangeOpenMs;
     while (this.#now() < deadline) {
       const snapshot = await this.#api.snapshot(this.studio.projectId, await this.#tokenSource(session).token());
       if (snapshot.exchangeId !== null) {
-        session.exchangeId = snapshot.exchangeId;
-        Object.assign(this.#state(session.runId), { exchangeId: snapshot.exchangeId, speakRequested: true });
-        return { kind: "studio.exchange.opened", source: "canonical", payload: { exchange_id: snapshot.exchangeId, input_epoch: snapshot.inputEpoch, room_id_sha256: snapshot.roomId === null ? null : labSha256(snapshot.roomId), project_id: this.studio.projectId, verified_by: "member_snapshot" }, dedupeKey: `studio-exchange-opened:${session.runId}:${snapshot.exchangeId}` };
+        if (snapshot.inputActorId !== null && snapshot.inputActorId !== run.principalId.toLowerCase()) {
+          throw studioError("STUDIO_EXCHANGE_NOT_PRINCIPALS", "The live exchange's floor holder is not this run's principal; it was not joined and is never touched.", "harness", false, { status: "fail" });
+        }
+        const state = this.#state(session.runId);
+        state.exchangeId = snapshot.exchangeId;
+        state.exchangeOpenedAtMs = this.#now();
+        return { kind: "studio.exchange.opened", source: "canonical", payload: {
+          exchange_id: snapshot.exchangeId, input_epoch: snapshot.inputEpoch, room_id_sha256: snapshot.roomId === null ? null : labSha256(snapshot.roomId),
+          project_id: this.studio.projectId, grant_id: state.grantId, run_binding_sha256: session.runBindingSha256,
+          input_actor_is_principal: snapshot.inputActorId === null ? null : true, opened_at_lab_ms: state.exchangeOpenedAtMs,
+          verified_by: "member_snapshot", write_ahead: true,
+        }, dedupeKey: `studio-exchange-opened:${session.runId}:${snapshot.exchangeId}` };
       }
       await this.#wait(500);
     }
@@ -704,9 +839,11 @@ export class StudioG7Driver implements VoiceBrowserDriver {
 
   async #awaitSessionClosed(session: StudioSession): Promise<DriverEvent[]> {
     const events: DriverEvent[] = [];
+    const exchangeId = this.#exchanges.get(session.runId)?.exchangeId ?? null;
+    if (exchangeId === null) return events;
     const deadline = this.#now() + this.#timeouts.sessionClosedMs;
     while (!session.sessionClosedSeen && this.#now() < deadline) {
-      events.push(...await this.#drainBridge(session).catch(() => []));
+      events.push(...await this.#readBridge(session.runId, exchangeId, this.#tokenSource(session), session.bridgeSeen, (closed) => { if (closed) session.sessionClosedSeen = true; }).catch(() => []));
       if (session.sessionClosedSeen) break;
       await this.#wait(1_000);
     }
@@ -714,59 +851,330 @@ export class StudioG7Driver implements VoiceBrowserDriver {
   }
 
   /**
-   * Ensure this run's exchange has ended and verify it through the member
-   * snapshot. Works with or without a live page: the API End uses the
-   * principal's own JWT. With `uiGrace`, the UI End gets half the window
-   * before the API End is sent. Without a retained join (driver restart) the
-   * open exchange of the dedicated synthetic project is presumed to be this
-   * run's: concurrency is one and the project serves only the Lab.
+   * Canonical ownership of the run's joined exchange: its qualification
+   * evidence, read as the principal, names this run's binding hash and the
+   * grant id of this run's bound page receipts. Anything less is not proof.
    */
-  async #verifyExchangeEnded(runId: string, tokens: TokenSource, uiGrace: boolean): Promise<{ confirmed: boolean; events: DriverEvent[] }> {
-    const retained = this.#exchanges.get(runId);
-    const record: ExchangeRecord = retained ?? { exchangeId: null, preexistingExchangeId: null, speakRequested: true, browserLaunched: true, authIssued: true };
+  async #proveOwnership(runId: string, tokens: TokenSource): Promise<{ status: OwnershipStatus; reason: string | null; event: DriverEvent }> {
+    const record = this.#exchanges.get(runId) ?? null;
+    const exchangeId = record?.exchangeId ?? null;
+    const emit = (status: OwnershipStatus, reason: string | null, observed: { grant_id: string | null; run_binding_matches: boolean | null; exchange_state: string | null }) => {
+      const payload = { exchange_id: exchangeId, status, reason, expected_grant_id: record?.grantId ?? null, ...observed, basis: "evidence_grant_binding_and_page_receipt_grant", join: record?.join ?? "none" };
+      return { status, reason, event: { kind: "studio.exchange.ownership", source: "canonical" as const, payload, dedupeKey: contentKey("studio-ownership", runId, payload) } };
+    };
+    if (exchangeId === null) return emit("unavailable", "no_exchange_join", { grant_id: null, run_binding_matches: null, exchange_state: null });
+    if (!record?.runBindingSha256) return emit("unavailable", "run_binding_unknown", { grant_id: null, run_binding_matches: null, exchange_state: null });
+    let read;
+    try { read = await this.#api.qualificationEvidence(exchangeId, await tokens.token()); }
+    catch (error) { return emit("unavailable", error instanceof VoiceLabError ? error.detail.code : "evidence_read_failed", { grant_id: null, run_binding_matches: null, exchange_state: null }); }
+    if (read.status === "unavailable") return emit("unavailable", `evidence_${read.reason}`, { grant_id: null, run_binding_matches: null, exchange_state: null });
+    if (read.status === "rejected") return emit("unavailable", "evidence_rejected", { grant_id: null, run_binding_matches: null, exchange_state: null });
+    const grantId = read.evidence.grant.grantId.toLowerCase();
+    const bindingMatches = read.evidence.grant.runBindingSha256 === record.runBindingSha256;
+    const observed = { grant_id: grantId, run_binding_matches: bindingMatches, exchange_state: read.evidence.state };
+    if (!bindingMatches) return emit("mismatch", "evidence_bound_to_another_run", observed);
+    if (record.grantId === null) return emit("unavailable", "page_receipt_grant_unknown", observed);
+    if (record.grantId !== grantId) return emit("mismatch", "evidence_bound_to_another_grant", observed);
+    return emit("proven", null, observed);
+  }
+
+  /**
+   * Settle this run's exchange. Ends it (UI End when the run's page is alive,
+   * then API End) only when ownership is proven; otherwise verifies read-only
+   * that the run's exchange is not live, or types the state for recovery.
+   */
+  async #settleExchange(runId: string, tokens: TokenSource, session: StudioSession | null): Promise<{ confirmed: boolean; events: DriverEvent[] }> {
+    const record = this.#exchanges.get(runId) ?? null;
     const events: DriverEvent[] = [];
-    if (retained && retained.exchangeId === null && !retained.speakRequested) {
+    const settle = (confirmed: boolean, status: "confirmed" | "uncertain" | "unavailable", basis: string, extra: Record<string, unknown> = {}) => {
+      const payload = { confirmed, status, basis, exchange_id: record?.exchangeId ?? null, join: record?.join ?? "none", verified_by: "member_snapshot", ...extra };
+      events.push({ kind: "studio.cleanup.exchange_ended", source: "canonical", payload, dedupeKey: contentKey("studio-exchange-ended", runId, payload) });
+      return { confirmed, events };
+    };
+    if (record && record.join === "retained" && !record.speakRequested && record.exchangeId === null) {
       // This driver owns the run and never clicked Speak: no exchange can
       // have been opened by it, so no member-API read is needed.
-      const none = { confirmed: true, basis: "no_exchange_opened_by_run", exchange_id: null, join: "retained", verified_by: "driver_never_requested_exchange" };
-      events.push({ kind: "studio.cleanup.exchange_ended", source: "canonical", payload: none, dedupeKey: contentKey("studio-exchange-ended", runId, none) });
-      return { confirmed: true, events };
+      return settle(true, "confirmed", "no_exchange_opened_by_run", { verified_by: "driver_never_requested_exchange", ownership: "not_required" });
     }
     let snapshot = await this.#api.snapshot(this.studio.projectId, await tokens.token());
-    const target = record.exchangeId ?? (record.speakRequested && snapshot.exchangeId !== null && snapshot.exchangeId !== record.preexistingExchangeId ? snapshot.exchangeId : null);
-    if (target === null) {
-      const none = { confirmed: true, basis: "no_exchange_opened_by_run", exchange_id: null, join: retained ? "retained" : "member_snapshot_after_driver_loss", verified_by: "member_snapshot" };
-      events.push({ kind: "studio.cleanup.exchange_ended", source: "canonical", payload: none, dedupeKey: contentKey("studio-exchange-ended", runId, none) });
-      return { confirmed: true, events };
+    const join = record?.exchangeId ?? null;
+    if (join === null) {
+      // No exchange is joined to this run. One live exchange per room: if
+      // none is live, whatever this run may have opened has ended.
+      if (snapshot.exchangeId === null) return settle(true, "confirmed", "no_live_exchange_in_room", { ownership: "not_required" });
+      return settle(false, "uncertain", "live_exchange_not_joined_to_run", { ownership: "not_required", live_exchange_present: true });
+    }
+    if (snapshot.exchangeId !== join) {
+      return settle(true, "confirmed", snapshot.exchangeId === null ? "run_exchange_not_live" : "run_exchange_not_live_other_exchange_live", { ownership: "not_required" });
+    }
+    const proof = await this.#proveOwnership(runId, tokens);
+    events.push(proof.event);
+    if (proof.status !== "proven") {
+      return settle(false, proof.status === "mismatch" ? "uncertain" : "unavailable", "ownership_unproven_not_touched", { ownership: proof.status, reason: proof.reason });
+    }
+    let clickedEnd = false;
+    if (session && session.page && !session.page.isClosed() && disposableBrowserProcessIsActive(session.ownership)) {
+      clickedEnd = await this.#clickIfVisible(session, /^End$/).catch(() => false);
+      const requested = { basis: "ui_end", control_clicked: clickedEnd, exchange_id: join };
+      events.push({ kind: "studio.exchange.end_requested", source: "browser", payload: requested, dedupeKey: contentKey("studio-end-ui", runId, requested) });
     }
     let usedApi = false;
-    const openAtFirstRead = snapshot.exchangeId === target;
     const start = this.#now();
-    const apiAt = uiGrace ? start + Math.floor(this.#timeouts.exchangeEndMs / 2) : start;
+    const apiAt = clickedEnd ? start + Math.floor(this.#timeouts.exchangeEndMs / 2) : start;
     const deadline = start + this.#timeouts.exchangeEndMs;
-    while (snapshot.exchangeId === target) {
+    while (snapshot.exchangeId === join) {
       if (!usedApi && this.#now() >= apiAt) {
-        const ended = await this.#api.endExchange(target, await tokens.token());
+        const ended = await this.#api.endExchange(join, await tokens.token());
         usedApi = true;
-        const requested = { basis: "api_end", exchange_id: target, accepted: ended.accepted, http_status: ended.http_status };
+        const requested = { basis: "api_end", exchange_id: join, accepted: ended.accepted, http_status: ended.http_status };
         events.push({ kind: "studio.exchange.end_requested", source: "canonical", payload: requested, dedupeKey: contentKey("studio-end-api", runId, requested) });
       }
       if (this.#now() >= deadline) break;
       await this.#wait(500);
       snapshot = await this.#api.snapshot(this.studio.projectId, await tokens.token());
     }
-    const confirmed = snapshot.exchangeId !== target;
-    // Basis says who ended it: the API End sent here, the UI End clicked just
-    // before (uiGrace), or an earlier/independent end (guard, prior cleanup).
-    const basis = usedApi ? "api_end" : uiGrace ? "ui_end" : openAtFirstRead ? "unconfirmed" : "already_ended";
-    const endedPayload = { confirmed, basis, exchange_id: target, join: retained ? "retained" : "member_snapshot_after_driver_loss", verified_by: "member_snapshot" };
-    events.push({ kind: "studio.cleanup.exchange_ended", source: "canonical", payload: endedPayload, dedupeKey: contentKey("studio-exchange-ended", runId, endedPayload) });
-    return { confirmed, events };
+    const confirmed = snapshot.exchangeId !== join;
+    return settle(confirmed, confirmed ? "confirmed" : "unavailable", usedApi ? "api_end" : clickedEnd ? "ui_end" : "already_ended", { ownership: "proven" });
   }
 
   #exchangeEndUnavailable(runId: string, purpose: string, error: unknown): DriverEvent {
-    const payload = { confirmed: false, basis: "member_api_unavailable", purpose, exchange_id: this.#exchanges.get(runId)?.exchangeId ?? null, verified_by: "member_snapshot", error_code: error instanceof VoiceLabError ? error.detail.code : "error" };
+    const record = this.#exchanges.get(runId) ?? null;
+    const payload = { confirmed: false, status: "unavailable", basis: "member_api_unavailable", purpose, exchange_id: record?.exchangeId ?? null, join: record?.join ?? "none", verified_by: "member_snapshot", error_code: error instanceof VoiceLabError ? error.detail.code : "error" };
     return { kind: "studio.cleanup.exchange_ended", source: "canonical", payload, dedupeKey: contentKey("studio-exchange-ended", runId, payload) };
+  }
+
+  async #leaveAndReturn(run: RunRecord, session: StudioSession, operationId: string): Promise<DriverEvent[]> {
+    const events: DriverEvent[] = [];
+    const leftAt = session.push.arrival;
+    await this.#clickControl(session, /^Leave the room$/, this.#timeouts.controlVisibleMs);
+    const leftPayload = { basis: "ui_leave", push_arrival_before: leftAt, operation_id: operationId };
+    events.push({ kind: "studio.room.left", source: "browser", payload: leftPayload, dedupeKey: contentKey("studio-room-left", run.id, leftPayload) });
+    events.push(await this.#joinRoom(session, `return:${operationId}`));
+    events.push(await this.#ensureMicrophoneOn(session));
+    const deadline = this.#now() + this.#timeouts.controlVisibleMs;
+    while (this.#now() < deadline) {
+      this.#noteIssuedTracks(session, await this.#peekHarness(session));
+      const republished = session.accepted.some((item) => item.arrival > leftAt && item.receipt.event === "mic_published" && item.receipt.runBindingSha256 === session.runBindingSha256 && session.issuedTrackHashes.has(sha256(item.receipt.trackId)));
+      if (republished) {
+        events.push({ kind: "studio.room.rejoined", source: "browser", payload: { lab_track_republished: true, operation_id: operationId }, dedupeKey: `studio-room-rejoined:${run.id}:${operationId}` });
+        return events;
+      }
+      await this.#wait(250);
+    }
+    throw studioError("STUDIO_RETURN_UNCONFIRMED", "The returning participant did not republish a Lab-issued microphone track.", "product", true);
+  }
+
+  /**
+   * The run's candidate report: design tasks of the principal in the run's
+   * window with a published page. The join to the run is `uncertain`; a
+   * target that is not unique is refused, never guessed.
+   */
+  async #reportTarget(run: RunRecord, tokens: TokenSource): Promise<{ status: "found"; artifactId: string; versions: ProjectedArtifactVersion[]; sections: string[]; designTaskId: string } | { status: "unavailable"; reason: string }> {
+    const observed = await this.#observeTasks(run, tokens, []);
+    const designs = observed.details.filter((detail) => detail.task.kind === "design" && detail.design?.artifactId && detail.design.publishedVersionId);
+    const artifacts = [...new Set(designs.map((detail) => detail.design!.artifactId!))];
+    if (artifacts.length === 0) return { status: "unavailable", reason: "no_published_design_in_run_window" };
+    if (artifacts.length > 1) return { status: "unavailable", reason: "report_target_ambiguous" };
+    const artifactId = artifacts[0]!;
+    const versions = await this.#api.artifactVersions(artifactId, await tokens.token());
+    if (versions.status !== "available") return { status: "unavailable", reason: `artifact_versions_${versions.reason}` };
+    const latestDesign = designs.sort((left, right) => (right.task.createdAt ?? "").localeCompare(left.task.createdAt ?? ""))[0]!;
+    return { status: "found", artifactId, versions: versions.value, sections: latestDesign.design!.sections, designTaskId: latestDesign.task.id };
+  }
+
+  async #htmlEditAction(run: RunRecord, tokens: TokenSource, operationId: string, purpose: "section_revision" | "stale_edit", input: Record<string, unknown>): Promise<{ events: DriverEvent[]; taskId: string | null; receipt: Record<string, unknown> }> {
+    const events: DriverEvent[] = [];
+    const record = (payload: Record<string, unknown>): Record<string, unknown> => {
+      const full: Record<string, unknown> = { purpose, operation_id: operationId, target_join: "uncertain", ...payload };
+      events.push({ kind: "studio.action.html_edit", source: "canonical", payload: full, dedupeKey: contentKey("studio-html-edit", run.id, full) });
+      return full;
+    };
+    // A target that cannot be resolved without guessing is typed, the
+    // request is not sent, and the step reports `performed: false`.
+    const notPerformed = (reason: string, extra: Record<string, unknown> = {}) => {
+      record({ status: "unavailable", reason, requested: false, ...extra });
+      return { events, taskId: null, receipt: { performed: false, status: "unavailable", reason } };
+    };
+    const target = await this.#reportTarget(run, tokens);
+    if (target.status !== "found") return notPerformed(target.reason);
+    const withPage = target.versions.filter((version) => version.renditions.some((rendition) => rendition.format === "html"));
+    const current = target.versions[0] ?? null;
+    const requestedSections = Array.isArray(input.sections) ? (input.sections as unknown[]).filter((value): value is string => typeof value === "string" && SECTION.test(value)) : [];
+    const sections = requestedSections.length > 0 ? requestedSections.slice(0, 16) : target.sections.slice(0, 1);
+    if (sections.length === 0) return notPerformed("section_unknown", { artifact_id: target.artifactId });
+    let versionId: string;
+    let supersededBy: string | null = null;
+    if (purpose === "section_revision") {
+      if (!current || !withPage.some((version) => version.id === current.id)) return notPerformed("current_version_has_no_designed_page", { artifact_id: target.artifactId });
+      versionId = current.id;
+    } else {
+      const older = withPage.find((version) => current !== null && version.id !== current.id);
+      if (!older || !current) return notPerformed("no_superseded_version", { artifact_id: target.artifactId });
+      versionId = older.id;
+      supersededBy = current.id;
+    }
+    const instruction = purpose === "stale_edit" ? STALE_EDIT_PROBE_INSTRUCTION : typeof input.instruction === "string" ? input.instruction : "";
+    if (instruction.length < 1 || instruction.length > 2_000) throw studioError("STUDIO_ACTION_INVALID", "A section-only revision needs an instruction of 1 to 2000 characters.", "validation");
+    const answer = await this.#api.htmlEdit(this.studio.projectId, { versionId, sections, instruction }, await tokens.token(), `voice-lab-g7:${operationId}`);
+    const payload = record({
+      status: answer.accepted ? "admitted" : "refused", requested: true, artifact_id: target.artifactId, version_id: versionId, superseded_by_version_id: supersededBy,
+      sections, instruction_sha256: sha256(instruction), http_status: answer.http_status, code: answer.code,
+      task_id: answer.receipt?.taskId ?? null, receipt_state: answer.receipt?.state ?? null, receipt_version_id: answer.receipt?.versionId ?? null,
+    });
+    let finalState: string | null = null;
+    if (purpose === "section_revision" && answer.accepted && answer.receipt) {
+      const budget = typeof input._settle_budget_ms === "number" ? input._settle_budget_ms : this.#timeouts.designSettleMs;
+      const settle = Math.min(typeof input.timeout_ms === "number" ? Math.max(input.timeout_ms, 0) : this.#timeouts.designSettleMs, this.#timeouts.designSettleMs, budget);
+      const deadline = this.#now() + settle;
+      for (;;) {
+        const detail = await this.#api.nativeTask(this.studio.projectId, answer.receipt.taskId, await tokens.token());
+        finalState = detail.status === "available" ? detail.value.design?.state ?? null : null;
+        if (finalState !== null && ["published", "failed", "cancelled", "superseded"].includes(finalState)) break;
+        if (this.#now() >= deadline) break;
+        await this.#wait(2_000);
+      }
+    }
+    return { events, taskId: answer.receipt?.taskId ?? null, receipt: { performed: true, status: payload.status, http_status: payload.http_status, code: payload.code, task_id: payload.task_id, design_state_at_return: finalState } };
+  }
+
+  /**
+   * Forget a note this run recorded by voice. Only a note bound to the run's
+   * own, ownership-proven exchange is withdrawn: the preview's ids and
+   * revisions are sent back with its proof, never its words.
+   */
+  async #withdrawalAction(run: RunRecord, tokens: TokenSource, operationId: string, input: Record<string, unknown>): Promise<{ events: DriverEvent[]; receipt: Record<string, unknown> }> {
+    const events: DriverEvent[] = [];
+    const recordEvent = (payload: Record<string, unknown>): Record<string, unknown> => {
+      const full: Record<string, unknown> = { operation_id: operationId, ...payload };
+      events.push({ kind: "studio.action.withdrawal", source: "canonical", payload: full, dedupeKey: contentKey("studio-withdrawal", run.id, full) });
+      return full;
+    };
+    const notPerformed = (reason: string, extra: Record<string, unknown> = {}) => {
+      recordEvent({ status: "unavailable", reason, requested: false, ...extra });
+      return { events, receipt: { performed: false, status: "unavailable", reason } };
+    };
+    const proof = await this.#proveOwnership(run.id, tokens);
+    events.push(proof.event);
+    const exchangeId = this.#exchanges.get(run.id)?.exchangeId ?? null;
+    if (proof.status !== "proven" || exchangeId === null) return notPerformed("exchange_ownership_unproven", { ownership: proof.status, ownership_reason: proof.reason });
+    const entries = await this.#api.missionEntries(this.studio.projectId, await tokens.token());
+    if (entries.status !== "available") return notPerformed(`mission_${entries.reason}`);
+    const principal = run.principalId.toLowerCase();
+    const bound = entries.value.filter((entry) => entry.exchangeId === exchangeId && entry.actorId === principal && entry.state === "current");
+    const requested = typeof input.entry_id === "string" ? input.entry_id.toLowerCase() : null;
+    const target = requested !== null ? bound.find((entry) => entry.id === requested) ?? null : bound.length === 1 ? bound[0]! : null;
+    if (!target) return notPerformed(requested !== null ? "entry_not_bound_to_run_exchange" : bound.length === 0 ? "no_note_bound_to_run_exchange" : "note_target_ambiguous", { bound_note_count: bound.length });
+    const preview = await this.#api.withdrawalPreview(this.studio.projectId, target.id, await tokens.token());
+    if (preview.status !== "available" || preview.value.entryId !== target.id) return notPerformed(preview.status === "available" ? "preview_entry_mismatch" : `preview_${preview.reason}`, { entry_id: target.id });
+    const answer = await this.#api.withdraw(this.studio.projectId, preview.value, await tokens.token(), `voice-lab-g7:${operationId}`);
+    const payload = recordEvent({
+      status: answer.accepted ? "committed" : "refused", requested: true, entry_id: target.id, entry_bound_exchange_id: exchangeId,
+      preview_entry_count: preview.value.entryIds.length, preview_decision_count: preview.value.decisions.length,
+      http_status: answer.http_status, code: answer.code, receipt_status: answer.receipt?.status ?? null, receipt_operation: answer.receipt?.operation ?? null,
+      affected_count: answer.receipt?.affectedCount ?? null,
+    });
+    return { events, receipt: { performed: true, status: payload.status, entry_id: target.id, http_status: payload.http_status, code: payload.code } };
+  }
+
+  #focusTasks(runId: string): string[] {
+    return this.#focus.get(runId) ?? [];
+  }
+
+  readonly #focus = new Map<string, string[]>();
+
+  async #observeTasks(run: RunRecord, tokens: TokenSource, focus: string[]): Promise<{ snapshot: StudioRoomSnapshot; details: ProjectedTaskDetail[]; windowStartMs: number; unavailable: Array<{ task_id: string; reason: string }> }> {
+    const snapshot = await this.#api.snapshot(this.studio.projectId, await tokens.token());
+    const record = this.#exchanges.get(run.id) ?? null;
+    const windowStartMs = (record?.exchangeOpenedAtMs ?? run.createdAt.getTime()) - OUTCOME_WINDOW_TOLERANCE_MS;
+    const principal = run.principalId.toLowerCase();
+    const inWindow = snapshot.work
+      .filter((task) => task.actorId === principal && task.createdAt !== null && Date.parse(task.createdAt) >= windowStartMs)
+      .sort((left, right) => (right.createdAt ?? "").localeCompare(left.createdAt ?? ""))
+      .map((task) => task.id);
+    const ids = [...new Set([...focus, ...inWindow])].slice(0, MAX_OBSERVED_TASKS);
+    const details: ProjectedTaskDetail[] = [];
+    const unavailable: Array<{ task_id: string; reason: string }> = [];
+    for (const id of ids) {
+      const detail = await this.#api.nativeTask(this.studio.projectId, id, await tokens.token());
+      if (detail.status === "available") details.push(detail.value);
+      else unavailable.push({ task_id: id, reason: detail.reason });
+    }
+    // Design tasks a research task handed its HTML to are part of the outcome.
+    for (const designId of details.map((detail) => detail.research?.designTaskId).filter((value): value is string => typeof value === "string")) {
+      if (details.length >= MAX_OBSERVED_TASKS || details.some((detail) => detail.task.id === designId)) continue;
+      const detail = await this.#api.nativeTask(this.studio.projectId, designId, await tokens.token());
+      if (detail.status === "available") details.push(detail.value);
+    }
+    return { snapshot, details, windowStartMs, unavailable };
+  }
+
+  /**
+   * Canonical outcome read through the member API as the principal: native
+   * tasks (ids, kinds, states, phases), their designs, the published
+   * version's HTML rendition and the SHA-256 of its downloaded bytes, compared
+   * with the source's and the rendition's declared digests.
+   */
+  async #observeOutcome(run: RunRecord, tokens: TokenSource, purpose: string, focus: string[], operationId: string): Promise<{ event: DriverEvent }> {
+    if (focus.length > 0) this.#focus.set(run.id, [...new Set([...(this.#focus.get(run.id) ?? []), ...focus])].slice(0, MAX_OBSERVED_TASKS));
+    const observed = await this.#observeTasks(run, tokens, this.#focusTasks(run.id));
+    const artifacts: Array<Record<string, unknown>> = [];
+    const verified = new Set<string>();
+    for (const detail of observed.details) {
+      const design = detail.design;
+      if (!design?.artifactId || !design.publishedVersionId || verified.has(design.publishedVersionId) || verified.size >= MAX_VERIFIED_ARTIFACTS) continue;
+      verified.add(design.publishedVersionId);
+      artifacts.push(await this.#verifyArtifact(tokens, design.artifactId, design.publishedVersionId, detail.task.id));
+    }
+    const payload = {
+      purpose, operation_id: operationId,
+      join: { basis: "actor_and_time_window", status: "uncertain", missing_product_field: "NativeTask.exchangeId", window_start: new Date(observed.windowStartMs).toISOString(), principal_actor_only: true },
+      focus_task_ids: this.#focusTasks(run.id),
+      live_exchange_present: observed.snapshot.exchangeId !== null,
+      tasks: observed.details.map((detail) => ({
+        task_id: detail.task.id, kind: detail.task.kind, state: detail.task.state, phase: detail.task.phase, created_at: detail.task.createdAt,
+        focus: this.#focusTasks(run.id).includes(detail.task.id),
+        research: detail.research ? { html_state: detail.research.htmlState, design_task_id: detail.research.designTaskId, amends_task_id: detail.research.amendsTaskId } : null,
+        design: detail.design ? { state: detail.design.state, mode: detail.design.mode, artifact_id: detail.design.artifactId, base_version_id: detail.design.baseVersionId, published_version_id: detail.design.publishedVersionId, research_task_id: detail.design.researchTaskId, revisions: detail.design.revisions, section_count: detail.design.sections.length } : null,
+        outputs: detail.outputs.map((output) => ({ artifact_version_id: output.artifactVersionId, format: output.format, source_id: output.sourceId, sha256: output.sha256, byte_length: output.byteLength })),
+      })),
+      tasks_unavailable: observed.unavailable,
+      artifacts,
+    };
+    return { event: { kind: "studio.outcome.observed", source: "canonical", payload, dedupeKey: contentKey("studio-outcome", run.id, payload) } };
+  }
+
+  async #verifyArtifact(tokens: TokenSource, artifactId: string, versionId: string, taskId: string): Promise<Record<string, unknown>> {
+    const base = { artifact_id: artifactId, version_id: versionId, task_id: taskId };
+    const versions = await this.#api.artifactVersions(artifactId, await tokens.token());
+    if (versions.status !== "available") return { ...base, status: "unavailable", reason: `versions_${versions.reason}` };
+    const version = versions.value.find((candidate) => candidate.id === versionId);
+    if (!version) return { ...base, status: "unavailable", reason: "published_version_not_listed" };
+    const rendition = version.renditions.find((candidate) => candidate.format === "html") ?? null;
+    const sourceId = rendition?.sourceId ?? (version.format === "html" ? version.sourceId : null);
+    const facts = { ...base, version_state: version.state, version_format: version.format, is_latest: versions.value[0]?.id === version.id, source_id: sourceId, rendition_sha256: rendition?.sha256 ?? null, source_hash: version.sourceHash };
+    if (sourceId === null) return { ...facts, status: "unavailable", reason: "no_html_rendition" };
+    const content = await this.#api.sourceContent(sourceId, await tokens.token());
+    if (content.status !== "available") return { ...facts, status: "unavailable", reason: `content_${content.reason}` };
+    let downloaded: { sha256: string; byteLength: number; basis: string } | null = null;
+    let reason: string | null = null;
+    if (content.value.downloadUrl !== null) {
+      const result = await this.#api.downloadSha256(content.value.downloadUrl);
+      if (result.status === "downloaded") downloaded = { sha256: result.sha256, byteLength: result.byteLength, basis: "signed_object_store_url" };
+      else reason = result.reason;
+    } else if (content.value.inlineText !== null) {
+      const bytes = Buffer.from(content.value.inlineText, "utf8");
+      downloaded = { sha256: createHash("sha256").update(bytes).digest("hex"), byteLength: bytes.byteLength, basis: "member_api_inline_text" };
+    } else reason = "no_download_url_or_inline_bytes";
+    const contentSha = content.value.sha256;
+    if (!downloaded) return { ...facts, content_sha256: contentSha, status: "unavailable", reason };
+    const sourceHashApplies = version.sourceId === sourceId && version.sourceHash !== null;
+    const agrees = downloaded.sha256 === contentSha && (rendition === null || rendition.sha256 === downloaded.sha256) && (!sourceHashApplies || version.sourceHash === downloaded.sha256) && downloaded.byteLength === content.value.byteLength;
+    return { ...facts, content_sha256: contentSha, downloaded_sha256: downloaded.sha256, downloaded_byte_length: downloaded.byteLength, download_basis: downloaded.basis, source_hash_compared: sourceHashApplies, hashes_agree: agrees, status: agrees ? "verified" : "mismatch", reason: agrees ? null : "downloaded_bytes_disagree_with_declared_digest" };
+  }
+
+  #outcomeUnavailable(runId: string, purpose: string, error: unknown): DriverEvent {
+    const payload = { purpose, status: "unavailable", reason: error instanceof VoiceLabError ? error.detail.code : "outcome_read_failed" };
+    return { kind: "studio.outcome.unavailable", source: "canonical", payload, dedupeKey: contentKey("studio-outcome-unavailable", runId, payload) };
   }
 
   /**
@@ -776,7 +1184,7 @@ export class StudioG7Driver implements VoiceBrowserDriver {
   async #signOut(runId: string, tokens: TokenSource): Promise<DriverEvent> {
     const target = { supabaseUrl: this.studio.supabaseUrl, publishableKey: this.studio.supabasePublishableKey };
     const known = this.#exchanges.get(runId);
-    if (tokens.held() === null && known !== undefined && !known.authIssued) {
+    if (tokens.held() === null && known !== undefined && known.join === "retained" && !known.authIssued) {
       // The password grant never succeeded for this run: there is no session
       // to revoke, and attempting a fresh grant would create one.
       const none = { schema: "sophia_voice_lab_studio_sign_out_v1", scope: "global", confirmed: true, http_status: null, basis: "no_session_issued", session_basis: "none", credentials_excluded: true };
@@ -829,29 +1237,32 @@ export class StudioG7Driver implements VoiceBrowserDriver {
     return { kind: "cleanup.browser_context_close_failed", source: "browser", payload: { reason, close_resolved: closed.closed, browser_registry_absent: false, browser_process_close_resolved: processClosed.closed, execution_epoch_sha256: ownership.executionEpochSha256, error_class: closed.errorClass ?? processClosed.errorClass }, dedupeKey: `cleanup:${runId}:browser-close-failed` };
   }
 
-  /** Cleanup with no browser at all: end the exchange via the API, then sign out. */
+  /** Cleanup with no browser at all: settle the exchange via the API (ownership-gated), then sign out. */
   async #apiOnlyCleanup(runId: string, purpose: string): Promise<DriverEvent[]> {
     const events: DriverEvent[] = [...(this.#orphanEvents.get(runId) ?? [])];
     this.#orphanEvents.delete(runId);
     const tokens = this.#tokenSource(null);
-    const ended = await this.#verifyExchangeEnded(runId, tokens, false).catch((error: unknown) => ({ confirmed: false, events: [this.#exchangeEndUnavailable(runId, purpose, error)] }));
-    events.push(...ended.events);
+    const settled = await this.#settleExchange(runId, tokens, null).catch((error: unknown) => ({ confirmed: false, events: [this.#exchangeEndUnavailable(runId, purpose, error)] }));
+    events.push(...settled.events);
+    // The joined exchange's late receipts are read with the same session.
+    const exchangeId = this.#exchanges.get(runId)?.exchangeId ?? null;
+    if (exchangeId !== null && tokens.held() !== null) events.push(...await this.#readBridge(runId, exchangeId, tokens, new Map()).catch(() => []));
     events.push(await this.#signOut(runId, tokens));
     const known = this.#exchanges.get(runId);
-    if (known !== undefined && !known.browserLaunched) {
+    if (known !== undefined && known.join === "retained" && !known.browserLaunched) {
       // Start failed before Chromium launched (e.g. deployment mismatch):
       // this driver instance owned the run and never allocated a browser.
       const absent = { browser_never_allocated: true, basis: "driver_failed_before_browser_launch", authoritative_ledger_read: false };
       events.push({ kind: "cleanup.browser_context_absent", source: "browser", payload: absent, dedupeKey: contentKey("cleanup-browser-absent", runId, absent) });
     }
-    if (ended.confirmed) this.#clearWatchdog(runId);
+    if (settled.confirmed) this.#clearWatchdog(runId);
     return events;
   }
 
   #state(runId: string): ExchangeRecord {
     let state = this.#exchanges.get(runId);
     if (!state) {
-      state = { exchangeId: null, preexistingExchangeId: null, speakRequested: false, browserLaunched: false, authIssued: false };
+      state = { exchangeId: null, preexistingExchangeId: null, speakRequested: false, browserLaunched: false, authIssued: false, grantId: null, runBindingSha256: null, exchangeOpenedAtMs: null, join: "retained" };
       this.#exchanges.set(runId, state);
     }
     return state;
@@ -866,18 +1277,19 @@ export class StudioG7Driver implements VoiceBrowserDriver {
   }
 
   /**
-   * Run deadline reached: end the exchange through the API even if the page
-   * or the whole browser is gone. Its receipts are returned by the next
-   * drain/abort/recover for durable persistence. The product guard still ends
-   * the exchange at the grant deadline independently of the Lab.
+   * Run deadline reached: settle the exchange through the API even if the
+   * page or the whole browser is gone (ending it only when ownership is
+   * proven). Its receipts are returned by the next drain/abort/recover for
+   * durable persistence. The product guard still ends the exchange at the
+   * grant deadline independently of the Lab.
    */
   async fireWatchdog(runId: string): Promise<DriverEvent[]> {
     this.#watchdogs.delete(runId);
-    const tokens = this.#tokenSource(this.#sessions.get(runId) ?? null);
-    const ended = await this.#verifyExchangeEnded(runId, tokens, false).catch((error: unknown) => ({ confirmed: false, events: [this.#exchangeEndUnavailable(runId, "watchdog", error)] }));
-    const fired = { basis: "run_deadline", exchange_end_confirmed: ended.confirmed };
-    const events: DriverEvent[] = [{ kind: "studio.watchdog.fired", source: "worker", payload: fired, dedupeKey: contentKey("studio-watchdog", runId, fired) }, ...ended.events];
-    const session = this.#sessions.get(runId);
+    const session = this.#sessions.get(runId) ?? null;
+    const tokens = this.#tokenSource(session);
+    const settled = await this.#settleExchange(runId, tokens, session).catch((error: unknown) => ({ confirmed: false, events: [this.#exchangeEndUnavailable(runId, "watchdog", error)] }));
+    const fired = { basis: "run_deadline", exchange_end_confirmed: settled.confirmed };
+    const events: DriverEvent[] = [{ kind: "studio.watchdog.fired", source: "worker", payload: fired, dedupeKey: contentKey("studio-watchdog", runId, fired) }, ...settled.events];
     if (session) session.pendingEvents.push(...events);
     else this.#orphanEvents.set(runId, [...(this.#orphanEvents.get(runId) ?? []), ...events]);
     return events;
@@ -890,12 +1302,14 @@ export class StudioG7Driver implements VoiceBrowserDriver {
   }
 
   /**
-   * Seed the exchange join from durable evidence (worker restart). A join the
-   * driver already retains is never replaced.
+   * Seed the exchange join from durable write-ahead evidence (worker restart).
+   * A join the driver already retains is never replaced.
    */
-  adoptExchangeJoin(runId: string, exchangeId: string): void {
-    if (this.#exchanges.has(runId) || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(exchangeId)) return;
-    this.#exchanges.set(runId, { exchangeId, preexistingExchangeId: null, speakRequested: true, browserLaunched: true, authIssued: true });
+  adoptStudioJoin(runId: string, join: DurableStudioJoin): void {
+    if (this.#exchanges.has(runId)) return;
+    const exchangeId = join.exchangeId !== null && UUID.test(join.exchangeId) ? join.exchangeId : null;
+    const grantId = join.grantId !== null && UUID.test(join.grantId) ? join.grantId : null;
+    this.#exchanges.set(runId, { exchangeId, preexistingExchangeId: null, speakRequested: join.speakRequested || exchangeId !== null, browserLaunched: true, authIssued: true, grantId, runBindingSha256: /^[0-9a-f]{64}$/.test(join.runBindingSha256) ? join.runBindingSha256 : null, exchangeOpenedAtMs: join.exchangeOpenedAtMs, join: "durable" });
   }
 
   /** Test seam: the exchange join the driver retains across browser loss. */

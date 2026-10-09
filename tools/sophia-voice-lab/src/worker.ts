@@ -27,9 +27,11 @@ import { D02BrowserContinuityProofSchema, assertFreshProductAdmissionProof, rese
 import { transitionRun } from "./state-machine.js";
 import { createWorkerBootIdentity, createWorkerHeartbeatAttestation, type WorkerBootIdentity } from "./worker-heartbeat.js";
 import { assertActiveRunWorkerProfile, measureWorkerProfile } from "./worker-profile.js";
-import { deriveStudioG7Verdicts, evaluateStudioG7Run, studioG7CleanupProof } from "./studio-g7/evaluate.js";
+import { deriveStudioG7Verdicts, evaluateStudioG7Run, studioDurableJoin, studioG7CleanupProof } from "./studio-g7/evaluate.js";
 import { isStudioG7ScenarioVersion } from "./studio-g7/scenarios.js";
-import { STUDIO_G7_TARGET_KIND } from "./studio-g7/contract.js";
+import { STUDIO_G7_TARGET_KIND, computeRunBindingSha256 } from "./studio-g7/contract.js";
+import { hasStudioExtensions } from "./studio-g7/studio-driver.js";
+import { STUDIO_DEAD_OWNER_HEARTBEAT_STALE_MS, STUDIO_DEAD_OWNER_LEASE_RELEASE_SCHEMA, STUDIO_DEAD_OWNER_VERIFIED_KIND, earliestGlobalSignOutAfter } from "./studio-g7/lease-release.js";
 
 interface ActiveLease { epoch: number; }
 interface D02WorkerShutdownArm {
@@ -53,6 +55,16 @@ interface D02WorkerShutdownArm {
 const D02_PRE_DISPATCH_SHUTDOWN_WAIT_MS = 20_000;
 const D02_PRE_DISPATCH_SHUTDOWN_POLL_MS = 100;
 export const WORKER_HEARTBEAT_INTERVAL_MS = 2_000;
+/** Studio G7: minimum spacing of API-only recoveries while the run's exchange stays unsettled. */
+export const STUDIO_EXCHANGE_REVERIFY_BACKOFF_MS = 30_000;
+/** One durable event per Studio API-only recovery (sign-in, settle, sign-out). */
+export const STUDIO_RECOVERY_ATTEMPT_EVENT = "studio.cleanup.recovery_attempt";
+/** Studio G7 evidence completion: bounded post-End re-reads of late bridge receipts. */
+export const STUDIO_EVIDENCE_REFRESH_EVENT = "studio.evidence.refresh";
+export const STUDIO_EVIDENCE_REFRESH_MAX_ATTEMPTS = 10;
+export const STUDIO_EVIDENCE_REFRESH_BACKOFF_MS = 30_000;
+/** Horizon for listing pending Studio runs (their certification deadline is the run TTL). */
+const STUDIO_EVIDENCE_LISTING_HORIZON_MS = 7 * 24 * 3_600_000;
 export const WORKER_HEARTBEAT_BROWSER_READINESS_TIMEOUT_MS = 5_000;
 const gzipAsync = promisify(gzip);
 
@@ -389,6 +401,19 @@ export class VoiceLabWorker {
 
   async maintainSessions(): Promise<void> {
     const maintenanceNow = new Date();
+    if (this.config.targetKind === STUDIO_G7_TARGET_KIND && hasStudioExtensions(this.driver)) {
+      // Evidence completion runs before the certification deadline check, so
+      // a run whose late receipts arrived is finalized from them rather than
+      // failed at its deadline.
+      const pending = await this.ledger.listRunsCertificationDue(new Date(maintenanceNow.getTime() + STUDIO_EVIDENCE_LISTING_HORIZON_MS), 20).catch((error) => {
+        this.logger.error({ error: safeError(error) }, "studio evidence completion listing unavailable; other maintenance continues");
+        return [] as RunRecord[];
+      });
+      for (const run of pending.filter(isStudioG7Run)) {
+        try { await this.#completeStudioG7Evidence(run.id, maintenanceNow); }
+        catch (error) { this.logger.error({ run_id_sha256: sha256(run.id), error: safeError(error) }, "studio evidence completion remains unconfirmed"); }
+      }
+    }
     let certificationDue: RunRecord[] = [];
     try { certificationDue = await this.ledger.listRunsCertificationDue(maintenanceNow, 20); }
     catch (error) { this.logger.error({ error: safeError(error) }, "certification deadline listing unavailable; resource maintenance continues"); }
@@ -868,7 +893,13 @@ export class VoiceLabWorker {
           await this.ledger.appendEvents(run.id, [{ ...event, payload: governedDriverEventPayload(run, event), ...(dedupeKey === null ? {} : { dedupeKey }) }, runtimeAcquisition(runtime)]);
           await this.ledger.preserveRecoveryExecutionOwnership(run.id);
           runtimeAcquisitionPersisted = true;
-        });
+        }, isStudioG7Run(run) ? async (events) => {
+          // Studio write-ahead: the Speak intent and the exchange join are
+          // durable before the driver acts on them, so a restarted worker
+          // can recover the exact join (or prove there was none).
+          await this.#fenceMutation(claimed, signal);
+          await this.#persistEvents(run.id, events);
+        } : undefined);
       } catch (error) {
         await this.ledger.appendEvents(run.id, startupStages);
         throw error;
@@ -935,6 +966,18 @@ export class VoiceLabWorker {
       run = await this.#freshRun(run.id);
       if (run.state === "ready") run = await transitionRun(this.ledger, run, "active");
       return { run_state: run.state, utterance_id: utteranceId, source: audio.source, source_text_hash: audio.sourceTextHash ?? null, synthesis: audio.synthesis ?? null, wav: { sha256: audio.sha256, sample_rate: audio.sampleRate, channels: audio.channels, duration_ms: audio.durationMs, byte_length: audio.bytes.byteLength }, schedule_receipt: scheduled.receipt };
+    }
+    if (operation.type === "studio_action") {
+      if (!isStudioG7Run(run) || !hasStudioExtensions(this.driver)) throw new VoiceLabError(labError("STUDIO_OPERATION_UNSUPPORTED", "Studio G7 actions run only on the Studio LiveKit target.", "validation", false, { status: "unsupported_for_target" }));
+      // A non-voice step must not cut the prior utterance's input window.
+      await this.#awaitPriorInputSettlement(run, operation.id, signal);
+      await this.#fenceMutation(claimed, signal);
+      const settleBudgetMs = deadlineAt === undefined ? undefined : Math.max(0, deadlineAt - Date.now() - 15_000);
+      const acted = await this.driver.studioAction(run, operation.id, { ...operation.input, ...(settleBudgetMs === undefined ? {} : { _settle_budget_ms: settleBudgetMs }) });
+      await this.#persistEvents(run.id, acted.events);
+      run = await this.#freshRun(run.id);
+      if (run.state === "ready") run = await transitionRun(this.ledger, run, "active");
+      return { run_state: run.state, ...acted.receipt };
     }
     if (operation.type === "force_socket_rotation") {
       await this.#mintAndVerify(run, "sophia-voice-runtime", ["voice:fault:socket_rotation"], "voice:fault:socket_rotation");
@@ -1153,8 +1196,18 @@ export class VoiceLabWorker {
    */
   async #finalizeStudioG7EndRun(initial: RunRecord, operations: import("./domain.js").OperationRecord[], endOperations: import("./domain.js").OperationRecord[]): Promise<void> {
     let run = initial;
+    let eventPage = await this.#allEvents(run.id);
+    if (!studioG7CleanupProof(eventPage.events).exchangeEnded && !this.driver.hasSession(run.id)) {
+      // End typed the exchange `uncertain`/`unavailable` (ownership not
+      // provable, or the API unreachable). Re-verify read-only (#recoverRun
+      // keeps the backoff) until it is no longer live; the product guard
+      // ends it at its deadline.
+      const recovered = await this.#recoverRun(run);
+      await this.#persistEvents(run.id, recovered.events);
+      eventPage = await this.#allEvents(run.id);
+    }
     const browserLeaseReleased = await this.#releaseBrowserLeaseProof(run.id);
-    const eventPage = await this.#allEvents(run.id);
+    eventPage = await this.#allEvents(run.id);
     const cleanup = studioG7CleanupProof(eventPage.events);
     const cleanupComplete = cleanup.complete && browserLeaseReleased && !this.driver.hasSession(run.id);
     if (!cleanupComplete) {
@@ -1938,9 +1991,23 @@ export class VoiceLabWorker {
       if (control?.browserAllocationEver === false && !this.driver.hasSession(run.id) && !studioEvents.some((event) => event.kind === "harness.browser_process_acquired")) {
         return { events: [{ kind: "cleanup.browser_context_absent", source: "worker", payload: { browser_never_allocated: true, authoritative_ledger_read: true, target_kind: STUDIO_G7_TARGET_KIND }, dedupeKey: `cleanup:${run.id}:studio-browser-never-allocated` }], artifacts: [] };
       }
-      // Hand the durable exchange join to the driver (it may have restarted).
-      const opened = studioEvents.find((event) => event.kind === "studio.exchange.opened" && event.source === "canonical" && typeof event.payload.exchange_id === "string");
-      if (opened) (this.driver as Partial<{ adoptExchangeJoin(runId: string, exchangeId: string): void }>).adoptExchangeJoin?.(run.id, String(opened.payload.exchange_id));
+      // Each Studio recovery signs in and out once. While an exchange stays
+      // unsettled (waiting for its guard deadline) re-verify at most every
+      // STUDIO_EXCHANGE_REVERIFY_BACKOFF_MS, so maintenance cannot hammer
+      // the principal's password grant.
+      // Settlement events are content-addressed (an identical result dedupes
+      // to its first time), so the cadence is kept by a per-attempt event.
+      const lastSettlement = [...studioEvents].reverse().find((event) => event.kind === "studio.cleanup.exchange_ended" && event.source === "canonical");
+      const lastAttempt = [...studioEvents].reverse().find((event) => event.kind === STUDIO_RECOVERY_ATTEMPT_EVENT && event.source === "worker");
+      if (!this.driver.hasSession(run.id) && lastSettlement && lastSettlement.payload.confirmed !== true && lastAttempt && lastAttempt.at.getTime() > Date.now() - STUDIO_EXCHANGE_REVERIFY_BACKOFF_MS) {
+        return { events: [], artifacts: [] };
+      }
+      if (!this.driver.hasSession(run.id)) await this.ledger.appendEvent(run.id, STUDIO_RECOVERY_ATTEMPT_EVENT, "worker", { attempt_id: randomUUID(), prior_exchange_status: typeof lastSettlement?.payload.status === "string" ? lastSettlement.payload.status : null }, `studio-recovery-attempt:${run.id}:${randomUUID()}`);
+      // Hand the durable write-ahead join to the driver (it may have
+      // restarted). Without one, the driver touches nothing: it only
+      // verifies, read-only, that no exchange is live in the room.
+      const join = studioDurableJoin(studioEvents, studioRunBinding(run));
+      if (join && hasStudioExtensions(this.driver)) this.driver.adoptStudioJoin(run.id, join);
       return this.driver.recover(recoveryTransportBinding({ runId: run.id, testRunId: run.testRunId, cleanupObligationId: run.cleanupObligationId, gatewayOrigin: run.target.gatewayUrl }), "studio-g7-recovery-uses-principal-session");
     }
     const combined: Awaited<ReturnType<VoiceBrowserDriver["recover"]>> = { events: [], artifacts: [] };
@@ -2865,6 +2932,71 @@ export class VoiceLabWorker {
   }
 
   /**
+   * Studio G7 evidence completion. A run that ended with every operation and
+   * cleanup settled but evidence still awaited (typically the bridge's late
+   * `session_closed` or last reply) re-reads its exchange's evidence with a
+   * fresh principal session (then signs out globally again) and is
+   * re-finalized from the durable ledger. Bounded attempts with backoff; the
+   * certification deadline still fails a run whose evidence never arrives.
+   */
+  async #completeStudioG7Evidence(runId: string, now: Date): Promise<void> {
+    const run = await this.#freshRun(runId);
+    if (run.state !== "pending_external_evidence" || !run.cleanupComplete || !hasStudioExtensions(this.driver)) return;
+    const page = await this.#allEvents(run.id);
+    const attempts = page.events.filter((event) => event.kind === STUDIO_EVIDENCE_REFRESH_EVENT && event.source === "worker");
+    if (attempts.length >= STUDIO_EVIDENCE_REFRESH_MAX_ATTEMPTS) return;
+    const last = attempts.at(-1);
+    if (last && last.at.getTime() > now.getTime() - STUDIO_EVIDENCE_REFRESH_BACKOFF_MS) return;
+    const join = studioDurableJoin(page.events, studioRunBinding(run));
+    if (!join?.exchangeId) return;
+    const attempt = attempts.length + 1;
+    await this.ledger.appendEvent(run.id, STUDIO_EVIDENCE_REFRESH_EVENT, "worker", { attempt, max_attempts: STUDIO_EVIDENCE_REFRESH_MAX_ATTEMPTS, exchange_id: join.exchangeId }, `studio-evidence-refresh:${run.id}:${attempt}`);
+    const refreshed = await this.driver.refreshStudioEvidence(run, join);
+    await this.#persistEvents(run.id, refreshed);
+    await this.#finalizeEndRun(run.id);
+  }
+
+  /**
+   * A dead foreign worker's Studio lease. Its browser cannot be proven closed
+   * by anyone else, so the lease is released only once that browser can no
+   * longer act on the product (studio-g7/lease-release.ts): lease expired,
+   * owner heartbeat stale, a global sign-out confirmed after the expiry, the
+   * access-JWT lifetime elapsed since, and then a fresh verification that the
+   * run's exchange is not live. Until then the obligation stays durable.
+   */
+  async #releaseDeadOwnerStudioLease(runId: string, lease: { workerId: string; leaseEpoch: number; expiresAt: Date }): Promise<boolean> {
+    const studio = this.config.studioG7;
+    const run = await this.#freshRun(runId);
+    if (!studio || !hasStudioExtensions(this.driver) || !TERMINAL_RUN_STATES.has(run.state) || lease.expiresAt.getTime() > Date.now()) return false;
+    const ownerHash = sha256(lease.workerId);
+    const pending = async (reason: string) => {
+      await this.ledger.appendEvent(runId, "cleanup.browser_lease_unconfirmed", "worker", { worker_id_hash: ownerHash, lease_epoch: lease.leaseEpoch, expires_at: lease.expiresAt.toISOString(), dead_owner_release: reason }, `cleanup:${runId}:browser-lease-unconfirmed:${ownerHash}:${lease.leaseEpoch}:${reason}`);
+      return false;
+    };
+    const live = await this.ledger.listLiveWorkers(new Date(Date.now() - STUDIO_DEAD_OWNER_HEARTBEAT_STALE_MS));
+    if (live.some((worker) => worker.workerId === lease.workerId)) return pending("owner_heartbeat_live");
+    const before = earliestGlobalSignOutAfter((await this.#allEvents(runId)).events, lease.expiresAt);
+    if (before && Date.now() < before.at.getTime() + studio.accessTokenMaxLifetimeMs) return pending("access_token_lifetime_pending");
+    const recovered = await this.#recoverRun(run);
+    if (recovered.events.length === 0) return pending("recovery_backoff");
+    await this.#persistEvents(runId, recovered.events);
+    const exchangeNotLive = recovered.events.some((event) => event.kind === "studio.cleanup.exchange_ended" && event.payload.confirmed === true)
+      && !recovered.events.some((event) => event.kind === "studio.cleanup.exchange_ended" && event.payload.confirmed !== true);
+    const signedOut = recovered.events.some((event) => event.kind === "studio.cleanup.signed_out" && event.payload.confirmed === true && event.payload.scope === "global");
+    if (!before) return pending(signedOut ? "access_token_lifetime_pending" : "global_sign_out_unconfirmed");
+    if (!exchangeNotLive || !signedOut) return pending(!signedOut ? "global_sign_out_unconfirmed" : "exchange_not_verified_not_live");
+    const verificationId = randomUUID();
+    await this.ledger.appendEvent(runId, STUDIO_DEAD_OWNER_VERIFIED_KIND, "worker", { verification_id: verificationId, worker_id_sha256: ownerHash, lease_epoch: lease.leaseEpoch, exchange_not_live: true, signed_out: true, access_token_max_lifetime_ms: studio.accessTokenMaxLifetimeMs }, `studio-dead-owner-verified:${runId}:${verificationId}`);
+    const result = await this.ledger.releaseDeadOwnerStudioBrowserLease(runId, { verificationId, tokenMaxLifetimeMs: studio.accessTokenMaxLifetimeMs, heartbeatStaleMs: STUDIO_DEAD_OWNER_HEARTBEAT_STALE_MS });
+    if (!result.released) return pending(result.reason);
+    await this.ledger.appendEvent(runId, "cleanup.browser_lease_released", "worker", {
+      schema: STUDIO_DEAD_OWNER_LEASE_RELEASE_SCHEMA, worker_id_hash: ownerHash, lease_epoch: lease.leaseEpoch, cas_deleted: true,
+      dead_owner_quiesced: true, browser_close: "unobservable_owner_dead", room_presence: "unobservable_via_member_api", verification_id: verificationId,
+    }, `cleanup:${runId}:browser-lease`);
+    return true;
+  }
+
+  /**
    * Studio lease release. The legacy execution-epoch proof requires a
    * browser-held provider socket and Better Auth cleanup that this target does
    * not have, so the release is gated on the Studio driver's own close proof
@@ -2874,6 +3006,9 @@ export class VoiceLabWorker {
   async #releaseStudioG7BrowserLease(runId: string): Promise<boolean> {
     const active = this.#activeLeases.get(runId);
     let current = await this.ledger.getBrowserLease(runId);
+    if (current && current.workerId !== this.workerId && !active && !this.driver.hasSession(runId)) {
+      if (await this.#releaseDeadOwnerStudioLease(runId, current)) current = null;
+    }
     const epoch = active?.epoch ?? (current?.workerId === this.workerId ? current.leaseEpoch : null);
     if (epoch !== null) {
       const proof = studioG7CleanupProof((await this.#allEvents(runId)).events);
@@ -2927,6 +3062,11 @@ export function studioPriorInputSettled(events: import("./domain.js").LabEvent[]
     try { return Number((JSON.parse(String(event.payload.receipt_json)) as Record<string, unknown>).windowSeq); } catch { return Number.NaN; }
   }).filter(Number.isSafeInteger));
   return windows.size >= nonSilence;
+}
+
+/** The run binding hash a Studio run's grant must carry. */
+function studioRunBinding(run: RunRecord): string {
+  return computeRunBindingSha256({ testRunId: run.testRunId, cleanupObligationId: run.cleanupObligationId, scenarioId: run.scenarioId ?? "", scenarioVersion: run.scenarioVersion ?? "" });
 }
 
 /** Studio G7 runs carry the `studio-g7-v1` catalogue version. */

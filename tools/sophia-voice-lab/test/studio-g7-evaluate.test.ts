@@ -5,9 +5,11 @@ import { sha256 } from "../src/security.js";
 import { deriveStudioG7Verdicts, evaluateStudioG7Run, studioG7CleanupProof, type StudioG7Evaluation } from "../src/studio-g7/evaluate.js";
 import { studioPriorInputSettled } from "../src/worker.js";
 import {
-  API_SHA, BRIDGE_SHA, EventLog, LAB_TRACK_ID, STUDIO_SHA,
-  cleanupEvents, evidenceGrant, identityEvent, inputTurn, inputWindow, labUtterance, outputReply, pageReceipt, providerReceipt, sessionClosed, speakOperation, studioRun, studioTestConfig,
+  API_SHA, BRIDGE_SHA, EXCHANGE_UUID, EventLog, GRANT_UUID, LAB_TRACK_ID, STUDIO_SHA,
+  cleanupEvents, evidenceGrant, guardReceipt, identityEvent, inputTurn, inputWindow, labUtterance, outputReply, pageReceipt, providerReceipt, sessionClosed, speakOperation, studioRun, studioTestConfig,
 } from "./studio-g7-helpers.js";
+import { randomUUID } from "node:crypto";
+import type { OperationRecord as Operation } from "../src/domain.js";
 
 const config = studioTestConfig();
 const expected = { studio: STUDIO_SHA, api: API_SHA, bridge: BRIDGE_SHA };
@@ -58,7 +60,7 @@ const statusOf = (evaluation: StudioG7Evaluation, id: string) => [...evaluation.
 const statusMap = (evaluation: StudioG7Evaluation) => Object.fromEntries([...evaluation.harness, ...evaluation.product].map((assertion) => [assertion.id, `${assertion.status}:${assertion.reason}`]));
 
 describe("Studio G7 evaluation", () => {
-  it("passes every receipt channel of a complete episode while keeping harness and product separate", () => {
+  it("passes every receipt channel of a two-utterance episode while keeping harness and product separate", () => {
     const item = episode();
     const evaluation = evaluate(item);
     for (const id of [
@@ -74,15 +76,14 @@ describe("Studio G7 evaluation", () => {
     expect(evaluation.grant_id).toBe(evidenceGrant(item.run).grantId);
     expect(evaluation.pcm_reconciliation).toBe("envelope_only");
     expect(evaluation.pcm_chain_comparison).toBe("unsupported");
-    // Non-voice and non-exposed steps stay typed unavailable, so the harness
-    // cannot certify the whole G7 episode from this adapter alone.
-    expect(statusOf(evaluation, "step.g7.leave_return.executed")).toMatchObject({ status: "unavailable", reason: "driver_action_not_exposed_as_mcp_operation" });
-    expect(statusOf(evaluation, "step.g7.stale_edit.executed")).toMatchObject({ status: "unavailable", reason: "requires_separate_non_voice_controller" });
-    expect(statusOf(evaluation, "step.g7.create.executed")).toMatchObject({ status: "pass" });
-    expect(statusOf(evaluation, "step.g7.hold.executed")).toMatchObject({ status: "unavailable", reason: "utterance_not_performed" });
-    expect(statusOf(evaluation, "step.g7.create.outcome")).toMatchObject({ status: "unavailable", reason: "member_api_work_join_not_implemented_in_adapter" });
-    expect(evaluation.verdicts).toEqual({ harness: "unavailable", product: "inconclusive", provider: "pass" });
-    expect(deriveStudioG7Verdicts(evaluation, { sessionEstablished: true })).toEqual({ harness: "unavailable", product: "inconclusive", provider: "pass", auth: "pass", evidence: "unavailable" });
+    expect(evaluation.retention).toEqual({ transcript: "not_retained", audio: "not_retained" });
+    expect(evaluation.limitations).toEqual(expect.arrayContaining(["fake_studio_loopback_peer_has_no_packet_flow_proof", "no_transcript_retained", "no_audio_retained"]));
+    // Steps not performed while the run is live are typed unavailable; the
+    // exchange was never proven the run's own here, so harness withholds.
+    expect(statusOf(evaluation, "step.g7.leave_return.executed")).toMatchObject({ status: "unavailable", reason: "step_not_yet_performed" });
+    expect(statusOf(evaluation, "binding.exchange_ownership")).toMatchObject({ status: "unavailable" });
+    expect(evaluation.verdicts.harness).toBe("unavailable");
+    expect(deriveStudioG7Verdicts(evaluation, { sessionEstablished: true })).toMatchObject({ harness: "unavailable", auth: "pass", evidence: "unavailable" });
     expect(deriveStudioG7Verdicts({ ...evaluation, verdicts: { ...evaluation.verdicts, harness: "pass" } }, { sessionEstablished: true }).evidence).toBe("pass");
     expect(evaluation.corroboration.webrtc_sender_stats.status).toBe("corroboration_only");
   });
@@ -104,17 +105,25 @@ describe("Studio G7 evaluation", () => {
 
   it("types a guard-ended exchange and still requires proven cleanup", () => {
     const item = episode({ skipCleanup: true });
-    item.log.bridge("guard", { grantId: evidenceGrant(item.run).grantId, runBindingSha256: evidenceGrant(item.run).runBindingSha256, seq: 11, atMs: T0 + 20_000, reason: "deadline" });
+    item.log.bridge("guard", guardReceipt(item.run, "deadline", T0 + 20_000), "service", 0);
     const evaluation = evaluate(item);
     expect(statusOf(evaluation, "guard.not_triggered")).toMatchObject({ status: "fail", reason: "guard_deadline" });
     expect(evaluation.cleanup).toMatchObject({ required: true, guard_reason: "deadline", complete: false });
-    expect(statusOf(evaluation, "cleanup.exchange_ended")).toMatchObject({ status: "fail" });
+    expect(statusOf(evaluation, "cleanup.exchange_ended")).toMatchObject({ status: "fail", reason: "exchange_end_not_verified" });
     expect(statusOf(evaluation, "cleanup.principal_signed_out")).toMatchObject({ status: "fail" });
     expect(deriveStudioG7Verdicts(evaluation, { sessionEstablished: true })).toMatchObject({ harness: "fail", auth: "fail", evidence: "fail" });
 
     const expired = episode();
-    expired.log.grant(evidenceGrant(expired.run, { endedReason: "expired" }));
+    expired.log.grant(evidenceGrant(expired.run, { endedReason: "expired" }), "ended");
     expect(statusOf(evaluate(expired), "guard.not_triggered")).toMatchObject({ status: "fail", reason: "guard_expired" });
+    // 0046's sixth reason.
+    const turns = episode();
+    turns.log.bridge("guard", guardReceipt(turns.run, "turns", T0 + 20_000), "service", 0);
+    expect(statusOf(evaluate(turns), "guard.not_triggered")).toMatchObject({ status: "fail", reason: "guard_turns" });
+    // A guard receipt arriving from the bridge source is a contract violation, not evidence.
+    const forged = episode();
+    forged.log.bridge("guard", guardReceipt(forged.run, "deadline"), "bridge", 0);
+    expect(statusOf(evaluate(forged), "contract.bridge_evidence_valid")).toMatchObject({ status: "fail" });
   });
 
   it("types missing receipts unavailable and never passes them", () => {
@@ -195,7 +204,7 @@ describe("Studio G7 evaluation", () => {
     conflict.log.bridge("input_turn", inputTurn(conflict.run, 4, 1, { outcome: "interrupted" }));
     const conflicted = evaluate(conflict);
     expect(statusOf(conflicted, "bridge.seq_integrity")).toMatchObject({ status: "fail", reason: "bridge_seq_conflict" });
-    expect(conflicted.bridge.conflicting_seqs).toEqual([4]);
+    expect(conflicted.bridge.conflicting_seqs).toEqual(["bridge:4"]);
     expect(conflicted.verdicts.harness).toBe("fail");
   });
 
@@ -276,7 +285,7 @@ describe("Studio G7 evaluation", () => {
 
   it("derives the cleanup proof and the studio input-settlement gate", () => {
     const item = episode();
-    expect(studioG7CleanupProof(item.log.events)).toEqual({ exchangeEnded: true, signedOut: true, browserClosed: true, complete: true });
+    expect(studioG7CleanupProof(item.log.events)).toEqual({ exchangeEnded: true, signedOut: true, browserClosed: true, browserQuiesced: false, complete: true });
     expect(studioG7CleanupProof(episode({ skipCleanup: true }).log.events).complete).toBe(false);
     const run = studioRun(config);
     const log = new EventLog(run.id);
@@ -286,5 +295,189 @@ describe("Studio G7 evaluation", () => {
     expect(studioPriorInputSettled(log.events, [prior], prior.id)).toBe(false);
     log.bridge("input_window", inputWindow(run, 1, 1, 1_000));
     expect(studioPriorInputSettled(log.events, [prior], prior.id)).toBe(true);
+  });
+});
+
+const DESIGN_TASK = "d0000000-0000-4000-8000-000000000001";
+const EDIT_TASK = "d0000000-0000-4000-8000-000000000002";
+const RESEARCH_TASK = "d0000000-0000-4000-8000-000000000003";
+const ARTIFACT = "a0000000-0000-4000-8000-000000000001";
+const VERSION_1 = "b0000000-0000-4000-8000-000000000001";
+const VERSION_2 = "b0000000-0000-4000-8000-000000000002";
+const NOTE = "c0000000-0000-4000-8000-000000000001";
+const PAGE_SHA = sha256("<html>page</html>");
+const PAGE2_SHA = sha256("<html>page v2</html>");
+
+function op(run: RunRecord, type: Operation["type"], createdAt: number, input: Record<string, unknown>, result: Record<string, unknown> | null = {}, state: Operation["state"] = "succeeded"): Operation {
+  return { ...speakOperation(run, new Date(createdAt)), id: randomUUID(), type, input, result, state };
+}
+
+function task(id: string, kind: string, extra: Record<string, unknown> = {}): Record<string, unknown> {
+  return { task_id: id, kind, state: "running", phase: "running", created_at: new Date(T0 + 5_000).toISOString(), focus: false, research: null, design: null, outputs: [], ...extra };
+}
+
+function artifact(taskId: string, versionId: string, digest: string, status = "verified"): Record<string, unknown> {
+  return { artifact_id: ARTIFACT, version_id: versionId, task_id: taskId, version_state: "stable", version_format: "html", is_latest: true, source_id: randomUUID(), rendition_sha256: digest, source_hash: digest, content_sha256: digest, downloaded_sha256: status === "mismatch" ? sha256("other bytes") : digest, downloaded_byte_length: 20, download_basis: "signed_object_store_url", source_hash_compared: true, hashes_agree: status === "verified", status, reason: status === "verified" ? null : "downloaded_bytes_disagree_with_declared_digest" };
+}
+
+interface G7Options { skip?: string[]; staleCode?: string; staleStatus?: number; artifactStatus?: string; ownership?: "proven" | "mismatch" | "unavailable"; withdrawalCommitted?: boolean; noEnd?: boolean }
+
+/** A complete G7 episode: five voice steps, four actions, observations, ownership, cleanup. */
+function g7Episode(options: G7Options = {}): Episode {
+  const run = studioRun(config);
+  const log = new EventLog(run.id);
+  const skip = new Set(options.skip ?? []);
+  identityEvent(log, "startup");
+  log.add("studio.auth.session_established", "canonical", { principal_bound: true });
+  log.add("harness.media_stream_issued", "browser", { replacement_active: true, track_id_sha256s: [sha256(LAB_TRACK_ID)] });
+  log.page(pageReceipt(run, "mic_published", T0));
+  log.add("studio.grant_gate.passed", "browser", { grant_id: GRANT_UUID, run_binding_sha256: evidenceGrant(run).runBindingSha256 });
+  log.add("studio.exchange.speak_requested", "canonical", { grant_id: GRANT_UUID, write_ahead: true });
+  log.add("studio.exchange.opened", "canonical", { exchange_id: EXCHANGE_UUID, grant_id: GRANT_UUID, opened_at_lab_ms: T0 });
+  log.add("studio.exchange.ownership", "canonical", { exchange_id: EXCHANGE_UUID, status: options.ownership ?? "proven", reason: options.ownership === "mismatch" ? "evidence_bound_to_another_run" : null });
+  log.grant(evidenceGrant(run));
+  const operations: Operation[] = [];
+  const voice = ["create", "steer", "hold", "resume", "stop"].filter((step) => !skip.has(`g7.${step}`));
+  let seq = 0;
+  log.bridge("provider", providerReceipt(run, seq++, "ready"));
+  voice.forEach((step, index) => {
+    const speak = op(run, "speak", T0 + 100 + index, { fixture_id: "conversation_greeting_probe", _g7_step: `g7.${step}` }, { schedule_receipt: { product: {} } });
+    operations.push(speak);
+    labUtterance(log, speak.id, T0 + 1_000 + index * 10_000, 1_500);
+    log.bridge("input_window", inputWindow(run, seq++, index + 1, 1_500));
+    log.bridge("input_turn", inputTurn(run, seq++, index + 1));
+    if (index === 0) log.page(pageReceipt(run, "sophia_playback", T0 + 2_900, { phase: "playing" }));
+    log.bridge("output_reply", outputReply(run, seq++, index + 1, T0 + 3_000 + index * 10_000));
+    if (step !== "create" && step !== "steer") {
+      const phase = step === "hold" ? "held" : step === "resume" ? "running" : "stopped";
+      const observe = op(run, "studio_action", T0 + 150 + index, { action: "observe", for_step: step }, { performed: false, status: "observed" });
+      operations.push(observe);
+      log.add("studio.outcome.observed", "canonical", { purpose: `g7.${step}`, operation_id: observe.id, join: { status: "uncertain" }, tasks: [task(RESEARCH_TASK, "research", { phase, state: step === "stop" ? "cancelled" : "running" })], artifacts: [] });
+    }
+  });
+  if (!skip.has("g7.leave_return")) {
+    const leave = op(run, "studio_action", T0 + 200, { action: "leave_and_return" }, { performed: true, status: "returned" });
+    operations.push(leave);
+    log.add("studio.room.left", "browser", { basis: "ui_leave", operation_id: leave.id });
+    log.page(pageReceipt(run, "mic_unpublished", T0 + 60_000));
+    log.page(pageReceipt(run, "mic_published", T0 + 61_000));
+    log.add("studio.room.rejoined", "browser", { lab_track_republished: true, operation_id: leave.id });
+  }
+  if (!skip.has("g7.section_revision")) {
+    const edit = op(run, "studio_action", T0 + 300, { action: "section_revision", instruction: "x" }, { performed: true, status: "admitted" });
+    operations.push(edit);
+    log.add("studio.action.html_edit", "canonical", { purpose: "section_revision", operation_id: edit.id, requested: true, status: "admitted", http_status: 202, code: null, task_id: EDIT_TASK, version_id: VERSION_1 });
+    log.add("studio.outcome.observed", "canonical", { purpose: "g7.section_revision", operation_id: edit.id, join: { status: "uncertain" }, tasks: [task(EDIT_TASK, "design", { state: "succeeded", design: { state: "published", mode: "edit", artifact_id: ARTIFACT, published_version_id: VERSION_2 } })], artifacts: [artifact(EDIT_TASK, VERSION_2, PAGE2_SHA, options.artifactStatus)] });
+  }
+  if (!skip.has("g7.stale_edit")) {
+    const stale = op(run, "studio_action", T0 + 400, { action: "stale_edit" }, { performed: true, status: options.staleStatus === 202 ? "admitted" : "refused" });
+    operations.push(stale);
+    log.add("studio.action.html_edit", "canonical", { purpose: "stale_edit", operation_id: stale.id, requested: true, status: options.staleStatus === 202 ? "admitted" : "refused", http_status: options.staleStatus ?? 409, code: options.staleCode ?? "stale_revision", version_id: VERSION_1, superseded_by_version_id: VERSION_2 });
+  }
+  if (!skip.has("g7.withdrawal")) {
+    const withdraw = op(run, "studio_action", T0 + 500, { action: "withdrawal" }, { performed: true, status: "committed" });
+    operations.push(withdraw);
+    const committed = options.withdrawalCommitted ?? true;
+    log.add("studio.action.withdrawal", "canonical", { operation_id: withdraw.id, requested: true, status: committed ? "committed" : "refused", entry_id: NOTE, entry_bound_exchange_id: EXCHANGE_UUID, http_status: committed ? 202 : 409, code: committed ? null : "stale_revision", receipt_operation: committed ? "withdraw_note" : null });
+    log.add("studio.outcome.observed", "canonical", { purpose: "g7.withdrawal", operation_id: withdraw.id, join: { status: "uncertain" }, tasks: [task(DESIGN_TASK, "design", { design: { state: "cancelled", mode: "create", artifact_id: ARTIFACT, published_version_id: VERSION_1 } })], artifacts: [] });
+  }
+  log.add("studio.outcome.observed", "canonical", { purpose: "final", operation_id: "end", join: { status: "uncertain" }, tasks: [task(DESIGN_TASK, "design", { state: "succeeded", design: { state: "published", mode: "create", artifact_id: ARTIFACT, published_version_id: VERSION_1 } }), task(RESEARCH_TASK, "research", { research: { html_state: "published", design_task_id: DESIGN_TASK } })], artifacts: [artifact(DESIGN_TASK, VERSION_1, PAGE_SHA, options.artifactStatus)] });
+  log.bridge("provider", providerReceipt(run, seq++, "closed"));
+  log.bridge("session_closed", sessionClosed(run, seq++, { windows: voice.length, turns: voice.length, replies: voice.length }));
+  cleanupEvents(log);
+  identityEvent(log, "final");
+  if (!options.noEnd) operations.push(op(run, "end", T0 + 900, {}, {}));
+  return { run, log, operations };
+}
+
+describe("Studio G7 episode: every step is an operation, outcomes are canonical or typed uncertain", () => {
+  it("certifies the harness of a complete episode; voice outcomes stay uncertain so the product is inconclusive", () => {
+    const item = g7Episode();
+    const evaluation = evaluate(item);
+    const failing = [...evaluation.harness].filter((assertion) => assertion.status !== "pass");
+    expect(failing).toEqual([]);
+    expect(evaluation.verdicts).toEqual({ harness: "pass", product: "inconclusive", provider: "pass" });
+    expect(evaluation.bridge.first_seq).toBe(0);
+    expect(evaluation.bridge.missing_seqs).toEqual([]);
+    const steps = Object.fromEntries(evaluation.steps.map((step) => [step.step_id, `${step.executed}/${step.outcome}:${step.reason}`]));
+    expect(steps).toEqual({
+      "g7.create": "pass/uncertain:published_html_bytes_verified_join_uncertain",
+      "g7.steer": "pass/uncertain:steer_effect_not_exposed_by_member_api",
+      "g7.leave_return": "pass/pass:null",
+      "g7.section_revision": "pass/pass:null",
+      "g7.stale_edit": "pass/pass:null",
+      "g7.hold": "pass/uncertain:intended_phase_observed_join_uncertain",
+      "g7.resume": "pass/uncertain:intended_phase_observed_join_uncertain",
+      "g7.stop": "pass/uncertain:intended_phase_observed_join_uncertain",
+      "g7.withdrawal": "pass/pass:null",
+    });
+    expect(statusOf(evaluation, "step.g7.withdrawal.design_ended")).toMatchObject({ status: "uncertain", reason: "design_end_observed_join_uncertain" });
+    expect(statusOf(evaluation, "outcome.artifact_bytes_integrity")).toMatchObject({ status: "pass" });
+    expect(evaluation.outcome).toMatchObject({ join: "uncertain", missing_product_field: "NativeTask.exchangeId", artifacts_verified: 2, artifacts_mismatched: 0 });
+    const verdicts = deriveStudioG7Verdicts(evaluation, { sessionEstablished: true });
+    expect(verdicts).toEqual({ harness: "pass", product: "inconclusive", provider: "pass", auth: "pass", evidence: "pass" });
+  });
+
+  it("fails a step not performed before End instead of leaving the run pending", () => {
+    const item = g7Episode({ skip: ["g7.stale_edit", "g7.hold"] });
+    const evaluation = evaluate(item);
+    expect(statusOf(evaluation, "step.g7.stale_edit.executed")).toMatchObject({ status: "fail", reason: "step_not_performed_before_end" });
+    expect(statusOf(evaluation, "step.g7.hold.executed")).toMatchObject({ status: "fail", reason: "step_not_performed_before_end" });
+    expect(evaluation.verdicts.harness).toBe("fail");
+    const live = g7Episode({ skip: ["g7.stale_edit"], noEnd: true });
+    expect(statusOf(evaluate(live), "step.g7.stale_edit.executed")).toMatchObject({ status: "unavailable", reason: "step_not_yet_performed" });
+  });
+
+  it("types a target that could not be resolved as not performed, never as executed", () => {
+    const item = g7Episode({ skip: ["g7.stale_edit"] });
+    const attempt = op(item.run, "studio_action", T0 + 450, { action: "stale_edit" }, { performed: false, status: "unavailable", reason: "no_superseded_version" });
+    item.operations.splice(item.operations.length - 1, 0, attempt);
+    expect(statusOf(evaluate(item), "step.g7.stale_edit.executed")).toMatchObject({ status: "fail", reason: "no_superseded_version" });
+  });
+
+  it("fails product outcomes the Lab's own requests prove wrong", () => {
+    expect(statusOf(evaluate(g7Episode({ staleStatus: 202 })), "step.g7.stale_edit.outcome")).toMatchObject({ status: "fail", reason: "stale_edit_admitted" });
+    expect(statusOf(evaluate(g7Episode({ staleStatus: 409, staleCode: "invalid_state" })), "step.g7.stale_edit.outcome")).toMatchObject({ status: "fail", reason: "stale_edit_refused_as_invalid_state" });
+    expect(statusOf(evaluate(g7Episode({ withdrawalCommitted: false })), "step.g7.withdrawal.outcome")).toMatchObject({ status: "fail" });
+    const mismatch = evaluate(g7Episode({ artifactStatus: "mismatch" }));
+    expect(statusOf(mismatch, "outcome.artifact_bytes_integrity")).toMatchObject({ status: "fail", reason: "downloaded_bytes_disagree_with_declared_digest" });
+    expect(statusOf(mismatch, "step.g7.section_revision.outcome")).toMatchObject({ status: "fail", reason: "revised_page_bytes_mismatch" });
+    expect(mismatch.verdicts.product).toBe("fail");
+  });
+
+  it("fails the harness when the joined exchange's evidence is bound to another run", () => {
+    const evaluation = evaluate(g7Episode({ ownership: "mismatch" }));
+    expect(statusOf(evaluation, "binding.exchange_ownership")).toMatchObject({ status: "fail", reason: "evidence_bound_to_another_run" });
+    expect(evaluation.verdicts.harness).toBe("fail");
+    expect(statusOf(evaluate(g7Episode({ ownership: "unavailable" })), "binding.exchange_ownership")).toMatchObject({ status: "unavailable" });
+  });
+
+  it("dedupes replayed receipts and operations deterministically", () => {
+    const baseline = evaluate(g7Episode());
+    const replayed = g7Episode();
+    // The same bridge rows read again by a later refresh, and the same outcome observed twice.
+    for (const event of replayed.log.events.filter((candidate) => candidate.kind === "studio.bridge_receipt").slice(0, 5)) replayed.log.add(event.kind, event.source, event.payload);
+    const final = replayed.log.events.find((event) => event.kind === "studio.outcome.observed" && event.payload.purpose === "final")!;
+    replayed.log.add(final.kind, final.source, final.payload);
+    const evaluation = evaluate(replayed);
+    expect(statusMap(evaluation)).toEqual(statusMap(baseline));
+    expect(evaluation.bridge.duplicate_count).toBe(5);
+  });
+
+  it("treats a dead foreign worker's quiesced lease as cleanup, typed never as a close", () => {
+    const run = studioRun(config);
+    const log = new EventLog(run.id);
+    log.add("harness.browser_process_acquired", "browser", {});
+    log.add("studio.cleanup.exchange_ended", "canonical", { confirmed: true, status: "confirmed", basis: "no_live_exchange_in_room" });
+    log.add("studio.cleanup.signed_out", "canonical", { confirmed: true, scope: "global" });
+    expect(studioG7CleanupProof(log.events).complete).toBe(false);
+    log.add("cleanup.browser_lease_released", "worker", { schema: "sophia_voice_lab_studio_g7_dead_owner_lease_release_v1", cas_deleted: true, dead_owner_quiesced: true });
+    expect(studioG7CleanupProof(log.events)).toEqual({ exchangeEnded: true, signedOut: true, browserClosed: false, browserQuiesced: true, complete: true });
+    expect(statusOf(evaluateStudioG7Run(run, log.events, [], { expected }), "cleanup.browser_closed")).toMatchObject({ status: "unavailable", reason: "dead_owner_quiesced_close_unobservable" });
+    // An uncertain settlement is never an exchange end.
+    const uncertain = new EventLog(run.id);
+    uncertain.add("studio.cleanup.exchange_ended", "canonical", { confirmed: false, status: "uncertain", basis: "live_exchange_not_joined_to_run" });
+    expect(studioG7CleanupProof(uncertain.events).exchangeEnded).toBe(false);
+    expect(statusOf(evaluateStudioG7Run(run, uncertain.events, [], { expected }), "cleanup.exchange_ended")).toMatchObject({ status: "unavailable", reason: "exchange_uncertain_live_exchange_not_joined_to_run" });
   });
 });

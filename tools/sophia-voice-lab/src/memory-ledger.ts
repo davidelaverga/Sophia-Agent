@@ -1,3 +1,4 @@
+import { decideStudioDeadOwnerRelease } from "./studio-g7/lease-release.js";
 import { deriveExecutionOwnership } from "./execution-ownership.js";
 import { canonicalEvidenceRefreshDue } from "./canonical-evidence-refresh.js";
 import { ingestGenericOwnerLoss } from "./generic-owner-loss.js";
@@ -709,6 +710,17 @@ export class MemoryVoiceLabLedger implements VoiceLabLedger {
       || proof.workerIdSha256 !== sha256(lease.workerId) || proof.browserLeaseEpoch !== lease.leaseEpoch) return false;
     this.#browserLeases.delete(runId);
     return true;
+  }
+  async releaseDeadOwnerStudioBrowserLease(runId: string, proof: { verificationId: string; tokenMaxLifetimeMs: number; heartbeatStaleMs: number }): Promise<{ released: boolean; reason: string }> {
+    const run = this.#runs.get(runId), lease = this.#browserLeases.get(runId);
+    if (!run || !lease) return { released: false, reason: !run ? "run_missing" : "lease_absent" };
+    const decision = decideStudioDeadOwnerRelease({
+      run, lease, ownerLastHeartbeatAt: this.#workerHeartbeats.get(lease.workerId)?.observedAt ?? null,
+      events: this.#events.get(runId) ?? [], now: new Date(), ...proof,
+    });
+    if (!decision.release) return { released: false, reason: decision.reason };
+    this.#browserLeases.delete(runId);
+    return { released: true, reason: "dead_owner_quiesced" };
   }
   async heartbeatWorker(heartbeat: WorkerHeartbeat): Promise<void> { this.#workerHeartbeats.set(heartbeat.workerId, clone(heartbeat)); }
   async listLiveWorkers(since: Date): Promise<WorkerHeartbeat[]> { return clone([...this.#workerHeartbeats.values()].filter((heartbeat) => heartbeat.observedAt >= since)); }

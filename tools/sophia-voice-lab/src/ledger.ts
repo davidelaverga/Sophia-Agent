@@ -264,6 +264,13 @@ export interface VoiceLabLedger {
   heartbeatBrowserLease(runId: string, workerId: string, leaseEpoch: number, leaseSeconds: number): Promise<boolean>;
   releaseBrowserLease(runId: string, workerId: string, leaseEpoch: number): Promise<boolean>;
   releaseRecoveredBrowserLease(runId: string): Promise<boolean>;
+  /**
+   * Studio G7: compare-and-delete the expired lease of a dead foreign worker
+   * once that worker's browser can no longer act on the product (see
+   * studio-g7/lease-release.ts). Evaluated in one transaction on the
+   * ledger's own clock; never acquires or extends the lease.
+   */
+  releaseDeadOwnerStudioBrowserLease(runId: string, proof: { verificationId: string; tokenMaxLifetimeMs: number; heartbeatStaleMs: number }): Promise<{ released: boolean; reason: string }>;
   /** Observe expired leases without deleting their durable recovery receipts. */
   reapExpiredBrowserLeases(now?: Date, limit?: number, afterRunId?: string): Promise<BrowserLease[]>;
   heartbeatWorker(heartbeat: WorkerHeartbeat): Promise<void>;

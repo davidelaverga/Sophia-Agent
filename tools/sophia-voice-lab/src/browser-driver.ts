@@ -479,7 +479,8 @@ export interface RecoveryTransportBinding {
 
 export interface VoiceBrowserDriver {
   verifyTarget(run: RunRecord): Promise<DriverStartResult>;
-  start(run: RunRecord, frontendCapability: string, browserContextBinding?: D02BrowserContextBinding, onStage?: (stage: BrowserStartStage) => Promise<void>, onAcquired?: BrowserAcquisitionObserver): Promise<DriverStartResult>;
+  /** onDurable (Studio G7 only): persist write-ahead events before the driver acts on them; the legacy driver never calls it. */
+  start(run: RunRecord, frontendCapability: string, browserContextBinding?: D02BrowserContextBinding, onStage?: (stage: BrowserStartStage) => Promise<void>, onAcquired?: BrowserAcquisitionObserver, onDurable?: (events: Omit<LabEvent, "runId" | "seq" | "at">[]) => Promise<void>): Promise<DriverStartResult>;
   schedule(run: RunRecord, operationId: string, utteranceId: string, audio: ResolvedAudio, delayMs?: number, activeTarget?: ActiveProductTarget): Promise<DriverOperationResult>;
   rotate(run: RunRecord, expectedEpoch: number, operationId: string, activeTarget?: ActiveProductTarget): Promise<DriverOperationResult>;
   continueSession(run: RunRecord, frontendContinueCapability: string): Promise<Omit<LabEvent, "runId" | "seq" | "at">[]>;

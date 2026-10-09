@@ -7,9 +7,9 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import type { ResolvedAudio } from "../src/audio.js";
 import type { VoiceBrowserDriver } from "../src/browser-driver.js";
-import type { LabEvent } from "../src/domain.js";
+import type { LabEvent, OperationRecord } from "../src/domain.js";
 import { sha256 } from "../src/security.js";
-import { evaluateStudioG7Run } from "../src/studio-g7/evaluate.js";
+import { deriveStudioG7Verdicts, evaluateStudioG7Run } from "../src/studio-g7/evaluate.js";
 import { StudioG7Driver } from "../src/studio-g7/studio-driver.js";
 import {
   API_SHA, BRIDGE_SHA, EXCHANGE_UUID, FAKE_EMAIL, FAKE_PASSWORD, FAKE_PUBLISHABLE_KEY, PRINCIPAL_UUID, PROJECT_UUID, STUDIO_SHA,
@@ -17,10 +17,14 @@ import {
 } from "./studio-g7-helpers.js";
 
 /**
- * A tiny local stand-in for the Studio room page. It uses the real Chromium
- * media stack: getUserMedia (the Lab's injected replacement), a loopback
- * RTCPeerConnection standing in for LiveKit's publish, and the product's
- * `sophia:voice-qualification` CustomEvent receipts.
+ * A local stand-in for the Studio room page, its member API, Supabase Auth
+ * and the object store, driven by the real Chromium media stack:
+ * getUserMedia (the Lab's injected replacement), a loopback
+ * RTCPeerConnection standing in for LiveKit's publish (it proves no packet
+ * flow to any SFU: a named limitation), and the product's
+ * `sophia:voice-qualification` receipts. The fake API answers in the exact
+ * migration-0046 evidence shape and returns free text (instructions,
+ * Markdown, note words, titles) that the Lab must drop at its boundary.
  */
 function resolveChromium(): string | null {
   const candidates = [process.env.SOPHIA_VOICE_LAB_TEST_CHROMIUM, chromium.executablePath(), "/opt/pw-browsers/chromium"].filter((value): value is string => typeof value === "string" && value.length > 0);
@@ -28,6 +32,10 @@ function resolveChromium(): string | null {
 }
 
 const executablePath = resolveChromium();
+const OTHER_PRINCIPAL = "12345678-1234-4234-8234-123456789abc";
+const FREE_TEXT = ["Build me a page about river otters", "secret research markdown body", "the user's dog is called Rex", "Make the introduction shorter please", "A newer version of this report exists"];
+const PREVIEW_PROOF = `v1.1791500000.${"c".repeat(64)}`;
+const SIGNATURE = "X-Amz-Signature=fakesignature0123456789";
 
 function sineWav(durationMs = 800, sampleRate = 16_000): Buffer {
   const samples = Math.floor(sampleRate * durationMs / 1_000);
@@ -53,18 +61,53 @@ function listen(handler: (request: IncomingMessage, response: ServerResponse, bo
   }));
 }
 
+type Row = { source: string; seq: number; kind: string; receivedAt: string; receipt: Record<string, unknown> };
+
 describe.skipIf(executablePath === null)("Studio G7 driver against a local fake Studio in real Chromium", () => {
   const servers: Server[] = [];
   const browserServers: BrowserServer[] = [];
-  const page = { grantId: evidenceGrant(studioRun(studioTestConfig())).grantId, runBindingSha256: "" };
-  const api = { exchangeId: null as string | null, receipts: [] as Array<{ seq: number; kind: string; receivedAt: string; receipt: Record<string, unknown> }>, calls: [] as string[], grant: null as Record<string, unknown> | null, onEnd: null as (() => void) | null };
+  const page = { grantId: evidenceGrant(studioRun(studioTestConfig())).grantId as string, runBindingSha256: "" };
+  const api = {
+    exchangeId: null as string | null, inputActorId: PRINCIPAL_UUID, evidenceMode: "ok" as "ok" | "missing" | "foreign",
+    receipts: [] as Row[], calls: [] as string[], grant: null as Record<string, unknown> | null, onEnd: null as (() => void) | null,
+    work: [] as Array<Record<string, unknown>>, tasks: new Map<string, Record<string, unknown>>(), versions: new Map<string, Array<Record<string, unknown>>>(),
+    contents: new Map<string, Buffer>(), mission: [] as Array<Record<string, unknown>>, edits: new Map<string, { status: number; body: unknown }>(), withdrawals: [] as unknown[],
+  };
   const tokens = { issued: new Set<string>(), revoked: new Set<string>() };
-  let origins = { studio: "", api: "", supabase: "" };
+  let origins = { studio: "", api: "", supabase: "", store: "" };
+
+  const ids = { research: randomUUID(), design: randomUUID(), edit: randomUUID(), artifact: randomUUID(), v1: randomUUID(), v2: randomUUID(), html1: randomUUID(), html2: randomUUID(), md: randomUUID(), note: randomUUID(), decision: randomUUID() };
+  const html1 = Buffer.from("<!doctype html><section id=intro>Otters</section>");
+  const html2 = Buffer.from("<!doctype html><section id=intro>Otters, briefly</section>");
+
+  function nativeTask(id: string, kind: string, extra: Record<string, unknown> = {}): Record<string, unknown> {
+    return { id, kind, goalId: randomUUID(), attemptId: randomUUID(), commandId: randomUUID(), actorId: PRINCIPAL_UUID, state: "running", phase: "running", createdAt: new Date().toISOString(), contextSourceId: randomUUID(), inputSourceIds: [], resultSourceId: null, reason: null, ...extra };
+  }
+  function version(id: string, htmlSource: string, html: Buffer, parentId: string | null): Record<string, unknown> {
+    return { id, artifactId: ids.artifact, projectId: PROJECT_UUID, parentId, sourceId: ids.md, sourceHash: sha256("markdown"), state: "stable", previewId: null, format: "markdown", exportEditability: "source_editable", title: "River otters report", versionNumber: parentId ? 2 : 1, limitations: ["free text limitation"], renditions: [{ format: "html", sourceId: htmlSource, sha256: createHash("sha256").update(html).digest("hex"), byteLength: html.byteLength, mime: "text/html", pageCount: null }] };
+  }
+  /** The product's reaction to the create utterance: a research task handing its HTML to a published design. */
+  function createReport(): void {
+    const research = nativeTask(ids.research, "research");
+    const design = nativeTask(ids.design, "design", { state: "succeeded", phase: "result_ready", artifactId: ids.artifact });
+    api.work = [research, design];
+    api.tasks.set(ids.research, { task: research, instruction: FREE_TEXT[0], result: { markdown: FREE_TEXT[1], sourceId: ids.md, sha256: sha256("markdown"), outputs: [] }, research: { question: FREE_TEXT[0], specialist: "x", outputs: [], rootTaskId: ids.research, capUsd: 1, committedUsd: 0, spentUsd: 0, searches: {}, reads: {}, html: { state: "published", designTaskId: ids.design } } });
+    api.tasks.set(ids.design, { task: design, instruction: FREE_TEXT[0], result: null, design: { researchTaskId: ids.research, artifactId: ids.artifact, baseVersionId: ids.v1, state: "published", targets: [], revisions: 0, renders: 1, candidates: [], maxRepairs: 2, publishedVersionId: ids.v1, mode: "create", sections: ["intro", "findings"] } });
+    api.versions.set(ids.artifact, [version(ids.v1, ids.html1, html1, null)]);
+    api.contents.set(ids.html1, html1);
+    api.mission = [{ id: ids.note, kind: "observation", epistemic: "reported", state: "current", text: FREE_TEXT[2], textKind: "member_text", authoredBy: "member", actorId: PRINCIPAL_UUID, origin: "voice", exchangeId: EXCHANGE_UUID, inputEpoch: 1 }];
+  }
+  function setPhase(taskId: string, phase: string, state = "running"): void {
+    api.work = api.work.map((task) => task.id === taskId ? { ...task, phase, state } : task);
+    const detail = api.tasks.get(taskId)!;
+    api.tasks.set(taskId, { ...detail, task: { ...(detail.task as Record<string, unknown>), phase, state } });
+  }
 
   beforeAll(async () => {
     const supabase = await listen((request, response, body) => {
       const url = new URL(request.url ?? "/", "http://local");
       if (request.headers.apikey !== FAKE_PUBLISHABLE_KEY) { response.writeHead(401).end(); return; }
+      if (request.method === "GET" && url.pathname === "/auth/v1/health") { response.writeHead(200, { "content-type": "application/json" }).end("{}"); return; }
       if (request.method === "POST" && url.pathname === "/auth/v1/token" && url.searchParams.get("grant_type") === "password") {
         const credentials = JSON.parse(body) as { email: string; password: string };
         if (credentials.email !== FAKE_EMAIL || credentials.password !== FAKE_PASSWORD) { response.writeHead(400, { "content-type": "application/json" }).end(JSON.stringify({ error: "invalid_grant" })); return; }
@@ -82,23 +125,76 @@ describe.skipIf(executablePath === null)("Studio G7 driver against a local fake 
       }
       response.writeHead(404).end();
     });
-    const apiServer = await listen((request, response) => {
+    const store = await listen((request, response) => {
+      const url = new URL(request.url ?? "/", "http://local");
+      const match = /^\/obj\/([0-9a-f-]{36})$/.exec(url.pathname);
+      const bytes = match ? api.contents.get(match[1]!) : undefined;
+      if (!bytes || !(request.url ?? "").includes(SIGNATURE)) { response.writeHead(403).end(); return; }
+      response.writeHead(200, { "content-type": "text/html", "content-length": String(bytes.byteLength) }).end(bytes);
+    });
+    const apiServer = await listen((request, response, body) => {
       const url = new URL(request.url ?? "/", "http://local");
       const cors = { "access-control-allow-origin": origins.studio, "access-control-allow-headers": "authorization", "access-control-allow-methods": "GET, POST" };
       const json = (status: number, value: unknown) => response.writeHead(status, { ...cors, "content-type": "application/json" }).end(JSON.stringify(value));
       if (request.method === "OPTIONS") { response.writeHead(204, cors).end(); return; }
       if (url.pathname === "/health") { json(200, { ok: true, commit: API_SHA }); return; }
+      if (url.pathname === "/ready") { json(200, { ready: true }); return; }
       const token = String(request.headers.authorization ?? "").replace(/^Bearer /, "");
       if (!tokens.issued.has(token) || tokens.revoked.has(token)) { json(401, { error: "unauthorized" }); return; }
       api.calls.push(`${request.method} ${url.pathname}`);
-      if (request.method === "POST" && url.pathname === `/test/projects/${PROJECT_UUID}/exchanges`) {
-        api.exchangeId = EXCHANGE_UUID;
-        json(200, { exchangeId: EXCHANGE_UUID });
+      const path = url.pathname;
+      if (request.method === "POST" && path === `/test/projects/${PROJECT_UUID}/exchanges`) { api.exchangeId = EXCHANGE_UUID; json(200, { exchangeId: EXCHANGE_UUID }); return; }
+      if (request.method === "GET" && path === `/api/v1/projects/${PROJECT_UUID}/snapshot`) {
+        json(200, { projectId: PROJECT_UUID, title: "Synthetic", room: { id: "room-g7-test", revision: 1, inputActorId: api.exchangeId ? api.inputActorId : null, mode: "invoked", sophia: { exchangeId: api.exchangeId, exchange: api.exchangeId ? "open" : "none", inputEpoch: 1, inputActorId: api.exchangeId ? api.inputActorId : null } }, work: api.work });
         return;
       }
-      if (request.method === "GET" && url.pathname === `/api/v1/projects/${PROJECT_UUID}/snapshot`) { json(200, { room: { id: "room-g7-test", sophia: { exchangeId: api.exchangeId, inputEpoch: 1 } }, work: [] }); return; }
-      if (request.method === "GET" && url.pathname === `/api/v1/exchanges/${EXCHANGE_UUID}/qualification-evidence`) { json(200, { exchangeId: EXCHANGE_UUID, grants: api.grant ? [api.grant] : [], receipts: api.receipts }); return; }
-      if (request.method === "POST" && url.pathname === `/api/v1/exchanges/${EXCHANGE_UUID}/end`) { api.exchangeId = null; api.onEnd?.(); api.onEnd = null; response.writeHead(204, cors).end(); return; }
+      if (request.method === "GET" && path === `/api/v1/exchanges/${EXCHANGE_UUID}/qualification-evidence`) {
+        if (api.evidenceMode === "missing" || !api.grant) { json(404, { code: "not_found", message: "Qualification evidence not found" }); return; }
+        const grant = api.evidenceMode === "foreign" ? { ...api.grant, runBindingSha256: "e".repeat(64) } : api.grant;
+        json(200, { exchangeId: EXCHANGE_UUID, state: api.exchangeId === EXCHANGE_UUID ? "open" : "ended", grant, receipts: api.evidenceMode === "foreign" ? [] : [...api.receipts].sort((left, right) => left.source === right.source ? left.seq - right.seq : left.source < right.source ? -1 : 1) });
+        return;
+      }
+      if (request.method === "POST" && path === `/api/v1/exchanges/${EXCHANGE_UUID}/end`) { api.exchangeId = null; api.onEnd?.(); api.onEnd = null; response.writeHead(204, cors).end(); return; }
+      const taskMatch = new RegExp(`^/api/v1/projects/${PROJECT_UUID}/native-tasks/([0-9a-f-]{36})$`).exec(path);
+      if (request.method === "GET" && taskMatch) { const detail = api.tasks.get(taskMatch[1]!); if (detail) json(200, detail); else json(404, { code: "not_found", message: "Task not found" }); return; }
+      const versionsMatch = /^\/api\/v1\/artifacts\/([0-9a-f-]{36})\/versions$/.exec(path);
+      if (request.method === "GET" && versionsMatch) { json(200, api.versions.get(versionsMatch[1]!) ?? []); return; }
+      const sourceMatch = /^\/api\/v1\/sources\/([0-9a-f-]{36})\/content$/.exec(path);
+      if (request.method === "GET" && sourceMatch) {
+        const bytes = api.contents.get(sourceMatch[1]!);
+        if (!bytes) { json(404, { code: "not_found", message: "Source not found" }); return; }
+        json(200, { sourceId: sourceMatch[1], sha256: createHash("sha256").update(bytes).digest("hex"), mime: "text/html", byteLength: bytes.byteLength, filename: "River otters.html", disposition: "inline", downloadUrl: `${origins.store}/obj/${sourceMatch[1]}?${SIGNATURE}`, expiresAt: new Date(Date.now() + 60_000).toISOString() });
+        return;
+      }
+      if (request.method === "GET" && path === `/api/v1/projects/${PROJECT_UUID}/mission`) { json(200, { projectId: PROJECT_UUID, entries: api.mission, history: [] }); return; }
+      if (path === `/api/v1/projects/${PROJECT_UUID}/mission/entries/${ids.note}/withdrawal`) {
+        if (request.method === "GET") { json(200, { entryId: ids.note, ledgerRevision: 4, previewToken: PREVIEW_PROOF, expiresAt: new Date(Date.now() + 900_000).toISOString(), entries: [{ id: ids.note, state: "current", text: FREE_TEXT[2] }], decisions: [{ id: ids.decision, kind: "mission", state: "accepted", revision: 2, statement: FREE_TEXT[2], purpose: null, destination: null, origin: null }] }); return; }
+        const parsed = JSON.parse(body) as { previewToken: string; expectedAffected: { entryIds: string[]; decisions: Array<{ id: string; revision: number }> } };
+        api.withdrawals.push({ idempotencyKey: request.headers["idempotency-key"], ...parsed });
+        if (parsed.previewToken !== PREVIEW_PROOF || JSON.stringify(parsed.expectedAffected) !== JSON.stringify({ entryIds: [ids.note], decisions: [{ id: ids.decision, revision: 2 }] })) { json(409, { code: "stale_revision", message: FREE_TEXT[4] }); return; }
+        api.mission = api.mission.map((entry) => ({ ...entry, state: "withdrawn", text: null }));
+        const design = api.tasks.get(ids.design)!;
+        api.tasks.set(ids.design, { ...design, design: { ...(design.design as Record<string, unknown>), state: "cancelled" } });
+        json(202, { status: "committed", operation: "withdraw_note", projectId: PROJECT_UUID, entryId: ids.note, decisionId: null, decisionRevision: null, decision: null, sourceId: null, sha256: null, affected: [ids.note], ledgerRevision: 5, missionRevision: 2, eligibilityRevision: 2, cursor: "12" });
+        return;
+      }
+      if (request.method === "POST" && path === `/api/v1/projects/${PROJECT_UUID}/html-edits`) {
+        const key = String(request.headers["idempotency-key"] ?? "");
+        const prior = api.edits.get(key);
+        if (prior) { json(prior.status, prior.body); return; }
+        const parsed = JSON.parse(body) as { versionId: string; sections: string[]; instruction: string };
+        const versions = api.versions.get(ids.artifact) ?? [];
+        if (parsed.versionId !== versions[0]?.id) { const answer = { status: 409, body: { code: "stale_revision", message: FREE_TEXT[4], requestId: randomUUID(), retry: "reconcile_first" } }; api.edits.set(key, answer); json(answer.status, answer.body); return; }
+        const edit = nativeTask(ids.edit, "design", { state: "succeeded", phase: "result_ready", artifactId: ids.artifact });
+        api.work = [...api.work, edit];
+        api.tasks.set(ids.edit, { task: edit, instruction: parsed.instruction, result: null, design: { researchTaskId: ids.research, artifactId: ids.artifact, baseVersionId: ids.v1, state: "published", targets: [], revisions: 1, renders: 1, candidates: [], maxRepairs: 2, publishedVersionId: ids.v2, mode: "edit", sections: parsed.sections } });
+        api.versions.set(ids.artifact, [version(ids.v2, ids.html2, html2, ids.v1), ...versions]);
+        api.contents.set(ids.html2, html2);
+        const answer = { status: 202, body: { taskId: ids.edit, state: "designing", versionId: parsed.versionId, baseCandidateId: randomUUID(), sections: parsed.sections, shell: false, styles: false, contributionId: randomUUID() } };
+        api.edits.set(key, answer);
+        json(answer.status, answer.body);
+        return;
+      }
       json(404, { error: "not_found" });
     });
     const studio = await listen((request, response) => {
@@ -153,8 +249,8 @@ else {
 }
 </script></body></html>`);
     });
-    servers.push(supabase.server, apiServer.server, studio.server);
-    origins = { studio: studio.origin, api: apiServer.origin, supabase: supabase.origin };
+    servers.push(supabase.server, apiServer.server, studio.server, store.server);
+    origins = { studio: studio.origin, api: apiServer.origin, supabase: supabase.origin, store: store.origin };
   }, 30_000);
 
   afterAll(async () => {
@@ -162,8 +258,12 @@ else {
     await Promise.all(servers.map((server) => new Promise<void>((resolve) => server.close(() => resolve()))));
   }, 30_000);
 
-  function harness() {
-    const config = studioTestConfig(origins);
+  function harness(overrides: NodeJS.ProcessEnv = {}) {
+    const config = studioTestConfig({ studio: origins.studio, api: origins.api, supabase: origins.supabase }, {
+      SOPHIA_VOICE_LAB_ALLOWED_ORIGINS: `http://frontend.test,http://gateway.test,http://voice.test,http://langgraph.test,${origins.studio},${origins.api},${origins.supabase},${origins.store}`,
+      SOPHIA_VOICE_LAB_STUDIO_OBJECT_STORE_ORIGINS: origins.store,
+      ...overrides,
+    });
     const readinessDriver: Pick<VoiceBrowserDriver, "readiness" | "close"> = { readiness: async () => ({ ok: true, detail: "fixture" }), close: async () => undefined };
     const driver = new StudioG7Driver(config, config.studioG7!, {
       readinessDriver,
@@ -172,108 +272,194 @@ else {
         browserServers.push(server);
         return server;
       },
-      timeouts: { micArrivalGraceMs: 3_000, exchangeEndMs: 8_000, sessionClosedMs: 5_000, uiActionMs: 3_000 },
+      timeouts: { micArrivalGraceMs: 3_000, exchangeEndMs: 8_000, sessionClosedMs: 5_000, uiActionMs: 3_000, designSettleMs: 5_000 },
     });
     const run = studioRun(config);
     page.runBindingSha256 = bindingOf(run);
     api.grant = evidenceGrant(run);
     api.exchangeId = null;
+    api.inputActorId = PRINCIPAL_UUID;
+    api.evidenceMode = "ok";
     api.calls.length = 0;
     api.receipts = [];
+    api.work = [];
+    api.tasks.clear();
+    api.versions.clear();
+    api.contents.clear();
+    api.mission = [];
+    api.edits.clear();
+    api.withdrawals.length = 0;
     return { config, driver, run };
   }
 
-  it("publishes the Lab-issued track, injects speech, reads receipts and cleans up through the product", async () => {
+  const audioOf = (wav: Buffer): ResolvedAudio => ({ id: "sine", sha256: createHash("sha256").update(wav).digest("hex"), sampleRate: 16_000, channels: 1, durationMs: 800, bytes: wav, source: "fixture", synthesis: { engine: "fixture", engine_version: "1", voice: "none", rate: "none" } });
+
+  it("performs the whole G7 episode as operations, reads canonical outcomes, and cleans up only what it owns", async () => {
     const { driver, run } = harness();
-    const pushReceipt = (kind: string, receipt: Record<string, unknown>) => api.receipts.push({ seq: Number(receipt.seq), kind, receivedAt: new Date().toISOString(), receipt });
+    let seq = 0;
+    const push = (kind: string, receipt: Record<string, unknown>) => api.receipts.push({ source: kind === "guard" ? "service" : "bridge", seq: Number(receipt.seq), kind, receivedAt: new Date().toISOString(), receipt });
     const collected: Array<Omit<LabEvent, "runId" | "seq" | "at">> = [];
-    const started = await driver.start(run, "capability-not-used-by-studio");
+    const durable: string[] = [];
+    const started = await driver.start(run, "capability-not-used-by-studio", undefined, undefined, undefined, async (events) => { durable.push(...events.map((event) => event.kind)); });
     collected.push(...started.events);
-    expect(driver.hasSession(run.id)).toBe(true);
-    expect(started.observedDeployment).toEqual({ frontend: STUDIO_SHA, backend: API_SHA });
-    expect(started.events.find((event) => event.kind === "studio.grant_gate.passed")?.payload).toMatchObject({ run_binding_sha256: bindingOf(run), lab_issued_track: true });
-    expect(started.events.find((event) => event.kind === "studio.exchange.opened")?.payload).toMatchObject({ exchange_id: EXCHANGE_UUID, verified_by: "member_snapshot" });
-    const micPublished = started.events.find((event) => event.kind === "studio.page_receipt" && event.payload.event === "mic_published");
-    const trackId = JSON.parse(String(micPublished!.payload.receipt_json)).trackId as string;
-    const issued = started.events.filter((event) => event.kind === "harness.media_stream_issued").flatMap((event) => event.payload.track_id_sha256s as string[]);
-    // The page's published microphone is exactly a track the Lab issued.
-    expect(issued).toContain(sha256(trackId));
-    expect(started.events.find((event) => event.kind === "harness.media_stream_issued")?.payload).toMatchObject({ issuance: "fresh_clone_per_request", replacement_active: true });
+    // Write-ahead: the Speak intent is durable before the click, the join right after.
+    expect(durable.indexOf("studio.exchange.speak_requested")).toBeGreaterThan(-1);
+    expect(durable.indexOf("studio.exchange.opened")).toBeGreaterThan(durable.indexOf("studio.exchange.speak_requested"));
+    expect(started.events.find((event) => event.kind === "studio.exchange.opened")?.payload).toMatchObject({ exchange_id: EXCHANGE_UUID, grant_id: page.grantId, input_actor_is_principal: true });
+    expect(started.events.find((event) => event.kind === "studio.exchange.ownership")?.payload).toMatchObject({ status: "proven", run_binding_matches: true });
 
-    // Bridge receipts for the opened exchange.
-    pushReceipt("provider", providerReceipt(run, 1, "setup"));
-    pushReceipt("provider", providerReceipt(run, 2, "ready"));
+    push("provider", providerReceipt(run, seq++, "ready"));
+    const operations: OperationRecord[] = [];
     const wav = sineWav(800);
-    const audio: ResolvedAudio = { id: "sine", sha256: createHash("sha256").update(wav).digest("hex"), sampleRate: 16_000, channels: 1, durationMs: 800, bytes: wav, source: "fixture", synthesis: { engine: "fixture", engine_version: "1", voice: "none", rate: "none" } };
-    const operation = speakOperation(run, new Date());
-    const scheduled = await driver.schedule(run, operation.id, randomUUID(), audio, 0);
-    collected.push(...scheduled.events);
-    const deadline = Date.now() + 15_000;
-    while (!collected.some((event) => event.kind === "audio.input.completed") && Date.now() < deadline) {
-      await new Promise((resolve) => setTimeout(resolve, 200));
-      collected.push(...await driver.drain(run.id));
-    }
-    expect(collected.some((event) => event.kind === "audio.input.completed" && event.payload.operation_id === operation.id)).toBe(true);
-    pushReceipt("input_window", inputWindow(run, 3, 1, 800));
-    pushReceipt("input_turn", inputTurn(run, 4, 1));
-    pushReceipt("output_reply", outputReply(run, 5, 1, Date.now()));
-    api.onEnd = () => {
-      pushReceipt("provider", providerReceipt(run, 6, "closed"));
-      pushReceipt("session_closed", sessionClosed(run, 7, { windows: 1, turns: 1, replies: 1 }));
+    const speakStep = async (step: string) => {
+      const operation = speakOperation(run, new Date(Date.now() + operations.length), { input: { fixture_id: "sine", _g7_step: `g7.${step}` } });
+      operations.push(operation);
+      collected.push(...(await driver.schedule(run, operation.id, randomUUID(), audioOf(wav), 0)).events);
+      const deadline = Date.now() + 15_000;
+      while (!collected.some((event) => event.kind === "audio.input.completed" && event.payload.operation_id === operation.id) && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 150));
+        collected.push(...await driver.drain(run.id));
+      }
+      const ordinal = operations.filter((candidate) => candidate.type === "speak").length;
+      push("input_window", inputWindow(run, seq++, ordinal, 800));
+      push("input_turn", inputTurn(run, seq++, ordinal));
+      push("output_reply", outputReply(run, seq++, ordinal, Date.now()));
     };
-    collected.push(...await driver.drain(run.id, true));
-    const stats = collected.filter((event) => event.kind === "studio.webrtc.sender_stats");
-    expect(stats.length).toBeGreaterThan(0);
-    expect(stats.flatMap((event) => event.payload.rows as Array<Record<string, unknown>>).some((row) => row.lab_issued_track === true)).toBe(true);
+    const act = async (input: Record<string, unknown>) => {
+      const operation: OperationRecord = { ...speakOperation(run, new Date(Date.now() + operations.length)), type: "studio_action", input, result: null };
+      const result = await driver.studioAction(run, operation.id, input);
+      collected.push(...result.events);
+      operations.push({ ...operation, result: result.receipt });
+      return result;
+    };
 
-    // Leave and return: LiveKit-style unpublish stops the local track, so the
-    // returning participant must acquire a fresh, live, Lab-issued track.
-    const returned = await driver.leaveAndReturn(run);
-    collected.push(...returned);
-    expect(returned.map((event) => event.kind)).toEqual(expect.arrayContaining(["studio.room.left", "studio.room.joined", "studio.room.rejoined"]));
-    const republished = returned.filter((event) => event.kind === "studio.page_receipt" && event.payload.event === "mic_published").map((event) => JSON.parse(String(event.payload.receipt_json)).trackId as string);
-    expect(republished).toHaveLength(1);
-    expect(republished[0]).not.toBe(trackId);
-    const reissued = collected.filter((event) => event.kind === "harness.media_stream_issued").flatMap((event) => event.payload.track_id_sha256s as string[]);
-    expect(reissued).toContain(sha256(republished[0]!));
-    // Corroboration only: the published RTP sender now carries the new
-    // Lab-issued track. (Packet counts are not asserted: the loopback ICE
-    // pair does not connect in every sandbox, and stats never satisfy a receipt.)
-    const batch = await driver.drain(run.id, true);
-    collected.push(...batch);
-    const senderRow = batch.filter((event) => event.kind === "studio.webrtc.sender_stats").flatMap((event) => event.payload.rows as Array<Record<string, unknown>>)
-      .find((row) => row.track_id_sha256 === sha256(republished[0]!));
-    expect(senderRow).toMatchObject({ lab_issued_track: true });
+    await speakStep("create");
+    createReport();
+    await speakStep("steer");
+    const left = await act({ action: "leave_and_return" });
+    expect(left.receipt).toMatchObject({ performed: true, status: "returned" });
+    const revised = await act({ action: "section_revision", instruction: FREE_TEXT[3], sections: ["intro"] });
+    expect(revised.receipt).toMatchObject({ performed: true, status: "admitted", http_status: 202, task_id: ids.edit, design_state_at_return: "published" });
+    const stale = await act({ action: "stale_edit" });
+    expect(stale.receipt).toMatchObject({ performed: true, status: "refused", http_status: 409, code: "stale_revision" });
+    for (const [step, phase, state] of [["hold", "held", "running"], ["resume", "running", "running"], ["stop", "stopped", "cancelled"]] as const) {
+      await speakStep(step);
+      setPhase(ids.research, phase, state);
+      expect((await act({ action: "observe", for_step: step })).receipt).toMatchObject({ performed: false, status: "observed" });
+    }
+    const withdrawn = await act({ action: "withdrawal" });
+    expect(withdrawn.receipt).toMatchObject({ performed: true, status: "committed", entry_id: ids.note, http_status: 202 });
+    expect(api.withdrawals).toHaveLength(1);
+    expect(api.withdrawals[0]).toMatchObject({ idempotencyKey: expect.stringMatching(/^voice-lab-g7:/), previewToken: PREVIEW_PROOF });
 
+    api.onEnd = () => {
+      push("provider", providerReceipt(run, seq++, "closed"));
+      push("session_closed", sessionClosed(run, seq++, { windows: 5, turns: 5, replies: 5 }));
+    };
     const ended = await driver.end(run, "unused", "unused");
     collected.push(...ended.events);
+    operations.push({ ...speakOperation(run, new Date(Date.now() + 100)), type: "end", input: {}, result: {} });
     expect(driver.hasSession(run.id)).toBe(false);
     expect(api.exchangeId).toBeNull();
-    expect(ended.events.find((event) => event.kind === "studio.cleanup.exchange_ended")?.payload).toMatchObject({ confirmed: true, basis: "ui_end", verified_by: "member_snapshot" });
+    expect(ended.events.find((event) => event.kind === "studio.cleanup.exchange_ended")?.payload).toMatchObject({ confirmed: true, basis: "ui_end", ownership: "proven", verified_by: "member_snapshot" });
     expect(ended.events.find((event) => event.kind === "studio.cleanup.signed_out")?.payload).toMatchObject({ confirmed: true, scope: "global" });
-    expect(ended.events.find((event) => event.kind === "cleanup.browser_context_closed")?.payload).toMatchObject({ close_resolved: true, browser_process_close_resolved: true, process_exited_before_close: false });
-    expect(collected.some((event) => event.kind === "studio.bridge_receipt" && event.payload.kind === "session_closed")).toBe(true);
-    // No credential appears in any durable event.
+    expect(ended.events.find((event) => event.kind === "cleanup.browser_context_closed")?.payload).toMatchObject({ close_resolved: true, browser_process_close_resolved: true });
+
+    // Canonical outcomes: downloaded bytes hashed and compared with the declared digests.
+    const outcomes = collected.filter((event) => event.kind === "studio.outcome.observed");
+    const finalOutcome = outcomes.find((event) => event.payload.purpose === "final")!;
+    const artifacts = finalOutcome.payload.artifacts as Array<Record<string, unknown>>;
+    expect(artifacts.map((artifact) => [artifact.version_id, artifact.status, artifact.downloaded_sha256])).toEqual(expect.arrayContaining([
+      [ids.v1, "verified", createHash("sha256").update(html1).digest("hex")],
+      [ids.v2, "verified", createHash("sha256").update(html2).digest("hex")],
+    ]));
+    expect(finalOutcome.payload.join).toMatchObject({ status: "uncertain", missing_product_field: "NativeTask.exchangeId" });
+
+    // Nothing secret or free-text is durable: no password, JWT, refresh token, preview proof, signed URL, instruction, Markdown, title or note words.
     const serialized = JSON.stringify(collected);
-    expect(serialized).not.toContain(FAKE_PASSWORD);
-    expect(serialized).not.toContain("fake-access-token-");
-    expect(serialized).not.toContain("fake-refresh-");
+    for (const forbidden of [FAKE_PASSWORD, "fake-access-token-", "fake-refresh-", PREVIEW_PROOF, "fakesignature", "River otters report", "River otters.html", "free text limitation", ...FREE_TEXT]) expect(serialized, forbidden).not.toContain(forbidden);
 
     const events: LabEvent[] = [
-      { kind: "utterance.resolved", source: "worker" as const, payload: { operation_id: operation.id, wav: { sha256: audio.sha256, duration_ms: audio.durationMs } }, dedupeKey: null },
+      ...operations.filter((operation) => operation.type === "speak").map((operation) => ({ kind: "utterance.resolved", source: "worker" as const, payload: { operation_id: operation.id, wav: { sha256: sha256(wav.toString("base64")), duration_ms: 800 } }, dedupeKey: null })),
       ...collected,
       { kind: "cleanup.browser_lease_released", source: "worker" as const, payload: { cas_deleted: true }, dedupeKey: null },
     ].map((event, index) => ({ ...event, runId: run.id, seq: index + 1, at: new Date(), dedupeKey: event.dedupeKey ?? null }));
-    const evaluation = evaluateStudioG7Run(run, events, [operation], { expected: { studio: STUDIO_SHA, api: API_SHA, bridge: BRIDGE_SHA } });
-    const status = (id: string) => [...evaluation.harness, ...evaluation.product].find((assertion) => assertion.id === id)?.status;
-    for (const id of ["binding.run_binding", "input.published_track_is_lab_issued", "input.1.r1_scheduling_chain", "input.1.r2_published_track_identity", "input.1.r3_playout_chain", "input.window_join", "input.1.window_envelope", "input.1.turn_accepted", "provider.lifecycle", "output.audible_reply", "output.page_playback_join", "session.closed_receipt", "cleanup.exchange_ended", "cleanup.principal_signed_out", "cleanup.browser_closed", "identity.api", "identity.studio", "identity.bridge"]) {
-      expect(status(id), id).toBe("pass");
-    }
-    expect(evaluation.steps.find((step) => step.step_id === "g7.leave_return")).toMatchObject({ status: "pass" });
-  }, 90_000);
+    const evaluation = evaluateStudioG7Run(run, events, operations, { expected: { studio: STUDIO_SHA, api: API_SHA, bridge: BRIDGE_SHA } });
+    const withheld = evaluation.harness.filter((assertion) => assertion.status !== "pass").map((assertion) => `${assertion.id}:${assertion.status}:${assertion.reason}`);
+    expect(withheld).toEqual([]);
+    expect(Object.fromEntries(evaluation.steps.map((step) => [step.step_id, `${step.executed}/${step.outcome}`]))).toEqual({
+      "g7.create": "pass/uncertain", "g7.steer": "pass/uncertain", "g7.leave_return": "pass/pass", "g7.section_revision": "pass/pass", "g7.stale_edit": "pass/pass",
+      "g7.hold": "pass/uncertain", "g7.resume": "pass/uncertain", "g7.stop": "pass/uncertain", "g7.withdrawal": "pass/pass",
+    });
+    expect(deriveStudioG7Verdicts(evaluation, { sessionEstablished: true })).toEqual({ harness: "pass", product: "inconclusive", provider: "pass", auth: "pass", evidence: "pass" });
+  }, 180_000);
+
+  it("never touches an exchange whose evidence names another run, nor one held by another principal", async () => {
+    const foreign = harness();
+    api.evidenceMode = "foreign";
+    const error = await foreign.driver.start(foreign.run, "unused").catch((caught: unknown) => caught) as { detail?: Record<string, unknown> };
+    expect(error.detail).toMatchObject({ code: "STUDIO_EXCHANGE_OWNERSHIP_MISMATCH", category: "harness" });
+    const aborted = await foreign.driver.abort(foreign.run, "STUDIO_EXCHANGE_OWNERSHIP_MISMATCH");
+    expect(api.exchangeId).toBe(EXCHANGE_UUID);
+    expect(api.calls).not.toContain(`POST /api/v1/exchanges/${EXCHANGE_UUID}/end`);
+    expect(aborted.events.filter((event) => event.kind === "studio.exchange.end_requested")).toHaveLength(0);
+    expect(aborted.events.find((event) => event.kind === "studio.cleanup.exchange_ended")?.payload).toMatchObject({ confirmed: false, status: "uncertain", ownership: "mismatch" });
+    expect(aborted.events.find((event) => event.kind === "cleanup.browser_context_closed")?.payload).toMatchObject({ close_resolved: true });
+
+    const other = harness();
+    api.inputActorId = OTHER_PRINCIPAL;
+    const wrong = await other.driver.start(other.run, "unused").catch((caught: unknown) => caught) as { detail?: Record<string, unknown> };
+    expect(wrong.detail).toMatchObject({ code: "STUDIO_EXCHANGE_NOT_PRINCIPALS" });
+    const cleaned = await other.driver.abort(other.run, "STUDIO_EXCHANGE_NOT_PRINCIPALS");
+    expect(api.exchangeId).toBe(EXCHANGE_UUID);
+    expect(api.calls).not.toContain(`POST /api/v1/exchanges/${EXCHANGE_UUID}/end`);
+    expect(cleaned.events.find((event) => event.kind === "studio.cleanup.exchange_ended")?.payload).toMatchObject({ confirmed: false, status: "uncertain", basis: "live_exchange_not_joined_to_run" });
+  }, 120_000);
+
+  it("without the evidence route, End never touches the exchange; recovery confirms it only once it is no longer live", async () => {
+    const { driver, run } = harness();
+    api.evidenceMode = "missing";
+    const started = await driver.start(run, "unused");
+    expect(started.events.find((event) => event.kind === "studio.exchange.ownership")?.payload).toMatchObject({ status: "unavailable", reason: "evidence_not_answered_to_principal" });
+    const ended = await driver.end(run, "unused", "unused");
+    expect(api.exchangeId).toBe(EXCHANGE_UUID);
+    expect(api.calls).not.toContain(`POST /api/v1/exchanges/${EXCHANGE_UUID}/end`);
+    expect(ended.events.find((event) => event.kind === "studio.cleanup.exchange_ended")?.payload).toMatchObject({ confirmed: false, status: "unavailable", basis: "ownership_unproven_not_touched" });
+    expect(ended.events.find((event) => event.kind === "studio.cleanup.signed_out")?.payload).toMatchObject({ confirmed: true });
+    expect(driver.hasSession(run.id)).toBe(false);
+    // The product guard ends the exchange at its deadline; recovery proves it read-only.
+    api.exchangeId = null;
+    const recovered = await driver.recover({ id: run.id, testRunId: run.testRunId, cleanupObligationId: run.cleanupObligationId } as never, "unused");
+    expect(recovered.events.find((event) => event.kind === "studio.cleanup.exchange_ended")?.payload).toMatchObject({ confirmed: true, basis: "run_exchange_not_live" });
+    expect(recovered.events.find((event) => event.kind === "studio.cleanup.recovery")?.payload).toMatchObject({ complete: true });
+  }, 120_000);
+
+  it("withdraws only a note bound to the run's own, ownership-proven exchange", async () => {
+    const { driver, run } = harness();
+    await driver.start(run, "unused");
+    createReport();
+    const foreignNote = { ...api.mission[0]!, exchangeId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee" };
+    api.mission = [foreignNote];
+    const foreign = await driver.studioAction(run, randomUUID(), { action: "withdrawal", entry_id: ids.note });
+    expect(foreign.receipt).toMatchObject({ performed: false, status: "unavailable", reason: "entry_not_bound_to_run_exchange" });
+    api.mission = [{ ...foreignNote, exchangeId: EXCHANGE_UUID, actorId: OTHER_PRINCIPAL }];
+    expect((await driver.studioAction(run, randomUUID(), { action: "withdrawal" })).receipt).toMatchObject({ performed: false, reason: "no_note_bound_to_run_exchange" });
+    // Without proven ownership of the exchange nothing is withdrawn at all.
+    api.mission = [{ ...foreignNote, exchangeId: EXCHANGE_UUID }];
+    api.evidenceMode = "missing";
+    const unproven = await driver.studioAction(run, randomUUID(), { action: "withdrawal" });
+    expect(unproven.receipt).toMatchObject({ performed: false, reason: "exchange_ownership_unproven" });
+    expect(api.withdrawals).toHaveLength(0);
+    expect(api.calls.filter((call) => call.startsWith("POST") && call.includes("/withdrawal"))).toHaveLength(0);
+    // A stale edit with no superseded version is typed, never sent.
+    api.evidenceMode = "ok";
+    expect((await driver.studioAction(run, randomUUID(), { action: "stale_edit" })).receipt).toMatchObject({ performed: false, reason: "no_superseded_version" });
+    expect(api.calls.filter((call) => call.endsWith("/html-edits"))).toHaveLength(0);
+    await driver.end(run, "unused", "unused");
+  }, 120_000);
 
   it("types a rejected password as an auth failure and still proves the browser closed", async () => {
-    const config = studioTestConfig(origins, { SOPHIA_VOICE_LAB_STUDIO_PRINCIPAL_PASSWORD: "wrong-fake-password-0002" });
+    const { config } = harness({ SOPHIA_VOICE_LAB_STUDIO_PRINCIPAL_PASSWORD: "wrong-fake-password-0002" });
     const driver = new StudioG7Driver(config, config.studioG7!, {
       readinessDriver: { readiness: async () => ({ ok: true, detail: "fixture" }), close: async () => undefined },
       launchBrowserServer: async (options) => { const server = await chromium.launchServer({ ...options, executablePath: executablePath! }); browserServers.push(server); return server; },
@@ -291,7 +477,7 @@ else {
     expect(JSON.stringify(aborted.events)).not.toContain("wrong-fake-password-0002");
   }, 60_000);
 
-  it("abort ends the exchange through the API and signs out when the browser process is dead", async () => {
+  it("abort ends an ownership-proven exchange through the API and signs out when the browser process is dead", async () => {
     const { driver, run } = harness();
     await driver.start(run, "capability-not-used-by-studio");
     expect(api.exchangeId).toBe(EXCHANGE_UUID);
@@ -303,7 +489,7 @@ else {
     const aborted = await driver.abort(run, "BROWSER_EXECUTION_EPOCH_LOST");
     expect(api.exchangeId).toBeNull();
     expect(api.calls).toContain(`POST /api/v1/exchanges/${EXCHANGE_UUID}/end`);
-    expect(aborted.events.find((event) => event.kind === "studio.cleanup.exchange_ended")?.payload).toMatchObject({ confirmed: true, basis: "api_end", exchange_id: EXCHANGE_UUID });
+    expect(aborted.events.find((event) => event.kind === "studio.cleanup.exchange_ended")?.payload).toMatchObject({ confirmed: true, basis: "api_end", exchange_id: EXCHANGE_UUID, ownership: "proven" });
     expect(aborted.events.find((event) => event.kind === "studio.cleanup.signed_out")?.payload).toMatchObject({ confirmed: true, scope: "global" });
     expect(aborted.events.find((event) => event.kind === "cleanup.browser_context_closed")?.payload).toMatchObject({ close_resolved: true, process_exited_before_close: true });
     expect(aborted.events.some((event) => event.kind === "cleanup.capture_unavailable")).toBe(true);

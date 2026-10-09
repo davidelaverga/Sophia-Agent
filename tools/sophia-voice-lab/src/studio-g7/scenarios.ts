@@ -10,22 +10,34 @@ export const STUDIO_G7_SCENARIO_IDS = ["V-G07"] as const;
 export type StudioG7ScenarioId = typeof STUDIO_G7_SCENARIO_IDS[number];
 
 export type StudioG7StepExecutor =
-  /** An ordinary `speak` operation through the Studio's own microphone path. */
+  /** A `speak` operation through the Studio's own microphone path (MCP `studio_g7_voice_step`). */
   | "speak"
-  /** A Studio room UI action the studio driver implements (no MCP operation in this change). */
-  | "studio_driver_action"
-  /** Needs a controller other than this voice driver (non-voice product steps). */
-  | "separate_controller";
+  /** A `studio_action` operation (MCP `studio_g7_action`): a room UI action or a member-API request as the principal. */
+  | "studio_action";
+
+export const STUDIO_G7_VOICE_STEPS = ["create", "steer", "hold", "resume", "stop"] as const;
+export type StudioG7VoiceStep = typeof STUDIO_G7_VOICE_STEPS[number];
+export const STUDIO_G7_ACTIONS = ["leave_and_return", "section_revision", "stale_edit", "withdrawal"] as const;
+export type StudioG7Action = typeof STUDIO_G7_ACTIONS[number];
 
 export interface StudioG7Step {
   id: string;
   ordinal: number;
-  intent: "create_html_by_voice" | "steer_by_voice" | "leave_and_return" | "hold_by_voice" | "resume_by_voice" | "stop_by_voice" | "stale_edit" | "withdrawal";
+  intent: "create_html_by_voice" | "steer_by_voice" | "leave_and_return" | "section_revision" | "stale_edit" | "hold_by_voice" | "resume_by_voice" | "stop_by_voice" | "withdrawal";
   executor: StudioG7StepExecutor;
+  /** The `step` (voice) or `action` value that performs it. */
+  label: StudioG7VoiceStep | StudioG7Action;
   /** Typed availability inside this adapter; `unavailable` is never a pass. */
   availability: "supported" | "unavailable";
   unavailable_reason: string | null;
-  /** Receipts the step's harness assertions are drawn from. */
+  /**
+   * How the step's product outcome joins to this run. `canonical`: the Lab's
+   * own member-API request returned the task or receipt id. `uncertain`: the
+   * product exposes no exchange binding on native tasks, so the outcome is
+   * joined by actor and time window only and is never a pass.
+   */
+  outcome_join: "canonical" | "uncertain" | "lab_owned";
+  /** Receipts the step's assertions are drawn from. */
   evidence: readonly string[];
 }
 
@@ -39,7 +51,8 @@ export interface StudioG7Scenario {
   steps: readonly StudioG7Step[];
 }
 
-const VOICE_EVIDENCE = ["utterance.resolved", "audio.input.scheduled", "audio.input.started", "audio.input.completed", "page:mic_published", "input_window", "input_turn", "provider", "output_reply", "page:sophia_playback"] as const;
+const VOICE_EVIDENCE = ["utterance.resolved", "audio.input.scheduled", "audio.input.started", "audio.input.completed", "page:mic_published", "input_window", "input_turn", "provider", "output_reply", "page:sophia_playback", "studio.outcome.observed"] as const;
+const voice = (id: string, ordinal: number, intent: StudioG7Step["intent"], label: StudioG7VoiceStep): StudioG7Step => ({ id, ordinal, intent, executor: "speak", label, availability: "supported", unavailable_reason: null, outcome_join: "uncertain", evidence: VOICE_EVIDENCE });
 
 export const STUDIO_G7_CATALOG: readonly StudioG7Scenario[] = Object.freeze([
   {
@@ -47,22 +60,28 @@ export const STUDIO_G7_CATALOG: readonly StudioG7Scenario[] = Object.freeze([
     version: STUDIO_G7_SCENARIO_VERSION,
     contract_version: STUDIO_G7_CONTRACT_VERSION,
     target_kind: STUDIO_G7_TARGET_KIND,
-    summary: "Pack 03 G7 synthetic in-app voice episode through the Studio room microphone",
-    // Start is the typed service method `VoiceLabService.startStudioG7Run`;
-    // it is not registered as an MCP tool in this change.
-    required_tools: ["VoiceLabService.startStudioG7Run", "speak", "inspect_voice_run", "end_voice_run", "export_voice_evidence"],
+    summary: "Pack 03 G7 synthetic in-app episode through the Studio room microphone and the member API",
+    required_tools: ["start_studio_g7_run", "studio_g7_voice_step", "studio_g7_action", "inspect_voice_run", "wait_for_turn", "end_voice_run", "export_voice_evidence"],
     steps: [
-      { id: "g7.create", ordinal: 1, intent: "create_html_by_voice", executor: "speak", availability: "supported", unavailable_reason: null, evidence: VOICE_EVIDENCE },
-      { id: "g7.steer", ordinal: 2, intent: "steer_by_voice", executor: "speak", availability: "supported", unavailable_reason: null, evidence: VOICE_EVIDENCE },
-      { id: "g7.leave_return", ordinal: 3, intent: "leave_and_return", executor: "studio_driver_action", availability: "unavailable", unavailable_reason: "driver_action_not_exposed_as_mcp_operation", evidence: ["studio.room.left", "studio.room.rejoined", "page:mic_unpublished", "page:mic_published"] },
-      { id: "g7.hold", ordinal: 4, intent: "hold_by_voice", executor: "speak", availability: "supported", unavailable_reason: null, evidence: VOICE_EVIDENCE },
-      { id: "g7.resume", ordinal: 5, intent: "resume_by_voice", executor: "speak", availability: "supported", unavailable_reason: null, evidence: VOICE_EVIDENCE },
-      { id: "g7.stop", ordinal: 6, intent: "stop_by_voice", executor: "speak", availability: "supported", unavailable_reason: null, evidence: VOICE_EVIDENCE },
-      { id: "g7.stale_edit", ordinal: 7, intent: "stale_edit", executor: "separate_controller", availability: "unavailable", unavailable_reason: "requires_separate_non_voice_controller", evidence: [] },
-      { id: "g7.withdrawal", ordinal: 8, intent: "withdrawal", executor: "separate_controller", availability: "unavailable", unavailable_reason: "requires_separate_non_voice_controller", evidence: [] },
+      voice("g7.create", 1, "create_html_by_voice", "create"),
+      voice("g7.steer", 2, "steer_by_voice", "steer"),
+      { id: "g7.leave_return", ordinal: 3, intent: "leave_and_return", executor: "studio_action", label: "leave_and_return", availability: "supported", unavailable_reason: null, outcome_join: "lab_owned", evidence: ["studio.room.left", "studio.room.rejoined", "page:mic_unpublished", "page:mic_published", "studio.outcome.observed"] },
+      { id: "g7.section_revision", ordinal: 4, intent: "section_revision", executor: "studio_action", label: "section_revision", availability: "supported", unavailable_reason: null, outcome_join: "canonical", evidence: ["studio.action.html_edit", "studio.outcome.observed"] },
+      { id: "g7.stale_edit", ordinal: 5, intent: "stale_edit", executor: "studio_action", label: "stale_edit", availability: "supported", unavailable_reason: null, outcome_join: "canonical", evidence: ["studio.action.html_edit"] },
+      voice("g7.hold", 6, "hold_by_voice", "hold"),
+      voice("g7.resume", 7, "resume_by_voice", "resume"),
+      voice("g7.stop", 8, "stop_by_voice", "stop"),
+      { id: "g7.withdrawal", ordinal: 9, intent: "withdrawal", executor: "studio_action", label: "withdrawal", availability: "supported", unavailable_reason: null, outcome_join: "canonical", evidence: ["studio.action.withdrawal", "studio.outcome.observed"] },
     ],
   },
 ] satisfies StudioG7Scenario[]);
+
+/** `g7.<label>` step id for a voice step or action label. */
+export function studioG7StepId(label: StudioG7VoiceStep | StudioG7Action): string {
+  const step = STUDIO_G7_CATALOG[0]!.steps.find((candidate) => candidate.label === label);
+  if (!step) throw new Error("Unknown Studio G7 step label");
+  return step.id;
+}
 
 export const STUDIO_G7_SCENARIO_ID_SET: ReadonlySet<string> = new Set(STUDIO_G7_SCENARIO_IDS);
 
@@ -77,6 +96,11 @@ export function studioG7Scenario(id: string | null | undefined): StudioG7Scenari
 /** Voice steps (`speak`) of a scenario, in episode order. */
 export function studioG7VoiceSteps(scenario: StudioG7Scenario): StudioG7Step[] {
   return scenario.steps.filter((step) => step.executor === "speak");
+}
+
+/** Action steps (`studio_action`) of a scenario, in episode order. */
+export function studioG7ActionSteps(scenario: StudioG7Scenario): StudioG7Step[] {
+  return scenario.steps.filter((step) => step.executor === "studio_action");
 }
 
 export type ScenarioTargetSupport =

@@ -1,3 +1,5 @@
+import { STUDIO_G7_TARGET_KIND } from "./studio-g7/contract.js";
+import { probeStudioReadiness } from "./studio-g7/readiness.js";
 import { randomUUID } from "node:crypto";
 import type { Server as HttpServer } from "node:http";
 
@@ -140,9 +142,12 @@ export function createHttpApp(config: VoiceLabConfig, service: VoiceLabService, 
     const health = await ledger.health();
     const workers = health.ok ? await ledger.listLiveWorkers(new Date(Date.now() - 10_000)) : [];
     const workerReadiness = assessWorkerReadiness(config, workers, webBoot);
+    // Target-aware: a studio-livekit-g7-v1 deployment answers for the Studio,
+    // its API and Supabase Auth; the legacy target keeps its exact probes.
+    const studioKind = config.targetKind === STUDIO_G7_TARGET_KIND && config.studioG7 ? config.studioG7 : null;
     const [target, testAuth, oauthReadiness] = await Promise.all([
-      config.readinessTarget ? probeTarget(config) : Promise.resolve({ ok: false, status: "unconfigured", builds: null, reason: "target_configuration_missing" }),
-      config.readinessTarget ? probeTestAuth(config) : Promise.resolve({ ok: false, status: "unverified", reason: "target_configuration_missing" }),
+      studioKind ? probeStudioReadiness(config, studioKind) : config.readinessTarget ? probeTarget(config) : Promise.resolve({ ok: false, status: "unconfigured", builds: null, reason: "target_configuration_missing" }),
+      studioKind ? Promise.resolve({ ok: true, status: "not_applicable_for_studio_target", reason: "studio_principal_signs_in_per_run_and_signs_out_globally" }) : config.readinessTarget ? probeTestAuth(config) : Promise.resolve({ ok: false, status: "unverified", reason: "target_configuration_missing" }),
       oauth ? oauth.readiness() : Promise.resolve({ ready: config.nodeEnv === "test", checks: { configured: false }, errors: config.nodeEnv === "test" ? [] : ["oauth_not_configured"] }),
     ]);
     const active = health.ok ? await ledger.countActiveRuns() : null;
@@ -157,15 +162,18 @@ export function createHttpApp(config: VoiceLabConfig, service: VoiceLabService, 
       : null;
     const mutationGateOrderSafe = 'mutation_gate_order_safe' in testAuth
       && testAuth.mutation_gate_order_safe === true;
-    const productMutationGatesOpen = target.ok && 'product_mutation_gates_open' in target && target.product_mutation_gates_open === true;
+    const productMutationGatesOpen = studioKind ? target.ok : target.ok && 'product_mutation_gates_open' in target && target.product_mutation_gates_open === true;
     const productMutationGateOrderSafe = config.killSwitch || productMutationGatesOpen;
     const baseReady = health.ok && workerReadiness.safeForWeb && target.ok && productMutationGateOrderSafe && oauthReadiness.ready && maintenance.ready;
+    // The Studio principal is an operator-provided Supabase account, not a
+    // Voice Lab provisioned principal: provisioning gates do not apply.
     const ready = baseReady
       && testAuth.ok
-      && mutationGateOrderSafe
-      && !config.provisioningEnabled
-      && principalProvision.status === 'completed';
+      && (studioKind !== null || (mutationGateOrderSafe
+        && !config.provisioningEnabled
+        && principalProvision.status === 'completed'));
     const provisioningRequired = baseReady
+      && studioKind === null
       && config.killSwitch
       && config.provisioningEnabled
       && active === 0
@@ -189,7 +197,8 @@ export function createHttpApp(config: VoiceLabConfig, service: VoiceLabService, 
       capacity: 1,
       execution: config.killSwitch ? "kill_switch_engaged" : "enabled",
       product_mutation_gates_open: productMutationGatesOpen,
-      mutation_ready: ready && !config.killSwitch && workerReadiness.gateSettled && frontendKillSwitchEngaged === false && productMutationGatesOpen,
+      mutation_ready: ready && !config.killSwitch && workerReadiness.gateSettled && (studioKind !== null || frontendKillSwitchEngaged === false) && productMutationGatesOpen,
+      ...(studioKind ? { target_kind: STUDIO_G7_TARGET_KIND } : {}),
       version: config.serviceVersion,
     };
     const httpStatus = ready || provisioningRequired ? 200 : 503;
