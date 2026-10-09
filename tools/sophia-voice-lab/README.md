@@ -423,6 +423,26 @@ passes first, the failed run holds admission again until that sign-out is
 done). A step not performed before End fails the harness at once instead of
 waiting for it.
 
+**Refused sessions.** A password grant can issue a session the Lab then
+refuses: another principal's, an access-JWT lifetime above 24 h, or an
+incomplete body. Its logout is owed from the moment Supabase issued it: the
+driver records the obligation before any validation can refuse it (and throw),
+holding the issued access token, its only revoke material, in memory alone
+(never logged, persisted or put in an event). The grant revokes it locally
+(`scope=local`, that session only) once; every later sign-out, recovery or
+evidence refresh of the run retries each one still owed, three attempts with
+backoff. A confirmed global sign-out of the principal also revokes one issued
+to the principal itself, never another principal's. A run that was issued
+sessions but accepted none is never `no_session_issued`: its sign-out is
+confirmed (`issued_sessions_revoked`) only once each was revoked, and stays
+unconfirmed (`issued_session_unrevoked`, pending) while one is not; a global
+sign-out is likewise not confirmed while a refused session stays unrevoked.
+The receipts carry counts only (`refused_sessions`,
+`refused_sessions_unrevoked`, `refused_logout_attempts`), never a token. The
+obligation lives only in the process that holds the token (residual): if that
+process dies first, no other worker knows of a refused session it still owed,
+and only a confirmed global sign-out revokes it, when it was the principal's.
+
 **Global sign-out fence.** Every Studio API-only recovery ends in a global
 sign-out of the one synthetic principal. The ledger grants it in one critical
 section that admission also takes (the PostgreSQL run-quota advisory lock), and

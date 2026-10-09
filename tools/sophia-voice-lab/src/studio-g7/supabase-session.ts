@@ -74,14 +74,56 @@ export function studioAuthError(code: string, message: string, status: number | 
 }
 
 /**
+ * A session Supabase issued (a successful grant carrying an access token),
+ * handed to the caller before anything validates it: from that moment its
+ * logout is owed, whether the Lab then accepts the session or refuses it.
+ * `accessToken` is the revoke material, held in memory only: never logged,
+ * persisted, or put in an error, an event or a manifest. `revoked` turns
+ * true once a local logout of it was confirmed.
+ */
+export interface IssuedStudioSession {
+  readonly accessToken: string;
+  /** The user the session was issued to, when the body names one (a UUID); not secret. */
+  readonly userId: string | null;
+  revoked: boolean;
+}
+
+/** The session a successful grant issued, or null when its body carries no access token (then nothing can be revoked). */
+function issuedSessionOf(body: Record<string, unknown> | null): IssuedStudioSession | null {
+  const token = body?.access_token;
+  if (typeof token !== "string" || token.length === 0) return null;
+  const user = body?.user && typeof body.user === "object" && !Array.isArray(body.user) ? (body.user as Record<string, unknown>).id : null;
+  return { accessToken: token, userId: typeof user === "string" && UUID.test(user) ? user : null, revoked: false };
+}
+
+/**
+ * Local logout (scope=local) of one issued session: only that session, never
+ * the principal's others. Marks it revoked once the server confirms.
+ */
+export async function revokeIssuedSession(target: SupabaseAuthTarget, issued: IssuedStudioSession, options: { fetchImpl?: FetchLike; timeoutMs?: number } = {}): Promise<SignOutReceipt> {
+  const receipt = await signOut(target, issued.accessToken, "local", options);
+  if (receipt.confirmed) issued.revoked = true;
+  return receipt;
+}
+
+type PasswordGrantOptions = {
+  fetchImpl?: FetchLike; timeoutMs?: number; expectedUserId?: string; nowSeconds?: () => number; maxExpiresInSeconds?: number;
+  /** Called with the issued session before any validation of it can refuse it (and throw): the caller's cleanup obligation starts here. */
+  onIssued?: (issued: IssuedStudioSession) => void;
+};
+
+/**
  * Password grant against `{supabaseUrl}/auth/v1/token?grant_type=password`.
  * A rejected credential is a typed authorization failure; the message never
- * contains the email, password or any token.
+ * contains the email, password or any token. A session issued and then
+ * refused (malformed, another principal's, an unbounded lifetime) is revoked
+ * locally once here; the caller, told of it through `onIssued` before the
+ * refusal, owes any retry.
  */
 export async function passwordGrant(
   target: SupabaseAuthTarget,
   credentials: { email: string; password: string },
-  options: { fetchImpl?: FetchLike; timeoutMs?: number; expectedUserId?: string; nowSeconds?: () => number; maxExpiresInSeconds?: number } = {},
+  options: PasswordGrantOptions = {},
 ): Promise<StudioUserSession> {
   const fetchImpl = options.fetchImpl ?? fetch;
   const url = authEndpoint(target, "/auth/v1/token", { grant_type: "password" });
@@ -105,20 +147,35 @@ export async function passwordGrant(
     }
     throw studioAuthError("STUDIO_AUTH_UNAVAILABLE", "The Supabase password grant failed.", response.status, errorCode, response.status >= 500 || response.status === 429);
   }
-  const session = validateSessionBody(body, options.nowSeconds ?? (() => Math.floor(Date.now() / 1_000)));
+  // From here a session may exist on the server: its obligation is recorded
+  // before anything below can refuse it.
+  const issued = issuedSessionOf(body);
+  if (issued !== null) options.onIssued?.(issued);
+  return acceptIssuedSession(target, body, response.status, issued, { ...options, fetchImpl });
+}
+
+/**
+ * Validate an issued session, or refuse it: revoke only it (scope=local; a
+ * global sign-out would touch every session of a principal the Lab may not
+ * own) and throw a typed error that says whether that revoke was confirmed.
+ */
+async function acceptIssuedSession(target: SupabaseAuthTarget, body: Record<string, unknown> | null, status: number, issued: IssuedStudioSession | null, options: PasswordGrantOptions & { fetchImpl: FetchLike }): Promise<StudioUserSession> {
+  const logout = { fetchImpl: options.fetchImpl, ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }) };
+  const refuse = async (): Promise<boolean> => issued !== null && (await revokeIssuedSession(target, issued, logout)).confirmed;
+  let session: StudioUserSession;
+  try { session = validateSessionBody(body, options.nowSeconds ?? (() => Math.floor(Date.now() / 1_000))); }
+  catch (error) { await refuse(); throw error; }
   if (options.expectedUserId !== undefined && session.userId.toLowerCase() !== options.expectedUserId.toLowerCase()) {
-    // Revoke only the session just issued (scope=local): a global sign-out
-    // would touch every session of a principal this Lab does not own.
-    const revoked = await signOut(target, session.accessToken, "local", { fetchImpl, ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }) });
-    throw new VoiceLabError(labError("STUDIO_AUTH_PRINCIPAL_MISMATCH", "The Supabase session is not bound to the configured synthetic principal.", "authorization", false, { http_status: response.status, supabase_error_code: null, issued_session_revoked: revoked.confirmed }));
+    const revoked = await refuse();
+    throw new VoiceLabError(labError("STUDIO_AUTH_PRINCIPAL_MISMATCH", "The Supabase session is not bound to the configured synthetic principal.", "authorization", false, { http_status: status, supabase_error_code: null, issued_session_revoked: revoked }));
   }
   const maxExpiresIn = Math.min(options.maxExpiresInSeconds ?? STUDIO_ACCESS_TOKEN_LIFETIME_BOUND_S, STUDIO_ACCESS_TOKEN_LIFETIME_BOUND_S);
   const nowSeconds = (options.nowSeconds ?? (() => Math.floor(Date.now() / 1_000)))();
   if (session.expiresIn > maxExpiresIn || session.expiresAt - nowSeconds > maxExpiresIn + 60) {
     // Fail closed: an unbounded lifetime would make a dead owner's lease wait
-    // unbounded. Only the session just issued is revoked (scope=local).
-    const revoked = await signOut(target, session.accessToken, "local", { fetchImpl, ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }) });
-    throw new VoiceLabError(labError("STUDIO_AUTH_TOKEN_LIFETIME_UNBOUNDED", "The Supabase access-JWT lifetime exceeds the Lab's 24 h bound; the session was refused.", "authorization", false, { http_status: response.status, supabase_error_code: null, expires_in_s: session.expiresIn, max_expires_in_s: maxExpiresIn, issued_session_revoked: revoked.confirmed }));
+    // unbounded.
+    const revoked = await refuse();
+    throw new VoiceLabError(labError("STUDIO_AUTH_TOKEN_LIFETIME_UNBOUNDED", "The Supabase access-JWT lifetime exceeds the Lab's 24 h bound; the session was refused.", "authorization", false, { http_status: status, supabase_error_code: null, expires_in_s: session.expiresIn, max_expires_in_s: maxExpiresIn, issued_session_revoked: revoked }));
   }
   return session;
 }

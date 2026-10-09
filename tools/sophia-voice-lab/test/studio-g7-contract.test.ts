@@ -208,6 +208,46 @@ describe("Supabase session handling", () => {
     await expect(passwordGrant(target, { email: FAKE_EMAIL, password: FAKE_PASSWORD }, { fetchImpl, expectedUserId: "00000000-0000-4000-8000-000000000000" })).rejects.toMatchObject({ detail: { code: "STUDIO_AUTH_PRINCIPAL_MISMATCH" } });
   });
 
+  it("Codex P2: hands an issued session to the caller before any validation can refuse it, and revokes a refused one locally (never logged)", async () => {
+    const other = "00000000-0000-4000-8000-000000000000";
+    const answers: Array<{ body: Record<string, unknown>; label: string; code: string; options: { expectedUserId?: string } }> = [
+      { label: "another principal's", body: session, code: "STUDIO_AUTH_PRINCIPAL_MISMATCH", options: { expectedUserId: other } },
+      { label: "an unbounded lifetime", body: { ...session, expires_in: 1_000_000_000_000, expires_at: Math.floor(Date.now() / 1_000) + 1_000_000_000_000 }, code: "STUDIO_AUTH_TOKEN_LIFETIME_UNBOUNDED", options: { expectedUserId: PRINCIPAL_UUID } },
+      { label: "an incomplete body", body: { access_token: FAKE_ACCESS_TOKEN, token_type: "bearer" }, code: "STUDIO_AUTH_SESSION_INVALID", options: {} },
+    ];
+    for (const answer of answers) {
+      for (const logoutStatus of [204, 503]) {
+        const order: string[] = [];
+        const issued: Array<{ accessToken: string; userId: string | null; revoked: boolean }> = [];
+        const fetchImpl = async (input: URL | string, init?: RequestInit) => {
+          const url = new URL(String(input));
+          order.push(url.pathname === "/auth/v1/logout" ? `logout:${url.searchParams.get("scope")}:${(init?.headers as Record<string, string>).authorization === `Bearer ${FAKE_ACCESS_TOKEN}`}` : "grant");
+          return url.pathname === "/auth/v1/logout" ? new Response(null, { status: logoutStatus }) : new Response(JSON.stringify(answer.body), { status: 200, headers: { "content-type": "application/json" } });
+        };
+        const error = await passwordGrant(target, { email: FAKE_EMAIL, password: FAKE_PASSWORD }, { fetchImpl, ...answer.options, onIssued: (fresh: { accessToken: string; userId: string | null; revoked: boolean }) => { order.push("issued"); issued.push(fresh); } } as never).catch((caught: unknown) => caught) as VoiceLabError;
+        const label = `${answer.label} ${logoutStatus}`;
+        expect(error.detail.code, label).toBe(answer.code);
+        // Recorded at issue, before the refusal; then only that session is logged out (scope=local, its own token).
+        expect(order, label).toEqual(["grant", "issued", "logout:local:true"]);
+        expect(issued, label).toHaveLength(1);
+        expect(issued[0]!.accessToken, label).toBe(FAKE_ACCESS_TOKEN);
+        expect(issued[0]!.revoked, label).toBe(logoutStatus === 204);
+        if (answer.code !== "STUDIO_AUTH_SESSION_INVALID") expect(error.detail.details, label).toMatchObject({ issued_session_revoked: logoutStatus === 204 });
+        const serialized = JSON.stringify({ detail: error.detail, message: error.message, stack: error.stack });
+        for (const secret of [FAKE_ACCESS_TOKEN, FAKE_REFRESH_TOKEN, FAKE_PASSWORD, FAKE_EMAIL, FAKE_PUBLISHABLE_KEY]) expect(serialized, label).not.toContain(secret);
+      }
+    }
+    // Accepted: issued once, never logged out here; no issue without an access token.
+    const accepted: string[] = [];
+    const ok = async () => new Response(JSON.stringify(session), { status: 200, headers: { "content-type": "application/json" } });
+    await passwordGrant(target, { email: FAKE_EMAIL, password: FAKE_PASSWORD }, { fetchImpl: ok, expectedUserId: PRINCIPAL_UUID, onIssued: () => { accepted.push("issued"); } } as never);
+    expect(accepted).toEqual(["issued"]);
+    const none: string[] = [];
+    const empty = async () => new Response(JSON.stringify({ token_type: "bearer" }), { status: 200, headers: { "content-type": "application/json" } });
+    await expect(passwordGrant(target, { email: FAKE_EMAIL, password: FAKE_PASSWORD }, { fetchImpl: empty, onIssued: () => { none.push("issued"); } } as never)).rejects.toMatchObject({ detail: { code: "STUDIO_AUTH_SESSION_INVALID" } });
+    expect(none).toEqual([]);
+  });
+
   it("types a bad password as an authorization failure without leaking any secret", async () => {
     const fetchImpl = async () => new Response(JSON.stringify({ error: "invalid_grant", error_description: `Invalid login credentials for ${FAKE_EMAIL} with ${FAKE_PASSWORD}` }), { status: 400, headers: { "content-type": "application/json" } });
     const error = await passwordGrant(target, { email: FAKE_EMAIL, password: FAKE_PASSWORD }, { fetchImpl }).catch((caught: unknown) => caught);

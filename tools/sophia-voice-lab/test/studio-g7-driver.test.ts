@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { VoiceBrowserDriver } from "../src/browser-driver.js";
 import { VoiceLabError } from "../src/domain.js";
 import { StudioApiClient, classifyRoomPresence } from "../src/studio-g7/studio-api.js";
-import { StudioG7Driver } from "../src/studio-g7/studio-driver.js";
+import { StudioG7Driver, type StudioDriverDependencies } from "../src/studio-g7/studio-driver.js";
 import { canonicalJson } from "../src/studio-g7/contract.js";
 import { recoveryTransportBinding } from "../src/recovery-control.js";
 import { testRun } from "./helpers.js";
@@ -118,7 +118,7 @@ class FakeStudioBackend {
   logoutScopes(): Array<string | null> { return this.calls.filter((call) => call.path.includes("/auth/v1/logout")).map((call) => new URL(call.path).searchParams.get("scope")); }
 }
 
-function driverFor(backend: FakeStudioBackend, timers: Array<{ callback: () => void; ms: number }> = []) {
+function driverFor(backend: FakeStudioBackend, timers: Array<{ callback: () => void; ms: number }> = [], extra: Pick<StudioDriverDependencies, "launchBrowserServer" | "connectBrowser"> = {}) {
   const config = studioTestConfig();
   let clock = Date.now();
   const readinessDriver: Pick<VoiceBrowserDriver, "readiness" | "close"> = { readiness: async () => ({ ok: true, detail: "fixture" }), close: async () => undefined };
@@ -130,6 +130,7 @@ function driverFor(backend: FakeStudioBackend, timers: Array<{ callback: () => v
     setTimer: (callback, ms) => { timers.push({ callback, ms }); return {}; },
     clearTimer: () => undefined,
     timeouts: { exchangeEndMs: 4_000 },
+    ...extra,
   });
   return { config, driver };
 }
@@ -713,5 +714,186 @@ describe("delta 5 (review P2-2): a withheld global sign-out is never the run's s
     const local = ofKind(recovered.events, "studio.cleanup.signed_out").map((event) => event.payload).find((payload) => payload.scope === "local");
     expect(local).toMatchObject({ scope: "local", confirmed: false, session_basis: "none" });
     expect(ofKind(recovered.events, "studio.cleanup.recovery")[0]!.payload).toMatchObject({ signed_out: false, complete: false });
+  });
+});
+
+/**
+ * A launched "Chromium" without a browser: the process and connection the
+ * driver owns from launch on. Start registers the run's session right after
+ * launch, then signs in, so a refused grant aborts with a browser to close.
+ */
+function fakeBrowserProcess(): Pick<StudioDriverDependencies, "launchBrowserServer" | "connectBrowser"> {
+  const child = { pid: 4242, exitCode: null as number | null, signalCode: null as string | null, kill() { this.signalCode = "SIGKILL"; } };
+  let connected = true;
+  const browser = { isConnected: () => connected, version: () => "fake-chromium", contexts: () => [], close: async () => { connected = false; } };
+  const server = { process: () => child, wsEndpoint: () => "ws://127.0.0.1:9/fake", close: async () => { child.exitCode = 0; } };
+  return { launchBrowserServer: async () => server as never, connectBrowser: async () => browser as never };
+}
+
+/** Everything the driver wrote anywhere during `act`: console and stdio, its events, and the error it threw (message, detail, stack). */
+async function captured<T>(act: () => Promise<T>): Promise<{ result: T; text: () => string }> {
+  const lines: string[] = [];
+  const restore: Array<() => void> = [];
+  for (const name of ["log", "info", "warn", "error", "debug"] as const) {
+    const original = console[name];
+    console[name] = (...args: unknown[]) => { lines.push(args.map((arg) => typeof arg === "string" ? arg : JSON.stringify(arg)).join(" ")); };
+    restore.push(() => { console[name] = original; });
+  }
+  for (const stream of [process.stdout, process.stderr]) {
+    const original = stream.write.bind(stream);
+    stream.write = ((chunk: unknown, ...rest: unknown[]) => { lines.push(String(chunk)); return (original as (...input: unknown[]) => boolean)(chunk, ...rest); }) as typeof stream.write;
+    restore.push(() => { stream.write = original; });
+  }
+  try {
+    const result = await act();
+    return { result, text: () => lines.join("\n") };
+  } finally { for (const undo of restore.reverse()) undo(); }
+}
+
+const thrown = (error: unknown) => JSON.stringify({ detail: (error as VoiceLabError).detail, message: (error as Error).message, stack: (error as Error).stack });
+
+describe("Codex P2 (r4233383211): a session issued and then refused still owes its logout", () => {
+  /** Start refused after Supabase issued a session (another principal's), then the abort. */
+  async function refusedStart(failLocalLogouts: number) {
+    const backend = new FakeStudioBackend();
+    backend.grantUser = OTHER_PRINCIPAL;
+    backend.failLocalLogouts = failLocalLogouts;
+    const { config, driver } = driverFor(backend, [], fakeBrowserProcess());
+    const run = studioRun(config);
+    const started = await captured(() => driver.start(run, "unused").then(() => null, (caught: unknown) => caught));
+    const error = started.result as VoiceLabError;
+    expect(error.detail).toMatchObject({ code: "STUDIO_AUTH_PRINCIPAL_MISMATCH", details: { issued_session_revoked: false } });
+    expect(driver.hasSession(run.id)).toBe(true);
+    const aborted = await captured(() => driver.abort(run, "STUDIO_AUTH_PRINCIPAL_MISMATCH"));
+    return { backend, driver, run, error, aborted: aborted.result, logs: () => `${started.text()}\n${aborted.text()}` };
+  }
+
+  /** No token, password, email, refresh token or publishable key anywhere the driver wrote. */
+  function expectNoCredential(backend: FakeStudioBackend, ...written: string[]) {
+    const all = written.join("\n");
+    for (const secret of [FAKE_PASSWORD, FAKE_EMAIL, FAKE_PUBLISHABLE_KEY, "fake-access-token-", "fake-refresh-", "Bearer "]) expect(all).not.toContain(secret);
+    for (const call of backend.calls) if (call.authorization) expect(all).not.toContain(call.authorization.replace(/^Bearer /, ""));
+  }
+
+  it("a rejection after issue owes the logout from the moment of issue: an initial failure is retried, and only the confirmed retry signs the run out (never no_session_issued)", async () => {
+    const { backend, run, error, aborted, logs } = await refusedStart(1);
+    // Root's reproduction: one session issued, its logout failed; before the fix the abort said
+    // `no_session_issued`, confirmed, with nothing revoked.
+    const signedOut = ofKind(aborted.events, "studio.cleanup.signed_out");
+    expect(signedOut).toHaveLength(1);
+    expect(signedOut[0]!.payload.basis).not.toBe("no_session_issued");
+    expect(signedOut[0]!.payload).toMatchObject({ scope: "global", confirmed: true, basis: "issued_sessions_revoked", session_basis: "refused_grant", refused_sessions: 1, refused_sessions_unrevoked: 0, refused_logout_attempts: 1 });
+    // The grant's own logout failed (503); the abort's retry revoked it.
+    expect(backend.issued).toBe(1);
+    expect(backend.logoutScopes()).toEqual(["local", "local"]);
+    expect(backend.revoked.size).toBe(1);
+    expect(ofKind(aborted.events, "cleanup.browser_context_closed")[0]?.payload).toMatchObject({ close_resolved: true });
+    // Nothing was read or ended as the other principal.
+    expect(backend.calls.some((call) => call.path.includes("/api/v1/"))).toBe(false);
+    expect(backend.logoutScopes()).not.toContain("global");
+    expectNoCredential(backend, thrown(error), JSON.stringify(aborted.events), logs());
+    expect(run.id).toBeTruthy();
+  });
+
+  it("a logout that keeps failing is fail-closed: the run stays not signed out (pending) and its cleanup incomplete, until a later cleanup's retry confirms it", async () => {
+    const { backend, driver, run, error, aborted, logs } = await refusedStart(100);
+    const payload = ofKind(aborted.events, "studio.cleanup.signed_out")[0]!.payload;
+    expect(payload).toMatchObject({ scope: "global", confirmed: false, basis: "issued_session_unrevoked", http_status: 503, refused_sessions: 1, refused_sessions_unrevoked: 1, refused_logout_attempts: 3 });
+    // The grant's own attempt, then three bounded retries: all refused by the server.
+    expect(backend.logoutScopes()).toEqual(["local", "local", "local", "local"]);
+    expect(backend.revoked.size).toBe(0);
+    const { studioG7CleanupProof } = await import("../src/studio-g7/evaluate.js");
+    const ledger = (events: typeof aborted.events) => events.map((event, index) => ({ seq: index + 1, at: new Date(), ...event })) as never;
+    expect(studioG7CleanupProof(ledger(aborted.events))).toMatchObject({ signedOut: false, complete: false });
+    // A later recovery of the same run retries the same owed logout; now the server accepts it.
+    backend.failLocalLogouts = 0;
+    const recovered = await captured(() => driver.recover(binding(run), "unused"));
+    expect(backend.revoked.size).toBe(1);
+    expect(backend.issued).toBe(1);
+    expect(ofKind(recovered.result.events, "studio.cleanup.signed_out")[0]!.payload).toMatchObject({ confirmed: true, basis: "issued_sessions_revoked", refused_sessions: 1, refused_sessions_unrevoked: 0, refused_logout_attempts: 1 });
+    expect(studioG7CleanupProof(ledger([...aborted.events, ...recovered.result.events]))).toMatchObject({ signedOut: true });
+    expectNoCredential(backend, thrown(error), JSON.stringify(aborted.events), JSON.stringify(recovered.result.events), logs(), recovered.text());
+  });
+
+  it("positive: a credential rejected without any issue is still no_session_issued, with no logout at all", async () => {
+    const backend = new FakeStudioBackend();
+    backend.password = "a-different-fake-password-004";
+    const { config, driver } = driverFor(backend, [], fakeBrowserProcess());
+    const run = studioRun(config);
+    const error = await driver.start(run, "unused").then(() => null, (caught: unknown) => caught) as VoiceLabError;
+    expect(error.detail).toMatchObject({ code: "STUDIO_AUTH_REJECTED" });
+    const aborted = await driver.abort(run, "STUDIO_AUTH_REJECTED");
+    expect(backend.issued).toBe(0);
+    expect(backend.logoutScopes()).toEqual([]);
+    expect(ofKind(aborted.events, "studio.cleanup.signed_out")[0]!.payload).toEqual({ schema: "sophia_voice_lab_studio_sign_out_v1", scope: "global", confirmed: true, http_status: null, basis: "no_session_issued", session_basis: "none", credentials_excluded: true });
+    expectNoCredential(backend, thrown(error), JSON.stringify(aborted.events));
+  });
+
+  it("positive: the normal path is unchanged: an accepted session is signed out globally, with no refused-session fields", async () => {
+    const backend = new FakeStudioBackend();
+    backend.exchangeId = null;
+    const { config, driver } = driverFor(backend);
+    const run = studioRun(config);
+    adopt(driver, run);
+    const recovered = await driver.recover(binding(run), "unused");
+    expect(backend.issued).toBe(1);
+    expect(backend.logoutScopes()).toEqual(["global"]);
+    const payload = ofKind(recovered.events, "studio.cleanup.signed_out")[0]!.payload;
+    expect(payload).toMatchObject({ scope: "global", confirmed: true, basis: "global_logout_accepted", session_basis: "held_session" });
+    expect(Object.keys(payload).filter((key) => key.startsWith("refused_"))).toEqual([]);
+    expectNoCredential(backend, JSON.stringify(recovered.events));
+  });
+
+  it("a refused session of the principal itself is discharged by a confirmed global sign-out; another principal's still owes its own logout", async () => {
+    for (const owner of ["principal", "other"] as const) {
+      const backend = new FakeStudioBackend();
+      backend.exchangeId = null;
+      const { config, driver } = driverFor(backend);
+      const run = studioRun(config);
+      adopt(driver, run);
+      // A recovery whose every grant is refused after issue (the principal's own session with an unbounded lifetime,
+      // or another principal's), with every local logout failing: nothing is signed out.
+      if (owner === "principal") backend.expiresIn = 1_000_000_000_000; else backend.grantUser = OTHER_PRINCIPAL;
+      backend.failLocalLogouts = 1_000;
+      const first = await driver.recover(binding(run), "unused");
+      const owed = backend.issued;
+      expect(owed, owner).toBeGreaterThan(0);
+      expect(ofKind(first.events, "studio.cleanup.signed_out")[0]!.payload, owner).toMatchObject({ confirmed: false, refused_sessions: owed, refused_sessions_unrevoked: owed, refused_logout_attempts: 3 * owed });
+      // The next recovery's grant is accepted and its global sign-out confirmed (local logouts still failing).
+      backend.expiresIn = 3_600;
+      backend.grantUser = PRINCIPAL_UUID;
+      const second = await driver.recover(binding(run), "unused");
+      expect(backend.logoutScopes().filter((scope) => scope === "global"), owner).toEqual(["global"]);
+      const payload = ofKind(second.events, "studio.cleanup.signed_out")[0]!.payload;
+      if (owner === "principal") expect(payload).toMatchObject({ confirmed: true, basis: "global_logout_accepted", refused_sessions: owed, refused_sessions_unrevoked: 0, refused_logout_attempts: 0 });
+      else expect(payload).toMatchObject({ confirmed: false, basis: "issued_session_unrevoked", http_status: 204, refused_sessions: owed, refused_sessions_unrevoked: owed, refused_logout_attempts: 3 * owed });
+      expect(ofKind(second.events, "studio.cleanup.recovery")[0]!.payload, owner).toMatchObject({ signed_out: owner === "principal" });
+      expectNoCredential(backend, JSON.stringify(first.events), JSON.stringify(second.events));
+    }
+  });
+
+  it("the evidence refresh revokes a refused session locally too (never globally): unrevoked, the cleanup proof stays incomplete", async () => {
+    const { studioG7CleanupProof } = await import("../src/studio-g7/evaluate.js");
+    for (const failLocalLogouts of [1_000, 1]) {
+      const run = studioRun(studioTestConfig());
+      const join = { exchangeId: EXCHANGE_UUID, grantId: GRANT_UUID, runBindingSha256: bindingOf(run), speakRequested: true, exchangeOpenedAtMs: null };
+      const backend = new FakeStudioBackend();
+      backend.grantUser = OTHER_PRINCIPAL;
+      backend.failLocalLogouts = failLocalLogouts;
+      const refreshed = await driverFor(backend).driver.refreshStudioEvidence(run, join);
+      const label = String(failLocalLogouts);
+      expect(backend.issued, label).toBe(1);
+      expect(backend.logoutScopes(), label).toEqual(failLocalLogouts === 1 ? ["local", "local"] : ["local", "local", "local", "local"]);
+      expect(ofKind(refreshed, "studio.bridge_evidence_unavailable")[0]?.payload, label).toMatchObject({ reason: "STUDIO_AUTH_PRINCIPAL_MISMATCH" });
+      const revoked = ofKind(refreshed, "studio.evidence.session_revoked");
+      expect(revoked, label).toHaveLength(1);
+      expect(revoked[0]!.payload, label).toMatchObject(failLocalLogouts === 1
+        ? { scope: "local", confirmed: true, status: "revoked", purpose: "evidence_refresh_refused_grant", attempts: 1, refused_sessions: 1, refused_sessions_unrevoked: 0 }
+        : { scope: "local", confirmed: false, status: "unrevoked", purpose: "evidence_refresh_refused_grant", attempts: 3, http_status: 503, refused_sessions: 1, refused_sessions_unrevoked: 1 });
+      const events = [{ kind: "cleanup.browser_context_closed", source: "browser", payload: { close_resolved: true, browser_registry_absent: true } }, ...refreshed].map((event, index) => ({ seq: index + 1, at: new Date(), ...event })) as never;
+      expect(studioG7CleanupProof(events).refreshSessionsRevoked, label).toBe(failLocalLogouts === 1);
+      expect(backend.logoutScopes(), label).not.toContain("global");
+      expectNoCredential(backend, JSON.stringify(refreshed));
+    }
   });
 });

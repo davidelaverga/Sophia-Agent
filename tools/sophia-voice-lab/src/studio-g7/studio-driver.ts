@@ -51,7 +51,7 @@ import { STUDIO_G7_ACTIONS, STUDIO_G7_VOICE_STEPS, isStudioG7ScenarioVersion, ST
 import { StudioApiClient, classifyRoomPresence, type IdentityObservation, type ProjectedArtifactVersion, type ProjectedTaskDetail, type StudioRoomSnapshot } from "./studio-api.js";
 import { STUDIO_ROOM_PRESENCE_KIND, STUDIO_ROOM_PRESENCE_SCHEMA } from "./lease-release.js";
 import { STUDIO_CALLS_END_STEP, STUDIO_CALLS_READ_KIND, STUDIO_CALLS_READ_SCHEMA } from "./calls-certification.js";
-import { buildStudioSessionSeedScript, globalSignOut, passwordGrant, signOut, supabaseStorageKey, type FetchLike, type SignOutReceipt, type StudioUserSession } from "./supabase-session.js";
+import { buildStudioSessionSeedScript, globalSignOut, passwordGrant, revokeIssuedSession, signOut, supabaseStorageKey, type FetchLike, type IssuedStudioSession, type SignOutReceipt, type StudioUserSession } from "./supabase-session.js";
 
 type DriverEvent = Omit<LabEvent, "runId" | "seq" | "at">;
 
@@ -65,6 +65,8 @@ const MAX_VERIFIED_ARTIFACTS = 4;
 /** A stale edit carries this fixed Lab instruction; it must be refused before anything is admitted. */
 /** Waits before each local revoke attempt of the evidence-refresh session (three attempts). */
 export const STUDIO_REFRESH_REVOKE_BACKOFF_MS: readonly number[] = [0, 500, 1_000];
+/** Waits before each local logout attempt of a session issued and then refused, per cleanup (three attempts). */
+export const STUDIO_REFUSED_SESSION_LOGOUT_BACKOFF_MS: readonly number[] = [0, 500, 1_000];
 export const STALE_EDIT_PROBE_INSTRUCTION = "Voice Lab stale-edit probe: revise this section of a superseded version.";
 /** The run's own synthetic note, recorded first; the create utterance asks for research that draws on it. */
 export const STUDIO_G7_NOTE_TEXT = "Families in the pilot prefer Saturday morning sessions near the river.";
@@ -174,6 +176,47 @@ type OwnReport =
 /** Caches one principal token per cleanup flow; never logged or persisted. */
 interface TokenSource { token(): Promise<string>; held(): StudioUserSession | null; forget(): void }
 
+/**
+ * A run's sessions that Supabase issued and the Lab did not accept: each is
+ * recorded when issued, before any validation could refuse it (and throw),
+ * and owes a logout. Their access tokens (the revoke material) live only
+ * here, in memory: never logged, persisted or put in an event, and dropped
+ * once revoked.
+ */
+interface RefusedSessions { owed: IssuedStudioSession[]; revoked: number }
+
+/** What the run's refused sessions came to: how many there were, how many stay unrevoked, and this cleanup's logout attempts. */
+interface RefusedSessionsOutcome { refused: number; unrevoked: number; attempts: number; httpStatus: number | null }
+
+/**
+ * Local logout of every refused session the run still owes, each retried with
+ * the bounded backoff. One issued to the principal itself is revoked by a
+ * confirmed global sign-out of the principal (`principalSignedOut`); one
+ * issued to anyone else only by its own logout.
+ */
+async function revokeRefusedSessions(sessions: RefusedSessions, principalId: string, principalSignedOut: boolean, logout: (issued: IssuedStudioSession) => Promise<SignOutReceipt>, wait: (ms: number) => Promise<void>): Promise<RefusedSessionsOutcome> {
+  let attempts = 0;
+  let httpStatus: number | null = null;
+  for (const issued of [...sessions.owed]) {
+    if (principalSignedOut && issued.userId !== null && issued.userId.toLowerCase() === principalId.toLowerCase()) issued.revoked = true;
+    for (const backoffMs of STUDIO_REFUSED_SESSION_LOGOUT_BACKOFF_MS) {
+      if (issued.revoked) break;
+      if (backoffMs > 0) await wait(backoffMs);
+      attempts += 1;
+      httpStatus = (await logout(issued)).http_status;
+    }
+    if (!issued.revoked) continue;
+    sessions.owed.splice(sessions.owed.indexOf(issued), 1);
+    sessions.revoked += 1;
+  }
+  return { refused: sessions.owed.length + sessions.revoked, unrevoked: sessions.owed.length, attempts, httpStatus };
+}
+
+/** The refused sessions' counts on a sign-out or revoke receipt (no token, ever). */
+function refusedSessionsFields(outcome: RefusedSessionsOutcome): Record<string, number> {
+  return { refused_sessions: outcome.refused, refused_sessions_unrevoked: outcome.unrevoked, refused_logout_attempts: outcome.attempts };
+}
+
 type IdentitySnapshot = { observed: Partial<DeploymentIdentity>; event: DriverEvent };
 
 /** The Studio extensions the worker calls for G7 runs (absent on the legacy driver). */
@@ -258,6 +301,8 @@ export class StudioG7Driver implements VoiceBrowserDriver, StudioDriverExtension
   readonly #watchdogs = new Map<string, unknown>();
   /** Watchdog/recovery events produced while no browser session exists. */
   readonly #orphanEvents = new Map<string, DriverEvent[]>();
+  /** Per run: sessions issued and refused, still owing their logout (memory only). */
+  readonly #refusedSessions = new Map<string, RefusedSessions>();
   readonly #api: StudioApiClient;
   readonly #fetch: FetchLike;
   readonly #readiness: Pick<VoiceBrowserDriver, "readiness" | "close">;
@@ -643,7 +688,7 @@ export class StudioG7Driver implements VoiceBrowserDriver, StudioDriverExtension
   async refreshStudioEvidence(run: RunRecord, join: DurableStudioJoin): Promise<DriverEvent[]> {
     if (join.exchangeId === null || !UUID.test(join.exchangeId)) return [];
     this.adoptStudioJoin(run.id, join);
-    const tokens = this.#tokenSource(null);
+    const tokens = this.#tokenSource(null, run.id);
     const events: DriverEvent[] = [];
     try {
       events.push(...await this.#readBridge(run.id, join.exchangeId, tokens, new Map()));
@@ -669,6 +714,13 @@ export class StudioG7Driver implements VoiceBrowserDriver, StudioDriverExtension
       tokens.forget();
       const revoked = { ...receipt!, status: receipt!.confirmed ? "revoked" : "unrevoked", attempts, purpose: "evidence_refresh", credentials_excluded: true, revocation_id: randomUUID() };
       events.push({ kind: "studio.evidence.session_revoked", source: "canonical", payload: revoked, dedupeKey: contentKey("studio-evidence-session-revoked", run.id, revoked) });
+    }
+    // A session issued and refused for the run owes its own logout here too,
+    // never a global one; while it stays unrevoked the cleanup proof says so.
+    const refused = await this.#revokeRefusedSessions(run.id, false);
+    if (refused !== null && refused.attempts > 0) {
+      const outcome = { schema: "sophia_voice_lab_studio_sign_out_v1", scope: "local", confirmed: refused.unrevoked === 0, http_status: refused.httpStatus, basis: refused.unrevoked === 0 ? "issued_sessions_revoked" : "issued_session_unrevoked", status: refused.unrevoked === 0 ? "revoked" : "unrevoked", attempts: refused.attempts, purpose: "evidence_refresh_refused_grant", ...refusedSessionsFields(refused), credentials_excluded: true, revocation_id: randomUUID() };
+      events.push({ kind: "studio.evidence.session_revoked", source: "canonical", payload: outcome, dedupeKey: contentKey("studio-evidence-session-revoked", run.id, outcome) });
     }
     return events;
   }
@@ -735,19 +787,42 @@ export class StudioG7Driver implements VoiceBrowserDriver, StudioDriverExtension
     return session.page;
   }
 
-  #tokenSource(session: StudioSession | null): TokenSource {
+  #tokenSource(session: StudioSession): TokenSource;
+  #tokenSource(session: StudioSession | null, runId: string): TokenSource;
+  #tokenSource(session: StudioSession | null, runId: string = session!.runId): TokenSource {
     let held = session?.auth ?? null;
     return {
       token: async () => {
         const nowSeconds = Math.floor(this.#now() / 1_000);
         if (held && held.expiresAt - nowSeconds > 60) return held.accessToken;
-        held = await passwordGrant({ supabaseUrl: this.studio.supabaseUrl, publishableKey: this.studio.supabasePublishableKey }, { email: this.studio.principalEmail, password: this.studio.principalPassword }, { fetchImpl: this.#fetch, expectedUserId: this.config.principalId });
+        // The logout a session owes is recorded the moment Supabase issues
+        // it, before any validation can refuse it (and throw); the session is
+        // dropped from the owed ones only once accepted.
+        const refused = this.#refusedOf(runId);
+        let issued = null as IssuedStudioSession | null;
+        held = await passwordGrant({ supabaseUrl: this.studio.supabaseUrl, publishableKey: this.studio.supabasePublishableKey }, { email: this.studio.principalEmail, password: this.studio.principalPassword }, { fetchImpl: this.#fetch, expectedUserId: this.config.principalId, onIssued: (fresh) => { issued = fresh; refused.owed.push(fresh); } });
+        const accepted = issued === null ? -1 : refused.owed.indexOf(issued);
+        if (accepted >= 0) refused.owed.splice(accepted, 1);
         if (session) { session.auth = held; this.#state(session.runId).authIssued = true; }
         return held.accessToken;
       },
       held: () => held,
       forget: () => { held = null; if (session) session.auth = null; },
     };
+  }
+
+  #refusedOf(runId: string): RefusedSessions {
+    let refused = this.#refusedSessions.get(runId);
+    if (refused === undefined) { refused = { owed: [], revoked: 0 }; this.#refusedSessions.set(runId, refused); }
+    return refused;
+  }
+
+  /** The run's refused sessions, each logout retried (see revokeRefusedSessions); null when the run never had one. */
+  async #revokeRefusedSessions(runId: string, principalSignedOut: boolean): Promise<RefusedSessionsOutcome | null> {
+    const refused = this.#refusedSessions.get(runId);
+    if (refused === undefined || refused.owed.length + refused.revoked === 0) return null;
+    const target = { supabaseUrl: this.studio.supabaseUrl, publishableKey: this.studio.supabasePublishableKey };
+    return revokeRefusedSessions(refused, this.config.principalId, principalSignedOut, (issued) => revokeIssuedSession(target, issued, { fetchImpl: this.#fetch }), this.#wait);
   }
 
   #noteIssuedTracks(session: StudioSession, events: DriverEvent[]): void {
@@ -1524,8 +1599,11 @@ export class StudioG7Driver implements VoiceBrowserDriver, StudioDriverExtension
     const target = { supabaseUrl: this.studio.supabaseUrl, publishableKey: this.studio.supabasePublishableKey };
     const known = this.#exchanges.get(runId);
     if (tokens.held() === null && known !== undefined && known.join === "retained" && !known.authIssued) {
-      // The password grant never succeeded for this run: there is no session
-      // to revoke, and attempting a fresh grant would create one.
+      // The password grant never gave this run a session it accepted, and
+      // attempting a fresh grant would create one.
+      const refused = await this.#revokeRefusedSessions(runId, false);
+      if (refused !== null) return this.#refusedSignOut(runId, refused);
+      // Nor did it issue any: there is no session to revoke.
       const none = { schema: "sophia_voice_lab_studio_sign_out_v1", scope: "global", confirmed: true, http_status: null, basis: "no_session_issued", session_basis: "none", credentials_excluded: true };
       // Content-addressed: a repeated "no session was ever issued" is one fact.
       return { kind: "studio.cleanup.signed_out", source: "canonical", payload: none, dedupeKey: contentKey("studio-signed-out", runId, none) };
@@ -1545,13 +1623,29 @@ export class StudioG7Driver implements VoiceBrowserDriver, StudioDriverExtension
       tokenBasis = error instanceof VoiceLabError ? error.detail.code : "sign_out_failed";
     }
     tokens.forget();
+    // Sessions issued and refused for this run (this sign-out's own fresh
+    // grant included) owe their own logout: while one stays unrevoked the
+    // run is not signed out.
+    const refused = await this.#revokeRefusedSessions(runId, receipt.confirmed && receipt.scope === "global");
+    if (refused !== null && refused.unrevoked > 0 && receipt.confirmed) receipt = { ...receipt, confirmed: false, basis: "issued_session_unrevoked" as SignOutReceipt["basis"] };
     const record = this.#exchanges.get(runId);
     if (record && receipt.confirmed && receipt.scope === "global") record.globalSignOutConfirmed = true;
     // Each sign-out is its own durable event (a later identical-looking
     // sign-out must never dedupe into an earlier one: the dead-owner release
     // needs the sign-out that happened after the lease expired).
-    const signedOut = { ...receipt, session_basis: tokenBasis, credentials_excluded: true, sign_out_id: randomUUID() };
+    const signedOut = { ...receipt, ...(refused === null ? {} : refusedSessionsFields(refused)), session_basis: tokenBasis, credentials_excluded: true, sign_out_id: randomUUID() };
     return { kind: "studio.cleanup.signed_out", source: "canonical", payload: signedOut, dedupeKey: contentKey("studio-signed-out", runId, signedOut) };
+  }
+
+  /**
+   * The sign-out of a run that was issued sessions but accepted none: it is
+   * signed out once each was revoked, and stays unconfirmed (pending) while
+   * one is not. Never `no_session_issued`.
+   */
+  #refusedSignOut(runId: string, refused: RefusedSessionsOutcome): DriverEvent {
+    const revoked = refused.unrevoked === 0;
+    const payload = { schema: "sophia_voice_lab_studio_sign_out_v1", scope: "global", confirmed: revoked, http_status: refused.httpStatus, basis: revoked ? "issued_sessions_revoked" : "issued_session_unrevoked", session_basis: "refused_grant", ...refusedSessionsFields(refused), credentials_excluded: true, sign_out_id: randomUUID() };
+    return { kind: "studio.cleanup.signed_out", source: "canonical", payload, dedupeKey: contentKey("studio-signed-out", runId, payload) };
   }
 
   async #closeBrowser(runId: string, session: StudioSession, reason: string): Promise<DriverEvent> {
@@ -1594,7 +1688,7 @@ export class StudioG7Driver implements VoiceBrowserDriver, StudioDriverExtension
   async #apiOnlyCleanup(runId: string, purpose: string): Promise<DriverEvent[]> {
     const events: DriverEvent[] = [...(this.#orphanEvents.get(runId) ?? [])];
     this.#orphanEvents.delete(runId);
-    const tokens = this.#tokenSource(null);
+    const tokens = this.#tokenSource(null, runId);
     const settled = await this.#settleExchange(runId, tokens).catch((error: unknown) => ({ confirmed: false, events: [this.#exchangeEndUnavailable(runId, purpose, error)] }));
     events.push(...settled.events);
     // The joined exchange's late receipts are read with the same session.
@@ -1749,7 +1843,7 @@ export class StudioG7Driver implements VoiceBrowserDriver, StudioDriverExtension
   async fireWatchdog(runId: string): Promise<DriverEvent[]> {
     this.#watchdogs.delete(runId);
     const session = this.#sessions.get(runId) ?? null;
-    const tokens = this.#tokenSource(session);
+    const tokens = this.#tokenSource(session, runId);
     const settled = await this.#settleExchange(runId, tokens).catch((error: unknown) => ({ confirmed: false, events: [this.#exchangeEndUnavailable(runId, "watchdog", error)] }));
     const fired = { basis: "run_deadline", exchange_end_confirmed: settled.confirmed };
     const events: DriverEvent[] = [{ kind: "studio.watchdog.fired", source: "worker", payload: fired, dedupeKey: contentKey("studio-watchdog", runId, fired) }, ...settled.events];
