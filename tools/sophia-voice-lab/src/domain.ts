@@ -49,6 +49,8 @@ export const OPERATION_TYPES = [
   "barge_in",
   "force_socket_rotation",
   "end",
+  // Studio LiveKit G7 non-voice steps (schema v7, migrations/007).
+  "studio_action",
 ] as const;
 export type OperationType = (typeof OPERATION_TYPES)[number];
 

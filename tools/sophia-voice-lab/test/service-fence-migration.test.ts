@@ -1,8 +1,8 @@
 import { readFile } from "node:fs/promises";
 import { expect, it } from "vitest";
 import { composeVoiceLabMigration } from "../src/migration-bundle.js";
-import { composeServiceFenceMigration, composeServiceFenceV2Migration } from "../src/service-fence-migration.js";
-import { SERVICE_FENCE_BUNDLE_SHA256, SERVICE_FENCE_V2_BUNDLE_SHA256, SERVICE_FENCE_V2_SCHEMA_VERSION } from "../src/service-fence-migration.js";
+import { composeServiceFenceMigration, composeServiceFenceV2Migration, composeStudioG7OperationsMigration } from "../src/service-fence-migration.js";
+import { SERVICE_FENCE_BUNDLE_SHA256, SERVICE_FENCE_V2_BUNDLE_SHA256, STUDIO_G7_OPERATIONS_BUNDLE_SHA256, STUDIO_G7_OPERATIONS_SCHEMA_VERSION } from "../src/service-fence-migration.js";
 import { createHash } from "node:crypto";
 import { VOICE_LAB_SCHEMA_VERSION, VOICE_LAB_MIGRATION_SHA256, VOICE_LAB_SCHEMA_SEAL_PATH } from "../src/schema-attestation.js";
 
@@ -12,12 +12,26 @@ async function source() {
     readFile(new URL("../migrations/004_recovery_controls.sql", import.meta.url)),
     readFile(new URL("../migrations/005_service_owner_fence.sql", import.meta.url)),
     readFile(new URL("../migrations/006_service_fence_v2.sql", import.meta.url)),
+    readFile(new URL("../migrations/007_studio_g7_operations.sql", import.meta.url)),
   ]);
 }
-it("binds current startup metadata and seal to the v6 bundle", () => {
-  expect(VOICE_LAB_SCHEMA_VERSION).toBe(SERVICE_FENCE_V2_SCHEMA_VERSION);
-  expect(VOICE_LAB_MIGRATION_SHA256).toBe(SERVICE_FENCE_V2_BUNDLE_SHA256);
-  expect(VOICE_LAB_SCHEMA_SEAL_PATH).toMatch(/schema-v6\.attestation\.json$/);
+it("binds current startup metadata and seal to the v7 bundle", () => {
+  expect(VOICE_LAB_SCHEMA_VERSION).toBe(STUDIO_G7_OPERATIONS_SCHEMA_VERSION);
+  expect(VOICE_LAB_SCHEMA_VERSION).toBe(7);
+  expect(VOICE_LAB_MIGRATION_SHA256).toBe(STUDIO_G7_OPERATIONS_BUNDLE_SHA256);
+  expect(VOICE_LAB_SCHEMA_SEAL_PATH).toMatch(/schema-v7\.attestation\.json$/);
+});
+it("extends the unchanged v6 bundle with the additive studio_action operation type in one transaction", async () => {
+  const [base, recovery, fence, fenceV2, studio] = await source();
+  const v6 = composeServiceFenceV2Migration(base!, recovery!, fence!, fenceV2!);
+  expect(createHash("sha256").update(v6).digest("hex")).toBe(SERVICE_FENCE_V2_BUNDLE_SHA256);
+  const result = composeStudioG7OperationsMigration(base!, recovery!, fence!, fenceV2!, studio!).toString("utf8");
+  expect(createHash("sha256").update(result).digest("hex")).toBe(STUDIO_G7_OPERATIONS_BUNDLE_SHA256);
+  expect(result.startsWith(v6.toString("utf8").replace(/\ncommit;\s*$/, ""))).toBe(true);
+  expect(result.match(/^begin;$/gm)).toHaveLength(1);
+  expect(result.match(/^commit;$/gm)).toHaveLength(1);
+  expect(studio!.toString("utf8")).toContain("'start','speak','barge_in','force_socket_rotation','end','studio_action'");
+  expect(() => composeStudioG7OperationsMigration(base!, recovery!, fence!, fenceV2!, Buffer.concat([studio!, Buffer.from("\n")]))).toThrow(/STUDIO_G7_OPERATIONS_MIGRATION_CHECKSUM_INVALID/);
 });
 it("extends the unchanged v5 bundle with the additive v2 proof shape in one transaction", async () => {
   const [base, recovery, fence, fenceV2] = await source();

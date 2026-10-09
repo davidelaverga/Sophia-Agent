@@ -6,12 +6,12 @@ import path from "node:path";
 import { canonicalRequestHash } from "./security.js";
 
 export const VOICE_LAB_SCHEMA = "sophia_voice_lab";
-export const VOICE_LAB_SCHEMA_VERSION = 6;
+export const VOICE_LAB_SCHEMA_VERSION = 7;
 // Updated only after the migration bytes are finalized. migrate.ts verifies
 // the exact bytes before it connects to Postgres, and persists this value in
 // schema_metadata for both web and worker startup attestation.
-export const VOICE_LAB_MIGRATION_SHA256 = "bc47d257ab1ebfced5708b0255a9e215085410337172632e62f97b422e798b67";
-export const VOICE_LAB_SCHEMA_SEAL_PATH = path.join(tmpdir(), "sophia-voice-lab-schema-v6.attestation.json");
+export const VOICE_LAB_MIGRATION_SHA256 = "fcba91c6cf7df9da6c6287e668f26f704698b3ff3dd08197719a2abb27769ec5";
+export const VOICE_LAB_SCHEMA_SEAL_PATH = path.join(tmpdir(), "sophia-voice-lab-schema-v7.attestation.json");
 
 export const VOICE_LAB_TABLES = [
   "admission_reservations",

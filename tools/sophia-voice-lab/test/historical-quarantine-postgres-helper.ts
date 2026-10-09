@@ -12,7 +12,7 @@ import { readVoiceLabCatalog } from "../src/schema-attestation.js";
 import { PostgresVoiceLabLedger } from "../src/postgres-ledger.js";
 import { canonicalRequestHash, sha256 } from "../src/security.js";
 import { testRun } from "./helpers.js";
-import { serviceFenceInventory, upgradeServiceFenceSchema, upgradeServiceFenceV2Schema } from "../src/service-fence-upgrade.js";
+import { serviceFenceInventory, upgradeServiceFenceSchema, upgradeServiceFenceV2Schema, upgradeStudioG7OperationsSchema } from "../src/service-fence-upgrade.js";
 import { SERVICE_FENCE_SOURCE_BUNDLE_SHA256 } from "../src/service-fence-migration.js";
 
 /** Called only by the dedicated disposable-database suite, never a live runner. */
@@ -76,9 +76,13 @@ async function proveQuarantineVariant(admin: pg.Client, databaseUrl: string, run
     const fence = await readFile("migrations/005_service_owner_fence.sql");
     await upgradeServiceFenceSchema(pool, { commit: "a".repeat(40), inventorySha256: fenceInventory }, base, extension, fence);
     await expect(runMigration(databaseUrl)).rejects.toThrow(/pre-existing schema drift/);
+    const fenceV2 = await readFile("migrations/006_service_fence_v2.sql");
     await upgradeServiceFenceV2Schema(pool, { commit: "a".repeat(40), inventorySha256: fenceInventory },
-      base, extension, fence, await readFile("migrations/006_service_fence_v2.sql"));
-    // Current startup can attest only after the explicit additive upgrade,
+      base, extension, fence, fenceV2);
+    await expect(runMigration(databaseUrl)).rejects.toThrow(/pre-existing schema drift/);
+    await upgradeStudioG7OperationsSchema(pool, { commit: "a".repeat(40), inventorySha256: fenceInventory },
+      base, extension, fence, fenceV2, await readFile("migrations/007_studio_g7_operations.sql"));
+    // Current startup can attest only after the explicit additive upgrades,
     // which must preserve both quarantine and per-identity exceptions.
     await runMigration(databaseUrl);
     const quarantinedLedger = new PostgresVoiceLabLedger(databaseUrl);

@@ -1,8 +1,8 @@
 import { createHash, randomBytes } from "node:crypto";
 import type pg from "pg";
 import { composeVoiceLabMigration } from "./migration-bundle.js";
-import { composeServiceFenceMigration, composeServiceFenceV2Migration, SERVICE_FENCE_BUNDLE_SHA256, SERVICE_FENCE_SOURCE_BUNDLE_SHA256, SERVICE_FENCE_SCHEMA_VERSION,
-  SERVICE_FENCE_V2_BUNDLE_SHA256, SERVICE_FENCE_V2_SCHEMA_VERSION } from "./service-fence-migration.js";
+import { composeServiceFenceMigration, composeServiceFenceV2Migration, composeStudioG7OperationsMigration, SERVICE_FENCE_BUNDLE_SHA256, SERVICE_FENCE_SOURCE_BUNDLE_SHA256, SERVICE_FENCE_SCHEMA_VERSION,
+  SERVICE_FENCE_V2_BUNDLE_SHA256, SERVICE_FENCE_V2_SCHEMA_VERSION, STUDIO_G7_OPERATIONS_BUNDLE_SHA256, STUDIO_G7_OPERATIONS_SCHEMA_VERSION } from "./service-fence-migration.js";
 import { readVoiceLabCatalog, VOICE_LAB_TABLES } from "./schema-attestation.js";
 import { canonicalRequestHash } from "./security.js";
 
@@ -57,7 +57,7 @@ export async function readServiceFenceUpgradeInventory(pool: pg.Pool) {
     const metadata = await client.query("select schema_version,migration_sha256,catalog_sha256 from sophia_voice_lab.schema_metadata where singleton=true");
     if (metadata.rows.length !== 1) throw new Error("SERVICE_FENCE_INVENTORY_METADATA_INVALID");
     const row = metadata.rows[0];
-    if (![4, 5, 6].includes(Number(row.schema_version)) || !/^[a-f0-9]{64}$/.test(row.migration_sha256)
+    if (![4, 5, 6, 7].includes(Number(row.schema_version)) || !/^[a-f0-9]{64}$/.test(row.migration_sha256)
       || !/^[a-f0-9]{64}$/.test(row.catalog_sha256)) throw new Error("SERVICE_FENCE_INVENTORY_METADATA_INVALID");
     const catalogSha256 = canonicalRequestHash(await readVoiceLabCatalog(client));
     const inventorySha256 = await serviceFenceInventory(client);
@@ -86,6 +86,14 @@ export async function upgradeServiceFenceV2Schema(pool: pg.Pool, intent: ReturnT
   return upgradeAttestedSchema(pool, intent, { resultSchema: "sophia.voice-lab.service-fence-v2-upgrade.v1",
     sourceVersion: SERVICE_FENCE_SCHEMA_VERSION, sourceSha256: SERVICE_FENCE_BUNDLE_SHA256, targetVersion: SERVICE_FENCE_V2_SCHEMA_VERSION, targetSha256: SERVICE_FENCE_V2_BUNDLE_SHA256,
     source: composeServiceFenceMigration(base, recovery, fence), target: composeServiceFenceV2Migration(base, recovery, fence, fenceV2), delta: fenceV2 });
+}
+
+/** v6 -> v7: admit the additive Studio G7 `studio_action` operation type.
+ * Every row and every legacy operation type is unchanged. */
+export async function upgradeStudioG7OperationsSchema(pool: pg.Pool, intent: ReturnType<typeof parseServiceFenceUpgradeIntent>, base: Buffer, recovery: Buffer, fence: Buffer, fenceV2: Buffer, studioOperations: Buffer) {
+  return upgradeAttestedSchema(pool, intent, { resultSchema: "sophia.voice-lab.studio-g7-operations-upgrade.v1",
+    sourceVersion: SERVICE_FENCE_V2_SCHEMA_VERSION, sourceSha256: SERVICE_FENCE_V2_BUNDLE_SHA256, targetVersion: STUDIO_G7_OPERATIONS_SCHEMA_VERSION, targetSha256: STUDIO_G7_OPERATIONS_BUNDLE_SHA256,
+    source: composeServiceFenceV2Migration(base, recovery, fence, fenceV2), target: composeStudioG7OperationsMigration(base, recovery, fence, fenceV2, studioOperations), delta: studioOperations });
 }
 
 /** No startup invocation, no host seal, no new admission, no row backfill.
