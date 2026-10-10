@@ -4,6 +4,7 @@ import { gzip } from "node:zlib";
 
 import pino, { type Logger } from "pino";
 
+import { ActiveLeasePulse, activeLeasePulseIntervalMs, type ActiveLeasePulseOutcome } from "./active-lease-pulse.js";
 import { assertAudioByteLimit, parseWav, type AudioResolver } from "./audio.js";
 import { DriverEndFailure, hasExactFinalizationEnvelope, type BrowserStartStage, type D02BrowserContextBinding, type D02ProductCleanupAcknowledgement, type DriverStartResult, type VoiceBrowserDriver } from "./browser-driver.js";
 import { BUNDLED_FIXTURE_MANIFEST_SHA256, type VoiceLabConfig } from "./config.js";
@@ -12,6 +13,7 @@ import { TERMINAL_RUN_STATES, VoiceLabError, initialVerdicts, labError, type Evi
 import type { ClaimedOperation, EventAppendInput, RollingAdmissionLimits, VoiceLabLedger } from "./ledger.js";
 import { PostgresVoiceLabLedger } from "./postgres-ledger.js";
 import { productTurnId } from "./product-turn.js";
+import { RunSerializer } from "./run-serializer.js";
 import { deriveBrowserProcessTermination } from "./browser-process-termination.js";
 import { pkceS256 } from "./oauth.js";
 import { deriveRecoveryBrowserBinding, RecoveryControlBindingSchema, recoveryTransportBinding, validateRecoveryBrowserBinding, type RecoveryControlRecord } from "./recovery-control.js";
@@ -36,7 +38,8 @@ import { studioWorkerIdSha256 } from "./studio-g7/sign-out-fence.js";
 import { STUDIO_STEP_EXECUTING_STATES, studioStepConflict, studioStepOf } from "./studio-g7/step-guard.js";
 import { STUDIO_DEAD_OWNER_HEARTBEAT_STALE_MS, STUDIO_DEAD_OWNER_LEASE_RELEASE_SCHEMA, STUDIO_DEAD_OWNER_VERIFIED_KIND, STUDIO_LEASE_OWNER_BOOT_KIND, STUDIO_LEASE_OWNER_BOOT_SCHEMA, STUDIO_PRESENCE_STUCK_CAP_MS, STUDIO_PRESENCE_VETO_BOUND_MS, STUDIO_ROOM_PRESENCE_KIND, studioEffectiveTokenLifetimeMs, studioLeaseOwnerBootIdSha256 } from "./studio-g7/lease-release.js";
 
-interface ActiveLease { epoch: number; }
+/** One owned browser lease epoch. `refused` records that the ledger refused to renew it: nothing renews it again. */
+interface ActiveLease { readonly epoch: number; refused: boolean; }
 interface D02WorkerShutdownArm {
   runId: string;
   terminationRequestIdSha256: string;
@@ -58,6 +61,8 @@ interface D02WorkerShutdownArm {
 const D02_PRE_DISPATCH_SHUTDOWN_WAIT_MS = 20_000;
 const D02_PRE_DISPATCH_SHUTDOWN_POLL_MS = 100;
 export const WORKER_HEARTBEAT_INTERVAL_MS = 2_000;
+/** Shutdown waits this long for active-lease pulse work in flight (#151) before its source-specific cleanup. */
+export const ACTIVE_LEASE_PULSE_SETTLE_MS = 5_000;
 /** Studio G7: minimum spacing of API-only recoveries while the run's exchange stays unsettled. */
 export const STUDIO_EXCHANGE_REVERIFY_BACKOFF_MS = 30_000;
 /** One durable event per Studio API-only recovery (sign-in, settle, sign-out). */
@@ -171,6 +176,9 @@ export class VoiceLabWorker {
   readonly #d02ShutdownArms = new Map<string, D02WorkerShutdownArm>();
   readonly #d02ShutdownsInFlight = new Map<string, Promise<void>>();
   readonly #d02PreDispatchPauses = new Set<string>();
+  /** One serialization point per run: operations, maintenance and the active-lease pulse take its turn before capture reads or writes (#151). */
+  readonly #runSerializer = new RunSerializer();
+  readonly #leasePulse: ActiveLeasePulse;
 
   constructor(
     readonly workerId: string,
@@ -189,16 +197,25 @@ export class VoiceLabWorker {
     this.logger = logger ?? pino({ level: config.logLevel, base: { service: "sophia-voice-lab-worker", worker_id: workerId } });
     this.#frontendCapabilities = new CapabilityCodec(config.grantSecret, config.capabilityIssuer, config.capabilityTtlSeconds);
     this.#workerBootIdentity = workerBootIdentity;
+    this.#leasePulse = new ActiveLeasePulse(activeLeasePulseIntervalMs(config.browserLeaseSeconds), {
+      renew: (runId, epoch) => this.#pulseRenew(runId, epoch),
+      drain: (runId, epoch) => this.#pulseDrain(runId, epoch),
+      onError: (runId, error) => this.logger.error({ run_id_sha256: sha256(runId), error: safeError(error) }, "active lease pulse unconfirmed; the next pulse retries"),
+    });
   }
 
   run(): Promise<void> {
     if (this.#loopPromise) return this.#loopPromise;
+    this.#leasePulse.enable();
+    for (const [runId, lease] of this.#activeLeases) this.#leasePulse.start(runId, lease.epoch);
     this.#startWorkerHeartbeatLoop();
     const firstHeartbeatAttempt = this.#workerHeartbeatFirstAttemptPromise ?? Promise.resolve();
     this.#loopPromise = firstHeartbeatAttempt.then(() => this.#runLoop()).finally(async () => {
       this.#stopping = true;
+      this.#leasePulse.stopAll();
       this.#wakeWorkerHeartbeatLoop?.();
       await this.#workerHeartbeatLoopPromise;
+      await this.#settleLeasePulse();
       this.#loopPromise = null;
     });
     return this.#loopPromise;
@@ -214,11 +231,23 @@ export class VoiceLabWorker {
 
   stop(): void {
     this.#stopping = true;
+    // Sticky: every pulse timer is cleared now and none is armed again.
+    this.#leasePulse.stopAll();
     this.#wakeWorkerHeartbeatLoop?.();
+  }
+
+  /** Awaits pulse work in flight. It never waits on a run's turn: a pulse only ever tries a turn. */
+  async #settleLeasePulse(): Promise<void> {
+    await withTimeout(this.#leasePulse.settle(), ACTIVE_LEASE_PULSE_SETTLE_MS).catch((error) => {
+      this.logger.error({ error: safeError(error), pulse_work_in_flight: this.#leasePulse.inFlight }, "active lease pulse work did not settle; shutdown cleanup continues");
+    });
   }
 
   async close(): Promise<void> {
     this.stop();
+    // Before any D02 or generic cleanup: no pulse renewal or drain runs
+    // alongside the shutdown arm validation and the cleanup below.
+    await this.#settleLeasePulse();
     await this.#workerHeartbeatLoopPromise;
     let d02QuiescenceFailure: unknown = null;
     let d02ArmValidationFailure: unknown = null;
@@ -304,6 +333,12 @@ export class VoiceLabWorker {
   async runOnce(): Promise<boolean> {
     const claimed = await this.ledger.claimNextOperation(this.workerId, this.config.operationLeaseSeconds);
     if (!claimed) return false;
+    // The operation holds its run's turn until it settled, so no pulse or
+    // maintenance drain interleaves with its capture reads and writes (#151).
+    return this.#runSerializer.run(claimed.run.id, () => this.#executeClaimed(claimed));
+  }
+
+  async #executeClaimed(claimed: ClaimedOperation): Promise<boolean> {
     await this.ledger.markOperationExecuting(claimed.operation.id, this.workerId, claimed.operation.leaseEpoch);
     const controller = new AbortController();
     this.#currentOperationAbort = controller;
@@ -415,7 +450,7 @@ export class VoiceLabWorker {
         return [] as RunRecord[];
       });
       for (const run of pending.filter(isStudioG7Run)) {
-        try { await this.#completeStudioG7Evidence(run.id, maintenanceNow); }
+        try { await this.#maintainRun(run.id, () => this.#completeStudioG7Evidence(run.id, maintenanceNow)); }
         catch (error) { this.logger.error({ run_id_sha256: sha256(run.id), error: safeError(error) }, "studio evidence completion remains unconfirmed"); }
       }
     }
@@ -423,19 +458,8 @@ export class VoiceLabWorker {
     try { certificationDue = await this.ledger.listRunsCertificationDue(maintenanceNow, 20); }
     catch (error) { this.logger.error({ error: safeError(error) }, "certification deadline listing unavailable; resource maintenance continues"); }
     for (const pending of certificationDue) {
-      try {
-        const error = labError("EXTERNAL_EVIDENCE_DEADLINE_EXPIRED", "The bounded external-evidence window expired before every mandatory supported assertion became machine-verifiable.", "harness", false, { deadline_at: pending.expiresAt.toISOString() });
-        const verdicts: Verdicts = { ...pending.verdicts, harness: "fail", evidence: "fail" };
-        // A Studio run whose cleanup proof is incomplete (e.g. an unrevoked
-        // evidence-refresh session) holds admission again, so terminal
-        // recovery completes it once no other run does.
-        const studioCleanupIncomplete = isStudioG7Run(pending) && pending.cleanupComplete && !studioG7CleanupProof((await this.#allEvents(pending.id)).events).complete;
-        let failed = await transitionRun(this.ledger, pending, "failed_harness", { verdicts, terminalError: error, ...(studioCleanupIncomplete ? { cleanupComplete: false } : {}) });
-        const terminal = await this.ledger.appendEvent(failed.id, "run.failed_harness", "worker", { terminal_state: "failed_harness", terminal_reason: error.code, certification_deadline_at: pending.expiresAt.toISOString(), execution_cleanup_complete: failed.cleanupComplete }, `run:${failed.id}:failed_harness`);
-        failed = await this.#freshRun(failed.id);
-        await this.#saveFailureEvidence(failed, error, []);
-        this.logger.warn({ run_id: failed.id, terminal_event_seq: terminal.seq }, "external evidence deadline expired");
-      } catch (error) {
+      try { await this.#maintainRun(pending.id, () => this.#expireCertificationDeadline(pending)); }
+      catch (error) {
         // Certification publication is not authority to defer unrelated hard
         // retention deadlines or leave provider/browser obligations unchecked.
         this.logger.error({ run_id_sha256: sha256(pending.id), error: safeError(error) }, "certification deadline update unconfirmed; resource maintenance continues");
@@ -449,15 +473,8 @@ export class VoiceLabWorker {
     try { retentionDue = await this.ledger.listRunsRetentionDue(maintenanceNow, 20); }
     catch (error) { this.logger.error({ error: safeError(error) }, "remote retention listing unavailable; local hard-deadline purge still required"); }
     for (const retained of retentionDue) {
-      try {
-        const recovery = await this.#recoverRun(retained);
-        await this.#persistEvents(retained.id, recovery.events);
-        const page = await this.#allEvents(retained.id);
-        if (authoritativeRetentionPurged(page.events)) {
-          const fresh = await this.#freshRun(retained.id);
-          await this.ledger.updateRun(fresh.id, fresh.version, { retentionPurgePending: false, retentionPurgeVerifiedAt: new Date() });
-        }
-      } catch (error) {
+      try { await this.#maintainRun(retained.id, () => this.#confirmRemoteRetentionPurge(retained)); }
+      catch (error) {
         // Remote deletion truth remains "unconfirmed", but a Gateway outage
         // can never extend the signed lifetime of local transcripts/screenshots.
         // purgeExpiredRetention below deletes local content unconditionally and
@@ -474,7 +491,7 @@ export class VoiceLabWorker {
       return [];
     });
     for (const retained of evidenceRefresh) {
-      try { await this.#refreshCanonicalEvidence(retained.id, maintenanceNow); }
+      try { await this.#maintainRun(retained.id, () => this.#refreshCanonicalEvidence(retained.id, maintenanceNow)); }
       catch (error) { this.logger.error({ run_id_sha256: sha256(retained.id), error: safeError(error) }, "canonical evidence refresh remains unconfirmed"); }
     }
     try { await this.ledger.purgeExpiredRetention(maintenanceNow, 20); }
@@ -485,7 +502,7 @@ export class VoiceLabWorker {
     });
     for (const control of retainedControls) {
       if (control.contentPurgedAt === null) continue;
-      try { await this.#recoverRetainedControl(control); }
+      try { await this.#maintainRun(control.binding.runId, () => this.#recoverRetainedControl(control)); }
       catch (error) { this.logger.error({ run_id_sha256: sha256(control.binding.runId), error: safeError(error) }, "retained recovery remains unconfirmed"); }
     }
     const expiredRuns = await this.ledger.listExpiredRuns(new Date(), 20).catch(error => {
@@ -493,7 +510,7 @@ export class VoiceLabWorker {
       return [];
     });
     for (const expired of expiredRuns) {
-      try { await this.#terminalizeFailure(expired.id, labError("RUN_EXPIRED", "Run exceeded its bounded TTL and was cleaned up.", "harness"), "expired"); }
+      try { await this.#maintainRun(expired.id, () => this.#terminalizeFailure(expired.id, labError("RUN_EXPIRED", "Run exceeded its bounded TTL and was cleaned up.", "harness"), "expired")); }
       catch (error) { this.logger.error({ run_id_sha256: sha256(expired.id), error: safeError(error) }, "expired run recovery remains unconfirmed"); }
     }
     let recoveryPage: RunRecord[] = [];
@@ -508,14 +525,8 @@ export class VoiceLabWorker {
       this.logger.error({ error: safeError(error) }, "terminal recovery listing unavailable; other resource maintenance continues");
     }
     for (const pending of recoveryPage) {
-      try {
-        const replacement = await this.#observeD02GracefulWorkerReplacement(pending);
-        if (replacement === "awaiting_replacement") continue;
-        const operations = await this.ledger.listOperations(pending.id);
-        const failedOperation = [...operations].reverse().find((operation) => (operation.state === "failed" || operation.state === "timed_out") && operation.error !== null);
-        const recoveryError = pending.terminalError ?? failedOperation?.error ?? labError("RECOVERY_PENDING", "Terminal run still requires durable zero-orphan recovery.", "harness", true);
-        await this.#terminalizeFailure(pending.id, recoveryError, TERMINAL_RUN_STATES.has(pending.state) ? pending.state : undefined);
-      } catch (error) {
+      try { await this.#maintainRun(pending.id, () => this.#recoverTerminalRun(pending)); }
+      catch (error) {
         this.logger.error({ run_id_sha256: sha256(pending.id), error: safeError(error) }, "terminal run recovery remains unconfirmed");
       }
     }
@@ -527,15 +538,8 @@ export class VoiceLabWorker {
       return [];
     });
     for (const pending of evidencePending) {
-      try {
-        // A Studio run awaiting evidence is re-finalized by its own path (which
-        // refuses while its cleanup proof is incomplete), never revised into a
-        // failure-shaped manifest.
-        if (studioAwaitingExternalEvidence(pending)) await this.#finalizeEndRun(pending.id);
-        else if (pending.terminalError !== null || !["completed", "product_failed", "inconclusive_provider", "failed_harness", "authorization_failed"].includes(pending.state)) await this.#saveFailureEvidence(pending, pending.terminalError ?? labError("TERMINAL_CERTIFICATION_REVISION", "Terminal execution evidence was revised without mutating the execution decision.", "evidence"), []);
-        else if (pending.scenarioId === "V-S01" || pending.scenarioId === "V-S02") await this.#finalizePreResourceScenario(pending.id);
-        else await this.#finalizeEndRun(pending.id);
-      } catch (error) {
+      try { await this.#maintainRun(pending.id, () => this.#publishTerminalEvidence(pending)); }
+      catch (error) {
         this.logger.error({ run_id_sha256: sha256(pending.id), error: safeError(error) }, "terminal evidence publication unconfirmed; live resource maintenance continues");
       }
     }
@@ -556,7 +560,7 @@ export class VoiceLabWorker {
     }
     let activeMaintenanceFailure: unknown = null;
     for (const [runId, lease] of this.#activeLeases) {
-      try { await this.#maintainActiveLease(runId, lease); }
+      try { await this.#maintainRun(runId, () => this.#maintainActiveLease(runId, lease)); }
       catch (error) {
         // An unavailable ownership read or failed recovery write proves neither
         // lease loss nor cleanup. Keep its durable obligation and continue with
@@ -573,7 +577,7 @@ export class VoiceLabWorker {
     // receipts and are revisited on wrap. No deletion or ownership extension.
     this.#expiredLeaseCursor = expiredPage.at(-1)?.runId;
     for (const lostLease of expiredPage) {
-      try { await this.#markDriverRestart(lostLease.runId, lostLease); }
+      try { await this.#maintainRun(lostLease.runId, () => this.#markDriverRestart(lostLease.runId, lostLease)); }
       catch (error) {
         this.logger.error({ run_id_sha256: sha256(lostLease.runId), error: safeError(error) }, "expired browser loss observation unconfirmed; remaining lease recovery continues");
       }
@@ -583,7 +587,63 @@ export class VoiceLabWorker {
     if (activeMaintenanceFailure !== null) throw activeMaintenanceFailure;
   }
 
+  /**
+   * One maintenance step for one run, taken in that run's turn (#151). A run
+   * another holder owns (its operation, or its active-lease pulse) is skipped
+   * and revisited by the next pass: maintenance never waits for a run, so a
+   * slow holder of one run never holds up any other run.
+   */
+  async #maintainRun(runId: string, step: () => Promise<void>): Promise<void> {
+    const turn = await this.#runSerializer.tryRun(runId, step);
+    if (!turn.ran) this.logger.debug({ run_id_sha256: sha256(runId) }, "run held by another owner; maintenance revisits it next pass");
+  }
+
+  async #expireCertificationDeadline(pending: RunRecord): Promise<void> {
+    const error = labError("EXTERNAL_EVIDENCE_DEADLINE_EXPIRED", "The bounded external-evidence window expired before every mandatory supported assertion became machine-verifiable.", "harness", false, { deadline_at: pending.expiresAt.toISOString() });
+    const verdicts: Verdicts = { ...pending.verdicts, harness: "fail", evidence: "fail" };
+    // A Studio run whose cleanup proof is incomplete (e.g. an unrevoked
+    // evidence-refresh session) holds admission again, so terminal
+    // recovery completes it once no other run does.
+    const studioCleanupIncomplete = isStudioG7Run(pending) && pending.cleanupComplete && !studioG7CleanupProof((await this.#allEvents(pending.id)).events).complete;
+    let failed = await transitionRun(this.ledger, pending, "failed_harness", { verdicts, terminalError: error, ...(studioCleanupIncomplete ? { cleanupComplete: false } : {}) });
+    const terminal = await this.ledger.appendEvent(failed.id, "run.failed_harness", "worker", { terminal_state: "failed_harness", terminal_reason: error.code, certification_deadline_at: pending.expiresAt.toISOString(), execution_cleanup_complete: failed.cleanupComplete }, `run:${failed.id}:failed_harness`);
+    failed = await this.#freshRun(failed.id);
+    await this.#saveFailureEvidence(failed, error, []);
+    this.logger.warn({ run_id: failed.id, terminal_event_seq: terminal.seq }, "external evidence deadline expired");
+  }
+
+  async #confirmRemoteRetentionPurge(retained: RunRecord): Promise<void> {
+    const recovery = await this.#recoverRun(retained);
+    await this.#persistEvents(retained.id, recovery.events);
+    const page = await this.#allEvents(retained.id);
+    if (authoritativeRetentionPurged(page.events)) {
+      const fresh = await this.#freshRun(retained.id);
+      await this.ledger.updateRun(fresh.id, fresh.version, { retentionPurgePending: false, retentionPurgeVerifiedAt: new Date() });
+    }
+  }
+
+  async #recoverTerminalRun(pending: RunRecord): Promise<void> {
+    const replacement = await this.#observeD02GracefulWorkerReplacement(pending);
+    if (replacement === "awaiting_replacement") return;
+    const operations = await this.ledger.listOperations(pending.id);
+    const failedOperation = [...operations].reverse().find((operation) => (operation.state === "failed" || operation.state === "timed_out") && operation.error !== null);
+    const recoveryError = pending.terminalError ?? failedOperation?.error ?? labError("RECOVERY_PENDING", "Terminal run still requires durable zero-orphan recovery.", "harness", true);
+    await this.#terminalizeFailure(pending.id, recoveryError, TERMINAL_RUN_STATES.has(pending.state) ? pending.state : undefined);
+  }
+
+  async #publishTerminalEvidence(pending: RunRecord): Promise<void> {
+    // A Studio run awaiting evidence is re-finalized by its own path (which
+    // refuses while its cleanup proof is incomplete), never revised into a
+    // failure-shaped manifest.
+    if (studioAwaitingExternalEvidence(pending)) await this.#finalizeEndRun(pending.id);
+    else if (pending.terminalError !== null || !["completed", "product_failed", "inconclusive_provider", "failed_harness", "authorization_failed"].includes(pending.state)) await this.#saveFailureEvidence(pending, pending.terminalError ?? labError("TERMINAL_CERTIFICATION_REVISION", "Terminal execution evidence was revised without mutating the execution decision.", "evidence"), []);
+    else if (pending.scenarioId === "V-S01" || pending.scenarioId === "V-S02") await this.#finalizePreResourceScenario(pending.id);
+    else await this.#finalizeEndRun(pending.id);
+  }
+
   async #maintainActiveLease(runId: string, lease: ActiveLease): Promise<void> {
+    // The pulse may have ended this lease epoch before maintenance took the turn.
+    if (this.#activeLeases.get(runId) !== lease) return;
     const current = await this.ledger.getRun(runId);
     const d02Arm = await this.#resolveD02WorkerShutdownArm(runId);
     if (d02Arm) {
@@ -596,12 +656,7 @@ export class VoiceLabWorker {
       // not committed. Preserve ownership without touching the frozen app;
       // the next maintenance pass either observes the unique dispatch claim
       // and quiesces or remains paused.
-      const owned = await this.ledger.heartbeatBrowserLease(runId, this.workerId, lease.epoch, this.config.browserLeaseSeconds);
-      if (!owned) {
-        this.#activeLeases.delete(runId);
-        const lostLease = await this.ledger.getBrowserLease(runId);
-        await this.#markDriverRestart(runId, lostLease?.workerId === this.workerId && lostLease.leaseEpoch === lease.epoch ? lostLease : undefined);
-      }
+      await this.#renewActiveLease(runId, lease, false);
       return;
     }
     if (this.#killSwitchEngaged() && current && !TERMINAL_RUN_STATES.has(current.state)) {
@@ -612,34 +667,147 @@ export class VoiceLabWorker {
       await this.#terminalizeFailure(runId, labError("RUN_EXPIRED", "Run exceeded its bounded TTL and was cleaned up.", "harness"), "expired");
       return;
     }
-    const owned = await this.ledger.heartbeatBrowserLease(runId, this.workerId, lease.epoch, this.config.browserLeaseSeconds);
-    if (!owned || !this.driver.hasSession(runId)) {
-      this.#activeLeases.delete(runId);
-      // Preserve the exact owned lease even when the in-process browser
-      // registry disappears before the database lease expires. Without this
-      // receipt a live browser crash would be indistinguishable from an
-      // unowned policy assertion during late D02 certification.
-      const lostLease = await this.ledger.getBrowserLease(runId);
-      await this.#markDriverRestart(runId, lostLease?.workerId === this.workerId && lostLease.leaseEpoch === lease.epoch ? lostLease : undefined);
-      return;
-    }
+    if (!await this.#renewActiveLease(runId, lease, true)) return;
     try {
+      let bound = true;
       if (!this.#killSwitchEngaged() && current) {
         const continueGrant = await this.#mintAndVerify(current, "sophia-voice-lab-frontend", ["session:continue", "session:create", "session:read", "session:finalize"], "session:continue");
-        await this.#persistEvents(runId, await this.driver.continueSession(current, continueGrant.token));
+        bound = await this.#persistLeaseBoundEvents(runId, lease, await this.driver.continueSession(current, continueGrant.token));
       }
-      await this.#persistEvents(runId, await this.driver.drain(runId));
+      if (bound) await this.#persistLeaseBoundEvents(runId, lease, await this.driver.drain(runId));
     }
     catch (error) {
-      const armedAfterFailure = await this.#resolveD02WorkerShutdownArm(runId);
-      if (armedAfterFailure) {
-        this.#d02ShutdownArms.set(runId, armedAfterFailure);
-        await this.#quiesceD02Worker(runId, armedAfterFailure);
-      } else {
-        this.#activeLeases.delete(runId);
-        await this.#terminalizeFailure(runId, errorDetail(error));
-      }
+      await this.#failActiveLeaseDrain(runId, error);
+      return;
     }
+    await this.#observeRefusedLease(runId, lease);
+  }
+
+  #activateLease(runId: string, epoch: number): void {
+    this.#activeLeases.set(runId, { epoch, refused: false });
+    this.#leasePulse.start(runId, epoch);
+  }
+
+  #deactivateLease(runId: string): void {
+    this.#activeLeases.delete(runId);
+    this.#leasePulse.stop(runId);
+  }
+
+  /**
+   * Renews this exact lease epoch. A refusal (or, when required, a missing
+   * browser session) is a lease loss and takes the existing loss handling.
+   * A lease the ledger refused is never renewed again.
+   */
+  async #renewActiveLease(runId: string, lease: ActiveLease, requireSession: boolean): Promise<boolean> {
+    const owned = !lease.refused && await this.ledger.heartbeatBrowserLease(runId, this.workerId, lease.epoch, this.config.browserLeaseSeconds);
+    if (!owned) lease.refused = true;
+    if (owned && (!requireSession || this.driver.hasSession(runId))) return true;
+    await this.#observeActiveLeaseLoss(runId, lease);
+    return false;
+  }
+
+  async #observeActiveLeaseLoss(runId: string, lease: ActiveLease): Promise<void> {
+    this.#deactivateLease(runId);
+    // Preserve the exact owned lease even when the in-process browser
+    // registry disappears before the database lease expires. Without this
+    // receipt a live browser crash would be indistinguishable from an
+    // unowned policy assertion during late D02 certification.
+    const lostLease = await this.ledger.getBrowserLease(runId);
+    await this.#markDriverRestart(runId, lostLease?.workerId === this.workerId && lostLease.leaseEpoch === lease.epoch ? lostLease : undefined);
+  }
+
+  /** The loss a lease-bound persist observed, handled once and outside the drain-failure path. */
+  async #observeRefusedLease(runId: string, lease: ActiveLease): Promise<void> {
+    if (lease.refused && this.#activeLeases.get(runId) === lease) await this.#observeActiveLeaseLoss(runId, lease);
+  }
+
+  /**
+   * Persists events read under this lease epoch only while that epoch still
+   * owns the run (#151). The ledger first renews the exact epoch, so a read
+   * that outlived its lease, or whose lease a later epoch replaced, writes
+   * nothing. Returns false, having persisted nothing, when the epoch no
+   * longer owns the run; a refusal is recorded as the lease's loss.
+   */
+  async #persistLeaseBoundEvents(runId: string, lease: ActiveLease, events: Array<Omit<import("./domain.js").LabEvent, "runId" | "seq" | "at">>): Promise<boolean> {
+    if (lease.refused || this.#activeLeases.get(runId) !== lease) return false;
+    if (events.length === 0) return true;
+    if (!await this.ledger.heartbeatBrowserLease(runId, this.workerId, lease.epoch, this.config.browserLeaseSeconds)) {
+      lease.refused = true;
+      return false;
+    }
+    await this.#persistEvents(runId, events);
+    return true;
+  }
+
+  async #failActiveLeaseDrain(runId: string, error: unknown): Promise<void> {
+    const armedAfterFailure = await this.#resolveD02WorkerShutdownArm(runId);
+    if (armedAfterFailure) {
+      this.#d02ShutdownArms.set(runId, armedAfterFailure);
+      await this.#quiesceD02Worker(runId, armedAfterFailure);
+    } else {
+      this.#deactivateLease(runId);
+      await this.#terminalizeFailure(runId, errorDetail(error));
+    }
+  }
+
+  /**
+   * Pulse renewal while another owner holds the run (#151): that owner (an
+   * operation, maintenance, or this pulse's own drain still in flight) drains
+   * it, and this keeps its exact lease epoch live meanwhile. It never waits
+   * for the run's turn and touches no page or capture cursor. A free run is
+   * renewed by the drain below, fenced like maintenance. A refusal is only
+   * recorded here: the loss is handled in the run's turn, and nothing renews
+   * that lease again.
+   */
+  async #pulseRenew(runId: string, epoch: number): Promise<ActiveLeasePulseOutcome> {
+    const lease = this.#activeLeases.get(runId);
+    if (this.#stopping || lease?.epoch !== epoch) return "end";
+    if (lease.refused || !this.#runSerializer.busy(runId)) return "continue";
+    if (!await this.ledger.heartbeatBrowserLease(runId, this.workerId, epoch, this.config.browserLeaseSeconds)) lease.refused = true;
+    return "continue";
+  }
+
+  /** Pulse drain (#151): only in the run's turn, never waiting for it. A busy run is drained by its holder. */
+  async #pulseDrain(runId: string, epoch: number): Promise<ActiveLeasePulseOutcome> {
+    const lease = this.#activeLeases.get(runId);
+    if (this.#stopping || lease?.epoch !== epoch) return "end";
+    const turn = await this.#runSerializer.tryRun(runId, () => this.#pulseDrainTurn(runId, lease));
+    return turn.ran ? turn.value : "continue";
+  }
+
+  /**
+   * What maintenance does for an active lease, minus everything with an
+   * effect beyond the lease row and the page capture: no session
+   * continuation, no D02 quiescence, no kill-switch or expiry
+   * terminalization. While those fence the run, the pulse only preserves
+   * ownership and maintenance acts on them exactly as before.
+   */
+  async #pulseDrainTurn(runId: string, lease: ActiveLease): Promise<ActiveLeasePulseOutcome> {
+    if (this.#stopping || this.#activeLeases.get(runId) !== lease) return "end";
+    if (lease.refused) {
+      await this.#observeActiveLeaseLoss(runId, lease);
+      return "end";
+    }
+    const current = await this.ledger.getRun(runId);
+    if (!current || TERMINAL_RUN_STATES.has(current.state)) return "end";
+    const fenced = await this.#activeLeaseFenced(runId, current);
+    if (!await this.#renewActiveLease(runId, lease, !fenced)) return "end";
+    if (fenced || this.#stopping) return "continue";
+    try { await this.#persistLeaseBoundEvents(runId, lease, await this.driver.drain(runId)); }
+    catch (error) {
+      // Once shutdown began, close() owns every active lease's cleanup.
+      if (this.#stopping) throw error;
+      await this.#failActiveLeaseDrain(runId, error);
+      return "end";
+    }
+    await this.#observeRefusedLease(runId, lease);
+    return lease.refused ? "end" : "continue";
+  }
+
+  /** A D02 arm or pre-dispatch pause, the kill switch and the run's expiry leave the app untouched. A D02 conflict throws. */
+  async #activeLeaseFenced(runId: string, current: RunRecord): Promise<boolean> {
+    if (await this.#resolveD02WorkerShutdownArm(runId)) return true;
+    return this.#d02PreDispatchPauses.has(runId) || this.#killSwitchEngaged() || current.expiresAt <= new Date();
   }
 
   async #advanceSuites(): Promise<void> {
@@ -860,7 +1028,7 @@ export class VoiceLabWorker {
       // for the owner (studio-g7/lease-release.ts).
       if (isStudioG7Run(run)) await this.#recordStudioLeaseOwnerBoot(run.id, operation.id);
       const browserLease = await this.ledger.upsertBrowserLease(run.id, this.workerId, this.config.browserLeaseSeconds);
-      this.#activeLeases.set(run.id, { epoch: browserLease.leaseEpoch });
+      this.#activateLease(run.id, browserLease.leaseEpoch);
       run = await transitionRun(this.ledger, run, "browser_leased");
       run = await transitionRun(this.ledger, run, "authenticating");
       const startOps = ["auth:session", "session:create", "session:read", "voice:start", "session:finalize", ...(run.scenarioId === "V-L01" ? ["trace:fault"] : [])];
@@ -2875,7 +3043,7 @@ export class VoiceLabWorker {
     const released = await this.ledger.releaseBrowserLease(runId, this.workerId, current.lostBrowserLeaseEpoch);
     if (!released) throw d02WorkerShutdownConflict("The D02 worker could not CAS-release the exact browser lease after closing its context.");
     await this.ledger.appendEvent(runId, "cleanup.browser_lease_released", "worker", { worker_id_hash: current.lostWorkerIdSha256, lease_epoch: current.lostBrowserLeaseEpoch, cas_deleted: true }, `cleanup:${runId}:browser-lease`);
-    this.#activeLeases.delete(runId);
+    this.#deactivateLease(runId);
     this.#d02PreDispatchPauses.delete(runId);
     const terminal = await this.#freshRun(runId);
     const recovered = await this.#recoverRun(terminal);
@@ -3136,7 +3304,7 @@ export class VoiceLabWorker {
         } : {}),
       }, `cleanup:${runId}:browser-lease`);
     }
-    this.#activeLeases.delete(runId);
+    this.#deactivateLease(runId);
     current = await this.ledger.getBrowserLease(runId);
     if (current === null) {
       const control = await this.ledger.getRecoveryControl(runId);
@@ -3359,7 +3527,7 @@ export class VoiceLabWorker {
         schema: "sophia_voice_lab_studio_g7_lease_release_v1", worker_id_hash: sha256(this.workerId), lease_epoch: epoch, cas_deleted: true, browser_closed: true,
       }, `cleanup:${runId}:browser-lease`);
     }
-    this.#activeLeases.delete(runId);
+    this.#deactivateLease(runId);
     current = await this.ledger.getBrowserLease(runId);
     if (current === null) {
       const prior = await this.ledger.findLatestEvent(runId, ["cleanup.browser_lease_released", "cleanup.browser_lease_absent"]);
