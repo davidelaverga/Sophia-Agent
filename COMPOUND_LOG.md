@@ -2506,3 +2506,36 @@ Automatic review of combined head 0d8c5633 found two further P2 privacy gaps. Er
 ### Codex follow-up: structural mode never attaches audio
 
 The review of 08215b7c found that an explicit audio-capture opt-in could still attach a raw recording despite the effective structural mode. Audio capture now also requires a non-structural mode. The real SDK multipart sentinel regression enables both legacy content and audio flags for a known non-governed owner while structural mode remains selected; it failed before the fix. Full mode with both flags remains the positive control. No runtime configuration was changed.
+
+## 2026-10-10 · [deck native test fixtures] · PR #169
+Author: Claude (fixture implementation), Codex (independent review and integration) · Track: backend tests · Spec reference: issue #153, existing seam rollback and canary overflow contracts.
+
+- What changed: install the embedded seam font in both host search directories and give the seam, headline and KPI fixtures margins under Pillow BASIC and RAQM. Production code and all 377 assertions in the file remain unchanged. The canary uses narrower boxes than its production-derived geometry to exercise overflow reliably with the embedded test font.
+- What we learned: a width close to a wrap boundary can pass under BASIC and fail under RAQM. The seam window is bounded by the existing alignment band; an almost engine-invariant string retains 6–7 px margins without changing that product bound.
+- Validation: independent root run at implementation commit 3ca49101, through the Python 3.12 uv workspace, passed 64 tests with four existing skips on macOS/BASIC. Author Linux evidence reproduced both failures before the fix and passed both repaired tests under each engine; disabling rollback or overflow detection still fails. Author full deck runs retained two local LibreOffice failures; Linux CI at the published head remains a merge requirement.
+- CLAUDE.md updates: none; runtime and architecture are unchanged. Skills created: none. GEPA log entry: not applicable; no prompt changed.
+
+## 2026-10-10 · [deck native test fixtures · correction] · PR #169
+Author: Claude (fixture implementation) · Track: backend tests · Spec reference: Codex P1 r4235732362 on PR #169; issue #153; the existing seam-rollback, canary-overflow and widen-within-card contracts.
+
+- Correction to the previous entry: its Linux evidence ran under a scratch pytest plugin, `ci_nonroot_plugin`, which made `process_group` treat the root process as non-root. That entry did not say so. Under actual root on Linux, `isolated_process_boundary()` runs the native lint/fix child as an unprivileged UID/GID with a private HOME (`<scratch>/home`, mode 0700). The fixture fonts written under the test's HOME were invisible to that child, so the seam test failed. Two further facts were also hidden:
+  - The root boundary grants the child read access to the whole top-level /tmp workspace holding its input, and rightly refuses any symlink in it. pytest's `tmp_path` always sits below `*current` symlinks. So as actual root, 37 of the 68 tests in this file failed before any font was measured, at c392c3d7 as well as c8d78285.
+  - A third fixture (widen-within-card, `ContainerSans`) seeded only `~/Library/Fonts`, which Linux never searches.
+- What changed (test harness only; 377 assertions unchanged, counted by AST):
+  - f5104a11 (workspace): a module-local, function-scoped `tmp_path` backed by an owned `tempfile.mkdtemp`, with cleanup in a finally block.
+  - 37920518 (fonts, after the workspace commit): a test-scoped wrapper around the real `process_group._private_runtime_env`. It writes only the embedded Pillow `load_default` bytes into the child's private `HOME/.fonts`, with the directory 0700 and the file 0600, both owned by the child. It is used by the seam (CanarySans), canary (CanarySerif-Bold) and widen (ContainerSans) fixtures. The widen fixture also seeds `~/.fonts` for unprivileged Linux runs.
+  - Unchanged: the setpriv/UID boundary, the private HOME, the read-grant symlink policy and the production font loader. No font is written to any host-global directory.
+  - 2b0b3493 and f3ada43a are an unpublished first attempt and its additive revert.
+- What we learned: green Linux CI runs as non-root and does not exercise the root boundary. A fixture font has to be shown to reach the child, because a host fallback font can pass by coincidence. Here the canary passed on LiberationSerif with different repaired sizes, and the widen test passed on LiberationSans with a 3 px wrap margin.
+- Validation (Python 3.12 uv workspace; actual uid 0 with the real setpriv, and no shim):
+  - Before:
+    - The whole file at c392c3d7 and at c8d78285, each under RAQM and under BASIC: 37 failed, 31 passed. All 37 failures are the symlink refusal.
+    - With only the workspace commit, as actual root, the seam test fails exactly as Codex described: the child measures in LiberationSans, applies one grow fix, and `fix_applied_count == 0` fails. The canary and widen tests pass, but on host fallback fonts.
+  - After, at 37920518:
+    - The three font fixtures pass as root and as non-root under both engines.
+    - The in-child witness covers 11 deck child processes as root and 11 as non-root, across both engines. As root, each child has a non-zero UID/GID, no groups or capabilities, `NoNewPrivs=1`, and HOME equal to its private scratch home. Each declared font resolves from that HOME's `.fonts`, with SHA-256 equal to the embedded bytes. As non-root, each font resolves from the test's own `HOME/.fonts`. No host font directory holds a copy (221 files scanned).
+    - With the synthetic fonts the results are identical across RAQM and BASIC, except the canary's mixed-run emphasis: 29.0 pt under RAQM and 29.5 pt under BASIC, both inside the asserted range.
+    - Disabling rollback still fails the seam test, and disabling overflow detection still fails all three, as root and as non-root.
+    - The whole file as root, under RAQM and under BASIC: 1 failed, 63 passed, 4 skipped. The skips are because Chromium is unavailable. The one failure is LibreOffice's "source file could not be loaded" in the render test.
+    - The whole file as non-root (a passwd-less numeric UID): 63 passed, 4 skipped, and the render test failed. In the render test, LibreOffice cannot create a user installation for that UID ("User installation could not be completed"). It also leaves a single-instance socket in /tmp whose name does not include the UID. While that socket remained, later non-root runs blocked in a headless modal dialog until the service's 600 s timeout. A direct soffice reproduction confirmed both behaviours. This is an environment fault, not a font one.
+- CLAUDE.md updates: none; runtime and architecture are unchanged. Skills created: none. GEPA log entry: not applicable; no prompt changed.
