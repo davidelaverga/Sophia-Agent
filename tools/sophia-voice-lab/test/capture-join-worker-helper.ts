@@ -45,6 +45,13 @@ class CaptureFixtureDriver {
     this.next = [];
     return events;
   };
+  /** As the real abort when a run is terminalized: the page closes. */
+  abort = async (run: RunRecord) => {
+    this.live.delete(run.id);
+    return { events: [{ kind: "cleanup.browser_context_closed", source: "worker" as const, payload: { closed: true }, dedupeKey: `cleanup:${run.id}:context` }], artifacts: [] };
+  };
+  /** As one complete Gateway recovery of the terminalized run. */
+  recover = async (binding: { runId: string }) => ({ events: [{ kind: "cleanup.recovery", source: "canonical" as const, payload: { complete: true, live_cleanup_complete: false }, dedupeKey: `recovery:${binding.runId}` }], artifacts: [] });
   cancel = async (runId: string) => { this.live.delete(runId); };
   close = async () => { this.live.clear(); };
 }
