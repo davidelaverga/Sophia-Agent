@@ -5769,47 +5769,63 @@ function captureAppendPlan(boundRun: RunRecord, events: CapturedEvent[]): { inpu
   return { inputs, failure: null };
 }
 
+type CaptureJoinState = { -readonly [K in keyof Required<CaptureJoinPatch>]: Required<CaptureJoinPatch>[K] };
+type CaptureJoinRule = (state: CaptureJoinState, payload: Record<string, unknown>) => void;
+const CAPTURE_JOIN_FIELDS = ["canonicalSessionId", "threadId", "providerSessionId", "traceId", "providerEpoch", "turnId"] as const;
+
+/** `value[key]` when both are objects, else an empty record. */
+function objectField(value: unknown, key: string): Record<string, unknown> {
+  const field = value && typeof value === "object" ? (value as Record<string, unknown>)[key] : undefined;
+  return field && typeof field === "object" ? field as Record<string, unknown> : {};
+}
+
+const CAPTURE_JOIN_RULES: Readonly<Record<string, CaptureJoinRule>> = {
+  "session.credentials_received": (state, payload) => {
+    state.canonicalSessionId = stableJoin("canonical_session_id", state.canonicalSessionId, exactString(payload.sessionId));
+    state.providerSessionId = stableJoin("provider_session_id", state.providerSessionId, exactString(payload.voiceAgentSessionId));
+    state.traceId = stableJoin("trace_id", state.traceId, exactString(payload.langsmithTraceId));
+    state.providerEpoch = monotonicEpoch(state.providerEpoch, exactPositiveProviderEpoch(payload.providerConnectionEpoch));
+  },
+  "provider.connection_epoch": (state, payload) => {
+    const receipt = objectField(payload, "receipt");
+    state.canonicalSessionId = stableJoin("canonical_session_id", state.canonicalSessionId, exactString(payload.sessionId));
+    state.providerSessionId = stableJoin("provider_session_id", state.providerSessionId, exactString(payload.voiceAgentSessionId));
+    state.traceId = stableJoin("trace_id", state.traceId, exactString(receipt.langsmithTraceId));
+    state.providerEpoch = monotonicEpoch(state.providerEpoch, exactPositiveProviderEpoch(receipt.providerConnectionEpoch));
+  },
+  "capture.snapshot": (state, payload) => {
+    const session = objectField(objectField(payload, "snapshot"), "session");
+    state.canonicalSessionId = stableJoin("canonical_session_id", state.canonicalSessionId, exactString(session.sessionId));
+    state.threadId = stableJoin("thread_id", state.threadId, exactString(session.threadId));
+  },
+};
+
+const joinCanonicalFinalization: CaptureJoinRule = (state, payload) => {
+  const transcript = objectField(objectField(payload, "receipt"), "canonical_transcript");
+  state.canonicalSessionId = stableJoin("canonical_session_id", state.canonicalSessionId, exactString(transcript.session_id));
+  state.threadId = stableJoin("thread_id", state.threadId, exactString(transcript.thread_id));
+};
+
+const joinProductTurn: CaptureJoinRule = (state, payload) => {
+  state.turnId = productTurnId(objectField(payload, "data")) ?? state.turnId;
+};
+
+function captureJoinRule(event: CapturedEvent): CaptureJoinRule | null {
+  if (event.source === "canonical" && event.kind === "session.finalized") return joinCanonicalFinalization;
+  if (event.kind.endsWith(".sophia.turn")) return joinProductTurn;
+  return CAPTURE_JOIN_RULES[event.kind] ?? null;
+}
+
 /** The run identifiers `events` join, given the run as it now stands, or null when nothing changes. */
 function captureJoinPatch(run: RunRecord, boundRun: RunRecord, events: CapturedEvent[]): CaptureJoinPatch | null {
-  let canonicalSessionId = run.canonicalSessionId;
-  let threadId = run.threadId;
-  let providerSessionId = run.providerSessionId;
-  let traceId = run.traceId;
-  let providerEpoch = run.providerEpoch;
-  let turnId = run.turnId;
+  const state: CaptureJoinState = { canonicalSessionId: run.canonicalSessionId, threadId: run.threadId, providerSessionId: run.providerSessionId, traceId: run.traceId, providerEpoch: run.providerEpoch, turnId: run.turnId };
   for (const event of events) {
-    const payload = event.payload as Record<string, unknown>;
     // Owning product joins are usable only when the original capture envelope
     // carried the exact app-authored authenticated synthetic binding.
-    if (event.source === "product" && strictProductRunBinding(event.source, payload, boundRun) === null) continue;
-    if (event.kind === "session.credentials_received") {
-      canonicalSessionId = stableJoin("canonical_session_id", canonicalSessionId, exactString(payload.sessionId));
-      providerSessionId = stableJoin("provider_session_id", providerSessionId, exactString(payload.voiceAgentSessionId));
-      traceId = stableJoin("trace_id", traceId, exactString(payload.langsmithTraceId));
-      providerEpoch = monotonicEpoch(providerEpoch, exactPositiveProviderEpoch(payload.providerConnectionEpoch));
-    } else if (event.kind === "provider.connection_epoch") {
-      const receipt = payload.receipt && typeof payload.receipt === "object" ? payload.receipt as Record<string, unknown> : {};
-      canonicalSessionId = stableJoin("canonical_session_id", canonicalSessionId, exactString(payload.sessionId));
-      providerSessionId = stableJoin("provider_session_id", providerSessionId, exactString(payload.voiceAgentSessionId));
-      traceId = stableJoin("trace_id", traceId, exactString(receipt.langsmithTraceId));
-      providerEpoch = monotonicEpoch(providerEpoch, exactPositiveProviderEpoch(receipt.providerConnectionEpoch));
-    } else if (event.kind === "capture.snapshot") {
-      const snapshot = payload.snapshot && typeof payload.snapshot === "object" ? payload.snapshot as Record<string, unknown> : {};
-      const session = snapshot.session && typeof snapshot.session === "object" ? snapshot.session as Record<string, unknown> : {};
-      canonicalSessionId = stableJoin("canonical_session_id", canonicalSessionId, exactString(session.sessionId));
-      threadId = stableJoin("thread_id", threadId, exactString(session.threadId));
-    } else if (event.source === "canonical" && event.kind === "session.finalized") {
-      const receipt = payload.receipt && typeof payload.receipt === "object" ? payload.receipt as Record<string, unknown> : {};
-      const transcript = receipt.canonical_transcript && typeof receipt.canonical_transcript === "object" ? receipt.canonical_transcript as Record<string, unknown> : {};
-      canonicalSessionId = stableJoin("canonical_session_id", canonicalSessionId, exactString(transcript.session_id));
-      threadId = stableJoin("thread_id", threadId, exactString(transcript.thread_id));
-    } else if (event.kind.endsWith(".sophia.turn")) {
-      const data = payload.data && typeof payload.data === "object" ? payload.data as Record<string, unknown> : {};
-      turnId = productTurnId(data) ?? turnId;
-    }
+    if (event.source === "product" && strictProductRunBinding(event.source, event.payload, boundRun) === null) continue;
+    captureJoinRule(event)?.(state, event.payload as Record<string, unknown>);
   }
-  if (canonicalSessionId === run.canonicalSessionId && threadId === run.threadId && providerSessionId === run.providerSessionId && traceId === run.traceId && providerEpoch === run.providerEpoch && turnId === run.turnId) return null;
-  return { canonicalSessionId, threadId, providerSessionId, traceId, providerEpoch, turnId };
+  return CAPTURE_JOIN_FIELDS.some((field) => state[field] !== run[field]) ? state : null;
 }
 
 function governedDriverEventPayload(run: RunRecord, event: { kind: string; source: string; payload: Record<string, unknown> }): Record<string, unknown> {

@@ -56,17 +56,41 @@ const RECOVERY_FETCH_TIMEOUT_MS = 15_000;
  * relative modules it imports (the product's resampler, in revisions that
  * have one), in source order, type-stripped. Any other import fails here.
  */
-async function moduleClosure(file: string, roots: string[]): Promise<string[]> {
+interface ModuleIndex { source: ts.SourceFile; declarations: Map<string, ts.Statement>; imports: Map<string, string> }
+
+function declaredNames(statement: ts.Statement): string[] {
+  if ((ts.isFunctionDeclaration(statement) || ts.isClassDeclaration(statement)) && statement.name) return [statement.name.text];
+  if (!ts.isVariableStatement(statement)) return [];
+  return statement.declarationList.declarations.flatMap((declaration) => ts.isIdentifier(declaration.name) ? [declaration.name.text] : []);
+}
+
+function importedNames(statement: ts.Statement): Array<[string, string]> {
+  if (!ts.isImportDeclaration(statement) || !ts.isStringLiteral(statement.moduleSpecifier)) return [];
+  const bindings = statement.importClause?.namedBindings;
+  if (!bindings || !ts.isNamedImports(bindings)) return [];
+  const specifier = statement.moduleSpecifier.text;
+  return bindings.elements.map((element): [string, string] => [element.name.text, specifier]);
+}
+
+async function indexModule(file: string): Promise<ModuleIndex> {
   const source = ts.createSourceFile(file, await readFile(file, "utf8"), ts.ScriptTarget.ES2022, true);
   const declarations = new Map<string, ts.Statement>();
   const imports = new Map<string, string>();
   for (const statement of source.statements) {
-    if ((ts.isFunctionDeclaration(statement) || ts.isClassDeclaration(statement)) && statement.name) declarations.set(statement.name.text, statement);
-    if (ts.isVariableStatement(statement)) for (const declaration of statement.declarationList.declarations) if (ts.isIdentifier(declaration.name)) declarations.set(declaration.name.text, statement);
-    if (ts.isImportDeclaration(statement) && ts.isStringLiteral(statement.moduleSpecifier) && statement.importClause?.namedBindings && ts.isNamedImports(statement.importClause.namedBindings)) {
-      for (const element of statement.importClause.namedBindings.elements) imports.set(element.name.text, statement.moduleSpecifier.text);
-    }
+    for (const name of declaredNames(statement)) declarations.set(name, statement);
+    for (const [name, specifier] of importedNames(statement)) imports.set(name, specifier);
   }
+  return { source, declarations, imports };
+}
+
+function identifiersIn(node: ts.Node, into = new Set<string>()): Set<string> {
+  if (ts.isIdentifier(node)) into.add(node.text);
+  ts.forEachChild(node, (child) => { identifiersIn(child, into); });
+  return into;
+}
+
+/** The statements `roots` reach inside one module, and the names they need from relative modules it imports. */
+function reach(index: ModuleIndex, roots: string[]): { included: Set<ts.Statement>; imported: Map<string, string[]> } {
   const included = new Set<ts.Statement>();
   const imported = new Map<string, string[]>();
   const seen = new Set<string>();
@@ -75,23 +99,25 @@ async function moduleClosure(file: string, roots: string[]): Promise<string[]> {
     const name = queue.shift()!;
     if (seen.has(name)) continue;
     seen.add(name);
-    const statement = declarations.get(name);
-    if (!statement) {
-      const specifier = imports.get(name);
-      if (specifier !== undefined) {
-        if (!specifier.startsWith("./")) throw new Error(`The microphone pipeline imports ${name} from ${specifier}, which this test cannot inline.`);
-        imported.set(specifier, [...(imported.get(specifier) ?? []), name]);
-      }
-      continue;
+    const statement = index.declarations.get(name);
+    const specifier = index.imports.get(name);
+    if (statement) {
+      included.add(statement);
+      queue.push(...[...identifiersIn(statement)].filter((identifier) => index.declarations.has(identifier) || index.imports.has(identifier)));
+    } else if (specifier !== undefined) {
+      if (!specifier.startsWith("./")) throw new Error(`The microphone pipeline imports ${name} from ${specifier}, which this test cannot inline.`);
+      imported.set(specifier, [...(imported.get(specifier) ?? []), name]);
     }
-    included.add(statement);
-    const identifiers = new Set<string>();
-    (function walk(node: ts.Node) { if (ts.isIdentifier(node)) identifiers.add(node.text); ts.forEachChild(node, walk); })(statement);
-    for (const identifier of identifiers) if (!seen.has(identifier) && (declarations.has(identifier) || imports.has(identifier))) queue.push(identifier);
   }
+  return { included, imported };
+}
+
+async function moduleClosure(file: string, roots: string[]): Promise<string[]> {
+  const index = await indexModule(file);
+  const { included, imported } = reach(index, roots);
   const dependencies: string[] = [];
   for (const [specifier, names] of imported) dependencies.push(...await moduleClosure(path.resolve(path.dirname(file), `${specifier}.ts`), names));
-  return [...dependencies, ...[...included].sort((a, b) => a.pos - b.pos).map((statement) => statement.getText(source).replace(/^export\s+/, ""))];
+  return [...dependencies, ...[...included].sort((a, b) => a.pos - b.pos).map((statement) => statement.getText(index.source).replace(/^export\s+/, ""))];
 }
 
 async function productPipelineScript(): Promise<string> {
@@ -272,7 +298,10 @@ interface CensusCase {
   pendingAfterMs?: number;
 }
 
-async function runCensus(options: CensusCase) {
+const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** One case's real worker, memory ledger, census driver and provider, with its claim and lease-truth recorders. */
+async function censusRig(options: CensusCase) {
   const provider = await providerServer();
   const logLines: string[] = [];
   const logger = pino({ level: "info" }, new Writable({ write(chunk, _encoding, done) { logLines.push(String(chunk)); done(); } }));
@@ -298,7 +327,6 @@ async function runCensus(options: CensusCase) {
     executing.push({ operationId, at: Date.now() });
     return marked;
   };
-
   // Lease truth, every second: the durable lease next to the owner's live page.
   const leaseSamples: Array<{ at: number; epoch: number | null; expiresInMs: number | null; pageAlive: boolean }> = [];
   const sampler = setInterval(() => {
@@ -306,57 +334,76 @@ async function runCensus(options: CensusCase) {
       leaseSamples.push({ at: Date.now(), epoch: lease?.leaseEpoch ?? null, expiresInMs: lease ? lease.expiresAt.getTime() - Date.now() : null, pageAlive: driver.hasSession(run.id) });
     });
   }, 1_000);
+  return { provider, logLines, ledger, run, driver, worker, operation, executing, leaseSamples, sampler };
+}
 
+type CensusRig = Awaited<ReturnType<typeof censusRig>>;
+
+/** Retained recovery becomes due for earlier runs whose Gateway no longer answers. */
+async function seedSilentRetainedRecoveries(rig: CensusRig, count: number): Promise<void> {
+  for (let i = 0; i < count; i += 1) {
+    const retained = testRun({ scenarioId: "V-A01", state: "failed_harness", retentionPurgeDueAt: new Date(0), retentionPurgePending: true, target: { ...rig.run.target, gatewayUrl: hangOrigin } });
+    await rig.ledger.createRunWithOperation(retained, { id: randomUUID(), runId: retained.id, callerId: retained.callerId, type: "start", idempotencyKey: randomUUID(), requestHash: sha256(retained.id), input: {} }, { global: 100, caller: 100 });
+  }
+  await rig.ledger.purgeExpiredRetention(new Date(), 100);
+}
+
+/** Until the input completes and is drained, the run leaves its live states, or 170 s pass (the input is 119.986 s). */
+async function untilInputSettles(rig: CensusRig): Promise<void> {
+  const deadline = Date.now() + 170_000;
+  for (;;) {
+    const state = (await rig.ledger.getRun(rig.run.id))?.state;
+    const completed = await rig.ledger.findLatestEvent(rig.run.id, ["audio.input.completed"]);
+    if (completed || (state && !["ready", "active"].includes(state)) || Date.now() > deadline) return;
+    await wait(500);
+  }
+}
+
+/** Drives one case on the real loop: start, the 120 s speak, the stall and the pending operation, then stops the worker. */
+async function driveCensus(rig: CensusRig, options: CensusCase): Promise<ReturnType<CensusRig["operation"]> | null> {
+  const { ledger, run, driver, worker, operation } = rig;
   const loop = worker.run();
-  let pending: ReturnType<typeof operation> | null = null;
+  let pending: ReturnType<CensusRig["operation"]> | null = null;
   try {
-    for (let i = 0; i < 600 && (await ledger.getRun(run.id))?.state !== "ready"; i += 1) await new Promise((resolve) => setTimeout(resolve, 100));
+    for (let i = 0; i < 600 && (await ledger.getRun(run.id))?.state !== "ready"; i += 1) await wait(100);
     expect((await ledger.getRun(run.id))?.state).toBe("ready");
     await ledger.createOperation(operation("speak", { text: "governed synthetic long utterance", _admission: { duration_ms: 120_000, bytes: 8_000_000 } }));
-    for (let i = 0; i < 600 && driver.calls.every((call) => call.call !== "schedule"); i += 1) await new Promise((resolve) => setTimeout(resolve, 50));
+    for (let i = 0; i < 600 && driver.calls.every((call) => call.call !== "schedule"); i += 1) await wait(50);
     const scheduledAt = Date.now();
     if (options.retainedControls > 0) {
-      // Retained recovery becomes due for earlier runs whose Gateway no longer answers.
-      await new Promise((resolve) => setTimeout(resolve, 2_000));
-      for (let i = 0; i < options.retainedControls; i += 1) {
-        const retained = testRun({ scenarioId: "V-A01", state: "failed_harness", retentionPurgeDueAt: new Date(0), retentionPurgePending: true, target: { ...run.target, gatewayUrl: hangOrigin } });
-        await ledger.createRunWithOperation(retained, { id: randomUUID(), runId: retained.id, callerId: retained.callerId, type: "start", idempotencyKey: randomUUID(), requestHash: sha256(retained.id), input: {} }, { global: 100, caller: 100 });
-      }
-      await ledger.purgeExpiredRetention(new Date(), 100);
+      await wait(2_000);
+      await seedSilentRetainedRecoveries(rig, options.retainedControls);
     }
     if (options.pendingAfterMs !== undefined) {
-      const wait = scheduledAt + options.pendingAfterMs - Date.now();
-      if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
+      await wait(Math.max(0, scheduledAt + options.pendingAfterMs - Date.now()));
       pending = operation("speak", { text: "governed synthetic follow-up", _admission: { duration_ms: 10_000, bytes: 1_000_000 } });
       await ledger.createOperation(pending);
     }
-    // Until the input completes and is drained, the run leaves its live states, or 170 s pass (the input is 119.986 s).
-    const deadline = Date.now() + 170_000;
-    for (;;) {
-      const state = (await ledger.getRun(run.id))?.state;
-      if (await ledger.findLatestEvent(run.id, ["audio.input.completed"])) break;
-      if (state && !["ready", "active"].includes(state)) break;
-      if (Date.now() > deadline) break;
-      await new Promise((resolve) => setTimeout(resolve, 500));
-    }
-    await new Promise((resolve) => setTimeout(resolve, 2_000));
+    await untilInputSettles(rig);
+    await wait(2_000);
   } finally {
-    clearInterval(sampler);
+    clearInterval(rig.sampler);
     worker.stop();
-    await Promise.race([loop.catch(() => undefined), new Promise((resolve) => setTimeout(resolve, 60_000))]);
+    await Promise.race([loop.catch(() => undefined), wait(60_000)]);
   }
+  return pending;
+}
 
+async function runCensus(options: CensusCase) {
+  const rig = await censusRig(options);
+  const pending = await driveCensus(rig, options);
+  const { ledger, run, driver, leaseSamples } = rig;
   const events = (await ledger.listEvents(run.id, 0, 100_000)).events;
   const browserSeqs = events.filter((event) => /^browser:\d+$/.test(event.dedupeKey ?? "")).map((event) => Number(event.dedupeKey!.slice(8))).sort((a, b) => a - b);
   const firstSpeak = (await ledger.listOperations(run.id)).filter((op) => op.type === "speak").sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())[0];
   const forwarded = events.filter((event) => event.kind === "harness.input_frame_forwarded" && event.payload.operation_id === firstSpeak?.id);
-  const frameSeqs = forwarded.map((event) => Number(event.payload.frame_seq)).sort((a, b) => a - b);
-  const censusAudio = events.filter((event) => event.kind === "harness.provider_frame_sent" && event.payload.realtime_input_kind === "audio").length;
   return {
-    ledger, run, driver, provider, logLines, leaseSamples, executing, pending,
+    ...rig, pending,
     finalRun: (await ledger.getRun(run.id))!,
     operations: await ledger.listOperations(run.id),
-    browserSeqs, forwarded, frameSeqs, censusAudio,
+    browserSeqs, forwarded,
+    frameSeqs: forwarded.map((event) => Number(event.payload.frame_seq)).sort((a, b) => a - b),
+    censusAudio: events.filter((event) => event.kind === "harness.provider_frame_sent" && event.payload.realtime_input_kind === "audio").length,
     completed: events.find((event) => event.kind === "audio.input.completed"),
     loss: events.filter((event) => event.kind === "durability.browser_worker_loss_observed"),
     expiredWhileAlive: leaseSamples.filter((sample) => sample.pageAlive && sample.expiresInMs !== null && sample.expiresInMs <= 0),
