@@ -34,7 +34,7 @@ import { P01_ASSISTANT_OBSERVATIONS, P01_OPERATION_OBSERVATIONS, P01_LIMITS, P01
 import { verifyRetainedD02OwnerDeath } from "./retained-owner-verifier.js";
 import {
   STUDIO_G7_OBSERVE_ACTION, StudioG7ActionSchema, StudioG7StartSchema, StudioG7VoiceStepSchema, isStudioRunOnStudioTarget, isStudioTargetKind,
-  refusesLegacyInputTool, studioConfigOf, studioG7Capabilities, studioG7StepId, studioLegacyStartRefusal, studioRunIdentity, studioTargetSpec,
+  refusesLegacyInputTool, studioConfigOf, studioG7Capabilities, studioG7StepId, studioLegacyStartRefusal, studioRunIdentity, studioTargetEnvironment, studioTargetSpec,
   STUDIO_G7_TOOL_NAMES,
 } from "./studio-g7/service-surface.js";
 export { STUDIO_G7_OBSERVE_ACTION, STUDIO_G7_TOOL_NAMES, StudioG7ActionSchema, StudioG7StartSchema, StudioG7VoiceStepSchema, studioTargetSpec } from "./studio-g7/service-surface.js";
@@ -545,12 +545,16 @@ export class VoiceLabService {
     readonly ttsEngine: () => Promise<TtsEngineInfo> = async () => ({ engine: "espeak-ng", expectedVersion: config.ttsExpectedVersion, observedVersion: null, voice: "en-us", rate: "155-wpm", available: false, status: "unavailable" }),
     readonly targetIdentity: () => Promise<Record<string, unknown> & { ok: boolean }> = async () => ({ ok: false, status: "not_probed", builds: null, reason: config.readinessTarget ? "target_probe_not_injected" : "target_configuration_missing" }),
     readonly d02Gateway: D02GatewayClient = new D02GatewayClient(config),
+    /** A Studio G7 deployment's target probe (webTargetProbes: the one /readyz runs); reported by get_capabilities only, never an admission proof. */
+    readonly studioTargetIdentity: () => Promise<Record<string, unknown> & { ok: boolean }> = async () => ({ ok: false, status: "not_probed", reason: "studio_probe_not_injected" }),
   ) {}
 
   async getCapabilities(caller: AuthenticatedCaller, raw: unknown): Promise<LabEnvelope> {
     toolInputSchemas.get_capabilities.parse(raw);
     requireScope(caller, "voice_lab:read");
-    const [fixtures, ttsEngine, targetIdentity, workers] = await Promise.all([this.fixtures(), this.ttsEngine(), this.targetIdentity(), this.ledger.listLiveWorkers(new Date(Date.now() - 10_000))]);
+    // A Studio G7 deployment reports its Studio probe; the legacy target keeps its own probe and shape.
+    const studioTarget = studioConfigOf(this.config);
+    const [fixtures, ttsEngine, targetIdentity, workers] = await Promise.all([this.fixtures(), this.ttsEngine(), studioTarget ? this.studioTargetIdentity() : this.targetIdentity(), this.ledger.listLiveWorkers(new Date(Date.now() - 10_000))]);
     const configuredTarget = this.config.readinessTarget;
     return envelope({ status: "ok", data: {
       tools: toolNamesForTarget(this.config.targetKind),
@@ -560,7 +564,7 @@ export class VoiceLabService {
       registered_app: { technical_id: this.config.registeredAppId ?? { status: "pending_registration" }, plugin_package_sha256: this.config.pluginPackageSha256, platform_install_attestation: "required_for_v_p01_and_not_self_asserted" },
       plugin_contract_version: CONTRACT_VERSION,
       environments: [this.config.environment],
-      target_environment: configuredTarget ? {
+      target_environment: studioTarget ? studioTargetEnvironment(this.config.environment, studioTarget, targetIdentity) : configuredTarget ? {
         environment: this.config.environment,
         frontend_url: configuredTarget.frontendUrl,
         gateway_url: configuredTarget.gatewayUrl,

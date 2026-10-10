@@ -116,6 +116,25 @@ export function studioG7Capabilities(config: Pick<VoiceLabConfig, "targetKind" |
   } };
 }
 
+/**
+ * get_capabilities' `target_environment` on a Studio G7 deployment: its safe
+ * origins and pinned commits only (never the publishable key, the project or
+ * the principal's credentials), and `current_identity` as the Studio probe
+ * reports it (the probe /readyz runs: an unpublished identity stays
+ * `unavailable`, a proven mismatch `deployment_mismatch`).
+ */
+export function studioTargetEnvironment(environment: string, studio: StudioG7Config, currentIdentity: Record<string, unknown>): Record<string, unknown> {
+  return {
+    environment,
+    target_kind: STUDIO_G7_TARGET_KIND,
+    studio_origin: studio.studioOrigin,
+    api_origin: studio.apiOrigin,
+    supabase_origin: studio.supabaseUrl,
+    expected_deployment: { studio: studio.expected.studio, api: studio.expected.api, bridge: studio.expected.bridge },
+    current_identity: currentIdentity,
+  };
+}
+
 /** The identity a Studio G7 run is accepted under: the target, the contract, and its non-secret run binding. */
 export function studioRunIdentity(run: Pick<RunRecord, "testRunId" | "cleanupObligationId" | "scenarioId" | "scenarioVersion">): { targetKind: typeof STUDIO_G7_TARGET_KIND; contractVersion: typeof STUDIO_G7_CONTRACT_VERSION; runBindingSchema: typeof STUDIO_RUN_BINDING_SCHEMA; runBindingSha256: string } {
   return {

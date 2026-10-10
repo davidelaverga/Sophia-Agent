@@ -1,5 +1,5 @@
 import { loadConfig } from "../config.js";
-import { createHttpApp, createWebBootIdentity, listen, probeEffectiveTarget } from "../http-server.js";
+import { createHttpApp, createWebBootIdentity, listen, webTargetProbes } from "../http-server.js";
 import { createAudioResolver, createLedger } from "../runtime.js";
 import { StaticAttestationAuthenticator, StaticBearerAuthenticator } from "../security.js";
 import { CompositeRequestAuthenticator } from "../security.js";
@@ -21,10 +21,10 @@ logWebBootStage("ledger_initialized");
 logWebBootStage("audio_initializing");
 const audio = await createAudioResolver(config);
 logWebBootStage("audio_initialized");
-const service = new VoiceLabService(ledger, config, async () => audio.summaries(), async () => audio.ttsInfo(), async () => {
-  if (!config.readinessTarget) return { ok: false, status: "unconfigured", builds: null, reason: "target_configuration_missing" };
-  return probeEffectiveTarget(config);
-});
+// The legacy probe stays the legacy admission proof; a Studio deployment's
+// get_capabilities reports the Studio probe /readyz runs (webTargetProbes).
+const targetProbes = webTargetProbes(config);
+const service = new VoiceLabService(ledger, config, async () => audio.summaries(), async () => audio.ttsInfo(), targetProbes.legacy, undefined, targetProbes.studio);
 if (!config.oauth || !config.databaseUrl) throw new Error("OAuth and DATABASE_URL are required for the registered production MCP lane.");
 const oauthStore = new PostgresOAuthLedgerStore(config.databaseUrl, 5, config.oauth.admissionRetentionSeconds, config.callerPartitionKeys, config.oauth.operatorSubject);
 const oauth = new OAuthAuthorizationServer({

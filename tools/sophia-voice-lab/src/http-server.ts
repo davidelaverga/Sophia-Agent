@@ -517,6 +517,23 @@ export async function probeTarget(config: VoiceLabConfig): Promise<Record<string
 }
 
 /** Direct product and signed frontend proof used at both admission fences. */
+/**
+ * The web process's target probes, kept apart. `legacy` is the legacy
+ * target's effective probe, unchanged: get_capabilities reports it on a legacy
+ * deployment, and it alone is the legacy admission proof
+ * (assertFreshProductAdmissionProof). `studio` is exactly the probe /readyz
+ * runs for a Studio G7 deployment (probeStudioReadiness: unauthenticated GETs
+ * of the Studio page, the API's /health and /ready and Supabase Auth's health
+ * with its publishable key; no sign-in, no mutation); get_capabilities reports
+ * it on a Studio deployment, and it never reaches the legacy admission proof.
+ */
+export function webTargetProbes(config: VoiceLabConfig): { legacy: () => Promise<Record<string, unknown> & { ok: boolean }>; studio: () => Promise<Record<string, unknown> & { ok: boolean }> } {
+  return {
+    legacy: async () => config.readinessTarget ? probeEffectiveTarget(config) : { ok: false, status: "unconfigured", builds: null, reason: "target_configuration_missing" },
+    studio: async () => config.targetKind === STUDIO_G7_TARGET_KIND && config.studioG7 ? probeStudioReadiness(config, config.studioG7) : { ok: false, status: "unconfigured", reason: "studio_configuration_missing" },
+  };
+}
+
 export async function probeEffectiveTarget(config: VoiceLabConfig): Promise<Record<string, unknown> & { ok: boolean }> {
   const [product, frontend] = await Promise.all([probeTarget(config), probeTestAuth(config)]);
   return {
