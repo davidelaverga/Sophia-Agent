@@ -5,6 +5,8 @@ import json
 import shutil
 import subprocess
 import sys
+import tempfile
+from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -26,6 +28,28 @@ DECK_PATH = (
     PROJECT_ROOT
     / "third_party/hands_on_deck/skills/hands-on-deck/scripts/deck.py"
 )
+
+
+@pytest.fixture
+def tmp_path() -> Iterator[Path]:
+    """Give each test in this module its own plain temporary directory.
+
+    This replaces pytest's ``tmp_path`` for this module only. As root on
+    Linux, the deck service lets the native child read the whole top-level
+    temporary directory that holds its input, and the UID boundary refuses
+    any symlink inside it. pytest's own ``tmp_path`` sits below a base
+    directory that always holds ``*current`` symlinks, so as root every
+    native call would fail before it ran. A ``mkdtemp`` directory has no such
+    links; the real-root preview tests use one for the same reason. The
+    directory is removed after the test, pass or fail. As root, that removal
+    also covers any file the dropped child left behind.
+    """
+
+    path = Path(tempfile.mkdtemp(prefix="deck-native-test-"))
+    try:
+        yield path
+    finally:
+        shutil.rmtree(path)
 
 
 def _html2patch_module():
