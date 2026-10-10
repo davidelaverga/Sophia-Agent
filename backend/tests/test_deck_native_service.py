@@ -2,12 +2,9 @@ from __future__ import annotations
 
 import importlib.util
 import json
-import os
 import shutil
 import subprocess
 import sys
-import tempfile
-from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -17,7 +14,6 @@ from pptx import Presentation
 from pptx.enum.shapes import MSO_CONNECTOR, MSO_SHAPE
 from pptx.util import Inches, Pt
 
-from deerflow.sophia import process_group
 from deerflow.sophia.deck_native import DeckNativeService, native_mechanical_report
 from deerflow.sophia.deck_native import service as native_service_module
 
@@ -1445,63 +1441,12 @@ def test_deck_native_lint_fix_does_not_compose_seam_with_grown_neighbor(
     assert grown.height.inches > 0.33
 
 
-@pytest.fixture
-def deck_input_workspace() -> Iterator[Path]:
-    """Yield a plain top-level temporary directory for a native deck input.
-
-    As root on Linux, the deck service lets the dropped child read the whole
-    top-level /tmp directory that holds its input, and the UID boundary refuses
-    any symlink inside it. pytest's ``tmp_path`` lives below a base directory
-    that always holds ``*current`` symlinks, so a root run cannot use it. The
-    real-root preview tests use ``mkdtemp`` for the same reason. The directory
-    is removed even when the test fails, including any file the child created.
-    """
-
-    workspace = Path(tempfile.mkdtemp(prefix="deck-native-fixture-"))
-    try:
-        yield workspace
-    finally:
-        shutil.rmtree(workspace)
-
-
-def _install_font_in_root_child_home(monkeypatch, file_name: str, font_bytes: bytes) -> None:
-    """Install the embedded test font in the private HOME of a root Linux child.
-
-    Unprivileged runs (CI, macOS) give the native child the HOME this test
-    sets. As root on Linux, ``isolated_process_boundary`` gives the child a
-    new private HOME owned by its dropped UID/GID instead. This wraps the real
-    ``_private_runtime_env`` and writes only these font bytes into that HOME's
-    ``.fonts``, the Linux user font directory the deck searches. The font is
-    owned by the child, with private modes. The boundary deletes it with the
-    rest of its scratch tree.
-    """
-
-    real_private_runtime_env = process_group._private_runtime_env
-
-    def private_runtime_env_with_fixture_font(base, scratch: Path, *, uid: int, gid: int) -> dict[str, str]:
-        env = real_private_runtime_env(base, scratch, uid=uid, gid=gid)
-        font_dir = Path(env["HOME"]) / ".fonts"
-        font_dir.mkdir(mode=0o700)
-        os.chown(font_dir, uid, gid, follow_symlinks=False)
-        os.chmod(font_dir, 0o700, follow_symlinks=False)
-        descriptor = os.open(font_dir / file_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-        with os.fdopen(descriptor, "wb") as stream:
-            os.fchown(stream.fileno(), uid, gid)
-            os.fchmod(stream.fileno(), 0o600)
-            stream.write(font_bytes)
-        return env
-
-    monkeypatch.setattr(process_group, "_private_runtime_env", private_runtime_env_with_fixture_font)
-
-
 def test_deck_native_lint_fix_rolls_back_seam_that_would_wrap_text(
     tmp_path: Path,
     monkeypatch,
-    deck_input_workspace: Path,
 ) -> None:
     # Give both macOS and Linux subprocesses the same font bytes, as the canary
-    # test does, so the neighbor is measured in CanarySans on every host. As
-    # root on Linux, the child's private HOME gets the same bytes.
+    # test does, so the neighbor is measured in CanarySans on every host.
     home = tmp_path / "home"
     embedded_font = ImageFont.load_default(size=12).path
     assert hasattr(embedded_font, "getvalue")
@@ -1510,9 +1455,8 @@ def test_deck_native_lint_fix_rolls_back_seam_that_would_wrap_text(
         font_dir.mkdir(parents=True, exist_ok=True)
         (font_dir / "CanarySans.ttf").write_bytes(embedded_font.getvalue())
     monkeypatch.setenv("HOME", str(home))
-    _install_font_in_root_child_home(monkeypatch, "CanarySans.ttf", embedded_font.getvalue())
 
-    output = deck_input_workspace / "wrapping-seam.pptx"
+    output = tmp_path / "wrapping-seam.pptx"
     presentation = Presentation()
     presentation.slide_width = Inches(20)
     presentation.slide_height = Inches(11.25)
@@ -2708,13 +2652,11 @@ def test_deck_native_lint_fix_keeps_larger_vector_bleed_as_residue(
 def test_deck_native_lint_fix_repairs_canary_headline_and_kpi_overflow(
     tmp_path: Path,
     monkeypatch,
-    deck_input_workspace: Path,
 ) -> None:
     """Exercise the production lint/fix subprocess with the failed canary geometry."""
 
     # Give both macOS and Linux subprocesses the same font bytes so this
     # regression tests geometry rather than whichever fonts the host installs.
-    # As root on Linux, the child's private HOME gets the same bytes.
     home = tmp_path / "home"
     embedded_font = ImageFont.load_default(size=12).path
     assert hasattr(embedded_font, "getvalue")
@@ -2723,9 +2665,8 @@ def test_deck_native_lint_fix_repairs_canary_headline_and_kpi_overflow(
         font_dir.mkdir(parents=True, exist_ok=True)
         (font_dir / "CanarySerif-Bold.ttf").write_bytes(embedded_font.getvalue())
     monkeypatch.setenv("HOME", str(home))
-    _install_font_in_root_child_home(monkeypatch, "CanarySerif-Bold.ttf", embedded_font.getvalue())
 
-    output = deck_input_workspace / "canary-overflow.pptx"
+    output = tmp_path / "canary-overflow.pptx"
     presentation = Presentation()
     presentation.slide_width = Inches(20)
     presentation.slide_height = Inches(11.25)
