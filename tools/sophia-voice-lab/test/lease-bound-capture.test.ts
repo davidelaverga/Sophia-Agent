@@ -10,6 +10,7 @@ import { MemoryVoiceLabLedger } from "../src/memory-ledger.js";
 import { PostgresVoiceLabLedger } from "../src/postgres-ledger.js";
 import { sha256 } from "../src/security.js";
 import { composeServiceFenceV2Migration } from "../src/service-fence-migration.js";
+import { captureJoinWorkerContract } from "./capture-join-worker-helper.js";
 import { completeExecutionCleanupFixture } from "./execution-cleanup-fixture.js";
 import { testRun } from "./helpers.js";
 
@@ -157,6 +158,8 @@ describe("lease-bound capture: memory store", () => {
     expect(await sideEffects(ledger, run.id)).toEqual({ cursor: before.cursor + 2, version: before.version + 1, threadId: "thread-racing", captured: 2 });
   });
 
+  describe("worker-level capture joins (root's P3)", () => captureJoinWorkerContract(() => new MemoryVoiceLabLedger("test")));
+
   it("refuses whole when the release is issued right before the append", async () => {
     const ledger = new MemoryVoiceLabLedger("test");
     const { run, lease } = await liveRun(ledger);
@@ -193,6 +196,8 @@ postgres("lease-bound capture: real PostgreSQL", () => {
     try { await ledger.pool.query("drop schema if exists sophia_voice_lab cascade"); } finally { await ledger.close(); }
   });
 
+  // First, while no other run's start operation is queued in this database: the worker claims the oldest one.
+  describe("worker-level capture joins (root's P3)", () => captureJoinWorkerContract(() => ledger));
   contract(() => ledger, (ms) => new Promise((resolve) => setTimeout(resolve, ms)));
 
   /** Waits until a backend running `fragment` waits on a lock. */

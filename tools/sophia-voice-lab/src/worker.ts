@@ -5780,26 +5780,32 @@ function objectField(value: unknown, key: string): Record<string, unknown> {
   return field && typeof field === "object" ? field as Record<string, unknown> : {};
 }
 
-const CAPTURE_JOIN_RULES: Readonly<Record<string, CaptureJoinRule>> = {
-  "session.credentials_received": (state, payload) => {
+/**
+ * The join rules keyed by captured event kind. The kind comes from the
+ * browser, so the table is a Map: a kind that is no rule, including a member
+ * of Object.prototype such as `__proto__`, `constructor` or `toString`,
+ * finds nothing and the event is ignored by the joins.
+ */
+const CAPTURE_JOIN_RULES: ReadonlyMap<string, CaptureJoinRule> = new Map<string, CaptureJoinRule>([
+  ["session.credentials_received", (state, payload) => {
     state.canonicalSessionId = stableJoin("canonical_session_id", state.canonicalSessionId, exactString(payload.sessionId));
     state.providerSessionId = stableJoin("provider_session_id", state.providerSessionId, exactString(payload.voiceAgentSessionId));
     state.traceId = stableJoin("trace_id", state.traceId, exactString(payload.langsmithTraceId));
     state.providerEpoch = monotonicEpoch(state.providerEpoch, exactPositiveProviderEpoch(payload.providerConnectionEpoch));
-  },
-  "provider.connection_epoch": (state, payload) => {
+  }],
+  ["provider.connection_epoch", (state, payload) => {
     const receipt = objectField(payload, "receipt");
     state.canonicalSessionId = stableJoin("canonical_session_id", state.canonicalSessionId, exactString(payload.sessionId));
     state.providerSessionId = stableJoin("provider_session_id", state.providerSessionId, exactString(payload.voiceAgentSessionId));
     state.traceId = stableJoin("trace_id", state.traceId, exactString(receipt.langsmithTraceId));
     state.providerEpoch = monotonicEpoch(state.providerEpoch, exactPositiveProviderEpoch(receipt.providerConnectionEpoch));
-  },
-  "capture.snapshot": (state, payload) => {
+  }],
+  ["capture.snapshot", (state, payload) => {
     const session = objectField(objectField(payload, "snapshot"), "session");
     state.canonicalSessionId = stableJoin("canonical_session_id", state.canonicalSessionId, exactString(session.sessionId));
     state.threadId = stableJoin("thread_id", state.threadId, exactString(session.threadId));
-  },
-};
+  }],
+]);
 
 const joinCanonicalFinalization: CaptureJoinRule = (state, payload) => {
   const transcript = objectField(objectField(payload, "receipt"), "canonical_transcript");
@@ -5814,7 +5820,7 @@ const joinProductTurn: CaptureJoinRule = (state, payload) => {
 function captureJoinRule(event: CapturedEvent): CaptureJoinRule | null {
   if (event.source === "canonical" && event.kind === "session.finalized") return joinCanonicalFinalization;
   if (event.kind.endsWith(".sophia.turn")) return joinProductTurn;
-  return CAPTURE_JOIN_RULES[event.kind] ?? null;
+  return CAPTURE_JOIN_RULES.get(event.kind) ?? null;
 }
 
 /** The run identifiers `events` join, given the run as it now stands, or null when nothing changes. */
