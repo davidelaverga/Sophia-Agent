@@ -216,13 +216,6 @@ describe("ActiveLeasePulse", () => {
     expect(seen.length).toBeGreaterThanOrEqual(6);
     expect(seen.filter((store) => store !== undefined)).toEqual([]);
   });
-    pulse.enable();
-    operationContext.run("claimed-operation", () => pulse.start("run-a", 1));
-    await vi.advanceTimersByTimeAsync(3_000);
-    expect(seen.length).toBeGreaterThanOrEqual(6);
-    expect(seen.every((store) => store === undefined)).toBe(true);
-    pulse.stopAll();
-  });
 });
 
 describe("RunSerializer", () => {
