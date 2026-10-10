@@ -199,14 +199,23 @@ describe("ActiveLeasePulse", () => {
     h.pulse.stopAll();
   });
 
-  it("runs every timer in the pulse's own async scope, never in the context that activated the lease", async () => {
+  it("runs every timer in the pulse's own async scope, never in the context that activated the lease (real timers: fake timers carry no async context)", async () => {
+    vi.useRealTimers();
     const operationContext = new AsyncLocalStorage<string>();
     const seen: Array<string | undefined> = [];
-    const pulse = new ActiveLeasePulse(1_000, {
+    const pulse = new ActiveLeasePulse(5, {
       renew: async () => { seen.push(operationContext.getStore()); return "continue"; },
       drain: async () => { seen.push(operationContext.getStore()); return "continue"; },
       onError: () => undefined,
     });
+    pulse.enable();
+    operationContext.run("claimed-operation", () => pulse.start("run-a", 1));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    pulse.stopAll();
+    await pulse.settle();
+    expect(seen.length).toBeGreaterThanOrEqual(6);
+    expect(seen.filter((store) => store !== undefined)).toEqual([]);
+  });
     pulse.enable();
     operationContext.run("claimed-operation", () => pulse.start("run-a", 1));
     await vi.advanceTimersByTimeAsync(3_000);
