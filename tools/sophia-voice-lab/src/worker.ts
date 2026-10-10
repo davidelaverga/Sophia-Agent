@@ -731,12 +731,14 @@ export class VoiceLabWorker {
 
   /**
    * Persists events read under this lease epoch only while that epoch still
-   * owns the run (#151): the ledger writes the batch, its cursor advance and
-   * its joins atomically, under the run and lease row locks, and only if this
-   * exact worker and epoch hold the unexpired lease at commit. A read that
-   * outlived its lease, or whose lease was released or replaced meanwhile,
-   * writes nothing. Returns false, having written nothing, when the epoch no
-   * longer owns the run; that is recorded as the lease's loss.
+   * owns the run (#151). The ledger enforces the exact worker and epoch, and
+   * an unexpired lease, at the write's linearization point: the lease row of
+   * that worker and epoch, locked in the same transaction (in memory, the
+   * same synchronous step) as the capture insert, its cursor advance and its
+   * joins, with its expiry compared to the store's clock there. A read that
+   * outlived its lease, or whose lease was released or fenced before that
+   * point, writes nothing: this returns false, recorded as the lease's loss.
+   * A join derivation that fails is thrown after the batch is durable.
    */
   async #persistLeaseBoundEvents(runId: string, lease: ActiveLease, events: CapturedEvent[]): Promise<boolean> {
     if (lease.refused || this.#activeLeases.get(runId) !== lease) return false;

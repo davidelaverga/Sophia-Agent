@@ -626,15 +626,20 @@ export class PostgresVoiceLabLedger implements VoiceLabLedger {
 
   async appendLeaseBoundEvents(runId: string, lease: CaptureLease, inputs: EventAppendInput[], deriveJoins?: (run: RunRecord) => CaptureJoinPatch | null): Promise<LeaseBoundAppendResult> {
     const client = await this.pool.connect();
+    let written: LeaseBoundAppendResult | null = null;
+    let joinFailure: unknown = null;
     try {
       await client.query("begin");
+      // Lock order run -> control -> lease, as allocation, settlement and the
+      // retention purge take them: never the lease before the control row.
       const locked = await client.query(`select * from ${SCHEMA}.runs where id=$1 for update`, [runId]);
       if (!locked.rows[0]) throw notFound("RUN_NOT_FOUND", "Run was not found.");
+      await client.query(`select 1 from ${SCHEMA}.recovery_controls where run_id=$1 for no key update`, [runId]);
       // The linearization point of a lease-bound capture write: the lease row
       // of this exact worker and epoch, locked FOR SHARE in this transaction
-      // (after the run row, before any capture write), with its expiry
-      // compared to the database clock here. A release, fence, renewal or
-      // takeover of that row serializes against it: before this point the
+      // (after the run and control rows, before any capture write), with its
+      // expiry compared to the database clock here. A release, fence, renewal
+      // or takeover of that row serializes against it: before this point the
       // write refuses everything; after it, the lease change waits for this
       // transaction to end.
       const owned = await client.query(
@@ -645,6 +650,13 @@ export class PostgresVoiceLabLedger implements VoiceLabLedger {
         await client.query("rollback");
         return { committed: false };
       }
+      // The joins are derived once, on the run as locked, before any write. A
+      // derivation that fails (a join conflict, a provider-epoch regression)
+      // keeps the batch and its cursor durable as evidence: only the joins are
+      // not applied, and the failure is thrown once the batch committed.
+      let joins: CaptureJoinPatch | null = null;
+      try { joins = deriveJoins?.(mapRun(locked.rows[0])) ?? null; }
+      catch (error) { joinFailure = error; }
       const keys = inputs.flatMap((input) => input.dedupeKey === undefined ? [] : [input.dedupeKey]);
       const durable = keys.length === 0 ? [] : (await client.query(`select * from ${SCHEMA}.run_events where run_id=$1 and dedupe_key=any($2::text[])`, [runId, keys])).rows.map(mapEvent);
       const pending = pendingCaptureInputs(inputs, new Map(durable.map((event): [string, LabEvent] => [String(event.dedupeKey), event])));
@@ -660,7 +672,6 @@ export class PostgresVoiceLabLedger implements VoiceLabLedger {
         );
         await client.query(`update ${SCHEMA}.runs set latest_cursor=$2,updated_at=now() where id=$1`, [runId, baseCursor + pending.length]);
       }
-      const joins = deriveJoins?.(mapRun(locked.rows[0])) ?? null;
       if (joins) {
         const run = { ...mapRun(locked.rows[0]), ...joins };
         const joined = await client.query(
@@ -673,9 +684,11 @@ export class PostgresVoiceLabLedger implements VoiceLabLedger {
         if (!joined.rows[0]) throw conflict("RUN_VERSION_CONFLICT", "Run changed concurrently.");
       }
       await client.query("commit");
-      return { committed: true, appended: pending.length };
+      written = { committed: true, appended: pending.length };
     } catch (error) { await client.query("rollback"); throw translatePgError(error); }
     finally { client.release(); }
+    if (joinFailure !== null) throw joinFailure;
+    return written;
   }
 
   async listEvents(runId: string, after: number, limit: number): Promise<EventPage> {

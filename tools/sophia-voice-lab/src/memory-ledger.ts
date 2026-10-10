@@ -631,6 +631,13 @@ export class MemoryVoiceLabLedger implements VoiceLabLedger {
     // expiry check of another call interleaves with the batch.
     const owned = this.#browserLeases.get(runId);
     if (!owned || owned.workerId !== lease.workerId || owned.leaseEpoch !== lease.leaseEpoch || owned.expiresAt <= new Date()) return { committed: false };
+    // The joins are derived once, on the run as it stands, before any write; a
+    // failed derivation keeps the batch and its cursor as evidence and is
+    // thrown after it, with no join applied (the PostgreSQL store does the same).
+    let joins: CaptureJoinPatch | null = null;
+    let joinFailure: unknown = null;
+    try { joins = deriveJoins?.(clone(run)) ?? null; }
+    catch (error) { joinFailure = error; }
     const events = this.#events.get(runId) ?? [];
     const pending = pendingCaptureInputs(inputs, new Map(events.flatMap((event): Array<[string, LabEvent]> => event.dedupeKey === null ? [] : [[event.dedupeKey, event]])));
     for (const input of pending) {
@@ -642,12 +649,12 @@ export class MemoryVoiceLabLedger implements VoiceLabLedger {
       run.latestCursor = latest.seq;
       run.updatedAt = latest.at;
     }
-    const joins = deriveJoins?.(clone(run)) ?? null;
     if (joins) {
       this.#runs.set(runId, { ...run, ...joins, version: run.version + 1, updatedAt: new Date() });
       const control = this.#recoveryControls.get(runId)!;
       this.#recoveryControls.set(runId, clone({ ...control, version: control.version + 1 }));
     }
+    if (joinFailure !== null) throw joinFailure;
     return { committed: true, appended: pending.length };
   }
 
