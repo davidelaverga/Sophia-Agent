@@ -10,6 +10,7 @@ import { MemoryVoiceLabLedger } from "../src/memory-ledger.js";
 import { PostgresVoiceLabLedger } from "../src/postgres-ledger.js";
 import { sha256 } from "../src/security.js";
 import { composeServiceFenceV2Migration } from "../src/service-fence-migration.js";
+import { completeExecutionCleanupFixture } from "./execution-cleanup-fixture.js";
 import { testRun } from "./helpers.js";
 
 /**
@@ -232,10 +233,13 @@ postgres("lease-bound capture: real PostgreSQL", () => {
   }
 
   const leaseExpired = async (runId: string): Promise<boolean> => (await admin.query("select expires_at <= clock_timestamp() as expired from sophia_voice_lab.browser_leases where run_id=$1", [runId])).rows[0].expired;
-  type Settled = { waitedMs: number; result?: unknown; harnessError?: string };
+  /** A domain refusal settles as `rejected: <code>`; any other error (a lock or statement timeout, SQL, setup) as `harnessError`. */
+  type Settled = { waitedMs: number; result?: unknown; rejected?: string; harnessError?: string };
   const settled = (work: Promise<unknown>): Promise<Settled> => {
     const started = Date.now();
-    return work.then((result) => ({ result, waitedMs: Date.now() - started }), (error: unknown) => ({ harnessError: (error as { code?: string }).code ?? String(error), waitedMs: Date.now() - started }));
+    return work.then((result) => ({ result, waitedMs: Date.now() - started }), (error: unknown) => error instanceof VoiceLabError
+      ? { rejected: error.detail.code, waitedMs: Date.now() - started }
+      : { harnessError: (error as { code?: string }).code ?? String(error), waitedMs: Date.now() - started });
   };
 
   it("root's P2: another session holds the exact lease row FOR UPDATE and leaves it unchanged while the append waits on it; the lease expires during that wait; the append refuses whole", async () => {
@@ -260,6 +264,144 @@ postgres("lease-bound capture: real PostgreSQL", () => {
     expect({ outcome: settledAs, effects: await sideEffects(ledger, run.id) }).toEqual({ outcome: { result: { committed: false } }, effects: before });
     expect(waitedMs).toBeLessThan(2_000);
     expect(await ledger.getBrowserLease(run.id), "the holder left the lease row unchanged").toEqual(leaseBefore);
+  });
+
+  /**
+   * Root's unchanged-tuple shape, for any statement that waits on the run's
+   * lease row: another session holds the row FOR UPDATE and leaves it
+   * unchanged; the ledger backend's Lock wait behind that session is read from
+   * pg_stat_activity; the 1 s lease expires during a 1.3 s wait (verified on
+   * the database clock); the holder rolls back. Returns how the work settled.
+   */
+  async function behindLockOnlyHolder(label: string, runId: string, fragment: string, work: () => Promise<unknown>): Promise<Settled> {
+    const holder = await lockOnlyLeaseHolder(runId);
+    try {
+      const running = settled(work());
+      const wait = await lockWaitBehind(holder.pid, fragment);
+      console.info(`${label}: ledger backend wait_event_type=${wait.wait_event_type} wait_event=${wait.wait_event} blocked_by_holder=${wait.blocked_by_holder}`);
+      expect(wait).toMatchObject({ wait_event_type: "Lock", blocked_by_holder: true });
+      await new Promise((resolve) => setTimeout(resolve, 1_300));
+      expect(await leaseExpired(runId)).toBe(true);
+      await holder.session.query("rollback");
+      const outcome = await running;
+      console.info(`${label}: outcome ${JSON.stringify(outcome)} (ledger lock_timeout 2000 ms)`);
+      return outcome;
+    } finally { await holder.session.end(); }
+  }
+
+  /** A run whose 1 s lease is preceded by the receipts preserveExecutionOwnership derives the owner from. */
+  async function ownedRun(leaseSeconds: number) {
+    const { run, lease } = await liveRun(ledger, leaseSeconds);
+    for (const event of completeExecutionCleanupFixture(run, WORKER, lease.leaseEpoch).slice(0, 2)) await ledger.appendEvent(run.id, event.kind, event.source, event.payload);
+    return { run, lease };
+  }
+
+  const LEASE_KEY = "sophia_voice_lab.browser_leases%where run_id=$1 and worker_id=$2 and lease_epoch=$3";
+  const RUN_LEASE_LOCK = "sophia_voice_lab.browser_leases where run_id=$1 for update";
+
+  it("heartbeatBrowserLease (predates 1c183ee6): another session holds the exact lease row FOR UPDATE and leaves it unchanged while the renewal waits on it; the lease expires during that wait; the renewal refuses and the lease is not revived", async () => {
+    const { run, lease } = await liveRun(ledger, 1);
+    const leaseBefore = await ledger.getBrowserLease(run.id);
+    const { waitedMs, ...outcome } = await behindLockOnlyHolder("heartbeat", run.id, LEASE_KEY, () => ledger.heartbeatBrowserLease(run.id, WORKER, lease.leaseEpoch, 30));
+    expect({ outcome, lease: await ledger.getBrowserLease(run.id) }).toEqual({ outcome: { result: false }, lease: leaseBefore });
+    expect(waitedMs).toBeLessThan(2_000);
+    expect(await leaseExpired(run.id), "the lease is not revived").toBe(true);
+    // A refused renewal stays refused: the expired lease is never renewed by a later call either.
+    await expect(ledger.heartbeatBrowserLease(run.id, WORKER, lease.leaseEpoch, 30)).resolves.toBe(false);
+    expect(await ledger.getBrowserLease(run.id)).toEqual(leaseBefore);
+  });
+
+  it("heartbeatBrowserLease (predates 1c183ee6): behind a lease-bound capture write that holds the lease row FOR SHARE and commits it unchanged, a renewal that waited past the lease's expiry refuses", async () => {
+    const { run, lease } = await liveRun(ledger, 1);
+    const leaseBefore = await ledger.getBrowserLease(run.id);
+    // A test-only trigger on this dedicated database pauses the capture insert, which runs after the append's lease check, while it holds the lease row FOR SHARE.
+    await admin.query(`create or replace function sophia_voice_lab.capture_test_hold() returns trigger language plpgsql as $$
+      begin if new.payload->>'hold' = 'true' then perform pg_sleep(1.5); end if; return new; end $$`);
+    await admin.query("create trigger capture_test_hold before insert on sophia_voice_lab.run_events for each row execute function sophia_voice_lab.capture_test_hold()");
+    let outcome: Settled = { waitedMs: -1, harnessError: "not settled" };
+    try {
+      const batch = capture("share-holder", 1).map((input) => ({ ...input, payload: { ...input.payload, hold: true } }));
+      const appending = ledger.appendLeaseBoundEvents(run.id, { workerId: WORKER, leaseEpoch: lease.leaseEpoch }, batch);
+      let appendPid: number | undefined;
+      for (let attempt = 0; attempt < 100 && appendPid === undefined; attempt += 1) {
+        appendPid = (await admin.query("select pid from pg_stat_activity where application_name='sophia-voice-lab' and wait_event='PgSleep'")).rows[0]?.pid;
+        if (appendPid === undefined) await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      if (appendPid === undefined) throw new Error("the capture write never reached its held insert");
+      const renewing = settled(ledger.heartbeatBrowserLease(run.id, WORKER, lease.leaseEpoch, 30));
+      const wait = await lockWaitBehind(appendPid, LEASE_KEY);
+      console.info(`heartbeat behind FOR SHARE: ledger backend wait_event_type=${wait.wait_event_type} wait_event=${wait.wait_event} blocked_by_append=${wait.blocked_by_holder}`);
+      expect(wait).toMatchObject({ wait_event_type: "Lock", blocked_by_holder: true });
+      for (let attempt = 0; attempt < 70 && !await leaseExpired(run.id); attempt += 1) await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(await leaseExpired(run.id), "the lease expired while the capture write still held it FOR SHARE").toBe(true);
+      await expect(appending).resolves.toEqual({ committed: true, appended: 1 });
+      outcome = await renewing;
+      console.info(`heartbeat behind FOR SHARE: outcome ${JSON.stringify(outcome)} (ledger lock_timeout 2000 ms)`);
+    } finally {
+      await admin.query("drop trigger if exists capture_test_hold on sophia_voice_lab.run_events");
+      await admin.query("drop function if exists sophia_voice_lab.capture_test_hold()");
+    }
+    const { waitedMs, ...settledAs } = outcome;
+    expect({ outcome: settledAs, lease: await ledger.getBrowserLease(run.id) }).toEqual({ outcome: { result: false }, lease: leaseBefore });
+    expect(waitedMs).toBeLessThan(2_000);
+  });
+
+  it("heartbeatBrowserLease control: behind the same lock-only holder, a live lease is renewed once the holder rolls back", async () => {
+    const { run, lease } = await liveRun(ledger, 30);
+    const leaseBefore = (await ledger.getBrowserLease(run.id))!;
+    const holder = await lockOnlyLeaseHolder(run.id);
+    try {
+      const renewing = settled(ledger.heartbeatBrowserLease(run.id, WORKER, lease.leaseEpoch, 60));
+      expect(await lockWaitBehind(holder.pid, LEASE_KEY)).toMatchObject({ wait_event_type: "Lock", blocked_by_holder: true });
+      await holder.session.query("rollback");
+      expect(await renewing).toMatchObject({ result: true });
+    } finally { await holder.session.end(); }
+    expect((await ledger.getBrowserLease(run.id))!.expiresAt.getTime()).toBeGreaterThan(leaseBefore.expiresAt.getTime() + 20_000);
+  });
+
+  it("preserveExecutionOwnership (predates 1c183ee6): another session holds the lease row FOR UPDATE and leaves it unchanged while the preservation waits on it; the lease expires during that wait; it refuses and preserves nothing", async () => {
+    const { run } = await ownedRun(1);
+    const controlBefore = await ledger.getRecoveryControl(run.id);
+    const { waitedMs, ...outcome } = await behindLockOnlyHolder("preserve ownership", run.id, RUN_LEASE_LOCK, () => ledger.preserveRecoveryExecutionOwnership(run.id));
+    expect({ outcome, control: await ledger.getRecoveryControl(run.id) }).toEqual({ outcome: { rejected: "RECOVERY_LEASE_MISMATCH" }, control: controlBefore });
+    expect(waitedMs).toBeLessThan(2_000);
+  });
+
+  it("preserveExecutionOwnership control: behind the same lock-only holder, a live lease's ownership is preserved once the holder rolls back", async () => {
+    const { run, lease } = await ownedRun(30);
+    const holder = await lockOnlyLeaseHolder(run.id);
+    try {
+      const preserving = settled(ledger.preserveRecoveryExecutionOwnership(run.id));
+      expect(await lockWaitBehind(holder.pid, RUN_LEASE_LOCK)).toMatchObject({ wait_event_type: "Lock", blocked_by_holder: true });
+      await holder.session.query("rollback");
+      expect(await preserving).toMatchObject({ result: { executionOwnership: { workerIdSha256: sha256(WORKER), browserLeaseEpoch: lease.leaseEpoch } } });
+    } finally { await holder.session.end(); }
+  });
+
+  /**
+   * The other interleaving, as its own case (not part of the fix): the holder
+   * UPDATES the lease row (expires it) and commits. PostgreSQL re-evaluates a
+   * waiting statement's WHERE and output columns against the updated row, so
+   * the waiter refuses before and after the fix alike.
+   */
+  it.each([
+    ["the capture append", RUN_LEASE_LOCK.replace(" for update", ""), async (runId: string, epoch: number) => ledger.appendLeaseBoundEvents(runId, { workerId: WORKER, leaseEpoch: epoch }, capture("updated-row"), joinThread("thread-updated-row")), { result: { committed: false } }],
+    ["the renewal", LEASE_KEY, async (runId: string, epoch: number) => ledger.heartbeatBrowserLease(runId, WORKER, epoch, 30), { result: false }],
+    ["the ownership preservation", RUN_LEASE_LOCK, async (runId: string) => ledger.preserveRecoveryExecutionOwnership(runId), { rejected: "RECOVERY_LEASE_MISMATCH" }],
+  ] as const)("updated row, its own case: the holder expires the lease row and commits while %s waits on it; the waiter refuses", async (_label, fragment, work, expected) => {
+    const { run, lease } = await ownedRun(30);
+    const holder = await holding("update sophia_voice_lab.browser_leases set expires_at=clock_timestamp()-interval '1 second' where run_id=$1", [run.id]);
+    const holderPid = (await holder.query<{ pid: number }>("select pg_backend_pid() as pid")).rows[0]!.pid;
+    let outcome: Settled = { waitedMs: -1, harnessError: "not settled" };
+    try {
+      const running = settled(work(run.id, lease.leaseEpoch));
+      expect(await lockWaitBehind(holderPid, fragment)).toMatchObject({ wait_event_type: "Lock", blocked_by_holder: true });
+      await holder.query("commit");
+      outcome = await running;
+    } finally { await holder.end(); }
+    const { waitedMs: _waited, ...settledAs } = outcome;
+    expect(settledAs).toEqual(expected);
+    expect(await leaseExpired(run.id)).toBe(true);
   });
 
   it("in flight, before the linearization point: the lease is released while the append waits for the run row; it then refuses whole", async () => {

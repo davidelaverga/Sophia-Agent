@@ -898,8 +898,24 @@ export class PostgresVoiceLabLedger implements VoiceLabLedger {
   }
 
   async heartbeatBrowserLease(runId: string, workerId: string, leaseEpoch: number, leaseSeconds: number): Promise<boolean> {
-    const result = await this.pool.query(`update ${SCHEMA}.browser_leases set expires_at=clock_timestamp()+make_interval(secs=>$4),updated_at=clock_timestamp() where run_id=$1 and worker_id=$2 and lease_epoch=$3 and expires_at>clock_timestamp()`, [runId, workerId, leaseEpoch, leaseSeconds]);
-    return (result.rowCount ?? 0) === 1;
+    // Lock the exact lease row first, then check its expiry under the held
+    // lock on a fresh clock, and renew only a live lease. An expiry predicate
+    // in the renewing UPDATE itself is evaluated before the UPDATE waits behind
+    // a holder that only locks the row (a lease-bound capture write's FOR
+    // SHARE, a recovery read FOR UPDATE), and would renew a lease that expired
+    // during that wait.
+    const client = await this.pool.connect();
+    try {
+      await client.query("begin");
+      if (!await exactBrowserLeaseLiveUnderLock(client, "for no key update", runId, workerId, leaseEpoch)) {
+        await client.query("rollback");
+        return false;
+      }
+      const result = await client.query(`update ${SCHEMA}.browser_leases set expires_at=clock_timestamp()+make_interval(secs=>$4),updated_at=clock_timestamp() where run_id=$1 and worker_id=$2 and lease_epoch=$3`, [runId, workerId, leaseEpoch, leaseSeconds]);
+      await client.query("commit");
+      return (result.rowCount ?? 0) === 1;
+    } catch (error) { await client.query("rollback").catch(() => undefined); throw error; }
+    finally { client.release(); }
   }
 
   async releaseBrowserLease(runId: string, workerId: string, leaseEpoch: number): Promise<boolean> {
