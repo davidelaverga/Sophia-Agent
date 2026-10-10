@@ -27,7 +27,8 @@ import {
   type SuiteRecord,
   type SuiteEvidenceRecord,
 } from "./domain.js";
-import type { AuthAuditRecord, BrowserLease, ClaimedOperation, EventAppendInput, EventClaimGuard, EventPage, LedgerHealth, NewOperation, OperationAdmission, PrincipalProvisionCapabilityRotation, PrincipalProvisionClaim, PrincipalProvisionControlRecord, PrincipalProvisionPreparation, PrincipalProvisionReadiness, RetentionTombstone, RollingAdmissionFence, RollingAdmissionLimits, RollingAdmissionReservation, RollingAdmissionResult, RunPatch, VoiceLabLedger, WorkerHeartbeat } from "./ledger.js";
+import type { AuthAuditRecord, BrowserLease, CaptureJoinPatch, CaptureLease, ClaimedOperation, EventAppendInput, EventClaimGuard, EventPage, LedgerHealth, NewOperation, OperationAdmission, PrincipalProvisionCapabilityRotation, PrincipalProvisionClaim, PrincipalProvisionControlRecord, PrincipalProvisionPreparation, PrincipalProvisionReadiness, RetentionTombstone, RollingAdmissionFence, RollingAdmissionLimits, RollingAdmissionReservation, RollingAdmissionResult, LeaseBoundAppendResult, RunPatch, VoiceLabLedger, WorkerHeartbeat } from "./ledger.js";
+import { pendingCaptureInputs } from "./lease-bound-capture.js";
 import { parseExactPrincipalProvisionReceipt } from './principal-provision-receipt.js';
 import { deriveExecutionEpochCleanupProof, sameExecutionCleanupProof } from "./execution-cleanup.js";
 import { canonicalRequestHash, sha256 } from "./security.js";
@@ -619,6 +620,35 @@ export class MemoryVoiceLabLedger implements VoiceLabLedger {
       run.updatedAt = latest.at;
     }
     return clone(appended.sort((left, right) => left.seq - right.seq));
+  }
+
+  async appendLeaseBoundEvents(runId: string, lease: CaptureLease, inputs: EventAppendInput[], deriveJoins?: (run: RunRecord) => CaptureJoinPatch | null): Promise<LeaseBoundAppendResult> {
+    const run = this.#runs.get(runId);
+    if (!run) throw notFound("RUN_NOT_FOUND", "Run was not found.");
+    // The linearization point of a lease-bound capture write: this exact
+    // worker and epoch with an unexpired lease, checked synchronously, and
+    // nothing yields from here to the last write, so no release, fence or
+    // expiry check of another call interleaves with the batch.
+    const owned = this.#browserLeases.get(runId);
+    if (!owned || owned.workerId !== lease.workerId || owned.leaseEpoch !== lease.leaseEpoch || owned.expiresAt <= new Date()) return { committed: false };
+    const events = this.#events.get(runId) ?? [];
+    const pending = pendingCaptureInputs(inputs, new Map(events.flatMap((event): Array<[string, LabEvent]> => event.dedupeKey === null ? [] : [[event.dedupeKey, event]])));
+    for (const input of pending) {
+      events.push({ runId, seq: events.length + 1, kind: input.kind, source: input.source, at: input.observedAt ?? new Date(), payload: clone(input.payload), dedupeKey: input.dedupeKey ?? null });
+    }
+    this.#events.set(runId, events);
+    const latest = events.at(-1);
+    if (pending.length > 0 && latest) {
+      run.latestCursor = latest.seq;
+      run.updatedAt = latest.at;
+    }
+    const joins = deriveJoins?.(clone(run)) ?? null;
+    if (joins) {
+      this.#runs.set(runId, { ...run, ...joins, version: run.version + 1, updatedAt: new Date() });
+      const control = this.#recoveryControls.get(runId)!;
+      this.#recoveryControls.set(runId, clone({ ...control, version: control.version + 1 }));
+    }
+    return { committed: true, appended: pending.length };
   }
 
   async listEvents(runId: string, after: number, limit: number): Promise<EventPage> {

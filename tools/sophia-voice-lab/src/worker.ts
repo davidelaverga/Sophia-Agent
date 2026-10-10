@@ -10,7 +10,7 @@ import { DriverEndFailure, hasExactFinalizationEnvelope, type BrowserStartStage,
 import { BUNDLED_FIXTURE_MANIFEST_SHA256, type VoiceLabConfig } from "./config.js";
 import { D02GatewayContinuityObservationReceiptSchema, D02GatewaySettlementReceiptSchema } from "./d02-gateway.js";
 import { TERMINAL_RUN_STATES, VoiceLabError, initialVerdicts, labError, type EvidenceRef, type LabError, type RunRecord, type RunState, type SuiteRecord, type Verdicts } from "./domain.js";
-import type { ClaimedOperation, EventAppendInput, RollingAdmissionLimits, VoiceLabLedger } from "./ledger.js";
+import type { CaptureJoinPatch, ClaimedOperation, EventAppendInput, RollingAdmissionLimits, VoiceLabLedger } from "./ledger.js";
 import { PostgresVoiceLabLedger } from "./postgres-ledger.js";
 import { productTurnId } from "./product-turn.js";
 import { RunSerializer } from "./run-serializer.js";
@@ -731,19 +731,25 @@ export class VoiceLabWorker {
 
   /**
    * Persists events read under this lease epoch only while that epoch still
-   * owns the run (#151). The ledger first renews the exact epoch, so a read
-   * that outlived its lease, or whose lease a later epoch replaced, writes
-   * nothing. Returns false, having persisted nothing, when the epoch no
-   * longer owns the run; a refusal is recorded as the lease's loss.
+   * owns the run (#151): the ledger writes the batch, its cursor advance and
+   * its joins atomically, under the run and lease row locks, and only if this
+   * exact worker and epoch hold the unexpired lease at commit. A read that
+   * outlived its lease, or whose lease was released or replaced meanwhile,
+   * writes nothing. Returns false, having written nothing, when the epoch no
+   * longer owns the run; that is recorded as the lease's loss.
    */
-  async #persistLeaseBoundEvents(runId: string, lease: ActiveLease, events: Array<Omit<import("./domain.js").LabEvent, "runId" | "seq" | "at">>): Promise<boolean> {
+  async #persistLeaseBoundEvents(runId: string, lease: ActiveLease, events: CapturedEvent[]): Promise<boolean> {
     if (lease.refused || this.#activeLeases.get(runId) !== lease) return false;
     if (events.length === 0) return true;
-    if (!await this.ledger.heartbeatBrowserLease(runId, this.workerId, lease.epoch, this.config.browserLeaseSeconds)) {
+    const boundRun = await this.#freshRun(runId);
+    const plan = captureAppendPlan(boundRun, events);
+    const written = await this.ledger.appendLeaseBoundEvents(runId, { workerId: this.workerId, leaseEpoch: lease.epoch }, plan.inputs,
+      plan.failure === null ? (run) => captureJoinPatch(run, boundRun, events) : undefined);
+    if (!written.committed) {
       lease.refused = true;
       return false;
     }
-    await this.#persistEvents(runId, events);
+    if (plan.failure !== null) throw plan.failure;
     return true;
   }
 
@@ -2120,60 +2126,14 @@ export class VoiceLabWorker {
     return durableBinding;
   }
 
-  async #persistEvents(runId: string, events: Array<Omit<import("./domain.js").LabEvent, "runId" | "seq" | "at">>): Promise<void> {
+  async #persistEvents(runId: string, events: CapturedEvent[]): Promise<void> {
     const boundRun = await this.#freshRun(runId);
-    for (const event of events) {
-      const provenance = event.payload._capture_provenance as Record<string, unknown> | undefined;
-      const rawObservedAt = provenance?.recorded_at ?? provenance?.observed_at;
-      const parsed = typeof rawObservedAt === "string" ? new Date(rawObservedAt) : new Date();
-      const appBinding = strictProductRunBinding(event.source, event.payload, boundRun);
-      await this.ledger.appendEvent(runId, event.kind, event.source, governedDriverEventPayload(boundRun, event), event.dedupeKey ?? undefined, Number.isNaN(parsed.getTime()) ? new Date() : parsed);
-      if (event.source === "product" && event.kind === "audio.input.product_fault" && appBinding !== null) {
-        const receipt = event.payload.receipt as Record<string, unknown> | undefined;
-        throw new VoiceLabError(labError("PRODUCT_INPUT_EVIDENCE_FAULT", "The product rejected or could not unambiguously correlate the governed synthetic input operation.", "harness", false, { fault_code: typeof receipt?.code === "string" ? receipt.code : "unknown" }));
-      }
-    }
-    let run = await this.#freshRun(runId);
-    let canonicalSessionId = run.canonicalSessionId;
-    let threadId = run.threadId;
-    let providerSessionId = run.providerSessionId;
-    let traceId = run.traceId;
-    let providerEpoch = run.providerEpoch;
-    let turnId = run.turnId;
-    for (const event of events) {
-      const payload = event.payload as Record<string, unknown>;
-      // Owning product joins are usable only when the original capture envelope
-      // carried the exact app-authored authenticated synthetic binding.
-      if (event.source === "product" && strictProductRunBinding(event.source, payload, boundRun) === null) continue;
-      if (event.kind === "session.credentials_received") {
-        canonicalSessionId = stableJoin("canonical_session_id", canonicalSessionId, exactString(payload.sessionId));
-        providerSessionId = stableJoin("provider_session_id", providerSessionId, exactString(payload.voiceAgentSessionId));
-        traceId = stableJoin("trace_id", traceId, exactString(payload.langsmithTraceId));
-        providerEpoch = monotonicEpoch(providerEpoch, exactPositiveProviderEpoch(payload.providerConnectionEpoch));
-      } else if (event.kind === "provider.connection_epoch") {
-        const receipt = payload.receipt && typeof payload.receipt === "object" ? payload.receipt as Record<string, unknown> : {};
-        canonicalSessionId = stableJoin("canonical_session_id", canonicalSessionId, exactString(payload.sessionId));
-        providerSessionId = stableJoin("provider_session_id", providerSessionId, exactString(payload.voiceAgentSessionId));
-        traceId = stableJoin("trace_id", traceId, exactString(receipt.langsmithTraceId));
-        providerEpoch = monotonicEpoch(providerEpoch, exactPositiveProviderEpoch(receipt.providerConnectionEpoch));
-      } else if (event.kind === "capture.snapshot") {
-        const snapshot = payload.snapshot && typeof payload.snapshot === "object" ? payload.snapshot as Record<string, unknown> : {};
-        const session = snapshot.session && typeof snapshot.session === "object" ? snapshot.session as Record<string, unknown> : {};
-        canonicalSessionId = stableJoin("canonical_session_id", canonicalSessionId, exactString(session.sessionId));
-        threadId = stableJoin("thread_id", threadId, exactString(session.threadId));
-      } else if (event.source === "canonical" && event.kind === "session.finalized") {
-        const receipt = payload.receipt && typeof payload.receipt === "object" ? payload.receipt as Record<string, unknown> : {};
-        const transcript = receipt.canonical_transcript && typeof receipt.canonical_transcript === "object" ? receipt.canonical_transcript as Record<string, unknown> : {};
-        canonicalSessionId = stableJoin("canonical_session_id", canonicalSessionId, exactString(transcript.session_id));
-        threadId = stableJoin("thread_id", threadId, exactString(transcript.thread_id));
-      } else if (event.kind.endsWith(".sophia.turn")) {
-        const data = payload.data && typeof payload.data === "object" ? payload.data as Record<string, unknown> : {};
-        turnId = productTurnId(data) ?? turnId;
-      }
-    }
-    if (canonicalSessionId !== run.canonicalSessionId || threadId !== run.threadId || providerSessionId !== run.providerSessionId || traceId !== run.traceId || providerEpoch !== run.providerEpoch || turnId !== run.turnId) {
-      run = await this.ledger.updateRun(run.id, run.version, { canonicalSessionId, threadId, providerSessionId, traceId, providerEpoch, turnId });
-    }
+    const plan = captureAppendPlan(boundRun, events);
+    for (const input of plan.inputs) await this.ledger.appendEvent(runId, input.kind, input.source, input.payload, input.dedupeKey, input.observedAt);
+    if (plan.failure !== null) throw plan.failure;
+    const run = await this.#freshRun(runId);
+    const joins = captureJoinPatch(run, boundRun, events);
+    if (joins) await this.ledger.updateRun(run.id, run.version, joins);
   }
 
   async #terminalizeFailure(runId: string, error: LabError, forcedState?: RunState): Promise<void> {
@@ -5781,6 +5741,75 @@ export function isExactBoundProductEvent(run: RunRecord, event: Pick<import("./d
     && record.provider_expires_at === run.expiresAt.toISOString()
     && record.cleanup_obligation_id_sha256 === sha256(run.cleanupObligationId);
 }
+type CapturedEvent = Omit<import("./domain.js").LabEvent, "runId" | "seq" | "at">;
+
+/**
+ * The appends that persisting `events` makes, in order: each event's governed
+ * payload at its capture time, stopping after a product input fault (kept)
+ * or before a product event whose run binding does not match (refused).
+ * `failure` is what persisting then throws, once that prefix is durable.
+ */
+function captureAppendPlan(boundRun: RunRecord, events: CapturedEvent[]): { inputs: EventAppendInput[]; failure: unknown | null } {
+  const inputs: EventAppendInput[] = [];
+  for (const event of events) {
+    const provenance = event.payload._capture_provenance as Record<string, unknown> | undefined;
+    const rawObservedAt = provenance?.recorded_at ?? provenance?.observed_at;
+    const parsed = typeof rawObservedAt === "string" ? new Date(rawObservedAt) : new Date();
+    let appBinding: Record<string, unknown> | null;
+    try { appBinding = strictProductRunBinding(event.source, event.payload, boundRun); }
+    catch (error) { return { inputs, failure: error }; }
+    inputs.push({ kind: event.kind, source: event.source, payload: governedDriverEventPayload(boundRun, event), ...(event.dedupeKey ? { dedupeKey: event.dedupeKey } : {}), observedAt: Number.isNaN(parsed.getTime()) ? new Date() : parsed });
+    if (event.source === "product" && event.kind === "audio.input.product_fault" && appBinding !== null) {
+      const receipt = event.payload.receipt as Record<string, unknown> | undefined;
+      return { inputs, failure: new VoiceLabError(labError("PRODUCT_INPUT_EVIDENCE_FAULT", "The product rejected or could not unambiguously correlate the governed synthetic input operation.", "harness", false, { fault_code: typeof receipt?.code === "string" ? receipt.code : "unknown" })) };
+    }
+  }
+  return { inputs, failure: null };
+}
+
+/** The run identifiers `events` join, given the run as it now stands, or null when nothing changes. */
+function captureJoinPatch(run: RunRecord, boundRun: RunRecord, events: CapturedEvent[]): CaptureJoinPatch | null {
+  let canonicalSessionId = run.canonicalSessionId;
+  let threadId = run.threadId;
+  let providerSessionId = run.providerSessionId;
+  let traceId = run.traceId;
+  let providerEpoch = run.providerEpoch;
+  let turnId = run.turnId;
+  for (const event of events) {
+    const payload = event.payload as Record<string, unknown>;
+    // Owning product joins are usable only when the original capture envelope
+    // carried the exact app-authored authenticated synthetic binding.
+    if (event.source === "product" && strictProductRunBinding(event.source, payload, boundRun) === null) continue;
+    if (event.kind === "session.credentials_received") {
+      canonicalSessionId = stableJoin("canonical_session_id", canonicalSessionId, exactString(payload.sessionId));
+      providerSessionId = stableJoin("provider_session_id", providerSessionId, exactString(payload.voiceAgentSessionId));
+      traceId = stableJoin("trace_id", traceId, exactString(payload.langsmithTraceId));
+      providerEpoch = monotonicEpoch(providerEpoch, exactPositiveProviderEpoch(payload.providerConnectionEpoch));
+    } else if (event.kind === "provider.connection_epoch") {
+      const receipt = payload.receipt && typeof payload.receipt === "object" ? payload.receipt as Record<string, unknown> : {};
+      canonicalSessionId = stableJoin("canonical_session_id", canonicalSessionId, exactString(payload.sessionId));
+      providerSessionId = stableJoin("provider_session_id", providerSessionId, exactString(payload.voiceAgentSessionId));
+      traceId = stableJoin("trace_id", traceId, exactString(receipt.langsmithTraceId));
+      providerEpoch = monotonicEpoch(providerEpoch, exactPositiveProviderEpoch(receipt.providerConnectionEpoch));
+    } else if (event.kind === "capture.snapshot") {
+      const snapshot = payload.snapshot && typeof payload.snapshot === "object" ? payload.snapshot as Record<string, unknown> : {};
+      const session = snapshot.session && typeof snapshot.session === "object" ? snapshot.session as Record<string, unknown> : {};
+      canonicalSessionId = stableJoin("canonical_session_id", canonicalSessionId, exactString(session.sessionId));
+      threadId = stableJoin("thread_id", threadId, exactString(session.threadId));
+    } else if (event.source === "canonical" && event.kind === "session.finalized") {
+      const receipt = payload.receipt && typeof payload.receipt === "object" ? payload.receipt as Record<string, unknown> : {};
+      const transcript = receipt.canonical_transcript && typeof receipt.canonical_transcript === "object" ? receipt.canonical_transcript as Record<string, unknown> : {};
+      canonicalSessionId = stableJoin("canonical_session_id", canonicalSessionId, exactString(transcript.session_id));
+      threadId = stableJoin("thread_id", threadId, exactString(transcript.thread_id));
+    } else if (event.kind.endsWith(".sophia.turn")) {
+      const data = payload.data && typeof payload.data === "object" ? payload.data as Record<string, unknown> : {};
+      turnId = productTurnId(data) ?? turnId;
+    }
+  }
+  if (canonicalSessionId === run.canonicalSessionId && threadId === run.threadId && providerSessionId === run.providerSessionId && traceId === run.traceId && providerEpoch === run.providerEpoch && turnId === run.turnId) return null;
+  return { canonicalSessionId, threadId, providerSessionId, traceId, providerEpoch, turnId };
+}
+
 function governedDriverEventPayload(run: RunRecord, event: { kind: string; source: string; payload: Record<string, unknown> }): Record<string, unknown> {
   const appBinding = strictProductRunBinding(event.source, event.payload, run);
   return preserveAuthCleanupBooleans(event, redact({ ...event.payload,

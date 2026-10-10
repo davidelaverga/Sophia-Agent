@@ -88,6 +88,17 @@ export interface EventAppendInput {
   observedAt?: Date;
 }
 
+/** The exact browser lease, worker and epoch, that a capture write is bound to (#151). */
+export interface CaptureLease {
+  workerId: string;
+  leaseEpoch: number;
+}
+
+/** The run identifiers a capture batch may join, derived from the run as locked for the write. */
+export type CaptureJoinPatch = Pick<RunPatch, "canonicalSessionId" | "threadId" | "providerSessionId" | "traceId" | "providerEpoch" | "turnId">;
+
+export type LeaseBoundAppendResult = { committed: true; appended: number } | { committed: false };
+
 export interface LedgerHealth {
   ok: boolean;
   detail: string;
@@ -266,6 +277,20 @@ export interface VoiceLabLedger {
   claimEvent(runId: string, kind: string, source: LabEvent["source"], payload: Record<string, unknown>, dedupeKey: string, observedAt?: Date, guard?: EventClaimGuard): Promise<{ event: LabEvent; replay: boolean }>;
   appendEvent(runId: string, kind: string, source: LabEvent["source"], payload: Record<string, unknown>, dedupeKey?: string, observedAt?: Date): Promise<LabEvent>;
   appendEvents(runId: string, events: EventAppendInput[]): Promise<LabEvent[]>;
+  /**
+   * Browser capture bound to a lease (#151). Appends `events`, and applies the
+   * joins `deriveJoins` returns for the run as locked for this write, only if
+   * `lease` (that exact worker and epoch) holds the run's unexpired browser
+   * lease at the write's linearization point: the lease row of that worker and
+   * epoch, locked in the same transaction as the capture insert and its
+   * cursor and join effects, with its expiry compared to the store's clock
+   * there. A lease removed, fenced or expired before that point makes the
+   * write refuse everything (no event, no cursor advance, no join;
+   * `{ committed: false }`); a change after it waits for the write to end.
+   * Recovery and cleanup writes, which are not browser capture, keep using
+   * appendEvent(s) and never require a live lease.
+   */
+  appendLeaseBoundEvents(runId: string, lease: CaptureLease, events: EventAppendInput[], deriveJoins?: (run: RunRecord) => CaptureJoinPatch | null): Promise<LeaseBoundAppendResult>;
   listEvents(runId: string, after: number, limit: number): Promise<EventPage>;
   findLatestEvent(runId: string, kinds: string[]): Promise<LabEvent | null>;
   createSuite(suite: SuiteRecord, rolling?: RollingAdmissionFence): Promise<{ suite: SuiteRecord; replay: boolean; rollingAdmission?: RollingAdmissionResult }>;

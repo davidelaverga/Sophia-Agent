@@ -19,7 +19,8 @@ import {
   type SuiteRecord,
   type SuiteEvidenceRecord,
 } from "./domain.js";
-import type { AuthAuditRecord, BrowserLease, ClaimedOperation, EventAppendInput, EventClaimGuard, EventPage, LedgerHealth, NewOperation, OperationAdmission, PrincipalProvisionCapabilityRotation, PrincipalProvisionClaim, PrincipalProvisionControlRecord, PrincipalProvisionPreparation, PrincipalProvisionReadiness, RetentionTombstone, RollingAdmissionFence, RollingAdmissionLimits, RollingAdmissionReservation, RollingAdmissionResult, RunPatch, VoiceLabLedger, WorkerHeartbeat } from "./ledger.js";
+import type { AuthAuditRecord, BrowserLease, CaptureJoinPatch, CaptureLease, ClaimedOperation, EventAppendInput, EventClaimGuard, EventPage, LedgerHealth, NewOperation, OperationAdmission, PrincipalProvisionCapabilityRotation, PrincipalProvisionClaim, PrincipalProvisionControlRecord, PrincipalProvisionPreparation, PrincipalProvisionReadiness, RetentionTombstone, RollingAdmissionFence, RollingAdmissionLimits, RollingAdmissionReservation, RollingAdmissionResult, LeaseBoundAppendResult, RunPatch, VoiceLabLedger, WorkerHeartbeat } from "./ledger.js";
+import { pendingCaptureInputs } from "./lease-bound-capture.js";
 import { canonicalRequestHash, sha256 } from "./security.js";
 import { parseExactPrincipalProvisionReceipt } from './principal-provision-receipt.js';
 import { attestVoiceLabSchema } from "./schema-attestation.js";
@@ -619,6 +620,60 @@ export class PostgresVoiceLabLedger implements VoiceLabLedger {
       }
       await client.query("commit");
       return [...replayed, ...inserted].sort((left, right) => left.seq - right.seq);
+    } catch (error) { await client.query("rollback"); throw translatePgError(error); }
+    finally { client.release(); }
+  }
+
+  async appendLeaseBoundEvents(runId: string, lease: CaptureLease, inputs: EventAppendInput[], deriveJoins?: (run: RunRecord) => CaptureJoinPatch | null): Promise<LeaseBoundAppendResult> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("begin");
+      const locked = await client.query(`select * from ${SCHEMA}.runs where id=$1 for update`, [runId]);
+      if (!locked.rows[0]) throw notFound("RUN_NOT_FOUND", "Run was not found.");
+      // The linearization point of a lease-bound capture write: the lease row
+      // of this exact worker and epoch, locked FOR SHARE in this transaction
+      // (after the run row, before any capture write), with its expiry
+      // compared to the database clock here. A release, fence, renewal or
+      // takeover of that row serializes against it: before this point the
+      // write refuses everything; after it, the lease change waits for this
+      // transaction to end.
+      const owned = await client.query(
+        `select 1 from ${SCHEMA}.browser_leases where run_id=$1 and worker_id=$2 and lease_epoch=$3 and expires_at>clock_timestamp() for share`,
+        [runId, lease.workerId, lease.leaseEpoch],
+      );
+      if (!owned.rows[0]) {
+        await client.query("rollback");
+        return { committed: false };
+      }
+      const keys = inputs.flatMap((input) => input.dedupeKey === undefined ? [] : [input.dedupeKey]);
+      const durable = keys.length === 0 ? [] : (await client.query(`select * from ${SCHEMA}.run_events where run_id=$1 and dedupe_key=any($2::text[])`, [runId, keys])).rows.map(mapEvent);
+      const pending = pendingCaptureInputs(inputs, new Map(durable.map((event): [string, LabEvent] => [String(event.dedupeKey), event])));
+      const baseCursor = Number(locked.rows[0].latest_cursor);
+      if (pending.length > 0) {
+        await client.query(
+          `insert into ${SCHEMA}.run_events (run_id,seq,kind,source,payload,dedupe_key,observed_at)
+           select $1, $2 + ordinal::integer, kind, source, payload::jsonb, dedupe_key, ${DATABASE_CLOCK_OBSERVED_AT("kind", "observed_at", "$8")}
+           from unnest($3::text[],$4::text[],$5::text[],$6::text[],$7::timestamptz[])
+             with ordinality as batch(kind,source,payload,dedupe_key,observed_at,ordinal)`,
+          [runId, baseCursor, pending.map((input) => input.kind), pending.map((input) => input.source), pending.map((input) => JSON.stringify(input.payload)),
+            pending.map((input) => input.dedupeKey ?? null), pending.map((input) => input.observedAt ?? new Date()), STUDIO_DATABASE_CLOCK_EVENT_KINDS],
+        );
+        await client.query(`update ${SCHEMA}.runs set latest_cursor=$2,updated_at=now() where id=$1`, [runId, baseCursor + pending.length]);
+      }
+      const joins = deriveJoins?.(mapRun(locked.rows[0])) ?? null;
+      if (joins) {
+        const run = { ...mapRun(locked.rows[0]), ...joins };
+        const joined = await client.query(
+          `with updated as (update ${SCHEMA}.runs set canonical_session_id=$2,thread_id=$3,provider_session_id=$4,trace_id=$5,provider_epoch=$6,turn_id=$7,version=version+1,updated_at=now()
+             where id=$1 and exists (select 1 from ${SCHEMA}.recovery_controls c where c.run_id=$1) returning id),
+           mirrored as (update ${SCHEMA}.recovery_controls c set version=c.version+1 from updated u where c.run_id=u.id returning c.run_id)
+           select m.run_id from updated u join mirrored m on m.run_id=u.id`,
+          [runId, run.canonicalSessionId, run.threadId, run.providerSessionId, run.traceId, run.providerEpoch, run.turnId],
+        );
+        if (!joined.rows[0]) throw conflict("RUN_VERSION_CONFLICT", "Run changed concurrently.");
+      }
+      await client.query("commit");
+      return { committed: true, appended: pending.length };
     } catch (error) { await client.query("rollback"); throw translatePgError(error); }
     finally { client.release(); }
   }
