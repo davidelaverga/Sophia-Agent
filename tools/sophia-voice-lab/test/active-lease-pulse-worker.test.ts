@@ -369,6 +369,16 @@ function longestGap(times: number[], from: number, to: number): number {
   return Math.max(...points.slice(1).map((at, index) => at - points[index]!));
 }
 
+/**
+ * The loop iteration whose claimed operation held its run's turn at `at`,
+ * once it returned: its last steps (evidence compression) settle on real I/O,
+ * so this keeps stepping the fake clock with real turns until it did.
+ */
+async function awaitHold(h: Harness, at: number): Promise<{ startedAt: number; returnedAt: number }> {
+  await until(h, () => h.iterations.some((iteration) => iteration.startedAt <= at && iteration.returnedAt >= at), 120_000, 500);
+  return holdAt(h, at);
+}
+
 /** The loop iteration whose claimed operation held its run's turn at `at`. */
 function holdAt(h: Harness, at: number): { startedAt: number; returnedAt: number } {
   const held = h.iterations.find((iteration) => iteration.startedAt <= at && iteration.returnedAt >= at);
@@ -674,6 +684,8 @@ describe("#151 a refused lease is never renewed again", () => {
     const run = h.runs[0]!;
     await startWorker(h);
     h.driver.rotateHoldMs.set(run.id, 60_000);
+    // Whoever sees the refusal, the run stays held well past several pulse intervals (rotation, then a slow cleanup).
+    h.driver.recoverDelayMs = 30_000;
     h.driver.pages.get(run.id)!.startSpeech(SPEECH_MS);
     const rotation = newOperation(run, "force_socket_rotation", { expected_socket_epoch: 1 });
     await h.ledger.createOperation(rotation);
@@ -725,7 +737,7 @@ describe("#151 every holder of a run renews and drains it while it holds the tur
     // The settlement wait drained every ~100 ms while it held the run.
     expect(longestGap(reads(h, run.id, "worker"), t0 + 500, t0 + 14_500)).toBeLessThanOrEqual(300);
     // The operation held the run through its 15 s wait and the 40 s terminal cleanup, renewing it throughout.
-    const held = holdAt(h, t0);
+    const held = await awaitHold(h, t0);
     expect(held.returnedAt - t0).toBeGreaterThanOrEqual(55_000);
     expect(expiredSamples(h, run.id, t0, held.returnedAt)).toEqual([]);
     expect(longestGap(okRenewals(h, run.id), t0, held.returnedAt)).toBeLessThanOrEqual(3_334 + SLACK_MS);
@@ -771,7 +783,7 @@ describe("#151 every holder of a run renews and drains it while it holds the tur
     expect(cancelled!.at - t0).toBeGreaterThanOrEqual(35_000);
     expect((await h.ledger.getOperation(rotation.id))?.state).toBe("timed_out");
     // After its cancellation the operation still held the run through the 40 s recovery, and the lease never lapsed.
-    const held = holdAt(h, t0);
+    const held = await awaitHold(h, t0);
     expect(held.returnedAt - cancelled!.at).toBeGreaterThanOrEqual(40_000);
     expect(expiredSamples(h, run.id, t0, held.returnedAt)).toEqual([]);
     expect(longestGap(okRenewals(h, run.id), cancelled!.at, held.returnedAt)).toBeLessThanOrEqual(3_334 + SLACK_MS);
