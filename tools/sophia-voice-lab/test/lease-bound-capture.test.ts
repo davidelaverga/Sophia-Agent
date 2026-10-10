@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 import pg from "pg";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
+import { VoiceLabError, labError } from "../src/domain.js";
 import type { EventAppendInput, VoiceLabLedger } from "../src/ledger.js";
 import { MemoryVoiceLabLedger } from "../src/memory-ledger.js";
 import { PostgresVoiceLabLedger } from "../src/postgres-ledger.js";
@@ -87,6 +88,30 @@ function contract(store: () => VoiceLabLedger, sleep: (ms: number) => Promise<vo
     const before = await sideEffects(ledger, run.id);
     const conflicting = [...capture("fresh", 1), { ...capture("dedupe", 1)[0]!, payload: { label: "dedupe", index: 0, drifted: true } }];
     await expect(ledger.appendLeaseBoundEvents(run.id, { workerId: WORKER, leaseEpoch: lease.leaseEpoch }, conflicting, joinThread("thread-dedupe"))).rejects.toMatchObject({ detail: { code: "DEDUPE_CONFLICT" } });
+    expect(await sideEffects(ledger, run.id)).toEqual(before);
+  });
+
+  it.each([
+    ["JOIN_CORRELATION_CONFLICT", "Conflicting thread_id values were observed from strict owning receipts."],
+    ["PROVIDER_EPOCH_REGRESSION", "Provider epoch regressed across strict product receipts."],
+  ])("a %s join derivation under a live lease keeps the batch and cursor as evidence, applies no join, and is rethrown", async (code, message) => {
+    const ledger = store();
+    const { run, lease } = await liveRun(ledger);
+    const before = await sideEffects(ledger, run.id);
+    const failingJoin = () => { throw new VoiceLabError(labError(code, message, "harness", false)); };
+    await expect(ledger.appendLeaseBoundEvents(run.id, { workerId: WORKER, leaseEpoch: lease.leaseEpoch }, capture(`join-${code}`), failingJoin)).rejects.toMatchObject({ detail: { code } });
+    expect(await sideEffects(ledger, run.id)).toEqual({ cursor: before.cursor + 2, version: before.version, threadId: before.threadId, captured: 2 });
+  });
+
+  it("the same failing join derivation under a refused lease writes nothing and is not reached", async () => {
+    const ledger = store();
+    const { run, lease } = await liveRun(ledger);
+    expect(await ledger.releaseBrowserLease(run.id, WORKER, lease.leaseEpoch)).toBe(true);
+    const before = await sideEffects(ledger, run.id);
+    let derived = false;
+    const failingJoin = () => { derived = true; throw new VoiceLabError(labError("JOIN_CORRELATION_CONFLICT", "conflict", "harness", false)); };
+    await expect(ledger.appendLeaseBoundEvents(run.id, { workerId: WORKER, leaseEpoch: lease.leaseEpoch }, capture("join-refused"), failingJoin)).resolves.toEqual({ committed: false });
+    expect(derived).toBe(false);
     expect(await sideEffects(ledger, run.id)).toEqual(before);
   });
 
@@ -217,22 +242,57 @@ postgres("lease-bound capture: real PostgreSQL", () => {
     expect(await sideEffects(ledger, run.id)).toEqual(before);
   });
 
+  it("lock order run -> control -> lease: a settlement-ordered transaction (control FOR UPDATE, then lease FOR UPDATE, no run lock) and a join-bearing capture write serialize without a deadlock", async () => {
+    const { run, lease } = await liveRun(ledger);
+    const before = await sideEffects(ledger, run.id);
+    // PostgresRecoveryControls.settle's statement order, on its own session.
+    const settle = await holding("select * from sophia_voice_lab.recovery_controls where run_id=$1 for update", [run.id]);
+    let settleError: unknown = null;
+    let appendError: unknown = null;
+    try {
+      const appending = ledger.appendLeaseBoundEvents(run.id, { workerId: WORKER, leaseEpoch: lease.leaseEpoch }, capture("lock-order"), joinThread("thread-lock-order"))
+        .catch((error: unknown) => { appendError = error; return null; });
+      // The capture write is now waiting for a lock (the control row, or the join's control update before the fix).
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        const waiting = await admin.query("select count(*)::int as n from pg_stat_activity where application_name='sophia-voice-lab' and wait_event_type='Lock'");
+        if (waiting.rows[0].n > 0) break;
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      await settle.query("set local lock_timeout = '4s'");
+      await settle.query("select worker_id,lease_epoch from sophia_voice_lab.browser_leases where run_id=$1 for update", [run.id]).catch((error: unknown) => { settleError = error; });
+      await settle.query(settleError === null ? "commit" : "rollback");
+      const appended = await appending;
+      expect({ settle: (settleError as { code?: string } | null)?.code ?? null, append: (appendError as { code?: string } | null)?.code ?? null }).toEqual({ settle: null, append: null });
+      expect(appended).toEqual({ committed: true, appended: 2 });
+    } finally { await settle.end(); }
+    expect(await sideEffects(ledger, run.id)).toEqual({ cursor: before.cursor + 2, version: before.version + 1, threadId: "thread-lock-order", captured: 2 });
+  });
+
   it("after the linearization point: a release issued while the append is in flight waits for it, so the append wins entirely before the release", async () => {
     const { run, lease } = await liveRun(ledger);
     const before = await sideEffects(ledger, run.id);
-    // Hold the append after its lease lock and insert, at its join's control-row update.
-    const holder = await holding("select run_id from sophia_voice_lab.recovery_controls where run_id=$1 for update", [run.id]);
+    // A test-only trigger on this dedicated database pauses the capture insert, which runs after the lease lock.
+    await admin.query(`create or replace function sophia_voice_lab.capture_test_pause() returns trigger language plpgsql as $$
+      begin if new.payload->>'pause' = 'true' then perform pg_sleep(1.2); end if; return new; end $$`);
+    await admin.query("create trigger capture_test_pause before insert on sophia_voice_lab.run_events for each row execute function sophia_voice_lab.capture_test_pause()");
     const order: string[] = [];
     try {
-      const appending = ledger.appendLeaseBoundEvents(run.id, { workerId: WORKER, leaseEpoch: lease.leaseEpoch }, capture("after-point"), joinThread("thread-after-point")).then((result) => { order.push("append"); return result; });
-      await blockedOn("with updated as (update sophia_voice_lab.runs set canonical_session_id");
+      const batch = capture("after-point").map((input, index) => index === 0 ? { ...input, payload: { ...input.payload, pause: true } } : input);
+      const appending = ledger.appendLeaseBoundEvents(run.id, { workerId: WORKER, leaseEpoch: lease.leaseEpoch }, batch, joinThread("thread-after-point")).then((result) => { order.push("append"); return result; });
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        const sleeping = await admin.query("select count(*)::int as n from pg_stat_activity where application_name='sophia-voice-lab' and wait_event='PgSleep'");
+        if (sleeping.rows[0].n > 0) break;
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
       const releasing = ledger.releaseBrowserLease(run.id, WORKER, lease.leaseEpoch).then((released) => { order.push("release"); return released; });
       await blockedOn("delete from sophia_voice_lab.browser_leases");
       expect(order).toEqual([]);
-      await holder.query("rollback");
       await expect(appending).resolves.toEqual({ committed: true, appended: 2 });
       await expect(releasing).resolves.toBe(true);
-    } finally { await holder.end(); }
+    } finally {
+      await admin.query("drop trigger if exists capture_test_pause on sophia_voice_lab.run_events");
+      await admin.query("drop function if exists sophia_voice_lab.capture_test_pause()");
+    }
     expect(order).toEqual(["append", "release"]);
     expect(await sideEffects(ledger, run.id)).toEqual({ cursor: before.cursor + 2, version: before.version + 1, threadId: "thread-after-point", captured: 2 });
     expect(await ledger.getBrowserLease(run.id)).toBeNull();

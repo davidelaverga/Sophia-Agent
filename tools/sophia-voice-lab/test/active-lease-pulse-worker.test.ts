@@ -1024,6 +1024,24 @@ describe("#151 lease-bound capture persistence is atomic with the exact lease (r
     expect((await allEvents(h, run.id)).filter((event) => event.kind === LABELLED_CAPTURE)).toEqual([]);
   }, 60_000);
 
+  it.each([
+    ["JOIN_CORRELATION_CONFLICT", { canonicalSessionId: "session-of-record" }, { kind: "session.credentials_received", payload: { sessionId: "session-conflicting" } }],
+    ["PROVIDER_EPOCH_REGRESSION", { providerEpoch: 7 }, { kind: "provider.connection_epoch", payload: { receipt: { providerConnectionEpoch: 3 } } }],
+  ] as const)("%s from a lease-bound drain: the receipt that conflicts stays durable as evidence, no join is applied, and the run fails with it", async (code, runPatch, receipt) => {
+    const { h, run } = await readyWithoutLoop();
+    const ready = (await h.ledger.getRun(run.id))!;
+    const before = await h.ledger.updateRun(run.id, ready.version, runPatch);
+    h.driver.extra.set(run.id, [{ kind: receipt.kind, source: "browser", payload: receipt.payload, dedupeKey: `conflict:${run.id}` }]);
+    const pass = h.worker.maintainSessions().catch(() => undefined);
+    for (let step = 0; step < 500; step += 1) await vi.advanceTimersByTimeAsync(10);
+    await pass;
+    const events = await allEvents(h, run.id);
+    expect(events.filter((event) => event.dedupeKey === `conflict:${run.id}`)).toHaveLength(1);
+    const terminal = (await h.ledger.getRun(run.id))!;
+    expect(terminal.terminalError?.code).toBe(code);
+    expect({ canonicalSessionId: terminal.canonicalSessionId, providerEpoch: terminal.providerEpoch }).toEqual({ canonicalSessionId: before.canonicalSessionId, providerEpoch: before.providerEpoch });
+  }, 60_000);
+
   it("control: with the lease live the held capture write commits the labelled event once", async () => {
     const { h, run } = await readyWithoutLoop();
     const { gate, finish } = await heldMaintenanceCapture(h, run);
