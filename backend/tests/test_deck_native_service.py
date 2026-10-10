@@ -1445,12 +1445,15 @@ def test_deck_native_lint_fix_rolls_back_seam_that_would_wrap_text(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
+    # Give both macOS and Linux subprocesses the same font bytes, as the canary
+    # test does, so the neighbor is measured in CanarySans on every host.
     home = tmp_path / "home"
-    font_dir = home / "Library/Fonts"
-    font_dir.mkdir(parents=True)
     embedded_font = ImageFont.load_default(size=12).path
     assert hasattr(embedded_font, "getvalue")
-    (font_dir / "CanarySans.ttf").write_bytes(embedded_font.getvalue())
+    for relative_dir in (Path("Library/Fonts"), Path(".fonts")):
+        font_dir = home / relative_dir
+        font_dir.mkdir(parents=True, exist_ok=True)
+        (font_dir / "CanarySans.ttf").write_bytes(embedded_font.getvalue())
     monkeypatch.setenv("HOME", str(home))
 
     output = tmp_path / "wrapping-seam.pptx"
@@ -1467,7 +1470,12 @@ def test_deck_native_lint_fix_rolls_back_seam_that_would_wrap_text(
     neighbor.text_frame.margin_right = 0
     neighbor.text_frame.margin_top = 0
     neighbor.text_frame.margin_bottom = 0
-    neighbor.text = "W" * 23 + " x"
+    # 'X' advances exactly 15 px at 18 pt under both of Pillow's layout
+    # engines (BASIC on macOS, RAQM on Linux), so the line measures 545.00 px
+    # (BASIC) or 545.19 px (RAQM): it fits the 552 px neighbor (5.76in) by
+    # about 7 px and wraps in the 539 px the seam would leave (5.62in) by
+    # about 6 px. The seam window is the 0.14in snap (ALIGN_BAND is 0.15in).
+    neighbor.text = "X" * 35 + " X"
     neighbor.text_frame.paragraphs[0].runs[0].font.name = "CanarySans"
     neighbor.text_frame.paragraphs[0].runs[0].font.size = Pt(18)
 
@@ -1482,7 +1490,7 @@ def test_deck_native_lint_fix_rolls_back_seam_that_would_wrap_text(
 
     add_text("wrap-target", 12.76, 1.0, 6.01078)
     for index, top in enumerate((2.0, 3.0, 4.0), start=1):
-        add_text(f"wrap-peer-{index}", 12.669, top, 6.10178)
+        add_text(f"wrap-peer-{index}", 12.62, top, 6.15078)
     presentation.save(output)
     before = Presentation(output)
     before_neighbor = next(shape for shape in before.slides[0].shapes if shape.name == "wrap-neighbor")
@@ -2695,10 +2703,14 @@ def test_deck_native_lint_fix_repairs_canary_headline_and_kpi_overflow(
         run.font.bold = bold
         return shape
 
+    # Measured at 37.5pt the headline is 749.00 px (BASIC, macOS) or 741.19 px
+    # (RAQM, Linux): the production 7.75in box (744 px) sat between them. At
+    # 7.25in (696 px) it overflows by at least 45 px under either engine and
+    # still fits by at least 77 px at the 31pt floor.
     add_textbox(
         name="canary-headline",
         at=(1.25, 0.85),
-        size=(7.75, 0.60),
+        size=(7.25, 0.60),
         text="Habitat is fragmented, not absent",
         font_size=37.5,
         line_spacing=43.1,
@@ -2715,9 +2727,10 @@ def test_deck_native_lint_fix_repairs_canary_headline_and_kpi_overflow(
     add_textbox(
         name="canary-kpi",
         at=(11.22, 6.87),
-        # The production box was 1.47in. Keep the same tight composition with
-        # a 0.02in cushion so the embedded cross-platform test font rewraps.
-        size=(1.45, 0.61),
+        # The production box was 1.47in. "0.9 mi" measures 140.00 px (BASIC)
+        # or 139.81 px (RAQM) at 39pt; 1.35in (129 px) makes the embedded test
+        # font rewrap by at least 10 px under either engine.
+        size=(1.35, 0.61),
         text="0.9 mi",
         font_size=39,
         line_spacing=46.8,
