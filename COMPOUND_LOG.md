@@ -2506,3 +2506,11 @@ Automatic review of combined head 0d8c5633 found two further P2 privacy gaps. Er
 ### Codex follow-up: structural mode never attaches audio
 
 The review of 08215b7c found that an explicit audio-capture opt-in could still attach a raw recording despite the effective structural mode. Audio capture now also requires a non-structural mode. The real SDK multipart sentinel regression enables both legacy content and audio flags for a known non-governed owner while structural mode remains selected; it failed before the fix. Full mode with both flags remains the positive control. No runtime configuration was changed.
+
+## 2026-10-10 · [deck native test fixtures] · PR #169
+Author: Claude (fixture implementation), Codex (independent review and integration) · Track: backend tests · Spec reference: issue #153, existing seam rollback and canary overflow contracts.
+
+- What changed: install the embedded seam font in both host search directories and give the seam, headline and KPI fixtures margins under Pillow BASIC and RAQM. Production code and all 377 assertions in the file remain unchanged. The canary uses narrower boxes than its production-derived geometry to exercise overflow reliably with the embedded test font.
+- What we learned: a width close to a wrap boundary can pass under BASIC and fail under RAQM. The seam window is bounded by the existing alignment band; an almost engine-invariant string retains 6–7 px margins without changing that product bound.
+- Validation: independent root run at implementation commit 3ca49101, through the Python 3.12 uv workspace, passed 64 tests with four existing skips on macOS/BASIC. Author Linux evidence reproduced both failures before the fix and passed both repaired tests under each engine; disabling rollback or overflow detection still fails. Author full deck runs retained two local LibreOffice failures; Linux CI at the published head remains a merge requirement.
+- CLAUDE.md updates: none; runtime and architecture are unchanged. Skills created: none. GEPA log entry: not applicable; no prompt changed.
