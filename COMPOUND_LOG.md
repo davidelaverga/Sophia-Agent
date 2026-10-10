@@ -2993,25 +2993,35 @@ Author: Claude (fixture implementation) · Track: backend tests · Spec referenc
 - CLAUDE.md updates: none; runtime and architecture are unchanged. Skills created: none. GEPA log entry: not applicable; no prompt changed.
 
 ## 2026-10-10 · [voice lab census lease pulse] · #151
-Author: Claude (Lab writer) · Track: Voice Lab worker · Spec reference: Codex r4077602539 on PR #151 (census against the 2,048-event page ring); root's census GO and proof requirements; coordinator reviews of d2d550e5 (capture TOCTOU) and ae82a1cd (lock order, join evidence).
+Author: Claude (Lab writer) · Track: Voice Lab worker · Spec reference: Codex r4077602539 on PR #151 (census against the 2,048-event page ring); root's census GO and proof requirements; coordinator reviews of d2d550e5 (capture TOCTOU) and ae82a1cd (lock order, join evidence); root's P2 on 81dda6b7 (expiry evaluated before the lease row-lock wait) and P3 on ba2f81c0 (join rules keyed by an inherited kind).
 
 - What changed:
   - The worker renews and drains each live run's browser lease on its own active-lease pulse. It is one `setTimeout` chain per run and lease epoch, every `min(5 s, lease / 3)`. Renewal never waits on the run or on maintenance.
   - One serialization point per run: a claimed operation holds its run's turn until it settles. Maintenance steps and pulse drains only try the turn and skip a busy run.
   - The pulse also renews a busy run's lease. An operation keeps renewing its own browser lease until it releases the turn, including during cancellation and shutdown cleanup. A refused lease is never renewed again.
-  - Lease-bound capture persistence (`appendLeaseBoundEvents`, PostgreSQL and memory) enforces the exact worker and epoch, and an unexpired lease, at the write's linearization point. In PostgreSQL that is the lease row locked FOR SHARE after the run and control rows, in the same transaction as the insert, cursor and joins, compared to the database clock. A failed join derivation keeps the batch and cursor as evidence and is thrown after them.
+  - Lease-bound capture persistence (`appendLeaseBoundEvents`, PostgreSQL and memory) enforces the exact worker and epoch, and an unexpired lease, at the write's linearization point. A failed join derivation keeps the batch and cursor as evidence and is thrown after them.
+    - In PostgreSQL the exact worker/epoch lease row is locked FOR SHARE after the run and control rows, with no expiry in that locking statement. Then a separate statement, under the held lock, compares its expiry to a fresh database clock, before any capture write. That check is the point. The insert, cursor and joins follow in the same transaction. Nothing is promised about the commit's wall-clock time.
+  - Heartbeat renewal and execution-ownership preservation, both older than 1c183ee6, now check lease expiry the same way: the row is locked first, then a fresh-clock check runs under the held lock.
+  - The capture join rules are a Map. A captured kind that is no rule, `__proto__`, `constructor` and the other Object.prototype members included, is persisted and ignored by the joins, as it was before the complexity split.
+  - Separately, `tts-trailing-silence-chromium` now extracts the current product microphone pipeline, including the StreamingPcm16Resampler module. It uses a dependency-closure helper shared with the census Chromium test. Its trailing-silence and single-stream-end assertions are unchanged.
   - Separately, a test-only correction: the MEM00 drift message expected by the real-Postgres auth-ledger test now matches the source.
 - What we learned:
   - Running every recovery stage before the live run's lease and drain lets one silent Gateway expire a live lease, and overflow the census ring, in a single maintenance pass.
   - A renewal followed by a generic append is still check-then-act. The lease predicate has to sit inside the capture write's own serialization.
   - A capture write that takes the lease before the control row can deadlock against settlement.
   - Fake timers carry no async context, so a test of timer async scope has to use real timers.
+  - PostgreSQL evaluates a locking statement's WHERE and output columns before it waits for the row lock. It re-evaluates them only for a row that was updated. A lease validity check inside the locking statement therefore stands stale behind a holder that only locked the row, and the check has to be a separate statement after the lock. `<=` expiry predicates are safe, because an expired lease that is left unchanged stays expired.
+  - A lookup table keyed by input from outside must not inherit. A plain object resolves `__proto__`, `constructor` and `toString` to Object.prototype members.
 - Validation:
   - Fail-before, at 1c183ee6 unless stated:
     - 13 of the 16 worker tests from the first draft fail on the property under test. The cases are lease expiry, 320 ring events lost, an operation never claimed, and a starved second run.
     - In real Chromium, the lease, ring and pending-operation cases fail and the positive control passes.
     - At d2d550e5, root's interleaving commits the capture from the released or expired lease (`{cursor: 4, labelled: 1}`).
     - At ae82a1cd, the PostgreSQL join cases lose the batch and the settlement-ordered case aborts the capture write with 40P01.
+    - At 81dda6b7, behind a session that holds the lease row FOR UPDATE and leaves it unchanged, the capture write commits from a 1 s lease that expired during a 1.3 s lock wait (`committed: true`, waited 1,316 ms within the 2 s lock timeout).
+    - At 98c402f9, in the same shape, renewal revives the expired lease (`true`, expiry advanced by about 29 s), including behind a capture write's FOR SHARE. Execution ownership is preserved for the expired lease.
+    - At 3832cad6, a capture event of kind `__proto__`, `hasOwnProperty` or `valueOf` terminalizes a ready run as `failed_harness` / UNEXPECTED_WORKER_ERROR, in memory and on PostgreSQL. At 81dda6b7 all are ignored. `constructor` and `toString` did not throw: they ran as rules without effect.
+    - At f9d0f80a and 934549a6, the tts check fails on its declaration list, before reaching the browser.
   - Mutants: 16 source mutants plus 2 Chromium reruns were each killed by explicit assertions. They covered:
     - the pulse not started, not serialized, renewing after a refusal, not cancelling its timers, or skipping the drain;
     - busy-run renewal dropped, and abort-time operation renewal dropped;
@@ -3021,8 +3031,10 @@ Author: Claude (Lab writer) · Track: Voice Lab worker · Spec reference: Codex 
     - joins derived after the insert;
     - the memory rethrow dropped;
     - timers inheriting the activating async context. This one survived on fake timers until its check moved to real timers.
+    - Later, also killed: the expiry back in the capture write's locking WHERE (M17) or its output columns (M17b); the renewal's expiry back in its locking UPDATE (M18); the ownership read's expiry back in its locking statement (M19); the plain-object join lookup (M20).
+    - A mutant counts as killed only when a named test fails on an assertion. Load, setup, SQL and harness errors are not counted.
   - The new tests on real PostgreSQL (own exactly named database on 55434): 60 of 60 pass. The Chromium census on the substitute chromium-1194 browser: 4 of 4 pass.
   - Whole Lab suite, full env, at 22df2905 (merged with a9b763d7): 1,449 tests, of which 1,447 passed and 2 failed.
-    - `tts-trailing-silence-chromium` fails on a production-line change: the frontend no longer defines `estimatePcm16ByteLength`.
+    - `tts-trailing-silence-chromium` fails on a production-line change: the frontend no longer defines `estimatePcm16ByteLength`. Corrected in 3832cad6, and the check passes on the substitute chromium-1194 browser: 17 trailing near-zero frames (about 1.58 s) before exactly one audioStreamEnd.
     - The security golden-vector check is environmental. The worktree had no backend venv; with a project-local `uv sync --frozen --offline` venv it passes, though its cold first import exceeded the 15 s timeout once.
 - CLAUDE.md updates: none; runtime and architecture are unchanged. Skills created: none. GEPA log entry: not applicable; no prompt changed.

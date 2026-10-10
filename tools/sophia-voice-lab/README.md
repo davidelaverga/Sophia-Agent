@@ -86,16 +86,30 @@ overflow its 2,048-event page ring.
   `appendLeaseBoundEvents`. The exact worker and epoch, and an unexpired lease,
   are enforced at the write's linearization point.
   - PostgreSQL: one transaction locks runs FOR UPDATE, then recovery_controls
-    FOR NO KEY UPDATE, then the lease row FOR SHARE, with `expires_at` compared
-    to `clock_timestamp()`. That is the point. The insert, cursor and joins
-    follow in the same transaction.
-  - Memory: the same predicate, then the writes, in one synchronous step.
+    FOR NO KEY UPDATE, then the lease row of that exact worker and epoch FOR
+    SHARE, with no expiry in that locking statement. Then a separate
+    statement, under the held lock, compares `expires_at` to a fresh
+    `clock_timestamp()`, before any capture write. That check is the point.
+    The insert, cursor and joins follow in the same transaction. Nothing is
+    promised about the wall-clock time of the commit.
+  - Memory: the same check on a fresh clock, then the writes, in one
+    synchronous step.
   - A lease removed, fenced or expired before the point makes the write refuse
     everything: no event, no cursor advance, no join. A lease change after it
     waits for the write to end.
   - A join derivation that fails keeps the batch and cursor as evidence and is
     thrown after them.
   - Recovery and cleanup writes are not capture. They need no lease.
+- **Lease validity is checked under the held row lock.** PostgreSQL evaluates
+  a locking statement's WHERE and output columns before it waits for the row
+  lock, and re-evaluates them only for a row that was updated. An expiry
+  check inside the locking statement would stand stale behind a holder that
+  only locked the row. So:
+  - Heartbeat renewal locks the exact worker/epoch lease row first (FOR NO KEY
+    UPDATE, no expiry in that statement). A separate fresh-clock statement
+    under the held lock then checks expiry, and only a live lease is renewed.
+  - Execution-ownership preservation locks the run's lease row first, then
+    checks its expiry the same way.
 - **Shutdown.** `close()` stops the pulse, then settles its work for at most
   5 s, then runs the D02 or generic cleanup. Settling never waits on a run's
   turn.
@@ -749,7 +763,8 @@ fairness across worker restarts remain outstanding.
 
 Expired browser leases remain durable recovery receipts. The historically named
 `reapExpiredBrowserLeases` observes them without deleting them in either adapter;
-expiry still forbids heartbeat renewal and never permits replacement allocation.
+expiry still forbids heartbeat renewal (checked under the held lease row lock on a
+fresh database clock) and never permits replacement allocation.
 A failed loss-observation write or interrupted maintenance pass can therefore
 read the same exact lease again. Receipt removal remains an explicit cleanup
 release/settlement operation, not evidence inferred from elapsed time. Expired
