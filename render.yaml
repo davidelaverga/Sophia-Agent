@@ -57,6 +57,10 @@ services:
         value: proj_q1I90sXEFJXjVt3Mvghj2P7nKEfzPvT9h0t9Ft3Z
       - key: SOPHIA_MEMORY_PROVIDER_ENVIRONMENT
         value: production
+      # WARNING: live dashboard values of the SOPHIA_MEMORY_* rollout flags and
+      # of SOPHIA_MEMORY_LANGSMITH_EXPORT can differ from the defaults below.
+      # A Blueprint sync would overwrite them and can turn memory governance
+      # off. Do not sync until they are reconciled in an approved change.
       - key: SOPHIA_MEMORY_SUPPORTED_CONTRACT_EPOCH
         value: "1"
       - key: SOPHIA_MEMORY_REFERENCE_HMAC_SECRET
@@ -129,6 +133,13 @@ services:
         value: https://eu.api.smith.langchain.com
       - key: SOPHIA_BUILDER_LANGSMITH_TRACING
         value: "true"
+      # Memory-governed (MEM00) owners' Builder runs are excluded from
+      # LangSmith. "true" opts them into structure-only tracing through a
+      # redacting client: run names, types, timings, status and token counts;
+      # never inputs, outputs, error text, prompts or tool content. Read with
+      # os.getenv (not config.production.yaml); the companion stays untraced.
+      - key: SOPHIA_GOVERNED_STRUCTURAL_TRACING
+        value: "false"
       - key: LANGSMITH_PROJECT
         value: Sophia
       - key: LANGSMITH_API_KEY
@@ -210,6 +221,10 @@ services:
         value: proj_q1I90sXEFJXjVt3Mvghj2P7nKEfzPvT9h0t9Ft3Z
       - key: SOPHIA_MEMORY_PROVIDER_ENVIRONMENT
         value: production
+      # WARNING: live dashboard values of the SOPHIA_MEMORY_* rollout flags and
+      # of SOPHIA_MEMORY_LANGSMITH_EXPORT can differ from the defaults below.
+      # A Blueprint sync would overwrite them and can turn memory governance
+      # off. Do not sync until they are reconciled in an approved change.
       - key: SOPHIA_MEMORY_SUPPORTED_CONTRACT_EPOCH
         value: "1"
       - key: SOPHIA_MEMORY_REFERENCE_HMAC_SECRET
@@ -392,6 +407,10 @@ services:
     region: oregon
     healthCheckPath: /ready
     envVars:
+      # WARNING: live dashboard values of the SOPHIA_MEMORY_* rollout flags and
+      # of SOPHIA_MEMORY_LANGSMITH_EXPORT can differ from the defaults below.
+      # A Blueprint sync would overwrite them and can turn memory governance
+      # off. Do not sync until they are reconciled in an approved change.
       - key: SOPHIA_MEMORY_SUPPORTED_CONTRACT_EPOCH
         value: "1"
       # Disable ONNX Runtime's native POSIX telemetry before smart-turn import;
@@ -478,6 +497,11 @@ services:
         value: Sophia-Gemini-Live-Voice
       - key: SOPHIA_GEMINI_LIVE_TRACE_SCHEMA
         value: sophia_gemini_live_trace_v2
+      # Voice traces are structure-only for every session: the voice service
+      # is not told an owner's memory-governance state. Non-structural content
+      # modes and audio capture take effect only when
+      # SOPHIA_GEMINI_LIVE_LANGSMITH_CONTENT is truthy AND a caller supplies an
+      # authoritative non-governed owner, which no caller does today.
       - key: SOPHIA_GEMINI_LIVE_TRACE_CONTENT_MODE
         value: structural
       - key: SOPHIA_GEMINI_LIVE_AUDIO_CAPTURE_ENABLED

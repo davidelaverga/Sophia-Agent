@@ -43,7 +43,10 @@ class MemoryGovernanceWorker:
         self.poll_seconds = poll_seconds
         self._stop = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
-        self._last_expiry_at = 0.0
+        # None means "never attempted". A 0.0 sentinel is wrong because
+        # time.monotonic() counts from boot on Linux: on a host up for less than
+        # an hour, the first expiry was skipped until uptime passed the interval.
+        self._last_expiry_at: float | None = None
         self._recovery_pending = bool(extraction and recovery_principals)
 
     @property
@@ -69,7 +72,7 @@ class MemoryGovernanceWorker:
                 logger.error("memory.governance recovery_failed error_type=%s", type(exc).__name__)
             else:
                 worked = recovered > 0
-        if self.extraction is not None and time.monotonic() - self._last_expiry_at >= 3600:
+        if self.extraction is not None and (self._last_expiry_at is None or time.monotonic() - self._last_expiry_at >= 3600):
             # Stamp the attempt BEFORE making it. The stamp used to be written
             # only on success, so a persistently failing expiry never advanced
             # it and the surrounding one-second poll loop retried the same RPC

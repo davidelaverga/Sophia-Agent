@@ -51,6 +51,7 @@ from deerflow.agents.sophia_agent.utils import validate_user_id
 from deerflow.agents.sophia_agent.vision_gate import supports_vision
 from deerflow.config.summarization_config import get_summarization_config
 from deerflow.models import create_chat_model
+from deerflow.sophia.diag import factory_mark, timed_graph_factory
 from deerflow.sophia.memory_governance.model_clients import GovernedChatAnthropic as ChatAnthropic
 from deerflow.sophia.observability import disable_langsmith_tracing_for_runnable
 from deerflow.sophia.tools.emit_artifact import emit_artifact
@@ -284,6 +285,7 @@ def _create_summarization_middleware():
     return SophiaSummarizationMiddleware(**kwargs)
 
 
+@timed_graph_factory("sophia_companion")
 def make_sophia_agent(config: RunnableConfig):
     """Create the Sophia companion agent with its full middleware chain.
 
@@ -505,6 +507,9 @@ def make_sophia_agent(config: RunnableConfig):
         ]
     )
 
+    # Launch-timeline diagnostics: the remainder of the factory is tool
+    # construction plus graph compilation.
+    factory_mark("pre_compile")
     retrieve_memories = make_retrieve_memories_tool(user_id)
     start_builder_task = make_start_builder_task_tool(user_id)
     edit_builder_artifact = make_edit_builder_artifact_tool(user_id)

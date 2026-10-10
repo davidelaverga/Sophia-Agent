@@ -19,6 +19,12 @@ export type UseCompanionChatRuntimeParams = {
     variant: 'warning' | 'error' | 'info' | 'success';
     durationMs?: number;
   }) => void;
+  /**
+   * A turn's terminal error, with the id of the message that started it and
+   * whether the turn may already have acted. sendMessage still resolves; must
+   * be stable (it keys the transport).
+   */
+  onTurnError?: (messageId: string | null, errorText: string, afterActivity: boolean) => void;
 };
 
 export type UseCompanionStreamContractParams = {

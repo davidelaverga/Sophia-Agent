@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import re
 from dataclasses import replace
 from types import SimpleNamespace
 from uuid import UUID, uuid4
@@ -417,9 +418,11 @@ def test_denied_entry_identifies_which_refusal_fired_without_exporting_content(e
     # exception text nor any owner content can ride along on a future edit.
     assert set(event) == {
         "service", "outcome", "fault_owner_id", "safe_reason_code",
-        "final_dispatch_permission", "error_type", "denied_at_line",
+        "final_dispatch_permission", "error_type", "denied_at_line", "denial_reason",
         "owner_ref", "context_ref", "run_ref",
     }
+    # A fixed literal or a class name, never exception text.
+    assert re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,63}", event["denial_reason"])
     blob = json.dumps(event, sort_keys=True, default=str)
     assert "CURRENT_SYNTHETIC_INPUT" not in blob
     # Identity travels only as a domain-separated keyed reference.

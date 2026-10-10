@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import React, { useState } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -34,6 +34,7 @@ function RecapOrbitHarness({
 
 describe('RecapMemoryOrbit demo flow', () => {
   afterEach(() => {
+    cleanup();
     vi.useRealTimers();
   });
 
@@ -110,5 +111,33 @@ describe('RecapMemoryOrbit demo flow', () => {
     expect(screen.queryByText('I recover faster when I slow down and breathe.')).not.toBeInTheDocument();
     expect(screen.queryByText('Temporary draft memory to remove.')).not.toBeInTheDocument();
     expect(screen.queryByText('Refined')).not.toBeInTheDocument();
+  });
+
+  it.each([undefined, '', '   '])('does not label the stock line as a key takeaway when none was supplied (%j)', (takeaway) => {
+    render(
+      <RecapMemoryOrbit
+        takeaway={takeaway}
+        candidates={[{ id: 'memory-1', text: 'Synthetic candidate', category: 'fact' }]}
+        decisions={{}}
+        onDecisionChange={() => {}}
+      />
+    );
+    expect(screen.queryByText('key takeaway')).toBeNull();
+    expect(screen.getByText('from this session')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('A thread worth carrying forward');
+  });
+
+  it('keeps the key takeaway label for a supplied takeaway', () => {
+    render(
+      <RecapMemoryOrbit
+        takeaway="You found the calmer thread."
+        candidates={[{ id: 'memory-1', text: 'Synthetic candidate', category: 'fact' }]}
+        decisions={{}}
+        onDecisionChange={() => {}}
+      />
+    );
+    expect(screen.getByText('key takeaway')).toBeInTheDocument();
+    expect(screen.queryByText('from this session')).toBeNull();
+    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('You found the calmer thread.');
   });
 });

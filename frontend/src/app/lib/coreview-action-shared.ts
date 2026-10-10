@@ -4,6 +4,13 @@ import type {
 } from "./artifact-renderers"
 import type { CoreviewArtifactCapabilities } from "./coreview-workspace-contract"
 
+// Gemini fixes its tools for the whole voice session, so every review-only
+// tool scopes itself to an active review. Without this an ordinary greeting
+// can read the review schemas as evidence that a file is open.
+// Kept identical to REVIEW_ONLY_TOOL_SCOPE in voice/realtime/coreview.py.
+export const COREVIEW_REVIEW_ONLY_TOOL_SCOPE =
+  "Only during artifact review (after the app sent an artifact image or said review is active); otherwise no artifact is open, so do not call or mention this tool. "
+
 export type CoreviewArtifactRebindStatus = "not_attempted" | "success" | "failed" | "not_needed"
 
 export interface CoreviewCurrentView {

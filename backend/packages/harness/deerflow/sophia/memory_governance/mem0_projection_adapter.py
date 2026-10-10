@@ -9,9 +9,12 @@ from __future__ import annotations
 import importlib.metadata
 import os
 import threading
+import time
 from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any, Literal
+
+from deerflow.sophia.diag import record_mem0
 
 from .models import ProviderHit
 
@@ -132,6 +135,9 @@ class Mem0ProjectionAdapter:
             raise Mem0ContractError("mem0_endpoint_contract_mismatch")
         self._client = client
         self._lock = threading.Lock()
+        # Content-free timing for the launch timeline: construction (TLS plus
+        # the SDK's synchronous ping) of the client built by the latest search.
+        self.diag_last_client_ms = 0
 
     def _get_client(self) -> Any:
         if self._client is not None:
@@ -150,12 +156,16 @@ class Mem0ProjectionAdapter:
             # Architecture tests allow this import only in this adapter.
             from mem0 import MemoryClient
 
+            started = time.perf_counter()
             self._client = MemoryClient(
                 api_key=api_key,
                 host=None,
                 org_id=org_id or None,
                 project_id=project_id or None,
             )
+            built_ms = (time.perf_counter() - started) * 1000
+            self.diag_last_client_ms = int(built_ms)
+            record_mem0("client_new", built_ms)
             return self._client
 
     @staticmethod
@@ -228,10 +238,17 @@ class Mem0ProjectionAdapter:
         clauses: list[dict[str, object]] = [{"user_id": provider_subject}]
         clauses.extend({"metadata": {key: value}} for key, value in metadata_filter.items())
         filters: dict[str, object] = {"AND": clauses}
+        self.diag_last_client_ms = 0
+        search_started = None
         try:
-            response = self._get_client().search(query=query, filters=filters, limit=bounded_limit)
+            client = self._get_client()
+            search_started = time.perf_counter()
+            response = client.search(query=query, filters=filters, limit=bounded_limit)
         except Exception as exc:
             raise Mem0ContractError("mem0_search_unavailable", retryable=True) from exc
+        finally:
+            if search_started is not None:
+                record_mem0("search", (time.perf_counter() - search_started) * 1000)
         hits: list[ProviderHit] = []
         for item in self._results(response):
             provider_id = item.get("id")

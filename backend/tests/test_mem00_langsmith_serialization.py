@@ -66,3 +66,91 @@ def test_denied_plaintext_never_reaches_sdk_transport(monkeypatch):
 def test_missing_or_ambiguous_event_timestamp_is_not_certified(occurred_at):
     with pytest.raises(ValueError, match="memory_event_timestamp_invalid"):
         build_memory_langsmith_run_payload({"event_name": "memory.test", "occurred_at": occurred_at})
+
+
+def _rejected_ingest(status: int, body: str) -> Exception:
+    """Shape a failure the way langsmith.Client.request_with_retries raises it."""
+
+    import requests
+    from langsmith import utils as ls_utils
+
+    response = requests.Response()
+    response.status_code = status
+    response._content = body.encode()
+    response.url = "https://eu.api.smith.langchain.com/runs?token=synthetic"
+    try:
+        try:
+            response.raise_for_status()
+        except requests.HTTPError as original:
+            raise requests.HTTPError(str(original), body) from original
+    except requests.HTTPError as wrapped:
+        try:
+            raise ls_utils.LangSmithError(f"Failed to POST /runs in LangSmith API. {wrapped!r}")
+        except ls_utils.LangSmithError as error:
+            return error
+    raise AssertionError("unreachable")
+
+
+_FAILURE_ENVELOPE = {
+    "schema": "sophia.memory.event.v1",
+    "event_name": "memory.retrieval.denied",
+    "occurred_at": "2026-09-06T09:20:43.411927+00:00",
+    "outcome": "denied",
+    "owner_ref": "hmac-sha256:owner:synthetic",
+}
+
+
+def test_export_failure_reports_status_and_class_but_no_message(monkeypatch, caplog):
+    import logging
+
+    from deerflow.sophia.memory_governance import observability
+
+    monkeypatch.setenv("SOPHIA_MEMORY_LANGSMITH_EXPORT", "true")
+    monkeypatch.setenv("LANGSMITH_ENDPOINT", "https://eu.api.smith.langchain.com/api?token=synthetic")
+    monkeypatch.setenv("LANGSMITH_WORKSPACE_ID", "synthetic-workspace-uuid")
+    observability.reset_counters_for_test()
+    caplog.set_level(logging.WARNING)
+
+    class RejectingClient:
+        def create_run(self, **_payload):
+            raise _rejected_ingest(403, '{"error":"Forbidden","detail":"SYNTHETIC PRIVATE BODY"}')
+
+    class SlowClient:
+        def create_run(self, **_payload):
+            import requests
+
+            raise requests.ReadTimeout("SYNTHETIC PRIVATE TIMEOUT DETAIL")
+
+    assert _export_langsmith(_FAILURE_ENVELOPE, client=RejectingClient()) == "unavailable"
+    assert _export_langsmith(_FAILURE_ENVELOPE, client=SlowClient()) == "unavailable"
+
+    assert "error_class=LangSmithError http_status=403 error_code=None" in caplog.text
+    assert "error_class=ReadTimeout http_status=None error_code=None" in caplog.text
+    assert "endpoint_host=eu.api.smith.langchain.com workspace_header_present=True" in caplog.text
+    assert "event_name=memory.retrieval.denied" in caplog.text
+    assert "elapsed_ms=" in caplog.text
+    for fragment in ("SYNTHETIC PRIVATE", "Forbidden", "token=synthetic", "synthetic-workspace-uuid", "/runs", "hmac-sha256"):
+        assert fragment not in caplog.text
+    snapshot = observability.runtime_metric_snapshot()
+    assert snapshot["export_failures_by_http_status"] == {"403": 1, "none": 1}
+
+
+def test_export_failure_logging_is_rate_limited(monkeypatch, caplog):
+    import logging
+
+    from deerflow.sophia.memory_governance import observability
+
+    monkeypatch.setenv("SOPHIA_MEMORY_LANGSMITH_EXPORT", "true")
+    observability.reset_counters_for_test()
+    caplog.set_level(logging.WARNING)
+
+    class RejectingClient:
+        def create_run(self, **_payload):
+            raise _rejected_ingest(403, '{"error":"Forbidden"}')
+
+    for _ in range(60):
+        assert _export_langsmith(_FAILURE_ENVELOPE, client=RejectingClient()) == "unavailable"
+
+    lines = [record.getMessage() for record in caplog.records if "memory_langsmith_export" in record.getMessage()]
+    assert [line.rsplit("failure_count=", 1)[1] for line in lines] == ["1", "2", "3", "4", "5", "50"]
+    assert observability.runtime_metric_snapshot()["export_failures_by_http_status"] == {"403": 60}

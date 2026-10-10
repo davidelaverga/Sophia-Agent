@@ -567,6 +567,30 @@ function buildSummary(): VoiceTelemetrySummary {
 }
 
 describe('buildVoiceTelemetryReport', () => {
+  it.each(['last-start-event', 'current-session-id', 'unknown'] as const)(
+    'excludes earlier-owner diagnostics with scope %s', (strategy) => {
+      const bundle = buildCaptureBundle(strategy === 'last-start-event' ? [{
+        seq: 1, recordedAt: '2026-05-20T12:00:00.000Z', category: 'voice-session',
+        name: 'start-talking-requested', payload: { sessionId: 'current-session' },
+      }] : []);
+      if (strategy === 'unknown') bundle.snapshot.session = null;
+      bundle.diagnostics = {
+        capacity: 200, totalProduced: 2, droppedCount: 0,
+        events: [
+          { v: 1, ev: 'builder.send', at: '2026-05-20T11:59:59.000Z', mono: 1, thread_id: 'earlier-owner-thread' },
+          { v: 1, ev: 'builder.send', at: '2026-05-20T12:00:01.000Z', mono: 2, thread_id: 'current-thread' },
+        ],
+      };
+      const report = buildVoiceTelemetryReport({
+        exportedAt: '2026-05-20T12:00:05.000Z', summary: buildSummary(),
+        metrics: buildMetrics(), captureBundle: bundle,
+      });
+      expect(report.captureBundle.diagnostics?.events.map((event) => event.thread_id))
+        .toEqual(strategy === 'unknown' ? [] : ['current-thread']);
+      expect(JSON.stringify(report)).not.toContain('earlier-owner-thread');
+    },
+  );
+
   it('keeps current-run telemetry and excludes persisted history snapshots', () => {
     const report = buildVoiceTelemetryReport({
       exportedAt: '2026-05-20T12:00:05.000Z',

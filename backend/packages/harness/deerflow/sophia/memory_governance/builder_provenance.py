@@ -7,9 +7,13 @@ re-admits its inclusion manifest before sandbox, briefing or model consumers.
 
 import hmac
 import json
+import logging
+from time import perf_counter
 from uuid import UUID, uuid4
 
 from langchain_core.messages import HumanMessage, convert_to_messages
+
+from deerflow.sophia.diag import code_or_none, diag_event, elapsed_ms
 
 from .context_provenance import _state_ref, seal_context
 from .refs import keyed_ref
@@ -39,24 +43,31 @@ def _normalize(value, *, assign_id=False):
     return normalized
 
 
-def issue_builder_handoff(*, guard, owner_id, parent_thread_id, child_thread_id, source_messages):
+def issue_builder_handoff(*, guard, owner_id, parent_thread_id, child_thread_id, source_messages, tool_call_id=None):
     # Only the active parent tool guard may request the independent source lane.
     if guard is None or not guard.enabled or guard.owner != owner_id or guard.context_id != parent_thread_id:
         raise ValueError("builder_parent_admission_required")
     from .builder_source_binding import BuilderSourceBindingService
     from .source_dependencies import encode_source_dependencies
     from .store import configured_memory_store
+    started = perf_counter()
     normalized, receipt, admission = BuilderSourceBindingService(owner_id=owner_id, store=configured_memory_store()).register_independent_text(
         guard=guard, child_thread_id=child_thread_id, messages=source_messages)
+    register_ms = elapsed_ms(started)
     parent = seal_context(owner_id=owner_id, context_id=parent_thread_id,
         messages=convert_to_messages(normalized["messages"]), blocks=[], admission=admission)
+    checked = perf_counter()
     guard.check()
+    check_ms = elapsed_ms(checked)
     body = {"schema": "mem00.builder-handoff.c2-source-only.v1", "owner_ref": parent["owner_ref"],
         "parent_ref": parent["context_ref"], "child_ref": keyed_ref("context", str(UUID(child_thread_id))),
         "manifest": encode_context_manifest(admission.context), "payload_ref": _state_ref(normalized),
         "payload_keys": sorted(normalized), "admission_ref": keyed_ref("prompt-admission", receipt.request.prior_admission_id),
         "source_dependencies": encode_source_dependencies(owner_id=owner_id, values=receipt.request.source_dependencies),
         "binding_receipt": receipt.model_dump(mode="json", by_alias=True)}
+    diag_event("builder.handoff.issued", parent_thread_id=parent_thread_id, child_thread_id=child_thread_id,
+        tool_call_id=tool_call_id, handoff_event_id=receipt.event_id, register_ms=register_ms, check_ms=check_ms,
+        total_ms=elapsed_ms(started))
     return normalized, {**body, "seal": keyed_ref("builder-handoff-seal", _json(body))}
 
 
@@ -79,40 +90,59 @@ async def dispatch_independent_builder(*, guard, owner_id, parent_thread_id, sou
         raise ValueError("builder_tool_call_invalid")
     child = str(uuid5(UUID(str(guard.config[INPUT_RUN_KEY])), "mem00-c2-builder:" + tool_call_id))
     wire, proof = issue_builder_handoff(guard=guard, owner_id=owner_id, parent_thread_id=parent_thread_id,
-        child_thread_id=child, source_messages=source_messages)
+        child_thread_id=child, source_messages=source_messages, tool_call_id=tool_call_id)
     client = get_client(url=None)
     store = configured_memory_store()
     service = BuilderSourceBindingService(owner_id=owner_id, store=store)
 
     async def observe():
+        started = perf_counter()
+        native_status = None
         try:
             binding = BuilderRunBinding.model_validate(store.get_builder_source_run_for_handoff(
                 p_user_id=owner_id, p_handoff_event_id=proof["binding_receipt"]["event_id"]))
             service.resolve_child(parent_thread_id=parent_thread_id, child_thread_id=child, child_run_id=binding.child_run_id)
             native = await client.runs.get(child, binding.child_run_id)
+            native_status = native.get("status")
             if (native.get("thread_id") != child or native.get("run_id") != binding.child_run_id
                     or native.get("status") not in {"pending", "running", "success", "error", "timeout", "interrupted"}):
                 raise ValueError("native_run_unproven")
             guard.check()
+            diag_event("builder.child.observed", parent_thread_id=parent_thread_id, child_thread_id=child,
+                child_run_id=binding.child_run_id, binding_event_id=binding.binding_event_id, confirmed=True,
+                native_status=code_or_none(native_status), observe_ms=elapsed_ms(started))
             return {"thread_id": child, "run_id": binding.child_run_id, "status": native["status"], "confirmed": True}
-        except Exception:
+        except Exception as exc:
+            diag_event("builder.child.observed", _level=logging.WARNING, parent_thread_id=parent_thread_id, child_thread_id=child,
+                confirmed=False, native_status=code_or_none(native_status), error_type=type(exc).__name__, observe_ms=elapsed_ms(started))
             return {"thread_id": child, "run_id": None, "status": "unconfirmed", "confirmed": False}
 
     guard.check()
+    started = perf_counter()
     try:
         allocated = await client.threads.create(thread_id=child, if_exists="raise")
         if allocated.get("thread_id") != child:
+            diag_event("builder.child.thread_created", _level=logging.WARNING, child_thread_id=child,
+                outcome="thread_mismatch", ms=elapsed_ms(started))
             return {"thread_id": child, "run_id": None, "status": "unconfirmed", "confirmed": False}
-    except Exception:
+    except Exception as exc:
         # Includes duplicate/retried allocation: only recover, never re-run.
+        diag_event("builder.child.thread_created", _level=logging.WARNING, child_thread_id=child,
+            outcome="create_failed_recovering", error_type=type(exc).__name__, ms=elapsed_ms(started))
         return await observe()
+    diag_event("builder.child.thread_created", child_thread_id=child, outcome="created", ms=elapsed_ms(started))
+    started = perf_counter()
     try:
         guard.check()
-        await client.runs.create(thread_id=child, assistant_id="sophia_builder", input=wire,
+        created = await client.runs.create(thread_id=child, assistant_id="sophia_builder", input=wire,
             config={"configurable": {"user_id": owner_id, "thread_id": child, HANDOFF_KEY: proof}},
             stream_resumable=True)
-    except Exception:
-        pass  # A failed response does not establish an ineffective request.
+        diag_event("builder.child.run_create", child_thread_id=child, outcome="created",
+            child_run_id=created.get("run_id") if isinstance(created, dict) else None, ms=elapsed_ms(started))
+    except Exception as exc:
+        # A failed response does not establish an ineffective request.
+        diag_event("builder.child.run_create", _level=logging.WARNING, child_thread_id=child,
+            outcome="failed_observing", error_type=type(exc).__name__, ms=elapsed_ms(started))
     return await observe()
 
 

@@ -15,7 +15,7 @@ from .context_provenance import CHECKPOINT_PROOF_KEY, MAX_MESSAGES, _state_ref, 
 from .refs import keyed_ref
 from .retained_context import RetainedMemoryContext
 from .source_dependencies import MAX_SOURCE_DEPENDENCIES, SourceDependency, merge_source_dependencies
-from .source_input_provenance import SourceInputWitness, _witness, recheck_recorded_source
+from .source_input_provenance import SourceInputWitness, _witness, recheck_recorded_source, safe_reason_code
 from .source_intake import SourceActionReceipt
 from .store import MemoryGovernanceUnavailable
 
@@ -92,5 +92,7 @@ def checkpoint_source_history(*, owner_id, context_id, state, current_witness, s
         groups = [sources] + ([original] if original else [])
         merged = merge_source_dependencies(owner_id=owner_id, groups=groups)
         return CheckpointSourceHistory(context, merged, len(pending), max((item.memory_clear_epoch for item in original), default=None))
-    except Exception:
-        raise MemoryGovernanceUnavailable("memory_pending_source_history_unproven") from None
+    except Exception as exc:
+        error = MemoryGovernanceUnavailable("memory_pending_source_history_unproven")
+        error.safe_reason = safe_reason_code(exc)
+        raise error from None

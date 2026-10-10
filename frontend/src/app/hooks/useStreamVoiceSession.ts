@@ -67,6 +67,7 @@ import {
   type StreamVoiceCredentials,
 } from "./useStreamVoice"
 import {
+  logUngroundedModeClaim,
   applyAssistantTranscriptUpdate,
   applyPacedAssistantTranscriptUpdate,
   createAssistantTranscriptStaleGuardState,
@@ -215,6 +216,7 @@ export type StreamVoiceSessionReturn = {
     frame: GeminiArtifactFramePayload,
     context?: GeminiArtifactFrameSendContext,
   ) => Promise<GeminiArtifactFrameSendResult> | GeminiArtifactFrameSendResult
+  endArtifactReview: () => void
   getArtifactFrameTransportStatus: () => GeminiArtifactFrameTransportStatusSnapshot
 }
 
@@ -1988,6 +1990,10 @@ export function useStreamVoiceSession(
         result,
       },
     })
+  }, [])
+
+  const endArtifactReview = useCallback(() => {
+    geminiConnectionRef.current?.endArtifactReview()
   }, [])
 
   const sendArtifactFrame = useCallback((
@@ -4011,6 +4017,21 @@ export function useStreamVoiceSession(
               },
             })
           },
+          onUngroundedModeClaim: (diagnostic) => {
+            if (!ownsController()) return
+            // Gemini mentioned files or review tools outside review.
+            logUngroundedModeClaim(diagnostic)
+            recordSophiaCaptureEvent({
+              category: "voice-session",
+              name: "gemini-ungrounded-mode-claim",
+              payload: {
+                runtime: "gemini_live",
+                sessionId: sessionIdRef.current ?? null,
+                voiceAgentSessionId: creds.session_id,
+                diagnostic,
+              },
+            })
+          },
           onRelayDiagnostic: (diagnostic) => {
             if (!ownsController()) return
             setRuntimeTelemetry((current) => current.runtime === "gemini_live"
@@ -4905,6 +4926,7 @@ export function useStreamVoiceSession(
     unlockAudio: () => {},
     speakText: async () => false,
     sendArtifactFrame,
+    endArtifactReview,
     getArtifactFrameTransportStatus,
   }
 }

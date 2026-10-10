@@ -2135,7 +2135,7 @@ describe("useStreamVoiceSession", () => {
     // interpreting its payload. This includes synthetic receipts and tool ledgers.
     const callbacks = Object.entries(mockConnectGeminiBrowserLiveFromBootstrap.mock.calls[0]?.[0] as Record<string, unknown>)
       .filter(([name, value]) => name.startsWith("on") && typeof value === "function")
-    expect(callbacks).toHaveLength(27)
+    expect(callbacks).toHaveLength(28)
     for (const [name, callback] of callbacks) {
       act(() => { (callback as (payload: unknown) => void)(undefined) })
       expect(result.current.runtimeTelemetry, name).toEqual(before)

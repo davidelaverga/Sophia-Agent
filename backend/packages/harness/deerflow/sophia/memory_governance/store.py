@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 from collections.abc import Iterable
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -16,6 +17,7 @@ from uuid import UUID
 
 import httpx
 
+from deerflow.sophia.diag import record_store_request
 from deerflow.sophia.rpc_business_errors import store_error_status
 
 if TYPE_CHECKING:
@@ -113,6 +115,10 @@ class SupabaseMemoryGovernanceStore:
         json_body: object | None = None,
         prefer: str | None = None,
     ) -> Any:
+        # Per-run launch diagnostics count requests by fixed resource name and
+        # duration only; never parameters, bodies or owner identifiers.
+        started = time.perf_counter()
+        status_code = None
         try:
             response = self._client.request(
                 method,
@@ -121,8 +127,11 @@ class SupabaseMemoryGovernanceStore:
                 params=params,
                 json=json_body,
             )
+            status_code = getattr(response, "status_code", None)
         except httpx.HTTPError as exc:
             raise MemoryGovernanceUnavailable("governance_transport_error") from exc
+        finally:
+            record_store_request(resource, started, status_code)
         status = store_error_status(response)
         if status in {409, 412}:
             raise MemoryGovernanceConflict("governance_revision_conflict")
@@ -569,6 +578,14 @@ class SupabaseMemoryGovernanceStore:
 
     def source_action_status(self, *, user_id: str, command_key: str):
         return self._rpc("sophia_memory_lookup_source_action", {"p_user_id": user_id, "p_idempotency_key": command_key})
+
+    def source_action_receipt_for_message(self, *, user_id: str, session_id: str, message_id: str):
+        """Immutable intake receipt for one checkpointed message; read evidence only."""
+        receipt = self._rpc("sophia_memory_lookup_source_action_by_message",
+            {"p_user_id": user_id, "p_session_id": session_id, "p_message_id": message_id})
+        if receipt is None:
+            raise MemoryGovernanceUnavailable("memory_source_receipt_not_found")
+        return receipt
 
     def source_snapshot(self, *, user_id: str, session_id: str, thread_id: str):
         return self._rpc("sophia_memory_source_snapshot", {"p_user_id": user_id, "p_session_id": session_id, "p_thread_id": thread_id})

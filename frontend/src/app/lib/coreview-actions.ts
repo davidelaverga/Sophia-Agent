@@ -5,6 +5,7 @@ import {
   type ArtifactRendererKind,
 } from "./artifact-renderers"
 import {
+  COREVIEW_REVIEW_ONLY_TOOL_SCOPE,
   type CoreviewArtifactRebindStatus,
   type CoreviewCurrentView,
 } from "./coreview-action-shared"
@@ -1098,7 +1099,7 @@ export function coreviewGeminiFunctionDeclarations(): Record<string, unknown>[] 
   return [
     {
       name: COREVIEW_SET_VIEW_TOOL_NAME,
-      description: "Set the active Coreview artifact view during Review with Sophia. Use page fields for PDF page navigation, zoom fields for generic zoom changes, and html_scroll_delta/html_scroll_position for HTML document scrolling. For zoom/focus on a specific title, text, selection, section, or area, use coreview_focus_anchor instead. Wait for the app result before acknowledging.",
+      description: COREVIEW_REVIEW_ONLY_TOOL_SCOPE + "Set the active Coreview artifact view during Review with Sophia. Use page fields for PDF page navigation, zoom fields for generic zoom changes, and html_scroll_delta/html_scroll_position for HTML document scrolling. For zoom/focus on a specific title, text, selection, section, or area, use coreview_focus_anchor instead. Wait for the app result before acknowledging.",
       parameters: {
         type: "OBJECT",
         properties: {
@@ -1117,7 +1118,7 @@ export function coreviewGeminiFunctionDeclarations(): Record<string, unknown>[] 
     },
     {
       name: COREVIEW_REFRESH_VIEW_TOOL_NAME,
-      description: "Refresh Sophia's still-frame view of the active Coreview artifact without changing artifact contents. Use only for requests like \"refresh your view\" or \"refresh your page\". Do not use this as a substitute for highlights, marks, notes, comments, pins, flags, callouts, or other annotations.",
+      description: COREVIEW_REVIEW_ONLY_TOOL_SCOPE + "Refresh Sophia's still-frame view of the active Coreview artifact without changing artifact contents. Use only for requests like \"refresh your view\" or \"refresh your page\". Do not use this as a substitute for highlights, marks, notes, comments, pins, flags, callouts, or other annotations.",
       parameters: {
         type: "OBJECT",
         properties: {
@@ -1128,7 +1129,7 @@ export function coreviewGeminiFunctionDeclarations(): Record<string, unknown>[] 
     },
     {
       name: COREVIEW_GET_CURRENT_VIEW_TOOL_NAME,
-      description: "Get safe metadata about what Sophia can currently see in the active Coreview artifact. Prefer this for simple visibility or current-page questions. Returns no raw artifact text, comments, or visual frame.",
+      description: COREVIEW_REVIEW_ONLY_TOOL_SCOPE + "Get safe metadata about what Sophia can currently see in the active Coreview artifact. Prefer this for simple visibility or current-page questions. Returns no raw artifact text, comments, or visual frame.",
       parameters: {
         type: "OBJECT",
         properties: {
@@ -1139,7 +1140,7 @@ export function coreviewGeminiFunctionDeclarations(): Record<string, unknown>[] 
     },
     {
       name: COREVIEW_ADD_ANNOTATION_TOOL_NAME,
-      description: "Required for annotation intents during Review with Sophia. For any user request containing highlight, mark, underline, arrow, annotate, note, comment, pin, flag, or callout, call this tool. Do not use coreview_refresh_view as a substitute. Do not say an annotation was added unless this tool returned ok=true. Examples: \"Highlight it yellow\" -> kind=highlight, anchor_type=current_title or current_selection, color=yellow. \"Underline the title\" -> kind=underline, anchor_type=current_title. \"Add an arrow pointing to this\" -> kind=arrow, anchor_type=current_selection or current_title. \"Leave a comment: change the font\" -> kind=comment, anchor_type=current_title, comment_text=\"change the font\". \"Highlight the title yellow and comment change the font\" -> call this tool twice, once for highlight and once for comment.",
+      description: COREVIEW_REVIEW_ONLY_TOOL_SCOPE + "Required for annotation intents during Review with Sophia. For any user request containing highlight, mark, underline, arrow, annotate, note, comment, pin, flag, or callout, call this tool. Do not use coreview_refresh_view as a substitute. Do not say an annotation was added unless this tool returned ok=true. Examples: \"Highlight it yellow\" -> kind=highlight, anchor_type=current_title or current_selection, color=yellow. \"Underline the title\" -> kind=underline, anchor_type=current_title. \"Add an arrow pointing to this\" -> kind=arrow, anchor_type=current_selection or current_title. \"Leave a comment: change the font\" -> kind=comment, anchor_type=current_title, comment_text=\"change the font\". \"Highlight the title yellow and comment change the font\" -> call this tool twice, once for highlight and once for comment.",
       parameters: {
         type: "OBJECT",
         properties: {
@@ -1179,7 +1180,7 @@ export function coreviewGeminiFunctionDeclarations(): Record<string, unknown>[] 
     },
     {
       name: COREVIEW_FOCUS_ANCHOR_TOOL_NAME,
-      description: "Zoom and center the active Coreview artifact around a text or coordinate anchor during Review with Sophia. For \"zoom/focus on X\" requests, use this tool, for example \"Zoom in on the current title\" -> anchor_type=current_title. Do not use this for highlights or comments; follow annotation requests with coreview_add_annotation.",
+      description: COREVIEW_REVIEW_ONLY_TOOL_SCOPE + "Zoom and center the active Coreview artifact around a text or coordinate anchor during Review with Sophia. For \"zoom/focus on X\" requests, use this tool, for example \"Zoom in on the current title\" -> anchor_type=current_title. Do not use this for highlights or comments; follow annotation requests with coreview_add_annotation.",
       parameters: {
         type: "OBJECT",
         properties: {

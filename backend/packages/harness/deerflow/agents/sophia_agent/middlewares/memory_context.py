@@ -9,7 +9,9 @@ Task/native-state recovery remains held; raising is not a rotation receipt.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
+import time
 from contextvars import ContextVar
 from copy import deepcopy
 from functools import wraps
@@ -22,6 +24,7 @@ from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import PrivateStateAttr
 from langchain_core.messages import ToolMessage
 
+from deerflow.sophia import diag
 from deerflow.sophia.memory_governance.context_provenance import CHECKPOINT_PROOF_KEY, seal_checkpoint, seal_context, verify_checkpoint_seal
 from deerflow.sophia.memory_governance.input_provenance import INPUT_PROOF_KEY, INPUT_RUN_KEY, verified_current_input
 from deerflow.sophia.memory_governance.refs import keyed_ref
@@ -30,6 +33,9 @@ from deerflow.sophia.memory_governance.retrieval_provenance import RETRIEVAL_PRO
 
 _active_tool_guard: ContextVar[object | None] = ContextVar("mem00_active_tool_guard", default=None)
 _active_model_guard: ContextVar[object | None] = ContextVar("mem00_active_model_guard", default=None)
+# Diagnostic label only: which middleware hook asked for a guard operation.
+# It never selects or skips a check.
+_guard_site: ContextVar[str | None] = ContextVar("mem00_guard_site", default=None)
 
 
 def active_model_guard():
@@ -71,11 +77,107 @@ class MemoryContextState(AgentState):
 
 
 def _serialized_dependencies(method):
+    op = method.__name__.lstrip("_")
+
     @wraps(method)
     def guarded(self, *args, **kwargs):
-        with self.dependency_update_lock():
+        with self.dependency_update_lock(), _GuardOp(self, op):
             return method(self, *args, **kwargs)
     return guarded
+
+
+def _guard_stats(guard):
+    stats = guard.__dict__.get("_diag_stats")
+    return stats if stats is not None else guard.__dict__.setdefault("_diag_stats", diag.GuardStats())
+
+
+def _guard_run_diag(guard):
+    # The factory's run-wide accumulator when one is current, else a private
+    # one that counts only work done inside this guard's operations.
+    run = guard.__dict__.get("_diag_run")
+    return run if run is not None else guard.__dict__.setdefault("_diag_run", diag.current_run_diag() or diag.RunDiag())
+
+
+class _GuardOp:
+    """Times one guard operation for the launch timeline. Observation only.
+
+    It never catches, replaces or reorders a check: __exit__ always returns
+    False and every diagnostic step is individually fail-safe. Store, Mem0
+    and export work done inside the operation is counted into the run's
+    accumulator, which the context variable shares across worker threads.
+    """
+
+    __slots__ = ("guard", "op", "started", "outer", "site", "token", "before", "readmits")
+
+    def __init__(self, guard, op):
+        self.guard, self.op = guard, op
+        self.started, self.outer, self.site, self.token, self.before, self.readmits = 0.0, False, None, None, None, 0
+
+    def __enter__(self):
+        try:
+            stats = _guard_stats(self.guard)
+            run = _guard_run_diag(self.guard)
+            self.outer = stats.depth == 0
+            stats.depth += 1
+            self.token = diag.bind_run_diag(run)
+            if self.outer:
+                self.site = diag.site_label(_guard_site.get())
+                self.before = run.totals()
+                self.readmits = stats.readmit_count()
+        except Exception:
+            pass
+        self.started = time.perf_counter()
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        try:
+            ms = (time.perf_counter() - self.started) * 1000
+            stats = _guard_stats(self.guard)
+            stats.depth = max(0, stats.depth - 1)
+            stats.record_op(self.op, ms, site=self.site if self.outer else None, denied=exc_type is not None)
+            if self.outer:
+                self._observe(stats, ms, exc_type)
+        except Exception:
+            pass
+        diag.reset_run_diag(self.token)
+        return False
+
+    def _observe(self, stats, ms, exc_type):
+        guard = self.guard
+        after = _guard_run_diag(guard).totals()
+        before = self.before or after
+        diag.diag_event("memory_guard.check", _level=logging.INFO if ms > diag.SLOW_GUARD_OP_MS else logging.DEBUG,
+            op=self.op, site=self.site, ms=int(ms), outcome="denied" if exc_type is not None else "ok",
+            error_type=exc_type.__name__ if exc_type is not None else None,
+            readmits=stats.readmit_count() - self.readmits, store_requests=after[0] - before[0],
+            store_ms=int(after[1] - before[1]), mem0_ms=int(after[2] - before[2]), thread_id=guard.__dict__.get("context_id"))
+        if stats.summary_emitted or not (self.op == "finish" or (self.op == "enter" and exc_type is not None)):
+            return
+        stats.summary_emitted = True
+        lane = "undeclared" if guard.__dict__.get("undeclared") else "governed" if guard.__dict__.get("enabled") else "legacy"
+        config = guard.__dict__.get("config") or {}
+        diag.diag_event("memory_guard.summary", outcome="finished" if self.op == "finish" else "entry_denied",
+            lane=lane, scope=diag.code_or_none(guard.__dict__.get("scope")),
+            store_scope="run" if _guard_run_diag(guard).run_scoped else "guard_ops",
+            thread_id=guard.__dict__.get("context_id"), run_id=config.get(INPUT_RUN_KEY) or config.get("run_id"),
+            **stats.summary(), **_guard_run_diag(guard).snapshot())
+
+
+class _at_site:
+    """``with _at_site("entry_pre"):`` labels guard operations started inside."""
+
+    __slots__ = ("label", "token")
+
+    def __init__(self, label):
+        self.label, self.token = label, None
+
+    def __enter__(self):
+        self.token = _guard_site.set(self.label)
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        _guard_site.reset(self.token)
+        return False
 
 
 def _supersedes(candidate, held) -> bool:
@@ -99,6 +201,7 @@ class MemoryRunGuard:
 
     def __init__(self, *, owner_id, config, scope="global"):
         from deerflow.sophia.memory_governance.context_state import allows_unversioned_builder_handoff
+        init_started = time.perf_counter()
         self.owner = owner_id
         self.config = dict(config)
         self.context_id = self.config.get("thread_id")
@@ -138,6 +241,13 @@ class MemoryRunGuard:
         self._rebuilt_source_count = 0
         self._retained_task_marker = None
         self._last_model_result_receipts = ()
+        # Adopt the run accumulator the factory installed (if any) while it is
+        # still current, then report the owner-authority lookups above.
+        try:
+            _guard_run_diag(self)
+        except Exception:
+            pass
+        diag.factory_segment_add("guard_init", (time.perf_counter() - init_started) * 1000)
 
     def dependency_update_lock(self):
         """One process-local lock for all shared dependency snapshots/updates.
@@ -154,16 +264,27 @@ class MemoryRunGuard:
         from deerflow.sophia.memory_governance.retained_admission import readmit_retained_context
         from deerflow.sophia.memory_governance.service import MemoryProviderContract
         from deerflow.sophia.memory_governance.store import configured_memory_store
-        if not memory_feature_flags_for_owner(self.owner).governed_runtime_read:
-            raise MemoryContextUnavailable()
-        result = readmit_retained_context(store=configured_memory_store(), adapter=Mem0ProjectionAdapter(),
-            provider=MemoryProviderContract.from_environ(), service_name=os.getenv("RENDER_SERVICE_NAME") or "sophia-langgraph",
-            owner_id=self.owner, context=context, scope=self.scope, caller="runtime_context_boundary", query="Runtime context availability check")
-        if result.transition.action != "continue":
-            raise MemoryContextUnavailable()
-        if self.scope == "builder" and (result.context is None or result.context.inclusions or result.memories):
-            raise MemoryContextUnavailable()
-        return result
+        started = time.perf_counter()
+        token = diag.bind_run_diag(_guard_run_diag(self))
+        try:
+            if not memory_feature_flags_for_owner(self.owner).governed_runtime_read:
+                raise MemoryContextUnavailable()
+            flags_ms = int((time.perf_counter() - started) * 1000)
+            result = readmit_retained_context(store=configured_memory_store(), adapter=Mem0ProjectionAdapter(),
+                provider=MemoryProviderContract.from_environ(), service_name=os.getenv("RENDER_SERVICE_NAME") or "sophia-langgraph",
+                owner_id=self.owner, context=context, scope=self.scope, caller="runtime_context_boundary", query="Runtime context availability check",
+                latency_segments={"flags_ms": flags_ms})
+            if result.transition.action != "continue":
+                raise MemoryContextUnavailable()
+            if self.scope == "builder" and (result.context is None or result.context.inclusions or result.memories):
+                raise MemoryContextUnavailable()
+            return result
+        finally:
+            try:
+                _guard_stats(self).record_readmit((time.perf_counter() - started) * 1000)
+            except Exception:
+                pass
+            diag.reset_run_diag(token)
 
     def _empty_native_surface(self):
         # A checkpoint lost on restart cannot make retained sandbox material
@@ -331,6 +452,11 @@ class MemoryRunGuard:
             # structure, never owner content, and they are the only thing that
             # tells those refusals apart. Exception text stays excluded.
             diagnosis: dict[str, object] = {"error_type": type(exc).__name__}
+            try:
+                from deerflow.sophia.memory_governance.source_input_provenance import safe_reason_code
+                diagnosis["denial_reason"] = safe_reason_code(exc)
+            except Exception:
+                diagnosis.pop("denial_reason", None)
             try:
                 frame = exc.__traceback__
                 while frame is not None:
@@ -760,7 +886,8 @@ class MemoryContextEntryMiddleware(AgentMiddleware[MemoryContextState]):
 
     def wrap_model_call(self, request, handler):
         from deerflow.sophia.memory_governance.model_result_provenance import model_result_sink, scoped_result_receipts
-        self.guard.check()
+        with _at_site("entry_pre"):
+            self.guard.check()
         self.guard._last_model_result_receipts = ()
         token = _active_model_guard.set(self.guard)
         try:
@@ -768,14 +895,16 @@ class MemoryContextEntryMiddleware(AgentMiddleware[MemoryContextState]):
                 result = handler(request)
         finally:
             _active_model_guard.reset(token)
-        self.guard.check()  # Abort before any after-model consumer on drift.
+        with _at_site("entry_post"):
+            self.guard.check()  # Abort before any after-model consumer on drift.
         self.guard._last_model_result_receipts = scoped_result_receipts(receipts, owner_id=self.guard.owner,
             run_id=self.guard.config.get(INPUT_RUN_KEY), thread_id=self.guard.context_id)
         return result
 
     async def awrap_model_call(self, request, handler):
         from deerflow.sophia.memory_governance.model_result_provenance import model_result_sink, scoped_result_receipts
-        await asyncio.to_thread(self.guard.check)
+        with _at_site("entry_pre"):
+            await asyncio.to_thread(self.guard.check)
         self.guard._last_model_result_receipts = ()
         token = _active_model_guard.set(self.guard)
         try:
@@ -783,14 +912,16 @@ class MemoryContextEntryMiddleware(AgentMiddleware[MemoryContextState]):
                 result = await handler(request)
         finally:
             _active_model_guard.reset(token)
-        await asyncio.to_thread(self.guard.check)
+        with _at_site("entry_post"):
+            await asyncio.to_thread(self.guard.check)
         self.guard._last_model_result_receipts = scoped_result_receipts(receipts, owner_id=self.guard.owner,
             run_id=self.guard.config.get(INPUT_RUN_KEY), thread_id=self.guard.context_id)
         return result
 
     def wrap_tool_call(self, request, handler):
         from deerflow.sophia.memory_governance.model_tool_origin import bind_model_tool_origin, prepare_model_tool_origin
-        self.guard.check()
+        with _at_site("entry_tool_pre"):
+            self.guard.check()
         if held := self.guard.held_task_tool_result(request):
             return held
         origin = prepare_model_tool_origin(self.guard, request)
@@ -800,12 +931,14 @@ class MemoryContextEntryMiddleware(AgentMiddleware[MemoryContextState]):
                 result = handler(request)
         finally:
             _active_tool_guard.reset(token)
-        self.guard.check()
+        with _at_site("entry_tool_post"):
+            self.guard.check()
         return result
 
     async def awrap_tool_call(self, request, handler):
         from deerflow.sophia.memory_governance.model_tool_origin import bind_model_tool_origin, prepare_model_tool_origin, settle_file_handler
-        await asyncio.to_thread(self.guard.check)
+        with _at_site("entry_tool_pre"):
+            await asyncio.to_thread(self.guard.check)
         if held := await asyncio.to_thread(self.guard.held_task_tool_result, request):
             return held
         origin = await asyncio.to_thread(prepare_model_tool_origin, self.guard, request)
@@ -815,7 +948,8 @@ class MemoryContextEntryMiddleware(AgentMiddleware[MemoryContextState]):
                 result = await settle_file_handler(origin, handler, request)
         finally:
             _active_tool_guard.reset(token)
-        await asyncio.to_thread(self.guard.check)
+        with _at_site("entry_tool_post"):
+            await asyncio.to_thread(self.guard.check)
         return result
 
     def after_agent(self, state, runtime):

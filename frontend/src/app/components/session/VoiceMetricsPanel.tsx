@@ -5,6 +5,7 @@ import {
   AlertTriangle,
   AudioLines,
   Clipboard,
+  ClipboardList,
   ChevronDown,
   ChevronUp,
   Clock3,
@@ -21,6 +22,8 @@ import {
 } from "lucide-react"
 import { startTransition, useEffect, useId, useMemo, useRef, useState } from "react"
 
+import { diagnosticsRingToNdjson, readDiagnosticsRing } from "../../lib/diag-log"
+import { copyTextToClipboard, downloadTextFile } from "../../lib/download-file"
 import {
   buildLastSessionTelemetrySnapshot,
   persistLastSessionTelemetrySnapshot,
@@ -57,6 +60,18 @@ type PointerInteraction = {
   pointerId: number
   startX: number
   origin: FloatingPanelBounds
+}
+
+type SerializedSessionJson = {
+  text: string
+  eventCount: number
+  diagnosticsCount: number
+  droppedCount: number
+}
+
+type ManualCopyState = {
+  label: string
+  text: string
 }
 
 type SummaryMetricCard = {
@@ -278,20 +293,35 @@ function recordVoiceTelemetryExportSuccess(
   action: "copy" | "download",
   metrics: VoiceDeveloperMetrics,
 ) {
-  recordSophiaCaptureEvent({
-    category: "voice-session",
-    name: "voice-telemetry-export",
-    payload: {
-      action,
-      telemetryExportAfterCommandSucceeded: Boolean(
-        metrics.coreview.visual.lastReviewVoiceCommandKind
-          || metrics.coreview.visual.lastReviewVoiceCommands.length > 0,
-      ),
-      lastReviewVoiceCommandKind: metrics.coreview.visual.lastReviewVoiceCommandKind,
-      rawTranscriptExcluded: true,
-      rawFrameExcluded: true,
-    },
-  })
+  try {
+    recordSophiaCaptureEvent({
+      category: "voice-session",
+      name: "voice-telemetry-export",
+      payload: {
+        action,
+        telemetryExportAfterCommandSucceeded: Boolean(
+          metrics.coreview.visual.lastReviewVoiceCommandKind
+            || metrics.coreview.visual.lastReviewVoiceCommands.length > 0,
+        ),
+        lastReviewVoiceCommandKind: metrics.coreview.visual.lastReviewVoiceCommandKind,
+        rawTranscriptExcluded: true,
+        rawFrameExcluded: true,
+      },
+    })
+  } catch {
+    // Recording the export never turns a completed copy or download into an error.
+  }
+}
+
+function describeExportCounts(serialized: SerializedSessionJson): string {
+  const parts = [
+    `${serialized.eventCount} ${serialized.eventCount === 1 ? "event" : "events"}`,
+    `${serialized.diagnosticsCount} diagnostics`,
+  ]
+  if (serialized.droppedCount > 0) {
+    parts.push(`${serialized.droppedCount} dropped`)
+  }
+  return parts.join(", ")
 }
 
 export function VoiceMetricsPanel({
@@ -322,6 +352,17 @@ export function VoiceMetricsPanel({
     }),
   )
   const [exportError, setExportError] = useState<string | null>(null)
+  // Shown when the clipboard rejects, so the text can still be copied by hand.
+  const [manualCopy, setManualCopy] = useState<ManualCopyState | null>(null)
+  const manualCopyRef = useRef<HTMLTextAreaElement | null>(null)
+
+  useEffect(() => {
+    if (!manualCopy) return
+    const textarea = manualCopyRef.current
+    if (!textarea) return
+    textarea.focus()
+    textarea.select()
+  }, [manualCopy])
 
   useEffect(() => {
     if (typeof window === "undefined") return
@@ -645,7 +686,7 @@ export function VoiceMetricsPanel({
     return () => window.removeEventListener("keydown", handleKeyDown)
   }, [isPanelOpen, layout])
 
-  const serializeSessionJson = () => {
+  const serializeSessionJson = (): SerializedSessionJson | null => {
     if (typeof window === "undefined") {
       return null
     }
@@ -656,57 +697,105 @@ export function VoiceMetricsPanel({
     const exportedAt = new Date().toISOString()
     const exportMetrics = withTelemetryExportCommandFlag(metrics)
     const captureBundle = readTelemetryCaptureBundle(capture, exportMetrics, exportedAt)
+    const report = buildVoiceTelemetryReport({
+      exportedAt,
+      summary: buildVoiceTelemetrySummary(exportMetrics),
+      metrics: exportMetrics,
+      captureBundle,
+    })
+    const diagnostics = report.captureBundle.diagnostics
 
-    return JSON.stringify(
-      buildVoiceTelemetryReport({
-        exportedAt,
-        summary: buildVoiceTelemetrySummary(exportMetrics),
-        metrics: exportMetrics,
-        captureBundle,
-      }),
-      null,
-      2,
-    )
+    return {
+      text: JSON.stringify(report, null, 2),
+      eventCount: report.captureBundle.eventCount,
+      diagnosticsCount: diagnostics?.events.length ?? 0,
+      droppedCount: (report.captureBundle.capture?.droppedCount ?? 0) + (diagnostics?.droppedCount ?? 0),
+    }
+  }
+
+  // The clipboard can reject (permissions, an unfocused document). Show the
+  // text pre-selected instead, so it can still be copied by hand.
+  const copyWithManualFallback = async (label: string, text: string): Promise<boolean> => {
+    const copied = await copyTextToClipboard(text)
+    if (copied) {
+      setManualCopy(null)
+      return true
+    }
+    setManualCopy({ label, text })
+    showToast({
+      message: `Clipboard unavailable. ${label} is selected below; copy it manually.`,
+      variant: "warning",
+      durationMs: 4200,
+    })
+    return false
   }
 
   const copySessionJson = async () => {
+    let serialized: SerializedSessionJson | null
     try {
-      const payload = serializeSessionJson()
-      if (!payload || typeof navigator?.clipboard?.writeText !== "function") {
-        showToast({ message: "Session JSON is unavailable right now", variant: "warning", durationMs: 2200 })
-        return
-      }
-
-      await navigator.clipboard.writeText(payload)
-      setExportError(null)
-      recordVoiceTelemetryExportSuccess("copy", metrics)
-      showToast({ message: "Voice telemetry report copied", variant: "success", durationMs: 1800 })
+      serialized = serializeSessionJson()
     } catch {
       setExportError("Could not copy session JSON.")
       showToast({ message: "Could not copy session JSON", variant: "error", durationMs: 2200 })
+      return
+    }
+    if (!serialized) {
+      showToast({ message: "Session JSON is unavailable right now", variant: "warning", durationMs: 2200 })
+      return
+    }
+
+    setExportError(null)
+    if (await copyWithManualFallback("Session JSON", serialized.text)) {
+      recordVoiceTelemetryExportSuccess("copy", metrics)
+      showToast({ message: "Voice telemetry report copied", variant: "success", durationMs: 1800 })
+    }
+  }
+
+  const copyDiagnostics = async () => {
+    const ring = readDiagnosticsRing()
+    const ndjson = diagnosticsRingToNdjson(ring)
+    if (!ndjson) {
+      showToast({ message: "No diagnostics recorded yet", variant: "info", durationMs: 2200 })
+      return
+    }
+
+    if (await copyWithManualFallback("Diagnostics NDJSON", ndjson)) {
+      const dropped = ring.droppedCount > 0 ? `, ${ring.droppedCount} dropped` : ""
+      showToast({
+        message: `Diagnostics copied (${ring.events.length} lines${dropped})`,
+        variant: "success",
+        durationMs: 2200,
+      })
     }
   }
 
   const exportSessionJson = () => {
     try {
-      const payload = serializeSessionJson()
-      if (!payload || typeof document === "undefined") {
+      const serialized = serializeSessionJson()
+      if (!serialized) {
         showToast({ message: "Session JSON is unavailable right now", variant: "warning", durationMs: 2200 })
         return
       }
 
-      const blob = new Blob([payload], { type: "application/json" })
-      const href = URL.createObjectURL(blob)
-      const anchor = document.createElement("a")
       const stamp = new Date().toISOString().replace(/[:.]/g, "-")
+      const download = downloadTextFile({
+        text: serialized.text,
+        filename: `sophia-voice-telemetry-report-${stamp}.json`,
+        mimeType: "application/json",
+      })
+      if (!download.ok) {
+        setExportError("Could not export session JSON.")
+        showToast({ message: "Export is unavailable in this browser", variant: "error", durationMs: 2600 })
+        return
+      }
 
-      anchor.href = href
-      anchor.download = `sophia-voice-telemetry-report-${stamp}.json`
-      anchor.click()
-      URL.revokeObjectURL(href)
       setExportError(null)
       recordVoiceTelemetryExportSuccess("download", metrics)
-      showToast({ message: "Voice telemetry report exported", variant: "success", durationMs: 1800 })
+      showToast({
+        message: `Voice telemetry report exported (${formatBytes(download.bytes)}, ${describeExportCounts(serialized)})`,
+        variant: "success",
+        durationMs: 2600,
+      })
     } catch {
       setExportError("Could not export session JSON.")
       showToast({ message: "Could not export session JSON", variant: "error", durationMs: 2200 })
@@ -863,6 +952,16 @@ export function VoiceMetricsPanel({
                   <Download className="h-3.5 w-3.5" />
                   Export JSON
                 </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    void copyDiagnostics()
+                  }}
+                  className={floatingActionButtonClass}
+                >
+                  <ClipboardList className="h-3.5 w-3.5" />
+                  Copy diagnostics
+                </button>
               </>
             )}
             {layout === "floating" && (
@@ -899,6 +998,26 @@ export function VoiceMetricsPanel({
             <p role="alert" className="max-w-[18rem] text-right text-xs text-rose-100">
               {exportError}
             </p>
+          ) : null}
+          {manualCopy ? (
+            <div className="flex w-full max-w-[22rem] flex-col gap-2" data-testid="voice-metrics-manual-copy">
+              <textarea
+                ref={manualCopyRef}
+                readOnly
+                aria-label={`${manualCopy.label} for manual copy`}
+                value={manualCopy.text}
+                onFocus={(event) => event.currentTarget.select()}
+                rows={6}
+                className="w-full resize-y rounded-2xl border border-white/10 bg-black/30 p-2 font-mono text-[10px] leading-snug text-sophia-text"
+              />
+              <button
+                type="button"
+                onClick={() => setManualCopy(null)}
+                className={cn(floatingActionButtonClass, "self-end")}
+              >
+                Done
+              </button>
+            </div>
           ) : null}
         </div>
       </div>

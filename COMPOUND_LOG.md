@@ -2838,3 +2838,156 @@ Late in this wave, several commits landed over a red suite or with edits that si
 
 ### Known Follow-up
 - Inline artifact card on a failed→restart run (issue #4): root cause is frontend run-tracking in `useBuilderCanvas`/`PresenceArtifactPanel`; gateway is correct within the 15-min TTL. Deferred — needs browser E2E verification.
+
+## 2026-09-29 · [mem00-recorded-source-anchor] · PR #165
+**Author:** Claude · **Track:** backend + web · **Spec:** `docs/specs/03_memory_system.md`; incident mailbox `ops/mailbox/voice-next-20260924/` (claude-053, codex-048)
+
+### What Changed
+- Migration `2026_09_29_mem00_recorded_source_anchor.sql`: `sophia_replace_session_messages` never updates or deletes a row that has an intake receipt, ignores snapshot items reusing a recorded `message_id`, and keeps other rows off recorded sequences. Adds `sophia_memory_lookup_source_action_by_message`.
+- Migration `2026_10_02_mem00_recorded_source_chronology.sql` (follow-up, from Codex's automatic review): a row that already followed a recorded anchor stays after it even when a snapshot omits the anchor. Before this, the anchor at sequence 3 and a later row at 4 could become 3 and 2, reversing the order that transcript reads and memory extraction sort by. After five review rounds the planner decides each row's gap between recorded rows first, then numbers each gap in snapshot order: a stored row keeps its gap; a new row follows a recorded row listed by exact id if listed after it, and always follows one the snapshot does not list (arrival order: a seventh review showed client created_at comes from the browser clock); a copy reusing a recorded message_id is discarded and positions nothing. Contradictory places or a full gap refuse the snapshot (`recorded_source_order_unrepresentable`, nothing written). The web client refetches and resends, which is never refused while no two rows of a session share a sequence (deploy preflight). The Supabase store's append/replace now raise on a refusal instead of dropping it. The voice bridge also drops a timed-out start's pending window when its send is later refused, refuses a second start while that window is open, and never lets a new run confirm a correction while a pending start could supply it. Lesson: patching one counterexample at a time took five rounds; a reference model of the planner plus property tests closed it.
+- LangGraph: implemented the missing `store.source_action_receipt_for_message` (pending-input recovery). `create_run` refusals log `memory_admission_denied` (stage, safe reason, keyed refs); the source recheck and pending recovery carry exact reasons; `memory.context.entry_denied` gains `denial_reason`.
+- Web: a governed 403 becomes `memory_source_send_refused`, and the voice bridge reports "did not start, do not retry".
+- LangGraph: the Builder handoff carrier check accepts the mirrored copy langgraph-api 0.8.1 makes (`configurable` ↔ `context`); copies must agree, and the sealed durable handoff stays the authority.
+- LangGraph: `BuilderCommandMiddleware` routes the voice bridge's `[Voice build request]` message straight to `start_builder_task` (brief + canonical task type) instead of leaving the second launch decision to the companion model. For governed owners the child Builder is seeded from the recorded source only, so `independent_builder_runtime_seed` now reads the envelope's canonical task type too; before, it always started from `document`, so research got the smaller web budget and a visual report became Markdown (Codex review on `db9cebbb`).
+- Web: the voice bridge refuses an update/edit when the session has no running build, delivered artifact or recently sent start (`no_build_to_change`), instead of forwarding a correction with nothing to correct. Each bridge call logs one content-free `[voice-builder] outcome` console line; tool diagnostics show `reason:send_error`; the output AudioContext logs its state changes (`[voice-audio] context-state`).
+
+### What We Learned
+- Every voice Builder request since the bridge shipped (2026-09-27) was refused. The browser's conflict-rebase PUT wrote the GET's millisecond `created_at` (and a position-based `sequence`) back onto the just-recorded row, rotating its version. Voice is hit because transcript rows keep arriving; a quiet typed session rebases nothing.
+- The same class of bug hit text on 2026-09-22 and was fixed only on the display-timestamp path. The durable fix belongs in the one server-side writer, not in each client.
+- One opaque 403 hid a dozen distinct refusals; the missing store method went unnoticed because no test fixture called it. A contract test now checks every reachable `store.<name>(` call exists on the real store.
+- A voice build crossed three decision points: Gemini chose its tool, the browser checked the request was explicit, then the companion model had to choose `start_builder_task` again. In R-016 it answered without launching. The voice bridge message is now a routed command like a typed "write a document about X".
+- In R-017, Gemini called `update_async_task` before any build existed. The bridge forwarded it as a correction, which took the turn's one recorded source and kept the chat busy, so the later start never became a start message. Lifecycle tools need the same target check in the browser that the companion's tools apply on the server.
+- Gemini 3.8 Live native async tool calling was assessed and rejected as a fix: tools still run in the browser and every request crosses the same governed admission (`ops/mailbox/voice-next-20260924/claude-artifacts/r014-gemini-38-live-assessment.md`).
+
+### CLAUDE.md Updates
+- Root `CLAUDE.md` (Jorge pitfalls): recorded source rows are write-once; read `memory_admission_denied` before guessing at a 403.
+- Root `CLAUDE.md` (Luis pitfalls): the `[Voice build request]` header, `Task type:` line and `Brief:` prefix are a backend routing contract.
+
+### Skills Created / Modified
+- None.
+
+### GEPA Log Entry
+- No prompt file changed. The voice bridge's tool-result guidance string changed (refused build: "could not be started, do not retry"). tone_delta: N/A. Trace pair: none (LangSmith ingest is still failing).
+
+## 2026-10-04 · [langsmith-policy · launch-diagnostics · recap-refresh] · PR #TBD
+**Author:** Claude · **Track:** backend + voice + web · **Spec:** `docs/specs/04_backend_integration.md`; mailbox `ops/mailbox/voice-next-20260924/` (claude-060, claude-061, codex-053, codex-054)
+
+### What Changed
+- **Tracing safety:**
+  - `LangSmithTraceDisabledRunnable` (and the governed wrapper) now survive `copy()`, `with_config` and `astream_events`.
+  - Completion annotation requires a positive run-identity match.
+- **Governed structure-only tracing:** new `SOPHIA_GOVERNED_STRUCTURAL_TRACING` (default off) for governed Builder runs, via a redacting LangSmith client (`deerflow/sophia/governed_tracing.py`). An excluded governed Builder stamps `trace_unavailable / memory_governance_policy` instead of the misleading "no active run tree" warning.
+- **LangSmith visibility:**
+  - one process-wide Builder client with a `tracing_error_callback` (`langsmith_ingest_rejected`);
+  - a once-per-process `langsmith_preflight`;
+  - a startup `[tracing]` line with presence and equality booleans;
+  - the memory exporter logs its failure class and HTTP status, and its fault check exits early when injection is off.
+- **Voice:**
+  - every session is structure-only (content needs `SOPHIA_GEMINI_LIVE_LANGSMITH_CONTENT` plus an authoritative non-governed owner);
+  - background ingest failures feed an `IngestHealth` record (`gemini.langsmith.ingest_rejected`, root-only while rejected, `trace_export_failures` counted);
+  - SDK ingest log spam is sampled;
+  - close no longer waits on the flush.
+- **Diagnostics:**
+  - backend `sophia_diag` events across the whole voice→Builder launch, plus per-run `memory_guard.summary`;
+  - gateway `source_action`, `builder.progress.received` and `builder.canvas.delivered`, with millisecond timestamps;
+  - browser `[sophia-diag]` single-string events with a dedicated diagnostics ring;
+  - working Copy/Export JSON;
+  - `/api/chat` `chat.governed_send` stage timings.
+- **Recap:**
+  - bounded GET polling while a canonical recap is processing (a failed re-read keeps polling);
+  - truthful processing copy;
+  - debug export from every state;
+  - a neutral heading when no takeaway exists.
+
+### What We Learned
+- **The governed LangSmith exclusion only held because no tracer was attached.** `langgraph_api` runs `graph.copy(update=...)`, and the wrapper's `__getattr__` handed back the bare graph. Setting `LANGSMITH_TRACING=true` would have traced governed conversations with full content.
+- **"Builder tracing resolves to disabled" was a misreading.** The flag and key were on; governed owners take a branch that never attaches the tracer. The pilot account is governed, so its missing traces were policy.
+- **Voice traces were not content-free in the default mode.** Error text, free-text Builder status fields and keys built from conversation data reached LangSmith. Other modes sent transcripts, tool payloads (including memory text) and the recording. The voice service cannot know governance, so structure-only is the only safe default.
+- **The voice 403 was invisible by construction.** Multipart ingest runs on the SDK's background thread, so `_safe_post` never saw it, and `trace_export_failures` stayed 0 while LangSmith rejected every batch.
+- **The recap stuck on "processing" for a simple reason.** The canonical branch never scheduled another GET; only legacy/404 paths had retry timers.
+- **Multi-argument `console.warn(tag, label, object)` is unreadable in captures.** One JSON string per line is the contract.
+
+### CLAUDE.md Updates
+- Root `CLAUDE.md` (Jorge): a missing governed trace is policy, never set `LANGSMITH_TRACING=true`, wrappers must survive `copy()`, diagnostics are observation-only.
+- Root `CLAUDE.md` (Luis): `diagLog()` single-string contract; recap processing polling.
+- `backend/CLAUDE.md`: new "Launch observability and LangSmith policy" section.
+- `docs/ops/langsmith-traces.md`: content policy table and a missing-trace runbook.
+
+### Skills Created / Modified
+- None.
+
+### GEPA Log Entry
+- N/A (no prompt file changed).
+
+## 2026-10-05 — PR #166 automatic review: redact boolean tool content
+
+- Codex's P1 review found that structural voice payloads retained boolean values, which can reveal sensitive yes/no facts.
+- Claude's `6200e925` retains only the boolean type. Codex added recorder-path tests for both values and nested objects/arrays; program-owned success flags remain available.
+- Fixed the architecture regression without changing runtime decisions: split diagnostic integration tests by seam, separate diagnostic value validators, move redacting-client methods into a mixin while preserving lazy SDK import, and keep frontend formatting/diagnostic ingestion with their existing owners. God files and complex-function counts return to the PR-base counts (27 and 720).
+- No settings or content-policy authority changed. Updated `backend/CLAUDE.md`; verification counts are recorded in the mailbox after integration.
+
+## 2026-10-05 · [mem00-governance-worker · first retention expiry] · PR #167
+**Author:** Claude · **Track:** backend · **Spec:** `docs/specs/03_memory_system.md` (retention)
+
+### What Changed
+- `MemoryGovernanceWorker._last_expiry_at` starts as `None` ("never attempted") instead of `0.0`; expiry runs when it is `None` or an hour has passed. The stamp is still written before the attempt, so a failing expiry backs off per interval, not per poll. No other retention behaviour changed.
+- New regression `test_first_expiry_runs_on_a_host_booted_under_an_hour_ago` replaces only the worker module's `time` name, so it fails on any host, not just a fresh one.
+
+### What We Learned
+- `time.monotonic()` counts from boot on Linux, so `0.0` is not "long ago". On a host up for less than an hour (a fresh CI runner, or production right after a reboot) the first expiry was skipped until uptime passed an hour. `backend-unit-tests` failed 5 expiry-backoff tests this way on PRs #162 and #163; they pass on any machine that has been up longer.
+- Never use `0.0` as a "never ran" sentinel for a monotonic clock; use `None`.
+
+### CLAUDE.md Updates
+- `backend/CLAUDE.md` (Memory System): new "MEM00 retention expiry cadence" entry. Expiry runs on the first cycle, then at most hourly; the `None` sentinel; stamp-before-attempt containment. Added after Codex's automatic review flagged the missing doc.
+
+### Skills Created / Modified
+- None.
+
+### GEPA Log Entry
+- N/A
+
+## 2026-10-05 — PR #166 automatic review: authenticate diagnostic joins
+
+- Codex P2 found client-controlled action IDs were logged before authentication. Governed chat diagnostics now acquire IDs after authentication, authority and thread ownership checks, and retain UUID joins only; arbitrary action keys stay in the unchanged request contract, never in logs.
+- Causal regressions cover unauthenticated, incompatible-authority and foreign-thread refusals, plus code-shaped secret-like action keys. No admission decision or settings change. Updated `backend/CLAUDE.md` and request-diagnostic tests.
+
+### Codex follow-up: structural errors and session diagnostic scope
+
+Automatic review of combined head 0d8c5633 found two further P2 privacy gaps. Error serialization and Builder lifecycle summaries now honor the effective structural mode even with the content gate open. A recorder regression and the real SDK multipart sentinel test cover that combination, including root and tool errors; full-mode content remains the positive control. Session JSON filters diagnostic joins by the latest session/microphone start, keeps current diagnostics despite provider-ring churn, and omits joins if no boundary is known. Three regression cases exclude earlier-owner IDs. These failures reproduced before the changes. Production settings and tracing credentials are unchanged.
+
+### Codex follow-up: structural mode never attaches audio
+
+The review of 08215b7c found that an explicit audio-capture opt-in could still attach a raw recording despite the effective structural mode. Audio capture now also requires a non-structural mode. The real SDK multipart sentinel regression enables both legacy content and audio flags for a known non-governed owner while structural mode remains selected; it failed before the fix. Full mode with both flags remains the positive control. No runtime configuration was changed.
+
+## 2026-10-10 · [deck native test fixtures] · PR #169
+Author: Claude (fixture implementation), Codex (independent review and integration) · Track: backend tests · Spec reference: issue #153, existing seam rollback and canary overflow contracts.
+
+- What changed: install the embedded seam font in both host search directories and give the seam, headline and KPI fixtures margins under Pillow BASIC and RAQM. Production code and all 377 assertions in the file remain unchanged. The canary uses narrower boxes than its production-derived geometry to exercise overflow reliably with the embedded test font.
+- What we learned: a width close to a wrap boundary can pass under BASIC and fail under RAQM. The seam window is bounded by the existing alignment band; an almost engine-invariant string retains 6–7 px margins without changing that product bound.
+- Validation: independent root run at implementation commit 3ca49101, through the Python 3.12 uv workspace, passed 64 tests with four existing skips on macOS/BASIC. Author Linux evidence reproduced both failures before the fix and passed both repaired tests under each engine; disabling rollback or overflow detection still fails. Author full deck runs retained two local LibreOffice failures; Linux CI at the published head remains a merge requirement.
+- CLAUDE.md updates: none; runtime and architecture are unchanged. Skills created: none. GEPA log entry: not applicable; no prompt changed.
+
+## 2026-10-10 · [deck native test fixtures · correction] · PR #169
+Author: Claude (fixture implementation) · Track: backend tests · Spec reference: Codex P1 r4235732362 on PR #169; issue #153; the existing seam-rollback, canary-overflow and widen-within-card contracts.
+
+- Correction to the previous entry: its Linux evidence ran under a scratch pytest plugin, `ci_nonroot_plugin`, which made `process_group` treat the root process as non-root. That entry did not say so. Under actual root on Linux, `isolated_process_boundary()` runs the native lint/fix child as an unprivileged UID/GID with a private HOME (`<scratch>/home`, mode 0700). The fixture fonts written under the test's HOME were invisible to that child, so the seam test failed. Two further facts were also hidden:
+  - The root boundary grants the child read access to the whole top-level /tmp workspace holding its input, and rightly refuses any symlink in it. pytest's `tmp_path` always sits below `*current` symlinks. So as actual root, 37 of the 68 tests in this file failed before any font was measured, at c392c3d7 as well as c8d78285.
+  - A third fixture (widen-within-card, `ContainerSans`) seeded only `~/Library/Fonts`, which Linux never searches.
+- What changed (test harness only; 377 assertions unchanged, counted by AST):
+  - f5104a11 (workspace): a module-local, function-scoped `tmp_path` backed by an owned `tempfile.mkdtemp`, with cleanup in a finally block.
+  - 37920518 (fonts, after the workspace commit): a test-scoped wrapper around the real `process_group._private_runtime_env`. It writes only the embedded Pillow `load_default` bytes into the child's private `HOME/.fonts`, with the directory 0700 and the file 0600, both owned by the child. It is used by the seam (CanarySans), canary (CanarySerif-Bold) and widen (ContainerSans) fixtures. The widen fixture also seeds `~/.fonts` for unprivileged Linux runs.
+  - Unchanged: the setpriv/UID boundary, the private HOME, the read-grant symlink policy and the production font loader. No font is written to any host-global directory.
+  - 2b0b3493 and f3ada43a are an unpublished first attempt and its additive revert.
+- What we learned: green Linux CI runs as non-root and does not exercise the root boundary. A fixture font has to be shown to reach the child, because a host fallback font can pass by coincidence. Here the canary passed on LiberationSerif with different repaired sizes, and the widen test passed on LiberationSans with a 3 px wrap margin.
+- Validation (Python 3.12 uv workspace; actual uid 0 with the real setpriv, and no shim):
+  - Before:
+    - The whole file at c392c3d7 and at c8d78285, each under RAQM and under BASIC: 37 failed, 31 passed. All 37 failures are the symlink refusal.
+    - With only the workspace commit, as actual root, the seam test fails exactly as Codex described: the child measures in LiberationSans, applies one grow fix, and `fix_applied_count == 0` fails. The canary and widen tests pass, but on host fallback fonts.
+  - After, at 37920518:
+    - The three font fixtures pass as root and as non-root under both engines.
+    - The in-child witness covers 11 deck child processes as root and 11 as non-root, across both engines. As root, each child has a non-zero UID/GID, no groups or capabilities, `NoNewPrivs=1`, and HOME equal to its private scratch home. Each declared font resolves from that HOME's `.fonts`, with SHA-256 equal to the embedded bytes. As non-root, each font resolves from the test's own `HOME/.fonts`. No host font directory holds a copy (221 files scanned).
+    - With the synthetic fonts the results are identical across RAQM and BASIC, except the canary's mixed-run emphasis: 29.0 pt under RAQM and 29.5 pt under BASIC, both inside the asserted range.
+    - Disabling rollback still fails the seam test, and disabling overflow detection still fails all three, as root and as non-root.
+    - The whole file as root, under RAQM and under BASIC: 1 failed, 63 passed, 4 skipped. The skips are because Chromium is unavailable. The one failure is LibreOffice's "source file could not be loaded" in the render test.
+    - The whole file as non-root (a passwd-less numeric UID): 63 passed, 4 skipped, and the render test failed. In the render test, LibreOffice cannot create a user installation for that UID ("User installation could not be completed"). It also leaves a single-instance socket in /tmp whose name does not include the UID. While that socket remained, later non-root runs blocked in a headless modal dialog until the service's 600 s timeout. A direct soffice reproduction confirmed both behaviours. This is an environment fault, not a font one.
+- CLAUDE.md updates: none; runtime and architecture are unchanged. Skills created: none. GEPA log entry: not applicable; no prompt changed.

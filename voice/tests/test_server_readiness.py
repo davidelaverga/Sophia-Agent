@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import importlib
+import logging
 from types import SimpleNamespace
 
 import pytest
+from fastapi.testclient import TestClient
 
 import voice.server as server
 from voice.adapters.base import BackendStageError
@@ -259,3 +261,37 @@ async def test_create_agent_allows_experimental_runtime_startup_for_dogfood(monk
     agent = await server.create_agent()
 
     assert agent is created["agent"]
+
+
+def test_lifespan_logs_langsmith_startup_status_and_flushes_at_shutdown(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    flushed: list[bool] = []
+    monkeypatch.setattr(server, "flush_shared_ingest_clients", lambda: flushed.append(True))
+    monkeypatch.setenv("LANGSMITH_API_KEY", "lsv2_sk_" + "s" * 32)
+    monkeypatch.setenv("LANGSMITH_ENDPOINT", "https://eu.api.smith.langchain.com")
+    monkeypatch.delenv("LANGSMITH_WORKSPACE_ID", raising=False)
+    monkeypatch.delenv("SOPHIA_GEMINI_LIVE_LANGSMITH_CONTENT", raising=False)
+    caplog.set_level(logging.INFO)
+
+    class FakeLauncher:
+        async def start(self) -> None:
+            return None
+
+        async def stop(self) -> None:
+            return None
+
+    with TestClient(server.create_fastapi_app(FakeLauncher())):
+        assert flushed == []
+
+    [line] = [
+        record.getMessage()
+        for record in caplog.records
+        if record.getMessage().startswith("gemini.langsmith.startup")
+    ]
+    assert "endpoint_host=eu.api.smith.langchain.com key_kind=service" in line
+    assert "workspace_present=False" in line
+    assert "content_mode=structure_only" in line
+    assert "lsv2" not in caplog.text
+    assert flushed == [True]

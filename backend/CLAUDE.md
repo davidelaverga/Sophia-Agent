@@ -119,6 +119,17 @@ recovery; source, payload, owner, parent/run, child, scope and epochs must match
 Do not apply this exception to generic `register` or treat it as a model permit.
 Native run-create ambiguity still needs its own exact-child recovery path.
 
+The installed LangGraph API mirrors a single raw Builder handoff carrier from
+`config.configurable` into `context`, or in the reverse direction. Either raw
+carrier therefore uses the same sealed, durably registered authority contract:
+owner, child, payload, current source and one-run binding must all verify. Equal
+copies establish consistency only, never authorization, and both are cleared
+after admission. The API refuses requests with both raw carriers populated;
+the hook separately refuses inconsistent copies. Regression coverage in
+`test_mem00_langgraph_framework_auth.py` uses the installed SDK/API/auth path,
+fresh isolated negative proofs, synthetic authority and blocked network. It
+qualifies admission and binding, not worker execution or artifact delivery.
+
 The staged `dispatch_independent_builder` adapter now supplies that exact-child
 observation path: duplicate or uncertain allocation cannot dispatch again, and
 confirmation requires both the owner-bound ledger association and native run
@@ -811,6 +822,41 @@ The webapp can either reuse `ProgressRenderer.apply` directly (delivers plain-te
 
 Every browser-facing voice SSE proxy preserves the session cursor end to end. Next.js forwards `Last-Event-ID`; gateway `routers/voice.py` validates it (or `last_event_id` / `lastEventId` query fallback), then forwards both the header and canonical query cursor to the voice service. The voice service emits integer `id:` lines and replays only events newer than the cursor. Do not strip or rewrite these headers/query parameters when changing a voice events proxy.
 
+### Launch observability and LangSmith policy (2026-10-04)
+
+**LangSmith content policy:**
+- **Companion:** never traced.
+- **Ordinary-owner Builder:** fully traced.
+- **Memory-governed (MEM00) Builder:** excluded by default. With `SOPHIA_GOVERNED_STRUCTURAL_TRACING=true` (sophia-langgraph, `os.getenv`, not in `config.production.yaml`) it is structure-only through the redacting client in `deerflow/sophia/governed_tracing.py`.
+- **Voice:** structure-only for every session, because it is never told an owner's governance state. Content needs `SOPHIA_GEMINI_LIVE_LANGSMITH_CONTENT=true` plus an authoritative non-governed owner.
+- Arbitrary tool/provider payload booleans are content too: structural traces retain only their type, including in nested objects and arrays. Program-owned success/status flags remain observable.
+- Full table: `docs/ops/langsmith-traces.md`.
+
+**Invariants:**
+1. **Trace-scoped wrappers must survive `copy()`.** `langgraph_api.get_graph` yields `graph.copy(update=...)`. `LangSmithTraceDisabledRunnable` and the governed wrapper override `copy`, `with_config` and `astream_events` (v2; v3 is refused). Before this change the exclusion held only because no tracer was attached.
+2. **Redact in the client, not at each caller.** Inside the governed structural scope, ambient tracing is disabled and only `StructuralLangChainTracer` (pinned to the redacting client) re-enables its own runs. An explicit model tracer on the default client (`models/factory.py` under `LANGSMITH_TRACING=true`) would otherwise post full content. The sentinel test in `tests/test_governed_structural_tracing.py` must stay green under all four ambient modes.
+3. **Completion annotation needs a positive identity match** (thread, task, run, build or operation id). A sole zero-score candidate once let a governed completion annotate another user's run in the same process.
+4. **Do not set `LANGSMITH_TRACING=true` to "enable traces".**
+5. **LangSmith failures are visible.** One process-wide client per service has a `tracing_error_callback`. It logs `langsmith_ingest_rejected` on langgraph and `gemini.langsmith.ingest_rejected` on voice, and `langsmith_preflight` runs once per process. Logs carry codes, statuses and booleans only, never key prefixes or bodies.
+6. The redacting-client mixin owns ingest serialization; `structural_client_class()` only supplies its lazily imported SDK base. Diagnostics validators and seam-specific tests must preserve the same allowlists, limits and rejection behavior when reorganized.
+7. Frontend governed-send diagnostics acquire join IDs only after authentication, governed authority and source-thread ownership checks. Message/thread joins are UUIDs or null; an arbitrary source action key must not become log content.
+8. Voice structural mode never enables recording attachments; trace errors and Builder lifecycle summaries must remain codes/classes even when an authoritative non-governed owner and the legacy content opt-in allow other modes. Session JSON scopes diagnostic records to the current session/microphone start independently of the bounded provider capture window; unknown boundaries omit joins. Lifetime drop counters remain identified as lifetime totals.
+
+**Content-free launch timeline:**
+- **Backend:** `deerflow/sophia/diag.py` `diag_event()` logs `sophia_diag {json}`. Keys come from an allowlist plus the MEM00 denied-key validator. Values are ints, ms, bools, codes, UUIDs or keyed refs, and the helper never raises. Events:
+  - `run.admission`, `builder.command.routed`, `builder.launch`;
+  - `builder.handoff.issued`, `builder.child.thread_created`, `builder.child.run_create`, `builder.child.observed`;
+  - `memory_guard.check` (INFO above 750 ms), `memory_guard.summary` (one per run: check and readmission counts and ms, store requests by resource, Mem0 client builds and searches, exports by status);
+  - `graph.factory`, `builder.progress.post`;
+  - gateway: `builder.progress.received`, `builder.canvas.delivered`, `source_action`.
+
+  Admission rows' `latency_segments` gain `flags_ms`, `observe_ms`, `mem0_client_ms`, `mem0_search_ms`, `hydrate_ms`, `contract_ms`.
+- **Browser:** `frontend/src/app/lib/diag-log.ts` `diagLog()` writes `[sophia-diag] {json}` as one `console.warn` string. Production `removeConsole` keeps warn, and readers flattened multi-argument logs to "Object". Records also go into a dedicated 200-entry diagnostics ring that audio events cannot evict. Events: `voice_builder.call`/`send`/`outcome`/`late`, `builder_canvas.*`, `voice_audio.context_state`; `/api/chat` emits `chat.governed_send` with per-stage ms.
+- **Join keys:** source `message_id` → companion `thread_id` → child `task_id`/`run_id` (LangGraph already stamps `run_id`/`thread_id`/`request_id` on every log line inside a run).
+- **Rule:** diagnostics are observation only. Guard checks keep the same count, order and fail-closed behaviour (`test_sophia_diag_events.py` asserts parity at two boundaries).
+
+**Ops trap:** the live Render values of the `SOPHIA_MEMORY_*` rollout flags and `SOPHIA_MEMORY_LANGSMITH_EXPORT` differ from `render.yaml`, so a Blueprint sync can turn governance off. `render.yaml` carries the warning.
+
 ### Render production deployment
 
 **TL;DR:** the file the live containers actually load is `/app/config.yaml`, baked in at Docker build time from **`config.production.yaml`** (the tracked one in repo root) via `COPY config.production.yaml ./config.yaml` in both [Dockerfile.gateway:8](Dockerfile.gateway) and `Dockerfile.langgraph`. The repo's local `config.yaml` is `.gitignore`'d and irrelevant to production.
@@ -934,6 +980,16 @@ rewrite the shared fences or authorize synthetic deletion. Source hash drift
 aborts installation. See `tests/test_mem00_delete_order_migration.py` and the
 disposable `tools/mem00_session_delete_contract.mjs` proof. Production approval
 is required; a source-invalidation receipt alone is not successful deletion.
+
+**MEM00 retention expiry cadence**: `MemoryGovernanceWorker`
+(`app/gateway/workers/memory_governance.py`) runs `expire_candidates` on its
+first cycle, then at most once per hour. `_last_expiry_at` starts as `None`
+("never attempted"); never use `0.0`, because `time.monotonic()` counts from
+boot on Linux and a host up for under an hour (fresh CI runner, rebooted
+service) would skip the first expiry. The stamp is written before the attempt
+and a failure is logged and contained, so a failing expiry retries once per
+interval, not once per one-second poll, and never blocks extraction or
+projection. Regression: `tests/test_memory_governance_worker_expiry_backoff.py`.
 
 **Components**:
 - `updater.py` - LLM-based memory updates with fact extraction, whitespace-normalized fact deduplication (trims leading/trailing whitespace before comparing), atomic file I/O, and timezone-aware UTC timestamp serialization (`...Z`) for memory metadata.

@@ -1906,8 +1906,11 @@ class SupabaseSessionTranscriptStore:
                 merged,
                 expected_revision=max(0, int(record.message_revision)),
             )
-            if not result.conflict:
+            if result.accepted:
                 return result.messages
+            if not result.conflict:
+                # A refused snapshot wrote nothing; never report it as appended.
+                raise SessionStoreError(f"Transcript append was refused ({result.rejection_reason}).")
         raise SessionStoreError("Concurrent transcript updates prevented an authoritative append.")
 
     def replace_messages(
@@ -1927,8 +1930,11 @@ class SupabaseSessionTranscriptStore:
                 records,
                 expected_revision=max(0, int(record.message_revision)),
             )
-            if not result.conflict:
+            if result.accepted:
                 return result.messages
+            if not result.conflict:
+                # A refused snapshot wrote nothing; never report it as replaced.
+                raise SessionStoreError(f"Transcript replace was refused ({result.rejection_reason}).")
         raise SessionStoreError("Concurrent transcript updates prevented an authoritative replace.")
 
     def replace_messages_revisioned(

@@ -1,5 +1,6 @@
 import { MAX_ATTACHED_FILES_PER_TURN } from '../../../lib/chat-constants';
 import { sourceActionSchema, type SourceAction } from '../../../lib/memory-source-contract';
+import { buildAttachmentPrompt } from '../../../stores/attachment-prompt';
 
 import { secureLog } from './config';
 import {
@@ -27,6 +28,11 @@ export interface ValidatedChatRequest {
    */
   attachedFiles: string[];
   sourceAction?: SourceAction;
+}
+
+/** Compose the attachment context after validation/spill without changing its bytes. */
+export function formatChatPrompt(message: string, attachedFiles: string[]): string {
+  return attachedFiles.length > 0 ? `${buildAttachmentPrompt(attachedFiles)}\n\n${message}` : message;
 }
 
 /**

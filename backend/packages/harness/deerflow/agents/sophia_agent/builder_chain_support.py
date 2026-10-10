@@ -20,6 +20,7 @@ from deerflow.sophia.observability import (
     enable_langsmith_tracing_for_builder_runnable,
     langsmith_builder_tracing_context,
     log_builder_tracing_startup_status,
+    wrap_governed_builder_runnable,
 )
 
 __all__ = [
@@ -32,6 +33,7 @@ __all__ = [
     "builder_distributed_trace_context",
     "log_builder_tracing_startup_status",
     "wrap_builder_agent_for_observability",
+    "wrap_governed_builder_agent_for_observability",
 ]
 
 _BUILDER_TODO_SYSTEM_PROMPT = """
@@ -121,4 +123,21 @@ def wrap_builder_agent_for_observability(
             model_name=model_name,
             model_source=model_source,
         ),
+    )
+
+
+def wrap_governed_builder_agent_for_observability(
+    agent,
+    *,
+    model_name: str | None = None,
+    model_source: str | None = None,
+    trace_config: dict | None = None,
+):
+    """Governed (MEM00) owners: excluded by default, structure-only when opted in."""
+
+    return wrap_governed_builder_runnable(
+        agent,
+        model_name=model_name,
+        model_source=model_source,
+        trace_config=trace_config,
     )

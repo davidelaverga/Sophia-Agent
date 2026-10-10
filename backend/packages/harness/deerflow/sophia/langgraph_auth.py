@@ -9,7 +9,10 @@ service callers and checkpoint continuation have passed compatibility tests.
 
 from __future__ import annotations
 
+import json
+import logging
 import os
+import time
 from uuid import UUID, uuid5
 
 import httpx
@@ -17,11 +20,14 @@ from langgraph_sdk import Auth
 from starlette.exceptions import HTTPException
 
 from deerflow.agents.sophia_agent.utils import validate_user_id
+from deerflow.sophia.diag import code_or_none, diag_event
+from deerflow.sophia.diag import elapsed_ms as diag_elapsed_ms
 from deerflow.sophia.langgraph_voice_lab_auth import BINDING_KEY
 from deerflow.sophia.langgraph_voice_lab_auth import PERMISSION as VOICE_LAB_THREAD_PERMISSION
 from deerflow.sophia.memory_governance.refs import keyed_ref
 
 auth = Auth()
+logger = logging.getLogger(__name__)
 OWNER_KEY = "sophia_authenticated_owner_v1"
 USER_PERMISSION = "sophia:user"
 READINESS_PERMISSION = "sophia:readiness"
@@ -54,6 +60,33 @@ BUILDER_ASSISTANT_ID = uuid5(UUID("6ba7b821-9dad-11d1-80b4-00c04fd430c8"), "soph
 
 def _deny(status: int = 403):
     raise Auth.exceptions.HTTPException(status_code=status, detail="sophia_auth_unavailable" if status == 503 else "sophia_access_denied")
+
+
+def _deny_run(stage: str, *, value=None, owner: str | None = None, exc: BaseException | None = None):
+    """Log one content-free create_run refusal, then deny with the same body.
+
+    Every refusal in create_run returns the identical 403, so a production
+    denial named no cause. Only a fixed stage, a safe reason code and keyed
+    references are logged: never input, content, raw ids or exception text.
+    """
+    try:
+        event: dict[str, str] = {"event_name": "memory.admission.denied", "stage": stage}
+        if exc is not None:
+            from deerflow.sophia.memory_governance.source_input_provenance import safe_reason_code
+            event["error_type"] = type(exc).__name__
+            event["denial_reason"] = safe_reason_code(exc)
+        if isinstance(owner, str) and owner:
+            event["owner_ref"] = keyed_ref("owner", owner)
+        if isinstance(value, dict):
+            for domain, key in (("context", "thread_id"), ("run", "run_id")):
+                try:
+                    event[f"{domain}_ref"] = keyed_ref(domain, str(UUID(str(value[key]))))
+                except (KeyError, TypeError, ValueError):
+                    pass
+        logger.warning("memory_admission_denied %s", json.dumps(event, sort_keys=True, separators=(",", ":")))
+    except Exception:
+        pass
+    _deny()
 
 
 def voice_lab_principal() -> str:
@@ -420,12 +453,12 @@ async def owned_thread(ctx, value):
 @auth.on.threads.create_run
 async def create_run(ctx, value):
     if VOICE_LAB_THREAD_PERMISSION in ctx.permissions:
-        _deny()
+        _deny_run("voice_lab_permission", value=value)
     _reject_owner_metadata(value)
     if MAINTENANCE_PERMISSION in ctx.permissions:
         # The retention lane may cancel a run. It may never start one, so no
         # memory, source or model path can ever be entered through it.
-        _deny()
+        _deny_run("maintenance_permission", value=value)
     if DECK_QUALITY_PERMISSION in ctx.permissions:
         return _deck_quality_run(value)
     synthetic_owner = _owns_only_authorized_synthetic_threads(ctx)
@@ -434,38 +467,38 @@ async def create_run(ctx, value):
         # synthetic thread, and nothing else. Not the companion, which is the
         # surface that carries tools, recall and the model boundary.
         if str(value.get("assistant_id")) != str(BUILDER_ASSISTANT_ID):
-            _deny()
+            _deny_run("synthetic_assistant", value=value)
     owner = _owner(ctx, synthetic=synthetic_owner)
     kwargs = value.get("kwargs")
     if not isinstance(kwargs, dict):
-        _deny()
+        _deny_run("kwargs_shape", value=value, owner=owner)
     config = kwargs.setdefault("config", {})
     if not isinstance(config, dict):
-        _deny()
+        _deny_run("config_shape", value=value, owner=owner)
     configurable = config.setdefault("configurable", {})
     if not isinstance(configurable, dict):
-        _deny()
+        _deny_run("configurable_shape", value=value, owner=owner)
     if configurable.get("user_id", owner) != owner:
-        _deny()
+        _deny_run("configurable_owner", value=value, owner=owner)
     # These fields were inserted by the installed server from the auth context;
     # its public write schemas reject client-supplied reserved auth fields.
     if configurable.get("langgraph_auth_user_id") != owner:
-        _deny()
+        _deny_run("auth_user", value=value, owner=owner)
     configurable["user_id"] = owner
     context = kwargs.get("context")
     if context is None:
         context = kwargs["context"] = {}
     if not isinstance(context, dict) or context.get("user_id", owner) not in (None, owner):
-        _deny()
+        _deny_run("context_owner", value=value, owner=owner)
     context["user_id"] = owner
     if value.get("thread_id") is not None:
         try:
             thread_id = str(UUID(str(value["thread_id"])))
         except (ValueError, TypeError):
-            _deny()
+            _deny_run("thread_id_invalid", owner=owner)
         for source in (configurable, context):
             if source.get("thread_id") is not None and str(source["thread_id"]) != thread_id:
-                _deny()
+                _deny_run("thread_id_mismatch", value=value, owner=owner)
             source["thread_id"] = thread_id
     # A client must never supply or replay a run-source proof. Every request
     # overwrites this field; only the authenticated create-run hook can mint it.
@@ -477,8 +510,15 @@ async def create_run(ctx, value):
     source_action, source_session = configurable.get(SOURCE_ACTION_KEY), configurable.get(SOURCE_SESSION_KEY)
     handoff_key, handoff_run_key = "sophia_builder_handoff_v1", "sophia_builder_handoff_run_v1"
     handoff = configurable.get(handoff_key)
-    if context.get(handoff_key) is not None:
-        _deny()
+    # langgraph-api mirrors either raw carrier into the other and rejects two
+    # nonempty carriers, so this hook cannot recover which one the caller used.
+    # A handoff sent through configurable or context has the same contract:
+    # bind_builder_run must verify its seal, durable receipt, authenticated owner,
+    # exact child/payload, current source authority and single-run binding.
+    # Matching copies are only consistency, not authority; conflicting copies
+    # are refused before any binding, and both transport copies are cleared below.
+    if context.get(handoff_key) is not None and context.get(handoff_key) != handoff:
+        _deny_run("handoff_carrier_conflict", value=value, owner=owner)
     disabled_requests = ("sophia_builder_completion_request_v1",
         "sophia_builder_resume_request_v1", "memory_source_attachment_keys")
     # C2 does not activate old signed personal-memory transitions. Null out
@@ -490,7 +530,10 @@ async def create_run(ctx, value):
         for key in (handoff_key, *disabled_requests, *proof_keys, INPUT_PROOF_KEY, INPUT_RUN_KEY, SOURCE_ACTION_KEY, SOURCE_SESSION_KEY):
             source[key] = None
     if disabled:
-        _deny()
+        _deny_run("disabled_carrier", value=value, owner=owner)
+    # Content-free launch timeline. Only fixed codes, durations and the
+    # existing join identifiers are logged, and only after admission succeeds.
+    admission = {"started": time.perf_counter(), "branch": "ungoverned"}
     try:
         try:
             authority_state = resolve_owner_authority(owner).authority_state
@@ -506,51 +549,76 @@ async def create_run(ctx, value):
             # same as a declared legacy owner. A store or transport failure still
             # reaches `except Exception: _deny()` and fails closed.
             authority_state = "unknown"
+        admission["owner_authority_ms"] = diag_elapsed_ms(admission["started"])
         if authority_state == "governed":
             from deerflow.agents.sophia_agent.middlewares.memory_context import active_governed_tool_owner
             from deerflow.sophia.memory_governance.input_provenance import issue_recorded_authenticated_input
             from deerflow.sophia.memory_governance.store import configured_memory_store
             if kwargs.get("command") is not None:
-                _deny()
+                _deny_run("command_present", value=value, owner=owner)
             if handoff is not None:
                 if (str(value.get("assistant_id")) != str(BUILDER_ASSISTANT_ID)
                         or source_action is not None or source_session is not None
                         or active_governed_tool_owner() not in (None, owner)):
-                    _deny()
+                    _deny_run("builder_scope", value=value, owner=owner)
                 from deerflow.sophia.memory_governance.builder_provenance import bind_builder_run
+                bind_started = time.perf_counter()
                 wire_input, proof = bind_builder_run(owner_id=owner, child_thread_id=value.get("thread_id"),
                     run_id=value.get("run_id"), wire_input=kwargs.get("input"), proof=handoff)
+                admission.update(branch="builder_bind", bind_ms=diag_elapsed_ms(bind_started))
                 kwargs["input"] = wire_input
                 configurable[handoff_run_key] = proof
                 # Select tools from the independent source, never the parent
                 # model's task-type/target hints. Entry rechecks source consent
                 # before admitting this deterministic machinery into state.
                 from deerflow.sophia.memory_governance.builder_source_binding import independent_builder_runtime_seed
+                seed_started = time.perf_counter()
                 seed = independent_builder_runtime_seed(binding=proof["binding"], wire_input=wire_input)
+                admission["seed_ms"] = diag_elapsed_ms(seed_started)
                 configurable["task_type"] = seed["delegation_context"]["task_type"]
                 from pathlib import PurePosixPath
                 configurable["artifact_target_ext"] = PurePosixPath(seed["builder_artifact_target_path"]).suffix
                 configurable["parent_thread_id"] = seed["delegation_context"]["parent_thread_id"]
                 configurable["build_id"] = seed["builder_build_id"]
                 configurable["operation_id"] = seed["builder_operation_id"]
+                admission["proof"] = proof
             else:
                 if active_governed_tool_owner() is not None or str(value.get("assistant_id")) != str(COMPANION_ASSISTANT_ID):
-                    _deny()
+                    _deny_run("companion_scope", value=value, owner=owner)
+                issue_started = time.perf_counter()
                 wire_input, proof = issue_recorded_authenticated_input(owner_id=owner, session_id=source_session,
                     thread_id=value.get("thread_id"), run_id=value.get("run_id"),
                     wire_input=kwargs.get("input"), source_action=source_action, store=configured_memory_store())
+                admission.update(branch="companion", issue_ms=diag_elapsed_ms(issue_started))
                 kwargs["input"] = wire_input
                 configurable[INPUT_PROOF_KEY] = proof
         elif handoff is not None:
-            _deny()
+            _deny_run("handoff_not_governed", value=value, owner=owner)
         configurable[INPUT_RUN_KEY] = str(UUID(str(value["run_id"])))
     except Auth.exceptions.HTTPException:
         raise
-    except Exception:
-        _deny()
+    except Exception as exc:
+        _deny_run("admission", value=value, owner=owner, exc=exc)
     owner_filter = _filter(ctx, synthetic=synthetic_owner)
     value.setdefault("metadata", {}).update(owner_filter)
+    _log_run_admission(value, admission, authority_state, source_action)
     return owner_filter
+
+
+def _log_run_admission(value, admission, authority_state, source_action):
+    """One content-free ``run.admission`` line per admitted run. Never raises."""
+    try:
+        binding = (admission.get("proof") or {}).get("binding") or {}
+        handoff_receipt = ((admission.get("proof") or {}).get("handoff") or {}).get("binding_receipt") or {}
+        diag_event("run.admission", branch=admission["branch"], authority=code_or_none(authority_state),
+            thread_id=value.get("thread_id"), run_id=value.get("run_id"),
+            source_message_id=source_action.get("message_id") if isinstance(source_action, dict) else None,
+            handoff_event_id=handoff_receipt.get("event_id"), binding_event_id=binding.get("binding_event_id"),
+            parent_thread_id=binding.get("parent_thread_id"),
+            owner_authority_ms=admission.get("owner_authority_ms"), issue_ms=admission.get("issue_ms"),
+            bind_ms=admission.get("bind_ms"), seed_ms=admission.get("seed_ms"), total_ms=diag_elapsed_ms(admission["started"]))
+    except Exception:
+        pass
 
 
 @auth.on.assistants.read

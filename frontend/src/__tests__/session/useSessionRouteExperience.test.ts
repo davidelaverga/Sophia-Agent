@@ -17,10 +17,20 @@ vi.mock('../../app/providers', () => ({ useAuth: () => ({ loading: false, user: 
 
 vi.mock('../../app/lib/memory-source-client', async () => {
   const actual = await vi.importActual<Record<string, unknown>>('../../app/lib/memory-source-client');
-  return { ...actual, loadSourceProfile: vi.fn(async (owner: string, session: string, thread: string) => ({
-    schema: 'mem00.source-profile.v1', owner_id: owner, session_id: session, thread_id: thread,
-    authority: 'legacy', observation_only: true, boundary: null,
-  })) };
+  // One dedicated session id gets a governed profile (canonical message ids);
+  // every other session stays legacy.
+  return { ...actual, loadSourceProfile: vi.fn(async (owner: string, session: string, thread: string) => (
+    session === '33333333-3333-4333-8333-333333333333'
+      ? {
+        schema: 'mem00.source-profile.v1', owner_id: owner, session_id: session, thread_id: thread,
+        authority: 'governed', observation_only: true, boundary: { schema: 'mem00.source-boundary.v1', owner_id: owner,
+          session_id: session, thread_id: thread, memory_clear_epoch: 1, transcript_revision: 0 },
+      }
+      : {
+        schema: 'mem00.source-profile.v1', owner_id: owner, session_id: session, thread_id: thread,
+        authority: 'legacy', observation_only: true, boundary: null,
+      }
+  )) };
 });
 
 vi.mock('../../app/companion-runtime/artifacts-runtime', () => ({
@@ -69,6 +79,11 @@ vi.mock('../../app/lib/builder-workflow', async () => {
   };
 });
 
+import {
+  executeVoiceBuilderToolBridgeCall,
+  hasVoiceBuilderToolBridge,
+  type VoiceBuilderToolResult,
+} from '../../app/lib/voice-builder-actions';
 import { useSessionRouteExperience } from '../../app/session/useSessionRouteExperience';
 
 describe('useSessionRouteExperience', () => {
@@ -81,6 +96,7 @@ describe('useSessionRouteExperience', () => {
       recentEvents: [],
       completion: null,
       reconnecting: false,
+      snapshotLoaded: true,
     });
 
     useCompanionArtifactsRuntimeMock.mockReturnValue({
@@ -404,6 +420,305 @@ describe('useSessionRouteExperience', () => {
     expect(showToast).toHaveBeenCalledWith(
       expect.objectContaining({ message: 'Builder cancelled.', variant: 'info' })
     );
+  });
+
+  it('does not cancel the running build for a spoken correction that mentions stop this', async () => {
+    const showToast = vi.fn();
+
+    renderHook(() =>
+      useSessionRouteExperience({
+        sessionId: 'session-1',
+        activeSessionId: 'session-1',
+        activeThreadId: 'thread-1',
+        chatRequestBody: { session_id: 'session-1', thread_id: 'thread-1', user_id: 'user-1' },
+        hasValidBackendSessionId: true,
+        backendSessionId: 'session-1',
+        userId: 'user-1',
+        artifacts: null,
+        storedBuilderArtifact: null,
+        storeArtifacts: vi.fn(),
+        storeBuilderArtifact: vi.fn(),
+        updateSession: vi.fn(),
+        showUsageLimitModal: vi.fn(),
+        recordConnectivityFailure: vi.fn(),
+        showToast,
+        setCurrentContext: vi.fn(),
+        setMessageMetadata: vi.fn(),
+        greetingAnchorId: 'greeting-1',
+        markOffline: vi.fn(),
+      })
+    );
+
+    const streamContractCall = useCompanionStreamContractMock.mock.calls[0][0] as {
+      setBuilderTask: (task: { phase: string; taskId?: string; runId?: string; detail?: string }) => void;
+    };
+    act(() => {
+      streamContractCall.setBuilderTask({ phase: 'running', taskId: 'task-builder-1', runId: 'run-builder-1' });
+    });
+
+    const { setOnUserTranscriptHandler } = useCompanionVoiceRuntimeMock.mock.results[0].value;
+    const calls = setOnUserTranscriptHandler.mock.calls;
+    const transcriptHandler = calls[calls.length - 1][0] as (text: string) => void;
+    await act(async () => {
+      transcriptHandler('stop this section about pricing and focus on Germany');
+      await Promise.resolve();
+    });
+    expect(cancelBuilderTaskMock).not.toHaveBeenCalled();
+
+    const latestHandler = setOnUserTranscriptHandler.mock.calls[setOnUserTranscriptHandler.mock.calls.length - 1][0] as (text: string) => void;
+    await act(async () => {
+      latestHandler('okay, stop it.');
+      await Promise.resolve();
+    });
+    expect(cancelBuilderTaskMock).toHaveBeenCalledWith('thread-1', 'task-builder-1', 'run-builder-1');
+  });
+
+  it('registers a voice builder bridge that sends corrections through the governed send path', async () => {
+    const rawSendMessage = vi.fn(async () => undefined);
+    useSessionOutboundSendMock.mockReturnValue(rawSendMessage);
+
+    const { result } = renderHook(() =>
+      useSessionRouteExperience({
+        sessionId: '11111111-1111-4111-8111-111111111111',
+        activeSessionId: '11111111-1111-4111-8111-111111111111',
+        activeThreadId: '22222222-2222-4222-8222-222222222222',
+        chatRequestBody: { session_id: '11111111-1111-4111-8111-111111111111', thread_id: '22222222-2222-4222-8222-222222222222', user_id: 'user-1' },
+        hasValidBackendSessionId: true,
+        backendSessionId: '11111111-1111-4111-8111-111111111111',
+        userId: 'user-1',
+        artifacts: null,
+        storedBuilderArtifact: null,
+        storeArtifacts: vi.fn(),
+        storeBuilderArtifact: vi.fn(),
+        updateSession: vi.fn(),
+        showUsageLimitModal: vi.fn(),
+        recordConnectivityFailure: vi.fn(),
+        showToast: vi.fn(),
+        setCurrentContext: vi.fn(),
+        setMessageMetadata: vi.fn(),
+        greetingAnchorId: 'greeting-1',
+        markOffline: vi.fn(),
+      })
+    );
+
+    const streamContractCall = useCompanionStreamContractMock.mock.calls[0][0] as {
+      setBuilderTask: (task: { phase: string; taskId?: string; runId?: string; detail?: string }) => void;
+    };
+    act(() => {
+      streamContractCall.setBuilderTask({ phase: 'running', taskId: 'task-builder-1', runId: 'run-builder-1' });
+    });
+    await waitFor(() => expect(result.current.sourceProfileReady).toBe(true));
+    expect(hasVoiceBuilderToolBridge()).toBe(true);
+
+    let pending!: Promise<VoiceBuilderToolResult>;
+    act(() => {
+      pending = executeVoiceBuilderToolBridgeCall({
+        id: 'voice-update-1',
+        name: 'update_async_task',
+        args: { task_id: 'task-builder-1', message: 'Stop this section about pricing.' },
+        recentUserUtterances: [],
+      });
+    });
+    await waitFor(() => expect(rawSendMessage).toHaveBeenCalledTimes(1));
+    expect(rawSendMessage).toHaveBeenCalledWith(expect.objectContaining({
+      text: expect.stringContaining('Correction: Stop this section about pricing.'),
+    }));
+    expect(cancelBuilderTaskMock).not.toHaveBeenCalled();
+
+    act(() => {
+      streamContractCall.setBuilderTask({ phase: 'running', taskId: 'task-builder-1', runId: 'run-builder-2' });
+    });
+    await expect(pending).resolves.toMatchObject({ ok: true, updated: true, task_id: 'task-builder-1', run_id: 'run-builder-2' });
+  });
+
+  describe('voice builder turn failures (governed session)', () => {
+    const governedSession = '33333333-3333-4333-8333-333333333333';
+    const governedThread = '44444444-4444-4444-8444-444444444444';
+
+    const renderGoverned = () => renderHook(() =>
+      useSessionRouteExperience({
+        sessionId: governedSession,
+        activeSessionId: governedSession,
+        activeThreadId: governedThread,
+        chatRequestBody: { session_id: governedSession, thread_id: governedThread, user_id: 'user-1' },
+        hasValidBackendSessionId: true,
+        backendSessionId: governedSession,
+        userId: 'user-1',
+        artifacts: null,
+        storedBuilderArtifact: null,
+        storeArtifacts: vi.fn(),
+        storeBuilderArtifact: vi.fn(),
+        updateSession: vi.fn(),
+        showUsageLimitModal: vi.fn(),
+        recordConnectivityFailure: vi.fn(),
+        showToast: vi.fn(),
+        setCurrentContext: vi.fn(),
+        setMessageMetadata: vi.fn(),
+        greetingAnchorId: 'greeting-1',
+        markOffline: vi.fn(),
+      })
+    );
+    // The AI SDK resolves the send even when the turn ends in a stream error;
+    // the transport reports the error with the id of the message it sent.
+    const reportTurnError = (messageId: string | null, errorText: string, afterActivity: boolean) => {
+      const runtime = useCompanionChatRuntimeMock.mock.calls[useCompanionChatRuntimeMock.mock.calls.length - 1][0] as {
+        onTurnError?: (messageId: string | null, errorText: string, afterActivity: boolean) => void;
+      };
+      runtime.onTurnError?.(messageId, errorText, afterActivity);
+    };
+    const startCall = (atMs: number) => executeVoiceBuilderToolBridgeCall({
+      id: 'voice-start-1',
+      name: 'start_builder_task',
+      args: { description: 'Research the EU AI Act and write a Markdown report.' },
+      recentUserUtterances: [{ text: 'please research the EU AI Act and write me a report', atMs }],
+    });
+
+    it("sends no build request until the thread's Builder state has loaded", async () => {
+      useBuilderCanvasMock.mockReturnValue({
+        activeTask: null,
+        recentEvents: [],
+        completion: null,
+        reconnecting: false,
+        snapshotLoaded: false,
+      });
+      const rawSendMessage = vi.fn(async () => undefined);
+      useSessionOutboundSendMock.mockReturnValue(rawSendMessage);
+      const { result } = renderGoverned();
+      await waitFor(() => expect(result.current.sourceProfileReady).toBe(true));
+
+      let pending!: Promise<VoiceBuilderToolResult>;
+      act(() => { pending = startCall(Date.now()); });
+
+      await expect(pending).resolves.toMatchObject({ ok: false, reason: 'builder_state_loading' });
+      expect(rawSendMessage).not.toHaveBeenCalled();
+    });
+
+    it('ends the request at once when its own companion turn is refused', async () => {
+      const rawSendMessage = vi.fn(async (input: { sourceIntent?: { action: { message_id: string } } }) => {
+        reportTurnError(input.sourceIntent?.action.message_id ?? null, 'memory_context_rotation_required', false);
+      });
+      useSessionOutboundSendMock.mockReturnValue(rawSendMessage);
+      const { result } = renderGoverned();
+      await waitFor(() => expect(result.current.sourceProfileReady).toBe(true));
+      expect(hasVoiceBuilderToolBridge()).toBe(true);
+
+      const startedAt = Date.now();
+      let pending!: Promise<VoiceBuilderToolResult>;
+      act(() => { pending = startCall(startedAt); });
+
+      await expect(pending).resolves.toMatchObject({
+        ok: false,
+        builder_task_started: false,
+        reason: 'builder_request_not_sent',
+        send_error: 'memory_context_rotation_required',
+      });
+      expect(rawSendMessage).toHaveBeenCalledTimes(1);
+      // Before the fix this waited for the 25 s confirmation timeout.
+      expect(Date.now() - startedAt).toBeLessThan(2_000);
+    });
+
+    it('reports a run-creation refusal (HTTP 403) as not started, not unconfirmed', async () => {
+      // 2026-09-28: all three voice requests were refused this way and the
+      // model was told they were unconfirmed, so it kept retrying.
+      const rawSendMessage = vi.fn(async (input: { sourceIntent?: { action: { message_id: string } } }) => {
+        reportTurnError(input.sourceIntent?.action.message_id ?? null, '{"error":"memory_source_send_refused"}', false);
+      });
+      useSessionOutboundSendMock.mockReturnValue(rawSendMessage);
+      const { result } = renderGoverned();
+      await waitFor(() => expect(result.current.sourceProfileReady).toBe(true));
+
+      let pending!: Promise<VoiceBuilderToolResult>;
+      act(() => { pending = startCall(Date.now()); });
+
+      const refused = await pending;
+      expect(refused).toMatchObject({
+        ok: false,
+        builder_task_started: false,
+        reason: 'builder_request_not_sent',
+        send_error: 'memory_source_send_refused',
+      });
+      expect(String(refused.recovery_guidance)).toContain('Do not retry it yourself');
+      expect(rawSendMessage).toHaveBeenCalledTimes(1);
+    });
+
+    it('threads the voice call id, message id and source record wait into the diagnostics lines', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      let sentMessageId: string | null = null;
+      const rawSendMessage = vi.fn(async (input: { sourceIntent?: { action: { message_id: string } } }) => {
+        sentMessageId = input.sourceIntent?.action.message_id ?? null;
+        const params = useSessionOutboundSendMock.mock.calls[useSessionOutboundSendMock.mock.calls.length - 1][0] as {
+          onSourceRecorded?: (messageId: string, sourceRecordMs: number) => void;
+        };
+        if (sentMessageId) params.onSourceRecorded?.(sentMessageId, 42);
+        reportTurnError(sentMessageId, '{"error":"memory_source_send_refused"}', false);
+      });
+      useSessionOutboundSendMock.mockReturnValue(rawSendMessage);
+      const { result } = renderGoverned();
+      await waitFor(() => expect(result.current.sourceProfileReady).toBe(true));
+
+      let pending!: Promise<VoiceBuilderToolResult>;
+      act(() => { pending = startCall(Date.now()); });
+      await expect(pending).resolves.toMatchObject({ ok: false, reason: 'builder_request_not_sent' });
+
+      const records = warn.mock.calls
+        .filter(([line]) => typeof line === 'string' && line.startsWith('[sophia-diag] ') && line.includes('"ev":"voice_builder.'))
+        .map(([line]) => JSON.parse((line as string).slice('[sophia-diag] '.length)) as Record<string, unknown>);
+      const sendLine = records.find((record) => record.ev === 'voice_builder.send');
+      const outcomeLine = records.find((record) => record.ev === 'voice_builder.outcome');
+      expect(sentMessageId).toEqual(expect.any(String));
+      expect(sendLine).toMatchObject({ message_id: sentMessageId, thread_id: governedThread, outcome: 'recorded', source_record_ms: 42 });
+      expect(typeof sendLine?.app_version_ms).toBe('number');
+      expect(outcomeLine).toMatchObject({
+        call: sendLine?.call,
+        message_id: sentMessageId,
+        thread_id: governedThread,
+        outcome: 'builder_request_not_sent',
+        send_error: 'memory_source_send_refused',
+        source_record_ms: 42,
+      });
+      expect(warn.mock.calls.flat().map(String).join('\n')).not.toContain('EU AI Act');
+      warn.mockRestore();
+    });
+
+    it('reports a refusal after the turn acted as unconfirmed, at once', async () => {
+      const rawSendMessage = vi.fn(async (input: { sourceIntent?: { action: { message_id: string } } }) => {
+        reportTurnError(input.sourceIntent?.action.message_id ?? null, 'memory_context_rotation_required', true);
+      });
+      useSessionOutboundSendMock.mockReturnValue(rawSendMessage);
+      const { result } = renderGoverned();
+      await waitFor(() => expect(result.current.sourceProfileReady).toBe(true));
+
+      const startedAt = Date.now();
+      let pending!: Promise<VoiceBuilderToolResult>;
+      act(() => { pending = startCall(startedAt); });
+
+      const outcome = await pending;
+      expect(outcome).toMatchObject({ ok: false, builder_task_started: false, reason: 'builder_start_unconfirmed', status: 'unconfirmed' });
+      expect(outcome).not.toHaveProperty('send_error');
+      expect(Date.now() - startedAt).toBeLessThan(2_000);
+    });
+
+    it("never blames another message's failure on the voice request", async () => {
+      const rawSendMessage = vi.fn(async () => {
+        // A concurrent typed turn (or an earlier session) fails meanwhile.
+        reportTurnError('some-other-message-id', 'memory_context_rotation_required', false);
+      });
+      useSessionOutboundSendMock.mockReturnValue(rawSendMessage);
+      const { result } = renderGoverned();
+      await waitFor(() => expect(result.current.sourceProfileReady).toBe(true));
+      const streamContractCall = useCompanionStreamContractMock.mock.calls[0][0] as {
+        setBuilderTask: (task: { phase: string; taskId?: string; runId?: string }) => void;
+      };
+
+      let pending!: Promise<VoiceBuilderToolResult>;
+      act(() => { pending = startCall(Date.now()); });
+      await waitFor(() => expect(rawSendMessage).toHaveBeenCalledTimes(1));
+      act(() => {
+        streamContractCall.setBuilderTask({ phase: 'running', taskId: 'task-builder-9', runId: 'run-builder-9' });
+      });
+
+      await expect(pending).resolves.toMatchObject({ ok: true, builder_task_started: true, task_id: 'task-builder-9' });
+    });
   });
 
   it('passes active stream state through to voice runtime retry handling', () => {

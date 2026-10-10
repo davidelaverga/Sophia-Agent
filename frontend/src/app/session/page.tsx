@@ -100,6 +100,7 @@ import {
 } from '../lib/session-artifact-index';
 import { recordSophiaCaptureEvent } from '../lib/session-capture';
 import { useVoiceLabControlAdapter } from '../hooks/useVoiceLabControlAdapter';
+import { diagLog } from '../lib/diag-log';
 import { cn } from '../lib/utils';
 import { useUiStore } from '../stores/ui-store';
 import type { BuilderCompletionEventV1 } from '../types/builder-completion';
@@ -727,8 +728,9 @@ function SessionPageContent() {
     () => new GeminiStillFrameTransport({
       sendArtifactFrame: voiceState.sendArtifactFrame,
       getStatus: voiceState.getArtifactFrameTransportStatus,
+      endArtifactReview: voiceState.endArtifactReview,
     }),
-    [voiceState.getArtifactFrameTransportStatus, voiceState.sendArtifactFrame],
+    [voiceState.endArtifactReview, voiceState.getArtifactFrameTransportStatus, voiceState.sendArtifactFrame],
   );
   const artifactReviewVoiceCommandRouterRef = useRef<ArtifactReviewVoiceCommandRouter | null>(null);
   const coreviewActionFeedbackDedupeRef = useRef(new Set<string>());
@@ -810,6 +812,18 @@ function SessionPageContent() {
     prompt: string;
     updateMode: CoreviewArtifactUpdateMode;
   }): Promise<CoreviewBuilderStartAdapterResult> => {
+    // Governed owners must send a recorded source intent, exactly like a typed
+    // message; a bare {text} payload is refused before it reaches the companion.
+    let captured: ReturnType<typeof captureSourceInput>;
+    try {
+      captured = captureSourceInput(prompt);
+    } catch {
+      return {
+        ok: false,
+        blockedReason: 'builder_start_failed',
+        userFacingMessage: 'Source verification is unavailable. The artifact update was not started.',
+      };
+    }
     suppressSessionLeaveGuardForCoreviewBuilderUpdate();
     setCoreviewArtifactUpdateSurfaceClaim({
       artifactPath: normalizeBuilderArtifactPath(context.artifactPath),
@@ -819,7 +833,7 @@ function SessionPageContent() {
       taskId: builderTask?.taskId ?? null,
       runId: builderTask?.runId ?? null,
     });
-    await sendMessage({ text: prompt });
+    await sendMessage(captured);
     return {
       ok: true,
       taskId: builderTask?.taskId ?? null,
@@ -828,7 +842,7 @@ function SessionPageContent() {
         ? `Sophia is preparing a new version of ${context.artifactTitle ?? 'this artifact'}.`
         : `Sophia is updating ${context.artifactTitle ?? 'this artifact'}.`,
     };
-  }, [builderTask?.runId, builderTask?.taskId, sendMessage]);
+  }, [builderTask?.runId, builderTask?.taskId, captureSourceInput, sendMessage]);
   const handleCoreviewBuilderCancelRequest = useCallback(async ({
     task,
   }: {
@@ -1523,10 +1537,11 @@ function SessionPageContent() {
     }
     if (!builderCompletionRecoveryFile?.path) {
       if (builderCompletion.status === 'success') {
-        console.warn('[builder-artifacts] success completion downgraded because no action is available', {
-          thread_id: (builderCompletion.thread_id || resolvedThreadId || '').slice(0, 12),
-          task_id: builderCompletion.task_id.slice(0, 12),
-          run_id: builderCompletion.run_id?.slice(0, 12) ?? null,
+        // A success completion is downgraded because no action is available.
+        diagLog('builder_artifacts.completion_downgraded', {
+          thread_id: builderCompletion.thread_id || resolvedThreadId || null,
+          task_id: builderCompletion.task_id,
+          run_id: builderCompletion.run_id ?? null,
         });
         return {
           ...builderCompletion,
@@ -1551,10 +1566,10 @@ function SessionPageContent() {
       error_message: null,
       source: 'artifact_library_recovery',
     };
-    console.warn('[builder-artifacts] completion action recovered from library', {
-      thread_id: resolvedThreadId?.slice(0, 12) ?? null,
-      task_id: builderCompletion.task_id.slice(0, 12),
-      run_id: builderCompletion.run_id?.slice(0, 12) ?? null,
+    diagLog('builder_artifacts.completion_recovered', {
+      thread_id: resolvedThreadId ?? null,
+      task_id: builderCompletion.task_id,
+      run_id: builderCompletion.run_id ?? null,
       artifact_path_present: true,
     });
     return recovered;
@@ -1563,10 +1578,10 @@ function SessionPageContent() {
   useEffect(() => {
     if (builderCompletionForDisplay?.status !== 'success') return;
     if (builderCompletionForDisplay.artifact_path || builderCompletionForDisplay.artifact_url) return;
-    console.warn('[builder-artifacts] terminal completion has no action href', {
-      thread_id: builderCompletionForDisplay.thread_id.slice(0, 12),
-      task_id: builderCompletionForDisplay.task_id.slice(0, 12),
-      run_id: builderCompletionForDisplay.run_id?.slice(0, 12) ?? null,
+    diagLog('builder_artifacts.completion_without_action', {
+      thread_id: builderCompletionForDisplay.thread_id || null,
+      task_id: builderCompletionForDisplay.task_id,
+      run_id: builderCompletionForDisplay.run_id ?? null,
     });
   }, [builderCompletionForDisplay]);
   const builderCompletionFallbackLabel = useMemo(

@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import shutil
 import subprocess
 import sys
+import tempfile
+from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -14,6 +17,7 @@ from pptx import Presentation
 from pptx.enum.shapes import MSO_CONNECTOR, MSO_SHAPE
 from pptx.util import Inches, Pt
 
+from deerflow.sophia import process_group
 from deerflow.sophia.deck_native import DeckNativeService, native_mechanical_report
 from deerflow.sophia.deck_native import service as native_service_module
 
@@ -26,6 +30,58 @@ DECK_PATH = (
     PROJECT_ROOT
     / "third_party/hands_on_deck/skills/hands-on-deck/scripts/deck.py"
 )
+
+
+@pytest.fixture
+def tmp_path() -> Iterator[Path]:
+    """Give each test in this module its own plain temporary directory.
+
+    This replaces pytest's ``tmp_path`` for this module only. As root on
+    Linux, the deck service lets the native child read the whole top-level
+    temporary directory that holds its input, and the UID boundary refuses
+    any symlink inside it. pytest's own ``tmp_path`` sits below a base
+    directory that always holds ``*current`` symlinks, so as root every
+    native call would fail before it ran. A ``mkdtemp`` directory has no such
+    links; the real-root preview tests use one for the same reason. The
+    directory is removed after the test, pass or fail. As root, that removal
+    also covers any file the dropped child left behind.
+    """
+
+    path = Path(tempfile.mkdtemp(prefix="deck-native-test-"))
+    try:
+        yield path
+    finally:
+        shutil.rmtree(path)
+
+
+def _install_font_in_root_child_home(monkeypatch, file_name: str, font_bytes: bytes) -> None:
+    """Install the embedded test font in the private HOME of a root Linux child.
+
+    Unprivileged runs (CI, macOS) give the native child the HOME this test
+    sets. As root on Linux, ``isolated_process_boundary`` gives the child a
+    new private HOME owned by its dropped UID/GID instead. This wraps the real
+    ``_private_runtime_env`` and writes only these font bytes into that HOME's
+    ``.fonts``, the Linux user font directory the deck searches. The font is
+    owned by the child, with private modes. The boundary deletes it with the
+    rest of its scratch tree.
+    """
+
+    real_private_runtime_env = process_group._private_runtime_env
+
+    def private_runtime_env_with_fixture_font(base, scratch: Path, *, uid: int, gid: int) -> dict[str, str]:
+        env = real_private_runtime_env(base, scratch, uid=uid, gid=gid)
+        font_dir = Path(env["HOME"]) / ".fonts"
+        font_dir.mkdir(mode=0o700)
+        os.chown(font_dir, uid, gid, follow_symlinks=False)
+        os.chmod(font_dir, 0o700, follow_symlinks=False)
+        descriptor = os.open(font_dir / file_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(descriptor, "wb") as stream:
+            os.fchown(stream.fileno(), uid, gid)
+            os.fchmod(stream.fileno(), 0o600)
+            stream.write(font_bytes)
+        return env
+
+    monkeypatch.setattr(process_group, "_private_runtime_env", private_runtime_env_with_fixture_font)
 
 
 def _html2patch_module():
@@ -1010,7 +1066,13 @@ def test_deck_native_lint_fix_widens_text_within_card_before_shrinking(
     embedded_font = ImageFont.load_default(size=12).path
     assert hasattr(embedded_font, "getvalue")
     (font_dir / "ContainerSans.ttf").write_bytes(embedded_font.getvalue())
+    # Linux searches ~/.fonts, not ~/Library/Fonts: give the Linux child the
+    # same bytes, and as root on Linux its private HOME too.
+    linux_font_dir = home / ".fonts"
+    linux_font_dir.mkdir()
+    (linux_font_dir / "ContainerSans.ttf").write_bytes(embedded_font.getvalue())
     monkeypatch.setenv("HOME", str(home))
+    _install_font_in_root_child_home(monkeypatch, "ContainerSans.ttf", embedded_font.getvalue())
 
     output = tmp_path / "container-width-overflow.pptx"
     presentation = Presentation()
@@ -1445,13 +1507,18 @@ def test_deck_native_lint_fix_rolls_back_seam_that_would_wrap_text(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
+    # Give both macOS and Linux subprocesses the same font bytes, as the canary
+    # test does, so the neighbor is measured in CanarySans on every host. As
+    # root on Linux, the child's private HOME gets the same bytes.
     home = tmp_path / "home"
-    font_dir = home / "Library/Fonts"
-    font_dir.mkdir(parents=True)
     embedded_font = ImageFont.load_default(size=12).path
     assert hasattr(embedded_font, "getvalue")
-    (font_dir / "CanarySans.ttf").write_bytes(embedded_font.getvalue())
+    for relative_dir in (Path("Library/Fonts"), Path(".fonts")):
+        font_dir = home / relative_dir
+        font_dir.mkdir(parents=True, exist_ok=True)
+        (font_dir / "CanarySans.ttf").write_bytes(embedded_font.getvalue())
     monkeypatch.setenv("HOME", str(home))
+    _install_font_in_root_child_home(monkeypatch, "CanarySans.ttf", embedded_font.getvalue())
 
     output = tmp_path / "wrapping-seam.pptx"
     presentation = Presentation()
@@ -1467,7 +1534,12 @@ def test_deck_native_lint_fix_rolls_back_seam_that_would_wrap_text(
     neighbor.text_frame.margin_right = 0
     neighbor.text_frame.margin_top = 0
     neighbor.text_frame.margin_bottom = 0
-    neighbor.text = "W" * 23 + " x"
+    # 'X' advances exactly 15 px at 18 pt under both of Pillow's layout
+    # engines (BASIC on macOS, RAQM on Linux), so the line measures 545.00 px
+    # (BASIC) or 545.19 px (RAQM): it fits the 552 px neighbor (5.76in) by
+    # about 7 px and wraps in the 539 px the seam would leave (5.62in) by
+    # about 6 px. The seam window is the 0.14in snap (ALIGN_BAND is 0.15in).
+    neighbor.text = "X" * 35 + " X"
     neighbor.text_frame.paragraphs[0].runs[0].font.name = "CanarySans"
     neighbor.text_frame.paragraphs[0].runs[0].font.size = Pt(18)
 
@@ -1482,7 +1554,7 @@ def test_deck_native_lint_fix_rolls_back_seam_that_would_wrap_text(
 
     add_text("wrap-target", 12.76, 1.0, 6.01078)
     for index, top in enumerate((2.0, 3.0, 4.0), start=1):
-        add_text(f"wrap-peer-{index}", 12.669, top, 6.10178)
+        add_text(f"wrap-peer-{index}", 12.62, top, 6.15078)
     presentation.save(output)
     before = Presentation(output)
     before_neighbor = next(shape for shape in before.slides[0].shapes if shape.name == "wrap-neighbor")
@@ -2649,6 +2721,7 @@ def test_deck_native_lint_fix_repairs_canary_headline_and_kpi_overflow(
 
     # Give both macOS and Linux subprocesses the same font bytes so this
     # regression tests geometry rather than whichever fonts the host installs.
+    # As root on Linux, the child's private HOME gets the same bytes.
     home = tmp_path / "home"
     embedded_font = ImageFont.load_default(size=12).path
     assert hasattr(embedded_font, "getvalue")
@@ -2657,6 +2730,7 @@ def test_deck_native_lint_fix_repairs_canary_headline_and_kpi_overflow(
         font_dir.mkdir(parents=True, exist_ok=True)
         (font_dir / "CanarySerif-Bold.ttf").write_bytes(embedded_font.getvalue())
     monkeypatch.setenv("HOME", str(home))
+    _install_font_in_root_child_home(monkeypatch, "CanarySerif-Bold.ttf", embedded_font.getvalue())
 
     output = tmp_path / "canary-overflow.pptx"
     presentation = Presentation()
@@ -2695,10 +2769,14 @@ def test_deck_native_lint_fix_repairs_canary_headline_and_kpi_overflow(
         run.font.bold = bold
         return shape
 
+    # Measured at 37.5pt the headline is 749.00 px (BASIC, macOS) or 741.19 px
+    # (RAQM, Linux): the production 7.75in box (744 px) sat between them. At
+    # 7.25in (696 px) it overflows by at least 45 px under either engine and
+    # still fits by at least 77 px at the 31pt floor.
     add_textbox(
         name="canary-headline",
         at=(1.25, 0.85),
-        size=(7.75, 0.60),
+        size=(7.25, 0.60),
         text="Habitat is fragmented, not absent",
         font_size=37.5,
         line_spacing=43.1,
@@ -2715,9 +2793,10 @@ def test_deck_native_lint_fix_repairs_canary_headline_and_kpi_overflow(
     add_textbox(
         name="canary-kpi",
         at=(11.22, 6.87),
-        # The production box was 1.47in. Keep the same tight composition with
-        # a 0.02in cushion so the embedded cross-platform test font rewraps.
-        size=(1.45, 0.61),
+        # The production box was 1.47in. "0.9 mi" measures 140.00 px (BASIC)
+        # or 139.81 px (RAQM) at 39pt; 1.35in (129 px) makes the embedded test
+        # font rewrap by at least 10 px under either engine.
+        size=(1.35, 0.61),
         text="0.9 mi",
         font_size=39,
         line_spacing=46.8,

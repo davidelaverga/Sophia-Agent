@@ -11,7 +11,15 @@ import {
   cancelBuilderTask as requestBuilderTaskCancellation,
 } from '../lib/builder-workflow';
 import { debugLog } from '../lib/debug-logger';
+import { diagElapsedMs, diagNow } from '../lib/diag-log';
 import { recordSophiaCaptureEvent } from '../lib/session-capture';
+import {
+  createCompanionTurnFailures,
+  createVoiceBuilderToolHandler,
+  registerVoiceBuilderToolBridge,
+  type VoiceBuilderSendContext,
+  type VoiceBuilderToolBridge,
+} from '../lib/voice-builder-actions';
 import { useAuth } from '../providers';
 import type { BuilderArtifactV1 } from '../types/builder-artifact';
 import type { BuilderCanvasActivity, BuilderCanvasTaskSnapshotV1 } from '../types/builder-canvas';
@@ -80,7 +88,10 @@ function builderCanvasStatusFromCompletion(
         : 'failed';
 }
 
-const BUILDER_CANCEL_INTENT_RE = /\b(?:stop|cancel|abort|terminate|end|kill|delete|delate)\b(?:\s+(?:the|this|that|my|current))?\s+(?:build|builder|task|artifact|job|run)\b|\b(?:stop|cancel|abort|terminate|kill)\s+(?:it|this|that|everything)\b/i;
+// A bare "stop it" / "cancel that" only counts when it ends the utterance, so
+// a spoken correction such as "stop this section about pricing" reaches the
+// companion as a correction instead of cancelling the running build.
+const BUILDER_CANCEL_INTENT_RE = /\b(?:stop|cancel|abort|terminate|end|kill|delete|delate)\b(?:\s+(?:the|this|that|my|current))?\s+(?:build|builder|task|artifact|job|run)\b|\b(?:stop|cancel|abort|terminate|kill)\s+(?:it|this|that|everything)(?:\s+(?:please|now|right\s+now))?\s*[.!]*$/i;
 
 function isBuilderCancelIntent(text: string): boolean {
   return BUILDER_CANCEL_INTENT_RE.test(text.trim());
@@ -400,6 +411,11 @@ export function useSessionRouteExperience({
     });
   }, [debugEnabled, routeProfile.id]);
 
+  const companionTurnFailuresRef = useRef(createCompanionTurnFailures());
+  const recordCompanionTurnError = useCallback((messageId: string | null, errorText: string, afterActivity: boolean) => {
+    companionTurnFailuresRef.current.record(messageId, errorText, afterActivity);
+  }, []);
+
   const {
     chatMessages,
     sendChatMessage,
@@ -414,6 +430,7 @@ export function useSessionRouteExperience({
     showUsageLimitModal,
     recordConnectivityFailure,
     showToast,
+    onTurnError: recordCompanionTurnError,
   });
 
   const canReloadForFreshBuild = chatStatus !== 'streaming' && chatStatus !== 'submitted';
@@ -516,6 +533,14 @@ export function useSessionRouteExperience({
     typeof chatRequestBody?.session_id === 'string' ? chatRequestBody.session_id : '',
     typeof chatRequestBody?.thread_id === 'string' ? chatRequestBody.thread_id : '',
   );
+  // Diagnostics only: a voice Builder send registers here by message id to
+  // learn how long its source record took.
+  const sourceRecordObserversRef = useRef(new Map<string, (sourceRecordMs: number) => void>());
+  const handleSourceRecorded = useCallback((messageId: string, sourceRecordMs: number) => {
+    const observer = sourceRecordObserversRef.current.get(messageId);
+    sourceRecordObserversRef.current.delete(messageId);
+    observer?.(sourceRecordMs);
+  }, []);
   const rawSendMessage = useSessionOutboundSend({
     setMessageTimestamp,
     chatStatus,
@@ -525,6 +550,7 @@ export function useSessionRouteExperience({
     debugEnabled,
     markStreamTurnStarted,
     showToast,
+    onSourceRecorded: handleSourceRecorded,
   });
 
   const sendMessage: typeof rawSendMessage = useCallback(
@@ -675,6 +701,93 @@ export function useSessionRouteExperience({
     },
     [],
   );
+
+  // Voice Builder actions travel through the governed text send path so the
+  // companion's own Builder tools start, update or edit the build exactly as a
+  // typed request would. The typed-message cancel shortcut is skipped on
+  // purpose: a spoken correction such as "stop this section" must reach the
+  // companion as a correction instead of cancelling the running build.
+  // The send resolves even when the companion turn ends in error, so a failed
+  // turn is looked up by this send's own message id and rethrown as a short
+  // code; the voice tool call then ends at once instead of waiting. Only a
+  // refusal before the turn acted reads as not sent; anything else reads as
+  // unconfirmed, since a build may already have started. A send without a
+  // canonical message id (legacy owner) keeps the confirmation wait.
+  // The send context only collects content-free ids and timings for the
+  // voice tool call's diagnostics lines.
+  const sendVoiceBuilderMessage = useCallback(async (text: string, context?: VoiceBuilderSendContext) => {
+    const captured = captureSourceInput(text);
+    const messageId = captured.sourceIntent?.action.message_id ?? null;
+    context?.note({ messageId });
+    const appVersionStartedAt = diagNow();
+    const appVersionFresh = await checkAppVersionFreshness({ reason: 'before-send' });
+    context?.note({ appVersionMs: diagElapsedMs(appVersionStartedAt) });
+    if (!appVersionFresh) {
+      throw new Error('memory_source_app_version_unavailable');
+    }
+    validateSourceInput(captured);
+    if (messageId && context) {
+      sourceRecordObserversRef.current.set(messageId, (sourceRecordMs) => {
+        context.note({ sourceRecordMs, sourceRecorded: true });
+      });
+    }
+    try {
+      await rawSendMessage(captured);
+    } finally {
+      if (messageId) sourceRecordObserversRef.current.delete(messageId);
+    }
+    const failure = messageId ? companionTurnFailuresRef.current.take(messageId) : null;
+    if (failure) {
+      throw new Error(failure);
+    }
+  }, [captureSourceInput, checkAppVersionFreshness, rawSendMessage, validateSourceInput]);
+
+  // A thread's Builder state is known once a valid canvas snapshot has loaded
+  // (the canvas retries every 30 s and on reconnect) and no reconnect is
+  // pending; a session without a thread has none yet.
+  const builderStateReady = !activeThreadId || (builderCanvas.snapshotLoaded === true && !builderCanvas.reconnecting);
+  const voiceBuilderStateRef = useRef({
+    builderTask,
+    builderCompletion: effectiveBuilderCompletion,
+    cancelBuilderTask,
+    sendVoiceBuilderMessage,
+    sessionKey: activeThreadId ?? null,
+    builderArtifactPath: builderArtifact?.artifactPath ?? null,
+    builderStateReady,
+  });
+  const voiceBuilderBridgeRef = useRef<VoiceBuilderToolBridge | null>(null);
+  useEffect(() => {
+    voiceBuilderStateRef.current = {
+      builderTask,
+      builderCompletion: effectiveBuilderCompletion,
+      cancelBuilderTask,
+      sendVoiceBuilderMessage,
+      sessionKey: activeThreadId ?? null,
+      builderArtifactPath: builderArtifact?.artifactPath ?? null,
+      builderStateReady,
+    };
+    // Let the bridge see every Builder state change, including a run that is
+    // cancelled or dismissed before any voice tool call.
+    voiceBuilderBridgeRef.current?.observe?.();
+  }, [activeThreadId, builderArtifact, builderStateReady, builderTask, cancelBuilderTask, effectiveBuilderCompletion, sendVoiceBuilderMessage]);
+
+  useEffect(() => {
+    const bridge = createVoiceBuilderToolHandler({
+      sendCompanionMessage: (text, context) => voiceBuilderStateRef.current.sendVoiceBuilderMessage(text, context),
+      getBuilderTask: () => voiceBuilderStateRef.current.builderTask,
+      getBuilderCompletion: () => voiceBuilderStateRef.current.builderCompletion,
+      cancelBuilderTask: () => voiceBuilderStateRef.current.cancelBuilderTask(),
+      getSessionKey: () => voiceBuilderStateRef.current.sessionKey,
+      getBuilderArtifactPath: () => voiceBuilderStateRef.current.builderArtifactPath,
+      isBuilderStateReady: () => voiceBuilderStateRef.current.builderStateReady,
+    });
+    voiceBuilderBridgeRef.current = bridge;
+    const unregister = registerVoiceBuilderToolBridge(bridge);
+    return () => {
+      voiceBuilderBridgeRef.current = null;
+      unregister();
+    };
+  }, []);
 
   return {
     routeProfile,

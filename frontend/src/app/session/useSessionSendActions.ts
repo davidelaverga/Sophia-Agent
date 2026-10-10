@@ -4,6 +4,7 @@ import type { FormEvent } from 'react';
 import { haptic } from '../hooks/useHaptics';
 import { isError, touchSession } from '../lib/api/sessions-api';
 import { debugLog } from '../lib/debug-logger';
+import { diagElapsedMs, diagNow } from '../lib/diag-log';
 import { recordSourceSendIntent, sourceSendIntentSchema, type SourceSendInput, type SourceSendIntent } from '../lib/memory-source-client';
 import { chatSanitizer } from '../lib/sanitize';
 import { useAttachmentsStore } from '../stores/attachments-store';
@@ -59,6 +60,8 @@ interface UseSessionOutboundSendParams {
   debugEnabled: boolean;
   markStreamTurnStarted: (startedAtMs: number) => void;
   showToast: (args: { message: string; variant: 'info' | 'success' | 'error' | 'warning'; durationMs?: number }) => void;
+  /** Diagnostics only: called once a governed send's source record is accepted. */
+  onSourceRecorded?: (messageId: string, sourceRecordMs: number) => void;
 }
 
 export function useSessionOutboundSend({
@@ -70,6 +73,7 @@ export function useSessionOutboundSend({
   debugEnabled,
   markStreamTurnStarted,
   showToast,
+  onSourceRecorded,
 }: UseSessionOutboundSendParams) {
   const chatStatusForSendRef = useRef(chatStatus);
   const lastOutboundRef = useRef<{ text: string; at: number } | null>(null);
@@ -177,7 +181,15 @@ export function useSessionOutboundSend({
         }
       };
       assertScope();
+      const sourceRecordStartedAt = diagNow();
       const sourceReceipt = sourceIntent ? await recordSourceSendIntent(sourceIntent) : undefined;
+      if (sourceIntent && sourceReceipt) {
+        try {
+          onSourceRecorded?.(sourceIntent.action.message_id, diagElapsedMs(sourceRecordStartedAt));
+        } catch {
+          // Diagnostics never change a send.
+        }
+      }
       assertScope();
       // Transcript persistence must retain the database timestamp byte-for-byte.
       // A display-generated time would update the accepted source row and rotate
@@ -222,6 +234,7 @@ export function useSessionOutboundSend({
     debugEnabled,
     hasValidBackendSessionId,
     markStreamTurnStarted,
+    onSourceRecorded,
     sendChatMessage,
     setMessageTimestamp,
     sendScope,

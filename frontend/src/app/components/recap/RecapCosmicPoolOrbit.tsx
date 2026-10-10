@@ -2180,6 +2180,9 @@ export function RecapCosmicPoolOrbit({
     [activeCandidates, safeFocusedIndex]
   );
   const reviewedCount = processedCandidates.length;
+  // Only a supplied takeaway earns the "key takeaway" label; the stock line
+  // stays under a neutral heading (canonical reviews carry no takeaway).
+  const verifiedTakeaway = typeof takeaway === 'string' && takeaway.trim().length > 0 ? takeaway : null;
 
   if (isLoading) {
     return <LoadingState />;
@@ -2227,7 +2230,7 @@ export function RecapCosmicPoolOrbit({
           data-onboarding="recap-summary"
         >
           <span className="mb-4 text-[10px] uppercase tracking-[0.14em]" style={{ color: 'color-mix(in srgb, var(--sophia-purple) 50%, transparent)' }}>
-            key takeaway
+            {verifiedTakeaway ? 'key takeaway' : 'from this session'}
           </span>
           <div className="relative max-w-2xl">
             <div
@@ -2239,7 +2242,7 @@ export function RecapCosmicPoolOrbit({
               }}
             />
             <h1 className="font-cormorant text-[26px] font-light leading-snug sm:text-[32px] md:text-[38px]" style={{ color: 'var(--cosmic-text-strong)' }}>
-              {takeaway ?? 'A thread worth carrying forward'}
+              {verifiedTakeaway ?? 'A thread worth carrying forward'}
             </h1>
           </div>
 

@@ -1,11 +1,11 @@
 import { useChat } from '@ai-sdk/react';
-import { DefaultChatTransport } from 'ai';
 import { useEffect, useMemo } from 'react';
 
 import { debugWarn } from '../lib/debug-logger';
 import { errorCopy } from '../lib/error-copy';
 import { parseUsageLimitFromError } from '../lib/usage-limit-parser';
 
+import { TurnErrorReportingChatTransport } from './turn-error-transport';
 import type { UseCompanionChatRuntimeParams } from './types';
 
 export function useCompanionChatRuntime({
@@ -15,13 +15,14 @@ export function useCompanionChatRuntime({
   showUsageLimitModal,
   recordConnectivityFailure,
   showToast,
+  onTurnError,
 }: UseCompanionChatRuntimeParams) {
   const chatTransport = useMemo(() => {
-    return new DefaultChatTransport({
+    return new TurnErrorReportingChatTransport({
       api: '/api/chat',
       body: chatRequestBody,
-    });
-  }, [chatRequestBody]);
+    }, onTurnError);
+  }, [chatRequestBody, onTurnError]);
 
   const {
     messages: chatMessages,

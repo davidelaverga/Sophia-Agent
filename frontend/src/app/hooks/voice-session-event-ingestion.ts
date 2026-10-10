@@ -1,3 +1,17 @@
+import { diagLog } from '../lib/diag-log';
+
+/** Provider diagnostic ingestion uses fixed pattern codes, never transcript text. */
+export function logUngroundedModeClaim(diagnostic: {
+  responseId?: string | null;
+  matchedPatterns: readonly string[];
+}): void {
+  diagLog('voice.ungrounded_mode_claim', {
+    response_id: diagnostic.responseId,
+    patterns: diagnostic.matchedPatterns.join(':'),
+    pattern_count: diagnostic.matchedPatterns.length,
+  });
+}
+
 type AssistantTranscriptHandlers = {
   setFinalReply: (text: string) => void;
   setPartialReply: (text: string) => void;
