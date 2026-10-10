@@ -346,14 +346,14 @@ export class VoiceLabWorker {
     let operationExecutionComplete = false;
     let heartbeatInFlight = false;
     const heartbeat = setInterval(() => {
-      if (heartbeatInFlight || controller.signal.aborted) return;
+      if (heartbeatInFlight) return;
       heartbeatInFlight = true;
       void (async () => {
           // Once execution settles, finishOperation intentionally makes its
           // lease non-renewable. Keep the independent browser lease alive for
           // finalization/abort, without mistaking that terminal operation for
           // ownership loss and cancelling the browser during cleanup.
-          if (!operationExecutionComplete) {
+          if (!operationExecutionComplete && !controller.signal.aborted) {
             try {
               const owned = await this.ledger.heartbeatOperation(claimed.operation.id, this.workerId, claimed.operation.leaseEpoch, this.config.operationLeaseSeconds);
               if (!owned && !operationExecutionComplete) { controller.abort(new VoiceLabError(labError("LEASE_LOST", "Operation lease was lost before the next irreversible action.", "conflict", true))); return; }
@@ -361,11 +361,19 @@ export class VoiceLabWorker {
               if (!operationExecutionComplete) throw error;
             }
           }
-          if (controller.signal.aborted) return;
+          // The operation holds its run's turn until it settled, and the
+          // active-lease pulse leaves a held run's drain to its holder and is
+          // off during shutdown (#151). So the operation keeps the browser
+          // lease renewed for as long as it holds the turn, an aborted
+          // operation's cancellation or shutdown cleanup included. A lease
+          // the ledger refused is never renewed again.
           const browserLease = this.#activeLeases.get(claimed.run.id);
-          if (!browserLease) return;
+          if (!browserLease || browserLease.refused) return;
           const browserOwned = await this.ledger.heartbeatBrowserLease(claimed.run.id, this.workerId, browserLease.epoch, this.config.browserLeaseSeconds);
-          if (!browserOwned) controller.abort(new VoiceLabError(labError("BROWSER_LEASE_LOST", "Browser lease was lost while the operation was in flight.", "conflict", true)));
+          if (!browserOwned) {
+            browserLease.refused = true;
+            controller.abort(new VoiceLabError(labError("BROWSER_LEASE_LOST", "Browser lease was lost while the operation was in flight.", "conflict", true)));
+          }
         })()
         .catch(() => controller.abort(new VoiceLabError(labError("LEASE_HEARTBEAT_FAILED", "Operation lease could not be renewed safely.", "harness", true))))
         .finally(() => { heartbeatInFlight = false; });
