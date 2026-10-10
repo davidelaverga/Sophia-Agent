@@ -2991,3 +2991,38 @@ Author: Claude (fixture implementation) · Track: backend tests · Spec referenc
     - The whole file as root, under RAQM and under BASIC: 1 failed, 63 passed, 4 skipped. The skips are because Chromium is unavailable. The one failure is LibreOffice's "source file could not be loaded" in the render test.
     - The whole file as non-root (a passwd-less numeric UID): 63 passed, 4 skipped, and the render test failed. In the render test, LibreOffice cannot create a user installation for that UID ("User installation could not be completed"). It also leaves a single-instance socket in /tmp whose name does not include the UID. While that socket remained, later non-root runs blocked in a headless modal dialog until the service's 600 s timeout. A direct soffice reproduction confirmed both behaviours. This is an environment fault, not a font one.
 - CLAUDE.md updates: none; runtime and architecture are unchanged. Skills created: none. GEPA log entry: not applicable; no prompt changed.
+
+## 2026-10-10 · [voice lab census lease pulse] · #151
+Author: Claude (Lab writer) · Track: Voice Lab worker · Spec reference: Codex r4077602539 on PR #151 (census against the 2,048-event page ring); root's census GO and proof requirements; coordinator reviews of d2d550e5 (capture TOCTOU) and ae82a1cd (lock order, join evidence).
+
+- What changed:
+  - The worker renews and drains each live run's browser lease on its own active-lease pulse. It is one `setTimeout` chain per run and lease epoch, every `min(5 s, lease / 3)`. Renewal never waits on the run or on maintenance.
+  - One serialization point per run: a claimed operation holds its run's turn until it settles. Maintenance steps and pulse drains only try the turn and skip a busy run.
+  - The pulse also renews a busy run's lease. An operation keeps renewing its own browser lease until it releases the turn, including during cancellation and shutdown cleanup. A refused lease is never renewed again.
+  - Lease-bound capture persistence (`appendLeaseBoundEvents`, PostgreSQL and memory) enforces the exact worker and epoch, and an unexpired lease, at the write's linearization point. In PostgreSQL that is the lease row locked FOR SHARE after the run and control rows, in the same transaction as the insert, cursor and joins, compared to the database clock. A failed join derivation keeps the batch and cursor as evidence and is thrown after them.
+  - Separately, a test-only correction: the MEM00 drift message expected by the real-Postgres auth-ledger test now matches the source.
+- What we learned:
+  - Running every recovery stage before the live run's lease and drain lets one silent Gateway expire a live lease, and overflow the census ring, in a single maintenance pass.
+  - A renewal followed by a generic append is still check-then-act. The lease predicate has to sit inside the capture write's own serialization.
+  - A capture write that takes the lease before the control row can deadlock against settlement.
+  - Fake timers carry no async context, so a test of timer async scope has to use real timers.
+- Validation:
+  - Fail-before, at 1c183ee6 unless stated:
+    - 13 of the 16 worker tests from the first draft fail on the property under test. The cases are lease expiry, 320 ring events lost, an operation never claimed, and a starved second run.
+    - In real Chromium, the lease, ring and pending-operation cases fail and the positive control passes.
+    - At d2d550e5, root's interleaving commits the capture from the released or expired lease (`{cursor: 4, labelled: 1}`).
+    - At ae82a1cd, the PostgreSQL join cases lose the batch and the settlement-ordered case aborts the capture write with 40P01.
+  - Mutants: 16 source mutants plus 2 Chromium reruns were each killed by explicit assertions. They covered:
+    - the pulse not started, not serialized, renewing after a refusal, not cancelling its timers, or skipping the drain;
+    - busy-run renewal dropped, and abort-time operation renewal dropped;
+    - maintenance or settle waiting on a busy run;
+    - the lease predicate dropped (memory and PostgreSQL), or checked outside the transaction;
+    - the control row locked after the lease;
+    - joins derived after the insert;
+    - the memory rethrow dropped;
+    - timers inheriting the activating async context. This one survived on fake timers until its check moved to real timers.
+  - The new tests on real PostgreSQL (own exactly named database on 55434): 60 of 60 pass. The Chromium census on the substitute chromium-1194 browser: 4 of 4 pass.
+  - Whole Lab suite, full env, at 22df2905 (merged with a9b763d7): 1,449 tests, of which 1,447 passed and 2 failed.
+    - `tts-trailing-silence-chromium` fails on a production-line change: the frontend no longer defines `estimatePcm16ByteLength`.
+    - The security golden-vector check is environmental. The worktree had no backend venv; with a project-local `uv sync --frozen --offline` venv it passes, though its cold first import exceeded the 15 s timeout once.
+- CLAUDE.md updates: none; runtime and architecture are unchanged. Skills created: none. GEPA log entry: not applicable; no prompt changed.

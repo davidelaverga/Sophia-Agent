@@ -55,6 +55,51 @@ not evidence of owner death. These checks do not authorize historical settlement
 
 A web-process restart reattaches to the durable ledger. A browser-worker loss is never presented as live-session reattachment: the run becomes `aborted_driver_restart`, pending operations are terminalized, Gateway recovery is attempted by exact `test_run_id`, and evidence records any unresolved orphan separately.
 
+### Active-lease pulse and one turn per run (#151)
+
+A live run's browser lease is renewed, and its page capture drained, on the
+worker's active-lease pulse, never only at the end of a maintenance pass. A
+slow maintenance stage (retained recovery against a Gateway that does not
+answer) used to let a live run's lease expire while its owner was alive, and
+overflow its 2,048-event page ring.
+
+- **Pulse.** One `setTimeout` chain per run and lease epoch, every
+  `min(5 s, lease / 3)` and at least every second. It starts when the lease
+  becomes active while the worker loop runs. It ends on lease loss, a terminal
+  run, deactivation or shutdown, and an ended entry never re-arms. Each tick
+  renews first. Renewal never waits on the run's turn or on maintenance. At
+  most one drain per run is in flight, and it never delays the next renewal.
+  Timers run in the pulse's own async scope, never in an operation's.
+- **One turn per run.** A claimed operation holds its run's turn until it
+  settles. Maintenance steps and the pulse only try the turn: a busy run is
+  skipped and revisited, so no capture read or persist interleaves for one run,
+  and no holder of one run delays another. While another owner holds the run,
+  the pulse still renews its exact lease epoch. An operation renews its own
+  browser lease until it releases the turn, including during cancellation and
+  shutdown cleanup. A lease the ledger refused is never renewed again; it
+  takes the existing loss handling.
+- **What the pulse does not do.** It has no effect beyond the lease row and
+  the page capture. It never continues a session, quiesces D02 or terminalizes
+  a run. A D02 arm or pre-dispatch pause, the kill switch or an expired run
+  only keeps its lease, and maintenance acts on it as before.
+- **Lease-bound capture.** Capture read under a lease is persisted through
+  `appendLeaseBoundEvents`. The exact worker and epoch, and an unexpired lease,
+  are enforced at the write's linearization point.
+  - PostgreSQL: one transaction locks runs FOR UPDATE, then recovery_controls
+    FOR NO KEY UPDATE, then the lease row FOR SHARE, with `expires_at` compared
+    to `clock_timestamp()`. That is the point. The insert, cursor and joins
+    follow in the same transaction.
+  - Memory: the same predicate, then the writes, in one synchronous step.
+  - A lease removed, fenced or expired before the point makes the write refuse
+    everything: no event, no cursor advance, no join. A lease change after it
+    waits for the write to end.
+  - A join derivation that fails keeps the batch and cursor as evidence and is
+    thrown after them.
+  - Recovery and cleanup writes are not capture. They need no lease.
+- **Shutdown.** `close()` stops the pulse, then settles its work for at most
+  5 s, then runs the D02 or generic cleanup. Settling never waits on a run's
+  turn.
+
 ## Local development
 
 Node 22 and pnpm 10.26.2 are required. From this directory:
