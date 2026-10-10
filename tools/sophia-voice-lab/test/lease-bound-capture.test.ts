@@ -212,6 +212,56 @@ postgres("lease-bound capture: real PostgreSQL", () => {
     return session;
   }
 
+  /** The pg_stat_activity row of a ledger backend that runs `fragment` and waits on a lock the backend `holderPid` holds. */
+  async function lockWaitBehind(holderPid: number, fragment: string): Promise<{ wait_event_type: string; wait_event: string; blocked_by_holder: boolean }> {
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const waiting = await admin.query(
+        "select wait_event_type, wait_event, $1::int = any(pg_blocking_pids(pid)) as blocked_by_holder from pg_stat_activity where application_name='sophia-voice-lab' and wait_event_type='Lock' and query like $2",
+        [holderPid, `%${fragment}%`],
+      );
+      if (waiting.rows[0]) return waiting.rows[0];
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    throw new Error(`no ledger backend waiting on a lock while running ${fragment}`);
+  }
+
+  /** Holds the run's lease row FOR UPDATE on its own session and leaves it unchanged: a lock-only holder. */
+  async function lockOnlyLeaseHolder(runId: string): Promise<{ session: pg.Client; pid: number }> {
+    const session = await holding("select 1 from sophia_voice_lab.browser_leases where run_id=$1 for update", [runId]);
+    return { session, pid: (await session.query<{ pid: number }>("select pg_backend_pid() as pid")).rows[0]!.pid };
+  }
+
+  const leaseExpired = async (runId: string): Promise<boolean> => (await admin.query("select expires_at <= clock_timestamp() as expired from sophia_voice_lab.browser_leases where run_id=$1", [runId])).rows[0].expired;
+  type Settled = { waitedMs: number; result?: unknown; harnessError?: string };
+  const settled = (work: Promise<unknown>): Promise<Settled> => {
+    const started = Date.now();
+    return work.then((result) => ({ result, waitedMs: Date.now() - started }), (error: unknown) => ({ harnessError: (error as { code?: string }).code ?? String(error), waitedMs: Date.now() - started }));
+  };
+
+  it("root's P2: another session holds the exact lease row FOR UPDATE and leaves it unchanged while the append waits on it; the lease expires during that wait; the append refuses whole", async () => {
+    const { run, lease } = await liveRun(ledger, 1);
+    const before = await sideEffects(ledger, run.id);
+    const leaseBefore = await ledger.getBrowserLease(run.id);
+    const holder = await lockOnlyLeaseHolder(run.id);
+    let outcome: Settled = { waitedMs: -1, harnessError: "not settled" };
+    try {
+      const appending = settled(ledger.appendLeaseBoundEvents(run.id, { workerId: WORKER, leaseEpoch: lease.leaseEpoch }, capture("lock-only-holder"), joinThread("thread-lock-only-holder")));
+      // The actual lock wait, read from pg_stat_activity: the append's lease statement, blocked by the holder's backend.
+      const wait = await lockWaitBehind(holder.pid, "from sophia_voice_lab.browser_leases where run_id=$1 and worker_id=$2 and lease_epoch=$3");
+      console.info(`root P2 append: ledger backend wait_event_type=${wait.wait_event_type} wait_event=${wait.wait_event} blocked_by_holder=${wait.blocked_by_holder}`);
+      expect(wait).toMatchObject({ wait_event_type: "Lock", blocked_by_holder: true });
+      await new Promise((resolve) => setTimeout(resolve, 1_300));
+      expect(await leaseExpired(run.id)).toBe(true);
+      await holder.session.query("rollback");
+      outcome = await appending;
+    } finally { await holder.session.end(); }
+    console.info(`root P2 append: outcome ${JSON.stringify(outcome)} (ledger lock_timeout 2000 ms)`);
+    const { waitedMs, ...settledAs } = outcome;
+    expect({ outcome: settledAs, effects: await sideEffects(ledger, run.id) }).toEqual({ outcome: { result: { committed: false } }, effects: before });
+    expect(waitedMs).toBeLessThan(2_000);
+    expect(await ledger.getBrowserLease(run.id), "the holder left the lease row unchanged").toEqual(leaseBefore);
+  });
+
   it("in flight, before the linearization point: the lease is released while the append waits for the run row; it then refuses whole", async () => {
     const { run, lease } = await liveRun(ledger);
     const before = await sideEffects(ledger, run.id);

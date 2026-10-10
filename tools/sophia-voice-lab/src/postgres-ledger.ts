@@ -635,18 +635,15 @@ export class PostgresVoiceLabLedger implements VoiceLabLedger {
       const locked = await client.query(`select * from ${SCHEMA}.runs where id=$1 for update`, [runId]);
       if (!locked.rows[0]) throw notFound("RUN_NOT_FOUND", "Run was not found.");
       await client.query(`select 1 from ${SCHEMA}.recovery_controls where run_id=$1 for no key update`, [runId]);
-      // The linearization point of a lease-bound capture write: the lease row
-      // of this exact worker and epoch, locked FOR SHARE in this transaction
-      // (after the run and control rows, before any capture write), with its
-      // expiry compared to the database clock here. A release, fence, renewal
-      // or takeover of that row serializes against it: before this point the
-      // write refuses everything; after it, the lease change waits for this
-      // transaction to end.
-      const owned = await client.query(
-        `select 1 from ${SCHEMA}.browser_leases where run_id=$1 and worker_id=$2 and lease_epoch=$3 and expires_at>clock_timestamp() for share`,
-        [runId, lease.workerId, lease.leaseEpoch],
-      );
-      if (!owned.rows[0]) {
+      // The lease row of this exact worker and epoch is locked FOR SHARE (after
+      // the run and control rows), then its expiry is checked under that held
+      // lock. The linearization point of a lease-bound capture write is that
+      // check: a separate statement on a fresh database clock, before any
+      // capture write. A release, fence, renewal or takeover of the row
+      // serializes against the held lock: before this point the write refuses
+      // everything; after it, the lease change waits for this transaction to
+      // end. Nothing is promised about the wall-clock time of the commit.
+      if (!await exactBrowserLeaseLiveUnderLock(client, "for share", runId, lease.workerId, lease.leaseEpoch)) {
         await client.query("rollback");
         return { committed: false };
       }
@@ -1337,6 +1334,23 @@ function mapPrincipalProvision(row: any): PrincipalProvisionControlRecord {
   };
 }
 function assertSameRequest(operation: OperationRecord, requestHash: string): void { if (operation.requestHash !== requestHash) throw conflict("IDEMPOTENCY_CONFLICT", "Idempotency key was reused with different arguments."); }
+/**
+ * Whether the browser lease of this exact worker and epoch is unexpired,
+ * decided under its row lock (#151). The row is locked first, with no expiry
+ * in the locking statement: PostgreSQL evaluates a locking statement's WHERE
+ * and output columns before it waits for the row lock and re-evaluates them
+ * only for a row that was updated, so an expiry evaluated there stands stale
+ * behind a holder that only locked the row and left it unchanged. Then a
+ * separate statement, under the held lock, compares the expiry to a fresh
+ * database clock. False when that row is gone or expired.
+ */
+async function exactBrowserLeaseLiveUnderLock(client: pg.PoolClient, strength: "for share" | "for no key update", runId: string, workerId: string, leaseEpoch: number): Promise<boolean> {
+  const exact = [runId, workerId, leaseEpoch];
+  const locked = await client.query(`select 1 from ${SCHEMA}.browser_leases where run_id=$1 and worker_id=$2 and lease_epoch=$3 ${strength}`, exact);
+  if (!locked.rows[0]) return false;
+  const checked = await client.query<{ live: boolean }>(`select expires_at>clock_timestamp() as live from ${SCHEMA}.browser_leases where run_id=$1 and worker_id=$2 and lease_epoch=$3`, exact);
+  return checked.rows[0]?.live === true;
+}
 function conflict(code: string, message: string): VoiceLabError { return new VoiceLabError(labError(code, message, "conflict")); }
 function notFound(code: string, message: string): VoiceLabError { return new VoiceLabError(labError(code, message, "validation")); }
 /**

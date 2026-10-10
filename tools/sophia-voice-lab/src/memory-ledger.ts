@@ -626,9 +626,11 @@ export class MemoryVoiceLabLedger implements VoiceLabLedger {
     const run = this.#runs.get(runId);
     if (!run) throw notFound("RUN_NOT_FOUND", "Run was not found.");
     // The linearization point of a lease-bound capture write: this exact
-    // worker and epoch with an unexpired lease, checked synchronously, and
-    // nothing yields from here to the last write, so no release, fence or
-    // expiry check of another call interleaves with the batch.
+    // worker and epoch with an unexpired lease, checked synchronously on a
+    // fresh clock before any capture write (the PostgreSQL store makes the
+    // same check under the held lease row lock). Nothing yields from here to
+    // the last write, so no release, fence or renewal of another call
+    // interleaves with the batch.
     const owned = this.#browserLeases.get(runId);
     if (!owned || owned.workerId !== lease.workerId || owned.leaseEpoch !== lease.leaseEpoch || owned.expiresAt <= new Date()) return { committed: false };
     // The joins are derived once, on the run as it stands, before any write; a

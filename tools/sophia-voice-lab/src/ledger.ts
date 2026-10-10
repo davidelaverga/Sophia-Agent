@@ -281,12 +281,14 @@ export interface VoiceLabLedger {
    * Browser capture bound to a lease (#151). Appends `events`, and applies the
    * joins `deriveJoins` returns for the run as locked for this write, only if
    * `lease` (that exact worker and epoch) holds the run's unexpired browser
-   * lease at the write's linearization point: the lease row of that worker and
-   * epoch, locked in the same transaction as the capture insert and its
-   * cursor and join effects, with its expiry compared to the store's clock
-   * there. A lease removed, fenced or expired before that point makes the
-   * write refuse everything (no event, no cursor advance, no join;
-   * `{ committed: false }`); a change after it waits for the write to end.
+   * lease at the write's linearization point: a check of the lease's expiry
+   * against a fresh store clock, made while the lease row of that worker and
+   * epoch is held locked in the same transaction as the capture insert and its
+   * cursor and join effects, and before any capture write. A lease removed,
+   * fenced or expired before that point makes the write refuse everything (no
+   * event, no cursor advance, no join; `{ committed: false }`); a change after
+   * it waits for the write to end. Nothing is promised about the wall-clock
+   * time of the commit.
    * Recovery and cleanup writes, which are not browser capture, keep using
    * appendEvent(s) and never require a live lease.
    */
