@@ -38,7 +38,7 @@ export async function transitionRun(ledger: VoiceLabLedger, run: RunRecord, stat
   return ledger.updateRun(run.id, run.version, { ...patch, state });
 }
 
-export function assertRunAcceptsOperation(run: RunRecord, operation: "speak" | "barge_in" | "force_socket_rotation" | "end"): void {
+export function assertRunAcceptsOperation(run: RunRecord, operation: "speak" | "barge_in" | "force_socket_rotation" | "end" | "studio_action"): void {
   if (TERMINAL_RUN_STATES.has(run.state)) throw new VoiceLabError(labError("RUN_TERMINAL", `Run is already terminal in state ${run.state}.`, "conflict"));
   if (operation === "end") {
     if (!["ready", "active", "ending", "finalizing", "exporting"].includes(run.state)) throw new VoiceLabError(labError("RUN_NOT_READY", `Run in state ${run.state} cannot end yet.`, "conflict", true));

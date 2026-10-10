@@ -49,6 +49,8 @@ export const OPERATION_TYPES = [
   "barge_in",
   "force_socket_rotation",
   "end",
+  // Studio LiveKit G7 non-voice steps (schema v7, migrations/007).
+  "studio_action",
 ] as const;
 export type OperationType = (typeof OPERATION_TYPES)[number];
 
@@ -64,7 +66,7 @@ export const OPERATION_STATES = [
 ] as const;
 export type OperationState = (typeof OPERATION_STATES)[number];
 
-export const VERDICTS = ["pending", "pass", "fail", "inconclusive", "unavailable"] as const;
+export const VERDICTS = ["pending", "pass", "fail", "invalid_test", "inconclusive", "unavailable"] as const;
 export type Verdict = (typeof VERDICTS)[number];
 
 export interface Verdicts {

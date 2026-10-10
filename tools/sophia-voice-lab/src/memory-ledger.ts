@@ -1,4 +1,8 @@
+import { decideStudioDeadOwnerRelease } from "./studio-g7/lease-release.js";
+import { studioStepConflict } from "./studio-g7/step-guard.js";
+import { STUDIO_GLOBAL_SIGNOUT_CLEARED_KIND, STUDIO_GLOBAL_SIGNOUT_PENDING_CODE, STUDIO_GLOBAL_SIGNOUT_PENDING_KIND, studioHeartbeatBootIdSha256, studioOutstandingSignOutMarkers, studioSignOutMarkerAbandoned, studioWorkerIdSha256, type StudioSignOutClearOutcome } from "./studio-g7/sign-out-fence.js";
 import { deriveExecutionOwnership } from "./execution-ownership.js";
+import { canonicalEvidenceRefreshDue } from "./canonical-evidence-refresh.js";
 import { ingestGenericOwnerLoss } from "./generic-owner-loss.js";
 import { deriveRetainedGenericRecovery } from "./retained-generic-recovery.js";
 import { z } from "zod";
@@ -23,7 +27,8 @@ import {
   type SuiteRecord,
   type SuiteEvidenceRecord,
 } from "./domain.js";
-import type { AuthAuditRecord, BrowserLease, ClaimedOperation, EventAppendInput, EventClaimGuard, EventPage, LedgerHealth, NewOperation, OperationAdmission, PrincipalProvisionCapabilityRotation, PrincipalProvisionClaim, PrincipalProvisionControlRecord, PrincipalProvisionPreparation, PrincipalProvisionReadiness, RetentionTombstone, RollingAdmissionFence, RollingAdmissionLimits, RollingAdmissionReservation, RollingAdmissionResult, RunPatch, VoiceLabLedger, WorkerHeartbeat } from "./ledger.js";
+import type { AuthAuditRecord, BrowserLease, CaptureJoinPatch, CaptureLease, ClaimedOperation, EventAppendInput, EventClaimGuard, EventPage, LedgerHealth, NewOperation, OperationAdmission, PrincipalProvisionCapabilityRotation, PrincipalProvisionClaim, PrincipalProvisionControlRecord, PrincipalProvisionPreparation, PrincipalProvisionReadiness, RetentionTombstone, RollingAdmissionFence, RollingAdmissionLimits, RollingAdmissionReservation, RollingAdmissionResult, LeaseBoundAppendResult, RunPatch, VoiceLabLedger, WorkerHeartbeat } from "./ledger.js";
+import { pendingCaptureInputs } from "./lease-bound-capture.js";
 import { parseExactPrincipalProvisionReceipt } from './principal-provision-receipt.js';
 import { deriveExecutionEpochCleanupProof, sameExecutionCleanupProof } from "./execution-cleanup.js";
 import { canonicalRequestHash, sha256 } from "./security.js";
@@ -72,6 +77,59 @@ export class MemoryVoiceLabLedger implements VoiceLabLedger {
   #runRequiresAdmission(run: RunRecord): boolean {
     return !TERMINAL_RUN_STATES.has(run.state) || !run.cleanupComplete
       || this.#recoveryControls.get(run.id)?.liveCleanupComplete === false || this.#browserLeases.has(run.id);
+  }
+  #liveSessionRunsExcept(runId: string): number {
+    const retained = [...this.#recoveryControls.values()].filter((control) => control.binding.runId !== runId && !this.#runs.has(control.binding.runId) && this.#browserLeases.has(control.binding.runId)).length;
+    return retained + [...this.#runs.values()].filter((run) => run.id !== runId && (!TERMINAL_RUN_STATES.has(run.state) || this.#browserLeases.has(run.id))).length;
+  }
+  async countLiveSessionRunsExcept(runId: string): Promise<number> { return this.#liveSessionRunsExcept(runId); }
+  /** The run's outstanding sign-out markers, each with whether it is provably abandoned (its owner dead). */
+  #signOutMarkers(runId: string, now: Date) {
+    const heartbeats = new Map([...this.#workerHeartbeats.values()].map((heartbeat) => [studioWorkerIdSha256(heartbeat.workerId), { at: heartbeat.observedAt, bootIdSha256: studioHeartbeatBootIdSha256(heartbeat.attestation) }]));
+    return studioOutstandingSignOutMarkers(this.#events.get(runId) ?? []).map((marker) => ({ marker, abandoned: studioSignOutMarkerAbandoned(marker, marker.ownerWorkerIdSha256 === null ? null : heartbeats.get(marker.ownerWorkerIdSha256) ?? null, now) }));
+  }
+  async beginStudioGlobalSignOut(runId: string, markerId: string, ownerWorkerId: string, ownerBootIdSha256: string | null = null): Promise<{ granted: boolean; liveSessionRuns: number; reason: "granted" | "sign_out_in_flight" | "live_session_runs" }> {
+    // One synchronous section (no await): atomic with createRunWithOperation.
+    const run = this.#runs.get(runId);
+    if (!run) throw notFound("RUN_NOT_FOUND", "Run was not found.");
+    const now = new Date();
+    // Same-run serialization: another recovery's sign-out is in flight.
+    const markers = this.#signOutMarkers(runId, now);
+    if (markers.some((item) => !item.abandoned)) return { granted: false, liveSessionRuns: 0, reason: "sign_out_in_flight" };
+    const liveSessionRuns = this.#liveSessionRunsExcept(runId);
+    if (liveSessionRuns > 0) return { granted: false, liveSessionRuns, reason: "live_session_runs" };
+    const events = this.#events.get(runId) ?? [];
+    // Take over markers whose owner provably died holding them.
+    for (const { marker } of markers) {
+      events.push({ runId, seq: events.length + 1, kind: STUDIO_GLOBAL_SIGNOUT_CLEARED_KIND, source: "worker", at: now, payload: { marker_id: marker.markerId, outcome: "abandoned_owner_dead", taken_over_by_marker_id: markerId }, dedupeKey: `studio-global-sign-out-abandoned:${runId}:${marker.markerId}` });
+    }
+    const previousCleanupComplete = run.cleanupComplete;
+    if (run.cleanupComplete) {
+      run.cleanupComplete = false;
+      run.version += 1;
+      const control = this.#recoveryControls.get(runId);
+      if (control) { control.liveCleanupComplete = false; control.version += 1; }
+    }
+    events.push({ runId, seq: events.length + 1, kind: STUDIO_GLOBAL_SIGNOUT_PENDING_KIND, source: "worker", at: now, payload: { marker_id: markerId, previous_cleanup_complete: previousCleanupComplete, owner_worker_id_sha256: studioWorkerIdSha256(ownerWorkerId), owner_boot_id_sha256: ownerBootIdSha256 }, dedupeKey: `studio-global-sign-out-pending:${runId}:${markerId}` });
+    this.#events.set(runId, events);
+    run.latestCursor = events.length;
+    run.updatedAt = now;
+    return { granted: true, liveSessionRuns: 0, reason: "granted" };
+  }
+  async holdsStudioGlobalSignOut(runId: string, markerId: string): Promise<boolean> {
+    // An abandoned marker is held by nobody: its stale owner never logs out globally.
+    return this.#signOutMarkers(runId, new Date()).some((item) => item.marker.markerId === markerId && !item.abandoned);
+  }
+  async listStudioSignOutMarkersOwnedBy(ownerWorkerIdSha256: string, limit: number): Promise<Array<{ runId: string; markerId: string; ownerBootIdSha256: string | null; abandoned: boolean }>> {
+    const now = new Date();
+    return [...this.#events.keys()]
+      .flatMap((runId) => this.#signOutMarkers(runId, now).filter((item) => item.marker.ownerWorkerIdSha256 === ownerWorkerIdSha256).map((item) => ({ runId, ...item })))
+      .sort((left, right) => left.marker.at.getTime() - right.marker.at.getTime())
+      .slice(0, limit)
+      .map(({ runId, marker, abandoned }) => ({ runId, markerId: marker.markerId, ownerBootIdSha256: marker.ownerBootIdSha256, abandoned }));
+  }
+  async endStudioGlobalSignOut(runId: string, markerId: string, outcome: StudioSignOutClearOutcome): Promise<void> {
+    await this.appendEvent(runId, STUDIO_GLOBAL_SIGNOUT_CLEARED_KIND, "worker", { marker_id: markerId, outcome }, `studio-global-sign-out-cleared:${runId}:${markerId}`);
   }
   async countActiveRuns(callerId?: string): Promise<number> {
     const partitions = callerId === undefined ? null : new Set(this.#callerPartitions.callerIds(callerId));
@@ -299,6 +357,12 @@ export class MemoryVoiceLabLedger implements VoiceLabLedger {
   async listRunsCertificationDue(now: Date, limit: number): Promise<RunRecord[]> {
     return clone([...this.#runs.values()].filter((run) => run.state === "pending_external_evidence" && run.expiresAt <= now).sort((left, right) => left.expiresAt.getTime() - right.expiresAt.getTime()).slice(0, limit));
   }
+  async listRunsCanonicalEvidenceRefreshDue(now: Date, limit: number): Promise<RunRecord[]> {
+    return clone([...this.#runs.values()]
+      .filter((run) => canonicalEvidenceRefreshDue(run, this.#events.get(run.id) ?? [], now).due)
+      .sort((left, right) => left.updatedAt.getTime() - right.updatedAt.getTime())
+      .slice(0, limit));
+  }
   async listRunsRetentionDue(now: Date, limit: number): Promise<RunRecord[]> {
     return clone([...this.#runs.values()]
       .filter((run) => TERMINAL_RUN_STATES.has(run.state) && run.cleanupComplete && run.retentionPurgePending && run.retentionPurgeDueAt !== null && run.retentionPurgeDueAt <= now && run.evidencePurgedAt === null)
@@ -339,6 +403,12 @@ export class MemoryVoiceLabLedger implements VoiceLabLedger {
     // Do not await between admission and insertion: the memory transaction must
     // remain atomic even when multiple callers submit starts in one tick.
     const active = [...this.#runs.values()].filter((candidate) => this.#runRequiresAdmission(candidate));
+    // A Studio global sign-out in flight on ANY run (whatever its cleanup
+    // flag): a run admitted now could have its tokens revoked.
+    const admissionNow = new Date();
+    if ([...this.#runs.keys()].some((id) => this.#signOutMarkers(id, admissionNow).some((item) => !item.abandoned))) {
+      throw conflict(STUDIO_GLOBAL_SIGNOUT_PENDING_CODE, "A global sign-out of the Studio principal is in progress; admission waits for it.");
+    }
     const retained = [...this.#recoveryControls.values()].filter((control) => !this.#runs.has(control.binding.runId) && (!control.liveCleanupComplete || this.#browserLeases.has(control.binding.runId)));
     const partitions = new Set(this.#callerPartitions.callerIds(operation.callerId));
     if (active.length + retained.length >= limits.global || active.filter((candidate) => candidate.callerId === operation.callerId).length + retained.filter((control) => partitions.has(control.binding.callerPartitionId)).length >= limits.caller) throw conflict("CONCURRENCY_LIMIT", "Voice Lab concurrency limit is reached.");
@@ -400,6 +470,10 @@ export class MemoryVoiceLabLedger implements VoiceLabLedger {
       throw conflict("D02_RUN_FROZEN", "The D02 browser-worker termination freeze forbids every new run operation.");
     }
     if (admission && (operation.type === "speak" || operation.type === "barge_in")) assertAdmission([...this.#operations.values()], operation, admission);
+    // Studio G7: a step at most once per run, checked in the same synchronous
+    // section that inserts the operation (no await in between).
+    const stepConflict = studioStepConflict([...this.#operations.values()].filter((candidate) => candidate.runId === operation.runId), operation);
+    if (stepConflict) throw stepConflict;
     const rollingAdmission = rolling ? this.#reserveRollingAdmission(rolling.reservation, rolling.limits) : undefined;
     const record = newOperationRecord(operation);
     this.#operations.set(record.id, record);
@@ -546,6 +620,44 @@ export class MemoryVoiceLabLedger implements VoiceLabLedger {
       run.updatedAt = latest.at;
     }
     return clone(appended.sort((left, right) => left.seq - right.seq));
+  }
+
+  async appendLeaseBoundEvents(runId: string, lease: CaptureLease, inputs: EventAppendInput[], deriveJoins?: (run: RunRecord) => CaptureJoinPatch | null): Promise<LeaseBoundAppendResult> {
+    const run = this.#runs.get(runId);
+    if (!run) throw notFound("RUN_NOT_FOUND", "Run was not found.");
+    // The linearization point of a lease-bound capture write: this exact
+    // worker and epoch with an unexpired lease, checked synchronously on a
+    // fresh clock before any capture write (the PostgreSQL store makes the
+    // same check under the held lease row lock). Nothing yields from here to
+    // the last write, so no release, fence or renewal of another call
+    // interleaves with the batch.
+    const owned = this.#browserLeases.get(runId);
+    if (!owned || owned.workerId !== lease.workerId || owned.leaseEpoch !== lease.leaseEpoch || owned.expiresAt <= new Date()) return { committed: false };
+    // The joins are derived once, on the run as it stands, before any write; a
+    // failed derivation keeps the batch and its cursor as evidence and is
+    // thrown after it, with no join applied (the PostgreSQL store does the same).
+    let joins: CaptureJoinPatch | null = null;
+    let joinFailure: unknown = null;
+    try { joins = deriveJoins?.(clone(run)) ?? null; }
+    catch (error) { joinFailure = error; }
+    const events = this.#events.get(runId) ?? [];
+    const pending = pendingCaptureInputs(inputs, new Map(events.flatMap((event): Array<[string, LabEvent]> => event.dedupeKey === null ? [] : [[event.dedupeKey, event]])));
+    for (const input of pending) {
+      events.push({ runId, seq: events.length + 1, kind: input.kind, source: input.source, at: input.observedAt ?? new Date(), payload: clone(input.payload), dedupeKey: input.dedupeKey ?? null });
+    }
+    this.#events.set(runId, events);
+    const latest = events.at(-1);
+    if (pending.length > 0 && latest) {
+      run.latestCursor = latest.seq;
+      run.updatedAt = latest.at;
+    }
+    if (joins) {
+      this.#runs.set(runId, { ...run, ...joins, version: run.version + 1, updatedAt: new Date() });
+      const control = this.#recoveryControls.get(runId)!;
+      this.#recoveryControls.set(runId, clone({ ...control, version: control.version + 1 }));
+    }
+    if (joinFailure !== null) throw joinFailure;
+    return { committed: true, appended: pending.length };
   }
 
   async listEvents(runId: string, after: number, limit: number): Promise<EventPage> {
@@ -702,6 +814,18 @@ export class MemoryVoiceLabLedger implements VoiceLabLedger {
       || proof.workerIdSha256 !== sha256(lease.workerId) || proof.browserLeaseEpoch !== lease.leaseEpoch) return false;
     this.#browserLeases.delete(runId);
     return true;
+  }
+  async releaseDeadOwnerStudioBrowserLease(runId: string, proof: { verificationId: string | null; tokenMaxLifetimeMs: number; heartbeatStaleMs: number }): Promise<{ released: boolean; reason: string }> {
+    const run = this.#runs.get(runId), lease = this.#browserLeases.get(runId);
+    if (!run || !lease) return { released: false, reason: !run ? "run_missing" : "lease_absent" };
+    const decision = decideStudioDeadOwnerRelease({
+      run, lease, ownerLastHeartbeatAt: this.#workerHeartbeats.get(lease.workerId)?.observedAt ?? null,
+      ownerHeartbeatBootIdSha256: studioHeartbeatBootIdSha256(this.#workerHeartbeats.get(lease.workerId)?.attestation ?? null),
+      events: this.#events.get(runId) ?? [], now: new Date(), ...proof,
+    });
+    if (!decision.release) return { released: false, reason: decision.reason };
+    this.#browserLeases.delete(runId);
+    return { released: true, reason: decision.basis === "owner_cleanup_complete" ? "dead_owner_cleanup_complete" : decision.presenceVetoCapped ? "dead_owner_quiesced_presence_veto_capped" : decision.presenceVetoExpired ? "dead_owner_quiesced_presence_veto_expired" : "dead_owner_quiesced" };
   }
   async heartbeatWorker(heartbeat: WorkerHeartbeat): Promise<void> { this.#workerHeartbeats.set(heartbeat.workerId, clone(heartbeat)); }
   async listLiveWorkers(since: Date): Promise<WorkerHeartbeat[]> { return clone([...this.#workerHeartbeats.values()].filter((heartbeat) => heartbeat.observedAt >= since)); }

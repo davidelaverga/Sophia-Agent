@@ -1,3 +1,5 @@
+import { STUDIO_G7_TARGET_KIND } from "./studio-g7/contract.js";
+import { probeStudioReadiness } from "./studio-g7/readiness.js";
 import { randomUUID } from "node:crypto";
 import type { Server as HttpServer } from "node:http";
 
@@ -140,9 +142,12 @@ export function createHttpApp(config: VoiceLabConfig, service: VoiceLabService, 
     const health = await ledger.health();
     const workers = health.ok ? await ledger.listLiveWorkers(new Date(Date.now() - 10_000)) : [];
     const workerReadiness = assessWorkerReadiness(config, workers, webBoot);
+    // Target-aware: a studio-livekit-g7-v1 deployment answers for the Studio,
+    // its API and Supabase Auth; the legacy target keeps its exact probes.
+    const studioKind = config.targetKind === STUDIO_G7_TARGET_KIND && config.studioG7 ? config.studioG7 : null;
     const [target, testAuth, oauthReadiness] = await Promise.all([
-      config.readinessTarget ? probeTarget(config) : Promise.resolve({ ok: false, status: "unconfigured", builds: null, reason: "target_configuration_missing" }),
-      config.readinessTarget ? probeTestAuth(config) : Promise.resolve({ ok: false, status: "unverified", reason: "target_configuration_missing" }),
+      studioKind ? probeStudioReadiness(config, studioKind) : config.readinessTarget ? probeTarget(config) : Promise.resolve({ ok: false, status: "unconfigured", builds: null, reason: "target_configuration_missing" }),
+      studioKind ? Promise.resolve({ ok: true, status: "not_applicable_for_studio_target", reason: "studio_principal_signs_in_per_run_and_signs_out_globally" }) : config.readinessTarget ? probeTestAuth(config) : Promise.resolve({ ok: false, status: "unverified", reason: "target_configuration_missing" }),
       oauth ? oauth.readiness() : Promise.resolve({ ready: config.nodeEnv === "test", checks: { configured: false }, errors: config.nodeEnv === "test" ? [] : ["oauth_not_configured"] }),
     ]);
     const active = health.ok ? await ledger.countActiveRuns() : null;
@@ -157,15 +162,18 @@ export function createHttpApp(config: VoiceLabConfig, service: VoiceLabService, 
       : null;
     const mutationGateOrderSafe = 'mutation_gate_order_safe' in testAuth
       && testAuth.mutation_gate_order_safe === true;
-    const productMutationGatesOpen = target.ok && 'product_mutation_gates_open' in target && target.product_mutation_gates_open === true;
+    const productMutationGatesOpen = studioKind ? target.ok : target.ok && 'product_mutation_gates_open' in target && target.product_mutation_gates_open === true;
     const productMutationGateOrderSafe = config.killSwitch || productMutationGatesOpen;
     const baseReady = health.ok && workerReadiness.safeForWeb && target.ok && productMutationGateOrderSafe && oauthReadiness.ready && maintenance.ready;
+    // The Studio principal is an operator-provided Supabase account, not a
+    // Voice Lab provisioned principal: provisioning gates do not apply.
     const ready = baseReady
       && testAuth.ok
-      && mutationGateOrderSafe
-      && !config.provisioningEnabled
-      && principalProvision.status === 'completed';
+      && (studioKind !== null || (mutationGateOrderSafe
+        && !config.provisioningEnabled
+        && principalProvision.status === 'completed'));
     const provisioningRequired = baseReady
+      && studioKind === null
       && config.killSwitch
       && config.provisioningEnabled
       && active === 0
@@ -189,7 +197,8 @@ export function createHttpApp(config: VoiceLabConfig, service: VoiceLabService, 
       capacity: 1,
       execution: config.killSwitch ? "kill_switch_engaged" : "enabled",
       product_mutation_gates_open: productMutationGatesOpen,
-      mutation_ready: ready && !config.killSwitch && workerReadiness.gateSettled && frontendKillSwitchEngaged === false && productMutationGatesOpen,
+      mutation_ready: ready && !config.killSwitch && workerReadiness.gateSettled && (studioKind !== null || frontendKillSwitchEngaged === false) && productMutationGatesOpen,
+      ...(studioKind ? { target_kind: STUDIO_G7_TARGET_KIND } : {}),
       version: config.serviceVersion,
     };
     const httpStatus = ready || provisioningRequired ? 200 : 503;
@@ -507,6 +516,37 @@ export async function probeTarget(config: VoiceLabConfig): Promise<Record<string
   }
 }
 
+/** Direct product and signed frontend proof used at both admission fences. */
+/**
+ * The web process's target probes, kept apart. `legacy` is the legacy
+ * target's effective probe, unchanged: get_capabilities reports it on a legacy
+ * deployment, and it alone is the legacy admission proof
+ * (assertFreshProductAdmissionProof). `studio` is exactly the probe /readyz
+ * runs for a Studio G7 deployment (probeStudioReadiness: unauthenticated GETs
+ * of the Studio page, the API's /health and /ready and Supabase Auth's health
+ * with its publishable key; no sign-in, no mutation); get_capabilities reports
+ * it on a Studio deployment, and it never reaches the legacy admission proof.
+ */
+export function webTargetProbes(config: VoiceLabConfig): { legacy: () => Promise<Record<string, unknown> & { ok: boolean }>; studio: () => Promise<Record<string, unknown> & { ok: boolean }> } {
+  return {
+    legacy: async () => config.readinessTarget ? probeEffectiveTarget(config) : { ok: false, status: "unconfigured", builds: null, reason: "target_configuration_missing" },
+    studio: async () => config.targetKind === STUDIO_G7_TARGET_KIND && config.studioG7 ? probeStudioReadiness(config, config.studioG7) : { ok: false, status: "unconfigured", reason: "studio_configuration_missing" },
+  };
+}
+
+export async function probeEffectiveTarget(config: VoiceLabConfig): Promise<Record<string, unknown> & { ok: boolean }> {
+  const [product, frontend] = await Promise.all([probeTarget(config), probeTestAuth(config)]);
+  return {
+    ...product,
+    frontend_auth_readiness_status: frontend.status,
+    frontend_control_adapter_enabled: frontend.frontend_control_adapter_enabled,
+    frontend_voice_lab_enabled: frontend.frontend_voice_lab_enabled,
+    frontend_kill_switch_engaged: frontend.frontend_kill_switch_engaged,
+    ok: product.ok && frontend.ok && frontend.frontend_control_adapter_enabled === true
+      && frontend.frontend_voice_lab_enabled === true && frontend.frontend_kill_switch_engaged === false,
+  };
+}
+
 export async function probeTestAuth(config: VoiceLabConfig): Promise<Record<string, unknown> & { ok: boolean; status: string }> {
   const target = config.readinessTarget!;
   const testRunId = randomUUID();
@@ -539,7 +579,6 @@ export async function probeTestAuth(config: VoiceLabConfig): Promise<Record<stri
       && typeof payload.control_adapter_enabled === 'boolean'
       && typeof payload.kill_switch_engaged === 'boolean' && typeof payload.provisioning_enabled === 'boolean'
       && (config.killSwitch || payload.voice_lab_enabled === true)
-      && (config.killSwitch || payload.control_adapter_enabled === true)
       && Number.isInteger(payload.provider_account_count) && Number(payload.provider_account_count) >= 0
       && Number.isInteger(payload.active_session_count) && Number(payload.active_session_count) >= 0;
     const provisioned = commonBound && payload.ready === true && payload.provisioned === true
@@ -561,9 +600,10 @@ export async function probeTestAuth(config: VoiceLabConfig): Promise<Record<stri
       : null;
     const mutationGateOrderSafe = frontendKillSwitchEngaged !== null
       && (config.killSwitch || frontendKillSwitchEngaged === false);
-    const status = response.ok && provisioned ? 'verified' : response.ok && unprovisioned ? 'provisioning_required' : 'unverified';
+    const adapterDisabled = !config.killSwitch && response.ok && provisioned && payload.control_adapter_enabled === false;
+    const status = adapterDisabled ? 'control_adapter_disabled' : response.ok && provisioned ? 'verified' : response.ok && unprovisioned ? 'provisioning_required' : 'unverified';
     return {
-      ok: response.ok && provisioned,
+      ok: response.ok && provisioned && !adapterDisabled,
       status,
       http_status: response.status,
       principal_hash: sha256(config.principalId),

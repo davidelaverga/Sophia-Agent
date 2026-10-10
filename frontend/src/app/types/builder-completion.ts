@@ -6,7 +6,7 @@
  * terminal task transition (success | error | timeout | cancelled).
  */
 
-import type { GeminiSyntheticBuilderJoin } from '../lib/gemini-browser-live-websocket-dogfood';
+import type { GeminiSyntheticBuilderJoin } from './synthetic-builder-join';
 
 export type BuilderCompletionStatus = 'success' | 'error' | 'timeout' | 'cancelled';
 

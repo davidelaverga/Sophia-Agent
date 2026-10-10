@@ -6,7 +6,7 @@ import type { VoiceLabLedger } from "./ledger.js";
 import { VoiceLabError, labError } from "./domain.js";
 import type { AuthenticatedCaller } from "./security.js";
 import { canonicalRequestHash, canonicalResponseHash, requireScope, sha256 } from "./security.js";
-import { errorEnvelope, toolInputSchemas, type VoiceLabService } from "./service.js";
+import { errorEnvelope, toolInputSchemas, toolNamesForTarget, type VoiceLabService } from "./service.js";
 
 const EnvelopeSchema = z.object({
   contract_version: z.literal("sophia.voice-lab.v1"),
@@ -67,6 +67,10 @@ const DEFINITIONS: Array<{
   { name: "export_voice_evidence", title: "Export durable voice evidence", description: "Read the restart-safe Postgres evidence manifest and resource references. LangSmith is optional and fail-open.", scopes: ["voice_lab:read"], annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true }, invoke: (s) => s.exportVoiceEvidence.bind(s) },
   { name: "run_regression_suite", title: "Run voice regression suite", description: "Durably schedule individually inspectable scenario runs with bounded concurrency; product failures do not hide later children.", scopes: ["voice_lab:run"], annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true, idempotentHint: true }, invoke: (s) => s.runRegressionSuite.bind(s) },
   { name: "get_suite_run", title: "Inspect regression suite", description: "Read the durable suite and every child run state/verdict without mutating execution.", scopes: ["voice_lab:read"], annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true }, invoke: (s) => s.getSuiteRun.bind(s) },
+  // Studio LiveKit G7 (registered only on a studio-livekit-g7-v1 deployment).
+  { name: "start_studio_g7_run", title: "Start Studio G7 voice run", description: "Durably reserve a Studio LiveKit G7 run against the configured Studio, API and bridge commits. Returns the non-secret run binding hash the operator puts in the product grant; the worker opens an exchange only after a grant-bound page receipt for that binding.", scopes: ["voice_lab:run"], annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true, idempotentHint: true }, invoke: (s) => s.startStudioG7Run.bind(s) },
+  { name: "studio_g7_voice_step", title: "Perform a G7 voice step", description: "Speak one G7 step (create, steer, hold, resume, create_stop_target, stop) through the Studio room's own microphone path as one durable speak operation labelled with its step. create_stop_target asks for a second, separate research that stop then ends. A performed step is never repeated under a new key.", scopes: ["voice_lab:run"], annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true, idempotentHint: true }, invoke: (s) => s.studioG7VoiceStep.bind(s) },
+  { name: "studio_g7_action", title: "Perform a G7 non-voice step", description: "Perform one G7 non-voice step as one durable studio_action operation: record_note (the run's own fixed synthetic note, first; no caller text), leave_and_return, section_revision, stale_edit, or withdrawal (forgets only the run's own note, and only when its whole cascade is the run's own); or observe, a read-only outcome read for a voice step. Records ids, states and hashes only.", scopes: ["voice_lab:run"], annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true, idempotentHint: true }, invoke: (s) => s.studioG7Action.bind(s) },
 ];
 
 export function createVoiceLabMcpServer(
@@ -80,7 +84,9 @@ export function createVoiceLabMcpServer(
     { name: "sophia-voice-lab", version: service.config.serviceVersion },
     { instructions: "First call get_capabilities. Use exact deployment SHAs and unique idempotency keys. Drive only the dedicated synthetic principal. Speak succeeds only with a page scheduling receipt. Inspect by cursor; end every run; then export evidence. Never infer product success from harness success." },
   );
-  for (const definition of DEFINITIONS) {
+  const exposed = new Set<string>(toolNamesForTarget(service.config.targetKind));
+  const definitions = DEFINITIONS.filter((definition) => exposed.has(definition.name));
+  for (const definition of definitions) {
     const invoke = definition.invoke(service);
     const securitySchemes = [{ type: "oauth2", scopes: definition.scopes }];
     server.registerTool(definition.name, {
@@ -158,7 +164,7 @@ export function createVoiceLabMcpServer(
   // level. Replace only tools/list with the forward-compatible wire shape;
   // registered call handlers and validation remain owned by McpServer.
   server.server.setRequestHandler(ListToolsRequestSchema, () => ({
-    tools: DEFINITIONS.map((definition) => {
+    tools: definitions.map((definition) => {
       const securitySchemes = [{ type: "oauth2", scopes: definition.scopes }];
       return {
         name: definition.name,

@@ -1,4 +1,8 @@
+import { decideStudioDeadOwnerRelease, STUDIO_DATABASE_CLOCK_EVENT_KINDS, STUDIO_DEAD_OWNER_DECISION_EVENT_KINDS } from "./studio-g7/lease-release.js";
+import { studioStepConflict, studioStepOf } from "./studio-g7/step-guard.js";
+import { STUDIO_GLOBAL_SIGNOUT_CLEARED_KIND, STUDIO_GLOBAL_SIGNOUT_OWNER_STALE_MS, STUDIO_GLOBAL_SIGNOUT_PENDING_CODE, STUDIO_GLOBAL_SIGNOUT_PENDING_KIND, studioHeartbeatBootIdSha256, studioWorkerIdSha256, type StudioSignOutClearOutcome } from "./studio-g7/sign-out-fence.js";
 import pg from "pg";
+import { CANONICAL_EVIDENCE_REFRESH_BASE_BACKOFF_MS, CANONICAL_EVIDENCE_REFRESH_EVENT, CANONICAL_EVIDENCE_REFRESH_MAX_ATTEMPTS } from "./canonical-evidence-refresh.js";
 import { retentionHmac } from "./retention-identity.js";
 
 import {
@@ -15,7 +19,8 @@ import {
   type SuiteRecord,
   type SuiteEvidenceRecord,
 } from "./domain.js";
-import type { AuthAuditRecord, BrowserLease, ClaimedOperation, EventAppendInput, EventClaimGuard, EventPage, LedgerHealth, NewOperation, OperationAdmission, PrincipalProvisionCapabilityRotation, PrincipalProvisionClaim, PrincipalProvisionControlRecord, PrincipalProvisionPreparation, PrincipalProvisionReadiness, RetentionTombstone, RollingAdmissionFence, RollingAdmissionLimits, RollingAdmissionReservation, RollingAdmissionResult, RunPatch, VoiceLabLedger, WorkerHeartbeat } from "./ledger.js";
+import type { AuthAuditRecord, BrowserLease, CaptureJoinPatch, CaptureLease, ClaimedOperation, EventAppendInput, EventClaimGuard, EventPage, LedgerHealth, NewOperation, OperationAdmission, PrincipalProvisionCapabilityRotation, PrincipalProvisionClaim, PrincipalProvisionControlRecord, PrincipalProvisionPreparation, PrincipalProvisionReadiness, RetentionTombstone, RollingAdmissionFence, RollingAdmissionLimits, RollingAdmissionReservation, RollingAdmissionResult, LeaseBoundAppendResult, RunPatch, VoiceLabLedger, WorkerHeartbeat } from "./ledger.js";
+import { pendingCaptureInputs } from "./lease-bound-capture.js";
 import { canonicalRequestHash, sha256 } from "./security.js";
 import { parseExactPrincipalProvisionReceipt } from './principal-provision-receipt.js';
 import { attestVoiceLabSchema } from "./schema-attestation.js";
@@ -32,6 +37,14 @@ const SCHEMA = "sophia_voice_lab";
 export const LEDGER_CONNECT_TIMEOUT_MS = 5_000;
 export const LEDGER_STATEMENT_TIMEOUT_MS = 5_000;
 export const LEDGER_LOCK_TIMEOUT_MS = 2_000;
+
+/** Studio G7, inside the caller's transaction (run row locked): refuse a labelled step another operation of the run already holds. */
+async function assertStudioStepFreeTx(client: pg.PoolClient, operation: NewOperation): Promise<void> {
+  if (studioStepOf(operation) === null) return;
+  const siblings = await client.query(`select * from ${SCHEMA}.operations where run_id=$1 and type in ('speak','studio_action')`, [operation.runId]);
+  const stepConflict = studioStepConflict(siblings.rows.map(mapOperation), operation);
+  if (stepConflict) throw stepConflict;
+}
 
 export class PostgresVoiceLabLedger implements VoiceLabLedger {
   readonly pool: pg.Pool;
@@ -97,6 +110,63 @@ export class PostgresVoiceLabLedger implements VoiceLabLedger {
     this.#callerPartitions.assertLivePartitionIds(result.rows.map((row) => row.caller_partition_id));
   }
 
+  async countLiveSessionRunsExcept(runId: string): Promise<number> {
+    return liveSessionRunCount(this.pool, runId);
+  }
+  async beginStudioGlobalSignOut(runId: string, markerId: string, ownerWorkerId: string, ownerBootIdSha256: string | null = null): Promise<{ granted: boolean; liveSessionRuns: number; reason: "granted" | "sign_out_in_flight" | "live_session_runs" }> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("begin");
+      // The admission lock: a start can neither be admitted between this
+      // count and the marker, nor while the marker is pending; and a second
+      // begin for the same run waits here until the first committed its marker.
+      await client.query("select pg_advisory_xact_lock(hashtext('sophia_voice_lab_run_quota'))");
+      const locked = await client.query(`select cleanup_complete,latest_cursor from ${SCHEMA}.runs where id=$1 for update`, [runId]);
+      if (!locked.rows[0]) throw notFound("RUN_NOT_FOUND", "Run was not found.");
+      // Same-run serialization: another recovery's sign-out is in flight.
+      const markers = await outstandingSignOutMarkers(client, runId);
+      if (markers.some((marker) => !marker.abandoned)) { await client.query("rollback"); return { granted: false, liveSessionRuns: 0, reason: "sign_out_in_flight" }; }
+      const liveSessionRuns = await liveSessionRunCount(client, runId);
+      if (liveSessionRuns > 0) { await client.query("rollback"); return { granted: false, liveSessionRuns, reason: "live_session_runs" }; }
+      const previousCleanupComplete = locked.rows[0].cleanup_complete === true;
+      if (previousCleanupComplete) {
+        await client.query(`update ${SCHEMA}.runs set cleanup_complete=false,version=version+1,updated_at=now() where id=$1`, [runId]);
+        await client.query(`update ${SCHEMA}.recovery_controls set live_cleanup_complete=false,version=version+1 where run_id=$1`, [runId]);
+      }
+      let seq = Number(locked.rows[0].latest_cursor);
+      // Take over markers whose owner provably died holding them.
+      for (const marker of markers) {
+        seq += 1;
+        await client.query(`insert into ${SCHEMA}.run_events (run_id,seq,kind,source,payload,dedupe_key,observed_at) values ($1,$2,$3,'worker',$4,$5,clock_timestamp())`,
+          [runId, seq, STUDIO_GLOBAL_SIGNOUT_CLEARED_KIND, { marker_id: marker.markerId, outcome: "abandoned_owner_dead", taken_over_by_marker_id: markerId }, `studio-global-sign-out-abandoned:${runId}:${marker.markerId}`]);
+      }
+      seq += 1;
+      await client.query(`insert into ${SCHEMA}.run_events (run_id,seq,kind,source,payload,dedupe_key,observed_at) values ($1,$2,$3,'worker',$4,$5,clock_timestamp())`,
+        [runId, seq, STUDIO_GLOBAL_SIGNOUT_PENDING_KIND, { marker_id: markerId, previous_cleanup_complete: previousCleanupComplete, owner_worker_id_sha256: studioWorkerIdSha256(ownerWorkerId), owner_boot_id_sha256: ownerBootIdSha256 }, `studio-global-sign-out-pending:${runId}:${markerId}`]);
+      await client.query(`update ${SCHEMA}.runs set latest_cursor=$2,updated_at=now() where id=$1`, [runId, seq]);
+      await client.query("commit");
+      return { granted: true, liveSessionRuns: 0, reason: "granted" };
+    } catch (error) { await client.query("rollback").catch(() => undefined); throw translatePgError(error); }
+    finally { client.release(); }
+  }
+  async holdsStudioGlobalSignOut(runId: string, markerId: string): Promise<boolean> {
+    // An abandoned marker is held by nobody: its stale owner never logs out globally.
+    return (await outstandingSignOutMarkers(this.pool, runId)).some((marker) => marker.markerId === markerId && !marker.abandoned);
+  }
+  async listStudioSignOutMarkersOwnedBy(ownerWorkerIdSha256: string, limit: number): Promise<Array<{ runId: string; markerId: string; ownerBootIdSha256: string | null; abandoned: boolean }>> {
+    // `abandoned` by the same rule a takeover uses (SIGN_OUT_MARKER_ABANDONED_SQL), on the database clock.
+    const result = await this.pool.query<{ run_id: string; marker_id: string; owner_boot_id_sha256: string | null; abandoned: boolean }>(
+      `select p.run_id, p.payload->>'marker_id' as marker_id, p.payload->>'owner_boot_id_sha256' as owner_boot_id_sha256, (${SIGN_OUT_MARKER_ABANDONED_SQL}) as abandoned
+         from ${SCHEMA}.runs r join ${SCHEMA}.run_events p on p.run_id=r.id and p.kind=$1
+        where p.payload->>'owner_worker_id_sha256' = $4
+          and not exists (select 1 from ${SCHEMA}.run_events c where c.run_id=p.run_id and c.kind=$2 and c.payload->>'marker_id' = p.payload->>'marker_id')
+        order by p.observed_at, p.run_id, p.seq limit $5`,
+      [STUDIO_GLOBAL_SIGNOUT_PENDING_KIND, STUDIO_GLOBAL_SIGNOUT_CLEARED_KIND, STUDIO_GLOBAL_SIGNOUT_OWNER_STALE_MS / 1_000, ownerWorkerIdSha256, limit]);
+    return result.rows.map((row) => ({ runId: row.run_id, markerId: row.marker_id, ownerBootIdSha256: row.owner_boot_id_sha256, abandoned: row.abandoned === true }));
+  }
+  async endStudioGlobalSignOut(runId: string, markerId: string, outcome: StudioSignOutClearOutcome): Promise<void> {
+    await this.appendEvent(runId, STUDIO_GLOBAL_SIGNOUT_CLEARED_KIND, "worker", { marker_id: markerId, outcome }, `studio-global-sign-out-cleared:${runId}:${markerId}`);
+  }
   async countActiveRuns(callerId?: string): Promise<number> {
     const counts = await activeRunCounts(this.pool, callerId ?? null, callerId === undefined ? [] : this.#callerPartitions.callerIds(callerId));
     return callerId === undefined ? counts.global : counts.caller;
@@ -166,6 +236,23 @@ export class PostgresVoiceLabLedger implements VoiceLabLedger {
     const result = await this.pool.query(`select * from ${SCHEMA}.runs where state='pending_external_evidence' and expires_at <= $1 order by expires_at asc limit $2`, [now, limit]);
     return result.rows.map(mapRun);
   }
+  async listRunsCanonicalEvidenceRefreshDue(now: Date, limit: number): Promise<RunRecord[]> {
+    const terminal = ["pending_external_evidence", "completed", "product_failed", "invalid_test", "inconclusive_provider", "failed_harness", "authorization_failed", "deployment_mismatch", "aborted_driver_restart", "expired", "cancelled"];
+    const result = await this.pool.query(
+      `select r.* from ${SCHEMA}.runs r
+        where r.state=any($1::text[]) and r.cleanup_complete=true and r.evidence_purged_at is null
+          and r.retention_purge_verified_at is null and r.retention_purge_pending=false
+          and coalesce(r.retention_purge_due_at, r.updated_at+make_interval(hours=>greatest(1,least(168,coalesce((r.capture_policy->>'retentionHours')::integer,24))))) > $2
+          and (select e.payload->'receipt'->'components'->'canonical_evidence'->>'status' from ${SCHEMA}.run_events e
+                where e.run_id=r.id and e.kind='cleanup.recovery' and e.source='canonical' order by e.seq desc limit 1) in ('failed','pending')
+          and (select count(*) from ${SCHEMA}.run_events a where a.run_id=r.id and a.kind=$3 and a.source='worker') < $4
+          and coalesce((select max(a.observed_at) from ${SCHEMA}.run_events a where a.run_id=r.id and a.kind=$3 and a.source='worker'), '-infinity'::timestamptz)
+              <= $2 - make_interval(secs => $5::double precision * power(2, greatest(0, (select count(*) from ${SCHEMA}.run_events a where a.run_id=r.id and a.kind=$3 and a.source='worker') - 1)))
+        order by r.updated_at asc limit $6`,
+      [terminal, now, CANONICAL_EVIDENCE_REFRESH_EVENT, CANONICAL_EVIDENCE_REFRESH_MAX_ATTEMPTS, CANONICAL_EVIDENCE_REFRESH_BASE_BACKOFF_MS / 1000, limit],
+    );
+    return result.rows.map(mapRun);
+  }
   async listRunsRetentionDue(now: Date, limit: number): Promise<RunRecord[]> {
     const terminal = ["pending_external_evidence", "completed", "product_failed", "invalid_test", "inconclusive_provider", "failed_harness", "authorization_failed", "deployment_mismatch", "aborted_driver_restart", "expired", "cancelled"];
     const result = await this.pool.query(
@@ -206,6 +293,16 @@ export class PostgresVoiceLabLedger implements VoiceLabLedger {
         return { run: mapRun(priorRun.rows[0]), operation: prior, replay: true, ...(rollingAdmission ? { rollingAdmission } : {}) };
       }
       if (rollingAdmission?.replay) throw conflict("IDEMPOTENCY_RETENTION_EXPIRED", "The idempotent start receipt was retention-purged and cannot be replayed or reallocated.");
+      // A Studio global sign-out in flight on ANY run, whatever its cleanup
+      // flag (its marker is written under this same lock): a run admitted now
+      // could have its tokens revoked. Markers match their own clear by id.
+      const signOutPending = await client.query(
+        `select 1 from ${SCHEMA}.runs r where exists (
+           select 1 from ${SCHEMA}.run_events p where p.run_id=r.id and p.kind=$1
+             and not exists (select 1 from ${SCHEMA}.run_events c where c.run_id=r.id and c.kind=$2 and c.payload->>'marker_id' = p.payload->>'marker_id')
+             and not (${SIGN_OUT_MARKER_ABANDONED_SQL})) limit 1`,
+        [STUDIO_GLOBAL_SIGNOUT_PENDING_KIND, STUDIO_GLOBAL_SIGNOUT_CLEARED_KIND, STUDIO_GLOBAL_SIGNOUT_OWNER_STALE_MS / 1_000]);
+      if (signOutPending.rows[0]) throw conflict(STUDIO_GLOBAL_SIGNOUT_PENDING_CODE, "A global sign-out of the Studio principal is in progress; admission waits for it.");
       const quota = await activeRunCounts(client, operation.callerId, this.#callerPartitions.callerIds(operation.callerId));
       if (quota.global >= limits.global || quota.caller >= limits.caller) throw conflict("CONCURRENCY_LIMIT", "Voice Lab concurrency limit is reached.");
       const binding = projectRecoveryControlBinding(run, this.#callerPartitions.activeCallerId(run.callerId));
@@ -285,6 +382,9 @@ export class PostgresVoiceLabLedger implements VoiceLabLedger {
         [operation.runId],
       );
       if (d02Fence.rows[0]) throw conflict("D02_RUN_FROZEN", "The D02 browser-worker termination freeze forbids every new run operation.");
+      // Studio G7: a step at most once per run, under the run row lock held
+      // above, so two concurrent keys for one step cannot both be inserted.
+      await assertStudioStepFreeTx(client, operation);
       if (admission && (operation.type === "speak" || operation.type === "barge_in")) {
         const usage = await client.query<{ utterances: string; duration_ms: string; injected_bytes: string; latest_at: Date | null }>(
           `select count(*)::text as utterances,
@@ -439,8 +539,8 @@ export class PostgresVoiceLabLedger implements VoiceLabLedger {
         await client.query(`update ${SCHEMA}.recovery_controls set d02_journal=$2,version=version+1 where run_id=$1`, [runId, journal]);
       }
       const inserted = await client.query(
-        `insert into ${SCHEMA}.run_events (run_id,seq,kind,source,payload,dedupe_key,observed_at) values ($1,$2,$3,$4,$5,$6,$7) returning *`,
-        [runId, seq, kind, source, payload, dedupeKey ?? null, observedAt],
+        `insert into ${SCHEMA}.run_events (run_id,seq,kind,source,payload,dedupe_key,observed_at) values ($1,$2,$3,$4,$5,$6,${DATABASE_CLOCK_OBSERVED_AT("$3", "$7", "$8")}) returning *`,
+        [runId, seq, kind, source, payload, dedupeKey ?? null, observedAt, STUDIO_DATABASE_CLOCK_EVENT_KINDS],
       );
       await client.query(`update ${SCHEMA}.runs set latest_cursor=$2,updated_at=now() where id=$1`, [runId, seq]);
       await client.query("commit");
@@ -458,8 +558,8 @@ export class PostgresVoiceLabLedger implements VoiceLabLedger {
       if (!locked.rows[0]) throw notFound("RUN_NOT_FOUND", "Run was not found.");
       const seq = Number(locked.rows[0].latest_cursor) + 1;
       const inserted = await client.query(
-        `insert into ${SCHEMA}.run_events (run_id,seq,kind,source,payload,dedupe_key,observed_at) values ($1,$2,$3,$4,$5,$6,$7) returning *`,
-        [runId, seq, kind, source, payload, null, observedAt],
+        `insert into ${SCHEMA}.run_events (run_id,seq,kind,source,payload,dedupe_key,observed_at) values ($1,$2,$3,$4,$5,$6,${DATABASE_CLOCK_OBSERVED_AT("$3", "$7", "$8")}) returning *`,
+        [runId, seq, kind, source, payload, null, observedAt, STUDIO_DATABASE_CLOCK_EVENT_KINDS],
       );
       await client.query(`update ${SCHEMA}.runs set latest_cursor=$2,updated_at=now() where id=$1`, [runId, seq]);
       await client.query("commit");
@@ -500,7 +600,7 @@ export class PostgresVoiceLabLedger implements VoiceLabLedger {
       if (pending.length > 0) {
         const insertedResult = await client.query(
           `insert into ${SCHEMA}.run_events (run_id,seq,kind,source,payload,dedupe_key,observed_at)
-           select $1, $2 + ordinal::integer, kind, source, payload::jsonb, dedupe_key, observed_at
+           select $1, $2 + ordinal::integer, kind, source, payload::jsonb, dedupe_key, ${DATABASE_CLOCK_OBSERVED_AT("kind", "observed_at", "$8")}
            from unnest($3::text[],$4::text[],$5::text[],$6::text[],$7::timestamptz[])
              with ordinality as batch(kind,source,payload,dedupe_key,observed_at,ordinal)
            returning *`,
@@ -512,6 +612,7 @@ export class PostgresVoiceLabLedger implements VoiceLabLedger {
             pending.map((input) => JSON.stringify(input.payload)),
             pending.map((input) => input.dedupeKey ?? null),
             pending.map((input) => input.observedAt ?? new Date()),
+            STUDIO_DATABASE_CLOCK_EVENT_KINDS,
           ],
         );
         inserted = insertedResult.rows.map(mapEvent);
@@ -521,6 +622,70 @@ export class PostgresVoiceLabLedger implements VoiceLabLedger {
       return [...replayed, ...inserted].sort((left, right) => left.seq - right.seq);
     } catch (error) { await client.query("rollback"); throw translatePgError(error); }
     finally { client.release(); }
+  }
+
+  async appendLeaseBoundEvents(runId: string, lease: CaptureLease, inputs: EventAppendInput[], deriveJoins?: (run: RunRecord) => CaptureJoinPatch | null): Promise<LeaseBoundAppendResult> {
+    const client = await this.pool.connect();
+    let written: LeaseBoundAppendResult | null = null;
+    let joinFailure: unknown = null;
+    try {
+      await client.query("begin");
+      // Lock order run -> control -> lease, as allocation, settlement and the
+      // retention purge take them: never the lease before the control row.
+      const locked = await client.query(`select * from ${SCHEMA}.runs where id=$1 for update`, [runId]);
+      if (!locked.rows[0]) throw notFound("RUN_NOT_FOUND", "Run was not found.");
+      await client.query(`select 1 from ${SCHEMA}.recovery_controls where run_id=$1 for no key update`, [runId]);
+      // The lease row of this exact worker and epoch is locked FOR SHARE (after
+      // the run and control rows), then its expiry is checked under that held
+      // lock. The linearization point of a lease-bound capture write is that
+      // check: a separate statement on a fresh database clock, before any
+      // capture write. A release, fence, renewal or takeover of the row
+      // serializes against the held lock: before this point the write refuses
+      // everything; after it, the lease change waits for this transaction to
+      // end. Nothing is promised about the wall-clock time of the commit.
+      if (!await exactBrowserLeaseLiveUnderLock(client, "for share", runId, lease.workerId, lease.leaseEpoch)) {
+        await client.query("rollback");
+        return { committed: false };
+      }
+      // The joins are derived once, on the run as locked, before any write. A
+      // derivation that fails (a join conflict, a provider-epoch regression)
+      // keeps the batch and its cursor durable as evidence: only the joins are
+      // not applied, and the failure is thrown once the batch committed.
+      let joins: CaptureJoinPatch | null = null;
+      try { joins = deriveJoins?.(mapRun(locked.rows[0])) ?? null; }
+      catch (error) { joinFailure = error; }
+      const keys = inputs.flatMap((input) => input.dedupeKey === undefined ? [] : [input.dedupeKey]);
+      const durable = keys.length === 0 ? [] : (await client.query(`select * from ${SCHEMA}.run_events where run_id=$1 and dedupe_key=any($2::text[])`, [runId, keys])).rows.map(mapEvent);
+      const pending = pendingCaptureInputs(inputs, new Map(durable.map((event): [string, LabEvent] => [String(event.dedupeKey), event])));
+      const baseCursor = Number(locked.rows[0].latest_cursor);
+      if (pending.length > 0) {
+        await client.query(
+          `insert into ${SCHEMA}.run_events (run_id,seq,kind,source,payload,dedupe_key,observed_at)
+           select $1, $2 + ordinal::integer, kind, source, payload::jsonb, dedupe_key, ${DATABASE_CLOCK_OBSERVED_AT("kind", "observed_at", "$8")}
+           from unnest($3::text[],$4::text[],$5::text[],$6::text[],$7::timestamptz[])
+             with ordinality as batch(kind,source,payload,dedupe_key,observed_at,ordinal)`,
+          [runId, baseCursor, pending.map((input) => input.kind), pending.map((input) => input.source), pending.map((input) => JSON.stringify(input.payload)),
+            pending.map((input) => input.dedupeKey ?? null), pending.map((input) => input.observedAt ?? new Date()), STUDIO_DATABASE_CLOCK_EVENT_KINDS],
+        );
+        await client.query(`update ${SCHEMA}.runs set latest_cursor=$2,updated_at=now() where id=$1`, [runId, baseCursor + pending.length]);
+      }
+      if (joins) {
+        const run = { ...mapRun(locked.rows[0]), ...joins };
+        const joined = await client.query(
+          `with updated as (update ${SCHEMA}.runs set canonical_session_id=$2,thread_id=$3,provider_session_id=$4,trace_id=$5,provider_epoch=$6,turn_id=$7,version=version+1,updated_at=now()
+             where id=$1 and exists (select 1 from ${SCHEMA}.recovery_controls c where c.run_id=$1) returning id),
+           mirrored as (update ${SCHEMA}.recovery_controls c set version=c.version+1 from updated u where c.run_id=u.id returning c.run_id)
+           select m.run_id from updated u join mirrored m on m.run_id=u.id`,
+          [runId, run.canonicalSessionId, run.threadId, run.providerSessionId, run.traceId, run.providerEpoch, run.turnId],
+        );
+        if (!joined.rows[0]) throw conflict("RUN_VERSION_CONFLICT", "Run changed concurrently.");
+      }
+      await client.query("commit");
+      written = { committed: true, appended: pending.length };
+    } catch (error) { await client.query("rollback"); throw translatePgError(error); }
+    finally { client.release(); }
+    if (joinFailure !== null) throw joinFailure;
+    return written;
   }
 
   async listEvents(runId: string, after: number, limit: number): Promise<EventPage> {
@@ -733,8 +898,24 @@ export class PostgresVoiceLabLedger implements VoiceLabLedger {
   }
 
   async heartbeatBrowserLease(runId: string, workerId: string, leaseEpoch: number, leaseSeconds: number): Promise<boolean> {
-    const result = await this.pool.query(`update ${SCHEMA}.browser_leases set expires_at=clock_timestamp()+make_interval(secs=>$4),updated_at=clock_timestamp() where run_id=$1 and worker_id=$2 and lease_epoch=$3 and expires_at>clock_timestamp()`, [runId, workerId, leaseEpoch, leaseSeconds]);
-    return (result.rowCount ?? 0) === 1;
+    // Lock the exact lease row first, then check its expiry under the held
+    // lock on a fresh clock, and renew only a live lease. An expiry predicate
+    // in the renewing UPDATE itself is evaluated before the UPDATE waits behind
+    // a holder that only locks the row (a lease-bound capture write's FOR
+    // SHARE, a recovery read FOR UPDATE), and would renew a lease that expired
+    // during that wait.
+    const client = await this.pool.connect();
+    try {
+      await client.query("begin");
+      if (!await exactBrowserLeaseLiveUnderLock(client, "for no key update", runId, workerId, leaseEpoch)) {
+        await client.query("rollback");
+        return false;
+      }
+      const result = await client.query(`update ${SCHEMA}.browser_leases set expires_at=clock_timestamp()+make_interval(secs=>$4),updated_at=clock_timestamp() where run_id=$1 and worker_id=$2 and lease_epoch=$3`, [runId, workerId, leaseEpoch, leaseSeconds]);
+      await client.query("commit");
+      return (result.rowCount ?? 0) === 1;
+    } catch (error) { await client.query("rollback").catch(() => undefined); throw error; }
+    finally { client.release(); }
   }
 
   async releaseBrowserLease(runId: string, workerId: string, leaseEpoch: number): Promise<boolean> {
@@ -744,6 +925,32 @@ export class PostgresVoiceLabLedger implements VoiceLabLedger {
 
   releaseRecoveredBrowserLease(runId: string): Promise<boolean> {
     return new PostgresRecoveryControls(this.pool).releaseRecoveredBrowserLease(runId);
+  }
+
+  async releaseDeadOwnerStudioBrowserLease(runId: string, proof: { verificationId: string | null; tokenMaxLifetimeMs: number; heartbeatStaleMs: number }): Promise<{ released: boolean; reason: string }> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("begin");
+      const runs = await client.query(`select state,scenario_version from ${SCHEMA}.runs where id=$1 for update`, [runId]);
+      const leases = await client.query(`select worker_id,lease_epoch,expires_at,clock_timestamp() as now from ${SCHEMA}.browser_leases where run_id=$1 for update`, [runId]);
+      const run = runs.rows[0], lease = leases.rows[0];
+      if (!run || !lease) { await client.query("rollback"); return { released: false, reason: !run ? "run_missing" : "lease_absent" }; }
+      const heartbeat = await client.query(`select observed_at,detail->'heartbeat_attestation' as attestation from ${SCHEMA}.worker_heartbeats where worker_id=$1`, [lease.worker_id]);
+      const events = await client.query(`select * from ${SCHEMA}.run_events where run_id=$1 and kind = any($2::text[]) order by seq`, [runId, STUDIO_DEAD_OWNER_DECISION_EVENT_KINDS]);
+      const decision = decideStudioDeadOwnerRelease({
+        run: { state: run.state, scenarioVersion: run.scenario_version },
+        lease: { workerId: lease.worker_id, leaseEpoch: Number(lease.lease_epoch), expiresAt: new Date(lease.expires_at) },
+        ownerLastHeartbeatAt: heartbeat.rows[0] ? new Date(heartbeat.rows[0].observed_at) : null,
+        ownerHeartbeatBootIdSha256: studioHeartbeatBootIdSha256(heartbeat.rows[0]?.attestation ?? null),
+        events: events.rows.map(mapEvent), now: new Date(lease.now), ...proof,
+      });
+      if (!decision.release) { await client.query("rollback"); return { released: false, reason: decision.reason }; }
+      // Release the exact dead execution, never acquire or impersonate its owner.
+      const deleted = await client.query(`delete from ${SCHEMA}.browser_leases where run_id=$1 and worker_id=$2 and lease_epoch=$3 and expires_at<=clock_timestamp()`, [runId, lease.worker_id, lease.lease_epoch]);
+      await client.query("commit");
+      return deleted.rowCount === 1 ? { released: true, reason: decision.basis === "owner_cleanup_complete" ? "dead_owner_cleanup_complete" : decision.presenceVetoCapped ? "dead_owner_quiesced_presence_veto_capped" : decision.presenceVetoExpired ? "dead_owner_quiesced_presence_veto_expired" : "dead_owner_quiesced" } : { released: false, reason: "lease_changed" };
+    } catch (error) { await client.query("rollback").catch(() => undefined); throw error; }
+    finally { client.release(); }
   }
 
   async reapExpiredBrowserLeases(now?: Date, limit = 100, afterRunId?: string): Promise<BrowserLease[]> {
@@ -1051,6 +1258,40 @@ export class PostgresVoiceLabLedger implements VoiceLabLedger {
 }
 
 
+/**
+ * A pending marker `p` (aliased in the query) that is provably abandoned: older
+ * than the owner-stale bound on the database clock, its owner's heartbeat
+ * absent, older than that bound ($3: seconds), or from another process boot
+ * than the one that wrote the marker (its attestation's boot id).
+ */
+const SIGN_OUT_MARKER_ABANDONED_SQL = `p.observed_at < clock_timestamp() - make_interval(secs => $3::double precision)
+  and not exists (select 1 from ${SCHEMA}.worker_heartbeats h where encode(sha256(convert_to(h.worker_id,'UTF8')),'hex') = p.payload->>'owner_worker_id_sha256'
+    and h.observed_at >= clock_timestamp() - make_interval(secs => $3::double precision)
+    and (p.payload->>'owner_boot_id_sha256' is null or h.detail->'heartbeat_attestation'->>'worker_boot_id_sha256' is not distinct from p.payload->>'owner_boot_id_sha256'))`;
+
+/** The run's outstanding sign-out markers (no clear for their own id), each with whether it is provably abandoned. */
+async function outstandingSignOutMarkers(database: Pick<pg.Pool | pg.PoolClient, "query">, runId: string): Promise<Array<{ markerId: string; abandoned: boolean }>> {
+  const result = await database.query<{ marker_id: string; abandoned: boolean }>(
+    `select p.payload->>'marker_id' as marker_id, (${SIGN_OUT_MARKER_ABANDONED_SQL}) as abandoned
+       from ${SCHEMA}.run_events p
+      where p.run_id=$4 and p.kind=$1
+        and not exists (select 1 from ${SCHEMA}.run_events c where c.run_id=p.run_id and c.kind=$2 and c.payload->>'marker_id' = p.payload->>'marker_id')
+      order by p.seq`,
+    [STUDIO_GLOBAL_SIGNOUT_PENDING_KIND, STUDIO_GLOBAL_SIGNOUT_CLEARED_KIND, STUDIO_GLOBAL_SIGNOUT_OWNER_STALE_MS / 1_000, runId]);
+  return result.rows.map((row) => ({ markerId: row.marker_id, abandoned: row.abandoned === true }));
+}
+
+/** Runs other than `excludeRunId` that can hold a live principal session (non-terminal, or holding a browser lease). */
+async function liveSessionRunCount(database: pg.Pool | pg.PoolClient, excludeRunId: string): Promise<number> {
+  const result = await database.query<{ n: string }>(`select count(*)::text as n from (
+      select r.id from ${SCHEMA}.runs r where r.id<>$1::uuid and (not (r.state=any($2::text[])) or exists (select 1 from ${SCHEMA}.browser_leases b where b.run_id=r.id))
+      union all
+      select c.run_id from ${SCHEMA}.recovery_controls c where c.run_id<>$1::uuid and not exists (select 1 from ${SCHEMA}.runs r where r.id=c.run_id)
+        and exists (select 1 from ${SCHEMA}.browser_leases b where b.run_id=c.run_id)
+    ) live`, [excludeRunId, [...TERMINAL_RUN_STATES]]);
+  return Number(result.rows[0]?.n ?? 0);
+}
+
 async function activeRunCounts(database: pg.Pool | pg.PoolClient, callerId: string | null, partitions: string[]): Promise<{ global: number; caller: number }> {
   const result = await database.query<{ global_count: string; caller_count: string }>(`with active as (
     select r.id,r.caller_id,null::text as caller_partition from ${SCHEMA}.runs r
@@ -1109,8 +1350,33 @@ function mapPrincipalProvision(row: any): PrincipalProvisionControlRecord {
   };
 }
 function assertSameRequest(operation: OperationRecord, requestHash: string): void { if (operation.requestHash !== requestHash) throw conflict("IDEMPOTENCY_CONFLICT", "Idempotency key was reused with different arguments."); }
+/**
+ * Whether the browser lease of this exact worker and epoch is unexpired,
+ * decided under its row lock (#151). The row is locked first, with no expiry
+ * in the locking statement: PostgreSQL evaluates a locking statement's WHERE
+ * and output columns before it waits for the row lock and re-evaluates them
+ * only for a row that was updated, so an expiry evaluated there stands stale
+ * behind a holder that only locked the row and left it unchanged. Then a
+ * separate statement, under the held lock, compares the expiry to a fresh
+ * database clock. False when that row is gone or expired.
+ */
+async function exactBrowserLeaseLiveUnderLock(client: pg.PoolClient, strength: "for share" | "for no key update", runId: string, workerId: string, leaseEpoch: number): Promise<boolean> {
+  const exact = [runId, workerId, leaseEpoch];
+  const locked = await client.query(`select 1 from ${SCHEMA}.browser_leases where run_id=$1 and worker_id=$2 and lease_epoch=$3 ${strength}`, exact);
+  if (!locked.rows[0]) return false;
+  const checked = await client.query<{ live: boolean }>(`select expires_at>clock_timestamp() as live from ${SCHEMA}.browser_leases where run_id=$1 and worker_id=$2 and lease_epoch=$3`, exact);
+  return checked.rows[0]?.live === true;
+}
 function conflict(code: string, message: string): VoiceLabError { return new VoiceLabError(labError(code, message, "conflict")); }
 function notFound(code: string, message: string): VoiceLabError { return new VoiceLabError(labError(code, message, "validation")); }
+/**
+ * Ordering-critical Studio events (lease-release.ts) carry the database's
+ * clock, the same clock as lease expiry, never the appending worker's.
+ */
+function DATABASE_CLOCK_OBSERVED_AT(kind: string, observedAt: string, kinds: string): string {
+  return `(case when ${kind} = any(${kinds}::text[]) then clock_timestamp() else ${observedAt}::timestamptz end)`;
+}
+
 function translatePgError(error: unknown): Error {
   if (error instanceof VoiceLabError) return error;
   const code = typeof error === "object" && error !== null && "code" in error ? String((error as { code: unknown }).code) : "";

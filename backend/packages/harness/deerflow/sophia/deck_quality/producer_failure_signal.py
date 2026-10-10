@@ -23,6 +23,7 @@ from deerflow.sophia.deck_quality.persistence import (
     DeckQualityPersistenceProtocolError,
     DeckQualityPersistenceRpcError,
 )
+from deerflow.sophia.rpc_business_errors import store_error_status
 
 PRODUCER_FAILURE_SIGNAL_SCHEMA_VERSION = (
     "deck-quality-producer-failure-signal/v1"
@@ -262,7 +263,7 @@ class SupabaseProducerFailureSignalRpcClient:
         if response.status_code >= 400:
             raise DeckQualityPersistenceRpcError(
                 operation,
-                status_code=response.status_code,
+                status_code=store_error_status(response),
             ) from None
         if not response.content:
             raise DeckQualityPersistenceProtocolError(
@@ -296,7 +297,7 @@ class SupabaseProducerFailureSignalRpcClient:
         if response.status_code >= 400:
             raise DeckQualityPersistenceRpcError(
                 "producer_failure_signal_probe",
-                status_code=response.status_code,
+                status_code=store_error_status(response),
             ) from None
         try:
             paths = set(response.json()["paths"])

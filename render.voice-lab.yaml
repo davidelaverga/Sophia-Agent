@@ -138,7 +138,7 @@ envVarGroups:
       - key: SOPHIA_VOICE_LAB_TARGET_VOICE_URL
         value: https://sophia-voice-2uzr.onrender.com
       - key: SOPHIA_VOICE_LAB_FIXTURE_MANIFEST_SHA256
-        value: 574806ada0f6450c097bffe6aa50c469c03bcc55cd21c8f5c78e9c9ef72073b8
+        value: 7f41be2da2587a556ec34c6daf1871019ec8b0ed7c7fae87d39353e7b897018d
       - key: SOPHIA_VOICE_LAB_OAUTH_ISSUER
         value: https://sophia-voice-lab-mcp.onrender.com
       - key: SOPHIA_VOICE_LAB_OAUTH_RESOURCE
@@ -265,6 +265,9 @@ services:
     dockerfilePath: ./tools/sophia-voice-lab/Dockerfile
     dockerContext: .
     dockerCommand: pnpm start:worker
+    # Active voice observation requires real-time browser audio forwarding.
+    # This Blueprint is not auto-synced; retained evidence may stay on the
+    # currently deployed Starter instance with execution kill=true.
     plan: starter
     region: oregon
     numInstances: 1

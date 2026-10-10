@@ -415,7 +415,7 @@ describeRealPostgres('Voice Lab auth-ledger and cleanup-index real Postgres cont
         [memoryFunction.replace('return old;', 'return old; -- source drift'), memoryFunction],
       ]) {
         await pool.query(drift);
-        await expect(runOperatorMigration('preflight')).rejects.toThrow('MEM00 delete-order trigger contract drifted');
+        await expect(runOperatorMigration('preflight')).rejects.toThrow('MEM00 companion trigger sophia_mem00_ordinary_session_delete_order contract drifted.');
         await expect(runtimeReadinessAsBetterAuthApp()).rejects.toMatchObject({ code: 'voice_lab_auth_ledger_not_ready' });
         await pool.query(restore);
         await expect(runOperatorMigration('preflight')).resolves.toContain('ready=true');

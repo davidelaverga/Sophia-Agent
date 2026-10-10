@@ -1,3 +1,4 @@
+import type { StudioSignOutClearOutcome } from "./studio-g7/sign-out-fence.js";
 import type {
   EvidenceRecord,
   DeploymentIdentity,
@@ -86,6 +87,17 @@ export interface EventAppendInput {
   dedupeKey?: string;
   observedAt?: Date;
 }
+
+/** The exact browser lease, worker and epoch, that a capture write is bound to (#151). */
+export interface CaptureLease {
+  workerId: string;
+  leaseEpoch: number;
+}
+
+/** The run identifiers a capture batch may join, derived from the run as locked for the write. */
+export type CaptureJoinPatch = Pick<RunPatch, "canonicalSessionId" | "threadId" | "providerSessionId" | "traceId" | "providerEpoch" | "turnId">;
+
+export type LeaseBoundAppendResult = { committed: true; appended: number } | { committed: false };
 
 export interface LedgerHealth {
   ok: boolean;
@@ -220,11 +232,35 @@ export interface VoiceLabLedger {
   close(): Promise<void>;
   health(): Promise<LedgerHealth>;
   countActiveRuns(callerId?: string): Promise<number>;
+  /**
+   * Runs other than `runId` that can hold a live principal session: not in a
+   * terminal state, or still holding a browser lease (retained controls with a
+   * lease included). A terminal run whose browser is closed is not counted.
+   */
+  countLiveSessionRunsExcept(runId: string): Promise<number>;
+  /**
+   * Studio global sign-out fence (studio-g7/sign-out-fence.ts): atomically with
+   * admission, grant only when no other run can hold a live session; then the
+   * run holds admission and a pending marker makes admission refuse with
+   * STUDIO_GLOBAL_SIGNOUT_PENDING until endStudioGlobalSignOut. Refused
+   * (`sign_out_in_flight`) while the run has another outstanding marker that
+   * is not provably abandoned; one that is (its owner dead) is cleared by the
+   * begin that takes over.
+   */
+  beginStudioGlobalSignOut(runId: string, markerId: string, ownerWorkerId: string, ownerBootIdSha256?: string | null): Promise<{ granted: boolean; liveSessionRuns: number; reason: "granted" | "sign_out_in_flight" | "live_session_runs" }>;
+  /** Clears exactly this marker id (the caller's own). */
+  endStudioGlobalSignOut(runId: string, markerId: string, outcome: StudioSignOutClearOutcome): Promise<void>;
+  /** Whether this marker is still outstanding and not abandoned (not cleared, not taken over, its owner alive): checked right before a global logout. */
+  holdsStudioGlobalSignOut(runId: string, markerId: string): Promise<boolean>;
+  /** Outstanding markers (any run) carrying this owner worker id hash, oldest first: a worker clears those no recovery of its process holds. */
+  listStudioSignOutMarkersOwnedBy(ownerWorkerIdSha256: string, limit: number): Promise<Array<{ runId: string; markerId: string; ownerBootIdSha256: string | null; abandoned: boolean }>>;
   listExpiredRuns(now: Date, limit: number): Promise<RunRecord[]>;
   listRunsNeedingRecovery(limit: number, afterRunId?: string): Promise<RunRecord[]>;
   listRunsPendingEvidence(limit: number): Promise<RunRecord[]>;
   listRunsCertificationDue(now: Date, limit: number): Promise<RunRecord[]>;
   listRunsRetentionDue(now: Date, limit: number): Promise<RunRecord[]>;
+  /** C077: terminal cleanup-complete runs whose latest canonical recovery left canonical evidence failed/pending, within the bounded retry window. */
+  listRunsCanonicalEvidenceRefreshDue(now: Date, limit: number): Promise<RunRecord[]>;
   reserveRollingAdmission(reservation: RollingAdmissionReservation, limits: RollingAdmissionLimits): Promise<RollingAdmissionResult>;
   createRunWithOperation(run: RunRecord, operation: NewOperation, limits: { global: number; caller: number }, rolling?: RollingAdmissionFence): Promise<{ run: RunRecord; operation: OperationRecord; replay: boolean; rollingAdmission?: RollingAdmissionResult }>;
   getRun(runId: string): Promise<RunRecord | null>;
@@ -241,6 +277,22 @@ export interface VoiceLabLedger {
   claimEvent(runId: string, kind: string, source: LabEvent["source"], payload: Record<string, unknown>, dedupeKey: string, observedAt?: Date, guard?: EventClaimGuard): Promise<{ event: LabEvent; replay: boolean }>;
   appendEvent(runId: string, kind: string, source: LabEvent["source"], payload: Record<string, unknown>, dedupeKey?: string, observedAt?: Date): Promise<LabEvent>;
   appendEvents(runId: string, events: EventAppendInput[]): Promise<LabEvent[]>;
+  /**
+   * Browser capture bound to a lease (#151). Appends `events`, and applies the
+   * joins `deriveJoins` returns for the run as locked for this write, only if
+   * `lease` (that exact worker and epoch) holds the run's unexpired browser
+   * lease at the write's linearization point: a check of the lease's expiry
+   * against a fresh store clock, made while the lease row of that worker and
+   * epoch is held locked in the same transaction as the capture insert and its
+   * cursor and join effects, and before any capture write. A lease removed,
+   * fenced or expired before that point makes the write refuse everything (no
+   * event, no cursor advance, no join; `{ committed: false }`); a change after
+   * it waits for the write to end. Nothing is promised about the wall-clock
+   * time of the commit.
+   * Recovery and cleanup writes, which are not browser capture, keep using
+   * appendEvent(s) and never require a live lease.
+   */
+  appendLeaseBoundEvents(runId: string, lease: CaptureLease, events: EventAppendInput[], deriveJoins?: (run: RunRecord) => CaptureJoinPatch | null): Promise<LeaseBoundAppendResult>;
   listEvents(runId: string, after: number, limit: number): Promise<EventPage>;
   findLatestEvent(runId: string, kinds: string[]): Promise<LabEvent | null>;
   createSuite(suite: SuiteRecord, rolling?: RollingAdmissionFence): Promise<{ suite: SuiteRecord; replay: boolean; rollingAdmission?: RollingAdmissionResult }>;
@@ -262,6 +314,13 @@ export interface VoiceLabLedger {
   heartbeatBrowserLease(runId: string, workerId: string, leaseEpoch: number, leaseSeconds: number): Promise<boolean>;
   releaseBrowserLease(runId: string, workerId: string, leaseEpoch: number): Promise<boolean>;
   releaseRecoveredBrowserLease(runId: string): Promise<boolean>;
+  /**
+   * Studio G7: compare-and-delete the expired lease of a dead foreign worker
+   * once that worker's browser can no longer act on the product (see
+   * studio-g7/lease-release.ts). Evaluated in one transaction on the
+   * ledger's own clock; never acquires or extends the lease.
+   */
+  releaseDeadOwnerStudioBrowserLease(runId: string, proof: { verificationId: string | null; tokenMaxLifetimeMs: number; heartbeatStaleMs: number }): Promise<{ released: boolean; reason: string }>;
   /** Observe expired leases without deleting their durable recovery receipts. */
   reapExpiredBrowserLeases(now?: Date, limit?: number, afterRunId?: string): Promise<BrowserLease[]>;
   heartbeatWorker(heartbeat: WorkerHeartbeat): Promise<void>;

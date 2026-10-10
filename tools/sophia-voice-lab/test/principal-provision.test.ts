@@ -505,7 +505,7 @@ describe('principal bootstrap readiness', () => {
   it.each([
     ['closed', true, false, 'verified', false],
     ['open', false, true, 'verified', true],
-    ['open with adapter disabled', false, false, 'unverified', null],
+    ['open with adapter disabled', false, false, 'control_adapter_disabled', false],
   ] as const)('binds the control adapter gate while %s', async (_label, mcpWebEngaged, adapterEnabled, status, observedEnabled) => {
     const config = targetConfig({
       SOPHIA_VOICE_LAB_KILL_SWITCH: String(mcpWebEngaged),

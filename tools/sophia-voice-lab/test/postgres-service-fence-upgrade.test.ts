@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import { readFile, mkdtemp, rm } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -6,8 +7,9 @@ import path from "node:path";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { composeVoiceLabMigration } from "../src/migration-bundle.js";
-import { SERVICE_FENCE_SOURCE_BUNDLE_SHA256, SERVICE_FENCE_BUNDLE_SHA256, SERVICE_FENCE_V2_BUNDLE_SHA256 } from "../src/service-fence-migration.js";
-import { serviceFenceInventory, upgradeServiceFenceSchema, upgradeServiceFenceV2Schema } from "../src/service-fence-upgrade.js";
+import { SERVICE_FENCE_SOURCE_BUNDLE_SHA256, SERVICE_FENCE_BUNDLE_SHA256, SERVICE_FENCE_V2_BUNDLE_SHA256, STUDIO_G7_OPERATIONS_BUNDLE_SHA256 } from "../src/service-fence-migration.js";
+import { serviceFenceInventory, upgradeServiceFenceSchema, upgradeServiceFenceV2Schema, upgradeStudioG7OperationsSchema } from "../src/service-fence-upgrade.js";
+import { studioRun, studioTestConfig } from "./studio-g7-helpers.js";
 import { readVoiceLabCatalog } from "../src/schema-attestation.js";
 import { canonicalRequestHash, sha256 } from "../src/security.js";
 import { projectRecoveryControlBinding } from "../src/recovery-control.js";
@@ -23,7 +25,7 @@ const url = process.env.SOPHIA_VOICE_LAB_FENCE_TEST_DATABASE_URL ?? "";
 const suite = url ? describe : describe.skip;
 suite("real PostgreSQL service-fence schema upgrade", () => {
   let pool: pg.Pool;
-  let base: Buffer, recovery: Buffer, fence: Buffer, fenceV2: Buffer;
+  let base: Buffer, recovery: Buffer, fence: Buffer, fenceV2: Buffer, studioOperations: Buffer;
   let sealDirectory: string;
   const execute = promisify(execFile);
   const migrate = () => execute(process.execPath, ["--import", "tsx", "src/bin/migrate.ts"], {
@@ -39,6 +41,7 @@ suite("real PostgreSQL service-fence schema upgrade", () => {
     recovery = await readFile(new URL("../migrations/004_recovery_controls.sql", import.meta.url));
     fence = await readFile(new URL("../migrations/005_service_owner_fence.sql", import.meta.url));
     fenceV2 = await readFile(new URL("../migrations/006_service_fence_v2.sql", import.meta.url));
+    studioOperations = await readFile(new URL("../migrations/007_studio_g7_operations.sql", import.meta.url));
     await pool.query("drop schema if exists sophia_voice_lab cascade");
     await pool.query(composeVoiceLabMigration(base, recovery).toString("utf8"));
     const catalog = canonicalRequestHash(await readVoiceLabCatalog(pool));
@@ -176,16 +179,71 @@ suite("real PostgreSQL service-fence schema upgrade", () => {
       [retainedBefore[0].value.run_id, persisted.proof])).rejects.toMatchObject({ code: "23514" });
     expect((await pool.query("select row_to_json(t) as value from sophia_voice_lab.recovery_controls t where run_id=$1", [retainedBefore[0].value.run_id])).rows).toEqual(retainedBefore);
 
+    // The v7 release startup refuses a v6 schema: the explicit, attested
+    // v6->v7 upgrade runs first, never an implicit startup DDL.
+    await expect(migrate()).rejects.toThrow(/pre-existing schema drift/);
+  }, 60000);
+  it("the attested v6->v7 upgrade admits the Studio studio_action operation type and changes no row", async () => {
+    const ledger = new PostgresVoiceLabLedger(url);
+    try {
+      const run = { ...studioRun(studioTestConfig()), callerId: "upgrade-caller" };
+      const start = { id: crypto.randomUUID(), runId: run.id, callerId: run.callerId, type: "start" as const, idempotencyKey: `start-${run.id}`, requestHash: sha256(`start-${run.id}`), input: {} };
+      await ledger.createRunWithOperation(run, start, { global: 5, caller: 5 });
+      const action = { id: crypto.randomUUID(), runId: run.id, callerId: run.callerId, type: "studio_action" as const, idempotencyKey: `action-${run.id}`, requestHash: sha256(`action-${run.id}`), input: { action: "leave_and_return" } };
+      // Schema v6 refuses the new operation type outright.
+      const refused = await ledger.createOperation(action).then(() => null, (error: { code?: string }) => error);
+      expect(refused).toMatchObject({ code: "23514" });
+      process.stdout.write(`[studio-g7 fail-before] schema v6 insert operations.type='studio_action' -> ${refused!.code}\n`);
+      const before = (await pool.query("select row_to_json(t)::text as value from sophia_voice_lab.operations t order by 1")).rows;
+      const client = await pool.connect();
+      let inventory: string;
+      try { inventory = await serviceFenceInventory(client); } finally { client.release(); }
+      const intent = { commit: "c".repeat(40), inventorySha256: inventory };
+      const cli = (env: Record<string, string>) => execute(process.execPath, ["--import", "tsx", "src/bin/upgrade-studio-g7-operations.ts"], {
+        env: { ...process.env, DATABASE_URL: url, COMMIT_SHA: intent.commit, RENDER_GIT_COMMIT: intent.commit, SOPHIA_VOICE_LAB_KILL_SWITCH: "true", ...env }, timeout: 30_000 });
+      // A lingering v5->v6 approval never authorizes the v6->v7 step.
+      const wrongPrefix = await cli({ SOPHIA_VOICE_LAB_SERVICE_FENCE_V2_UPGRADE_APPROVED: "YES", SOPHIA_VOICE_LAB_SERVICE_FENCE_V2_UPGRADE_EXPECTED_COMMIT: intent.commit,
+        SOPHIA_VOICE_LAB_SERVICE_FENCE_V2_UPGRADE_INVENTORY_SHA256: inventory }).then(() => null, (error: { code?: number }) => error);
+      expect(wrongPrefix?.code).toBe(1);
+      const env = { SOPHIA_VOICE_LAB_STUDIO_G7_OPERATIONS_UPGRADE_APPROVED: "YES", SOPHIA_VOICE_LAB_STUDIO_G7_OPERATIONS_UPGRADE_EXPECTED_COMMIT: intent.commit,
+        SOPHIA_VOICE_LAB_STUDIO_G7_OPERATIONS_UPGRADE_INVENTORY_SHA256: inventory };
+      expect((await cli({ ...env, SOPHIA_VOICE_LAB_KILL_SWITCH: "false" }).then(() => null, (error: { code?: number }) => error))?.code).toBe(1);
+      await pool.query("insert into sophia_voice_lab.worker_heartbeats (worker_id,service_version,browser_ready) values ('studio-ops-test-worker','test',false)");
+      await expect(upgradeStudioG7OperationsSchema(pool, intent, base, recovery, fence, fenceV2, studioOperations)).rejects.toThrow(/NOT_QUIESCENT/);
+      await pool.query("delete from sophia_voice_lab.worker_heartbeats where worker_id='studio-ops-test-worker'");
+      // The pending start operation is live work: the upgrade waits for quiescence.
+      await expect(upgradeStudioG7OperationsSchema(pool, intent, base, recovery, fence, fenceV2, studioOperations)).rejects.toThrow(/NOT_QUIESCENT/);
+      await pool.query("update sophia_voice_lab.operations set state='cancelled' where run_id=$1", [run.id]);
+      const quiesced = (await pool.query("select row_to_json(t)::text as value from sophia_voice_lab.operations t order by 1")).rows;
+      expect(quiesced).not.toEqual(before);
+      await expect(upgradeStudioG7OperationsSchema(pool, intent, base, recovery, fence, fenceV2, Buffer.concat([studioOperations, Buffer.from("\n")]))).rejects.toThrow(/CHECKSUM_INVALID/);
+      expect((await pool.query("select schema_version from sophia_voice_lab.schema_metadata")).rows[0].schema_version).toBe(6);
+      const upgraded = await cli(env);
+      expect(upgraded.stderr).toBe("");
+      const result = JSON.parse(upgraded.stdout);
+      expect(result).toMatchObject({ schema: "sophia.voice-lab.studio-g7-operations-upgrade.v1", replay: false, inventorySha256: inventory, retainedObligationsChanged: false, hostSealWritten: false, admissionAuthorized: false });
+      expect((await pool.query("select schema_version,migration_sha256,catalog_sha256 from sophia_voice_lab.schema_metadata")).rows[0])
+        .toEqual({ schema_version: 7, migration_sha256: STUDIO_G7_OPERATIONS_BUNDLE_SHA256, catalog_sha256: result.catalogSha256 });
+      expect((await pool.query("select row_to_json(t)::text as value from sophia_voice_lab.operations t order by 1")).rows).toEqual(quiesced);
+      expect(JSON.parse((await cli(env)).stdout)).toEqual({ ...result, replay: true });
+      await expect(upgradeServiceFenceV2Schema(pool, intent, base, recovery, fence, fenceV2)).rejects.toThrow(/SOURCE_INVALID/);
+      // v7 admits it; every other type stays refused.
+      const admitted = await ledger.createOperation(action);
+      expect(admitted.operation).toMatchObject({ type: "studio_action", state: "queued" });
+      process.stdout.write(`[studio-g7 pass-after] schema v7 insert operations.type='studio_action' -> ${admitted.operation.state}\n`);
+      await expect(pool.query("update sophia_voice_lab.operations set type='studio_actions' where id=$1", [action.id])).rejects.toMatchObject({ code: "23514" });
+      await pool.query("update sophia_voice_lab.operations set state='cancelled' where run_id=$1", [run.id]);
+    } finally { await ledger.close(); }
     await migrate();
-    expect(JSON.parse(await readFile(path.join(sealDirectory, "sophia-voice-lab-schema-v6.attestation.json"), "utf8")))
-      .toEqual({ schema_version: 6, migration_sha256: SERVICE_FENCE_V2_BUNDLE_SHA256, catalog_sha256: result.catalogSha256 });
+    expect(JSON.parse(await readFile(path.join(sealDirectory, "sophia-voice-lab-schema-v7.attestation.json"), "utf8")))
+      .toMatchObject({ schema_version: 7, migration_sha256: STUDIO_G7_OPERATIONS_BUNDLE_SHA256 });
     await migrate();
   }, 60000);
-  it("creates and seals a fresh v6 schema through the actual startup executable", async () => {
+  it("creates and seals a fresh v7 schema through the actual startup executable", async () => {
     await pool.query("drop schema sophia_voice_lab cascade");
     await migrate();
     const metadata = (await pool.query("select schema_version,migration_sha256,catalog_sha256 from sophia_voice_lab.schema_metadata")).rows[0];
-    expect(metadata).toEqual({ schema_version: 6, migration_sha256: SERVICE_FENCE_V2_BUNDLE_SHA256,
+    expect(metadata).toEqual({ schema_version: 7, migration_sha256: STUDIO_G7_OPERATIONS_BUNDLE_SHA256,
       catalog_sha256: canonicalRequestHash(await readVoiceLabCatalog(pool)) });
     await migrate();
   }, 30000);

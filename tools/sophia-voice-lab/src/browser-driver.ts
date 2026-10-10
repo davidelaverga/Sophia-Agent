@@ -479,7 +479,8 @@ export interface RecoveryTransportBinding {
 
 export interface VoiceBrowserDriver {
   verifyTarget(run: RunRecord): Promise<DriverStartResult>;
-  start(run: RunRecord, frontendCapability: string, browserContextBinding?: D02BrowserContextBinding, onStage?: (stage: BrowserStartStage) => Promise<void>, onAcquired?: BrowserAcquisitionObserver): Promise<DriverStartResult>;
+  /** onDurable (Studio G7 only): persist write-ahead events before the driver acts on them; the legacy driver never calls it. */
+  start(run: RunRecord, frontendCapability: string, browserContextBinding?: D02BrowserContextBinding, onStage?: (stage: BrowserStartStage) => Promise<void>, onAcquired?: BrowserAcquisitionObserver, onDurable?: (events: Omit<LabEvent, "runId" | "seq" | "at">[]) => Promise<void>): Promise<DriverStartResult>;
   schedule(run: RunRecord, operationId: string, utteranceId: string, audio: ResolvedAudio, delayMs?: number, activeTarget?: ActiveProductTarget): Promise<DriverOperationResult>;
   rotate(run: RunRecord, expectedEpoch: number, operationId: string, activeTarget?: ActiveProductTarget): Promise<DriverOperationResult>;
   continueSession(run: RunRecord, frontendContinueCapability: string): Promise<Omit<LabEvent, "runId" | "seq" | "at">[]>;
@@ -603,7 +604,7 @@ type StartupPushState = {
   queue: StartupPushEnvelope[];
 };
 
-const PAGE_PUSH_BINDING_NAME = "__sophiaVoiceLabPushV1";
+export const PAGE_PUSH_BINDING_NAME = "__sophiaVoiceLabPushV1";
 const MAX_STARTUP_PUSH_EVENTS = 4_096;
 
 const CONSENT_ACCEPT_SELECTOR = '[data-voice-lab="consent-accept"]';
@@ -975,15 +976,9 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
 
   async drain(runId: string): Promise<Omit<LabEvent, "runId" | "seq" | "at">[]> {
     const session = this.#requireSession(runId);
-    const harness = await session.page.evaluate((after) => (window as any).__sophiaVoiceLab?.drain(after) ?? { min_seq: after + 1, latest_seq: after, events: [] }, session.harnessCursor);
-    if (harness.min_seq > session.harnessCursor + 1) throw cursorGap("harness", session.harnessCursor, harness.min_seq);
-    const events: Omit<LabEvent, "runId" | "seq" | "at">[] = [];
-    for (const event of harness.events as Array<{ seq: number; kind: string; payload: Record<string, unknown> }>) {
-      if (event.seq <= session.harnessCursor) continue;
-      session.harnessCursor = event.seq;
-      const observedAt = typeof (event as any).observed_at === "string" ? (event as any).observed_at : null;
-      events.push({ kind: event.kind, source: "browser", payload: redact({ ...event.payload, _capture_provenance: { source: "voice-lab-init", seq: event.seq, observed_at: observedAt } }), dedupeKey: `browser:${event.seq}` });
-    }
+    const harness = await readHarnessEvents(session.page, session.harnessCursor);
+    session.harnessCursor = harness.cursor;
+    const events: Omit<LabEvent, "runId" | "seq" | "at">[] = harness.events;
     const productDrain = await drainProductCapture(session.productCursor, (cursor) => session.page.evaluate((requestedCursor) => {
         const capture = (window as any).__sophiaCapture;
         if (capture?.readAfter) return capture.readAfter(requestedCursor, 500);
@@ -1548,6 +1543,23 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
   }
 }
 
+/** Read the shared init script's harness ring after a cursor. Extracted
+ * unchanged from the legacy drain so the Studio driver reads the same
+ * receipts with the same gap discipline. */
+export async function readHarnessEvents(page: Pick<Page, "evaluate">, harnessCursor: number): Promise<{ cursor: number; events: Omit<LabEvent, "runId" | "seq" | "at">[] }> {
+  const harness = await page.evaluate((after) => (window as any).__sophiaVoiceLab?.drain(after) ?? { min_seq: after + 1, latest_seq: after, events: [] }, harnessCursor);
+  if (harness.min_seq > harnessCursor + 1) throw cursorGap("harness", harnessCursor, harness.min_seq);
+  const events: Omit<LabEvent, "runId" | "seq" | "at">[] = [];
+  let cursor = harnessCursor;
+  for (const event of harness.events as Array<{ seq: number; kind: string; payload: Record<string, unknown> }>) {
+    if (event.seq <= cursor) continue;
+    cursor = event.seq;
+    const observedAt = typeof (event as any).observed_at === "string" ? (event as any).observed_at : null;
+    events.push({ kind: event.kind, source: "browser", payload: redact({ ...event.payload, _capture_provenance: { source: "voice-lab-init", seq: event.seq, observed_at: observedAt } }), dedupeKey: `browser:${event.seq}` });
+  }
+  return { cursor, events };
+}
+
 export async function closeContextWithProof(
   context: Pick<BrowserContext, "close">,
   browserContexts: () => Array<Pick<BrowserContext, "close">>,
@@ -1615,10 +1627,14 @@ export async function requestBoundJsonWithOneTransientRetry(
 /** C046: a FINITE catalog, not a shape filter. Exactly the machine codes the
  * frontend Voice Lab capability/ledger/auth routes and the gateway
  * end-session/capability paths can return (extracted from b103 frontend and
- * 7d0f gateway source). Any other string, however code-shaped, is omitted. */
+ * 7d0f gateway source; `voice_lab_canonical_transcript_unavailable`, the
+ * gateway's 503 `detail.code` when the canonical transcript cannot be read,
+ * added from 6aede7d's backend/app/gateway/routers/sophia.py). Any other
+ * string, however code-shaped, is omitted. */
 export const PRODUCT_ERROR_CODES: ReadonlySet<string> = new Set([
   "voice_lab_auth_active_run_conflict", "voice_lab_auth_ledger_binding_mismatch", "voice_lab_auth_ledger_not_ready", "voice_lab_auth_run_not_found",
   "voice_lab_auth_session_mutation_unconfirmed", "voice_lab_authenticated_principal_required", "voice_lab_canonical_transcript_invalid",
+  "voice_lab_canonical_transcript_unavailable",
   "voice_lab_capability_deployment_mismatch", "voice_lab_capability_expired_or_not_yet_valid", "voice_lab_capability_invalid_lifetime",
   "voice_lab_capability_invalid_signature", "voice_lab_capability_malformed", "voice_lab_capability_missing",
   "voice_lab_capability_operation_denied", "voice_lab_capability_wrong_audience", "voice_lab_capability_wrong_environment",

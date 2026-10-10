@@ -1,40 +1,34 @@
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { readFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import type { Socket } from "node:net";
 import path from "node:path";
 
 import { chromium, type Browser } from "playwright";
-import ts from "typescript";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { AudioResolver } from "../src/audio.js";
 import { buildVoiceLabInitScript } from "../src/browser-init.js";
 import { testConfig } from "./helpers.js";
+import { productPipeline } from "./product-microphone-pipeline-helper.js";
 import { espeakLikeWav } from "./tts-silence-helper.js";
 
-// The deployed product client, not a reimplementation: these declarations are
-// extracted verbatim from the frontend source and only type-stripped.
-const PRODUCT_SOURCE = path.resolve(process.cwd(), "../../frontend/src/app/lib/gemini-browser-live-websocket-dogfood.ts");
-const PRODUCT_FUNCTIONS = ["startMicrophoneAudioPipeline", "pcm16Base64FromFloat32", "bytesToBase64", "base64ToBytes", "estimatePcm16ByteLength", "shouldEmitInputAudioFrameDiagnostic"];
-const PRODUCT_CONSTANTS = ["INPUT_AUDIO_RATE_HZ", "WEBSOCKET_OPEN"];
-const LIVE_CONTEXT_RATE = 44_100; // observed live: 4096-sample buffers -> 1486 samples -> 2972-byte frames
-
-async function productPipelineScript(): Promise<string> {
-  const file = ts.createSourceFile(PRODUCT_SOURCE, await readFile(PRODUCT_SOURCE, "utf8"), ts.ScriptTarget.ES2022, true);
-  const found = new Map<string, string>();
-  for (const statement of file.statements) {
-    if (ts.isFunctionDeclaration(statement) && statement.name && PRODUCT_FUNCTIONS.includes(statement.name.text)) found.set(statement.name.text, statement.getText(file));
-    if (ts.isVariableStatement(statement)) for (const declaration of statement.declarationList.declarations) {
-      if (ts.isIdentifier(declaration.name) && PRODUCT_CONSTANTS.includes(declaration.name.text)) found.set(declaration.name.text, statement.getText(file));
-    }
-  }
-  expect([...found.keys()].sort()).toEqual([...PRODUCT_FUNCTIONS, ...PRODUCT_CONSTANTS].sort());
-  const source = [...found.values()].map((text) => text.replace(/^export\s+/, "")).join("\n");
-  const js = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None } }).outputText;
-  return `window.__productPipeline = (() => { ${js}\n return { startMicrophoneAudioPipeline }; })();`;
-}
+// The deployed product client, not a reimplementation: the declarations the
+// microphone pipeline reaches, extracted verbatim from the frontend source with
+// the product's StreamingPcm16Resampler module, and only type-stripped. The
+// exact set is pinned, so a drift of the product pipeline fails here, loudly.
+const PRODUCT_PIPELINE_DECLARATIONS = [
+  "gemini-browser-live-websocket-dogfood.ts:INPUT_AUDIO_RATE_HZ",
+  "gemini-browser-live-websocket-dogfood.ts:WEBSOCKET_OPEN",
+  "gemini-browser-live-websocket-dogfood.ts:base64ToBytes",
+  "gemini-browser-live-websocket-dogfood.ts:bytesToBase64",
+  "gemini-browser-live-websocket-dogfood.ts:shouldEmitInputAudioFrameDiagnostic",
+  "gemini-browser-live-websocket-dogfood.ts:startMicrophoneAudioPipeline",
+  "streaming-pcm-resampler.ts:StreamingPcm16Resampler",
+];
+const LIVE_CONTEXT_RATE = 44_100; // observed live: 4096-sample buffers at 44.1 kHz into the 16 kHz product stream
+/** 16 kHz samples per 4096-sample buffer: 1486.06, which the product's streaming resampler emits as 1486 or 1487, carrying its phase. */
+const SAMPLES_PER_BUFFER = 4_096 * 16_000 / LIVE_CONTEXT_RATE;
 
 describe("real Chromium product stream shape for a synthesized utterance", () => {
   let server: Server;
@@ -84,7 +78,9 @@ describe("real Chromium product stream shape for a synthesized utterance", () =>
     await context.addInitScript({ content: buildVoiceLabInitScript({ pageOrigin: origin, websocketOrigins: [wsOrigin], maxAudioBytes: 2_000_000, testRunId: "00000000-0000-4000-8000-000000000011", cleanupObligationId: "00000000-0000-4000-8000-000000000012" }) });
     const page = await context.newPage();
     await page.goto(origin);
-    await page.addScriptTag({ content: await productPipelineScript() });
+    const pipeline = await productPipeline();
+    expect(pipeline.declarations).toEqual(PRODUCT_PIPELINE_DECLARATIONS);
+    await page.addScriptTag({ content: pipeline.script });
     const contextRate = await page.evaluate(async ({ wsUrl, rate }) => {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
       const audioContext = new AudioContext({ sampleRate: rate });
@@ -111,7 +107,11 @@ describe("real Chromium product stream shape for a synthesized utterance", () =>
     const frames = events.filter((event) => event.kind === "harness.input_frame_forwarded" && event.payload.operation_id === operationId)
       .sort((a, b) => a.payload.frame_seq - b.payload.frame_seq);
     expect(frames.length).toBeGreaterThan(20);
-    expect(new Set(frames.map((frame) => frame.payload.byte_length))).toEqual(new Set([2_972]));
+    // Each frame is one 4096-sample buffer resampled by the product: 1486 or
+    // 1487 samples (2972 or 2974 bytes), with no cumulative drift across frames.
+    const samples = frames.map((frame) => frame.payload.byte_length / 2);
+    expect(samples.filter((count) => count !== Math.floor(SAMPLES_PER_BUFFER) && count !== Math.ceil(SAMPLES_PER_BUFFER))).toEqual([]);
+    expect(Math.abs(samples.reduce((total, count) => total + count, 0) - frames.length * SAMPLES_PER_BUFFER)).toBeLessThan(1);
     let trailing = 0;
     for (const frame of [...frames].reverse()) {
       if (frame.payload.nonzero_byte_count > 0.05 * frame.payload.byte_length) break;

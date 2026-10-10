@@ -4,17 +4,20 @@ import { gzip } from "node:zlib";
 
 import pino, { type Logger } from "pino";
 
+import { ActiveLeasePulse, activeLeasePulseIntervalMs, type ActiveLeasePulseOutcome } from "./active-lease-pulse.js";
 import { assertAudioByteLimit, parseWav, type AudioResolver } from "./audio.js";
 import { DriverEndFailure, hasExactFinalizationEnvelope, type BrowserStartStage, type D02BrowserContextBinding, type D02ProductCleanupAcknowledgement, type DriverStartResult, type VoiceBrowserDriver } from "./browser-driver.js";
 import { BUNDLED_FIXTURE_MANIFEST_SHA256, type VoiceLabConfig } from "./config.js";
 import { D02GatewayContinuityObservationReceiptSchema, D02GatewaySettlementReceiptSchema } from "./d02-gateway.js";
 import { TERMINAL_RUN_STATES, VoiceLabError, initialVerdicts, labError, type EvidenceRef, type LabError, type RunRecord, type RunState, type SuiteRecord, type Verdicts } from "./domain.js";
-import type { ClaimedOperation, EventAppendInput, RollingAdmissionLimits, VoiceLabLedger } from "./ledger.js";
+import type { CaptureJoinPatch, ClaimedOperation, EventAppendInput, RollingAdmissionLimits, VoiceLabLedger } from "./ledger.js";
 import { PostgresVoiceLabLedger } from "./postgres-ledger.js";
 import { productTurnId } from "./product-turn.js";
+import { RunSerializer } from "./run-serializer.js";
 import { deriveBrowserProcessTermination } from "./browser-process-termination.js";
 import { pkceS256 } from "./oauth.js";
 import { deriveRecoveryBrowserBinding, RecoveryControlBindingSchema, recoveryTransportBinding, validateRecoveryBrowserBinding, type RecoveryControlRecord } from "./recovery-control.js";
+import { CANONICAL_EVIDENCE_REFRESH_EVENT, CANONICAL_EVIDENCE_REFRESH_MAX_ATTEMPTS, canonicalEvidenceRefreshDue, localRetentionDeadline } from "./canonical-evidence-refresh.js";
 import { UNCONFIRMED_AUTH_CLEANUP_SCHEMA, authCleanupConfirmed, authCleanupPath, preserveAuthCleanupBooleans, authoritativeLiveCleanupComplete, deriveExecutionEpochCleanupProof, recoveryComponentComplete, type ExecutionEpochCleanupProof } from "./execution-cleanup.js";
 import { PLATFORM_EXECUTION_TERMINATION_KIND } from "./platform-execution-termination.js";
 export { deriveExecutionEpochCleanupProof, type ExecutionEpochCleanupProof } from "./execution-cleanup.js";
@@ -25,8 +28,18 @@ import { recoveryAttemptAuditHash } from "./retained-d02-recovery.js";
 import { D02BrowserContinuityProofSchema, assertFreshProductAdmissionProof, reserveAudioInput, toolInputSchemas, validateAudioInputLimit, type FixtureSummary } from "./service.js";
 import { transitionRun } from "./state-machine.js";
 import { createWorkerBootIdentity, createWorkerHeartbeatAttestation, type WorkerBootIdentity } from "./worker-heartbeat.js";
+import { assertActiveRunWorkerProfile, measureWorkerProfile } from "./worker-profile.js";
+import { deriveStudioG7Verdicts, evaluateStudioG7Run, studioDurableJoin, studioG7CleanupProof } from "./studio-g7/evaluate.js";
+import { isStudioG7ScenarioVersion } from "./studio-g7/scenarios.js";
+import { STUDIO_G7_TARGET_KIND, computeRunBindingSha256 } from "./studio-g7/contract.js";
+import { hasStudioExtensions } from "./studio-g7/studio-driver.js";
+import { STUDIO_CALLS_END_STEP, STUDIO_CALLS_READ_KIND } from "./studio-g7/calls-certification.js";
+import { studioWorkerIdSha256 } from "./studio-g7/sign-out-fence.js";
+import { STUDIO_STEP_EXECUTING_STATES, studioStepConflict, studioStepOf } from "./studio-g7/step-guard.js";
+import { STUDIO_DEAD_OWNER_HEARTBEAT_STALE_MS, STUDIO_DEAD_OWNER_LEASE_RELEASE_SCHEMA, STUDIO_DEAD_OWNER_VERIFIED_KIND, STUDIO_LEASE_OWNER_BOOT_KIND, STUDIO_LEASE_OWNER_BOOT_SCHEMA, STUDIO_PRESENCE_STUCK_CAP_MS, STUDIO_PRESENCE_VETO_BOUND_MS, STUDIO_ROOM_PRESENCE_KIND, studioEffectiveTokenLifetimeMs, studioLeaseOwnerBootIdSha256 } from "./studio-g7/lease-release.js";
 
-interface ActiveLease { epoch: number; }
+/** One owned browser lease epoch. `refused` records that the ledger refused to renew it: nothing renews it again. */
+interface ActiveLease { readonly epoch: number; refused: boolean; }
 interface D02WorkerShutdownArm {
   runId: string;
   terminationRequestIdSha256: string;
@@ -48,6 +61,18 @@ interface D02WorkerShutdownArm {
 const D02_PRE_DISPATCH_SHUTDOWN_WAIT_MS = 20_000;
 const D02_PRE_DISPATCH_SHUTDOWN_POLL_MS = 100;
 export const WORKER_HEARTBEAT_INTERVAL_MS = 2_000;
+/** Shutdown waits this long for active-lease pulse work in flight (#151) before its source-specific cleanup. */
+export const ACTIVE_LEASE_PULSE_SETTLE_MS = 5_000;
+/** Studio G7: minimum spacing of API-only recoveries while the run's exchange stays unsettled. */
+export const STUDIO_EXCHANGE_REVERIFY_BACKOFF_MS = 30_000;
+/** One durable event per Studio API-only recovery (sign-in, settle, sign-out). */
+export const STUDIO_RECOVERY_ATTEMPT_EVENT = "studio.cleanup.recovery_attempt";
+/** Studio G7 evidence completion: bounded post-End re-reads of late bridge receipts. */
+export const STUDIO_EVIDENCE_REFRESH_EVENT = "studio.evidence.refresh";
+export const STUDIO_EVIDENCE_REFRESH_MAX_ATTEMPTS = 10;
+export const STUDIO_EVIDENCE_REFRESH_BACKOFF_MS = 30_000;
+/** Horizon for listing pending Studio runs (their certification deadline is the run TTL). */
+const STUDIO_EVIDENCE_LISTING_HORIZON_MS = 7 * 24 * 3_600_000;
 export const WORKER_HEARTBEAT_BROWSER_READINESS_TIMEOUT_MS = 5_000;
 const gzipAsync = promisify(gzip);
 
@@ -151,6 +176,9 @@ export class VoiceLabWorker {
   readonly #d02ShutdownArms = new Map<string, D02WorkerShutdownArm>();
   readonly #d02ShutdownsInFlight = new Map<string, Promise<void>>();
   readonly #d02PreDispatchPauses = new Set<string>();
+  /** One serialization point per run: operations, maintenance and the active-lease pulse take its turn before capture reads or writes (#151). */
+  readonly #runSerializer = new RunSerializer();
+  readonly #leasePulse: ActiveLeasePulse;
 
   constructor(
     readonly workerId: string,
@@ -169,16 +197,25 @@ export class VoiceLabWorker {
     this.logger = logger ?? pino({ level: config.logLevel, base: { service: "sophia-voice-lab-worker", worker_id: workerId } });
     this.#frontendCapabilities = new CapabilityCodec(config.grantSecret, config.capabilityIssuer, config.capabilityTtlSeconds);
     this.#workerBootIdentity = workerBootIdentity;
+    this.#leasePulse = new ActiveLeasePulse(activeLeasePulseIntervalMs(config.browserLeaseSeconds), {
+      renew: (runId, epoch) => this.#pulseRenew(runId, epoch),
+      drain: (runId, epoch) => this.#pulseDrain(runId, epoch),
+      onError: (runId, error) => this.logger.error({ run_id_sha256: sha256(runId), error: safeError(error) }, "active lease pulse unconfirmed; the next pulse retries"),
+    });
   }
 
   run(): Promise<void> {
     if (this.#loopPromise) return this.#loopPromise;
+    this.#leasePulse.enable();
+    for (const [runId, lease] of this.#activeLeases) this.#leasePulse.start(runId, lease.epoch);
     this.#startWorkerHeartbeatLoop();
     const firstHeartbeatAttempt = this.#workerHeartbeatFirstAttemptPromise ?? Promise.resolve();
     this.#loopPromise = firstHeartbeatAttempt.then(() => this.#runLoop()).finally(async () => {
       this.#stopping = true;
+      this.#leasePulse.stopAll();
       this.#wakeWorkerHeartbeatLoop?.();
       await this.#workerHeartbeatLoopPromise;
+      await this.#settleLeasePulse();
       this.#loopPromise = null;
     });
     return this.#loopPromise;
@@ -194,11 +231,23 @@ export class VoiceLabWorker {
 
   stop(): void {
     this.#stopping = true;
+    // Sticky: every pulse timer is cleared now and none is armed again.
+    this.#leasePulse.stopAll();
     this.#wakeWorkerHeartbeatLoop?.();
+  }
+
+  /** Awaits pulse work in flight. It never waits on a run's turn: a pulse only ever tries a turn. */
+  async #settleLeasePulse(): Promise<void> {
+    await withTimeout(this.#leasePulse.settle(), ACTIVE_LEASE_PULSE_SETTLE_MS).catch((error) => {
+      this.logger.error({ error: safeError(error), pulse_work_in_flight: this.#leasePulse.inFlight }, "active lease pulse work did not settle; shutdown cleanup continues");
+    });
   }
 
   async close(): Promise<void> {
     this.stop();
+    // Before any D02 or generic cleanup: no pulse renewal or drain runs
+    // alongside the shutdown arm validation and the cleanup below.
+    await this.#settleLeasePulse();
     await this.#workerHeartbeatLoopPromise;
     let d02QuiescenceFailure: unknown = null;
     let d02ArmValidationFailure: unknown = null;
@@ -284,6 +333,12 @@ export class VoiceLabWorker {
   async runOnce(): Promise<boolean> {
     const claimed = await this.ledger.claimNextOperation(this.workerId, this.config.operationLeaseSeconds);
     if (!claimed) return false;
+    // The operation holds its run's turn until it settled, so no pulse or
+    // maintenance drain interleaves with its capture reads and writes (#151).
+    return this.#runSerializer.run(claimed.run.id, () => this.#executeClaimed(claimed));
+  }
+
+  async #executeClaimed(claimed: ClaimedOperation): Promise<boolean> {
     await this.ledger.markOperationExecuting(claimed.operation.id, this.workerId, claimed.operation.leaseEpoch);
     const controller = new AbortController();
     this.#currentOperationAbort = controller;
@@ -291,14 +346,14 @@ export class VoiceLabWorker {
     let operationExecutionComplete = false;
     let heartbeatInFlight = false;
     const heartbeat = setInterval(() => {
-      if (heartbeatInFlight || controller.signal.aborted) return;
+      if (heartbeatInFlight) return;
       heartbeatInFlight = true;
       void (async () => {
           // Once execution settles, finishOperation intentionally makes its
           // lease non-renewable. Keep the independent browser lease alive for
           // finalization/abort, without mistaking that terminal operation for
           // ownership loss and cancelling the browser during cleanup.
-          if (!operationExecutionComplete) {
+          if (!operationExecutionComplete && !controller.signal.aborted) {
             try {
               const owned = await this.ledger.heartbeatOperation(claimed.operation.id, this.workerId, claimed.operation.leaseEpoch, this.config.operationLeaseSeconds);
               if (!owned && !operationExecutionComplete) { controller.abort(new VoiceLabError(labError("LEASE_LOST", "Operation lease was lost before the next irreversible action.", "conflict", true))); return; }
@@ -306,11 +361,19 @@ export class VoiceLabWorker {
               if (!operationExecutionComplete) throw error;
             }
           }
-          if (controller.signal.aborted) return;
+          // The operation holds its run's turn until it settled, and the
+          // active-lease pulse leaves a held run's drain to its holder and is
+          // off during shutdown (#151). So the operation keeps the browser
+          // lease renewed for as long as it holds the turn, an aborted
+          // operation's cancellation or shutdown cleanup included. A lease
+          // the ledger refused is never renewed again.
           const browserLease = this.#activeLeases.get(claimed.run.id);
-          if (!browserLease) return;
+          if (!browserLease || browserLease.refused) return;
           const browserOwned = await this.ledger.heartbeatBrowserLease(claimed.run.id, this.workerId, browserLease.epoch, this.config.browserLeaseSeconds);
-          if (!browserOwned) controller.abort(new VoiceLabError(labError("BROWSER_LEASE_LOST", "Browser lease was lost while the operation was in flight.", "conflict", true)));
+          if (!browserOwned) {
+            browserLease.refused = true;
+            controller.abort(new VoiceLabError(labError("BROWSER_LEASE_LOST", "Browser lease was lost while the operation was in flight.", "conflict", true)));
+          }
         })()
         .catch(() => controller.abort(new VoiceLabError(labError("LEASE_HEARTBEAT_FAILED", "Operation lease could not be renewed safely.", "harness", true))))
         .finally(() => { heartbeatInFlight = false; });
@@ -384,19 +447,27 @@ export class VoiceLabWorker {
 
   async maintainSessions(): Promise<void> {
     const maintenanceNow = new Date();
+    if (this.config.targetKind === STUDIO_G7_TARGET_KIND && hasStudioExtensions(this.driver)) {
+      // First: no sign-out marker of this worker id outlives its owner.
+      await this.#sweepOwnSignOutMarkers().catch((error) => this.logger.error({ error: safeError(error) }, "studio sign-out marker sweep unavailable; other maintenance continues"));
+      // Evidence completion runs before the certification deadline check, so
+      // a run whose late receipts arrived is finalized from them rather than
+      // failed at its deadline.
+      const pending = await this.ledger.listRunsCertificationDue(new Date(maintenanceNow.getTime() + STUDIO_EVIDENCE_LISTING_HORIZON_MS), 20).catch((error) => {
+        this.logger.error({ error: safeError(error) }, "studio evidence completion listing unavailable; other maintenance continues");
+        return [] as RunRecord[];
+      });
+      for (const run of pending.filter(isStudioG7Run)) {
+        try { await this.#maintainRun(run.id, () => this.#completeStudioG7Evidence(run.id, maintenanceNow)); }
+        catch (error) { this.logger.error({ run_id_sha256: sha256(run.id), error: safeError(error) }, "studio evidence completion remains unconfirmed"); }
+      }
+    }
     let certificationDue: RunRecord[] = [];
     try { certificationDue = await this.ledger.listRunsCertificationDue(maintenanceNow, 20); }
     catch (error) { this.logger.error({ error: safeError(error) }, "certification deadline listing unavailable; resource maintenance continues"); }
     for (const pending of certificationDue) {
-      try {
-        const error = labError("EXTERNAL_EVIDENCE_DEADLINE_EXPIRED", "The bounded external-evidence window expired before every mandatory supported assertion became machine-verifiable.", "harness", false, { deadline_at: pending.expiresAt.toISOString() });
-        const verdicts: Verdicts = { ...pending.verdicts, harness: "fail", evidence: "fail" };
-        let failed = await transitionRun(this.ledger, pending, "failed_harness", { verdicts, terminalError: error });
-        const terminal = await this.ledger.appendEvent(failed.id, "run.failed_harness", "worker", { terminal_state: "failed_harness", terminal_reason: error.code, certification_deadline_at: pending.expiresAt.toISOString(), execution_cleanup_complete: failed.cleanupComplete }, `run:${failed.id}:failed_harness`);
-        failed = await this.#freshRun(failed.id);
-        await this.#saveFailureEvidence(failed, error, []);
-        this.logger.warn({ run_id: failed.id, terminal_event_seq: terminal.seq }, "external evidence deadline expired");
-      } catch (error) {
+      try { await this.#maintainRun(pending.id, () => this.#expireCertificationDeadline(pending)); }
+      catch (error) {
         // Certification publication is not authority to defer unrelated hard
         // retention deadlines or leave provider/browser obligations unchecked.
         this.logger.error({ run_id_sha256: sha256(pending.id), error: safeError(error) }, "certification deadline update unconfirmed; resource maintenance continues");
@@ -410,21 +481,26 @@ export class VoiceLabWorker {
     try { retentionDue = await this.ledger.listRunsRetentionDue(maintenanceNow, 20); }
     catch (error) { this.logger.error({ error: safeError(error) }, "remote retention listing unavailable; local hard-deadline purge still required"); }
     for (const retained of retentionDue) {
-      try {
-        const recovery = await this.#recoverRun(retained);
-        await this.#persistEvents(retained.id, recovery.events);
-        const page = await this.#allEvents(retained.id);
-        if (authoritativeRetentionPurged(page.events)) {
-          const fresh = await this.#freshRun(retained.id);
-          await this.ledger.updateRun(fresh.id, fresh.version, { retentionPurgePending: false, retentionPurgeVerifiedAt: new Date() });
-        }
-      } catch (error) {
+      try { await this.#maintainRun(retained.id, () => this.#confirmRemoteRetentionPurge(retained)); }
+      catch (error) {
         // Remote deletion truth remains "unconfirmed", but a Gateway outage
         // can never extend the signed lifetime of local transcripts/screenshots.
         // purgeExpiredRetention below deletes local content unconditionally and
         // retains only the keyed content-free tombstone.
         this.logger.error({ run_id: retained.id, error: safeError(error) }, "remote retention purge could not be confirmed before local hard deadline");
       }
+    }
+    // C077: bounded re-verification of retained canonical evidence that an
+    // earlier recovery left failed/pending (e.g. a since-fixed Gateway reader).
+    // Runs before the hard purge (C080: a pinned past deadline purges in this
+    // same pass) and before evidence publication (a real receipt republishes).
+    const evidenceRefresh = await this.ledger.listRunsCanonicalEvidenceRefreshDue(maintenanceNow, 5).catch(error => {
+      this.logger.error({ error: safeError(error) }, "canonical evidence refresh listing unavailable; other maintenance continues");
+      return [];
+    });
+    for (const retained of evidenceRefresh) {
+      try { await this.#maintainRun(retained.id, () => this.#refreshCanonicalEvidence(retained.id, maintenanceNow)); }
+      catch (error) { this.logger.error({ run_id_sha256: sha256(retained.id), error: safeError(error) }, "canonical evidence refresh remains unconfirmed"); }
     }
     try { await this.ledger.purgeExpiredRetention(maintenanceNow, 20); }
     catch (error) { this.logger.error({ error: safeError(error) }, "local retention purge unconfirmed; independent resource recovery continues"); }
@@ -434,7 +510,7 @@ export class VoiceLabWorker {
     });
     for (const control of retainedControls) {
       if (control.contentPurgedAt === null) continue;
-      try { await this.#recoverRetainedControl(control); }
+      try { await this.#maintainRun(control.binding.runId, () => this.#recoverRetainedControl(control)); }
       catch (error) { this.logger.error({ run_id_sha256: sha256(control.binding.runId), error: safeError(error) }, "retained recovery remains unconfirmed"); }
     }
     const expiredRuns = await this.ledger.listExpiredRuns(new Date(), 20).catch(error => {
@@ -442,7 +518,7 @@ export class VoiceLabWorker {
       return [];
     });
     for (const expired of expiredRuns) {
-      try { await this.#terminalizeFailure(expired.id, labError("RUN_EXPIRED", "Run exceeded its bounded TTL and was cleaned up.", "harness"), "expired"); }
+      try { await this.#maintainRun(expired.id, () => this.#terminalizeFailure(expired.id, labError("RUN_EXPIRED", "Run exceeded its bounded TTL and was cleaned up.", "harness"), "expired")); }
       catch (error) { this.logger.error({ run_id_sha256: sha256(expired.id), error: safeError(error) }, "expired run recovery remains unconfirmed"); }
     }
     let recoveryPage: RunRecord[] = [];
@@ -457,14 +533,8 @@ export class VoiceLabWorker {
       this.logger.error({ error: safeError(error) }, "terminal recovery listing unavailable; other resource maintenance continues");
     }
     for (const pending of recoveryPage) {
-      try {
-        const replacement = await this.#observeD02GracefulWorkerReplacement(pending);
-        if (replacement === "awaiting_replacement") continue;
-        const operations = await this.ledger.listOperations(pending.id);
-        const failedOperation = [...operations].reverse().find((operation) => (operation.state === "failed" || operation.state === "timed_out") && operation.error !== null);
-        const recoveryError = pending.terminalError ?? failedOperation?.error ?? labError("RECOVERY_PENDING", "Terminal run still requires durable zero-orphan recovery.", "harness", true);
-        await this.#terminalizeFailure(pending.id, recoveryError, TERMINAL_RUN_STATES.has(pending.state) ? pending.state : undefined);
-      } catch (error) {
+      try { await this.#maintainRun(pending.id, () => this.#recoverTerminalRun(pending)); }
+      catch (error) {
         this.logger.error({ run_id_sha256: sha256(pending.id), error: safeError(error) }, "terminal run recovery remains unconfirmed");
       }
     }
@@ -476,11 +546,8 @@ export class VoiceLabWorker {
       return [];
     });
     for (const pending of evidencePending) {
-      try {
-        if (pending.terminalError !== null || !["completed", "product_failed", "inconclusive_provider", "failed_harness", "authorization_failed"].includes(pending.state)) await this.#saveFailureEvidence(pending, pending.terminalError ?? labError("TERMINAL_CERTIFICATION_REVISION", "Terminal execution evidence was revised without mutating the execution decision.", "evidence"), []);
-        else if (pending.scenarioId === "V-S01" || pending.scenarioId === "V-S02") await this.#finalizePreResourceScenario(pending.id);
-        else await this.#finalizeEndRun(pending.id);
-      } catch (error) {
+      try { await this.#maintainRun(pending.id, () => this.#publishTerminalEvidence(pending)); }
+      catch (error) {
         this.logger.error({ run_id_sha256: sha256(pending.id), error: safeError(error) }, "terminal evidence publication unconfirmed; live resource maintenance continues");
       }
     }
@@ -501,7 +568,7 @@ export class VoiceLabWorker {
     }
     let activeMaintenanceFailure: unknown = null;
     for (const [runId, lease] of this.#activeLeases) {
-      try { await this.#maintainActiveLease(runId, lease); }
+      try { await this.#maintainRun(runId, () => this.#maintainActiveLease(runId, lease)); }
       catch (error) {
         // An unavailable ownership read or failed recovery write proves neither
         // lease loss nor cleanup. Keep its durable obligation and continue with
@@ -518,7 +585,7 @@ export class VoiceLabWorker {
     // receipts and are revisited on wrap. No deletion or ownership extension.
     this.#expiredLeaseCursor = expiredPage.at(-1)?.runId;
     for (const lostLease of expiredPage) {
-      try { await this.#markDriverRestart(lostLease.runId, lostLease); }
+      try { await this.#maintainRun(lostLease.runId, () => this.#markDriverRestart(lostLease.runId, lostLease)); }
       catch (error) {
         this.logger.error({ run_id_sha256: sha256(lostLease.runId), error: safeError(error) }, "expired browser loss observation unconfirmed; remaining lease recovery continues");
       }
@@ -528,7 +595,63 @@ export class VoiceLabWorker {
     if (activeMaintenanceFailure !== null) throw activeMaintenanceFailure;
   }
 
+  /**
+   * One maintenance step for one run, taken in that run's turn (#151). A run
+   * another holder owns (its operation, or its active-lease pulse) is skipped
+   * and revisited by the next pass: maintenance never waits for a run, so a
+   * slow holder of one run never holds up any other run.
+   */
+  async #maintainRun(runId: string, step: () => Promise<void>): Promise<void> {
+    const turn = await this.#runSerializer.tryRun(runId, step);
+    if (!turn.ran) this.logger.debug({ run_id_sha256: sha256(runId) }, "run held by another owner; maintenance revisits it next pass");
+  }
+
+  async #expireCertificationDeadline(pending: RunRecord): Promise<void> {
+    const error = labError("EXTERNAL_EVIDENCE_DEADLINE_EXPIRED", "The bounded external-evidence window expired before every mandatory supported assertion became machine-verifiable.", "harness", false, { deadline_at: pending.expiresAt.toISOString() });
+    const verdicts: Verdicts = { ...pending.verdicts, harness: "fail", evidence: "fail" };
+    // A Studio run whose cleanup proof is incomplete (e.g. an unrevoked
+    // evidence-refresh session) holds admission again, so terminal
+    // recovery completes it once no other run does.
+    const studioCleanupIncomplete = isStudioG7Run(pending) && pending.cleanupComplete && !studioG7CleanupProof((await this.#allEvents(pending.id)).events).complete;
+    let failed = await transitionRun(this.ledger, pending, "failed_harness", { verdicts, terminalError: error, ...(studioCleanupIncomplete ? { cleanupComplete: false } : {}) });
+    const terminal = await this.ledger.appendEvent(failed.id, "run.failed_harness", "worker", { terminal_state: "failed_harness", terminal_reason: error.code, certification_deadline_at: pending.expiresAt.toISOString(), execution_cleanup_complete: failed.cleanupComplete }, `run:${failed.id}:failed_harness`);
+    failed = await this.#freshRun(failed.id);
+    await this.#saveFailureEvidence(failed, error, []);
+    this.logger.warn({ run_id: failed.id, terminal_event_seq: terminal.seq }, "external evidence deadline expired");
+  }
+
+  async #confirmRemoteRetentionPurge(retained: RunRecord): Promise<void> {
+    const recovery = await this.#recoverRun(retained);
+    await this.#persistEvents(retained.id, recovery.events);
+    const page = await this.#allEvents(retained.id);
+    if (authoritativeRetentionPurged(page.events)) {
+      const fresh = await this.#freshRun(retained.id);
+      await this.ledger.updateRun(fresh.id, fresh.version, { retentionPurgePending: false, retentionPurgeVerifiedAt: new Date() });
+    }
+  }
+
+  async #recoverTerminalRun(pending: RunRecord): Promise<void> {
+    const replacement = await this.#observeD02GracefulWorkerReplacement(pending);
+    if (replacement === "awaiting_replacement") return;
+    const operations = await this.ledger.listOperations(pending.id);
+    const failedOperation = [...operations].reverse().find((operation) => (operation.state === "failed" || operation.state === "timed_out") && operation.error !== null);
+    const recoveryError = pending.terminalError ?? failedOperation?.error ?? labError("RECOVERY_PENDING", "Terminal run still requires durable zero-orphan recovery.", "harness", true);
+    await this.#terminalizeFailure(pending.id, recoveryError, TERMINAL_RUN_STATES.has(pending.state) ? pending.state : undefined);
+  }
+
+  async #publishTerminalEvidence(pending: RunRecord): Promise<void> {
+    // A Studio run awaiting evidence is re-finalized by its own path (which
+    // refuses while its cleanup proof is incomplete), never revised into a
+    // failure-shaped manifest.
+    if (studioAwaitingExternalEvidence(pending)) await this.#finalizeEndRun(pending.id);
+    else if (pending.terminalError !== null || !["completed", "product_failed", "inconclusive_provider", "failed_harness", "authorization_failed"].includes(pending.state)) await this.#saveFailureEvidence(pending, pending.terminalError ?? labError("TERMINAL_CERTIFICATION_REVISION", "Terminal execution evidence was revised without mutating the execution decision.", "evidence"), []);
+    else if (pending.scenarioId === "V-S01" || pending.scenarioId === "V-S02") await this.#finalizePreResourceScenario(pending.id);
+    else await this.#finalizeEndRun(pending.id);
+  }
+
   async #maintainActiveLease(runId: string, lease: ActiveLease): Promise<void> {
+    // The pulse may have ended this lease epoch before maintenance took the turn.
+    if (this.#activeLeases.get(runId) !== lease) return;
     const current = await this.ledger.getRun(runId);
     const d02Arm = await this.#resolveD02WorkerShutdownArm(runId);
     if (d02Arm) {
@@ -541,12 +664,7 @@ export class VoiceLabWorker {
       // not committed. Preserve ownership without touching the frozen app;
       // the next maintenance pass either observes the unique dispatch claim
       // and quiesces or remains paused.
-      const owned = await this.ledger.heartbeatBrowserLease(runId, this.workerId, lease.epoch, this.config.browserLeaseSeconds);
-      if (!owned) {
-        this.#activeLeases.delete(runId);
-        const lostLease = await this.ledger.getBrowserLease(runId);
-        await this.#markDriverRestart(runId, lostLease?.workerId === this.workerId && lostLease.leaseEpoch === lease.epoch ? lostLease : undefined);
-      }
+      await this.#renewActiveLease(runId, lease, false);
       return;
     }
     if (this.#killSwitchEngaged() && current && !TERMINAL_RUN_STATES.has(current.state)) {
@@ -557,34 +675,156 @@ export class VoiceLabWorker {
       await this.#terminalizeFailure(runId, labError("RUN_EXPIRED", "Run exceeded its bounded TTL and was cleaned up.", "harness"), "expired");
       return;
     }
-    const owned = await this.ledger.heartbeatBrowserLease(runId, this.workerId, lease.epoch, this.config.browserLeaseSeconds);
-    if (!owned || !this.driver.hasSession(runId)) {
-      this.#activeLeases.delete(runId);
-      // Preserve the exact owned lease even when the in-process browser
-      // registry disappears before the database lease expires. Without this
-      // receipt a live browser crash would be indistinguishable from an
-      // unowned policy assertion during late D02 certification.
-      const lostLease = await this.ledger.getBrowserLease(runId);
-      await this.#markDriverRestart(runId, lostLease?.workerId === this.workerId && lostLease.leaseEpoch === lease.epoch ? lostLease : undefined);
-      return;
-    }
+    if (!await this.#renewActiveLease(runId, lease, true)) return;
     try {
+      let bound = true;
       if (!this.#killSwitchEngaged() && current) {
         const continueGrant = await this.#mintAndVerify(current, "sophia-voice-lab-frontend", ["session:continue", "session:create", "session:read", "session:finalize"], "session:continue");
-        await this.#persistEvents(runId, await this.driver.continueSession(current, continueGrant.token));
+        bound = await this.#persistLeaseBoundEvents(runId, lease, await this.driver.continueSession(current, continueGrant.token));
       }
-      await this.#persistEvents(runId, await this.driver.drain(runId));
+      if (bound) await this.#persistLeaseBoundEvents(runId, lease, await this.driver.drain(runId));
     }
     catch (error) {
-      const armedAfterFailure = await this.#resolveD02WorkerShutdownArm(runId);
-      if (armedAfterFailure) {
-        this.#d02ShutdownArms.set(runId, armedAfterFailure);
-        await this.#quiesceD02Worker(runId, armedAfterFailure);
-      } else {
-        this.#activeLeases.delete(runId);
-        await this.#terminalizeFailure(runId, errorDetail(error));
-      }
+      await this.#failActiveLeaseDrain(runId, error);
+      return;
     }
+    await this.#observeRefusedLease(runId, lease);
+  }
+
+  #activateLease(runId: string, epoch: number): void {
+    this.#activeLeases.set(runId, { epoch, refused: false });
+    this.#leasePulse.start(runId, epoch);
+  }
+
+  #deactivateLease(runId: string): void {
+    this.#activeLeases.delete(runId);
+    this.#leasePulse.stop(runId);
+  }
+
+  /**
+   * Renews this exact lease epoch. A refusal (or, when required, a missing
+   * browser session) is a lease loss and takes the existing loss handling.
+   * A lease the ledger refused is never renewed again.
+   */
+  async #renewActiveLease(runId: string, lease: ActiveLease, requireSession: boolean): Promise<boolean> {
+    const owned = !lease.refused && await this.ledger.heartbeatBrowserLease(runId, this.workerId, lease.epoch, this.config.browserLeaseSeconds);
+    if (!owned) lease.refused = true;
+    if (owned && (!requireSession || this.driver.hasSession(runId))) return true;
+    await this.#observeActiveLeaseLoss(runId, lease);
+    return false;
+  }
+
+  async #observeActiveLeaseLoss(runId: string, lease: ActiveLease): Promise<void> {
+    this.#deactivateLease(runId);
+    // Preserve the exact owned lease even when the in-process browser
+    // registry disappears before the database lease expires. Without this
+    // receipt a live browser crash would be indistinguishable from an
+    // unowned policy assertion during late D02 certification.
+    const lostLease = await this.ledger.getBrowserLease(runId);
+    await this.#markDriverRestart(runId, lostLease?.workerId === this.workerId && lostLease.leaseEpoch === lease.epoch ? lostLease : undefined);
+  }
+
+  /** The loss a lease-bound persist observed, handled once and outside the drain-failure path. */
+  async #observeRefusedLease(runId: string, lease: ActiveLease): Promise<void> {
+    if (lease.refused && this.#activeLeases.get(runId) === lease) await this.#observeActiveLeaseLoss(runId, lease);
+  }
+
+  /**
+   * Persists events read under this lease epoch only while that epoch still
+   * owns the run (#151). The ledger enforces the exact worker and epoch, and
+   * an unexpired lease, at the write's linearization point: a check of the
+   * lease's expiry against a fresh store clock, made while the lease row of
+   * that worker and epoch is held locked in the same transaction (in memory,
+   * the same synchronous step) as the capture insert, its cursor advance and
+   * its joins, before any capture write. A read that
+   * outlived its lease, or whose lease was released or fenced before that
+   * point, writes nothing: this returns false, recorded as the lease's loss.
+   * A join derivation that fails is thrown after the batch is durable.
+   */
+  async #persistLeaseBoundEvents(runId: string, lease: ActiveLease, events: CapturedEvent[]): Promise<boolean> {
+    if (lease.refused || this.#activeLeases.get(runId) !== lease) return false;
+    if (events.length === 0) return true;
+    const boundRun = await this.#freshRun(runId);
+    const plan = captureAppendPlan(boundRun, events);
+    const written = await this.ledger.appendLeaseBoundEvents(runId, { workerId: this.workerId, leaseEpoch: lease.epoch }, plan.inputs,
+      plan.failure === null ? (run) => captureJoinPatch(run, boundRun, events) : undefined);
+    if (!written.committed) {
+      lease.refused = true;
+      return false;
+    }
+    if (plan.failure !== null) throw plan.failure;
+    return true;
+  }
+
+  async #failActiveLeaseDrain(runId: string, error: unknown): Promise<void> {
+    const armedAfterFailure = await this.#resolveD02WorkerShutdownArm(runId);
+    if (armedAfterFailure) {
+      this.#d02ShutdownArms.set(runId, armedAfterFailure);
+      await this.#quiesceD02Worker(runId, armedAfterFailure);
+    } else {
+      this.#deactivateLease(runId);
+      await this.#terminalizeFailure(runId, errorDetail(error));
+    }
+  }
+
+  /**
+   * Pulse renewal while another owner holds the run (#151): that owner (an
+   * operation, maintenance, or this pulse's own drain still in flight) drains
+   * it, and this keeps its exact lease epoch live meanwhile. It never waits
+   * for the run's turn and touches no page or capture cursor. A free run is
+   * renewed by the drain below, fenced like maintenance. A refusal is only
+   * recorded here: the loss is handled in the run's turn, and nothing renews
+   * that lease again.
+   */
+  async #pulseRenew(runId: string, epoch: number): Promise<ActiveLeasePulseOutcome> {
+    const lease = this.#activeLeases.get(runId);
+    if (this.#stopping || lease?.epoch !== epoch) return "end";
+    if (lease.refused || !this.#runSerializer.busy(runId)) return "continue";
+    if (!await this.ledger.heartbeatBrowserLease(runId, this.workerId, epoch, this.config.browserLeaseSeconds)) lease.refused = true;
+    return "continue";
+  }
+
+  /** Pulse drain (#151): only in the run's turn, never waiting for it. A busy run is drained by its holder. */
+  async #pulseDrain(runId: string, epoch: number): Promise<ActiveLeasePulseOutcome> {
+    const lease = this.#activeLeases.get(runId);
+    if (this.#stopping || lease?.epoch !== epoch) return "end";
+    const turn = await this.#runSerializer.tryRun(runId, () => this.#pulseDrainTurn(runId, lease));
+    return turn.ran ? turn.value : "continue";
+  }
+
+  /**
+   * What maintenance does for an active lease, minus everything with an
+   * effect beyond the lease row and the page capture: no session
+   * continuation, no D02 quiescence, no kill-switch or expiry
+   * terminalization. While those fence the run, the pulse only preserves
+   * ownership and maintenance acts on them exactly as before.
+   */
+  async #pulseDrainTurn(runId: string, lease: ActiveLease): Promise<ActiveLeasePulseOutcome> {
+    if (this.#stopping || this.#activeLeases.get(runId) !== lease) return "end";
+    if (lease.refused) {
+      await this.#observeActiveLeaseLoss(runId, lease);
+      return "end";
+    }
+    const current = await this.ledger.getRun(runId);
+    if (!current || TERMINAL_RUN_STATES.has(current.state)) return "end";
+    const fenced = await this.#activeLeaseFenced(runId, current);
+    if (!await this.#renewActiveLease(runId, lease, !fenced)) return "end";
+    if (fenced || this.#stopping) return "continue";
+    try { await this.#persistLeaseBoundEvents(runId, lease, await this.driver.drain(runId)); }
+    catch (error) {
+      // Once shutdown began, close() owns every active lease's cleanup.
+      if (this.#stopping) throw error;
+      await this.#failActiveLeaseDrain(runId, error);
+      return "end";
+    }
+    await this.#observeRefusedLease(runId, lease);
+    return lease.refused ? "end" : "continue";
+  }
+
+  /** A D02 arm or pre-dispatch pause, the kill switch and the run's expiry leave the app untouched. A D02 conflict throws. */
+  async #activeLeaseFenced(runId: string, current: RunRecord): Promise<boolean> {
+    if (await this.#resolveD02WorkerShutdownArm(runId)) return true;
+    return this.#d02PreDispatchPauses.has(runId) || this.#killSwitchEngaged() || current.expiresAt <= new Date();
   }
 
   async #advanceSuites(): Promise<void> {
@@ -741,7 +981,7 @@ export class VoiceLabWorker {
       browserReady: browser.ok && tts.ok && fixturesReady,
       observedAt,
       attestation: createWorkerHeartbeatAttestation(this.config, this.#workerBootIdentity, effectiveKillSwitchEngaged, heartbeatSequence),
-      detail: { browser: browser.detail, browser_engine: browser.engine ?? null, browser_version: browser.version ?? null, fixtures_ready: fixturesReady, fixture_count: this.audio.summaries().length, tts_ready: tts.ok, tts: tts.detail },
+      detail: { browser: browser.detail, browser_engine: browser.engine ?? null, browser_version: browser.version ?? null, fixtures_ready: fixturesReady, fixture_count: this.audio.summaries().length, tts_ready: tts.ok, tts: tts.detail, active_run_profile: measureWorkerProfile() },
     });
   }
 
@@ -788,7 +1028,11 @@ export class VoiceLabWorker {
       if (run.state !== "reserved") throw new VoiceLabError(labError("BROWSER_SESSION_LOST", "A replayed start operation cannot recreate an already-started browser honestly.", "harness"));
       run = await transitionRun(this.ledger, run, "validating_target");
       if (run.scenarioId === "V-S01" || run.scenarioId === "V-S02") return this.#executePreResourceScenario(run, operation.id);
-      if (this.config.readinessTarget !== null || this.config.nodeEnv !== "test") assertFreshProductAdmissionProof(this.config, run.target, await this.targetIdentity());
+      // Studio G7 runs verify their own pinned identities inside driver.start.
+      if (!isStudioG7Run(run) && (this.config.readinessTarget !== null || this.config.nodeEnv !== "test")) assertFreshProductAdmissionProof(this.config, run.target, await this.targetIdentity());
+      const workerProfile = measureWorkerProfile();
+      assertActiveRunWorkerProfile(this.config.nodeEnv, workerProfile);
+      if (this.config.nodeEnv !== "test") await this.ledger.appendEvent(run.id, "harness.worker_profile_verified", "worker", { ...workerProfile }, `run:${run.id}:worker_profile`);
       // Admission at the MCP boundary prevents an accepted request from
       // allocating work beyond the rolling campaign budget. Replaying the
       // exact durable reservation here is the final provider-allocation fence:
@@ -796,8 +1040,12 @@ export class VoiceLabWorker {
       // same transactionally enforced counter before a browser/provider exists.
       await this.#fenceProviderAdmission(run, operation);
       run = await transitionRun(this.ledger, run, "browser_queued");
+      // Studio: this process boot is recorded as the lease's owner before the
+      // lease exists, so a restart under the same worker id is never mistaken
+      // for the owner (studio-g7/lease-release.ts).
+      if (isStudioG7Run(run)) await this.#recordStudioLeaseOwnerBoot(run.id, operation.id);
       const browserLease = await this.ledger.upsertBrowserLease(run.id, this.workerId, this.config.browserLeaseSeconds);
-      this.#activeLeases.set(run.id, { epoch: browserLease.leaseEpoch });
+      this.#activateLease(run.id, browserLease.leaseEpoch);
       run = await transitionRun(this.ledger, run, "browser_leased");
       run = await transitionRun(this.ledger, run, "authenticating");
       const startOps = ["auth:session", "session:create", "session:read", "voice:start", "session:finalize", ...(run.scenarioId === "V-L01" ? ["trace:fault"] : [])];
@@ -847,7 +1095,13 @@ export class VoiceLabWorker {
           await this.ledger.appendEvents(run.id, [{ ...event, payload: governedDriverEventPayload(run, event), ...(dedupeKey === null ? {} : { dedupeKey }) }, runtimeAcquisition(runtime)]);
           await this.ledger.preserveRecoveryExecutionOwnership(run.id);
           runtimeAcquisitionPersisted = true;
-        });
+        }, isStudioG7Run(run) ? async (events) => {
+          // Studio write-ahead: the Speak intent and the exchange join are
+          // durable before the driver acts on them, so a restarted worker
+          // can recover the exact join (or prove there was none).
+          await this.#fenceMutation(claimed, signal);
+          await this.#persistEvents(run.id, events);
+        } : undefined);
       } catch (error) {
         await this.ledger.appendEvents(run.id, startupStages);
         throw error;
@@ -881,6 +1135,11 @@ export class VoiceLabWorker {
       }
       return { run_state: run.state, capability_jti_hash: sha256(grant.claims.jti) };
     }
+    if ((operation.type === "speak" || operation.type === "barge_in" || operation.type === "force_socket_rotation" || operation.type === "studio_action") && isStudioG7Run(run)) {
+      // Re-checked at execution, whatever admitted the row: only labelled G7
+      // steps run on a Studio run, and each step at most once.
+      await this.#assertStudioOperationExecutable(run, operation);
+    }
     if (operation.type === "speak" || operation.type === "barge_in") {
       const allowedOp = operation.type === "speak" ? "voice:synthetic_input" : "voice:barge_in";
       await this.#mintAndVerify(run, "sophia-voice-runtime", [allowedOp], allowedOp);
@@ -906,6 +1165,21 @@ export class VoiceLabWorker {
       const targetAt = typeof bargeTarget?.target_schedule_at === "string" ? new Date(bargeTarget.target_schedule_at).getTime() : Number.NaN;
       if (operation.type === "barge_in") assertBargeWindow(bargeTarget);
       const delayMs = operation.type === "barge_in" ? (Number.isNaN(targetAt) ? Number(operation.input.delay_ms ?? 0) : Math.max(0, targetAt - Date.now())) : Number(timing.delay_ms ?? 0);
+      if (isStudioG7Run(run) && hasStudioExtensions(this.driver)) {
+        // A G7 voice step is certified only from the exchange's calls whose
+        // recording began after this baseline (calls-certification.ts). The
+        // prior step has settled (its reply ended, above); its own calls are
+        // read now (?after= its baseline, until all are answered), then this
+        // step's baseline, durable before the step's write-ahead. A
+        // re-executed operation keeps its first baseline and never reads a
+        // later one.
+        const stepId = typeof operation.input._g7_step === "string" ? operation.input._g7_step : null;
+        const prior = (await this.#allEvents(run.id)).events.some((event) => event.kind === STUDIO_CALLS_READ_KIND && event.source === "canonical" && event.payload.purpose === "baseline" && event.payload.operation_id === operation.id);
+        if (!prior) {
+          await this.#readStudioCallsAfterPriorStep(run, operation.id);
+          await this.#persistEvents(run.id, [await this.driver.readStudioCalls(run, "baseline", operation.id, stepId)]);
+        }
+      }
       await this.ledger.appendEvent(run.id, "utterance.resolved", "worker", { utterance_id: utteranceId, operation_id: operation.id, idempotency_key_hash: sha256(operation.idempotencyKey), test_run_id: run.testRunId, scenario_id: run.scenarioId, scenario_version: run.scenarioVersion, source: audio.source, fixture: audio.fixture ?? null, source_text_hash: audio.sourceTextHash ?? null, synthesis: audio.synthesis ?? null, barge_target: bargeTarget ?? null, scheduled_delay_ms: delayMs, wav: { sha256: audio.sha256, sample_rate: audio.sampleRate, channels: audio.channels, duration_ms: audio.durationMs, byte_length: audio.bytes.byteLength } }, `utterance:${utteranceId}:resolved`);
       if (operation.type === "barge_in" && operation.input._tool_target) await this.#revalidateActiveTarget(run, operation.id, operation.input._tool_target as Record<string, unknown>);
       await this.#fenceMutation(claimed, signal);
@@ -914,6 +1188,28 @@ export class VoiceLabWorker {
       run = await this.#freshRun(run.id);
       if (run.state === "ready") run = await transitionRun(this.ledger, run, "active");
       return { run_state: run.state, utterance_id: utteranceId, source: audio.source, source_text_hash: audio.sourceTextHash ?? null, synthesis: audio.synthesis ?? null, wav: { sha256: audio.sha256, sample_rate: audio.sampleRate, channels: audio.channels, duration_ms: audio.durationMs, byte_length: audio.bytes.byteLength }, schedule_receipt: scheduled.receipt };
+    }
+    if (operation.type === "studio_action") {
+      if (!isStudioG7Run(run) || !hasStudioExtensions(this.driver)) throw new VoiceLabError(labError("STUDIO_OPERATION_UNSUPPORTED", "Studio G7 actions run only on the Studio LiveKit target.", "validation", false, { status: "unsupported_for_target" }));
+      // A non-voice step must not cut the prior utterance's input window.
+      await this.#awaitPriorInputSettlement(run, operation.id, signal);
+      // The prior voice step has settled: its own calls are read now, before this action acts.
+      await this.#readStudioCallsAfterPriorStep(run, null);
+      // The run's report is resolved only from the certified create task
+      // (the create step's /calls certification), never from a time window.
+      // Computed before the fence, so nothing long runs between the fence
+      // check and the driver's mutation.
+      const ownCreateTaskId = await this.#studioOwnCreateTaskId(run);
+      // The run's own note: its committed record_note receipt (entry and source), never a note found elsewhere.
+      const ownNote = await this.#studioOwnNote(run);
+      await this.#fenceMutation(claimed, signal);
+      const settleBudgetMs = deadlineAt === undefined ? undefined : Math.max(0, deadlineAt - Date.now() - 15_000);
+      this.driver.setStudioOwnCreateTask(run.id, ownCreateTaskId);
+      const acted = await this.driver.studioAction(run, operation.id, { ...operation.input, _own_create_task_id: ownCreateTaskId, ...(ownNote === null ? {} : { _own_note_entry_id: ownNote.entryId, _own_note_source_id: ownNote.sourceId }), ...(settleBudgetMs === undefined ? {} : { _settle_budget_ms: settleBudgetMs }) });
+      await this.#persistEvents(run.id, acted.events);
+      run = await this.#freshRun(run.id);
+      if (run.state === "ready") run = await transitionRun(this.ledger, run, "active");
+      return { run_state: run.state, ...acted.receipt };
     }
     if (operation.type === "force_socket_rotation") {
       await this.#mintAndVerify(run, "sophia-voice-runtime", ["voice:fault:socket_rotation"], "voice:fault:socket_rotation");
@@ -947,6 +1243,22 @@ export class VoiceLabWorker {
     const cleanupGrant = await this.#mintAndVerify(run, "sophia-voice-lab-frontend", ["session:cleanup"], "session:cleanup");
     if (run.state !== "ending") run = await transitionRun(this.ledger, run, "ending");
     await this.#fenceMutation(claimed, signal);
+    // The last G7 voice step's calls, read before End signs the principal out.
+    if (isStudioG7Run(run) && hasStudioExtensions(this.driver)) {
+      // Evidence reads before End never block End's cleanup: a failure is
+      // logged, the evidence stays missing (typed by the evaluator), and the
+      // driver gets no own task (null: nothing is verified as the run's).
+      const evidenceRead = <T>(read: () => Promise<T>, fallback: T, what: string): Promise<T> => read().catch((error: unknown) => {
+        this.logger.error({ run_id_sha256: sha256(run.id), error: safeError(error) }, `${what} failed before End; cleanup continues`);
+        return fallback;
+      });
+      await evidenceRead(() => this.#readStudioCallsAfterPriorStep(run, null), undefined, "studio last step calls read");
+      // The read of every call is End's own post-quiescence audit (the driver
+      // takes it once the exchange ended and the provider session closed,
+      // before the global sign-out): a read here could miss later calls.
+      // The final outcome read verifies only the run's own report.
+      this.driver.setStudioOwnCreateTask(run.id, await evidenceRead(() => this.#studioOwnCreateTaskId(run), null, "studio own create resolution"));
+    }
     const ended = await this.driver.end(run, finalizeGrant.token, cleanupGrant.token, deadlineAt).catch(async (error: unknown) => {
       if (error instanceof DriverEndFailure) await this.#persistEvents(run.id, error.events);
       throw error;
@@ -1055,6 +1367,10 @@ export class VoiceLabWorker {
       await this.ledger.appendEvent(run.id, "operation.succeeded", "worker", { operation_id: operation.id, operation_type: operation.type }, `operation:${operation.id}:succeeded`);
     }
 
+    if (isStudioG7Run(run)) {
+      await this.#finalizeStudioG7EndRun(run, operations, endOperations);
+      return;
+    }
     let eventPage = await this.#allEvents(run.id);
     const executionEpochCleanup = deriveExecutionEpochCleanupProof(run, eventPage.events);
     const legacyBrowserContextClosed = eventPage.events.some((event) => event.kind === "cleanup.browser_context_closed" && event.payload.close_resolved === true && event.payload.browser_registry_absent === true) && !this.driver.hasSession(run.id);
@@ -1113,6 +1429,63 @@ export class VoiceLabWorker {
       terminalReason,
       verdicts: derivedVerdicts,
       terminalError: terminalState === "completed" || terminalState === "pending_external_evidence" ? null : labError("SCENARIO_VERDICT_TERMINAL", "One or more machine assertions produced a non-passing terminal verdict.", terminalState === "product_failed" ? "product" : terminalState === "inconclusive_provider" ? "provider" : terminalState === "authorization_failed" ? "authorization" : "harness", false, { terminal_state: terminalState }),
+      createdAt: terminalEvent.at,
+      purpose: "completed-flow",
+      intentionallyUnallocated: false,
+      artifacts: [],
+    });
+  }
+
+  /**
+   * Studio G7 terminal settlement. Same lifecycle as the legacy finalizer, but
+   * the zero-orphan gate is the Studio cleanup proof (exchange ended per the
+   * member snapshot, global sign-out confirmed, browser closed, lease
+   * released) and the verdicts come from the Studio evaluator.
+   */
+  async #finalizeStudioG7EndRun(initial: RunRecord, operations: import("./domain.js").OperationRecord[], endOperations: import("./domain.js").OperationRecord[]): Promise<void> {
+    let run = initial;
+    let eventPage = await this.#allEvents(run.id);
+    if (!studioG7CleanupProof(eventPage.events).exchangeEnded && !this.driver.hasSession(run.id)) {
+      // End typed the exchange `uncertain`/`unavailable` (ownership not
+      // provable, or the API unreachable). Re-verify read-only (#recoverRun
+      // keeps the backoff) until it is no longer live; the product guard
+      // ends it at its deadline.
+      const recovered = await this.#recoverRun(run);
+      await this.#persistEvents(run.id, recovered.events);
+      eventPage = await this.#allEvents(run.id);
+    }
+    const browserLeaseReleased = await this.#releaseBrowserLeaseProof(run.id);
+    eventPage = await this.#allEvents(run.id);
+    const cleanup = studioG7CleanupProof(eventPage.events);
+    const cleanupComplete = cleanup.complete && browserLeaseReleased && !this.driver.hasSession(run.id);
+    if (!cleanupComplete) {
+      throw new VoiceLabError(labError("ZERO_ORPHAN_CLEANUP_UNCONFIRMED", "Studio run cannot produce final evidence until the exchange end, global sign-out, browser close and lease release are proven.", "harness", true, {
+        exchange_ended: cleanup.exchangeEnded, signed_out: cleanup.signedOut, browser_context_closed: cleanup.browserClosed, browser_lease_released: browserLeaseReleased,
+      }));
+    }
+    const evaluation = evaluateStudioG7Run(run, eventPage.events, operations, { expected: studioExpectedIdentities(run) });
+    const derivedVerdicts = deriveStudioG7Verdicts(evaluation, { sessionEstablished: eventPage.events.some((event) => event.kind === "studio.auth.session_established" && event.source === "canonical") });
+    const decision = certificationTerminalDecision(derivedVerdicts);
+    if (run.state === "exporting") {
+      run = await this.ledger.updateRun(run.id, run.version, { verdicts: derivedVerdicts, cleanupComplete: true });
+      run = await transitionRun(this.ledger, run, decision.state, { verdicts: derivedVerdicts, cleanupComplete: true });
+    } else if (run.state === "pending_external_evidence" && decision.state !== "pending_external_evidence") {
+      run = await transitionRun(this.ledger, run, decision.state, { verdicts: derivedVerdicts });
+    } else if (run.state !== decision.state) {
+      throw new VoiceLabError(labError("TERMINAL_DECISION_CONFLICT", "A recovered evidence finalizer derived a different terminal state from the already durable decision.", "evidence", false, { durable_state: run.state, derived_state: decision.state }));
+    } else if (canonicalRequestHash(run.verdicts) !== canonicalRequestHash(derivedVerdicts)) {
+      run = await this.ledger.updateRun(run.id, run.version, { verdicts: derivedVerdicts });
+    }
+    const terminalEvent = await this.ledger.appendEvent(run.id, `run.${decision.state}`, "worker", {
+      terminal_state: decision.state, terminal_reason: decision.reason, cleanup_complete: true,
+      end_operation_ids: endOperations.map((operation) => operation.id).sort(),
+    }, `run:${run.id}:${decision.state}`);
+    await this.#publishRunEvidence({
+      runId: run.id,
+      terminalState: decision.state,
+      terminalReason: decision.reason,
+      verdicts: derivedVerdicts,
+      terminalError: decision.state === "completed" || decision.state === "pending_external_evidence" ? null : labError("SCENARIO_VERDICT_TERMINAL", "One or more machine assertions produced a non-passing terminal verdict.", decision.state === "product_failed" ? "product" : decision.state === "inconclusive_provider" ? "provider" : decision.state === "authorization_failed" ? "authorization" : "harness", false, { terminal_state: decision.state }),
       createdAt: terminalEvent.at,
       purpose: "completed-flow",
       intentionallyUnallocated: false,
@@ -1555,20 +1928,119 @@ export class VoiceLabWorker {
     throwIfCancelled(signal);
   }
 
+  /**
+   * The latest G7 voice step's own calls (other than `exceptOperationId`):
+   * `?after=` its durable baseline's readAt, passed back verbatim, re-read
+   * until every listed call is answered (calls-certification.ts).
+   */
+  async #readStudioCallsAfterPriorStep(run: RunRecord, exceptOperationId: string | null): Promise<void> {
+    if (!hasStudioExtensions(this.driver)) return;
+    const reads = (await this.#allEvents(run.id)).events.filter((event) => event.kind === STUDIO_CALLS_READ_KIND && event.source === "canonical");
+    const baseline = reads.filter((event) => event.payload.purpose === "baseline" && event.payload.operation_id !== exceptOperationId && event.payload.step_id !== STUDIO_CALLS_END_STEP).at(-1);
+    if (!baseline || baseline.payload.status !== "available" || typeof baseline.payload.read_at !== "string") return;
+    // Read once: the step's window ends at its first settled read, taken as soon as the step settled.
+    if (reads.some((event) => event.payload.purpose === "after" && event.payload.operation_id === baseline.payload.operation_id && event.payload.settled === true)) return;
+    const stepId = typeof baseline.payload.step_id === "string" ? baseline.payload.step_id : null;
+    await this.#persistEvents(run.id, [await this.driver.readStudioCalls(run, "after", String(baseline.payload.operation_id), stepId, baseline.payload.read_at)]);
+  }
+
+  /** The hash of this process's random boot token (its heartbeats' attestation carries it). */
+  get workerBootIdSha256(): string { return this.#workerBootIdentity.bootIdSha256; }
+
+  /** Sign-out markers a recovery of this process holds right now (from before its begin to after its clear). */
+  readonly #heldSignOutMarkers = new Set<string>();
+  /** Clears that failed, with the outcome they were to record; retried by the sweep. */
+  readonly #failedSignOutClears = new Map<string, "confirmed" | "abandoned">();
+
+  /**
+   * Clear every outstanding sign-out marker carrying this worker's id that no
+   * recovery of this process holds: a clear that failed (retried with its
+   * recorded outcome), a begin whose answer was lost (abandoned), or one a
+   * previous process boot under the same instance id left behind (that
+   * process is gone: abandoned_owner_restarted). Markers are durable, so this
+   * set survives restarts; without it a marker whose owner keeps
+   * heartbeating would close admission for good.
+   */
+  async #sweepOwnSignOutMarkers(): Promise<void> {
+    // Throttled (it scans the fence events): at most every
+    // STUDIO_MARKER_SWEEP_INTERVAL_MS, and at once while a failed clear waits.
+    const nowMs = Date.now();
+    if (this.#lastMarkerSweepAtMs !== null && nowMs - this.#lastMarkerSweepAtMs < STUDIO_MARKER_SWEEP_INTERVAL_MS && this.#failedSignOutClears.size === 0) return;
+    this.#lastMarkerSweepAtMs = nowMs;
+    const limit = 50;
+    const own = await this.ledger.listStudioSignOutMarkersOwnedBy(studioWorkerIdSha256(this.workerId), limit);
+    // A failed clear whose marker is no longer outstanding (cleared meanwhile) is done.
+    if (own.length < limit) for (const markerId of [...this.#failedSignOutClears.keys()]) if (!own.some((marker) => marker.markerId === markerId)) this.#failedSignOutClears.delete(markerId);
+    for (const marker of own) {
+      if (this.#heldSignOutMarkers.has(marker.markerId)) continue;
+      const foreignBoot = marker.ownerBootIdSha256 !== null && marker.ownerBootIdSha256 !== this.#workerBootIdentity.bootIdSha256;
+      // Another boot's marker is cleared only once the ledger's own rule says
+      // it is abandoned (90 s, its heartbeat stale or from another boot): one
+      // instance id must belong to one live process, and a second live one
+      // under it is never presumed dead.
+      if (foreignBoot && !marker.abandoned) {
+        this.logger.warn({ run_id_sha256: sha256(marker.runId) }, "studio sign-out marker of another boot under this instance id is not abandoned yet; one live process per instance id is required");
+        continue;
+      }
+      const outcome = foreignBoot ? "abandoned_owner_restarted" : this.#failedSignOutClears.get(marker.markerId) ?? "abandoned";
+      try {
+        await this.ledger.endStudioGlobalSignOut(marker.runId, marker.markerId, outcome);
+        this.#failedSignOutClears.delete(marker.markerId);
+      } catch (error) {
+        // Already cleared (its clear key holds another outcome): done.
+        if (error instanceof VoiceLabError && error.detail.code === "DEDUPE_CONFLICT") { this.#failedSignOutClears.delete(marker.markerId); continue; }
+        this.logger.error({ run_id_sha256: sha256(marker.runId), error: safeError(error) }, "studio sign-out marker clear still failing; retried next maintenance");
+      }
+    }
+  }
+
+  #lastMarkerSweepAtMs: number | null = null;
+  /** Clears that failed and wait for the sweep (diagnostics). */
+  get pendingSignOutClearCount(): number { return this.#failedSignOutClears.size; }
+
+  /** The run's own note from its durable record_note receipt (the latest committed one), or null. */
+  async #studioOwnNote(run: RunRecord): Promise<{ entryId: string; sourceId: string } | null> {
+    const recorded = (await this.#allEvents(run.id)).events.filter((event) => event.kind === "studio.action.record_note" && event.source === "canonical" && event.payload.status === "committed"
+      && typeof event.payload.entry_id === "string" && typeof event.payload.source_id === "string").at(-1);
+    return recorded ? { entryId: String(recorded.payload.entry_id), sourceId: String(recorded.payload.source_id) } : null;
+  }
+
+  /** The task the run's certified create step made (calls-certification.ts), or null while it is not certified. */
+  async #studioOwnCreateTaskId(run: RunRecord): Promise<string | null> {
+    const events = (await this.#allEvents(run.id)).events;
+    const operations = await this.ledger.listOperations(run.id);
+    // Mid-run: the latest input window's own turn may still be in flight (the run's own evaluations never pass midRun).
+    return evaluateStudioG7Run(run, events, operations, { expected: studioExpectedIdentities(run), midRun: true }).outcome.own_report.create_task_id;
+  }
+
   async #awaitPriorInputSettlement(run: RunRecord, operationId: string, signal: AbortSignal): Promise<void> {
     const prior = (await this.ledger.listOperations(run.id))
       .filter((operation) => operation.id !== operationId && operation.state === "succeeded" && (operation.type === "speak" || operation.type === "barge_in"))
       .sort((left, right) => right.updatedAt.getTime() - left.updatedAt.getTime())[0];
     if (!prior) return;
     const deadline = Date.now() + 15_000;
+    // Studio: once every earlier window arrived, also wait (bounded) for each
+    // one's input_turn, which the bridge sends right after its window: the
+    // evaluation that hands the certified create over cross-checks the
+    // window's tool calls with its step's (labrev7 Nit-3). A turn still
+    // missing at the bound does not block the step; the evaluation skips a
+    // window without its turn until session_closed.
+    let turnsDeadline: number | null = null;
     while (Date.now() < deadline) {
       throwIfCancelled(signal);
       const events = await this.#allEvents(run.id);
-      const settled = events.events.some((event) => isExactBoundProductEvent(run, event) && event.kind === "audio.input.product_turn" && (event.payload.receipt as Record<string, unknown> | undefined)?.operation_id === prior.id && (event.payload.receipt as Record<string, unknown> | undefined)?.source === "settlement");
-      if (settled) return;
+      const settled = isStudioG7Run(run)
+        ? studioPriorInputSettled(events.events, (await this.ledger.listOperations(run.id)).filter((operation) => operation.id !== operationId && operation.state === "succeeded" && (operation.type === "speak" || operation.type === "barge_in")), prior.id)
+        : events.events.some((event) => isExactBoundProductEvent(run, event) && event.kind === "audio.input.product_turn" && (event.payload.receipt as Record<string, unknown> | undefined)?.operation_id === prior.id && (event.payload.receipt as Record<string, unknown> | undefined)?.source === "settlement");
+      if (settled && (!isStudioG7Run(run) || studioInputTurnsArrived(events.events))) return;
+      if (settled) {
+        turnsDeadline ??= Date.now() + STUDIO_INPUT_TURN_WAIT_MS;
+        if (Date.now() >= turnsDeadline) return;
+      }
       await this.#persistEvents(run.id, await this.driver.drain(run.id));
       await delay(100);
     }
+    if (turnsDeadline !== null) return;
     throw new VoiceLabError(labError("INPUT_OPERATION_SETTLEMENT_PENDING", "The prior exact input operation did not reach its app-authored turn settlement before another injection could start.", "harness", true, { prior_operation_id: prior.id }));
   }
 
@@ -1657,60 +2129,14 @@ export class VoiceLabWorker {
     return durableBinding;
   }
 
-  async #persistEvents(runId: string, events: Array<Omit<import("./domain.js").LabEvent, "runId" | "seq" | "at">>): Promise<void> {
+  async #persistEvents(runId: string, events: CapturedEvent[]): Promise<void> {
     const boundRun = await this.#freshRun(runId);
-    for (const event of events) {
-      const provenance = event.payload._capture_provenance as Record<string, unknown> | undefined;
-      const rawObservedAt = provenance?.recorded_at ?? provenance?.observed_at;
-      const parsed = typeof rawObservedAt === "string" ? new Date(rawObservedAt) : new Date();
-      const appBinding = strictProductRunBinding(event.source, event.payload, boundRun);
-      await this.ledger.appendEvent(runId, event.kind, event.source, governedDriverEventPayload(boundRun, event), event.dedupeKey ?? undefined, Number.isNaN(parsed.getTime()) ? new Date() : parsed);
-      if (event.source === "product" && event.kind === "audio.input.product_fault" && appBinding !== null) {
-        const receipt = event.payload.receipt as Record<string, unknown> | undefined;
-        throw new VoiceLabError(labError("PRODUCT_INPUT_EVIDENCE_FAULT", "The product rejected or could not unambiguously correlate the governed synthetic input operation.", "harness", false, { fault_code: typeof receipt?.code === "string" ? receipt.code : "unknown" }));
-      }
-    }
-    let run = await this.#freshRun(runId);
-    let canonicalSessionId = run.canonicalSessionId;
-    let threadId = run.threadId;
-    let providerSessionId = run.providerSessionId;
-    let traceId = run.traceId;
-    let providerEpoch = run.providerEpoch;
-    let turnId = run.turnId;
-    for (const event of events) {
-      const payload = event.payload as Record<string, unknown>;
-      // Owning product joins are usable only when the original capture envelope
-      // carried the exact app-authored authenticated synthetic binding.
-      if (event.source === "product" && strictProductRunBinding(event.source, payload, boundRun) === null) continue;
-      if (event.kind === "session.credentials_received") {
-        canonicalSessionId = stableJoin("canonical_session_id", canonicalSessionId, exactString(payload.sessionId));
-        providerSessionId = stableJoin("provider_session_id", providerSessionId, exactString(payload.voiceAgentSessionId));
-        traceId = stableJoin("trace_id", traceId, exactString(payload.langsmithTraceId));
-        providerEpoch = monotonicEpoch(providerEpoch, exactPositiveProviderEpoch(payload.providerConnectionEpoch));
-      } else if (event.kind === "provider.connection_epoch") {
-        const receipt = payload.receipt && typeof payload.receipt === "object" ? payload.receipt as Record<string, unknown> : {};
-        canonicalSessionId = stableJoin("canonical_session_id", canonicalSessionId, exactString(payload.sessionId));
-        providerSessionId = stableJoin("provider_session_id", providerSessionId, exactString(payload.voiceAgentSessionId));
-        traceId = stableJoin("trace_id", traceId, exactString(receipt.langsmithTraceId));
-        providerEpoch = monotonicEpoch(providerEpoch, exactPositiveProviderEpoch(receipt.providerConnectionEpoch));
-      } else if (event.kind === "capture.snapshot") {
-        const snapshot = payload.snapshot && typeof payload.snapshot === "object" ? payload.snapshot as Record<string, unknown> : {};
-        const session = snapshot.session && typeof snapshot.session === "object" ? snapshot.session as Record<string, unknown> : {};
-        canonicalSessionId = stableJoin("canonical_session_id", canonicalSessionId, exactString(session.sessionId));
-        threadId = stableJoin("thread_id", threadId, exactString(session.threadId));
-      } else if (event.source === "canonical" && event.kind === "session.finalized") {
-        const receipt = payload.receipt && typeof payload.receipt === "object" ? payload.receipt as Record<string, unknown> : {};
-        const transcript = receipt.canonical_transcript && typeof receipt.canonical_transcript === "object" ? receipt.canonical_transcript as Record<string, unknown> : {};
-        canonicalSessionId = stableJoin("canonical_session_id", canonicalSessionId, exactString(transcript.session_id));
-        threadId = stableJoin("thread_id", threadId, exactString(transcript.thread_id));
-      } else if (event.kind.endsWith(".sophia.turn")) {
-        const data = payload.data && typeof payload.data === "object" ? payload.data as Record<string, unknown> : {};
-        turnId = productTurnId(data) ?? turnId;
-      }
-    }
-    if (canonicalSessionId !== run.canonicalSessionId || threadId !== run.threadId || providerSessionId !== run.providerSessionId || traceId !== run.traceId || providerEpoch !== run.providerEpoch || turnId !== run.turnId) {
-      run = await this.ledger.updateRun(run.id, run.version, { canonicalSessionId, threadId, providerSessionId, traceId, providerEpoch, turnId });
-    }
+    const plan = captureAppendPlan(boundRun, events);
+    for (const input of plan.inputs) await this.ledger.appendEvent(runId, input.kind, input.source, input.payload, input.dedupeKey, input.observedAt);
+    if (plan.failure !== null) throw plan.failure;
+    const run = await this.#freshRun(runId);
+    const joins = captureJoinPatch(run, boundRun, events);
+    if (joins) await this.ledger.updateRun(run.id, run.version, joins);
   }
 
   async #terminalizeFailure(runId: string, error: LabError, forcedState?: RunState): Promise<void> {
@@ -1730,7 +2156,9 @@ export class VoiceLabWorker {
       // browser-close or platform-termination receipt still requires recovery
       // after that event so the execution-epoch proof can establish ordering
       // without guessing closure.
-      const productRecoveryCurrent = priorEvents.events.some(event => event.seq > latestExecutionClose && authoritativeLiveCleanupComplete([event], run));
+      const productRecoveryCurrent = isStudioG7Run(run)
+        ? studioG7CleanupProof(priorEvents.events).complete
+        : priorEvents.events.some(event => event.seq > latestExecutionClose && authoritativeLiveCleanupComplete([event], run));
       let recoveredArtifacts: Array<{ id: string; kind: string; contentType: string; bytes: Buffer }> = [];
       if (!productRecoveryCurrent || this.driver.hasSession(run.id)) {
         const recovered = await this.#recoverRun(run);
@@ -1744,13 +2172,18 @@ export class VoiceLabWorker {
       run = await this.#freshRun(run.id);
       const recoveryPage = await this.#allEvents(run.id);
       const browserLeaseReleased = await this.#releaseBrowserLeaseProof(run.id);
-      const liveCleanupComplete = authoritativeLiveCleanupComplete(recoveryPage.events, run) && !this.driver.hasSession(run.id) && browserLeaseReleased;
+      const liveCleanupComplete = (isStudioG7Run(run) ? studioG7CleanupProof(recoveryPage.events).complete : authoritativeLiveCleanupComplete(recoveryPage.events, run)) && !this.driver.hasSession(run.id) && browserLeaseReleased;
       // Raw terminal state is not settlement authority. Correct stale success
       // downward as well as promoting newly proven cleanup, and reconcile an
       // independent backfilled control even when the raw flag already agrees.
       if (run.cleanupComplete !== liveCleanupComplete || control?.liveCleanupComplete !== liveCleanupComplete) {
         run = await this.ledger.updateRun(run.id, run.version, { cleanupComplete: liveCleanupComplete, ...retentionPatchFromEvents(recoveryPage.events) });
       }
+      // A Studio run awaiting external evidence did not fail: a fenced global
+      // sign-out only held its cleanup open (and was abandoned, so this
+      // recovery retried it). Its evidence is re-finalized from the durable
+      // ledger by the Studio evidence path, never published failure-shaped.
+      if (studioAwaitingExternalEvidence(run)) return;
       // Rebuild the deterministic failure manifest after every recovery
       // attempt so a pending receipt can become a durable complete receipt.
       await this.#saveFailureEvidence(run, run.terminalError ?? error, recoveredArtifacts);
@@ -1771,14 +2204,61 @@ export class VoiceLabWorker {
     const state: RunState = forcedState ?? (error.code === "CAPTURE_CURSOR_GAP" || error.code === "CAPTURE_DRAIN_UNSUPPORTED" || error.code === "PRODUCT_INPUT_EVIDENCE_FAULT" ? "invalid_test" : error.code === "DEPLOYMENT_MISMATCH" ? "deployment_mismatch" : error.category === "authorization" ? "authorization_failed" : error.category === "product" ? "product_failed" : error.category === "provider" ? "inconclusive_provider" : "failed_harness");
     const verdicts = deriveFailureVerdicts(run, state, ended.events);
     const browserLeaseReleased = await this.#releaseBrowserLeaseProof(run.id);
-    const liveCleanupComplete = authoritativeLiveCleanupComplete(ended.events, run) && !this.driver.hasSession(run.id) && browserLeaseReleased;
+    const liveCleanupComplete = (isStudioG7Run(run) ? studioG7CleanupProof((await this.#allEvents(run.id)).events).complete : authoritativeLiveCleanupComplete(ended.events, run)) && !this.driver.hasSession(run.id) && browserLeaseReleased;
     run = await this.ledger.updateRun(run.id, run.version, { state, verdicts, terminalError: error, cleanupComplete: liveCleanupComplete, ...retentionPatchFromEvents(ended.events) });
     await this.ledger.appendEvent(run.id, `run.${state}`, "worker", { error }, `run:${run.id}:${state}`);
     await this.#saveFailureEvidence(run, error, ended.artifacts);
   }
 
+  /**
+   * C077: one bounded canonical-evidence refresh through the existing
+   * session:recover authority (Gateway HTTP only; no browser, provider or start
+   * reservation). Every durable write advances updated_at, and the local hard
+   * deadline falls back to updated_at, so the deadline is first pinned to the
+   * run's authenticated finalization receipt, never later than today's
+   * deadline. Without that proof nothing is written. Prior manifests and
+   * receipts are retained; only real new observations are appended.
+   */
+  async #refreshCanonicalEvidence(runId: string, now: Date): Promise<void> {
+    let run = await this.#freshRun(runId);
+    const page = await this.#allEvents(run.id);
+    const decision = canonicalEvidenceRefreshDue(run, page.events, now);
+    if (!decision.due) return;
+    const finalization = page.events.find((event) => isCanonicalFinalizationReceipt(run, event));
+    const signedRaw = (finalization?.payload.receipt as Record<string, unknown> | undefined)?.retention_expires_at;
+    const signed = typeof signedRaw === "string" ? new Date(signedRaw) : null;
+    if (!signed || Number.isNaN(signed.getTime()) || signed.toISOString() !== signedRaw) return;
+    if (run.retentionPurgeDueAt === null) {
+      if (signed > localRetentionDeadline(run)) return;
+      run = await this.ledger.updateRun(run.id, run.version, { retentionPurgeDueAt: signed });
+    }
+    // C080: an authenticated deadline that has already passed is now pinned,
+    // so the hard purge that follows in this maintenance pass removes the
+    // content. Nothing is recovered or allocated past the signed expiry.
+    if (signed <= now) return;
+    const pinned = run.retentionPurgeDueAt!;
+    await this.ledger.appendEvent(run.id, CANONICAL_EVIDENCE_REFRESH_EVENT, "worker", {
+      attempt: decision.attempt, max_attempts: CANONICAL_EVIDENCE_REFRESH_MAX_ATTEMPTS,
+      prior_canonical_evidence_status: decision.status, prior_canonical_evidence_code: decision.code,
+      local_deadline_at: pinned.toISOString(), test_run_id_sha256: sha256(run.testRunId), cleanup_obligation_id_sha256: sha256(run.cleanupObligationId),
+    }, `canonical-evidence-refresh:${run.id}:${decision.attempt}`);
+    const recovered = await this.#recoverRun(run);
+    await this.#persistEvents(run.id, recovered.events);
+    const patch = retentionPatchFromEvents(recovered.events);
+    if (Object.keys(patch).length === 0) return;
+    // Remote retention truth comes only from the validated recovery receipt,
+    // and it may never move the pinned local deadline later.
+    if (patch.retentionPurgeDueAt && patch.retentionPurgeDueAt > pinned) patch.retentionPurgeDueAt = pinned;
+    const fresh = await this.#freshRun(run.id);
+    await this.ledger.updateRun(fresh.id, fresh.version, patch);
+  }
+
   async #recoverRetainedControl(control: RecoveryControlRecord): Promise<void> {
     const binding = RecoveryControlBindingSchema.parse(control.binding);
+    // Studio runs have no Gateway retention receipt; their product evidence
+    // rows expire under the product's own 24 h TTL. Live cleanup for them is
+    // settled by the run-scoped recovery path, never by this retained path.
+    if (isStudioG7ScenarioVersion(binding.scenarioVersion)) return;
     const d02 = binding.scenarioId === "V-D02"
       ? validateRecoveryBrowserBinding(binding, control.browserContextBinding ?? control.browserAllocationBinding)
       : undefined;
@@ -1803,7 +2283,97 @@ export class VoiceLabWorker {
     await this.ledger.settleRecoveryControl(binding.runId, control.version, completed, attempt);
   }
 
-  async #recoverRun(run: RunRecord): Promise<Awaited<ReturnType<VoiceBrowserDriver["recover"]>>> {
+  async #recoverRun(run: RunRecord, options: { force?: boolean; principalQuiesced?: boolean } = {}): Promise<Awaited<ReturnType<VoiceBrowserDriver["recover"]>>> {
+    if (isStudioG7Run(run)) {
+      // One API-only recovery (end the exchange, global sign-out); skipped
+      // once the Studio cleanup proof is already durable for a closed browser,
+      // unless forced (a dead owner's lease whose proof is not bound to it).
+      const studioEvents = (await this.#allEvents(run.id)).events;
+      if (!options.force && !this.driver.hasSession(run.id) && studioG7CleanupProof(studioEvents).complete) return { events: [], artifacts: [] };
+      // A foreign worker's lease: its owner may be alive. The dead-owner
+      // release path alone recovers such a run, on the ledger's clock.
+      if (!options.force && await this.#studioForeignLeaseHeld(run)) return { events: [], artifacts: [] };
+      // Never allocated (failed before browser launch): the durable control
+      // record is the authoritative proof; no sign-in, no member-API call.
+      const control = await this.ledger.getRecoveryControl(run.id);
+      if (control?.browserAllocationEver === false && !this.driver.hasSession(run.id) && !studioEvents.some((event) => event.kind === "harness.browser_process_acquired")) {
+        return { events: [{ kind: "cleanup.browser_context_absent", source: "worker", payload: { browser_never_allocated: true, authoritative_ledger_read: true, target_kind: STUDIO_G7_TARGET_KIND }, dedupeKey: `cleanup:${run.id}:studio-browser-never-allocated` }], artifacts: [] };
+      }
+      // Each Studio recovery signs in and out once. While an exchange stays
+      // unsettled (waiting for its guard deadline) re-verify at most every
+      // STUDIO_EXCHANGE_REVERIFY_BACKOFF_MS, so maintenance cannot hammer
+      // the principal's password grant.
+      // Settlement events are content-addressed (an identical result dedupes
+      // to its first time), so the cadence is kept by a per-attempt event.
+      const lastSettlement = [...studioEvents].reverse().find((event) => event.kind === "studio.cleanup.exchange_ended" && event.source === "canonical");
+      const lastAttempt = [...studioEvents].reverse().find((event) => event.kind === STUDIO_RECOVERY_ATTEMPT_EVENT && event.source === "worker");
+      // Every API-only recovery (forced or not, whatever the last settlement)
+      // is spaced by the backoff: each one is a password grant and a global
+      // sign-out.
+      if (!this.driver.hasSession(run.id) && lastAttempt && lastAttempt.at.getTime() > Date.now() - STUDIO_EXCHANGE_REVERIFY_BACKOFF_MS) {
+        return { events: [], artifacts: [] };
+      }
+      // The API-only recovery ends in a global sign-out, which would revoke
+      // the tokens of any other run of the principal that can hold a live
+      // session. The ledger's fence (studio-g7/sign-out-fence.ts) grants it,
+      // atomically with admission, only when no such run exists (a terminal
+      // run whose browser is closed never blocks it), and refuses admission
+      // until the sign-out is done.
+      const markerId = randomUUID();
+      const fenced = !this.driver.hasSession(run.id);
+      if (fenced) {
+        // Held by this process from before the begin: the owner-marker sweep
+        // never clears a marker a recovery of this process is using.
+        this.#heldSignOutMarkers.add(markerId);
+        const fence = await this.ledger.beginStudioGlobalSignOut(run.id, markerId, this.workerId, this.#workerBootIdentity.bootIdSha256).catch((error: unknown) => {
+          this.#heldSignOutMarkers.delete(markerId);
+          throw error;
+        });
+        if (!fence.granted) {
+          this.#heldSignOutMarkers.delete(markerId);
+          this.logger.warn({ run_id_sha256: sha256(run.id), live_session_runs: fence.liveSessionRuns, reason: fence.reason }, fence.reason === "sign_out_in_flight"
+            ? "studio API-only recovery deferred: another recovery's global sign-out of this run is in flight"
+            : "studio API-only recovery deferred: another run can hold a live principal session");
+          return { events: [], artifacts: [] };
+        }
+      }
+      // From a granted begin on, every path (a throw included) clears the
+      // marker in the finally: confirmed only on a confirmed global sign-out,
+      // abandoned otherwise.
+      let recovered: Awaited<ReturnType<VoiceBrowserDriver["recover"]>> | null = null;
+      try {
+        // Right before its global logout the driver re-checks, in the ledger,
+        // that this marker is still ours (never taken over).
+        if (fenced && hasStudioExtensions(this.driver)) this.driver.setStudioSignOutGate(run.id, () => this.ledger.holdsStudioGlobalSignOut(run.id, markerId));
+        if (fenced) await this.ledger.appendEvent(run.id, STUDIO_RECOVERY_ATTEMPT_EVENT, "worker", { attempt_id: randomUUID(), prior_exchange_status: typeof lastSettlement?.payload.status === "string" ? lastSettlement.payload.status : null }, `studio-recovery-attempt:${run.id}:${randomUUID()}`);
+        // Hand the durable write-ahead join to the driver (it may have
+        // restarted). Without one, the driver touches nothing: it only
+        // verifies, read-only, that no exchange is live in the room. The join
+        // carries whether the principal has durably left (browser closed and a
+        // global sign-out confirmed after Speak), or, for a dead owner past its
+        // token lifetime, can no longer act at all.
+        const join = studioDurableJoin(studioEvents, studioRunBinding(run));
+        if (join && options.principalQuiesced) { join.browserClosed = true; join.globalSignOutConfirmed = true; }
+        if (join && hasStudioExtensions(this.driver)) this.driver.adoptStudioJoin(run.id, join);
+        recovered = await this.driver.recover(recoveryTransportBinding({ runId: run.id, testRunId: run.testRunId, cleanupObligationId: run.cleanupObligationId, gatewayOrigin: run.target.gatewayUrl }), "studio-g7-recovery-uses-principal-session");
+        return recovered;
+      } finally {
+        if (fenced) {
+          if (hasStudioExtensions(this.driver)) this.driver.setStudioSignOutGate(run.id, null);
+          const signedOut = recovered?.events.some((event) => event.kind === "studio.cleanup.signed_out" && event.payload.confirmed === true && event.payload.scope === "global") === true;
+          // A clear that fails never strands the marker (nor loses this
+          // recovery's evidence): it stays durable, and maintenance retries
+          // it (#sweepOwnSignOutMarkers) with the outcome recorded here.
+          await this.ledger.endStudioGlobalSignOut(run.id, markerId, signedOut ? "confirmed" : "abandoned").catch((error: unknown) => {
+            // Already cleared (its clear key holds another outcome): nothing to retry.
+            if (error instanceof VoiceLabError && error.detail.code === "DEDUPE_CONFLICT") return;
+            this.#failedSignOutClears.set(markerId, signedOut ? "confirmed" : "abandoned");
+            this.logger.error({ run_id_sha256: sha256(run.id), error: safeError(error) }, "studio global sign-out marker clear failed; maintenance retries it");
+          });
+          this.#heldSignOutMarkers.delete(markerId);
+        }
+      }
+    }
     const combined: Awaited<ReturnType<VoiceBrowserDriver["recover"]>> = { events: [], artifacts: [] };
     const browserLease = await this.ledger.getBrowserLease(run.id);
     const control = await this.ledger.getRecoveryControl(run.id);
@@ -2102,7 +2672,13 @@ export class VoiceLabWorker {
       screenshots: refs.filter((ref) => ref.kind.includes("screenshot")),
       video: { status: "unavailable", reason: "video_capture_disabled_or_not_implemented" },
       raw_audio: { status: "not_captured", reason: "privacy_default" },
-      metrics: deriveEvidenceMetrics(eventPage.events, operations),
+      metrics: {
+        ...deriveEvidenceMetrics(eventPage.events, operations),
+        worker_profile: eventPage.events.find((event) => event.kind === "harness.worker_profile_verified")?.payload ?? { status: "unavailable" },
+        input_delivery: operations.filter((operation) => operation.type === "speak" || operation.type === "barge_in")
+          .map((operation) => ({ operation_id: operation.id, ...classifyInputDelivery(eventPage.events, operation.id) })),
+      },
+      c5_first_use_assessment: run.scenarioId === "V-O01" ? deriveC5FirstUseAssessment(run, eventPage.events, operations) : { schema: C5_FIRST_USE_ASSESSMENT_SCHEMA, status: "not_applicable", scenario_id: run.scenarioId },
       cleanup_audit: {
         browser_context_closed: browserContextClosed,
         execution_epoch_cleanup: executionEpochCleanup,
@@ -2126,6 +2702,7 @@ export class VoiceLabWorker {
       event_stream: eventEvidence.index,
       assertions: projectEvidence("assertions", assertions),
       human_summary: assertions.summary,
+      ...(isStudioG7Run(run) ? { studio_g7: projectEvidence("studio_g7", evaluateStudioG7Run(run, eventPage.events, operations, { expected: studioExpectedIdentities(run) })) } : {}),
     };
     if (projectionOverflow.length > 0) {
       const overflowPayload = { schema_version: "sophia.voice-lab.evidence-projection-overflow.v1", run_id: run.id, records: projectionOverflow };
@@ -2437,7 +3014,7 @@ export class VoiceLabWorker {
     const released = await this.ledger.releaseBrowserLease(runId, this.workerId, current.lostBrowserLeaseEpoch);
     if (!released) throw d02WorkerShutdownConflict("The D02 worker could not CAS-release the exact browser lease after closing its context.");
     await this.ledger.appendEvent(runId, "cleanup.browser_lease_released", "worker", { worker_id_hash: current.lostWorkerIdSha256, lease_epoch: current.lostBrowserLeaseEpoch, cas_deleted: true }, `cleanup:${runId}:browser-lease`);
-    this.#activeLeases.delete(runId);
+    this.#deactivateLease(runId);
     this.#d02PreDispatchPauses.delete(runId);
     const terminal = await this.#freshRun(runId);
     const recovered = await this.#recoverRun(terminal);
@@ -2642,6 +3219,8 @@ export class VoiceLabWorker {
   }
 
   async #releaseBrowserLeaseProof(runId: string): Promise<boolean> {
+    // Studio runs exist only on a Studio-kind deployment; legacy pays no extra read.
+    if (this.config.targetKind === STUDIO_G7_TARGET_KIND && isStudioG7Run(await this.#freshRun(runId))) return this.#releaseStudioG7BrowserLease(runId);
     const active = this.#activeLeases.get(runId);
     let current = await this.ledger.getBrowserLease(runId);
     if (current && current.workerId !== this.workerId && !this.driver.hasSession(runId)) {
@@ -2696,7 +3275,7 @@ export class VoiceLabWorker {
         } : {}),
       }, `cleanup:${runId}:browser-lease`);
     }
-    this.#activeLeases.delete(runId);
+    this.#deactivateLease(runId);
     current = await this.ledger.getBrowserLease(runId);
     if (current === null) {
       const control = await this.ledger.getRecoveryControl(runId);
@@ -2716,6 +3295,221 @@ export class VoiceLabWorker {
     return false;
   }
 
+  /** Another worker, or another boot of this worker id, holds this run's browser lease (it may still be alive). */
+  async #studioForeignLeaseHeld(run: RunRecord): Promise<boolean> {
+    if (this.driver.hasSession(run.id) || this.#activeLeases.has(run.id)) return false;
+    const lease = await this.ledger.getBrowserLease(run.id);
+    return lease !== null && !await this.#studioLeaseOfThisBoot(run.id, lease);
+  }
+
+  /** Write-ahead: this process boot will acquire the run's browser lease. */
+  async #recordStudioLeaseOwnerBoot(runId: string, operationId: string): Promise<void> {
+    await this.ledger.appendEvent(runId, STUDIO_LEASE_OWNER_BOOT_KIND, "worker", {
+      schema: STUDIO_LEASE_OWNER_BOOT_SCHEMA, worker_id_sha256: sha256(this.workerId), worker_boot_id_sha256: this.#workerBootIdentity.bootIdSha256,
+      operation_id: operationId, raw_worker_identifier_excluded: true,
+    }, `studio-lease-owner-boot:${runId}`);
+  }
+
+  /**
+   * A Studio lease is this process's own when it holds it now, or when it is
+   * held under this worker id and its owner-boot record names this boot (or
+   * no record names any, a lease acquired before the record existed). A lease
+   * under this worker id acquired by an earlier boot is not: that process
+   * died, and its lease is released through the dead-owner path.
+   */
+  async #studioLeaseOfThisBoot(runId: string, lease: { workerId: string }): Promise<boolean> {
+    if (lease.workerId !== this.workerId) return false;
+    if (this.#activeLeases.has(runId)) return true;
+    const ownerBoot = studioLeaseOwnerBootIdSha256((await this.#allEvents(runId)).events, lease.workerId);
+    return ownerBoot === null || ownerBoot === this.#workerBootIdentity.bootIdSha256;
+  }
+
+  /**
+   * A Studio run executes only labelled G7 steps (a `speak` carrying its
+   * `_g7_step`, or a `studio_action`), each at most once: another operation of
+   * the same step that already performed it, or is executing now, refuses this
+   * one before the driver acts.
+   */
+  async #assertStudioOperationExecutable(run: RunRecord, operation: import("./domain.js").OperationRecord): Promise<void> {
+    if (operation.type === "barge_in" || operation.type === "force_socket_rotation" || (operation.type === "speak" && studioStepOf(operation) === null)) {
+      throw new VoiceLabError(labError("SCENARIO_UNSUPPORTED_FOR_TARGET", "Only labelled G7 steps run on a Studio G7 run.", "validation", false, { status: "unsupported_for_target", target_kind: STUDIO_G7_TARGET_KIND, operation_type: operation.type }));
+    }
+    const conflict = studioStepConflict(await this.ledger.listOperations(run.id), operation, operation.id, STUDIO_STEP_EXECUTING_STATES);
+    if (conflict) throw conflict;
+  }
+
+  /**
+   * Studio G7 evidence completion. A run that ended with every operation and
+   * cleanup settled but evidence still awaited (typically the bridge's late
+   * `session_closed` or last reply) re-reads its exchange's evidence with a
+   * fresh principal session (then signs out globally again) and is
+   * re-finalized from the durable ledger. Bounded attempts with backoff; the
+   * certification deadline still fails a run whose evidence never arrives.
+   */
+  async #completeStudioG7Evidence(runId: string, now: Date): Promise<void> {
+    const run = await this.#freshRun(runId);
+    if (run.state !== "pending_external_evidence" || !run.cleanupComplete || !hasStudioExtensions(this.driver)) return;
+    if (!studioG7CleanupProof((await this.#allEvents(run.id)).events).refreshSessionsRevoked) {
+      // An earlier refresh session is still unrevoked: resolve that first.
+      if (await this.#revokeUnrevokedRefreshSessions(run)) await this.#finalizeEndRun(run.id);
+      return;
+    }
+    const page = await this.#allEvents(run.id);
+    const attempts = page.events.filter((event) => event.kind === STUDIO_EVIDENCE_REFRESH_EVENT && event.source === "worker");
+    if (attempts.length >= STUDIO_EVIDENCE_REFRESH_MAX_ATTEMPTS) return;
+    const last = attempts.at(-1);
+    if (last && last.at.getTime() > now.getTime() - STUDIO_EVIDENCE_REFRESH_BACKOFF_MS) return;
+    const join = studioDurableJoin(page.events, studioRunBinding(run));
+    if (!join?.exchangeId) return;
+    const attempt = attempts.length + 1;
+    await this.ledger.appendEvent(run.id, STUDIO_EVIDENCE_REFRESH_EVENT, "worker", { attempt, max_attempts: STUDIO_EVIDENCE_REFRESH_MAX_ATTEMPTS, exchange_id: join.exchangeId }, `studio-evidence-refresh:${run.id}:${attempt}`);
+    const refreshed = await this.driver.refreshStudioEvidence(run, join);
+    await this.#persistEvents(run.id, refreshed);
+    if (!studioG7CleanupProof((await this.#allEvents(run.id)).events).refreshSessionsRevoked && !await this.#revokeUnrevokedRefreshSessions(run)) return;
+    await this.#finalizeEndRun(run.id);
+  }
+
+  /**
+   * An evidence-refresh session whose local revoke failed stays valid on the
+   * server. A global sign-out revokes it, but would also revoke the tokens of
+   * any other run of the principal that holds admission now; so it is made
+   * (as one API-only recovery, which also re-verifies the exchange read-only)
+   * only when no other run holds admission. Until then the cleanup proof stays
+   * incomplete and the run cannot certify. True once resolved.
+   */
+  async #revokeUnrevokedRefreshSessions(run: RunRecord): Promise<boolean> {
+    if (await this.ledger.countLiveSessionRunsExcept(run.id) > 0) {
+      await this.ledger.appendEvent(run.id, "studio.cleanup.global_sign_out_deferred", "worker", { reason: "another_run_can_hold_a_live_session", purpose: "unrevoked_evidence_refresh_session" }, `studio-global-sign-out-deferred:${run.id}:unrevoked-refresh`);
+      return false;
+    }
+    // The ledger fence inside #recoverRun re-checks this atomically with
+    // admission and holds admission (cleanup not complete) until the sign-out.
+    const recovered = await this.#recoverRun(run, { force: true });
+    await this.#persistEvents(run.id, recovered.events);
+    const proof = studioG7CleanupProof((await this.#allEvents(run.id)).events);
+    if (!proof.refreshSessionsRevoked) return false;
+    const fresh = await this.#freshRun(run.id);
+    if (proof.complete && !fresh.cleanupComplete) await this.ledger.updateRun(fresh.id, fresh.version, { cleanupComplete: true });
+    return true;
+  }
+
+  /**
+   * A dead foreign worker's Studio lease, or one an earlier boot of this
+   * worker id left (studio-g7/lease-release.ts).
+   *
+   * When the owner's own cleanup for that lease epoch is durable (its browser
+   * proven closed, a global sign-out, the exchange confirmed ended after its
+   * join) the lease is released at once by compare-and-delete. Otherwise its
+   * browser cannot be proven closed by anyone else, so this worker runs an
+   * API-only recovery (never short-circuited by a cleanup proof that is not
+   * bound to the lease) and releases the lease only once that browser can no
+   * longer act: lease expired, owner heartbeat stale, a global sign-out
+   * confirmed after the expiry, the access-JWT lifetime elapsed since, and
+   * then a fresh verification that the run's exchange is not live. Until then
+   * the obligation stays durable.
+   */
+  async #releaseDeadOwnerStudioLease(runId: string, lease: { workerId: string; leaseEpoch: number; expiresAt: Date }): Promise<boolean> {
+    const studio = this.config.studioG7;
+    const run = await this.#freshRun(runId);
+    if (!studio || !hasStudioExtensions(this.driver) || !TERMINAL_RUN_STATES.has(run.state)) return false;
+    const ownerHash = sha256(lease.workerId);
+    const pending = async (reason: string) => {
+      await this.ledger.appendEvent(runId, "cleanup.browser_lease_unconfirmed", "worker", { worker_id_hash: ownerHash, lease_epoch: lease.leaseEpoch, expires_at: lease.expiresAt.toISOString(), dead_owner_release: reason }, `cleanup:${runId}:browser-lease-unconfirmed:${ownerHash}:${lease.leaseEpoch}:${reason}`);
+      return false;
+    };
+    const released = async (result: { released: boolean; reason: string }, verificationId: string | null, presence: { status: string; reason: string | null } | null = null) => {
+      if (!result.released) return pending(result.reason);
+      const ownerCleanup = result.reason === "dead_owner_cleanup_complete";
+      await this.ledger.appendEvent(runId, "cleanup.browser_lease_released", "worker", {
+        schema: STUDIO_DEAD_OWNER_LEASE_RELEASE_SCHEMA, worker_id_hash: ownerHash, lease_epoch: lease.leaseEpoch, cas_deleted: true,
+        // Audit: the dead owner was an earlier boot of this same worker id.
+        ...(lease.workerId === this.workerId ? { owner_earlier_boot_of_this_worker: true } : {}),
+        ...(ownerCleanup
+          ? { dead_owner_cleanup_complete: true, browser_close: "proven_by_owner_epoch", basis: "owner_cleanup_complete", room_presence: "not_required_owner_browser_closed", room_presence_reason: null }
+          : { dead_owner_quiesced: true, browser_close: "unobservable_owner_dead", basis: "quiesced", verification_id: verificationId, room_presence: presence ? presence.status : "unobservable", room_presence_reason: presence ? presence.reason : "presence_not_read",
+            // Audit: released although the last fresh report placed the principal in the room, its veto expired (STUDIO_PRESENCE_VETO_BOUND_MS).
+            ...(result.reason === "dead_owner_quiesced_presence_veto_expired" ? { presence_veto_expired: true, presence_veto_bound_ms: STUDIO_PRESENCE_VETO_BOUND_MS } : {}),
+            // Audit: released at the stuck-present cap although fresh reports still placed the principal in the room.
+            ...(result.reason === "dead_owner_quiesced_presence_veto_capped" ? { presence_veto_capped: true, presence_stuck_cap_ms: STUDIO_PRESENCE_STUCK_CAP_MS } : {}) }),
+      }, `cleanup:${runId}:browser-lease`);
+      return true;
+    };
+    // Every gate is decided by the ledger on ITS clock (the clock of the lease
+    // expiry and of the DB-stamped sign-out), never on this worker's clock: a
+    // dry run without a verification either releases on basis 1 (the owner's
+    // own cleanup for this lease epoch) or says what is still missing.
+    const proof = { tokenMaxLifetimeMs: studio.accessTokenMaxLifetimeMs, heartbeatStaleMs: STUDIO_DEAD_OWNER_HEARTBEAT_STALE_MS };
+    const dryRun = await this.ledger.releaseDeadOwnerStudioBrowserLease(runId, { verificationId: null, ...proof });
+    if (dryRun.released) return released(dryRun, null);
+    if (dryRun.reason !== "global_sign_out_after_expiry_missing" && dryRun.reason !== "fresh_exchange_verification_missing") return pending(dryRun.reason);
+    const before = dryRun.reason === "fresh_exchange_verification_missing";
+    const lifetimeMs = studioEffectiveTokenLifetimeMs((await this.#allEvents(runId)).events, studio.accessTokenMaxLifetimeMs);
+    // One API-only recovery (sign-in, read-only verification, global
+    // sign-out), spaced by the Studio recovery backoff.
+    // Past the token lifetime after a post-expiry sign-out, the dead owner's
+    // browser can no longer act: the principal has left the room for good.
+    const recovered = await this.#recoverRun(run, { force: true, principalQuiesced: before });
+    if (recovered.events.length === 0) return pending("recovery_backoff");
+    await this.#persistEvents(runId, recovered.events);
+    const exchangeNotLive = recovered.events.some((event) => event.kind === "studio.cleanup.exchange_ended" && event.payload.confirmed === true)
+      && !recovered.events.some((event) => event.kind === "studio.cleanup.exchange_ended" && event.payload.confirmed !== true);
+    const signedOut = recovered.events.some((event) => event.kind === "studio.cleanup.signed_out" && event.payload.confirmed === true && event.payload.scope === "global");
+    if (!before) return pending(signedOut ? "access_token_lifetime_pending" : "global_sign_out_unconfirmed");
+    if (!exchangeNotLive || !signedOut) return pending(!signedOut ? "global_sign_out_unconfirmed" : "exchange_not_verified_not_live");
+    // The room as the bridge last saw it, read by this same recovery: only a
+    // fresh report is evidence (present keeps the lease, absent is recorded);
+    // anything else is unobservable and the other gates decide alone.
+    const presenceEvent = [...recovered.events].reverse().find((event) => event.kind === STUDIO_ROOM_PRESENCE_KIND && event.source === "canonical");
+    const presence = presenceEvent?.payload.status === "present" || presenceEvent?.payload.status === "absent"
+      ? { status: presenceEvent.payload.status, reason: null }
+      : { status: "unobservable", reason: typeof presenceEvent?.payload.reason === "string" ? presenceEvent.payload.reason : "presence_not_read" };
+    const verificationId = randomUUID();
+    await this.ledger.appendEvent(runId, STUDIO_DEAD_OWNER_VERIFIED_KIND, "worker", { verification_id: verificationId, worker_id_sha256: ownerHash, lease_epoch: lease.leaseEpoch, exchange_not_live: true, signed_out: true, access_token_max_lifetime_ms: lifetimeMs, room_presence: presence.status, room_presence_reason: presence.reason }, `studio-dead-owner-verified:${runId}:${verificationId}`);
+    return released(await this.ledger.releaseDeadOwnerStudioBrowserLease(runId, { verificationId, ...proof }), verificationId, presence);
+  }
+
+  /**
+   * Studio lease release. The legacy execution-epoch proof requires a
+   * browser-held provider socket and Better Auth cleanup that this target does
+   * not have, so the release is gated on the Studio driver's own close proof
+   * (and an absent session). The lease of another worker, or of an earlier
+   * boot of this worker id (#studioLeaseOfThisBoot), is never this process's
+   * to release by its own close proof: it goes through the dead-owner release.
+   */
+  async #releaseStudioG7BrowserLease(runId: string): Promise<boolean> {
+    const active = this.#activeLeases.get(runId);
+    let current = await this.ledger.getBrowserLease(runId);
+    const own = current !== null && await this.#studioLeaseOfThisBoot(runId, current);
+    if (current && !own && !active && !this.driver.hasSession(runId)) {
+      if (await this.#releaseDeadOwnerStudioLease(runId, current)) current = null;
+    }
+    const epoch = active?.epoch ?? (current && own ? current.leaseEpoch : null);
+    if (epoch !== null) {
+      const proof = studioG7CleanupProof((await this.#allEvents(runId)).events);
+      if (!proof.browserClosed || this.driver.hasSession(runId)) {
+        await this.ledger.appendEvent(runId, "cleanup.execution_epoch_unconfirmed", "worker", {
+          schema: "sophia_voice_lab_studio_g7_cleanup_gate_v1", browser_lease_epoch: epoch,
+          browser_closed: proof.browserClosed, browser_session_absent: !this.driver.hasSession(runId),
+        }, `cleanup:${runId}:execution-epoch-unconfirmed:${epoch}`);
+        return false;
+      }
+      const released = await this.ledger.releaseBrowserLease(runId, this.workerId, epoch);
+      if (released) await this.ledger.appendEvent(runId, "cleanup.browser_lease_released", "worker", {
+        schema: "sophia_voice_lab_studio_g7_lease_release_v1", worker_id_hash: sha256(this.workerId), lease_epoch: epoch, cas_deleted: true, browser_closed: true,
+      }, `cleanup:${runId}:browser-lease`);
+    }
+    this.#deactivateLease(runId);
+    current = await this.ledger.getBrowserLease(runId);
+    if (current === null) {
+      const prior = await this.ledger.findLatestEvent(runId, ["cleanup.browser_lease_released", "cleanup.browser_lease_absent"]);
+      if (!prior) await this.ledger.appendEvent(runId, "cleanup.browser_lease_absent", "worker", { authoritative_ledger_read: true }, `cleanup:${runId}:browser-lease-absent`);
+      return true;
+    }
+    const ownerHash = sha256(current.workerId);
+    await this.ledger.appendEvent(runId, "cleanup.browser_lease_unconfirmed", "worker", { worker_id_hash: ownerHash, lease_epoch: current.leaseEpoch, expires_at: current.expiresAt.toISOString() }, `cleanup:${runId}:browser-lease-unconfirmed:${ownerHash}:${current.leaseEpoch}:${current.expiresAt.getTime()}`);
+    return false;
+  }
+
   async #freshRun(runId: string): Promise<RunRecord> {
     const run = await this.ledger.getRun(runId);
     if (!run) throw new VoiceLabError(labError("RUN_NOT_FOUND", "Run was not found.", "validation"));
@@ -2726,6 +3520,62 @@ export class VoiceLabWorker {
     const live = process.env.SOPHIA_VOICE_LAB_KILL_SWITCH?.trim().toLowerCase();
     return this.config.killSwitch || live === "true" || live === "1";
   }
+}
+
+/**
+ * Studio input settlement: the Lab finished playing the prior utterance into
+ * the published track, and the bridge has closed one input window per prior
+ * non-silence utterance (ordinal join). Without the window the next utterance
+ * could merge into the same provider turn and void the ordinal join.
+ */
+export function studioPriorInputSettled(events: import("./domain.js").LabEvent[], priorInputs: import("./domain.js").OperationRecord[], priorId: string): boolean {
+  const completed = events.some((event) => event.kind === "audio.input.completed" && event.source === "browser" && event.payload.operation_id === priorId);
+  if (!completed) return false;
+  const nonSilence = priorInputs.filter((operation) => !String(operation.input.fixture_id ?? "").toLowerCase().includes("silence")).length;
+  const windows = new Set(events.filter((event) => event.kind === "studio.bridge_receipt" && event.source === "canonical" && event.payload.kind === "input_window").map((event) => {
+    try { return Number((JSON.parse(String(event.payload.receipt_json)) as Record<string, unknown>).windowSeq); } catch { return Number.NaN; }
+  }).filter(Number.isSafeInteger));
+  return windows.size >= nonSilence;
+}
+
+/** How long the settlement gate waits for an arrived window's input_turn (the bridge sends it right after the window). */
+export const STUDIO_INPUT_TURN_WAIT_MS = 5_000;
+
+/** Whether every input window the bridge reported so far has its own input_turn receipt (same windowSeq). */
+export function studioInputTurnsArrived(events: import("./domain.js").LabEvent[]): boolean {
+  const seqsOf = (kind: string) => new Set(events.filter((event) => event.kind === "studio.bridge_receipt" && event.source === "canonical" && event.payload.kind === kind).map((event) => {
+    try { return Number((JSON.parse(String(event.payload.receipt_json)) as Record<string, unknown>).windowSeq); } catch { return Number.NaN; }
+  }).filter(Number.isSafeInteger));
+  const turns = seqsOf("input_turn");
+  return [...seqsOf("input_window")].every((windowSeq) => turns.has(windowSeq));
+}
+
+/** The run binding hash a Studio run's grant must carry. */
+function studioRunBinding(run: RunRecord): string {
+  return computeRunBindingSha256({ testRunId: run.testRunId, cleanupObligationId: run.cleanupObligationId, scenarioId: run.scenarioId ?? "", scenarioVersion: run.scenarioVersion ?? "" });
+}
+
+/** How often a worker sweeps its own outstanding sign-out markers (the query scans the fence events). */
+export const STUDIO_MARKER_SWEEP_INTERVAL_MS = 30_000;
+
+/** Studio G7 runs carry the `studio-g7-v1` catalogue version. */
+export function isStudioG7Run(run: Pick<RunRecord, "scenarioVersion">): boolean {
+  return isStudioG7ScenarioVersion(run.scenarioVersion);
+}
+
+/**
+ * A Studio run that ended without a failure and still awaits external
+ * evidence. Its manifests come only from the Studio evidence path
+ * (#finalizeEndRun), never from the generic failure or revision publishers.
+ */
+function studioAwaitingExternalEvidence(run: Pick<RunRecord, "scenarioVersion" | "state" | "terminalError">): boolean {
+  return isStudioG7Run(run) && run.state === "pending_external_evidence" && run.terminalError === null;
+}
+
+/** Studio runs store their pinned identities in the TargetSpec container:
+ * frontend = Studio, backend = API, voice = media bridge. */
+function studioExpectedIdentities(run: RunRecord): { studio: string; api: string; bridge: string } {
+  return { studio: run.target.expectedDeployment.frontend.toLowerCase(), api: run.target.expectedDeployment.backend.toLowerCase(), bridge: run.target.expectedDeployment.voice.toLowerCase() };
 }
 
 function errorDetail(error: unknown): LabError {
@@ -3307,7 +4157,7 @@ export function suiteCertificationProjection(children: RunRecord[]): {
     ? { status: "pending_lifecycle" as const, outcome: "lifecycle_or_cleanup_unconfirmed" }
     : runCertificationProjection(run.verdicts));
   const productCounts = { pass: 0, unavailable: 0, fail: 0, inconclusive: 0, pending: 0 };
-  for (const run of children) productCounts[run.verdicts.product] += 1;
+  for (const run of children) productCounts[run.verdicts.product as keyof typeof productCounts] += 1;
   const outcomeCounts: Record<string, number> = {};
   for (const projection of projections) outcomeCounts[projection.outcome] = (outcomeCounts[projection.outcome] ?? 0) + 1;
   const certifiedCount = projections.filter((projection) => projection.status === "certified").length;
@@ -3324,6 +4174,7 @@ export function suiteCertificationProjection(children: RunRecord[]): {
 export function certificationTerminalDecision(verdicts: Verdicts): { state: RunState; reason: string } {
   const state: RunState = verdicts.harness === "unavailable" || verdicts.evidence === "unavailable"
     ? "pending_external_evidence"
+    : verdicts.harness === "invalid_test" ? "invalid_test"
     : verdicts.harness === "fail" ? "failed_harness"
       : verdicts.auth === "fail" ? "authorization_failed"
         : verdicts.product === "fail" ? "product_failed"
@@ -3358,6 +4209,7 @@ export function deriveCompletedVerdicts(run: RunRecord, events: import("./domain
   const providerDegraded = eligibleEvents.some((event) => event.kind === "provider.connection_epoch" && (event.payload.receipt as Record<string, unknown> | undefined)?.phase === "degraded");
   const authClean = authCleanupPath(run, events) !== null;
   const injectedOperations = operations.filter((operation) => (operation.type === "speak" || operation.type === "barge_in") && operation.state === "succeeded");
+  const invalidInputDelivery = injectedOperations.some((operation) => classifyInputDelivery(events, operation.id).status !== "valid");
   const nonSilenceOperations = injectedOperations.filter((operation) => !String(operation.input.fixture_id ?? "").toLowerCase().includes("silence"));
   const inputTranscript = eligibleEvents.some((event) => event.kind.endsWith(".sophia.user_transcript") || event.kind === "transcript.input.final");
   const assistantAudio = kinds.has("audio.output.started");
@@ -3386,9 +4238,11 @@ export function deriveCompletedVerdicts(run: RunRecord, events: import("./domain
   const baseHarnessPass = preResource
     ? !failedHarness && preResourceCleanup
     : !failedHarness && injectionChains && deploymentVerified && joinsComplete && captureProven && cleanupProven;
-  const harness: Verdicts["harness"] = !baseHarnessPass || scenarioHasFailure ? "fail" : scenarioHasUnavailable ? "unavailable" : "pass";
+  const harness: Verdicts["harness"] = invalidInputDelivery ? "invalid_test" : !baseHarnessPass || scenarioHasFailure ? "fail" : scenarioHasUnavailable ? "unavailable" : "pass";
   const productStatuses = scenarioEvaluation.product.map((assertion) => assertion.status);
   const product: Verdicts["product"] = preResource
+    ? "unavailable"
+    : invalidInputDelivery
     ? "unavailable"
     : !finalized
     ? "fail"
@@ -3404,6 +4258,75 @@ export function deriveCompletedVerdicts(run: RunRecord, events: import("./domain
     auth: preResource ? (run.scenarioId === "V-S01" && harness === "pass" ? "pass" : "unavailable") : authClean ? "pass" : "fail",
     evidence: harness === "pass" && (preResource ? preResourceCleanup : finalized && cleanupProven) ? "pass" : harness === "unavailable" ? "unavailable" : "fail",
   };
+}
+
+/** A provider observation is not product evidence when the harness played the
+ * waveform slower than real time. Frame receipts are already durable and
+ * content-free; compare their timestamps with their exact 16 kHz PCM bytes. */
+export const INPUT_DELIVERY_LIMITS = { max_speech_gap_ms: 150, max_lag_growth_ms: 100, max_context_wall_ratio_error: 0.05 } as const;
+type InputDeliveryEvent = import("./domain.js").LabEvent;
+type InputDeliveryOptions = { allowLedgerTimestampFallback?: boolean };
+
+function inputObservedMs(event: InputDeliveryEvent, options: InputDeliveryOptions): number | null {
+  const provenance = event.payload._capture_provenance;
+  const observedAt = provenance && typeof provenance === "object" && !Array.isArray(provenance)
+    ? (provenance as Record<string, unknown>).observed_at : null;
+  if (typeof observedAt === "string") {
+    const parsed = Date.parse(observedAt);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return options.allowLedgerTimestampFallback === true ? event.at.getTime() : null;
+}
+
+function frameTiming(frames: InputDeliveryEvent[], options: InputDeliveryOptions): { audioMs: number; maxSpeechGap: number } | null {
+  let maxSpeechGap = 0;
+  let audioMs = 0;
+  for (let index = 0; index < frames.length; index += 1) {
+    const bytes = Number(frames[index]!.payload.byte_length);
+    if (!Number.isSafeInteger(bytes) || bytes <= 0 || bytes % 2 !== 0) return null;
+    if (index < frames.length - 1) audioMs += bytes / 32;
+    if (index === 0) continue;
+    const current = inputObservedMs(frames[index]!, options);
+    const previous = inputObservedMs(frames[index - 1]!, options);
+    if (current === null || previous === null) return null;
+    const gap = current - previous;
+    if (!Number.isFinite(gap) || gap < 0) return null;
+    if (Number(frames[index]!.payload.nonzero_byte_count) > 0 || Number(frames[index - 1]!.payload.nonzero_byte_count) > 0) {
+      maxSpeechGap = Math.max(maxSpeechGap, gap);
+    }
+  }
+  return { audioMs, maxSpeechGap };
+}
+
+function contextWallRatio(events: InputDeliveryEvent[], operationId: string, audioMs: number, wallMs: number, options: InputDeliveryOptions): number | null {
+  const started = events.find((event) => event.kind === "audio.input.started" && event.payload.operation_id === operationId);
+  const completed = events.find((event) => event.kind === "audio.input.completed" && event.payload.operation_id === operationId);
+  if (!started || !completed) return audioMs / wallMs;
+  const contextMs = (Number(completed.payload.actual_context_time) - Number(started.payload.actual_context_time)) * 1000;
+  const completedMs = inputObservedMs(completed, options);
+  const startedMs = inputObservedMs(started, options);
+  if (completedMs === null || startedMs === null) return null;
+  const contextWallMs = completedMs - startedMs;
+  return Number.isFinite(contextMs) && contextWallMs > 0 ? contextMs / contextWallMs : null;
+}
+
+export function classifyInputDelivery(events: import("./domain.js").LabEvent[], operationId: string, options: InputDeliveryOptions = {}): { status: "valid" | "degraded" | "unavailable"; delivery_valid: boolean | null; max_speech_gap_ms: number | null; lag_growth_ms: number | null; context_wall_ratio: number | null; timestamp_source: "browser_observed" | "ledger_fallback" | "unavailable" } {
+  const frames = events.filter((event) => event.kind === "harness.input_frame_forwarded" && event.source === "browser" && event.payload.operation_id === operationId)
+    .sort((a, b) => Number(a.payload.frame_seq) - Number(b.payload.frame_seq));
+  const unavailable = { status: "unavailable" as const, delivery_valid: null, max_speech_gap_ms: null, lag_growth_ms: null, context_wall_ratio: null, timestamp_source: "unavailable" as const };
+  if (frames.length < 2) return unavailable;
+  const timing = frameTiming(frames, options);
+  if (timing === null) return unavailable;
+  const firstMs = inputObservedMs(frames[0]!, options);
+  const lastMs = inputObservedMs(frames.at(-1)!, options);
+  if (firstMs === null || lastMs === null) return unavailable;
+  const wallMs = lastMs - firstMs;
+  if (wallMs <= 0 || timing.audioMs <= 0) return unavailable;
+  const ratio = contextWallRatio(events, operationId, timing.audioMs, wallMs, options);
+  if (ratio === null) return unavailable;
+  const lagGrowth = wallMs - timing.audioMs;
+  const degraded = timing.maxSpeechGap > INPUT_DELIVERY_LIMITS.max_speech_gap_ms || lagGrowth > INPUT_DELIVERY_LIMITS.max_lag_growth_ms || Math.abs(ratio - 1) > INPUT_DELIVERY_LIMITS.max_context_wall_ratio_error;
+  return { status: degraded ? "degraded" : "valid", delivery_valid: !degraded, max_speech_gap_ms: timing.maxSpeechGap, lag_growth_ms: lagGrowth, context_wall_ratio: ratio, timestamp_source: options.allowLedgerTimestampFallback ? "ledger_fallback" : "browser_observed" };
 }
 
 export type ScenarioAssertion = {
@@ -3460,6 +4383,246 @@ export function reconcileProductInputLeg(
     && leg.pcm_sha256_chain === computed
     && (silence ? nonzeroBytes === 0 && Number(leg.nonzero_sample_count) === 0 : nonzeroBytes > 0 && Number(leg.nonzero_sample_count) > 0);
   return { verified, reason: verified ? null : "harness_product_pcm_digest_or_metric_mismatch", frame_count: frames.length, byte_length: byteLength, nonzero_byte_count: nonzeroBytes, computed_pcm_sha256_chain: computed };
+}
+
+type OutputChainSources = { playback: import("./domain.js").LabEvent[]; received: import("./domain.js").LabEvent[]; providerChunks: import("./domain.js").LabEvent[]; interactions: ReturnType<typeof outputInteractionBindings> };
+type Receipt = Record<string, unknown> | undefined;
+const receiptOf = (event: import("./domain.js").LabEvent | undefined): Receipt => event?.payload.receipt as Receipt;
+const diagnosticOf = (event: import("./domain.js").LabEvent): Receipt => event.payload.diagnostic as Receipt;
+/** The provider receive join shared by the received aggregate and the chunk. */
+function sameProviderReceive(diagnostic: Receipt, terminal: Receipt): boolean {
+  return diagnostic?.providerReceiveSequence === terminal?.providerReceiveSequence && diagnostic?.providerConnectionEpoch === terminal?.providerConnectionEpoch
+    && diagnostic?.playbackGeneration === terminal?.playbackGeneration && diagnostic?.relayCorrelationId === terminal?.relayCorrelationId
+    && diagnostic?.providerRelaySequence === terminal?.providerRelaySequence && diagnostic?.providerReceivedAt === terminal?.providerReceivedAt;
+}
+function sameChunk(diagnostic: Receipt, terminal: Receipt): boolean {
+  return diagnostic?.chunkIndex === terminal?.chunkIndex && diagnostic?.chunksInEvent === terminal?.chunksInEvent
+    && diagnostic?.chunkHash === terminal?.chunkHash && diagnostic?.byteLength === terminal?.byteLength;
+}
+/** Scheduled, undropped, and carrying the native composite identity it claims. */
+function playableNativeChunk(diagnostic: Receipt, realizationId: string | null): boolean {
+  return diagnostic?.scheduled === true && diagnostic?.dropReason === null
+    && diagnostic?.realizationId === realizationId && nativeOutputRealizationId(diagnostic) === realizationId
+    && diagnostic?.providerChunkSequence === `${diagnostic?.providerConnectionEpoch}:${diagnostic?.providerReceiveSequence}:${diagnostic?.chunkIndex}`;
+}
+/** A verified, completed, non-silent, raw-free output leg with timing. */
+function audibleOutputLeg(leg: Receipt): boolean {
+  return leg?.schema === "sophia_gemini_output_leg_v1" && leg.status === "verified" && leg.completionPhase === "completed"
+    && /^[a-f0-9]{64}$/.test(String(leg.monitorDigestSha256)) && Number(leg.monitorFrameCount) > 0 && Number(leg.monitorNonSilentFrameCount) > 0 && leg.rawAudioExcluded === true
+    && typeof leg.scheduledAt === "string" && typeof leg.completedAt === "string" && Number(leg.monitorDurationMs) >= 0;
+}
+function orderedSeqs(...seqs: Array<number | undefined>): boolean {
+  return seqs.every((seq, index) => seq !== undefined && (index === 0 || seq > seqs[index - 1]!));
+}
+/** The leg, its terminal playback receipt and its utterance binding agree. */
+function legBoundToTerminal(leg: Receipt, terminal: Receipt, interactionEpoch: number | undefined): boolean {
+  return interactionEpoch !== undefined && interactionEpoch === leg?.providerConnectionEpoch
+    && leg?.providerChunkFingerprint === terminal?.chunkHash && leg?.providerConnectionEpoch === terminal?.providerConnectionEpoch
+    && leg?.playbackGeneration === terminal?.playbackGeneration;
+}
+function buildOutputChain(legEvent: import("./domain.js").LabEvent, sources: OutputChainSources) {
+  const leg = receiptOf(legEvent);
+  const realizationId = typeof leg?.realizationId === "string" ? leg.realizationId : null;
+  const receipts = sources.playback.filter((event) => receiptOf(event)?.realizationId === realizationId);
+  const phase = (name: string) => receipts.filter((event) => receiptOf(event)?.phase === name);
+  const scheduled = phase("scheduled"), started = phase("started"), completed = phase("completed");
+  const terminal = receiptOf(completed[0]);
+  const receivedEvent = sources.received.find((event) => sameProviderReceive(diagnosticOf(event), terminal)
+    && diagnosticOf(event)?.responseId === terminal?.responseId && diagnosticOf(event)?.providerEventId === terminal?.providerEventId);
+  const chunkEvent = sources.providerChunks.find((event) => sameProviderReceive(diagnosticOf(event), terminal) && sameChunk(diagnosticOf(event), terminal) && playableNativeChunk(diagnosticOf(event), realizationId));
+  const interaction = realizationId === null ? undefined : sources.interactions.byRealization.get(realizationId);
+  const exact = audibleOutputLeg(leg) && scheduled.length === 1 && started.length === 1 && completed.length === 1
+    && legBoundToTerminal(leg, terminal, interaction?.epoch)
+    && orderedSeqs(receivedEvent?.seq, chunkEvent?.seq, scheduled[0]?.seq, started[0]?.seq, completed[0]?.seq, legEvent.seq) && Number(terminal?.durationSeconds) > 0;
+  const identity = chunkEvent ? outputChunkIdentity(chunkEvent.payload.diagnostic as Record<string, unknown>) : null;
+  const durationSeconds = Number(terminal?.durationSeconds);
+  return { exact, realizationId, identity, durationSeconds: Number.isFinite(durationSeconds) ? durationSeconds : 0, operationId: interaction?.operationId ?? null, receivedSeq: receivedEvent?.seq ?? null, chunkSeq: chunkEvent?.seq ?? null, events: [...(receivedEvent ? [receivedEvent] : []), ...(chunkEvent ? [chunkEvent] : []), ...receipts, ...(interaction ? [interaction.event] : []), legEvent] };
+}
+
+/**
+ * The V-O01 output-chain join (C075), shared with the C5 first-use assessment.
+ * Every chain is one output leg with its playback receipts, provider chunk and
+ * received aggregate under the product's native composite identity, bound to
+ * at most one utterance interaction. Pure: it certifies nothing by itself.
+ */
+export function deriveOutputChains(run: RunRecord, productEvents: import("./domain.js").LabEvent[], operations: import("./domain.js").OperationRecord[]) {
+  const productByKind = (kind: string) => productEvents.filter((event) => event.kind === kind);
+  const utteranceOperations = operations.filter((operation) => operation.type === "speak" && operation.state === "succeeded" && !String(operation.input.fixture_id ?? "").toLowerCase().includes("silence"));
+  const interactions = outputInteractionBindings(run, productByKind("product.voice-session.gemini-synthetic-interaction-receipt"), utteranceOperations);
+  const received = productByKind("audio.output.received");
+  const providerChunks = productByKind("audio.output.provider_chunk");
+  const playback = ["audio.output.scheduled", "audio.output.started", "audio.output.completed"].flatMap(productByKind);
+  const legs = productByKind("audio.output.leg_receipt");
+  const chains = legs.map((legEvent) => buildOutputChain(legEvent, { playback, received, providerChunks, interactions }));
+  return { utteranceOperations, interactions, received, providerChunks, playback, legs, chains };
+}
+
+/**
+ * C075: the product's native output identity. chunkHash is its FNV-1a 32-bit
+ * (8 hex) consistency fingerprint (hashGeminiOutputAudioChunk), never identity
+ * or cryptographic proof. Identity is the composite the product derives from
+ * the provider receipt (gemini-output-{epoch}-{receiveSeq}-{chunkIndex}-
+ * {fingerprint}-{duplicateOrdinal}), recomputed here from the diagnostic's own
+ * fields, plus playback generation and relay correlation.
+ */
+export const PRODUCT_OUTPUT_FINGERPRINT_ALGORITHM = "fnv1a32-hex8";
+function nativeOutputRealizationId(diagnostic: Record<string, unknown> | undefined): string | null {
+  const epoch = diagnostic?.providerConnectionEpoch, sequence = diagnostic?.providerReceiveSequence, index = diagnostic?.chunkIndex;
+  const fingerprint = diagnostic?.chunkHash, ordinal = diagnostic?.duplicateOrdinal;
+  if (!Number.isSafeInteger(epoch) || Number(epoch) < 1 || !Number.isSafeInteger(sequence) || Number(sequence) < 0
+    || !Number.isSafeInteger(index) || Number(index) < 0 || typeof fingerprint !== "string" || !/^[a-f0-9]{8}$/.test(fingerprint)
+    || !Number.isSafeInteger(ordinal) || Number(ordinal) < 1) return null;
+  return `gemini-output-${epoch}-${sequence}-${index}-${fingerprint}-${ordinal}`;
+}
+function outputChunkIdentity(diagnostic: Record<string, unknown>): string | null {
+  const realization = nativeOutputRealizationId(diagnostic);
+  return realization === null || !Number.isSafeInteger(diagnostic.playbackGeneration) || typeof diagnostic.relayCorrelationId !== "string"
+    ? null : `${realization}|generation:${diagnostic.playbackGeneration}|relay:${diagnostic.relayCorrelationId}`;
+}
+
+/**
+ * C075: the product-authored per-utterance output binding
+ * (sophia_gemini_interaction_v1). The latest receipt per interaction lists the
+ * output realizations it owns. It carries the product's own synthetic
+ * response/turn id; no provider response id is inferred. Invalid, foreign,
+ * duplicate-per-utterance or overlapping bindings make the whole set invalid.
+ */
+function outputInteractionBindings(
+  run: RunRecord,
+  receiptEvents: import("./domain.js").LabEvent[],
+  utteranceOperations: import("./domain.js").OperationRecord[],
+): { valid: boolean; byRealization: Map<string, { operationId: string; epoch: number; event: import("./domain.js").LabEvent }> } {
+  const latest = new Map<string, import("./domain.js").LabEvent>();
+  let valid = true;
+  for (const event of receiptEvents) {
+    const receipt = event.payload.receipt as Record<string, unknown> | undefined;
+    const id = receipt?.interaction_id;
+    if (typeof id !== "string" || id.length === 0) { valid = false; continue; }
+    const prior = latest.get(id);
+    if (!prior || prior.seq < event.seq) latest.set(id, event);
+  }
+  const byRealization = new Map<string, { operationId: string; epoch: number; event: import("./domain.js").LabEvent }>();
+  const operationIds = new Set(utteranceOperations.map((operation) => operation.id));
+  const interactionByOperation = new Map<string, string>();
+  for (const [id, event] of latest) {
+    const receipt = event.payload.receipt as Record<string, unknown>;
+    const operationId = String(receipt.operation_id);
+    if (!validInteractionReceipt(run, receipt, operationIds)
+      || (interactionByOperation.has(operationId) && interactionByOperation.get(operationId) !== id)) { valid = false; continue; }
+    interactionByOperation.set(operationId, id);
+    const epoch = receipt.provider_connection_epoch;
+    for (const realization of receipt.output_realization_ids as unknown[]) {
+      if (typeof realization !== "string" || byRealization.has(realization)) { valid = false; continue; }
+      byRealization.set(realization, { operationId, epoch: Number(epoch), event });
+    }
+  }
+  return { valid, byRealization: valid ? byRealization : new Map() };
+}
+
+/** One interaction receipt is exactly this run's, for one of its utterances. */
+function validInteractionReceipt(run: RunRecord, receipt: Record<string, unknown>, operationIds: ReadonlySet<string>): boolean {
+  const nonEmpty = (value: unknown) => typeof value === "string" && value.length > 0;
+  return receipt.schema === "sophia_gemini_interaction_v1" && receipt.synthetic === true && receipt.test_run_id === run.testRunId
+    && receipt.scenario_id === run.scenarioId && receipt.scenario_version === run.scenarioVersion
+    && typeof receipt.operation_id === "string" && operationIds.has(receipt.operation_id)
+    && nonEmpty(receipt.response_id) && nonEmpty(receipt.assistant_turn_id)
+    && Number.isSafeInteger(receipt.provider_connection_epoch) && Number(receipt.provider_connection_epoch) >= 1
+    && Array.isArray(receipt.output_realization_ids);
+}
+
+type Event = import("./domain.js").LabEvent;
+type Operation = import("./domain.js").OperationRecord;
+/** One utterance: complete input with transcript receipts, >=1 exact audible chain, ordering after the prior reply. */
+function assessC5Utterance(operation: Operation, previous: Operation | null, eligible: Event[], chains: ReturnType<typeof deriveOutputChains>["chains"],
+  accepted: (operation: Operation) => Event | undefined, replyCompleted: (operation: Operation) => Event[]) {
+  const audible = chains.filter((chain) => chain.exact && chain.operationId === operation.id);
+  const acceptedEvent = accepted(operation);
+  const priorCompletion = previous ? replyCompleted(previous)[0] : undefined;
+  const ordering = previous === null ? "not_applicable_first_utterance" as const
+    : acceptedEvent !== undefined && priorCompletion !== undefined && acceptedEvent.seq > priorCompletion.seq ? "met" as const : "gap" as const;
+  return {
+    operation_id: operation.id,
+    input: exactProductInputChain(eligible, operation) ? "met" as const : "gap" as const,
+    audible_exact_chain_count: audible.length,
+    audible_seconds: Math.round(audible.reduce((total, chain) => total + chain.durationSeconds, 0) * 1000) / 1000,
+    output: audible.length > 0 ? "met" as const : "gap" as const,
+    adaptive_ordering: ordering,
+    evidence_seqs: [...(acceptedEvent ? [acceptedEvent.seq] : []), ...(priorCompletion ? [priorCompletion.seq] : []), ...audible.flatMap((chain) => chain.events.map((event) => event.seq))],
+  };
+}
+/** C082: completion witnesses of this run's durably succeeded supported End. */
+function c5EndCompletions(run: RunRecord, operations: Operation[], eligible: Event[]): Event[] {
+  return operations.filter((operation) => operation.type === "end" && operation.state === "succeeded" && operation.runId === run.id)
+    .flatMap((operation) => eligible.filter((event) => event.kind === "operation.succeeded" && event.source === "worker"
+      && event.payload.operation_id === operation.id && event.payload.operation_type === "end"));
+}
+/** Ordinary settlement: live zero, execution-epoch proof, auth path, lease release. */
+function c5Settled(run: RunRecord, events: Event[], eligible: Event[]): boolean {
+  const proof = deriveExecutionEpochCleanupProof(run, events);
+  return authoritativeLiveCleanupComplete(events, run) && proof.ready && authCleanupPath(run, events, proof) !== null
+    && eligible.some((event) => event.kind === "cleanup.browser_lease_released" || event.kind === "cleanup.browser_lease_absent");
+}
+
+export const C5_FIRST_USE_ASSESSMENT_SCHEMA = "sophia.voice-lab.c5-first-use-assessment.v1";
+type C5Criterion = { id: string; status: "met" | "gap"; evidence_seqs: number[]; detail?: Record<string, unknown> };
+
+/**
+ * C079: the restricted first-use assessment, reported beside (never instead
+ * of) the scenario verdicts, certification and terminal state. It asks only
+ * what the continuation mission asks: exact deployment, an authenticated
+ * synthetic session, at least two non-silent synthetic utterances each with
+ * complete input delivery plus provider/public transcript receipts and at
+ * least one exact audible output chain, second and later utterances accepted
+ * only after the prior reply completed, ordinary settlement, and canonical
+ * evidence. Recognition accuracy, semantic adaptivity, acoustic quality and
+ * all-chunk certification are not assessed here; semantic adaptivity needs
+ * coordinator review.
+ */
+export function deriveC5FirstUseAssessment(run: RunRecord, events: import("./domain.js").LabEvent[], operations: import("./domain.js").OperationRecord[]) {
+  const eligible = events.filter((event) => event.source !== "product" || isExactBoundProductEvent(run, event));
+  const productEvents = eligible.filter((event) => event.source === "product");
+  const seqsOf = (list: import("./domain.js").LabEvent[]) => list.map((event) => event.seq);
+  const criterion = (id: string, met: boolean, evidence: import("./domain.js").LabEvent[], detail?: Record<string, unknown>): C5Criterion => ({ id, status: met ? "met" : "gap", evidence_seqs: seqsOf(evidence), ...(detail ? { detail } : {}) });
+  const deployment = eligible.filter((event) => event.kind === "deployment.verified" || event.kind === "deployment.reverified");
+  const exactTuple = (event: import("./domain.js").LabEvent) => (["frontend", "backend", "voice"] as const).every((component) => (event.payload[component] as Record<string, unknown> | undefined)?.commit_sha === run.target.expectedDeployment[component])
+    && (event.payload.langgraph as Record<string, unknown> | undefined)?.commit_sha === run.target.expectedDependencies.langgraph;
+  const tupleMet = (["deployment.verified", "deployment.reverified"] as const).every((kind) => deployment.some((event) => event.kind === kind && exactTuple(event)));
+  const capture = eligible.filter((event) => ["harness.initialized", "harness.media_stream_issued", "session.microphone_stream_acquired"].includes(event.kind));
+  const sessionMet = run.canonicalSessionId !== null && ["harness.initialized", "harness.media_stream_issued", "session.microphone_stream_acquired"].every((kind) => capture.some((event) => event.kind === kind));
+  const { utteranceOperations, chains } = deriveOutputChains(run, productEvents, operations);
+  const accepted = (operation: import("./domain.js").OperationRecord) => eligible.find((event) => event.kind === "operation.speak.accepted" && event.payload.operation_id === operation.id);
+  const ordered = [...utteranceOperations].sort((left, right) => (accepted(left)?.seq ?? Number.MAX_SAFE_INTEGER) - (accepted(right)?.seq ?? Number.MAX_SAFE_INTEGER));
+  const replyCompleted = (operation: import("./domain.js").OperationRecord) => productEvents.filter((event) => event.kind === "product.voice-session.gemini-synthetic-interaction-receipt"
+    && (event.payload.receipt as Record<string, unknown> | undefined)?.operation_id === operation.id && (event.payload.receipt as Record<string, unknown> | undefined)?.phase === "assistant_response_completed");
+  const utterances = ordered.map((operation, index) => assessC5Utterance(operation, index > 0 ? ordered[index - 1]! : null, eligible, chains, accepted, replyCompleted));
+  const finalization = eligible.filter((event) => isCanonicalFinalizationReceipt(run, event));
+  // C082: this run's supported End must itself have succeeded, with its durable
+  // completion witness. Recovery after a failed or timed-out End is settlement,
+  // not an ordinary End. Full-scenario success is NOT required here.
+  const endCompletions = c5EndCompletions(run, operations, eligible);
+  const settled = endCompletions.length > 0 && finalization.length > 0 && c5Settled(run, events, eligible);
+  const recoveries = eligible.filter((event) => event.kind === "cleanup.recovery" && event.source === "canonical");
+  const canonicalEvidence = ((recoveries.at(-1)?.payload.receipt as Record<string, unknown> | undefined)?.components as Record<string, Record<string, unknown>> | undefined)?.canonical_evidence;
+  const criteria: C5Criterion[] = [
+    criterion("exact_deployment_tuple", tupleMet, deployment),
+    criterion("authenticated_synthetic_session_and_capture", sessionMet, capture),
+    criterion("two_or_more_non_silent_utterances", utterances.length >= 2, eligible.filter((event) => event.kind === "operation.speak.accepted")),
+    { id: "input_delivery_and_transcript_receipts_each_utterance", status: utterances.length > 0 && utterances.every((utterance) => utterance.input === "met") ? "met" : "gap", evidence_seqs: [] },
+    { id: "audible_exact_output_each_utterance", status: utterances.length > 0 && utterances.every((utterance) => utterance.output === "met") ? "met" : "gap", evidence_seqs: utterances.flatMap((utterance) => utterance.evidence_seqs) },
+    { id: "later_utterances_after_prior_reply", status: utterances.length >= 2 && utterances.every((utterance) => utterance.adaptive_ordering !== "gap") ? "met" : "gap", evidence_seqs: [] },
+    criterion("ordinary_end_and_settlement", settled, [...endCompletions, ...finalization, ...recoveries.slice(-1)]),
+    criterion("canonical_evidence_retained", ["retention_pending", "completed", "already_terminal"].includes(String(canonicalEvidence?.status)), recoveries.slice(-1), { canonical_evidence_status: canonicalEvidence?.status ?? null, code: canonicalEvidence?.code ?? null }),
+  ];
+  return {
+    schema: C5_FIRST_USE_ASSESSMENT_SCHEMA,
+    scope: "restricted_internal_use_first_use",
+    separate_from_scenario_verdicts: true,
+    status: criteria.every((item) => item.status === "met") ? "met" as const : "gap" as const,
+    criteria,
+    utterances,
+    semantic_adaptivity: "coordinator_assessment_required" as const,
+    not_assessed: ["recognition_accuracy", "semantic_adaptivity", "acoustic_quality", "all_chunk_output_certification"],
+  };
 }
 
 function exactProductInputChain(events: import("./domain.js").LabEvent[], operation: import("./domain.js").OperationRecord): boolean {
@@ -3652,53 +4815,7 @@ export function evaluateScenarioAssertions(run: RunRecord, events: import("./dom
       break;
     }
     case "V-O01": {
-      const received = productByKind("audio.output.received");
-      const providerChunks = productByKind("audio.output.provider_chunk");
-      const playback = ["audio.output.scheduled", "audio.output.started", "audio.output.completed"].flatMap(productByKind);
-      const legs = productByKind("audio.output.leg_receipt");
-      const chains = legs.map((legEvent) => {
-        const leg = legEvent.payload.receipt as Record<string, unknown> | undefined;
-        const realizationId = typeof leg?.realizationId === "string" ? leg.realizationId : null;
-        const receipts = playback.filter((event) => (event.payload.receipt as Record<string, unknown> | undefined)?.realizationId === realizationId);
-        const scheduled = receipts.filter((event) => (event.payload.receipt as Record<string, unknown> | undefined)?.phase === "scheduled");
-        const started = receipts.filter((event) => (event.payload.receipt as Record<string, unknown> | undefined)?.phase === "started");
-        const completed = receipts.filter((event) => (event.payload.receipt as Record<string, unknown> | undefined)?.phase === "completed");
-        const terminal = completed[0]?.payload.receipt as Record<string, unknown> | undefined;
-        const receivedEvent = received.find((event) => {
-          const diagnostic = event.payload.diagnostic as Record<string, unknown> | undefined;
-          return diagnostic?.providerReceiveSequence === terminal?.providerReceiveSequence
-            && diagnostic?.providerConnectionEpoch === terminal?.providerConnectionEpoch
-            && diagnostic?.playbackGeneration === terminal?.playbackGeneration
-            && diagnostic?.relayCorrelationId === terminal?.relayCorrelationId
-            && diagnostic?.providerRelaySequence === terminal?.providerRelaySequence
-            && diagnostic?.providerReceivedAt === terminal?.providerReceivedAt
-            && diagnostic?.responseId === terminal?.responseId
-            && diagnostic?.providerEventId === terminal?.providerEventId;
-        });
-        const chunkEvent = providerChunks.find((event) => {
-          const diagnostic = event.payload.diagnostic as Record<string, unknown> | undefined;
-          return diagnostic?.providerReceiveSequence === terminal?.providerReceiveSequence
-            && diagnostic?.providerConnectionEpoch === terminal?.providerConnectionEpoch
-            && diagnostic?.playbackGeneration === terminal?.playbackGeneration
-            && diagnostic?.relayCorrelationId === terminal?.relayCorrelationId
-            && diagnostic?.providerRelaySequence === terminal?.providerRelaySequence
-            && diagnostic?.providerReceivedAt === terminal?.providerReceivedAt
-            && diagnostic?.chunkIndex === terminal?.chunkIndex
-            && diagnostic?.chunksInEvent === terminal?.chunksInEvent
-            && diagnostic?.chunkHash === terminal?.chunkHash
-            && diagnostic?.byteLength === terminal?.byteLength
-            && diagnostic?.scheduled === true && diagnostic?.dropReason === null
-            && /^[a-f0-9]{64}$/.test(String(diagnostic?.chunkHash));
-        });
-        const exact = leg?.schema === "sophia_gemini_output_leg_v1" && leg.status === "verified" && leg.completionPhase === "completed"
-          && /^[a-f0-9]{64}$/.test(String(leg.monitorDigestSha256)) && Number(leg.monitorFrameCount) > 0 && Number(leg.monitorNonSilentFrameCount) > 0 && leg.rawAudioExcluded === true
-          && scheduled.length === 1 && started.length === 1 && completed.length === 1 && receivedEvent !== undefined && chunkEvent !== undefined
-          && typeof terminal?.responseId === "string" && terminal.responseId.length > 0
-          && leg.providerChunkFingerprint === terminal?.chunkHash && leg.providerConnectionEpoch === terminal?.providerConnectionEpoch && leg.playbackGeneration === terminal?.playbackGeneration
-          && receivedEvent.seq < chunkEvent.seq && chunkEvent.seq < scheduled[0]!.seq && scheduled[0]!.seq < started[0]!.seq && started[0]!.seq < completed[0]!.seq && completed[0]!.seq < legEvent.seq
-          && typeof leg.scheduledAt === "string" && typeof leg.completedAt === "string" && Number(leg.monitorDurationMs) >= 0 && Number(terminal?.durationSeconds) > 0;
-        return { exact, realizationId, fingerprint: leg?.providerChunkFingerprint, receivedSeq: receivedEvent?.seq ?? null, chunkSeq: chunkEvent?.seq ?? null, events: [...(receivedEvent ? [receivedEvent] : []), ...(chunkEvent ? [chunkEvent] : []), ...receipts, legEvent] };
-      });
+      const { utteranceOperations, interactions, received, providerChunks, playback, chains } = deriveOutputChains(run, productEvents, operations);
       const scheduledReceipts = playback.filter((event) => (event.payload.receipt as Record<string, unknown> | undefined)?.phase === "scheduled");
       const startedReceipts = playback.filter((event) => (event.payload.receipt as Record<string, unknown> | undefined)?.phase === "started");
       const completedReceipts = playback.filter((event) => (event.payload.receipt as Record<string, unknown> | undefined)?.phase === "completed");
@@ -3718,12 +4835,16 @@ export function evaluateScenarioAssertions(run: RunRecord, events: import("./dom
         const indexes = group.map((event) => Number((event.payload.diagnostic as Record<string, unknown> | undefined)?.chunkIndex)).sort((left, right) => left - right);
         return Number.isSafeInteger(count) && count > 0 && group.length === count
           && indexes.every((value, index) => value === index)
-          && typeof aggregate?.responseId === "string" && aggregate.responseId.length > 0;
+          && typeof aggregate?.relayCorrelationId === "string" && aggregate.relayCorrelationId.length > 0;
       });
+      // Every non-silent utterance must own exactly one interaction and at
+      // least one exact audible chain bound to it.
+      const utterancesCovered = interactions.valid && utteranceOperations.every((operation) => chains.some((chain) => chain.exact && chain.operationId === operation.id));
       const exactNaturalChains = chains.length > 0 && chains.every((chain) => chain.exact)
         && receivedCoverage && providerChunks.length === chains.length && scheduledReceipts.length === chains.length && startedReceipts.length === chains.length && completedReceipts.length === chains.length && playback.length === chains.length * 3
         && new Set(chains.map((chain) => chain.realizationId)).size === chains.length
-        && new Set(chains.map((chain) => chain.fingerprint)).size === chains.length
+        && utterancesCovered
+        && new Set(chains.map((chain) => chain.identity)).size === chains.length && chains.every((chain) => chain.identity !== null)
         && new Set(chains.map((chain) => chain.chunkSeq)).size === chains.length
         && completedRealizations.length === chains.length && new Set(completedRealizations).size === completedRealizations.length
         && new Set(scheduledReceipts.map((event) => (event.payload.receipt as Record<string, unknown> | undefined)?.realizationId)).size === chains.length
@@ -4623,6 +5744,97 @@ export function isExactBoundProductEvent(run: RunRecord, event: Pick<import("./d
     && record.provider_expires_at === run.expiresAt.toISOString()
     && record.cleanup_obligation_id_sha256 === sha256(run.cleanupObligationId);
 }
+type CapturedEvent = Omit<import("./domain.js").LabEvent, "runId" | "seq" | "at">;
+
+/**
+ * The appends that persisting `events` makes, in order: each event's governed
+ * payload at its capture time, stopping after a product input fault (kept)
+ * or before a product event whose run binding does not match (refused).
+ * `failure` is what persisting then throws, once that prefix is durable.
+ */
+function captureAppendPlan(boundRun: RunRecord, events: CapturedEvent[]): { inputs: EventAppendInput[]; failure: unknown | null } {
+  const inputs: EventAppendInput[] = [];
+  for (const event of events) {
+    const provenance = event.payload._capture_provenance as Record<string, unknown> | undefined;
+    const rawObservedAt = provenance?.recorded_at ?? provenance?.observed_at;
+    const parsed = typeof rawObservedAt === "string" ? new Date(rawObservedAt) : new Date();
+    let appBinding: Record<string, unknown> | null;
+    try { appBinding = strictProductRunBinding(event.source, event.payload, boundRun); }
+    catch (error) { return { inputs, failure: error }; }
+    inputs.push({ kind: event.kind, source: event.source, payload: governedDriverEventPayload(boundRun, event), ...(event.dedupeKey ? { dedupeKey: event.dedupeKey } : {}), observedAt: Number.isNaN(parsed.getTime()) ? new Date() : parsed });
+    if (event.source === "product" && event.kind === "audio.input.product_fault" && appBinding !== null) {
+      const receipt = event.payload.receipt as Record<string, unknown> | undefined;
+      return { inputs, failure: new VoiceLabError(labError("PRODUCT_INPUT_EVIDENCE_FAULT", "The product rejected or could not unambiguously correlate the governed synthetic input operation.", "harness", false, { fault_code: typeof receipt?.code === "string" ? receipt.code : "unknown" })) };
+    }
+  }
+  return { inputs, failure: null };
+}
+
+type CaptureJoinState = { -readonly [K in keyof Required<CaptureJoinPatch>]: Required<CaptureJoinPatch>[K] };
+type CaptureJoinRule = (state: CaptureJoinState, payload: Record<string, unknown>) => void;
+const CAPTURE_JOIN_FIELDS = ["canonicalSessionId", "threadId", "providerSessionId", "traceId", "providerEpoch", "turnId"] as const;
+
+/** `value[key]` when both are objects, else an empty record. */
+function objectField(value: unknown, key: string): Record<string, unknown> {
+  const field = value && typeof value === "object" ? (value as Record<string, unknown>)[key] : undefined;
+  return field && typeof field === "object" ? field as Record<string, unknown> : {};
+}
+
+/**
+ * The join rules keyed by captured event kind. The kind comes from the
+ * browser, so the table is a Map: a kind that is no rule, including a member
+ * of Object.prototype such as `__proto__`, `constructor` or `toString`,
+ * finds nothing and the event is ignored by the joins.
+ */
+const CAPTURE_JOIN_RULES: ReadonlyMap<string, CaptureJoinRule> = new Map<string, CaptureJoinRule>([
+  ["session.credentials_received", (state, payload) => {
+    state.canonicalSessionId = stableJoin("canonical_session_id", state.canonicalSessionId, exactString(payload.sessionId));
+    state.providerSessionId = stableJoin("provider_session_id", state.providerSessionId, exactString(payload.voiceAgentSessionId));
+    state.traceId = stableJoin("trace_id", state.traceId, exactString(payload.langsmithTraceId));
+    state.providerEpoch = monotonicEpoch(state.providerEpoch, exactPositiveProviderEpoch(payload.providerConnectionEpoch));
+  }],
+  ["provider.connection_epoch", (state, payload) => {
+    const receipt = objectField(payload, "receipt");
+    state.canonicalSessionId = stableJoin("canonical_session_id", state.canonicalSessionId, exactString(payload.sessionId));
+    state.providerSessionId = stableJoin("provider_session_id", state.providerSessionId, exactString(payload.voiceAgentSessionId));
+    state.traceId = stableJoin("trace_id", state.traceId, exactString(receipt.langsmithTraceId));
+    state.providerEpoch = monotonicEpoch(state.providerEpoch, exactPositiveProviderEpoch(receipt.providerConnectionEpoch));
+  }],
+  ["capture.snapshot", (state, payload) => {
+    const session = objectField(objectField(payload, "snapshot"), "session");
+    state.canonicalSessionId = stableJoin("canonical_session_id", state.canonicalSessionId, exactString(session.sessionId));
+    state.threadId = stableJoin("thread_id", state.threadId, exactString(session.threadId));
+  }],
+]);
+
+const joinCanonicalFinalization: CaptureJoinRule = (state, payload) => {
+  const transcript = objectField(objectField(payload, "receipt"), "canonical_transcript");
+  state.canonicalSessionId = stableJoin("canonical_session_id", state.canonicalSessionId, exactString(transcript.session_id));
+  state.threadId = stableJoin("thread_id", state.threadId, exactString(transcript.thread_id));
+};
+
+const joinProductTurn: CaptureJoinRule = (state, payload) => {
+  state.turnId = productTurnId(objectField(payload, "data")) ?? state.turnId;
+};
+
+function captureJoinRule(event: CapturedEvent): CaptureJoinRule | null {
+  if (event.source === "canonical" && event.kind === "session.finalized") return joinCanonicalFinalization;
+  if (event.kind.endsWith(".sophia.turn")) return joinProductTurn;
+  return CAPTURE_JOIN_RULES.get(event.kind) ?? null;
+}
+
+/** The run identifiers `events` join, given the run as it now stands, or null when nothing changes. */
+function captureJoinPatch(run: RunRecord, boundRun: RunRecord, events: CapturedEvent[]): CaptureJoinPatch | null {
+  const state: CaptureJoinState = { canonicalSessionId: run.canonicalSessionId, threadId: run.threadId, providerSessionId: run.providerSessionId, traceId: run.traceId, providerEpoch: run.providerEpoch, turnId: run.turnId };
+  for (const event of events) {
+    // Owning product joins are usable only when the original capture envelope
+    // carried the exact app-authored authenticated synthetic binding.
+    if (event.source === "product" && strictProductRunBinding(event.source, event.payload, boundRun) === null) continue;
+    captureJoinRule(event)?.(state, event.payload as Record<string, unknown>);
+  }
+  return CAPTURE_JOIN_FIELDS.some((field) => state[field] !== run[field]) ? state : null;
+}
+
 function governedDriverEventPayload(run: RunRecord, event: { kind: string; source: string; payload: Record<string, unknown> }): Record<string, unknown> {
   const appBinding = strictProductRunBinding(event.source, event.payload, run);
   return preserveAuthCleanupBooleans(event, redact({ ...event.payload,

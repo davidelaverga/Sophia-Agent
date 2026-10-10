@@ -26,6 +26,458 @@ Every merged PR appends an entry here. This file is the team's accumulating inst
 ## Log
 <!-- Append new entries below this line -->
 
+## 2026-10-09 · [voice-lab · security P1: a Studio withdrawal owns a decision only at its exact revision] · PR #168
+**Author:** Claude · **Track:** voice · **Spec:** root's independent security P1 at 0955ee8 on PR #168 ([comment](https://github.com/davidelaverga/Sophia-Agent/pull/168#issuecomment-6090735518)); root's full packet, test and refactor acceptance ([comment](https://github.com/davidelaverga/Sophia-Agent/pull/168#issuecomment-6090730638)). Commits 36f2f3e (fix and tests) and 35b7feb (README)
+
+### What Changed
+- **The defect.** The Studio driver's withdrawal action read the mission to decide which previewed decisions were the run's own, but kept only their ids. Root's reproduction (real pinned Chromium 1234, the actual driver, a local fixture):
+  - The principal's own undecided voice proposal D is at revision 1 when the mission is read.
+  - Before the preview, another member accepts D. The product gives it revision 2, decided by OTHER (0020).
+  - The preview names D@2, the id still matched, and the driver posted the signed, current preview. The product rightly commits a valid current preview (0018), so the other member's accepted decision was erased.
+  - The product's staleness check guards only changes after the preview, never the earlier ownership read.
+- **The fix (36f2f3e, `src/studio-g7/studio-driver.ts`).** The signed-preview semantics and the own-decision rule itself are unchanged, and nothing else is relaxed.
+  - A decision is the run's own only at its exact `{id, revision}`. `studioWithdrawalOwnScope` keeps each own decision's revision, and `studioWithdrawalForeign` counts a previewed decision as foreign unless it is own at exactly that revision.
+  - If a previewed decision the read held as own carries another revision (`studioWithdrawalRevisionChanges`), one bounded fresh mission read decides. The withdrawal is sent only if that read shows the decision is the run's own at exactly the previewed revision. Otherwise nothing is sent (`withdrawal_cascade_not_own`); an unavailable fresh read sends nothing either (`recheck_mission_<reason>`).
+- **Tests (`test/studio-g7-chromium.test.ts`).** They run the actual driver against the local fake Studio, in the **substitute** Chromium 1194 through a shim, because the pinned 1234 is absent here.
+  - The fake Studio gains three hooks: on the preview GET before its cascade is computed, on the withdrawal POST before the staleness check, and on each mission read, with a counter.
+  - **The race (root's sequence):** at the preview GET, another member accepts D. Result: no POST, D intact, the note current, and exactly one fresh read.
+  - **Positive control:** the own undecided D at the read revision is still withdrawn, with no fresh read.
+  - **Own acceptance between read and preview:** the principal's own acceptance in between is confirmed by the fresh read, and D is withdrawn at that exact revision.
+  - **Another revision on the fresh read:** a fresh read that finds yet another revision (D@3, own again) sends nothing.
+  - **Change after the preview:** still refused by the product's staleness check (409 `stale_revision`).
+  - **Foreign cascades:** the six existing foreign-cascade controls are unchanged and pass.
+- **README:** the withdrawal paragraph now states the exact-revision rule and the one bounded fresh read. The plugin's `tool-contracts.md` states the rule without revisions; it is untouched and still accurate.
+
+### What We Learned
+- **An ownership read and a signed preview describe two different moments.** Any identity check that bridges them must carry the version, not just the id. The product's staleness check covers only what happens after the preview.
+- **Evidence (`lab-author-logs-r13`; Node v22.22.0, pnpm 10.26.2, checked per run; one file per invocation, each with its own timeout):**
+  - Fail-before: the new tests against 0955ee8's source fail 3 of 40, and the race commits.
+  - After: 40/40. driver 46/46, wiring 54/54, evaluate 76/76 (product shape included), contract 17/17, typecheck exit 0.
+  - Mutants, each killed:
+    - mA, ownership by id only: killed by the race, own-acceptance and another-revision tests;
+    - mB, the fresh check skipped: killed by the own-acceptance test, and by the fresh-read count in the race and another-revision tests;
+    - mC, the revision ignored in the fresh check: killed by the another-revision test.
+  - CI-exact Sentrux gate at 36f2f3e: exit 0, no degradation.
+  - full-env at 36f2f3e: exit 0, 1 378/1 378 in 112 files (the 1 373 before plus the 5 new tests). The gates run again at this entry's commit, the final head.
+- **Databases:** only this writer's exactly named databases on 55434. The product-shape test creates and drops its own. Roles and every other object were read only.
+- **Root's scoped acceptance of the repair** at the exact, unpublished 36f2f3e ([PR #168 comment](https://github.com/davidelaverga/Sophia-Agent/pull/168#issuecomment-6091065339)). It accepts **only** root's finding 6090735518, at 36f2f3e. Root checked, on the actual pinned Chromium 1234:
+  - Root's original withdrawal-race fixture, unchanged except for the source prefix, now passes 2 of 2. At 0955ee8 it was 1 pass and 1 fail.
+  - Four extra root cases pass: exact own; a fresh read at a different revision; the fresh read unavailable; mixed owners.
+  - Root's candidate run: Chromium 40, driver 46, wiring 54 and contract 17, a total of 157 pass, 0 fail, 0 skip, in 235.07 s. Typecheck exit 0.
+  - Two independent mutants were killed (expected POST count 0, got 1) in a separate checkout, which was then restored; the candidate is clean.
+  - The packet's 26 hashes and both bundles verified.
+- **Chromium:** the author's runs used the **substitute** chromium-1194 (141.0.7390.37) through a scratch shim, because the pinned 1234 is absent here. Root's runs used the actual pinned 1234.
+- **Correction for the records:** labrev10 is **not** pending. Root's labrev10 extraction review already accepted its scoped source delta ([PR #168 comment](https://github.com/davidelaverga/Sophia-Agent/pull/168#issuecomment-6090730638)), and that verdict stands. The r12 entries below list labrev10 as pending; that wording is stale and is left as written.
+- **The earlier full-env pass:** the 1 373/1 373 full-env is evidence for 0955ee8, not for 36f2f3e.
+- **Pending, explicitly:**
+  - the final records, full-env and CI-exact gates at the final head;
+  - the consolidated security review;
+  - base 151;
+  - the acceptance gates;
+  - publication, merge and production.
+
+### CLAUDE.md Updates
+- None
+
+### Skills Created / Modified
+- None
+
+### GEPA Log Entry
+- N/A
+
+## 2026-10-09 · [voice-lab · root's scoped acceptances of the four r12 commits] · PR #168
+**Author:** Claude · **Track:** voice · **Spec:** records for the r12 entry below (commit d822756, left as written); root's reviews on PR #168
+
+### What Changed
+- No code, test or plugin change: this entry records root's scoped reviews of the four r12 commits. Each accepts its commit within its own scope only.
+- **d8d0b4e, the catalogue fix:** accepted ([PR #168 comment](https://github.com/davidelaverga/Sophia-Agent/pull/168#issuecomment-6090134075)).
+- **cc9f732, security setup and tests:** accepted ([PR #168 comment](https://github.com/davidelaverga/Sophia-Agent/pull/168#issuecomment-6090248261)), as already recorded in the r12 entry. Root's security comment also discloses that root corrected its initial two-part test-token redactor before sharing.
+- **348be3f, the three-file P01 fixture and test repair:** accepted ([PR #168 comment](https://github.com/davidelaverga/Sophia-Agent/pull/168#issuecomment-6090363946)). Root ran it on its own PostgreSQL 17.6 cluster, recreating an exactly named `voice_lab_test` database for each run:
+  - **Before:** the exact parent's fixtures reproduced 18 pass and 2 fail: first the original order drift, then CONCURRENCY_LIMIT.
+  - **After:** the candidate passes 20/20, and the three related worker files 13/13.
+  - **Fixture mutants:** restoring either fixture leak on its own makes both P01 tests fail their explicit precondition.
+  - **Worker mutants:** removing the terminal cancellation, or the reserved-state guard, kills the matching new worker test.
+  - **Install and typecheck:** a frozen install and the typecheck pass.
+  - **Cleanup:** all source restored, the candidate clean, the database dropped, and root's own PostgreSQL stopped and verified.
+  - **Setup disclosure:** root's first `initdb` attempts failed before any server or test ran, because older tooling lacked template and timezone resources. The successful run used a complete existing PostgreSQL 17.6 native tree, copied read-only into new root scratch. No shared cluster was affected.
+- **41ced42, recovery.md, docs only:** accepted ([PR #168 comment](https://github.com/davidelaverga/Sophia-Agent/pull/168#issuecomment-6090341790)). The new plugin hash `dcb2919326a1a5e719f59db0e7f0aae8f0e94f3206590bc94a0d5cc004de4d15` passes its check, the old one fails, and nothing was activated.
+
+### What We Learned
+- **Information, not a gate.**
+  - Root's strict whole-stack comparison from the original to the final b31d7b8 ([PR #168 comment](https://github.com/davidelaverga/Sophia-Agent/pull/168#issuecomment-6090086080)) found 218 evaluator outputs and 223 certification outputs equal. Root states it is not a CI gate.
+  - Root has seen d822756 and the author's full-env at 41ced42 (1 373/1 373 on the substitute Chromium).
+- **The author's checks at d822756:**
+  - CI-exact Sentrux gate exit 0 (no degradation; god files 27 → 27, cycles 7 → 7, quality 4272 → 4280, coupling 0.04 → 0.03);
+  - typecheck exit 0;
+  - full-env exit 0, 1 373/1 373 in 112 files, on the substitute chromium-1194 through the scratch shim.
+
+  The final gates run again at this entry's commit, which is the final head.
+- **Pending, explicitly:** the final packet; the consolidated security review and labrev10; the independent final and published-head gates; publication, merge and production. The original Lab PR threads stay open until a reviewed publication.
+
+### CLAUDE.md Updates
+- None
+
+### Skills Created / Modified
+- None
+
+### GEPA Log Entry
+- N/A
+
+## 2026-10-09 · [voice-lab · the four full-env failures repaired, and the plugin's recovery notes] · PR #168
+**Author:** Claude · **Track:** voice · **Spec:** root's final review of b31d7b8 on PR #168 ([comment](https://github.com/davidelaverga/Sophia-Agent/pull/168#issuecomment-6089907815)): diagnose and repair the 4 full-env failures in additive commits; update the plugin's recovery.md (docs only). Commits d8d0b4e (the catalogue: one code in `src/browser-driver.ts`, one test assertion), cc9f732 (a test and the README), 348be3f (tests only), 41ced42 (recovery.md only)
+
+### What Changed
+- **Root's review of b31d7b8** accepted it within scope as documentation only, with the packet fully verified. It is not a final PR approval, and the 4 full-env failures were not waived by the earlier r9 evidence. This entry records their diagnosis and repair.
+- Each failure was captured before the fix, at b31d7b8, one file per invocation with its own timeout. Each was then classified, fixed with a fail-before and an after, and its assertions were kept.
+- **1. `normal-provider-disconnect` › "catalogues every Voice Lab error code…" (d8d0b4e). Catalogue drift.**
+  - Since the base 6aede7d, the gateway returns `voice_lab_canonical_transcript_unavailable` as the 503 `detail.code` of `routers/sophia.py` (`_read_exact_synthetic_messages`). The Lab's finite C046 catalogue lacked it.
+  - `PRODUCT_ERROR_CODES` gains exactly that code. A new assertion pins the gateway's `{detail: {code}}` shape.
+  - The catalogue test is unchanged and still exhaustive.
+  - Fail-before against b31d7b8's `browser-driver.ts`: 2 of 77 fail. After: 77/77.
+- **2. `security` › "golden HMAC vectors accepted by the actual Python Gateway and Voice verifiers" (cc9f732). Environment and setup.**
+  - The interpreters `backend/.venv/bin/python` and `voice/.venv/bin/python` did not exist, so `spawnSync` returned status null.
+  - Both environments were created, untracked, with uv 0.8.17 and Python 3.12.3. The two installs ran `--offline` from the local cache (no network); `uv venv` used the installed interpreter. `backend/uv.lock` and every tracked file are unchanged. The commands:
+    - `(cd backend && uv sync --group dev)`;
+    - `uv venv voice/.venv --python 3.12`;
+    - `uv pip install --python voice/.venv/bin/python -r voice/requirements-dev.txt`.
+  - With them, the test passes against the real verifiers.
+  - The test now fails loudly, never skips, naming a missing interpreter and the command that creates it.
+  - New negative controls: claims signed with another secret must be refused by both verifiers (`voice_lab_capability_invalid_signature`). Mutants s1 and s2, which skip each verifier's signature check, are killed.
+  - The README documents the setup.
+- **3. `postgres-integration` P01 ×2 (348be3f). Contamination by fixtures the Lab's tests own, not a defect in order, admission or concurrency.**
+  - On fresh, exactly named databases, both P01 tests pass alone. Bisection finds the two earlier tests that break them:
+    - "persists an invalid input-delivery verdict…";
+    - `verifyRecoveredLeaseRelease`.
+  - Each leaves a ledger-only run with a queued start it never retires. `claimNextOperation` hands out any queued start, oldest first, whatever its run's state; this is the same in both ledgers and is unchanged. The P01 proof's settle claimed the leftover ("collector operation order drifted"). The second test's CONCURRENCY_LIMIT was the first test's aborted run.
+  - Production never leaves such a start claimable:
+    - A run turns terminal only while its own claimed operation executes, or through `#terminalizeFailure`, which first cancels every pending operation: expiry, kill switch, graceful shutdown, recovery after an earlier boot.
+    - The D02 shutdown also cancels first.
+    - The certification-deadline transition starts from `pending_external_evidence`, after the start.
+    - The reserved run and its start are created in one transaction.
+    - A start claimed late for a run past `reserved` is refused before any lease or driver start (BROWSER_SESSION_LOST).
+  - The fix is in the tests only:
+    - Both fixtures retire their own start (TEST_FIXTURE_COMPLETE), as six others already do.
+    - Each P01 test gets an explicit precondition: no earlier claimable operation and no active run. Mutants f1 and f2, which remove either teardown, fail on it and name the rows.
+    - `test/stray-start-operation.test.ts` pins the production half on the worker's real path. Mutants p1 (no cancellation on terminalization) and p2 (no reserved check) are killed.
+  - Fail-before at b31d7b8: 2 of 20. After: 20/20.
+- **4. Plugin `recovery.md` (41ced42), documentation only, authorized by root.** It gains two paragraphs, one per residual:
+  - leases from an earlier boot (before 7f22c29, heartbeats that name no boot, non-Studio leases);
+  - logouts owed for sessions issued but refused (the token lives only in process memory).
+
+  No other plugin file was touched, and nothing was installed, activated, updated, granted, hosted, provider-called or spent. The plugin package hash moves from `cedf70ccaae57ee6e5ca7cb36d5c6e4ccf98c368354b0dd003d2201ff407ae9b` to `dcb2919326a1a5e719f59db0e7f0aae8f0e94f3206590bc94a0d5cc004de4d15`, which the read-only `--check` confirms. A deployment that pins the old hash needs the new one.
+
+### What We Learned
+- **A shared integration ledger needs every fixture to retire its own work.** A queued start left by one test is claimed, correctly, by the next test that claims work. A precondition that names the leftover beats an assertion failing deep inside the next proof.
+- **Before calling it contamination, prove production cannot reach the same state.** Here that meant listing every terminal transition, and pinning both the retirement and the late refusal on the worker's real path.
+- **A cross-language test that runs real interpreters must say which environment is missing**, and must show the verifiers can refuse as well as accept.
+- **Records:**
+  - The r12 summary header recorded `pnpm 11.7.0`, because it was measured in the shell's working directory outside the Lab. Every vitest run used corepack's pnpm 10.26.2 from `tools/sophia-voice-lab`; the runner now checks this before each run.
+  - A deliberately failing security run printed a test-only capability token (test constant secret, 120 s lifetime). That log was redacted and the original kept out of every packet.
+  - The main PostgreSQL database must be named exactly `voice_lab_test`. A first before-run under another name failed on that, and the log is kept.
+- **Validation at 41ced42, the last source head** (Node v22.22.0, pnpm 10.26.2, PostgreSQL 127.0.0.1:55434 with only this writer's own named databases): full-env exit 0: 1 373 tests passed in 112 files, 0 failed, 0 skipped. The product-shape run used the product roles already present on 55434; it never created, changed or dropped them. Chromium is the **substitute** chromium-1194 (141.0.7390.37) through a scratch shim, because the pinned chromium-1234 is absent here.
+- **Root's scoped review of cc9f732** accepted it for its two-file setup and test repair ([PR #168 comment](https://github.com/davidelaverga/Sophia-Agent/pull/168#issuecomment-6090248261)). Root, independently:
+  - verified the packet: 40 checksums, both bundles and the exact tree;
+  - used Node 22.22, pnpm 10.26.2, uv 0.8.17 and Python 3.12.14 (the author's runs used Python 3.12.3);
+  - created the environments as documented: backend `uv sync --group dev`, plus the voice environment;
+  - ran the security file 9/9 and the typecheck across the whole Lab, exit 0;
+  - with either the backend or the voice environment missing, saw the test fail loudly and name the setup;
+  - removed either verifier's signature check: the exact parent's golden test still passes with it, while the candidate's fails both mutants;
+  - narrowed its first mutant selector, which had stopped before mutating anything because another verifier shares that condition, to the exact capability-error block, and resumed only the mutants not yet run;
+  - restored its source and environments in `finally`, leaving its checkout clean;
+  - redacted the synthetic capability tokens in its own failure logs before sharing them.
+
+  That reproduces the mechanism. The classification of the author's redacted log stays the author's.
+- **Pending, explicitly:** labrev10 (the independent review of the refactor), the wider security review, root's review of d8d0b4e, 348be3f, 41ced42 and this entry, and the final published-head gates, publication, merge and production choices. Nothing here approves publication, a base retarget, a merge, any plugin action or production.
+
+### CLAUDE.md Updates
+- None
+
+### Skills Created / Modified
+- `plugins/sophia-voice-lab/skills/autonomous-voice-dogfood/references/recovery.md`: two residual paragraphs (documentation only)
+
+### GEPA Log Entry
+- N/A
+
+## 2026-10-09 · [voice-lab · Studio G7 Codex P1/P2, and the Sentrux gate back to its base] · PR #168
+**Author:** Claude · **Track:** voice · **Spec:** pack 03 G7; Codex review on PR #168 (r4233383200 P1, r4233383211 P2); Sentrux v0.5.7 architecture gate against base 6aede7d. Commits 7f22c29 (P1), 1faa5aa (P2), 4e92063, af4aad6, 3d6a3b9, 1d31b6f, 9e166aa (pure refactors), 752a801 and f5b2ae0 (bound tests only)
+
+### What Changed
+- **Codex P1 (7f22c29): a worker restarted under the same stable worker id no longer takes its earlier boot's lease for its own.**
+  - Before a Studio lease exists, the worker records its random per-process boot (`harness.browser_lease_owner_boot`, schema `sophia_voice_lab_studio_g7_lease_owner_boot_v1`, hashes only). Its heartbeat attestation carries `worker_boot_id_sha256`. Both changes are additive.
+  - A lease recorded under another boot goes through the dead-owner release: sign-out after expiry, the JWT lifetime, a fresh verification, with fencing intact. The release records `owner_earlier_boot_of_this_worker`.
+  - In both ledgers, only a heartbeat from the lease's own boot keeps the owner alive. A heartbeat from a later boot under the same id does not.
+  - Tests: `test/studio-g7-lease-boot.test.ts` (5) and two PostgreSQL tests.
+    - Fail-before against the 3794c84 sources: 3 of the 5 fail, and both PostgreSQL tests fail. The 2 that pass are positive controls: the same boot keeps its own lease, and a foreign live lease is not taken.
+    - Mutants m11a–m11f were each killed. They are: boot id ignored, prior boot treated as local, takeover without cleanup, boot record omitted, own boot not local, and unattested heartbeat not live. Each ran twice: in the worktree on 3794c84, and again at the committed 1faa5aa.
+- **Codex P2 (1faa5aa): a session that is issued and then refused still owes its logout.**
+  - `passwordGrant` hands each issued session to the driver (`onIssued`) before any validation can refuse it. The tokens are held in memory only: never logged, persisted or put in an event.
+  - The refused session's local logout is retried with a bounded backoff of 0, 500 and 1 000 ms.
+  - This fails closed. Until the logout is confirmed, the run is never certified `no_session_issued` or signed out (basis `issued_session_unrevoked`), and its cleanup stays incomplete.
+  - A confirmed global sign-out discharges only a refused session of the principal itself. The evidence refresh revokes a refused session locally as well.
+  - Tests: 6 driver tests and 1 contract test.
+    - Fail-before against the 3794c84 sources: 4 of the 6 driver tests and the contract test fail. The 2 that pass are positive controls: a credential refused before any session is issued, and the normal path.
+    - Mutants m11g–m11l were each killed. They are: obligation recorded after validation, no retry, abort certifies success, refused branch dropped, global sign-out not downgraded, and any user discharged.
+- **The Sentrux gate is back to its base.** All of these are pure refactors into ordinary named functions, each at or under cc 15, with nothing hidden. Thresholds, exclusions, the baseline, `rules.toml` and the workflow are untouched.
+  - God files went from 30 to 27 (4e92063):
+    - the service's Studio surface moved to `studio-g7/service-surface.ts`;
+    - `genericOwnerDispatch` moved verbatim to `generic-owner-control.ts`. It is the base's offender (cc 22), still counted;
+    - the presence constants moved to `studio-api.ts`;
+    - the wiring test's first describe moved to `studio-g7-service-wiring.test.ts`.
+  - Complex functions went from 728 to 718:
+    - af4aad6: the seven small ones (the dead-owner decision and its cleanup, the cleanup proof, the exchange-calls projection, the session-body validation, `studioAction`, `createOperation`);
+    - 3d6a3b9: `certifyStudioVoiceSteps` (in `calls-certification.ts`);
+    - 1d31b6f: `evaluateStudioG7Run`;
+    - 9e166aa: the test builder `g7Episode`.
+  - The CI comparison, exactly: `gate --save` at 6aede7d, its baseline copied into a clean checkout of the candidate, then `gate .` and `check .`.
+    - Before, at 1faa5aa: gate exit 1. God files 27 → 30 and complex functions 718 → 728.
+    - After, at 9e166aa: gate exit 0, "No degradation detected". Quality 4272 → 4280, coupling 0.04 → 0.03, cycles 7 → 7, god files 27 → 27.
+    - `check .` lists the same findings as at 6aede7d. It exits 1 at both, on the pre-existing cycles, god files and layer rules.
+- **Bound tests only:**
+  - 752a801: `studio-g7-release-bounds.test.ts` (7) and `studio-g7-session-bounds.test.ts` (4);
+  - f5b2ae0: `studio-g7-evaluate-bounds.test.ts` (11).
+- **README:** P1 is in the dead-owner section. P2 is a new paragraph, "Refused sessions".
+- No plugin change: `plugins/` is untouched since 3794c84, and its `--check cedf70cc…` passes. The plugin's `recovery.md` is not updated (plugin files were out of scope). Toolchain: Node v22.22.0 and pnpm 10.26.2.
+
+### What We Learned
+- **Prove a pure refactor equivalent, then test the proof.**
+  - A corpus of 3 042 recorded (input, output) pairs was taken at 1faa5aa, over the six refactored decisions. It replays identically at every refactor head and at 9e166aa.
+  - A differential fuzz (50 000 exchange-call inputs, 20 000 session bodies) found no difference.
+  - Under a deterministic `randomUUID` and a frozen clock, `g7Episode` builds the same 139 episodes before and after. The 2 product-shape SQL builds are identical once the database-issued ids are renamed.
+- **The corpus is not exhaustive, and one check proved it.**
+  - Its sensitivity check caught three seeded mutants (o1–o3) but missed o4: the presence veto's `>=` turned `>`. No recorded input sits on that millisecond.
+  - Separately, two of the four seeded `g7Episode` mutants pass the test suite, but the episode comparison catches them.
+- **The suites reach numeric bounds only far from their edges.** Each bound got an off-by-one mutant. The records:
+  - b1–b7, the dead-owner decision's time and size bounds (b1 is o4): all survived the Studio suites (136/136 at 3d6a3b9). Each was killed by the release-bounds tests (752a801).
+  - v1–v6, the session-body bounds: all survived (63/63). Each was killed by the session-bounds tests (752a801).
+  - e01–e15, the evaluation's bounds:
+    - e06, e09, e10 and e13 were killed by the existing suites.
+    - e01–e05, e07, e08, e11, e12, e14 and e15 survived (130/130 at 1d31b6f). Each was killed by the evaluate-bounds tests (f5b2ae0).
+  - c1 and c2 were killed by the suites. c3 (`event.seq <= upper` → `<`) survives, and it is equivalent: `upper` is the seq of a calls-read event, never an observation's.
+  - Each bound test passes against the 1faa5aa and 3794c84 sources as well as at HEAD, so the bounds pin the behaviour from before the refactor.
+- **How Sentrux counts.**
+  - It counts `if`, loops, `catch`, `&&` and `||`, and a `switch` once. It does not count ternaries, `?.` or `??`.
+  - A closure counts both in its parent and on its own, so splitting a function means lifting its closures out too.
+  - A type-only import still counts toward fan-out.
+- **Residuals, not fixed here:**
+  - A lease acquired before 7f22c29 has no boot record, and a heartbeat that names no boot still counts. Either one proves no restart, so the earlier behaviour stands for such leases.
+  - Legacy (non-Studio) leases record no boot.
+  - A refused session's token lives only in the process's memory. A crash before its logout is confirmed loses the revoke material. After that, only a confirmed global sign-out of the principal discharges a refused session of its own; any other refused session lasts until its JWT lifetime ends.
+- **The author's validation at 9e166aa** (Node v22.22.0, pnpm 10.26.2, PostgreSQL 127.0.0.1:55434, logs in `lab-author-logs-r11`):
+  - typecheck exit 0.
+  - The Studio files with `SOPHIA_VOICE_LAB_REQUIRE_PRODUCT_SHAPE=1`, one file per invocation, each exit 0. That is 263 tests: the 241 of 1faa5aa (the 6 wiring tests now in their own file) plus the 22 bound tests.
+  - PostgreSQL Studio 25/25 and fence upgrade 6/6.
+  - full-env: only the 4 known failures (the catalogue code, golden HMAC, P01 ×2), 1 367 passed, 0 skipped.
+    - The first full-env run had no shim. Three Chromium files failed in `beforeAll` because the pinned chromium-1234 was absent; that is not a test result, and the log is kept.
+    - Those three files were then rerun one per invocation (1, 9 and 1 pass), and full-env again, through a scratch `PLAYWRIGHT_BROWSERS_PATH` shim.
+  - Chromium in all of these is a **substitute**: chromium-1194 (Chromium 141.0.7390.37), because the pinned chromium-1234 is absent here.
+  - Plugin `--check cedf70cc…` exit 0. A first attempt exited 127 because `uv` was not on the script's PATH, which is not a check result; that log is kept as it is.
+  - The Sentrux runs, the 3 042-pair corpus, the fuzz, the `g7Episode` comparison and all the mutant runs are the author's.
+- **Root's scoped reviews** (independent of the author's runs above):
+  - f5b2ae0, accepted within scope ([PR #168 comment](https://github.com/davidelaverga/Sophia-Agent/pull/168#issuecomment-6089331075)): all 15 bound mutants killed, the 11 new assertions passing against the actual evaluators at 1faa5aa and 3794c84, typecheck.
+  - 9e166aa, accepted within scope as the refactor ([PR #168 comment](https://github.com/davidelaverga/Sophia-Agent/pull/168#issuecomment-6089607942)):
+    - the whole one-file test-helper delta reviewed;
+    - 167 independent strict comparisons of the complete old and new `g7Episode` objects pass, including the running, queued and cancelled `editBefore` states the author's corpus never sampled;
+    - focused: 16 files, 300/300, zero skips, on the actual pinned Chromium 1234 (151.0.7922.34). Root's broader run was interrupted; root kept that original partial log and recovered only the missing focused stage;
+    - owned PostgreSQL 31 pass, plus 1 required product-shape run against product 46f22b90;
+    - typecheck of the whole Lab exit 0;
+    - all 46 packet hashes and both bundles verified.
+  - Earlier, root accepted 1faa5aa, 4e92063, af4aad6, 3d6a3b9, 752a801 and 1d31b6f, each within its own scope.
+  - None of this approves publication, a base retarget, a merge, any plugin action or production. The original Lab threads stay open until the fixes are published, and labrev10 (an independent review of the refactor) is pending.
+
+### CLAUDE.md Updates
+- None
+
+### Skills Created / Modified
+- None
+
+### GEPA Log Entry
+- N/A
+
+## 2026-10-09 · [voice-lab · Studio G7 labrev9 nit, and observations] · PR #TBD
+**Author:** Claude · **Track:** voice · **Spec:** pack 03 G7; independent review of cdba228..1ba1ab3 (labrev9: no P1/P2/P3, one nit); fix in 3ea24cf (tests and README only)
+
+### What Changed
+- **The settlement gate's turn wait is pinned from both sides.** Its `STUDIO_INPUT_TURN_WAIT_MS` constant is pinned to 5 000 ms.
+  - Each action after a lost turn is timed: at least the bound, and under 12 s. That leaves 7 s of margin for a loaded runner and stays 3 s under the gate's 15 s settlement deadline.
+  - Before this, the worker test asserted only a lower bound, so a wait raised to the deadline passed.
+  - Mutants m10a (the wait raised to 60 000 ms) and m10b (its own bound ignored) were each run twice: they survive at 7bbbf09 and are killed at 3ea24cf. All four raw logs are kept (`lab-author-logs-r10`); the runner now never overwrites.
+- **README:** the gate waits for an in-flight turn before an action or a voice step. End has no gate.
+- No source or plugin change. Toolchain: Node v22.22.0 and pnpm 10.26.2.
+
+### What We Learned
+- **A test that names a bound must assert both sides of it.** A lower bound alone lets the bound grow until a surrounding deadline catches it.
+- **Observations from the review, recorded without code changes:**
+  - **Output-only stream.** After the latest window's turn is lost, a later `output_reply` (or other output-only receipt) does not end the turn's "in flight" state. It ends only at the next input receipt or `session_closed`.
+    - Until then each hand-over keeps the certified create while that window's count stays unknown, and each action pays the 5 s gate.
+    - The run's own evaluation refuses the join.
+    - A tighter rule (any higher bridge seq ends "in flight") would need the scripted driver's late-turn order to match the product's: the turn sent before the reply.
+  - **The later-input clause is pinned only by an ordering the product cannot produce** (a turn delivered after a later window). With the product's in-order sender, it is effectively redundant: harmless, defensive code.
+  - **Before End there is no settlement gate.** The README now says so. The run's own evaluation checks every window anyway.
+  - **Replaced sessions.**
+    - A session replaced on the exchange after its room is lost restarts `windowSeq` at 1 while the seq continues. The hand-over then never certifies the create, `bridge.window_ordinals_unique` fails, and the product verdict is `fail`.
+    - A bridge process restart (the seq restarts too) was not probed.
+- **Records:** the labrev7 entry (a42067c) describes 2b8dbd8's broad mid-run rule, which cdba228 narrowed. The labrev8 entry describes the narrowed rule.
+- **Review state:** 3ea24cf is not yet reviewed.
+
+### CLAUDE.md Updates
+- None
+
+### Skills Created / Modified
+- None
+
+### GEPA Log Entry
+- N/A
+
+## 2026-10-09 · [voice-lab · Studio G7 labrev8 nit, and a correction to the labrev6 entry] · PR #TBD
+**Author:** Claude · **Track:** voice · **Spec:** pack 03 G7; independent review of 148f8fc..6cf354b (labrev8: the five labrev7 nits confirmed resolved, no P1/P2/P3, one nit, a step-level regression from 2b8dbd8); fix in cdba228, tests in 1ba1ab3
+
+### What Changed
+- **The mid-run turn tolerance now covers only the one window whose turn may still be in flight.** It applies only:
+  - in the worker's hand-over of the certified create, through the new evaluator option `midRun`;
+  - before `session_closed`;
+  - to the highest `windowSeq` seen, while its own `input_turn` has not arrived and no later input receipt has.
+- An earlier window without its turn is checked, mid-run too. A run's own evaluation never skips, even when `session_closed` never came. Before this fix, the review's NOCLOSE probe certified hold's stale-epoch call at the step level.
+- The settlement gate's 5 s bound is unchanged, so the latest window's turn is still tolerated mid-run (the review's GATE-NEVER and GATE-LATE shapes).
+- Each condition has a test that kills its removal (mutants m9a–m9e).
+- The plugin is unchanged (0.2.17+codex.20261009164559). Toolchain: Node v22.22.0 and pnpm 10.26.2 (corepack).
+
+### What We Learned
+- **Correction to the labrev6 entry below (148f8fc).** It describes the join's residual as "a fragment turn completed with exactly the step's call count". The bound is wider:
+  - a displaced window passes when it shows 1 to n calls, n being its new step's own listed calls;
+  - for a step with no command, it passes when it shows 0 to n.
+
+  The labrev7 entry states this correctly, and tests pin it (R1, R2).
+- **A tolerance justified by "this receipt may still be in flight" must be scoped to exactly what can be in flight.** That is the newest window, before anything later arrived, and only in a mid-run evaluation; never an earlier gap, and never a final evaluation.
+- **An evaluator cannot tell mid-run from a final evaluation of a run that lost its last receipts.** The caller has to say which it is (`midRun`), and the default must be the strict one.
+- **Every condition of a guard needs a test that kills its removal.** Three of five conditions here were covered only after the mutants showed they survived.
+- **Review state:** cdba228 and 1ba1ab3 are not yet reviewed.
+
+### CLAUDE.md Updates
+- None
+
+### Skills Created / Modified
+- None
+
+### GEPA Log Entry
+- N/A
+
+### Correction (records, added after 63afe00)
+- **The claim above that "three of five conditions here were covered only after the mutants showed they survived" is overstated.** Only m9e's survival was observed, and it survives only as a summary line.
+  - **m9e (the hand-over evaluated without `midRun`).** It survived one run: cdba228's sources, with the wiring tests as committed in cdba228.
+    - The only record is a summary line: line 13 of `mutants-summary.txt` in `lab-author-logs-r9` (`vitest exit 0; Tests 1 passed | 58 skipped`). The session transcript repeats that line.
+    - Its raw log, `mutant-m9e_handover_not_mid_run.log`, was overwritten (the runner opens it with mode "w"). It now holds only the later run that kills it at 1ba1ab3's tests.
+  - **m9a (highest windowSeq only) and m9d (before `session_closed`).** These were never run against cdba228's committed tests, so no survival was ever observed.
+    - Reading those tests, I judged no existing test would kill them. I wrote the two tests that do (later committed in 1ba1ab3) before running any mutant.
+    - Their survival is my unverified account; no record of it exists. Their only runs are the killing ones (summary lines 1 and 10).
+- **The kills of all five are recorded** in `lab-author-logs-r9`:
+  - raw logs `mutant-m9a…m9e`, where m9e's log is its killing run;
+  - summary lines 1 (m9a), 4 (m9b), 7 (m9c), 10 (m9d) and 15 (m9e).
+- **No original survival output is retained anywhere.** Nothing was re-run to recreate it.
+- The mutant runner lives in the log directories, outside the repository's tools, so it is unchanged.
+
+## 2026-10-09 · [voice-lab · Studio G7 labrev7 nits] · PR #TBD
+**Author:** Claude · **Track:** voice · **Spec:** pack 03 G7; independent review of 5d4463d (labrev7: the four labrev6 findings confirmed fixed, no P1/P2/P3, five nits); fixes in 2b8dbd8 and 6cf354b (tests only)
+
+### What Changed
+- **The epoch join's residual is now stated as the code applies it, and pinned by tests.** A count-preserving shift is unseen whenever every displaced window shows a count within its new step's bounds: 1 to the step's own listed calls, or 0 to them for a step without a command. The review's R1 and R2 are pinned tests.
+- **A call refused before it is recorded (by the bridge, or the API's `not_declared`) still refuses the whole join.** It is documented as a known false negative, with the reason: such a window cannot be told from a shifted one, and a shift displaces every step from an unknown point on.
+- **The settlement gate waits for each arrived window's `input_turn`, bounded at 5 s.** Before `session_closed`, the cross-check skips a window whose turn has not arrived; after it, every window is checked, even when no drop is detected.
+- **`design_ended` needs S to be the only source newly withdrawn from X's closure.** Otherwise it is `concurrent_foreign_withdrawal`.
+- **The product-shape test is `PRODUCT-SHAPE-SQL`.**
+  - With `SOPHIA_VOICE_LAB_REQUIRE_PRODUCT_SHAPE=1`, it fails instead of skipping when its variables are missing.
+  - On the product's own SQL, it now asserts the `withdraw_note` receipt's `sourceId` is S, and `task_withdrawn_sources` is [] before and [S] after for the research that drew on S.
+  - The design-edit revocation needs the runtime protocol, so it stays covered by the product's own test.
+- Plugin 0.2.17+codex.20261009164559. Toolchain: Node v22.22.0 and pnpm 10.26.2 (corepack).
+
+### What We Learned
+- **State a residual exactly as the code bounds it.** "Exactly as many" described one case of a 1..n range, and the review found the rest.
+- **When an anomaly cannot be told apart from an attack, refuse the whole inference rather than scope the refusal.** A local excess of tool calls may mark a shift that began earlier.
+- **A gate that waits on one receipt of a pair races its partner.** The bridge sends `input_turn` as a separate POST after its window.
+- **"S was withdrawn" is not "the withdrawal caused it" unless S is the only new withdrawal in the window.**
+- **An env-gated test must be able to fail when it is required, and must exercise the fields the verdict actually joins on.**
+- **Review state:** 2b8dbd8 and 6cf354b are not yet reviewed.
+
+### CLAUDE.md Updates
+- None
+
+### Skills Created / Modified
+- `plugins/sophia-voice-lab/skills/autonomous-voice-dogfood/references/evidence-interpretation.md`: the epoch join's cross-check, and the single-new-source rule for the withdrawal's end.
+
+### GEPA Log Entry
+- N/A
+
+## 2026-10-09 · [voice-lab · Studio G7 labrev6 fixes, and a correction to the entry below] · PR #TBD
+**Author:** Claude · **Track:** voice · **Spec:** pack 03 G7; independent review of 1df8d1b..7f23015 (labrev6); fixes in 5d4463d
+
+### What Changed
+- **P2-1 (5d4463d):** `design_ended` no longer requires S in R's `NativeTask.inputSourceIds`. It rests only on fields the product serves:
+  - the `withdraw_note` receipt's `sourceId` naming S;
+  - X, the Lab's own admitted edit of the run's own research on the run's own artifact, live and not yet listing S before the withdrawal;
+  - X failed for the revoke reason with S in its own `withdrawnSourceIds` after it.
+  - The fake member API now lists only contribution sources in `inputSourceIds`, and an env-gated real-PostgreSQL test runs the product's own SQL (46 migrations).
+- **P3-1:** the ordinal epoch join is cross-checked. Every input window must have ended `turn_complete`. Each window's turn must show no more tool calls than the step's own calls read lists, and at least one when that read holds a command.
+- **Nit-1:** Stop without the sub-episode's certified create is `stop_target_not_certified`.
+- **Nit-2:** `record_note` takes no caller text; the Lab's fixed synthetic note is sent and only its hash is recorded.
+- Plugin 0.2.16+codex.20261009161454.
+- **Toolchain:** this round ran under Node v22.22.0 and pnpm 10.26.2 (corepack), as the package's engines and packageManager require. The earlier rounds' receipts used Node 24.21.0.
+
+### What We Learned
+- **Correction to the entry below (7f23015).**
+  - It says `design_ended` "is proven only on S, through R2's `inputSourceIds` and `withdrawnSourceIds`". That is wrong. `inputSourceIds` is the A05 `NativeTask` field, and the product builds it from discussion contributions only (`native_task_view`, migration 0022). A mission note's source is never listed there. Against the real product, no run could pass `design_ended` that way.
+  - Since 5d4463d it is proven through the `withdraw_note` receipt's `sourceId` and X's own `withdrawnSourceIds` (A15/0046), plus the own-chain checks.
+- **Correction, continued.** The entry below also says "every earlier round's findings are fixed, each with a regression test that fails at the prior head and mutants that are killed". That is broader than was independently verified.
+  - Each round's commit message records the author's own fail-before and mutant results at the time.
+  - The labrev6 review re-ran only the earlier probes in its table, mutant m6j and the two C5 mutants.
+- A fake member API can serve a field the product never fills. That made a gate pass in Chromium and fail on every real run. Check the product's SQL for any field a verdict joins on; an env-gated test on the product's own migrations now does this for `inputSourceIds`.
+- **Count rules miss compensating anomalies.** An extra window before a step plus a missing one after it keeps the count, so join-by-count needs a per-item cross-check. Bounds are safe for a normal run; exact equality is not, because a tool continuation after the turn completes is not in the window's count.
+- **Residual:** a fragment turn completed with exactly the step's call count, together with a later utterance that gets no window, still shifts the join.
+- **Review state:** labrev6 findings are fixed in 5d4463d, which is not reviewed yet.
+
+### CLAUDE.md Updates
+- None
+
+### Skills Created / Modified
+- `plugins/sophia-voice-lab/skills/autonomous-voice-dogfood/references/` (`evidence-interpretation.md`, `scenario-catalog.md`, `tool-contracts.md`): the design_ended joins, the fixed note, plugin 0.2.16.
+
+### GEPA Log Entry
+- N/A
+
+## 2026-10-09 · [voice-lab · Studio/LiveKit G7 adapter (V-G07)] · PR #TBD
+**Author:** Claude · **Track:** voice · **Spec:** pack 03 G7 (`docs/plans/voice-qualification-g7.md` in the product, migration 0046 authoritative); branch `voice-lab/studio-livekit-g7`, 1dbec89..e8f4c46 on 6aede7d
+
+### What Changed
+- **Adapter (1dbec89 partial handoff as delivered, d179d98, e2935b4, a8e3e60; plugin 0.2.0):** a second target kind `studio-livekit-g7-v1` (off by default; the legacy Gemini browser target, its tools, `/readyz` and init-script bytes unchanged). Lab schema v7 admits `studio_action` (additive CHECK widening, quiescent upgrade binary). Three Studio-only MCP tools; every G7 step is one durable, idempotent operation (`speak` or `studio_action`), at most once per run, enforced in the ledger transaction and re-checked by the worker. Receipts parsed strictly in the 0046 shape, bound by grant id and run binding; separate harness and product verdicts; owned-only cleanup (End only as the id-bound API End of an ownership-proven exchange, global sign-out, browser closed).
+- **Review rounds 1–4 (8518699, 782e459, e5cbcb9, 87a6f62, c1f9e08, 4815489, cca65ec, 9599fe5; plugin 0.2.1–0.2.4):** dead-owner lease release by compare-and-delete or API-only recovery on the database clock; an exchange end counts only after Speak and for the joined exchange; JWT lifetime made durable and bounded; the admission deadlock (P2) fixed; the same-run global sign-out fence; no failure-shaped manifest while evidence is pending.
+- **Product joins (0c183e5, dab44f5, 21b9aff, 547c032, 237d5fc, 45dd942; plugin 0.2.5–0.2.9):** refused member reads typed as the product answers them (422 `not_found` vs a 404 absent route); tasks bound only by `NativeTask.exchangeId`; room live presence; every voice step certified only from the exchange's calls (`readAt`, `?after=`, answered calls, input epoch, one command of the step's kind).
+- **Delta 3 review (df8239d; plugin 0.2.10):** the withdrawal's effect needs its own before/after observations; the presence veto decided by the latest verification; calls read only with the run's own session.
+- **Delta 4 (96a271f, root P2 and review P2-3; plugin 0.2.11):** the report is resolved only through the run's own chain (certified create → research `designTaskId` → design naming it back → artifact); foreign designs are never edited, downloaded or judged.
+- **Delta 5 (72b0d57; plugin 0.2.12):** marker healing by boot id, global-only sign-out proof, command later states and unattributed calls, a bounded presence veto.
+- **labrev4 fixes (6c590e1; plugin 0.2.13):** exact-prefix input-epoch join; the revision sends the own artifact's current version; a withdrawal is sent only when its whole cascade is the run's own (foreign corrections and decisions get zero POSTs).
+- **labrev5 fixes with root's C3/C4 (1fcdfc6; plugin 0.2.14):** the own-marker sweep clears another boot's marker only once abandoned (throttled to 30 s); a `DEDUPE_CONFLICT` clear counts as done; End's post-quiescence calls audit replaces the pre-End read; the veto bound counts only gone reports, and a report stuck `present` is capped at 2 h and audited.
+- **Delta 6 (1df8d1b, tests e8f4c46; plugin 0.2.15):** the episode follows the product's lifecycle order. It records the run's own note first (`record_note`, giving source S), then: create, steer, leave/return, hold/resume while D is live, the HTTP revision once D publishes (X left live), the stale probe, the withdrawal while X is live, and the Stop sub-episode (`create_stop_target`, then `stop`).
+  - `design_ended` is proven only on S, through R2's `inputSourceIds` and `withdrawnSourceIds`. The old limitation is removed.
+  - Stop is credited only on the sub-episode's own live work.
+  - Contract `sophia.studio-g7.v2`; the catalogue stays `studio-g7-v1`.
+
+### What We Learned
+- Never attribute a product effect by actor, time window or "the only one published": every false pass in review came from that. Join only on ids the product records for the run's own act (the exchange on a task, the command on a call, the source on a receipt).
+- Order the episode by the product's real lifecycle, observed on its own PostgreSQL tests:
+  - the product admits no edit while the first design is live;
+  - it admits one design of a page at a time;
+  - it refuses Stop on a completed goal, so Stop needs its own sub-episode.
+- Use the note's source id, not its entry id, for the withdrawal join. A correction gets a new source, and the closure the product computes lists sources.
+- A read of "every call" is only an audit once quiescence holds: the exchange has ended, no provider session remains, and the read happens before the sign-out. It relies on the product's C5 fence of recording against End: reported 04fac683, verification pending. Before quiescence, an empty read proves nothing.
+- Review state: delta 6 (1df8d1b, e8f4c46) is not reviewed yet. Every earlier round's findings are fixed, each with a regression test that fails at the prior head and mutants that are killed.
+
+### CLAUDE.md Updates
+- None
+
+### Skills Created / Modified
+- `plugins/sophia-voice-lab/skills/autonomous-voice-dogfood/SKILL.md` and its references (`scenario-catalog.md`, `tool-contracts.md`, `evidence-interpretation.md`, `recovery.md`): the Studio G7 flow, tools, evidence rules and episode order. Plugin 0.2.0 → 0.2.15+codex.20261009151737.
+
+### GEPA Log Entry
+- N/A
+
 ## 2026-06-29 · [decks · restore HTML-slide path + partial-image floor + truthful image errors] · PR #TBD
 **Author:** Claude · **Track:** backend + skills · forensics `docs/audits/sophia-builder-deck-revert-and-trace-forensics-2026-06-29.md`
 
@@ -2538,4 +2990,51 @@ Author: Claude (fixture implementation) · Track: backend tests · Spec referenc
     - Disabling rollback still fails the seam test, and disabling overflow detection still fails all three, as root and as non-root.
     - The whole file as root, under RAQM and under BASIC: 1 failed, 63 passed, 4 skipped. The skips are because Chromium is unavailable. The one failure is LibreOffice's "source file could not be loaded" in the render test.
     - The whole file as non-root (a passwd-less numeric UID): 63 passed, 4 skipped, and the render test failed. In the render test, LibreOffice cannot create a user installation for that UID ("User installation could not be completed"). It also leaves a single-instance socket in /tmp whose name does not include the UID. While that socket remained, later non-root runs blocked in a headless modal dialog until the service's 600 s timeout. A direct soffice reproduction confirmed both behaviours. This is an environment fault, not a font one.
+- CLAUDE.md updates: none; runtime and architecture are unchanged. Skills created: none. GEPA log entry: not applicable; no prompt changed.
+
+## 2026-10-10 · [voice lab census lease pulse] · #151
+Author: Claude (Lab writer) · Track: Voice Lab worker · Spec reference: Codex r4077602539 on PR #151 (census against the 2,048-event page ring); root's census GO and proof requirements; coordinator reviews of d2d550e5 (capture TOCTOU) and ae82a1cd (lock order, join evidence); root's P2 on 81dda6b7 (expiry evaluated before the lease row-lock wait) and P3 on ba2f81c0 (join rules keyed by an inherited kind).
+
+- What changed:
+  - The worker renews and drains each live run's browser lease on its own active-lease pulse. It is one `setTimeout` chain per run and lease epoch, every `min(5 s, lease / 3)`. Renewal never waits on the run or on maintenance.
+  - One serialization point per run: a claimed operation holds its run's turn until it settles. Maintenance steps and pulse drains only try the turn and skip a busy run.
+  - The pulse also renews a busy run's lease. An operation keeps renewing its own browser lease until it releases the turn, including during cancellation and shutdown cleanup. A refused lease is never renewed again.
+  - Lease-bound capture persistence (`appendLeaseBoundEvents`, PostgreSQL and memory) enforces the exact worker and epoch, and an unexpired lease, at the write's linearization point. A failed join derivation keeps the batch and cursor as evidence and is thrown after them.
+    - In PostgreSQL the exact worker/epoch lease row is locked FOR SHARE after the run and control rows, with no expiry in that locking statement. Then a separate statement, under the held lock, compares its expiry to a fresh database clock, before any capture write. That check is the point. The insert, cursor and joins follow in the same transaction. Nothing is promised about the commit's wall-clock time.
+  - Heartbeat renewal and execution-ownership preservation, both older than 1c183ee6, now check lease expiry the same way: the row is locked first, then a fresh-clock check runs under the held lock.
+  - The capture join rules are a Map. A captured kind that is no rule, `__proto__`, `constructor` and the other Object.prototype members included, is persisted and ignored by the joins, as it was before the complexity split.
+  - Separately, `tts-trailing-silence-chromium` now extracts the current product microphone pipeline, including the StreamingPcm16Resampler module. It uses a dependency-closure helper shared with the census Chromium test. Its trailing-silence and single-stream-end assertions are unchanged.
+  - Separately, a test-only correction: the MEM00 drift message expected by the real-Postgres auth-ledger test now matches the source.
+- What we learned:
+  - Running every recovery stage before the live run's lease and drain lets one silent Gateway expire a live lease, and overflow the census ring, in a single maintenance pass.
+  - A renewal followed by a generic append is still check-then-act. The lease predicate has to sit inside the capture write's own serialization.
+  - A capture write that takes the lease before the control row can deadlock against settlement.
+  - Fake timers carry no async context, so a test of timer async scope has to use real timers.
+  - PostgreSQL evaluates a locking statement's WHERE and output columns before it waits for the row lock. It re-evaluates them only for a row that was updated. A lease validity check inside the locking statement therefore stands stale behind a holder that only locked the row, and the check has to be a separate statement after the lock. `<=` expiry predicates are safe, because an expired lease that is left unchanged stays expired.
+  - A lookup table keyed by input from outside must not inherit. A plain object resolves `__proto__`, `constructor` and `toString` to Object.prototype members.
+- Validation:
+  - Fail-before, at 1c183ee6 unless stated:
+    - 13 of the 16 worker tests from the first draft fail on the property under test. The cases are lease expiry, 320 ring events lost, an operation never claimed, and a starved second run.
+    - In real Chromium, the lease, ring and pending-operation cases fail and the positive control passes.
+    - At d2d550e5, root's interleaving commits the capture from the released or expired lease (`{cursor: 4, labelled: 1}`).
+    - At ae82a1cd, the PostgreSQL join cases lose the batch and the settlement-ordered case aborts the capture write with 40P01.
+    - At 81dda6b7, behind a session that holds the lease row FOR UPDATE and leaves it unchanged, the capture write commits from a 1 s lease that expired during a 1.3 s lock wait (`committed: true`, waited 1,316 ms within the 2 s lock timeout).
+    - At 98c402f9, in the same shape, renewal revives the expired lease (`true`, expiry advanced by about 29 s), including behind a capture write's FOR SHARE. Execution ownership is preserved for the expired lease.
+    - At 3832cad6, a capture event of kind `__proto__`, `hasOwnProperty` or `valueOf` terminalizes a ready run as `failed_harness` / UNEXPECTED_WORKER_ERROR, in memory and on PostgreSQL. At 81dda6b7 all are ignored. `constructor` and `toString` did not throw: they ran as rules without effect.
+    - At f9d0f80a and 934549a6, the tts check fails on its declaration list, before reaching the browser.
+  - Mutants: 16 source mutants plus 2 Chromium reruns were each killed by explicit assertions. They covered:
+    - the pulse not started, not serialized, renewing after a refusal, not cancelling its timers, or skipping the drain;
+    - busy-run renewal dropped, and abort-time operation renewal dropped;
+    - maintenance or settle waiting on a busy run;
+    - the lease predicate dropped (memory and PostgreSQL), or checked outside the transaction;
+    - the control row locked after the lease;
+    - joins derived after the insert;
+    - the memory rethrow dropped;
+    - timers inheriting the activating async context. This one survived on fake timers until its check moved to real timers.
+    - Later, also killed: the expiry back in the capture write's locking WHERE (M17) or its output columns (M17b); the renewal's expiry back in its locking UPDATE (M18); the ownership read's expiry back in its locking statement (M19); the plain-object join lookup (M20).
+    - A mutant counts as killed only when a named test fails on an assertion. Load, setup, SQL and harness errors are not counted.
+  - The new tests on real PostgreSQL (own exactly named database on 55434): 60 of 60 pass. The Chromium census on the substitute chromium-1194 browser: 4 of 4 pass.
+  - Whole Lab suite, full env, at 22df2905 (merged with a9b763d7): 1,449 tests, of which 1,447 passed and 2 failed.
+    - `tts-trailing-silence-chromium` fails on a production-line change: the frontend no longer defines `estimatePcm16ByteLength`. Corrected in 3832cad6, and the check passes on the substitute chromium-1194 browser: 17 trailing near-zero frames (about 1.58 s) before exactly one audioStreamEnd.
+    - The security golden-vector check is environmental. The worktree had no backend venv; with a project-local `uv sync --frozen --offline` venv it passes, though its cold first import exceeded the 15 s timeout once.
 - CLAUDE.md updates: none; runtime and architecture are unchanged. Skills created: none. GEPA log entry: not applicable; no prompt changed.

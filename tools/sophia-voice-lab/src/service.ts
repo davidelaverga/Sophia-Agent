@@ -2,8 +2,7 @@ import { createHmac, createPublicKey, randomUUID, timingSafeEqual, verify as ver
 
 import { z } from "zod";
 import { productTurnId } from "./product-turn.js";
-import { AnyServiceOwnerFenceReceiptSchema, isVerifiedServiceOwnerFenceV2, serviceFenceSourceLabSha } from "./service-owner-fence.js";
-import { derivePlatformExecutionTermination, PLATFORM_EXECUTION_TERMINATION_KIND } from "./platform-execution-termination.js";
+import { genericOwnerDispatchControl } from "./generic-owner-control.js";
 
 import { FINAL_CODEX_PLUGIN_VERSION_PATTERN, type VoiceLabConfig } from "./config.js";
 import { D02GatewayClient, D02GatewayContinuityObservationReceiptSchema } from "./d02-gateway.js";
@@ -33,6 +32,12 @@ import { assertRunAcceptsOperation } from "./state-machine.js";
 import { SCENARIO_CATALOG, SCENARIO_IDS } from "./scenarios.js";
 import { P01_ASSISTANT_OBSERVATIONS, P01_OPERATION_OBSERVATIONS, P01_LIMITS, P01_MAX_CHRONOLOGICAL_CALLS, p01EndNeedsFinalization } from "./p01-contract.js";
 import { verifyRetainedD02OwnerDeath } from "./retained-owner-verifier.js";
+import {
+  STUDIO_G7_OBSERVE_ACTION, StudioG7ActionSchema, StudioG7StartSchema, StudioG7VoiceStepSchema, isStudioRunOnStudioTarget, isStudioTargetKind,
+  refusesLegacyInputTool, studioConfigOf, studioG7Capabilities, studioG7StepId, studioLegacyStartRefusal, studioRunIdentity, studioTargetEnvironment, studioTargetSpec,
+  STUDIO_G7_TOOL_NAMES,
+} from "./studio-g7/service-surface.js";
+export { STUDIO_G7_OBSERVE_ACTION, STUDIO_G7_TOOL_NAMES, StudioG7ActionSchema, StudioG7StartSchema, StudioG7VoiceStepSchema, studioTargetSpec } from "./studio-g7/service-surface.js";
 import { deriveRetainedD02SettlementLookup } from "./retained-d02-provider.js";
 
 const StartSchema = z.object({
@@ -431,13 +436,24 @@ export const toolInputSchemas = {
   export_voice_evidence: ExportSchema,
   run_regression_suite: SuiteSchema,
   get_suite_run: GetSuiteSchema,
+  // Studio LiveKit G7 (registered only when SOPHIA_VOICE_LAB_TARGET_KIND is
+  // studio-livekit-g7-v1; the legacy tool surface is unchanged).
+  start_studio_g7_run: StudioG7StartSchema,
+  studio_g7_voice_step: StudioG7VoiceStepSchema,
+  studio_g7_action: StudioG7ActionSchema,
 } as const;
+
+/** The MCP tools a deployment exposes: the legacy target keeps exactly its original surface. */
+export function toolNamesForTarget(targetKind: string | undefined): Array<keyof typeof toolInputSchemas> {
+  const all = Object.keys(toolInputSchemas) as Array<keyof typeof toolInputSchemas>;
+  return isStudioTargetKind(targetKind) ? all : all.filter((name) => !(STUDIO_G7_TOOL_NAMES as readonly string[]).includes(name));
+}
 
 export interface FixtureSummary {
   id: string;
   fixtureVersion: string;
   family: string;
-  fixtureClass: "short_command" | "long_brief" | "silence" | "trailing_pause" | "noisy_command";
+  fixtureClass: "short_command" | "long_brief" | "silence" | "trailing_pause" | "noisy_command" | "conversation_probe";
   sha256: string;
   sampleRate: number;
   channels: number;
@@ -529,22 +545,26 @@ export class VoiceLabService {
     readonly ttsEngine: () => Promise<TtsEngineInfo> = async () => ({ engine: "espeak-ng", expectedVersion: config.ttsExpectedVersion, observedVersion: null, voice: "en-us", rate: "155-wpm", available: false, status: "unavailable" }),
     readonly targetIdentity: () => Promise<Record<string, unknown> & { ok: boolean }> = async () => ({ ok: false, status: "not_probed", builds: null, reason: config.readinessTarget ? "target_probe_not_injected" : "target_configuration_missing" }),
     readonly d02Gateway: D02GatewayClient = new D02GatewayClient(config),
+    /** A Studio G7 deployment's target probe (webTargetProbes: the one /readyz runs); reported by get_capabilities only, never an admission proof. */
+    readonly studioTargetIdentity: () => Promise<Record<string, unknown> & { ok: boolean }> = async () => ({ ok: false, status: "not_probed", reason: "studio_probe_not_injected" }),
   ) {}
 
   async getCapabilities(caller: AuthenticatedCaller, raw: unknown): Promise<LabEnvelope> {
     toolInputSchemas.get_capabilities.parse(raw);
     requireScope(caller, "voice_lab:read");
-    const [fixtures, ttsEngine, targetIdentity] = await Promise.all([this.fixtures(), this.ttsEngine(), this.targetIdentity()]);
+    // A Studio G7 deployment reports its Studio probe; the legacy target keeps its own probe and shape.
+    const studioTarget = studioConfigOf(this.config);
+    const [fixtures, ttsEngine, targetIdentity, workers] = await Promise.all([this.fixtures(), this.ttsEngine(), studioTarget ? this.studioTargetIdentity() : this.targetIdentity(), this.ledger.listLiveWorkers(new Date(Date.now() - 10_000))]);
     const configuredTarget = this.config.readinessTarget;
     return envelope({ status: "ok", data: {
-      tools: Object.keys(toolInputSchemas),
+      tools: toolNamesForTarget(this.config.targetKind),
       server_version: this.config.serviceVersion,
       versions: { harness: this.config.harnessVersion, mcp: this.config.mcpVersion, plugin: this.config.pluginVersion, evidence_schema: "sophia.voice-lab.evidence.v1", scenario_catalog: SCENARIO_CATALOG_VERSION },
       repository_commits: { base: this.config.repositoryBaseSha, candidate: this.config.repositoryCandidateSha, rollback: this.config.repositoryRollbackSha },
       registered_app: { technical_id: this.config.registeredAppId ?? { status: "pending_registration" }, plugin_package_sha256: this.config.pluginPackageSha256, platform_install_attestation: "required_for_v_p01_and_not_self_asserted" },
       plugin_contract_version: CONTRACT_VERSION,
       environments: [this.config.environment],
-      target_environment: configuredTarget ? {
+      target_environment: studioTarget ? studioTargetEnvironment(this.config.environment, studioTarget, targetIdentity) : configuredTarget ? {
         environment: this.config.environment,
         frontend_url: configuredTarget.frontendUrl,
         gateway_url: configuredTarget.gatewayUrl,
@@ -562,6 +582,7 @@ export class VoiceLabService {
       persistence: "postgres-required",
       browser: "chromium-web-audio-dynamic-injection",
       tts: { adaptive: { engine: ttsEngine.engine, status: ttsEngine.status, expected_version: ttsEngine.expectedVersion, observed_version: ttsEngine.observedVersion, voice: ttsEngine.voice, rate: ttsEngine.rate }, deterministic_fixture_count: fixtures.length },
+      active_run_worker_profile: workers.length === 1 ? workers[0]!.detail.active_run_profile ?? { status: "unavailable" } : { status: "unavailable", live_workers: workers.length },
       fixtures,
       fixture_families: [...new Set(fixtures.map((fixture) => fixture.family))],
       restricted_fault_capabilities: caller.scopes.has("voice_lab:fault") ? ["force_socket_rotation"] : [],
@@ -571,59 +592,13 @@ export class VoiceLabService {
       raw_audio: "unavailable_until_isolated_storage",
       video: "unavailable_until_isolated_storage",
       kill_switch: this.config.killSwitch ? "engaged" : "open",
+      ...studioG7Capabilities(this.config),
     } });
   }
 
   /** Deployment-control journal access only; never performs a provider action. */
   async genericOwnerDispatch(caller: AuthenticatedCaller, raw: unknown) {
-    requireScope(caller, "voice_lab:attest");
-    requireScope(caller, "voice_lab:attest:deployment_control");
-    if (caller.authorizationKind !== "attestation" || caller.subject !== this.config.attestationAuthorities.deployment_control.subject)
-      throw new VoiceLabError(labError("ATTESTATION_AUTHORITY_MISMATCH", "Generic owner recovery requires deployment-control transport authority.", "authorization"));
-    if (!this.config.killSwitch || !this.config.genericRecoveryWorkerServiceId)
-      throw new VoiceLabError(labError("GENERIC_RECOVERY_CLOSED_WINDOW_REQUIRED", "Generic recovery requires closed admission and a configured exact worker service.", "conflict"));
-    const runId = z.string().uuid();
-    const version = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
-    const input = z.discriminatedUnion("action", [
-      z.object({ action: z.literal("inspect"), runId }).strict(),
-      z.object({ action: z.literal("prepare"), runId, expectedVersion: version, requestId: z.string().uuid() }).strict(),
-      z.object({ action: z.literal("consume"), runId, expectedVersion: version, preparedProofSha256: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
-      z.object({ action: z.literal("ingest_owner_loss"), runId, expectedVersion: version, receipt: z.unknown() }).strict(),
-      z.object({ action: z.literal("ingest_service_fence"), runId, expectedVersion: version, receipt: AnyServiceOwnerFenceReceiptSchema }).strict(),
-    ]).parse(raw);
-    const control = await this.ledger.getRecoveryControl(input.runId);
-    if (!control || control.binding.scenarioId === "V-D02" || control.binding.principalId !== this.config.principalId
-      || control.binding.environment !== this.config.environment) throw new VoiceLabError(labError("GENERIC_RECOVERY_SCOPE_INVALID", "Generic recovery control is outside the configured principal/environment.", "authorization"));
-    if (control.genericOwnerDispatch && control.genericOwnerDispatch.workerServiceIdSha256 !== sha256(this.config.genericRecoveryWorkerServiceId))
-      throw new VoiceLabError(labError("GENERIC_RECOVERY_SERVICE_MISMATCH", "Stored recovery service differs from current configuration.", "conflict"));
-    if (input.action === "inspect") return { dispatchAllowed: false, control, workerServiceId: this.config.genericRecoveryWorkerServiceId };
-    if (input.action === "ingest_owner_loss" || input.action === "ingest_service_fence") {
-      const target = this.config.readinessTarget;
-      if (!target || (input.action === "ingest_owner_loss" && canonicalRequestHash(target.expectedDeployment) !== canonicalRequestHash(control.binding.expectedDeployment)))
-        throw new VoiceLabError(labError("GENERIC_RECOVERY_RELEASE_MISMATCH", "Generic receipt ingestion requires the configured exact product release.", "conflict"));
-      const authority = this.config.attestationAuthorities.deployment_control;
-      await this.ledger.persistGenericOwnerLoss({ runId: input.runId, expectedVersion: input.expectedVersion, receipt: input.receipt,
-        authority: { issuer: authority.issuer, subject: authority.subject, key_id: authority.keyId, public_key_spki_base64: authority.publicKeySpkiBase64 },
-        expectedWorkerServiceIdSha256: sha256(this.config.genericRecoveryWorkerServiceId),
-        ...(input.action === "ingest_service_fence" ? { expectedRecoveryDeployment: target.expectedDeployment } : {}),
-        expectedLabSha: input.action === "ingest_service_fence"
-          ? serviceFenceSourceLabSha(input.receipt, this.config.serviceVersion, this.config.genericRecoveryReceiptSha256)
-          : this.config.serviceVersion, expectedLangGraphSha: target.expectedDependencies.langgraph });
-      const persisted = await this.ledger.getRecoveryControl(input.runId);
-      if (!persisted?.genericOwnerLoss) throw new Error("GENERIC_OWNER_PERSISTENCE_UNCONFIRMED");
-      // A verified v2 service fence is the only source permitted to author the
-      // canonical platform-termination receipt. It is appended under a durable
-      // dedupe key, so an exact retry replays one receipt rather than settling
-      // the epoch twice, and it never stands in for provider/resource cleanup.
-      const settled = persisted.genericOwnerLoss;
-      if (input.action === "ingest_service_fence" && settled.schema === "sophia.voice-lab.verified-service-owner-fence.v2" && isVerifiedServiceOwnerFenceV2(settled)) {
-        const termination = derivePlatformExecutionTermination(persisted, settled);
-        await this.ledger.appendEvent(input.runId, PLATFORM_EXECUTION_TERMINATION_KIND, "canonical", termination.payload, termination.dedupeKey);
-      }
-      return { dispatchAllowed: false, control: persisted, workerServiceId: this.config.genericRecoveryWorkerServiceId };
-    }
-    if (input.action === "prepare") return { dispatchAllowed: false, control: await this.ledger.prepareGenericOwnerDispatch({ runId: input.runId, expectedVersion: input.expectedVersion, requestId: input.requestId, workerServiceId: this.config.genericRecoveryWorkerServiceId }), workerServiceId: this.config.genericRecoveryWorkerServiceId };
-    return { ...await this.ledger.consumeGenericOwnerDispatch(input), workerServiceId: this.config.genericRecoveryWorkerServiceId };
+    return genericOwnerDispatchControl(this.ledger, this.config, caller, raw);
   }
 
   /** Read-only owning proof used by the independent D02 controller after the
@@ -1613,6 +1588,9 @@ export class VoiceLabService {
   async startVoiceRun(caller: AuthenticatedCaller, raw: unknown): Promise<LabEnvelope> {
     requireScope(caller, "voice_lab:run");
     this.assertMutationEnabled("start_voice_run");
+    // Legacy Gemini-browser scenarios (V-A01 … V-P01) need a browser
+    // provider socket the Studio does not have; they are never remapped.
+    if (isStudioTargetKind(this.config.targetKind)) throw studioLegacyStartRefusal(raw);
     const input = StartSchema.parse(raw);
     if (input.scenario_id === "V-L01") requireScope(caller, "voice_lab:fault");
     assertScenarioSupported(input.scenario_id);
@@ -1672,12 +1650,152 @@ export class VoiceLabService {
     return envelope({ run: fresh, operationId: created.operation.id, status: created.operation.state === "succeeded" ? "completed" : "accepted", data: { replay: created.replay, submission_outcome: created.replay ? "idempotent_replay" : "durably_accepted", run_state: fresh.state, operation_state: created.operation.state, rolling_admission: { replay: rollingAdmission.replay, reset_at: rollingAdmission.resetAt.toISOString(), remaining: rollingAdmission.remaining } } });
   }
 
+  /**
+   * Reserve a Studio G7 run. The response carries the non-secret run binding
+   * hash the operator passes to `sophia.voice_qualification_grant(...)`; the
+   * worker's start waits (bounded) for the grant-bound page receipt before it
+   * opens an exchange, because a grant never covers an earlier exchange.
+   */
+  async startStudioG7Run(caller: AuthenticatedCaller, raw: unknown): Promise<LabEnvelope> {
+    requireScope(caller, "voice_lab:run");
+    this.assertMutationEnabled("start_studio_g7_run");
+    const studio = studioConfigOf(this.config);
+    if (!studio) {
+      const record = raw && typeof raw === "object" && !Array.isArray(raw) ? raw as Record<string, unknown> : {};
+      throw new VoiceLabError(labError("SCENARIO_UNSUPPORTED_FOR_TARGET", "Studio G7 scenarios need the studio-livekit-g7-v1 target kind.", "validation", false, { status: "unsupported_for_target", target_kind: this.config.targetKind ?? "legacy-gemini-browser-v1", scenario_id: typeof record.scenario_id === "string" ? record.scenario_id : null, scenario_version: typeof record.scenario_version === "string" ? record.scenario_version : null }));
+    }
+    const input = StudioG7StartSchema.parse(raw);
+    if (input.environment !== this.config.environment) throw new VoiceLabError(labError("ENVIRONMENT_MISMATCH", "Requested environment does not match this isolated Voice Lab deployment.", "deployment"));
+    const target = studioTargetSpec(studio);
+    this.validateTarget(target);
+    if (this.config.nodeEnv !== "test") {
+      const workers = await this.ledger.listLiveWorkers(new Date(Date.now() - 10_000));
+      const profile = workers.length === 1 ? workers[0]!.detail.active_run_profile as Record<string, unknown> | undefined : undefined;
+      if (profile?.status !== "sufficient") throw new VoiceLabError(labError("WORKER_PROFILE_INSUFFICIENT", "The live singleton worker has not attested the minimum active-run cgroup profile.", "deployment", true, { live_workers: workers.length, profile_status: profile?.status ?? "unavailable" }));
+    }
+    const policy = input.capture_policy ?? { raw_audio: false, screenshot: false, video: false, retention_hours: 24 };
+    if (policy.raw_audio) throw new VoiceLabError(labError("RAW_AUDIO_UNAVAILABLE", "Raw audio capture is unavailable until isolated governed storage is implemented.", "authorization"));
+    if (policy.video) throw new VoiceLabError(labError("VIDEO_UNAVAILABLE", "Video capture is unavailable until isolated durable storage is provisioned.", "validation"));
+    this.validateRetentionPolicy(policy.retention_hours);
+    const now = new Date();
+    const runId = randomUUID();
+    const run: RunRecord = {
+      id: runId, callerId: caller.subject, principalId: this.config.principalId, testRunId: randomUUID(), cleanupObligationId: randomUUID(),
+      environment: input.environment, scenarioId: input.scenario_id, scenarioVersion: input.scenario_version, state: "reserved", version: 1, target,
+      observedDeployment: {},
+      // Screenshots may show captions (speech text); the product's privacy
+      // model forbids retaining speech, so studio runs never capture them.
+      capturePolicy: { rawAudio: false, screenshot: false, video: false, retentionHours: policy.retention_hours },
+      verdicts: initialVerdicts(), canonicalSessionId: null, threadId: null, providerSessionId: null, traceId: null, providerEpoch: null, turnId: null,
+      latestCursor: 0, expiresAt: new Date(now.getTime() + this.config.maxRunSeconds * 1_000), createdAt: now, updatedAt: now, cleanupComplete: false,
+      retentionPurgeDueAt: null, retentionPurgePending: false, retentionPurgeVerifiedAt: null, evidencePurgedAt: null, terminalError: null,
+    };
+    const requestHash = canonicalRequestHash({ ...input, tool: "start_studio_g7_run" });
+    const rolling: RollingAdmissionFence = { reservation: {
+      reservationKey: sha256(`run\u0000${caller.subject}\u0000${input.idempotency_key}`), requestHash, callerId: caller.subject, environment: input.environment, kind: "run",
+      runStarts: 1, providerSeconds: this.config.maxRunSeconds, suites: 0, suiteChildren: 0, audioDurationMs: 0, audioBytes: 0, observedAt: now,
+    }, limits: this.rollingAdmissionLimits() };
+    const created = await this.ledger.createRunWithOperation(run, { id: randomUUID(), runId, callerId: caller.subject, type: "start", idempotencyKey: input.idempotency_key, requestHash, input: input as unknown as Record<string, unknown> }, { global: this.config.maxConcurrentRuns, caller: this.config.maxRunsPerCaller }, rolling);
+    const fresh = await this.ledger.getRun(created.run.id) ?? created.run;
+    const identity = studioRunIdentity(fresh);
+    const runBindingSha256 = identity.runBindingSha256;
+    if (!created.replay) await this.ledger.appendEvent(created.run.id, "run.accepted", "mcp", { operation_id: created.operation.id, scenario_id: created.run.scenarioId, target_kind: identity.targetKind, run_binding_sha256: runBindingSha256 }, `operation:${created.operation.id}:accepted`);
+    return envelope({ run: fresh, operationId: created.operation.id, status: created.operation.state === "succeeded" ? "completed" : "accepted", data: {
+      replay: created.replay, submission_outcome: created.replay ? "idempotent_replay" : "durably_accepted", run_state: fresh.state, operation_state: created.operation.state,
+      target_kind: identity.targetKind, contract_version: identity.contractVersion,
+      // Non-secret: the operator puts this value in the product grant.
+      run_binding: { schema: identity.runBindingSchema, run_binding_sha256: runBindingSha256, grant_wait_ms: studio.grantWaitMs },
+      rolling_admission: { replay: created.rollingAdmission!.replay, reset_at: created.rollingAdmission!.resetAt.toISOString(), remaining: created.rollingAdmission!.remaining },
+    } });
+  }
+
+  /**
+   * One G7 voice step (create, steer, hold, resume, stop) as one `speak`
+   * operation through the Studio's own microphone path, labelled with its
+   * step. A step that already succeeded is not performed again under a new
+   * idempotency key; the same key replays the same operation.
+   */
+  async studioG7VoiceStep(caller: AuthenticatedCaller, raw: unknown): Promise<LabEnvelope> {
+    requireScope(caller, "voice_lab:run");
+    this.assertMutationEnabled("studio_g7_voice_step");
+    const input = StudioG7VoiceStepSchema.parse(raw);
+    validateAudioInputLimit(input, this.config.maxTextCharacters);
+    const run = await this.studioRun(caller, input.run_id);
+    const stepId = studioG7StepId(input.step);
+    const reservation = await reserveAudioInput(input, await this.fixtures(), this.config);
+    const { step: _step, ...speech } = input;
+    const operationInput: Record<string, unknown> = { ...speech, _g7_step: stepId, _admission: reservation };
+    const operations = await this.ledger.listOperations(run.id);
+    const existing = operations.find((operation) => operation.type === "speak" && operation.idempotencyKey === input.idempotency_key);
+    if (!existing) this.assertStudioStepFree(operations, "speak", stepId, (operation) => operation.input._g7_step === stepId);
+    const rolling = this.rollingAudioFence(run, caller.subject, "speak", input.idempotency_key, operationInput, reservation);
+    const accepted = await this.queueRunOperation(caller, input.run_id, "speak", input.idempotency_key, operationInput, true, rolling);
+    return this.awaitSchedulingReceipt(caller, accepted, input.timing_policy?.schedule_timeout_ms ?? 10_000);
+  }
+
+  /**
+   * One G7 non-voice step as one `studio_action` operation: leave and return,
+   * a section-only revision, a stale edit, or a withdrawal; or `observe`, a
+   * read-only outcome read for a voice step. Product requests are made by the
+   * worker as the synthetic principal through the member API.
+   */
+  async studioG7Action(caller: AuthenticatedCaller, raw: unknown): Promise<LabEnvelope> {
+    requireScope(caller, "voice_lab:run");
+    this.assertMutationEnabled("studio_g7_action");
+    const input = StudioG7ActionSchema.parse(raw);
+    const run = await this.studioRun(caller, input.run_id);
+    const operations = await this.ledger.listOperations(run.id);
+    const existing = operations.find((operation) => operation.type === "studio_action" && operation.idempotencyKey === input.idempotency_key);
+    if (!existing && input.action !== STUDIO_G7_OBSERVE_ACTION) {
+      const stepId = studioG7StepId(input.action);
+      this.assertStudioStepFree(operations, "studio_action", stepId, (operation) => operation.input.action === input.action);
+    }
+    const { run_id: _runId, ...operationInput } = input;
+    // The step label makes the ledger's at-most-once rule exact for actions too.
+    const stepLabel = input.action === STUDIO_G7_OBSERVE_ACTION ? {} : { _g7_step: studioG7StepId(input.action) };
+    const accepted = await this.queueRunOperation(caller, input.run_id, "studio_action", input.idempotency_key, { run_id: input.run_id, ...operationInput, ...stepLabel }, false);
+    return this.awaitSchedulingReceipt(caller, accepted, Math.min(input.timeout_ms ?? this.config.maxOperationSeconds * 1_000, this.config.maxOperationSeconds * 1_000));
+  }
+
+  private async studioRun(caller: AuthenticatedCaller, runId: string): Promise<RunRecord> {
+    const run = await this.ownedRun(caller, runId);
+    if (!isStudioRunOnStudioTarget(this.config.targetKind, run)) {
+      throw new VoiceLabError(labError("SCENARIO_UNSUPPORTED_FOR_TARGET", "Studio G7 steps run only on a Studio G7 run of a studio-livekit-g7-v1 deployment.", "validation", false, { status: "unsupported_for_target", target_kind: this.config.targetKind ?? "legacy-gemini-browser-v1", scenario_id: run.scenarioId, scenario_version: run.scenarioVersion }));
+    }
+    return run;
+  }
+
+  /** A step runs at most once: one in flight, and none after a performed success. */
+  private assertStudioStepFree(operations: Awaited<ReturnType<VoiceLabLedger["listOperations"]>>, type: "speak" | "studio_action", stepId: string, matches: (operation: Awaited<ReturnType<VoiceLabLedger["listOperations"]>>[number]) => boolean): void {
+    const same = operations.filter((operation) => operation.type === type && matches(operation));
+    if (same.some((operation) => ["accepted", "queued", "leased", "executing"].includes(operation.state))) {
+      throw new VoiceLabError(labError("STUDIO_G7_STEP_IN_FLIGHT", "This G7 step already has an operation in flight; inspect it or retry with its idempotency key.", "conflict", true, { step_id: stepId }));
+    }
+    if (same.some((operation) => operation.state === "succeeded" && (type === "speak" || operation.result?.performed === true))) {
+      throw new VoiceLabError(labError("STUDIO_G7_STEP_ALREADY_PERFORMED", "This G7 step was already performed in this run; it is never performed twice.", "conflict", false, { step_id: stepId }));
+    }
+  }
+
+  /**
+   * The legacy Gemini-path input tools answer `unsupported_for_target` on the
+   * Studio kind (and for any Studio run) before any work: a Studio voice step
+   * goes through studio_g7_voice_step, which enforces the G7 step rules.
+   */
+  private assertLegacyTargetTool(tool: "speak" | "barge_in" | "force_socket_rotation", run?: Pick<RunRecord, "scenarioId" | "scenarioVersion">): void {
+    if (!refusesLegacyInputTool(this.config.targetKind, run)) return;
+    throw new VoiceLabError(labError("SCENARIO_UNSUPPORTED_FOR_TARGET", `${tool} drives the legacy Gemini browser path; Studio G7 runs use studio_g7_voice_step and studio_g7_action.`, "validation", false, {
+      status: "unsupported_for_target", target_kind: this.config.targetKind ?? "legacy-gemini-browser-v1", tool,
+      ...(run ? { scenario_id: run.scenarioId, scenario_version: run.scenarioVersion } : {}),
+    }));
+  }
+
   async speak(caller: AuthenticatedCaller, raw: unknown): Promise<LabEnvelope> {
     requireScope(caller, "voice_lab:run");
     this.assertMutationEnabled("speak");
+    this.assertLegacyTargetTool("speak");
     const input = SpeakSchema.parse(raw);
     validateAudioInputLimit(input, this.config.maxTextCharacters);
-    await this.ownedRun(caller, input.run_id);
+    this.assertLegacyTargetTool("speak", await this.ownedRun(caller, input.run_id));
     // Resolve only immutable metadata before the ready-state precondition. This
     // gives V-S02 a real authenticated public `/mcp` path for an unknown
     // fixture while still creating no operation, TTS process, browser, or
@@ -1699,9 +1817,11 @@ export class VoiceLabService {
   async bargeIn(caller: AuthenticatedCaller, raw: unknown): Promise<LabEnvelope> {
     requireScope(caller, "voice_lab:run");
     this.assertMutationEnabled("barge_in");
+    this.assertLegacyTargetTool("barge_in");
     const input = BargeSchema.parse(raw);
     validateAudioInputLimit(input, this.config.maxTextCharacters);
     const run = await this.ownedRun(caller, input.run_id);
+    this.assertLegacyTargetTool("barge_in", run);
     await this.assertInputPreconditions(caller, input.run_id, input);
     await this.assertAdaptiveObservation(run, input);
     const page = await this.ledger.listEvents(input.run_id, input.after_output_event_seq - 1, 1);
@@ -1774,8 +1894,10 @@ export class VoiceLabService {
   async forceSocketRotation(caller: AuthenticatedCaller, raw: unknown): Promise<LabEnvelope> {
     requireScope(caller, "voice_lab:fault");
     this.assertMutationEnabled("force_socket_rotation");
+    this.assertLegacyTargetTool("force_socket_rotation");
     const input = RotateSchema.parse(raw);
     const run = await this.ownedRun(caller, input.run_id);
+    this.assertLegacyTargetTool("force_socket_rotation", run);
     if (run.scenarioId === "V-N02" && !input.commit_target) throw new VoiceLabError(labError("COMMIT_TARGET_REQUIRED", "V-N02 requires an exact app-authored committed output or tool-effect target.", "validation", false));
     if (run.scenarioId !== "V-N02" && input.commit_target) throw new VoiceLabError(labError("COMMIT_TARGET_NOT_ALLOWED", "A committed-boundary target is only accepted for V-N02.", "validation", false));
     if (input.expected_socket_epoch !== run.providerEpoch) throw new VoiceLabError(labError("PROVIDER_EPOCH_PRECONDITION_FAILED", "Requested provider epoch is not the run's current exact product epoch.", "conflict", true));
@@ -2002,7 +2124,7 @@ export class VoiceLabService {
     return envelope({ suite: fresh, status: fresh.state === "completed" ? "completed" : terminal ? "failed" : "running", ...(evidence ? { evidence: evidence.artifactRefs.filter((reference) => reference.kind === "suite_manifest") } : {}), data: { state: fresh.state, scheduling: "agent_guided_sequential", next_scenario_index: fresh.nextScenarioIndex, scenario_count: fresh.definition.scenarios.length, current_child_run_id: current?.id ?? null, next_required_action: terminal ? null : current ? "inspect_child_and_drive_scenario_recipe_then_end" : "wait_for_child_allocation", aggregate_evidence: evidence ? { status: "available", manifest_id: evidence.manifestId, manifest_sha256: evidence.manifestSha256, schema_version: evidence.schemaVersion, resource_id: `voice-lab://suite-evidence/${evidence.manifestId}` } : terminal ? { status: "pending", reason: "terminal_aggregate_manifest_pending" } : { status: "pending", reason: "children_not_terminal" }, unsupported_scenarios: unsupported, runs: runs.filter(Boolean).map((run) => ({ run_id: run!.id, scenario_id: run!.scenarioId, scenario_version: run!.scenarioVersion, state: run!.state, verdicts: run!.verdicts, cleanup_complete: run!.cleanupComplete, event_cursor: run!.latestCursor })) } });
   }
 
-  async queueRunOperation(caller: AuthenticatedCaller, runId: string, type: "speak" | "barge_in" | "force_socket_rotation" | "end", idempotencyKey: string, input: Record<string, unknown>, audioAdmission = false, rolling?: RollingAdmissionFence): Promise<LabEnvelope> {
+  async queueRunOperation(caller: AuthenticatedCaller, runId: string, type: "speak" | "barge_in" | "force_socket_rotation" | "end" | "studio_action", idempotencyKey: string, input: Record<string, unknown>, audioAdmission = false, rolling?: RollingAdmissionFence): Promise<LabEnvelope> {
     const run = await this.ownedRun(caller, runId);
     assertRunAcceptsOperation(run, type);
     const created = await this.ledger.createOperation({ id: randomUUID(), runId, callerId: caller.subject, type, idempotencyKey, requestHash: canonicalRequestHash(input), input }, audioAdmission ? { maxUtterances: this.config.maxUtterancesPerRun, maxTotalDurationMs: this.config.maxInjectedDurationMs, maxTotalBytes: this.config.maxInjectedBytes, minIntervalMs: this.config.minUtteranceIntervalMs } : undefined, rolling);
@@ -2194,6 +2316,11 @@ export class VoiceLabService {
     if (this.config.readinessTarget === null && this.config.nodeEnv === "test") return;
     const proof = await this.targetIdentity();
     assertFreshProductAdmissionProof(this.config, target, proof);
+    if (this.config.nodeEnv !== "test") {
+      const workers = await this.ledger.listLiveWorkers(new Date(Date.now() - 10_000));
+      const profile = workers.length === 1 ? workers[0]!.detail.active_run_profile as Record<string, unknown> | undefined : undefined;
+      if (profile?.status !== "sufficient") throw new VoiceLabError(labError("WORKER_PROFILE_INSUFFICIENT", "The live singleton worker has not attested the minimum active-run cgroup profile.", "deployment", true, { live_workers: workers.length, profile_status: profile?.status ?? "unavailable" }));
+    }
   }
 
   private assertMutationEnabled(tool: string): void {
@@ -2252,6 +2379,15 @@ export function assertFreshProductAdmissionProof(config: VoiceLabConfig, target:
   const fresh = Number.isFinite(observedAt) && observedAt <= now + 2_000 && observedAt >= now - 15_000;
   const probeId = typeof proof.probe_id === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(proof.probe_id);
   const productMutationGatesOpen = proof.product_mutation_gates_open === true;
+  // /api/app-version can match while the effective deployed frontend has the
+  // control adapter disabled. Require its signed, live readiness response.
+  const frontendControlAdapterReady = proof.frontend_auth_readiness_status === "verified"
+    && proof.frontend_control_adapter_enabled === true
+    && proof.frontend_voice_lab_enabled === true
+    && proof.frontend_kill_switch_engaged === false;
+  if (proof.frontend_auth_readiness_status === "control_adapter_disabled" || proof.frontend_control_adapter_enabled === false) {
+    throw new VoiceLabError(labError("FRONTEND_CONTROL_ADAPTER_DISABLED", "The signed readiness response from the exact served frontend deployment reports the Voice Lab control adapter disabled.", "deployment", true));
+  }
   const builds = proof.builds && typeof proof.builds === "object" ? proof.builds as Record<string, unknown> : {};
   const expectedComponents = [
     ["frontend", target.expectedDeployment.frontend],
@@ -2266,13 +2402,14 @@ export function assertFreshProductAdmissionProof(config: VoiceLabConfig, target:
       && typeof entry.observed === "string" && entry.observed.toLowerCase() === expected;
   });
   if (!sameTarget || proof.ok !== true || proof.status !== "verified" || proof.environment !== config.environment
-    || proof.target_binding_sha256 !== targetAdmissionBinding(target) || !fresh || !probeId || !components || !productMutationGatesOpen) {
+    || proof.target_binding_sha256 !== targetAdmissionBinding(target) || !fresh || !probeId || !components || !productMutationGatesOpen || !frontendControlAdapterReady) {
     throw new VoiceLabError(labError("PRODUCT_ADMISSION_NOT_READY", "The exact deployed Voice Lab target did not provide a fresh all-component admission-ready proof.", "deployment", true, {
       configured_target_match: sameTarget,
       probe_status: typeof proof.status === "string" ? proof.status : "malformed",
       fresh,
       component_readiness: components,
       product_mutation_gates_open: productMutationGatesOpen,
+      frontend_control_adapter_ready: frontendControlAdapterReady,
     }));
   }
 }

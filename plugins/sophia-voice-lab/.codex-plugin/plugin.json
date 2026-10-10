@@ -1,6 +1,6 @@
 {
   "name": "sophia-voice-lab",
-  "version": "0.1.0+codex.20260913232552",
+  "version": "0.2.17+codex.20261009164559",
   "description": "Private autonomous production voice dogfood and evidence tooling for Sophia.",
   "author": {
     "name": "Sophia Engineering",
@@ -28,7 +28,8 @@
     "capabilities": [
       "Voice testing",
       "Production evidence",
-      "Regression suites"
+      "Regression suites",
+      "Studio LiveKit G7 episodes"
     ],
     "websiteURL": "https://www.sophia-ei.com/",
     "defaultPrompt": [

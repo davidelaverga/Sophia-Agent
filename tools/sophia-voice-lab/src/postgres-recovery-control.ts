@@ -170,12 +170,17 @@ export class PostgresRecoveryControls {
       if (!runs.rows[0] || !controls.rows[0]) throw conflict("RECOVERY_OWNERSHIP_UNAVAILABLE");
       const current = record(controls.rows[0]);
       if (!current.browserAllocationEver || current.contentPurgedAt !== null) throw conflict("RECOVERY_OWNERSHIP_UNAVAILABLE");
-      const leases = await client.query("select worker_id,lease_epoch,expires_at>clock_timestamp() as live from sophia_voice_lab.browser_leases where run_id=$1 for update", [runId]);
+      // Lock the lease row first, then check its expiry under the held lock on
+      // a fresh clock: an expiry computed by the locking statement itself is
+      // evaluated before that statement waits behind a holder that only locks
+      // the row, and stands stale after the wait.
+      const leases = await client.query("select worker_id,lease_epoch from sophia_voice_lab.browser_leases where run_id=$1 for update", [runId]);
+      const live = leases.rows[0] ? (await client.query<{ live: boolean }>("select expires_at>clock_timestamp() as live from sophia_voice_lab.browser_leases where run_id=$1", [runId])).rows[0]?.live === true : false;
       const events = await client.query("select * from sophia_voice_lab.run_events where run_id=$1 order by seq", [runId]);
       const ownership = deriveExecutionOwnership({ id: runId, cleanupObligationId: runs.rows[0].cleanup_obligation_id }, events.rows.map(row => ({ runId, seq: Number(row.seq), kind: row.kind, source: row.source, payload: row.payload, at: row.observed_at, dedupeKey: row.dedupe_key })));
       if (!executionMatchesRecoveryAllocation(current, ownership)) throw conflict("RECOVERY_LEASE_MISMATCH");
       const lease = leases.rows[0];
-      if (!lease?.live || sha256(lease.worker_id) !== ownership.workerIdSha256 || Number(lease.lease_epoch) !== ownership.browserLeaseEpoch) throw conflict("RECOVERY_LEASE_MISMATCH");
+      if (!lease || !live || sha256(lease.worker_id) !== ownership.workerIdSha256 || Number(lease.lease_epoch) !== ownership.browserLeaseEpoch) throw conflict("RECOVERY_LEASE_MISMATCH");
       if (current.executionOwnership) {
         if (canonicalRequestHash(current.executionOwnership) !== canonicalRequestHash(ownership)) throw conflict("RECOVERY_OWNERSHIP_CONFLICT");
         await client.query("commit");

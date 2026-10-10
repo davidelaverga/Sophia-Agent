@@ -114,6 +114,9 @@ describe("worker End with an unconfirmed direct auth cleanup after proven normal
     const evidence = (await ledger.getEvidence(run.id))!;
     const manifest = JSON.parse(Buffer.from((await ledger.getArtifact(evidence.manifestId))!.bytes).toString("utf8"));
     expect(manifest.cleanup_audit).toMatchObject({ auth_session_revoked: true, auth_cleanup_path: "recovery", cleanup_complete: true });
+    // C079: the restricted first-use assessment is published beside, never instead of, the verdicts.
+    expect(manifest.c5_first_use_assessment).toMatchObject({ schema: "sophia.voice-lab.c5-first-use-assessment.v1", separate_from_scenario_verdicts: true, semantic_adaptivity: "coordinator_assessment_required" });
+    expect(manifest.verdicts ?? manifest.certification).toBeDefined();
     expect(events.some((e) => e.kind === "auth.session_cleanup" && e.payload.session_revoked === true)).toBe(false); // never a fabricated direct proof
   });
 

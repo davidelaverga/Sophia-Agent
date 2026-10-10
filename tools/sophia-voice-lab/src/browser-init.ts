@@ -4,10 +4,51 @@ export interface InitScriptOptions {
   maxAudioBytes: number;
   testRunId: string;
   cleanupObligationId: string;
+  /**
+   * Target profile. Absent (the default) is the legacy Gemini-browser profile
+   * and produces the exact historical script bytes. The Studio LiveKit
+   * profile differs only by extraction: it does not seed legacy product
+   * localStorage keys, and every getUserMedia call receives a fresh clone of
+   * the page-owned synthetic track (LiveKit stops its local track on leave,
+   * so a returning participant must be able to acquire a live track again).
+   */
+  profile?: "legacy-gemini-browser-v1" | "studio-livekit-g7-v1";
 }
 
+const LEGACY_PRODUCT_STORAGE_SEED = `    try {
+      const completedOnboarding = { state: { firstRun: { status: 'completed', currentStepId: null, completedSteps: [], skippedAt: null, completedAt: new Date().toISOString() }, contextualTips: {}, preferences: { voiceOverEnabled: true, reducedMotion: true }, legacyStep: 'complete' }, version: 2 };
+      localStorage.setItem('sophia-onboarding-v2', JSON.stringify(completedOnboarding));
+      // The dashboard spotlight predates the v2 onboarding store and uses its
+      // own completion key. Seed both before hydration so its full-screen
+      // overlay cannot appear later and intercept the ordinary microphone CTA.
+      localStorage.setItem('sophia-onboarded', '1');
+      // The dedicated synthetic principal is forbidden from ordinary product
+      // mutation endpoints, including /api/consent/accept. Import the
+      // campaign-approved consent state before React hydrates so the ordinary
+      // dashboard can render without asking the isolated principal to cross
+      // that boundary. Synthetic telemetry remains independently fenced by
+      // the HttpOnly run-context markers.
+      localStorage.setItem('sophia_consent_accepted', 'true');
+      localStorage.setItem('sophia.capture.enabled', '1');
+    } catch {}`;
+
+const LEGACY_STREAM_ISSUANCE = `      const trackIds = destination.stream.getAudioTracks().map((track) => track.id);
+      emit('harness.media_stream_issued', { audio_tracks: trackIds.length, stream_id_sha256: await hashText(destination.stream.id), track_id_sha256s: await Promise.all(trackIds.map(hashText)), replacement_active: activeGetUserMedia === replacement || observerWrapperInstalled });
+      return destination.stream;`;
+
+// Studio profile: a fresh MediaStream carrying clones of the page-owned
+// destination track. Clones share the same WebAudio source, so scheduled
+// synthetic audio reaches whichever clone the product published; the issued
+// identifiers are hashed exactly as in the legacy receipt.
+const STUDIO_STREAM_ISSUANCE = `      const issued = new MediaStream(destination.stream.getAudioTracks().map((track) => track.clone()));
+      const trackIds = issued.getAudioTracks().map((track) => track.id);
+      emit('harness.media_stream_issued', { audio_tracks: trackIds.length, stream_id_sha256: await hashText(issued.id), track_id_sha256s: await Promise.all(trackIds.map(hashText)), replacement_active: activeGetUserMedia === replacement || observerWrapperInstalled, issuance: 'fresh_clone_per_request' });
+      return issued;`;
+
 export function buildVoiceLabInitScript(options: InitScriptOptions): string {
-  const encoded = JSON.stringify(options).replaceAll("<", "\\u003c");
+  const studio = options.profile === "studio-livekit-g7-v1";
+  const { profile: _profile, ...scriptOptions } = options;
+  const encoded = JSON.stringify(scriptOptions).replaceAll("<", "\\u003c");
   return `(() => {
     'use strict';
     const options = ${encoded};
@@ -115,22 +156,7 @@ export function buildVoiceLabInitScript(options: InitScriptOptions): string {
       emit('harness.product_active_target_fenced', receipt);
       return receipt;
     };
-    try {
-      const completedOnboarding = { state: { firstRun: { status: 'completed', currentStepId: null, completedSteps: [], skippedAt: null, completedAt: new Date().toISOString() }, contextualTips: {}, preferences: { voiceOverEnabled: true, reducedMotion: true }, legacyStep: 'complete' }, version: 2 };
-      localStorage.setItem('sophia-onboarding-v2', JSON.stringify(completedOnboarding));
-      // The dashboard spotlight predates the v2 onboarding store and uses its
-      // own completion key. Seed both before hydration so its full-screen
-      // overlay cannot appear later and intercept the ordinary microphone CTA.
-      localStorage.setItem('sophia-onboarded', '1');
-      // The dedicated synthetic principal is forbidden from ordinary product
-      // mutation endpoints, including /api/consent/accept. Import the
-      // campaign-approved consent state before React hydrates so the ordinary
-      // dashboard can render without asking the isolated principal to cross
-      // that boundary. Synthetic telemetry remains independently fenced by
-      // the HttpOnly run-context markers.
-      localStorage.setItem('sophia_consent_accepted', 'true');
-      localStorage.setItem('sophia.capture.enabled', '1');
-    } catch {}
+${studio ? "" : LEGACY_PRODUCT_STORAGE_SEED}
     const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
     if (!AudioContextCtor) { emit('harness.audio_context_unavailable'); return; }
     const audioContext = new AudioContextCtor({ latencyHint: 'interactive' });
@@ -150,9 +176,7 @@ export function buildVoiceLabInitScript(options: InitScriptOptions): string {
         emit('harness.media_request_rejected', { wants_audio: wantsAudio, wants_video: wantsVideo });
         throw new DOMException('Voice Lab only permits the synthetic audio-only stream.', 'NotAllowedError');
       }
-      const trackIds = destination.stream.getAudioTracks().map((track) => track.id);
-      emit('harness.media_stream_issued', { audio_tracks: trackIds.length, stream_id_sha256: await hashText(destination.stream.id), track_id_sha256s: await Promise.all(trackIds.map(hashText)), replacement_active: activeGetUserMedia === replacement || observerWrapperInstalled });
-      return destination.stream;
+${studio ? STUDIO_STREAM_ISSUANCE : LEGACY_STREAM_ISSUANCE}
     };
     activeGetUserMedia = replacement;
     Object.defineProperty(mediaDevices, 'getUserMedia', {

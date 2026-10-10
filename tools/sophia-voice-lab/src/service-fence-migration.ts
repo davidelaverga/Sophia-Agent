@@ -27,3 +27,16 @@ export function composeServiceFenceV2Migration(base: Buffer, recovery: Buffer, f
   if (createHash("sha256").update(fenceV2).digest("hex") !== SERVICE_FENCE_V2_MIGRATION_SHA256) throw new Error("SERVICE_FENCE_V2_MIGRATION_CHECKSUM_INVALID");
   return Buffer.from(`${v5.replace(/\ncommit;\s*$/, "")}\n${fenceV2.toString("utf8")}\ncommit;\n`);
 }
+
+export const STUDIO_G7_OPERATIONS_MIGRATION_SHA256 = "a02949effd1de49666c3ee21a3ace8106fc127764efdda4609a6ab9b1ad1881f";
+export const STUDIO_G7_OPERATIONS_SCHEMA_VERSION = 7;
+export const STUDIO_G7_OPERATIONS_BUNDLE_SHA256 = "fcba91c6cf7df9da6c6287e668f26f704698b3ff3dd08197719a2abb27769ec5";
+
+/** v7 release bytes: the exact v6 bundle plus the additive `studio_action`
+ * operation type in the same transaction. The v6 bundle (and 004..006) stays
+ * byte-identical, so the v6 -> v7 upgrade can derive both catalogs. */
+export function composeStudioG7OperationsMigration(base: Buffer, recovery: Buffer, fence: Buffer, fenceV2: Buffer, studioOperations: Buffer): Buffer {
+  const v6 = composeServiceFenceV2Migration(base, recovery, fence, fenceV2).toString("utf8");
+  if (createHash("sha256").update(studioOperations).digest("hex") !== STUDIO_G7_OPERATIONS_MIGRATION_SHA256) throw new Error("STUDIO_G7_OPERATIONS_MIGRATION_CHECKSUM_INVALID");
+  return Buffer.from(`${v6.replace(/\ncommit;\s*$/, "")}\n${studioOperations.toString("utf8")}\ncommit;\n`);
+}

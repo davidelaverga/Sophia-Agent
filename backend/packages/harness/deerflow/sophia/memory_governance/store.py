@@ -18,6 +18,7 @@ from uuid import UUID
 import httpx
 
 from deerflow.sophia.diag import record_store_request
+from deerflow.sophia.rpc_business_errors import store_error_status
 
 if TYPE_CHECKING:
     from deerflow.sophia.session_store import SessionRecord
@@ -131,13 +132,14 @@ class SupabaseMemoryGovernanceStore:
             raise MemoryGovernanceUnavailable("governance_transport_error") from exc
         finally:
             record_store_request(resource, started, status_code)
-        if response.status_code in {409, 412}:
+        status = store_error_status(response)
+        if status in {409, 412}:
             raise MemoryGovernanceConflict("governance_revision_conflict")
-        if response.status_code >= 400:
+        if status >= 400:
             # Provider/database bodies can contain identifiers or echoed input.
             # Preserve only the status class in application-visible errors.
-            reason = f"governance_http_{response.status_code // 100}xx"
-            if response.status_code in {400, 422}:
+            reason = f"governance_http_{status // 100}xx"
+            if status in {400, 422}:
                 raise MemoryGovernanceConflict(reason)
             raise MemoryGovernanceUnavailable(reason)
         if not response.content:

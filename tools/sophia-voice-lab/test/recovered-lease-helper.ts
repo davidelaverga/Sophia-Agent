@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { expect } from "vitest";
+import { labError } from "../src/domain.js";
 import type { VoiceLabLedger } from "../src/ledger.js";
 import { sha256 } from "../src/security.js";
 import { testRun } from "./helpers.js";
@@ -25,8 +26,10 @@ export async function verifyRecoveredLeaseRelease(ledger: VoiceLabLedger) {
     } else {
       expect(await ledger.getBrowserLease(run.id)).toEqual(lease);
     }
-    // Ledger-only fixture teardown; no browser or provider was allocated.
+    // Ledger-only fixture teardown; no browser or provider was allocated. Its
+    // never-dispatched start is retired too, so a shared ledger holds no claimable work.
     await ledger.releaseBrowserLease(run.id, lease.workerId, lease.leaseEpoch);
+    await ledger.cancelPendingRunOperations(run.id, null, labError("TEST_FIXTURE_COMPLETE", "Ledger-only lease-release test does not dispatch a start.", "harness"));
     const fresh = (await ledger.getRun(run.id))!;
     await ledger.updateRun(run.id, fresh.version, { state: "failed_harness", cleanupComplete: true });
   }
