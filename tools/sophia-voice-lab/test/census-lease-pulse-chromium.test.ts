@@ -1,6 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { readFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import type { Socket } from "node:net";
 import path from "node:path";
@@ -8,7 +7,6 @@ import { Writable } from "node:stream";
 
 import pino from "pino";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
-import ts from "typescript";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { AudioResolver } from "../src/audio.js";
@@ -19,6 +17,7 @@ import { MemoryVoiceLabLedger } from "../src/memory-ledger.js";
 import { CapabilityCodec, sha256 } from "../src/security.js";
 import { VoiceLabWorker } from "../src/worker.js";
 import { testConfig, testRun } from "./helpers.js";
+import { productPipelineScript } from "./product-microphone-pipeline-helper.js";
 import { espeakLikeWav } from "./tts-silence-helper.js";
 
 /**
@@ -44,88 +43,10 @@ import { espeakLikeWav } from "./tts-silence-helper.js";
  * live run's Gateway host is a reserved .test name.
  */
 
-const PRODUCT_SOURCE = path.resolve(process.cwd(), "../../frontend/src/app/lib/gemini-browser-live-websocket-dogfood.ts");
 const LIVE_CONTEXT_RATE = 44_100;
 /** + the 186 ms espeak tail + the resolver's 1,500 ms zero tail = 119,986 ms, within the 120,000 ms maximum. */
 const SPEECH_MS = 118_300;
 const RECOVERY_FETCH_TIMEOUT_MS = 15_000;
-
-/**
- * The deployed microphone pipeline, extracted from the frontend source: the
- * top-level declarations startMicrophoneAudioPipeline reaches, plus those of
- * relative modules it imports (the product's resampler, in revisions that
- * have one), in source order, type-stripped. Any other import fails here.
- */
-interface ModuleIndex { source: ts.SourceFile; declarations: Map<string, ts.Statement>; imports: Map<string, string> }
-
-function declaredNames(statement: ts.Statement): string[] {
-  if ((ts.isFunctionDeclaration(statement) || ts.isClassDeclaration(statement)) && statement.name) return [statement.name.text];
-  if (!ts.isVariableStatement(statement)) return [];
-  return statement.declarationList.declarations.flatMap((declaration) => ts.isIdentifier(declaration.name) ? [declaration.name.text] : []);
-}
-
-function importedNames(statement: ts.Statement): Array<[string, string]> {
-  if (!ts.isImportDeclaration(statement) || !ts.isStringLiteral(statement.moduleSpecifier)) return [];
-  const bindings = statement.importClause?.namedBindings;
-  if (!bindings || !ts.isNamedImports(bindings)) return [];
-  const specifier = statement.moduleSpecifier.text;
-  return bindings.elements.map((element): [string, string] => [element.name.text, specifier]);
-}
-
-async function indexModule(file: string): Promise<ModuleIndex> {
-  const source = ts.createSourceFile(file, await readFile(file, "utf8"), ts.ScriptTarget.ES2022, true);
-  const declarations = new Map<string, ts.Statement>();
-  const imports = new Map<string, string>();
-  for (const statement of source.statements) {
-    for (const name of declaredNames(statement)) declarations.set(name, statement);
-    for (const [name, specifier] of importedNames(statement)) imports.set(name, specifier);
-  }
-  return { source, declarations, imports };
-}
-
-function identifiersIn(node: ts.Node, into = new Set<string>()): Set<string> {
-  if (ts.isIdentifier(node)) into.add(node.text);
-  ts.forEachChild(node, (child) => { identifiersIn(child, into); });
-  return into;
-}
-
-/** The statements `roots` reach inside one module, and the names they need from relative modules it imports. */
-function reach(index: ModuleIndex, roots: string[]): { included: Set<ts.Statement>; imported: Map<string, string[]> } {
-  const included = new Set<ts.Statement>();
-  const imported = new Map<string, string[]>();
-  const seen = new Set<string>();
-  const queue = [...roots];
-  while (queue.length > 0) {
-    const name = queue.shift()!;
-    if (seen.has(name)) continue;
-    seen.add(name);
-    const statement = index.declarations.get(name);
-    const specifier = index.imports.get(name);
-    if (statement) {
-      included.add(statement);
-      queue.push(...[...identifiersIn(statement)].filter((identifier) => index.declarations.has(identifier) || index.imports.has(identifier)));
-    } else if (specifier !== undefined) {
-      if (!specifier.startsWith("./")) throw new Error(`The microphone pipeline imports ${name} from ${specifier}, which this test cannot inline.`);
-      imported.set(specifier, [...(imported.get(specifier) ?? []), name]);
-    }
-  }
-  return { included, imported };
-}
-
-async function moduleClosure(file: string, roots: string[]): Promise<string[]> {
-  const index = await indexModule(file);
-  const { included, imported } = reach(index, roots);
-  const dependencies: string[] = [];
-  for (const [specifier, names] of imported) dependencies.push(...await moduleClosure(path.resolve(path.dirname(file), `${specifier}.ts`), names));
-  return [...dependencies, ...[...included].sort((a, b) => a.pos - b.pos).map((statement) => statement.getText(index.source).replace(/^export\s+/, ""))];
-}
-
-async function productPipelineScript(): Promise<string> {
-  const statements = await moduleClosure(PRODUCT_SOURCE, ["startMicrophoneAudioPipeline"]);
-  expect(statements.some((statement) => statement.startsWith("function startMicrophoneAudioPipeline"))).toBe(true);
-  const js = ts.transpileModule(statements.join("\n"), { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None } }).outputText;
-  return `window.__productPipeline = (() => { ${js}\n return { startMicrophoneAudioPipeline }; })();`;
-}
 
 /** Minimal RFC 6455 reader for client-to-server text frames: what the "provider" actually received. */
 function wsReader(onText: (text: string) => void): (chunk: Buffer) => void {
