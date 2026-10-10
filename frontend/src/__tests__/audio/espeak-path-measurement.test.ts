@@ -6,12 +6,13 @@ import { pcm16Base64FromFloat32 } from '@/app/lib/gemini-browser-live-websocket-
  * Offline reproduction of the live third-run audio path:
  *   espeak-ng 22050 Hz mono
  *     -> decodeAudioData upsample to the page AudioContext rate (44100)
- *     -> pcm16Base64FromFloat32(input, 44100, 16000)  [deployed source]
+ *     -> pcm16Base64FromFloat32(input, 44100, 16000)  [current source]
  *     -> realtimeInput.audio  (audio/pcm;rate=16000)
  *
- * Nothing here calls a provider. The point is to MEASURE the distortion the
- * deployed decimator introduces, and to decide whether it can account for a
- * total absence of any input transcript.
+ * Nothing here calls a provider. The legacy control reproduces the unfiltered
+ * point decimator from before PR #155; the current path must preserve speech
+ * while reducing that control's upper-band aliasing. This is an offline signal
+ * check, not evidence about a provider's input transcription.
  */
 
 const SOURCE_RATE = 22_050
@@ -127,6 +128,17 @@ function runDeployedPath(source: Float32Array) {
   return { context, produced, reference }
 }
 
+/** Historical control: the point decimator used before PR #155, including PCM quantization. */
+function legacyPointDecimate(input: Float32Array): Float32Array {
+  const ratio = CONTEXT_RATE / TARGET_RATE
+  const pcm = new Int16Array(Math.floor(input.length / ratio))
+  for (let index = 0; index < pcm.length; index += 1) {
+    const sample = Math.max(-1, Math.min(1, input[Math.floor(index * ratio)] ?? 0))
+    pcm[index] = sample < 0 ? sample * 0x8000 : sample * 0x7fff
+  }
+  return decodeBase64Pcm16(Buffer.from(pcm.buffer).toString('base64'))
+}
+
 describe('espeak 22050 -> 44100 -> 16000 deployed path', () => {
   it('produces the expected frame geometry and non-trivial amplitude', () => {
     const { context, produced } = runDeployedPath(syntheticUtterance(1, true))
@@ -138,23 +150,32 @@ describe('espeak 22050 -> 44100 -> 16000 deployed path', () => {
     expect(peak).toBeGreaterThan(0.2)
   })
 
-  it('MEASURE: aliasing from the 8-11 kHz band lands above the speech band', () => {
-    const { produced, reference } = runDeployedPath(syntheticUtterance(1, true))
+  it('preserves speech and reduces upper-band aliasing relative to the legacy decimator', () => {
+    const { context, produced, reference } = runDeployedPath(syntheticUtterance(1, true))
+    const legacy = legacyPointDecimate(context)
     const speechProduced = bandEnergy(produced, TARGET_RATE, 300, 3_400)
     const speechReference = bandEnergy(reference, TARGET_RATE, 300, 3_400)
     const upperProduced = bandEnergy(produced, TARGET_RATE, 5_000, 7_900)
     const upperReference = bandEnergy(reference, TARGET_RATE, 5_000, 7_900)
+    const speechLegacy = bandEnergy(legacy, TARGET_RATE, 300, 3_400)
+    const upperLegacy = bandEnergy(legacy, TARGET_RATE, 5_000, 7_900)
 
     const speechRatioDb = 10 * Math.log10(speechProduced / speechReference)
     const upperRatioDb = 10 * Math.log10(upperProduced / Math.max(upperReference, 1e-12))
+    const legacySpeechRatioDb = 10 * Math.log10(speechLegacy / speechReference)
+    const legacyUpperRatioDb = 10 * Math.log10(upperLegacy / Math.max(upperReference, 1e-12))
+    const upperReductionDb = 10 * Math.log10(upperLegacy / upperProduced)
     // eslint-disable-next-line no-console
-    console.log(`speech-band delta ${speechRatioDb.toFixed(2)} dB, 5-8 kHz delta ${upperRatioDb.toFixed(2)} dB`)
+    console.log(`speech-band delta ${speechRatioDb.toFixed(2)} dB, 5-8 kHz delta ${upperRatioDb.toFixed(2)} dB, reduction from legacy ${upperReductionDb.toFixed(2)} dB`)
 
     // The core speech band is preserved: a 22050 Hz source is already limited
-    // to 11.025 kHz, and unfiltered decimation to 16 kHz folds that content to
-    // |16000 - f| = 4975..8000 Hz. It cannot reach 300-3400 Hz.
+    // to 11.025 kHz. The historical control folds that content to
+    // |16000 - f| = 4975..8000 Hz; PR #155 filters it before decimation.
+    // Retain the old measurement as a positive control, then require the
+    // current path to reduce upper-band energy by at least 3 dB (half).
     expect(Math.abs(speechRatioDb)).toBeLessThan(3)
-    expect(upperRatioDb).toBeGreaterThan(speechRatioDb)
+    expect(legacyUpperRatioDb).toBeGreaterThan(legacySpeechRatioDb)
+    expect(upperReductionDb).toBeGreaterThan(3)
   })
 
   it('MEASURE: no fricative content means no meaningful added distortion', () => {
